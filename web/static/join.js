@@ -255,6 +255,7 @@
 
   function waking() {
     waitingScreen();
+    wakeOrigin();
     // A slow link may need longer than a napping server does: each miss
     // gives the next ping more time, up to 10 s.
     let timeout = 2500;
@@ -269,6 +270,18 @@
       lookup(); // the clock runs until the room answers
     };
     setTimeout(poll, WAKE_POLL_MS);
+  }
+
+  function wakeOrigin() {
+    const configured = document.querySelector('meta[name="kn-origin"]')?.content;
+    if (!configured || configured === '__KN_ORIGIN__') return;
+    try {
+      const origin = new URL(configured);
+      if (origin.origin === location.origin) return;
+      fetch(new URL('/health', origin), { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+    } catch {
+      // A malformed build value should not interrupt the normal same-origin poll.
+    }
   }
 
   window.KNLagViz.init(() => state === 'inv-waking');

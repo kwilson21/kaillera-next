@@ -20,7 +20,7 @@ HARNESS = r"""
 const mod = await import(process.argv[1]);
 const worker = mod.default;
 const env = {
-  ORIGIN: 'https://game.example',
+  ORIGIN: process.argv[3] || 'https://game.example',
   // Pages carry the static preview block's host placeholder. The freshness
   // check's own-build-id fetch gets plain text here (not JSON), so it comes
   // back inconclusive and the verdict stays 'unknown' — same as before this
@@ -29,7 +29,7 @@ const env = {
     fetch: async (req) => {
       const p = new URL(req.url).pathname;
       const og = p === '/join.html' ? ' <meta property="og:url" content="https://__KN_HOST__/join" />' : '';
-      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og' + og : ''), { status: 200 });
+      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og <meta name="kn-origin" content="__KN_ORIGIN__">' + og : ''), { status: 200 });
     },
   },
 };
@@ -94,12 +94,12 @@ console.log(JSON.stringify(out));
 """
 
 
-def _run(origin_up: bool):
+def _run(origin_up: bool, origin="https://game.example"):
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
     res = subprocess.run(
-        [node, "--input-type=module", "-e", HARNESS, WORKER.as_uri(), "up" if origin_up else "down"],
+        [node, "--input-type=module", "-e", HARNESS, WORKER.as_uri(), "up" if origin_up else "down", origin],
         capture_output=True,
         text=True,
         timeout=30,
@@ -119,12 +119,22 @@ def test_pages_and_their_files_come_from_assets():
     assert _body(r, "/join?room=ABC").startswith("asset:/join.html")
     for page in ["/", "/join?room=ABC", "/privacy", "/privacy.html"]:
         assert "script-src 'self'" in r[(page, "GET", "")]["csp"]
+        assert "connect-src 'self' https://game.example;" in r[(page, "GET", "")]["csp"]
+        assert "img-src 'self' data:;" in r[(page, "GET", "")]["csp"]
         assert r[(page, "GET", "")]["cache"] == "no-store"
         # The static preview tags get the public host.
         assert " og=https://kn.example/og" in _body(r, page)
+        assert 'name="kn-origin" content="https://game.example"' in _body(r, page)
     assert _body(r, "/static/landing.js") == "asset:/static/landing.js"
     assert r[("/static/landing.js", "GET", "")]["cache"] == "no-cache"
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
+
+
+def test_pages_do_not_add_a_connect_origin_when_origin_is_the_public_host():
+    r = _run(origin_up=True, origin="https://kn.example")
+    for path in ("/", "/join?room=ABC", "/privacy"):
+        assert "connect-src 'self';" in r[(path, "GET", "")]["csp"]
+        assert 'name="kn-origin" content=""' in _body(r, path)
 
 
 def test_privacy_notice_is_available_without_the_game_server():

@@ -440,6 +440,7 @@
 
   function waking() {
     setState('waking');
+    wakeOrigin();
     const started = Date.now();
     const clock = $('elapsed');
     clockTimer = setInterval(() => {
@@ -466,6 +467,18 @@
       refresh();
     };
     wakeTimer = setTimeout(poll, WAKE_POLL_MS);
+  }
+
+  function wakeOrigin() {
+    const configured = document.querySelector('meta[name="kn-origin"]')?.content;
+    if (!configured || configured === '__KN_ORIGIN__') return;
+    try {
+      const origin = new URL(configured);
+      if (origin.origin === location.origin) return;
+      fetch(new URL('/health', origin), { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+    } catch {
+      // A malformed build value should not interrupt the normal same-origin poll.
+    }
   }
 
   async function start() {
