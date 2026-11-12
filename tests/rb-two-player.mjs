@@ -151,10 +151,12 @@
  *     not cover the host stalling on its own slot (2026-11-09): that lives in
  *     the lockstep path a solo game takes, see solo-signaling-drop.mjs.
  *   DROP_SIGNALING_GUEST_LATE_MS=<n>   With DROP_SIGNALING_MS: keep the
- *     guest's signaling down n ms longer than the host's. The host then sees
- *     a room without the guest before the guest rejoins under a new socket
- *     id, and must keep the live WebRTC connection rather than evict it as a
- *     stale peer. BATTLE_SECONDS must cover this too.
+ *     guest's signaling down up to n ms longer than the host's, until the
+ *     host has rejoined and seen a room without the guest. The guest then
+ *     rejoins under a new socket id, and the host must keep the live WebRTC
+ *     connection rather than evict it as a stale peer. The run fails if the
+ *     host has not seen that roster within n ms. BATTLE_SECONDS must cover
+ *     this too.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
@@ -450,6 +452,8 @@ const mkPage = async (browser, name, { throttleHz = 0, hidden = false, suspendAu
   return page;
 };
 
+// DROP_SIGNALING_GUEST_LATE_MS: did the host rejoin and see a room without the guest first?
+let hostSawRoomWithoutGuest = false;
 // Per-page signaling proxy state for DROP_SIGNALING_MS.
 const signaling = new Map();
 const setSignalingDown = async (page, down) => {
@@ -788,16 +792,33 @@ if (inBattle) {
     await Promise.all([setSignalingDown(host, true), setSignalingDown(guest, true)]);
     console.log(`signaling sockets cut on both pages for ${DROP_SIGNALING_MS} ms`);
     await host.waitForTimeout(DROP_SIGNALING_MS);
-    // With DROP_SIGNALING_GUEST_LATE_MS the host comes back first and sees a
-    // room without the guest before the guest rejoins under a new socket id.
+    // With DROP_SIGNALING_GUEST_LATE_MS the host comes back first and must
+    // see a room without the guest before the guest rejoins under a new
+    // socket id. Opening the host's gate does not make that happen, so wait
+    // for the host's engine to log the one-player roster; if it has not by
+    // the end of the window, the run did not test what it claims and fails.
+    const soloRosters = () =>
+      host.evaluate(
+        () => (window.NetplayRollback?.exportSyncLog?.() || '').match(/onUsersUpdated: 1 players/g)?.length ?? 0,
+      );
+    const soloRostersBefore = DROP_SIGNALING_GUEST_LATE_MS > 0 ? await soloRosters() : 0;
+    const restoreStarted = Date.now();
     await setSignalingDown(host, false);
     if (DROP_SIGNALING_GUEST_LATE_MS > 0) {
-      console.log(`host signaling allowed to reconnect; guest held ${DROP_SIGNALING_GUEST_LATE_MS} ms longer`);
-      await host.waitForTimeout(DROP_SIGNALING_GUEST_LATE_MS);
+      console.log(`host signaling allowed to reconnect; guest held up to ${DROP_SIGNALING_GUEST_LATE_MS} ms longer`);
+      while (Date.now() - restoreStarted < DROP_SIGNALING_GUEST_LATE_MS) {
+        if ((await soloRosters()) > soloRostersBefore) {
+          hostSawRoomWithoutGuest = true;
+          break;
+        }
+        await host.waitForTimeout(500);
+      }
+      console.log(`host saw the room without the guest: ${hostSawRoomWithoutGuest}`);
     }
     await setSignalingDown(guest, false);
     console.log('signaling allowed to reconnect');
-    await host.waitForTimeout(BATTLE_SECONDS * 1000 - before - DROP_SIGNALING_MS - DROP_SIGNALING_GUEST_LATE_MS);
+    const guestLateFor = Date.now() - restoreStarted;
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - DROP_SIGNALING_MS - guestLateFor));
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
   }
@@ -1191,16 +1212,23 @@ if (suspendGuestAudioFailed) {
     console.log('SUSPEND_GUEST_AUDIO: guest never installed the stand-in audio clock (fix path unexercised)');
   }
 }
-const signalingDropFailed =
-  DROP_SIGNALING_MS > 0 &&
-  [summary.signalingDrop.host, summary.signalingDrop.guest].some(
-    (side) =>
-      side.reconnectsAfterOutage < 1 ||
-      side.lifecycleReports.length > 0 ||
-      side.tickStuck > 0 ||
-      side.inputStalls > 0 ||
-      side.rbStallTimeouts > 0,
+const hostFirstUnverified = DROP_SIGNALING_GUEST_LATE_MS > 0 && !hostSawRoomWithoutGuest;
+if (hostFirstUnverified) {
+  console.log(
+    'DROP_SIGNALING_GUEST_LATE_MS: the host never saw the room without the guest, so the order was not tested',
   );
+}
+const signalingDropFailed =
+  hostFirstUnverified ||
+  (DROP_SIGNALING_MS > 0 &&
+    [summary.signalingDrop.host, summary.signalingDrop.guest].some(
+      (side) =>
+        side.reconnectsAfterOutage < 1 ||
+        side.lifecycleReports.length > 0 ||
+        side.tickStuck > 0 ||
+        side.inputStalls > 0 ||
+        side.rbStallTimeouts > 0,
+    ));
 if (signalingDropFailed) {
   console.log('DROP_SIGNALING_MS: a page never reconnected, stalled, or its lifecycle machine reported:');
   console.log(JSON.stringify(summary.signalingDrop));
