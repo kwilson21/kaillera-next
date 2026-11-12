@@ -74,7 +74,7 @@ via `gameManager.loadState()`, then syncs at next delay boundary.
 
 **Detection (star topology, host-authoritative):** Two hashing paths:
 1. C-level (patched core): `_kn_sync_hash()` hashes game-specific RDRAM regions directly
-   in C. Per-64KB-block checksums via `_kn_rdram_block_hashes` for targeted desync diagnosis.
+   in C. `_kn_rdram_block_hashes` hashes the first 256 bytes of each 64KB block for targeted desync diagnosis.
 2. JS fallback: FNV-1a hash of RDRAM via direct HEAPU8 access, falling back to
    `getState()` serialization.
 
