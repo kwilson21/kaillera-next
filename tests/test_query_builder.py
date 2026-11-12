@@ -8,9 +8,16 @@ Run: cd server && uv run pytest ../tests/test_query_builder.py -v
 
 import sqlite3
 
+import pytest
 from sqlalchemy import insert, select
 from src import db
 from src.schema import Feedback, SessionLog, SessionLogChunk
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _patch_browser_ssl():
+    """No browser needed (overrides the Playwright fixture in conftest.py)."""
+    yield
 
 
 def test_params_come_out_in_placeholder_order():

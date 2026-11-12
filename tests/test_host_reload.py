@@ -16,12 +16,17 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from src.api import signaling
 from src.api.payloads import OpenRoomPayload
 from src.api.signaling import Room, _open_room_locked, _sid_to_room, make_reconnect_token, rooms
 
 ENGINE = Path(__file__).parent.parent / "web" / "static" / "netplay-rollback.js"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _patch_browser_ssl():
+    """No browser needed (overrides the Playwright fixture in conftest.py)."""
+    yield
 
 
 def _run(coro):
