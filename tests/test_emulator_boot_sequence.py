@@ -197,7 +197,10 @@ def test_smash_remix_rng_seed_sync_stays_out_of_live_tick_path():
 
     runner_idx = source.find("const _runStepOneFrame = (branch) => {")
     assert runner_idx != -1
-    runner_window = source[runner_idx : runner_idx + 300]
+    # Whole wrapper body: up to the closing brace at the wrapper's own indent.
+    runner_end = source.find("\n  };\n", runner_idx)
+    assert runner_end != -1
+    runner_window = source[runner_idx:runner_end]
     assert "stepOneFrame();" in runner_window
     assert "_syncRNGSeed" not in runner_window
 
@@ -313,7 +316,10 @@ def test_same_rom_remix_resume_skips_title_wait_and_syncs_current_state():
     assert resume_idx != -1
     assert title_wait_idx > resume_idx
     assert main_loop_resume_idx > title_wait_idx
-    resume_branch = wait_window[resume_idx:title_wait_idx]
+    # Only the same-ROM branch itself: up to its closing brace.
+    resume_end = wait_window.find("\n    }\n", resume_idx)
+    assert resume_idx < resume_end < title_wait_idx
+    resume_branch = wait_window[resume_idx:resume_end]
     assert "return;" in resume_branch
     assert "same-ROM resume, capturing current state" in resume_branch
     assert "mod.pauseMainLoop?.()" in resume_branch
