@@ -37,8 +37,9 @@ whichever server the hostname points to.
 
 One deploy per merge, started by GitHub rather than by Render.
 `.github/workflows/version-bump.yml` runs on every push to `main`, pushes
-the `chore(version)` commit when the merge was a `feat:` or `fix:`, then
-calls the service's deploy hook, which deploys the tip of `main`.
+a `chore(version)` commit when there is a `feat:` or `fix:` since the last
+one, then calls the service's deploy hook, which deploys the tip of `main`.
+Runs go one at a time; if one is cancelled or fails, the next covers it.
 
 Render's auto-deploy is off (`autoDeployTrigger: 'off'` in `render.yaml`).
 With it on, a merge produced two deploys seconds apart, one for the merge

@@ -4,8 +4,10 @@ on:
   push:
     branches: [main]
 
-# One release at a time: a second merge waits for the first one's bump and
-# deploy instead of racing it.
+# One release at a time. GitHub keeps one waiting run per group and cancels an
+# older waiting one, so a run must not depend on having seen its own push:
+# each run works from the tip of main and covers everything since the last
+# version commit, which makes up for any run that was cancelled or failed.
 concurrency:
   group: release-main
   cancel-in-progress: false
@@ -18,43 +20,37 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Only feat: and fix: commits bump the version. Every push still deploys.
-      - name: Decide whether this push bumps the version
-        id: plan
-        env:
-          MESSAGE: ${{ github.event.head_commit.message }}
-        run: |
-          case "$MESSAGE" in
-            feat:* | feat\(* | fix:* | fix\(*) echo "bump=true" >> "$GITHUB_OUTPUT" ;;
-            *) echo "bump=false" >> "$GITHUB_OUTPUT" ;;
-          esac
-
       - uses: actions/setup-node@v7
-        if: steps.plan.outputs.bump == 'true'
         with:
           node-version: 20
 
       - name: Configure git
-        if: steps.plan.outputs.bump == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Run version bump
-        if: steps.plan.outputs.bump == 'true'
         # `just deploy` invokes the script with no args (range = origin/main..HEAD).
-        # Here, post-squash-merge, origin/main == HEAD, so we pass --from with
-        # the pre-push SHA (github.event.before) so the script's RANGE covers
-        # exactly the commits the merge introduced. Everything else — bump
-        # rule, changelog, commit, tag — is identical to local `just deploy`.
-        run: bash scripts/bump-version.sh --from "${{ github.event.before }}"
+        # Here origin/main == HEAD, so we pass --from with the last
+        # chore(version) commit: the range is every commit released since.
+        # The script bumps only if that range holds a feat: or fix: commit.
+        # Everything else — bump rule, changelog, commit, tag — is identical
+        # to local `just deploy`.
+        run: |
+          last_version=$(git log --format=%H --grep='^chore(version):' -1)
+          bash scripts/bump-version.sh --from "$last_version"
 
       - name: Push version bump
-        if: steps.plan.outputs.bump == 'true'
-        run: git push --follow-tags
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "No version commit to push."
+          else
+            git push --follow-tags
+          fi
 
       # The only thing that deploys the site. Render's own auto-deploy is off
       # (render.yaml): it ran one deploy for the merge and a second for the
