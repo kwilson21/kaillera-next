@@ -29,6 +29,10 @@ const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
 const DROP_FRAMES = Number(process.env.DROP_FRAMES || 700); // spans two 300-frame health checks
 const OUT = process.env.OUT || '/tmp/solo-drop';
+if (!(Number.isInteger(DROP_FRAMES) && DROP_FRAMES >= 600)) {
+  console.log(`DROP_FRAMES=${process.env.DROP_FRAMES} invalid — must be a whole number >= 600 (two health checks)`);
+  process.exit(1);
+}
 if (!ROM || !fs.existsSync(ROM)) {
   console.log('KN_ROM must point at the SSB64 US ROM');
   process.exit(1);

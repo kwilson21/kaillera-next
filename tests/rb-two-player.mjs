@@ -143,7 +143,8 @@
  *     server restart or a network drop does; the match itself runs over
  *     WebRTC and must carry on. Pick n long enough to span a 300-frame mesh
  *     health check at the frame rate this machine manages (40000 in the cloud
- *     container). Needs BATTLE_SECONDS >= n/1000 + 30. On top of the normal
+ *     container). The outage starts a third of the way in, so two thirds of
+ *     BATTLE_SECONDS must cover n plus 20 s to reconnect. On top of the normal
  *     checks the run fails if either page: never reconnected; logged any
  *     TICK-STUCK or INPUT-STALL; or had its lifecycle machine report
  *     session-disagree or late-join-stranded (web/src/session.ts). This does
@@ -221,8 +222,12 @@ if (DROP_SIGNALING_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS >
   console.log('DROP_SIGNALING_MS is mutually exclusive with the FREEZE, THROTTLE, HIDE and CLICK knobs');
   process.exit(1);
 }
-if (DROP_SIGNALING_MS > 0 && !(BATTLE_SECONDS >= DROP_SIGNALING_MS / 1000 + 30)) {
-  console.log(`DROP_SIGNALING_MS=${DROP_SIGNALING_MS} needs BATTLE_SECONDS >= ${DROP_SIGNALING_MS / 1000 + 30}`);
+// The outage starts a third of the way in, so it and the reconnect that
+// follows must fit in the remaining two thirds.
+const DROP_SIGNALING_RECONNECT_MS = 20000;
+const dropSignalingNeedsSeconds = Math.ceil(((DROP_SIGNALING_MS + DROP_SIGNALING_RECONNECT_MS) * 3) / 2 / 1000);
+if (DROP_SIGNALING_MS > 0 && !(BATTLE_SECONDS >= dropSignalingNeedsSeconds)) {
+  console.log(`DROP_SIGNALING_MS=${DROP_SIGNALING_MS} needs BATTLE_SECONDS >= ${dropSignalingNeedsSeconds}`);
   process.exit(1);
 }
 if (HIDE_GUEST_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST)) {
