@@ -145,9 +145,10 @@
  *     health check at the frame rate this machine manages (40000 in the cloud
  *     container). Needs BATTLE_SECONDS >= n/1000 + 30. On top of the normal
  *     checks the run fails if either page: never reconnected; logged any
- *     TICK-STUCK or INPUT-STALL (the host used to stall on its own slot,
- *     2026-11-09); or had its lifecycle machine report session-disagree or
- *     late-join-stranded (web/src/session.ts).
+ *     TICK-STUCK or INPUT-STALL; or had its lifecycle machine report
+ *     session-disagree or late-join-stranded (web/src/session.ts). This does
+ *     not cover the host stalling on its own slot (2026-11-09): that lives in
+ *     the lockstep path a solo game takes, see solo-signaling-drop.mjs.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
