@@ -17,6 +17,7 @@
     "CHANGELOG.md",
     "web/static/changelog.json",
     "web/static/version.json",
-    "docs/"
+    "docs/",
+    "web/static/dist/"
   ]
 }

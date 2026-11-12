@@ -1,7 +1,14 @@
 import { defineConfig } from 'oxlint';
 
 export default defineConfig({
-  ignorePatterns: ['web/static/ejs/**', '**/*.min.js', 'build/**', 'tools/oxlint/anti-slop/**', 'node_modules/**'],
+  ignorePatterns: [
+    'web/static/ejs/**',
+    'web/static/dist/**',
+    '**/*.min.js',
+    'build/**',
+    'tools/oxlint/anti-slop/**',
+    'node_modules/**',
+  ],
   jsPlugins: [{ name: 'anti-slop', specifier: './tools/oxlint/anti-slop/index.ts' }],
   rules: {
     // Existing code has findings for the rules set to 'warn'; they are a

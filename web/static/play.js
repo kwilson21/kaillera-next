@@ -118,6 +118,25 @@
   let previousPlayers = {};
   let previousSpectators = {};
   let _lateJoin = false;
+
+  // Page lifecycle state machine from the TypeScript core (web/src/session.ts).
+  // Stage 1: it only observes. This page still decides from gameRunning, and
+  // _sessionSocketUp reports any disagreement between the two.
+  const _session = window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta)) ?? null;
+  let _sessionLateJoinPoll = null;
+  const _sessionStopLateJoinPoll = () => {
+    if (_sessionLateJoinPoll) clearInterval(_sessionLateJoinPoll);
+    _sessionLateJoinPoll = null;
+  };
+  // A late join is done once the emulator is advancing frames.
+  const _sessionWatchLateJoin = () => {
+    if (!_session || _sessionLateJoinPoll) return;
+    _sessionLateJoinPoll = setInterval(() => {
+      if (!(KNState.frameNum > 0)) return;
+      _sessionStopLateJoinPoll();
+      _session.send({ type: 'lateJoinSynced' });
+    }, 1000);
+  };
   let _romBlob = null; // raw ROM Blob for re-creating blob URLs
   let _romBlobUrl = null;
   let _romHash = null; // SHA-256 hex of loaded ROM
@@ -656,6 +675,7 @@
       onConnect();
     });
     socket.on('disconnect', (reason) => {
+      _session?.send({ type: 'socketDown' });
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       if (reason === 'io client disconnect') return;
       // Show spinner banner after brief delay (lobby and in-game)
@@ -683,6 +703,7 @@
       KNEvent('reconnect', `Reconnected after ${attempt} attempt(s)`, { attempts: attempt });
       KNState.sessionStats.reconnects++;
       _hideReconnecting();
+      _session?.socketUp({ gameRunning });
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
       const payload = isHost
         ? {
@@ -957,6 +978,7 @@
             return;
           }
           mySlot = 0;
+          _session?.send({ type: 'joined', status: 'lobby', matchId: null, spectator: false });
           KNEvent('room_created', '', { mode });
           sendDeviceType();
           if (mode === 'rollback' || mode === 'streaming') {
@@ -1110,8 +1132,15 @@
               clearLoadedRom();
             }
 
+            _session?.send({
+              type: 'joined',
+              status: roomData.status === 'playing' ? 'playing' : 'lobby',
+              matchId: joinData?.matchId ?? null,
+              spectator: !!isSpectator,
+            });
             // Mid-game join handling
             if (roomData.status === 'playing') {
+              if (!isSpectator) _sessionWatchLateJoin();
               crumb('mid-game-join', {
                 spectator: isSpectator,
                 mode,
@@ -1384,6 +1413,8 @@
   const onGameStarted = (data) => {
     // Keep match events from covering the fatal error modal.
     if (coreFatal) return;
+    _sessionStopLateJoinPoll();
+    _session?.send({ type: 'gameStarted', matchId: String(data?.matchId ?? '') });
     crumb('game-started', {
       mode: data.mode,
       hasRom: !!(_romBlob || _romBlobUrl),
@@ -1488,6 +1519,8 @@
     );
     gameRunning = false;
     _lateJoin = false;
+    _sessionStopLateJoinPoll();
+    _session?.send({ type: 'gameEnded' });
     _pendingLateJoin = false;
     showToast('The host has ended the game');
     if (engine) {

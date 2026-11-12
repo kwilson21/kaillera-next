@@ -10,6 +10,8 @@ __pycache__
 *.egg-info
 .venv
 dist
+# The committed TypeScript bundle must ship in the image.
+!web/static/dist
 
 # Build artifacts (WASM core compilation — very large)
 build/

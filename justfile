@@ -40,6 +40,16 @@ setup:
     uv tool install pre-commit
     pre-commit install
 
+# Type-check, test and bundle the TypeScript core (web/src -> web/static/dist)
+build:
+    npm run --silent typecheck
+    npm run --silent test:ts
+    npm run --silent build
+
+# Flag placeholder, deferral and hedging comments (cargo install antislop --version 0.3.0 --locked)
+slop:
+    antislop --disable stub --no-filename-check .
+
 # Model-check the Quint specs in specs/
 spec:
     npm run --silent spec

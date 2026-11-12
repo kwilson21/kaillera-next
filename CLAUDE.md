@@ -118,7 +118,9 @@ kaillera-next/
 │       ├── version.js           # version display + changelog modal
 │       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
+│       ├── dist/kn-core.js      # built from web/src by `just build`; committed, never edited by hand
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
+│   └── src/                 # TypeScript core (Effect, XState): bundled into static/dist/kn-core.js as window.KNCore
 ├── build/           # WASM core build system (Docker + patches)
 ├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route live on kaillera-next.thesuperhuman.us)
 ├── tests/           # pytest + Playwright E2E tests
@@ -274,6 +276,17 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - **Core artifacts ship together.** The `.data` archive and the standalone
   `mupen64plus_next_libretro.{js,wasm}` (used by the Mode 2 worker) must come
   from the same build; URLs are content-hashed via `/api/core-info`.
+- **TypeScript is the direction for the frontend.** New frontend logic goes
+  in `web/src/*.ts` (strict TypeScript, Effect, Effect Schema, XState via
+  `@xstate/effect`) and reaches the plain-script pages through `window.KNCore`.
+  After changing `web/src`, run `just build` and commit
+  `web/static/dist/kn-core.js`; CI fails if it is stale. Migration stages are
+  in `docs/roadmap.md`. A module moves from observing to deciding only after
+  production shows it agrees with the code it replaces.
+- **Model and prove before you patch state logic.** Room and page lifecycle
+  changes update `specs/room_lifecycle.qnt` in the same PR. Pure functions
+  with a contract worth proving are listed in `LemmaScript-files.txt` and
+  checked by the `proofs` CI job (Dafny is not installed locally by default).
 - **Never tolerate a prediction mismatch.** Any "close enough" input match
   leaves peers with different state that nothing corrects. The C engine
   used to accept stick values in the same zone without a rollback; #14 made
