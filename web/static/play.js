@@ -647,13 +647,29 @@
         showToast('Unable to reach server \u2014 retrying\u2026', 'error');
       }
     }, 10000);
+    let _hasConnected = false;
+    let _reconnectAttempts = 0;
     socket.on('connect', () => {
       if (_initialConnectTimer) {
         clearTimeout(_initialConnectTimer);
         _initialConnectTimer = null;
       }
       _hideReconnecting();
-      onConnect();
+      // A `connect` after an earlier one is a signaling reconnect. (Socket.IO
+      // v4 emits `reconnect` on the Manager, never on the Socket, and the
+      // Manager's also fires for a first connection that needed retries.)
+      const isReconnect = _hasConnected;
+      _hasConnected = true;
+      if (isReconnect) {
+        console.log('[play] socket reconnected after', _reconnectAttempts, 'attempts, new id:', socket.id);
+        KNEvent('reconnect', `Reconnected after ${_reconnectAttempts} attempt(s)`, { attempts: _reconnectAttempts });
+        KNState.sessionStats.reconnects++;
+      }
+      _reconnectAttempts = 0;
+      onConnect(isReconnect);
+    });
+    socket.io.on('reconnect_attempt', (attempt) => {
+      _reconnectAttempts = attempt;
     });
     socket.on('disconnect', (reason) => {
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
@@ -677,76 +693,6 @@
           }, 30000);
         }
       }
-    });
-    socket.on('reconnect', (attempt) => {
-      console.log('[play] socket reconnected after', attempt, 'attempts, new id:', socket.id);
-      KNEvent('reconnect', `Reconnected after ${attempt} attempt(s)`, { attempts: attempt });
-      KNState.sessionStats.reconnects++;
-      _hideReconnecting();
-      const rejoinEvent = isHost ? 'open-room' : 'join-room';
-      const payload = isHost
-        ? {
-            extra: {
-              sessionid: roomCode,
-              player_name: playerName,
-              room_name: `${playerName}'s room`,
-              game_id: _gameId || 'ssb64',
-              persistentId: _persistentId,
-              reconnectToken: _reconnectToken,
-            },
-            maxPlayers: 4,
-          }
-        : {
-            extra: {
-              sessionid: roomCode,
-              userid: socket.id,
-              player_name: playerName,
-              spectate: isSpectator,
-              persistentId: _persistentId,
-              reconnectToken: _reconnectToken,
-            },
-          };
-      socket.emit(rejoinEvent, payload, (err, joinData) => {
-        const data = isHost ? undefined : joinData;
-        if (err) {
-          console.log('[play] rejoin failed:', err);
-          if (!gameRunning) {
-            showToast('Room is no longer available');
-            setTimeout(() => {
-              window.location.href = '/';
-            }, 2000);
-          }
-          return;
-        }
-        console.log('[play] rejoined room after reconnect');
-        if (data?.players) {
-          for (const entry of Object.values(data.players)) {
-            if (entry.socketId === socket.id) {
-              mySlot = entry.slot;
-              break;
-            }
-          }
-        }
-        sendDeviceType();
-        // Resume stalled ROM transfer — pre-game WebRTC connections are lost on
-        // socket reconnect, so re-register signaling and retry via Socket.IO
-        if (
-          !isHost &&
-          _romSharingDecision === 'accepted' &&
-          !_romBlob &&
-          (_romTransferState === 'resuming' || _romTransferState === 'paused')
-        ) {
-          console.log('[play] resuming ROM transfer after reconnect');
-          cleanupPreGameConnections();
-          registerRomSignalHandler();
-          _romTransferRetries = 0;
-          _romTransferState = 'resuming';
-          clearTimeout(_romTransferResumeTimer);
-          _romTransferResumeTimer = null;
-          requestResumeTransfer();
-          updateRomSharingUI();
-        }
-      });
     });
     socket.on('connect_error', (e) => {
       console.log('[play] connect_error:', e.message);
@@ -898,7 +844,7 @@
     }
   };
 
-  const onConnect = async () => {
+  const onConnect = async (isReconnect = false) => {
     // Mid-game reconnect: silently rejoin signaling channel, don't reset UI
     if (gameRunning) {
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
@@ -1105,6 +1051,7 @@
               console.log('[play] join: cached ROM mismatch — clearing');
               clearLoadedRom();
             }
+            if (isReconnect) resumeRomTransferAfterReconnect();
 
             // Mid-game join handling
             if (roomData.status === 'playing') {
@@ -2296,6 +2243,23 @@
       }
       updateRomSharingUI();
     }, 15000);
+  };
+
+  // A lobby guest that loses its socket is dropped from the room, so the host
+  // tears down the pre-game transfer and any retry sent while offline never
+  // reaches it. Once rejoined (new socket id), ask again from where we stopped.
+  const resumeRomTransferAfterReconnect = () => {
+    if (isHost || _romSharingDecision !== 'accepted' || _romBlob) return;
+    if (_romTransferState !== 'resuming' && _romTransferState !== 'paused') return;
+    console.log('[play] resuming ROM transfer after reconnect');
+    cleanupPreGameConnections();
+    registerRomSignalHandler();
+    _romTransferRetries = 0;
+    _romTransferState = 'resuming';
+    clearTimeout(_romTransferResumeTimer);
+    _romTransferResumeTimer = null;
+    requestResumeTransfer();
+    updateRomSharingUI();
   };
 
   const resetStallTimer = () => {
