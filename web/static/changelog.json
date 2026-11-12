@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.66.2",
+    "date": "2026-11-12",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "limit feedback request bodies to 64 KiB (#108)"
+      }
+    ]
+  },
+  {
     "version": "0.66.1",
     "date": "2026-11-12",
     "changes": [
