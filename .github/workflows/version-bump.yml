@@ -4,39 +4,89 @@ on:
   push:
     branches: [main]
 
+# One release at a time. GitHub keeps one waiting run per group and cancels an
+# older waiting one, so a run must not depend on having seen its own push:
+# each run works from the tip of main and covers everything since the last
+# version commit, which makes up for any run that was cancelled or failed.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
-  bump:
-    # Only run on feat: or fix: commits, skip version bump commits
-    if: |
-      startsWith(github.event.head_commit.message, 'feat:') ||
-      startsWith(github.event.head_commit.message, 'feat(') ||
-      startsWith(github.event.head_commit.message, 'fix:') ||
-      startsWith(github.event.head_commit.message, 'fix(')
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # If main has moved past the push that started this run, a newer run is
+      # waiting and will bump and deploy for both. Standing down here keeps
+      # merges that land together to one deploy. Version commits on top of
+      # this push don't count: that is a re-run, which should deploy again.
+      - name: Check this run is for the newest push
+        id: newest
+        run: |
+          newer=$(git log --format=%s "${GITHUB_SHA}..HEAD" | grep -vc '^chore(version):' || true)
+          if [ "$newer" -gt 0 ]; then
+            echo "::notice::main has $newer newer commit(s); the run for the newest push will release this one."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v7
+        if: steps.newest.outputs.release == 'true'
         with:
           node-version: 20
 
       - name: Configure git
+        if: steps.newest.outputs.release == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Run version bump
+        if: steps.newest.outputs.release == 'true'
         # `just deploy` invokes the script with no args (range = origin/main..HEAD).
-        # Here, post-squash-merge, origin/main == HEAD, so we pass --from with
-        # the pre-push SHA (github.event.before) so the script's RANGE covers
-        # exactly the commits the merge introduced. Everything else — bump
-        # rule, changelog, commit, tag — is identical to local `just deploy`.
-        run: bash scripts/bump-version.sh --from "${{ github.event.before }}"
+        # Here origin/main == HEAD, so we pass --from with the last
+        # chore(version) commit: the range is every commit released since.
+        # The script bumps only if that range holds a feat: or fix: commit.
+        # Everything else — bump rule, changelog, commit, tag — is identical
+        # to local `just deploy`.
+        run: |
+          last_version=$(git log --format=%H --grep='^chore(version):' -1)
+          bash scripts/bump-version.sh --from "$last_version"
 
       - name: Push version bump
-        run: git push --follow-tags
+        if: steps.newest.outputs.release == 'true'
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "No version commit to push."
+          else
+            # --atomic: if main moved and the branch is rejected, the tag must
+            # not land on its own, or every later bump stops at "tag exists".
+            git push --atomic --follow-tags
+          fi
+
+      # The only thing that deploys the site. Render's own auto-deploy is off
+      # (render.yaml): it ran one deploy for the merge and a second for the
+      # version commit seconds later, and on the free plan the second could be
+      # killed while the service was being put back to sleep. The hook deploys
+      # the tip of main, which by now includes the version commit. A push made
+      # with GITHUB_TOKEN starts no workflow, so this runs once per merge.
+      - name: Deploy to Render
+        if: steps.newest.outputs.release == 'true'
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "::error::RENDER_DEPLOY_HOOK_URL is not set, so nothing was deployed. See deploy/render/README.md."
+            exit 1
+          fi
+          curl --fail --silent --show-error --output /dev/null --retry 3 --request POST "$RENDER_DEPLOY_HOOK_URL"
+          echo "Asked Render to deploy main at $(git rev-parse --short HEAD)."

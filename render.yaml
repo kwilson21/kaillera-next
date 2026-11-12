@@ -1,5 +1,7 @@
 # Render Blueprint: the free fallback host for the public site.
-# Render builds the Dockerfile from main and redeploys on every merge.
+# Render builds the Dockerfile from main. It does not deploy on its own:
+# .github/workflows/version-bump.yml calls the service's deploy hook once per
+# merge, after the version commit is pushed (deploy/render/README.md).
 # Setup and switching between Render and a self-hosted server: deploy/render/README.md
 services:
   - type: web
@@ -7,7 +9,7 @@ services:
     runtime: docker
     plan: free
     branch: main
-    autoDeploy: true
+    autoDeployTrigger: 'off'
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
