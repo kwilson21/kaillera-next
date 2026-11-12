@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.2",
+    "date": "2026-11-12",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a slow boot is not a failed boot; spectator stream survives a signaling reconnect (#117)"
+      }
+    ]
+  },
+  {
     "version": "0.67.1",
     "date": "2026-11-12",
     "changes": [
