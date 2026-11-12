@@ -438,9 +438,8 @@
   let wakeTimer = 0;
   let clockTimer = 0;
 
-  function waking() {
+  function waking(started) {
     setState('waking');
-    const started = Date.now();
     const directWakeSent = wakeOrigin();
     const clock = $('elapsed');
     clockTimer = setInterval(() => {
@@ -488,7 +487,7 @@
     try {
       const elapsedMs = Math.max(0, Date.now() - started);
       if (elapsedMs > 60 * 60 * 1000) return;
-      fetch('/api/wake-event', {
+      fetch(`${API}/api/wake-event`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ page, elapsed_ms: elapsedMs, direct_wake_sent: directWakeSent }),
@@ -500,10 +499,11 @@
   }
 
   async function start() {
+    const started = Date.now();
     try {
       await getJSON('/health', 2000);
     } catch {
-      waking();
+      waking(started);
       return;
     }
     refresh();

@@ -253,8 +253,7 @@
     clock = 0;
   }
 
-  function waking() {
-    const started = Date.now();
+  function waking(started) {
     waitingScreen(started);
     const directWakeSent = wakeOrigin();
     // A slow link may need longer than a napping server does: each miss
@@ -292,7 +291,7 @@
     try {
       const elapsedMs = Math.max(0, Date.now() - started);
       if (elapsedMs > 60 * 60 * 1000) return;
-      fetch('/api/wake-event', {
+      fetch(`${API}/api/wake-event`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ page, elapsed_ms: elapsedMs, direct_wake_sent: directWakeSent }),
@@ -308,10 +307,11 @@
   async function start() {
     if (!code) return showClosed('');
     if (!canPlay && !hasWebRTC) return show('inv-unsupported');
+    const started = Date.now();
     try {
       await getJSON('/health', 2000);
     } catch {
-      waking();
+      waking(started);
       return;
     }
     lookup();

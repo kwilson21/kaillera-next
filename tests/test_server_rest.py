@@ -139,6 +139,21 @@ def test_wake_event_saves_wake_time_and_metadata(wake_client):
     }
 
 
+def test_client_event_rejects_wake_time(wake_client, monkeypatch):
+    from src.api import app as appmod
+
+    client, insert = wake_client
+    monkeypatch.setitem(appmod.rooms, "ROOM1", object())
+    monkeypatch.setattr(appmod, "verify_upload_token", lambda room, token: True)
+    response = client.post(
+        "/api/client-event?room=ROOM1&token=valid",
+        json={"type": "wake-time", "msg": "forged", "meta": {"elapsed_ms": 1}},
+    )
+
+    assert response.status_code == 400
+    insert.assert_not_awaited()
+
+
 def test_health(server_url):
     r = requests.get(f"{server_url}/health", timeout=5)
     assert r.status_code == 200

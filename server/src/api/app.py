@@ -136,8 +136,8 @@ _VALID_EVENT_TYPES = {
     "milestone_reached",
     "peer_left",
     "peer_reconnected",
-    "wake-time",
 }
+_ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 
 _FEEDBACK_CONTEXT_MAX = 4096  # 4KB max for context JSON
 
@@ -1804,7 +1804,7 @@ def create_app(lifespan=None) -> FastAPI:
 
         conditions = ["created_at > datetime('now', ?)"]
         params: list = [f"-{days} days"]
-        if evt_type and evt_type in _VALID_EVENT_TYPES:
+        if evt_type and evt_type in _ADMIN_EVENT_TYPES:
             conditions.append("type = ?")
             params.append(evt_type)
         if room:

@@ -195,9 +195,17 @@ def test_waking_sends_one_direct_origin_wake_request(page, server_url):
 
 def test_wake_duration_is_reported_once_after_health_recovers(page, server_url):
     ready = {"value": False}
+    health_calls = {"count": 0}
     reports = []
     page.route("**/", lambda route: _landing_with_origin(route, "https://wake-origin.example"))
-    page.route("**/health", lambda route: route.fulfill(json={"status": "ok"}) if ready["value"] else route.abort())
+
+    def health(route):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            time.sleep(1.1)  # The initial probe is part of the wake duration.
+        route.fulfill(json={"status": "ok"}) if ready["value"] else route.abort()
+
+    page.route("**/health", health)
     page.route("**://wake-origin.example/health*", lambda route: route.fulfill(status=204))
     page.route("**/api/wake-event", lambda route: (reports.append(route.request.post_data_json), route.fulfill(status=204)))
     page.goto(server_url)
@@ -208,7 +216,7 @@ def test_wake_duration_is_reported_once_after_health_recovers(page, server_url):
     page.wait_for_timeout(100)
     assert len(reports) == 1
     assert reports == [{"page": "front", "elapsed_ms": reports[0]["elapsed_ms"], "direct_wake_sent": True}]
-    assert reports[0]["elapsed_ms"] >= 1000
+    assert reports[0]["elapsed_ms"] >= 4000
     page.wait_for_timeout(1200)
     assert len(reports) == 1
 
