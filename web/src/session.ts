@@ -72,8 +72,11 @@ export const sessionMachine = setupEffect({
     lobby: {
       on: {
         joined: ({ context, event }) => {
-          if (event.status !== 'playing' || event.spectator) return;
-          return { target: 'lateJoinWaiting', context: { ...context, matchId: event.matchId } };
+          if (event.status !== 'playing') return;
+          // A spectator watches the host's stream: the game is on for this
+          // page at once, with no state to wait for.
+          const target = event.spectator ? 'running' : 'lateJoinWaiting';
+          return { target, context: { ...context, matchId: event.matchId } };
         },
       },
     },

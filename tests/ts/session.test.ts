@@ -46,11 +46,14 @@ test('joining a room in play waits for state, then runs (lateJoinTest)', async (
   await session.stop();
 });
 
-test('a spectator joining a room in play stays in the lobby state', async () => {
-  const { session } = open();
+test('a spectator joining a room in play is in the game at once, and is never reported', async () => {
+  const { session, reported } = open(30);
   session.send({ type: 'joined', status: 'playing', matchId: 'm1', spectator: true });
-  await session.socketUp({ gameRunning: false });
-  assert.equal(session.state(), 'lobby');
+  // play.js sets gameRunning for any mid-game join, spectators included.
+  assert.equal(await session.socketUp({ gameRunning: true }), true);
+  assert.equal(session.state(), 'running');
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(reported, []);
   await session.stop();
 });
 
