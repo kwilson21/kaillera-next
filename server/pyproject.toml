@@ -23,6 +23,7 @@ dependencies = [
     "Pillow>=10.0.0",
     # Cloudflare R2 blob storage (src/blobstore.py) through its S3-compatible API.
     "boto3>=1.34",
+    "sqlalchemy>=2.0.40",
 ]
 
 [project.optional-dependencies]

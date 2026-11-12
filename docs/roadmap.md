@@ -133,7 +133,7 @@ server-side disconnect grace period plus client-side reconnect retries (see CHAN
 
 ---
 
-## Phase 7: TypeScript core (Effect, XState, Quint, LemmaScript) [in progress]
+## Phase 7: Frontend overhaul (TypeScript, Effect, XState, Quint, LemmaScript) [in progress]
 
 The frontend moves from plain scripts to a typed core in `web/src/`, bundled
 to `web/static/dist/kn-core.js` and exposed as `window.KNCore`. Each stage
@@ -189,5 +189,9 @@ through one function) become Effect timeouts and scoped finalizers.
 - The bundle is 493 KB minified (162 KB gzipped), mostly Effect. It is
   committed so that deploys need no Node step. Moving the build into the
   Docker image is the alternative once the bundle changes often.
-- The database layer stays Python and plain SQL. Drizzle would only fit if
-  database access moved into the Cloudflare Worker.
+- The database stays on Cloudflare D1 (SQLite locally). Queries are built with
+  SQLAlchemy Core from the tables in `server/src/schema.py` and compiled to
+  SQL for the existing backends; SQLAlchemy never opens a connection.
+  `db.py` and the admin API are converted. `retention.py`,
+  `match_rotation.py` and `desync_vision.py` still pass SQL strings to
+  `db.query` / `db.execute_write`; those helpers go once they are converted.
