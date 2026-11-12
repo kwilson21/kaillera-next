@@ -874,6 +874,7 @@
         if (err) console.log('[play] mid-game rejoin failed:', err);
         else console.log('[play] mid-game rejoin succeeded');
         sendDeviceType();
+        if (!err && isReconnect) resumeRomTransferAfterReconnect();
       });
       return;
     }
@@ -2245,12 +2246,17 @@
     }, 15000);
   };
 
-  // A lobby guest that loses its socket is dropped from the room, so the host
-  // tears down the pre-game transfer and any retry sent while offline never
-  // reaches it. Once rejoined (new socket id), ask again from where we stopped.
+  // A transfer request or retry sent over Socket.IO while the socket is down is
+  // flushed before the page has rejoined the room, so the server drops it (and
+  // in the lobby the host has torn down the pre-game transfer as well). Once
+  // rejoined (new socket id), ask again from where we stopped.
   const resumeRomTransferAfterReconnect = () => {
     if (isHost || _romSharingDecision !== 'accepted' || _romBlob) return;
     if (_romTransferState !== 'resuming' && _romTransferState !== 'paused') return;
+    // Mid-game: still waiting to ask over the engine DataChannel. That poll
+    // sends the request itself (or falls back to Socket.IO); asking here too
+    // could start a second transfer into the same chunk buffer.
+    if (_romAcceptPollInterval) return;
     console.log('[play] resuming ROM transfer after reconnect');
     cleanupPreGameConnections();
     registerRomSignalHandler();

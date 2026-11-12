@@ -125,3 +125,43 @@ def test_lobby_reconnect_resumes_stalled_rom_transfer(browser, server_url, room)
         host.close()
         guest.close()
         os.unlink(rom)
+
+
+def test_mid_game_reconnect_resumes_stalled_rom_transfer(browser, server_url, room):
+    rom = _make_fake_rom(0x42)
+    host = browser.new_page()
+    guest = browser.new_page()
+    guest_logs = []
+    guest.on("console", lambda msg: guest_logs.append(msg.text))
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom)
+        expect(host.locator("#opt-rom-sharing")).to_be_enabled(timeout=5000)
+        host.evaluate("document.getElementById('opt-rom-sharing').click()")
+
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest&debug=1")
+        expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
+        _wait_connected(guest)
+
+        # Start without booting an emulator (the ROM is fake); sharing lets the
+        # host start before the guest has a ROM.
+        host.evaluate("window.__test_skipBoot = true")
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        guest.wait_for_function("KNState.matchId", timeout=10000)
+
+        _drop_socket(guest)
+        guest.click("#rom-accept-btn")
+        guest.wait_for_timeout(500)
+        assert not guest.evaluate("document.getElementById('rom-drop').classList.contains('loaded')")
+
+        _wait_connected(guest)
+        guest.wait_for_function("document.getElementById('rom-drop').classList.contains('loaded')", timeout=8000)
+        assert any("mid-game rejoin succeeded" in line for line in guest_logs)
+        assert any("resuming ROM transfer after reconnect" in line for line in guest_logs)
+    finally:
+        host.close()
+        guest.close()
+        os.unlink(rom)
+
