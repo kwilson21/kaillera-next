@@ -15,6 +15,7 @@ V1 endpoints:
   POST /api/cache-state/{h}     upload save state to cache
   POST /api/session-log          HTTP fallback for session log flush
   POST /api/client-event        submit client error/diagnostic event
+  POST /api/wake-event          submit landing-page wake timing
   POST /api/feedback            submit user feedback
 
 Admin endpoints (auth via ADMIN_KEY env var):
@@ -41,10 +42,12 @@ import re
 import subprocess as _sp
 import time
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.gzip import GZipMiddleware
 
 from src import db, landing_build, retention, state, state_cache, stats
@@ -82,6 +85,37 @@ _PUBLIC_ROOM_ID_RE = re.compile(r"^[A-Za-z0-9]{3,16}$")
 _PUBLIC_GAME_ID_RE = re.compile(r"^[A-Za-z0-9\-]{1,32}$")
 
 _CLIENT_EVENT_MAX_SIZE = 4 * 1024  # 4KB max per event
+_WAKE_EVENT_MAX_ELAPSED_MS = 60 * 60 * 1000  # one hour
+
+
+async def _read_limited_body(request: Request, max_size: int) -> bytes:
+    """Read a request body while enforcing its size limit."""
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > max_size:
+                raise HTTPException(status_code=413, detail="Event too large")
+        except ValueError:
+            pass
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(status_code=413, detail="Event too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+class WakeEventPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    page: Literal["front", "invite"]
+    elapsed_ms: int = Field(ge=0, le=_WAKE_EVENT_MAX_ELAPSED_MS)
+    direct_wake_sent: bool
+
+
 _VALID_EVENT_TYPES = {
     "webrtc-fail",
     "wasm-fail",
@@ -103,6 +137,7 @@ _VALID_EVENT_TYPES = {
     "peer_left",
     "peer_reconnected",
 }
+_ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 
 _FEEDBACK_CONTEXT_MAX = 4096  # 4KB max for context JSON
 
@@ -1216,6 +1251,36 @@ def create_app(lifespan=None) -> FastAPI:
                 log.warning("Flagging %s for a %s event failed: %s", match_id[:8], evt_type, exc)
         return {"status": "saved", "id": row_id}
 
+    @app.post("/api/wake-event", status_code=204)
+    async def wake_event(request: Request) -> Response:
+        """Store anonymous landing-page wake timing in the existing event log."""
+        client_ip = _client_ip(request)
+        if not check_ip(client_ip, "wake-event"):
+            raise HTTPException(status_code=429, detail="Rate limited")
+        body = await _read_limited_body(request, _CLIENT_EVENT_MAX_SIZE)
+        try:
+            event = WakeEventPayload.model_validate_json(body)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail="Invalid wake event") from exc
+        await db.insert_client_event(
+            {
+                "type": "wake-time",
+                "message": f"{event.page} powered on in {event.elapsed_ms} ms",
+                "meta": json.dumps(
+                    {
+                        "page": event.page,
+                        "elapsed_ms": event.elapsed_ms,
+                        "direct_wake_sent": event.direct_wake_sent,
+                    }
+                ),
+                "room": "",
+                "slot": None,
+                "ip_hash": ip_hash(client_ip),
+                "user_agent": request.headers.get("user-agent", ""),
+            }
+        )
+        return Response(status_code=204)
+
     # ── Feedback submission ──────────────────────────────────────────────
 
     @app.post("/api/feedback")
@@ -1739,7 +1804,7 @@ def create_app(lifespan=None) -> FastAPI:
 
         conditions = ["created_at > datetime('now', ?)"]
         params: list = [f"-{days} days"]
-        if evt_type and evt_type in _VALID_EVENT_TYPES:
+        if evt_type and evt_type in _ADMIN_EVENT_TYPES:
             conditions.append("type = ?")
             params.append(evt_type)
         if room:

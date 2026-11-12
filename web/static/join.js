@@ -209,6 +209,7 @@
       room = await getJSON(`/room/${encodeURIComponent(code)}`, 8000);
     } catch {
       if (seq !== lookupSeq) return; // a newer lookup is out and retries itself
+      // Health already succeeded; this waiting screen is not a server wake.
       // The server answered /health but not this. A room already on screen
       // stays; otherwise the waiting screen (with its clock and, after two
       // minutes, the "something's wrong" line) shows while we retry.
@@ -235,10 +236,9 @@
   // ── Waking ─────────────────────────────────────────────────────────────
 
   let clock = 0;
-  function waitingScreen() {
+  function waitingScreen(started = Date.now()) {
     if (state !== 'inv-waking') show('inv-waking');
     if (clock) return;
-    const started = Date.now();
     clock = setInterval(() => {
       const s = Math.floor((Date.now() - started) / 1000);
       $('elapsed').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -253,9 +253,9 @@
     clock = 0;
   }
 
-  function waking() {
-    waitingScreen();
-    wakeOrigin();
+  function waking(started) {
+    waitingScreen(started);
+    const directWakeSent = wakeOrigin();
     // A slow link may need longer than a napping server does: each miss
     // gives the next ping more time, up to 10 s.
     let timeout = 2500;
@@ -267,6 +267,7 @@
         setTimeout(poll, WAKE_POLL_MS);
         return;
       }
+      reportWakeDuration('invite', started, directWakeSent);
       lookup(); // the clock runs until the room answers
     };
     setTimeout(poll, WAKE_POLL_MS);
@@ -274,13 +275,30 @@
 
   function wakeOrigin() {
     const configured = document.querySelector('meta[name="kn-origin"]')?.content;
-    if (!configured || configured === '__KN_ORIGIN__') return;
+    if (!configured || configured === '__KN_ORIGIN__') return false;
     try {
       const origin = new URL(configured);
-      if (origin.origin === location.origin) return;
+      if (origin.origin === location.origin) return false;
       fetch(new URL('/health', origin), { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+      return true;
     } catch {
       // A malformed build value should not interrupt the normal same-origin poll.
+      return false;
+    }
+  }
+
+  function reportWakeDuration(page, started, directWakeSent) {
+    try {
+      const elapsedMs = Math.max(0, Date.now() - started);
+      if (elapsedMs > 60 * 60 * 1000) return;
+      fetch(`${API}/api/wake-event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page, elapsed_ms: elapsedMs, direct_wake_sent: directWakeSent }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // Wake telemetry must never interrupt the page's normal recovery path.
     }
   }
 
@@ -289,10 +307,11 @@
   async function start() {
     if (!code) return showClosed('');
     if (!canPlay && !hasWebRTC) return show('inv-unsupported');
+    const started = Date.now();
     try {
       await getJSON('/health', 2000);
     } catch {
-      waking();
+      waking(started);
       return;
     }
     lookup();
