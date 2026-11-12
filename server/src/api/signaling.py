@@ -722,10 +722,20 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
         _sid_to_room.pop(old_sid, None)
         _sid_to_room[sid] = (session_id, persistent_id, False)
         await sio.enter_room(sid, session_id)
-        await sio.emit("users-updated", _players_payload(existing), room=session_id)
+        # The host reloaded mid-game: their emulator is gone and their page is
+        # showing the lobby, so the match is over. Leaving the room "playing"
+        # sent every later joiner down the late-join path to a host with
+        # nothing running (specs/room_lifecycle.qnt, ownerSeesGame). A socket
+        # that reconnects under a still-running game is not fresh and keeps
+        # the match.
+        if payload.extra.fresh and existing.status == "playing" and existing.owner == sid:
+            log.info("Room %s: host re-opened from a fresh page mid-game, ending the match", session_id)
+            await _end_match(session_id, existing, "host-reload")
+        else:
+            await sio.emit("users-updated", _players_payload(existing), room=session_id)
+            await state.save_room(session_id, existing)
         await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
         await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
-        await state.save_room(session_id, existing)
         log.info("SIO %s reconnected to room %s (host, persistentId=%s)", sid, session_id, persistent_id)
         return None
 
@@ -1110,7 +1120,12 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     session_id, room = result
     if room.owner != sid:
         return "Only the host can end the game"
+    await _end_match(session_id, room, "game-end")
+    return None
 
+
+async def _end_match(session_id: str, room: Room, reason: str) -> None:
+    """Put a playing room back in the lobby and tell everyone in it."""
     ended_match_id = room.match_id
     room.match_id = None
     room.status = "lobby"
@@ -1136,12 +1151,12 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     # though every client was already told the game ended above.
     await state.save_room(session_id, room)
     if ended_match_id:
-        await db.set_session_ended(ended_match_id, None, "game-end")
-    log.info("Game ended in room %s", session_id)
+        await db.set_session_ended(ended_match_id, None, reason)
+    log.info("Game ended in room %s (%s)", session_id, reason)
     await db.insert_client_event(
         {
             "type": "server_game_ended",
-            "message": "",
+            "message": reason,
             "meta": json.dumps({"match_id": ended_match_id}),
             "room": session_id,
             "slot": -1,
@@ -1153,7 +1168,6 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     # does not block the client end-game return.
     if ended_match_id:
         asyncio.create_task(desync_vision.run_postmortem(ended_match_id))
-    return None
 
 
 @sio.on("set-mode")

@@ -1,0 +1,87 @@
+name: Lint, types, specs and proofs
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/lint.yml'
+      - 'web/**'
+      - 'deploy/static/**'
+      - 'tests/**'
+      - 'specs/**'
+      - 'tools/oxlint/**'
+      - 'scripts/check-specs.sh'
+      - 'package.json'
+      - 'tsconfig.json'
+      - 'LemmaScript-files.txt'
+      - 'scripts/build-web.mjs'
+      - 'biome.json'
+      - 'antislop.toml'
+      - 'server/**'
+      - 'build/kn_rollback/**'
+      - 'scripts/**'
+      - 'tools/**'
+      - 'oxlint.config.mts'
+      - '.oxfmtrc.json'
+
+permissions:
+  contents: read
+
+jobs:
+  js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned tools
+        run: npm install --ignore-scripts --no-package-lock
+      - name: Format check (oxfmt)
+        run: npm run fmt:check
+      - name: Lint (oxlint + anti-slop, Biome)
+        run: npm run lint
+      - name: Typecheck (tsc)
+        run: npm run typecheck
+      - name: TypeScript tests
+        run: npm run test:ts
+      - name: Committed bundle matches web/src
+        run: npm run build:check
+      - name: Model-check specs (Quint)
+        run: npm run spec
+
+  # Proofs for the files in LemmaScript-files.txt. `lsc check` regenerates the
+  # Dafny from the annotated TypeScript and verifies it; the diff step fails
+  # when the committed .dfy/.dfy.gen are out of date with the source.
+  proofs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned tools
+        run: npm install --ignore-scripts --no-package-lock
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - uses: dafny-lang/setup-dafny-action@v1
+        with:
+          dafny-version: '4.11.0'
+      - name: Verify (LemmaScript, Dafny backend)
+        run: npx lsc check --backend=dafny
+      - name: Generated Dafny is up to date
+        run: |
+          git diff --exit-code -- '*.dfy.gen' '*.dfy'
+          test -z "$(git ls-files --others --exclude-standard -- '*.dfy.gen' '*.dfy')"
+
+  # Placeholder, deferral and hedging comments across Python, JS/TS, C and
+  # shell. Built from the crates.io source; the npm wrapper downloads an
+  # unpinned binary in a postinstall script.
+  slop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/antislop
+          key: antislop-0.3.0-${{ runner.os }}
+      - name: Install antislop
+        run: test -x ~/.cargo/bin/antislop || cargo install antislop --version 0.3.0 --locked
+      - name: antislop
+        run: ~/.cargo/bin/antislop --disable stub --no-filename-check .

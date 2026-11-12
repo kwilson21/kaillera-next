@@ -9,7 +9,7 @@ Thanks for your interest in contributing! This project is open to contributions 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip for dependency management
 - [just](https://github.com/casey/just) (command runner)
-- Node.js (for Prettier formatting)
+- Node.js (for the JS formatter, linters and the Quint model checker)
 - Optionally: Docker (for Redis), [lego](https://go-acme.github.io/lego/) + a
   Cloudflare API token (for HTTPS dev — see `just certs` in the README)
 
@@ -214,7 +214,27 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 - **Modern ECMAScript** — `const`/`let` (never `var`), arrow functions, template
   literals, `async`/`await`, optional chaining. No ES modules (see above).
 - **Python** — formatted by ruff, type hints encouraged.
-- **HTML/CSS** — formatted by prettier.
+- **TypeScript** — new frontend logic lives in `web/src/` (strict mode,
+  Effect, Effect Schema, XState). `just build` type-checks, runs
+  `tests/ts`, and bundles it to `web/static/dist/kn-core.js`, which is
+  committed. The existing `web/static/*.js` files stay plain scripts until
+  their turn in the migration (`docs/roadmap.md`).
+- **JS/TS/HTML/CSS** — formatted by oxfmt (`just fmt`), same style Prettier
+  produced. Linted by oxlint with the vendored anti-slop rules
+  (`tools/oxlint/anti-slop/`, yours to edit) and by Biome (`just lint`).
+  Errors fail CI; warnings are the existing backlog. Fix warnings in files
+  you touch, but not in netplay code without a two-player run.
+- **Comments** — `just slop` (antislop) rejects placeholder, deferral and
+  hedging comments in Python, JS/TS, C and shell. Install it with
+  `cargo install antislop --version 0.3.0 --locked`.
+- **Specs** — `specs/*.qnt` are Quint models of the room lifecycle. Run
+  `just spec`. Change the model in the same PR when you change how rooms
+  start, end, or handle a reconnect.
+- **Proofs** — functions listed in `LemmaScript-files.txt` carry `//@`
+  contracts that CI proves with Dafny. After editing one, run
+  `npx lsc gen --backend=dafny <file>` and commit the regenerated
+  `.dfy.gen`; `npx lsc check --backend=dafny` verifies locally if you have
+  Dafny 4.11.
 - **No unnecessary comments** — code should be self-evident. Add comments only
   where the *why* isn't obvious from the *what*.
 - **Commit messages** — use [conventional commits](https://www.conventionalcommits.org/):

@@ -130,3 +130,64 @@ desync. Rollback activates automatically when the WASM core exports `kn_pre_tick
 
 **Followup:** WebRTC DC reconnect when Socket.IO signaling survives — shipped: a 30s
 server-side disconnect grace period plus client-side reconnect retries (see CHANGELOG.md).
+
+---
+
+## Phase 7: TypeScript core (Effect, XState, Quint, LemmaScript) [in progress]
+
+The frontend moves from plain scripts to a typed core in `web/src/`, bundled
+to `web/static/dist/kn-core.js` and exposed as `window.KNCore`. Each stage
+ships on its own and leaves the site working; nothing is rewritten in place
+without the old code running beside it first.
+
+**Rules for every stage**
+
+- A new module starts by observing: it runs next to the code it will replace
+  and reports disagreement (`session-disagree`). It takes over only after
+  production shows none.
+- Anything touching the tick loop, sync, input or the core needs
+  `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
+- State logic is modelled in Quint first; pure functions with a contract are
+  proven with LemmaScript.
+
+**Stage 1: foundation [done]**
+Toolchain (TypeScript 7, esbuild, oxfmt, oxlint + anti-slop, Biome, antislop,
+Quint, LemmaScript) and CI. First modules: `protocol.ts` (Effect Schema for
+server messages), `session.ts` (page lifecycle machine, observing), `roster.ts`
+(mesh-heal target selection, proven never to return the player's own id).
+
+**Stage 2: the page lifecycle decides**
+Once `session-disagree` stays at zero in production: `play.js` reads lobby /
+late-join / running from the machine instead of `gameRunning`, `_lateJoin`
+and `_pendingLateJoin`. The reconnect handshake (open-room / join-room after
+a socket drop) becomes Effect logic invoked by the machine, with a timeout
+and retry instead of a bare callback. Resolve the two open questions in
+`specs/room_lifecycle.qnt` using the `late-join-stranded` reports.
+
+**Stage 3: the socket boundary**
+Every Socket.IO and DataChannel message is decoded with Effect Schema on
+arrival. Generate the client schemas from the server's Pydantic models so
+there is one source of truth. `play.js` becomes `web/src/play/*.ts`.
+
+**Stage 4: engine periphery**
+`shared.js` (input wire format; prove encode/decode round-trips with
+LemmaScript), `kn-state.js`, `gamepad-manager.js`, `kn-diagnostics.js`,
+`kn-desync-detector.js`. The engine calls `KNCore.meshHealTargets` instead of
+its inline roster loops.
+
+**Stage 5: the engine**
+`netplay-rollback.js` (18k lines) is split by concern into typed modules:
+peer mesh, signaling, late join, resync, tick loop. The per-peer and boot
+phase state become machines; the per-frame tick loop stays plain code. The
+netplay invariants I1 (every wait has a deadline) and I2 (all peer cleanup
+through one function) become Effect timeouts and scoped finalizers.
+
+**Open decisions**
+
+- `@xstate/effect` requires XState 6, which is in beta. Both are pinned to
+  exact versions. Revisit when XState 6 is stable.
+- The bundle is 493 KB minified (162 KB gzipped), mostly Effect. It is
+  committed so that deploys need no Node step. Moving the build into the
+  Docker image is the alternative once the bundle changes often.
+- The database layer stays Python and plain SQL. Drizzle would only fit if
+  database access moved into the Cloudflare Worker.

@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.66.3",
+    "date": "2026-11-12",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "end the match on host reload and stop self-stall; add TypeScript core and tooling (#104)"
+      }
+    ]
+  },
+  {
     "version": "0.66.2",
     "date": "2026-11-12",
     "changes": [

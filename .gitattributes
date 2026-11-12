@@ -1,0 +1,2 @@
+web/static/dist/* linguist-generated=true -diff
+*.dfy.gen linguist-generated=true
