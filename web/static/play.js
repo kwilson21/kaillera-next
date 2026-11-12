@@ -666,8 +666,7 @@
         showToast('Unable to reach server \u2014 retrying\u2026', 'error');
       }
     }, 10000);
-    let _hasConnected = false;
-    let _reconnectAttempts = 0;
+    const _connects = window.KNCore?.createConnectTracker() ?? null;
     socket.on('connect', () => {
       // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
       // on the socket, so 'connect' is the event that fires here.
@@ -677,21 +676,18 @@
         _initialConnectTimer = null;
       }
       _hideReconnecting();
-      // A `connect` after an earlier one is a signaling reconnect. (Socket.IO
-      // v4 emits `reconnect` on the Manager, never on the Socket, and the
-      // Manager's also fires for a first connection that needed retries.)
-      const isReconnect = _hasConnected;
-      _hasConnected = true;
+      // A `connect` after an earlier one is a signaling reconnect; the rule
+      // lives in web/src/reconnect.ts.
+      const { isReconnect, attempts } = _connects?.connected() ?? { isReconnect: false, attempts: 0 };
       if (isReconnect) {
-        console.log('[play] socket reconnected after', _reconnectAttempts, 'attempts, new id:', socket.id);
-        KNEvent('reconnect', `Reconnected after ${_reconnectAttempts} attempt(s)`, { attempts: _reconnectAttempts });
+        console.log('[play] socket reconnected after', attempts, 'attempts, new id:', socket.id);
+        KNEvent('reconnect', `Reconnected after ${attempts} attempt(s)`, { attempts });
         KNState.sessionStats.reconnects++;
       }
-      _reconnectAttempts = 0;
       onConnect(isReconnect);
     });
     socket.io.on('reconnect_attempt', (attempt) => {
-      _reconnectAttempts = attempt;
+      _connects?.attempt(attempt);
     });
     socket.on('disconnect', (reason) => {
       _session?.send({ type: 'socketDown' });
@@ -2301,17 +2297,17 @@
     }, 15000);
   };
 
-  // A transfer request or retry sent over Socket.IO while the socket is down is
-  // flushed before the page has rejoined the room, so the server drops it (and
-  // in the lobby the host has torn down the pre-game transfer as well). Once
-  // rejoined (new socket id), ask again from where we stopped.
+  // Ask the host for the ROM again after rejoining (new socket id), from where
+  // we stopped. When to do so is decided in web/src/reconnect.ts.
   const resumeRomTransferAfterReconnect = () => {
-    if (isHost || _romSharingDecision !== 'accepted' || _romBlob) return;
-    if (_romTransferState !== 'resuming' && _romTransferState !== 'paused') return;
-    // Mid-game: still waiting to ask over the engine DataChannel. That poll
-    // sends the request itself (or falls back to Socket.IO); asking here too
-    // could start a second transfer into the same chunk buffer.
-    if (_romAcceptPollInterval) return;
+    const resume = window.KNCore?.shouldResumeRomTransfer({
+      isHost,
+      sharingDecision: _romSharingDecision,
+      hasRom: !!_romBlob,
+      transferState: _romTransferState,
+      askingOverEngine: !!_romAcceptPollInterval,
+    });
+    if (!resume) return;
     console.log('[play] resuming ROM transfer after reconnect');
     cleanupPreGameConnections();
     registerRomSignalHandler();
