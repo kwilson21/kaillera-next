@@ -138,6 +138,18 @@
  *     gameplay-hash compare below fail (hundreds of finalized
  *     gameplay-hash mismatches observed before the fix, 0 after); after
  *     the fix it should pass like a CLICK_DURING_BATTLE=0 run.
+ *   DROP_SIGNALING_MS=<n>   A third of the way into the battle, cut both
+ *     pages' Socket.IO WebSocket and refuse reconnects for n ms, the way a
+ *     server restart or a network drop does; the match itself runs over
+ *     WebRTC and must carry on. Pick n long enough to span a 300-frame mesh
+ *     health check at the frame rate this machine manages (40000 in the cloud
+ *     container). The outage starts a third of the way in, so two thirds of
+ *     BATTLE_SECONDS must cover n plus 20 s to reconnect. On top of the normal
+ *     checks the run fails if either page: never reconnected; logged any
+ *     TICK-STUCK or INPUT-STALL; or had its lifecycle machine report
+ *     session-disagree or late-join-stranded (web/src/session.ts). This does
+ *     not cover the host stalling on its own slot (2026-11-09): that lives in
+ *     the lockstep path a solo game takes, see solo-signaling-drop.mjs.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
@@ -164,6 +176,7 @@ const GUEST_BROWSER = process.env.GUEST_BROWSER || 'chromium';
 const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
 const THROTTLE_GUEST_HZ = Number(process.env.THROTTLE_GUEST_HZ || 30);
 const HIDE_GUEST_MS = Number(process.env.HIDE_GUEST_MS || 0);
+const DROP_SIGNALING_MS = Number(process.env.DROP_SIGNALING_MS || 0);
 const HIDE_GUEST_FROZEN = process.env.HIDE_GUEST_FROZEN === '1';
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
@@ -199,6 +212,22 @@ if (!Number.isFinite(HIDE_GUEST_MS) || HIDE_GUEST_MS < 0) {
 }
 if (HIDE_GUEST_FROZEN && !(HIDE_GUEST_MS > 0)) {
   console.log('HIDE_GUEST_FROZEN=1 needs HIDE_GUEST_MS > 0');
+  process.exit(1);
+}
+if (!(Number.isFinite(DROP_SIGNALING_MS) && DROP_SIGNALING_MS >= 0)) {
+  console.log(`DROP_SIGNALING_MS=${process.env.DROP_SIGNALING_MS} invalid — must be a finite number >= 0`);
+  process.exit(1);
+}
+if (DROP_SIGNALING_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS > 0 || CLICK_DURING_BATTLE)) {
+  console.log('DROP_SIGNALING_MS is mutually exclusive with the FREEZE, THROTTLE, HIDE and CLICK knobs');
+  process.exit(1);
+}
+// The outage starts a third of the way in, so it and the reconnect that
+// follows must fit in the remaining two thirds.
+const DROP_SIGNALING_RECONNECT_MS = 20000;
+const dropSignalingNeedsSeconds = Math.ceil(((DROP_SIGNALING_MS + DROP_SIGNALING_RECONNECT_MS) * 3) / 2 / 1000);
+if (DROP_SIGNALING_MS > 0 && !(BATTLE_SECONDS >= dropSignalingNeedsSeconds)) {
+  console.log(`DROP_SIGNALING_MS=${DROP_SIGNALING_MS} needs BATTLE_SECONDS >= ${dropSignalingNeedsSeconds}`);
   process.exit(1);
 }
 if (HIDE_GUEST_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST)) {
@@ -360,15 +389,64 @@ const hiddenInitScript = () => {
   });
 };
 
+// DROP_SIGNALING_MS: keep every client event the page reports (type and meta),
+// so the run can assert on reconnects and on the lifecycle machine's reports.
+const recordEventsInitScript = () => {
+  window.__knEvents = [];
+  let real;
+  Object.defineProperty(window, 'KNEvent', {
+    configurable: true,
+    set: (fn) => {
+      real = fn;
+    },
+    get: () =>
+      real &&
+      ((type, msg, meta) => {
+        window.__knEvents.push({ type, meta: meta ?? {} });
+        return real(type, msg, meta);
+      }),
+  });
+};
+
 const mkPage = async (browser, name, { throttleHz = 0, hidden = false, suspendAudio = false } = {}) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(initScript, { lat: LAT, jitter: JITTER });
   if (throttleHz) await ctx.addInitScript(throttleInitScript, throttleHz);
   if (hidden) await ctx.addInitScript(hiddenInitScript);
   if (suspendAudio) await ctx.addInitScript(suspendAudioInitScript);
+  if (DROP_SIGNALING_MS) await ctx.addInitScript(recordEventsInitScript);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
+  if (DROP_SIGNALING_MS) {
+    // Proxy the signaling WebSocket so it can be cut, and kept down, on demand.
+    signaling.set(page, { down: false, sockets: [] });
+    await page.routeWebSocket(/socket\.io/, (ws) => {
+      const state = signaling.get(page);
+      if (state.down) {
+        ws.close({ code: 4000, reason: 'signaling down (test)' });
+        return;
+      }
+      const server = ws.connectToServer();
+      state.sockets.push({ page: ws, server });
+      ws.onMessage((message) => server.send(message));
+    });
+  }
   return page;
+};
+
+// Per-page signaling proxy state for DROP_SIGNALING_MS.
+const signaling = new Map();
+const setSignalingDown = async (page, down) => {
+  const state = signaling.get(page);
+  state.down = down;
+  if (!down) return;
+  // Close both ends: the page must see the drop, and the server must see the
+  // client go rather than keep the old session until its heartbeat times out.
+  // 4000 is an application close code; 1006 is reserved and cannot be sent.
+  for (const { page: pageSide, server } of state.sockets.splice(0)) {
+    await server.close({ code: 4000, reason: 'signaling down (test)' });
+    await pageSide.close({ code: 4000, reason: 'signaling down (test)' });
+  }
 };
 
 const host = await mkPage(hostBrowser, 'host');
@@ -682,6 +760,21 @@ if (inBattle) {
       console.log('guest tab shown again');
     }
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+  } else if (DROP_SIGNALING_MS > 0) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    // Only reconnects after this point count: one during setup must not satisfy the check.
+    for (const p of [host, guest]) {
+      signaling.get(p).reconnectsBefore = await p.evaluate(
+        () => window.__knEvents.filter((e) => e.type === 'reconnect').length,
+      );
+    }
+    await Promise.all([setSignalingDown(host, true), setSignalingDown(guest, true)]);
+    console.log(`signaling sockets cut on both pages for ${DROP_SIGNALING_MS} ms`);
+    await host.waitForTimeout(DROP_SIGNALING_MS);
+    await Promise.all([setSignalingDown(host, false), setSignalingDown(guest, false)]);
+    console.log('signaling allowed to reconnect');
+    await host.waitForTimeout(BATTLE_SECONDS * 1000 - before - DROP_SIGNALING_MS);
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
   }
@@ -724,6 +817,8 @@ const collect = (p, VISUAL_CHECK) =>
     };
   }, VISUAL_CHECK);
 const [H, G] = await Promise.all([collect(host, VISUAL_CHECK), collect(guest, VISUAL_CHECK)]);
+const knEventsOf = (page) => (DROP_SIGNALING_MS ? page.evaluate(() => window.__knEvents) : []);
+const [hostEvents, guestEvents] = await Promise.all([knEventsOf(host), knEventsOf(guest)]);
 await host.screenshot({ path: `${OUT}/host.png` });
 await guest.screenshot({ path: `${OUT}/guest.png` });
 fs.writeFileSync(`${OUT}/host-clog.txt`, H.clog);
@@ -921,8 +1016,29 @@ if (VISUAL_CHECK) {
   };
 }
 
+const signalingDropOf = (page, events, log) => ({
+  reconnectsAfterOutage:
+    events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
+  lifecycleReports: events.filter((e) => e.type === 'session-disagree' || e.type === 'late-join-stranded'),
+  tickStuck: count(log, /TICK-STUCK/g),
+  // The lockstep-path stall (waiting on a peer's input), not the rollback engine's routine RB-INPUT-STALL.
+  inputStalls: count(log, /(?<!RB-)INPUT-STALL (start|hard-timeout)/g),
+  // The rollback engine gave up waiting on a peer's input (not its routine RB-INPUT-STALL pacing).
+  rbStallTimeouts: count(log, /RB-INPUT-STALL-TIMEOUT/g),
+  meshHeals: count(log, /MESH-HEAL/g),
+});
+
 const summary = {
   room,
+  ...(DROP_SIGNALING_MS
+    ? {
+        signalingDrop: {
+          ms: DROP_SIGNALING_MS,
+          host: signalingDropOf(host, hostEvents, H.sync),
+          guest: signalingDropOf(guest, guestEvents, G.sync),
+        },
+      }
+    : {}),
   latencyMs: LAT,
   jitterMs: JITTER,
   ...(FREEZE_MS > 0
@@ -1052,7 +1168,22 @@ if (suspendGuestAudioFailed) {
     console.log('SUSPEND_GUEST_AUDIO: guest never installed the stand-in audio clock (fix path unexercised)');
   }
 }
+const signalingDropFailed =
+  DROP_SIGNALING_MS > 0 &&
+  [summary.signalingDrop.host, summary.signalingDrop.guest].some(
+    (side) =>
+      side.reconnectsAfterOutage < 1 ||
+      side.lifecycleReports.length > 0 ||
+      side.tickStuck > 0 ||
+      side.inputStalls > 0 ||
+      side.rbStallTimeouts > 0,
+  );
+if (signalingDropFailed) {
+  console.log('DROP_SIGNALING_MS: a page never reconnected, stalled, or its lifecycle machine reported:');
+  console.log(JSON.stringify(summary.signalingDrop));
+}
 const failed =
+  signalingDropFailed ||
   gpMis > 0 ||
   gsMis > 0 ||
   summary.bootInputStallTimeouts.host > 0 ||
