@@ -233,6 +233,7 @@ if (DROP_SIGNALING_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS >
 // The outage starts a third of the way in, so it and the reconnect that
 // follows must fit in the remaining two thirds.
 const DROP_SIGNALING_RECONNECT_MS = 20000;
+const DROP_SIGNALING_RECONNECT_WAIT_MS = 60000;
 if (!(Number.isFinite(DROP_SIGNALING_GUEST_LATE_MS) && DROP_SIGNALING_GUEST_LATE_MS >= 0)) {
   console.log(`DROP_SIGNALING_GUEST_LATE_MS=${process.env.DROP_SIGNALING_GUEST_LATE_MS} invalid — must be >= 0`);
   process.exit(1);
@@ -819,6 +820,19 @@ if (inBattle) {
     console.log('signaling allowed to reconnect');
     const guestLateFor = Date.now() - restoreStarted;
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - DROP_SIGNALING_MS - guestLateFor));
+    // Socket.IO retries on a backoff, and an attempt can take many seconds on
+    // a slow machine, so a page may still be mid-retry when the battle time is
+    // up. Give each page until DROP_SIGNALING_RECONNECT_WAIT_MS to record its
+    // reconnect; one that still has not is reported as never reconnected.
+    for (const p of [host, guest]) {
+      await p
+        .waitForFunction(
+          (reconnectsBefore) => window.__knEvents.filter((e) => e.type === 'reconnect').length > reconnectsBefore,
+          signaling.get(p).reconnectsBefore,
+          { timeout: DROP_SIGNALING_RECONNECT_WAIT_MS },
+        )
+        .catch(() => {});
+    }
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
   }
