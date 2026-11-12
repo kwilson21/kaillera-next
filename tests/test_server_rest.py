@@ -21,6 +21,7 @@ def _patch_browser_ssl():
 @pytest.fixture
 def wake_client(monkeypatch):
     from fastapi.testclient import TestClient
+
     from src import db
     from src.api import app as appmod
 
@@ -28,6 +29,60 @@ def wake_client(monkeypatch):
     monkeypatch.setattr(db, "insert_client_event", insert)
     monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
     return TestClient(appmod.create_app()), insert
+
+
+@pytest.fixture
+def upload_event_client(monkeypatch):
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from src import db
+    from src.api import app as appmod
+
+    monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
+    monkeypatch.setattr(appmod, "verify_upload_token", lambda room, token: True)
+    monkeypatch.setitem(appmod.rooms, "ROOM1", SimpleNamespace(match_id="other-match"))
+    monkeypatch.setattr(db, "match_accepts_uploads", AsyncMock(return_value=True))
+    monkeypatch.setattr(db, "session_log_busy", lambda match_id, slot: False)
+    insert = AsyncMock(return_value=12)
+    monkeypatch.setattr(db, "insert_client_event", insert)
+    append = AsyncMock(return_value={"accepted": 0})
+    monkeypatch.setattr(db, "append_session_flush", append)
+
+    client = TestClient(appmod.create_app())
+    return client, insert, append
+
+
+def _post_chunked_body(app, path, cap):
+    """Post a chunked body and verify the endpoint stops after crossing its cap."""
+    import httpx
+
+    chunks_consumed = 0
+    request_headers = []
+
+    async def body_chunks():
+        nonlocal chunks_consumed
+        chunks_consumed += 1
+        yield b"x" * cap
+        chunks_consumed += 1
+        yield b"y"
+        chunks_consumed += 1
+        raise AssertionError("request body was read after exceeding the cap")
+
+    async def send_request():
+        async def record_headers(scope, receive, send):
+            request_headers.extend(scope.get("headers", []))
+            await app(scope, receive, send)
+
+        transport = httpx.ASGITransport(app=record_headers)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(path, content=body_chunks())
+
+    response = asyncio.run(send_request())
+    assert not any(name == b"content-length" for name, _ in request_headers)
+    assert chunks_consumed == 2
+    return response
 
 
 def test_wake_event_rejects_oversized_body(wake_client):
@@ -44,6 +99,7 @@ def test_wake_event_rejects_oversized_body(wake_client):
 
 def test_wake_event_rejects_oversized_content_length_without_reading():
     from fastapi import HTTPException
+
     from src.api.app import _read_limited_body
 
     class Request:
@@ -65,6 +121,7 @@ def test_wake_event_rejects_oversized_content_length_without_reading():
 
 def test_wake_event_rejects_oversized_stream_without_reading_past_crossing_chunk():
     from fastapi import HTTPException
+
     from src.api.app import _read_limited_body
 
     class Request:
@@ -152,6 +209,80 @@ def test_client_event_rejects_wake_time(wake_client, monkeypatch):
 
     assert response.status_code == 400
     insert.assert_not_awaited()
+
+
+def test_client_event_rejects_oversized_content_length(upload_event_client):
+    client, _, _ = upload_event_client
+    response = client.post(
+        "/api/client-event?room=ROOM1&token=valid",
+        content=b" " * (4 * 1024 + 1),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Event too large"}
+
+
+def test_client_event_stops_reading_chunked_body_at_cap(upload_event_client):
+    client, _, _ = upload_event_client
+    response = _post_chunked_body(
+        client.app,
+        "/api/client-event?room=ROOM1&token=valid",
+        4 * 1024,
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Event too large"}
+
+
+def test_client_event_accepts_valid_request(upload_event_client):
+    client, insert, _ = upload_event_client
+    response = client.post(
+        "/api/client-event?room=ROOM1&token=valid",
+        json={"type": "webrtc-fail", "msg": "failed", "meta": {}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "saved", "id": 12}
+    insert.assert_awaited_once()
+
+
+def test_session_log_rejects_oversized_content_length(upload_event_client):
+    client, _, append = upload_event_client
+    response = client.post(
+        "/api/session-log?room=ROOM1&token=valid",
+        content=b" " * (2 * 1024 * 1024 + 1),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Payload too large"}
+    append.assert_not_awaited()
+
+
+def test_session_log_stops_reading_chunked_body_at_cap(upload_event_client):
+    client, _, append = upload_event_client
+    response = _post_chunked_body(
+        client.app,
+        "/api/session-log?room=ROOM1&token=valid",
+        2 * 1024 * 1024,
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Payload too large"}
+    append.assert_not_awaited()
+
+
+def test_session_log_accepts_valid_request(upload_event_client):
+    client, _, append = upload_event_client
+    response = client.post(
+        "/api/session-log?room=ROOM1&token=valid",
+        json={"matchId": "match-1", "slot": 0, "entries": []},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "saved", "accepted": 0}
+    append.assert_awaited_once()
 
 
 def test_health(server_url):

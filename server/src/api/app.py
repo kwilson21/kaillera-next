@@ -88,13 +88,13 @@ _CLIENT_EVENT_MAX_SIZE = 4 * 1024  # 4KB max per event
 _WAKE_EVENT_MAX_ELAPSED_MS = 60 * 60 * 1000  # one hour
 
 
-async def _read_limited_body(request: Request, max_size: int) -> bytes:
+async def _read_limited_body(request: Request, max_size: int, too_large_detail: str = "Event too large") -> bytes:
     """Read a request body while enforcing its size limit."""
     content_length = request.headers.get("content-length")
     if content_length is not None:
         try:
             if int(content_length) > max_size:
-                raise HTTPException(status_code=413, detail="Event too large")
+                raise HTTPException(status_code=413, detail=too_large_detail)
         except ValueError:
             pass
 
@@ -103,7 +103,7 @@ async def _read_limited_body(request: Request, max_size: int) -> bytes:
     async for chunk in request.stream():
         total += len(chunk)
         if total > max_size:
-            raise HTTPException(status_code=413, detail="Event too large")
+            raise HTTPException(status_code=413, detail=too_large_detail)
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -1094,9 +1094,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.post("/api/session-log")
     async def session_log_http(request: Request, _auth: None = Depends(_require_upload_token_relaxed)) -> dict:
-        body = await request.body()
-        if len(body) > _SESSION_LOG_HTTP_MAX:
-            raise HTTPException(status_code=413, detail="Payload too large")
+        body = await _read_limited_body(request, _SESSION_LOG_HTTP_MAX, "Payload too large")
         if len(body) == 0:
             raise HTTPException(status_code=400, detail="Empty payload")
         try:
@@ -1199,9 +1197,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.post("/api/client-event")
     async def client_event(request: Request, _auth: None = Depends(_require_upload_token)) -> dict:
-        body = await request.body()
-        if len(body) > _CLIENT_EVENT_MAX_SIZE:
-            raise HTTPException(status_code=413, detail="Event too large")
+        body = await _read_limited_body(request, _CLIENT_EVENT_MAX_SIZE)
         if len(body) == 0:
             raise HTTPException(status_code=400, detail="Empty event")
         try:
