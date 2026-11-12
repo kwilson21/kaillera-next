@@ -78,9 +78,12 @@ via `gameManager.loadState()`, then syncs at next delay boundary.
 2. JS fallback: FNV-1a hash of RDRAM via direct HEAPU8 access, falling back to
    `getState()` serialization.
 
-Periodic hash broadcasts are disabled — AI DMA determinism + SoftFloat FPU make steady-state
-gameplay deterministic. Resync is instead triggered by reconnect, mobile lifecycle,
-network-change, input-stall, boot-correction, peer-recovery, and explicit sync-request paths.
+The legacy periodic `sync-hash` broadcast is disabled — AI DMA determinism + SoftFloat FPU
+make steady-state gameplay deterministic. (In C rollback mode, a separate RB-CHECK
+gameplay-hash exchange still runs every 300 frames, but a mismatch is logged as a bug to fix,
+not auto-resynced — see Rollback Integrity in docs/netplay-invariants.md.) This resync path is
+triggered by reconnect, network-change, input-stall, boot-correction, peer-recovery, explicit
+sync-request paths, and (lockstep-fallback only) mobile lifecycle returns.
 
 **Resync (host-authoritative):** Desynced client sends `sync-request` -> host exports state
 via `_kn_sync_read()` (C-level) or `getState()` (JS fallback), compresses and sends via
