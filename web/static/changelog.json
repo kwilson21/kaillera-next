@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.1",
+    "date": "2026-11-12",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "store the lifecycle machine's reports instead of rejecting them (#113)"
+      }
+    ]
+  },
+  {
     "version": "0.67.0",
     "date": "2026-11-12",
     "changes": [
