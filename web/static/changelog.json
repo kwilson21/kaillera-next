@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.66.4",
+    "date": "2026-11-12",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "count signaling reconnects and resume ROM transfer after one (#109)"
+      }
+    ]
+  },
+  {
     "version": "0.66.3",
     "date": "2026-11-12",
     "changes": [
