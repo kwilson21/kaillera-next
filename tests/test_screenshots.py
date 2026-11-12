@@ -125,3 +125,59 @@ def test_desync_vision_loads_screenshots_from_blob_store(tmp_path):
 
     shots = run_async(scenario())
     assert [(s.slot, base64.b64decode(s.png_b64)) for s in shots] == [(0, JPEG), (1, JPEG + b"-p2")]
+
+
+def test_postmortem_reads_unverified_events_and_stores_the_verdict(tmp_path, monkeypatch):
+    """run_postmortem end to end with a stand-in for the vision API: it finds
+    the desync event with no verdict, loads both peers' screenshots, and
+    records what the model said."""
+    import sys
+    from types import SimpleNamespace
+
+    from src.api import desync_vision
+
+    class FakeAnthropic:
+        def __init__(self, api_key):
+            self.messages = SimpleNamespace(create=self._create)
+
+        async def _create(self, **_kwargs):
+            return SimpleNamespace(content=[SimpleNamespace(text='{"equal": false, "confidence": "high"}')])
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(AsyncAnthropic=FakeAnthropic))
+    monkeypatch.setenv("DESYNC_VISION_ENABLED", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(desync_vision, "_CACHE", {})
+
+    async def scenario():
+        db = await _open(tmp_path)
+        try:
+            await db.insert_screenshot("m1", 0, 300, JPEG)
+            await db.insert_screenshot("m1", 1, 300, JPEG + b"-p2")
+            await db.execute_write(
+                "INSERT INTO desync_events (match_id, frame, field, slot, trigger) VALUES ('m1', 300, 'stocks', 0, 'rb-check')",
+                (),
+            )
+            await db.execute_write(
+                "INSERT INTO desync_events (match_id, frame, field, slot, trigger, vision_verdict_json)"
+                " VALUES ('m1', 301, 'stocks', 0, 'rb-check', '{}')",
+                (),
+            )
+            processed = await desync_vision.run_postmortem("m1")
+            stored = await db.query(
+                "SELECT frame, field, vision_equal, vision_confidence, hashes_json FROM desync_events"
+                " WHERE match_id = 'm1' AND vision_confidence IS NOT NULL",
+                (),
+            )
+            return processed, stored
+        finally:
+            await db.close_db()
+
+    processed, stored = run_async(scenario())
+    # Only the event without a verdict is sent. The one at frame 301 already has
+    # one; it sits within two frames of both screenshots, so only the
+    # "no verdict yet" filter keeps it from being sent too.
+    assert processed == 1
+    assert [(row["frame"], row["field"], row["vision_equal"], row["vision_confidence"]) for row in stored] == [
+        (300, "stocks", 0, "high")
+    ]
+    assert "png_b64" not in stored[0]["hashes_json"]

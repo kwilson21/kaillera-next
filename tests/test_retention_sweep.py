@@ -186,19 +186,19 @@ def test_tombstone_is_not_set_on_a_match_flagged_meanwhile(tmp_path):
         db = await _open(tmp_path)
         try:
             await _match(db, "old", ended_days_ago=8, created_days_ago=8)
-            real_query = dbmod.query
+            real_fetch = dbmod.fetch
 
-            async def query_then_flag(sql, params):
-                rows = await real_query(sql, params)
-                if "deleting_at IS NULL" in sql and rows:
+            async def fetch_then_flag(statement):
+                rows = await real_fetch(statement)
+                if "deleting_at IS NULL" in dbmod.compile_statement(statement)[0] and rows:
                     await db.flag_match("old", [{"signal": "feedback", "count": 1}], auto=False)
                 return rows
 
-            dbmod.query = query_then_flag
+            dbmod.fetch = fetch_then_flag
             try:
                 marked = await retention.mark_expired()
             finally:
-                dbmod.query = real_query
+                dbmod.fetch = real_fetch
             return marked, await _left(db, "old", tmp_path)
         finally:
             await db.close_db()
@@ -368,23 +368,28 @@ def test_one_failing_match_does_not_stop_the_sweep(tmp_path):
         try:
             await _match(db, "bad", ended_days_ago=9, created_days_ago=9)
             await _match(db, "good", ended_days_ago=8, created_days_ago=8)
-            real_batch = dbmod.execute_batch
+            real_batch = dbmod.run_batch
 
             async def failing_for_bad(statements):
-                if statements and statements[0][1] == ("bad",):
+                if statements and dbmod.compile_statement(statements[0])[1] == ("bad",):
                     raise RuntimeError("D1 query failed (HTTP 500)")
                 return await real_batch(statements)
 
-            dbmod.execute_batch = failing_for_bad
+            dbmod.run_batch = failing_for_bad
             try:
                 await retention.sweep()
             finally:
-                dbmod.execute_batch = real_batch
-            return await _left(db, "good", tmp_path)
+                dbmod.run_batch = real_batch
+            return await _left(db, "good", tmp_path), await _left(db, "bad", tmp_path)
         finally:
             await db.close_db()
 
-    assert run_async(scenario()) == GONE
+    good, bad = run_async(scenario())
+    assert good == GONE
+    # The failing match must really have failed: its rows are still there
+    # for the next sweep. Without this the test passes even if the
+    # failure is never injected.
+    assert bad["match_retention"] == 1 and bad["session_logs"] == 1
 
 
 @pytest.mark.parametrize("match_id", ["", "a/b", ".."])

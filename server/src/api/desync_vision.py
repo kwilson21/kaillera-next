@@ -18,8 +18,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func, insert, select
 
 from .. import db
+from ..schema import DesyncEvent, Screenshot
 from . import desync_prompts
 
 log = logging.getLogger(__name__)
@@ -113,24 +115,19 @@ async def _do_vision_call(req: VisionRequest) -> dict[str, Any]:
     except json.JSONDecodeError:
         verdict = {"parse_error": True, "raw": raw_text, "equal": None, "confidence": "low"}
 
-    await db.execute_write(
-        """INSERT INTO desync_events
-           (match_id, frame, field, slot, trigger, hashes_json,
-            vision_verdict_json, vision_equal, vision_confidence,
-            replay_meta_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            req.match_id,
-            req.frame,
-            req.field,
-            req.slot,
-            req.trigger,
-            json.dumps([p.model_dump(exclude={"png_b64"}) for p in req.peers]),
-            json.dumps(verdict),
-            verdict.get("equal"),
-            verdict.get("confidence"),
-            json.dumps(req.replay_meta) if req.replay_meta else None,
-        ),
+    await db.run(
+        insert(DesyncEvent).values(
+            match_id=req.match_id,
+            frame=req.frame,
+            field=req.field,
+            slot=req.slot,
+            trigger=req.trigger,
+            hashes_json=json.dumps([p.model_dump(exclude={"png_b64"}) for p in req.peers]),
+            vision_verdict_json=json.dumps(verdict),
+            vision_equal=verdict.get("equal"),
+            vision_confidence=verdict.get("confidence"),
+            replay_meta_json=json.dumps(req.replay_meta) if req.replay_meta else None,
+        )
     )
 
     await _flag_if_desynced(req.match_id, req.frame, verdict)
@@ -195,12 +192,10 @@ async def _load_screenshots(match_id: str, frame: int) -> list[PeerScreenshot]:
     """Load all peer screenshots for (match_id, frame ±2): rows from the
     screenshots table, bytes from the blob store. One per slot, closest-frame
     first."""
-    rows = await db.query(
-        """SELECT slot, blob_key, data
-           FROM screenshots
-           WHERE match_id = ? AND frame BETWEEN ? AND ?
-           ORDER BY slot, ABS(frame - ?)""",
-        (match_id, frame - 2, frame + 2, frame),
+    rows = await db.fetch(
+        select(Screenshot.slot, Screenshot.blob_key, Screenshot.data)
+        .where(Screenshot.match_id == match_id, Screenshot.frame.between(frame - 2, frame + 2))
+        .order_by(Screenshot.slot, func.abs(Screenshot.frame - frame))
     )
     seen_slots: set[int] = set()
     out: list[PeerScreenshot] = []
@@ -226,12 +221,19 @@ async def run_postmortem(match_id: str) -> int:
     enabled."""
     if not is_enabled():
         return 0
-    rows = await db.query(
-        """SELECT id, match_id, frame, field, slot, trigger, hashes_json, replay_meta_json
-           FROM desync_events
-           WHERE match_id = ? AND vision_verdict_json IS NULL
-           ORDER BY frame""",
-        (match_id,),
+    rows = await db.fetch(
+        select(
+            DesyncEvent.id,
+            DesyncEvent.match_id,
+            DesyncEvent.frame,
+            DesyncEvent.field,
+            DesyncEvent.slot,
+            DesyncEvent.trigger,
+            DesyncEvent.hashes_json,
+            DesyncEvent.replay_meta_json,
+        )
+        .where(DesyncEvent.match_id == match_id, DesyncEvent.vision_verdict_json.is_(None))
+        .order_by(DesyncEvent.frame)
     )
     processed = 0
     for row in rows:

@@ -192,6 +192,6 @@ through one function) become Effect timeouts and scoped finalizers.
 - The database stays on Cloudflare D1 (SQLite locally). Queries are built with
   SQLAlchemy from the model classes in `server/src/schema.py` and compiled to
   SQL for the existing backends; SQLAlchemy never opens a connection.
-  `db.py` and the admin API are converted. `retention.py`,
-  `match_rotation.py` and `desync_vision.py` still pass SQL strings to
-  `db.query` / `db.execute_write`; those helpers go once they are converted.
+  All application queries are built this way; `db.query` and
+  `db.execute_write` remain only for tests and one-off tooling that
+  arrange data with hand-written SQL.

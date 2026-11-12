@@ -15,7 +15,18 @@ import logging
 import os
 from collections.abc import Iterable
 
+from sqlalchemy import ColumnElement, and_, case, delete, func, or_, select, update
+
 from src import db
+from src.schema import (
+    ClientEvent,
+    DesyncEvent,
+    MatchMetrics,
+    MatchRetention,
+    Screenshot,
+    SessionLog,
+    SessionLogChunk,
+)
 
 log = logging.getLogger(__name__)
 
@@ -91,11 +102,6 @@ def _count(found: dict[str, dict], signal: str, entry: dict) -> None:
 #   normal:             LOG_RETENTION_DAYS after it ended (or started, if it never ended)
 #   flagged, unresolved: untouched for FLAGGED_STALE_DAYS
 #   flagged, resolved:   LOG_RETENTION_DAYS after it was resolved
-_EXPIRED = """(
-    (tier = 'normal' AND COALESCE(ended_at, created_at) < datetime('now', ?))
-    OR (tier = 'flagged' AND resolved_at IS NULL AND last_touched_at < datetime('now', ?))
-    OR (tier = 'flagged' AND resolved_at IS NOT NULL AND resolved_at < datetime('now', ?))
-)"""
 _BATCH = 200
 
 
@@ -109,10 +115,39 @@ def _days(name: str, default: int) -> int:
     return max(value, 1)
 
 
-def _windows() -> tuple[str, str, str]:
-    retention_days = _days("LOG_RETENTION_DAYS", 7)
-    stale_days = _days("FLAGGED_STALE_DAYS", 180)
-    return f"-{retention_days} days", f"-{stale_days} days", f"-{retention_days} days"
+def _retention_window() -> str:
+    return f"-{_days('LOG_RETENTION_DAYS', 7)} days"
+
+
+def _expired() -> ColumnElement[bool]:
+    """The match_retention rows whose window has passed (see the three cases above)."""
+    kept_until = db.ago(_retention_window())
+    stale = db.ago(f"-{_days('FLAGGED_STALE_DAYS', 180)} days")
+    return or_(
+        and_(
+            MatchRetention.tier == "normal",
+            func.coalesce(MatchRetention.ended_at, MatchRetention.created_at) < kept_until,
+        ),
+        and_(
+            MatchRetention.tier == "flagged",
+            MatchRetention.resolved_at.is_(None),
+            MatchRetention.last_touched_at < stale,
+        ),
+        and_(
+            MatchRetention.tier == "flagged",
+            MatchRetention.resolved_at.is_not(None),
+            MatchRetention.resolved_at < kept_until,
+        ),
+    )
+
+
+def _event_match_id() -> ColumnElement:
+    """The match a client event belongs to: meta.match_id, or NULL when meta isn't JSON."""
+    return case((func.json_valid(ClientEvent.meta), db.json_field(ClientEvent.meta, "$.match_id")))
+
+
+# Everything keyed by match_id, in deletion order.
+_MATCH_TABLES = (Screenshot, DesyncEvent, SessionLogChunk, SessionLog, MatchMetrics)
 
 
 async def mark_expired() -> list[str]:
@@ -122,18 +157,16 @@ async def mark_expired() -> list[str]:
     SELECT and the UPDATE makes it a no-op. A tombstoned match is refused for
     uploads and flags.
     """
-    windows = _windows()
-    rows = await db.query(
-        f"SELECT match_id FROM match_retention WHERE deleting_at IS NULL AND {_EXPIRED} LIMIT ?",
-        (*windows, _BATCH),
-    )
+    live = MatchRetention.deleting_at.is_(None)
+    rows = await db.fetch(select(MatchRetention.match_id).where(live, _expired()).limit(_BATCH))
     marked = []
     for row in rows:
-        changed = await db.execute_write(
-            f"UPDATE match_retention SET deleting_at = datetime('now') WHERE match_id = ? AND deleting_at IS NULL AND {_EXPIRED}",
-            (row["match_id"], *windows),
+        tombstone = (
+            update(MatchRetention)
+            .values(deleting_at=db.now())
+            .where(MatchRetention.match_id == row["match_id"], live, _expired())
         )
-        if changed:
+        if (await db.run(tombstone)).changes:
             marked.append(row["match_id"])
     return marked
 
@@ -144,36 +177,26 @@ async def finish_deletes() -> int:
     Each step is idempotent, so a sweep interrupted anywhere leaves a hidden
     match that the next sweep finishes (spec §4). Returns matches finished.
     """
-    rows = await db.query(
-        "SELECT match_id FROM match_retention WHERE deleting_at IS NOT NULL ORDER BY deleting_at LIMIT ?", (_BATCH,)
+    tombstoned = MatchRetention.deleting_at.is_not(None)
+    rows = await db.fetch(
+        select(MatchRetention.match_id).where(tombstoned).order_by(MatchRetention.deleting_at).limit(_BATCH)
     )
     if not rows:
         return 0
     # client_events has no index on meta.match_id, so delete every tombstoned
     # match's events in one scan rather than one scan per match (D1 bills
     # rows read). The matches are already hidden, so doing this first is safe.
-    await db.execute_write(
-        """DELETE FROM client_events
-           WHERE CASE WHEN json_valid(meta) THEN json_extract(meta, '$.match_id') END IN
-                 (SELECT match_id FROM match_retention WHERE deleting_at IS NOT NULL)""",
-        (),
-    )
+    await db.run(delete(ClientEvent).where(_event_match_id().in_(select(MatchRetention.match_id).where(tombstoned))))
     finished = 0
     for row in rows:
         match_id = row["match_id"]
         try:
             await db.delete_match_blobs(match_id)
-            await db.execute_batch(
+            await db.run_batch(
                 [
-                    (f"DELETE FROM {table} WHERE match_id = ?", (match_id,))
-                    for table in (
-                        "screenshots",
-                        "desync_events",
-                        "session_log_chunks",
-                        "session_logs",
-                        "match_metrics",
-                        "match_retention",  # last: the tombstone goes only when everything else has
-                    )
+                    delete(table).where(table.match_id == match_id)
+                    # MatchRetention last: the tombstone goes only when everything else has
+                    for table in (*_MATCH_TABLES, MatchRetention)
                 ]
             )
         except Exception as exc:
@@ -188,22 +211,21 @@ async def finish_deletes() -> int:
 async def sweep_unregistered() -> None:
     """Age out rows that belong to no match_retention row: logs from before
     registration existed, and client events outside any match."""
-    cutoff = (_windows()[0],)
-    orphan = "created_at < datetime('now', ?) AND NOT EXISTS (SELECT 1 FROM match_retention r WHERE r.match_id = {t}.match_id)"
-    shots = await db.query(
-        f"SELECT blob_key FROM screenshots WHERE blob_key IS NOT NULL AND {orphan.format(t='screenshots')}", cutoff
+    old = db.ago(_retention_window())
+
+    def unregistered(table) -> ColumnElement[bool]:
+        registered = select(MatchRetention.match_id).where(MatchRetention.match_id == table.match_id).exists()
+        return and_(table.created_at < old, ~registered)
+
+    shots = await db.fetch(
+        select(Screenshot.blob_key).where(Screenshot.blob_key.is_not(None), unregistered(Screenshot))
     )
     if shots:
         await db.delete_blobs([r["blob_key"] for r in shots])
-    for table in ("screenshots", "desync_events", "session_log_chunks", "session_logs", "match_metrics"):
-        await db.execute_write(f"DELETE FROM {table} WHERE {orphan.format(t=table)}", cutoff)
-    await db.execute_write(
-        """DELETE FROM client_events WHERE created_at < datetime('now', ?)
-           AND NOT EXISTS (SELECT 1 FROM match_retention r
-                           WHERE r.match_id = CASE WHEN json_valid(client_events.meta)
-                                                   THEN json_extract(client_events.meta, '$.match_id') END)""",
-        cutoff,
-    )
+    for table in _MATCH_TABLES:
+        await db.run(delete(table).where(unregistered(table)))
+    in_a_match = select(MatchRetention.match_id).where(MatchRetention.match_id == _event_match_id()).exists()
+    await db.run(delete(ClientEvent).where(ClientEvent.created_at < old, ~in_a_match))
 
 
 async def sweep(*, include_unregistered: bool = True) -> None:
