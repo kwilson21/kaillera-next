@@ -4,6 +4,8 @@ __pycache__/
 *.egg-info/
 .venv/
 dist/
+# ...except the committed TypeScript bundle (built by `just build`)
+!web/static/dist/
 
 # EmulatorJS core build artifacts (source repos + compiled output)
 build/src/

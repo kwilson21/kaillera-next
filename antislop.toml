@@ -1,0 +1,313 @@
+# antislop: flags placeholder, deferral and hedging comments ("for now",
+# "should work", TODO/FIXME) in Python, JS/TS, C and shell.
+#
+# This is `antislop --print-config` with two changes: the vendored and
+# generated directories are excluded, and the "BUG marker" pattern is removed
+# (comments here describe real bugs by name; every hit was prose).
+# Run with `just slop`; the `stub` category is disabled there because its
+# AST checks misfire on Protocol methods (`...`) and early `return null`.
+exclude = [
+    "web/static/ejs/**",
+    "web/static/dist/**",
+    "tools/oxlint/anti-slop/**",
+    "docs/**",
+    "node_modules/**",
+    "target/**",
+    "venv/**",
+    ".venv/**",
+    "env/**",
+    "__pycache__/**",
+    "*.min.js",
+    "vendor/**",
+    "build/src/**",
+    "build/output/**",
+    "dist/**",
+    "third_party/**",
+]
+exclude_patterns = []
+file_extensions = [
+    ".rs",
+    ".py",
+    ".js",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    ".go",
+    ".java",
+    ".kt",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".php",
+    ".rb",
+    ".swift",
+    ".dart",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".fish",
+]
+max_file_size_kb = 1024
+
+[[patterns]]
+regex = "raise NotImplementedError"
+severity = "critical"
+message = "Stub: NotImplementedError raised"
+category = "stub"
+languages = ["Python"]
+
+[[patterns]]
+regex = 'NotImplementedError\(\)'
+severity = "critical"
+message = "Stub: NotImplementedError exception"
+category = "stub"
+languages = ["Python"]
+
+[[patterns]]
+regex = 'todo!\('
+severity = "critical"
+message = "Stub: todo!() macro"
+category = "stub"
+languages = ["Rust"]
+
+[[patterns]]
+regex = 'unimplemented!\('
+severity = "critical"
+message = "Stub: unimplemented!() macro"
+category = "stub"
+languages = ["Rust"]
+
+[[patterns]]
+regex = 'panic\("not implemented'
+severity = "critical"
+message = "Stub: panic with not implemented"
+category = "stub"
+languages = ["Go"]
+
+[[patterns]]
+regex = "throw new UnsupportedOperationException"
+severity = "critical"
+message = "Stub: UnsupportedOperationException"
+category = "stub"
+languages = [
+    "Java",
+    "Kotlin",
+]
+
+[[patterns]]
+regex = '''throw new Error\(['"]not implemented'''
+severity = "critical"
+message = "Stub: throw not implemented error"
+category = "stub"
+languages = [
+    "JavaScript",
+    "TypeScript",
+]
+
+[[patterns]]
+regex = '''throw std::logic_error\(['"]not implemented'''
+severity = "critical"
+message = "Stub: logic_error not implemented"
+category = "stub"
+languages = ["C++"]
+
+[[patterns]]
+regex = "raise NotImplementedError"
+severity = "critical"
+message = "Stub: NotImplementedError raised"
+category = "stub"
+languages = ["Ruby"]
+
+[[patterns]]
+regex = '(?i)not\s*implement'
+severity = "critical"
+message = "Stub: code explicitly not implemented"
+category = "stub"
+languages = []
+
+[[patterns]]
+regex = '(?i)\bunimplemented\b'
+severity = "critical"
+message = "Stub: unimplemented marker"
+category = "stub"
+languages = []
+
+[[patterns]]
+regex = '(?i)\bTODO\s*:'
+severity = "medium"
+message = "Placeholder: TODO marker"
+category = "placeholder"
+languages = []
+
+[[patterns]]
+regex = '(?i)\bTO\s*DO\s*:'
+severity = "medium"
+message = "Placeholder: TO DO marker"
+category = "placeholder"
+languages = []
+
+[[patterns]]
+regex = '(?i)\bFIXME\s*:'
+severity = "medium"
+message = "Placeholder: FIXME marker"
+category = "placeholder"
+languages = []
+
+[[patterns]]
+regex = '(?i)\bFIX\s*ME\s*:'
+severity = "medium"
+message = "Placeholder: FIX ME marker"
+category = "placeholder"
+languages = []
+
+[[patterns]]
+regex = '(?i)\bXXX\b'
+severity = "high"
+message = "Placeholder: XXX critical marker"
+category = "placeholder"
+languages = []
+
+[[patterns]]
+regex = '(?i)\bHACK\s*:'
+severity = "high"
+message = "Placeholder: HACK marker"
+category = "placeholder"
+languages = []
+
+[[patterns]]
+regex = '(?i)TODO\s*:?\s*implement'
+severity = "high"
+message = "Stub: TODO with implementation note"
+category = "stub"
+languages = []
+
+[[patterns]]
+regex = '(?i)FIXME\s*:?\s*implement'
+severity = "high"
+message = "Stub: FIXME with implementation note"
+category = "stub"
+languages = []
+
+[[patterns]]
+regex = '(?i)quick\s*(fix|hack)'
+severity = "high"
+message = "Deferral: quick hack creates debt"
+category = "deferral"
+languages = []
+
+[[patterns]]
+regex = '(?i)dirty\s*hack'
+severity = "high"
+message = "Deferral: dirty hack admitted"
+category = "deferral"
+languages = []
+
+[[patterns]]
+regex = "(?i)in production.*(would|should|will|need to)"
+severity = "medium"
+message = "Deferral: production code promised later"
+category = "deferral"
+languages = []
+
+[[patterns]]
+regex = "(?i)in a real.*(app|production|world)"
+severity = "medium"
+message = "Hedging: code acknowledges it''s not production-ready"
+category = "hedging"
+languages = []
+
+[[patterns]]
+regex = '(?i)not\s*production\s*ready'
+severity = "medium"
+message = "Hedging: explicitly not production-ready"
+category = "hedging"
+languages = []
+
+[[patterns]]
+regex = "raise NotImplementedError"
+severity = "critical"
+message = "NotImplementedError stub detected"
+category = "stub"
+ast_query = "(raise_statement) @stub"
+languages = ["Python"]
+
+[[patterns]]
+regex = "pass$"
+severity = "medium"
+message = "Function body contains only 'pass' statement"
+category = "stub"
+ast_query = "(pass_statement) @stub"
+languages = ["Python"]
+
+[[patterns]]
+regex = '\.\.\.$'
+severity = "medium"
+message = "Ellipsis (...) used as stub placeholder"
+category = "stub"
+ast_query = "(expression_statement (ellipsis)) @stub"
+languages = ["Python"]
+
+[[patterns]]
+regex = "throw new (NotImplementedError|NotImplemented)"
+severity = "critical"
+message = "NotImplementedError stub detected"
+category = "stub"
+ast_query = "(throw_statement) @stub"
+languages = [
+    "JavaScript",
+    "TypeScript",
+]
+
+[[patterns]]
+regex = "return (null|undefined)"
+severity = "low"
+message = "Function returns null/undefined placeholder"
+category = "stub"
+ast_query = "(return_statement) @stub"
+languages = [
+    "JavaScript",
+    "TypeScript",
+]
+
+[[patterns]]
+regex = "todo!"
+severity = "critical"
+message = "todo!() macro stub detected"
+category = "stub"
+ast_query = "(macro_invocation) @stub"
+languages = ["Rust"]
+
+[[patterns]]
+regex = "unimplemented!"
+severity = "critical"
+message = "unimplemented!() macro stub detected"
+category = "stub"
+ast_query = "(macro_invocation) @stub"
+languages = ["Rust"]
+
+[[patterns]]
+regex = "panic"
+severity = "critical"
+message = "panic() usage detected (possible stub)"
+category = "stub"
+ast_query = '(call_expression function: (identifier) @func (#eq? @func "panic")) @stub'
+languages = ["Go"]
+
+[[patterns]]
+regex = "UnsupportedOperationException"
+severity = "critical"
+message = "UnsupportedOperationException stub detected"
+category = "stub"
+ast_query = '(throw_statement (new_expression type: (type_identifier) @type (#match? @type "UnsupportedOperationException"))) @stub'
+languages = ["Java"]
+
+[[patterns]]
+regex = "throw"
+severity = "medium"
+message = "Throw statement detected (possible stub)"
+category = "stub"
+ast_query = "(throw_statement) @stub"
+languages = ["C++"]
+

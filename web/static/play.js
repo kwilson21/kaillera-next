@@ -118,6 +118,25 @@
   let previousPlayers = {};
   let previousSpectators = {};
   let _lateJoin = false;
+
+  // Page lifecycle state machine from the TypeScript core (web/src/session.ts).
+  // Stage 1: it only observes. This page still decides from gameRunning, and
+  // _sessionSocketUp reports any disagreement between the two.
+  const _session = window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta)) ?? null;
+  let _sessionLateJoinPoll = null;
+  const _sessionStopLateJoinPoll = () => {
+    if (_sessionLateJoinPoll) clearInterval(_sessionLateJoinPoll);
+    _sessionLateJoinPoll = null;
+  };
+  // A late join is done once the emulator is advancing frames.
+  const _sessionWatchLateJoin = () => {
+    if (!_session || _sessionLateJoinPoll) return;
+    _sessionLateJoinPoll = setInterval(() => {
+      if (!(KNState.frameNum > 0)) return;
+      _sessionStopLateJoinPoll();
+      _session.send({ type: 'lateJoinSynced' });
+    }, 1000);
+  };
   let _romBlob = null; // raw ROM Blob for re-creating blob URLs
   let _romBlobUrl = null;
   let _romHash = null; // SHA-256 hex of loaded ROM
@@ -648,6 +667,9 @@
       }
     }, 10000);
     socket.on('connect', () => {
+      // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
+      // on the socket, so 'connect' is the event that fires here.
+      _session?.socketUp({ gameRunning });
       if (_initialConnectTimer) {
         clearTimeout(_initialConnectTimer);
         _initialConnectTimer = null;
@@ -656,6 +678,7 @@
       onConnect();
     });
     socket.on('disconnect', (reason) => {
+      _session?.send({ type: 'socketDown' });
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       if (reason === 'io client disconnect') return;
       // Show spinner banner after brief delay (lobby and in-game)
@@ -693,6 +716,9 @@
               game_id: _gameId || 'ssb64',
               persistentId: _persistentId,
               reconnectToken: _reconnectToken,
+              // Only a page with no game running may end a match the server
+              // still thinks is on (see open-room in signaling.py).
+              fresh: !gameRunning,
             },
             maxPlayers: 4,
           }
@@ -944,6 +970,7 @@
             game_id: _gameId || 'ssb64',
             persistentId: _persistentId,
             reconnectToken: _reconnectToken,
+            fresh: true,
           },
           maxPlayers: 4,
         },
@@ -953,6 +980,7 @@
             return;
           }
           mySlot = 0;
+          _session?.send({ type: 'joined', status: 'lobby', matchId: null, spectator: false });
           KNEvent('room_created', '', { mode });
           sendDeviceType();
           if (mode === 'rollback' || mode === 'streaming') {
@@ -1106,6 +1134,12 @@
               clearLoadedRom();
             }
 
+            _session?.send({
+              type: 'joined',
+              status: roomData.status === 'playing' ? 'playing' : 'lobby',
+              matchId: joinData?.matchId ?? null,
+              spectator: !!isSpectator,
+            });
             // Mid-game join handling
             if (roomData.status === 'playing') {
               crumb('mid-game-join', {
@@ -1130,6 +1164,12 @@
               if (roomData.mode) mode = roomData.mode;
               else if (joinData?.mode) mode = joinData.mode;
               _lateJoin = !isSpectator || mode === 'streaming';
+              if (!isSpectator) {
+                // A streaming guest watches the host's video: there is no
+                // state to wait for, and no frame counter to watch.
+                if (mode === 'streaming') _session?.send({ type: 'lateJoinSynced' });
+                else _sessionWatchLateJoin();
+              }
               // Use joinData directly — the users-updated socket event may not
               // have arrived yet (ack returns before broadcast is delivered)
               if (joinData) lastUsersData = joinData;
@@ -1380,6 +1420,8 @@
   const onGameStarted = (data) => {
     // Keep match events from covering the fatal error modal.
     if (coreFatal) return;
+    _sessionStopLateJoinPoll();
+    _session?.send({ type: 'gameStarted', matchId: String(data?.matchId ?? '') });
     crumb('game-started', {
       mode: data.mode,
       hasRom: !!(_romBlob || _romBlobUrl),
@@ -1484,6 +1526,8 @@
     );
     gameRunning = false;
     _lateJoin = false;
+    _sessionStopLateJoinPoll();
+    _session?.send({ type: 'gameEnded' });
     _pendingLateJoin = false;
     showToast('The host has ended the game');
     if (engine) {
