@@ -4,6 +4,7 @@
  */
 import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor, sendAndAwait } from '@xstate/effect';
+import { bootTimedOut } from './boot.ts';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { meshHealTargets } from './roster.ts';
@@ -72,6 +73,7 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
 };
 
 export const KNCore = {
+  bootTimedOut,
   createConnectTracker,
   createSession,
   meshHealTargets,

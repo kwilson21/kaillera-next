@@ -161,7 +161,11 @@ Once `session-disagree` stays at zero in production: `play.js` reads lobby /
 late-join / running from the machine instead of `gameRunning`, `_lateJoin`
 and `_pendingLateJoin`. The reconnect handshake (open-room / join-room after
 a socket drop) becomes Effect logic invoked by the machine, with a timeout
-and retry instead of a bare callback. Resolve the two open questions in
+and retry instead of a bare callback. Production has had too little traffic to
+supply the evidence, so it comes from end-to-end runs instead:
+`tests/solo-signaling-drop.mjs`, `tests/rb-two-player.mjs` with
+`DROP_SIGNALING_MS`, and `tests/lifecycle-e2e.mjs` (late join, spectating,
+host reload) all show no `session-disagree`. Resolve the two open questions in
 `specs/room_lifecycle.qnt` using the `late-join-stranded` reports.
 
 **Stage 3: the socket boundary**
