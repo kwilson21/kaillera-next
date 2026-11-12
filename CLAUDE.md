@@ -245,6 +245,9 @@ invariants doc before proposing any watchdog that *acts* on stalls.
   that runs `scripts/bump-version.sh` on push to `main` (also runnable locally via `just deploy`)
 - Commit messages use **conventional commits**: `feat:` → minor bump, `fix:` → patch bump, anything else → no bump
 - Only runs on the `main` branch
+- The same workflow then deploys: it calls Render's deploy hook
+  (`RENDER_DEPLOY_HOOK_URL` secret) once per push to `main`, bump or not.
+  Render's own auto-deploy is off (`render.yaml`); see `deploy/render/README.md`
 - Version displayed in page footer (`web/static/version.json`), changelog in modal (`web/static/changelog.json`)
 - PRs are squash-merged; PR title becomes the commit message
 

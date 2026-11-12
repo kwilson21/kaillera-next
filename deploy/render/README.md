@@ -20,8 +20,8 @@ whichever server the hostname points to.
 
 1. Sign in at **dashboard.render.com** with GitHub, then choose **New →
    Blueprint** and pick this repo. Render reads `render.yaml` and creates
-   the `kaillera-next` web service (free plan, Docker, deploys `main` on
-   every merge).
+   the `kaillera-next` web service (free plan, Docker). Render's own
+   auto-deploy is off; see "Deploys" below.
 2. When asked, fill in the two secret values in Render's form. They're kept
    in the service's environment, never in the repo or chat:
    - `CF_TURN_KEY_ID`
@@ -32,6 +32,31 @@ whichever server the hostname points to.
 3. Wait for the first deploy, then open the service's
    `https://<name>.onrender.com` URL. The site works there before any DNS
    change.
+
+## Deploys
+
+One deploy per merge, started by GitHub rather than by Render.
+`.github/workflows/version-bump.yml` runs on every push to `main`, pushes
+the `chore(version)` commit when the merge was a `feat:` or `fix:`, then
+calls the service's deploy hook, which deploys the tip of `main`.
+
+Render's auto-deploy is off (`autoDeployTrigger: 'off'` in `render.yaml`).
+With it on, a merge produced two deploys seconds apart, one for the merge
+and one for the version commit. On 2026-11-12 the free instance was being
+put back to sleep as the second one started, and that deploy timed out.
+
+Setup, once:
+
+1. Render → service → **Settings → Deploy Hook**: copy the URL. It contains
+   a key, so treat it as a secret.
+2. GitHub → repo → **Settings → Secrets and variables → Actions → New
+   repository secret**: name `RENDER_DEPLOY_HOOK_URL`, value the URL.
+3. Check Render → **Settings → Auto-Deploy** reads **Off**. A Blueprint sync
+   sets it from `render.yaml`; set it by hand if the service is not synced.
+
+Without the secret the workflow fails with a message saying so, and nothing
+deploys. To deploy by hand: Render → **Manual Deploy → Deploy latest
+commit**.
 
 ## Database in Cloudflare D1
 
