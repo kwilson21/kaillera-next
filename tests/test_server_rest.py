@@ -5,6 +5,7 @@ Uses the shared server_url fixture from conftest.py.
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -118,6 +119,24 @@ def test_wake_event_rejects_elapsed_time_over_one_hour(wake_client):
     )
     assert response.status_code == 422
     insert.assert_not_awaited()
+
+
+def test_wake_event_saves_wake_time_and_metadata(wake_client):
+    client, insert = wake_client
+    response = client.post(
+        "/api/wake-event",
+        json={"page": "front", "elapsed_ms": 42000, "direct_wake_sent": True},
+    )
+
+    assert response.status_code == 204
+    insert.assert_awaited_once()
+    saved_event = insert.await_args.args[0]
+    assert saved_event["type"] == "wake-time"
+    assert json.loads(saved_event["meta"]) == {
+        "page": "front",
+        "elapsed_ms": 42000,
+        "direct_wake_sent": True,
+    }
 
 
 def test_health(server_url):
