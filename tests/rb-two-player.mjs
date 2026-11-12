@@ -150,6 +150,11 @@
  *     session-disagree or late-join-stranded (web/src/session.ts). This does
  *     not cover the host stalling on its own slot (2026-11-09): that lives in
  *     the lockstep path a solo game takes, see solo-signaling-drop.mjs.
+ *   DROP_SIGNALING_GUEST_LATE_MS=<n>   With DROP_SIGNALING_MS: keep the
+ *     guest's signaling down n ms longer than the host's. The host then sees
+ *     a room without the guest before the guest rejoins under a new socket
+ *     id, and must keep the live WebRTC connection rather than evict it as a
+ *     stale peer. BATTLE_SECONDS must cover this too.
  *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
@@ -177,6 +182,7 @@ const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
 const THROTTLE_GUEST_HZ = Number(process.env.THROTTLE_GUEST_HZ || 30);
 const HIDE_GUEST_MS = Number(process.env.HIDE_GUEST_MS || 0);
 const DROP_SIGNALING_MS = Number(process.env.DROP_SIGNALING_MS || 0);
+const DROP_SIGNALING_GUEST_LATE_MS = Number(process.env.DROP_SIGNALING_GUEST_LATE_MS || 0);
 const HIDE_GUEST_FROZEN = process.env.HIDE_GUEST_FROZEN === '1';
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
@@ -225,9 +231,19 @@ if (DROP_SIGNALING_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS >
 // The outage starts a third of the way in, so it and the reconnect that
 // follows must fit in the remaining two thirds.
 const DROP_SIGNALING_RECONNECT_MS = 20000;
-const dropSignalingNeedsSeconds = Math.ceil(((DROP_SIGNALING_MS + DROP_SIGNALING_RECONNECT_MS) * 3) / 2 / 1000);
+if (!(Number.isFinite(DROP_SIGNALING_GUEST_LATE_MS) && DROP_SIGNALING_GUEST_LATE_MS >= 0)) {
+  console.log(`DROP_SIGNALING_GUEST_LATE_MS=${process.env.DROP_SIGNALING_GUEST_LATE_MS} invalid — must be >= 0`);
+  process.exit(1);
+}
+if (DROP_SIGNALING_GUEST_LATE_MS > 0 && !(DROP_SIGNALING_MS > 0)) {
+  console.log('DROP_SIGNALING_GUEST_LATE_MS only applies with DROP_SIGNALING_MS');
+  process.exit(1);
+}
+const dropSignalingNeedsSeconds = Math.ceil(
+  ((DROP_SIGNALING_MS + DROP_SIGNALING_GUEST_LATE_MS + DROP_SIGNALING_RECONNECT_MS) * 3) / 2 / 1000,
+);
 if (DROP_SIGNALING_MS > 0 && !(BATTLE_SECONDS >= dropSignalingNeedsSeconds)) {
-  console.log(`DROP_SIGNALING_MS=${DROP_SIGNALING_MS} needs BATTLE_SECONDS >= ${dropSignalingNeedsSeconds}`);
+  console.log(`this signaling outage needs BATTLE_SECONDS >= ${dropSignalingNeedsSeconds}`);
   process.exit(1);
 }
 if (HIDE_GUEST_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST)) {
@@ -772,9 +788,16 @@ if (inBattle) {
     await Promise.all([setSignalingDown(host, true), setSignalingDown(guest, true)]);
     console.log(`signaling sockets cut on both pages for ${DROP_SIGNALING_MS} ms`);
     await host.waitForTimeout(DROP_SIGNALING_MS);
-    await Promise.all([setSignalingDown(host, false), setSignalingDown(guest, false)]);
+    // With DROP_SIGNALING_GUEST_LATE_MS the host comes back first and sees a
+    // room without the guest before the guest rejoins under a new socket id.
+    await setSignalingDown(host, false);
+    if (DROP_SIGNALING_GUEST_LATE_MS > 0) {
+      console.log(`host signaling allowed to reconnect; guest held ${DROP_SIGNALING_GUEST_LATE_MS} ms longer`);
+      await host.waitForTimeout(DROP_SIGNALING_GUEST_LATE_MS);
+    }
+    await setSignalingDown(guest, false);
     console.log('signaling allowed to reconnect');
-    await host.waitForTimeout(BATTLE_SECONDS * 1000 - before - DROP_SIGNALING_MS);
+    await host.waitForTimeout(BATTLE_SECONDS * 1000 - before - DROP_SIGNALING_MS - DROP_SIGNALING_GUEST_LATE_MS);
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
   }
