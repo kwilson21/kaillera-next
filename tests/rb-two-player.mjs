@@ -455,6 +455,7 @@ const mkPage = async (browser, name, { throttleHz = 0, hidden = false, suspendAu
 
 // DROP_SIGNALING_GUEST_LATE_MS: did the host rejoin and see a room without the guest first?
 let hostSawRoomWithoutGuest = false;
+let hostSawGuestReturn = false;
 // Per-page signaling proxy state for DROP_SIGNALING_MS.
 const signaling = new Map();
 const setSignalingDown = async (page, down) => {
@@ -832,6 +833,24 @@ if (inBattle) {
           { timeout: DROP_SIGNALING_RECONNECT_WAIT_MS },
         )
         .catch(() => {});
+    }
+    // The guest's reconnect is recorded when its socket connects, before it
+    // has rejoined the room. The host's handling of that rejoin is the thing
+    // under test, so wait for the host to log the two-player roster again and
+    // then long enough for a stall to be logged (TICK-STUCK errors at 5 s).
+    if (hostSawRoomWithoutGuest) {
+      const guestIsBack = () =>
+        host.evaluate(() => {
+          const log = window.NetplayRollback?.exportSyncLog?.() || '';
+          return log.slice(log.lastIndexOf('onUsersUpdated: 1 players')).includes('onUsersUpdated: 2 players');
+        });
+      const until = Date.now() + DROP_SIGNALING_RECONNECT_WAIT_MS;
+      while (Date.now() < until && !hostSawGuestReturn) {
+        hostSawGuestReturn = await guestIsBack();
+        if (!hostSawGuestReturn) await host.waitForTimeout(500);
+      }
+      console.log(`host saw the guest back in the room: ${hostSawGuestReturn}`);
+      await host.waitForTimeout(8000);
     }
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
@@ -1226,10 +1245,11 @@ if (suspendGuestAudioFailed) {
     console.log('SUSPEND_GUEST_AUDIO: guest never installed the stand-in audio clock (fix path unexercised)');
   }
 }
-const hostFirstUnverified = DROP_SIGNALING_GUEST_LATE_MS > 0 && !hostSawRoomWithoutGuest;
+const hostFirstUnverified = DROP_SIGNALING_GUEST_LATE_MS > 0 && !(hostSawRoomWithoutGuest && hostSawGuestReturn);
 if (hostFirstUnverified) {
   console.log(
-    'DROP_SIGNALING_GUEST_LATE_MS: the host never saw the room without the guest, so the order was not tested',
+    'DROP_SIGNALING_GUEST_LATE_MS: the host must see the room without the guest and then the guest back in it; ' +
+      `saw the first: ${hostSawRoomWithoutGuest}, the second: ${hostSawGuestReturn}`,
   );
 }
 const signalingDropFailed =
