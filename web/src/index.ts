@@ -5,6 +5,7 @@
 import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor, sendAndAwait } from '@xstate/effect';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
+import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { meshHealTargets } from './roster.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
@@ -71,8 +72,10 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
 };
 
 export const KNCore = {
+  createConnectTracker,
   createSession,
   meshHealTargets,
+  shouldResumeRomTransfer,
   protocol: { decodeUsersUpdated, decodeGameStarted, decodeGameEnded },
 };
 

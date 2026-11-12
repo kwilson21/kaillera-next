@@ -666,6 +666,7 @@
         showToast('Unable to reach server \u2014 retrying\u2026', 'error');
       }
     }, 10000);
+    const _connects = window.KNCore?.createConnectTracker() ?? null;
     socket.on('connect', () => {
       // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
       // on the socket, so 'connect' is the event that fires here.
@@ -675,7 +676,18 @@
         _initialConnectTimer = null;
       }
       _hideReconnecting();
-      onConnect();
+      // A `connect` after an earlier one is a signaling reconnect; the rule
+      // lives in web/src/reconnect.ts.
+      const { isReconnect, attempts } = _connects?.connected() ?? { isReconnect: false, attempts: 0 };
+      if (isReconnect) {
+        console.log('[play] socket reconnected after', attempts, 'attempts, new id:', socket.id);
+        KNEvent('reconnect', `Reconnected after ${attempts} attempt(s)`, { attempts });
+        KNState.sessionStats.reconnects++;
+      }
+      onConnect(isReconnect);
+    });
+    socket.io.on('reconnect_attempt', (attempt) => {
+      _connects?.attempt(attempt);
     });
     socket.on('disconnect', (reason) => {
       _session?.send({ type: 'socketDown' });
@@ -700,79 +712,6 @@
           }, 30000);
         }
       }
-    });
-    socket.on('reconnect', (attempt) => {
-      console.log('[play] socket reconnected after', attempt, 'attempts, new id:', socket.id);
-      KNEvent('reconnect', `Reconnected after ${attempt} attempt(s)`, { attempts: attempt });
-      KNState.sessionStats.reconnects++;
-      _hideReconnecting();
-      const rejoinEvent = isHost ? 'open-room' : 'join-room';
-      const payload = isHost
-        ? {
-            extra: {
-              sessionid: roomCode,
-              player_name: playerName,
-              room_name: `${playerName}'s room`,
-              game_id: _gameId || 'ssb64',
-              persistentId: _persistentId,
-              reconnectToken: _reconnectToken,
-              // Only a page with no game running may end a match the server
-              // still thinks is on (see open-room in signaling.py).
-              fresh: !gameRunning,
-            },
-            maxPlayers: 4,
-          }
-        : {
-            extra: {
-              sessionid: roomCode,
-              userid: socket.id,
-              player_name: playerName,
-              spectate: isSpectator,
-              persistentId: _persistentId,
-              reconnectToken: _reconnectToken,
-            },
-          };
-      socket.emit(rejoinEvent, payload, (err, joinData) => {
-        const data = isHost ? undefined : joinData;
-        if (err) {
-          console.log('[play] rejoin failed:', err);
-          if (!gameRunning) {
-            showToast('Room is no longer available');
-            setTimeout(() => {
-              window.location.href = '/';
-            }, 2000);
-          }
-          return;
-        }
-        console.log('[play] rejoined room after reconnect');
-        if (data?.players) {
-          for (const entry of Object.values(data.players)) {
-            if (entry.socketId === socket.id) {
-              mySlot = entry.slot;
-              break;
-            }
-          }
-        }
-        sendDeviceType();
-        // Resume stalled ROM transfer — pre-game WebRTC connections are lost on
-        // socket reconnect, so re-register signaling and retry via Socket.IO
-        if (
-          !isHost &&
-          _romSharingDecision === 'accepted' &&
-          !_romBlob &&
-          (_romTransferState === 'resuming' || _romTransferState === 'paused')
-        ) {
-          console.log('[play] resuming ROM transfer after reconnect');
-          cleanupPreGameConnections();
-          registerRomSignalHandler();
-          _romTransferRetries = 0;
-          _romTransferState = 'resuming';
-          clearTimeout(_romTransferResumeTimer);
-          _romTransferResumeTimer = null;
-          requestResumeTransfer();
-          updateRomSharingUI();
-        }
-      });
     });
     socket.on('connect_error', (e) => {
       console.log('[play] connect_error:', e.message);
@@ -924,7 +863,7 @@
     }
   };
 
-  const onConnect = async () => {
+  const onConnect = async (isReconnect = false) => {
     // Mid-game reconnect: silently rejoin signaling channel, don't reset UI
     if (gameRunning) {
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
@@ -954,6 +893,7 @@
         if (err) console.log('[play] mid-game rejoin failed:', err);
         else console.log('[play] mid-game rejoin succeeded');
         sendDeviceType();
+        if (!err && isReconnect) resumeRomTransferAfterReconnect();
       });
       return;
     }
@@ -1133,6 +1073,7 @@
               console.log('[play] join: cached ROM mismatch — clearing');
               clearLoadedRom();
             }
+            if (isReconnect) resumeRomTransferAfterReconnect();
 
             _session?.send({
               type: 'joined',
@@ -2205,6 +2146,20 @@
     }
 
     console.log('[play] received rom-transfer DataChannel from', remoteSid);
+    // Only one channel may fill the chunk buffer. A repeated request (e.g. a
+    // retry after a signaling reconnect that crossed with the original) makes
+    // the host open a second one; the newest wins and restarts from the
+    // offset reported below.
+    if (_romTransferDC && _romTransferDC !== channel) {
+      console.log('[play] replacing earlier rom-transfer DataChannel');
+      const stale = _romTransferDC;
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.onclose = null;
+      try {
+        stale.close();
+      } catch (_) {}
+    }
     _romTransferDC = channel;
     channel.binaryType = 'arraybuffer';
 
@@ -2340,6 +2295,28 @@
       }
       updateRomSharingUI();
     }, 15000);
+  };
+
+  // Ask the host for the ROM again after rejoining (new socket id), from where
+  // we stopped. When to do so is decided in web/src/reconnect.ts.
+  const resumeRomTransferAfterReconnect = () => {
+    const resume = window.KNCore?.shouldResumeRomTransfer({
+      isHost,
+      sharingDecision: _romSharingDecision,
+      hasRom: !!_romBlob,
+      transferState: _romTransferState,
+      askingOverEngine: !!_romAcceptPollInterval,
+    });
+    if (!resume) return;
+    console.log('[play] resuming ROM transfer after reconnect');
+    cleanupPreGameConnections();
+    registerRomSignalHandler();
+    _romTransferRetries = 0;
+    _romTransferState = 'resuming';
+    clearTimeout(_romTransferResumeTimer);
+    _romTransferResumeTimer = null;
+    requestResumeTransfer();
+    updateRomSharingUI();
   };
 
   const resetStallTimer = () => {
