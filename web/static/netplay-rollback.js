@@ -7464,6 +7464,10 @@
       };
     }
 
+    // Whose connection this is, when the roster already says (a connection
+    // recreated by mesh heal or a late-join reconnect gets no roster update).
+    const knownIdentity = _knownPlayers[remoteSid]?.persistentId;
+    if (knownIdentity) peer.persistentId = knownIdentity;
     _peers[remoteSid] = peer;
     KNState.peers = _peers;
 
