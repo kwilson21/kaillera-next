@@ -10674,8 +10674,11 @@
     const peer = _peers[remoteSid];
     if (!peer || !_hostStream) return;
 
+    // A spectator whose signaling reconnects is offered the stream again on
+    // the same connection; addTrack throws if the track already has a sender.
+    const alreadySending = new Set(peer.pc.getSenders().map((sender) => sender.track));
     for (const track of _hostStream.getTracks()) {
-      peer.pc.addTrack(track, _hostStream);
+      if (!alreadySending.has(track)) peer.pc.addTrack(track, _hostStream);
     }
     renegotiate(remoteSid);
   };

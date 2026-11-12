@@ -19,7 +19,7 @@
  *
  * At each checkpoint the test also checks what the page itself shows (lobby
  * overlay up or down), so a run cannot pass with machine and page agreeing on
- * the wrong answer.
+ * the wrong answer. An uncaught exception on any page fails the scenario.
  *
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [KN_URL=http://localhost:27888] [SCENARIO=late-join] \
@@ -83,12 +83,18 @@ const recordEvents = () => {
   });
 };
 
+// Uncaught exceptions on any page, for the scenario in progress.
+const pageErrors = [];
+
 /** A page in its own browser context, with a signaling socket the test can cut. */
 const openPlayer = async (label, query) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(recordEvents);
   const page = await ctx.newPage();
-  page.on('pageerror', (e) => console.log(`[${label}] pageerror ${e.message}`));
+  page.on('pageerror', (e) => {
+    console.log(`[${label}] pageerror ${e.message}`);
+    pageErrors.push(`${label}: ${e.message}`);
+  });
   const signaling = { down: false, sockets: [] };
   await page.routeWebSocket(/socket\.io/, (ws) => {
     if (signaling.down) {
@@ -331,6 +337,7 @@ for (const name of wanted) {
     fs.writeFileSync(`${OUT}/${name}-${player.label}-sync.txt`, sync);
   }
   for (const ctx of browser.contexts()) await ctx.close();
+  for (const message of pageErrors.splice(0)) failures.push(`uncaught page error (${message})`);
   results.push({ scenario: name, room, checkpoints: log, failures });
 }
 
