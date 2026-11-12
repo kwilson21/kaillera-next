@@ -164,3 +164,43 @@ def test_mid_game_reconnect_resumes_stalled_rom_transfer(browser, server_url, ro
         host.close()
         guest.close()
         os.unlink(rom)
+
+
+def test_repeated_rom_request_does_not_overlap_transfers(browser, server_url, room):
+    # Big enough that two transfers started back to back are in flight together.
+    rom = _make_fake_rom(0x43, size=16 * 1024 * 1024)
+    host = browser.new_page()
+    guest = browser.new_page()
+    guest_logs = []
+    guest.on("console", lambda msg: guest_logs.append(msg.text))
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom)
+        expect(host.locator("#opt-rom-sharing")).to_be_enabled(timeout=5000)
+        host.evaluate("document.getElementById('opt-rom-sharing').click()")
+
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest&debug=1")
+        expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
+        _wait_connected(guest)
+
+        host.evaluate("window.__test_skipBoot = true")
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        # Both requests must land on the engine connection to the host.
+        guest.wait_for_function(
+            "Object.values(KNState.peers || {}).some((p) => p.dc && p.dc.readyState === 'open')", timeout=15000
+        )
+
+        guest.click("#rom-accept-btn")
+        guest.evaluate(
+            "window.__test_socket.emit('data-message', { type: 'rom-accepted', sender: window.__test_socket.id })"
+        )
+
+        guest.wait_for_function("document.getElementById('rom-drop').classList.contains('loaded')", timeout=30000)
+        assert any("replacing earlier rom-transfer DataChannel" in line for line in guest_logs)
+        assert not any("size mismatch" in line or "hash mismatch" in line.lower() for line in guest_logs)
+    finally:
+        host.close()
+        guest.close()
+        os.unlink(rom)

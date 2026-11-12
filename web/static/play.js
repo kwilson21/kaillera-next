@@ -2109,6 +2109,20 @@
     }
 
     console.log('[play] received rom-transfer DataChannel from', remoteSid);
+    // Only one channel may fill the chunk buffer. A repeated request (e.g. a
+    // retry after a signaling reconnect that crossed with the original) makes
+    // the host open a second one; the newest wins and restarts from the
+    // offset reported below.
+    if (_romTransferDC && _romTransferDC !== channel) {
+      console.log('[play] replacing earlier rom-transfer DataChannel');
+      const stale = _romTransferDC;
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.onclose = null;
+      try {
+        stale.close();
+      } catch (_) {}
+    }
     _romTransferDC = channel;
     channel.binaryType = 'arraybuffer';
 
