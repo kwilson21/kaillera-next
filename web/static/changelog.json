@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.0",
+    "date": "2026-11-12",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "replace the waking-screen ping test with a cycling graphic (#112)"
+      }
+    ]
+  },
+  {
     "version": "0.66.4",
     "date": "2026-11-12",
     "changes": [
