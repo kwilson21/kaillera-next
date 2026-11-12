@@ -40,6 +40,7 @@ One deploy per merge, started by GitHub rather than by Render.
 a `chore(version)` commit when there is a `feat:` or `fix:` since the last
 one, then calls the service's deploy hook, which deploys the tip of `main`.
 Runs go one at a time; if one is cancelled or fails, the next covers it.
+When merges land together, only the run for the newest one releases.
 
 Render's auto-deploy is off (`autoDeployTrigger: 'off'` in `render.yaml`).
 With it on, a merge produced two deploys seconds apart, one for the merge

@@ -24,16 +24,34 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # If main has moved past the push that started this run, a newer run is
+      # waiting and will bump and deploy for both. Standing down here keeps
+      # merges that land together to one deploy. Version commits on top of
+      # this push don't count: that is a re-run, which should deploy again.
+      - name: Check this run is for the newest push
+        id: newest
+        run: |
+          newer=$(git log --format=%s "${GITHUB_SHA}..HEAD" | grep -vc '^chore(version):' || true)
+          if [ "$newer" -gt 0 ]; then
+            echo "::notice::main has $newer newer commit(s); the run for the newest push will release this one."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v7
+        if: steps.newest.outputs.release == 'true'
         with:
           node-version: 20
 
       - name: Configure git
+        if: steps.newest.outputs.release == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Run version bump
+        if: steps.newest.outputs.release == 'true'
         # `just deploy` invokes the script with no args (range = origin/main..HEAD).
         # Here origin/main == HEAD, so we pass --from with the last
         # chore(version) commit: the range is every commit released since.
@@ -45,11 +63,14 @@ jobs:
           bash scripts/bump-version.sh --from "$last_version"
 
       - name: Push version bump
+        if: steps.newest.outputs.release == 'true'
         run: |
           if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
             echo "No version commit to push."
           else
-            git push --follow-tags
+            # --atomic: if main moved and the branch is rejected, the tag must
+            # not land on its own, or every later bump stops at "tag exists".
+            git push --atomic --follow-tags
           fi
 
       # The only thing that deploys the site. Render's own auto-deploy is off
@@ -59,6 +80,7 @@ jobs:
       # the tip of main, which by now includes the version commit. A push made
       # with GITHUB_TOKEN starts no workflow, so this runs once per merge.
       - name: Deploy to Render
+        if: steps.newest.outputs.release == 'true'
         env:
           RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
