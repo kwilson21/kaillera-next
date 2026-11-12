@@ -66,6 +66,10 @@ class OpenRoomExtra(BaseModel):
     room_name: str = Field(default="Room", max_length=64)
     game_id: str = Field(default="", max_length=32)
     room_password: str | None = None
+    # True when the page sending this has no game running: a first load or a
+    # reload. A page whose socket merely reconnected under a running game
+    # leaves it False (as do clients from before the field existed).
+    fresh: bool = False
 
 
 class OpenRoomPayload(BaseModel):

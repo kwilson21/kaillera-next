@@ -693,6 +693,9 @@
               game_id: _gameId || 'ssb64',
               persistentId: _persistentId,
               reconnectToken: _reconnectToken,
+              // Only a page with no game running may end a match the server
+              // still thinks is on (see open-room in signaling.py).
+              fresh: !gameRunning,
             },
             maxPlayers: 4,
           }
@@ -944,6 +947,7 @@
             game_id: _gameId || 'ssb64',
             persistentId: _persistentId,
             reconnectToken: _reconnectToken,
+            fresh: true,
           },
           maxPlayers: 4,
         },
