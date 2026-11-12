@@ -667,6 +667,9 @@
       }
     }, 10000);
     socket.on('connect', () => {
+      // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
+      // on the socket, so 'connect' is the event that fires here.
+      _session?.socketUp({ gameRunning });
       if (_initialConnectTimer) {
         clearTimeout(_initialConnectTimer);
         _initialConnectTimer = null;
@@ -703,7 +706,6 @@
       KNEvent('reconnect', `Reconnected after ${attempt} attempt(s)`, { attempts: attempt });
       KNState.sessionStats.reconnects++;
       _hideReconnecting();
-      _session?.socketUp({ gameRunning });
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
       const payload = isHost
         ? {
@@ -1140,7 +1142,6 @@
             });
             // Mid-game join handling
             if (roomData.status === 'playing') {
-              if (!isSpectator) _sessionWatchLateJoin();
               crumb('mid-game-join', {
                 spectator: isSpectator,
                 mode,
@@ -1163,6 +1164,12 @@
               if (roomData.mode) mode = roomData.mode;
               else if (joinData?.mode) mode = joinData.mode;
               _lateJoin = !isSpectator || mode === 'streaming';
+              if (!isSpectator) {
+                // A streaming guest watches the host's video: there is no
+                // state to wait for, and no frame counter to watch.
+                if (mode === 'streaming') _session?.send({ type: 'lateJoinSynced' });
+                else _sessionWatchLateJoin();
+              }
               // Use joinData directly — the users-updated socket event may not
               // have arrived yet (ack returns before broadcast is delivered)
               if (joinData) lastUsersData = joinData;
