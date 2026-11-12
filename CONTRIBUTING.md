@@ -9,7 +9,7 @@ Thanks for your interest in contributing! This project is open to contributions 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip for dependency management
 - [just](https://github.com/casey/just) (command runner)
-- Node.js (for Prettier formatting)
+- Node.js (for the JS formatter, linters and the Quint model checker)
 - Optionally: Docker (for Redis), [lego](https://go-acme.github.io/lego/) + a
   Cloudflare API token (for HTTPS dev — see `just certs` in the README)
 
@@ -214,7 +214,14 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 - **Modern ECMAScript** — `const`/`let` (never `var`), arrow functions, template
   literals, `async`/`await`, optional chaining. No ES modules (see above).
 - **Python** — formatted by ruff, type hints encouraged.
-- **HTML/CSS** — formatted by prettier.
+- **JS/HTML/CSS** — formatted by oxfmt (`just fmt`), same style Prettier
+  produced. Linted by oxlint with the vendored anti-slop rules
+  (`tools/oxlint/anti-slop/`, yours to edit) and by Biome (`just lint`).
+  Errors fail CI; warnings are the existing backlog. Fix warnings in files
+  you touch, but not in netplay code without a two-player run.
+- **Specs** — `specs/*.qnt` are Quint models of the room lifecycle. Run
+  `just spec`. Change the model in the same PR when you change how rooms
+  start, end, or handle a reconnect.
 - **No unnecessary comments** — code should be self-evident. Add comments only
   where the *why* isn't obvious from the *what*.
 - **Commit messages** — use [conventional commits](https://www.conventionalcommits.org/):

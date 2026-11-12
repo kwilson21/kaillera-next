@@ -214,10 +214,10 @@ function simulate({ seed, delayP1, delayP2, dropProb, mapsStart, stageSelect = t
           mapsScrollWait--;
           break;
         }
-        if (anyHold & BTN.DOWN && mapsSlot < 5) (mapsSlot += 5), (mapsScrollWait = 12);
-        else if (anyHold & BTN.UP && mapsSlot >= 5) (mapsSlot -= 5), (mapsScrollWait = 12);
-        else if (anyHold & BTN.RIGHT) (mapsSlot = mapsSlot === 9 ? 0 : mapsSlot + 1), (mapsScrollWait = 12);
-        else if (anyHold & BTN.LEFT) (mapsSlot = mapsSlot === 0 ? 9 : mapsSlot - 1), (mapsScrollWait = 12);
+        if (anyHold & BTN.DOWN && mapsSlot < 5) ((mapsSlot += 5), (mapsScrollWait = 12));
+        else if (anyHold & BTN.UP && mapsSlot >= 5) ((mapsSlot -= 5), (mapsScrollWait = 12));
+        else if (anyHold & BTN.RIGHT) ((mapsSlot = mapsSlot === 9 ? 0 : mapsSlot + 1), (mapsScrollWait = 12));
+        else if (anyHold & BTN.LEFT) ((mapsSlot = mapsSlot === 0 ? 9 : mapsSlot - 1), (mapsScrollWait = 12));
         break;
       }
       default:

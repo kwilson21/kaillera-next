@@ -9,20 +9,35 @@ repos:
         args: [--config, server/pyproject.toml]
         files: ^server/
 
-  # Using rbubley/mirrors-prettier (community fork) because the official
-  # mirrors-prettier repo is archived and its last tag v4.0.0-alpha.8 is
-  # broken: prettier exits with "No files matching the given patterns were
-  # found" on every JS file even with absolute paths. rbubley tracks
-  # stable prettier 3.x releases.
-  - repo: https://github.com/rbubley/mirrors-prettier
-    rev: v3.9.10
-    hooks:
-      - id: prettier
-        types_or: [javascript, css, json, yaml, html]
-        exclude: ^(build/src/|web/static/ejs/|node_modules/)
-
+  # JS tooling runs from node_modules (`just setup`): oxfmt formats, oxlint
+  # (with the vendored anti-slop rules) and Biome lint. Versions are pinned in
+  # package.json.
   - repo: local
     hooks:
+      - id: oxfmt
+        name: oxfmt
+        entry: npx oxfmt --no-error-on-unmatched-pattern
+        language: system
+        types_or: [javascript, css, json, yaml, html]
+        exclude: ^(build/src/|web/static/ejs/|node_modules/)
+      - id: oxlint
+        name: oxlint
+        entry: npx oxlint
+        language: system
+        files: ^(web/static|deploy/static|tests)/.*\.m?js$
+        exclude: ^web/static/ejs/
+      - id: biome-lint
+        name: biome lint
+        entry: npx biome lint --no-errors-on-unmatched
+        language: system
+        files: ^(web/static|deploy/static|tests)/.*\.m?js$
+        exclude: ^web/static/ejs/
+      - id: quint-specs
+        name: Quint specs
+        entry: bash scripts/check-specs.sh
+        language: system
+        files: ^specs/
+        pass_filenames: false
       - id: check-hash-citations
         name: Hash registry citation check
         entry: bash scripts/check-hash-citations.sh

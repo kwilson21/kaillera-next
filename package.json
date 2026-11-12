@@ -1,5 +1,17 @@
 {
+  "scripts": {
+    "fmt": "oxfmt \"**/*.{js,mjs,mts,css,json,jsonc,yaml,yml,html}\"",
+    "fmt:check": "oxfmt --check \"**/*.{js,mjs,mts,css,json,jsonc,yaml,yml,html}\"",
+    "lint": "oxlint web/static deploy/static tests && biome lint",
+    "spec": "bash scripts/check-specs.sh",
+    "check": "npm run fmt:check && npm run lint && npm run spec"
+  },
   "devDependencies": {
+    "@biomejs/biome": "2.6.7",
+    "@informalsystems/quint": "0.33.1",
+    "@oxlint/plugins": "1.93.0",
+    "oxfmt": "0.78.0",
+    "oxlint": "1.93.0",
     "playwright": "^1.64.1",
     "wrangler": "^4.151.2"
   }

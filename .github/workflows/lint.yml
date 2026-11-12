@@ -1,0 +1,33 @@
+name: Lint and specs
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/lint.yml'
+      - 'web/**'
+      - 'deploy/static/**'
+      - 'tests/**'
+      - 'specs/**'
+      - 'tools/oxlint/**'
+      - 'scripts/check-specs.sh'
+      - 'package.json'
+      - 'biome.json'
+      - 'oxlint.config.mts'
+      - '.oxfmtrc.json'
+
+permissions:
+  contents: read
+
+jobs:
+  js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned tools
+        run: npm install --ignore-scripts --no-package-lock
+      - name: Format check (oxfmt)
+        run: npm run fmt:check
+      - name: Lint (oxlint + anti-slop, Biome)
+        run: npm run lint
+      - name: Model-check specs (Quint)
+        run: npm run spec

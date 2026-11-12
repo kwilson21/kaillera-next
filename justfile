@@ -7,12 +7,13 @@ set dotenv-load
 fmt:
     uvx ruff format server/src/ --config server/pyproject.toml
     uvx ruff check server/src/ --config server/pyproject.toml --fix
-    npx prettier --write "web/static/*.js" "web/static/*.css" "web/*.html"
+    npm run --silent fmt
 
 # Lint without fixing
 lint:
     uvx ruff check server/src/ --config server/pyproject.toml
-    npx prettier --check "web/static/*.js" "web/static/*.css" "web/*.html"
+    npm run --silent fmt:check
+    npm run --silent lint
 
 # Format Python only
 fmt-py:
@@ -21,7 +22,7 @@ fmt-py:
 
 # Format JS only
 fmt-js:
-    npx prettier --write "web/static/*.js" "web/static/*.css" "web/*.html"
+    npm run --silent fmt
 
 # Lint Python only
 lint-py:
@@ -29,14 +30,19 @@ lint-py:
 
 # Lint JS only
 lint-js:
-    npx prettier --check "web/static/*.js" "web/static/*.css" "web/*.html"
+    npm run --silent fmt:check
+    npm run --silent lint
 
 # Install dev dependencies
 setup:
     uv pip install -e "server/[dev]"
-    npm install --save-dev prettier
+    npm install --no-package-lock
     uv tool install pre-commit
     pre-commit install
+
+# Model-check the Quint specs in specs/
+spec:
+    npm run --silent spec
 
 # Run pre-commit on all files
 check:
