@@ -6,8 +6,11 @@
  * the machine's state with its own `gameRunning` flag and reports
  * `session-disagree` if they differ. So each scenario walks the pages through
  * a lifecycle change and then blips their signaling socket to force that
- * comparison. The machine also reports `late-join-stranded` if a late joiner
- * waits more than 20 s for state.
+ * comparison. The machine also reports `late-join-stranded` when a late
+ * joiner has waited more than 20 s for state. For the late joiner that is a
+ * notice, not a disagreement: the scenario times the wait itself and fails
+ * only if the notice and the measured wait contradict each other. For anyone
+ * else it is a failure.
  *
  * Scenarios (SCENARIO picks one; default runs all three, each in its own room):
  *   late-join    a guest joins a game already running, then the host ends it
@@ -41,7 +44,7 @@ if (!ROM || !fs.existsSync(ROM)) {
 fs.mkdirSync(OUT, { recursive: true });
 
 const BLIP_MS = 3000;
-const LIFECYCLE_REPORTS = ['session-disagree', 'late-join-stranded'];
+const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
 const browser = await chromium.launch({
   ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
@@ -166,14 +169,21 @@ const blip = async (player) => {
  * nothing.
  */
 const checkpoint = async (name, expectations, failures, log) => {
-  for (const { player, lobby } of expectations) {
+  for (const { player, lobby, lateJoiner = false } of expectations) {
     const reconnects = await blip(player);
     const lobbyShown = await lobbyShownOn(player);
-    const reports = (await eventsOf(player)).filter((e) => LIFECYCLE_REPORTS.includes(e.type));
-    log.push({ checkpoint: name, player: player.label, reconnects, lobbyShown, reports });
+    const disagreements = (await eventsOf(player)).filter((e) => e.type === 'session-disagree');
+    const stranded = await countOf(player, 'late-join-stranded');
+    log.push({ checkpoint: name, player: player.label, reconnects, lobbyShown, disagreements, stranded });
+    console.log(
+      `  ${name}: ${player.label} reconnects=${reconnects} lobbyShown=${lobbyShown} ` +
+        `disagreements=${disagreements.length} stranded=${stranded}`,
+    );
     if (reconnects < 1) failures.push(`${name}: ${player.label} never reconnected, so nothing was compared`);
     if (lobbyShown !== lobby) failures.push(`${name}: ${player.label} ${lobby ? 'is not' : 'is'} showing the lobby`);
-    if (reports.length) failures.push(`${name}: ${player.label} lifecycle reports ${JSON.stringify(reports)}`);
+    if (disagreements.length)
+      failures.push(`${name}: ${player.label} machine disagreed with the page ${JSON.stringify(disagreements)}`);
+    if (stranded && !lateJoiner) failures.push(`${name}: ${player.label} was reported as a stranded late joiner`);
   }
 };
 
@@ -198,6 +208,7 @@ const scenarios = {
     const host = await startSoloGame(room);
     if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
 
+    const joinedAt = Date.now();
     const guest = await openPlayer('guest', `room=${room}&name=Guest`);
     await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
     await loadRom(guest);
@@ -205,13 +216,39 @@ const scenarios = {
       await clickGesturePrompt(guest);
       return (await frameOf(guest)) > 0;
     }, 180000);
+    const waitedMs = Date.now() - joinedAt;
     if (!synced) failures.push('the late joiner never received state');
+    // The machine's clock starts at the join ack, after ours, so a notice
+    // means our measured wait must be over its threshold too.
+    await guest.page.waitForTimeout(1500); // the page polls for sync once a second
+    const stranded = await countOf(guest, 'late-join-stranded');
+    log.push({ lateJoinWaitMs: waitedMs, stranded });
+    console.log(`  late joiner waited ${waitedMs} ms for state; stranded notices: ${stranded}`);
+    if (stranded && waitedMs < LATE_JOIN_REPORT_AFTER_MS)
+      failures.push(`the machine reported a stranded joiner after only ${waitedMs} ms`);
+    if (stranded > 1) failures.push(`the machine reported the same stranded joiner ${stranded} times`);
     await waitForFrames([host, guest], 60, 120000);
-    await checkpoint('after late join', [{ player: host, lobby: false }, { player: guest, lobby: false }], failures, log);
+    await checkpoint(
+      'after late join',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
 
     await endGame(host);
     if (!(await waitUntil(() => lobbyShownOn(guest), 30000))) failures.push('the guest never returned to the lobby');
-    await checkpoint('after end game', [{ player: host, lobby: true }, { player: guest, lobby: true }], failures, log);
+    await checkpoint(
+      'after end game',
+      [
+        { player: host, lobby: true },
+        { player: guest, lobby: true, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
     return [host, guest];
   },
 
@@ -225,7 +262,10 @@ const scenarios = {
     await waitForFrames([host], 120, 120000);
     await checkpoint(
       'while spectating',
-      [{ player: host, lobby: false }, { player: watcher, lobby: false }],
+      [
+        { player: host, lobby: false },
+        { player: watcher, lobby: false },
+      ],
       failures,
       log,
     );
@@ -233,7 +273,15 @@ const scenarios = {
     await endGame(host);
     if (!(await waitUntil(() => lobbyShownOn(watcher), 30000)))
       failures.push('the spectator never returned to the lobby');
-    await checkpoint('after end game', [{ player: host, lobby: true }, { player: watcher, lobby: true }], failures, log);
+    await checkpoint(
+      'after end game',
+      [
+        { player: host, lobby: true },
+        { player: watcher, lobby: true },
+      ],
+      failures,
+      log,
+    );
     return [host, watcher];
   },
 
@@ -253,7 +301,15 @@ const scenarios = {
     await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 30000 });
     if (!(await waitUntil(() => lobbyShownOn(guest), 30000)))
       failures.push('the guest was left in a game the host had abandoned');
-    await checkpoint('after host reload', [{ player: host, lobby: true }, { player: guest, lobby: true }], failures, log);
+    await checkpoint(
+      'after host reload',
+      [
+        { player: host, lobby: true },
+        { player: guest, lobby: true },
+      ],
+      failures,
+      log,
+    );
     return [host, guest];
   },
 };

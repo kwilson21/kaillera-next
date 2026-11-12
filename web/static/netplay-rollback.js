@@ -8938,6 +8938,7 @@
 
     let _bootPollCount = 0;
     let _bootGestureReceived = false;
+    let _bootPollStartedAt = 0; // when polling began after the gesture; 0 = not yet
     // Boot-audio-stall tracking (I1): last observed boot frame count and
     // when it last changed, plus per-stall log/attempt flags.
     let _bootLastFrames = -1;
@@ -9097,8 +9098,19 @@
         return;
       }
 
-      // Timeout after 30 seconds of polling (300 polls at 100ms)
-      if (_bootPollCount > 300) {
+      // Terminal boot deadline (I1). A stalled boot gets 300 polls (~30s); one
+      // whose frame count is still advancing is slow, not stuck, and keeps
+      // waiting up to a hard cap. The rule is KNCore.bootTimedOut
+      // (web/src/boot.ts); without the bundle the fixed 300-poll limit applies.
+      const bootNowMs = performance.now();
+      if (!_bootPollStartedAt) _bootPollStartedAt = bootNowMs;
+      const bootGaveUp =
+        window.KNCore?.bootTimedOut?.({
+          polls: _bootPollCount,
+          elapsedMs: bootNowMs - _bootPollStartedAt,
+          sinceProgressMs: bootNowMs - _bootFrameProgressAt,
+        }) ?? _bootPollCount > 300;
+      if (bootGaveUp) {
         _syncLog(`boot timed out after ${_bootPollCount} polls`);
         setStatus('Emulator failed to start — try reloading the page');
         _config?.onStatus?.('Emulator failed to start — try reloading');
@@ -9206,6 +9218,7 @@
         });
         if (recovery) {
           _bootPollCount = 0;
+          _bootPollStartedAt = 0;
           _bootGestureReceived = false;
           _bootLastFrames = -1;
           _bootFrameProgressAt = performance.now();
