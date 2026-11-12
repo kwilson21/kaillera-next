@@ -2,8 +2,8 @@
  * landing.js — front page (docs/landing-design.md §7.2 M1).
  *
  * The open-rooms board (live / empty / waking / error), Create and the room
- * code field, the waking-state lag visualizer, the header mark set, and the
- * click-to-play video. No framework; every server string goes in as text.
+ * code field, the header mark set, and the click-to-play video. No framework;
+ * every server string goes in as text.
  *
  * Consumed by: index.html
  * Exposes: nothing (self-contained IIFE)
@@ -598,10 +598,6 @@
     document.body.append(o);
     setTimeout(() => document.addEventListener('keydown', close), 100);
   });
-
-  // ── Waking-state lag visualizer (lagviz.js, shared with the invite page) ──
-
-  window.KNLagViz.init(() => state === 'waking');
 
   // ── Header marks: one per visit, click to advance (§5.8) ─────────────────
 

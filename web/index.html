@@ -86,32 +86,9 @@
           <div class="waking" id="st-waking" role="status" hidden>
             <h3>Powering on… <small class="elapsed" id="elapsed">0:00</small></h3>
             <p id="waking-line">
-              The room server naps when nobody's around. Your visit woke it up; it takes up to a minute. Press SPACE
-              (tap on a phone) while you wait. This is what rollback does to lag.
+              The room server naps when nobody's around. Your visit woke it up; it takes up to a minute.
             </p>
             <div class="prog" aria-hidden="true"><i></i></div>
-            <div class="viz" id="viz">
-              <div class="viz-row">
-                <span>Input</span>
-                <div class="track"><i class="pulse" id="p-in"></i></div>
-                <b id="v-in">--</b>
-              </div>
-              <div class="viz-row">
-                <span>Response</span>
-                <div class="track"><i class="pulse" id="p-out"></i></div>
-                <b id="v-out">--</b>
-              </div>
-              <div class="verdict ok" id="verdict">Press SPACE or tap here</div>
-              <div class="verdict-sub" id="verdict-sub"></div>
-              <div class="viz-ctl">
-                <button class="btn" type="button" id="viz-send">Send an input</button>
-                <label for="lag"
-                  >Network lag <input type="range" id="lag" min="0" max="300" step="10" value="120" />
-                  <output id="lag-out" for="lag">120 ms</output></label
-                >
-                <label for="rb"><input type="checkbox" id="rb" checked /> Rollback on</label>
-              </div>
-            </div>
           </div>
 
           <div class="error" id="st-error" hidden>
@@ -203,7 +180,6 @@
             <p class="m">Don't take our word for it.</p>
             <div class="proof">
               <a class="btn primary" href="/demo.html">Try the demo · needs your ROM</a>
-              <a class="btn" href="/lag-test.html">Lag visualizer · no ROM</a>
             </div>
           </div>
           <div>
@@ -620,7 +596,7 @@
     <script src="/static/version-guard.js" defer></script>
     <script src="/static/storage.js" defer></script>
     <script src="/static/version.js" defer></script>
-    <script src="/static/lagviz.js" defer></script>
+    <script src="/static/dist/kn-wake-art.js" defer></script>
     <script src="/static/landing.js" defer></script>
     <script src="/static/feedback.js" defer></script>
   </body>

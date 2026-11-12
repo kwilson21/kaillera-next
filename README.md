@@ -194,14 +194,13 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   admin.html           Admin dashboard (session logs, events, feedback, screenshots)
   privacy.html         Privacy notice — what's collected (diagnostics, screenshots), opt-out
   demo.html            Interactive rollback demo (user-supplied ROM required)
-  lag-test.html        Standalone dev harness for lagviz.js
   error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
     landing.js         Front-page board controller (room creation, open-rooms board)
     landing.css        Front-page styles (direction A tokens)
     join.js            Invite-page controller (room lookup, join/watch states)
-    lagviz.js          Waking-state lag visualizer (front page + invite page)
+    dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     admin.css          Admin dashboard styles
     play.css           Play page styles (room overlay tokens, direction A)
@@ -236,6 +235,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     vendor/fflate.min.js   Self-hosted compression lib used to extract ROM ZIP archives
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
+  src/                    Strict TypeScript frontend, including standalone landing-page waking art
 build/               WASM core build system (Docker + C patches)
 tests/               E2E tests (pytest + Playwright) + VGP visual regression
 docs/                Roadmap, MVP plan, design specs

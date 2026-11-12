@@ -84,7 +84,6 @@ kaillera-next/
 │   └── static/
 │       ├── landing.js           # front page: board poll, waking state, header marks
 │       ├── join.js              # invite page: room lookup, full/closed/in-app states
-│       ├── lagviz.js            # waking-state lag visualizer (front page + invite page)
 │       ├── landing.css          # front page styles (direction A tokens)
 │       ├── play.css             # play page styles (room overlay tokens, direction A)
 │       ├── admin.css            # admin dashboard styles
@@ -119,9 +118,13 @@ kaillera-next/
 │       ├── version.js           # version display + changelog modal
 │       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
-│       ├── dist/kn-core.js      # built from web/src by `just build`; committed, never edited by hand
+│       ├── dist/kn-core.js       # built from web/src by `just build`; committed, never edited by hand
+│       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
-│   └── src/                 # TypeScript core (Effect, XState): bundled into static/dist/kn-core.js as window.KNCore
+│   ├── src/                     # strict TypeScript frontend
+│   │   ├── index.ts             # core entry, bundled as window.KNCore
+│   │   ├── wake-art.ts          # shared waking art logic for the landing pages
+│   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
 ├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route live on kaillera-next.thesuperhuman.us)
 ├── tests/           # pytest + Playwright E2E tests
@@ -280,6 +283,10 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - **TypeScript is the direction for the frontend.** New frontend logic goes
   in `web/src/*.ts` (strict TypeScript, Effect, Effect Schema, XState via
   `@xstate/effect`) and reaches the plain-script pages through `window.KNCore`.
+  Logic for the static landing pages (front page, invite page) is written in
+  web/src TypeScript but ships in its own small bundle rather than through
+  window.KNCore, because those pages must stay light and are served while the
+  server sleeps.
   After changing `web/src`, run `just build` and commit
   `web/static/dist/kn-core.js`; CI fails if it is stale. Migration stages are
   in `docs/roadmap.md`. A module moves from observing to deciding only after
