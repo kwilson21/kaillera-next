@@ -149,6 +149,37 @@ def test_waking_sends_one_direct_origin_wake_request(page, server_url):
     expect(page.locator("#inv-waking")).to_be_visible()  # same-origin health still controls the page state
 
 
+def test_wake_duration_is_reported_once_after_health_recovers(page, server_url):
+    ready = {"value": False}
+    reports = []
+    page.route(f"{server_url}/join*", lambda route: _landing_with_origin(route, "https://wake-origin.example"))
+    page.route("**/health", lambda route: route.fulfill(json={"status": "ok"}) if ready["value"] else route.abort())
+    page.route("**://wake-origin.example/health*", lambda route: route.fulfill(status=204))
+    page.route("**/room/*", lambda route: route.fulfill(json=_room()))
+    page.route("**/api/wake-event", lambda route: (reports.append(route.request.post_data_json), route.fulfill(status=204)))
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-waking")).to_be_visible()
+    page.wait_for_timeout(1200)
+    ready["value"] = True
+    expect(page.locator("#inv-main")).to_be_visible(timeout=10000)
+    page.wait_for_timeout(100)
+    assert len(reports) == 1
+    assert reports == [{"page": "invite", "elapsed_ms": reports[0]["elapsed_ms"], "direct_wake_sent": True}]
+    assert reports[0]["elapsed_ms"] >= 1000
+    page.wait_for_timeout(1200)
+    assert len(reports) == 1
+
+
+def test_ready_invite_page_does_not_report_a_wake(page, server_url):
+    reports = []
+    _mock(page, room=_room())
+    page.route("**/api/wake-event", lambda route: (reports.append(route.request.post_data_json), route.fulfill(status=204)))
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-main")).to_be_visible()
+    page.wait_for_timeout(100)
+    assert reports == []
+
+
 @pytest.mark.parametrize("origin", ["", "__KN_ORIGIN__", "{page_origin}"])
 def test_waking_skips_direct_origin_wake_without_a_distinct_origin(page, server_url, origin):
     page.route("**/health", lambda route: route.abort())

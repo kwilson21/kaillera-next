@@ -440,8 +440,8 @@
 
   function waking() {
     setState('waking');
-    wakeOrigin();
     const started = Date.now();
+    const directWakeSent = wakeOrigin();
     const clock = $('elapsed');
     clockTimer = setInterval(() => {
       const s = Math.floor((Date.now() - started) / 1000);
@@ -464,6 +464,7 @@
         return;
       }
       clearInterval(clockTimer);
+      reportWakeDuration('front', started, directWakeSent);
       refresh();
     };
     wakeTimer = setTimeout(poll, WAKE_POLL_MS);
@@ -471,13 +472,30 @@
 
   function wakeOrigin() {
     const configured = document.querySelector('meta[name="kn-origin"]')?.content;
-    if (!configured || configured === '__KN_ORIGIN__') return;
+    if (!configured || configured === '__KN_ORIGIN__') return false;
     try {
       const origin = new URL(configured);
-      if (origin.origin === location.origin) return;
+      if (origin.origin === location.origin) return false;
       fetch(new URL('/health', origin), { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
+      return true;
     } catch {
       // A malformed build value should not interrupt the normal same-origin poll.
+      return false;
+    }
+  }
+
+  function reportWakeDuration(page, started, directWakeSent) {
+    try {
+      const elapsedMs = Math.max(0, Date.now() - started);
+      if (elapsedMs > 60 * 60 * 1000) return;
+      fetch('/api/wake-event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ page, elapsed_ms: elapsedMs, direct_wake_sent: directWakeSent }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // Wake telemetry must never interrupt the page's normal recovery path.
     }
   }
 

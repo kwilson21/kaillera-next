@@ -52,6 +52,7 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "cache-state": (5, 60),
     "session-log": (16, 30),  # 4 players × 1 flush per 30s + late-join bursts
     "client-event": (60, 60),
+    "wake-event": (6, 3600),
     "debug-sync": (5, 1),
     "debug-logs": (5, 60),
     "game-screenshot": (12, 5),  # 4 players burst simultaneously every 5s; headroom for spectators/jitter/local dev

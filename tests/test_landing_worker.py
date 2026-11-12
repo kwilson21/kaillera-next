@@ -67,6 +67,7 @@ const cases = [
   ['/static/changelog.json', 'GET', ''],
   ['/play.html?room=ABC', 'GET', ''],
   ['/list', 'GET', ''],
+  ['/api/wake-event', 'POST', ''],
   ['/socket.io/?EIO=4', 'GET', ''],
 ];
 const out = [];
@@ -161,6 +162,7 @@ def test_everything_else_goes_to_the_game_server_untouched():
     for path, method in [
         ("/static/play.js", "GET"),
         ("/list", "GET"),
+        ("/api/wake-event", "POST"),
         ("/socket.io/?EIO=4", "GET"),
     ]:
         assert _body(r, path, method) == f"origin:{path} og=https://game.example/card"
