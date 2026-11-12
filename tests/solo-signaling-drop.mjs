@@ -70,13 +70,23 @@ page.on('pageerror', (e) => console.log(`pageerror ${e.message}`));
 const signaling = { down: false, sockets: [] };
 await page.routeWebSocket(/socket\.io/, (ws) => {
   if (signaling.down) {
-    ws.close({ code: 1006, reason: 'signaling down (test)' });
+    ws.close({ code: 4000, reason: 'signaling down (test)' });
     return;
   }
   const server = ws.connectToServer();
-  signaling.sockets.push(ws);
+  signaling.sockets.push({ page: ws, server });
   ws.onMessage((message) => server.send(message));
 });
+// Close both ends: the page must see the drop, and the server must see the
+// client go rather than keep the old session until its heartbeat times out.
+// 4000 is an application close code; 1006 is reserved and cannot be sent.
+const cutSignaling = async () => {
+  signaling.down = true;
+  for (const { page: pageSide, server } of signaling.sockets.splice(0)) {
+    await server.close({ code: 4000, reason: 'signaling down (test)' });
+    await pageSide.close({ code: 4000, reason: 'signaling down (test)' });
+  }
+};
 
 await page.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback&knperf=light`);
 await page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
@@ -103,9 +113,11 @@ const waitForFrame = async (target, timeoutMs) => {
 const failures = [];
 if (!(await waitForFrame(120, 120000))) failures.push('game never started');
 
+const reconnectCount = () => page.evaluate(() => window.__knEvents.filter((e) => e.type === 'reconnect').length);
 const cutAt = await frame();
-signaling.down = true;
-for (const ws of signaling.sockets.splice(0)) await ws.close({ code: 1006, reason: 'signaling down (test)' });
+// Only a reconnect after this point counts: one during setup must not satisfy the check.
+const reconnectsBefore = await reconnectCount();
+await cutSignaling();
 console.log(`room ${room}: signaling cut at frame ${cutAt}; holding it down for ${DROP_FRAMES} frames`);
 const advanced = await waitForFrame(cutAt + DROP_FRAMES, 240000);
 const restoredAt = await frame();
@@ -114,7 +126,11 @@ console.log(`signaling allowed to reconnect at frame ${restoredAt}`);
 if (!advanced)
   failures.push(`game advanced only ${restoredAt - cutAt} of ${DROP_FRAMES} frames while signaling was down`);
 await page
-  .waitForFunction(() => window.__knEvents.some((e) => e.type === 'reconnect'), null, { timeout: 30000 })
+  .waitForFunction(
+    (before) => window.__knEvents.filter((e) => e.type === 'reconnect').length > before,
+    reconnectsBefore,
+    { timeout: 30000 },
+  )
   .catch(() => {});
 await page.waitForTimeout(2000);
 
@@ -131,12 +147,12 @@ const summary = {
   meshHeals: count(/MESH-HEAL/g),
   inputStalls: count(/INPUT-STALL (start|hard-timeout)/g),
   tickStuck: count(/TICK-STUCK/g),
-  reconnects: events.filter((e) => e.type === 'reconnect').length,
+  reconnectsAfterOutage: events.filter((e) => e.type === 'reconnect').length - reconnectsBefore,
   lifecycleReports: events.filter((e) => e.type === 'session-disagree' || e.type === 'late-join-stranded'),
 };
 if (summary.meshHeals) failures.push('the mesh health check tried to reconnect to a peer in a solo game');
 if (summary.inputStalls || summary.tickStuck) failures.push('the game stalled');
-if (summary.reconnects < 1) failures.push('the page never recorded the reconnect');
+if (summary.reconnectsAfterOutage < 1) failures.push('the page never reconnected after the outage');
 if (summary.lifecycleReports.length) failures.push('the lifecycle machine disagreed with the page');
 
 await browser.close();

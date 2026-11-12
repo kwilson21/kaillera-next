@@ -423,11 +423,11 @@ const mkPage = async (browser, name, { throttleHz = 0, hidden = false, suspendAu
     await page.routeWebSocket(/socket\.io/, (ws) => {
       const state = signaling.get(page);
       if (state.down) {
-        ws.close({ code: 1006, reason: 'signaling down (test)' });
+        ws.close({ code: 4000, reason: 'signaling down (test)' });
         return;
       }
       const server = ws.connectToServer();
-      state.sockets.push(ws);
+      state.sockets.push({ page: ws, server });
       ws.onMessage((message) => server.send(message));
     });
   }
@@ -439,7 +439,14 @@ const signaling = new Map();
 const setSignalingDown = async (page, down) => {
   const state = signaling.get(page);
   state.down = down;
-  if (down) for (const ws of state.sockets.splice(0)) await ws.close({ code: 1006, reason: 'signaling down (test)' });
+  if (!down) return;
+  // Close both ends: the page must see the drop, and the server must see the
+  // client go rather than keep the old session until its heartbeat times out.
+  // 4000 is an application close code; 1006 is reserved and cannot be sent.
+  for (const { page: pageSide, server } of state.sockets.splice(0)) {
+    await server.close({ code: 4000, reason: 'signaling down (test)' });
+    await pageSide.close({ code: 4000, reason: 'signaling down (test)' });
+  }
 };
 
 const host = await mkPage(hostBrowser, 'host');
@@ -756,6 +763,12 @@ if (inBattle) {
   } else if (DROP_SIGNALING_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
+    // Only reconnects after this point count: one during setup must not satisfy the check.
+    for (const p of [host, guest]) {
+      signaling.get(p).reconnectsBefore = await p.evaluate(
+        () => window.__knEvents.filter((e) => e.type === 'reconnect').length,
+      );
+    }
     await Promise.all([setSignalingDown(host, true), setSignalingDown(guest, true)]);
     console.log(`signaling sockets cut on both pages for ${DROP_SIGNALING_MS} ms`);
     await host.waitForTimeout(DROP_SIGNALING_MS);
@@ -1003,12 +1016,15 @@ if (VISUAL_CHECK) {
   };
 }
 
-const signalingDropOf = (events, log) => ({
-  reconnects: events.filter((e) => e.type === 'reconnect').length,
+const signalingDropOf = (page, events, log) => ({
+  reconnectsAfterOutage:
+    events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
   lifecycleReports: events.filter((e) => e.type === 'session-disagree' || e.type === 'late-join-stranded'),
   tickStuck: count(log, /TICK-STUCK/g),
   // The lockstep-path stall (waiting on a peer's input), not the rollback engine's routine RB-INPUT-STALL.
   inputStalls: count(log, /(?<!RB-)INPUT-STALL (start|hard-timeout)/g),
+  // The rollback engine gave up waiting on a peer's input (not its routine RB-INPUT-STALL pacing).
+  rbStallTimeouts: count(log, /RB-INPUT-STALL-TIMEOUT/g),
   meshHeals: count(log, /MESH-HEAL/g),
 });
 
@@ -1018,8 +1034,8 @@ const summary = {
     ? {
         signalingDrop: {
           ms: DROP_SIGNALING_MS,
-          host: signalingDropOf(hostEvents, H.sync),
-          guest: signalingDropOf(guestEvents, G.sync),
+          host: signalingDropOf(host, hostEvents, H.sync),
+          guest: signalingDropOf(guest, guestEvents, G.sync),
         },
       }
     : {}),
@@ -1155,7 +1171,12 @@ if (suspendGuestAudioFailed) {
 const signalingDropFailed =
   DROP_SIGNALING_MS > 0 &&
   [summary.signalingDrop.host, summary.signalingDrop.guest].some(
-    (side) => side.reconnects < 1 || side.lifecycleReports.length > 0 || side.tickStuck > 0 || side.inputStalls > 0,
+    (side) =>
+      side.reconnectsAfterOutage < 1 ||
+      side.lifecycleReports.length > 0 ||
+      side.tickStuck > 0 ||
+      side.inputStalls > 0 ||
+      side.rbStallTimeouts > 0,
   );
 if (signalingDropFailed) {
   console.log('DROP_SIGNALING_MS: a page never reconnected, stalled, or its lifecycle machine reported:');
