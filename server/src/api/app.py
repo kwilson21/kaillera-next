@@ -48,6 +48,7 @@ from urllib.parse import quote
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import ColumnElement, Select, or_, select
 from starlette.middleware.gzip import GZipMiddleware
 
 from src import db, landing_build, retention, state, state_cache, stats
@@ -76,6 +77,7 @@ from src.api.signaling import (
     verify_upload_token,
 )
 from src.ratelimit import check_ip, extract_ip, ip_hash
+from src.schema import ClientEvent, DesyncEvent, Feedback, MatchMetrics, SessionLog
 
 log = logging.getLogger(__name__)
 
@@ -1338,6 +1340,35 @@ def create_app(lifespan=None) -> FastAPI:
 
     # ── Admin API ─────────────────────────────────────────────────────────
 
+    def _events_of(match_id: str | None, room: str | None) -> ColumnElement[bool] | None:
+        """Client events of one session: in-game events carry the match id in
+        meta, pre-game ones only the room. None when neither is given."""
+        terms = []
+        if match_id:
+            terms.append(db.json_field(ClientEvent.meta, "$.match_id") == match_id)
+        if room:
+            terms.append(ClientEvent.room == room)
+        return or_(*terms) if terms else None
+
+    def _desync_verdicts(match_id: str) -> Select:
+        """A match's desync events with their vision verdicts, in frame order."""
+        return (
+            select(
+                DesyncEvent.id,
+                DesyncEvent.frame,
+                DesyncEvent.field,
+                DesyncEvent.slot,
+                DesyncEvent.trigger,
+                DesyncEvent.vision_equal,
+                DesyncEvent.vision_confidence,
+                DesyncEvent.vision_verdict_json,
+                DesyncEvent.replay_meta_json,
+                DesyncEvent.created_at,
+            )
+            .where(DesyncEvent.match_id == match_id)
+            .order_by(DesyncEvent.frame)
+        )
+
     def _admin_auth(request: Request) -> None:
         """Check admin key. ADMIN_KEY must be set — blocks all access if unset."""
         admin_key = os.environ.get("ADMIN_KEY")
@@ -1349,17 +1380,17 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/stats")
     async def admin_stats(request: Request, _auth: None = Depends(_require_admin)) -> dict:
-        session_log_rows = await db.query("SELECT COUNT(*) as cnt FROM session_logs", ())
-        client_event_rows = await db.query("SELECT COUNT(*) as cnt FROM client_events", ())
-        feedback_rows = await db.query("SELECT COUNT(*) as cnt FROM feedback", ())
+        session_log_count = await db.count(select(SessionLog.id))
+        client_event_count = await db.count(select(ClientEvent.id))
+        feedback_count = await db.count(select(Feedback.id))
         return {
             "rooms": len(rooms),
             "max_rooms": MAX_ROOMS,
             "players": sum(len(r.players) for r in rooms.values()),
             "spectators": sum(len(r.spectators) for r in rooms.values()),
-            "session_log_count": session_log_rows[0]["cnt"] if session_log_rows else 0,
-            "client_event_count": client_event_rows[0]["cnt"] if client_event_rows else 0,
-            "feedback_count": feedback_rows[0]["cnt"] if feedback_rows else 0,
+            "session_log_count": session_log_count,
+            "client_event_count": client_event_count,
+            "feedback_count": feedback_count,
             "retention_days": int(os.environ.get("LOG_RETENTION_DAYS", "7")),
         }
 
@@ -1376,42 +1407,37 @@ def create_app(lifespan=None) -> FastAPI:
         limit = min(int(request.query_params.get("limit", "50")), 200)
         offset = int(request.query_params.get("offset", "0"))
 
-        conditions = ["created_at > datetime('now', ?)"]
-        params: list = [f"-{days} days"]
+        matching = select(
+            SessionLog.id,
+            SessionLog.match_id,
+            SessionLog.room,
+            SessionLog.slot,
+            SessionLog.player_name,
+            SessionLog.mode,
+            SessionLog.summary,
+            SessionLog.ended_by,
+            SessionLog.created_at,
+            SessionLog.updated_at,
+        ).where(SessionLog.created_at > db.ago(f"-{days} days"))
         if room:
-            conditions.append("room = ?")
-            params.append(room)
+            matching = matching.where(SessionLog.room == room)
         if match_id:
-            conditions.append("match_id = ?")
-            params.append(match_id)
+            matching = matching.where(SessionLog.match_id == match_id)
         if mode == "rollback":
             # Include legacy "lockstep" rows as historical synonym — the engine
             # was renamed without changing semantics, so analytics for "rollback"
             # should include all sessions whether logged before or after the rename.
-            conditions.append("mode IN (?, ?)")
-            params.extend(["rollback", "lockstep"])
-        elif mode == "streaming":
-            conditions.append("mode = ?")
-            params.append("streaming")
-        elif mode == "lockstep":
-            # Direct legacy filter — return only pre-rename rows.
-            conditions.append("mode = ?")
-            params.append("lockstep")
+            matching = matching.where(SessionLog.mode.in_(["rollback", "lockstep"]))
+        elif mode in ("streaming", "lockstep"):
+            # "lockstep" on its own is the direct legacy filter: pre-rename rows only.
+            matching = matching.where(SessionLog.mode == mode)
         if has_desyncs == "true":
-            conditions.append("json_extract(summary, '$.desyncs') > 0")
+            matching = matching.where(db.json_field(SessionLog.summary, "$.desyncs") > 0)
         if player_name:
-            conditions.append("player_name LIKE ?")
-            params.append(f"%{player_name}%")
+            matching = matching.where(SessionLog.player_name.like(f"%{player_name}%"))
 
-        where = " AND ".join(conditions)
-        total_rows = await db.query(f"SELECT COUNT(*) as cnt FROM session_logs WHERE {where}", tuple(params))
-        total = total_rows[0]["cnt"] if total_rows else 0
-
-        params_with_paging = params + [limit, offset]
-        entries = await db.query(
-            f"SELECT id, match_id, room, slot, player_name, mode, summary, ended_by, created_at, updated_at FROM session_logs WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-            tuple(params_with_paging),
-        )
+        total = await db.count(matching)
+        entries = await db.fetch(matching.order_by(SessionLog.updated_at.desc()).limit(limit).offset(offset))
         for entry in entries:
             if entry.get("summary") and isinstance(entry["summary"], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -1421,12 +1447,11 @@ def create_app(lifespan=None) -> FastAPI:
         match_ids = {e["match_id"] for e in entries if e.get("match_id")}
         desync_counts: dict[str, int] = {}
         for mid in match_ids:
-            rows = await db.query(
-                "SELECT COUNT(*) as cnt FROM desync_events WHERE match_id = ? AND vision_equal = 0",
-                (mid,),
+            mismatches = await db.count(
+                select(DesyncEvent.id).where(DesyncEvent.match_id == mid, DesyncEvent.vision_equal == 0)
             )
-            if rows and rows[0]["cnt"]:
-                desync_counts[mid] = rows[0]["cnt"]
+            if mismatches:
+                desync_counts[mid] = mismatches
         for entry in entries:
             mid = entry.get("match_id")
             if mid and mid in desync_counts:
@@ -1436,7 +1461,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/session-logs/{log_id}")
     async def admin_session_log_detail(request: Request, log_id: int, _auth: None = Depends(_require_admin)) -> dict:
-        rows = await db.query("SELECT * FROM session_logs WHERE id = ?", (log_id,))
+        rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
@@ -1454,23 +1479,20 @@ def create_app(lifespan=None) -> FastAPI:
         # is visible in one API call (DC failures, WebRTC state, milestones).
         match_id = entry.get("match_id")
         room = entry.get("room")
-        conditions = []
-        params: list = []
-        if match_id:
-            conditions.append("json_extract(meta, '$.match_id') = ?")
-            params.append(match_id)
-        if room:
-            conditions.append("room = ?")
-            params.append(room)
-        if conditions:
-            where = " OR ".join(conditions)
-            event_rows = await db.query(
-                f"""SELECT id, type, message, meta, slot, created_at
-                    FROM client_events
-                    WHERE {where}
-                    ORDER BY created_at ASC, id ASC
-                    LIMIT 200""",
-                tuple(params),
+        either = _events_of(match_id, room)
+        if either is not None:
+            event_rows = await db.fetch(
+                select(
+                    ClientEvent.id,
+                    ClientEvent.type,
+                    ClientEvent.message,
+                    ClientEvent.meta,
+                    ClientEvent.slot,
+                    ClientEvent.created_at,
+                )
+                .where(either)
+                .order_by(ClientEvent.created_at, ClientEvent.id)
+                .limit(200)
             )
             for row in event_rows:
                 if row.get("meta") and isinstance(row["meta"], str):
@@ -1482,16 +1504,7 @@ def create_app(lifespan=None) -> FastAPI:
 
         # Bundle vision desync verdicts for this match.
         if match_id:
-            entry["desync_events"] = await db.query(
-                """SELECT id, frame, field, slot, trigger,
-                          vision_equal, vision_confidence, vision_verdict_json,
-                          replay_meta_json, created_at
-                   FROM desync_events
-                   WHERE match_id = ?
-                   ORDER BY frame ASC
-                   LIMIT 200""",
-                (match_id,),
-            )
+            entry["desync_events"] = await db.fetch(_desync_verdicts(match_id).limit(200))
         else:
             entry["desync_events"] = []
 
@@ -1519,7 +1532,7 @@ def create_app(lifespan=None) -> FastAPI:
         """
         if format != "jsonl":
             raise HTTPException(status_code=400, detail="Only format=jsonl is supported")
-        rows = await db.query("SELECT * FROM session_logs WHERE id = ?", (log_id,))
+        rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
@@ -1603,31 +1616,22 @@ def create_app(lifespan=None) -> FastAPI:
         except ValueError:
             limit = 50
 
-        rows = await db.query(
-            """
-            SELECT match_id, mode, peer_count, frames, duration_sec, ended_by,
-                   mismatch_count, first_divergence_frame, last_clean_frame,
-                   rollbacks, predictions, correct_predictions, max_rollback_depth,
-                   failed_rollbacks, tolerance_hits, pacing_throttle_count,
-                   parquet_path, parquet_bytes, entry_count, rotated_at, created_at
-            FROM match_metrics
-            WHERE created_at > datetime('now', ?)
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (f"-{days} days", limit),
+        rows = await db.fetch(
+            select(MatchMetrics)
+            .where(MatchMetrics.created_at > db.ago(f"-{days} days"))
+            .order_by(MatchMetrics.created_at.desc())
+            .limit(limit)
         )
         return {"matches": rows, "count": len(rows)}
 
     @app.get("/admin/api/matches/{match_id}")
     async def admin_match_detail(match_id: str, _auth: None = Depends(_require_admin)) -> dict:
         """Return one match's precomputed metrics row."""
-        rows = await db.query("SELECT * FROM match_metrics WHERE match_id = ?", (match_id,))
+        rows = await db.fetch(select(MatchMetrics).where(MatchMetrics.match_id == match_id))
         if not rows:
             # Fall back to prefix match so CLI tools can pass a short id.
-            rows = await db.query(
-                "SELECT * FROM match_metrics WHERE match_id LIKE ? LIMIT 1",
-                (f"{match_id}%",),
+            rows = await db.fetch(
+                select(MatchMetrics).where(MatchMetrics.match_id.startswith(match_id, autoescape=True)).limit(1)
             )
         if not rows:
             raise HTTPException(status_code=404, detail="Match not rotated yet")
@@ -1666,9 +1670,10 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/input-audit/{match_id}")
     async def admin_input_audit(match_id: str, _auth: None = Depends(_require_admin)) -> dict:
-        rows = await db.query(
-            "SELECT slot, player_name, context FROM session_logs WHERE match_id = ? ORDER BY slot",
-            (match_id,),
+        rows = await db.fetch(
+            select(SessionLog.slot, SessionLog.player_name, SessionLog.context)
+            .where(SessionLog.match_id == match_id)
+            .order_by(SessionLog.slot)
         )
         if not rows:
             raise HTTPException(status_code=404, detail="No session logs for match")
@@ -1800,24 +1805,14 @@ def create_app(lifespan=None) -> FastAPI:
         limit = min(int(request.query_params.get("limit", "50")), 200)
         offset = int(request.query_params.get("offset", "0"))
 
-        conditions = ["created_at > datetime('now', ?)"]
-        params: list = [f"-{days} days"]
+        matching = select(ClientEvent).where(ClientEvent.created_at > db.ago(f"-{days} days"))
         if evt_type and evt_type in _ADMIN_EVENT_TYPES:
-            conditions.append("type = ?")
-            params.append(evt_type)
+            matching = matching.where(ClientEvent.type == evt_type)
         if room:
-            conditions.append("room = ?")
-            params.append(room)
+            matching = matching.where(ClientEvent.room == room)
 
-        where = " AND ".join(conditions)
-        total_rows = await db.query(f"SELECT COUNT(*) as cnt FROM client_events WHERE {where}", tuple(params))
-        total = total_rows[0]["cnt"] if total_rows else 0
-
-        params_with_paging = params + [limit, offset]
-        entries = await db.query(
-            f"SELECT * FROM client_events WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            tuple(params_with_paging),
-        )
+        total = await db.count(matching)
+        entries = await db.fetch(matching.order_by(ClientEvent.created_at.desc()).limit(limit).offset(offset))
         for entry in entries:
             if entry.get("meta") and isinstance(entry["meta"], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -1826,7 +1821,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/client-events/{event_id}")
     async def admin_client_event_detail(request: Request, event_id: int, _auth: None = Depends(_require_admin)) -> dict:
-        rows = await db.query("SELECT * FROM client_events WHERE id = ?", (event_id,))
+        rows = await db.fetch(select(ClientEvent).where(ClientEvent.id == event_id))
         if not rows:
             raise HTTPException(status_code=404, detail="Client event not found")
         entry = rows[0]
@@ -1844,23 +1839,12 @@ def create_app(lifespan=None) -> FastAPI:
         limit = min(int(request.query_params.get("limit", "50")), 200)
         offset = int(request.query_params.get("offset", "0"))
 
-        conditions = ["created_at > datetime('now', ?)"]
-        params: list = [f"-{days} days"]
-
+        matching = select(Feedback).where(Feedback.created_at > db.ago(f"-{days} days"))
         if category and category in ("bug", "feature", "general"):
-            conditions.append("category = ?")
-            params.append(category)
+            matching = matching.where(Feedback.category == category)
 
-        where = " AND ".join(conditions)
-
-        total_rows = await db.query(f"SELECT COUNT(*) as cnt FROM feedback WHERE {where}", tuple(params))
-        total = total_rows[0]["cnt"] if total_rows else 0
-
-        params_with_paging = params + [limit, offset]
-        entries = await db.query(
-            f"SELECT * FROM feedback WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            tuple(params_with_paging),
-        )
+        total = await db.count(matching)
+        entries = await db.fetch(matching.order_by(Feedback.created_at.desc()).limit(limit).offset(offset))
         # Parse context JSON strings back to dicts for the response
         for entry in entries:
             if entry.get("context") and isinstance(entry["context"], str):
@@ -1870,7 +1854,7 @@ def create_app(lifespan=None) -> FastAPI:
 
     @app.get("/admin/api/feedback/{feedback_id}")
     async def admin_feedback_single(request: Request, feedback_id: int, _auth: None = Depends(_require_admin)) -> dict:
-        rows = await db.query("SELECT * FROM feedback WHERE id = ?", (feedback_id,))
+        rows = await db.fetch(select(Feedback).where(Feedback.id == feedback_id))
         if not rows:
             raise HTTPException(status_code=404, detail="Feedback not found")
         entry = rows[0]
@@ -1896,23 +1880,19 @@ def create_app(lifespan=None) -> FastAPI:
         # meta) and in-game (match_id present in meta). We union both paths so
         # the timeline shows the full sequence from room_created through
         # milestone_reached plus any failure events.
-        conditions = []
-        params: list = []
-        if match_id:
-            conditions.append("json_extract(meta, '$.match_id') = ?")
-            params.append(match_id)
-        if room:
-            conditions.append("room = ?")
-            params.append(room)
-        where = " OR ".join(conditions)
-
-        rows = await db.query(
-            f"""SELECT id, type, message, meta, room, slot, created_at
-                FROM client_events
-                WHERE {where}
-                ORDER BY created_at ASC, id ASC
-                LIMIT 500""",
-            tuple(params),
+        rows = await db.fetch(
+            select(
+                ClientEvent.id,
+                ClientEvent.type,
+                ClientEvent.message,
+                ClientEvent.meta,
+                ClientEvent.room,
+                ClientEvent.slot,
+                ClientEvent.created_at,
+            )
+            .where(_events_of(match_id, room))
+            .order_by(ClientEvent.created_at, ClientEvent.id)
+            .limit(500)
         )
         # Parse meta JSON for client consumption; tolerate malformed rows.
         for row in rows:
@@ -1935,15 +1915,7 @@ def create_app(lifespan=None) -> FastAPI:
         match_id = request.query_params.get("match_id", "")
         if not match_id:
             raise HTTPException(status_code=400, detail="match_id required")
-        rows = await db.query(
-            """SELECT id, match_id, frame, field, slot, trigger,
-                      vision_equal, vision_confidence, vision_verdict_json,
-                      replay_meta_json, created_at
-               FROM desync_events
-               WHERE match_id = ?
-               ORDER BY frame""",
-            (match_id,),
-        )
+        rows = await db.fetch(_desync_verdicts(match_id).add_columns(DesyncEvent.match_id))
         return {
             "match_id": match_id,
             "events": rows,

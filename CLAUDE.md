@@ -57,6 +57,7 @@ kaillera-next/
 │       ├── state_cache.py   # Redis-backed save-state cache for late joiners
 │       ├── ratelimit.py     # per-IP rate limiting
 │       ├── db.py            # database: SQLite or Cloudflare D1 backend (src/dbbackend/), SQL migrations in server/migrations/
+│       ├── schema.py        # model classes the query builder builds from (SQLAlchemy, compiled to SQL in db.py); tested against the migrations
 │       ├── migrate.py       # plain-SQL schema migrations shared by SQLite/D1 (replaces Alembic)
 │       ├── blobstore.py     # blob storage for screenshots (R2 in prod, local folder in dev)
 │       ├── retention.py     # flags matches with a crash/freeze/desync; sweeps expired ones
