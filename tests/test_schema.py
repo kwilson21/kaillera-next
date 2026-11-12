@@ -41,12 +41,12 @@ def test_every_migrated_table_is_declared(migrated):
         row[0]
         for row in migrated.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
     }
-    assert in_db - {"schema_migrations"} == set(schema.metadata.tables)
+    assert in_db - {"schema_migrations"} == set(schema.Base.metadata.tables)
 
 
-@pytest.mark.parametrize("table", sorted(schema.metadata.tables))
+@pytest.mark.parametrize("table", sorted(schema.Base.metadata.tables))
 def test_columns_match_the_migrations(migrated, table):
-    declared = schema.metadata.tables[table]
+    declared = schema.Base.metadata.tables[table]
     actual = _columns(migrated, table)
     assert set(actual) == {c.name for c in declared.columns}
     for column in declared.columns:

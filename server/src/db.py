@@ -24,7 +24,7 @@ from src.blobstore import BlobStore, BlobStoreError, blobstore_from_env
 from src.dbbackend import DEFAULT_DB_PATH, Backend, backend_from_env
 from src.dbbackend.base import ExecResult, Statement
 from src.migrate import apply_migrations
-from src.schema import client_events, feedback, match_retention, screenshots, session_log_chunks, session_logs
+from src.schema import ClientEvent, Feedback, MatchRetention, Screenshot, SessionLog, SessionLogChunk
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ def ago(offset: str) -> ColumnElement:
 async def insert_feedback(data: dict) -> int:
     """Insert a feedback row and return the new row ID."""
     result = await run(
-        insert(feedback).values(
+        insert(Feedback).values(
             category=data["category"],
             message=data["message"],
             email=data.get("email"),
@@ -278,10 +278,9 @@ async def append_session_flush(data: dict) -> dict | None:
 
 
 async def _append_session_log_locked(data: dict, match_id: str, slot: int | None, epoch: str) -> dict:
-    logs = session_logs.c
     rows = await fetch(
-        select(logs.last_seq, logs.log_epoch, logs.audit_last_seq, logs.audit_epoch).where(
-            logs.match_id == match_id, logs.slot.is_(slot)
+        select(SessionLog.last_seq, SessionLog.log_epoch, SessionLog.audit_last_seq, SessionLog.audit_epoch).where(
+            SessionLog.match_id == match_id, SessionLog.slot.is_(slot)
         )
     )
     row = rows[0] if rows else None
@@ -307,7 +306,7 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
     else:
         audit_epoch, audit_max_seq = stored_audit_epoch, stored_audit_seq
 
-    upsert = sqlite_insert(session_logs).values(
+    upsert = sqlite_insert(SessionLog).values(
         match_id=match_id,
         room=data["room"],
         slot=slot,
@@ -327,18 +326,22 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
     # Within one epoch the high-water mark only moves forward; a new epoch replaces it.
     statements.append(
         upsert.on_conflict_do_update(
-            index_elements=[logs.match_id, logs.slot],
+            index_elements=[SessionLog.match_id, SessionLog.slot],
             set_={
                 "summary": new.summary,
                 "context": new.context,
                 "ip_hash": new.ip_hash,
                 "updated_at": now(),
                 "last_seq": case(
-                    (logs.log_epoch == new.log_epoch, func.max(logs.last_seq, new.last_seq)), else_=new.last_seq
+                    (SessionLog.log_epoch == new.log_epoch, func.max(SessionLog.last_seq, new.last_seq)),
+                    else_=new.last_seq,
                 ),
                 "log_epoch": new.log_epoch,
                 "audit_last_seq": case(
-                    (logs.audit_epoch == new.audit_epoch, func.max(logs.audit_last_seq, new.audit_last_seq)),
+                    (
+                        SessionLog.audit_epoch == new.audit_epoch,
+                        func.max(SessionLog.audit_last_seq, new.audit_last_seq),
+                    ),
                     else_=new.audit_last_seq,
                 ),
                 "audit_epoch": new.audit_epoch,
@@ -383,7 +386,7 @@ async def _chunk_statements(
         high_seq = max([high_seq, *seqs])
         new_bytes += len(entries_json)
         statements.append(
-            insert(session_log_chunks).values(
+            insert(SessionLogChunk).values(
                 match_id=match_id,
                 slot=slot,
                 kind=kind,
@@ -425,17 +428,14 @@ async def _stored_chunk_bytes(match_id: str, slot: int | None, kind: str = "log"
     `length(entries)` for every stored chunk on every flush.
     """
     rows = await fetch(
-        select(func.coalesce(func.sum(session_log_chunks.c.size), 0).label("total")).where(
-            *_chunks_of(match_id, slot, kind)
-        )
+        select(func.coalesce(func.sum(SessionLogChunk.size), 0).label("total")).where(*_chunks_of(match_id, slot, kind))
     )
     return int(rows[0]["total"]) if rows else 0
 
 
 def _chunks_of(match_id: str, slot: int | None, kind: str) -> tuple[ColumnElement[bool], ...]:
     """The WHERE terms selecting one player's chunks of one kind."""
-    chunks = session_log_chunks.c
-    return (chunks.match_id == match_id, chunks.slot.is_(slot), chunks.kind == kind)
+    return (SessionLogChunk.match_id == match_id, SessionLogChunk.slot.is_(slot), SessionLogChunk.kind == kind)
 
 
 def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> Executable:
@@ -444,14 +444,16 @@ def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> 
     Keeps the newest chunks whose cumulative size (counted from the newest
     backwards) still fits, in one statement rather than a per-row DELETE.
     """
-    chunks = session_log_chunks.c
     newest_first = (
-        select(chunks.id, func.sum(chunks.size).over(order_by=chunks.id.desc()).label("running_total"))
+        select(
+            SessionLogChunk.id,
+            func.sum(SessionLogChunk.size).over(order_by=SessionLogChunk.id.desc()).label("running_total"),
+        )
         .where(*_chunks_of(match_id, slot, kind))
         .subquery()
     )
     fits = select(newest_first.c.id).where(newest_first.c.running_total <= _chunk_cap(kind))
-    return delete(session_log_chunks).where(*_chunks_of(match_id, slot, kind), chunks.id.not_in(fits))
+    return delete(SessionLogChunk).where(*_chunks_of(match_id, slot, kind), SessionLogChunk.id.not_in(fits))
 
 
 async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: str | None) -> list[dict]:
@@ -487,9 +489,7 @@ async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: st
 
 def _chunk_entries(match_id: str, slot: int | None, kind: str) -> Executable:
     """One player's stored chunks of one kind, oldest first."""
-    return (
-        select(session_log_chunks.c.entries).where(*_chunks_of(match_id, slot, kind)).order_by(session_log_chunks.c.id)
-    )
+    return select(SessionLogChunk.entries).where(*_chunks_of(match_id, slot, kind)).order_by(SessionLogChunk.id)
 
 
 async def get_input_audit(match_id: str, slot: int | None) -> list[dict]:
@@ -518,12 +518,11 @@ _registered_matches: set[str] = set()
 
 def _uploads_open() -> ColumnElement[bool]:
     """A match that isn't being deleted and is still inside its upload window."""
-    retention = match_retention.c
     return and_(
-        retention.deleting_at.is_(None),
+        MatchRetention.deleting_at.is_(None),
         or_(
-            and_(retention.ended_at.is_not(None), retention.ended_at > ago(_UPLOAD_GRACE_AFTER_END)),
-            and_(retention.ended_at.is_(None), retention.created_at > ago(_UPLOAD_WINDOW_WITHOUT_END)),
+            and_(MatchRetention.ended_at.is_not(None), MatchRetention.ended_at > ago(_UPLOAD_GRACE_AFTER_END)),
+            and_(MatchRetention.ended_at.is_(None), MatchRetention.created_at > ago(_UPLOAD_WINDOW_WITHOUT_END)),
         ),
     )
 
@@ -537,7 +536,7 @@ async def register_match(match_id: str, room: str) -> None:
     """
     if match_id in _registered_matches:
         return
-    await run(insert(match_retention).prefix_with("OR IGNORE").values(match_id=match_id, room=room))
+    await run(insert(MatchRetention).prefix_with("OR IGNORE").values(match_id=match_id, room=room))
     if len(_registered_matches) >= _UPLOAD_CHECK_CACHE_MAX:
         _registered_matches.clear()
     _registered_matches.add(match_id)
@@ -555,9 +554,10 @@ async def match_accepts_uploads(match_id: str, room: str) -> bool:
     cached = _upload_check_cache.get(key)
     if cached and cached[1] > now:
         return cached[0]
-    retention = match_retention.c
     rows = await fetch(
-        select(retention.match_id).where(retention.match_id == match_id, retention.room == room, _uploads_open())
+        select(MatchRetention.match_id).where(
+            MatchRetention.match_id == match_id, MatchRetention.room == room, _uploads_open()
+        )
     )
     accepted = bool(rows)
     if len(_upload_check_cache) >= _UPLOAD_CHECK_CACHE_MAX:
@@ -571,11 +571,10 @@ async def find_recent_match(room: str) -> str | None:
 
     Links feedback that carries only a room code to the match it's about.
     """
-    retention = match_retention.c
     rows = await fetch(
-        select(retention.match_id)
-        .where(retention.room == room, _uploads_open())
-        .order_by(retention.created_at.desc())
+        select(MatchRetention.match_id)
+        .where(MatchRetention.room == room, _uploads_open())
+        .order_by(MatchRetention.created_at.desc())
         .limit(1)
     )
     return rows[0]["match_id"] if rows else None
@@ -613,17 +612,16 @@ _DEFAULT_BUDGET_AUTO_FLAGGED_BYTES = 200 * 1024 * 1024
 
 async def _flagged_bytes() -> int:
     """Bytes of session-log chunks and screenshots held by flagged matches."""
-    flagged = match_retention.c.tier == "flagged"
+    flagged = MatchRetention.tier == "flagged"
     chunk_bytes = (
-        select(func.sum(session_log_chunks.c.size))
-        .join(match_retention, match_retention.c.match_id == session_log_chunks.c.match_id)
+        select(func.sum(SessionLogChunk.size))
+        .join(MatchRetention, MatchRetention.match_id == SessionLogChunk.match_id)
         .where(flagged)
         .scalar_subquery()
     )
-    shots = screenshots.c
     shot_bytes = (
-        select(func.sum(func.coalesce(shots.size, func.length(shots.data), 0)))
-        .join(match_retention, match_retention.c.match_id == shots.match_id)
+        select(func.sum(func.coalesce(Screenshot.size, func.length(Screenshot.data), 0)))
+        .join(MatchRetention, MatchRetention.match_id == Screenshot.match_id)
         .where(flagged)
         .scalar_subquery()
     )
@@ -632,9 +630,10 @@ async def _flagged_bytes() -> int:
 
 
 async def _flag_match_locked(match_id: str, reasons: list[dict], auto: bool) -> None:
-    retention = match_retention.c
     rows = await fetch(
-        select(retention.flag_reasons, retention.deleting_at, retention.tier).where(retention.match_id == match_id)
+        select(MatchRetention.flag_reasons, MatchRetention.deleting_at, MatchRetention.tier).where(
+            MatchRetention.match_id == match_id
+        )
     )
     if not rows or rows[0]["deleting_at"]:
         return
@@ -654,7 +653,7 @@ async def _flag_match_locked(match_id: str, reasons: list[dict], auto: bool) -> 
             old["first_f"] = frame
     merged = json.dumps(list(by_signal.values()))
     budget = int(os.environ.get("BUDGET_AUTO_FLAGGED_BYTES", _DEFAULT_BUDGET_AUTO_FLAGGED_BYTES))
-    live = update(match_retention).where(retention.match_id == match_id, retention.deleting_at.is_(None))
+    live = update(MatchRetention).where(MatchRetention.match_id == match_id, MatchRetention.deleting_at.is_(None))
     if auto and rows[0]["tier"] != "flagged" and await _flagged_bytes() > budget:
         await run(live.values(flag_reasons=merged, auto_flag_capped=1))
         return
@@ -663,20 +662,18 @@ async def _flag_match_locked(match_id: str, reasons: list[dict], auto: bool) -> 
 
 async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> None:
     """Mark how a session ended."""
-    logs = session_logs.c
-    ended = update(session_logs).values(ended_by=ended_by, updated_at=now()).where(logs.match_id == match_id)
+    ended = update(SessionLog).values(ended_by=ended_by, updated_at=now()).where(SessionLog.match_id == match_id)
     if slot is not None:
-        await run(ended.where(logs.slot == slot))
+        await run(ended.where(SessionLog.slot == slot))
         return
     # Game end: mark sessions without an existing ended_by (don't overwrite
     # leave/disconnect) and record when the match ended.
-    retention = match_retention.c
     await run_batch(
         [
-            ended.where(logs.ended_by.is_(None)),
-            update(match_retention)
+            ended.where(SessionLog.ended_by.is_(None)),
+            update(MatchRetention)
             .values(ended_at=now())
-            .where(retention.match_id == match_id, retention.ended_at.is_(None)),
+            .where(MatchRetention.match_id == match_id, MatchRetention.ended_at.is_(None)),
         ]
     )
 
@@ -684,7 +681,7 @@ async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> N
 async def insert_client_event(data: dict) -> int:
     """Insert a client event and return row ID."""
     result = await run(
-        insert(client_events).values(
+        insert(ClientEvent).values(
             type=data["type"],
             message=data.get("message"),
             meta=data.get("meta"),
@@ -727,25 +724,24 @@ async def insert_screenshot(match_id: str, slot: int, frame: int, data: bytes) -
         log.warning("Screenshot not stored (match=%s slot=%s frame=%s): %s", match_id[:8], slot, frame, exc)
         return None
     result = await run(
-        insert(screenshots).values(match_id=match_id, slot=slot, frame=frame, blob_key=key, size=len(data))
+        insert(Screenshot).values(match_id=match_id, slot=slot, frame=frame, blob_key=key, size=len(data))
     )
     return result.last_row_id
 
 
 async def get_screenshots(match_id: str) -> list[dict]:
     """Return screenshot metadata (without data) for a match."""
-    shots = screenshots.c
     return await fetch(
         select(
-            shots.id,
-            shots.match_id,
-            shots.slot,
-            shots.frame,
-            func.coalesce(shots.size, func.length(shots.data)).label("size"),
-            shots.created_at,
+            Screenshot.id,
+            Screenshot.match_id,
+            Screenshot.slot,
+            Screenshot.frame,
+            func.coalesce(Screenshot.size, func.length(Screenshot.data)).label("size"),
+            Screenshot.created_at,
         )
-        .where(shots.match_id == match_id)
-        .order_by(shots.slot, shots.frame)
+        .where(Screenshot.match_id == match_id)
+        .order_by(Screenshot.slot, Screenshot.frame)
     )
 
 
@@ -759,7 +755,7 @@ async def read_screenshot(row: dict) -> bytes | None:
 
 async def get_screenshot_data(screenshot_id: int) -> bytes | None:
     """Return raw JPEG bytes for a screenshot."""
-    rows = await fetch(select(screenshots.c.blob_key, screenshots.c.data).where(screenshots.c.id == screenshot_id))
+    rows = await fetch(select(Screenshot.blob_key, Screenshot.data).where(Screenshot.id == screenshot_id))
     return await read_screenshot(rows[0]) if rows else None
 
 

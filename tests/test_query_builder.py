@@ -10,11 +10,11 @@ import sqlite3
 
 from sqlalchemy import insert, select
 from src import db
-from src.schema import feedback, session_log_chunks, session_logs
+from src.schema import Feedback, SessionLog, SessionLogChunk
 
 
 def test_params_come_out_in_placeholder_order():
-    sql, params = db.compile_statement(insert(feedback).values(message="m", category="bug", email=None))
+    sql, params = db.compile_statement(insert(Feedback).values(message="m", category="bug", email=None))
     assert sql.count("?") == len(params) == 3
     columns = sql[sql.index("(") + 1 : sql.index(")")].split(", ")
     assert dict(zip(columns, params, strict=True)) == {"category": "bug", "message": "m", "email": None}
@@ -22,15 +22,14 @@ def test_params_come_out_in_placeholder_order():
 
 def test_slot_matches_null_and_numbers_alike():
     """`slot IS ?` in the hand-written SQL: a spectator's slot is NULL."""
-    logs = session_logs.c
-    sql, params = db.compile_statement(select(logs.id).where(logs.slot.is_(None)))
+    sql, params = db.compile_statement(select(SessionLog.id).where(SessionLog.slot.is_(None)))
     assert "slot IS NULL" in sql and params == ()
-    sql, params = db.compile_statement(select(logs.id).where(logs.slot.is_(2)))
+    sql, params = db.compile_statement(select(SessionLog.id).where(SessionLog.slot.is_(2)))
     assert "slot IS ?" in sql and params == (2,)
 
 
 def test_in_lists_expand_to_one_placeholder_per_value():
-    sql, params = db.compile_statement(select(feedback.c.id).where(feedback.c.category.in_(["bug", "idea"])))
+    sql, params = db.compile_statement(select(Feedback.id).where(Feedback.category.in_(["bug", "idea"])))
     assert "IN (?, ?)" in sql and params == ("bug", "idea")
 
 
@@ -52,7 +51,7 @@ def test_chunk_cap_keeps_the_newest_chunks_that_fit(monkeypatch):
     for match_id, slot, kind, size in rows:
         conn.execute(
             *db.compile_statement(
-                insert(session_log_chunks).values(
+                insert(SessionLogChunk).values(
                     match_id=match_id, slot=slot, kind=kind, first_seq=0, last_seq=0, entries="[]", size=size
                 )
             )

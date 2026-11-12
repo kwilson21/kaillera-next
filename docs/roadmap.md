@@ -190,7 +190,7 @@ through one function) become Effect timeouts and scoped finalizers.
   committed so that deploys need no Node step. Moving the build into the
   Docker image is the alternative once the bundle changes often.
 - The database stays on Cloudflare D1 (SQLite locally). Queries are built with
-  SQLAlchemy Core from the tables in `server/src/schema.py` and compiled to
+  SQLAlchemy from the model classes in `server/src/schema.py` and compiled to
   SQL for the existing backends; SQLAlchemy never opens a connection.
   `db.py` and the admin API are converted. `retention.py`,
   `match_rotation.py` and `desync_vision.py` still pass SQL strings to
