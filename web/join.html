@@ -79,32 +79,9 @@
           <h1>Powering on… <small class="elapsed" id="elapsed">0:00</small></h1>
           <p id="waking-line">
             The room server naps when nobody's around. Your visit woke it up; it takes up to a minute. We'll check on
-            the room the moment it answers. Press SPACE (tap on a phone) while you wait. This is what rollback does to
-            lag.
+            the room the moment it answers.
           </p>
           <div class="prog" aria-hidden="true"><i></i></div>
-          <div class="viz" id="viz">
-            <div class="viz-row">
-              <span>Input</span>
-              <div class="track"><i class="pulse" id="p-in"></i></div>
-              <b id="v-in">--</b>
-            </div>
-            <div class="viz-row">
-              <span>Response</span>
-              <div class="track"><i class="pulse" id="p-out"></i></div>
-              <b id="v-out">--</b>
-            </div>
-            <div class="verdict ok" id="verdict">Press SPACE or tap here</div>
-            <div class="verdict-sub" id="verdict-sub"></div>
-            <div class="viz-ctl">
-              <button class="btn" type="button" id="viz-send">Send an input</button>
-              <label for="lag"
-                >Network lag <input type="range" id="lag" min="0" max="300" step="10" value="120" />
-                <output id="lag-out" for="lag">120 ms</output></label
-              >
-              <label for="rb"><input type="checkbox" id="rb" checked /> Rollback on</label>
-            </div>
-          </div>
         </section>
 
         <hr class="inv-sep" />
@@ -112,7 +89,7 @@
       </div>
     </main>
 
-    <script src="/static/lagviz.js" defer></script>
+    <script src="/static/wake-art.js" defer></script>
     <script src="/static/join.js" defer></script>
   </body>
 </html>

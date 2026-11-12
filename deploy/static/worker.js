@@ -43,7 +43,7 @@ const ASSET_PREFIXES = ['/static/fonts/', '/static/shots/'];
 const ASSET_FILES = new Set([
   '/static/landing.css',
   '/static/landing.js',
-  '/static/lagviz.js',
+  '/static/wake-art.js',
   '/static/join.js',
   '/static/storage.js',
   '/static/version.js',

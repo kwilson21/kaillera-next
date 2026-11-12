@@ -83,7 +83,7 @@ kaillera-next/
 │   └── static/
 │       ├── landing.js           # front page: board poll, waking state, header marks
 │       ├── join.js              # invite page: room lookup, full/closed/in-app states
-│       ├── lagviz.js            # waking-state lag visualizer (front page + invite page)
+│       ├── wake-art.js           # shared decorative waking-state art
 │       ├── landing.css          # front page styles (direction A tokens)
 │       ├── play.css             # play page styles (room overlay tokens, direction A)
 │       ├── admin.css            # admin dashboard styles

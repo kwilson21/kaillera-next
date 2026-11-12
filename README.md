@@ -194,14 +194,13 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   admin.html           Admin dashboard (session logs, events, feedback, screenshots)
   privacy.html         Privacy notice — what's collected (diagnostics, screenshots), opt-out
   demo.html            Interactive rollback demo (user-supplied ROM required)
-  lag-test.html        Standalone dev harness for lagviz.js
   error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
     landing.js         Front-page board controller (room creation, open-rooms board)
     landing.css        Front-page styles (direction A tokens)
     join.js            Invite-page controller (room lookup, join/watch states)
-    lagviz.js          Waking-state lag visualizer (front page + invite page)
+    wake-art.js        Shared decorative waking-state art
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     admin.css          Admin dashboard styles
     play.css           Play page styles (room overlay tokens, direction A)

@@ -302,8 +302,6 @@
     }
   }
 
-  window.KNLagViz.init(() => state === 'inv-waking');
-
   async function start() {
     if (!code) return showClosed('');
     if (!canPlay && !hasWebRTC) return show('inv-unsupported');
