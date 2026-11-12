@@ -638,7 +638,7 @@ button {
   border-radius: 3px;
   background: currentColor;
   opacity: 0.22;
-  animation: wake-dot 2.4s ease-out infinite;
+  animation: wake-dot 4.8s ease-out infinite;
 }
 .wake-dot-row i:nth-child(1) {
   --dot-index: 0;
@@ -665,16 +665,16 @@ button {
   --dot-index: 7;
 }
 .wake-dot-row:nth-child(1) i {
-  animation-delay: calc(var(--dot-index) * 220ms);
+  animation-delay: calc(var(--dot-index) * 120ms);
 }
 .wake-dot-row:nth-child(2) i {
-  animation-delay: calc(160ms + var(--dot-index) * 220ms);
+  animation-delay: calc(160ms + var(--dot-index) * 120ms);
 }
 .wake-dot-row:nth-child(3) i {
-  animation-delay: calc(320ms + var(--dot-index) * 220ms);
+  animation-delay: calc(320ms + var(--dot-index) * 120ms);
 }
 .wake-dot-row:nth-child(4) i {
-  animation-delay: calc(480ms + var(--dot-index) * 220ms);
+  animation-delay: calc(480ms + var(--dot-index) * 120ms);
 }
 @keyframes wake-dot {
   0%,

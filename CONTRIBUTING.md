@@ -202,7 +202,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |
 | `landing.js` | — | Front-page board controller (room creation, open-rooms board) on index.html | — |
 | `join.js` | — | Invite-page controller (room lookup, join/watch states) on join.html | — |
-| `wake-art.js` | — | Shared decorative waking-state art while a room wakes | index.html, join.html |
+| `dist/kn-wake-art.js` | — | Standalone TypeScript bundle for waking-state art while a room wakes | index.html, join.html |
 | `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
 | `demo.js` | ~1,818 | Demo page orchestrator (fake peer + menu autopilot) | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
 | `fake-peer.js` | ~559 | Synthetic P2 for the demo page (simulated input/jitter) | demo.js |
@@ -217,8 +217,10 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 - **TypeScript** — new frontend logic lives in `web/src/` (strict mode,
   Effect, Effect Schema, XState). `just build` type-checks, runs
   `tests/ts`, and bundles it to `web/static/dist/kn-core.js`, which is
-  committed. The existing `web/static/*.js` files stay plain scripts until
-  their turn in the migration (`docs/roadmap.md`).
+  committed. Static landing-page waking art is strict TypeScript too, built
+  as its own small `web/static/dist/kn-wake-art.js` bundle. The existing
+  `web/static/*.js` files stay plain scripts until their turn in the
+  migration (`docs/roadmap.md`).
 - **JS/TS/HTML/CSS** — formatted by oxfmt (`just fmt`), same style Prettier
   produced. Linted by oxlint with the vendored anti-slop rules
   (`tools/oxlint/anti-slop/`, yours to edit) and by Biome (`just lint`).

@@ -158,7 +158,7 @@ def test_server_strings_are_text_not_html(landing):
 
 def test_waking_state_disables_actions_and_recovers(page, server_url):
     alive = {"up": False}
-    page.add_init_script("window.__KN_WAKE_ART_CYCLE_MS__ = 40")
+    page.add_init_script("window.__KN_WAKE_ART_CYCLE_MS__ = 0")
     _mock(page)
     page.unroute("**/health")
     page.route(
@@ -170,10 +170,11 @@ def test_waking_state_disables_actions_and_recovers(page, server_url):
     expect(page.locator("#st-waking")).to_have_attribute("role", "status")
     stage = page.locator("#st-waking .wake-art")
     expect(stage).to_have_attribute("aria-hidden", "true")
-    expect(stage.locator('[data-art="a"]')).to_be_visible()
-    expect(stage.locator('[data-art="c"]')).to_be_hidden()
-    expect(stage.locator('[data-art="b"]')).to_be_hidden()
-    expect(stage.locator('[data-art="c"]')).to_be_visible(timeout=2000)
+    expect(stage.locator('[data-art="a"]')).to_have_class("wake-art-view is-active")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view")
+    expect(stage.locator('[data-art="b"]')).to_have_class("wake-art-view wake-rollback")
+    page.evaluate("window.__KN_WAKE_ART_STEP__()")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view is-active")
     expect(page.locator("#elapsed")).to_be_visible()
     expect(page.locator("#st-waking .prog")).to_be_visible()
     expect(page.locator("#create-btn")).to_be_disabled()
@@ -183,13 +184,9 @@ def test_waking_state_disables_actions_and_recovers(page, server_url):
     assert page.locator("#st-waking #viz-send").count() == 0
     alive["up"] = True
     expect(page.locator("#board")).to_have_attribute("data-state", "empty", timeout=10000)
-    page.wait_for_timeout(120)
-    assert stage.locator('[data-art="a"]').get_attribute("class").endswith("is-active")
-    assert not stage.locator('[data-art="c"]').get_attribute("class").endswith("is-active")
-    assert not stage.locator('[data-art="b"]').get_attribute("class").endswith("is-active")
-    expect(stage.locator('[data-art="a"]')).to_be_hidden()
-    expect(stage.locator('[data-art="c"]')).to_be_hidden()
-    expect(stage.locator('[data-art="b"]')).to_be_hidden()
+    expect(stage.locator('[data-art="a"]')).to_have_class("wake-art-view is-active")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view")
+    expect(stage.locator('[data-art="b"]')).to_have_class("wake-art-view wake-rollback")
     expect(page.locator("#create-btn")).to_be_enabled()
 
 

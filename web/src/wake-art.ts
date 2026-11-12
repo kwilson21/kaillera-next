@@ -1,13 +1,19 @@
-/* Decorative waking-state art shared by the front page and invite page. */
-(() => {
-  const waking = document.querySelector('#st-waking, #inv-waking');
-  const progress = waking?.querySelector('.prog');
-  if (!waking || !progress) return;
+/** Small decorative animation shared by the static front and invite pages. */
 
+export function nextWakeView(current: number, viewCount: number): number {
+  return (current + 1) % viewCount;
+}
+
+export function wakeDotColumns(width: number): number {
+  return Math.min(40, Math.max(1, Math.floor((width - 15 + 6) / 13)));
+}
+
+const dotRows = ['p1', 'p2', 'p3', 'p4'];
+
+function createStage(): HTMLDivElement {
   const stage = document.createElement('div');
   stage.className = 'wake-art';
   stage.setAttribute('aria-hidden', 'true');
-  const dotRows = ['p1', 'p2', 'p3', 'p4'];
   stage.innerHTML = `
     <div class="wake-art-view is-active" data-art="a">
       <div class="wake-ports">
@@ -41,66 +47,106 @@
         <text class="lbl re" x="27" y="26" text-anchor="middle">rewind · replay</text>
       </svg>
     </div>`;
+  return stage;
+}
+
+export function startWakeArt(): void {
+  const waking = document.querySelector<HTMLElement>('#st-waking, #inv-waking');
+  const progress = waking?.querySelector<HTMLElement>('.prog');
+  if (!waking || !progress) return;
+  const wakingSection = waking;
+
+  const stage = createStage();
   progress.after(stage);
 
-  const dots = stage.querySelector('.wake-dots');
-  function sizeDotRows() {
-    const columns = Math.min(40, Math.max(1, Math.floor((dots.clientWidth - 15 + 6) / 13)));
-    dots.querySelectorAll('.wake-dot-row').forEach((row) => {
-      row.replaceChildren(...Array.from({ length: columns }, () => document.createElement('i')));
+  const dots = stage.querySelector<HTMLElement>('.wake-dots');
+  if (!dots) return;
+  const dotContainer = dots;
+  function sizeDotRows(): void {
+    const columns = wakeDotColumns(dotContainer.clientWidth);
+    dotContainer.querySelectorAll('.wake-dot-row').forEach((row) => {
+      row.replaceChildren(
+        ...Array.from({ length: columns }, (_, index) => {
+          const dot = document.createElement('i');
+          dot.style.setProperty('--dot-index', String(index));
+          return dot;
+        }),
+      );
     });
   }
   sizeDotRows();
-  new ResizeObserver(sizeDotRows).observe(dots);
+  new ResizeObserver(sizeDotRows).observe(dotContainer);
 
-  const views = [...stage.querySelectorAll('.wake-art-view')];
-  const ports = [...stage.querySelectorAll('.wake-port')];
+  const views = [...stage.querySelectorAll<HTMLElement>('.wake-art-view')];
+  const ports = [...stage.querySelectorAll<HTMLElement>('.wake-port')];
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-  const cycleMs = Number(window.__KN_WAKE_ART_CYCLE_MS__) || 8000;
-  let timer = null;
-  let portTimers = [];
+  const cycleMs = Number(window.__KN_WAKE_ART_CYCLE_MS__ ?? 8000);
+  let timer: number | null = null;
+  let portTimers: number[] = [];
   let current = 0;
 
-  function show(index) {
+  function show(index: number): void {
     current = index;
-    views.forEach((view, i) => view.classList.toggle('is-active', i === index));
+    views.forEach((view, i) => {
+      view.classList.toggle('is-active', i === index);
+    });
   }
 
-  function stop() {
+  if (cycleMs === 0) window.__KN_WAKE_ART_STEP__ = () => show(nextWakeView(current, views.length));
+
+  function stop(): void {
     if (timer !== null) window.clearTimeout(timer);
     timer = null;
-    portTimers.forEach((handle) => window.clearTimeout(handle));
+    portTimers.forEach((handle) => {
+      window.clearTimeout(handle);
+    });
     portTimers = [];
-    ports.forEach((port) => port.classList.remove('is-lit'));
+    ports.forEach((port) => {
+      port.classList.remove('is-lit');
+    });
     show(0);
   }
 
-  function startPorts() {
+  function startPorts(): void {
     portTimers = [];
     ports.forEach((port, index) => {
       portTimers.push(window.setTimeout(() => port.classList.add('is-lit'), index * 500));
     });
-    portTimers.push(window.setTimeout(() => ports.forEach((port) => port.classList.remove('is-lit')), 2600));
+    portTimers.push(
+      window.setTimeout(() => {
+        ports.forEach((port) => {
+          port.classList.remove('is-lit');
+        });
+      }, 2600),
+    );
     portTimers.push(window.setTimeout(startPorts, 3200));
   }
 
-  function schedule() {
+  function schedule(): void {
+    if (cycleMs === 0) return;
     timer = window.setTimeout(() => {
-      show((current + 1) % views.length);
+      show(nextWakeView(current, views.length));
       schedule();
     }, cycleMs);
   }
 
-  function sync() {
+  function sync(): void {
     stop();
-    stage.classList.toggle('is-waking', !waking.hidden);
-    if (!waking.hidden && !reducedMotion.matches) {
+    stage.classList.toggle('is-waking', !wakingSection.hidden);
+    if (!wakingSection.hidden && !reducedMotion.matches) {
       startPorts();
       schedule();
     }
   }
 
-  new MutationObserver(sync).observe(waking, { attributes: true, attributeFilter: ['hidden'] });
+  new MutationObserver(sync).observe(wakingSection, { attributes: true, attributeFilter: ['hidden'] });
   reducedMotion.addEventListener?.('change', sync);
   sync();
-})();
+}
+
+declare global {
+  interface Window {
+    __KN_WAKE_ART_CYCLE_MS__?: number;
+    __KN_WAKE_ART_STEP__?: () => void;
+  }
+}

@@ -123,7 +123,7 @@ def test_host_name_is_text_not_html(invite):
 
 def test_waking_then_the_room(page, server_url):
     up = {"on": False}
-    page.add_init_script("window.__KN_WAKE_ART_CYCLE_MS__ = 40")
+    page.add_init_script("window.__KN_WAKE_ART_CYCLE_MS__ = 0")
     page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}) if up["on"] else r.abort())
     page.route("**/room/*", lambda r: r.fulfill(json=_room()))
     page.goto(f"{server_url}/join?room=KAZ12345")
@@ -131,25 +131,22 @@ def test_waking_then_the_room(page, server_url):
     expect(page.locator("#inv-waking")).to_have_attribute("role", "status")
     stage = page.locator("#inv-waking .wake-art")
     expect(stage).to_have_attribute("aria-hidden", "true")
-    expect(stage.locator('[data-art="a"]')).to_be_visible()
-    expect(stage.locator('[data-art="c"]')).to_be_hidden()
-    expect(stage.locator('[data-art="b"]')).to_be_hidden()
-    expect(stage.locator('[data-art="c"]')).to_be_visible(timeout=2000)
+    expect(stage.locator('[data-art="a"]')).to_have_class("wake-art-view is-active")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view")
+    expect(stage.locator('[data-art="b"]')).to_have_class("wake-art-view wake-rollback")
+    page.evaluate("window.__KN_WAKE_ART_STEP__()")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view is-active")
     expect(page.locator("#elapsed")).to_be_visible()
     expect(page.locator("#inv-waking .prog")).to_be_visible()
-    expect(page.locator("#inv-waking")).to_contain_text("This room is waking up")
+    expect(page.locator("#inv-waking")).to_contain_text("The room server naps when nobody's around")
     assert page.locator("#inv-waking #viz").count() == 0
     assert page.locator("#inv-waking #viz-send").count() == 0
     up["on"] = True
     expect(page.locator("#inv-main")).to_be_visible(timeout=10000)
     expect(page.locator("#inv-waking")).to_be_hidden()
-    page.wait_for_timeout(120)
-    assert stage.locator('[data-art="a"]').get_attribute("class").endswith("is-active")
-    assert not stage.locator('[data-art="c"]').get_attribute("class").endswith("is-active")
-    assert not stage.locator('[data-art="b"]').get_attribute("class").endswith("is-active")
-    expect(stage.locator('[data-art="a"]')).to_be_hidden()
-    expect(stage.locator('[data-art="c"]')).to_be_hidden()
-    expect(stage.locator('[data-art="b"]')).to_be_hidden()
+    expect(stage.locator('[data-art="a"]')).to_have_class("wake-art-view is-active")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view")
+    expect(stage.locator('[data-art="b"]')).to_have_class("wake-art-view wake-rollback")
 
 
 def test_waking_sends_one_direct_origin_wake_request(page, server_url):
