@@ -80,6 +80,7 @@ kaillera-next/
 │   ├── privacy.html         # privacy notice: what's collected (diagnostics, screenshots), opt-out
 │   ├── demo.html            # interactive rollback demo (user-supplied ROM required)
 │   ├── error.html           # error/fallback page
+│   ├── lag-test.html        # standalone input-lag visualizer (no ROM needed)
 │   └── static/
 │       ├── landing.js           # front page: board poll, waking state, header marks
 │       ├── join.js              # invite page: room lookup, full/closed/in-app states

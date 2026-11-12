@@ -26,7 +26,7 @@ automatically on all clients when netplay starts -- no host configuration requir
 - `800A4D24 0000` -- Items Off
 - `810BA9F1 0000+800BA9F3 0000` -- No Wind
 
-**Files:** `web/static/netplay-rollback.js`. No server changes.
+**Files:** `web/static/shared.js`. No server changes.
 
 ---
 
@@ -74,12 +74,13 @@ via `gameManager.loadState()`, then syncs at next delay boundary.
 
 **Detection (star topology, host-authoritative):** Two hashing paths:
 1. C-level (patched core): `_kn_sync_hash()` hashes game-specific RDRAM regions directly
-   in C. Per-region checksums via `_kn_sync_hash_regions` for targeted desync diagnosis.
+   in C. Per-64KB-block checksums via `_kn_rdram_block_hashes` for targeted desync diagnosis.
 2. JS fallback: FNV-1a hash of RDRAM via direct HEAPU8 access, falling back to
    `getState()` serialization.
 
-Host broadcasts `sync-hash:frame:hash:cycleMs` every ~120 frames (~2s). Guests compare
-their own hash — mismatch triggers resync.
+Periodic hash broadcasts are disabled — AI DMA determinism + SoftFloat FPU make steady-state
+gameplay deterministic. Resync is instead triggered by reconnect, mobile lifecycle,
+network-change, input-stall, boot-correction, peer-recovery, and explicit sync-request paths.
 
 **Resync (host-authoritative):** Desynced client sends `sync-request` -> host exports state
 via `_kn_sync_read()` (C-level) or `getState()` (JS fallback), compresses and sends via

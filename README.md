@@ -248,7 +248,7 @@ The pre-built patched core is included at `web/static/ejs/cores/`. You only need
 
 The build compiles a patched mupen64plus-next core with:
 - Deterministic timing exports (`_kn_set_deterministic`, `_kn_set_frame_time`)
-- C-level resync exports (`_kn_sync_hash`, `_kn_sync_read`, `_kn_sync_write`, `_kn_sync_hash_regions`)
+- C-level resync exports (`_kn_sync_hash`, `_kn_sync_read`, `_kn_sync_write`, `_kn_rdram_block_hashes`)
 - Frame-locked audio exports (`_kn_get_audio_ptr`, `_kn_get_audio_samples`, `_kn_reset_audio`, `_kn_get_audio_rate`)
 - Strict IEEE 754 floating-point (`-fno-fast-math`, `-ffp-contract=off`)
 - NaN canonicalization via `wasm-opt --denan` (injected before `--asyncify`)
