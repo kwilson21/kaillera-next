@@ -92,3 +92,37 @@ test('a late joiner who gets state in time is not reported', async () => {
   assert.deepEqual(reported, []);
   await session.stop();
 });
+
+test('the state is readable in the same tick as the event that changed it', async () => {
+  // play.js sends an event and branches on the result straight away.
+  const { session } = open();
+  assert.equal(session.gameOn(), false);
+  session.send({ type: 'joined', status: 'playing', matchId: 'm1', spectator: false });
+  assert.equal(session.state(), 'lateJoinWaiting');
+  assert.equal(session.gameOn(), true);
+  session.send({ type: 'gameStarted', matchId: 'm1' });
+  assert.equal(session.state(), 'running');
+  session.send({ type: 'gameEnded' });
+  assert.equal(session.gameOn(), false);
+  await session.stop();
+});
+
+test('a room closed by the server puts the page back in the lobby', async () => {
+  const { session, reported } = open(30);
+  session.send({ type: 'joined', status: 'playing', matchId: 'm1', spectator: false });
+  session.send({ type: 'roomClosed' });
+  assert.equal(session.state(), 'lobby');
+  assert.equal(await session.socketUp({ gameRunning: false }), true);
+  // The stranded-joiner timer died with the wait.
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(reported, []);
+  await session.stop();
+});
+
+test('the effects still run: a late joiner left waiting is reported once', async () => {
+  const { session, reported } = open(30);
+  session.send({ type: 'joined', status: 'playing', matchId: 'm1', spectator: false });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(reported, [{ type: 'late-join-stranded', matchId: 'm1' }]);
+  await session.stop();
+});

@@ -33,6 +33,10 @@
 module room {
   const HOST_REOPEN_ENDS_MATCH: bool
 
+  // web/src/session.ts is the page half of this model, and since stage 2 it
+  // is what play.js reads "is a game on" from (Waiting or Running). A room
+  // closed by the server (`roomClosed` there) is `closeTab` here: the page is
+  // no longer in the room.
   type Page =
     | Closed          // no tab
     | Lobby           // tab open, lobby UI, no emulator

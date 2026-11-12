@@ -111,7 +111,12 @@
   };
   let lastUsersData = null;
   let engine = null;
-  let gameRunning = false;
+  // The old "is a game on" flag. The lifecycle machine below decides now
+  // (isGameRunning); this is still written at the same places so the two can
+  // be compared on every signaling reconnect until production shows no
+  // session-disagree and it can be deleted. Also the answer if the TypeScript
+  // bundle failed to load.
+  let _pageGameRunning = false;
   let _endGameInFlight = false;
   let _lastHandledGameEndMatchId = null;
   let _gameResyncEnabled = true;
@@ -120,9 +125,9 @@
   let _lateJoin = false;
 
   // Page lifecycle state machine from the TypeScript core (web/src/session.ts).
-  // Stage 1: it only observes. This page still decides from gameRunning, and
-  // _sessionSocketUp reports any disagreement between the two.
+  // Stage 2: the machine says whether a game is on for this page.
   const _session = window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta)) ?? null;
+  const isGameRunning = () => (_session ? _session.gameOn() : _pageGameRunning);
   let _sessionLateJoinPoll = null;
   const _sessionStopLateJoinPoll = () => {
     if (_sessionLateJoinPoll) clearInterval(_sessionLateJoinPoll);
@@ -670,7 +675,7 @@
     socket.on('connect', () => {
       // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
       // on the socket, so 'connect' is the event that fires here.
-      _session?.socketUp({ gameRunning });
+      _session?.socketUp({ gameRunning: _pageGameRunning });
       if (_initialConnectTimer) {
         clearTimeout(_initialConnectTimer);
         _initialConnectTimer = null;
@@ -697,7 +702,7 @@
       setTimeout(() => {
         if (!socket.connected) _showReconnecting();
       }, 2000);
-      if (gameRunning) {
+      if (isGameRunning()) {
         // In-game: swap spinner text to info message after 15s (game still works P2P)
         if (!_reconnectDowngradeTimer) {
           _reconnectDowngradeTimer = setTimeout(() => {
@@ -717,7 +722,7 @@
       console.log('[play] connect_error:', e.message);
       // During games: silent — Socket.IO keeps retrying
       // During lobby: banner handles visibility, just set 30s hard error
-      if (!gameRunning) {
+      if (!isGameRunning()) {
         setTimeout(() => {
           if (!socket.connected) _showReconnecting();
         }, 2000);
@@ -865,7 +870,7 @@
 
   const onConnect = async (isReconnect = false) => {
     // Mid-game reconnect: silently rejoin signaling channel, don't reset UI
-    if (gameRunning) {
+    if (isGameRunning()) {
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
       const payload = isHost
         ? {
@@ -1094,7 +1099,7 @@
               console.log(
                 `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
               );
-              gameRunning = true;
+              _pageGameRunning = true;
               // Set matchId for late joiners — game-started event doesn't fire
               // for them, so session logging would silently fail without this.
               // roomData (REST) doesn't include matchId — use joinData (Socket.IO ack).
@@ -1279,7 +1284,7 @@
       }
       // Restore the ROM drop / gamepad UI that showOverlay() hid for
       // spectators — claiming a slot needs your ROM (§7.2 M3 #3).
-      if (!gameRunning) showOverlay();
+      if (!isGameRunning()) showOverlay();
       if (localRomLoaded() && (isHost || !hostRomMismatch())) notifyRomReady();
     }
 
@@ -1292,7 +1297,7 @@
     if (!isSpectator && nowSpectator) {
       isSpectator = true;
       window._isSpectator = true;
-      if (!gameRunning) {
+      if (!isGameRunning()) {
         if (!unsupportedReleaseSucceeded) showToast("Watching — you'll see the game when it starts");
         showOverlay();
       }
@@ -1313,7 +1318,7 @@
     updatePlayerList(players, spectators, ownerSid);
 
     // Update overlay UI if in pre-game
-    if (!gameRunning) {
+    if (!isGameRunning()) {
       updateStartButton(players);
       updateGamepadSlot();
       // Show/hide host controls after ownership transfer
@@ -1362,7 +1367,6 @@
     // Keep match events from covering the fatal error modal.
     if (coreFatal) return;
     _sessionStopLateJoinPoll();
-    _session?.send({ type: 'gameStarted', matchId: String(data?.matchId ?? '') });
     crumb('game-started', {
       mode: data.mode,
       hasRom: !!(_romBlob || _romBlobUrl),
@@ -1379,7 +1383,7 @@
       `EJS=${!!window.EJS_emulator}`,
       `romBlob=${!!_romBlob}`,
       `romBlobUrl=${!!_romBlobUrl}`,
-      `gameRunning=${gameRunning}`,
+      `gameRunning=${isGameRunning()}`,
     );
     mode = data.mode || mode;
     _gameResyncEnabled = data.resyncEnabled !== false;
@@ -1391,7 +1395,8 @@
     KNState.matchId = data.matchId || null;
     _gfxRecoveryAttempt = 0;
 
-    gameRunning = true;
+    _session?.send({ type: 'gameStarted', matchId: String(data?.matchId ?? '') });
+    _pageGameRunning = true;
 
     // Spectators and streaming-mode guests don't run an emulator — they
     // receive a video stream from the host. Skip ROM checks and boot.
@@ -1454,7 +1459,7 @@
   const onGameEnded = (data = {}) => {
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (endedMatchId && _lastHandledGameEndMatchId === endedMatchId) return;
-    if (!gameRunning && !engine && !_lateJoin && !_pendingLateJoin) return;
+    if (!isGameRunning() && !engine && !_lateJoin && !_pendingLateJoin) return;
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
     _endGameInFlight = false;
     console.log(
@@ -1465,10 +1470,10 @@
       `romBlobUrl=${!!_romBlobUrl}`,
       `matchId=${endedMatchId || 'none'}`,
     );
-    gameRunning = false;
-    _lateJoin = false;
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
+    _pageGameRunning = false;
+    _lateJoin = false;
     _pendingLateJoin = false;
     showToast('The host has ended the game');
     if (engine) {
@@ -1503,7 +1508,9 @@
   };
 
   const onRoomClosed = (data) => {
-    gameRunning = false;
+    _sessionStopLateJoinPoll();
+    _session?.send({ type: 'roomClosed' });
+    _pageGameRunning = false;
     if (engine) {
       engine.stop();
       engine = null;
@@ -1716,7 +1723,7 @@
     updateRomSharingUI();
 
     // Pre-game: initiate early ROM transfer via standalone WebRTC connection
-    if (!gameRunning) {
+    if (!isGameRunning()) {
       console.log('[play] ROM sharing accepted pre-game — requesting early transfer');
       registerRomSignalHandler();
       requestResumeTransfer();
@@ -1724,7 +1731,7 @@
     }
 
     // Mid-game join: start engine in connect-only mode to get WebRTC
-    if (!engine && gameRunning) {
+    if (!engine && isGameRunning()) {
       initEngine();
       waitForDCAndSendRomAccepted();
       return;
@@ -2467,7 +2474,7 @@
 
     // If game is running and we were waiting for the ROM (connect-only mode),
     // hide overlay, show toolbar, and boot the emulator
-    if (gameRunning && !window.EJS_emulator && (isHost || mode !== 'rollback')) {
+    if (isGameRunning() && !window.EJS_emulator && (isHost || mode !== 'rollback')) {
       hideOverlay();
       showToolbar();
       bootEmulator();
@@ -3644,7 +3651,7 @@
     setTimeout(() => {
       if (coreFatal) return;
       const loadingEl = document.getElementById('game-loading');
-      if (loadingEl && !loadingEl.classList.contains('hidden') && gameRunning) {
+      if (loadingEl && !loadingEl.classList.contains('hidden') && isGameRunning()) {
         const text = document.getElementById('game-loading-text');
         // Inspect peer connection states to give a specific reason
         const peers = KNState.peers || {};
@@ -3763,7 +3770,7 @@
     setTimeout(() => {
       if (!_endGameInFlight) return;
       _endGameInFlight = false;
-      if (gameRunning || engine) {
+      if (isGameRunning() || engine) {
         showToast('Ending game locally...');
         onGameEnded({ matchId: endingMatchId, localTimeout: true });
       }
@@ -3867,7 +3874,7 @@
     // Ensure _lateJoin is set — dismissLateJoinPrompt only runs for mid-game
     // joins. The flag may have been consumed by a prior initEngine() call
     // (e.g., game-started handler for ROM sharing no-ROM path).
-    if (gameRunning) _lateJoin = true;
+    if (isGameRunning()) _lateJoin = true;
 
     // Now proceed with late join
     showToolbar();
@@ -3970,7 +3977,7 @@
         else delete nameEl.dataset.a21;
         // ROM ready indicator (pre-game only) — W4: "✓ ROM" / "needs ROM"
         if (romEl) {
-          if (!gameRunning) {
+          if (!isGameRunning()) {
             const ready = !!playerInSlot.romReady;
             romEl.textContent = ready ? '✓ ROM' : 'needs ROM';
             romEl.className = `rom-status ${ready ? 'ready' : 'not-ready'}`;
@@ -4022,7 +4029,7 @@
         }
         // Spectator slot-claim: "Join · needs your ROM" (§7.2 M3 #3).
         // Lobby-only — hidden once the game is running.
-        if (claimBtn) claimBtn.hidden = !(isSpectator && !gameRunning);
+        if (claimBtn) claimBtn.hidden = !(isSpectator && !isGameRunning());
       }
     }
 
