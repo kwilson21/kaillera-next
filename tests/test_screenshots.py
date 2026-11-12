@@ -159,7 +159,7 @@ def test_postmortem_reads_unverified_events_and_stores_the_verdict(tmp_path, mon
             )
             await db.execute_write(
                 "INSERT INTO desync_events (match_id, frame, field, slot, trigger, vision_verdict_json)"
-                " VALUES ('m1', 10, 'stocks', 0, 'rb-check', '{}')",
+                " VALUES ('m1', 301, 'stocks', 0, 'rb-check', '{}')",
                 (),
             )
             processed = await desync_vision.run_postmortem("m1")
@@ -173,7 +173,9 @@ def test_postmortem_reads_unverified_events_and_stores_the_verdict(tmp_path, mon
             await db.close_db()
 
     processed, stored = run_async(scenario())
-    # Only the event without a verdict is sent; the one at frame 10 already has one.
+    # Only the event without a verdict is sent. The one at frame 301 already has
+    # one; it sits within two frames of both screenshots, so only the
+    # "no verdict yet" filter keeps it from being sent too.
     assert processed == 1
     assert [(row["frame"], row["field"], row["vision_equal"], row["vision_confidence"]) for row in stored] == [
         (300, "stocks", 0, "high")
