@@ -695,7 +695,10 @@ async def insert_client_event(data: dict) -> int:
 
 
 async def execute_write(sql: str, params: tuple) -> int:
-    """Run a write query (DELETE, UPDATE) and commit. Returns rows changed."""
+    """Run a hand-written write and return rows changed.
+
+    For tests and one-off tooling that need to arrange data; application code
+    builds statements from src/schema.py and uses run()."""
     return (await _require().execute(sql, params)).changes
 
 
@@ -759,11 +762,6 @@ async def get_screenshot_data(screenshot_id: int) -> bytes | None:
     return await read_screenshot(rows[0]) if rows else None
 
 
-async def execute_batch(statements: list[tuple[str, tuple]]) -> None:
-    """Run write statements as one atomic batch (one D1 request)."""
-    await _require().batch(statements)
-
-
 async def delete_match_blobs(match_id: str) -> None:
     """Delete every blob stored under the match's prefix (screenshots now).
 
@@ -780,5 +778,8 @@ async def delete_blobs(keys: list[str]) -> None:
 
 
 async def query(sql: str, params: tuple) -> list[dict]:
-    """Run a read query and return results as a list of dicts."""
+    """Run a hand-written read and return rows as dicts.
+
+    For tests and one-off tooling; application code builds statements from
+    src/schema.py and uses fetch()."""
     return await _require().query(sql, params)
