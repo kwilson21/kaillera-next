@@ -164,4 +164,3 @@ def test_mid_game_reconnect_resumes_stalled_rom_transfer(browser, server_url, ro
         host.close()
         guest.close()
         os.unlink(rom)
-
