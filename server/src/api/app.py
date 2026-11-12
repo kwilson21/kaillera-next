@@ -139,6 +139,10 @@ _VALID_EVENT_TYPES = {
     "milestone_reached",
     "peer_left",
     "peer_reconnected",
+    # Reports from the page lifecycle machine (web/src/session.ts). Every
+    # SessionReport type must be listed: tests/test_session_reports.py.
+    "session-disagree",
+    "late-join-stranded",
 }
 _ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 
