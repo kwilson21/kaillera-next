@@ -54,6 +54,20 @@ def upload_event_client(monkeypatch):
     return client, insert, append
 
 
+@pytest.fixture
+def feedback_client(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from src import db
+    from src.api import app as appmod
+
+    insert = AsyncMock(return_value=23)
+    monkeypatch.setattr(db, "insert_feedback", insert)
+    monkeypatch.setattr(db, "find_recent_match", AsyncMock(return_value=None))
+    monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
+    return TestClient(appmod.create_app()), insert
+
+
 def _post_chunked_body(app, path, cap):
     """Post a chunked body and verify the endpoint stops after crossing its cap."""
     import httpx
@@ -283,6 +297,48 @@ def test_session_log_accepts_valid_request(upload_event_client):
     assert response.status_code == 200
     assert response.json() == {"status": "saved", "accepted": 0}
     append.assert_awaited_once()
+
+
+def test_feedback_rejects_oversized_content_length(feedback_client):
+    client, insert = feedback_client
+    response = client.post(
+        "/api/feedback",
+        content=b" " * (64 * 1024 + 1),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Payload too large"}
+    insert.assert_not_awaited()
+
+
+def test_feedback_stops_reading_chunked_body_at_cap(feedback_client):
+    client, insert = feedback_client
+    response = _post_chunked_body(client.app, "/api/feedback", 64 * 1024)
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Payload too large"}
+    insert.assert_not_awaited()
+
+
+def test_feedback_accepts_maximum_form_payload(feedback_client):
+    client, insert = feedback_client
+    body = {
+        "category": "bug",
+        "message": "m" * 2000,
+        "email": "e" * 249 + "@x.io",
+        "company_fax": "",
+        "page": "g" * 20,
+        "context": {"metadata": "c" * 4080},
+    }
+    assert len(json.dumps(body["context"])) == 4096
+    assert len(json.dumps(body)) < 64 * 1024
+
+    response = client.post("/api/feedback", json=body)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "saved", "id": 23}
+    insert.assert_awaited_once()
 
 
 def test_health(server_url):

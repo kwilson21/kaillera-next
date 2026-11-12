@@ -85,6 +85,7 @@ _PUBLIC_ROOM_ID_RE = re.compile(r"^[A-Za-z0-9]{3,16}$")
 _PUBLIC_GAME_ID_RE = re.compile(r"^[A-Za-z0-9\-]{1,32}$")
 
 _CLIENT_EVENT_MAX_SIZE = 4 * 1024  # 4KB max per event
+_FEEDBACK_MAX_SIZE = 64 * 1024  # 64KB max for feedback submissions
 _WAKE_EVENT_MAX_ELAPSED_MS = 60 * 60 * 1000  # one hour
 
 
@@ -1283,8 +1284,9 @@ def create_app(lifespan=None) -> FastAPI:
     async def submit_feedback(request: Request) -> dict:
         if not check_ip(_client_ip(request), "feedback"):
             raise HTTPException(status_code=429, detail="Rate limited")
+        body_bytes = await _read_limited_body(request, _FEEDBACK_MAX_SIZE, "Payload too large")
         try:
-            body = await request.json()
+            body = json.loads(body_bytes)
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON") from exc
         try:
