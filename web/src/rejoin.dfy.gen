@@ -21,5 +21,6 @@ lemma reconcileRejoin_ensures(inGame: bool, pageMatchId: string, roomPlaying: bo
   ensures (inGame ==> !(roomPlaying) ==> (reconcileRejoin(inGame, pageMatchId, roomPlaying, roomMatchId) == "gameEnded"))
   ensures ((reconcileRejoin(inGame, pageMatchId, roomPlaying, roomMatchId) == "matchReplaced") ==> ((inGame && roomPlaying) && (pageMatchId != roomMatchId)))
   ensures (inGame ==> roomPlaying ==> (pageMatchId == roomMatchId) ==> (reconcileRejoin(inGame, pageMatchId, roomPlaying, roomMatchId) == "keep"))
+  ensures (inGame ==> roomPlaying ==> (|pageMatchId| > 0) ==> (|roomMatchId| > 0) ==> (pageMatchId != roomMatchId) ==> (reconcileRejoin(inGame, pageMatchId, roomPlaying, roomMatchId) == "matchReplaced"))
 {
 }

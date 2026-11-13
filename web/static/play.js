@@ -989,8 +989,12 @@
         }
         applyHostRomFromData(roomData);
 
-        // Room full: auto-join as spectator with banner
-        if (!isSpectator && roomData.player_count >= roomData.max_players) {
+        // Room full: auto-join as spectator with banner. A page that already
+        // holds a player slot is counted in player_count itself: rejoining a
+        // full room (socket reconnect, or catching up with a replaced match)
+        // must not turn it into a spectator while the server keeps its slot.
+        const holdsPlayerSlot = mySlot !== null && mySlot !== undefined;
+        if (!isSpectator && !holdsPlayerSlot && roomData.player_count >= roomData.max_players) {
           console.log(
             `[play] auto-spectate: player_count=${roomData.player_count} >= max_players=${roomData.max_players}`,
           );

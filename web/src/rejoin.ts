@@ -29,6 +29,7 @@ export type RejoinVerdict = 'keep' | 'gameEnded' | 'matchReplaced';
 //@ ensures inGame && !roomPlaying ==> \result === "gameEnded"
 //@ ensures \result === "matchReplaced" ==> inGame && roomPlaying && pageMatchId !== roomMatchId
 //@ ensures inGame && roomPlaying && pageMatchId === roomMatchId ==> \result === "keep"
+//@ ensures inGame && roomPlaying && pageMatchId.length > 0 && roomMatchId.length > 0 && pageMatchId !== roomMatchId ==> \result === "matchReplaced"
 export function reconcileRejoin(
   inGame: boolean,
   pageMatchId: string,
