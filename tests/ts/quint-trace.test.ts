@@ -60,6 +60,47 @@ test('values are written the way the spec writes them', () => {
   assert.equal(show(''), '""');
 });
 
+test('a record with a field called tag is a record, not a variant', () => {
+  assert.equal(show({ tag: 'ready', count: { '#bigint': '2' } }), '{tag: ready, count: 2}');
+  const job = (count: string) => ({ job: { tag: 'ready', count: { '#bigint': count } } });
+  const diagram = sequenceDiagram({ vars: ['job'], states: [job('1'), job('2')] }, ['step 1'], { hub: 'Server' });
+  assert.match(diagram, /Note over Server: job = \{tag: ready, count: 2\}/);
+});
+
+test('a set or map listed in another order is the same value', () => {
+  assert.equal(show({ '#set': ['b', 'a'] }), show({ '#set': ['a', 'b'] }));
+  const one = { '#bigint': '1' };
+  const two = { '#bigint': '2' };
+  const diagram = sequenceDiagram(
+    {
+      vars: ['online', 'names'],
+      states: [
+        {
+          online: { '#set': ['a', 'b'] },
+          names: {
+            '#map': [
+              [one, 'x'],
+              [two, 'y'],
+            ],
+          },
+        },
+        {
+          online: { '#set': ['b', 'a'] },
+          names: {
+            '#map': [
+              [two, 'y'],
+              [one, 'x'],
+            ],
+          },
+        },
+      ],
+    },
+    ['step 1'],
+    { hub: 'Server' },
+  );
+  assert.doesNotMatch(diagram, /Note over/);
+});
+
 test('the constants of a module instance are read from its import', () => {
   assert.deepEqual(
     [...instanceConstants(SPEC, 'room_fixed')],
@@ -112,6 +153,24 @@ module room_before { import room(FIXED = false).* }
 `;
   assert.deepEqual(runScenarios(spec, 'room_fixed')[0]?.steps, ['openRoom("host")', 'admit("guest")', 'beginSync']);
   assert.deepEqual(runScenarios(spec, 'room_before')[0]?.steps, ['openRoom("host")', 'endGame', 'leave("guest")']);
+});
+
+test('a run may begin on the line that declares it', () => {
+  const spec = `
+module room {
+  run smokeTest = init.then(openRoom("host"))
+  run longerTest = init
+      .then(openRoom("host"))
+      .then(startGame)
+}
+`;
+  assert.deepEqual(
+    runScenarios(spec, 'room').map((scenario) => [scenario.name, scenario.steps]),
+    [
+      ['smokeTest', ['openRoom("host")']],
+      ['longerTest', ['openRoom("host")', 'startGame']],
+    ],
+  );
 });
 
 test('a branch that cannot be decided is an error, not a guess', () => {
@@ -216,6 +275,39 @@ test('a line break in a value does not end the note', () => {
     { hub: 'Server' },
   );
   assert.match(diagram, /Note over Server: status = two lines\n$/);
+});
+
+test("an action that is the hub's own stays on the hub though it names a player", () => {
+  const states = [
+    { 'm::room::page': page(['guest', 'Syncing']), 'm::room::status': 'playing' },
+    { 'm::room::page': page(['guest', 'Running']), 'm::room::status': 'playing' },
+  ];
+  const mine = sequenceDiagram(trace(...states), ['serveLateJoin("guest")'], { hub: 'Server' });
+  assert.match(mine, /guest->>Server: serveLateJoin\("guest"\)\n {2}Note over guest: Running/);
+  const hubs = sequenceDiagram(trace(...states), ['serveLateJoin("guest")'], {
+    hub: 'Server',
+    hubActions: ['serveLateJoin'],
+  });
+  assert.match(hubs, /Server->>Server: serveLateJoin\("guest"\)\n {2}Server-->>guest: Running/);
+});
+
+test('a player called the same as the hub is a lifeline of its own', () => {
+  const diagram = sequenceDiagram(
+    trace(
+      { 'm::room::page': page(['Server', 'Closed']), 'm::room::status': 'lobby' },
+      { 'm::room::page': page(['Server', 'Lobby']), 'm::room::status': 'playing' },
+    ),
+    ['join("Server")'],
+    { hub: 'Server' },
+  );
+  assert.deepEqual(diagram.trimEnd().split('\n'), [
+    'sequenceDiagram',
+    '  participant Server',
+    '  participant lifeline1 as Server',
+    '  lifeline1->>Server: join("Server")',
+    '  Note over Server: status = playing',
+    '  Note over lifeline1: Lobby',
+  ]);
 });
 
 test('the labels must match the trace, step for step', () => {

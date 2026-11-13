@@ -13,7 +13,10 @@
  *   npx quint run specs/room_lifecycle.qnt --main=room_before_start_fix \
  *     --invariant=startIsNotHeldUpByALateJoiner --backend=typescript \
  *     --mbt --out-itf=trace.itf.json
- *   node scripts/trace-diagram.mjs --itf trace.itf.json [--hub Server]
+ *   node scripts/trace-diagram.mjs --itf trace.itf.json [--hub Server] [--hub-actions graceExpire,serveLateJoin]
+ *
+ * `--hub-actions` names the actions that are the hub's own although they
+ * take a player; any other step is drawn as coming from the player it names.
  *
  * `--mbt` makes Quint record the action of each step; without it the steps
  * are numbered. The diagram goes to standard output.
@@ -35,6 +38,8 @@ const SPECS = [
     file: 'specs/room_lifecycle.qnt',
     main: 'room_current',
     hub: 'Server',
+    // What the server, or the host answering a joiner, does to a player.
+    hubActions: ['graceExpire', 'serveLateJoin', 'admitToStart'],
     about:
       "The server's view of a room against what each player's page is doing. " +
       'The note on a page is the state it moves to; a dashed arrow is what an action did to another page.',
@@ -49,7 +54,12 @@ const argument = (name) => {
 const itf = argument('--itf');
 if (itf !== undefined) {
   const trace = JSON.parse(fs.readFileSync(itf, 'utf8'));
-  process.stdout.write(sequenceDiagram(trace, mbtLabels(trace), { hub: argument('--hub') ?? 'Model' }));
+  process.stdout.write(
+    sequenceDiagram(trace, mbtLabels(trace), {
+      hub: argument('--hub') ?? 'Model',
+      hubActions: (argument('--hub-actions') ?? '').split(',').filter(Boolean),
+    }),
+  );
   process.exit(0);
 }
 
@@ -91,12 +101,22 @@ for (const spec of SPECS) {
   const source = fs.readFileSync(path.join(ROOT, spec.file), 'utf8');
   const traces = tracesOf(spec);
   lines.push(`## \`${spec.file}\` (\`${spec.main}\`)`, '', spec.about, '');
-  for (const scenario of runScenarios(source, spec.main)) {
+  const scenarios = runScenarios(source, spec.main);
+  // Every run Quint replayed must be drawn: a run this script failed to read
+  // from the spec would otherwise go missing without a word.
+  const unread = [...traces.keys()].filter((name) => !scenarios.some((scenario) => scenario.name === name));
+  if (unread.length > 0) throw new Error(`${spec.file}: no steps read for ${unread.join(', ')}`);
+  for (const scenario of scenarios) {
     const trace = traces.get(scenario.name);
     if (trace === undefined) throw new Error(`quint wrote no trace for ${scenario.name}`);
     lines.push(`### ${scenario.name}`, '');
     if (scenario.comment) lines.push(scenario.comment, '');
-    lines.push('```mermaid', sequenceDiagram(trace, scenario.steps, { hub: spec.hub }).trimEnd(), '```', '');
+    lines.push(
+      '```mermaid',
+      sequenceDiagram(trace, scenario.steps, { hub: spec.hub, hubActions: spec.hubActions }).trimEnd(),
+      '```',
+      '',
+    );
   }
 }
 const text = lines.join('\n');

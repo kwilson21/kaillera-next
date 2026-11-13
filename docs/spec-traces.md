@@ -89,8 +89,8 @@ sequenceDiagram
   Note over guest1: Starting(1)
   guest1->>Server: startLateJoinEngine("guest1")
   Note over guest1: Syncing(1)
-  guest1->>Server: serveLateJoin("guest1")
-  Note over guest1: Running(1)
+  Server->>Server: serveLateJoin("guest1")
+  Server-->>guest1: Running(1)
   Server->>Server: endGame
   Note over Server: matchId = 0<br/>status = lobby
   Server-->>host: Lobby
@@ -123,8 +123,8 @@ sequenceDiagram
   Note over guest1: Starting(1)
   guest1->>Server: startLateJoinEngine("guest1")
   Note over guest1: Syncing(1)
-  guest1->>Server: serveLateJoin("guest1")
-  Note over guest1: Running(1)
+  Server->>Server: serveLateJoin("guest1")
+  Server-->>guest1: Running(1)
 ```
 
 ### gameEndsWhileAwaitingRomTest
@@ -176,8 +176,8 @@ sequenceDiagram
   Note over guest2: Starting(1)
   guest2->>Server: startLateJoinEngine("guest2")
   Note over guest2: Syncing(1)
-  guest2->>Server: admitToStart("guest2")
-  Note over guest2: Loading(1)
+  Server->>Server: admitToStart("guest2")
+  Server-->>guest2: Loading(1)
   Server->>Server: beginSync
   Server-->>host: StartSync(1)
   Server-->>guest1: StartSync(1)
@@ -219,6 +219,6 @@ sequenceDiagram
   Server->>Server: startRunning
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
-  guest2->>Server: serveLateJoin("guest2")
-  Note over guest2: Running(1)
+  Server->>Server: serveLateJoin("guest2")
+  Server-->>guest2: Running(1)
 ```
