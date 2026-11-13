@@ -7,6 +7,7 @@
  * the pads, listens for keys, debounces, and shows the prompts. Every state
  * is a new value, so going back is just returning to an earlier one.
  */
+import { stepAfter, stepVerdict } from './remap-step.ts';
 
 /** One input the wizard asks for. `bit` is the N64 input bit it will drive. */
 export type WizardStep =
@@ -129,56 +130,79 @@ export type WizardOutcome =
   | { readonly state: WizardState; readonly result: 'advanced' | 'done' | 'ignored' }
   | { readonly state: WizardState; readonly result: 'wrong-stick'; readonly pairName: 'UP' | 'LEFT' };
 
-const ignored = (state: WizardState): WizardOutcome => ({ state, result: 'ignored' });
-
 /** Move on from `state` with these changes, remembering `state` for Back. */
-const advance = (state: WizardState, changes: Partial<WizardState>): WizardOutcome => {
-  const next = { ...state, ...changes, step: state.step + 1, history: [...state.history, state] };
-  return { state: next, result: next.step >= WIZARD_STEPS.length ? 'done' : 'advanced' };
-};
+const taken = (state: WizardState, verdict: 'advance' | 'done', changes: Partial<WizardState>): WizardOutcome => ({
+  state: { ...state, ...changes, step: stepAfter(state.step, verdict), history: [...state.history, state] },
+  result: verdict === 'done' ? 'done' : 'advanced',
+});
 
-const captureAxis = (state: WizardState, step: WizardStep, index: number, positive: boolean): WizardOutcome => {
+/** The mapping after a taken input. The verdict has already ruled out every input that does not fit the step. */
+const changesFor = (state: WizardState, step: WizardStep, input: TakenInput): Partial<WizardState> => {
+  if (input.kind === 'skip') return {};
+  // A key drives one input: binding it here takes it from wherever it was.
+  if (input.kind === 'key') return { keyMap: { ...state.keyMap, [input.keyCode]: step.bit } };
   const profile = state.profile;
-  if (profile === null) return ignored(state);
+  if (profile === null) return {};
+  if (input.kind === 'button') {
+    return { profile: { ...profile, buttons: { ...profile.buttons, [input.index]: 1 << step.bit } } };
+  }
   if (step.type === 'axis') {
+    const direction = input.positive ? { posBit: step.bit } : { negBit: step.bit };
     const captured = state.axisCaptures[step.axisGroup];
-    if (captured !== undefined && captured.index !== index) {
-      return { state, result: 'wrong-stick', pairName: step.axisGroup === 'stickY' ? 'UP' : 'LEFT' };
-    }
-    const direction = positive ? { posBit: step.bit } : { negBit: step.bit };
-    return advance(state, {
-      axisCaptures: { ...state.axisCaptures, [step.axisGroup]: { ...captured, index, ...direction } },
-    });
+    return {
+      axisCaptures: { ...state.axisCaptures, [step.axisGroup]: { ...captured, index: input.index, ...direction } },
+    };
   }
-  if (step.type === 'cbutton') {
-    const masks = profile.axisButtons?.[index] ?? { pos: 0, neg: 0 };
-    const bit = 1 << step.bit;
-    const pressed = positive ? { ...masks, pos: masks.pos | bit } : { ...masks, neg: masks.neg | bit };
-    return advance(state, { profile: { ...profile, axisButtons: { ...profile.axisButtons, [index]: pressed } } });
-  }
-  return ignored(state);
+  const masks = profile.axisButtons?.[input.index] ?? { pos: 0, neg: 0 };
+  const bit = 1 << step.bit;
+  const pressed = input.positive ? { ...masks, pos: masks.pos | bit } : { ...masks, neg: masks.neg | bit };
+  return { profile: { ...profile, axisButtons: { ...profile.axisButtons, [input.index]: pressed } } };
 };
 
-/** Apply one input to the wizard. */
+type TakenInput = Exclude<WizardInput, { readonly kind: 'back' }>;
+
+/** Apply one input to the wizard. Whether it is taken is decided by `stepVerdict` (remap-step.ts). */
 export const wizardInput = (state: WizardState, input: WizardInput): WizardOutcome => {
   if (input.kind === 'back') {
     const previous = state.history.at(-1);
-    return previous === undefined || state.step === 0 ? ignored(state) : { state: previous, result: 'advanced' };
+    return previous === undefined || state.step === 0
+      ? { state, result: 'ignored' }
+      : { state: previous, result: 'advanced' };
   }
   const step = WIZARD_STEPS[state.step];
-  if (step === undefined) return ignored(state);
-  if (input.kind === 'skip') return advance(state, {});
-  if (input.kind === 'key') {
-    // A key drives one input: binding it here takes it from wherever it was.
-    return advance(state, { keyMap: { ...state.keyMap, [input.keyCode]: step.bit } });
+  if (step === undefined) return { state, result: 'ignored' };
+  const pairedAxis = step.type === 'axis' ? (state.axisCaptures[step.axisGroup]?.index ?? -1) : -1;
+  const verdict = stepVerdict(
+    step.type,
+    input.kind,
+    state.profile !== null,
+    pairedAxis,
+    input.kind === 'axis' ? input.index : -1,
+    state.step,
+    WIZARD_STEPS.length,
+  );
+  if (verdict === 'ignore') return { state, result: 'ignored' };
+  if (verdict === 'wrongStick') {
+    return {
+      state,
+      result: 'wrong-stick',
+      pairName: step.type === 'axis' && step.axisGroup === 'stickX' ? 'LEFT' : 'UP',
+    };
   }
-  if (input.kind === 'button') {
-    if (state.profile === null || step.type === 'axis') return ignored(state);
-    const buttons = { ...state.profile.buttons, [input.index]: 1 << step.bit };
-    return advance(state, { profile: { ...state.profile, buttons } });
-  }
-  return captureAxis(state, step, input.index, input.positive);
+  return taken(state, verdict, changesFor(state, step, input));
 };
+
+/**
+ * What play.js's own wizard holds, laid out the same way, so the two can be
+ * compared after every input while play.js is still in charge.
+ */
+export const comparable = (state: WizardState) => ({
+  step: state.step,
+  keyMap: state.keyMap,
+  buttons: state.profile?.buttons ?? null,
+  axisButtons: state.profile?.axisButtons ?? null,
+  axisCaptures: state.axisCaptures,
+});
 
 /**
  * The profile to save: the edited one, with each stick whose two directions

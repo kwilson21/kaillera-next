@@ -35,11 +35,14 @@ def _report_types() -> list[str]:
     boundary = SOCKET_BOUNDARY_TS.read_text()
     report = boundary[boundary.index("export type ProtocolReport") :]
     report = report[: report.index("};")]
-    return re.findall(r"readonly type: '([^']+)'", union + report)
+    observe = (SESSION_TS.parent / "play" / "observe.ts").read_text()
+    disagree = observe[observe.index("export type DisagreeReport") :]
+    disagree = disagree[: disagree.index("};")]
+    return re.findall(r"readonly type: '([^']+)'", union + report + disagree)
 
 
 def test_the_union_is_found():
-    assert set(_report_types()) >= {"session-disagree", "late-join-stranded", "protocol-mismatch"}
+    assert set(_report_types()) >= {"session-disagree", "late-join-stranded", "protocol-mismatch", "play-disagree"}
 
 
 @pytest.mark.parametrize("report_type", _report_types())
