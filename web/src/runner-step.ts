@@ -12,6 +12,8 @@
  *   - `cycleBefore` / `cycleAfter`: the core's CP0 Count in ms
  *     (`kn_get_cycle_time_ms`) sampled around the call. A real step moves
  *     it; a step that ran nothing leaves it where it was.
+ *
+ * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */
 
 /**
@@ -21,6 +23,9 @@
  */
 export type RunnerStep = 'unknown' | 'stale' | 'emulated';
 
+//@ ensures (cycleBefore === null || cycleBefore === undefined || cycleAfter === null || cycleAfter === undefined) ==> \result === "unknown"
+//@ ensures \result === "stale" ==> !rescheduled && cycleBefore === cycleAfter
+//@ ensures rescheduled ==> \result !== "stale"
 export function classifyRunnerStep(
   rescheduled: boolean,
   cycleBefore: number | null | undefined,
