@@ -237,3 +237,21 @@ test('a room closed by the server puts the page back in the lobby', async () => 
   assert.deepEqual(reported, []);
   await session.stop();
 });
+
+test('a rejoin the server refuses ends the game for this page, from any state (returnAfterGraceTest)', async () => {
+  for (const before of [[], [engineUp], [engineUp, { type: 'lateJoinSynced' } as const]]) {
+    const { session, reported } = open(30);
+    session.send(joinMidGame);
+    for (const event of before) session.send(event);
+    assert.notEqual(session.state(), 'lobby');
+    session.send({ type: 'rejoinRefused' });
+    assert.equal(session.state(), 'lobby');
+    assert.equal(session.gameOn(), false);
+    // A fresh join afterwards is a late join of the match in play.
+    session.send(joinMidGame);
+    assert.equal(session.state(), 'lateJoinStarting');
+    await pause(60);
+    assert.deepEqual(reported, []);
+    await session.stop();
+  }
+});

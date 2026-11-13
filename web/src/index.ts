@@ -26,6 +26,7 @@ import {
   staleHoldersOf,
 } from './peer-signaling.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
+import { startRejoin } from './rejoin-attempt.ts';
 import { meshHealTargets } from './roster.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
@@ -152,6 +153,7 @@ export const KNCore = {
   signalDisposition,
   staleHoldersOf,
   startLateJoinWait,
+  startRejoin,
   shouldResumeRomTransfer,
   protocol: {
     decodeUsersUpdated,

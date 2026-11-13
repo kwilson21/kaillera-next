@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.7",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a rejoin after the grace window takes a playing player back, and a refusal is acted on (#144)"
+      }
+    ]
+  },
+  {
     "version": "0.67.6",
     "date": "2026-11-13",
     "changes": [

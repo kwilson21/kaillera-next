@@ -707,6 +707,9 @@
     });
     socket.on('disconnect', (reason) => {
       _session?.send({ type: 'socketDown' });
+      // A rejoin in flight belongs to the socket that just went; the next
+      // connect starts its own.
+      _cancelRejoin();
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       if (reason === 'io client disconnect') return;
       // Show spinner banner after brief delay (lobby and in-game)
@@ -893,6 +896,27 @@
     if (verdict === 'matchReplaced') onConnect(false);
   };
 
+  // The room no longer counts this page as a member (its socket was down for
+  // longer than the grace window, or the room is gone), so the game it is
+  // showing is over for it. End it and join again as a fresh page would:
+  // that lands in the lobby or on the late-join path of the match in play,
+  // or shows the player why it cannot get back in.
+  let _rejoin = null;
+  const _cancelRejoin = () => {
+    _rejoin?.cancel();
+    _rejoin = null;
+  };
+  const _leaveDroppedGame = (reason) => {
+    console.log('[play] mid-game rejoin refused:', reason);
+    KNEvent('rejoin-refused', '', { reason });
+    onGameEnded({ matchId: KNState.matchId, reason: 'dropped' });
+    // The match itself may still be on, and this page may be about to join
+    // it again: its real game-ended must not be taken for a repeat.
+    _lastHandledGameEndMatchId = null;
+    _session?.send({ type: 'rejoinRefused' });
+    onConnect(false);
+  };
+
   const onConnect = async (isReconnect = false) => {
     // Mid-game reconnect: silently rejoin signaling channel, don't reset UI
     if (isGameRunning()) {
@@ -919,15 +943,48 @@
               reconnectToken: _reconnectToken,
             },
           };
-      socket.emit(rejoinEvent, payload, (err, room) => {
-        if (err) console.log('[play] mid-game rejoin failed:', err);
-        else console.log('[play] mid-game rejoin succeeded');
+      // `resume` tells the server this page still has a game running, in
+      // which slot and which match. If the room dropped it while its socket
+      // was down, the server takes it back into that match and slot, or
+      // refuses; it never lets it in as a new player or opens a new room.
+      payload.extra.resume = true;
+      payload.extra.slot = isSpectator || mySlot === null || mySlot === undefined ? null : mySlot;
+      payload.extra.matchId = KNState.matchId || '';
+      _cancelRejoin();
+      const rejoin = window.KNCore.startRejoin({
+        send: (answer) => socket.emit(rejoinEvent, payload, answer),
+        answerWithinMs: 5000,
+        retryAfterMs: 2000,
+        attempts: 4,
+      });
+      _rejoin = rejoin;
+      rejoin.outcome.then((outcome) => {
+        // An answer for a rejoin that is no longer the current one (its game
+        // ended, or a newer connect replaced it) changes nothing.
+        if (_rejoin !== rejoin) return;
+        _rejoin = null;
+        if (outcome.kind === 'noAnswer') {
+          // Reported, not acted on: the socket says it is connected, and if
+          // it drops, the next connect starts a new rejoin.
+          console.log('[play] mid-game rejoin: no answer from the server');
+          KNEvent('rejoin-no-answer', '', {});
+          return;
+        }
+        if (outcome.kind === 'dropped') {
+          _leaveDroppedGame(outcome.reason);
+          return;
+        }
+        console.log('[play] mid-game rejoin succeeded');
         sendDeviceType();
-        if (!err && isReconnect) resumeRomTransferAfterReconnect();
+        // A player taken back after its grace window ran out is on a new
+        // socket the server has no ROM report for: without this the next
+        // start would wait for a ROM everybody already has.
+        if (localRomLoaded()) notifyRomReady();
+        if (isReconnect) resumeRomTransferAfterReconnect();
         // join-room's reconnect path says what the room is doing now. (The
         // host's open-room does not: only the host starts and ends games, so
         // its page cannot fall behind while it is still the owner.)
-        if (!err && room?.status) _reconcileAfterRejoin(room);
+        if (outcome.room?.status) _reconcileAfterRejoin(outcome.room);
       });
       return;
     }
@@ -949,6 +1006,17 @@
           maxPlayers: 4,
         },
         (err) => {
+          if (err === 'Not the owner') {
+            // This page's URL says host, but the room is in play and belongs
+            // to someone else now (this player was dropped mid-match, the
+            // room was handed on, and it was taken back as a player). Come
+            // in the way any other player does.
+            console.log('[play] open-room: not the owner of a room in play, joining instead');
+            isHost = false;
+            KNState.isLocalHost = false;
+            onConnect(false);
+            return;
+          }
           if (err) {
             showError(`Failed to create room: ${err}`);
             return;
@@ -1521,12 +1589,15 @@
       `romBlobUrl=${!!_romBlobUrl}`,
       `matchId=${endedMatchId || 'none'}`,
     );
+    _cancelRejoin();
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
     _pageGameRunning = false;
     _lateJoin = false;
     _pendingLateJoin = false;
-    showToast('The host has ended the game');
+    showToast(
+      data?.reason === 'dropped' ? 'You were disconnected for too long. Rejoining...' : 'The host has ended the game',
+    );
     if (engine) {
       engine.stop();
       engine = null;
@@ -1559,6 +1630,7 @@
   };
 
   const onRoomClosed = (data) => {
+    _cancelRejoin();
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'roomClosed' });
     _pageGameRunning = false;
