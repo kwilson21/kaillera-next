@@ -1,8 +1,16 @@
 """Pydantic v2 payload models for Socket.IO event validation.
 
-Each model corresponds to one Socket.IO event handler in signaling.py.
-The `validated` decorator wraps handlers to parse incoming dicts through
-the model before the handler runs.
+Each client-to-server model corresponds to one Socket.IO event handler in
+signaling.py. The `validated` decorator wraps handlers to parse incoming
+dicts through the model before the handler runs.
+
+The server-to-client models at the bottom describe the dicts signaling.py
+sends; tests/test_protocol_payloads.py holds the real payloads to them.
+
+Every model here is also the source of the client's Effect Schemas:
+scripts/gen_protocol.py writes web/src/protocol.gen.ts from this module
+(`npm run protocol`), and CI fails when that file is stale. After changing a
+model, regenerate and commit it.
 """
 
 from __future__ import annotations
@@ -10,7 +18,7 @@ from __future__ import annotations
 from functools import wraps
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 # ── Mode coercion (back-compat) ──────────────────────────────────────────────
 # Pre-rename clients send mode="lockstep". The product-facing engine is now
@@ -206,3 +214,107 @@ class FeedbackPayload(BaseModel):
     company_fax: str | None = None  # honeypot — non-empty = bot
     page: str | None = Field(default=None, max_length=20)
     context: dict | None = None
+
+
+# ── server → client ──────────────────────────────────────────────────────────
+# What signaling.py sends, as it sends it today, duplicate snake_case keys
+# included (older cached pages read them). The dicts are still built by hand
+# in signaling.py; these models are their contract. `extra="forbid"` and
+# `strict` make the server test fail on a key the model does not name or a
+# value of another type, so a new field has to be added here (and so to the
+# generated client schema) before it ships.
+
+RoomStatus = Literal["lobby", "playing"]
+
+
+class _ServerMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class RoomPlayer(_ServerMessage):
+    socketId: str
+    playerName: str
+    # None while the player holds no slot.
+    slot: int | None
+    romReady: bool
+    inputType: str
+    deviceType: str
+
+
+class RoomSpectator(_ServerMessage):
+    socketId: str
+    playerName: str
+
+
+class HostRom(_ServerMessage):
+    hash: str | None
+    name: str | None
+    size: int | None
+    gameId: str
+    game_id: str
+
+
+class UsersUpdated(_ServerMessage):
+    """`users-updated`: the room as every member should see it."""
+
+    # Keyed by persistent player id.
+    players: dict[str, RoomPlayer]
+    spectators: dict[str, RoomSpectator]
+    # Socket id of the host.
+    owner: str
+    romSharing: bool
+    romHash: str | None
+    romName: str | None
+    rom_name: str | None
+    romSize: int | None
+    rom_size: int | None
+    hostRom: HostRom
+    gameId: str
+    game_id: str
+    # None until the host picks a mode or starts a game.
+    mode: str | None
+    status: RoomStatus
+    listed: bool
+
+
+class JoinRoomAck(UsersUpdated):
+    """The second value of the `join-room` ack (the first is an error or null)."""
+
+    rom_hash: str | None
+    rom_sharing: bool
+    # Sent only while a match is running: the key is absent otherwise, never null.
+    matchId: str | None = None
+
+
+class GameStarted(_ServerMessage):
+    """`game-started`."""
+
+    mode: Literal["rollback", "streaming"]
+    resyncEnabled: bool
+    romHash: str | None
+    romName: str | None
+    rom_name: str | None
+    romSize: int | None
+    rom_size: int | None
+    hostRom: HostRom
+    gameId: str
+    matchId: str
+
+
+class GameEnded(_ServerMessage):
+    """`game-ended`."""
+
+    # None when the room had no match to end.
+    matchId: str | None
+
+
+class RomSharingUpdated(_ServerMessage):
+    """`rom-sharing-updated`."""
+
+    romSharing: bool
+
+
+class TokenMessage(_ServerMessage):
+    """`upload-token` and `reconnect-token`."""
+
+    token: str

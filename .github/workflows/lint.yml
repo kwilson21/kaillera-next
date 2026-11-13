@@ -114,6 +114,10 @@ jobs:
         run: |
           python -m pip install uv
           uv sync --directory server --frozen --extra dev
+      # Here, not in the js job: the generator imports the Pydantic models, so
+      # it needs the server's Python environment (and no node_modules).
+      - name: Generated client schemas match server/src/api/payloads.py
+        run: npm run protocol:check
       - name: Server unit tests
         run: |
           uv run --directory server --frozen --extra dev pytest --noconftest -p no:playwright -q \
@@ -122,6 +126,7 @@ jobs:
             ../tests/test_schema.py \
             ../tests/test_query_builder.py \
             ../tests/test_room_logic.py \
+            ../tests/test_protocol_payloads.py \
             ../tests/test_db.py \
             ../tests/test_db_backends.py \
             ../tests/test_d1_backend.py \
