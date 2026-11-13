@@ -313,8 +313,12 @@ const scenarios = {
     const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
     await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
     await loadRom(host);
-    await host.page.waitForSelector('#opt-rom-sharing:not([disabled])', { timeout: 60000 });
-    await host.page.check('#opt-rom-sharing');
+    // The checkbox sits in a host-options row that may be collapsed, so it
+    // is clicked through the DOM rather than waited on as a visible element.
+    await host.page.waitForSelector('#opt-rom-sharing:not([disabled])', { state: 'attached', timeout: 60000 });
+    await host.page.evaluate(() => document.getElementById('opt-rom-sharing').click());
+    if (!(await host.page.evaluate(() => document.getElementById('opt-rom-sharing').checked)))
+      failures.push('the host could not turn ROM sharing on');
     await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
     await host.page.click('#start-btn');
     if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
