@@ -85,3 +85,6 @@ test-results/
 # Wrangler local dev state
 .wrangler/
 dist-landing/
+
+# Apalache working files from `quint verify`
+_apalache-out/
