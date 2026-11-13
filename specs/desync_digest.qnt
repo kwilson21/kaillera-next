@@ -146,6 +146,18 @@ module desync_digest {
       .then(4.reps(_ => advance(false)))
       .expect(reportedWrong == not(REPORT_CONFIRMED and REPLAY_REWRITES))
 
+  // A misprediction corrected the way the configuration corrects it: by the
+  // worker's state under Mode 2, by a local replay otherwise. Under Mode 2
+  // the wrong frame's history entry is still the mispredicted hash when the
+  // window has passed and it is reported.
+  run correctedByWorkerTest =
+    init
+      .then(advance(false))
+      .then(advance(true))
+      .then(if (WITH_WORKER_REPLAY) adopt else rollback)
+      .then(4.reps(_ => advance(false)))
+      .expect(reportedWrong == (WITH_WORKER_REPLAY or not(REPORT_CONFIRMED and REPLAY_REWRITES)))
+
   // A late joiner takes the host's state at frame 5 and plays on: its first
   // digests would be for frames 2..5, which it never simulated.
   run lateJoinTest =
