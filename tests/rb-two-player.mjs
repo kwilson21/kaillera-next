@@ -166,7 +166,8 @@
  *     say so: the run passes only if both peers' sync logs have a
  *     `KNDesync suspect ... field=stocks slot=0 trigger=flag` line after the
  *     change, and none before it; and the gameplay hash (kn_gameplay_hash,
- *     which lists the stock counts) differs on at least one frame. The
+ *     which lists the stock counts) differs on at least one frame from the
+ *     change on, and on none before it. The
  *     game-state and full-state hashes are reported but not judged: the
  *     stock counts sit in an RDRAM block kn_game_state_hash leaves out as
  *     tainted, and kn_full_state_hash samples one byte in 64.
@@ -973,7 +974,9 @@ let both = 0,
   firstFull = null,
   battleCompared = 0,
   gsMis = 0,
-  firstGs = null;
+  firstGs = null,
+  gpMisBeforeDesync = 0,
+  gpMisAfterDesync = 0;
 const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f],
@@ -984,6 +987,12 @@ for (const f of Object.keys(H.hashes)) {
   if (a[0] !== b[0]) {
     gpMis++;
     if (firstGp === null) firstGp = +f;
+    // DESYNC_GUEST: the hash must differ because of the change, so only
+    // frames from the change on count, and none may differ before it.
+    if (DESYNC_GUEST && desyncGuestAt >= 0) {
+      if (+f >= desyncGuestAt) gpMisAfterDesync++;
+      else gpMisBeforeDesync++;
+    }
   }
   if (a[1] !== b[1]) {
     fullMis++;
@@ -1183,7 +1192,14 @@ const signalingDropOf = (page, events, log) => ({
 const summary = {
   room,
   ...(DESYNC_GUEST
-    ? { desyncGuest: { atFrame: desyncGuestAt, host: desyncFlagsOf(H.sync), guest: desyncFlagsOf(G.sync) } }
+    ? {
+        desyncGuest: {
+          atFrame: desyncGuestAt,
+          gameplayMismatches: { before: gpMisBeforeDesync, after: gpMisAfterDesync },
+          host: desyncFlagsOf(H.sync),
+          guest: desyncFlagsOf(G.sync),
+        },
+      }
     : {}),
   ...(DROP_SIGNALING_MS
     ? {
@@ -1358,7 +1374,8 @@ if (signalingDropFailed) {
 const desyncGuestFailed =
   DESYNC_GUEST &&
   (desyncGuestAt < 0 ||
-    gpMis < 1 ||
+    gpMisAfterDesync < 1 ||
+    gpMisBeforeDesync > 0 ||
     [summary.desyncGuest.host, summary.desyncGuest.guest].some((side) => side.before > 0 || side.stocksAfter < 1));
 if (DESYNC_GUEST) {
   console.log(
