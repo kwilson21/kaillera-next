@@ -575,11 +575,20 @@
   const onDataMessage = (data) => {
     if (!data || data.type !== 'streaming-late-join-ready') return;
     if (_playerSlot !== 0) return;
-    const remoteSid = typeof data.senderSid === 'string' ? data.senderSid : '';
+    // Who sent it is the server's stamp (KNCore.checkRelayed), not what the
+    // message says: any room member can write to the relay and could name
+    // another socket here. A message with no stamp comes from a server older
+    // than the stamp and is read as before: server and pages deploy
+    // together, and a member cannot remove a stamp the server adds.
+    const from = window.KNCore?.checkRelayed?.(data) ?? null;
+    if (from && !from.allowed) return;
+    const declaredSid = typeof data.senderSid === 'string' ? data.senderSid : '';
+    const remoteSid = from?.stamped ? from.sid : declaredSid;
     if (!remoteSid || remoteSid === socket.id) return;
 
     const known = _knownPlayers[remoteSid];
-    if (!known && data.isSpectator !== true) return;
+    const senderSpectates = from?.stamped ? from.slot === null : data.isSpectator === true;
+    if (!known && !senderSpectates) return;
     const remoteSlot = known ? known.slot : null;
     let peer = _peers[remoteSid];
     if (peer?.dc?.readyState === 'open' || peer?.pc?.connectionState === 'connected') return;

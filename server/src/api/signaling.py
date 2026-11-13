@@ -82,6 +82,8 @@ from src.api.payloads import (
     JoinRoomPayload,
     OpenRoomExtra,
     OpenRoomPayload,
+    RELAY_SENDER_KEY,
+    RelaySender,
     RomReadyPayload,
     RomSharingTogglePayload,
     SessionLogPayload,
@@ -1498,6 +1500,15 @@ async def rom_signal(sid: str, data: dict) -> None:
     await _relay_signal(sid, data, "rom-signal", _ROM_SIGNAL_KEYS)
 
 
+def _relay_sender(sid: str, room: Room) -> dict:
+    """The stamp `_relay` puts on a message: who sent it, as the server knows it."""
+    entry = _sid_to_room.get(sid)
+    slot = None
+    if entry is not None and not entry[2]:
+        slot = next((int(s) for s, pid in room.slots.items() if pid == entry[1]), None)
+    return RelaySender(sid=sid, slot=slot, owner=room.owner == sid).model_dump()
+
+
 async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int = _RELAY_MAX_BYTES) -> None:
     """Validate, rate-check, and relay *data* to a room or targetSid."""
     if not isinstance(data, dict):
@@ -1518,6 +1529,13 @@ async def _relay(sid: str, data: dict, event: str, rate_key: str, max_bytes: int
     if result is None:
         return
     session_id, room = result
+
+    # Everything else in the message is whatever the sender wrote, and any
+    # member of the room, spectators included, can send one. The stamp is the
+    # one part a receiver can believe: it replaces whatever the sender put
+    # under the same key. Added after the size and budget checks, so it does
+    # not count against the sender.
+    data = {**data, RELAY_SENDER_KEY: _relay_sender(sid, room)}
 
     target_sid = data.get("targetSid")
     if isinstance(target_sid, str) and target_sid:

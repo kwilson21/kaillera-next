@@ -359,3 +359,20 @@ class TokenMessage(_ServerMessage):
     """`upload-token` and `reconnect-token`."""
 
     token: str
+
+
+class RelaySender(_ServerMessage):
+    """Who sent a relayed `data-message`, `snapshot` or `input`, as the server knows it.
+
+    The server puts it on every message it relays, under `knFrom`
+    (`RELAY_SENDER_KEY`), replacing anything the sender put there. The rest
+    of a relayed message is the sender's own words.
+    """
+
+    sid: str
+    # None for a spectator, and for a player holding no slot.
+    slot: int | None
+    owner: bool
+
+
+RELAY_SENDER_KEY = "knFrom"
