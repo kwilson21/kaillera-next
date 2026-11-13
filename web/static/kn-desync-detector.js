@@ -19,7 +19,7 @@
   /* ── Configuration ───────────────────────────────────────────── */
   const CONFIG = {
     digestCadence: { B: 1, C: 6 }, // frames between broadcasts
-    heartbeatIntervalMs: 5000, // B-mode only
+    heartbeatEveryFrames: 300, // B-mode only
     dedupWindowFrames: 60, // per (field, slot) flag dedup
     historyDepth: 60,
     visionConfidenceMin: 'med',
@@ -27,9 +27,6 @@
     // every peer. It has to be past the tick at which the slowest peer
     // learns of F: one rollback window after F plus the digest's trip.
     captureLeadFrames: 90,
-    // Mode B's heartbeat has no flagged frame; peers capture at the next
-    // multiple of this.
-    heartbeatCaptureEvery: 300,
   };
 
   /* Diagnostic-only URL flag: ?forceDesyncTick=1 forces the per-tick
@@ -77,7 +74,8 @@
   let _localDigests = new Map(); // frame → digest
   let _localFrameTick = 0;
   let _lastFlagFrame = new Map(); // "field:slot" → frame
-  let _heartbeatTimerId = null;
+  let _heartbeatOn = false;
+  let _lastHeartbeatFrame = -1;
   let _missingExportsLogged = false;
   // Frames the engine may still replay (its rollback window). A digest is
   // built for the frame this far behind the newest one; see tick().
@@ -485,36 +483,36 @@
     }
   }
 
+  // Mode B's heartbeat: a screenshot from every peer at intervals, whether
+  // or not a field has been flagged. It is driven by the frame count, not a
+  // clock: each peer raises it on the same frames (every
+  // CONFIG.heartbeatEveryFrames, five seconds at full speed), so the
+  // pictures are of one frame and the server pairs them. A wall-clock timer
+  // fired on a different frame on each peer, and could fire more than once
+  // for the same frame when the game ran slow.
   function _startHeartbeat() {
-    _stopHeartbeat();
-    if (_mode !== 'B') return;
-    _heartbeatTimerId = setInterval(() => {
-      if (!_enabled || !_module) return;
-      // Each peer's timer fires on a different frame. Name the heartbeat by
-      // the next shared frame boundary and capture there, so the peers'
-      // pictures are of one frame and the server can pair them.
-      const every = CONFIG.heartbeatCaptureEvery;
-      const payload = {
-        frame: Math.ceil(_localFrameTick / every) * every,
-        field: 'heartbeat',
-        slot: null,
-        hashes: null,
-        trigger: 'heartbeat',
-        scope: ['damage', 'stocks', 'position', 'css_cursor'],
-        replayMeta: null,
-      };
-      payload.matchId = window.KNState && KNState.matchId;
-      _log(`suspect frame=${payload.frame} field=heartbeat slot=g trigger=heartbeat`);
-      _events.dispatchEvent(new CustomEvent('desync-suspect', { detail: payload }));
-      _scheduleCapture(payload, 0);
-    }, CONFIG.heartbeatIntervalMs);
+    _heartbeatOn = _mode === 'B';
+    _lastHeartbeatFrame = 0;
+  }
+
+  function _heartbeatAt(frame) {
+    const payload = {
+      frame,
+      field: 'heartbeat',
+      slot: null,
+      hashes: null,
+      trigger: 'heartbeat',
+      scope: ['damage', 'stocks', 'position', 'css_cursor'],
+      replayMeta: null,
+    };
+    payload.matchId = window.KNState && KNState.matchId;
+    _log(`suspect frame=${frame} field=heartbeat slot=g trigger=heartbeat`);
+    _events.dispatchEvent(new CustomEvent('desync-suspect', { detail: payload }));
+    _scheduleCapture(payload, 0);
   }
 
   function _stopHeartbeat() {
-    if (_heartbeatTimerId !== null) {
-      clearInterval(_heartbeatTimerId);
-      _heartbeatTimerId = null;
-    }
+    _heartbeatOn = false;
   }
 
   const KNDesync = {
@@ -557,8 +555,8 @@
     },
 
     // Stop the heartbeat and clear cross-game caches. Callers (lockstep stop)
-    // must invoke this; otherwise the setInterval keeps firing into the next
-    // session and _peerDigests/_localDigests carry stale frame state.
+    // must invoke this; otherwise _peerDigests/_localDigests carry stale
+    // frame state into the next session.
     stop() {
       _stopHeartbeat();
       _enabled = false;
@@ -606,6 +604,11 @@
       // no-op DC and comparisons run against an empty peer-digest map;
       // the work is what we're measuring.
       if (!_hasRealPeer && !window.__knForceDesyncTick) return;
+      // Once per frame number: a resync can rewind the counter over it.
+      if (_heartbeatOn && frame > _lastHeartbeatFrame && frame % CONFIG.heartbeatEveryFrames === 0) {
+        _lastHeartbeatFrame = frame;
+        _heartbeatAt(frame);
+      }
       // Which frame to report, if any: KNCore.digestFrame
       // (web/src/desync-confirm.ts). It is the frame one rollback window
       // behind this tick, on the broadcast cadence (mode B = every frame;
