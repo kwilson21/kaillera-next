@@ -976,6 +976,10 @@
         }
         console.log('[play] mid-game rejoin succeeded');
         sendDeviceType();
+        // A player taken back after its grace window ran out is on a new
+        // socket the server has no ROM report for: without this the next
+        // start would wait for a ROM everybody already has.
+        if (localRomLoaded()) notifyRomReady();
         if (isReconnect) resumeRomTransferAfterReconnect();
         // join-room's reconnect path says what the room is doing now. (The
         // host's open-room does not: only the host starts and ends games, so
@@ -1002,6 +1006,17 @@
           maxPlayers: 4,
         },
         (err) => {
+          if (err === 'Not the owner') {
+            // This page's URL says host, but the room is in play and belongs
+            // to someone else now (this player was dropped mid-match, the
+            // room was handed on, and it was taken back as a player). Come
+            // in the way any other player does.
+            console.log('[play] open-room: not the owner of a room in play, joining instead');
+            isHost = false;
+            KNState.isLocalHost = false;
+            onConnect(false);
+            return;
+          }
           if (err) {
             showError(`Failed to create room: ${err}`);
             return;
