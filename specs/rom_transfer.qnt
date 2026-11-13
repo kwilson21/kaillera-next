@@ -16,6 +16,8 @@
 //                      to the host is open; a poll waits for the channel
 //   acceptOverEngine   the guest accepts mid-game with the channel open and
 //                      asks over it
+//   acceptFallback     the guest accepts mid-game with an engine but no open
+//                      channel to the host, and asks over Socket.IO
 //   pollSends          the poll finds the channel open and asks over it
 //   pollGivesUp        the poll runs out (15 s) and asks over Socket.IO
 //   channelArrives     the host opens a rom-transfer channel
@@ -33,12 +35,14 @@
 // a second channel replacing the first, a stale timer from an earlier
 // request firing late.
 //
-// DEADLINE_ON_ENGINE_ASK: a request sent over the engine channel starts the
-//   same 15 s deadline as one sent over Socket.IO. false = before this model
-//   was written: the request was sent and nothing was left running, so a
-//   host that never answered left the guest on "reconnecting..." for good.
+// DEADLINE_ON_EVERY_ASK: every request for a channel starts the 15 s
+//   deadline, however it is sent. false = before this model was written:
+//   only the lobby request and the retries did. A request sent mid-game, over
+//   the engine channel or by the Socket.IO fallback, left nothing running,
+//   so a host that never answered left the guest on "reconnecting..." for
+//   good.
 module rom_transfer {
-  const DEADLINE_ON_ENGINE_ASK: bool
+  const DEADLINE_ON_EVERY_ASK: bool
 
   var phase: str          // idle | receiving | paused | resuming | complete
   var retries: int        // automatic retries since the guest last acted
@@ -48,7 +52,7 @@ module rom_transfer {
 
   pure val MAX_RETRIES = 3
 
-  pure def engineAskTimer(deadline: bool): str = if (deadline) "resume" else "none"
+  pure def midGameAskTimer(deadline: bool): str = if (deadline) "resume" else "none"
 
   action init = all {
     phase' = "idle", retries' = 0, gotBytes' = false, timer' = "none", retryOffered' = false,
@@ -60,11 +64,12 @@ module rom_transfer {
 
   action acceptPreGame = all { phase == "idle", startWaiting("resume") }
   action acceptPolling = all { phase == "idle", startWaiting("poll") }
-  action acceptOverEngine = all { phase == "idle", startWaiting(engineAskTimer(DEADLINE_ON_ENGINE_ASK)) }
+  action acceptOverEngine = all { phase == "idle", startWaiting(midGameAskTimer(DEADLINE_ON_EVERY_ASK)) }
+  action acceptFallback = all { phase == "idle", startWaiting(midGameAskTimer(DEADLINE_ON_EVERY_ASK)) }
 
   action pollSends = all {
     phase == "resuming", timer == "poll",
-    timer' = engineAskTimer(DEADLINE_ON_ENGINE_ASK),
+    timer' = midGameAskTimer(DEADLINE_ON_EVERY_ASK),
     phase' = phase, retries' = retries, gotBytes' = gotBytes, retryOffered' = retryOffered,
   }
 
@@ -138,7 +143,7 @@ module rom_transfer {
   action cancel = init
 
   action step = any {
-    acceptPreGame, acceptPolling, acceptOverEngine, pollSends, pollGivesUp,
+    acceptPreGame, acceptPolling, acceptOverEngine, acceptFallback, pollSends, pollGivesUp,
     channelArrives, chunk, completes, closes, backoffFires, resumeTimesOut,
     userRetry, sharingOff, sharingOn, cancel,
   }
@@ -164,14 +169,20 @@ module rom_transfer {
   run engineAskHostSilentTest =
     init
       .then(acceptOverEngine)
-      .expect(waitingHasAWayOut == DEADLINE_ON_ENGINE_ASK)
+      .expect(waitingHasAWayOut == DEADLINE_ON_EVERY_ASK)
+
+  // The same when the request falls back to Socket.IO mid-game.
+  run fallbackAskHostSilentTest =
+    init
+      .then(acceptFallback)
+      .expect(waitingHasAWayOut == DEADLINE_ON_EVERY_ASK)
 
   // The same through the poll.
   run pollThenHostSilentTest =
     init
       .then(acceptPolling)
       .then(pollSends)
-      .expect(waitingHasAWayOut == DEADLINE_ON_ENGINE_ASK)
+      .expect(waitingHasAWayOut == DEADLINE_ON_EVERY_ASK)
 
   // A channel that dies before any byte is not retried automatically; the
   // page offers Retry.
@@ -202,12 +213,12 @@ module rom_transfer {
       .expect(phase == "receiving" and gotBytes and retries == 1)
 }
 
-// Before this model: a request over the engine channel had no deadline.
+// Before this model: a request sent mid-game had no deadline.
 module rom_transfer_before {
-  import rom_transfer(DEADLINE_ON_ENGINE_ASK = false).*
+  import rom_transfer(DEADLINE_ON_EVERY_ASK = false).*
 }
 
 // Today.
 module rom_transfer_current {
-  import rom_transfer(DEADLINE_ON_ENGINE_ASK = true).*
+  import rom_transfer(DEADLINE_ON_EVERY_ASK = true).*
 }

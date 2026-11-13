@@ -1807,8 +1807,8 @@
         }
       }
     }
-    // Fallback: Socket.IO data-message
-    socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
+    // Fallback: ask over Socket.IO, with the same deadline as every other request.
+    requestResumeTransfer();
   };
 
   const waitForDCAndSendRomAccepted = () => {
