@@ -1,0 +1,26 @@
+Backport of mupen64plus-core 3984137fc0c44110f1ef876adb008885b05a6e18
+CVE-2025-9688: validate both operands before the buffer-length addition.
+Only path, comment and whitespace differ from the upstream fix.
+
+diff --git a/mupen64plus-core/src/device/cart/is_viewer.c b/mupen64plus-core/src/device/cart/is_viewer.c
+index d352240..644eba7 100644
+--- a/mupen64plus-core/src/device/cart/is_viewer.c
++++ b/mupen64plus-core/src/device/cart/is_viewer.c
+@@ -55,12 +55,14 @@ void write_is_viewer(void* opaque, uint32_t address, uint32_t value, uint32_t ma
+     {
+         if (word > 0)
+         {
+-            /* make sure we don't overflow the buffer */
+-            if (is_viewer->buffer_pos + word > IS_BUFFER_SIZE)
++            /* Check each operand before adding: CVE-2025-9688. */
++            if (is_viewer->buffer_pos > IS_BUFFER_SIZE
++                || word > IS_BUFFER_SIZE
++                || is_viewer->buffer_pos + word > IS_BUFFER_SIZE)
+             {
+                 /* reset buffer */
+                 memset(is_viewer->output_buffer, 0, IS_BUFFER_SIZE);
+                 is_viewer->buffer_pos = 0;
+-                DebugMessage(M64MSG_WARNING, "IS64: prevented buffer overflow, cleared buffer");
++                DebugMessage(M64MSG_WARNING, "IS64: prevented integer overflow, cleared buffer");
+                 return;
+             }
