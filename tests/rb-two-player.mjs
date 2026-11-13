@@ -158,6 +158,22 @@
  *     host has not seen that roster within n ms. BATTLE_SECONDS must cover
  *     this too.
  *
+ *   DESYNC_GUEST=1   The one knob that makes the match unhealthy on purpose:
+ *     halfway through the battle the guest's copy of P1's stock count
+ *     (SCPlayerData.stock_count, one byte of RDRAM) is changed and held for
+ *     3 s, long enough that no rollback restores it. The peers are then
+ *     really desynced, and the desync detector (kn-desync-detector.js) must
+ *     say so: the run passes only if both peers' sync logs have a
+ *     `KNDesync suspect ... field=stocks ... trigger=flag` line after the
+ *     change, and none before it. The gameplay-hash and integrity checks
+ *     are reported but not judged. In the first run they did not see the
+ *     change at all (zero mismatches): they hash the saved rollback states,
+ *     and a byte poked into RDRAM from outside the emulator may not reach
+ *     those, whereas the detector hashes live RDRAM after each tick.
+ *     Reported as `desyncGuest` in summary.json. Mutually exclusive with the
+ *     other knobs. This is the detector's positive test; every other run
+ *     only shows that it stays quiet.
+ *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
  * compare runs with each other; HEADED=1 on a real machine is closer to play.
@@ -190,6 +206,7 @@ const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
 const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
 const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
+const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 
 // Validate knobs before launching anything: a typo here should fail fast,
 // not surface as a confusing result after minutes of gameplay.
@@ -228,6 +245,13 @@ if (!(Number.isFinite(DROP_SIGNALING_MS) && DROP_SIGNALING_MS >= 0)) {
 }
 if (DROP_SIGNALING_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS > 0 || CLICK_DURING_BATTLE)) {
   console.log('DROP_SIGNALING_MS is mutually exclusive with the FREEZE, THROTTLE, HIDE and CLICK knobs');
+  process.exit(1);
+}
+if (
+  DESYNC_GUEST &&
+  (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS > 0 || CLICK_DURING_BATTLE || DROP_SIGNALING_MS > 0 || VISUAL_CHECK)
+) {
+  console.log('DESYNC_GUEST is mutually exclusive with the other knobs');
   process.exit(1);
 }
 // The outage starts a third of the way in, so it and the reconnect that
@@ -671,6 +695,7 @@ const tb = Date.now();
 const MENU_MS = Number(process.env.MENU_SECONDS || 600) * 1000;
 let lastLog = 0;
 let inBattle = false;
+let desyncGuestAt = -1; // DESYNC_GUEST: the guest's frame when its stock count was changed
 let throttleFlipped = null; // null until the 15s mark; then whether the flip Promise.all resolved or rejected
 for (;;) {
   const s = await Promise.all(
@@ -781,6 +806,26 @@ if (inBattle) {
       });
       console.log('guest tab shown again');
     }
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+  } else if (DESYNC_GUEST) {
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+    // P1's stock count: SCPlayerData.stock_count, N64 offset 0xA4F23
+    // (KN_ADDR_PLAYER_STOCKS_BASE). RDRAM is host-order words, so the byte
+    // is at offset ^ 3. Held for 3 s so that every state the rollback ring
+    // can still restore carries the change.
+    desyncGuestAt = await guest.evaluate(async () => {
+      const mod = window.EJS_emulator.gameManager.Module;
+      const at = mod._kn_get_rdram_ptr() + (0xa4f23 ^ 3);
+      const wrong = mod.HEAPU8[at] ^ 1;
+      const frame = window.NetplayRollback.getHudCounters?.()?.currentFrame ?? 0;
+      const until = performance.now() + 3000;
+      while (performance.now() < until) {
+        mod.HEAPU8[at] = wrong;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return frame;
+    });
+    console.log('guest desynced on purpose: P1 stock count changed at frame', desyncGuestAt);
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
   } else if (DROP_SIGNALING_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -1093,6 +1138,24 @@ if (VISUAL_CHECK) {
   };
 }
 
+// DESYNC_GUEST: the detector's cross-peer flags in one peer's sync log, split
+// at the frame the guest was desynced.
+const desyncFlagsOf = (log) => {
+  const flags = [...log.matchAll(/KNDesync suspect frame=(\d+) field=(\w+) slot=(\w+) trigger=flag/g)].map((m) => ({
+    frame: Number(m[1]),
+    field: m[2],
+    slot: m[3],
+  }));
+  const after = flags.filter((f) => f.frame >= desyncGuestAt);
+  return {
+    before: flags.length - after.length,
+    after: after.length,
+    stocksAfter: after.filter((f) => f.field === 'stocks').length,
+    firstAfter: after[0] ?? null,
+    fields: [...new Set(after.map((f) => f.field))],
+  };
+};
+
 const signalingDropOf = (page, events, log) => ({
   reconnectsAfterOutage:
     events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
@@ -1107,6 +1170,9 @@ const signalingDropOf = (page, events, log) => ({
 
 const summary = {
   room,
+  ...(DESYNC_GUEST
+    ? { desyncGuest: { atFrame: desyncGuestAt, host: desyncFlagsOf(H.sync), guest: desyncFlagsOf(G.sync) } }
+    : {}),
   ...(DROP_SIGNALING_MS
     ? {
         signalingDrop: {
@@ -1266,6 +1332,20 @@ const signalingDropFailed =
 if (signalingDropFailed) {
   console.log('DROP_SIGNALING_MS: a page never reconnected, stalled, or its lifecycle machine reported:');
   console.log(JSON.stringify(summary.signalingDrop));
+}
+// DESYNC_GUEST inverts the run: the peers were desynced on purpose, so only
+// the detector is judged, not the hash and integrity checks. It must flag
+// the changed field on both peers, and nothing before the change.
+const desyncGuestFailed =
+  DESYNC_GUEST &&
+  (desyncGuestAt < 0 ||
+    [summary.desyncGuest.host, summary.desyncGuest.guest].some((side) => side.before > 0 || side.stocksAfter < 1));
+if (DESYNC_GUEST) {
+  console.log(
+    desyncGuestFailed ? 'DESYNC_GUEST: the detector did not flag the desync as expected:' : 'DESYNC_GUEST: flagged:',
+    JSON.stringify(summary.desyncGuest),
+  );
+  process.exit(desyncGuestFailed || H.inBattleAt < 0 || G.inBattleAt < 0 ? 1 : 0);
 }
 const failed =
   signalingDropFailed ||
