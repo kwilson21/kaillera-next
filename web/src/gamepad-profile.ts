@@ -23,9 +23,10 @@ const PAD_INDEX = /^(0|[1-9][0-9]*)$/;
  * A record with any other key is refused whole; dropping the one entry would
  * leave a mapping the player did not make.
  */
-const padIndexKeys = Schema.makeFilter((record: { readonly [key: string]: object | number }) =>
-  Object.keys(record).every((key) => PAD_INDEX.test(key)),
-);
+const padIndexKeys = <Value>() =>
+  Schema.makeFilter((record: { readonly [key: string]: Value }) =>
+    Object.keys(record).every((key) => PAD_INDEX.test(key)),
+  );
 
 /** One stick axis: the pad axis it reads and the N64 bit each end means. */
 const StickAxis = Schema.Struct({
@@ -42,10 +43,10 @@ const AxisButton = Schema.Struct({
 export const GamepadProfile = Schema.Struct({
   name: maybe(Schema.String),
   /** Pad button index to N64 button mask. */
-  buttons: Schema.Record(Schema.String, Schema.Int).check(padIndexKeys),
+  buttons: Schema.Record(Schema.String, Schema.Int).check(padIndexKeys<number>()),
   axes: maybe(Schema.Struct({ stickX: maybe(StickAxis), stickY: maybe(StickAxis) })),
   /** Pad axis index to the two masks it presses. */
-  axisButtons: maybe(Schema.Record(Schema.String, AxisButton).check(padIndexKeys)),
+  axisButtons: maybe(Schema.Record(Schema.String, AxisButton).check(padIndexKeys<typeof AxisButton.Type>())),
   /** The raw axis value of full deflection. */
   axisRange: maybe(Schema.Finite.check(Schema.isGreaterThan(0))),
   axisCenter: maybe(Schema.Literal('auto')),
