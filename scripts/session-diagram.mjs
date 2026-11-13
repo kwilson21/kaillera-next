@@ -1,6 +1,6 @@
 /**
- * Draws the page lifecycle machine (web/src/session.ts) as a Mermaid state
- * diagram in docs/session-machine.md.
+ * Draws the page lifecycle machine (web/src/session.ts) as a Mermaid
+ * flowchart in docs/session-machine.md.
  *
  * The diagram is not written by hand: it is found by walking the machine
  * itself with XState's pure `transition`, from the initial state, over one
@@ -25,19 +25,19 @@ const joined = (over) => ({
 });
 // One sample of each event the page sends, labelled the way a reader would say it.
 const EVENTS = [
-  ['joined (room in lobby)', joined({ status: 'lobby', matchId: null })],
-  ['joined mid-game', joined({})],
-  ['joined mid-game (streamed)', joined({ streaming: true })],
-  ['joined mid-game as spectator', joined({ spectator: true })],
-  ['joined mid-game as spectator (streamed)', joined({ spectator: true, streaming: true })],
+  ['join: room in lobby', joined({ status: 'lobby', matchId: null })],
+  ['join mid-game: player', joined({})],
+  ['join mid-game: player, streamed', joined({ streaming: true })],
+  ['join mid-game: spectator', joined({ spectator: true })],
+  ['join mid-game: spectator, streamed', joined({ spectator: true, streaming: true })],
   ['gameStarted', { type: 'gameStarted', matchId: 'm' }],
   ['gameEnded', { type: 'gameEnded' }],
   ['roomClosed', { type: 'roomClosed' }],
   ['lateJoinRomNeeded', { type: 'lateJoinRomNeeded' }],
   ['lateJoinRomReady', { type: 'lateJoinRomReady' }],
-  ['engineStarted (connect only)', { type: 'engineStarted', connectOnly: true, waitsForState: true }],
-  ['engineStarted (needs state)', { type: 'engineStarted', connectOnly: false, waitsForState: true }],
-  ['engineStarted (no state needed)', { type: 'engineStarted', connectOnly: false, waitsForState: false }],
+  ['engineStarted: connect only', { type: 'engineStarted', connectOnly: true, waitsForState: true }],
+  ['engineStarted: needs state', { type: 'engineStarted', connectOnly: false, waitsForState: true }],
+  ['engineStarted: no state needed', { type: 'engineStarted', connectOnly: false, waitsForState: false }],
   ['lateJoinSynced', { type: 'lateJoinSynced' }],
   ['socketDown', { type: 'socketDown' }],
   ['socketUp', { type: 'socketUp' }],
@@ -63,23 +63,50 @@ while (queue.length) {
 
 const states = [...snapshots.keys()];
 const yesNo = (value) => (value ? 'yes' : 'no');
+
+// An event that takes every other state to the same place (gameEnded and
+// roomClosed, back to the lobby) would add one arrow per state and bury the
+// rest. Those are said once in words instead of drawn.
+const everywhere = new Map(); // label -> target
+for (const [label] of EVENTS) {
+  const targets = new Set();
+  let sources = 0;
+  for (const [key, labels] of edges) {
+    if (!labels.includes(label)) continue;
+    sources += 1;
+    targets.add(key.split(' ')[1]);
+  }
+  const [target] = targets;
+  if (targets.size === 1 && sources === states.length - 1) everywhere.set(label, target);
+}
+const drawn = [...edges.entries()]
+  .map(([key, labels]) => [key, labels.filter((label) => !everywhere.has(label))])
+  .filter(([, labels]) => labels.length > 0);
+const everywhereByTarget = new Map();
+for (const [label, target] of everywhere) {
+  everywhereByTarget.set(target, [...(everywhereByTarget.get(target) ?? []), label]);
+}
+
 const lines = [
   '# Page lifecycle machine',
   '',
   'Generated from `web/src/session.ts` by `node scripts/session-diagram.mjs`. Do not edit by hand;',
   '`npm run check` fails when it is out of date.',
   '',
-  'Events that leave the state unchanged are not drawn. `gameEnded` and `roomClosed` return every',
-  'state to the lobby.',
-  '',
   '```mermaid',
-  'stateDiagram-v2',
-  `  [*] --> ${initial.value}`,
-  ...[...edges.entries()].map(([key, labels]) => {
+  'flowchart LR',
+  `  start(( )) --> ${initial.value}`,
+  ...drawn.map(([key, labels]) => {
     const [from, to] = key.split(' ');
-    return `  ${from} --> ${to}: ${labels.join(' / ')}`;
+    return `  ${from} -->|"${labels.join('<br/>')}"| ${to}`;
   }),
   '```',
+  '',
+  ...[...everywhereByTarget.entries()].map(
+    ([target, labels]) =>
+      `Not drawn: ${labels.map((label) => `\`${label}\``).join(' and ')} take every state to \`${target}\`.`,
+  ),
+  'Events that leave a state unchanged are not drawn either.',
   '',
   'What `play.js` reads from each state (`sessionFlag`):',
   '',

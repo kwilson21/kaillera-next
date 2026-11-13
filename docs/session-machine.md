@@ -3,24 +3,20 @@
 Generated from `web/src/session.ts` by `node scripts/session-diagram.mjs`. Do not edit by hand;
 `npm run check` fails when it is out of date.
 
-Events that leave the state unchanged are not drawn. `gameEnded` and `roomClosed` return every
-state to the lobby.
-
 ```mermaid
-stateDiagram-v2
-  [*] --> lobby
-  lobby --> lateJoinStarting: joined mid-game / joined mid-game (streamed) / joined mid-game as spectator (streamed)
-  lobby --> running: joined mid-game as spectator / gameStarted
-  lateJoinStarting --> lobby: gameEnded / roomClosed
-  lateJoinStarting --> lateJoinAwaitingRom: lateJoinRomNeeded
-  lateJoinStarting --> lateJoinSyncing: engineStarted (needs state)
-  lateJoinStarting --> running: engineStarted (no state needed) / lateJoinSynced
-  running --> lobby: gameEnded / roomClosed
-  lateJoinAwaitingRom --> lobby: gameEnded / roomClosed
-  lateJoinAwaitingRom --> lateJoinStarting: lateJoinRomReady
-  lateJoinSyncing --> lobby: gameEnded / roomClosed
-  lateJoinSyncing --> running: lateJoinSynced
+flowchart LR
+  start(( )) --> lobby
+  lobby -->|"join mid-game: player<br/>join mid-game: player, streamed<br/>join mid-game: spectator, streamed"| lateJoinStarting
+  lobby -->|"join mid-game: spectator<br/>gameStarted"| running
+  lateJoinStarting -->|"lateJoinRomNeeded"| lateJoinAwaitingRom
+  lateJoinStarting -->|"engineStarted: needs state"| lateJoinSyncing
+  lateJoinStarting -->|"engineStarted: no state needed<br/>lateJoinSynced"| running
+  lateJoinAwaitingRom -->|"lateJoinRomReady"| lateJoinStarting
+  lateJoinSyncing -->|"lateJoinSynced"| running
 ```
+
+Not drawn: `gameEnded` and `roomClosed` take every state to `lobby`.
+Events that leave a state unchanged are not drawn either.
 
 What `play.js` reads from each state (`sessionFlag`):
 
