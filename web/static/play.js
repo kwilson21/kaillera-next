@@ -983,10 +983,16 @@
         if (_rejoin !== rejoin) return;
         _rejoin = null;
         if (outcome.kind === 'noAnswer') {
-          // Reported, not acted on: the socket says it is connected, and if
-          // it drops, the next connect starts a new rejoin.
-          console.log('[play] mid-game rejoin: no answer from the server');
+          // Every attempt went unanswered on a socket that says it is
+          // connected, so this page is not in the room's signaling. Take a
+          // new connection: its connect starts a new rejoin. The game keeps
+          // running over the players' own connections meanwhile.
+          console.log('[play] mid-game rejoin: no answer from the server, reconnecting the socket');
           KNEvent('rejoin-no-answer', '', {});
+          if (socket.connected) {
+            socket.disconnect();
+            socket.connect();
+          }
           return;
         }
         if (outcome.kind === 'dropped') {

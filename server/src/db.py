@@ -678,6 +678,21 @@ async def set_session_ended(match_id: str, slot: int | None, ended_by: str) -> N
     )
 
 
+async def reopen_session(match_id: str, slot: int) -> None:
+    """Clear how a session ended: the player is back in that match and slot.
+
+    A player the room dropped (its grace window ran out) was marked ended by
+    the disconnect. If it is taken back while still playing, leaving the mark
+    would record a player who finished the match as having left it, since the
+    game-end update skips rows that already say how they ended.
+    """
+    await run(
+        update(SessionLog)
+        .values(ended_by=None, updated_at=now())
+        .where(SessionLog.match_id == match_id, SessionLog.slot == slot)
+    )
+
+
 async def insert_client_event(data: dict) -> int:
     """Insert a client event and return row ID."""
     result = await run(

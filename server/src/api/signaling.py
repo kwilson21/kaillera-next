@@ -762,8 +762,9 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
         # A fresh page asking to open a room it is in but no longer owns (it
         # was dropped mid-match, the room was handed on, and it was taken
         # back as a player; its URL still says host). Opening would show it a
-        # lobby over a match in play: it has to come in through join-room.
-        if payload.extra.fresh and existing.status == "playing" and existing.owner != old_sid:
+        # lobby over a match in play, or host controls the server refuses:
+        # it has to come in through join-room.
+        if payload.extra.fresh and existing.owner != old_sid:
             return NOT_THE_OWNER
         _cancel_disconnect_grace(persistent_id)
         _swap_sid(existing, persistent_id, old_sid, sid)
@@ -864,6 +865,9 @@ async def _readmit_dropped_player(
     await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
     await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
     await state.save_room(session_id, room)
+    # Its session was marked ended when the room dropped it.
+    if room.match_id:
+        await db.reopen_session(room.match_id, slot)
     log.info(
         "SIO %s taken back into room %s after its grace ran out (slot %d, persistentId=%s)",
         sid,
