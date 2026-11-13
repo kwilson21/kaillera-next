@@ -19,6 +19,7 @@ import {
   decodeUsersUpdated,
 } from './protocol.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
+import { newStoredRom, openRomLibrary, romLibraryHtml } from './play/rom-library.ts';
 import { escapeHtml, inviteUrl, roomClosedMessage, rosterToasts } from './play/room-text.ts';
 import {
   formatRomSize,
@@ -178,6 +179,9 @@ export const KNCore = {
     hostRomIdentityKey,
     romFromArchive,
     romHashMismatch,
+    newStoredRom,
+    openRomLibrary,
+    romLibraryHtml,
   },
   protocol: {
     decodeUsersUpdated,
