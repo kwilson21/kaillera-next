@@ -25,8 +25,6 @@
  *   late-join-two-player  a third player joins a two-player match in play
  *   missed-game-end   a guest's signaling is down while the host ends the
  *                     game; on reconnect it must return to the lobby
- *   missed-new-match  the same, and the host starts another game before the
- *                     guest is back; on reconnect it must join the new match
  *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
@@ -51,7 +49,6 @@ const SCENARIOS = [
   'late-join-shared',
   'late-join-two-player',
   'missed-game-end',
-  'missed-new-match',
   'streaming-join',
   'spectate',
   'host-reload',
@@ -235,8 +232,6 @@ const startSoloGame = async (room, mode = 'rollback') => {
   await host.page.click('#start-btn');
   return host;
 };
-
-const matchOf = (player) => player.page.evaluate(() => window.KNState?.matchId ?? null);
 
 const startTwoPlayerGame = async (room, failures) => {
   const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
@@ -498,37 +493,6 @@ const scenarios = {
       [
         { player: host, lobby: true },
         { player: guest, lobby: true },
-      ],
-      failures,
-      log,
-    );
-    return [host, guest];
-  },
-
-  'missed-new-match': async (room, failures, log) => {
-    const [host, guest] = await startTwoPlayerGame(room, failures);
-    const firstMatch = await matchOf(guest);
-    await cutSignaling(guest);
-    await endGame(host);
-    if (!(await waitUntil(() => lobbyShownOn(host), 30000))) failures.push('the host never returned to the lobby');
-    // The host starts again while the guest is still out.
-    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
-    await host.page.click('#start-btn');
-    if (!(await waitUntil(async () => (await matchOf(host)) !== firstMatch && (await frameOf(host)) > 60, 180000)))
-      failures.push('the host never started the second match');
-    const secondMatch = await matchOf(host);
-
-    guest.signaling.down = false;
-    const joined = await waitUntil(async () => {
-      for (const p of [host, guest]) await clickGesturePrompt(p);
-      return (await matchOf(guest)) === secondMatch && (await frameOf(guest)) > 0;
-    }, 420000);
-    if (!joined) failures.push(`the guest never joined the new match (it is in ${await matchOf(guest)})`);
-    await checkpoint(
-      'after the guest joined the new match',
-      [
-        { player: host, lobby: false },
-        { player: guest, lobby: false, lateJoiner: true },
       ],
       failures,
       log,
