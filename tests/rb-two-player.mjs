@@ -164,6 +164,7 @@
  */
 import { chromium, webkit } from 'playwright';
 import fs from 'fs';
+import { phantomRecovery, phantomRecoveryVerdict } from './phantom-recovery.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -920,6 +921,7 @@ let both = 0,
   battleCompared = 0,
   gsMis = 0,
   firstGs = null;
+const mismatchFrames = [];
 const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f],
@@ -939,7 +941,11 @@ for (const f of Object.keys(H.hashes)) {
     gsMis++;
     if (firstGs === null) firstGs = +f;
   }
+  if (a[0] !== b[0] || a[2] !== b[2]) mismatchFrames.push(+f);
 }
+// For the reader of a failed run: were the mismatches a page that stopped
+// (tests/phantom-recovery.mjs)? Reported only; it changes no result.
+const recovery = phantomRecovery({ host: H.sync, guest: G.sync }, mismatchFrames);
 const count = (log, re) => (log.match(re) || []).length;
 const bootInputStallTimeoutsOf = (log) =>
   [...log.matchAll(/RB-INPUT-STALL-TIMEOUT f=(\d+)/g)].filter(([, frame]) => +frame < 300).length;
@@ -1162,11 +1168,14 @@ const summary = {
     fullStateMismatches: fullMis,
     firstFullMismatch: firstFull,
   },
+  phantomRecovery: recovery,
   ...(VISUAL_CHECK ? { visualCheck } : {}),
 };
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
+const recoveryVerdict = FREEZE_MS > 0 ? null : phantomRecoveryVerdict(recovery);
+if (recoveryVerdict) console.log(recoveryVerdict);
 // Close each distinct browser instance once (host and guest may share one,
 // e.g. the Chromium/Chromium default, or both resolve to the one WebKit
 // instance with HOST_BROWSER=webkit GUEST_BROWSER=webkit).
