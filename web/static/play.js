@@ -4412,41 +4412,34 @@
   };
 
   // ── Remap Wizard ──────────────────────────────────────────────────────
+  // The rules (the steps, what a captured input does to the mapping, Back
+  // and Skip) are web/src/play/remap-wizard.ts. Polling the pads, the key
+  // listener, the debounce and the prompts are here.
 
-  const WIZARD_STEPS = [
-    { prompt: 'Press: A', type: 'button', bit: 0 },
-    { prompt: 'Press: B', type: 'button', bit: 1 },
-    { prompt: 'Press: Start', type: 'button', bit: 3 },
-    { prompt: 'Press: Z', type: 'button', bit: 12 },
-    { prompt: 'Press: L', type: 'button', bit: 10 },
-    { prompt: 'Press: R', type: 'button', bit: 11 },
-    { prompt: 'Press: D-Up', type: 'button', bit: 4 },
-    { prompt: 'Press: D-Down', type: 'button', bit: 5 },
-    { prompt: 'Press: D-Left', type: 'button', bit: 6 },
-    { prompt: 'Press: D-Right', type: 'button', bit: 7 },
-    { prompt: 'Push stick UP', type: 'axis', bit: 19, axisGroup: 'stickY' },
-    { prompt: 'Push stick DOWN', type: 'axis', bit: 18, axisGroup: 'stickY' },
-    { prompt: 'Push stick LEFT', type: 'axis', bit: 17, axisGroup: 'stickX' },
-    { prompt: 'Push stick RIGHT', type: 'axis', bit: 16, axisGroup: 'stickX' },
-    { prompt: 'Press: C-Up', type: 'cbutton', bit: 23 },
-    { prompt: 'Press: C-Down', type: 'cbutton', bit: 22 },
-    { prompt: 'Press: C-Left', type: 'cbutton', bit: 20 },
-    { prompt: 'Press: C-Right', type: 'cbutton', bit: 21 },
-  ];
+  const _remap = window.KNCore.play.remapWizard;
 
   let _wizardActive = false;
   let _wizardInGame = false; // true when wizard launched from in-game toolbar
-  let _wizardStep = 0;
+  let _wizard = null; // the wizard's state while it runs (remap-wizard.ts)
   let _wizardDebounce = 0;
   let _wizardRafId = null;
   let _wizardKeyHandler = null;
-  let _wizardGamepadProfile = null;
-  let _wizardKeyMap = null;
   let _wizardBaselineButtons = null;
-  let _wizardAxisCaptures = {};
-  let _wizardSnapshots = []; // state snapshots for go-back
   let _wizardHadGamepad = false;
   let _wizardHotPlugCheck = 0;
+
+  // Buttons held when a step begins are not that step's answer.
+  const wizardCaptureBaseline = () => {
+    _wizardBaselineButtons = {};
+    const gps = GamepadManager.nativeGetGamepads();
+    for (let gi = 0; gi < gps.length; gi++) {
+      if (gps[gi]) {
+        for (let bi = 0; bi < gps[gi].buttons.length; bi++) {
+          if (gps[gi].buttons[bi].pressed) _wizardBaselineButtons[`${gi}:${bi}`] = true;
+        }
+      }
+    }
+  };
 
   const startWizard = (inGame) => {
     // Idempotent: if the wizard is already running, tear it down first so we
@@ -4455,57 +4448,22 @@
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     const gamepadId = detected.length > 0 ? detected[0].id : null;
 
-    // Initialize gamepad profile from current (default or saved)
+    // The gamepad profile to edit: a copy of the current one (default or saved).
+    let profile = null;
     if (gamepadId && window.GamepadManager) {
       const current = GamepadManager.hasCustomProfile(gamepadId)
         ? JSON.parse(_safeGet('localStorage', `gamepad-profile:${gamepadId}`))
         : GamepadManager.getDefaultProfile(gamepadId);
-      _wizardGamepadProfile = {
-        name: 'Custom',
-        buttons: { ...current.buttons },
-        axes: JSON.parse(JSON.stringify(current.axes)),
-        axisButtons: JSON.parse(JSON.stringify(current.axisButtons || {})),
-        axisRange: current.axisRange,
-        axisCenter: current.axisCenter,
-        deadzone: current.deadzone || 0.3,
-      };
-    } else {
-      _wizardGamepadProfile = null;
+      profile = _remap.customProfileFrom(current);
     }
 
-    // Initialize keyboard map from current (saved or DEFAULT_N64_KEYMAP)
+    // The keyboard map to edit: the saved one, or the default.
     let savedKb = null;
     try {
       savedKb = JSON.parse(_safeGet('localStorage', 'keyboard-mapping'));
     } catch (_) {}
-    if (savedKb && Object.keys(savedKb).length > 0) {
-      _wizardKeyMap = { ...savedKb };
-    } else {
-      _wizardKeyMap = {
-        67: 0,
-        88: 1,
-        86: 3,
-        38: 4,
-        40: 5,
-        37: 6,
-        39: 7,
-        84: 10,
-        89: 11,
-        90: 12,
-        68: 16,
-        65: 17,
-        83: 18,
-        87: 19,
-        74: 20,
-        76: 21,
-        75: 22,
-        73: 23,
-      };
-    }
 
-    _wizardAxisCaptures = {};
-    _wizardSnapshots = [];
-    _wizardStep = 0;
+    _wizard = _remap.startWizardState(profile, savedKb);
     _wizardActive = true;
     KNState.remapActive = true; // exposed for netplay input suppression
     _wizardInGame = !!inGame;
@@ -4527,16 +4485,7 @@
 
     // Capture baseline gamepad buttons (ignore already-pressed)
     _wizardBaselineButtons = {};
-    if (gamepadId) {
-      const gps = GamepadManager.nativeGetGamepads();
-      for (let gi = 0; gi < gps.length; gi++) {
-        if (gps[gi]) {
-          for (let bi = 0; bi < gps[gi].buttons.length; bi++) {
-            if (gps[gi].buttons[bi].pressed) _wizardBaselineButtons[`${gi}:${bi}`] = true;
-          }
-        }
-      }
-    }
+    if (gamepadId) wizardCaptureBaseline();
 
     // Keyboard listener
     _wizardKeyHandler = (e) => {
@@ -4547,7 +4496,7 @@
       } // Escape
       e.preventDefault();
       if (Date.now() < _wizardDebounce) return;
-      captureKeyboard(e.keyCode);
+      wizardApply({ kind: 'key', keyCode: e.keyCode });
     };
     document.addEventListener('keydown', _wizardKeyHandler, true);
 
@@ -4597,23 +4546,12 @@
   const saveWizard = () => {
     // Save gamepad profile
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
-    if (detected.length > 0 && _wizardGamepadProfile) {
-      // Assemble axis captures into profile
-      for (const groupName in _wizardAxisCaptures) {
-        const cap = _wizardAxisCaptures[groupName];
-        if (cap.index !== undefined && cap.posBit !== undefined && cap.negBit !== undefined) {
-          _wizardGamepadProfile.axes[groupName] = {
-            index: cap.index,
-            bits: [cap.posBit, cap.negBit],
-          };
-        }
-      }
-      GamepadManager.saveGamepadProfile(detected[0].id, _wizardGamepadProfile);
-    }
+    const profile = _remap.finishedProfile(_wizard);
+    if (detected.length > 0 && profile) GamepadManager.saveGamepadProfile(detected[0].id, profile);
 
     // Save keyboard mapping
     try {
-      _safeSet('localStorage', 'keyboard-mapping', JSON.stringify(_wizardKeyMap));
+      _safeSet('localStorage', 'keyboard-mapping', JSON.stringify(_wizard.keyMap));
     } catch (_) {}
     // Tell the netplay engine to re-read its cached keymap so the
     // wizard's binding changes actually reach readLocalInput.
@@ -4637,59 +4575,49 @@
     updateGamepadUI();
   };
 
+  const wizardPromptEl = () => document.getElementById(`${_wizardInGame ? 'ingame-remap' : 'remap'}-prompt`);
+
   const updateWizardPrompt = () => {
     const prefix = _wizardInGame ? 'ingame-remap' : 'remap';
-    const promptEl = document.getElementById(`${prefix}-prompt`);
     const progressEl = document.getElementById(`${prefix}-progress`);
     const backBtn = document.getElementById(`${prefix}-back`);
-    if (promptEl) promptEl.textContent = `${WIZARD_STEPS[_wizardStep].prompt} (gamepad or key)`;
-    if (progressEl) progressEl.textContent = `(${_wizardStep + 1}/${WIZARD_STEPS.length})`;
-    if (backBtn) backBtn.disabled = _wizardStep === 0;
+    const shown = _remap.wizardPrompt(_wizard);
+    const promptEl = wizardPromptEl();
+    if (promptEl) promptEl.textContent = shown.prompt;
+    if (progressEl) progressEl.textContent = shown.progress;
+    if (backBtn) backBtn.disabled = !shown.canGoBack;
   };
 
-  const wizardSaveSnapshot = () => {
-    _wizardSnapshots.push({
-      gamepadProfile: _wizardGamepadProfile ? JSON.parse(JSON.stringify(_wizardGamepadProfile)) : null,
-      keyMap: _wizardKeyMap ? { ..._wizardKeyMap } : null,
-      axisCaptures: JSON.parse(JSON.stringify(_wizardAxisCaptures)),
-    });
-  };
-
-  const wizardAdvance = () => {
+  // Hand one input to the wizard's rules and show what came of it.
+  const wizardApply = (input) => {
+    const outcome = _remap.wizardInput(_wizard, input);
+    _wizard = outcome.state;
+    if (outcome.result === 'ignored') return;
+    if (outcome.result === 'wrong-stick') {
+      const promptEl = wizardPromptEl();
+      if (promptEl) {
+        promptEl.textContent = `Must use same stick as ${outcome.pairName} — try again`;
+        setTimeout(() => {
+          updateWizardPrompt();
+        }, 1000);
+      }
+      return;
+    }
     _wizardDebounce = Date.now() + 150;
-    _wizardStep++;
-    if (_wizardStep >= WIZARD_STEPS.length) {
+    if (outcome.result === 'done') {
       saveWizard();
       return;
     }
-    // Reset baseline for new step
-    _wizardBaselineButtons = {};
-    const gps = GamepadManager.nativeGetGamepads();
-    for (let gi = 0; gi < gps.length; gi++) {
-      if (gps[gi]) {
-        for (let bi = 0; bi < gps[gi].buttons.length; bi++) {
-          if (gps[gi].buttons[bi].pressed) _wizardBaselineButtons[`${gi}:${bi}`] = true;
-        }
-      }
-    }
+    if (input.kind !== 'back') wizardCaptureBaseline();
     updateWizardPrompt();
   };
 
   const wizardBack = () => {
-    if (!_wizardActive || _wizardStep === 0 || _wizardSnapshots.length === 0) return;
-    const snap = _wizardSnapshots.pop();
-    _wizardStep--;
-    _wizardGamepadProfile = snap.gamepadProfile;
-    _wizardKeyMap = snap.keyMap;
-    _wizardAxisCaptures = snap.axisCaptures;
-    _wizardDebounce = Date.now() + 150;
-    updateWizardPrompt();
+    if (_wizardActive) wizardApply({ kind: 'back' });
   };
 
   const wizardSkip = () => {
-    if (!_wizardActive) return;
-    wizardSaveSnapshot();
-    wizardAdvance();
+    if (_wizardActive) wizardApply({ kind: 'skip' });
   };
 
   const wizardPoll = () => {
@@ -4721,7 +4649,7 @@
       }
     }
 
-    const step = WIZARD_STEPS[_wizardStep];
+    const step = _remap.WIZARD_STEPS[_wizard.step];
 
     for (let gi = 0; gi < gps.length; gi++) {
       const gp = gps[gi];
@@ -4731,7 +4659,7 @@
       if (step.type === 'button' || step.type === 'cbutton') {
         for (let bi = 0; bi < gp.buttons.length; bi++) {
           if (gp.buttons[bi].pressed && !_wizardBaselineButtons[`${gi}:${bi}`]) {
-            captureGamepadButton(bi, step);
+            wizardApply({ kind: 'button', index: bi });
             return;
           }
         }
@@ -4743,82 +4671,12 @@
         for (let ai = 0; ai < gp.axes.length; ai++) {
           const val = gp.axes[ai];
           if (Math.abs(val) > dz) {
-            captureGamepadAxis(ai, val > 0, step);
+            wizardApply({ kind: 'axis', index: ai, positive: val > 0 });
             return;
           }
         }
       }
     }
-  };
-
-  const captureGamepadButton = (buttonIndex, step) => {
-    if (!_wizardGamepadProfile) return;
-    wizardSaveSnapshot();
-    _wizardGamepadProfile.buttons[buttonIndex] = 1 << step.bit;
-    wizardAdvance();
-  };
-
-  const captureGamepadAxis = (axisIndex, isPositive, step) => {
-    if (!_wizardGamepadProfile) return;
-    wizardSaveSnapshot();
-
-    if (step.type === 'axis') {
-      const group = step.axisGroup;
-      if (!_wizardAxisCaptures[group]) {
-        _wizardAxisCaptures[group] = {};
-      }
-      const cap = _wizardAxisCaptures[group];
-
-      // Check if partner direction was already captured on a different axis
-      if (cap.index !== undefined && cap.index !== axisIndex) {
-        const prefix = _wizardInGame ? 'ingame-remap' : 'remap';
-        const promptEl = document.getElementById(`${prefix}-prompt`);
-        if (promptEl) {
-          const pairName = group === 'stickY' ? 'UP' : 'LEFT';
-          promptEl.textContent = `Must use same stick as ${pairName} — try again`;
-          setTimeout(() => {
-            updateWizardPrompt();
-          }, 1000);
-        }
-        return;
-      }
-
-      cap.index = axisIndex;
-      if (isPositive) {
-        cap.posBit = step.bit;
-      } else {
-        cap.negBit = step.bit;
-      }
-
-      wizardAdvance();
-    } else if (step.type === 'cbutton') {
-      if (!_wizardGamepadProfile.axisButtons) _wizardGamepadProfile.axisButtons = {};
-      if (!_wizardGamepadProfile.axisButtons[axisIndex]) {
-        _wizardGamepadProfile.axisButtons[axisIndex] = { pos: 0, neg: 0 };
-      }
-      if (isPositive) {
-        _wizardGamepadProfile.axisButtons[axisIndex].pos |= 1 << step.bit;
-      } else {
-        _wizardGamepadProfile.axisButtons[axisIndex].neg |= 1 << step.bit;
-      }
-      wizardAdvance();
-    }
-  };
-
-  const captureKeyboard = (keyCode) => {
-    const step = WIZARD_STEPS[_wizardStep];
-    wizardSaveSnapshot();
-
-    // Remove old entry for this keyCode (key can only map to one function)
-    for (const k in _wizardKeyMap) {
-      if (parseInt(k, 10) === keyCode) {
-        delete _wizardKeyMap[k];
-      }
-    }
-
-    // Add new entry
-    _wizardKeyMap[keyCode] = step.bit;
-    wizardAdvance();
   };
 
   // ── Delay Preference ────────────────────────────────────────────────

@@ -20,6 +20,7 @@ import {
 } from './protocol.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as delay from './play/delay.ts';
+import * as remapWizard from './play/remap-wizard.ts';
 import { newStoredRom, openRomLibrary, romLibraryHtml } from './play/rom-library.ts';
 import { escapeHtml, inviteUrl, roomClosedMessage, rosterToasts } from './play/room-text.ts';
 import {
@@ -184,6 +185,7 @@ export const KNCore = {
     openRomLibrary,
     romLibraryHtml,
     delay,
+    remapWizard,
   },
   protocol: {
     decodeUsersUpdated,
