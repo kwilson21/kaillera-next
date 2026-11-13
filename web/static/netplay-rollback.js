@@ -5068,6 +5068,10 @@
 
   // Lockstep state
   let _lockstepReadyPeers = {}; // remoteSid -> true when peer signals lockstep-ready
+  // Slots of the players who had loaded when this page began the initial
+  // state sync. The ready barrier waits for these and nobody else; a player
+  // who appears later is held as a late joiner (KNCore.heldAsLateJoiner).
+  let _startCohortSlots = null;
   let _startWaitRttLogged = false;
   let _guestStateBytes = null; // decompressed state bytes to load
   let _guestStateKind = 'savestate'; // 'savestate' or 'kn-sync'
@@ -7320,12 +7324,20 @@
     // Late-join: joiner always initiates (host's offer would arrive before listener is ready)
     // Running host: DON'T initiate to new players — let them initiate after their init()
     for (const p of otherPlayers) {
-      const shouldHoldForLateJoin =
-        _phase === PHASE_RUNNING &&
-        !_lateJoin &&
-        !_isSpectator &&
-        _isValidPlayerSlot(p.slot) &&
-        !_slotAlreadyActive(p.slot);
+      // Held in a running match, and also once the initial sync has begun:
+      // that player was not sent the state and the ready barrier must not
+      // wait for them (specs/room_lifecycle.qnt, startIsNotHeldUpByALateJoiner).
+      const running = _phase === PHASE_RUNNING;
+      const syncBegun = !!_startCohortSlots && (_phase === PHASE_SYNCING || _phase === PHASE_LOCKSTEP_READY);
+      const held = window.KNCore?.heldAsLateJoiner
+        ? window.KNCore.heldAsLateJoiner(
+            running,
+            syncBegun,
+            !!_startCohortSlots?.has(p.slot),
+            _slotAlreadyActive(p.slot),
+          )
+        : running && !_slotAlreadyActive(p.slot);
+      const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && held;
 
       const key = _peerKey(p.socketId);
       if (_peers[key]) {
@@ -7360,6 +7372,9 @@
       } else if (_phase === PHASE_RUNNING) {
         shouldInitiate = false;
         reason = 'running — wait for late-joiner offer';
+      } else if (shouldHoldForLateJoin) {
+        shouldInitiate = false;
+        reason = 'initial sync under way — wait for late-joiner offer';
       } else if (_isSpectator) {
         shouldInitiate = false;
         reason = 'spectator never initiates';
@@ -9503,6 +9518,12 @@
 
     if (_phase >= PHASE_SYNCING) return; // guard against re-entrant calls
     _phase = PHASE_SYNCING;
+    // Everyone loaded at this moment starts the match together, including a
+    // player who was held as a late joiner by an earlier sync that timed out.
+    _startCohortSlots = new Set(playerPeers.map((p) => p.slot));
+    for (const [peerSid, p] of Object.entries(_peers)) {
+      if (_startCohortSlots.has(p.slot)) _clearPendingLateJoinPeer(peerSid, p.slot, 'in the start cohort');
+    }
 
     _syncLog(`${readyPeers.length + 1} emulators ready -- syncing initial state`);
     setStatus('Syncing...');
@@ -9540,6 +9561,7 @@
         _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
         _phase = PHASE_EMU_READY; // allow sync retry
         _lockstepReadyPeers = {};
+        _startCohortSlots = null;
       }
     }, syncTimeoutMs);
   };
@@ -9559,9 +9581,12 @@
     if (_phase === PHASE_RUNNING) return;
 
     // Check that at least 1 player peer is lockstep-ready
+    // Not the players held as late joiners: they joined after the initial
+    // sync began, were never sent its state and cannot become ready. Waiting
+    // for them left the match unstarted and their state request unanswered.
     const playerPeerSids = Object.keys(_peers).filter((sid) => {
       const p = _peers[sid];
-      return p.slot !== null && p.slot !== undefined;
+      return p.slot !== null && p.slot !== undefined && !_isPeerPendingLateJoin(sid, p);
     });
     const soloMode = playerPeerSids.length === 0;
     const readyCount = playerPeerSids.filter((sid) => _lockstepReadyPeers[sid]).length;
@@ -13308,6 +13333,7 @@
     _setLastSyncState(null, 'stopSync');
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
+    _startCohortSlots = null;
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};
@@ -17930,6 +17956,7 @@
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
+    _startCohortSlots = null;
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};

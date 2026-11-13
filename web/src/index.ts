@@ -12,6 +12,7 @@ import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { meshHealTargets } from './roster.ts';
+import { heldAsLateJoiner } from './start-cohort.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
   sessionFlag,
@@ -123,6 +124,7 @@ export const KNCore = {
   bootTimedOut,
   createConnectTracker,
   createSession,
+  heldAsLateJoiner,
   meshHealTargets,
   rosterKey,
   startLateJoinWait,

@@ -33,6 +33,9 @@ check room_current pagesAgreeWithServer
 # A joiner asking for state while the others are still loading always has a
 # way forward (violated on room_before_start_fix).
 check room_current joinersAreNotLeftWaitingAtTheStart
+# Players who have synced the start are not held up by someone who joined
+# after the sync began (violated on room_before_start_fix).
+check room_current startIsNotHeldUpByALateJoiner
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
