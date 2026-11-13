@@ -53,3 +53,14 @@ expect_violation "$ROOM" room_before_start_fix startIsNotHeldUpByALateJoiner
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
+
+PAIR=specs/peer_connection.qnt
+verify "$PAIR" peer_connection_fixed allHold
+verify "$PAIR" peer_connection_current holdToday
+# Today's engine: each of these has a counterexample within 5 steps.
+# (neverLeftWithNothingPending is violated too, but its shortest
+# counterexample is longer than this bound; crossedHealOffersTest replays it.)
+expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
+expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
+expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
+expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
