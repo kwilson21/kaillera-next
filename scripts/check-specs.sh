@@ -11,9 +11,11 @@ QUINT="npx quint"
 
 $QUINT typecheck "$SPEC"
 
-# Scenario tests: today's code and the two earlier variants (the scenarios
+# Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend=typescript
+$QUINT test "$SPEC" --main=room_before_resume_flag --backend=typescript
+$QUINT test "$SPEC" --main=room_before_start_fix --backend=typescript
 $QUINT test "$SPEC" --main=room_before_reconcile --backend=typescript
 $QUINT test "$SPEC" --main=room_before_104 --backend=typescript
 
@@ -29,6 +31,15 @@ check() { # module invariant
 check room_current ownerSeesGame
 check room_current lateJoinersChaseTheCurrentMatch
 check room_current pagesAgreeWithServer
+# A joiner asking for state while the others are still loading always has a
+# way forward (violated on room_before_start_fix).
+check room_current joinersAreNotLeftWaitingAtTheStart
+# Players who have synced the start are not held up by someone who joined
+# after the sync began (violated on room_before_start_fix).
+check room_current startIsNotHeldUpByALateJoiner
+# A page whose rejoin the server answered is never left showing a match the
+# room dropped it from (violated on room_before_resume_flag).
+check room_current nobodyIsStrandedInADroppedMatch
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
@@ -55,3 +66,16 @@ for invariant in waitingHasAWayOut timersAloneStop; do
   $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
+# ── Desync digests: which frame a peer may report a hash for ────────────────
+DIGEST=specs/desync_digest.qnt
+$QUINT typecheck "$DIGEST"
+for variant in desync_digest_before desync_digest_lag_only desync_digest_unsimulated \
+  desync_digest_worker_replay desync_digest_current; do
+  $QUINT test "$DIGEST" --main="$variant" --backend=typescript
+done
+# Today: a healthy peer never reports a hash for a frame it may still replay.
+# Violated when the digest is built for the newest frame; with the wait alone,
+# while replays leave the history as first written; when a late joiner
+# reports frames it never simulated; and with the detector on under Mode 2.
+$QUINT run "$DIGEST" --main=desync_digest_current --invariant=neverReportsAnUnconfirmedHash \
+  --max-samples=20000 --max-steps=25 --backend=typescript

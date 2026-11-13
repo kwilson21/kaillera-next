@@ -72,7 +72,10 @@
   let _lastFlagFrame = new Map(); // "field:slot" → frame
   let _heartbeatTimerId = null;
   let _missingExportsLogged = false;
-  let _lastReplayTrajectoryEvent = null;
+  // Frames the engine may still replay (its rollback window). A digest is
+  // built for the frame this far behind the newest one; see tick().
+  let _confirmWindow = 0;
+  let _noDecisionLogged = false;
   const _events = new EventTarget();
 
   /* (Helpers _buildLocalDigest, _broadcastDigest, etc. added in
@@ -153,31 +156,6 @@
     }
   }
 
-  function _firstReplayTrajectoryDivergence(replayStart, replayLength) {
-    if (!_module || typeof _module._kn_get_replay_frame_hash !== 'function') return null;
-    const cappedLength = Math.min(replayLength >>> 0, 64);
-    for (let offset = 0; offset < cappedLength; offset++) {
-      const absoluteFrame = replayStart + offset + 1;
-      for (let fid = 0; fid < FIELD.COUNT; fid++) {
-        const replayHash = _module._kn_get_replay_frame_hash(fid, offset) >>> 0;
-        const forwardHash = _readFieldHash(fid, absoluteFrame) >>> 0;
-        if (replayHash === 0 || forwardHash === 0) continue;
-        if (replayHash !== forwardHash) {
-          return {
-            offset,
-            absoluteFrame,
-            fieldId: fid,
-            field: _FIELD_NAMES[fid],
-            slot: _slotForField(fid),
-            replayHash,
-            forwardHash,
-          };
-        }
-      }
-    }
-    return null;
-  }
-
   function _buildReplayMeta() {
     const m = _module;
     const replayStart = m._kn_get_last_replay_target_frame() | 0;
@@ -198,7 +176,12 @@
       length,
       pre,
       post,
-      firstTrajectoryDivergence: _firstReplayTrajectoryDivergence(replayStart, length),
+      // Always null now. It was the first replay frame whose hash differed
+      // from the forward pass, read from the history rings; a replay now
+      // rewrites those entries (they must hold the confirmed hash), so the
+      // forward pass's value is no longer kept. The key stays for the
+      // server and for peers that decode it.
+      firstTrajectoryDivergence: null,
     };
   }
 
@@ -242,7 +225,8 @@
 
   function _ingestPeerDigest(peerId, payload) {
     if (!payload || typeof payload.frame !== 'number') return;
-    const dropFloor = _localFrameTick - CONFIG.historyDepth;
+    if (!Array.isArray(payload.hashes) || !_hasHistory(payload.hashes)) return;
+    const dropFloor = _localFrameTick - _confirmWindow - CONFIG.historyDepth;
     if (payload.frame < dropFloor) return;
     let perPeer = _peerDigests.get(peerId);
     if (!perPeer) {
@@ -327,8 +311,26 @@
   const IN_GAME_SCENES = new Set([SCENE.IN_GAME_VS]);
   const CSS_PHASE_SCENES = new Set([SCENE.CSS_VS]);
 
-  function _readScenePhase() {
-    return _module && _module._kn_get_scene_curr ? _module._kn_get_scene_curr() : 0;
+  // The scene a digest's frame was in, from its match_phase hash (FNV-1a of
+  // the one scene byte). A digest is for a frame a rollback window old, so
+  // the live scene can already be the next one; gating on that dropped the
+  // character-select fields from the last digests of the character select.
+  // -1 when the hash is of no scene byte (0 = the registry had no entry).
+  const _SCENE_BY_HASH = new Map();
+  for (let scene = 0; scene < 256; scene++) {
+    _SCENE_BY_HASH.set(Math.imul(0x811c9dc5 ^ scene, 0x01000193) >>> 0, scene);
+  }
+  // Whether the registry had an entry for the digest's frame. It returns 0
+  // for a frame this emulator never simulated: after a late join or a
+  // resync loads the host's state at frame F, the frames a rollback window
+  // before F were never run here. FNV-1a of one byte is never 0, so a zero
+  // match_phase hash means "no entry", not a scene; such a digest is neither
+  // sent nor compared.
+  function _hasHistory(hashes) {
+    return hashes[FIELD.MATCH_PHASE] >>> 0 !== 0;
+  }
+  function _sceneOfDigest(hashes) {
+    return _SCENE_BY_HASH.get(hashes[FIELD.MATCH_PHASE] >>> 0) ?? -1;
   }
 
   function _fieldEligibleInPhase(fid, phase) {
@@ -363,7 +365,10 @@
   // same rule, used if the bundle did not load or a peer sent a digest
   // that is not a full array of hashes.
   function _fieldsToFlag(ha, hb, frame) {
-    const phase = _readScenePhase();
+    // The scene the digest's frame was in, not the live one: a digest is a
+    // rollback window old. When the two match_phase hashes differ, that
+    // alone is flagged and the scene is not used.
+    const phase = _sceneOfDigest(ha);
     const decide = window.KNCore?.desyncFieldsToFlag;
     if (decide && Array.isArray(ha) && Array.isArray(hb) && ha.length >= FIELD.COUNT && hb.length >= FIELD.COUNT) {
       const lastFlagged = [];
@@ -430,24 +435,6 @@
     _events.dispatchEvent(new CustomEvent('desync-suspect', { detail: payload }));
   }
 
-  function _maybeEmitReplayTrajectoryEvent(localDigest) {
-    const div = localDigest && localDigest.replayMeta && localDigest.replayMeta.firstTrajectoryDivergence;
-    if (!div) return;
-    const meta = localDigest.replayMeta;
-    const key = `${meta.target}:${meta.final}:${meta.length}:${div.offset}:${div.fieldId}:${div.replayHash}:${div.forwardHash}`;
-    if (key === _lastReplayTrajectoryEvent) return;
-    _lastReplayTrajectoryEvent = key;
-    _emitSuspect({
-      frame: div.absoluteFrame,
-      field: div.field,
-      slot: div.slot,
-      hashes: { replay: div.replayHash, forward: div.forwardHash },
-      trigger: 'replay-trajectory',
-      severity: 'high',
-      replayMeta: meta,
-    });
-  }
-
   function _startHeartbeat() {
     _stopHeartbeat();
     if (_mode !== 'B') return;
@@ -480,12 +467,23 @@
       _peerDigests.clear();
       _localDigests.clear();
       _lastFlagFrame.clear();
+      _noDecisionLogged = false;
       _log(`init mode=${mode}`);
       if (!_enabled) {
         _stopHeartbeat();
         return;
       }
       if (_mode === 'B') _startHeartbeat();
+    },
+
+    // The engine's rollback window in frames, set once it is known
+    // (kn_rollback_init). 0, the default, is right for strict lockstep,
+    // where no frame is simulated on a predicted input.
+    setConfirmWindow(frames) {
+      const n = Number.isInteger(frames) && frames > 0 ? frames : 0;
+      if (n === _confirmWindow) return;
+      _confirmWindow = n;
+      _log(`confirm window=${n}`);
     },
 
     setMode(mode) {
@@ -501,6 +499,7 @@
       _stopHeartbeat();
       _enabled = false;
       _module = null;
+      _confirmWindow = 0;
       _peerDigests.clear();
       _localDigests.clear();
       _lastFlagFrame.clear();
@@ -541,29 +540,41 @@
       // no-op DC and comparisons run against an empty peer-digest map;
       // the work is what we're measuring.
       if (!_hasRealPeer && !window.__knForceDesyncTick) return;
-      // Rate-limit digest BUILD to broadcast cadence + replay-active
-      // frames. Per-frame build was the dominant main-thread cost
-      // (~3-9 ms × 60 Hz on mobile = up to 540 ms/sec at default mode B).
-      // The peer broadcasts only on its own cadence-aligned frames so
-      // any digest we built between cadence frames had nothing to
-      // compare against — wasted CPU. We still build on every replay-
-      // active frame so _maybeEmitReplayTrajectoryEvent's per-replay
-      // detection isn't lost. Detection latency for cross-peer drift
-      // moves from 1 frame (~16 ms) to cadence frames (mode B = 1 frame
-      // unchanged; mode C = 6 frames ≈ 100 ms — still well inside
-      // typical desync timescales).
-      const cadence = CONFIG.digestCadence[_mode];
+      // Which frame to report, if any: KNCore.digestFrame
+      // (web/src/desync-confirm.ts). It is the frame one rollback window
+      // behind this tick, on the broadcast cadence (mode B = every frame;
+      // mode C = every 6th). The newest frame ran on predicted inputs and
+      // may still be replayed, so two healthy peers can hold different
+      // hashes for it; the frame a window back is final, and the registry
+      // rewrites a frame's history when a replay re-simulates it
+      // (specs/desync_digest.qnt). Building on the cadence only also keeps
+      // the cost down: a digest between cadence frames had nothing to
+      // compare against.
+      //
+      // A replay's own trajectory is not flagged. The forward pass ran on a
+      // mispredicted input, so the replay differing from it is what a
+      // rollback is for; flagging it raised a `suspect` (and a canvas
+      // capture in kn-vision-client.js) on healthy matches. The first
+      // divergence still travels in replayMeta with a cross-peer flag.
+      const decide = window.KNCore?.digestFrame;
+      if (typeof decide !== 'function') {
+        if (!_noDecisionLogged) {
+          _noDecisionLogged = true;
+          _log('no digests: KNCore.digestFrame is not loaded');
+        }
+        return;
+      }
       const replayActive = typeof _module._kn_get_replay_depth === 'function' && _module._kn_get_replay_depth() > 0;
-      if (!replayActive && frame % cadence !== 0) return;
-
-      const localDigest = _buildLocalDigest(frame);
-      if (!localDigest) return;
-      _maybeEmitReplayTrajectoryEvent(localDigest);
       if (replayActive) return;
-      _localDigests.set(frame, localDigest);
-      _trimDigestMap(_localDigests, frame - CONFIG.historyDepth);
+      const digestFor = decide(frame, _confirmWindow, CONFIG.digestCadence[_mode]);
+      if (digestFor < 0) return;
+
+      const localDigest = _buildLocalDigest(digestFor);
+      if (!localDigest || !_hasHistory(localDigest.hashes)) return;
+      _localDigests.set(digestFor, localDigest);
+      _trimDigestMap(_localDigests, digestFor - CONFIG.historyDepth);
       _compareAtFrame(localDigest);
-      if (frame % cadence === 0) _broadcastDigest(localDigest);
+      _broadcastDigest(localDigest);
     },
 
     onPeerDigest(peerId, payload) {

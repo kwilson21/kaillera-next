@@ -12,10 +12,10 @@ flowchart LR
   lateJoinStarting -->|"engineStarted: needs state"| lateJoinSyncing
   lateJoinStarting -->|"engineStarted: no state needed<br/>lateJoinSynced"| running
   lateJoinAwaitingRom -->|"lateJoinRomReady"| lateJoinStarting
-  lateJoinSyncing -->|"lateJoinSynced"| running
+  lateJoinSyncing -->|"lateJoinSynced<br/>admittedToStart"| running
 ```
 
-Not drawn, because every state goes to `lobby` on them: `gameEnded`, `roomClosed`, `rejoined: game ended while away`, `rejoined: match replaced while away`.
+Not drawn, because every state goes to `lobby` on them: `gameEnded`, `roomClosed`, `rejoinRefused`, `rejoined: game ended while away`, `rejoined: match replaced while away`.
 Events that leave a state unchanged are not drawn either.
 
 What `play.js` reads from each state (`sessionFlag`):

@@ -6,16 +6,17 @@
  * tell them apart). The scenario tests in tests/ts replay that model's runs
  * against it.
  *
- * Stage 2, in two steps:
+ * Stage 2:
  *  - "Is a game on" is read from this machine. play.js still writes its old
  *    `gameRunning` flag beside it and reports any disagreement
  *    (`session-disagree`) on every signaling reconnect; the flag goes once
  *    production shows none.
  *  - On a signaling reconnect the page reconciles with the server
  *    (`rejoined`): this one decides, there was no rule before it.
- *  - The late-join states observe. play.js still decides from `_lateJoin`
- *    and `_pendingLateJoin` and reports, at each place it reads one, whether
- *    the machine would have answered the same.
+ *  - The late-join states decide too: play.js reads "is the next engine
+ *    start a late join" and "is the page waiting for a ROM" from here. It
+ *    still writes `_lateJoin` and `_pendingLateJoin` beside the machine and
+ *    reports any disagreement at each read; they go with `gameRunning`.
  */
 import { Context, Effect, Schema } from 'effect';
 import { setupEffect } from '@xstate/effect';
@@ -98,6 +99,13 @@ export const sessionMachine = setupEffect({
        * lobby; play.js then does what a fresh join would (web/src/rejoin.ts).
        */
       rejoined: Schema.Struct({ playing: Schema.Boolean, matchId: Schema.NullOr(Schema.String) }),
+      /**
+       * The socket came back but the room has dropped this page (its grace
+       * window ran out) or will not take it back. Its game is over; play.js
+       * then joins again as a fresh page would (web/src/rejoin-attempt.ts;
+       * `returnAfterExpiry` in the Quint model).
+       */
+      rejoinRefused: Empty,
       /** A late joiner has no usable ROM and has been asked for one. */
       lateJoinRomNeeded: Empty,
       /** The ROM question is settled; the late join can go ahead. */
@@ -109,6 +117,12 @@ export const sessionMachine = setupEffect({
         /** This page runs an emulator, so it needs the match state before it is in the game. */
         waitsForState: Schema.Boolean,
       }),
+      /**
+       * The host was not running yet when this joiner asked for state, so the
+       * joiner loads as a player who was there at the start
+       * (web/src/late-join-wait.ts; `admitToStart` in the Quint model).
+       */
+      admittedToStart: Empty,
       /** The late-join state arrived and the emulator is running it. */
       lateJoinSynced: Empty,
       socketDown: Empty,
@@ -133,6 +147,7 @@ export const sessionMachine = setupEffect({
     socketUp: ({ context }) => ({ context: { ...context, socketUp: true } }),
     gameEnded: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
     roomClosed: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
+    rejoinRefused: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
   },
   states: {
     lobby: {
@@ -195,6 +210,7 @@ export const sessionMachine = setupEffect({
         // A game-started for a page already in the match changes nothing but the match id.
         gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
         lateJoinSynced: { target: 'running' },
+        admittedToStart: { target: 'running' },
       },
     },
     running: {

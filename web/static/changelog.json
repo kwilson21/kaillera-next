@@ -1,5 +1,45 @@
 [
   {
+    "version": "0.67.9",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the relay stamps the true sender and pages check it before acting (#149)"
+      }
+    ]
+  },
+  {
+    "version": "0.67.8",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "desync detection runs again (core exports the field hashes) (#143)"
+      }
+    ]
+  },
+  {
+    "version": "0.67.7",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a rejoin after the grace window takes a playing player back, and a refusal is acted on (#144)"
+      }
+    ]
+  },
+  {
+    "version": "0.67.6",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a player who asks for the match state before the host is running joins the start (#125)"
+      }
+    ]
+  },
+  {
     "version": "0.67.5",
     "date": "2026-11-13",
     "changes": [

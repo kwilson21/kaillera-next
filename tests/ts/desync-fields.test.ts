@@ -13,6 +13,7 @@ import {
   fieldsToFlag,
   slotForField,
 } from '../../web/src/desync-fields.ts';
+import { digestFrame } from '../../web/src/desync-confirm.ts';
 import { lcg } from './load-shared.ts';
 
 const never = (): number[] => Array.from({ length: FIELD_COUNT }, () => -1);
@@ -111,26 +112,42 @@ interface DetectorWindow {
 interface Detector {
   init: (module: CoreExports, mode: string) => void;
   tick: (frame: number) => void;
+  setConfirmWindow: (frames: number) => void;
   onPeerDigest: (peerId: string, payload: { frame: number; hashes: number[] }) => void;
   events: EventTarget;
 }
 interface DetectorCore {
-  desyncFieldsToFlag: typeof fieldsToFlag;
+  // Which frame a digest is built for (web/src/desync-confirm.ts). The
+  // detector builds none without it.
+  digestFrame: typeof digestFrame;
+  desyncFieldsToFlag?: typeof fieldsToFlag;
 }
 
 /**
  * Run web/static/kn-desync-detector.js through a scripted match against one
  * peer whose digests now and then differ, and return every suspect it emits.
  */
-const runDetector = (mode: string, isLocalHost: boolean, core?: DetectorCore): Suspect[] => {
-  const source = readFileSync(new URL('../../web/static/kn-desync-detector.js', import.meta.url), 'utf8');
+// The engine's rollback window in the scripted match: digests are for the
+// frame this many ticks back.
+const CONFIRM_WINDOW = 7;
+const DETECTOR = readFileSync(new URL('../../web/static/kn-desync-detector.js', import.meta.url), 'utf8');
+// FNV-1a of one byte: what the core's match_phase hash is for a scene.
+const sceneHash = (scene: number): number => Math.imul(0x811c9dc5 ^ scene, 0x01000193) >>> 0;
+const sceneAt = (frame: number): number => (frame < 500 ? SCENE_CSS_VS : frame < 1200 ? SCENE_IN_GAME_VS : 21);
+
+const runDetector = (
+  mode: string,
+  isLocalHost: boolean,
+  core: DetectorCore = { digestFrame },
+  source: string = DETECTOR,
+): Suspect[] => {
   const slot = isLocalHost ? 1 : 0;
   const state: DetectorState = { isLocalHost, matchId: 'm1', peers: { peerA: { slot } } };
   const window: DetectorWindow = {
     KNState: state,
     _peers: { peerA: { slot, dc: { readyState: 'open', send: () => undefined } } },
   };
-  if (core) window.KNCore = core;
+  window.KNCore = core;
   const context = vm.createContext({
     window,
     KNState: state,
@@ -145,8 +162,10 @@ const runDetector = (mode: string, isLocalHost: boolean, core?: DetectorCore): S
   const detector = window.KNDesync;
   assert.ok(detector, 'kn-desync-detector.js did not define window.KNDesync');
 
-  let scene = 0;
-  const local = (fid: number, frame: number): number => fid * 1000 + (frame % 7) + 1;
+  // The match_phase hash says which scene a frame was in; the detector reads
+  // the scene from the digest, since a digest is a rollback window old.
+  const local = (fid: number, frame: number): number =>
+    fid === MATCH_PHASE_FIELD ? sceneHash(sceneAt(frame)) : fid * 1000 + (frame % 7) + 1;
   const perSlot = (base: number) => (slot: number, frame: number) => local(base + slot, frame);
   const module = {
     _kn_hash_stocks: perSlot(0),
@@ -164,7 +183,7 @@ const runDetector = (mode: string, isLocalHost: boolean, core?: DetectorCore): S
     _kn_get_last_replay_final_frame: () => -1,
     _kn_get_replay_frame_hash: () => 0,
     _kn_get_last_replay_length: () => 0,
-    _kn_get_scene_curr: () => scene,
+    _kn_get_scene_curr: () => sceneAt(0),
   } satisfies CoreExports;
 
   const suspects: Suspect[] = [];
@@ -172,9 +191,9 @@ const runDetector = (mode: string, isLocalHost: boolean, core?: DetectorCore): S
     if (event instanceof CustomEvent) suspects.push(structuredClone(event.detail));
   });
   detector.init(module, mode);
+  detector.setConfirmWindow(CONFIRM_WINDOW);
   const next = lcg(2026);
   for (let frame = 0; frame < 1500; frame++) {
-    scene = frame < 500 ? SCENE_CSS_VS : frame < 1200 ? SCENE_IN_GAME_VS : 21;
     detector.tick(frame);
     const theirs = Array.from({ length: FIELD_COUNT }, (_, fid) => local(fid, frame));
     const r = next() % 100;
@@ -189,43 +208,44 @@ const runDetector = (mode: string, isLocalHost: boolean, core?: DetectorCore): S
 
 const digestOf = (suspects: Suspect[]): string => createHash('sha256').update(JSON.stringify(suspects)).digest('hex');
 
-// What kn-desync-detector.js emitted for this script at ff53345, before its
-// flag decision moved to web/src/desync-fields.ts: the number of suspects
-// and a hash of all of them, per comparison mode.
+// What kn-desync-detector.js on main emitted for this script at 7641b88,
+// where the flag decision was still inline in it (digests for the frame a
+// rollback window back, the scene read from the digest): the number of
+// suspects and a hash of all of them, per comparison mode.
 const GOLDEN: { mode: string; isLocalHost: boolean; count: number; sha256: string }[] = [
   {
     mode: 'B',
     isLocalHost: false,
-    count: 94,
-    sha256: 'a267f5ec6916ab9b2ea3426269f6dcadb71436f47a15d680232e7bd54a97d076',
+    count: 78,
+    sha256: '71e5b5f1133840aeeb800f362e72487d4b3cab7950651b44215f28e69e7894bf',
   },
   {
     mode: 'B',
     isLocalHost: true,
-    count: 94,
-    sha256: 'a267f5ec6916ab9b2ea3426269f6dcadb71436f47a15d680232e7bd54a97d076',
+    count: 78,
+    sha256: '71e5b5f1133840aeeb800f362e72487d4b3cab7950651b44215f28e69e7894bf',
   },
   {
     mode: 'C',
     isLocalHost: true,
-    count: 18,
-    sha256: '45532da945df3ec056849f40b646f0b75b2c43b91383e5994e2f0e0676db777f',
+    count: 15,
+    sha256: 'a178d7d49d4ceb664f72d41666c8189588f37306df39337800366e4ac9af63ad',
   },
   {
     mode: 'C',
     isLocalHost: false,
-    count: 18,
-    sha256: '2512ea6051c127bcd1718d7eee1d2defc16987e7ad42796552417c64c27ab208',
+    count: 15,
+    sha256: 'e3e02985e51c14458cad4e3a315b5a7b342a8c83e978dd9586a6b3a19536175c',
   },
 ];
 
-test('the detector emits what it did before, with and without the bundle', () => {
+test("the detector emits what it did before, with its own rule and with KNCore's", () => {
   for (const g of GOLDEN) {
     const where = `mode ${g.mode}, ${g.isLocalHost ? 'host' : 'guest'}`;
     const builtIn = runDetector(g.mode, g.isLocalHost);
     assert.equal(builtIn.length, g.count, `${where}, built-in rule`);
     assert.equal(digestOf(builtIn), g.sha256, `${where}, built-in rule`);
-    const withCore = runDetector(g.mode, g.isLocalHost, { desyncFieldsToFlag: fieldsToFlag });
+    const withCore = runDetector(g.mode, g.isLocalHost, { digestFrame, desyncFieldsToFlag: fieldsToFlag });
     assert.deepStrictEqual(withCore, builtIn, `${where}, KNCore rule`);
     assert.ok(g.count > 10, `${where}: the script should produce suspects to compare`);
   }
@@ -234,6 +254,7 @@ test('the detector emits what it did before, with and without the bundle', () =>
 test('the detector asks KNCore for the decision when the bundle is loaded', () => {
   let calls = 0;
   runDetector('B', false, {
+    digestFrame,
     desyncFieldsToFlag: (...args) => {
       calls++;
       return fieldsToFlag(...args);

@@ -164,8 +164,8 @@ All events go through the default Socket.IO namespace (`/`).
 
 | Event | Direction | Payload | Description |
 |---|---|---|---|
-| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id}, password, maxPlayers}` | Create room |
-| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}, password}` | Join/spectate |
+| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id, fresh, resume, slot, matchId}, password, maxPlayers}` | Create room (`fresh`: the page has no game running; `resume`: it has one, in `slot` of `matchId`, and is taking its place back. A player the room dropped is taken back into that match and slot, or refused with `Not in room`) |
+| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate, resume, slot, matchId}, password}` | Join/spectate (`resume`, `slot`, `matchId` as for `open-room`) |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
 | `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
@@ -176,7 +176,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `set-game-id` | client→server | `{game_id}` | Host updates game_id after ROM identification |
 | `webrtc-signal` | bidirectional | `{target, offer/answer/candidate/reconnect/requestRenegotiate}` | WebRTC relay |
 | `rom-signal` | bidirectional | `{target, ...}` | Pre-game ROM transfer signaling |
-| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max) |
+| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max). The server stamps every relayed `data-message`, `snapshot` and `input` with `knFrom: {sid, slot, owner}`, the true sender; pages check it (`KNCore.checkRelayed`) |
 | `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
 | `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |

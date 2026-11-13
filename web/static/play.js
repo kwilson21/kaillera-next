@@ -174,16 +174,18 @@
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _emulatorBootInFlight = false; // true while ejs-loader is creating a fresh instance
   let _pendingLateJoin = false; // waiting for ROM before late-join init
-  // The machine mirrors the two late-join flags as states and is told of
-  // every change; each read below also asks it whether it would have said
-  // the same (session-disagree), so they can move into it once it does.
+  // The machine has the two late-join flags as states and is told of every
+  // change. It decides: each read below returns what the machine says. The
+  // old flags are still written beside it and compared at every read
+  // (session-disagree); they go once production shows no disagreement.
   const _setPendingLateJoin = (pending) => {
     _pendingLateJoin = pending;
     _session?.send({ type: pending ? 'lateJoinRomNeeded' : 'lateJoinRomReady' });
   };
+  // Is the next engine start a late join?
+  const _isLateJoin = () => (_session ? _session.decide('lateJoin', _lateJoin) : _lateJoin);
   const _isPendingLateJoin = () => {
-    _session?.check('pendingLateJoin', _pendingLateJoin);
-    return _pendingLateJoin;
+    return _session ? _session.decide('pendingLateJoin', _pendingLateJoin) : _pendingLateJoin;
   };
   // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
   const _ROM_SHARING_FEATURE = window.KN_CONFIG?.romSharingEnabled !== false;
@@ -711,6 +713,9 @@
     });
     socket.on('disconnect', (reason) => {
       _session?.send({ type: 'socketDown' });
+      // A rejoin in flight belongs to the socket that just went; the next
+      // connect starts its own.
+      _cancelRejoin();
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       if (reason === 'io client disconnect') return;
       // Show spinner banner after brief delay (lobby and in-game)
@@ -892,9 +897,30 @@
     if (verdict === 'keep') return;
     console.log('[play] rejoin: the room moved on while the socket was down:', verdict);
     KNEvent('rejoin-reconciled', '', { verdict });
-    onGameEnded({ matchId: KNState.matchId });
+    onGameEnded({ matchId: KNState.matchId, leftByMachine: true });
     // The room is playing another match: join it as a fresh page would.
     if (verdict === 'matchReplaced') onConnect(false);
+  };
+
+  // The room no longer counts this page as a member (its socket was down for
+  // longer than the grace window, or the room is gone), so the game it is
+  // showing is over for it. End it and join again as a fresh page would:
+  // that lands in the lobby or on the late-join path of the match in play,
+  // or shows the player why it cannot get back in.
+  let _rejoin = null;
+  const _cancelRejoin = () => {
+    _rejoin?.cancel();
+    _rejoin = null;
+  };
+  const _leaveDroppedGame = (reason) => {
+    console.log('[play] mid-game rejoin refused:', reason);
+    KNEvent('rejoin-refused', '', { reason });
+    onGameEnded({ matchId: KNState.matchId, reason: 'dropped' });
+    // The match itself may still be on, and this page may be about to join
+    // it again: its real game-ended must not be taken for a repeat.
+    _lastHandledGameEndMatchId = null;
+    _session?.send({ type: 'rejoinRefused' });
+    onConnect(false);
   };
 
   const onConnect = async (isReconnect = false) => {
@@ -923,16 +949,49 @@
               reconnectToken: _reconnectToken,
             },
           };
-      socket.emit(rejoinEvent, payload, (err, room) => {
-        if (err) console.log('[play] mid-game rejoin failed:', err);
-        else console.log('[play] mid-game rejoin succeeded');
+      // `resume` tells the server this page still has a game running, in
+      // which slot and which match. If the room dropped it while its socket
+      // was down, the server takes it back into that match and slot, or
+      // refuses; it never lets it in as a new player or opens a new room.
+      payload.extra.resume = true;
+      payload.extra.slot = isSpectator || mySlot === null || mySlot === undefined ? null : mySlot;
+      payload.extra.matchId = KNState.matchId || '';
+      _cancelRejoin();
+      const rejoin = window.KNCore.startRejoin({
+        send: (answer) => socket.emit(rejoinEvent, payload, answer),
+        answerWithinMs: 5000,
+        retryAfterMs: 2000,
+        attempts: 4,
+      });
+      _rejoin = rejoin;
+      rejoin.outcome.then((outcome) => {
+        // An answer for a rejoin that is no longer the current one (its game
+        // ended, or a newer connect replaced it) changes nothing.
+        if (_rejoin !== rejoin) return;
+        _rejoin = null;
+        if (outcome.kind === 'noAnswer') {
+          // Reported, not acted on: the socket says it is connected, and if
+          // it drops, the next connect starts a new rejoin.
+          console.log('[play] mid-game rejoin: no answer from the server');
+          KNEvent('rejoin-no-answer', '', {});
+          return;
+        }
+        if (outcome.kind === 'dropped') {
+          _leaveDroppedGame(outcome.reason);
+          return;
+        }
+        console.log('[play] mid-game rejoin succeeded');
         sendDeviceType();
-        if (!err && isReconnect) resumeRomTransferAfterReconnect();
+        // A player taken back after its grace window ran out is on a new
+        // socket the server has no ROM report for: without this the next
+        // start would wait for a ROM everybody already has.
+        if (localRomLoaded()) notifyRomReady();
+        if (isReconnect) resumeRomTransferAfterReconnect();
         // join-room's reconnect path says what the room is doing now. (The
         // host's open-room does not: only the host starts and ends games, so
         // its page cannot fall behind while it is still the owner.)
-        if (!err && rejoinEvent === 'join-room') _protocol?.checkAck('join-room', room);
-        if (!err && room?.status) _reconcileAfterRejoin(room);
+        if (rejoinEvent === 'join-room') _protocol?.checkAck('join-room', outcome.room);
+        if (outcome.room?.status) _reconcileAfterRejoin(outcome.room);
       });
       return;
     }
@@ -954,6 +1013,17 @@
           maxPlayers: 4,
         },
         (err) => {
+          if (err === 'Not the owner') {
+            // This page's URL says host, but the room is in play and belongs
+            // to someone else now (this player was dropped mid-match, the
+            // room was handed on, and it was taken back as a player). Come
+            // in the way any other player does.
+            console.log('[play] open-room: not the owner of a room in play, joining instead');
+            isHost = false;
+            KNState.isLocalHost = false;
+            onConnect(false);
+            return;
+          }
           if (err) {
             showError(`Failed to create room: ${err}`);
             return;
@@ -1220,6 +1290,10 @@
                 return;
               }
 
+              // A page that was in the lobby (it has just caught up with a
+              // match that replaced the one it was in) still has the lobby
+              // overlay up; a fresh page does not.
+              hideOverlay();
               showToolbar();
               initEngine();
               return;
@@ -1485,7 +1559,11 @@
   const onGameEnded = (data = {}) => {
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (endedMatchId && _lastHandledGameEndMatchId === endedMatchId) return;
-    if (!isGameRunning() && !engine && !_lateJoin && !_isPendingLateJoin()) return;
+    // Nothing to end if no game is on for this page. A caller that has
+    // already moved the machine to the lobby (a reconnect that found the
+    // game over) says so, because the machine can no longer answer whether
+    // there is a game to clean up.
+    if (!data?.leftByMachine && !isGameRunning() && !engine && !_isLateJoin() && !_isPendingLateJoin()) return;
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
     _endGameInFlight = false;
     console.log(
@@ -1496,12 +1574,15 @@
       `romBlobUrl=${!!_romBlobUrl}`,
       `matchId=${endedMatchId || 'none'}`,
     );
+    _cancelRejoin();
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
     _pageGameRunning = false;
     _lateJoin = false;
     _pendingLateJoin = false;
-    showToast('The host has ended the game');
+    showToast(
+      data?.reason === 'dropped' ? 'You were disconnected for too long. Rejoining...' : 'The host has ended the game',
+    );
     if (engine) {
       engine.stop();
       engine = null;
@@ -1512,6 +1593,7 @@
     if (gameEl) gameEl.classList.remove('kn-playing');
     dismissGameLoading();
     hideToolbar();
+    _clearLateJoinRomPrompt();
     showOverlay();
     // Refresh player list with latest data (device/input types may have
     // been updated during gameplay while updatePlayerList was skipped)
@@ -1534,6 +1616,7 @@
   };
 
   const onRoomClosed = (data) => {
+    _cancelRejoin();
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'roomClosed' });
     _pageGameRunning = false;
@@ -1636,6 +1719,19 @@
 
   const onDataMessage = (data) => {
     if (!data || typeof data !== 'object' || typeof data.type !== 'string') return;
+    // Any room member can write to the server's relay, so who sent a message
+    // is the server's stamp (KNCore.checkRelayed, web/src/relay.ts), not
+    // what the message says: `mode-select` is taken only from the room's
+    // owner, and `rom-accepted` starts a transfer to the socket that really
+    // sent it. A message with no stamp comes from a server older than the
+    // stamp and is handled as before: server and pages deploy together, and
+    // a member cannot remove a stamp the server adds. A stamped message this
+    // page cannot check (the bundle did not load) is refused.
+    const checkRelayed = window.KNCore?.checkRelayed;
+    if (!checkRelayed && Object.hasOwn(data, 'knFrom')) return;
+    const from = checkRelayed ? checkRelayed(data) : null;
+    if (from && !from.allowed) return;
+    if (from?.stamped) data = { ...data, sender: from.sid };
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
       const incoming = normalizeMode(data.mode);
@@ -1991,22 +2087,7 @@
     dc.bufferedAmountLowThreshold = 256 * 1024;
     _romTransferDCs[peerSid] = dc;
 
-    dc.onopen = () => {
-      console.log('[play] pre-game rom-transfer DC open to', peerSid);
-      // Always wait for receiver's rom-resume message with offset.
-    };
-    dc.onmessage = (e) => {
-      if (typeof e.data === 'string') {
-        _protocol?.peerText('rom-transfer', e.data);
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'rom-resume' && msg.offset >= 0) {
-            console.log('[play] pre-game ROM resume from offset', msg.offset);
-            sendRomOverChannel(dc, peerSid, msg.offset);
-          }
-        } catch (_) {}
-      }
-    };
+    answerRomResumeOn(dc, peerSid, 'pre-game ');
     dc.onclose = () => {
       delete _romTransferDCs[peerSid];
       if (_preGamePCs[peerSid]) {
@@ -2052,6 +2133,25 @@
 
   // ── ROM Transfer: Host sending ──────────────────────────────────────
 
+  // The sender waits for the receiver's rom-resume, which names the offset to
+  // send from. KNCore.createRomResumeAnswerer keeps a request that arrives
+  // before this side's channel reports open and answers it on open
+  // (web/src/rom-resume.ts).
+  const answerRomResumeOn = (dc, peerSid, label) => {
+    const answer = window.KNCore.createRomResumeAnswerer((offset) => {
+      console.log(`[play] ${label}ROM resume requested from offset`, offset);
+      sendRomOverChannel(dc, peerSid, offset);
+    });
+    dc.onopen = () => {
+      console.log(`[play] ${label}rom-transfer DC open to`, peerSid);
+      answer.channelOpened();
+    };
+    dc.onmessage = (e) => {
+      if (typeof e.data === 'string') _protocol?.peerText('rom-transfer', e.data);
+      answer.received(e.data, dc.readyState === 'open');
+    };
+  };
+
   const startRomTransferTo = (peerSid) => {
     // A server with ROM sharing off never sends a ROM, on any connection.
     if (!_ROM_SHARING_FEATURE || !_romBlob || !isHost) return;
@@ -2070,23 +2170,7 @@
     dc.bufferedAmountLowThreshold = 256 * 1024;
     _romTransferDCs[peerSid] = dc;
 
-    dc.onopen = () => {
-      console.log('[play] rom-transfer DC open to', peerSid);
-      // Always wait for receiver's rom-resume message with offset.
-      // This prevents double-sending when the guest also signals rom-resume.
-    };
-    dc.onmessage = (e) => {
-      if (typeof e.data === 'string') {
-        _protocol?.peerText('rom-transfer', e.data);
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'rom-resume' && msg.offset >= 0) {
-            console.log('[play] ROM resume requested from offset', msg.offset);
-            sendRomOverChannel(dc, peerSid, msg.offset);
-          }
-        } catch (_) {}
-      }
-    };
+    answerRomResumeOn(dc, peerSid, '');
     dc.onclose = () => {
       delete _romTransferDCs[peerSid];
     };
@@ -3443,7 +3527,7 @@
 
     const resyncEnabled = _gameResyncEnabled;
 
-    _session?.check('lateJoin', _lateJoin);
+    const lateJoin = _isLateJoin();
     engine = Engine;
     engine.init({
       socket,
@@ -3511,7 +3595,13 @@
         }
       },
       initialPlayers: lastUsersData,
-      lateJoin: _lateJoin,
+      lateJoin,
+      // The host had not started running, so this page loads as a player
+      // who was there at the start instead of waiting for state.
+      onLateJoinAdmitted: () => {
+        _sessionStopLateJoinPoll();
+        _session?.send({ type: 'admittedToStart' });
+      },
     });
     _lateJoin = false;
     _session?.send({
@@ -3680,6 +3770,22 @@
 
   // ── Late-Join ROM Prompt ─────────────────────────────────────────────
 
+  // Undo showLateJoinRomPrompt: take its message away and show the lobby's
+  // sections again. Also run when the game ends under the prompt, which
+  // used to leave a lobby with only the ROM drop zone and "Game in progress".
+  const _clearLateJoinRomPrompt = () => {
+    const msg = document.getElementById('late-join-msg');
+    if (msg) msg.parentNode.removeChild(msg);
+    const overlay = document.getElementById('overlay');
+    if (!overlay) return;
+    const sections = overlay.querySelectorAll(
+      '.card-section, .card-header, #host-controls, #guest-status, #leave-btn, #engine-status',
+    );
+    for (const section of sections) {
+      section.style.display = '';
+    }
+  };
+
   const showLateJoinRomPrompt = () => {
     // Show the overlay with only the ROM drop zone visible
     const overlay = document.getElementById('overlay');
@@ -3733,21 +3839,8 @@
       return;
     }
 
-    // Remove the late-join message
-    const msg = document.getElementById('late-join-msg');
-    if (msg) msg.parentNode.removeChild(msg);
-
-    // Restore all sections visibility
-    const overlay = document.getElementById('overlay');
-    if (overlay) {
-      overlay.classList.add('hidden');
-      const sections = overlay.querySelectorAll(
-        '.card-section, .card-header, #host-controls, #guest-status, #leave-btn, #engine-status',
-      );
-      for (const section of sections) {
-        section.style.display = '';
-      }
-    }
+    _clearLateJoinRomPrompt();
+    document.getElementById('overlay')?.classList.add('hidden');
 
     // Ensure _lateJoin is set — dismissLateJoinPrompt only runs for mid-game
     // joins. The flag may have been consumed by a prior initEngine() call

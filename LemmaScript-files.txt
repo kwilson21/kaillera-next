@@ -1,6 +1,7 @@
 web/src/roster.ts
 web/src/peer-identity.ts
 web/src/rejoin.ts
+web/src/start-cohort.ts
 web/src/input-wire.ts
 web/src/flush-fit.ts
 web/src/runner-step.ts
@@ -9,3 +10,5 @@ web/src/desync-fields.ts
 web/src/diagnostics.ts
 web/src/play/remap-step.ts
 web/src/play/rom-transfer-step.ts
+web/src/relay-sender.ts
+web/src/desync-confirm.ts

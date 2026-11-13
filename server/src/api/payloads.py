@@ -85,6 +85,13 @@ class OpenRoomExtra(BaseModel):
     # reload. A page whose socket merely reconnected under a running game
     # leaves it False (as do clients from before the field existed).
     fresh: bool = False
+    # A page that still has a game running, taking its place in the room back
+    # after a socket drop; `slot` and `matchId` say what it is playing. The
+    # rule is the one on JoinRoomExtra. A dropped host that is taken back
+    # comes back as a player: the room was handed on when it was dropped.
+    resume: bool = False
+    slot: int | None = Field(default=None, ge=0, le=3)
+    matchId: str = Field(default="", max_length=64)
 
 
 class OpenRoomPayload(BaseModel):
@@ -102,6 +109,18 @@ class JoinRoomExtra(BaseModel):
     reconnectToken: str = ""
     player_name: str = Field(default="Player", max_length=32)
     spectate: bool = False
+    # `resume` is true when the page still has a game running and is taking
+    # its place in the room back after a socket drop; `slot` and `matchId`
+    # are the slot it plays and the match it is in. A member is taken back as
+    # always. A player the room dropped meanwhile (the grace window ran out)
+    # may still be playing, since the players' connections are their own: it
+    # is taken back into that slot if the room is still playing that match
+    # and the slot is free, and refused with NOT_IN_ROOM otherwise, so the
+    # page ends its game instead of carrying on with no signaling
+    # (specs/room_lifecycle.qnt, nobodyIsStrandedInADroppedMatch).
+    resume: bool = False
+    slot: int | None = Field(default=None, ge=0, le=3)
+    matchId: str = Field(default="", max_length=64)
 
 
 class JoinRoomPayload(BaseModel):
@@ -346,6 +365,23 @@ class TokenMessage(_ServerMessage):
     """`upload-token` and `reconnect-token`."""
 
     token: str
+
+
+class RelaySender(_ServerMessage):
+    """Who sent a relayed `data-message`, `snapshot` or `input`, as the server knows it.
+
+    The server puts it on every message it relays, under `knFrom`
+    (`RELAY_SENDER_KEY`), replacing anything the sender put there. The rest
+    of a relayed message is the sender's own words.
+    """
+
+    sid: str
+    # None for a spectator, and for a player holding no slot.
+    slot: int | None
+    owner: bool
+
+
+RELAY_SENDER_KEY = "knFrom"
 
 
 # Each event the server sends with a payload of its own making, and its model.

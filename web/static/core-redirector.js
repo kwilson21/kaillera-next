@@ -111,6 +111,11 @@
             .filter(
               (db) =>
                 db.name &&
+                // Never the player's cartridge saves: Emscripten's IDBFS
+                // names its database after its mount point, and EmulatorJS
+                // mounts the save directory at /data/saves. A new core does
+                // not change the save format.
+                db.name !== '/data/saves' &&
                 (db.name.includes('emulator') ||
                   db.name.includes('EJS') ||
                   db.name.includes('ejs') ||

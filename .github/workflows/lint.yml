@@ -123,6 +123,8 @@ jobs:
           uv run --directory server --frozen --extra dev pytest --noconftest -p no:playwright -q \
             ../tests/test_session_reports.py \
             ../tests/test_host_reload.py \
+            ../tests/test_resume_refused.py \
+            ../tests/test_relay_sender.py \
             ../tests/test_schema.py \
             ../tests/test_query_builder.py \
             ../tests/test_room_logic.py \

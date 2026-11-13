@@ -9,6 +9,7 @@ import { bootTimedOut } from './boot.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
+import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import {
   decodeGameEnded,
@@ -38,12 +39,17 @@ import {
 } from './play/rom.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts';
+import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
+import { startRejoin } from './rejoin-attempt.ts';
+import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
 import { createStickDeadband } from './stick-deadband.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
+import { createRomResumeAnswerer } from './rom-resume.ts';
+import { heldAsLateJoiner } from './start-cohort.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
   sessionFlag,
@@ -124,6 +130,15 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
     gameOn: (): boolean => sessionFlag(state(), 'gameRunning'),
     check,
     /**
+     * What the machine says one of the page's flags is. The machine decides;
+     * the page passes the flag it still keeps beside it, and a disagreement
+     * is reported so production can show when that flag can be deleted.
+     */
+    decide: (name: SessionCheck, page: boolean): boolean => {
+      check(name, page);
+      return sessionFlag(state(), name);
+    },
+    /**
      * Called when the signaling socket comes back: does the machine agree
      * with the `gameRunning` flag play.js still keeps beside it? The machine
      * decides either way; a disagreement is reported so production can show
@@ -157,6 +172,7 @@ export const KNCore = {
   axisSign,
   bootTimedOut,
   classifyRunnerStep,
+  checkRelayed,
   createConnectTracker,
   createSession,
   createStickDeadband,
@@ -169,10 +185,15 @@ export const KNCore = {
   hashPixels,
   inputEqual,
   measureCanvasHealth,
+  digestFrame,
+  createRomResumeAnswerer,
+  heldAsLateJoiner,
   meshHealTargets,
   normalizeAxis,
   rosterKey,
   screenshotCrop,
+  startLateJoinWait,
+  startRejoin,
   shouldResumeRomTransfer,
   /** The play page's own logic, moving here from web/static/play.js piece by piece. */
   play: {

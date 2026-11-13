@@ -25,6 +25,18 @@
  *   late-join-two-player  a third player joins a two-player match in play
  *   missed-game-end   a guest's signaling is down while the host ends the
  *                     game; on reconnect it must return to the lobby
+ *   missed-game-end-at-rom-prompt  the same for a guest that joined mid-game
+ *                     and is still being asked for a ROM (no engine yet)
+ *   missed-new-match  the same, and the host starts another game before the
+ *                     guest is back; on reconnect it must join the new match.
+ *                     The host waits for the guest to load before it runs, so
+ *                     the guest must be let into the start, not left asking
+ *                     for a state nobody has yet
+ *   dropped-rejoin    a guest's signaling is down for longer than the server's
+ *                     grace window, so the room drops it while the match goes
+ *                     on over the players' own connections; on reconnect it
+ *                     must be taken back and neither page may leave the match
+ *   dropped-host      the same for the host, whose room is handed to the guest
  *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
@@ -49,6 +61,10 @@ const SCENARIOS = [
   'late-join-shared',
   'late-join-two-player',
   'missed-game-end',
+  'missed-game-end-at-rom-prompt',
+  'missed-new-match',
+  'dropped-rejoin',
+  'dropped-host',
   'streaming-join',
   'spectate',
   'host-reload',
@@ -65,6 +81,7 @@ if (!ROM || !fs.existsSync(ROM)) {
 fs.mkdirSync(OUT, { recursive: true });
 
 const BLIP_MS = 3000;
+const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
 const browser = await chromium.launch({
@@ -120,6 +137,16 @@ const openPlayer = async (label, query) => {
   page.on('requestfailed', (request) => {
     console.log(`[${label}] request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText})`);
   });
+  // KN_CONSOLE=1 prints each page's console, for working out why a scenario
+  // failed. The play page silences console.log outside debug mode, so the
+  // original is pinned first; debug mode itself would change what runs.
+  if (process.env.KN_CONSOLE) {
+    await ctx.addInitScript(() => {
+      const log = console.log;
+      Object.defineProperty(console, 'log', { configurable: true, get: () => log, set: () => {} });
+    });
+    page.on('console', (m) => console.log(`[${label}] ${m.text().slice(0, 300)}`));
+  }
   const signaling = { down: false, sockets: [] };
   await page.routeWebSocket(/socket\.io/, (ws) => {
     if (signaling.down) {
@@ -222,6 +249,39 @@ const checkpoint = async (name, expectations, failures, log) => {
   }
 };
 
+const playersInRoom = async (room) => {
+  const res = await fetch(`${URL}/room/${room}`);
+  return res.ok ? (await res.json()).player_count : 0;
+};
+
+// One player's signaling stays down past the server's grace window, so the
+// room drops it while the match goes on over the players' own connections.
+// When the socket returns the player must be taken back into the room and
+// neither page may leave the match.
+const droppedPlayerReturns = async (room, failures, log, who) => {
+  const [host, guest] = await startTwoPlayerGame(room, failures);
+  const dropped = who === 'host' ? host : guest;
+  await cutSignaling(dropped);
+  await dropped.page.waitForTimeout(SERVER_GRACE_MS + 8000);
+  if ((await playersInRoom(room)) !== 1) failures.push(`the room did not drop the ${who} after its grace window`);
+  dropped.signaling.down = false;
+  if (!(await waitUntil(async () => (await playersInRoom(room)) === 2, 60000)))
+    failures.push(`the ${who} was not taken back into the room`);
+  if (await countOf(dropped, 'rejoin-refused')) failures.push(`the ${who}'s rejoin was refused`);
+  if ((await lobbyShownOn(host)) || (await lobbyShownOn(guest))) failures.push('a page left the match');
+  if (!(await waitForFrames([host, guest], 120, 120000))) failures.push('the game stopped advancing after the return');
+  await checkpoint(
+    `after the dropped ${who} returned`,
+    [
+      { player: host, lobby: false },
+      { player: guest, lobby: false },
+    ],
+    failures,
+    log,
+  );
+  return [host, guest];
+};
+
 const loadRom = (player) => player.page.locator("#rom-drop input[type='file']").setInputFiles(ROM);
 
 const startSoloGame = async (room, mode = 'rollback') => {
@@ -232,6 +292,8 @@ const startSoloGame = async (room, mode = 'rollback') => {
   await host.page.click('#start-btn');
   return host;
 };
+
+const matchOf = (player) => player.page.evaluate(() => window.KNState?.matchId ?? null);
 
 const startTwoPlayerGame = async (room, failures) => {
   const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
@@ -493,6 +555,79 @@ const scenarios = {
       [
         { player: host, lobby: true },
         { player: guest, lobby: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'dropped-rejoin': async (room, failures, log) => droppedPlayerReturns(room, failures, log, 'guest'),
+  'dropped-host': async (room, failures, log) => droppedPlayerReturns(room, failures, log, 'host'),
+
+  'missed-game-end-at-rom-prompt': async (room, failures, log) => {
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+    // The guest joins mid-game with no ROM: it is asked for one and has no engine yet.
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+    const before = await countOf(guest, 'reconnect');
+    await cutSignaling(guest);
+    await endGame(host);
+    if (!(await waitUntil(() => lobbyShownOn(host), 30000))) failures.push('the host never returned to the lobby');
+    guest.signaling.down = false;
+    if (!(await waitUntil(async () => (await countOf(guest, 'reconnect')) > before, 40000)))
+      failures.push('the guest never reconnected');
+    await guest.page.waitForTimeout(3000);
+    // The page must have dropped its late join: a ROM loaded now is a ROM
+    // for the lobby, not the start of a late join into a game that is over.
+    await loadRom(guest);
+    await guest.page.waitForTimeout(8000);
+    if (!(await lobbyShownOn(guest))) failures.push('the guest started a late join into a game that had ended');
+    if (await guest.page.locator('#late-join-msg').count())
+      failures.push('the guest is still showing the late-join prompt');
+    if ((await frameOf(guest)) > 0) failures.push('the guest booted an emulator for a game that had ended');
+    await checkpoint(
+      'after the guest caught up at the ROM prompt',
+      [
+        { player: host, lobby: true },
+        { player: guest, lobby: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'missed-new-match': async (room, failures, log) => {
+    const [host, guest] = await startTwoPlayerGame(room, failures);
+    const firstMatch = await matchOf(guest);
+    await cutSignaling(guest);
+    await endGame(host);
+    if (!(await waitUntil(() => lobbyShownOn(host), 30000))) failures.push('the host never returned to the lobby');
+    // The host starts again while the guest is still out. It will not run a
+    // frame until the guest has loaded: the room still lists the guest.
+    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await host.page.click('#start-btn');
+    if (!(await waitUntil(async () => ![null, firstMatch].includes(await matchOf(host)), 60000)))
+      failures.push('the host never started the second match');
+    const secondMatch = await matchOf(host);
+
+    guest.signaling.down = false;
+    const running = await waitUntil(async () => {
+      for (const p of [host, guest]) await clickGesturePrompt(p);
+      return (await matchOf(guest)) === secondMatch && (await frameOf(guest)) > 60 && (await frameOf(host)) > 60;
+    }, 480000);
+    if (!running)
+      failures.push(
+        `the new match never ran for both (guest in ${await matchOf(guest)} at frame ${await frameOf(guest)}, ` +
+          `host at frame ${await frameOf(host)})`,
+      );
+    await checkpoint(
+      'after the guest joined the new match',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
       ],
       failures,
       log,

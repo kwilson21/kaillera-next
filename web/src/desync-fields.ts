@@ -11,7 +11,7 @@
  *     nothing else is compared for the frame: every other field would differ
  *     for the same reason.
  *   - Otherwise each differing field is flagged if it means something in the
- *     current scene (stocks only in a battle, cursors only on the character
+ *     scene of that frame (stocks only in a battle, cursors only on the character
  *     select screen) and it was not flagged in the last `dedupWindow` frames.
  *
  * Verified with LemmaScript (Dafny backend; see LemmaScript-files.txt): a
@@ -71,7 +71,9 @@ export function fieldEligibleInPhase(fid: number, phase: number): boolean {
  * The fields to flag for one pair of digests of frame `frame`.
  *
  * @param ha, hb        the two peers' hashes, indexed by field id
- * @param phase         the scene this peer is in
+ * @param phase         the scene the digests' frame was in (read from the
+ *                      digest, which is a rollback window old; unused when
+ *                      the peers disagree on the match phase)
  * @param lastFlagged   the frame each field was last flagged on, -1 if never
  * @param dedupWindow   frames a flagged field stays quiet for
  */

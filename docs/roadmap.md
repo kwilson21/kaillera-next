@@ -183,11 +183,34 @@ host reload) all show no `session-disagree`.
   machine) and returns to the lobby, or rejoins the new match, when the room
   moved on without it. `pagesAgreeWithServer` and
   `lateJoinersChaseTheCurrentMatch` now hold on `room_current`.
-- Next: the rejoin itself is still a bare callback with no timeout or retry,
-  and a rejoin the server refuses (the grace window ran out) is only logged.
-  It becomes Effect logic invoked by the machine.
-- Then: `play.js` reads the late-join flags from the machine and the old
-  flags are deleted, once the reports above stay empty.
+- Done: a joiner who asks for the match state before the host is running
+  is admitted to the start instead of waiting for ever (host replies
+  `join-the-start`). The joiner's wait is the first Effect program in the
+  engine's path (`web/src/late-join-wait.ts`): repeated request, a race
+  between the two answers, a deadline with a recovery action, cancelled when
+  the engine stops. `joinersAreNotLeftWaitingAtTheStart` holds on
+  `room_current`.
+- Done: the rejoin after a socket drop is an Effect program
+  (`web/src/rejoin-attempt.ts`): each attempt has a deadline, an unanswered
+  or rate-limited attempt is repeated, and every ending is an outcome the
+  page handles. The rejoin says it is a resume and names its slot and match
+  (`extra.resume`, `slot`, `matchId`). A player the server dropped while its
+  socket was down (the grace window ran out) may still be playing over the
+  players' own connections: the server takes it back into the same match
+  and slot, and refuses otherwise, in which case the page ends its game and
+  joins again as a fresh page would (`rejoinRefused` in the machine).
+  `nobodyIsStrandedInADroppedMatch` holds on `room_current`. The program is
+  started by `play.js` when the socket connects, not yet invoked by the
+  machine. A dropped host that is taken back returns as a player; whether
+  it should get the room back is undecided.
+- Done: `play.js` reads the two late-join flags from the machine
+  (`_session.decide`). The old `_lateJoin` and `_pendingLateJoin` are still
+  written beside it and compared at every read, like `gameRunning`.
+  Production had no matches to show agreement, so the evidence is every
+  two-emulator scenario in `tests/lifecycle-e2e.mjs` reporting no
+  `session-disagree`.
+- Then: delete the three old flags once production shows no
+  `session-disagree`.
 - Still open in the model: `noGhostMatch` (a playing room whose only member
   is a late joiner waiting for state).
 

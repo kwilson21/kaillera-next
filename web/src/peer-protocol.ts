@@ -31,6 +31,10 @@ const TEXT_GRAMMAR = {
     'late-join-pause': '',
     'late-join-resume': '',
     'late-join-ready': '',
+    // A waiting late joiner says so on its own channels; the host answers a
+    // too-early state request by letting it into the start (#125).
+    'late-joiner': '',
+    'join-the-start': '',
     leaving: '',
     'peer-resumed': '',
     // roster:<frame>:<slot>,<slot>,...   (no slots: the part after the colon is empty)
