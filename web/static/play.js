@@ -879,6 +879,20 @@
     }
   };
 
+  // This page's socket was down, so it heard none of the room's broadcasts.
+  // If the game ended meanwhile, or was replaced by a new match, catch up:
+  // the rule is KNCore's reconcileRejoin (web/src/rejoin.ts), modelled as
+  // `reconciled` in specs/room_lifecycle.qnt.
+  const _reconcileAfterRejoin = (room) => {
+    const verdict = _session?.rejoined({ playing: room.status === 'playing', matchId: room.matchId ?? null }) ?? 'keep';
+    if (verdict === 'keep') return;
+    console.log('[play] rejoin: the room moved on while the socket was down:', verdict);
+    KNEvent('rejoin-reconciled', '', { verdict });
+    onGameEnded({ matchId: KNState.matchId });
+    // The room is playing another match: join it as a fresh page would.
+    if (verdict === 'matchReplaced') onConnect(false);
+  };
+
   const onConnect = async (isReconnect = false) => {
     // Mid-game reconnect: silently rejoin signaling channel, don't reset UI
     if (isGameRunning()) {
@@ -905,11 +919,15 @@
               reconnectToken: _reconnectToken,
             },
           };
-      socket.emit(rejoinEvent, payload, (err) => {
+      socket.emit(rejoinEvent, payload, (err, room) => {
         if (err) console.log('[play] mid-game rejoin failed:', err);
         else console.log('[play] mid-game rejoin succeeded');
         sendDeviceType();
         if (!err && isReconnect) resumeRomTransferAfterReconnect();
+        // join-room's reconnect path says what the room is doing now. (The
+        // host's open-room does not: only the host starts and ends games, so
+        // its page cannot fall behind while it is still the owner.)
+        if (!err && room?.status) _reconcileAfterRejoin(room);
       });
       return;
     }

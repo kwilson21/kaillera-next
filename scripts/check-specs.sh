@@ -11,10 +11,10 @@ QUINT="npx quint"
 
 $QUINT typecheck "$SPEC"
 
-# Scenario tests: today's code, the proposed reconnect fix, and the code
-# before #104 (hostReloadTest shows what that fix changed).
+# Scenario tests: today's code and the two earlier variants (the scenarios
+# show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend=typescript
-$QUINT test "$SPEC" --main=room_fixed --backend=typescript
+$QUINT test "$SPEC" --main=room_before_reconcile --backend=typescript
 $QUINT test "$SPEC" --main=room_before_104 --backend=typescript
 
 check() { # module invariant
@@ -22,15 +22,13 @@ check() { # module invariant
     --max-samples=20000 --max-steps=25 --backend=typescript
 }
 
-# Today: no reachable state has the host in the lobby of a playing room.
+# Today: the host is never in the lobby of a playing room; a late joiner
+# always joins the match the server is running; every connected page agrees
+# with the server about lobby vs playing. The last two were violated before
+# the page reconciled on reconnect (room_before_reconcile).
 check room_current ownerSeesGame
-
-# With the reconnect fix (a page follows the status and match id its rejoin
-# returns), these hold as well. Both are violated by today's code; see the
-# properties section of the spec.
-check room_fixed ownerSeesGame
-check room_fixed lateJoinersChaseTheCurrentMatch
-check room_fixed pagesAgreeWithServer
+check room_current lateJoinersChaseTheCurrentMatch
+check room_current pagesAgreeWithServer
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt

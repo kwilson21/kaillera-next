@@ -23,6 +23,10 @@
  *   late-join-shared  the guest has no ROM and accepts the host's: its engine
  *                     first connects only to receive the ROM, then late-joins
  *   late-join-two-player  a third player joins a two-player match in play
+ *   missed-game-end   a guest's signaling is down while the host ends the
+ *                     game; on reconnect it must return to the lobby
+ *   missed-new-match  the same, and the host starts another game before the
+ *                     guest is back; on reconnect it must join the new match
  *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
@@ -46,6 +50,8 @@ const SCENARIOS = [
   'late-join-cached',
   'late-join-shared',
   'late-join-two-player',
+  'missed-game-end',
+  'missed-new-match',
   'streaming-join',
   'spectate',
   'host-reload',
@@ -176,13 +182,17 @@ const waitUntil = async (probe, timeoutMs) => {
  * closed, with an application close code, so the server sees the client go.
  * Returns how many reconnects the page recorded afterwards.
  */
-const blip = async (player) => {
-  const before = await countOf(player, 'reconnect');
+const cutSignaling = async (player) => {
   player.signaling.down = true;
   for (const { page: pageSide, server } of player.signaling.sockets.splice(0)) {
     await server.close({ code: 4000, reason: 'signaling down (test)' });
     await pageSide.close({ code: 4000, reason: 'signaling down (test)' });
   }
+};
+
+const blip = async (player) => {
+  const before = await countOf(player, 'reconnect');
+  await cutSignaling(player);
   await player.page.waitForTimeout(BLIP_MS);
   player.signaling.down = false;
   await waitUntil(async () => (await countOf(player, 'reconnect')) > before, 40000);
@@ -224,6 +234,20 @@ const startSoloGame = async (room, mode = 'rollback') => {
   await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
   await host.page.click('#start-btn');
   return host;
+};
+
+const matchOf = (player) => player.page.evaluate(() => window.KNState?.matchId ?? null);
+
+const startTwoPlayerGame = async (room, failures) => {
+  const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
+  await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+  const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+  await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+  for (const p of [host, guest]) await loadRom(p);
+  await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+  await host.page.click('#start-btn');
+  if (!(await waitForFrames([host, guest], 120, 180000))) failures.push('the two-player game never started');
+  return [host, guest];
 };
 
 const endGame = async (host) => {
@@ -455,6 +479,61 @@ const scenarios = {
       log,
     );
     return [host, watcher];
+  },
+
+  'missed-game-end': async (room, failures, log) => {
+    const [host, guest] = await startTwoPlayerGame(room, failures);
+    // The guest hears nothing from the server from here on.
+    await cutSignaling(guest);
+    await endGame(host);
+    if (!(await waitUntil(() => lobbyShownOn(host), 30000))) failures.push('the host never returned to the lobby');
+    await guest.page.waitForTimeout(5000);
+    if (await lobbyShownOn(guest)) failures.push('the guest left the game before its socket came back');
+
+    guest.signaling.down = false;
+    if (!(await waitUntil(() => lobbyShownOn(guest), 60000)))
+      failures.push('the guest stayed in a game the host had ended');
+    await checkpoint(
+      'after the guest caught up',
+      [
+        { player: host, lobby: true },
+        { player: guest, lobby: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'missed-new-match': async (room, failures, log) => {
+    const [host, guest] = await startTwoPlayerGame(room, failures);
+    const firstMatch = await matchOf(guest);
+    await cutSignaling(guest);
+    await endGame(host);
+    if (!(await waitUntil(() => lobbyShownOn(host), 30000))) failures.push('the host never returned to the lobby');
+    // The host starts again while the guest is still out.
+    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await host.page.click('#start-btn');
+    if (!(await waitUntil(async () => (await matchOf(host)) !== firstMatch && (await frameOf(host)) > 60, 180000)))
+      failures.push('the host never started the second match');
+    const secondMatch = await matchOf(host);
+
+    guest.signaling.down = false;
+    const joined = await waitUntil(async () => {
+      for (const p of [host, guest]) await clickGesturePrompt(p);
+      return (await matchOf(guest)) === secondMatch && (await frameOf(guest)) > 0;
+    }, 420000);
+    if (!joined) failures.push(`the guest never joined the new match (it is in ${await matchOf(guest)})`);
+    await checkpoint(
+      'after the guest joined the new match',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
   },
 
   'host-reload': async (room, failures, log) => {

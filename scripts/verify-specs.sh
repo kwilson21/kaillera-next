@@ -44,8 +44,8 @@ expect_violation "$PEERS" peer_identity_untagged neverEvictsLiveConnection
 
 ROOM=specs/room_lifecycle.qnt
 verify "$ROOM" room_current ownerSeesGame
-verify "$ROOM" room_fixed ownerSeesGame
-verify "$ROOM" room_fixed lateJoinersChaseTheCurrentMatch
-verify "$ROOM" room_fixed pagesAgreeWithServer
-# The known violations of the last two on room_current need 7 to 8 steps
-# (found at 8 in ~4 minutes), beyond this bound; check-specs.sh documents them.
+verify "$ROOM" room_current lateJoinersChaseTheCurrentMatch
+verify "$ROOM" room_current pagesAgreeWithServer
+# Before the page reconciled on reconnect, the last two have counterexamples
+# 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
+# check-specs.sh samples deep enough to reach them.

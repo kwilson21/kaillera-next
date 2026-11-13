@@ -139,6 +139,9 @@ _VALID_EVENT_TYPES = {
     "milestone_reached",
     "peer_left",
     "peer_reconnected",
+    # play.js caught up with the room after a signaling reconnect: the game
+    # had ended, or been replaced, while its socket was down.
+    "rejoin-reconciled",
     # Reports from the page lifecycle machine (web/src/session.ts). Every
     # SessionReport type must be listed: tests/test_session_reports.py.
     "session-disagree",

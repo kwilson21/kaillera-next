@@ -177,13 +177,15 @@ host reload) all show no `session-disagree`.
   (LemmaScript) and the reconnect orderings are model-checked in
   `specs/peer_identity.qnt`, which reproduces #119 and its review finding on
   the older variants.
-- Next: reconcile on reconnect. Today a page rejoins silently after a socket
-  drop and keeps whatever it was doing; the model shows that leaves a page in
-  a game the server has ended, or joining a match that has been replaced
-  (`pagesAgreeWithServer`, `lateJoinersChaseTheCurrentMatch`, both violated
-  in `room_current` and holding in `room_fixed`). The rejoin becomes a machine
-  event carrying the server's status and match id, handled as Effect logic
-  with a timeout and retry instead of a bare callback.
+- Done: reconcile on reconnect. A guest whose socket comes back compares
+  itself with the status and match id the rejoin returns
+  (`reconcileRejoin` in `web/src/rejoin.ts`, proved; `rejoined` in the
+  machine) and returns to the lobby, or rejoins the new match, when the room
+  moved on without it. `pagesAgreeWithServer` and
+  `lateJoinersChaseTheCurrentMatch` now hold on `room_current`.
+- Next: the rejoin itself is still a bare callback with no timeout or retry,
+  and a rejoin the server refuses (the grace window ran out) is only logged.
+  It becomes Effect logic invoked by the machine.
 - Then: `play.js` reads the late-join flags from the machine and the old
   flags are deleted, once the reports above stay empty.
 - Still open in the model: `noGhostMatch` (a playing room whose only member
