@@ -9,16 +9,11 @@
 
   const { get: safeGet, set: safeSet, remove: safeRemove } = KNStorage;
 
-  // The shape and starting values are KNCore.initialKNState
-  // (web/src/kn-state.ts), where each field is typed. The literal below is
-  // the same state, for a page that does not load the bundle (the demo
-  // page); tests/ts/kn-state.test.ts holds the two to the same fields.
-  const initial = window.KNCore?.initialKNState;
-  if (initial) {
-    window.KNState = initial(KNStorage);
-    return;
-  }
-
+  // The fields below are typed, with the same starting values, as PageState
+  // and initialKNState in web/src/kn-state.ts; tests/ts/kn-state.test.ts
+  // fails if the two differ. This script runs before the TypeScript bundle
+  // on purpose: core-redirector.js reads KNState from a fetch callback, so
+  // the state must exist before anything large is loaded.
   window.KNState = {
     // ── Cross-module state ──
     // Each property replaces a former window.* global.

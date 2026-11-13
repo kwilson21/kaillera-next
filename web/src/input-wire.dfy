@@ -88,6 +88,12 @@ function inputEqual(a: WireInput, b: WireInput): bool
   (((((a.buttons == b.buttons) && (a.lx == b.lx)) && (a.ly == b.ly)) && (a.cx == b.cx)) && (a.cy == b.cy))
 }
 
+lemma inputEqual_ensures(a: WireInput, b: WireInput)
+  ensures (inputEqual(a, b) == (((((a.buttons == b.buttons) && (a.lx == b.lx)) && (a.ly == b.ly)) && (a.cx == b.cx)) && (a.cy == b.cy)))
+  ensures ((a == b) ==> inputEqual(a, b))
+{
+}
+
 function sameRecord(a: FrameInput, b: FrameInput): bool
 {
   ((((((a.frame == b.frame) && (a.buttons == b.buttons)) && (a.lx == b.lx)) && (a.ly == b.ly)) && (a.cx == b.cx)) && (a.cy == b.cy))

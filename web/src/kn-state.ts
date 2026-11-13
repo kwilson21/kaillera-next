@@ -1,7 +1,9 @@
 /**
  * `window.KNState`: the state the plain-script pages share between modules,
- * in place of scattered `window.*` globals. This file is its shape and its
- * starting values; web/static/kn-state.js puts it on the window.
+ * in place of scattered `window.*` globals. This file is its type and its
+ * starting values, for TypeScript modules that read the state.
+ * web/static/kn-state.js builds the object itself, before the bundle loads,
+ * and tests/ts/kn-state.test.ts holds the two to the same fields and values.
  *
  * Each field has one or two writers and a few readers, named beside it. The
  * engines are "the engine" below whichever mode is running.
@@ -11,8 +13,8 @@
 export interface PeerView {
   /** The player slot, or null for a spectator. */
   slot: number | null;
-  /** The peer's data channel, once it exists. */
-  dc?: { readyState: string };
+  /** The peer's data channel; null until it exists. */
+  dc?: { readyState: string } | null;
   /** A simulated peer (the demo page), with no real connection. */
   synthetic?: boolean;
 }
