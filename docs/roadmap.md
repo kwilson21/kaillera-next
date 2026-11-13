@@ -210,6 +210,15 @@ relays) are described in `web/src/peer-protocol.ts` and checked the same way;
 DataChannel strings are sampled (the first 16 of each kind) because they
 arrive on the tick path. The per-frame input packet is `input-wire.ts`.
 
+`play.js` is moving to `web/src/play/*.ts` in slices, each read back through
+`window.KNCore.play`. Moved: ROM identity (`rom.ts`: host ROM from a payload,
+identity key, size text, hash and hash comparison, ROM out of an archive) and
+room text (`room-text.ts`: HTML escaping, closed-room message, invite links,
+join/leave toasts). Next, in order of how little shared state they touch:
+the ROM library (IndexedDB), delay preference and advanced options, the remap
+wizard, toasts and the More menu, ROM transfer. Last: connect, the game
+lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
+
 **Stage 4: engine periphery**
 `shared.js` (input wire format; prove encode/decode round-trips with
 LemmaScript), `kn-state.js`, `gamepad-manager.js`, `kn-diagnostics.js`,
