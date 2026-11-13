@@ -89,6 +89,31 @@ test('an if on a constant takes the branch the module instance takes', () => {
   assert.deepEqual(before[0]?.steps, ['openRoom("host")', 'join("guest", true)', 'startGame', 'endGame', 'stutter']);
 });
 
+test('a .then() may spread its argument over several lines', () => {
+  const spec = `
+module room {
+  run spreadTest =
+    init
+      .then(openRoom("host"))
+      .then(
+        if (FIXED)
+          admit("guest")
+            .then(beginSync)
+        else
+          endGame
+            .then(leave("guest"))
+      )
+      .expect(status == "lobby")
+
+  val unrelated = true
+}
+module room_fixed { import room(FIXED = true).* }
+module room_before { import room(FIXED = false).* }
+`;
+  assert.deepEqual(runScenarios(spec, 'room_fixed')[0]?.steps, ['openRoom("host")', 'admit("guest")', 'beginSync']);
+  assert.deepEqual(runScenarios(spec, 'room_before')[0]?.steps, ['openRoom("host")', 'endGame', 'leave("guest")']);
+});
+
 test('a branch that cannot be decided is an error, not a guess', () => {
   assert.throws(() => runScenarios(SPEC, 'room_fixed'), /cannot tell which branch/);
 });

@@ -293,13 +293,19 @@ export const runScenarios = (source: string, main: string): RunScenario[] => {
   lines.forEach((line, at) => {
     const name = /^\s*run (\w+) =\s*$/.exec(line)?.[1];
     if (name === undefined) return;
+    // The run goes on to the next blank line, comment, definition or closing
+    // brace; a `.then(` may spread its argument over several lines.
     const body: string[] = [];
-    for (let i = at + 1; i < lines.length && /^\s+(init\b|\.)/.test(lines[i] ?? ''); i += 1) body.push(lines[i] ?? '');
+    for (let i = at + 1; i < lines.length; i += 1) {
+      const part = (lines[i] ?? '').trim();
+      if (part === '' || part === '}' || /^(\/\/|run |val |def |action |pure )/.test(part)) break;
+      body.push(part);
+    }
     const comment: string[] = [];
     for (let i = at - 1; i >= 0 && /^\s*\/\//.test(lines[i] ?? ''); i -= 1) {
       comment.unshift((lines[i] ?? '').replace(/^\s*\/\/ ?/, ''));
     }
-    const { args } = thens(body.map((part) => part.trim()).join(''));
+    const { args } = thens(body.join(' '));
     scenarios.push({
       name,
       comment: comment.join(' '),
