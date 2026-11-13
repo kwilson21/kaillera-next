@@ -2027,32 +2027,19 @@
   // ── ROM Transfer: Host sending ──────────────────────────────────────
 
   // The sender waits for the receiver's rom-resume, which names the offset to
-  // send from (this also stops a double send when the guest signals twice).
-  // That message can be delivered before this side's channel reports open.
-  // Sending then throws, so the request is kept and answered on open;
-  // dropping it left the receiver waiting for a ROM for ever.
+  // send from. KNCore.createRomResumeAnswerer keeps a request that arrives
+  // before this side's channel reports open and answers it on open
+  // (web/src/rom-resume.ts).
   const answerRomResumeOn = (dc, peerSid, label) => {
-    let resumeOffsetBeforeOpen = null;
+    const answer = window.KNCore.createRomResumeAnswerer((offset) => {
+      console.log(`[play] ${label}ROM resume requested from offset`, offset);
+      sendRomOverChannel(dc, peerSid, offset);
+    });
     dc.onopen = () => {
       console.log(`[play] ${label}rom-transfer DC open to`, peerSid);
-      if (resumeOffsetBeforeOpen === null) return;
-      const offset = resumeOffsetBeforeOpen;
-      resumeOffsetBeforeOpen = null;
-      sendRomOverChannel(dc, peerSid, offset);
+      answer.channelOpened();
     };
-    dc.onmessage = (e) => {
-      if (typeof e.data !== 'string') return;
-      let msg;
-      try {
-        msg = JSON.parse(e.data);
-      } catch (_) {
-        return;
-      }
-      if (msg.type !== 'rom-resume' || !(msg.offset >= 0)) return;
-      console.log(`[play] ${label}ROM resume requested from offset`, msg.offset);
-      if (dc.readyState === 'open') sendRomOverChannel(dc, peerSid, msg.offset);
-      else resumeOffsetBeforeOpen = msg.offset;
-    };
+    dc.onmessage = (e) => answer.received(e.data, dc.readyState === 'open');
   };
 
   const startRomTransferTo = (peerSid) => {

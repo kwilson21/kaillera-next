@@ -20,6 +20,7 @@ import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { meshHealTargets } from './roster.ts';
+import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
@@ -134,6 +135,7 @@ export const KNCore = {
   createSession,
   decodeInput,
   encodeInput,
+  createRomResumeAnswerer,
   heldAsLateJoiner,
   meshHealTargets,
   rosterKey,
