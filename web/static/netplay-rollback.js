@@ -6958,12 +6958,7 @@
     _awaitingLateJoinState = true;
     _declareLateJoiner();
     setStatus('Requesting game state...');
-    const start = window.KNCore?.startLateJoinWait;
-    if (!start) {
-      _sendLateJoinRequest();
-      return;
-    }
-    const wait = start({
+    const wait = window.KNCore.startLateJoinWait({
       request: _sendLateJoinRequest,
       retryEveryMs: LATE_JOIN_WAIT_RETRY_MS,
       timeoutMs: LATE_JOIN_WAIT_TIMEOUT_MS,
@@ -7221,56 +7216,28 @@
     const sid = p.socketId;
     // The decision is KNCore.rosterKey (web/src/peer-identity.ts), whose
     // search for a live connection of the same player is proved, and whose
-    // orderings are model-checked in specs/peer_identity.qnt. The code below
-    // it is the same rule, used only if the bundle did not load.
-    const decide = window.KNCore?.rosterKey;
-    if (decide) {
-      const connections = Object.entries(_peers).map(([key, peer]) => ({
-        key,
-        slot: peer.slot,
-        persistentId: peer.persistentId || '',
-        live: _peerConnectionLive(peer),
-      }));
-      const previouslyKnown = Object.entries(prevKnown).map(([key, info]) => ({
-        key,
-        persistentId: info.persistentId || '',
-        socketId: info.socketId,
-      }));
-      const key = decide(
-        { persistentId: pid, socketId: sid, slot: p.slot },
-        sid === socket?.id,
-        connections,
-        previouslyKnown,
-      );
-      if (key !== sid && prevKnown[key]?.socketId !== sid) {
-        _syncLog(`onUsersUpdated: slot ${p.slot} is ${sid} on the server now; keeping connection ${key}`);
-      }
-      return key;
+    // orderings are model-checked in specs/peer_identity.qnt.
+    const connections = Object.entries(_peers).map(([key, peer]) => ({
+      key,
+      slot: peer.slot,
+      persistentId: peer.persistentId || '',
+      live: _peerConnectionLive(peer),
+    }));
+    const previouslyKnown = Object.entries(prevKnown).map(([key, info]) => ({
+      key,
+      persistentId: info.persistentId || '',
+      socketId: info.socketId,
+    }));
+    const key = window.KNCore.rosterKey(
+      { persistentId: pid, socketId: sid, slot: p.slot },
+      sid === socket?.id,
+      connections,
+      previouslyKnown,
+    );
+    if (key !== sid && prevKnown[key]?.socketId !== sid) {
+      _syncLog(`onUsersUpdated: slot ${p.slot} is ${sid} on the server now; keeping connection ${key}`);
     }
-    if (sid === socket?.id || _peers[sid]) return sid;
-    for (const [key, info] of Object.entries(prevKnown)) {
-      if (info.persistentId !== pid || key === sid) continue;
-      const peer = _peers[key];
-      if (!peer || peer.slot !== p.slot) continue;
-      // Already mapped to this id: keep it, even while the connection
-      // recovers (an ICE reconnect isn't connected yet).
-      if (info.socketId === sid) return key;
-      if (_peerConnectionLive(peer)) {
-        _syncLog(`onUsersUpdated: slot ${p.slot} reconnected to the server as ${sid}; keeping connection ${key}`);
-        return key;
-      }
-    }
-    // The player was missing from the last roster (their signaling was down
-    // when ours came back), so prevKnown no longer lists them. The connection
-    // itself remembers whose it is.
-    for (const [key, peer] of Object.entries(_peers)) {
-      if (key === sid || peer.persistentId !== pid || peer.slot !== p.slot) continue;
-      if (_peerConnectionLive(peer)) {
-        _syncLog(`onUsersUpdated: slot ${p.slot} rejoined the room as ${sid}; keeping connection ${key}`);
-        return key;
-      }
-    }
-    return sid;
+    return key;
   };
 
   // Record on each player connection which player (persistentId) it belongs
@@ -7359,14 +7326,12 @@
       // wait for them (specs/room_lifecycle.qnt, startIsNotHeldUpByALateJoiner).
       const running = _phase === PHASE_RUNNING;
       const syncBegun = !!_startCohortSlots && (_phase === PHASE_SYNCING || _phase === PHASE_LOCKSTEP_READY);
-      const held = window.KNCore?.heldAsLateJoiner
-        ? window.KNCore.heldAsLateJoiner(
-            running,
-            syncBegun,
-            !!_startCohortSlots?.has(p.slot),
-            _slotAlreadyActive(p.slot),
-          )
-        : running && !_slotAlreadyActive(p.slot);
+      const held = window.KNCore.heldAsLateJoiner(
+        running,
+        syncBegun,
+        !!_startCohortSlots?.has(p.slot),
+        _slotAlreadyActive(p.slot),
+      );
       const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && held;
 
       const key = _peerKey(p.socketId);
@@ -9292,15 +9257,14 @@
       // Terminal boot deadline (I1). A stalled boot gets 300 polls (~30s); one
       // whose frame count is still advancing is slow, not stuck, and keeps
       // waiting up to a hard cap. The rule is KNCore.bootTimedOut
-      // (web/src/boot.ts); without the bundle the fixed 300-poll limit applies.
+      // (web/src/boot.ts).
       const bootNowMs = performance.now();
       if (!_bootPollStartedAt) _bootPollStartedAt = bootNowMs;
-      const bootGaveUp =
-        window.KNCore?.bootTimedOut?.({
-          polls: _bootPollCount,
-          elapsedMs: bootNowMs - _bootPollStartedAt,
-          sinceProgressMs: bootNowMs - _bootFrameProgressAt,
-        }) ?? _bootPollCount > 300;
+      const bootGaveUp = window.KNCore.bootTimedOut({
+        polls: _bootPollCount,
+        elapsedMs: bootNowMs - _bootPollStartedAt,
+        sinceProgressMs: bootNowMs - _bootFrameProgressAt,
+      });
       if (bootGaveUp) {
         _syncLog(`boot timed out after ${_bootPollCount} polls`);
         setStatus('Emulator failed to start — try reloading the page');
