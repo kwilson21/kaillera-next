@@ -417,33 +417,17 @@
   _safeSet('sessionStorage', 'kn-player-id', _persistentId);
   let _reconnectToken = _safeGet('sessionStorage', 'kn-reconnect-token') || '';
 
-  const _escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => _escapeMap[c]);
-
-  const formatRomSize = (bytes) => {
-    const n = Number(bytes);
-    if (!Number.isFinite(n) || n <= 0) return '';
-    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(n >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
-    if (n >= 1024) return `${Math.round(n / 1024)} KB`;
-    return `${n} B`;
-  };
-
-  const hostRomIdentityKey = (hash, name, size) => {
-    if (hash) return `h:${hash}:${size ?? ''}`;
-    if (name || size !== null) return `n:${name || ''}:${size ?? ''}`;
-    return '';
-  };
-
-  const hostRomFromData = (data) => {
-    const hostRom = data?.hostRom || {};
-    const size = data?.romSize ?? data?.rom_size ?? hostRom.size ?? null;
-    return {
-      hash: data?.romHash ?? data?.rom_hash ?? hostRom.hash ?? null,
-      name: data?.romName ?? data?.rom_name ?? hostRom.name ?? null,
-      size: size === null || size === undefined ? null : Number(size),
-      gameId: data?.gameId ?? data?.game_id ?? hostRom.gameId ?? hostRom.game_id ?? null,
-    };
-  };
+  // Moved to TypeScript (web/src/play/): this page reads them from the core
+  // bundle, which play.html loads just before this file.
+  const {
+    escapeHtml,
+    formatRomSize,
+    hostRomFromData,
+    hostRomIdentityKey,
+    romHashMismatch,
+    roomClosedMessage,
+    rosterToasts,
+  } = window.KNCore.play;
 
   const hostRomDisplayName = () => {
     if (_hostRomHash && _knownRoms[_hostRomHash]?.game) return _knownRoms[_hostRomHash].game;
@@ -1259,13 +1243,6 @@
 
   // ── Users Updated ──────────────────────────────────────────────────────
 
-  const roomClosedMessage = (hostName) => {
-    const host = (hostName || '').trim();
-    return host
-      ? `${host}'s room has closed. Rooms live only while someone's in them. Ask ${host} for a new link, or open your own.`
-      : "This room has closed. Rooms live only while someone's in them. Ask for a new link, or open your own.";
-  };
-
   const onUsersUpdated = (data) => {
     lastUsersData = data;
     if (data.listed !== undefined) {
@@ -1401,29 +1378,7 @@
   };
 
   const diffForToasts = (players, spectators) => {
-    // Skip first update
-    if (Object.keys(previousPlayers).length === 0 && Object.keys(previousSpectators).length === 0) return;
-
-    for (const pid in players) {
-      if (!previousPlayers[pid] && !previousSpectators[pid]) {
-        showToast(`${escapeHtml(players[pid].playerName)} joined`);
-      }
-    }
-    for (const pid in previousPlayers) {
-      if (!players[pid] && !spectators[pid]) {
-        showToast(`${escapeHtml(previousPlayers[pid].playerName)} left`);
-      }
-    }
-    for (const pid in spectators) {
-      if (!previousSpectators[pid] && !previousPlayers[pid]) {
-        showToast(`${escapeHtml(spectators[pid].playerName)} is watching`);
-      }
-    }
-    for (const pid in previousSpectators) {
-      if (!spectators[pid] && !players[pid]) {
-        showToast(`${escapeHtml(previousSpectators[pid].playerName)} left`);
-      }
-    }
+    for (const toast of rosterToasts(previousPlayers, previousSpectators, players, spectators)) showToast(toast);
   };
 
   // ── Game Lifecycle ─────────────────────────────────────────────────────
@@ -3186,54 +3141,11 @@
 
   // ── ZIP extraction ────────────────────────────────────────────────────
 
-  const _ROM_EXTS = ['.z64', '.n64', '.v64', '.ndd'];
+  const extractRomFromZip = async (arrayBuffer) =>
+    window.KNCore.play.romFromArchive(fflate.unzipSync(new Uint8Array(arrayBuffer)));
 
-  const extractRomFromZip = async (arrayBuffer) => {
-    const data = new Uint8Array(arrayBuffer);
-    const entries = fflate.unzipSync(data);
+  const hashArrayBuffer = (buf) => window.KNCore.play.hashRom(buf);
 
-    for (const [fileName, fileData] of Object.entries(entries)) {
-      const lower = fileName.toLowerCase();
-      if (_ROM_EXTS.some((ext) => lower.endsWith(ext)) && fileData.length > 0) {
-        const baseName = fileName.split('/').pop();
-        return { name: baseName, data: fileData };
-      }
-    }
-
-    return null;
-  };
-
-  const hashArrayBuffer = async (buf) => {
-    // crypto.subtle requires a secure context (HTTPS or localhost).
-    // On LAN IPs over HTTP, fall back to FNV-1a.
-    // Prefix with algorithm tag so cross-context comparisons can detect
-    // mismatched algorithms and skip the check instead of false-alarming.
-    if (window.crypto?.subtle) {
-      const digest = await crypto.subtle.digest('SHA-256', buf);
-      const arr = new Uint8Array(digest);
-      let hex = '';
-      for (const byte of arr) {
-        hex += `0${byte.toString(16)}`.slice(-2);
-      }
-      return `S${hex}`;
-    }
-    // Fallback: FNV-1a 64-bit (good enough for mismatch detection)
-    const bytes = new Uint8Array(buf);
-    let h1 = 0x811c9dc5 >>> 0;
-    let h2 = 0x811c9dc5 >>> 0;
-    for (let i = 0; i < bytes.length; i++) {
-      if (i & 1) {
-        h1 = (h1 ^ bytes[i]) >>> 0;
-        h1 = Math.imul(h1, 0x01000193) >>> 0;
-      } else {
-        h2 = (h2 ^ bytes[i]) >>> 0;
-        h2 = Math.imul(h2, 0x01000193) >>> 0;
-      }
-    }
-    return `F${'00000000'.concat(h1.toString(16)).slice(-8)}${'00000000'.concat(h2.toString(16)).slice(-8)}`;
-  };
-
-  // Compare ROM hashes: returns true if they definitely mismatch.
   const clearLoadedRom = () => {
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     discardHibernatedEmulatorForRomChange(null);
@@ -3251,14 +3163,6 @@
     const statusEl = document.getElementById('rom-status');
     if (romDrop) romDrop.classList.remove('loaded');
     if (statusEl) _setRomStatus('Drop or click to load ROM');
-  };
-
-  // Hashes are prefixed with 'S' (SHA-256) or 'F' (FNV-1a).
-  // If algorithms differ (host on localhost, guest on LAN HTTP), skip — can't compare.
-  const romHashMismatch = (a, b) => {
-    if (!a || !b) return false;
-    if (a[0] !== b[0]) return false; // different algorithms, can't compare
-    return a !== b;
   };
 
   // ── ROM IDB Cache (multi-ROM library) ──────────────────────────────────
@@ -4372,8 +4276,7 @@
   // Invite links land on the invite page (landing-design §7.2 M2), which
   // wakes the server if needed and says what Join and Watch need before
   // handing off to this page.
-  const inviteUrl = (spectate) =>
-    `${window.location.origin}/join?room=${encodeURIComponent(roomCode)}${spectate ? '&spectate=1' : ''}`;
+  const inviteUrl = (spectate) => window.KNCore.play.inviteUrl(window.location.origin, roomCode, spectate);
 
   const copyLink = () => {
     // Toggle overlay invite dropdown — positioned via JS to escape overflow:auto clipping

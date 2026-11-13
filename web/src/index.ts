@@ -15,6 +15,15 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { escapeHtml, inviteUrl, roomClosedMessage, rosterToasts } from './play/room-text.ts';
+import {
+  formatRomSize,
+  hashRom,
+  hostRomFromData,
+  hostRomIdentityKey,
+  romFromArchive,
+  romHashMismatch,
+} from './play/rom.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts';
 import { rosterKey } from './peer-identity.ts';
@@ -136,6 +145,19 @@ export const KNCore = {
   meshHealTargets,
   rosterKey,
   shouldResumeRomTransfer,
+  /** The play page's own logic, moving here from web/static/play.js piece by piece. */
+  play: {
+    escapeHtml,
+    inviteUrl,
+    roomClosedMessage,
+    rosterToasts,
+    formatRomSize,
+    hashRom,
+    hostRomFromData,
+    hostRomIdentityKey,
+    romFromArchive,
+    romHashMismatch,
+  },
   protocol: {
     decodeUsersUpdated,
     decodeGameStarted,
