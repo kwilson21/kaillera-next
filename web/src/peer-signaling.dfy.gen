@@ -6,15 +6,19 @@ datatype DisconnectDisposition = retryStartup | reconnect | hardDisconnect
 
 datatype SlotHolder = SlotHolder(key: string, slot: int)
 
-function shouldInitiate(lateJoiner: bool, running: bool, held: bool, spectator: bool, mySlot: int, theirSlot: int): bool
+function shouldInitiate(spectator: bool, lateJoiner: bool, running: bool, held: bool, mySlot: int, theirSlot: int): bool
 {
-  (lateJoiner || (if ((running || held) || spectator) then false else (mySlot < theirSlot)))
+  if spectator then
+    false
+  else
+    (lateJoiner || (if (running || held) then false else (mySlot < theirSlot)))
 }
 
-lemma shouldInitiate_ensures(lateJoiner: bool, running: bool, held: bool, spectator: bool, mySlot: int, theirSlot: int)
-  ensures (lateJoiner ==> (shouldInitiate(lateJoiner, running, held, spectator, mySlot, theirSlot) == true))
-  ensures (!(lateJoiner) ==> ((running || held) || spectator) ==> (shouldInitiate(lateJoiner, running, held, spectator, mySlot, theirSlot) == false))
-  ensures (!(lateJoiner) ==> !(running) ==> !(held) ==> !(spectator) ==> (shouldInitiate(lateJoiner, running, held, spectator, mySlot, theirSlot) == (mySlot < theirSlot)))
+lemma shouldInitiate_ensures(spectator: bool, lateJoiner: bool, running: bool, held: bool, mySlot: int, theirSlot: int)
+  ensures (spectator ==> (shouldInitiate(spectator, lateJoiner, running, held, mySlot, theirSlot) == false))
+  ensures (!(spectator) ==> lateJoiner ==> (shouldInitiate(spectator, lateJoiner, running, held, mySlot, theirSlot) == true))
+  ensures (!(spectator) ==> !(lateJoiner) ==> (running || held) ==> (shouldInitiate(spectator, lateJoiner, running, held, mySlot, theirSlot) == false))
+  ensures (!(spectator) ==> !(lateJoiner) ==> !(running) ==> !(held) ==> (shouldInitiate(spectator, lateJoiner, running, held, mySlot, theirSlot) == (mySlot < theirSlot)))
 {
 }
 

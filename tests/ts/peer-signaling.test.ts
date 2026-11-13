@@ -27,25 +27,65 @@ test('a late joiner offers to the players in the match, and they wait for it', (
   for (const joiner of SLOTS) {
     for (const player of SLOTS) {
       if (joiner === player) continue;
-      assert.equal(shouldInitiate(true, false, false, false, joiner, player), true);
+      assert.equal(shouldInitiate(false, true, false, false, joiner, player), true);
       // The running page, whether or not it has marked the joiner as held yet.
-      for (const held of BOOLS) assert.equal(shouldInitiate(false, true, held, false, player, joiner), false);
+      for (const held of BOOLS) assert.equal(shouldInitiate(false, false, true, held, player, joiner), false);
     }
   }
 });
 
 test('a page whose initial sync has begun waits for a player it holds as a late joiner', () => {
-  assert.equal(shouldInitiate(false, false, true, false, 0, 1), false);
+  assert.equal(shouldInitiate(false, false, false, true, 0, 1), false);
 });
 
-test('a spectator never offers', () => {
-  for (const slot of SLOTS) assert.equal(shouldInitiate(false, false, false, true, -1, slot), false);
+test('a spectator never offers, even one who joined a streamed match in play', () => {
+  for (const slot of SLOTS) {
+    for (const lateJoiner of BOOLS) {
+      for (const running of BOOLS) {
+        for (const held of BOOLS) assert.equal(shouldInitiate(true, lateJoiner, running, held, -1, slot), false);
+      }
+    }
+  }
+});
+
+test("the answer is the one onUsersUpdated's ladder gives, for every input", () => {
+  // The ladder in onUsersUpdated (web/static/netplay-rollback.js), in its own order.
+  const engine = (
+    spectator: boolean,
+    lateJoin: boolean,
+    running: boolean,
+    held: boolean,
+    mySlot: number,
+    theirSlot: number,
+  ): boolean => {
+    if (lateJoin && !spectator) return true;
+    if (running) return false;
+    if (held) return false;
+    if (spectator) return false;
+    return mySlot < theirSlot;
+  };
+  for (const spectator of BOOLS) {
+    for (const lateJoin of BOOLS) {
+      for (const running of BOOLS) {
+        for (const held of BOOLS) {
+          for (const mine of SLOTS) {
+            for (const theirs of SLOTS) {
+              assert.equal(
+                shouldInitiate(spectator, lateJoin, running, held, mine, theirs),
+                engine(spectator, lateJoin, running, held, mine, theirs),
+              );
+            }
+          }
+        }
+      }
+    }
+  }
 });
 
 test('known gap: two players joining a match at the same moment both offer', () => {
   // Kept as the engine does it today. The fix belongs in the model first.
-  assert.equal(shouldInitiate(true, false, false, false, 2, 3), true);
-  assert.equal(shouldInitiate(true, false, false, false, 3, 2), true);
+  assert.equal(shouldInitiate(false, true, false, false, 2, 3), true);
+  assert.equal(shouldInitiate(false, true, false, false, 3, 2), true);
 });
 
 test('an answer or a candidate never creates, replaces or resets a connection', () => {

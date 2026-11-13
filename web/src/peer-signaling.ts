@@ -21,31 +21,35 @@
  * joining a match in play always does, because the pages already in it
  * cannot know when the joiner is ready to answer; they never offer to a
  * player they are holding as a late joiner, and a running page offers to
- * nobody. A spectator never offers (players offer to spectators).
+ * nobody. A spectator never offers (players offer to spectators), and that
+ * comes first: a spectator who joins a streamed match in play is a late
+ * joiner too.
  *
  * Known gap, kept as it is today: two players who join a match in play at
  * the same moment are both `lateJoiner`, so both offer to each other.
  *
- * @param lateJoiner  this page is a player joining a match already in play
+ * @param spectator   this page is a spectator
+ * @param lateJoiner  this page is joining a match already in play
  * @param running     this page is running the match
  * @param held        the other player is held as a late joiner (start-cohort.ts)
- * @param spectator   this page is a spectator
  * @param mySlot      this page's slot; ignored for a spectator
  * @param theirSlot   the other player's slot
  */
-//@ ensures lateJoiner ==> \result === true
-//@ ensures !lateJoiner && (running || held || spectator) ==> \result === false
-//@ ensures !lateJoiner && !running && !held && !spectator ==> \result === (mySlot < theirSlot)
+//@ ensures spectator ==> \result === false
+//@ ensures !spectator && lateJoiner ==> \result === true
+//@ ensures !spectator && !lateJoiner && (running || held) ==> \result === false
+//@ ensures !spectator && !lateJoiner && !running && !held ==> \result === (mySlot < theirSlot)
 export function shouldInitiate(
+  spectator: boolean,
   lateJoiner: boolean,
   running: boolean,
   held: boolean,
-  spectator: boolean,
   mySlot: number,
   theirSlot: number,
 ): boolean {
+  if (spectator) return false;
   if (lateJoiner) return true;
-  if (running || held || spectator) return false;
+  if (running || held) return false;
   return mySlot < theirSlot;
 }
 
