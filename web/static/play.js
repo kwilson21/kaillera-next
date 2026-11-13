@@ -1980,21 +1980,7 @@
     dc.bufferedAmountLowThreshold = 256 * 1024;
     _romTransferDCs[peerSid] = dc;
 
-    dc.onopen = () => {
-      console.log('[play] pre-game rom-transfer DC open to', peerSid);
-      // Always wait for receiver's rom-resume message with offset.
-    };
-    dc.onmessage = (e) => {
-      if (typeof e.data === 'string') {
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'rom-resume' && msg.offset >= 0) {
-            console.log('[play] pre-game ROM resume from offset', msg.offset);
-            sendRomOverChannel(dc, peerSid, msg.offset);
-          }
-        } catch (_) {}
-      }
-    };
+    answerRomResumeOn(dc, peerSid, 'pre-game ');
     dc.onclose = () => {
       delete _romTransferDCs[peerSid];
       if (_preGamePCs[peerSid]) {
@@ -2040,6 +2026,35 @@
 
   // ── ROM Transfer: Host sending ──────────────────────────────────────
 
+  // The sender waits for the receiver's rom-resume, which names the offset to
+  // send from (this also stops a double send when the guest signals twice).
+  // That message can be delivered before this side's channel reports open.
+  // Sending then throws, so the request is kept and answered on open;
+  // dropping it left the receiver waiting for a ROM for ever.
+  const answerRomResumeOn = (dc, peerSid, label) => {
+    let resumeOffsetBeforeOpen = null;
+    dc.onopen = () => {
+      console.log(`[play] ${label}rom-transfer DC open to`, peerSid);
+      if (resumeOffsetBeforeOpen === null) return;
+      const offset = resumeOffsetBeforeOpen;
+      resumeOffsetBeforeOpen = null;
+      sendRomOverChannel(dc, peerSid, offset);
+    };
+    dc.onmessage = (e) => {
+      if (typeof e.data !== 'string') return;
+      let msg;
+      try {
+        msg = JSON.parse(e.data);
+      } catch (_) {
+        return;
+      }
+      if (msg.type !== 'rom-resume' || !(msg.offset >= 0)) return;
+      console.log(`[play] ${label}ROM resume requested from offset`, msg.offset);
+      if (dc.readyState === 'open') sendRomOverChannel(dc, peerSid, msg.offset);
+      else resumeOffsetBeforeOpen = msg.offset;
+    };
+  };
+
   const startRomTransferTo = (peerSid) => {
     // A server with ROM sharing off never sends a ROM, on any connection.
     if (!_ROM_SHARING_FEATURE || !_romBlob || !isHost) return;
@@ -2058,22 +2073,7 @@
     dc.bufferedAmountLowThreshold = 256 * 1024;
     _romTransferDCs[peerSid] = dc;
 
-    dc.onopen = () => {
-      console.log('[play] rom-transfer DC open to', peerSid);
-      // Always wait for receiver's rom-resume message with offset.
-      // This prevents double-sending when the guest also signals rom-resume.
-    };
-    dc.onmessage = (e) => {
-      if (typeof e.data === 'string') {
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'rom-resume' && msg.offset >= 0) {
-            console.log('[play] ROM resume requested from offset', msg.offset);
-            sendRomOverChannel(dc, peerSid, msg.offset);
-          }
-        } catch (_) {}
-      }
-    };
+    answerRomResumeOn(dc, peerSid, '');
     dc.onclose = () => {
       delete _romTransferDCs[peerSid];
     };

@@ -126,6 +126,16 @@ const openPlayer = async (label, query) => {
   page.on('requestfailed', (request) => {
     console.log(`[${label}] request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText})`);
   });
+  // KN_CONSOLE=1 prints each page's console, for working out why a scenario
+  // failed. The play page silences console.log outside debug mode, so the
+  // original is pinned first; debug mode itself would change what runs.
+  if (process.env.KN_CONSOLE) {
+    await ctx.addInitScript(() => {
+      const log = console.log;
+      Object.defineProperty(console, 'log', { configurable: true, get: () => log, set: () => {} });
+    });
+    page.on('console', (m) => console.log(`[${label}] ${m.text().slice(0, 300)}`));
+  }
   const signaling = { down: false, sockets: [] };
   await page.routeWebSocket(/socket\.io/, (ws) => {
     if (signaling.down) {
