@@ -189,9 +189,20 @@ def test_smash_remix_rng_seed_sync_stays_out_of_live_tick_path():
     tick_window = source[tick_idx : tick_idx + 700]
     assert tick_window.count("_syncRNGSeed(tickMod, _frameNum);") == 1
     sync_idx = tick_window.find("_syncRNGSeed(tickMod, _frameNum);")
-    step_idx = tick_window.find("stepOneFrame();")
+    # The tick loop steps through _runStepOneFrame (STEP-NORUN / STEP-THREW
+    # handling), which is the wrapper around the raw stepOneFrame() call.
+    step_idx = tick_window.find("_runStepOneFrame('fallback')")
     assert sync_idx != -1
     assert step_idx > sync_idx
+
+    runner_idx = source.find("const _runStepOneFrame = (branch) => {")
+    assert runner_idx != -1
+    # Whole wrapper body: up to the closing brace at the wrapper's own indent.
+    runner_end = source.find("\n  };\n", runner_idx)
+    assert runner_end != -1
+    runner_window = source[runner_idx:runner_end]
+    assert "stepOneFrame();" in runner_window
+    assert "_syncRNGSeed" not in runner_window
 
 
 def test_determinism_harness_has_setup_only_css_character_gate():
@@ -296,13 +307,22 @@ def test_same_rom_remix_resume_skips_title_wait_and_syncs_current_state():
 
     wait_idx = source.find("const waitForSmashTitleState = async (gm) => {")
     assert wait_idx != -1
-    wait_window = source[wait_idx : wait_idx + 900]
+    # The window covers the early-return branches (config skip, same-ROM
+    # resume) up to the point the title wait resumes the main loop.
+    wait_window = source[wait_idx : wait_idx + 1500]
     resume_idx = wait_window.find("if (_isSameRomEmulatorResume())")
     title_wait_idx = wait_window.find("Smash Remix initial sync: waiting for title-screen state")
+    main_loop_resume_idx = wait_window.find("mod.resumeMainLoop?.()")
     assert resume_idx != -1
     assert title_wait_idx > resume_idx
-    assert "same-ROM resume, capturing current state" in wait_window
-    assert "mod.pauseMainLoop?.()" in wait_window
+    assert main_loop_resume_idx > title_wait_idx
+    # Only the same-ROM branch itself: up to its closing brace.
+    resume_end = wait_window.find("\n    }\n", resume_idx)
+    assert resume_idx < resume_end < title_wait_idx
+    resume_branch = wait_window[resume_idx:resume_end]
+    assert "return;" in resume_branch
+    assert "same-ROM resume, capturing current state" in resume_branch
+    assert "mod.pauseMainLoop?.()" in resume_branch
 
 
 def test_host_runs_same_kn_sync_restore_stack_as_guest():

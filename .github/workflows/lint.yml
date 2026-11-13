@@ -117,4 +117,5 @@ jobs:
             ../tests/test_retention.py \
             ../tests/test_retention_sweep.py \
             ../tests/test_screenshots.py \
-            ../tests/test_state.py
+            ../tests/test_state.py \
+            ../tests/test_emulator_boot_sequence.py
