@@ -124,6 +124,7 @@ jobs:
             ../tests/test_session_reports.py \
             ../tests/test_host_reload.py \
             ../tests/test_resume_refused.py \
+            ../tests/test_abandoned_match.py \
             ../tests/test_relay_sender.py \
             ../tests/test_schema.py \
             ../tests/test_query_builder.py \

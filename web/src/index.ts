@@ -83,7 +83,18 @@ const startActor = (sink: ReportSink, scope: Scope.Scope, lateJoinReportAfterMs:
  * late-joiner timer and its report). Events sent before the actor is up are
  * held for it and delivered in order.
  */
-export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = LATE_JOIN_REPORT_AFTER_MS) => {
+export const createSession = (
+  sink: ReportSink,
+  lateJoinReportAfterMs: number = LATE_JOIN_REPORT_AFTER_MS,
+  /**
+   * Called when a page that joined a match in play gets into it (running,
+   * or let into its start). The page tells the server, which until then
+   * counts this player as waiting and ends a match only waiting players
+   * are left in (`match-joined`; specs/room_lifecycle.qnt,
+   * anAbandonedMatchIsEnded).
+   */
+  onMatchJoined: (matchId: string) => void = () => undefined,
+) => {
   const scope = Effect.runSync(Scope.make());
   const ready = startActor(sink, scope, lateJoinReportAfterMs);
   let actor: Awaited<typeof ready> | undefined;
@@ -95,10 +106,20 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
 
   let [snapshot] = initialTransition(sessionMachine, { lateJoinReportAfterMs });
   const state = (): SessionState => snapshot.value;
+  // This page came into its match by joining one already in play.
+  let joinedMidMatch = false;
+  /** The match this page joined in play and is now in; null otherwise. */
+  const joinedMatch = (): string | null =>
+    joinedMidMatch && snapshot.value === 'running' ? snapshot.context.matchId : null;
   const send = (event: SessionEvent): void => {
+    const before = joinedMatch();
     [snapshot] = transition(sessionMachine, snapshot, event);
+    if (snapshot.value === 'lobby') joinedMidMatch = false;
+    else if (event.type === 'joined') joinedMidMatch = true;
     if (actor) actor.send(event);
     else held.push(event);
+    const now = joinedMatch();
+    if (now !== null && now !== before) onMatchJoined(now);
   };
 
   // The last disagreement reported for each flag, so one that stays wrong is
@@ -126,6 +147,7 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
   return {
     send,
     state,
+    joinedMatch,
     /** A game is on for this page: it is anywhere but the lobby. */
     gameOn: (): boolean => sessionFlag(state(), 'gameRunning'),
     check,

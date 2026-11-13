@@ -72,6 +72,17 @@ export const StartGamePayload = Schema.Struct({
 });
 export type StartGamePayload = typeof StartGamePayload.Type;
 
+/**
+ * A player who joined a match in play says it is now in it.
+ *
+ * Until then the server counts it as waiting, and ends a match in which
+ * every player left is waiting (signaling.match_is_abandoned).
+ */
+export const MatchJoinedPayload = Schema.Struct({
+  matchId: Schema.String.check(Schema.isMaxCodePoints(64)),
+});
+export type MatchJoinedPayload = typeof MatchJoinedPayload.Type;
+
 export const EndGamePayload = Schema.Struct({});
 export type EndGamePayload = typeof EndGamePayload.Type;
 
@@ -277,6 +288,7 @@ export const decodeJoinRoomPayload = Schema.decodeUnknownResult(JoinRoomPayload)
 export const decodeClaimSlotPayload = Schema.decodeUnknownResult(ClaimSlotPayload);
 export const decodeSetNamePayload = Schema.decodeUnknownResult(SetNamePayload);
 export const decodeStartGamePayload = Schema.decodeUnknownResult(StartGamePayload);
+export const decodeMatchJoinedPayload = Schema.decodeUnknownResult(MatchJoinedPayload);
 export const decodeEndGamePayload = Schema.decodeUnknownResult(EndGamePayload);
 export const decodeSetModePayload = Schema.decodeUnknownResult(SetModePayload);
 export const decodeSetGameIdPayload = Schema.decodeUnknownResult(SetGameIdPayload);

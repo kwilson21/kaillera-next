@@ -171,6 +171,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
 | `start-game` | client→server | `{mode, resyncEnabled, romHash, gameId}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
 | `end-game` | client→server | `{}` | Host ends game |
+| `match-joined` | client→server | `{matchId}` | A player who joined a match in play is now in it. Until then the server counts it as waiting, and ends a match only waiting players are left in |
 | `set-name` | client→server | `{name}` | Update player display name |
 | `set-mode` | client→server | `{mode}` | Host sets game mode |
 | `set-game-id` | client→server | `{game_id}` | Host updates game_id after ROM identification |

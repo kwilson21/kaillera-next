@@ -270,3 +270,47 @@ test('the machine decides a flag the page disagrees about, and reports the disag
   assert.equal(session.decide('lateJoin', false), false);
   await session.stop();
 });
+
+test('a page that joined a match in play says so once it is in it, however it got in (abandonedMatchTest)', async () => {
+  const ways = [
+    [engineUp, { type: 'lateJoinSynced' }],
+    [engineUp, { type: 'admittedToStart' }],
+    [{ type: 'engineStarted', connectOnly: false, waitsForState: false }],
+  ] as const;
+  for (const way of ways) {
+    const joined: string[] = [];
+    const session = createSession(
+      () => undefined,
+      5000,
+      (matchId) => joined.push(matchId),
+    );
+    session.send(joinMidGame);
+    assert.equal(session.joinedMatch(), null);
+    assert.deepEqual(joined, [], 'not in the match while still joining');
+    for (const event of way) session.send(event);
+    assert.equal(session.state(), 'running');
+    assert.deepEqual(joined, ['m1']);
+    assert.equal(session.joinedMatch(), 'm1');
+    // Said once: later events in the same match do not repeat it.
+    session.send({ type: 'socketDown' });
+    session.send({ type: 'socketUp' });
+    assert.deepEqual(joined, ['m1']);
+    session.send({ type: 'gameEnded' });
+    assert.equal(session.joinedMatch(), null);
+    await session.stop();
+  }
+});
+
+test('a page that was there when the match started has nothing to say', async () => {
+  const joined: string[] = [];
+  const session = createSession(
+    () => undefined,
+    5000,
+    (matchId) => joined.push(matchId),
+  );
+  session.send({ type: 'gameStarted', matchId: 'm1' });
+  assert.equal(session.state(), 'running');
+  assert.deepEqual(joined, []);
+  assert.equal(session.joinedMatch(), null);
+  await session.stop();
+});

@@ -211,8 +211,19 @@ host reload) all show no `session-disagree`.
   `session-disagree`.
 - Then: delete the three old flags once production shows no
   `session-disagree`.
-- Still open in the model: `noGhostMatch` (a playing room whose only member
-  is a late joiner waiting for state).
+- Done: a playing room nobody is running is ended by the server. It
+  tracks the players who joined after a match began and have not got into
+  it (`Room.waiting_for_state`); a page says it is in with `match-joined`,
+  sent when the machine reaches `running` after a mid-match join. When only
+  waiting players are left the match ends (`match_is_abandoned`). This was
+  the open `noGhostMatch` question; the property is now
+  `anAbandonedMatchIsEnded` and holds on `room_current`.
+- Done: a page that loaded as host and was dropped from its room joins it
+  as a guest when the room has been handed on, instead of failing to open
+  it. (A host that still owns its room cannot fall behind it: only the
+  owner starts and ends games.)
+- Not done: the rejoin program is still started by `play.js` on socket
+  connect, not invoked by the machine.
 
 **Stage 3: the socket boundary**
 Every Socket.IO and DataChannel message is decoded with Effect Schema on

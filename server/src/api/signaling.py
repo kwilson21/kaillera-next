@@ -83,6 +83,7 @@ from src.api.payloads import (
     JoinRoomAck,
     JoinRoomExtra,
     JoinRoomPayload,
+    MatchJoinedPayload,
     OpenRoomExtra,
     OpenRoomPayload,
     RelaySender,
@@ -314,6 +315,10 @@ class Room:
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
     listed: bool = False  # host opted in to the front-page board; never true with a password
     started_at: float | None = None  # wall-clock start of the current match, for the board
+    # playerIds who joined after the current match began and are not in it
+    # yet (at the ROM prompt, booting, or asking for its state). A page says
+    # it is in with `match-joined`. Cleared when a match starts or ends.
+    waiting_for_state: set[str] = field(default_factory=set)
 
     def next_slot(self) -> int | None:
         """Return the lowest available slot index, or None if full."""
@@ -593,6 +598,7 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
             await db.set_session_ended(room.match_id, rm_slot, reason)
 
         room.players.pop(player_id, None)
+        room.waiting_for_state.discard(player_id)
         if rm_slot is not None:
             del room.slots[rm_slot]
 
@@ -665,6 +671,9 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
 
     await state.save_room(session_id, room)
     await _emit("users-updated", _players_payload(room), room=session_id)
+    # The players who were running the match may all be gone now.
+    if not is_spectator:
+        await _end_match_if_abandoned(session_id, room)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -907,8 +916,14 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         await _emit("users-updated", _players_payload(room), room=session_id)
         await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
         await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+        # A player's fresh page (a reload) has no emulator running: it has to
+        # late-join the match again. A page resuming under a running game
+        # says so and is left as it was.
+        if is_returning_player and room.status == "playing" and not payload.extra.resume:
+            room.waiting_for_state.add(persistent_id)
         await state.save_room(session_id, room)
         log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
+        await _end_match_if_abandoned(session_id, room)
         return (None, _join_ack(room))
 
     if not _password_ok(room, password):
@@ -954,6 +969,9 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         room.players[persistent_id] = {"socketId": sid, "playerName": player_name}
         room.slots[slot] = persistent_id
         _sid_to_room[sid] = (session_id, persistent_id, False)
+        # Joining a match in play: not in it until the page says so.
+        if room.status == "playing":
+            room.waiting_for_state.add(persistent_id)
 
     await sio.enter_room(sid, session_id)
     await _emit("users-updated", _players_payload(room), room=session_id)
@@ -963,6 +981,7 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     log.info(
         "SIO %s %s room %s (persistentId=%s)", sid, "spectating" if spectate else "joined", session_id, persistent_id
     )
+    await _end_match_if_abandoned(session_id, room)
     return (None, _join_ack(room))
 
 
@@ -1145,6 +1164,7 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.status = "playing"
     room.mode = mode
     room.match_id = str(uuid.uuid4())
+    room.waiting_for_state.clear()
     # Register before announcing the match, so log uploads quoting this id
     # are accepted. Logging never blocks a game: a failed write is logged and
     # only HTTP-fallback uploads for this match will be refused.
@@ -1195,6 +1215,26 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     return None
 
 
+@sio.on("match-joined")
+@validated(MatchJoinedPayload)
+async def match_joined(sid: str, payload: MatchJoinedPayload) -> str | None:
+    """A player who joined a match in play is now in it (running, or let into its start)."""
+    if not check(sid, "match-joined"):
+        return "Rate limited"
+    async with _room_lock:
+        entry = _sid_to_room.get(sid)
+        if entry is None:
+            return "Not in a room"
+        session_id, player_id, _is_spectator = entry
+        room = rooms.get(session_id)
+        if room is None or room.status != "playing" or room.match_id != payload.matchId:
+            return None  # that match is over; nothing to record
+        if player_id in room.waiting_for_state:
+            room.waiting_for_state.discard(player_id)
+            await state.save_room(session_id, room)
+        return None
+
+
 @sio.on("end-game")
 @validated(EndGamePayload)
 async def end_game(sid: str, payload: EndGamePayload) -> str | None:
@@ -1213,10 +1253,31 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     return None
 
 
+def match_is_abandoned(room: Room) -> bool:
+    """Is the room playing a match that none of its players is running?
+
+    True when every player left in it joined after the match began and is
+    still waiting to get in. Late-join state comes only from a player running
+    the match, so they would wait for ever: the room stayed "playing", each
+    joiner timed out, and a reload put it straight back on the late-join path
+    (specs/room_lifecycle.qnt, anAbandonedMatchIsEnded). A player inside a
+    disconnect grace window is still in `players` and counts as running
+    unless it too was waiting.
+    """
+    return room.status == "playing" and all(pid in room.waiting_for_state for pid in room.players)
+
+
+async def _end_match_if_abandoned(session_id: str, room: Room) -> None:
+    if match_is_abandoned(room):
+        log.info("Room %s: nobody left is running the match, ending it", session_id)
+        await _end_match(session_id, room, "abandoned")
+
+
 async def _end_match(session_id: str, room: Room, reason: str) -> None:
     """Put a playing room back in the lobby and tell everyone in it."""
     ended_match_id = room.match_id
     room.match_id = None
+    room.waiting_for_state.clear()
     room.status = "lobby"
     room.started_at = None
     _drop_room_frame(session_id)

@@ -126,7 +126,15 @@
 
   // Page lifecycle state machine from the TypeScript core (web/src/session.ts).
   // Stage 2: the machine says whether a game is on for this page.
-  const _session = window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta)) ?? null;
+  // A page that joined a match in play tells the server once it is in it:
+  // until then the server counts this player as waiting for the match, and
+  // ends a match that only waiting players are left in.
+  const _tellServerMatchJoined = (matchId) => {
+    if (socket?.connected) socket.emit('match-joined', { matchId });
+  };
+  const _session =
+    window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta), undefined, _tellServerMatchJoined) ??
+    null;
   const isGameRunning = () => (_session ? _session.gameOn() : _pageGameRunning);
   // The observer holds its reports until the server has sent this page load
   // an upload token (client events need one).
@@ -908,6 +916,10 @@
   // that lands in the lobby or on the late-join path of the match in play,
   // or shows the player why it cannot get back in.
   let _rejoin = null;
+  // This page loaded as host and was told the room had dropped it: if its
+  // fresh open-room finds the room still there, it belongs to someone else
+  // now and the page joins it as a guest.
+  let _droppedAsHost = false;
   const _cancelRejoin = () => {
     _rejoin?.cancel();
     _rejoin = null;
@@ -920,6 +932,7 @@
     // it again: its real game-ended must not be taken for a repeat.
     _lastHandledGameEndMatchId = null;
     _session?.send({ type: 'rejoinRefused' });
+    _droppedAsHost = isHost;
     onConnect(false);
   };
 
@@ -986,6 +999,9 @@
         // socket the server has no ROM report for: without this the next
         // start would wait for a ROM everybody already has.
         if (localRomLoaded()) notifyRomReady();
+        // Said again in case the first telling was lost with the socket.
+        const joinedMatch = _session?.joinedMatch();
+        if (joinedMatch) _tellServerMatchJoined(joinedMatch);
         if (isReconnect) resumeRomTransferAfterReconnect();
         // join-room's reconnect path says what the room is doing now. (The
         // host's open-room does not: only the host starts and ends games, so
@@ -1013,11 +1029,13 @@
           maxPlayers: 4,
         },
         (err) => {
-          if (err === 'Not the owner') {
-            // This page's URL says host, but the room is in play and belongs
-            // to someone else now (this player was dropped mid-match, the
-            // room was handed on, and it was taken back as a player). Come
-            // in the way any other player does.
+          const roomHandedOn = err === 'Room already exists' && _droppedAsHost;
+          _droppedAsHost = false;
+          if (err === 'Not the owner' || roomHandedOn) {
+            // This page's URL says host, but the room belongs to someone
+            // else now: this player was dropped mid-match and the room was
+            // handed on (and it may since have been taken back as a player).
+            // Come in the way any other player does.
             console.log('[play] open-room: not the owner of a room in play, joining instead');
             isHost = false;
             KNState.isLocalHost = false;

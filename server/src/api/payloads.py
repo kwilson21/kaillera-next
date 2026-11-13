@@ -152,6 +152,19 @@ class StartGamePayload(_ModeCompatMixin, BaseModel):
     gameId: str | None = Field(default=None, max_length=32)
 
 
+# ── match-joined ─────────────────────────────────────────────────────────────
+
+
+class MatchJoinedPayload(BaseModel):
+    """A player who joined a match in play says it is now in it.
+
+    Until then the server counts it as waiting, and ends a match in which
+    every player left is waiting (signaling.match_is_abandoned).
+    """
+
+    matchId: str = Field(max_length=64)
+
+
 # ── end-game ─────────────────────────────────────────────────────────────────
 
 

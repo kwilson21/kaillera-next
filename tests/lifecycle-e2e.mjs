@@ -32,6 +32,9 @@
  *                     The host waits for the guest to load before it runs, so
  *                     the guest must be let into the start, not left asking
  *                     for a state nobody has yet
+ *   abandoned-match   the only player running a match leaves while a guest
+ *                     is still at the ROM prompt; the server must end the
+ *                     match and give the guest the lobby back
  *   dropped-rejoin    a guest's signaling is down for longer than the server's
  *                     grace window, so the room drops it while the match goes
  *                     on over the players' own connections; on reconnect it
@@ -63,6 +66,7 @@ const SCENARIOS = [
   'missed-game-end',
   'missed-game-end-at-rom-prompt',
   'missed-new-match',
+  'abandoned-match',
   'dropped-rejoin',
   'dropped-host',
   'streaming-join',
@@ -597,6 +601,28 @@ const scenarios = {
       log,
     );
     return [host, guest];
+  },
+
+  'abandoned-match': async (room, failures, log) => {
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+    // The guest joins mid-game with no ROM and is asked for one.
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+    // The only player running the match leaves for good.
+    await host.ctx.close();
+    // The server drops the host after its grace window and, with only a
+    // waiting joiner left, ends the match: the guest gets the lobby back.
+    const ended = await waitUntil(
+      async () => (await lobbyShownOn(guest)) && !(await guest.page.locator('#late-join-msg').count()),
+      SERVER_GRACE_MS + 30000,
+    );
+    if (!ended) failures.push('the guest was left joining a match nobody was running');
+    const res = await fetch(`${URL}/room/${room}`);
+    const status = res.ok ? (await res.json()).status : `HTTP ${res.status}`;
+    if (status !== 'lobby') failures.push(`the room is still ${status} with nobody running the match`);
+    await checkpoint('after the abandoned match was ended', [{ player: guest, lobby: true }], failures, log);
+    return [guest];
   },
 
   'missed-new-match': async (room, failures, log) => {
