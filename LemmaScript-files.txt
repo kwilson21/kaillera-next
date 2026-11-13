@@ -5,3 +5,4 @@ web/src/input-wire.ts
 web/src/runner-step.ts
 web/src/stick-axis.ts
 web/src/desync-fields.ts
+web/src/play/remap-step.ts

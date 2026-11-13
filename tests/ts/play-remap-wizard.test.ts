@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  comparable,
   customProfileFrom,
   DEFAULT_KEY_MAP,
   finishedProfile,
@@ -134,7 +135,16 @@ const oldWizard = (
     }
     return { step, saved, profile: out, keyMap: jsonCopy(keyMap) };
   };
-  return { apply, result };
+  /** What play.js hands the observer after each input (wizardShadowCompare). */
+  const view = () =>
+    JSON.stringify({
+      step,
+      keyMap,
+      buttons: profile?.buttons ?? null,
+      axisButtons: profile?.axisButtons ?? null,
+      axisCaptures,
+    });
+  return { apply, result, view };
 };
 
 const PAD: PadProfile = {
@@ -163,7 +173,8 @@ const newWizard = (current: PadProfile | null, savedKeyMap: Record<number, numbe
     profile: jsonCopy(finishedProfile(state)),
     keyMap: jsonCopy(state.keyMap),
   });
-  return { apply, result };
+  const view = () => JSON.stringify(comparable(state));
+  return { apply, result, view };
 };
 
 // A small fixed-seed generator, so a failure names a sequence that can be rerun.
@@ -195,6 +206,8 @@ test('agrees with the code it replaced over random sessions', () => {
       old.apply(input);
       now.apply(input);
       assert.deepEqual(now.result(), old.result(), `seed ${seed}, input ${i}: ${JSON.stringify(input)}`);
+      // The observer in play.js compares these two strings: equal here means no report there.
+      assert.equal(now.view(), old.view(), `seed ${seed}, input ${i}: ${JSON.stringify(input)}`);
       compared++;
     }
     assert.deepEqual({ pad, keys }, before, "the caller's profile and key map are not modified");

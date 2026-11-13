@@ -149,6 +149,9 @@ _VALID_EVENT_TYPES = {
     # A message the server sent did not match the client's schema for it
     # (web/src/socket-boundary.ts): tests/test_session_reports.py.
     "protocol-mismatch",
+    # A decision moved out of play.js disagreed with the play.js code still in
+    # charge of it (web/src/play/observe.ts): tests/test_session_reports.py.
+    "play-disagree",
 }
 _ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 
