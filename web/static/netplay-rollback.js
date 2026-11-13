@@ -12282,10 +12282,26 @@
     // _hasRequiredExports. Opt out with ?desync=off; ?desync=b promotes to
     // pairwise mode B with the 5s heartbeat (every-frame digests + always-on
     // vision sampling — for active triage only).
+    //
+    // The core's hash registry has one address map, for SSB64 US
+    // (build/kn_rollback/kn_gameplay_addrs.h). On any other ROM its fields
+    // would hash unrelated memory under SSB64's labels, so the detector
+    // stays off there. ?desync=force runs it anyway (triage and the
+    // two-player harness on another ROM; field names mean nothing then).
     const desyncParam = _urlParams.get('desync');
     if (lsMod && window.KNDesync && desyncParam !== 'off') {
-      const desyncMode = desyncParam === 'b' ? 'B' : 'C';
-      KNDesync.init(lsMod, desyncMode);
+      const hasAddressMap = !!_config?.romHash && _config.romHash === window.KNShared?.SSB64_HASH;
+      if (RB_WORKER_COPROC) {
+        // Mode 2 adopts the worker's corrected state without re-simulating
+        // those frames here, so the registry's history for them keeps the
+        // mispredicted hashes and a healthy match would be flagged.
+        _syncLog('KNDesync off: worker replay (Mode 2) does not rewrite field history');
+      } else if (hasAddressMap || desyncParam === 'force') {
+        const desyncMode = desyncParam === 'b' ? 'B' : 'C';
+        KNDesync.init(lsMod, desyncMode);
+      } else {
+        _syncLog('KNDesync off: no field address map for this ROM');
+      }
     }
 
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
@@ -12432,6 +12448,9 @@
           );
         }
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        // The desync detector reports a frame only once it is this far
+        // behind the newest one: the engine never replays further back.
+        window.KNDesync?.setConfirmWindow?.(rollbackMax);
         if (detMod._kn_get_state_backend) {
           const activeBackend = detMod._kn_get_state_backend() === 1 ? 'split-rdram' : 'retro';
           _syncLog(`C-ROLLBACK state backend active=${activeBackend}`);
