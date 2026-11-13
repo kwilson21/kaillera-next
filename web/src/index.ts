@@ -6,6 +6,7 @@ import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
+import { decodeInput, encodeInput } from './input-wire.ts';
 import {
   decodeGameEnded,
   decodeGameStarted,
@@ -129,6 +130,8 @@ export const KNCore = {
   bootTimedOut,
   createConnectTracker,
   createSession,
+  decodeInput,
+  encodeInput,
   meshHealTargets,
   rosterKey,
   shouldResumeRomTransfer,
