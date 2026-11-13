@@ -23,6 +23,13 @@
     dedupWindowFrames: 60, // per (field, slot) flag dedup
     historyDepth: 60,
     visionConfidenceMin: 'med',
+    // A screenshot for a flagged frame F is taken at frame F + this, on
+    // every peer. It has to be past the tick at which the slowest peer
+    // learns of F: one rollback window after F plus the digest's trip.
+    captureLeadFrames: 90,
+    // Mode B's heartbeat has no flagged frame; peers capture at the next
+    // multiple of this.
+    heartbeatCaptureEvery: 300,
   };
 
   /* Diagnostic-only URL flag: ?forceDesyncTick=1 forces the per-tick
@@ -76,6 +83,8 @@
   // built for the frame this far behind the newest one; see tick().
   let _confirmWindow = 0;
   let _noDecisionLogged = false;
+  // Screenshots waiting for their frame: capture frame -> suspect payloads.
+  let _pendingCaptures = new Map();
   const _events = new EventTarget();
 
   /* (Helpers _buildLocalDigest, _broadcastDigest, etc. added in
@@ -409,6 +418,47 @@
         ` slot=${payload.slot ?? 'g'} trigger=${payload.trigger} phase=${payload.matchPhase}`,
     );
     _events.dispatchEvent(new CustomEvent('desync-suspect', { detail: payload }));
+    _scheduleCapture(payload, CONFIG.captureLeadFrames);
+  }
+
+  // The peers' screenshots for a suspect are compared with each other, so
+  // they must show the same frame. Each peer raises the suspect at a
+  // different tick; both know its frame, so both capture at the same later
+  // one (KNCore.captureFrame, web/src/desync-capture.ts;
+  // specs/desync_capture.qnt). A peer that hears of it after that frame
+  // takes no picture. `desync-capture` is what kn-vision-client.js acts on.
+  function _scheduleCapture(payload, lead) {
+    const decide = window.KNCore?.captureFrame;
+    if (typeof decide !== 'function') return;
+    const at = decide(payload.frame, _localFrameTick, lead);
+    if (at < 0) {
+      _log(`capture skipped: suspect frame=${payload.frame} raised at tick=${_localFrameTick}, past its capture frame`);
+      return;
+    }
+    const waiting = _pendingCaptures.get(at);
+    if (waiting) waiting.push(payload);
+    else _pendingCaptures.set(at, [payload]);
+    if (at === _localFrameTick) _dispatchCaptures(at);
+  }
+
+  function _dispatchCaptures(frame) {
+    if (_pendingCaptures.size === 0) return;
+    for (const at of [..._pendingCaptures.keys()]) {
+      if (at > frame) continue;
+      const payloads = _pendingCaptures.get(at);
+      _pendingCaptures.delete(at);
+      if (at < frame) {
+        // The frame counter jumped over it (a resync). A picture now would
+        // not be of the agreed frame.
+        _log(`capture dropped: frame=${at} was never ticked (now ${frame})`);
+        continue;
+      }
+      for (const payload of payloads) {
+        payload.captureFrame = at;
+        _log(`capture frame=${at} suspect=${payload.frame} field=${payload.field} slot=${payload.slot ?? 'g'}`);
+        _events.dispatchEvent(new CustomEvent('desync-capture', { detail: payload }));
+      }
+    }
   }
 
   function _startHeartbeat() {
@@ -416,15 +466,23 @@
     if (_mode !== 'B') return;
     _heartbeatTimerId = setInterval(() => {
       if (!_enabled || !_module) return;
-      _emitSuspect({
-        frame: _localFrameTick,
+      // Each peer's timer fires on a different frame. Name the heartbeat by
+      // the next shared frame boundary and capture there, so the peers'
+      // pictures are of one frame and the server can pair them.
+      const every = CONFIG.heartbeatCaptureEvery;
+      const payload = {
+        frame: Math.ceil(_localFrameTick / every) * every,
         field: 'heartbeat',
         slot: null,
         hashes: null,
         trigger: 'heartbeat',
         scope: ['damage', 'stocks', 'position', 'css_cursor'],
         replayMeta: null,
-      });
+      };
+      payload.matchId = window.KNState && KNState.matchId;
+      _log(`suspect frame=${payload.frame} field=heartbeat slot=g trigger=heartbeat`);
+      _events.dispatchEvent(new CustomEvent('desync-suspect', { detail: payload }));
+      _scheduleCapture(payload, 0);
     }, CONFIG.heartbeatIntervalMs);
   }
 
@@ -443,6 +501,7 @@
       _peerDigests.clear();
       _localDigests.clear();
       _lastFlagFrame.clear();
+      _pendingCaptures.clear();
       _noDecisionLogged = false;
       _log(`init mode=${mode}`);
       if (!_enabled) {
@@ -476,6 +535,7 @@
       _enabled = false;
       _module = null;
       _confirmWindow = 0;
+      _pendingCaptures.clear();
       _peerDigests.clear();
       _localDigests.clear();
       _lastFlagFrame.clear();
@@ -488,6 +548,7 @@
         if (!_enabled) return;
       }
       _localFrameTick = frame;
+      _dispatchCaptures(frame);
       // Skip the expensive digest build when there is no real peer to
       // detect divergence with. _buildLocalDigest does 21 field hashes plus
       // _buildReplayMeta's 42 pre/post hashes plus up to 64×21×2 trajectory
