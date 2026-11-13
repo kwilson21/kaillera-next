@@ -138,13 +138,19 @@ export const openRomLibrary = (legacy: LegacyRom) => {
   const list = async (): Promise<RomEntry[]> => {
     const database = await db;
     if (database === null) return [];
-    const store = database.transaction(STORE, 'readonly').objectStore(STORE);
-    const [keys, values] = await Promise.all([whenDone(store.getAllKeys()), whenDone(store.getAll())]);
+    // A cursor, so only one ROM's bytes are in memory at a time: a library
+    // can hold hundreds of megabytes.
+    const tx = database.transaction(STORE, 'readonly');
+    const cursorRequest = tx.objectStore(STORE).openCursor();
     const entries: RomEntry[] = [];
-    for (const [index, key] of keys.entries()) {
-      const stored = decodeStoredRom(values[index]);
-      if (typeof key === 'string' && Result.isSuccess(stored)) entries.push(rowOf(key, stored.success));
-    }
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (cursor === null) return;
+      const stored = decodeStoredRom(cursor.value);
+      if (typeof cursor.key === 'string' && Result.isSuccess(stored)) entries.push(rowOf(cursor.key, stored.success));
+      cursor.continue();
+    };
+    await whenCommitted(tx);
     return byLastUsed(entries);
   };
 
