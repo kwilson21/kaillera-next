@@ -99,8 +99,13 @@ const openPlayer = async (label, query) => {
   await ctx.addInitScript(recordEvents);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => {
-    console.log(`[${label}] pageerror ${e.message}`);
+    console.log(`[${label}] pageerror ${e.stack || e.message}`);
     pageErrors.push(`${label}: ${e.message}`);
+  });
+  // Which request failed says whether an uncaught "Failed to fetch" is the
+  // page's bug or this machine's network.
+  page.on('requestfailed', (request) => {
+    console.log(`[${label}] request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText})`);
   });
   const signaling = { down: false, sockets: [] };
   await page.routeWebSocket(/socket\.io/, (ws) => {
@@ -303,12 +308,16 @@ const scenarios = {
     await first.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
     await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
     await host.page.click('#start-btn');
-    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+    // The streaming engine has no frame counter to watch: the game is on
+    // for the host once its lobby overlay is gone.
+    if (!(await waitUntil(async () => !(await lobbyShownOn(host)), 60000)))
+      failures.push('the host game never started');
+    await host.page.waitForTimeout(10000);
 
     const guest = await openPlayer('guest2', `room=${room}&name=Late`);
     if (!(await waitUntil(async () => !(await lobbyShownOn(guest)), 30000)))
       failures.push('the streaming guest never left the lobby overlay');
-    await waitForFrames([host], 120, 120000);
+    await host.page.waitForTimeout(10000);
     await checkpoint(
       'while streaming',
       [
