@@ -103,6 +103,15 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
     gameOn: (): boolean => sessionFlag(state(), 'gameRunning'),
     check,
     /**
+     * What the machine says one of the page's flags is. The machine decides;
+     * the page passes the flag it still keeps beside it, and a disagreement
+     * is reported so production can show when that flag can be deleted.
+     */
+    decide: (name: SessionCheck, page: boolean): boolean => {
+      check(name, page);
+      return sessionFlag(state(), name);
+    },
+    /**
      * Called when the signaling socket comes back: does the machine agree
      * with the `gameRunning` flag play.js still keeps beside it? The machine
      * decides either way; a disagreement is reported so production can show

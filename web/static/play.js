@@ -158,16 +158,18 @@
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _emulatorBootInFlight = false; // true while ejs-loader is creating a fresh instance
   let _pendingLateJoin = false; // waiting for ROM before late-join init
-  // The machine mirrors the two late-join flags as states and is told of
-  // every change; each read below also asks it whether it would have said
-  // the same (session-disagree), so they can move into it once it does.
+  // The machine has the two late-join flags as states and is told of every
+  // change. It decides: each read below returns what the machine says. The
+  // old flags are still written beside it and compared at every read
+  // (session-disagree); they go once production shows no disagreement.
   const _setPendingLateJoin = (pending) => {
     _pendingLateJoin = pending;
     _session?.send({ type: pending ? 'lateJoinRomNeeded' : 'lateJoinRomReady' });
   };
+  // Is the next engine start a late join?
+  const _isLateJoin = () => (_session ? _session.decide('lateJoin', _lateJoin) : _lateJoin);
   const _isPendingLateJoin = () => {
-    _session?.check('pendingLateJoin', _pendingLateJoin);
-    return _pendingLateJoin;
+    return _session ? _session.decide('pendingLateJoin', _pendingLateJoin) : _pendingLateJoin;
   };
   // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
   const _ROM_SHARING_FEATURE = window.KN_CONFIG?.romSharingEnabled !== false;
@@ -1578,7 +1580,7 @@
   const onGameEnded = (data = {}) => {
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (endedMatchId && _lastHandledGameEndMatchId === endedMatchId) return;
-    if (!isGameRunning() && !engine && !_lateJoin && !_isPendingLateJoin()) return;
+    if (!isGameRunning() && !engine && !_isLateJoin() && !_isPendingLateJoin()) return;
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
     _endGameInFlight = false;
     console.log(
@@ -3681,7 +3683,7 @@
 
     const resyncEnabled = _gameResyncEnabled;
 
-    _session?.check('lateJoin', _lateJoin);
+    const lateJoin = _isLateJoin();
     engine = Engine;
     engine.init({
       socket,
@@ -3749,7 +3751,7 @@
         }
       },
       initialPlayers: lastUsersData,
-      lateJoin: _lateJoin,
+      lateJoin,
       // The host had not started running, so this page loads as a player
       // who was there at the start instead of waiting for state.
       onLateJoinAdmitted: () => {
