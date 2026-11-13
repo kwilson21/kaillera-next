@@ -228,11 +228,37 @@ effects with nothing to compare: the page's passing messages and small menus
 invite menu, share or copy, the More menu). Next: ROM transfer. Last: connect, the game
 lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
 
-**Stage 4: engine periphery**
+**Stage 4: engine periphery [pure logic done]**
 `shared.js` (input wire format; prove encode/decode round-trips with
 LemmaScript), `kn-state.js`, `gamepad-manager.js`, `kn-diagnostics.js`,
 `kn-desync-detector.js`. The engine calls `KNCore.meshHealTargets` instead of
 its inline roster loops.
+
+Done: the decisions and arithmetic of each script are typed functions in
+`web/src`, called through `KNCore`, with the script's own code kept as the
+fallback for a page without the bundle (the demo page). A test per script
+runs the real script with and without the bundle against output captured
+before the move.
+
+- Proved (LemmaScript): the input packet round trip (`input-wire.ts`), the
+  stick dead-band's per-axis rule (`stick-axis.ts`), `classifyRunnerStep`,
+  `inputEqual`, and which fields the desync detector flags
+  (`desync-fields.ts`).
+- Typed and tested, not proved (floating point and typed arrays, which the
+  verifier does not model): the sync log ring, the diagnostics' pixel hash,
+  canvas health, screenshot crop and audio transition (`diagnostics.ts`),
+  and the gamepad axis scaling and polarity (`gamepad-axes.ts`).
+- `KNState` has a type (`kn-state.ts`); `kn-state.js` still builds it and
+  still runs before the bundle, because `core-redirector.js` reads it from a
+  fetch callback.
+- Both engine roster loops ask `meshHealTargets`, one entry at a time.
+
+Not done: the scripts themselves are still plain JavaScript. What is left in
+them is the part bound to the browser (reading pads and the canvas, DOM
+hooks, peer-connection helpers, cheats, storage) and their mutable state.
+The fallbacks can be deleted, and `play.html` can stop loading the scripts
+in favour of the bundle, once production shows no difference; the demo page
+needs the bundle first.
 
 **Stage 5: the engine**
 `netplay-rollback.js` (18k lines) is split by concern into typed modules:
