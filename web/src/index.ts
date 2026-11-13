@@ -3,7 +3,8 @@
  * and exposed to the plain-script pages as `window.KNCore`.
  */
 import { Effect, Exit, Scope } from 'effect';
-import { createEffectActor, sendAndAwait } from '@xstate/effect';
+import { createEffectActor } from '@xstate/effect';
+import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
@@ -30,8 +31,14 @@ const startActor = (sink: ReportSink, scope: Scope.Scope, lateJoinReportAfterMs:
   );
 
 /**
- * The page's session actor. Events sent before the actor is up are held and
- * delivered in order.
+ * The page's session: the lifecycle machine the page reads its state from.
+ *
+ * The page needs the state in the same tick as the event that changed it, and
+ * the Effect actor processes events on a later one. So the state is kept
+ * here with XState's pure `transition`, and the actor receives the same
+ * events in the same order only to run the machine's effects (the stranded
+ * late-joiner timer and its report). Events sent before the actor is up are
+ * held for it and delivered in order.
  */
 export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = LATE_JOIN_REPORT_AFTER_MS) => {
   const scope = Effect.runSync(Scope.make());
@@ -43,30 +50,33 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
     for (const event of held.splice(0)) a.send(event);
   });
 
-  const state = (): SessionState => (actor ? actor.getSnapshot().value : 'lobby');
+  let [snapshot] = initialTransition(sessionMachine, { lateJoinReportAfterMs });
+  const state = (): SessionState => snapshot.value;
+  const send = (event: SessionEvent): void => {
+    [snapshot] = transition(sessionMachine, snapshot, event);
+    if (actor) actor.send(event);
+    else held.push(event);
+  };
 
   return {
-    send: (event: SessionEvent): void => {
-      if (actor) actor.send(event);
-      else held.push(event);
-    },
+    send,
     state,
+    /** A game is on for this page: it is anywhere but the lobby. */
+    gameOn: (): boolean => state() !== 'lobby',
     /**
-     * Stage 1 cross-check, called when the signaling socket comes back: does
-     * the machine agree with play.js about whether a game is on? The
-     * answer is read after every earlier event has been processed.
+     * Cross-check, called when the signaling socket comes back: does the
+     * machine agree with the flag play.js still keeps beside it about whether
+     * a game is on? The machine decides either way; a disagreement is
+     * reported so production can show when the flag can be deleted.
      */
-    socketUp: async (page: { gameRunning: boolean }): Promise<boolean> => {
-      const a = await ready;
-      const snapshot = await Effect.runPromise(sendAndAwait(a, { type: 'socketUp' }));
-      const machineState: SessionState = snapshot.value;
-      // play.js sets gameRunning as soon as it joins a room in play, before the
-      // late-join state arrives, so "a game is on" is every state but the lobby.
+    socketUp: (page: { gameRunning: boolean }): Promise<boolean> => {
+      send({ type: 'socketUp' });
+      const machineState = state();
       const agrees = (machineState !== 'lobby') === page.gameRunning;
       if (!agrees) {
         sink({ type: 'session-disagree', machine: machineState, gameRunning: page.gameRunning });
       }
-      return agrees;
+      return Promise.resolve(agrees);
     },
     stop: (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void)),
   };

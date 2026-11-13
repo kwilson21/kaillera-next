@@ -7109,7 +7109,25 @@
         return key;
       }
     }
+    // The player was missing from the last roster (their signaling was down
+    // when ours came back), so prevKnown no longer lists them. The connection
+    // itself remembers whose it is.
+    for (const [key, peer] of Object.entries(_peers)) {
+      if (key === sid || peer.persistentId !== pid || peer.slot !== p.slot) continue;
+      if (_peerConnectionLive(peer)) {
+        _syncLog(`onUsersUpdated: slot ${p.slot} rejoined the room as ${sid}; keeping connection ${key}`);
+        return key;
+      }
+    }
     return sid;
+  };
+
+  // Record on each player connection which player (persistentId) it belongs
+  // to. It lives on the _peers entry, so it goes when the entry does.
+  const _tagPeerIdentities = () => {
+    for (const [key, info] of Object.entries(_knownPlayers)) {
+      if (_peers[key] && info.persistentId) _peers[key].persistentId = info.persistentId;
+    }
   };
 
   // Socket stand-in for messages addressed to a peer: WebRTC signals
@@ -7157,6 +7175,7 @@
       };
     }
     _restoreSyntheticKnownPlayers();
+    _tagPeerIdentities();
     _dropPendingLateJoinPeersMissingFromRoster(players);
 
     // Update my slot from server (handles spectator -> player transition)
@@ -7237,6 +7256,7 @@
       createPeer(p.socketId, p.slot, shouldInitiate);
       if (shouldInitiate) sendOffer(p.socketId);
     }
+    _tagPeerIdentities();
 
     // Players initiate connections to spectators
     if (!_isSpectator) {
@@ -7444,6 +7464,10 @@
       };
     }
 
+    // Whose connection this is, when the roster already says (a connection
+    // recreated by mesh heal or a late-join reconnect gets no roster update).
+    const knownIdentity = _knownPlayers[remoteSid]?.persistentId;
+    if (knownIdentity) peer.persistentId = knownIdentity;
     _peers[remoteSid] = peer;
     KNState.peers = _peers;
 

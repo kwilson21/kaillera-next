@@ -4,9 +4,11 @@
  * specs/room_lifecycle.qnt (`Page = Lobby | Waiting | Running`); the scenario
  * tests in tests/ts replay that model's runs against it.
  *
- * Stage 1: the machine observes. play.js still decides from its own
- * `gameRunning` flag and reports any disagreement (`session-disagree`), so
- * production can show the two agree before the machine takes over.
+ * Stage 2: play.js reads "is a game on" from this machine. It still keeps
+ * its old `gameRunning` flag beside it, written at the same places, and
+ * reports any disagreement (`session-disagree`) on every signaling reconnect;
+ * the flag goes once production shows none. `_lateJoin` and
+ * `_pendingLateJoin` in play.js are not yet read from here.
  */
 import { Context, Effect, Schema } from 'effect';
 import { setupEffect } from '@xstate/effect';
@@ -43,6 +45,8 @@ export const sessionMachine = setupEffect({
       joined: Schema.Struct({ status: RoomStatus, matchId: Schema.NullOr(Schema.String), spectator: Schema.Boolean }),
       gameStarted: Schema.Struct({ matchId: Schema.String }),
       gameEnded: Empty,
+      /** The server closed the room under this page (host left, shutdown). */
+      roomClosed: Empty,
       /** The late-join state arrived and the emulator is running it. */
       lateJoinSynced: Empty,
       socketDown: Empty,
@@ -66,6 +70,7 @@ export const sessionMachine = setupEffect({
     socketDown: ({ context }) => ({ context: { ...context, socketUp: false } }),
     socketUp: ({ context }) => ({ context: { ...context, socketUp: true } }),
     gameEnded: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
+    roomClosed: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
     gameStarted: ({ context, event }) => ({ target: '.running', context: { ...context, matchId: event.matchId } }),
   },
   states: {

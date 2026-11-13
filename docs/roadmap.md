@@ -156,17 +156,24 @@ Quint, LemmaScript) and CI. First modules: `protocol.ts` (Effect Schema for
 server messages), `session.ts` (page lifecycle machine, observing), `roster.ts`
 (mesh-heal target selection, proven never to return the player's own id).
 
-**Stage 2: the page lifecycle decides**
-Once `session-disagree` stays at zero in production: `play.js` reads lobby /
-late-join / running from the machine instead of `gameRunning`, `_lateJoin`
-and `_pendingLateJoin`. The reconnect handshake (open-room / join-room after
-a socket drop) becomes Effect logic invoked by the machine, with a timeout
-and retry instead of a bare callback. Production has had too little traffic to
-supply the evidence, so it comes from end-to-end runs instead:
+**Stage 2: the page lifecycle decides [in progress]**
+Production has had too little traffic to show that the machine agrees with
+the page, so the evidence comes from end-to-end runs:
 `tests/solo-signaling-drop.mjs`, `tests/rb-two-player.mjs` with
 `DROP_SIGNALING_MS`, and `tests/lifecycle-e2e.mjs` (late join, spectating,
-host reload) all show no `session-disagree`. Resolve the two open questions in
-`specs/room_lifecycle.qnt` using the `late-join-stranded` reports.
+host reload) all show no `session-disagree`.
+
+- Done: `play.js` reads "is a game on" from the machine (`isGameRunning`).
+  The old `gameRunning` flag is still written beside it and compared on every
+  signaling reconnect; delete it once production shows no `session-disagree`.
+- Next: `_lateJoin` and `_pendingLateJoin` move into the machine (waiting for
+  a ROM, waiting for state, engine started). They do not map onto its current
+  states one to one, so the machine and the Quint model grow first.
+- Then: the reconnect handshake (open-room / join-room after a socket drop)
+  becomes Effect logic invoked by the machine, with a timeout and retry
+  instead of a bare callback.
+- Resolve the two open questions in `specs/room_lifecycle.qnt` using the
+  `late-join-stranded` reports.
 
 **Stage 3: the socket boundary**
 Every Socket.IO and DataChannel message is decoded with Effect Schema on
