@@ -3825,6 +3825,28 @@
     if (overlay) overlay.classList.add('hidden');
   };
 
+  // What each slot, the spectator line and the info panel show is
+  // web/src/play/room-view.ts; the elements are found and written here.
+  const _roomView = window.KNCore.play.roomView;
+
+  const setBadge = (el, badge) => {
+    if (!el) return;
+    if (badge) {
+      el.textContent = badge.icon;
+      el.title = badge.label;
+      el.setAttribute('aria-label', badge.label);
+      el.removeAttribute('aria-hidden');
+    } else {
+      // Empty slot: no input/device to report. role="img" with no name is
+      // an axe violation (role-img-alt); aria-hidden is correct here since
+      // the empty state is already conveyed by the "Open" name text.
+      el.textContent = '';
+      el.title = '';
+      el.removeAttribute('aria-label');
+      el.setAttribute('aria-hidden', 'true');
+    }
+  };
+
   const updatePlayerList = (players, spectators, ownerSid) => {
     for (let i = 0; i < 4; i++) {
       const slotEl = document.querySelector(`.player-slot[data-slot="${i}"]`);
@@ -3832,89 +3854,32 @@
       const nameEl = slotEl.querySelector('.name');
       if (!nameEl) continue;
 
-      let playerInSlot = null;
-      for (const entry of Object.values(players)) {
-        if (entry.slot === i) {
-          playerInSlot = entry;
-          break;
-        }
-      }
+      const playerInSlot = Object.values(players).find((entry) => entry.slot === i) ?? null;
+      const view = _roomView.slotView(playerInSlot, {
+        isOwner: !!(playerInSlot && ownerSid && playerInSlot.socketId === ownerSid),
+        gameRunning: isGameRunning(),
+        viewerSpectates: isSpectator,
+      });
 
-      const gpEl = slotEl.querySelector('.gamepad');
-      const devEl = slotEl.querySelector('.device');
+      nameEl.textContent = view.name;
+      nameEl.classList.toggle('empty', view.empty);
+      if (view.flair) nameEl.dataset.a21 = '1';
+      else delete nameEl.dataset.a21;
+
       const romEl = slotEl.querySelector('.rom-status');
-      const claimBtn = slotEl.querySelector('.claim-slot-btn');
-
-      if (playerInSlot) {
-        if (claimBtn) claimBtn.hidden = true;
-        const isOwner = ownerSid && playerInSlot.socketId === ownerSid;
-        const suffix = isOwner ? ' (host)' : '';
-        nameEl.textContent = playerInSlot.playerName + suffix;
-        nameEl.classList.remove('empty');
-        if (/\b(a21|agent[- ]?21|atwenty0ne)\b/i.test(playerInSlot.playerName)) nameEl.dataset.a21 = '1';
-        else delete nameEl.dataset.a21;
-        // ROM ready indicator (pre-game only) — W4: "✓ ROM" / "needs ROM"
-        if (romEl) {
-          if (!isGameRunning()) {
-            const ready = !!playerInSlot.romReady;
-            romEl.textContent = ready ? '✓ ROM' : 'needs ROM';
-            romEl.className = `rom-status ${ready ? 'ready' : 'not-ready'}`;
-          } else {
-            romEl.textContent = '';
-            romEl.className = 'rom-status';
-          }
-        }
-        // Show input type indicator
-        if (gpEl) {
-          const itype = playerInSlot.inputType || 'keyboard';
-          const gpLabel = itype === 'gamepad' ? 'Gamepad' : 'Keyboard';
-          gpEl.textContent = itype === 'gamepad' ? '\uD83C\uDFAE' : '\u2328\uFE0F';
-          gpEl.title = gpLabel;
-          gpEl.setAttribute('aria-label', gpLabel);
-          gpEl.removeAttribute('aria-hidden');
-        }
-        // Show device type indicator
-        if (devEl) {
-          const dtype = playerInSlot.deviceType || 'desktop';
-          const devLabel = dtype === 'mobile' ? 'Mobile' : 'Desktop';
-          devEl.textContent = dtype === 'mobile' ? '\uD83D\uDCF1' : '\uD83D\uDDA5\uFE0F';
-          devEl.title = devLabel;
-          devEl.setAttribute('aria-label', devLabel);
-          devEl.removeAttribute('aria-hidden');
-        }
-      } else {
-        nameEl.textContent = 'Open';
-        nameEl.classList.add('empty');
-        delete nameEl.dataset.a21;
-        if (romEl) {
-          romEl.textContent = '';
-          romEl.className = 'rom-status';
-        }
-        // Empty slot: no input/device to report. role="img" with no name is
-        // an axe violation (role-img-alt); aria-hidden is correct here since
-        // the empty state is already conveyed by the "Open" name text.
-        if (gpEl) {
-          gpEl.textContent = '';
-          gpEl.title = '';
-          gpEl.removeAttribute('aria-label');
-          gpEl.setAttribute('aria-hidden', 'true');
-        }
-        if (devEl) {
-          devEl.textContent = '';
-          devEl.title = '';
-          devEl.removeAttribute('aria-label');
-          devEl.setAttribute('aria-hidden', 'true');
-        }
-        // Spectator slot-claim: "Join · needs your ROM" (§7.2 M3 #3).
-        // Lobby-only — hidden once the game is running.
-        if (claimBtn) claimBtn.hidden = !(isSpectator && !isGameRunning());
+      if (romEl) {
+        romEl.textContent = view.romText;
+        romEl.className = view.romClass ? `rom-status ${view.romClass}` : 'rom-status';
       }
+      setBadge(slotEl.querySelector('.gamepad'), view.input);
+      setBadge(slotEl.querySelector('.device'), view.device);
+      const claimBtn = slotEl.querySelector('.claim-slot-btn');
+      if (claimBtn) claimBtn.hidden = view.claimHidden;
     }
 
     const specEl = document.getElementById('spectator-list');
     if (specEl) {
-      const specNames = Object.values(spectators).map((s) => s.playerName);
-      specEl.textContent = specNames.length > 0 ? `Watching: ${specNames.join(', ')}` : '';
+      specEl.textContent = _roomView.spectatorLine(Object.values(spectators).map((s) => s.playerName));
     }
   };
 
@@ -3948,6 +3913,13 @@
         btn.textContent = 'Start Game';
       }
     }
+    // Whether the host may start is still decided above; room-view.ts
+    // computes it beside this and a difference is reported as play-disagree.
+    _playObserver.compare(
+      'start-button',
+      { disabled: btn.disabled, label: btn.textContent },
+      _roomView.startButton(playerCount, entries.filter((p) => p.romReady).length, selectedMode, _romSharingEnabled),
+    );
   };
 
   // ── UI: Toolbar ────────────────────────────────────────────────────────
@@ -4045,61 +4017,11 @@
     const statsEl = document.getElementById('info-stats');
     const peersEl = document.getElementById('info-peers');
 
-    if (!info) {
-      if (headerEl) headerEl.textContent = '';
-      if (statsEl) statsEl.textContent = 'FPS: -- | Ping: --';
-      if (peersEl) peersEl.textContent = '';
-      return;
-    }
-
-    // Header: mode + input type
-    const inputType = window.GamepadManager?.hasGamepad?.(mySlot) ? 'Gamepad' : 'Keyboard';
-    const engineMode = normalizeMode(info.mode);
-    const modeLabel = engineMode === 'streaming' ? 'Streaming' : 'Rollback';
-    if (headerEl) headerEl.textContent = `${modeLabel} | ${inputType}`;
-
-    // Stats line
-    const parts = [];
-    parts.push(`FPS: ${info.fps || 0}`);
-    const pingStr = info.ping !== null && info.ping !== undefined ? `${Math.round(info.ping)}ms` : '--';
-    parts.push(`Ping: ${pingStr}`);
-
-    if (engineMode === 'rollback') {
-      if (info.rollback) {
-        parts.push(`Delay: ${info.frameDelay}f (feels 0f)`);
-      } else {
-        parts.push(`Delay: ${info.frameDelay}f`);
-      }
-      parts.push(`Players: ${info.playerCount}`);
-      if (info.rollback) {
-        parts.push(`Rollback: ${info.rollback.rollbacks}/${info.rollback.predictions}`);
-      }
-      if (info.syncEnabled && info.resyncCount > 0) {
-        parts.push(`Resyncs: ${info.resyncCount}`);
-      }
-    } else {
-      // Streaming: codec + resolution
-      if (info.codec && info.codec !== '?') parts.push(info.codec);
-      if (info.resolution && info.resolution !== '?x?') parts.push(info.resolution);
-      parts.push(`Players: ${info.playerCount}`);
-    }
-    if (statsEl) statsEl.textContent = parts.join(' | ');
-
-    // Peers detail
-    const peerLines = [];
-    if (engineMode === 'rollback' && info.peers) {
-      for (const p of info.peers) {
-        const pRtt = p.rtt !== null ? `${Math.round(p.rtt)}ms` : '--';
-        peerLines.push(`P${p.slot + 1}: ${pRtt}`);
-      }
-    } else if (info.mode === 'streaming') {
-      // Streaming-specific detail (values are numeric from gatherStats)
-      if (info.encodeTime !== null) peerLines.push(`Encode: ${info.encodeTime}ms`);
-      if (info.bitrate !== null) peerLines.push(`BW: ${info.bitrate}Mbps`);
-      if (info.jitter !== null) peerLines.push(`Jitter: ${info.jitter}ms`);
-      if (info.lossRate && info.lossRate > 0) peerLines.push(`Loss: ${info.lossRate}%`);
-    }
-    if (peersEl) peersEl.textContent = peerLines.join(' | ');
+    const usesGamepad = !!window.GamepadManager?.hasGamepad?.(mySlot);
+    const panel = _roomView.infoPanel(info, usesGamepad);
+    if (headerEl) headerEl.textContent = panel.header;
+    if (statsEl) statsEl.textContent = panel.stats;
+    if (peersEl) peersEl.textContent = panel.peers;
   };
 
   // ── UI: Toast Notifications ───────────────────────────────────────────

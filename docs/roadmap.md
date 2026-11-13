@@ -229,7 +229,9 @@ invite menu, share or copy, the More menu). Observing: a guest receiving the
 host's ROM (`rom-transfer.ts`, decisions proved in `rom-transfer-step.ts`,
 modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
 keeps the channel, the timers and the page. The host's sending side and the
-WebRTC set-up are still `play.js`. Last: connect, the game
+WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
+(each player slot, the spectator line, the in-game info panel; the Start
+button's rule is observed, `play.js` still decides it). Last: connect, the game
 lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
 
 **Stage 4: engine periphery [pure logic done]**
