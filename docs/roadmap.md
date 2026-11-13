@@ -220,9 +220,10 @@ a ROM does to the page), and input delay (`delay.ts`: a player's delay
 preference and the words beside the picker; `play.js` still reads and writes
 the controls), and the control remap wizard (`remap-wizard.ts`: the steps,
 what a captured button, stick or key does to the mapping, Back and Skip;
-`play.js` keeps the pad polling, key listener, debounce and prompts). Next, in
-order of how little shared state they touch: toasts and the More menu, ROM
-transfer. Last: connect, the game
+`play.js` keeps the pad polling, key listener, debounce and prompts), and the
+page's passing messages and small menus (`notices.ts`: toasts, the error card,
+the room-full banner; `menus.ts`: the invite menu, share or copy, the More
+menu). Next: ROM transfer. Last: connect, the game
 lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
 
 **Stage 4: engine periphery**

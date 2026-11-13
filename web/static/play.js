@@ -4033,22 +4033,8 @@
     // shrinking #game and triggering EJS ResizeObserver (canvas clear).
   };
 
-  const showToast = (msg) => {
-    const container = document.getElementById('toast-container');
-    if (!container) return;
-
-    const toast = document.createElement('div');
-    toast.className = 'toast';
-    toast.textContent = msg;
-    container.appendChild(toast);
-
-    setTimeout(() => {
-      toast.classList.add('fade-out');
-      setTimeout(() => {
-        if (toast.parentNode) toast.parentNode.removeChild(toast);
-      }, 300);
-    }, 2700);
-  };
+  // Toasts, the error card and the room-full banner are web/src/play/notices.ts.
+  const { showToast, showErrorCard, showRoomFullBanner } = window.KNCore.play.notices;
 
   // Expose toast/error for cross-module UI surfacing (P1-3). Other modules
   // (shared.js, netplay-rollback.js) can call these to show user-visible
@@ -4060,44 +4046,11 @@
   const showError = (msg) => {
     crumb('error', msg);
     flushBreadcrumbs(msg);
-    const el = document.getElementById('error-msg');
-    if (!el) return;
-    el.classList.remove('hidden');
-    const card = el.querySelector('.error-card');
-    if (!card) return;
-    card.innerHTML = '';
-    const h3 = document.createElement('h3');
-    h3.textContent = 'Error';
-    const p = document.createElement('p');
-    p.textContent = msg;
-    const a = document.createElement('a');
-    a.href = '/';
-    a.className = 'error-back';
-    a.textContent = 'Back to Lobby';
-    card.appendChild(h3);
-    card.appendChild(p);
-    card.appendChild(a);
+    showErrorCard(msg);
   };
 
   // Expose for cross-module UI surfacing — see knShowToast comment above.
   window.knShowError = showError;
-
-  const showRoomFullBanner = () => {
-    const banner = document.createElement('div');
-    banner.className = 'room-full-banner';
-    banner.innerHTML = '<span>Game is full \u2014 you\u2019ve joined as a spectator</span>';
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'banner-close';
-    closeBtn.textContent = '\u2715';
-    closeBtn.onclick = () => {
-      banner.remove();
-    };
-    banner.appendChild(closeBtn);
-    document.body.appendChild(banner);
-    setTimeout(() => {
-      if (banner.parentNode) banner.remove();
-    }, 5000);
-  };
 
   // ── UI: Copy Link ─────────────────────────────────────────────────────
 
@@ -4106,198 +4059,13 @@
   // handing off to this page.
   const inviteUrl = (spectate) => window.KNCore.play.inviteUrl(window.location.origin, roomCode, spectate);
 
-  const copyLink = () => {
-    // Toggle overlay invite dropdown — positioned via JS to escape overflow:auto clipping
-    const existing = document.getElementById('kn-invite-dropdown');
-    if (existing) {
-      existing.remove();
-      return;
-    }
-    const btn = document.getElementById('copy-link');
-    if (!btn) return;
-    const rect = btn.getBoundingClientRect();
-
-    const dropdown = document.createElement('div');
-    dropdown.id = 'kn-invite-dropdown';
-    Object.assign(dropdown.style, {
-      position: 'fixed',
-      top: `${rect.bottom + 6}px`,
-      right: `${window.innerWidth - rect.right}px`,
-      background: '#1a1a2e',
-      border: '1px solid #2a2a40',
-      borderRadius: '8px',
-      padding: '4px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '2px',
-      minWidth: '140px',
-      zIndex: '99999',
-    });
-
-    const makeOption = (label, url, title) => {
-      const opt = document.createElement('button');
-      opt.textContent = label;
-      opt.className = 'share-option';
-      opt.addEventListener('click', () => {
-        shareOrCopy(url, `${label} link`, title);
-        dropdown.remove();
-      });
-      return opt;
-    };
-
-    const playUrl = inviteUrl(false);
-    const watchUrl = inviteUrl(true);
-    dropdown.append(
-      makeOption('Play', playUrl, 'Join my game on Kaillera Next'),
-      makeOption('Watch', watchUrl, 'Watch my game on Kaillera Next'),
-    );
-
-    document.body.appendChild(dropdown);
-
-    // Close on outside click (next tick to avoid immediate self-close)
-    setTimeout(() => {
-      const close = (e) => {
-        if (!dropdown.contains(e.target) && e.target !== btn) {
-          dropdown.remove();
-          document.removeEventListener('click', close);
-        }
-      };
-      document.addEventListener('click', close);
-    }, 0);
-  };
-
-  // ── UI: In-Game Share Dropdown ──────────────────────────────────────
-
-  const _canNativeShare = _isMobile && typeof navigator.share === 'function';
-
-  const nativeShare = async (url, title) => {
-    try {
-      await navigator.share({ title, url });
-    } catch (err) {
-      // AbortError = user dismissed; NotAllowedError = permission denied (e.g. no gesture)
-      if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
-        showToast('Share failed');
-      }
-    }
-  };
-
-  const shareOrCopy = async (url, label, title) => {
-    if (_canNativeShare) {
-      await nativeShare(url, title);
-    } else {
-      await copyToClipboard(url, label);
-    }
-  };
-
-  const copyToClipboard = async (text, label) => {
-    if (navigator.clipboard && window.isSecureContext) {
-      try {
-        await navigator.clipboard.writeText(text);
-        showToast(`${label} copied!`);
-        return;
-      } catch (_) {
-        /* fall through to execCommand fallback */
-      }
-    }
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-    showToast(`${label} copied!`);
-  };
-
-  // ── UI: More (overflow) Dropdown ──────────────────────────────────────
-
-  const isPopoverOpen = (el) => {
-    try {
-      return !!el?.matches?.(':popover-open');
-    } catch (_) {
-      return false;
-    }
-  };
-
-  const showMoreDropdownTopLayer = (dd) => {
-    if (typeof dd?.showPopover !== 'function') return false;
-    dd.setAttribute('popover', 'manual');
-    try {
-      if (!isPopoverOpen(dd)) dd.showPopover();
-      return true;
-    } catch (_) {
-      dd.removeAttribute('popover');
-      return false;
-    }
-  };
-
-  const hideMoreDropdownTopLayer = (dd) => {
-    try {
-      if (typeof dd?.hidePopover === 'function' && isPopoverOpen(dd)) dd.hidePopover();
-    } catch (_) {
-      // Best-effort only; the z-index fallback still covers older engines.
-    }
-    dd?.removeAttribute?.('popover');
-  };
-
-  const positionMoreDropdown = (dd, btn) => {
-    if (!dd || !btn) return;
-    const rect = btn.getBoundingClientRect();
-    const gap = 6;
-    const edge = 8;
-    dd.style.maxHeight = `${Math.max(160, rect.top - edge - gap)}px`;
-    dd.style.overflowY = 'auto';
-    const menuRect = dd.getBoundingClientRect();
-    const left = Math.min(window.innerWidth - menuRect.width - edge, Math.max(edge, rect.right - menuRect.width));
-    const top = Math.max(edge, rect.top - menuRect.height - gap);
-    dd.style.left = `${left}px`;
-    dd.style.top = `${top}px`;
-  };
-
-  const toggleMoreDropdown = () => {
-    const dd = document.getElementById('more-dropdown');
-    const btn = document.getElementById('toolbar-more');
-    if (!dd) return;
-    const isOpen = !dd.classList.contains('hidden') || isPopoverOpen(dd);
-    if (isOpen) {
-      closeMoreDropdown();
-    } else {
-      if (btn) {
-        document.body.appendChild(dd);
-        dd.classList.add('floating');
-      }
-      dd.classList.remove('hidden');
-      const topLayer = showMoreDropdownTopLayer(dd);
-      positionMoreDropdown(dd, btn);
-      if (topLayer) {
-        requestAnimationFrame(() => {
-          if (!dd.classList.contains('hidden')) positionMoreDropdown(dd, btn);
-        });
-      }
-      if (btn) {
-        btn.classList.add('active');
-        btn.setAttribute('aria-expanded', 'true');
-      }
-    }
-  };
-
-  const closeMoreDropdown = () => {
-    const dd = document.getElementById('more-dropdown');
-    const btn = document.getElementById('toolbar-more');
-    if (dd) {
-      hideMoreDropdownTopLayer(dd);
-      dd.classList.add('hidden');
-      dd.classList.remove('floating');
-      dd.removeAttribute('style');
-      const home = document.getElementById('more-wrapper');
-      if (home && dd.parentElement !== home) home.appendChild(dd);
-    }
-    if (btn) {
-      btn.classList.remove('active');
-      btn.setAttribute('aria-expanded', 'false');
-    }
-  };
+  // The invite menu, sharing or copying a link, and the More menu are
+  // web/src/play/menus.ts.
+  const _menus = window.KNCore.play.menus;
+  const inviteLinksNow = () => _menus.inviteLinks(inviteUrl(false), inviteUrl(true));
+  const copyLink = () => _menus.toggleInviteMenu(inviteUrl(false), inviteUrl(true), _isMobile);
+  const toggleMoreDropdown = _menus.toggleMoreMenu;
+  const closeMoreDropdown = _menus.closeMoreMenu;
 
   window.KNCloseMoreDropdown = closeMoreDropdown;
 
@@ -4953,7 +4721,7 @@
     const copyBtn = document.getElementById('unsupported-copy');
     if (copyBtn) {
       copyBtn.addEventListener('click', () => {
-        copyToClipboard(inviteUrl(false), 'Link');
+        _menus.copyToClipboard(inviteUrl(false), 'Link');
       });
     }
     const watchBtn = document.getElementById('unsupported-watch');
@@ -5207,8 +4975,7 @@
     const sharePlay = document.getElementById('share-play');
     if (sharePlay) {
       sharePlay.addEventListener('click', () => {
-        const url = inviteUrl(false);
-        shareOrCopy(url, 'Play link', 'Join my game on Kaillera Next');
+        _menus.shareOrCopy(inviteLinksNow().play, _isMobile);
         closeMoreDropdown();
       });
     }
@@ -5216,8 +4983,7 @@
     const shareWatch = document.getElementById('share-watch');
     if (shareWatch) {
       shareWatch.addEventListener('click', () => {
-        const url = inviteUrl(true);
-        shareOrCopy(url, 'Watch link', 'Watch my game on Kaillera Next');
+        _menus.shareOrCopy(inviteLinksNow().watch, _isMobile);
         closeMoreDropdown();
       });
     }
