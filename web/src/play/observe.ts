@@ -14,7 +14,7 @@ export type DisagreeReport = {
   readonly type: 'play-disagree';
   /** Which decision: 'delay-preference', 'remap-wizard', ... */
   readonly message: string;
-  /** What play.js decided, and what the new function would have, as JSON. */
+  /** What play.js decided, and what the new function would have: JSON, cut to a window around the first difference. */
   readonly old: string;
   readonly next: string;
 };
@@ -24,7 +24,19 @@ export const DISAGREE_LIMIT = 10;
 /** Longest value kept in a report. */
 const VALUE_MAX = 300;
 
-const shown = (value: WirePayload | undefined): string => (JSON.stringify(value) ?? 'undefined').slice(0, VALUE_MAX);
+const asJson = (value: WirePayload | undefined): string => JSON.stringify(value) ?? 'undefined';
+
+/** The part of a value worth reporting: a window around where the two first differ. */
+const windowAt = (text: string, firstDifference: number): string => {
+  const start = Math.max(0, Math.min(firstDifference - VALUE_MAX / 3, text.length - VALUE_MAX));
+  return text.slice(start, start + VALUE_MAX);
+};
+
+const firstDifference = (a: string, b: string): number => {
+  let index = 0;
+  while (index < a.length && index < b.length && a[index] === b[index]) index++;
+  return index;
+};
 
 /**
  * Compare decisions and report where they differ. `sink` returns false when
@@ -41,9 +53,13 @@ export const createComparer = (sink: (report: DisagreeReport) => boolean) => {
 
   /** Returns whether the two agree. The caller keeps using `oldValue`. */
   const compare = (what: string, oldValue: WirePayload | undefined, newValue: WirePayload | undefined): boolean => {
-    const old = shown(oldValue);
-    const next = shown(newValue);
-    if (old !== next) {
+    const oldJson = asJson(oldValue);
+    const nextJson = asJson(newValue);
+    const agree = oldJson === nextJson;
+    if (!agree) {
+      const at = firstDifference(oldJson, nextJson);
+      const old = windowAt(oldJson, at);
+      const next = windowAt(nextJson, at);
       const key = `${what}\n${old}\n${next}`;
       if (!seen.has(key) && seen.size < DISAGREE_LIMIT) {
         seen.add(key);
@@ -51,7 +67,7 @@ export const createComparer = (sink: (report: DisagreeReport) => boolean) => {
       }
     }
     if (waiting.length > 0) flush();
-    return old === next;
+    return agree;
   };
 
   return { compare, flush };

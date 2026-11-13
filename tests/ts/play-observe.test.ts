@@ -59,8 +59,13 @@ test('reports wait until they can be sent, then go in order', () => {
   assert.equal(sent.length, 2);
 });
 
-test('long values are cut short', () => {
+test('long values are compared whole and reported around the first difference', () => {
   const { sent, comparer } = collecting();
-  comparer.compare('remap-wizard', 'x'.repeat(5000), 'y');
+  const long = 'x'.repeat(5000);
+  assert.equal(comparer.compare('remap-wizard', long, long), true);
+  assert.equal(comparer.compare('remap-wizard', `${long}A`, `${long}B`), false);
+  assert.equal(sent.length, 1);
   assert.equal(sent[0]?.old.length, 300);
+  assert.ok(sent[0]?.old.endsWith('A"'));
+  assert.ok(sent[0]?.next.endsWith('B"'));
 });
