@@ -7107,6 +7107,21 @@
 
   const _isOwnSid = (sid) => !!sid && (sid === socket?.id || _ownSids.has(sid));
 
+  // Does the mesh need a new connection to this roster player? The decision
+  // is KNCore.meshHealTargets (web/src/roster.ts), proved never to return one
+  // of our own ids: the host once opened a connection to itself here and
+  // stalled on input from its own slot. The line below it is the same rule,
+  // used only if the bundle did not load.
+  const _needsMeshHeal = (sid, healthy, reconnecting) => {
+    const targets = window.KNCore?.meshHealTargets;
+    if (targets) {
+      const ownSids = [..._ownSids];
+      if (socket?.id) ownSids.push(socket.id);
+      return targets([{ sid, healthy, reconnecting }], ownSids).length > 0;
+    }
+    return !_isOwnSid(sid) && !healthy && !reconnecting;
+  };
+
   const _peerConnectionLive = (peer) =>
     peer?.pc?.connectionState === 'connected' && (peer.dc?.readyState === 'open' || peer.rbDc?.readyState === 'open');
 
@@ -10594,10 +10609,10 @@
       // removed by hardDisconnectPeer (_running was false) or left as zombies
       // by the reconnect timeout (which closes PC but doesn't delete from _peers).
       for (const [sid, info] of Object.entries(_knownPlayers)) {
-        if (_isOwnSid(sid)) continue;
         const existing = _peers[sid];
         const pcState = existing?.pc?.connectionState;
-        if (existing && pcState === 'connected' && existing.dc?.readyState === 'open') continue;
+        const working = !!existing && pcState === 'connected' && existing.dc?.readyState === 'open';
+        if (!_needsMeshHeal(sid, working, false)) continue;
         // Peer is missing, dead, or has no working DC — clean up and recreate
         if (existing) {
           _syncLog(
@@ -16747,15 +16762,15 @@
       // failed initial connections, and silent DC deaths that no event fires for.
       if (_frameNum % 300 === 0) {
         for (const [sid, info] of Object.entries(_knownPlayers)) {
-          // _isOwnSid, not `sid === socket.id`: while the signaling socket is
-          // down socket.id is undefined, and after it reconnects the roster
-          // still lists us under the old id until users-updated arrives.
-          if (_isOwnSid(sid)) continue;
           if (_isPeerPendingLateJoin(sid)) continue;
-          const p = _peers[sid];
-          if (p && p.dc?.readyState === 'open') continue; // healthy
-          if (p?.reconnecting) continue; // already in progress
           if (_peerPhantom[info.slot]) continue; // confirmed dead during gameplay
+          const p = _peers[sid];
+          // Skips our own entry (under any id we have had: while the
+          // signaling socket is down socket.id is undefined, and after it
+          // reconnects the roster still lists us under the old id until
+          // users-updated arrives), a peer with an open DC, and a reconnect
+          // already in progress.
+          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) continue;
           const pcState = p?.pc?.connectionState;
           _syncLog(
             `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
