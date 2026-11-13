@@ -115,6 +115,7 @@ export const ROM_ADDRESSES = {
 const hasMap = (romHash: string): romHash is keyof typeof ROM_ADDRESSES => Object.hasOwn(ROM_ADDRESSES, romHash);
 
 const RDRAM_SIZE = 0x800000;
+const PLAYERS = 4;
 const SPAN_MAX = 0x10000;
 const SPANS: ReadonlySet<keyof AddressMap> = new Set([
   'playerStride',
@@ -126,7 +127,13 @@ const SPANS: ReadonlySet<keyof AddressMap> = new Set([
   'ftBufferSize',
 ]);
 
-/** Why the registry would refuse this map, or null if it would take it (`kn_field_map_set`'s rules). */
+/**
+ * Why this map must not be installed, or null if it is sound. It covers
+ * `kn_field_map_set`'s own rules (every entry in range) and one the registry
+ * does not check: that every read the map leads to stays inside RDRAM. A
+ * read that runs off the end hashes to 0 in the registry, which the
+ * detector takes for "no data", so the field would silently go unchecked.
+ */
 export const addressMapProblem = (map: AddressMap): string | null => {
   for (const key of ADDRESS_MAP_ORDER) {
     const value = map[key];
@@ -135,6 +142,21 @@ export const addressMapProblem = (map: AddressMap): string | null => {
   }
   if (map.vsBattleHeaderSize === 0) return 'vsBattleHeaderSize is 0';
   if (map.ftBufferSize === 0) return 'ftBufferSize is 0';
+  const lastPlayer = PLAYERS - 1;
+  const reads: readonly (readonly [string, number])[] = [
+    ["the last player's stock count", map.stocksBase + lastPlayer * map.playerStride + 1],
+    ['sceneCurr', map.sceneCurr + 1],
+    ['the battle header', map.vsBattleHeader + map.vsBattleHeaderSize],
+    ['rngSeed', map.rngSeed + 4],
+    ["the last player's cssCharId", map.cssBase + lastPlayer * map.cssStride + map.cssCharId + 4],
+    ["the last player's cssCursorState", map.cssBase + lastPlayer * map.cssStride + map.cssCursorState + 4],
+    ["the last player's cssSelectedFlag", map.cssBase + lastPlayer * map.cssStride + map.cssSelectedFlag + 4],
+    ['ftMotionCount', map.ftMotionCount + 4],
+    ['ftBufferPtr', map.ftBufferPtr + 4],
+  ];
+  for (const [what, end] of reads) {
+    if (end > RDRAM_SIZE) return `${what} would be read past the end of RDRAM`;
+  }
   return null;
 };
 
@@ -144,5 +166,8 @@ export const packAddressMap = (map: AddressMap): number[] => ADDRESS_MAP_ORDER.m
 export const addressMapFor = (romHash: string | null | undefined): PackedRomAddresses | null => {
   if (!romHash || !hasMap(romHash)) return null;
   const rom = ROM_ADDRESSES[romHash];
+  // The table is checked by its tests; this keeps an unsound entry from
+  // reaching the core if one ever slips in.
+  if (addressMapProblem(rom.map) !== null) return null;
   return { name: rom.name, values: packAddressMap(rom.map), scenes: rom.scenes };
 };

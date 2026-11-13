@@ -168,8 +168,9 @@
  *     change, and none before it; both peers log `KNDesync capture` for the
  *     first flagged frame at the same frame number (their screenshots are
  *     compared with each other); and the gameplay hash (kn_gameplay_hash,
- *     which lists the stock counts) differs on at least one frame from the
- *     change on, and on none before it. The
+ *     which lists SSB64's stock counts) differs on at least one frame from
+ *     the change on, where the map's stock address is the one it lists, and
+ *     on none before it. The
  *     game-state and full-state hashes are reported but not judged: the
  *     stock counts sit in an RDRAM block kn_game_state_hash leaves out as
  *     tainted, and kn_full_state_hash samples one byte in 64.
@@ -770,6 +771,7 @@ const tb = Date.now();
 const MENU_MS = Number(process.env.MENU_SECONDS || 600) * 1000;
 let lastLog = 0;
 let inBattle = false;
+let desyncGuestStocksBase = -1; // DESYNC_GUEST: the map's address of P1's stock count
 let desyncGuestAt = -1; // DESYNC_GUEST: the guest's frame when its stock count was changed
 let throttleFlipped = null; // null until the 15s mark; then whether the flip Promise.all resolved or rejected
 for (;;) {
@@ -888,7 +890,7 @@ if (inBattle) {
     // SCPlayerData.stock_count, 0xA4F23). RDRAM is host-order words, so the byte
     // is at offset ^ 3. Held for 3 s so that every state the rollback ring
     // can still restore carries the change.
-    desyncGuestAt = await guest.evaluate(async () => {
+    ({ frame: desyncGuestAt, stocksBase: desyncGuestStocksBase } = await guest.evaluate(async () => {
       const mod = window.EJS_emulator.gameManager.Module;
       const stocksBase = mod._kn_field_map_value?.(0) ?? 0xa4f23;
       const at = mod._kn_get_rdram_ptr() + (stocksBase ^ 3);
@@ -899,8 +901,8 @@ if (inBattle) {
         mod.HEAPU8[at] = wrong;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      return frame;
-    });
+      return { frame, stocksBase };
+    }));
     console.log('guest desynced on purpose: P1 stock count changed at frame', desyncGuestAt);
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
   } else if (DROP_SIGNALING_MS > 0) {
@@ -1509,6 +1511,10 @@ const desyncCapturesAgree = (hostSide, guestSide) => {
   const hostAt = hostSide.captures[suspect];
   return hostAt !== undefined && hostAt === guestSide.captures[suspect];
 };
+// kn_gameplay_hash has its own table of addresses, compiled in and SSB64's.
+// It sees the changed stock count only when the map's stock address is the
+// one in that table, so only then is it required to.
+const desyncGuestGameplayHashCovers = desyncGuestStocksBase === 0xa4f23;
 // DESYNC_GUEST inverts the run: the peers were desynced on purpose. The
 // detector must flag the changed field on both peers, and nothing before
 // the change; and the gameplay hash, which lists the stock counts, must
@@ -1518,7 +1524,7 @@ const desyncCapturesAgree = (hostSide, guestSide) => {
 const desyncGuestFailed =
   DESYNC_GUEST &&
   (desyncGuestAt < 0 ||
-    gpMisAfterDesync < 1 ||
+    (desyncGuestGameplayHashCovers && gpMisAfterDesync < 1) ||
     gpMisBeforeDesync > 0 ||
     [summary.desyncGuest.host, summary.desyncGuest.guest].some((side) => side.before > 0 || side.stocksAfter < 1) ||
     !desyncCapturesAgree(summary.desyncGuest.host, summary.desyncGuest.guest));

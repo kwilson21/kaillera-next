@@ -530,7 +530,13 @@
       _noDecisionLogged = false;
       _scenes = SSB64_SCENES;
       _log(`init mode=${mode}`);
-      if (_enabled && rom && !_installAddressMap(emModule, rom)) _enabled = false;
+      if (_enabled && rom && !_installAddressMap(emModule, rom)) {
+        // Off for the whole match. tick() re-checks the exports of a
+        // module it holds and would switch the detector back on, hashing
+        // through whatever map the core was left with.
+        _enabled = false;
+        _module = null;
+      }
       if (!_enabled) {
         _stopHeartbeat();
         return;

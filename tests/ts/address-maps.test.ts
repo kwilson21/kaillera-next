@@ -64,6 +64,16 @@ test('a map the registry would refuse is named', () => {
   assert.match(addressMapProblem({ ...base, rngSeed: 1.5 }) ?? '', /rngSeed/);
 });
 
+test('a map whose reads would run off the end of RDRAM is named', () => {
+  const base = ROM_ADDRESSES[SSB64_US].map;
+  // Each entry is in range on its own; the read it leads to is not.
+  assert.match(addressMapProblem({ ...base, vsBattleHeader: 0x7ffff0 }) ?? '', /battle header/);
+  assert.match(addressMapProblem({ ...base, cssBase: 0x7ffe00 }) ?? '', /cssCharId/);
+  assert.match(addressMapProblem({ ...base, stocksBase: 0x7fff00 }) ?? '', /stock count/);
+  assert.match(addressMapProblem({ ...base, rngSeed: 0x7ffffe }) ?? '', /rngSeed/);
+  assert.equal(addressMapProblem({ ...base, rngSeed: 0x7ffffc }), null);
+});
+
 test('the plain-script pages reach it through KNCore', () => {
   assert.equal(KNCore.addressMapFor, addressMapFor);
 });

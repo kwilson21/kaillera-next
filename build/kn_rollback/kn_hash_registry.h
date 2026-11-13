@@ -54,7 +54,11 @@ enum {
 
 /* Install a map: `count` must be KN_MAP_COUNT and every entry must fit in
  * 8 MB of RDRAM (sizes and strides at most 64 KB). Returns 1 and clears the
- * history rings, or 0 and changes nothing. */
+ * history rings, or 0 and changes nothing. It checks each entry on its own,
+ * not that a base plus its size or strides stays inside RDRAM: a read that
+ * runs off the end hashes to 0, like any unavailable field. The page checks
+ * whole reads before it installs a map (addressMapProblem in
+ * web/src/address-maps.ts). */
 int kn_field_map_set(const uint32_t* values, uint32_t count);
 uint32_t kn_field_map_count(void);
 /* The entry in use at `index`; 0xFFFFFFFF if out of range. */
