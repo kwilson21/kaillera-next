@@ -72,7 +72,6 @@
   let _lastFlagFrame = new Map(); // "field:slot" → frame
   let _heartbeatTimerId = null;
   let _missingExportsLogged = false;
-  let _lastReplayTrajectoryEvent = null;
   const _events = new EventTarget();
 
   /* (Helpers _buildLocalDigest, _broadcastDigest, etc. added in
@@ -408,24 +407,6 @@
     _events.dispatchEvent(new CustomEvent('desync-suspect', { detail: payload }));
   }
 
-  function _maybeEmitReplayTrajectoryEvent(localDigest) {
-    const div = localDigest && localDigest.replayMeta && localDigest.replayMeta.firstTrajectoryDivergence;
-    if (!div) return;
-    const meta = localDigest.replayMeta;
-    const key = `${meta.target}:${meta.final}:${meta.length}:${div.offset}:${div.fieldId}:${div.replayHash}:${div.forwardHash}`;
-    if (key === _lastReplayTrajectoryEvent) return;
-    _lastReplayTrajectoryEvent = key;
-    _emitSuspect({
-      frame: div.absoluteFrame,
-      field: div.field,
-      slot: div.slot,
-      hashes: { replay: div.replayHash, forward: div.forwardHash },
-      trigger: 'replay-trajectory',
-      severity: 'high',
-      replayMeta: meta,
-    });
-  }
-
   function _startHeartbeat() {
     _stopHeartbeat();
     if (_mode !== 'B') return;
@@ -519,29 +500,28 @@
       // no-op DC and comparisons run against an empty peer-digest map;
       // the work is what we're measuring.
       if (!_hasRealPeer && !window.__knForceDesyncTick) return;
-      // Rate-limit digest BUILD to broadcast cadence + replay-active
-      // frames. Per-frame build was the dominant main-thread cost
-      // (~3-9 ms × 60 Hz on mobile = up to 540 ms/sec at default mode B).
-      // The peer broadcasts only on its own cadence-aligned frames so
-      // any digest we built between cadence frames had nothing to
-      // compare against — wasted CPU. We still build on every replay-
-      // active frame so _maybeEmitReplayTrajectoryEvent's per-replay
-      // detection isn't lost. Detection latency for cross-peer drift
-      // moves from 1 frame (~16 ms) to cadence frames (mode B = 1 frame
-      // unchanged; mode C = 6 frames ≈ 100 ms — still well inside
-      // typical desync timescales).
+      // Build a digest only on broadcast-cadence frames, and never while a
+      // rollback replay is in flight. Per-frame build was the dominant
+      // main-thread cost (~3-9 ms x 60 Hz on mobile at mode B), and the peer
+      // only broadcasts on its own cadence-aligned frames, so a digest
+      // between them had nothing to compare against. Detection latency is
+      // one cadence step (mode B = 1 frame; mode C = 6 frames, ~100 ms).
+      //
+      // A replay's own trajectory is not flagged here. The forward pass ran
+      // on a mispredicted input, so the replay differing from it is what a
+      // rollback is for, not a desync; flagging it raised a `suspect` (and a
+      // canvas capture in kn-vision-client.js) on healthy matches. The
+      // first divergence still travels in replayMeta with a cross-peer flag.
       const cadence = CONFIG.digestCadence[_mode];
       const replayActive = typeof _module._kn_get_replay_depth === 'function' && _module._kn_get_replay_depth() > 0;
-      if (!replayActive && frame % cadence !== 0) return;
+      if (replayActive || frame % cadence !== 0) return;
 
       const localDigest = _buildLocalDigest(frame);
       if (!localDigest) return;
-      _maybeEmitReplayTrajectoryEvent(localDigest);
-      if (replayActive) return;
       _localDigests.set(frame, localDigest);
       _trimDigestMap(_localDigests, frame - CONFIG.historyDepth);
       _compareAtFrame(localDigest);
-      if (frame % cadence === 0) _broadcastDigest(localDigest);
+      _broadcastDigest(localDigest);
     },
 
     onPeerDigest(peerId, payload) {
