@@ -204,7 +204,11 @@ under tests and logs `PAYLOAD-CONTRACT` in production. The page decodes every
 server-authored event and the `join-room` ack (`web/src/socket-boundary.ts`),
 observing: a message off its schema is reported as `protocol-mismatch` and the
 handlers still run on the raw payload. Handlers move onto decoded values once
-production shows no reports. Not done: DataChannel messages have no schemas.
+production shows no reports. Messages peers author (DataChannel control
+strings and JSON, and the `data-message` / `webrtc-signal` / `rom-signal`
+relays) are described in `web/src/peer-protocol.ts` and checked the same way;
+DataChannel strings are sampled (the first 16 of each kind) because they
+arrive on the tick path. The per-frame input packet is `input-wire.ts`.
 
 **Stage 4: engine periphery**
 `shared.js` (input wire format; prove encode/decode round-trips with

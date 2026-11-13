@@ -15,6 +15,7 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts';
 import { rosterKey } from './peer-identity.ts';
@@ -144,6 +145,8 @@ export const KNCore = {
     decodeRomSharingUpdated,
     decodeTokenMessage,
     checkServerMessage,
+    checkPeerText,
+    checkRelay,
     createObserver: createProtocolObserver,
   },
 };

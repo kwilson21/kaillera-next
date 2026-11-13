@@ -1996,6 +1996,7 @@
     };
     dc.onmessage = (e) => {
       if (typeof e.data === 'string') {
+        _protocol?.peerText('rom-transfer', e.data);
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'rom-resume' && msg.offset >= 0) {
@@ -2075,6 +2076,7 @@
     };
     dc.onmessage = (e) => {
       if (typeof e.data === 'string') {
+        _protocol?.peerText('rom-transfer', e.data);
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'rom-resume' && msg.offset >= 0) {
@@ -2265,6 +2267,7 @@
 
     channel.onmessage = (e) => {
       if (typeof e.data === 'string') {
+        _protocol?.peerText('rom-transfer', e.data);
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'rom-header') {

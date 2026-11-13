@@ -5859,6 +5859,23 @@
     if (wait <= 0) flush();
     else _criticalFlushTimer = setTimeout(flush, wait);
   };
+  // Stage 3, observing: the strings peers send over the DataChannels (and the
+  // session-log ack) are checked against web/src/peer-protocol.ts and a
+  // mismatch is reported; the handlers below still read the raw message.
+  // Looked up on first use: kn-core.js loads after this file.
+  let _peerProtocolObserver;
+  const _peerProtocol = () => {
+    if (_peerProtocolObserver === undefined) {
+      _peerProtocolObserver =
+        window.KNCore?.protocol?.createObserver?.(({ type, message, issue }) => {
+          if (!window.KNState?.uploadToken) return false;
+          window.KNEvent?.(type, message, { issue });
+          return true;
+        }) ?? null;
+    }
+    return _peerProtocolObserver;
+  };
+
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: _frameNum, msg });
     if (_knVerboseSyncConsole || _isConsoleCriticalSyncLog(msg)) {
@@ -6208,6 +6225,8 @@
         socket.emit('session-log', payload, (ack) => {
           acked = true;
           _socketFlushFails = 0;
+          // The server acks a flush it turned away with no data at all.
+          if (ack) _peerProtocol()?.checkAck('session-log', ack);
           _ackSyncLogFlush(ack, payload);
         });
         // If no ack within 5s, count as failure and try HTTP next time
@@ -7992,6 +8011,7 @@
 
       // String messages
       if (typeof e.data === 'string') {
+        _peerProtocol()?.peerText('lockstep', e.data);
         if (e.data === 'ready') {
           peer.ready = true;
         }
@@ -8452,6 +8472,7 @@
     _syncChunks = [];
     ch.onmessage = (e) => {
       if (typeof e.data === 'string') {
+        _peerProtocol()?.peerText('sync-state', e.data);
         // Guest: incoming state transfer header
         if (e.data.startsWith('sync-start:')) {
           const parts = e.data.split(':');

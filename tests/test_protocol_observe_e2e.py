@@ -119,3 +119,68 @@ def test_a_payload_off_its_schema_is_reported_once_and_still_handled(browser, se
         assert host.evaluate("window.__test_socket.connected")
     finally:
         host.close()
+
+
+# Beside the page's and the engine's own observers: every message either would
+# check, and what the schemas say about it, with no sampling.
+_RECORD_PEER = """
+    window.__peer = [];
+    const protocol = window.KNCore.protocol;
+    const create = protocol.createObserver;
+    protocol.createObserver = (sink) => {
+        const observer = create(sink);
+        const peerText = observer.peerText;
+        observer.peerText = (channel, text) => {
+            const verdict = protocol.checkPeerText(channel, text);
+            window.__peer.push({ kind: 'dc ' + verdict.kind, issue: verdict.issue });
+            return peerText(channel, text);
+        };
+        return observer;
+    };
+    window.__test_socket.onAny((event, data) => {
+        const relay = protocol.checkRelay(event, data);
+        if (relay) window.__peer.push({ kind: relay.kind, issue: relay.issue });
+        else window.__peer.push({ kind: event, issue: protocol.checkServerMessage(event, data) });
+    });
+"""
+
+_ROM_READY = """
+    if (window.__test_setRomLoaded) window.__test_setRomLoaded();
+    window.__test_socket.emit('rom-ready', { ready: true });
+"""
+
+
+def test_a_started_match_decodes_cleanly_peer_messages_included(browser, server_url, room):
+    """Start and end a match (no real ROM: the emulators never boot).
+
+    That is enough for game-started and game-ended, the WebRTC signal relays,
+    and the first messages peers exchange once their DataChannel opens.
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    try:
+        for page in (host, guest):
+            page.evaluate(_RECORD_PEER)
+            page.evaluate(_ROM_READY)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        expect(guest.locator("#overlay")).to_be_hidden(timeout=10000)
+        # The peers connect and greet each other over the lockstep channel.
+        for page in (host, guest):
+            page.wait_for_function("window.__peer.some((m) => m.kind.startsWith('dc lockstep '))", timeout=30000)
+        host.wait_for_timeout(3000)
+        host.click("#toolbar-more")
+        host.click("#toolbar-end")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+
+        for page in (host, guest):
+            seen = page.evaluate("window.__peer")
+            kinds = {m["kind"] for m in seen}
+            assert [m for m in seen if m["issue"]] == []
+            assert {"game-started", "game-ended", "webrtc-signal"} <= kinds, kinds
+            assert any(k.startswith("dc lockstep ") for k in kinds), kinds
+            assert _mismatch_reports(page) == []
+        print("peer kinds seen:", sorted({m["kind"] for p in (host, guest) for m in p.evaluate("window.__peer")}))
+    finally:
+        host.close()
+        guest.close()
