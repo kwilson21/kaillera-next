@@ -4823,10 +4823,32 @@
 
   // ── Delay Preference ────────────────────────────────────────────────
 
-  // The arithmetic and the wording are web/src/play/delay.ts; the controls
-  // are read and written here.
+  // The wording beside the picker is web/src/play/delay.ts. The delay itself
+  // (what this player asks the engine for) is still decided here: delay.ts
+  // computes it beside this code and a difference is reported as
+  // play-disagree. It takes over once production shows none; then
+  // sanitizeFrameDelay, currentAutoDelayValue and getDelayPreference below
+  // become calls into it.
   const _delay = window.KNCore.play.delay;
-  const { DEFAULT_FRAME_DELAY, sanitizeFrameDelay } = _delay;
+  // Reports wait for the room's upload token (client events need one).
+  const _playObserver = window.KNCore.play.observe.createComparer(({ type, message, old, next }) => {
+    if (!_uploadToken) return false;
+    KNEvent(type, message, { old, next });
+    return true;
+  });
+
+  const SOLO_FRAME_DELAY = 0;
+  const DEFAULT_FRAME_DELAY = 2;
+  const MIN_FRAME_DELAY = 1;
+  const MAX_FRAME_DELAY = 9;
+
+  const sanitizeFrameDelay = (value, fallback = DEFAULT_FRAME_DELAY, { allowZero = false } = {}) => {
+    const parsed = parseInt(value, 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    if (allowZero && parsed === SOLO_FRAME_DELAY) return SOLO_FRAME_DELAY;
+    if (parsed <= 0) return fallback;
+    return Math.min(MAX_FRAME_DELAY, Math.max(MIN_FRAME_DELAY, parsed));
+  };
 
   KNState.delayAutoValue = DEFAULT_FRAME_DELAY;
 
@@ -4843,9 +4865,27 @@
     autoValue: KNState.delayAutoValue,
   });
 
-  const currentAutoDelayValue = () => _delay.currentAutoDelay(delayPickerNow());
+  const currentAutoDelayValue = () =>
+    isSoloDelayContext() ? SOLO_FRAME_DELAY : sanitizeFrameDelay(KNState.delayAutoValue);
 
-  const getDelayPreference = () => _delay.delayPreference(delayPickerNow());
+  const getDelayPreference = () => {
+    const decided = decideDelayPreference();
+    _playObserver.compare('delay-preference', decided, _delay.delayPreference(delayPickerNow()));
+    return decided;
+  };
+
+  const decideDelayPreference = () => {
+    if (isSoloDelayContext()) return SOLO_FRAME_DELAY;
+    const autoEl = document.getElementById('delay-auto');
+    const selectEl = document.getElementById('delay-select');
+    if (autoEl?.checked) {
+      return currentAutoDelayValue();
+    }
+    if (selectEl) {
+      return sanitizeFrameDelay(selectEl.value);
+    }
+    return DEFAULT_FRAME_DELAY;
+  };
 
   window.getDelayPreference = getDelayPreference;
 
