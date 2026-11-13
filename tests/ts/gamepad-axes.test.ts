@@ -212,7 +212,8 @@ const runManager = (core?: AxesCore): string[] => {
         deadzone: 0.15,
       });
     }
-    if (round % 3 === 1) manager.setSetting('kn-analog-range', [33, 66, 100][round % 3]!);
+    // Two rounds in three change the range, cycling through three values.
+    if (round % 3 !== 0) manager.setSetting('kn-analog-range', [33, 100, 50][Math.floor(round / 3) % 3]!);
     if (round % 5 === 2) manager.setSetting('kn-analog-sensitivity', [0.5, 1.5, 2][round % 3]!);
     if (round % 7 === 3) manager.setSetting('kn-deadzone-lx', 0.3);
     const rest = Array.from({ length: 6 }, () => ((next() % 200) - 100) / 1000);
@@ -240,7 +241,7 @@ const runManager = (core?: AxesCore): string[] => {
 
 // What gamepad-manager.js read for this script at ff53345, before its axis
 // arithmetic moved to web/src/gamepad-axes.ts.
-const GOLDEN = { reads: 9060, sha256: '33589fc2a87b2f6d0cca1975ae0dee3d721e375c7120476a2992c81a76e70c45' };
+const GOLDEN = { reads: 9060, sha256: '004d3d10d0df8e00a9424fd55c8157cceabdeab429c58fdb6a6863dc45d8d790' };
 
 test('gamepad-manager.js reads the same inputs as before, with and without the bundle', () => {
   const builtIn = runManager();
@@ -250,6 +251,14 @@ test('gamepad-manager.js reads the same inputs as before, with and without the b
   assert.deepStrictEqual(withCore, builtIn, 'KNCore arithmetic');
   // The script must move the sticks: more than a handful of distinct reads.
   assert.ok(new Set(builtIn).size > 2000, `only ${new Set(builtIn).size} distinct reads`);
+  // The range setting must have taken effect: full deflection reaches the
+  // maximum of each range the script sets (100 gives 127, 33 gives 41).
+  for (const max of ['127', '41']) {
+    assert.ok(
+      builtIn.some((line) => line.split(',').includes(max)),
+      `no read at the maximum ${max}`,
+    );
+  }
   assert.ok(
     builtIn.some((line) => line.includes('-0')),
     'no negative zero in the script',
