@@ -190,9 +190,19 @@ host reload) all show no `session-disagree`.
   between the two answers, a deadline with a recovery action, cancelled when
   the engine stops. `joinersAreNotLeftWaitingAtTheStart` holds on
   `room_current`.
-- Next: the rejoin itself is still a bare callback with no timeout or retry,
-  and a rejoin the server refuses (the grace window ran out) is only logged.
-  It becomes Effect logic invoked by the machine.
+- Done: the rejoin after a socket drop is an Effect program
+  (`web/src/rejoin-attempt.ts`): each attempt has a deadline, an unanswered
+  or rate-limited attempt is repeated, and every ending is an outcome the
+  page handles. The rejoin says it is a resume and names its slot and match
+  (`extra.resume`, `slot`, `matchId`). A player the server dropped while its
+  socket was down (the grace window ran out) may still be playing over the
+  players' own connections: the server takes it back into the same match
+  and slot, and refuses otherwise, in which case the page ends its game and
+  joins again as a fresh page would (`rejoinRefused` in the machine).
+  `nobodyIsStrandedInADroppedMatch` holds on `room_current`. The program is
+  started by `play.js` when the socket connects, not yet invoked by the
+  machine. A dropped host that is taken back returns as a player; whether
+  it should get the room back is undecided.
 - Then: `play.js` reads the late-join flags from the machine and the old
   flags are deleted, once the reports above stay empty.
 - Still open in the model: `noGhostMatch` (a playing room whose only member

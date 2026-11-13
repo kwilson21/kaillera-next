@@ -19,6 +19,7 @@ import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
+import { startRejoin } from './rejoin-attempt.ts';
 import { meshHealTargets } from './roster.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
@@ -140,6 +141,7 @@ export const KNCore = {
   meshHealTargets,
   rosterKey,
   startLateJoinWait,
+  startRejoin,
   shouldResumeRomTransfer,
   protocol: {
     decodeUsersUpdated,

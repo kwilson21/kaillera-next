@@ -98,6 +98,13 @@ export const sessionMachine = setupEffect({
        * lobby; play.js then does what a fresh join would (web/src/rejoin.ts).
        */
       rejoined: Schema.Struct({ playing: Schema.Boolean, matchId: Schema.NullOr(Schema.String) }),
+      /**
+       * The socket came back but the room has dropped this page (its grace
+       * window ran out) or will not take it back. Its game is over; play.js
+       * then joins again as a fresh page would (web/src/rejoin-attempt.ts;
+       * `returnAfterExpiry` in the Quint model).
+       */
+      rejoinRefused: Empty,
       /** A late joiner has no usable ROM and has been asked for one. */
       lateJoinRomNeeded: Empty,
       /** The ROM question is settled; the late join can go ahead. */
@@ -139,6 +146,7 @@ export const sessionMachine = setupEffect({
     socketUp: ({ context }) => ({ context: { ...context, socketUp: true } }),
     gameEnded: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
     roomClosed: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
+    rejoinRefused: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
   },
   states: {
     lobby: {
