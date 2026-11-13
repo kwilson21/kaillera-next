@@ -74,20 +74,24 @@ from src import db, state, stats
 from src.api import desync_vision, og_card
 from src.api.og import feature_enabled_for_host
 from src.api.payloads import (
+    SERVER_EVENTS,
     ClaimSlotPayload,
     DeviceTypePayload,
     EndGamePayload,
     InputTypePayload,
+    JoinRoomAck,
     JoinRoomPayload,
     OpenRoomPayload,
     RomReadyPayload,
     RomSharingTogglePayload,
+    SessionLogAck,
     SessionLogPayload,
     SetGameIdPayload,
     SetListedPayload,
     SetModePayload,
     SetNamePayload,
     StartGamePayload,
+    checked,
     validated,
 )
 from src.ratelimit import (
@@ -331,6 +335,25 @@ _ROOM_FRAME_MAX_W, _ROOM_FRAME_MAX_H = 640, 480  # captures are 320x240
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+async def _emit(event: str, data: dict, **kwargs) -> None:
+    """Send an event the server builds itself, held to its model on the way out.
+
+    Every such event has a model in payloads.SERVER_EVENTS (a KeyError here
+    means a new event was added without one). Relays of what a client sent go
+    through sio.emit directly.
+    """
+    await sio.emit(event, checked(SERVER_EVENTS[event], data, event), **kwargs)
+
+
+def _join_ack(room: Room) -> dict:
+    """The data half of the join-room ack: the room, plus what a joiner needs to catch up."""
+    resp = _players_payload(room)
+    resp["rom_hash"] = room.rom_hash
+    resp["rom_sharing"] = _room_rom_sharing(room)
+    resp["matchId"] = room.match_id
+    return checked(JoinRoomAck, resp, "join-room ack")
 
 
 def _players_payload(room: Room) -> dict:
@@ -628,10 +651,10 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
                 del room.slots[old_slot]
             room.slots[0] = new_owner_pid
         log.info("Room %s ownership transferred to %s (slot 0)", session_id, new_owner_sid)
-        await sio.emit("webrtc-signal", {"requestRenegotiate": True}, to=new_owner_sid)
+        await _emit("webrtc-signal", {"requestRenegotiate": True}, to=new_owner_sid)
 
     await state.save_room(session_id, room)
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await _emit("users-updated", _players_payload(room), room=session_id)
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
@@ -732,10 +755,10 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
             log.info("Room %s: host re-opened from a fresh page mid-game, ending the match", session_id)
             await _end_match(session_id, existing, "host-reload")
         else:
-            await sio.emit("users-updated", _players_payload(existing), room=session_id)
+            await _emit("users-updated", _players_payload(existing), room=session_id)
             await state.save_room(session_id, existing)
-        await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-        await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+        await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+        await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
         log.info("SIO %s reconnected to room %s (host, persistentId=%s)", sid, session_id, persistent_id)
         return None
 
@@ -767,9 +790,9 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
     await state.save_room(session_id, room)
 
     await sio.enter_room(sid, session_id)
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
-    await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-    await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+    await _emit("users-updated", _players_payload(room), room=session_id)
+    await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+    await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
     log.info("SIO %s opened room %s (game=%s, persistentId=%s)", sid, session_id, game_id, persistent_id)
     return None  # success
 
@@ -813,19 +836,12 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         _sid_to_room.pop(old_sid, None)
         _sid_to_room[sid] = (session_id, persistent_id, is_returning_spectator)
         await sio.enter_room(sid, session_id)
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
-        await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-        await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+        await _emit("users-updated", _players_payload(room), room=session_id)
+        await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+        await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
         await state.save_room(session_id, room)
         log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
-        resp = _players_payload(room)
-        resp["status"] = room.status
-        resp["mode"] = room.mode
-        resp["rom_hash"] = room.rom_hash
-        resp["rom_sharing"] = _room_rom_sharing(room)
-        if room.match_id:
-            resp["matchId"] = room.match_id
-        return (None, resp)
+        return (None, _join_ack(room))
 
     # Zombie rule: a room no player is connected to (restored after a
     # restart) only takes back its own members, above. A new joiner would
@@ -860,21 +876,14 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         _sid_to_room[sid] = (session_id, persistent_id, False)
 
     await sio.enter_room(sid, session_id)
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
-    await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-    await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+    await _emit("users-updated", _players_payload(room), room=session_id)
+    await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+    await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
     await state.save_room(session_id, room)
     log.info(
         "SIO %s %s room %s (persistentId=%s)", sid, "spectating" if spectate else "joined", session_id, persistent_id
     )
-    resp = _players_payload(room)
-    resp["status"] = room.status
-    resp["mode"] = room.mode
-    resp["rom_hash"] = room.rom_hash
-    resp["rom_sharing"] = _room_rom_sharing(room)
-    if room.match_id:
-        resp["matchId"] = room.match_id
-    return (None, resp)
+    return (None, _join_ack(room))
 
 
 @sio.on("leave-room")
@@ -928,7 +937,7 @@ async def _claim_slot_locked(sid: str, payload: ClaimSlotPayload) -> str | None:
     room.slots[slot] = player_id
     _sid_to_room[sid] = (session_id, player_id, False)
 
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await _emit("users-updated", _players_payload(room), room=session_id)
     await state.save_room(session_id, room)
     log.info("SIO %s claimed slot %d in room %s", sid, slot, session_id)
     return None
@@ -978,7 +987,7 @@ async def _release_slot_locked(sid: str) -> str | None:
     room.rom_ready.discard(sid)
     _sid_to_room[sid] = (session_id, player_id, True)
 
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await _emit("users-updated", _players_payload(room), room=session_id)
     await state.save_room(session_id, room)
     log.info("SIO %s released slot to spectate in room %s", sid, session_id)
     return None
@@ -1009,7 +1018,7 @@ async def set_name(sid: str, payload: SetNamePayload) -> str | None:
                 if info["socketId"] == sid:
                     info["playerName"] = name
                     break
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await _emit("users-updated", _players_payload(room), room=session_id)
     return None
 
 
@@ -1068,7 +1077,7 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     asyncio.create_task(stats.record_match(room.started_at))
     if payload.gameId and _ALNUM_HYPHEN_RE.match(payload.gameId):
         room.game_id = payload.gameId
-    await sio.emit(
+    await _emit(
         "game-started",
         {
             "mode": room.mode,
@@ -1140,10 +1149,10 @@ async def _end_match(session_id: str, room: Room, reason: str) -> None:
     # broadcast reflects the true post-end state even though the DB row
     # hasn't been marked ended yet.
     # mode persists for rematch convenience
-    await sio.emit("game-ended", {"matchId": ended_match_id}, room=session_id)
+    await _emit("game-ended", {"matchId": ended_match_id}, room=session_id)
     # Broadcast fresh state so player list reflects current device/input types
     # (late-joiners' corrected types may not have been seen by all clients)
-    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await _emit("users-updated", _players_payload(room), room=session_id)
 
     # Redis first, then the DB write: if set_session_ended raises, Redis must
     # already reflect the room back in "lobby" — otherwise a restart or
@@ -1188,7 +1197,7 @@ async def set_mode(sid: str, payload: SetModePayload) -> str | None:
 
         mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
         room.mode = mode
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await _emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
         log.info("Mode set to %s in room %s", mode, session_id)
     return None
@@ -1211,7 +1220,7 @@ async def set_game_id(sid: str, payload: SetGameIdPayload) -> str | None:
         if not _ALNUM_HYPHEN_RE.match(game_id) or len(game_id) > 32:
             game_id = "unknown"
         room.game_id = game_id
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await _emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
         log.info("Game ID set to %s in room %s", game_id, session_id)
     return None
@@ -1253,7 +1262,7 @@ async def rom_sharing_toggle(sid: str, payload: RomSharingTogglePayload) -> str 
             return "ROM sharing is disabled on this server"
 
         room.rom_sharing = payload.enabled
-        await sio.emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
+        await _emit("rom-sharing-updated", {"romSharing": payload.enabled}, room=session_id)
         await state.save_room(session_id, room)
         log.info("ROM sharing %s in room %s", "enabled" if payload.enabled else "disabled", session_id)
     return None
@@ -1277,7 +1286,7 @@ async def set_listed(sid: str, payload: SetListedPayload) -> str | None:
         room.listed = payload.listed
         if not room.listed:
             _drop_room_frame(session_id)
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await _emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
         log.info("Room %s %s", session_id, "listed" if room.listed else "unlisted")
     return None
@@ -1314,18 +1323,18 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
         elif payload.ready:
             if _rom_hashes_conflict(room.rom_hash, payload.hash):
                 room.rom_ready.discard(sid)
-                await sio.emit("users-updated", _players_payload(room), room=session_id)
+                await _emit("users-updated", _players_payload(room), room=session_id)
                 await state.save_room(session_id, room)
                 return "ROM does not match host"
             if room.rom_size is not None and payload.size is not None and room.rom_size != payload.size:
                 room.rom_ready.discard(sid)
-                await sio.emit("users-updated", _players_payload(room), room=session_id)
+                await _emit("users-updated", _players_payload(room), room=session_id)
                 await state.save_room(session_id, room)
                 return "ROM does not match host"
             room.rom_ready.add(sid)
         else:
             room.rom_ready.discard(sid)
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await _emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)
     return None
 
@@ -1343,7 +1352,7 @@ async def input_type(sid: str, payload: InputTypePayload) -> str | None:
 
         itype = payload.type if payload.type in ("keyboard", "gamepad") else "keyboard"
         room.input_types[sid] = itype
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await _emit("users-updated", _players_payload(room), room=session_id)
     return None
 
 
@@ -1360,7 +1369,7 @@ async def device_type(sid: str, payload: DeviceTypePayload) -> str | None:
 
         dtype = payload.type if payload.type in ("desktop", "mobile") else "desktop"
         room.device_types[sid] = dtype
-        await sio.emit("users-updated", _players_payload(room), room=session_id)
+        await _emit("users-updated", _players_payload(room), room=session_id)
     return None
 
 
@@ -1810,7 +1819,7 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
     entries = _session_log_entries(payload.entries, _SESSION_LOG_MAX)
     audit_epoch, audit_entries = _session_log_audit(payload.audit)
 
-    return await db.append_session_flush(
+    ack = await db.append_session_flush(
         {
             "match_id": payload.matchId,
             "room": session_id,
@@ -1826,6 +1835,7 @@ async def session_log_handler(sid: str, payload: SessionLogPayload) -> dict | No
             "audit_entries": audit_entries,
         }
     )
+    return ack if ack is None else checked(SessionLogAck, ack, "session-log ack")
 
 
 # Log-flush match registrations in flight, one per match (see _register_match_soon).

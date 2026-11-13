@@ -11,6 +11,9 @@ import { Schema } from 'effect';
 export const RoomStatus = Schema.Literals(['lobby', 'playing']);
 export type RoomStatus = typeof RoomStatus.Type;
 
+export const GameMode = Schema.Literals(['rollback', 'streaming']);
+export type GameMode = typeof GameMode.Type;
+
 export const OpenRoomExtra = Schema.Struct({
   sessionid: Schema.optional(Schema.String),
   persistentId: Schema.optional(Schema.String),
@@ -56,7 +59,7 @@ export const SetNamePayload = Schema.Struct({
 export type SetNamePayload = typeof SetNamePayload.Type;
 
 export const StartGamePayload = Schema.Struct({
-  mode: Schema.optional(Schema.Literals(['rollback', 'streaming'])),
+  mode: Schema.optional(GameMode),
   resyncEnabled: Schema.optional(Schema.Boolean),
   romHash: Schema.optional(Schema.NullOr(Schema.String)),
   gameId: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(32)))),
@@ -67,7 +70,7 @@ export const EndGamePayload = Schema.Struct({});
 export type EndGamePayload = typeof EndGamePayload.Type;
 
 export const SetModePayload = Schema.Struct({
-  mode: Schema.optional(Schema.Literals(['rollback', 'streaming'])),
+  mode: Schema.optional(GameMode),
 });
 export type SetModePayload = typeof SetModePayload.Type;
 
@@ -164,7 +167,7 @@ export const UsersUpdated = Schema.Struct({
   hostRom: HostRom,
   gameId: Schema.String,
   game_id: Schema.String,
-  mode: Schema.NullOr(Schema.String),
+  mode: Schema.NullOr(GameMode),
   status: RoomStatus,
   listed: Schema.Boolean,
 });
@@ -184,18 +187,18 @@ export const JoinRoomAck = Schema.Struct({
   hostRom: HostRom,
   gameId: Schema.String,
   game_id: Schema.String,
-  mode: Schema.NullOr(Schema.String),
+  mode: Schema.NullOr(GameMode),
   status: RoomStatus,
   listed: Schema.Boolean,
   rom_hash: Schema.NullOr(Schema.String),
   rom_sharing: Schema.Boolean,
-  matchId: Schema.optional(Schema.NullOr(Schema.String)),
+  matchId: Schema.NullOr(Schema.String),
 });
 export type JoinRoomAck = typeof JoinRoomAck.Type;
 
 /** `game-started`. */
 export const GameStarted = Schema.Struct({
-  mode: Schema.Literals(['rollback', 'streaming']),
+  mode: GameMode,
   resyncEnabled: Schema.Boolean,
   romHash: Schema.NullOr(Schema.String),
   romName: Schema.NullOr(Schema.String),
@@ -275,3 +278,17 @@ export const decodeRomSharingUpdated = Schema.decodeUnknownResult(RomSharingUpda
 export const decodeRenegotiateRequest = Schema.decodeUnknownResult(RenegotiateRequest);
 export const decodeSessionLogAck = Schema.decodeUnknownResult(SessionLogAck);
 export const decodeTokenMessage = Schema.decodeUnknownResult(TokenMessage);
+
+/**
+ * Server-authored events by name. Events that also relay what another
+ * client sent (`webrtc-signal`, `data-message`, ...) are not listed.
+ */
+export const serverEvents = {
+  'users-updated': UsersUpdated,
+  'game-started': GameStarted,
+  'game-ended': GameEnded,
+  'rom-sharing-updated': RomSharingUpdated,
+  'upload-token': TokenMessage,
+  'reconnect-token': TokenMessage,
+} as const;
+export type ServerEventName = keyof typeof serverEvents;

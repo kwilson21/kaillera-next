@@ -197,10 +197,11 @@ arrival. Generate the client schemas from the server's Pydantic models so
 there is one source of truth. `play.js` becomes `web/src/play/*.ts`.
 
 Done so far: `scripts/gen_protocol.py` writes `web/src/protocol.gen.ts` from
-`server/src/api/payloads.py` (`npm run protocol`; CI fails when it is stale),
-and the payloads the server sends have models there too, held to the real
-handlers by `tests/test_protocol_payloads.py`. Not done: the page does not
-decode with them yet, and DataChannel messages have no schemas.
+`server/src/api/payloads.py` (`npm run protocol`; CI fails when it is stale).
+The payloads the server sends have models there too, and `signaling.py` holds
+every one to its model as it goes out (`_emit`, `checked`): a mismatch raises
+under tests and logs `PAYLOAD-CONTRACT` in production. Not done: the page does
+not decode with them yet, and DataChannel messages have no schemas.
 
 **Stage 4: engine periphery**
 `shared.js` (input wire format; prove encode/decode round-trips with
