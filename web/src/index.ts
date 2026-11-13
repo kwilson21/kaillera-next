@@ -9,6 +9,7 @@ import { bootTimedOut } from './boot.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
+import { initialKNState } from './kn-state.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
@@ -141,6 +142,7 @@ export const KNCore = {
   encodeInput,
   gamepadDisplayName,
   hashPixels,
+  initialKNState,
   inputEqual,
   measureCanvasHealth,
   meshHealTargets,

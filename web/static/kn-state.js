@@ -9,6 +9,16 @@
 
   const { get: safeGet, set: safeSet, remove: safeRemove } = KNStorage;
 
+  // The shape and starting values are KNCore.initialKNState
+  // (web/src/kn-state.ts), where each field is typed. The literal below is
+  // the same state, for a page that does not load the bundle (the demo
+  // page); tests/ts/kn-state.test.ts holds the two to the same fields.
+  const initial = window.KNCore?.initialKNState;
+  if (initial) {
+    window.KNState = initial(KNStorage);
+    return;
+  }
+
   window.KNState = {
     // ── Cross-module state ──
     // Each property replaces a former window.* global.
