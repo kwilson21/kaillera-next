@@ -92,29 +92,6 @@ const recordEvents = () => {
 
 // Uncaught exceptions on any page, for the scenario in progress.
 const pageErrors = [];
-// Pages that had a network request fail, for the scenario in progress.
-const failedRequests = [];
-let closing = false;
-// Uncaught errors that predate this test and are tracked separately. They are
-// printed and listed under `knownIssues` in the summary, never hidden.
-//   streaming-join / host: "Failed to fetch" while a streamed game starts.
-//   Present on main (2026-11-13); no failed network request and not the
-//   page's own window.fetch, so probably a blob: URL inside the emulator boot.
-// The error carries no stack to match on, so it is told apart from a new
-// fetch failure by what is known about it: it happens once, and no network
-// request on that page fails. A second one, or one alongside a failed
-// request (an API or asset that did not load), fails the scenario.
-const KNOWN_PAGE_ERRORS = [{ scenario: 'streaming-join', label: 'host', message: 'Failed to fetch' }];
-const isKnownPageError = (scenario, error, allErrors) =>
-  KNOWN_PAGE_ERRORS.some(
-    (known) =>
-      known.scenario === scenario &&
-      known.label === error.label &&
-      known.message === error.message &&
-      allErrors.filter((e) => e.label === error.label && e.message === error.message).length === 1 &&
-      !failedRequests.includes(error.label),
-  );
-
 /** A page in its own browser context, with a signaling socket the test can cut. */
 const openPlayer = async (label, query) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
@@ -128,7 +105,6 @@ const openPlayer = async (label, query) => {
   // page's bug or this machine's network.
   page.on('requestfailed', (request) => {
     console.log(`[${label}] request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText})`);
-    if (!closing) failedRequests.push(label);
   });
   const signaling = { down: false, sockets: [] };
   await page.routeWebSocket(/socket\.io/, (ws) => {
@@ -445,18 +421,9 @@ for (const name of wanted) {
     const sync = await player.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '').catch(() => '');
     fs.writeFileSync(`${OUT}/${name}-${player.label}-sync.txt`, sync);
   }
-  // Closing a page aborts whatever it was loading; those are not failures.
-  closing = true;
   for (const ctx of browser.contexts()) await ctx.close();
-  const knownIssues = [];
-  const errors = pageErrors.splice(0);
-  for (const error of errors) {
-    const list = isKnownPageError(name, error, errors) ? knownIssues : failures;
-    list.push(`uncaught page error (${error.label}: ${error.message})`);
-  }
-  failedRequests.length = 0;
-  closing = false;
-  results.push({ scenario: name, room, checkpoints: log, knownIssues, failures });
+  for (const error of pageErrors.splice(0)) failures.push(`uncaught page error (${error.label}: ${error.message})`);
+  results.push({ scenario: name, room, checkpoints: log, failures });
 }
 
 await browser.close();
