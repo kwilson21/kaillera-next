@@ -170,6 +170,20 @@ test('a flag that stays wrong is reported once, and again only after it changes'
   await session.stop();
 });
 
+test('two flags that are both wrong are each reported once, however the reads interleave', async () => {
+  const { session, reported } = open();
+  session.send(joinMidGame);
+  for (let read = 0; read < 3; read++) {
+    session.check('pendingLateJoin', true);
+    session.check('lateJoin', false);
+  }
+  assert.deepEqual(
+    reported.map((r) => (r.type === 'session-disagree' ? r.check : r.type)),
+    ['pendingLateJoin', 'lateJoin'],
+  );
+  await session.stop();
+});
+
 test('a late joiner who never gets state is reported once, and left waiting', async () => {
   const { session, reported } = open(30);
   session.send(joinMidGame);

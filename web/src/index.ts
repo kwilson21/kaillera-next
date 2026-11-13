@@ -60,9 +60,9 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
     else held.push(event);
   };
 
-  // The last disagreement reported, so a flag that stays wrong is reported
-  // once and not at every read.
-  let lastDisagreement = '';
+  // The last disagreement reported for each flag, so one that stays wrong is
+  // reported once and not at every read, whatever the other flags are doing.
+  const lastDisagreement = new Map<SessionCheck, string>();
   /**
    * Compare one of play.js's own flags with what the machine says it should
    * be, and report a disagreement. Returns whether they agree.
@@ -70,12 +70,16 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
   const check = (name: SessionCheck, page: boolean): boolean => {
     const machineState = state();
     const agrees = sessionFlag(machineState, name) === page;
-    const key = agrees ? '' : `${name}:${machineState}:${page}`;
-    if (!agrees && key !== lastDisagreement) {
+    if (agrees) {
+      lastDisagreement.delete(name);
+      return true;
+    }
+    const key = `${machineState}:${page}`;
+    if (lastDisagreement.get(name) !== key) {
+      lastDisagreement.set(name, key);
       sink({ type: 'session-disagree', machine: machineState, check: name, page });
     }
-    if (!agrees || lastDisagreement.startsWith(`${name}:`)) lastDisagreement = key;
-    return agrees;
+    return false;
   };
 
   return {

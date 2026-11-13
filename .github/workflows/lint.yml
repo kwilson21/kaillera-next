@@ -43,6 +43,8 @@ jobs:
         run: npm run test:ts
       - name: Committed bundle matches web/src
         run: npm run build:check
+      - name: Machine diagram matches web/src/session.ts
+        run: npm run diagram:check
       - name: Model-check specs (Quint)
         run: npm run spec
 
