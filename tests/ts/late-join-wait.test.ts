@@ -16,8 +16,11 @@ const waitWith = (over: { retryEveryMs?: number; timeoutMs?: number } = {}) => {
 };
 
 test('the request is sent at once', async () => {
-  const { wait, requests } = waitWith();
-  await pause(5);
+  // "At once" means without waiting out the retry interval, which is set far
+  // longer than this test waits. How soon the fiber first runs depends on the
+  // machine (5 ms was too tight on CI), so the first request is polled for.
+  const { wait, requests } = waitWith({ retryEveryMs: 60_000, timeoutMs: 120_000 });
+  for (let waited = 0; requests() === 0 && waited < 2000; waited += 5) await pause(5);
   assert.equal(requests(), 1);
   wait.cancel();
 });
