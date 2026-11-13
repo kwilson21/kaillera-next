@@ -357,41 +357,63 @@
     }
   }
 
-  function _diffDigests(a, b) {
-    const ha = a.digest.hashes;
-    const hb = b.digest.hashes;
+  // The field ids to flag for one pair of digests. The decision is
+  // KNCore.desyncFieldsToFlag (web/src/desync-fields.ts), which is proved
+  // never to flag a field whose hashes are equal. The code below it is the
+  // same rule, used if the bundle did not load or a peer sent a digest
+  // that is not a full array of hashes.
+  function _fieldsToFlag(ha, hb, frame) {
+    const phase = _readScenePhase();
+    const decide = window.KNCore?.desyncFieldsToFlag;
+    if (decide && Array.isArray(ha) && Array.isArray(hb) && ha.length >= FIELD.COUNT && hb.length >= FIELD.COUNT) {
+      const lastFlagged = [];
+      for (let fid = 0; fid < FIELD.COUNT; fid++) {
+        lastFlagged.push(_lastFlagFrame.get(_dedupKey(fid)) ?? -1);
+      }
+      return decide(ha, hb, phase, frame, lastFlagged, CONFIG.dedupWindowFrames);
+    }
 
     // GATING RULE: phase mismatch is itself the high-priority flag and
     // suppresses other field comparisons for this frame.
-    if (ha[FIELD.MATCH_PHASE] !== hb[FIELD.MATCH_PHASE]) {
-      _emitSuspect({
-        frame: a.digest.frame,
-        field: 'match_phase',
-        slot: null,
-        hashes: { [a.peerId]: ha[FIELD.MATCH_PHASE], [b.peerId]: hb[FIELD.MATCH_PHASE] },
-        trigger: 'flag',
-        severity: 'high',
-        replayMeta: null,
-      });
-      return;
-    }
-
-    const phase = _readScenePhase();
+    if (ha[FIELD.MATCH_PHASE] !== hb[FIELD.MATCH_PHASE]) return [FIELD.MATCH_PHASE];
+    const flagged = [];
     for (let fid = 0; fid < FIELD.COUNT; fid++) {
       if (fid === FIELD.MATCH_PHASE) continue;
       if (ha[fid] === hb[fid]) continue;
       if (!_fieldEligibleInPhase(fid, phase)) continue;
+      const lastFlagged = _lastFlagFrame.get(_dedupKey(fid)) ?? -1;
+      if (frame - lastFlagged < CONFIG.dedupWindowFrames) continue;
+      flagged.push(fid);
+    }
+    return flagged;
+  }
 
-      const slot = _slotForField(fid);
-      const dedupKey = `${fid}:${slot ?? 'g'}`;
-      const lastFlagged = _lastFlagFrame.get(dedupKey) ?? -1;
-      if (a.digest.frame - lastFlagged < CONFIG.dedupWindowFrames) continue;
-      _lastFlagFrame.set(dedupKey, a.digest.frame);
+  function _dedupKey(fid) {
+    return `${fid}:${_slotForField(fid) ?? 'g'}`;
+  }
 
+  function _diffDigests(a, b) {
+    const ha = a.digest.hashes;
+    const hb = b.digest.hashes;
+
+    for (const fid of _fieldsToFlag(ha, hb, a.digest.frame)) {
+      if (fid === FIELD.MATCH_PHASE) {
+        _emitSuspect({
+          frame: a.digest.frame,
+          field: 'match_phase',
+          slot: null,
+          hashes: { [a.peerId]: ha[FIELD.MATCH_PHASE], [b.peerId]: hb[FIELD.MATCH_PHASE] },
+          trigger: 'flag',
+          severity: 'high',
+          replayMeta: null,
+        });
+        continue;
+      }
+      _lastFlagFrame.set(_dedupKey(fid), a.digest.frame);
       _emitSuspect({
         frame: a.digest.frame,
         field: _FIELD_NAMES[fid],
-        slot,
+        slot: _slotForField(fid),
         hashes: { [a.peerId]: ha[fid], [b.peerId]: hb[fid] },
         trigger: 'flag',
         replayMeta: a.digest.replayMeta || b.digest.replayMeta || null,
