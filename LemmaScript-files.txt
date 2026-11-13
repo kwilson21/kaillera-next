@@ -2,6 +2,8 @@ web/src/roster.ts
 web/src/peer-identity.ts
 web/src/rejoin.ts
 web/src/input-wire.ts
+web/src/flush-fit.ts
 web/src/runner-step.ts
 web/src/stick-axis.ts
 web/src/desync-fields.ts
+web/src/diagnostics.ts
