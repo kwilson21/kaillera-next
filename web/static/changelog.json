@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.6",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a player who asks for the match state before the host is running joins the start (#125)"
+      }
+    ]
+  },
+  {
     "version": "0.67.5",
     "date": "2026-11-13",
     "changes": [
