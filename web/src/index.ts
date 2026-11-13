@@ -6,6 +6,7 @@ import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
+import { fieldsToFlag } from './desync-fields.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
@@ -130,6 +131,7 @@ export const KNCore = {
   createStickDeadband,
   createSyncLogRing,
   decodeInput,
+  desyncFieldsToFlag: fieldsToFlag,
   encodeInput,
   inputEqual,
   meshHealTargets,
