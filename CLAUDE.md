@@ -161,8 +161,8 @@ All events go through the default Socket.IO namespace (`/`).
 
 | Event | Direction | Payload | Description |
 |---|---|---|---|
-| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id}, password, maxPlayers}` | Create room |
-| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}, password}` | Join/spectate |
+| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id, fresh, resume}, password, maxPlayers}` | Create room (`fresh`: the page has no game running; `resume`: it has one and is taking its place back, refused with `Not in room` if the room dropped it) |
+| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate, resume}, password}` | Join/spectate (`resume` as for `open-room`) |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
 | `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |

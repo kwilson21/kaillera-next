@@ -20,6 +20,7 @@ export const OpenRoomExtra = Schema.Struct({
   game_id: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(32))),
   room_password: Schema.optional(Schema.NullOr(Schema.String)),
   fresh: Schema.optional(Schema.Boolean),
+  resume: Schema.optional(Schema.Boolean),
 });
 export type OpenRoomExtra = typeof OpenRoomExtra.Type;
 
@@ -36,6 +37,7 @@ export const JoinRoomExtra = Schema.Struct({
   reconnectToken: Schema.optional(Schema.String),
   player_name: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(32))),
   spectate: Schema.optional(Schema.Boolean),
+  resume: Schema.optional(Schema.Boolean),
 });
 export type JoinRoomExtra = typeof JoinRoomExtra.Type;
 

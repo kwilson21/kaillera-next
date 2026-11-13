@@ -30,6 +30,10 @@
  *                     The host waits for the guest to load before it runs, so
  *                     the guest must be let into the start, not left asking
  *                     for a state nobody has yet
+ *   dropped-rejoin    a guest's signaling is down for longer than the server's
+ *                     grace window, so the room drops it mid-match; on
+ *                     reconnect its rejoin is refused and it must end that
+ *                     game and late-join the match again
  *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
@@ -55,6 +59,7 @@ const SCENARIOS = [
   'late-join-two-player',
   'missed-game-end',
   'missed-new-match',
+  'dropped-rejoin',
   'streaming-join',
   'spectate',
   'host-reload',
@@ -71,6 +76,7 @@ if (!ROM || !fs.existsSync(ROM)) {
 fs.mkdirSync(OUT, { recursive: true });
 
 const BLIP_MS = 3000;
+const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
 const browser = await chromium.launch({
@@ -511,6 +517,37 @@ const scenarios = {
       [
         { player: host, lobby: true },
         { player: guest, lobby: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'dropped-rejoin': async (room, failures, log) => {
+    const [host, guest] = await startTwoPlayerGame(room, failures);
+    // The guest's socket stays down past the server's grace window, so the
+    // room drops it while the match goes on.
+    await cutSignaling(guest);
+    await guest.page.waitForTimeout(SERVER_GRACE_MS + 8000);
+    const before = await frameOf(host);
+    guest.signaling.down = false;
+    // Its rejoin is refused. The page ends the game it was dropped from and
+    // joins the match again as a fresh page would: by late join.
+    if (!(await waitUntil(async () => (await countOf(guest, 'rejoin-refused')) > 0, 60000)))
+      failures.push('the guest was never told the room had dropped it');
+    const back = await waitUntil(async () => {
+      await clickGesturePrompt(guest);
+      await clickGesturePrompt(host);
+      return !(await lobbyShownOn(guest)) && (await frameOf(guest)) > before;
+    }, 420000);
+    if (!back) failures.push('the guest never got back into the match');
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the return');
+    await checkpoint(
+      'after the dropped guest returned',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
       ],
       failures,
       log,

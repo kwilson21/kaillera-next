@@ -33,6 +33,7 @@ const EVENTS = [
   ['gameStarted', { type: 'gameStarted', matchId: 'm' }],
   ['gameEnded', { type: 'gameEnded' }],
   ['roomClosed', { type: 'roomClosed' }],
+  ['rejoinRefused', { type: 'rejoinRefused' }],
   ['lateJoinRomNeeded', { type: 'lateJoinRomNeeded' }],
   ['lateJoinRomReady', { type: 'lateJoinRomReady' }],
   ['engineStarted: connect only', { type: 'engineStarted', connectOnly: true, waitsForState: true }],

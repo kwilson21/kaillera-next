@@ -113,6 +113,9 @@ _PER_IP_SPECTATOR_CAP = int(os.environ.get("PER_IP_SPECTATOR_CAP", "3"))
 _RELAY_MAX_BYTES = 65_536
 _SIGNAL_MAX_BYTES = 65_536
 _DISCONNECT_GRACE_SECONDS = 30
+# The answer to a rejoin marked `resume` from a client the room no longer
+# counts as a member. The page matches on this text (web/src/rejoin-attempt.ts).
+NOT_IN_ROOM = "Not in room"
 # Short grace for lobby OWNER disconnects only — closes the ownership-churn
 # race where a brief network blip transferred host privileges to another
 # player. Mid-game already has the longer grace above; non-owner lobby
@@ -739,6 +742,11 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
         log.info("SIO %s reconnected to room %s (host, persistentId=%s)", sid, session_id, persistent_id)
         return None
 
+    # A page resuming a game it is no longer a member of gets told so, before
+    # anything is created for it.
+    if payload.extra.resume:
+        return NOT_IN_ROOM
+
     if session_id in rooms:
         return "Room already exists"
 
@@ -826,6 +834,11 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         if room.match_id:
             resp["matchId"] = room.match_id
         return (None, resp)
+
+    # A page resuming a game the room has dropped it from is refused, not
+    # let in as a new player: it has to end that game first, then join.
+    if payload.extra.resume:
+        return (NOT_IN_ROOM, None)
 
     # Zombie rule: a room no player is connected to (restored after a
     # restart) only takes back its own members, above. A new joiner would

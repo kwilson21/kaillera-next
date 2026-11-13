@@ -50,6 +50,15 @@ module room {
   //   true   today: only the players who were loaded when the sync began;
   //          anyone later is a late joiner and is served once they run
   const START_WAITS_ONLY_FOR_ITS_COHORT: bool
+  // What a rejoin does for a page whose grace window ran out, so the server
+  // has already dropped it from the room:
+  //   false  before: the guest's join-room took it for a new player and let
+  //          it in, and the page (same match id) carried on with a game the
+  //          others had dropped it from; any refusal was only logged
+  //   true   today: the rejoin says it is a resume, the server refuses a
+  //          resume from a non-member, and the page ends its game and joins
+  //          again as a fresh page would (web/src/rejoin-attempt.ts)
+  const RESUME_KNOWS_IT_WAS_DROPPED: bool
 
   // web/src/session.ts is the page half of this model, state for state:
   //   Lobby = lobby, AwaitingRom = lateJoinAwaitingRom, Starting =
@@ -66,6 +75,8 @@ module room {
     | Loading(int)      // in match n from its start: emulator loaded, waiting for the others
     | StartSync(int)    // everyone was loaded; the initial state sync for match n is under way
     | Running(int)      // emulator running match n
+    | Orphaned(int)     // still showing match n, socket down, dropped by the room when its grace ran out
+    | Stranded(int)     // socket back and the server has answered, yet still showing match n it was dropped from
 
   pure val PLAYERS = Set("host", "guest1", "guest2")
   pure val NOBODY = ""
@@ -109,6 +120,23 @@ module room {
     | Starting(_) => Starting(m)
     | Syncing(_) => Syncing(m)
     | _ => Loading(m)
+  }
+
+  // A page the room drops while its tab is still showing a game does not
+  // know it yet: its socket is down.
+  pure def droppedPage(pg: Page): Page = match pg {
+    | AwaitingRom(n) => Orphaned(n)
+    | Starting(n) => Orphaned(n)
+    | Syncing(n) => Orphaned(n)
+    | Loading(n) => Orphaned(n)
+    | StartSync(n) => Orphaned(n)
+    | Running(n) => Orphaned(n)
+    | _ => pg
+  }
+
+  pure def orphanedMatch(pg: Page): int = match pg {
+    | Orphaned(n) => n
+    | _ => 0
   }
 
   // ── helpers ────────────────────────────────────────────────────────────
@@ -315,7 +343,39 @@ module room {
 
   action graceExpire(p: str): bool = all {
     grace.contains(p),
-    removeMember(p, page.get(p)),
+    removeMember(p, droppedPage(page.get(p))),
+  }
+
+  // The socket of a dropped page comes back and it sends its mid-game rejoin:
+  // open-room from a page that loaded as host, join-room from any other.
+  action returnAfterExpiry(p: str, hasRom: bool, asHost: bool): bool = {
+    val was = orphanedMatch(page.get(p))
+    val roomTakesJoiners = members != Set() and (online != Set() or grace != Set())
+    all {
+      was != 0, not(members.contains(p)),
+      nextMatch' = nextMatch, grace' = grace,
+      if (asHost and members == Set()) all {
+        // open-room finds no room and creates one. Before, the page kept its
+        // game; now it is told its resume failed and opens the room afresh.
+        members' = Set(p), owner' = p, creator' = p, online' = Set(p),
+        status' = "lobby", matchId' = 0,
+        page' = page.set(p, if (RESUME_KNOWS_IT_WAS_DROPPED) Lobby else Stranded(was)),
+      } else if (asHost or not(roomTakesJoiners)) all {
+        // Refused: the room has another owner now, or is gone, or is closed
+        // to joiners. Before, that was only logged; now the page shows it.
+        members' = members, owner' = owner, creator' = creator, online' = online,
+        status' = status, matchId' = matchId,
+        page' = page.set(p, if (RESUME_KNOWS_IT_WAS_DROPPED) Closed else Stranded(was)),
+      } else all {
+        // join-room lets the player in as a new member. Before, a page still
+        // showing the room's current match saw nothing to reconcile.
+        members' = members.union(Set(p)), online' = online.union(Set(p)),
+        owner' = owner, creator' = creator, status' = status, matchId' = matchId,
+        page' = page.set(p,
+          if (not(RESUME_KNOWS_IT_WAS_DROPPED) and status == "playing" and was == matchId) Stranded(was)
+          else joinedPage(status, matchId, hasRom)),
+      },
+    }
   }
 
   // A page that is no longer in the room is closed by its user.
@@ -333,7 +393,9 @@ module room {
     endGame,
     nondet p = oneOf(PLAYERS)
     nondet hasRom = oneOf(Set(true, false))
+    nondet asHost = oneOf(Set(true, false))
     any {
+      returnAfterExpiry(p, hasRom, asHost),
       openRoom(p), join(p, hasRom), romReady(p), startLateJoinEngine(p), serveLateJoin(p), admitToStart(p),
       leave(p), reload(p), dropSocket(p), reopen(p, hasRom), resume(p, hasRom), graceExpire(p), closeTab(p),
     },
@@ -391,6 +453,17 @@ module room {
   val startIsNotHeldUpByALateJoiner =
     (status == "playing" and members.exists(p => page.get(p) == StartSync(matchId))) implies startCanRun
 
+  // A page whose rejoin the server has answered is never left showing a
+  // match the room dropped it from. Failed before (read from the code,
+  // 2026-11-13, then modelled): a socket that was down for longer than the
+  // grace window came back, join-room let the player in as a new member, and
+  // the page carried on with its old game; a refused rejoin was only logged.
+  val nobodyIsStrandedInADroppedMatch =
+    PLAYERS.forall(p => match page.get(p) {
+      | Stranded(_) => false
+      | _ => true
+    })
+
   // An open question, not gated in CI and not fixed by RESUME_RECONCILES.
   //
   // A playing room always has someone running the match, or someone on their
@@ -427,6 +500,23 @@ module room {
       .then(dropSocket("host"))
       .then(resume("host", true))
       .expect(status == "playing" and page.get("host") == Running(1) and page.get("guest1") == Running(1))
+
+  // A guest's socket is down for longer than the grace window while the
+  // match goes on, then comes back. Before, join-room took it for a new
+  // player and the page carried on with the game it had been dropped from.
+  run returnAfterGraceTest =
+    init
+      .then(openRoom("host"))
+      .then(join("guest1", true))
+      .then(startGame)
+      .then(beginSync)
+      .then(startRunning)
+      .then(dropSocket("guest1"))
+      .then(graceExpire("guest1"))
+      .expect(page.get("guest1") == Orphaned(1) and not(members.contains("guest1")))
+      .then(returnAfterExpiry("guest1", true, false))
+      .expect(members.contains("guest1"))
+      .expect(page.get("guest1") == (if (RESUME_KNOWS_IT_WAS_DROPPED) Starting(1) else Stranded(1)))
 
   run lateJoinTest =
     init
@@ -499,7 +589,14 @@ module room {
 // The server and client as they are today.
 module room_current {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
-         START_WAITS_ONLY_FOR_ITS_COHORT = true).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true).*
+}
+
+// Before a rejoin said it was a resume. nobodyIsStrandedInADroppedMatch is
+// violated here.
+module room_before_resume_flag {
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = false).*
 }
 
 // Before a joiner who asks for state too early was admitted to the start
@@ -507,7 +604,7 @@ module room_current {
 // violated here.
 module room_before_start_fix {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false,
-         START_WAITS_ONLY_FOR_ITS_COHORT = false).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false).*
 }
 
 // Before the page reconciled with the server on reconnect
@@ -515,11 +612,11 @@ module room_before_start_fix {
 // pagesAgreeWithServer are violated here.
 module room_before_reconcile {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
-         START_WAITS_ONLY_FOR_ITS_COHORT = false).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false).*
 }
 
 // Before #104, kept so hostReloadTest still shows what that fix changed.
 module room_before_104 {
   import room(HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
-         START_WAITS_ONLY_FOR_ITS_COHORT = false).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false).*
 }
