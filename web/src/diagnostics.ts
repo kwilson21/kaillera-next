@@ -8,6 +8,11 @@
  * and writes the log lines; these functions are given the numbers. None of
  * this feeds the emulator or the netplay engine: it only decides what is
  * logged and reported.
+ *
+ * `audioTransition` is verified with LemmaScript (Dafny backend; see
+ * LemmaScript-files.txt). The other three are floating-point and typed-array
+ * arithmetic, which the verifier does not model; they are marked `//@ skip`
+ * and covered by tests/ts/diagnostics.test.ts.
  */
 
 /**
@@ -16,6 +21,7 @@
  * purpose, so that dithering noise on a frozen frame does not look like
  * movement.
  */
+//@ skip
 export function hashPixels(rgba: ArrayLike<number>): number {
   let hash = 2166136261;
   const stride = 16 * 4;
@@ -52,6 +58,7 @@ export interface CanvasHealth {
  * Measure a sample of RGBA pixels. `rgba` is `ImageData.data`: four bytes a
  * pixel, so its length is a multiple of four.
  */
+//@ skip
 export function measureCanvasHealth(rgba: ArrayLike<number>): CanvasHealth {
   const n = rgba.length / 4;
   let sumR = 0;
@@ -125,6 +132,7 @@ export interface Crop {
  * screenshot takes: a wider canvas loses its sides, a taller one its top
  * and bottom.
  */
+//@ skip
 export function screenshotCrop(width: number, height: number): Crop {
   const targetRatio = 4 / 3;
   const srcRatio = width / height;
@@ -145,6 +153,10 @@ export function screenshotCrop(width: number, height: number): Crop {
  * state, and null for anything else (including the first state seen, when
  * `previous` is the empty string).
  */
+//@ ensures previous === current ==> \result === null
+//@ ensures \result === "stall" ==> previous === "running" && current !== "running"
+//@ ensures \result === "resume" ==> current === "running" && previous !== "running" && previous !== ""
+//@ ensures previous === "running" && current !== "running" ==> \result === "stall"
 export function audioTransition(previous: string, current: string): 'stall' | 'resume' | null {
   if (current === previous) return null;
   if (current !== 'running' && previous === 'running') return 'stall';
