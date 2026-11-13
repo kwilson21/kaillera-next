@@ -25,6 +25,8 @@
  *   late-join-two-player  a third player joins a two-player match in play
  *   missed-game-end   a guest's signaling is down while the host ends the
  *                     game; on reconnect it must return to the lobby
+ *   missed-game-end-at-rom-prompt  the same for a guest that joined mid-game
+ *                     and is still being asked for a ROM (no engine yet)
  *   missed-new-match  the same, and the host starts another game before the
  *                     guest is back; on reconnect it must join the new match.
  *                     The host waits for the guest to load before it runs, so
@@ -63,6 +65,7 @@ const SCENARIOS = [
   'late-join-shared',
   'late-join-two-player',
   'missed-game-end',
+  'missed-game-end-at-rom-prompt',
   'missed-new-match',
   'dropped-rejoin',
   'dropped-host',
@@ -566,6 +569,40 @@ const scenarios = {
 
   'dropped-rejoin': async (room, failures, log) => droppedPlayerReturns(room, failures, log, 'guest'),
   'dropped-host': async (room, failures, log) => droppedPlayerReturns(room, failures, log, 'host'),
+
+  'missed-game-end-at-rom-prompt': async (room, failures, log) => {
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+    // The guest joins mid-game with no ROM: it is asked for one and has no engine yet.
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+    const before = await countOf(guest, 'reconnect');
+    await cutSignaling(guest);
+    await endGame(host);
+    if (!(await waitUntil(() => lobbyShownOn(host), 30000))) failures.push('the host never returned to the lobby');
+    guest.signaling.down = false;
+    if (!(await waitUntil(async () => (await countOf(guest, 'reconnect')) > before, 40000)))
+      failures.push('the guest never reconnected');
+    await guest.page.waitForTimeout(3000);
+    // The page must have dropped its late join: a ROM loaded now is a ROM
+    // for the lobby, not the start of a late join into a game that is over.
+    await loadRom(guest);
+    await guest.page.waitForTimeout(8000);
+    if (!(await lobbyShownOn(guest))) failures.push('the guest started a late join into a game that had ended');
+    if (await guest.page.locator('#late-join-msg').count())
+      failures.push('the guest is still showing the late-join prompt');
+    if ((await frameOf(guest)) > 0) failures.push('the guest booted an emulator for a game that had ended');
+    await checkpoint(
+      'after the guest caught up at the ROM prompt',
+      [
+        { player: host, lobby: true },
+        { player: guest, lobby: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
 
   'missed-new-match': async (room, failures, log) => {
     const [host, guest] = await startTwoPlayerGame(room, failures);

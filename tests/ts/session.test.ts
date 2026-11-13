@@ -255,3 +255,18 @@ test('a rejoin the server refuses ends the game for this page, from any state (r
     await session.stop();
   }
 });
+
+test('the machine decides a flag the page disagrees about, and reports the disagreement once', async () => {
+  const { session, reported } = open(5000);
+  session.send(joinMidGame);
+  // The page's own flag says "not a late join"; the machine says it is.
+  assert.equal(session.decide('lateJoin', false), true);
+  assert.equal(session.decide('lateJoin', false), true);
+  assert.equal(session.decide('pendingLateJoin', false), false);
+  assert.deepEqual(reported, [
+    { type: 'session-disagree', machine: 'lateJoinStarting', check: 'lateJoin', page: false },
+  ]);
+  session.send(engineUp);
+  assert.equal(session.decide('lateJoin', false), false);
+  await session.stop();
+});
