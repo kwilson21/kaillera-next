@@ -81,11 +81,13 @@ class OpenRoomExtra(BaseModel):
     # reload. A page whose socket merely reconnected under a running game
     # leaves it False (as do clients from before the field existed).
     fresh: bool = False
-    # True when the page still has a game running and is taking its place in
-    # the room back after a socket drop. If the room has dropped it meanwhile
-    # (the grace window ran out) the server refuses with NOT_IN_ROOM instead
-    # of creating a room: the page must end its game before it opens one.
+    # A page that still has a game running, taking its place in the room back
+    # after a socket drop; `slot` and `matchId` say what it is playing. The
+    # rule is the one on JoinRoomExtra. A dropped host that is taken back
+    # comes back as a player: the room was handed on when it was dropped.
     resume: bool = False
+    slot: int | None = Field(default=None, ge=0, le=3)
+    matchId: str = Field(default="", max_length=64)
 
 
 class OpenRoomPayload(BaseModel):
@@ -103,13 +105,18 @@ class JoinRoomExtra(BaseModel):
     reconnectToken: str = ""
     player_name: str = Field(default="Player", max_length=32)
     spectate: bool = False
-    # True when the page still has a game running and is taking its place in
-    # the room back after a socket drop. If the room has dropped it meanwhile
-    # the server refuses with NOT_IN_ROOM instead of letting it in as a new
-    # player, which would leave the page running a game the others had
-    # dropped it from (specs/room_lifecycle.qnt,
-    # nobodyIsStrandedInADroppedMatch).
+    # `resume` is true when the page still has a game running and is taking
+    # its place in the room back after a socket drop; `slot` and `matchId`
+    # are the slot it plays and the match it is in. A member is taken back as
+    # always. A player the room dropped meanwhile (the grace window ran out)
+    # may still be playing, since the players' connections are their own: it
+    # is taken back into that slot if the room is still playing that match
+    # and the slot is free, and refused with NOT_IN_ROOM otherwise, so the
+    # page ends its game instead of carrying on with no signaling
+    # (specs/room_lifecycle.qnt, nobodyIsStrandedInADroppedMatch).
     resume: bool = False
+    slot: int | None = Field(default=None, ge=0, le=3)
+    matchId: str = Field(default="", max_length=64)
 
 
 class JoinRoomPayload(BaseModel):

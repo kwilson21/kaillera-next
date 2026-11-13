@@ -709,8 +709,7 @@
       _session?.send({ type: 'socketDown' });
       // A rejoin in flight belongs to the socket that just went; the next
       // connect starts its own.
-      _rejoin?.cancel();
-      _rejoin = null;
+      _cancelRejoin();
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       if (reason === 'io client disconnect') return;
       // Show spinner banner after brief delay (lobby and in-game)
@@ -903,6 +902,10 @@
   // that lands in the lobby or on the late-join path of the match in play,
   // or shows the player why it cannot get back in.
   let _rejoin = null;
+  const _cancelRejoin = () => {
+    _rejoin?.cancel();
+    _rejoin = null;
+  };
   const _leaveDroppedGame = (reason) => {
     console.log('[play] mid-game rejoin refused:', reason);
     KNEvent('rejoin-refused', '', { reason });
@@ -940,11 +943,14 @@
               reconnectToken: _reconnectToken,
             },
           };
-      // `resume` tells the server this page still has a game running: if the
-      // room dropped it while its socket was down, the server refuses
-      // instead of letting it in as a new player (or opening a new room).
+      // `resume` tells the server this page still has a game running, in
+      // which slot and which match. If the room dropped it while its socket
+      // was down, the server takes it back into that match and slot, or
+      // refuses; it never lets it in as a new player or opens a new room.
       payload.extra.resume = true;
-      _rejoin?.cancel();
+      payload.extra.slot = isSpectator || mySlot === null || mySlot === undefined ? null : mySlot;
+      payload.extra.matchId = KNState.matchId || '';
+      _cancelRejoin();
       const rejoin = window.KNCore.startRejoin({
         send: (answer) => socket.emit(rejoinEvent, payload, answer),
         answerWithinMs: 5000,
@@ -953,7 +959,10 @@
       });
       _rejoin = rejoin;
       rejoin.outcome.then((outcome) => {
-        if (_rejoin === rejoin) _rejoin = null;
+        // An answer for a rejoin that is no longer the current one (its game
+        // ended, or a newer connect replaced it) changes nothing.
+        if (_rejoin !== rejoin) return;
+        _rejoin = null;
         if (outcome.kind === 'noAnswer') {
           // Reported, not acted on: the socket says it is connected, and if
           // it drops, the next connect starts a new rejoin.
@@ -1565,6 +1574,7 @@
       `romBlobUrl=${!!_romBlobUrl}`,
       `matchId=${endedMatchId || 'none'}`,
     );
+    _cancelRejoin();
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
     _pageGameRunning = false;
@@ -1605,6 +1615,7 @@
   };
 
   const onRoomClosed = (data) => {
+    _cancelRejoin();
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'roomClosed' });
     _pageGameRunning = false;

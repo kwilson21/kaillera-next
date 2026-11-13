@@ -78,7 +78,9 @@ from src.api.payloads import (
     DeviceTypePayload,
     EndGamePayload,
     InputTypePayload,
+    JoinRoomExtra,
     JoinRoomPayload,
+    OpenRoomExtra,
     OpenRoomPayload,
     RomReadyPayload,
     RomSharingTogglePayload,
@@ -742,10 +744,16 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
         log.info("SIO %s reconnected to room %s (host, persistentId=%s)", sid, session_id, persistent_id)
         return None
 
-    # A page resuming a game it is no longer a member of gets told so, before
-    # anything is created for it.
+    # A page resuming a game it is no longer a member of. If the room is
+    # still playing that match the host is taken back as a player (the room
+    # was handed to someone else when it was dropped, and stays theirs);
+    # otherwise it is told so, before anything is created for it.
     if payload.extra.resume:
-        return NOT_IN_ROOM
+        if existing is None or not _password_ok(existing, password):
+            return NOT_IN_ROOM
+        return await _readmit_dropped_player(
+            existing, session_id, sid, persistent_id, _sanitize_str(player_name, 32), payload.extra
+        )
 
     if session_id in rooms:
         return "Room already exists"
@@ -782,6 +790,59 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
     return None  # success
 
 
+def _password_ok(room: Room, password: str | None) -> bool:
+    return not room.password or hmac.compare_digest(room.password, password or "")
+
+
+def _join_response(room: Room) -> dict:
+    """What join-room answers with: the room list plus what the room is doing."""
+    resp = _players_payload(room)
+    resp["status"] = room.status
+    resp["mode"] = room.mode
+    resp["rom_hash"] = room.rom_hash
+    resp["rom_sharing"] = _room_rom_sharing(room)
+    if room.match_id:
+        resp["matchId"] = room.match_id
+    return resp
+
+
+async def _readmit_dropped_player(
+    room: Room,
+    session_id: str,
+    sid: str,
+    persistent_id: str,
+    player_name: str,
+    extra: OpenRoomExtra | JoinRoomExtra,
+) -> str | None:
+    """Take a dropped player back into the match it is still playing.
+
+    The caller has checked the password and that the player is not a member.
+    Returns NOT_IN_ROOM unless the room is playing the match the page names
+    and the slot it names is free.
+    """
+    slot = extra.slot
+    same_match = room.status == "playing" and bool(room.match_id) and extra.matchId == room.match_id
+    if not same_match or slot is None or slot >= room.max_players or slot in room.slots:
+        return NOT_IN_ROOM
+    await _leave(sid)  # clean up if already in another room
+    room.players[persistent_id] = {"socketId": sid, "playerName": player_name}
+    room.slots[slot] = persistent_id
+    _sid_to_room[sid] = (session_id, persistent_id, False)
+    await sio.enter_room(sid, session_id)
+    await sio.emit("users-updated", _players_payload(room), room=session_id)
+    await sio.emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+    await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+    await state.save_room(session_id, room)
+    log.info(
+        "SIO %s taken back into room %s after its grace ran out (slot %d, persistentId=%s)",
+        sid,
+        session_id,
+        slot,
+        persistent_id,
+    )
+    return None
+
+
 @sio.on("join-room")
 @validated(JoinRoomPayload, error_response=("Invalid data", None))
 async def join_room(sid: str, payload: JoinRoomPayload) -> tuple[str | None, dict | None]:
@@ -805,10 +866,10 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     if room is None:
         return ("Room not found", None)
 
-    if room.password and not hmac.compare_digest(room.password, password or ""):
-        return ("Wrong password", None)
-
-    # Reconnect detection — BEFORE _leave
+    # Reconnect detection — BEFORE _leave, and before the password check: a
+    # returning member proves itself with its reconnect token, and the page's
+    # mid-game rejoin carries no password. Asking for one here refused every
+    # signaling reconnect in a password room.
     is_returning_player = persistent_id in room.players
     is_returning_spectator = persistent_id in room.spectators
     if is_returning_player or is_returning_spectator:
@@ -826,19 +887,10 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         await sio.emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
         await state.save_room(session_id, room)
         log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
-        resp = _players_payload(room)
-        resp["status"] = room.status
-        resp["mode"] = room.mode
-        resp["rom_hash"] = room.rom_hash
-        resp["rom_sharing"] = _room_rom_sharing(room)
-        if room.match_id:
-            resp["matchId"] = room.match_id
-        return (None, resp)
+        return (None, _join_response(room))
 
-    # A page resuming a game the room has dropped it from is refused, not
-    # let in as a new player: it has to end that game first, then join.
-    if payload.extra.resume:
-        return (NOT_IN_ROOM, None)
+    if not _password_ok(room, password):
+        return ("Wrong password", None)
 
     # Zombie rule: a room no player is connected to (restored after a
     # restart) only takes back its own members, above. A new joiner would
@@ -849,6 +901,15 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     player_returning = not spectate and any(pid in _disconnect_grace_tasks for pid in room.players)
     if not room_is_live(room) and not player_returning:
         return ("Room closed", None)
+
+    # A page resuming a game the room has dropped it from. Still playing
+    # that match with its slot free: taken back. Otherwise refused, not let
+    # in as a new player: it has to end that game first, then join.
+    if payload.extra.resume:
+        err = await _readmit_dropped_player(room, session_id, sid, persistent_id, player_name, payload.extra)
+        if err:
+            return (err, None)
+        return (None, _join_response(room))
 
     await _leave(sid)  # clean up if already in another room
 
@@ -880,14 +941,7 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     log.info(
         "SIO %s %s room %s (persistentId=%s)", sid, "spectating" if spectate else "joined", session_id, persistent_id
     )
-    resp = _players_payload(room)
-    resp["status"] = room.status
-    resp["mode"] = room.mode
-    resp["rom_hash"] = room.rom_hash
-    resp["rom_sharing"] = _room_rom_sharing(room)
-    if room.match_id:
-        resp["matchId"] = room.match_id
-    return (None, resp)
+    return (None, _join_response(room))
 
 
 @sio.on("leave-room")
