@@ -156,6 +156,16 @@ KN_KEEPALIVE uint32_t kn_get_replay_frame_hash(kn_field_id_t field, uint32_t rep
 }
 KN_KEEPALIVE uint32_t kn_get_last_replay_length(void) { return 0; }
 KN_KEEPALIVE uint8_t kn_get_scene_curr(void) { return 0; }
+KN_KEEPALIVE int kn_field_map_set(const uint32_t* values, uint32_t count) {
+    (void)values;
+    (void)count;
+    return 0;
+}
+KN_KEEPALIVE uint32_t kn_field_map_count(void) { return 0; }
+KN_KEEPALIVE uint32_t kn_field_map_value(uint32_t index) {
+    (void)index;
+    return 0xFFFFFFFFu;
+}
 
 #else
 
@@ -167,6 +177,26 @@ KN_KEEPALIVE uint8_t kn_get_scene_curr(void) { return 0; }
  * units are UB and may produce silent zero-hashes on some platforms. */
 extern void*    kn_get_rdram_ptr(void);
 extern uint32_t kn_get_rdram_size(void);
+
+/* ── The address map (see kn_hash_registry.h) ────────────────────────
+ * Defaults are SSB64 US, from kn_gameplay_addrs.h. */
+static uint32_t s_map[KN_MAP_COUNT] = {
+    [KN_MAP_STOCKS_BASE]           = KN_ADDR_PLAYER_STOCKS_BASE,
+    [KN_MAP_PLAYER_STRIDE]         = KN_PLAYER_STRIDE,
+    [KN_MAP_SCENE_CURR]            = KN_ADDR_SCENE_CURR,
+    [KN_MAP_VS_BATTLE_HEADER]      = KN_ADDR_VS_BATTLE_HEADER,
+    [KN_MAP_VS_BATTLE_HEADER_SIZE] = KN_SIZE_VS_BATTLE_HEADER,
+    [KN_MAP_RNG_SEED]              = KN_ADDR_SY_UTILS_RANDOM_SEED,
+    [KN_MAP_CSS_BASE]              = KN_ADDR_P1_CSS_BASE,
+    [KN_MAP_CSS_STRIDE]            = KN_CSS_STRIDE,
+    [KN_MAP_CSS_OFF_CHAR_ID]       = KN_CSS_OFF_CHAR_ID,
+    [KN_MAP_CSS_OFF_CURSOR_STATE]  = KN_CSS_OFF_CURSOR_STATE,
+    [KN_MAP_CSS_OFF_SELECTED_FLAG] = KN_CSS_OFF_SELECTED_FLAG,
+    [KN_MAP_FT_MOTION_COUNT]       = KN_ADDR_FT_MOTION_COUNT,
+    [KN_MAP_FT_BUFFER_PTR]         = 0x130D84,
+    [KN_MAP_FT_BUFFER_SIZE]        = KN_FT_BUFFER_SIZE,
+};
+#define MAP(name) (s_map[KN_MAP_##name])
 
 /* ── FNV-1a 32-bit ───────────────────────────────────────────────────
  * Standard FNV-1a, prime 0x01000193, offset 0x811c9dc5. Same algorithm
@@ -246,7 +276,7 @@ uint32_t kn_hash_stocks(uint8_t player_idx, int32_t frame) {
         return ring_find_frame(s_ring_stocks[player_idx], s_head_stocks[player_idx], frame);
     }
     /* Live read. */
-    uint32_t off = KN_ADDR_PLAYER_STOCKS_BASE + (uint32_t)player_idx * KN_PLAYER_STRIDE;
+    uint32_t off = MAP(STOCKS_BASE) + (uint32_t)player_idx * MAP(PLAYER_STRIDE);
     return hash_rdram_u8(off);
 }
 
@@ -267,7 +297,7 @@ size_t kn_hash_history_stocks(uint8_t player_idx, uint32_t count, uint32_t* out_
 /* Append-to-ring helper: called from kn_hash_registry_post_tick. */
 static void ring_append_stocks(int32_t frame) {
     for (uint8_t p = 0; p < 4; p++) {
-        uint32_t off = KN_ADDR_PLAYER_STOCKS_BASE + (uint32_t)p * KN_PLAYER_STRIDE;
+        uint32_t off = MAP(STOCKS_BASE) + (uint32_t)p * MAP(PLAYER_STRIDE);
         uint32_t h = hash_rdram_u8(off);
         s_ring_stocks[p][s_head_stocks[p]] = (kn_ring_entry_t){ .frame = frame, .hash = h };
         s_head_stocks[p] = (s_head_stocks[p] + 1) % KN_RING_SIZE;
@@ -285,7 +315,7 @@ uint32_t kn_hash_character_id(uint8_t player_idx, int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_character_id[player_idx], s_head_character_id[player_idx], frame);
     }
-    uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)player_idx * KN_CSS_STRIDE + KN_CSS_OFF_CHAR_ID;
+    uint32_t off = MAP(CSS_BASE) + (uint32_t)player_idx * MAP(CSS_STRIDE) + MAP(CSS_OFF_CHAR_ID);
     return hash_rdram_slice(off, 4);
 }
 
@@ -304,7 +334,7 @@ size_t kn_hash_history_character_id(uint8_t player_idx, uint32_t count, uint32_t
 
 static void ring_append_character_id(int32_t frame) {
     for (uint8_t p = 0; p < 4; p++) {
-        uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)p * KN_CSS_STRIDE + KN_CSS_OFF_CHAR_ID;
+        uint32_t off = MAP(CSS_BASE) + (uint32_t)p * MAP(CSS_STRIDE) + MAP(CSS_OFF_CHAR_ID);
         uint32_t h = hash_rdram_slice(off, 4);
         s_ring_character_id[p][s_head_character_id[p]] = (kn_ring_entry_t){ .frame = frame, .hash = h };
         s_head_character_id[p] = (s_head_character_id[p] + 1) % KN_RING_SIZE;
@@ -322,7 +352,7 @@ uint32_t kn_hash_css_cursor(uint8_t player_idx, int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_css_cursor[player_idx], s_head_css_cursor[player_idx], frame);
     }
-    uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)player_idx * KN_CSS_STRIDE + KN_CSS_OFF_CURSOR_STATE;
+    uint32_t off = MAP(CSS_BASE) + (uint32_t)player_idx * MAP(CSS_STRIDE) + MAP(CSS_OFF_CURSOR_STATE);
     return hash_rdram_slice(off, 4);
 }
 
@@ -341,7 +371,7 @@ size_t kn_hash_history_css_cursor(uint8_t player_idx, uint32_t count, uint32_t* 
 
 static void ring_append_css_cursor(int32_t frame) {
     for (uint8_t p = 0; p < 4; p++) {
-        uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)p * KN_CSS_STRIDE + KN_CSS_OFF_CURSOR_STATE;
+        uint32_t off = MAP(CSS_BASE) + (uint32_t)p * MAP(CSS_STRIDE) + MAP(CSS_OFF_CURSOR_STATE);
         uint32_t h = hash_rdram_slice(off, 4);
         s_ring_css_cursor[p][s_head_css_cursor[p]] = (kn_ring_entry_t){ .frame = frame, .hash = h };
         s_head_css_cursor[p] = (s_head_css_cursor[p] + 1) % KN_RING_SIZE;
@@ -359,7 +389,7 @@ uint32_t kn_hash_css_selected(uint8_t player_idx, int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_css_selected[player_idx], s_head_css_selected[player_idx], frame);
     }
-    uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)player_idx * KN_CSS_STRIDE + KN_CSS_OFF_SELECTED_FLAG;
+    uint32_t off = MAP(CSS_BASE) + (uint32_t)player_idx * MAP(CSS_STRIDE) + MAP(CSS_OFF_SELECTED_FLAG);
     return hash_rdram_slice(off, 4);
 }
 
@@ -378,7 +408,7 @@ size_t kn_hash_history_css_selected(uint8_t player_idx, uint32_t count, uint32_t
 
 static void ring_append_css_selected(int32_t frame) {
     for (uint8_t p = 0; p < 4; p++) {
-        uint32_t off = KN_ADDR_P1_CSS_BASE + (uint32_t)p * KN_CSS_STRIDE + KN_CSS_OFF_SELECTED_FLAG;
+        uint32_t off = MAP(CSS_BASE) + (uint32_t)p * MAP(CSS_STRIDE) + MAP(CSS_OFF_SELECTED_FLAG);
         uint32_t h = hash_rdram_slice(off, 4);
         s_ring_css_selected[p][s_head_css_selected[p]] = (kn_ring_entry_t){ .frame = frame, .hash = h };
         s_head_css_selected[p] = (s_head_css_selected[p] + 1) % KN_RING_SIZE;
@@ -395,7 +425,7 @@ uint32_t kn_hash_rng(int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_rng, s_head_rng, frame);
     }
-    return hash_rdram_slice(KN_ADDR_SY_UTILS_RANDOM_SEED, 4);
+    return hash_rdram_slice(MAP(RNG_SEED), 4);
 }
 
 KN_KEEPALIVE
@@ -412,7 +442,7 @@ size_t kn_hash_history_rng(uint32_t count, uint32_t* out_pairs) {
 }
 
 static void ring_append_rng(int32_t frame) {
-    uint32_t h = hash_rdram_slice(KN_ADDR_SY_UTILS_RANDOM_SEED, 4);
+    uint32_t h = hash_rdram_slice(MAP(RNG_SEED), 4);
     s_ring_rng[s_head_rng] = (kn_ring_entry_t){ .frame = frame, .hash = h };
     s_head_rng = (s_head_rng + 1) % KN_RING_SIZE;
 }
@@ -427,7 +457,7 @@ uint32_t kn_hash_match_phase(int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_match_phase, s_head_match_phase, frame);
     }
-    return hash_rdram_u8(KN_ADDR_SCENE_CURR);
+    return hash_rdram_u8(MAP(SCENE_CURR));
 }
 
 KN_KEEPALIVE
@@ -444,7 +474,7 @@ size_t kn_hash_history_match_phase(uint32_t count, uint32_t* out_pairs) {
 }
 
 static void ring_append_match_phase(int32_t frame) {
-    uint32_t h = hash_rdram_u8(KN_ADDR_SCENE_CURR);
+    uint32_t h = hash_rdram_u8(MAP(SCENE_CURR));
     s_ring_match_phase[s_head_match_phase] = (kn_ring_entry_t){ .frame = frame, .hash = h };
     s_head_match_phase = (s_head_match_phase + 1) % KN_RING_SIZE;
 }
@@ -459,7 +489,7 @@ uint32_t kn_hash_vs_battle_hdr(int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_vs_battle_hdr, s_head_vs_battle_hdr, frame);
     }
-    return hash_rdram_slice(KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER);
+    return hash_rdram_slice(MAP(VS_BATTLE_HEADER), MAP(VS_BATTLE_HEADER_SIZE));
 }
 
 KN_KEEPALIVE
@@ -476,7 +506,7 @@ size_t kn_hash_history_vs_battle_hdr(uint32_t count, uint32_t* out_pairs) {
 }
 
 static void ring_append_vs_battle_hdr(int32_t frame) {
-    uint32_t h = hash_rdram_slice(KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER);
+    uint32_t h = hash_rdram_slice(MAP(VS_BATTLE_HEADER), MAP(VS_BATTLE_HEADER_SIZE));
     s_ring_vs_battle_hdr[s_head_vs_battle_hdr] = (kn_ring_entry_t){ .frame = frame, .hash = h };
     s_head_vs_battle_hdr = (s_head_vs_battle_hdr + 1) % KN_RING_SIZE;
 }
@@ -491,7 +521,7 @@ uint32_t kn_hash_physics_motion(int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_physics_motion, s_head_physics_motion, frame);
     }
-    return hash_rdram_slice(KN_ADDR_FT_MOTION_COUNT, 4);
+    return hash_rdram_slice(MAP(FT_MOTION_COUNT), 4);
 }
 
 KN_KEEPALIVE
@@ -508,7 +538,7 @@ size_t kn_hash_history_physics_motion(uint32_t count, uint32_t* out_pairs) {
 }
 
 static void ring_append_physics_motion(int32_t frame) {
-    uint32_t h = hash_rdram_slice(KN_ADDR_FT_MOTION_COUNT, 4);
+    uint32_t h = hash_rdram_slice(MAP(FT_MOTION_COUNT), 4);
     s_ring_physics_motion[s_head_physics_motion] = (kn_ring_entry_t){ .frame = frame, .hash = h };
     s_head_physics_motion = (s_head_physics_motion + 1) % KN_RING_SIZE;
 }
@@ -523,16 +553,17 @@ static uint32_t        s_head_ft_buffer;
  * pointer is null or the dereferenced range exceeds RDRAM. */
 static uint32_t hash_ft_buffer_live(void) {
     uint8_t* base = (uint8_t*)kn_get_rdram_ptr();
-    if (!base) return 0;
+    uint32_t sz = kn_get_rdram_size();
+    uint32_t ptr_off = MAP(FT_BUFFER_PTR);
+    if (!base || ptr_off + 4 > sz) return 0;
     uint32_t buf_ptr_n64 = 0;
     for (int b = 0; b < 4; b++) {
-        buf_ptr_n64 |= ((uint32_t)base[0x130D84 + b]) << (b * 8);
+        buf_ptr_n64 |= ((uint32_t)base[ptr_off + b]) << (b * 8);
     }
     if (buf_ptr_n64 == 0) return 0;
     uint32_t rdram_off = buf_ptr_n64 & 0x00FFFFFF;
-    uint32_t sz = kn_get_rdram_size();
-    if (rdram_off + KN_FT_BUFFER_SIZE > sz) return 0;
-    return kn_hash_fnv1a(base + rdram_off, KN_FT_BUFFER_SIZE);
+    if (rdram_off + MAP(FT_BUFFER_SIZE) > sz) return 0;
+    return kn_hash_fnv1a(base + rdram_off, MAP(FT_BUFFER_SIZE));
 }
 
 KN_KEEPALIVE
@@ -639,17 +670,17 @@ static int32_t  s_last_replay_final  = -1;
  * snapshot the same field set the per-frame post_tick uses. */
 static void snapshot_all_fields(uint32_t* out) {
     for (uint8_t p = 0; p < 4; p++) {
-        uint32_t off_stocks = KN_ADDR_PLAYER_STOCKS_BASE + (uint32_t)p * KN_PLAYER_STRIDE;
+        uint32_t off_stocks = MAP(STOCKS_BASE) + (uint32_t)p * MAP(PLAYER_STRIDE);
         out[KN_FIELD_STOCKS_P0 + p]        = hash_rdram_u8(off_stocks);
-        uint32_t css_base = KN_ADDR_P1_CSS_BASE + (uint32_t)p * KN_CSS_STRIDE;
-        out[KN_FIELD_CHARACTER_ID_P0 + p]  = hash_rdram_slice(css_base + KN_CSS_OFF_CHAR_ID, 4);
-        out[KN_FIELD_CSS_CURSOR_P0 + p]    = hash_rdram_slice(css_base + KN_CSS_OFF_CURSOR_STATE, 4);
-        out[KN_FIELD_CSS_SELECTED_P0 + p]  = hash_rdram_slice(css_base + KN_CSS_OFF_SELECTED_FLAG, 4);
+        uint32_t css_base = MAP(CSS_BASE) + (uint32_t)p * MAP(CSS_STRIDE);
+        out[KN_FIELD_CHARACTER_ID_P0 + p]  = hash_rdram_slice(css_base + MAP(CSS_OFF_CHAR_ID), 4);
+        out[KN_FIELD_CSS_CURSOR_P0 + p]    = hash_rdram_slice(css_base + MAP(CSS_OFF_CURSOR_STATE), 4);
+        out[KN_FIELD_CSS_SELECTED_P0 + p]  = hash_rdram_slice(css_base + MAP(CSS_OFF_SELECTED_FLAG), 4);
     }
-    out[KN_FIELD_RNG]             = hash_rdram_slice(KN_ADDR_SY_UTILS_RANDOM_SEED, 4);
-    out[KN_FIELD_MATCH_PHASE]     = hash_rdram_u8(KN_ADDR_SCENE_CURR);
-    out[KN_FIELD_VS_BATTLE_HDR]   = hash_rdram_slice(KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER);
-    out[KN_FIELD_PHYSICS_MOTION]  = hash_rdram_slice(KN_ADDR_FT_MOTION_COUNT, 4);
+    out[KN_FIELD_RNG]             = hash_rdram_slice(MAP(RNG_SEED), 4);
+    out[KN_FIELD_MATCH_PHASE]     = hash_rdram_u8(MAP(SCENE_CURR));
+    out[KN_FIELD_VS_BATTLE_HDR]   = hash_rdram_slice(MAP(VS_BATTLE_HEADER), MAP(VS_BATTLE_HEADER_SIZE));
+    out[KN_FIELD_PHYSICS_MOTION]  = hash_rdram_slice(MAP(FT_MOTION_COUNT), 4);
     out[KN_FIELD_FT_BUFFER]       = hash_ft_buffer_live();
 }
 
@@ -686,8 +717,64 @@ KN_KEEPALIVE int32_t kn_get_last_replay_final_frame(void)  { return s_last_repla
 
 KN_KEEPALIVE
 uint8_t kn_get_scene_curr(void) {
-    const uint8_t* b = rdram_u8(KN_ADDR_SCENE_CURR);
+    const uint8_t* b = rdram_u8(MAP(SCENE_CURR));
     return b ? *b : 0;
+}
+
+/* ── Installing a map ────────────────────────────────────────────── */
+#define KN_RDRAM_MAX 0x800000u
+#define KN_MAP_SPAN_MAX 0x10000u
+
+static int map_entry_is_span(uint32_t index) {
+    return index == KN_MAP_PLAYER_STRIDE || index == KN_MAP_VS_BATTLE_HEADER_SIZE ||
+           index == KN_MAP_CSS_STRIDE || index == KN_MAP_CSS_OFF_CHAR_ID ||
+           index == KN_MAP_CSS_OFF_CURSOR_STATE || index == KN_MAP_CSS_OFF_SELECTED_FLAG ||
+           index == KN_MAP_FT_BUFFER_SIZE;
+}
+
+static void rings_reset(void) {
+    memset(s_ring_stocks, 0, sizeof(s_ring_stocks));
+    memset(s_head_stocks, 0, sizeof(s_head_stocks));
+    memset(s_ring_character_id, 0, sizeof(s_ring_character_id));
+    memset(s_head_character_id, 0, sizeof(s_head_character_id));
+    memset(s_ring_css_cursor, 0, sizeof(s_ring_css_cursor));
+    memset(s_head_css_cursor, 0, sizeof(s_head_css_cursor));
+    memset(s_ring_css_selected, 0, sizeof(s_ring_css_selected));
+    memset(s_head_css_selected, 0, sizeof(s_head_css_selected));
+    memset(s_ring_rng, 0, sizeof(s_ring_rng));
+    s_head_rng = 0;
+    memset(s_ring_match_phase, 0, sizeof(s_ring_match_phase));
+    s_head_match_phase = 0;
+    memset(s_ring_vs_battle_hdr, 0, sizeof(s_ring_vs_battle_hdr));
+    s_head_vs_battle_hdr = 0;
+    memset(s_ring_physics_motion, 0, sizeof(s_ring_physics_motion));
+    s_head_physics_motion = 0;
+    memset(s_ring_ft_buffer, 0, sizeof(s_ring_ft_buffer));
+    s_head_ft_buffer = 0;
+    memset(s_replay_ring, 0, sizeof(s_replay_ring));
+    s_replay_length = 0;
+}
+
+KN_KEEPALIVE
+int kn_field_map_set(const uint32_t* values, uint32_t count) {
+    if (!values || count != KN_MAP_COUNT) return 0;
+    for (uint32_t i = 0; i < KN_MAP_COUNT; i++) {
+        uint32_t limit = map_entry_is_span(i) ? KN_MAP_SPAN_MAX : KN_RDRAM_MAX;
+        if (values[i] >= limit) return 0;
+    }
+    if (values[KN_MAP_VS_BATTLE_HEADER_SIZE] == 0 || values[KN_MAP_FT_BUFFER_SIZE] == 0) return 0;
+    memcpy(s_map, values, sizeof(s_map));
+    /* Hashes recorded under the old map are of other memory. */
+    rings_reset();
+    return 1;
+}
+
+KN_KEEPALIVE
+uint32_t kn_field_map_count(void) { return KN_MAP_COUNT; }
+
+KN_KEEPALIVE
+uint32_t kn_field_map_value(uint32_t index) {
+    return index < KN_MAP_COUNT ? s_map[index] : 0xFFFFFFFFu;
 }
 
 #endif

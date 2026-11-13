@@ -5,6 +5,7 @@
 import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
+import { addressMapFor } from './address-maps.ts';
 import { bootTimedOut } from './boot.ts';
 import { captureFrame } from './desync-capture.ts';
 import { digestFrame } from './desync-confirm.ts';
@@ -143,6 +144,7 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
 };
 
 export const KNCore = {
+  addressMapFor,
   bootTimedOut,
   captureFrame,
   checkRelayed,

@@ -125,6 +125,33 @@
     return false;
   }
 
+  // Hand the registry this ROM's addresses (kn_field_map_set). A core from
+  // before the map was data has only the built-in SSB64 US map; that is
+  // fine for SSB64 US and wrong for anything else.
+  function _installAddressMap(m, rom) {
+    const values = rom.values;
+    if (typeof m._kn_field_map_set !== 'function' || typeof m._malloc !== 'function') {
+      if (rom.name === 'ssb64-us') return true;
+      _log(`disabled: this core cannot take the address map for ${rom.name}`);
+      return false;
+    }
+    const ptr = m._malloc(values.length * 4);
+    let accepted = false;
+    try {
+      m.HEAPU32.set(values, ptr >>> 2);
+      accepted = m._kn_field_map_set(ptr, values.length) === 1;
+    } finally {
+      m._free(ptr);
+    }
+    if (!accepted) {
+      _log(`disabled: the core refused the address map for ${rom.name}`);
+      return false;
+    }
+    _scenes = rom.scenes;
+    _log(`address map=${rom.name}`);
+    return true;
+  }
+
   function _readFieldHash(fid, frame) {
     const m = _module;
     switch (fid) {
@@ -310,13 +337,11 @@
     return null;
   }
 
-  const SCENE = {
-    IN_GAME_VS: 22, // nSCKindVSBattle
-    CSS_VS: 16, // nSCKindPlayersVS
-    STAGE_SELECT: 21, // nSCKindMaps
-  };
-  const IN_GAME_SCENES = new Set([SCENE.IN_GAME_VS]);
-  const CSS_PHASE_SCENES = new Set([SCENE.CSS_VS]);
+  // The scenes fields are gated on. They come with the ROM's address map
+  // (web/src/address-maps.ts); these are SSB64 US's, the registry's
+  // built-in map: nSCKindVSBattle and nSCKindPlayersVS.
+  const SSB64_SCENES = Object.freeze({ characterSelect: 16, stageSelect: 21, battle: 22 });
+  let _scenes = SSB64_SCENES;
 
   // The scene a digest's frame was in, from its match_phase hash (FNV-1a of
   // the one scene byte). A digest is for a frame a rollback window old, so
@@ -341,8 +366,8 @@
   }
 
   function _fieldEligibleInPhase(fid, phase) {
-    const inGame = IN_GAME_SCENES.has(phase);
-    const cssPhase = CSS_PHASE_SCENES.has(phase);
+    const inGame = phase === _scenes.battle;
+    const cssPhase = phase === _scenes.characterSelect;
     switch (fid) {
       case FIELD.STOCKS_P0:
       case FIELD.STOCKS_P1:
@@ -491,7 +516,10 @@
   }
 
   const KNDesync = {
-    init(emModule, mode = 'B') {
+    // `rom` is the ROM's addresses from KNCore.addressMapFor
+    // ({name, values, scenes}); without it the registry's built-in map
+    // (SSB64 US) is used as it stands.
+    init(emModule, mode = 'B', rom = null) {
       _module = emModule;
       _mode = mode;
       _enabled = _hasRequiredExports(emModule);
@@ -500,7 +528,15 @@
       _lastFlagFrame.clear();
       _pendingCaptures.clear();
       _noDecisionLogged = false;
+      _scenes = SSB64_SCENES;
       _log(`init mode=${mode}`);
+      if (_enabled && rom && !_installAddressMap(emModule, rom)) {
+        // Off for the whole match. tick() re-checks the exports of a
+        // module it holds and would switch the detector back on, hashing
+        // through whatever map the core was left with.
+        _enabled = false;
+        _module = null;
+      }
       if (!_enabled) {
         _stopHeartbeat();
         return;

@@ -26,6 +26,44 @@ uint32_t kn_hash_fnv1a(const uint8_t* data, size_t len);
  * envelope, well below RDRAM size. */
 #define KN_FT_BUFFER_SIZE 4096
 
+/* ── The address map ─────────────────────────────────────────────────
+ * Where each field lives is data, not code: one uint32 per entry below, in
+ * this order. The built-in values are SSB64 US's (kn_gameplay_addrs.h and
+ * the citation blocks in this header). A page that knows another ROM's map
+ * installs it with kn_field_map_set before the match starts; the maps and
+ * the checks a map must pass are in web/src/address-maps.ts and
+ * docs/address-maps.md. Offsets are N64 RDRAM offsets (address & 0x00FFFFFF);
+ * the registry applies the byte swap for one-byte fields itself. */
+enum {
+    KN_MAP_STOCKS_BASE = 0,     /* P1 stock_count (1 byte); + player * PLAYER_STRIDE */
+    KN_MAP_PLAYER_STRIDE,
+    KN_MAP_SCENE_CURR,          /* scene_curr (1 byte) */
+    KN_MAP_VS_BATTLE_HEADER,
+    KN_MAP_VS_BATTLE_HEADER_SIZE,
+    KN_MAP_RNG_SEED,            /* 4 bytes */
+    KN_MAP_CSS_BASE,            /* P1 character-select struct; + player * CSS_STRIDE */
+    KN_MAP_CSS_STRIDE,
+    KN_MAP_CSS_OFF_CHAR_ID,     /* 4 bytes each, within the struct */
+    KN_MAP_CSS_OFF_CURSOR_STATE,
+    KN_MAP_CSS_OFF_SELECTED_FLAG,
+    KN_MAP_FT_MOTION_COUNT,     /* 4 bytes */
+    KN_MAP_FT_BUFFER_PTR,       /* holds an N64 pointer to the fighter structs */
+    KN_MAP_FT_BUFFER_SIZE,      /* bytes hashed from that pointer */
+    KN_MAP_COUNT
+};
+
+/* Install a map: `count` must be KN_MAP_COUNT and every entry must fit in
+ * 8 MB of RDRAM (sizes and strides at most 64 KB). Returns 1 and clears the
+ * history rings, or 0 and changes nothing. It checks each entry on its own,
+ * not that a base plus its size or strides stays inside RDRAM: a read that
+ * runs off the end hashes to 0, like any unavailable field. The page checks
+ * whole reads before it installs a map (addressMapProblem in
+ * web/src/address-maps.ts). */
+int kn_field_map_set(const uint32_t* values, uint32_t count);
+uint32_t kn_field_map_count(void);
+/* The entry in use at `index`; 0xFFFFFFFF if out of range. */
+uint32_t kn_field_map_value(uint32_t index);
+
 /* Per-field exports declared in Tasks 3+ on top of this skeleton.
  * Each entry MUST carry the citation block above its declaration. */
 
