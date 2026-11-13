@@ -15,7 +15,7 @@ flowchart LR
   lateJoinSyncing -->|"lateJoinSynced"| running
 ```
 
-Not drawn: `gameEnded` and `roomClosed` take every state to `lobby`.
+Not drawn, because every state goes to `lobby` on them: `gameEnded`, `roomClosed`, `rejoined: game ended while away`, `rejoined: match replaced while away`.
 Events that leave a state unchanged are not drawn either.
 
 What `play.js` reads from each state (`sessionFlag`):

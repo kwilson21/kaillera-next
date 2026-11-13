@@ -11,6 +11,8 @@
  *    `gameRunning` flag beside it and reports any disagreement
  *    (`session-disagree`) on every signaling reconnect; the flag goes once
  *    production shows none.
+ *  - On a signaling reconnect the page reconciles with the server
+ *    (`rejoined`): this one decides, there was no rule before it.
  *  - The late-join states observe. play.js still decides from `_lateJoin`
  *    and `_pendingLateJoin` and reports, at each place it reads one, whether
  *    the machine would have answered the same.
@@ -18,6 +20,7 @@
 import { Context, Effect, Schema } from 'effect';
 import { setupEffect } from '@xstate/effect';
 import { RoomStatus } from './protocol.ts';
+import { reconcileRejoin } from './rejoin.ts';
 
 export type SessionState =
   | 'lobby'
@@ -88,6 +91,13 @@ export const sessionMachine = setupEffect({
       gameEnded: Empty,
       /** The server closed the room under this page (host left, shutdown). */
       roomClosed: Empty,
+      /**
+       * The socket came back and the server acknowledged the rejoin with what
+       * the room is doing now. A page that is out of step (the game ended, or
+       * the match was replaced, while its socket was down) returns to the
+       * lobby; play.js then does what a fresh join would (web/src/rejoin.ts).
+       */
+      rejoined: Schema.Struct({ playing: Schema.Boolean, matchId: Schema.NullOr(Schema.String) }),
       /** A late joiner has no usable ROM and has been asked for one. */
       lateJoinRomNeeded: Empty,
       /** The ROM question is settled; the late join can go ahead. */
@@ -139,6 +149,11 @@ export const sessionMachine = setupEffect({
     },
     lateJoinAwaitingRom: {
       on: {
+        rejoined: ({ context, event }) => {
+          const verdict = reconcileRejoin(true, context.matchId ?? '', event.playing, event.matchId ?? '');
+          if (verdict === 'keep') return;
+          return { target: 'lobby', context: { ...context, matchId: null } };
+        },
         // A game-started for a page already in the match changes nothing but the match id.
         gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
         lateJoinRomReady: { target: 'lateJoinStarting' },
@@ -147,6 +162,11 @@ export const sessionMachine = setupEffect({
     },
     lateJoinStarting: {
       on: {
+        rejoined: ({ context, event }) => {
+          const verdict = reconcileRejoin(true, context.matchId ?? '', event.playing, event.matchId ?? '');
+          if (verdict === 'keep') return;
+          return { target: 'lobby', context: { ...context, matchId: null } };
+        },
         // A game-started for a page already in the match changes nothing but the match id.
         gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
         lateJoinRomNeeded: { target: 'lateJoinAwaitingRom' },
@@ -167,6 +187,11 @@ export const sessionMachine = setupEffect({
         },
       },
       on: {
+        rejoined: ({ context, event }) => {
+          const verdict = reconcileRejoin(true, context.matchId ?? '', event.playing, event.matchId ?? '');
+          if (verdict === 'keep') return;
+          return { target: 'lobby', context: { ...context, matchId: null } };
+        },
         // A game-started for a page already in the match changes nothing but the match id.
         gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
         lateJoinSynced: { target: 'running' },
@@ -174,6 +199,11 @@ export const sessionMachine = setupEffect({
     },
     running: {
       on: {
+        rejoined: ({ context, event }) => {
+          const verdict = reconcileRejoin(true, context.matchId ?? '', event.playing, event.matchId ?? '');
+          if (verdict === 'keep') return;
+          return { target: 'lobby', context: { ...context, matchId: null } };
+        },
         // A game-started for a page already in the match changes nothing but the match id.
         gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
       },

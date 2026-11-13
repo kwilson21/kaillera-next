@@ -9,6 +9,7 @@ import { bootTimedOut } from './boot.ts';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { rosterKey } from './peer-identity.ts';
+import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { meshHealTargets } from './roster.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
@@ -98,6 +99,20 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
     socketUp: (page: { gameRunning: boolean }): Promise<boolean> => {
       send({ type: 'socketUp' });
       return Promise.resolve(check('gameRunning', page.gameRunning));
+    },
+    /**
+     * The server acknowledged a rejoin after a socket drop. Moves the machine
+     * if the page is out of step and says what the page must do about it.
+     */
+    rejoined: (room: { playing: boolean; matchId: string | null }): RejoinVerdict => {
+      const verdict = reconcileRejoin(
+        state() !== 'lobby',
+        snapshot.context.matchId ?? '',
+        room.playing,
+        room.matchId ?? '',
+      );
+      send({ type: 'rejoined', playing: room.playing, matchId: room.matchId });
+      return verdict === 'gameEnded' || verdict === 'matchReplaced' ? verdict : 'keep';
     },
     stop: (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void)),
   };

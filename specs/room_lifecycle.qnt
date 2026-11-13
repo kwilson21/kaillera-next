@@ -33,9 +33,9 @@
 module room {
   const HOST_REOPEN_ENDS_MATCH: bool
   // What a page does when its socket reconnects under it:
-  //   false  today's code: rejoin silently and keep whatever it was doing
-  //   true   proposed fix: compare with the status and match id the rejoin
-  //          returns, and follow the server when they differ
+  //   false  before: rejoin silently and keep whatever it was doing
+  //   true   today (web/src/rejoin.ts): compare with the status and match
+  //          id the rejoin returns, and follow the server when they differ
   const RESUME_RECONCILES: bool
 
   // web/src/session.ts is the page half of this model, state for state:
@@ -280,12 +280,12 @@ module room {
   val ownerSeesGame =
     (status == "playing" and listeners.contains(owner)) implies page.get(owner) != Lobby
 
-  // The next two fail today and hold with RESUME_RECONCILES. Both come from
-  // a page whose socket was down while the room moved on: on reconnect it
-  // rejoins silently and never compares itself with the server.
+  // The next two failed before RESUME_RECONCILES and hold with it. Both came
+  // from a page whose socket was down while the room moved on: on reconnect
+  // it rejoined silently and never compared itself with the server.
   //
   // A page on the late-join path is joining the match the server is running
-  // now. Fails today: a joiner at the ROM prompt loses its socket, the host
+  // now. Failed before: a joiner at the ROM prompt loses its socket, the host
   // ends that game and starts another, and the joiner carries on joining the
   // old one (found by the model, 2026-11-13; not seen in production).
   val lateJoinersChaseTheCurrentMatch =
@@ -297,7 +297,7 @@ module room {
       })
 
   // Every connected page agrees with the server about lobby vs playing.
-  // Fails today when a page misses game-ended while its socket is down.
+  // Failed before when a page missed game-ended while its socket was down.
   val pagesAgreeWithServer =
     listeners.forall(p => (page.get(p) == Lobby) iff (status == "lobby"))
 
@@ -371,12 +371,14 @@ module room {
 
 // The server and client as they are today.
 module room_current {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false).*
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true).*
 }
 
-// With the proposed reconnect fix.
-module room_fixed {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true).*
+// Before the page reconciled with the server on reconnect
+// (web/src/rejoin.ts). lateJoinersChaseTheCurrentMatch and
+// pagesAgreeWithServer are violated here.
+module room_before_reconcile {
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false).*
 }
 
 // Before #104, kept so hostReloadTest still shows what that fix changed.
