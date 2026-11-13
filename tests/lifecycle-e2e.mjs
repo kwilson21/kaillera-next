@@ -12,10 +12,17 @@
  * only if the notice and the measured wait contradict each other. For anyone
  * else it is a failure.
  *
- * Scenarios (SCENARIO picks one; default runs all three, each in its own room):
- *   late-join    a guest joins a game already running, then the host ends it
- *   spectate     a spectator joins a game already running, then the host ends it
- *   host-reload  the host reloads mid-game; the server ends the match for the guest
+ * The machine also mirrors play.js's two late-join flags, and play.js asks it
+ * at every place it reads one whether it would have answered the same; those
+ * disagreements are reported as `session-disagree` too and fail a checkpoint.
+ *
+ * Scenarios (SCENARIO picks one; default runs them all, each in its own room):
+ *   late-join         a guest with no ROM joins a game already running, is
+ *                     asked for one, then the host ends the game
+ *   late-join-cached  the same, with the guest's ROM already in its library
+ *   streaming-join    a guest joins a streamed game already running
+ *   spectate          a spectator joins a game already running, then the host ends it
+ *   host-reload       the host reloads mid-game; the server ends the match for the guest
  *
  * At each checkpoint the test also checks what the page itself shows (lobby
  * overlay up or down), so a run cannot pass with machine and page agreeing on
@@ -31,7 +38,7 @@ import { chromium } from 'playwright';
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
 const OUT = process.env.OUT || '/tmp/lifecycle-e2e';
-const SCENARIOS = ['late-join', 'spectate', 'host-reload'];
+const SCENARIOS = ['late-join', 'late-join-cached', 'streaming-join', 'spectate', 'host-reload'];
 const wanted = process.env.SCENARIO ? [process.env.SCENARIO] : SCENARIOS;
 if (wanted.some((name) => !SCENARIOS.includes(name))) {
   console.log(`SCENARIO must be one of ${SCENARIOS.join(', ')}`);
@@ -195,8 +202,8 @@ const checkpoint = async (name, expectations, failures, log) => {
 
 const loadRom = (player) => player.page.locator("#rom-drop input[type='file']").setInputFiles(ROM);
 
-const startSoloGame = async (room) => {
-  const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
+const startSoloGame = async (room, mode = 'rollback') => {
+  const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=${mode}`);
   await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
   await loadRom(host);
   await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
@@ -251,6 +258,67 @@ const scenarios = {
       [
         { player: host, lobby: true },
         { player: guest, lobby: true, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'late-join-cached': async (room, failures, log) => {
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+
+    // Put the ROM in the guest's library first, from a room of its own.
+    const guest = await openPlayer('guest', `room=${room}W&host=1&name=Guest&mode=rollback`);
+    await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    await loadRom(guest);
+    await guest.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+
+    await guest.page.goto(`${URL}/play.html?room=${room}&name=Guest&knperf=light`);
+    const synced = await waitUntil(async () => {
+      await clickGesturePrompt(guest);
+      return (await frameOf(guest)) > 0;
+    }, 240000);
+    if (!synced) failures.push('the late joiner never received state');
+    await waitForFrames([host, guest], 60, 120000);
+    await checkpoint(
+      'after late join',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'streaming-join': async (room, failures, log) => {
+    const host = await startSoloGame(room, 'streaming');
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    if (!(await waitUntil(async () => !(await lobbyShownOn(guest)), 30000)))
+      failures.push('the streaming guest never left the lobby overlay');
+    await waitForFrames([host], 120, 120000);
+    await checkpoint(
+      'while streaming',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false },
+      ],
+      failures,
+      log,
+    );
+
+    await endGame(host);
+    if (!(await waitUntil(() => lobbyShownOn(guest), 30000))) failures.push('the guest never returned to the lobby');
+    await checkpoint(
+      'after end game',
+      [
+        { player: host, lobby: true },
+        { player: guest, lobby: true },
       ],
       failures,
       log,

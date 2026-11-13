@@ -11,8 +11,10 @@ import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { meshHealTargets } from './roster.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
+  sessionFlag,
   sessionMachine,
   Telemetry,
+  type SessionCheck,
   type SessionReport,
   type SessionState,
 } from './session.ts';
@@ -58,25 +60,39 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
     else held.push(event);
   };
 
+  // The last disagreement reported, so a flag that stays wrong is reported
+  // once and not at every read.
+  let lastDisagreement = '';
+  /**
+   * Compare one of play.js's own flags with what the machine says it should
+   * be, and report a disagreement. Returns whether they agree.
+   */
+  const check = (name: SessionCheck, page: boolean): boolean => {
+    const machineState = state();
+    const agrees = sessionFlag(machineState, name) === page;
+    const key = agrees ? '' : `${name}:${machineState}:${page}`;
+    if (!agrees && key !== lastDisagreement) {
+      sink({ type: 'session-disagree', machine: machineState, check: name, page });
+    }
+    if (!agrees || lastDisagreement.startsWith(`${name}:`)) lastDisagreement = key;
+    return agrees;
+  };
+
   return {
     send,
     state,
     /** A game is on for this page: it is anywhere but the lobby. */
-    gameOn: (): boolean => state() !== 'lobby',
+    gameOn: (): boolean => sessionFlag(state(), 'gameRunning'),
+    check,
     /**
-     * Cross-check, called when the signaling socket comes back: does the
-     * machine agree with the flag play.js still keeps beside it about whether
-     * a game is on? The machine decides either way; a disagreement is
-     * reported so production can show when the flag can be deleted.
+     * Called when the signaling socket comes back: does the machine agree
+     * with the `gameRunning` flag play.js still keeps beside it? The machine
+     * decides either way; a disagreement is reported so production can show
+     * when the flag can be deleted.
      */
     socketUp: (page: { gameRunning: boolean }): Promise<boolean> => {
       send({ type: 'socketUp' });
-      const machineState = state();
-      const agrees = (machineState !== 'lobby') === page.gameRunning;
-      if (!agrees) {
-        sink({ type: 'session-disagree', machine: machineState, gameRunning: page.gameRunning });
-      }
-      return Promise.resolve(agrees);
+      return Promise.resolve(check('gameRunning', page.gameRunning));
     },
     stop: (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void)),
   };

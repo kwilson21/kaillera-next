@@ -1,25 +1,60 @@
 /**
- * What this page is doing, as a state machine: showing the lobby, waiting for
- * a late-join state, or running a match. It is the page half of
- * specs/room_lifecycle.qnt (`Page = Lobby | Waiting | Running`); the scenario
- * tests in tests/ts replay that model's runs against it.
+ * What this page is doing, as a state machine: showing the lobby, joining a
+ * match already in play, or running a match. It is the page half of
+ * specs/room_lifecycle.qnt (`Page = Lobby | Waiting | Running`; the three
+ * late-join states here are all `Waiting` there, since the server cannot
+ * tell them apart). The scenario tests in tests/ts replay that model's runs
+ * against it.
  *
- * Stage 2: play.js reads "is a game on" from this machine. It still keeps
- * its old `gameRunning` flag beside it, written at the same places, and
- * reports any disagreement (`session-disagree`) on every signaling reconnect;
- * the flag goes once production shows none. `_lateJoin` and
- * `_pendingLateJoin` in play.js are not yet read from here.
+ * Stage 2, in two steps:
+ *  - "Is a game on" is read from this machine. play.js still writes its old
+ *    `gameRunning` flag beside it and reports any disagreement
+ *    (`session-disagree`) on every signaling reconnect; the flag goes once
+ *    production shows none.
+ *  - The late-join states observe. play.js still decides from `_lateJoin`
+ *    and `_pendingLateJoin` and reports, at each place it reads one, whether
+ *    the machine would have answered the same.
  */
 import { Context, Effect, Schema } from 'effect';
 import { setupEffect } from '@xstate/effect';
 import { RoomStatus } from './protocol.ts';
 
-export type SessionState = 'lobby' | 'lateJoinWaiting' | 'running';
+export type SessionState =
+  | 'lobby'
+  /** Joined a match in play; no usable ROM yet, the page is asking for one. */
+  | 'lateJoinAwaitingRom'
+  /** Joined a match in play; the next engine start is the late join. */
+  | 'lateJoinStarting'
+  /** The late-join engine is up and waiting for the match state. */
+  | 'lateJoinSyncing'
+  | 'running';
+
+/** The page flags the machine can be compared with. */
+export type SessionCheck = 'gameRunning' | 'lateJoin' | 'pendingLateJoin';
+
+/** What the machine says each page flag should be in a given state. */
+export const sessionFlag = (state: SessionState, check: SessionCheck): boolean => {
+  switch (check) {
+    case 'gameRunning':
+      return state !== 'lobby';
+    case 'pendingLateJoin':
+      return state === 'lateJoinAwaitingRom';
+    case 'lateJoin':
+      // The next engine start is a late join until an engine has started as one.
+      return state === 'lateJoinAwaitingRom' || state === 'lateJoinStarting';
+  }
+};
 
 /** What the machine reports. It never acts on these; the page logs them. */
 export type SessionReport =
   | { readonly type: 'late-join-stranded'; readonly matchId: string | null }
-  | { readonly type: 'session-disagree'; readonly machine: SessionState; readonly gameRunning: boolean };
+  | {
+      readonly type: 'session-disagree';
+      readonly machine: SessionState;
+      readonly check: SessionCheck;
+      /** What play.js's own flag said. */
+      readonly page: boolean;
+    };
 
 /** Where reports go. Provided by the host page. */
 export class Telemetry extends Context.Service<
@@ -42,11 +77,28 @@ export const sessionMachine = setupEffect({
     input: Schema.Struct({ lateJoinReportAfterMs: Schema.Number }),
     events: {
       /** The server acknowledged open-room or join-room. */
-      joined: Schema.Struct({ status: RoomStatus, matchId: Schema.NullOr(Schema.String), spectator: Schema.Boolean }),
+      joined: Schema.Struct({
+        status: RoomStatus,
+        matchId: Schema.NullOr(Schema.String),
+        spectator: Schema.Boolean,
+        /** The match is streamed: nobody but the host runs an emulator. */
+        streaming: Schema.Boolean,
+      }),
       gameStarted: Schema.Struct({ matchId: Schema.String }),
       gameEnded: Empty,
       /** The server closed the room under this page (host left, shutdown). */
       roomClosed: Empty,
+      /** A late joiner has no usable ROM and has been asked for one. */
+      lateJoinRomNeeded: Empty,
+      /** The ROM question is settled; the late join can go ahead. */
+      lateJoinRomReady: Empty,
+      /** play.js started the netplay engine. */
+      engineStarted: Schema.Struct({
+        /** No ROM yet: the engine only connects, to fetch the ROM from the host. */
+        connectOnly: Schema.Boolean,
+        /** This page runs an emulator, so it needs the match state before it is in the game. */
+        waitsForState: Schema.Boolean,
+      }),
       /** The late-join state arrived and the emulator is running it. */
       lateJoinSynced: Empty,
       socketDown: Empty,
@@ -71,29 +123,60 @@ export const sessionMachine = setupEffect({
     socketUp: ({ context }) => ({ context: { ...context, socketUp: true } }),
     gameEnded: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
     roomClosed: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
-    gameStarted: ({ context, event }) => ({ target: '.running', context: { ...context, matchId: event.matchId } }),
   },
   states: {
     lobby: {
       on: {
+        gameStarted: ({ context, event }) => ({ target: 'running', context: { ...context, matchId: event.matchId } }),
         joined: ({ context, event }) => {
           if (event.status !== 'playing') return;
-          // A spectator watches the host's stream: the game is on for this
-          // page at once, with no state to wait for.
-          const target = event.spectator ? 'running' : 'lateJoinWaiting';
+          // A spectator of a rollback match watches the host's stream: the
+          // game is on at once, and its engine start is not a late join.
+          const target = event.spectator && !event.streaming ? 'running' : 'lateJoinStarting';
           return { target, context: { ...context, matchId: event.matchId } };
         },
       },
     },
-    lateJoinWaiting: {
-      // Detection only, like the tick watchdog: report, take no action.
+    lateJoinAwaitingRom: {
+      on: {
+        // A game-started for a page already in the match changes nothing but the match id.
+        gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
+        lateJoinRomReady: { target: 'lateJoinStarting' },
+        // A connect-only engine start fetches the ROM; the late join is still to come.
+      },
+    },
+    lateJoinStarting: {
+      on: {
+        // A game-started for a page already in the match changes nothing but the match id.
+        gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
+        lateJoinRomNeeded: { target: 'lateJoinAwaitingRom' },
+        engineStarted: ({ event }) => {
+          if (event.connectOnly) return;
+          return { target: event.waitsForState ? 'lateJoinSyncing' : 'running' };
+        },
+        lateJoinSynced: { target: 'running' },
+      },
+    },
+    lateJoinSyncing: {
+      // Detection only, like the tick watchdog: report, take no action. The
+      // clock starts when the engine does, so time spent choosing a ROM is
+      // not counted against the joiner.
       after: {
         lateJoinReportAfter: ({ actions, context, self }, enq) => {
           enq(actions.reportStrandedJoiner, { matchId: context.matchId, self });
         },
       },
-      on: { lateJoinSynced: { target: 'running' } },
+      on: {
+        // A game-started for a page already in the match changes nothing but the match id.
+        gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
+        lateJoinSynced: { target: 'running' },
+      },
     },
-    running: {},
+    running: {
+      on: {
+        // A game-started for a page already in the match changes nothing but the match id.
+        gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
+      },
+    },
   },
 });
