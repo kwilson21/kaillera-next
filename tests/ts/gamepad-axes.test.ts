@@ -1,0 +1,284 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { test } from 'node:test';
+import vm from 'node:vm';
+import {
+  analogScale,
+  axisSign,
+  digitalSnap,
+  gamepadDisplayName,
+  n64StickMax,
+  normalizeAxis,
+  type AxisName,
+  type AxisProfile,
+} from '../../web/src/gamepad-axes.ts';
+import { lcg, plain } from './load-shared.ts';
+
+test('the default range of 66 gives the N64 maximum of 83', () => {
+  assert.equal(n64StickMax(66), 83);
+  assert.equal(n64StickMax(100), 127);
+  assert.equal(n64StickMax(0), 0);
+});
+
+test('analogScale is 0 in the dead zone, reaches the maximum, and never passes it', () => {
+  for (const range of [0, 33, 66, 100]) {
+    const max = n64StickMax(range);
+    for (const sensitivity of [0.5, 1, 1.5, 2]) {
+      for (const deadzone of [0, 0.15, 0.4]) {
+        let previous = -max;
+        for (let step = -1000; step <= 1000; step++) {
+          const value = step / 1000;
+          const out = analogScale(value, deadzone, range, sensitivity);
+          const where = `value=${value} dz=${deadzone} range=${range} sens=${sensitivity} out=${out}`;
+          if (!Number.isInteger(out) || Math.abs(out) > max) assert.fail(`out of range: ${where}`);
+          if (Math.abs(value) < deadzone && out !== 0) assert.fail(`dead zone: ${where}`);
+          if (out < previous) assert.fail(`not monotonic: ${where}`);
+          if (out + analogScale(-value, deadzone, range, sensitivity) !== 0) assert.fail(`not odd: ${where}`);
+          previous = out;
+        }
+        assert.equal(analogScale(1, deadzone, range, sensitivity), max);
+        assert.equal(analogScale(-1, deadzone, range, sensitivity), -max);
+      }
+    }
+  }
+});
+
+test('digitalSnap is off in the dead zone and full on outside it', () => {
+  assert.equal(digitalSnap(0.1, 0.15, 66), 0);
+  assert.equal(digitalSnap(0.15, 0.15, 66), 83);
+  assert.equal(digitalSnap(-0.9, 0.15, 66), -83);
+  assert.equal(digitalSnap(0.5, 0.15, 100), 127);
+});
+
+test('axisSign follows what the profile says each end of an axis means', () => {
+  const standard: AxisProfile = {
+    axes: { stickX: { index: 0, bits: [16, 17] }, stickY: { index: 1, bits: [18, 19] } },
+    axisButtons: { 2: { pos: 1 << 21, neg: 1 << 20 }, 3: { pos: 1 << 22, neg: 1 << 23 } },
+  };
+  const names: AxisName[] = ['lx', 'ly', 'cx', 'cy'];
+  assert.deepEqual(
+    names.map((n) => axisSign(standard, n)),
+    [1, 1, 1, 1],
+  );
+  // The Switch 2 Pro layout: +Y is up on both sticks.
+  const upIsPositive: AxisProfile = {
+    axes: { stickX: { index: 0, bits: [16, 17] }, stickY: { index: 1, bits: [19, 18] } },
+    axisButtons: { 3: { pos: 1 << 21, neg: 1 << 20 }, 5: { pos: 1 << 23, neg: 1 << 22 } },
+  };
+  assert.deepEqual(
+    names.map((n) => axisSign(upIsPositive, n)),
+    [1, -1, 1, -1],
+  );
+  // No axis data at all keeps Standard polarity.
+  assert.deepEqual(
+    names.map((n) => axisSign({}, n)),
+    [1, 1, 1, 1],
+  );
+});
+
+test('normalizeAxis subtracts the rest position, divides out the range and clamps', () => {
+  assert.equal(normalizeAxis(0.5, 0, 1, 1), 0.5);
+  assert.equal(normalizeAxis(0.5, 0.1, 1, 0.8), 0.5);
+  assert.equal(normalizeAxis(0.9, 0, 1, 0.8), 1);
+  assert.equal(normalizeAxis(-0.9, 0, -1, 0.8), 1);
+});
+
+test('gamepadDisplayName strips the vendor decorations browsers add', () => {
+  assert.equal(
+    gamepadDisplayName('Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)'),
+    'Xbox Wireless Controller',
+  );
+  assert.equal(gamepadDisplayName('045e-0b13-Xbox Wireless Controller'), 'Xbox Wireless Controller');
+  assert.equal(gamepadDisplayName('Switch 2 Pro Controller (Vendor: 057e Product: 2069)'), 'Switch 2 Pro Controller');
+  assert.equal(gamepadDisplayName('(Vendor: 057e Product: 2069)'), '(Vendor: 057e Product: 2069)');
+});
+
+// ── gamepad-manager.js itself ─────────────────────────────────────────────
+
+interface AxesCore {
+  analogScale: typeof analogScale;
+  digitalSnap: typeof digitalSnap;
+  axisSign: typeof axisSign;
+  normalizeAxis: typeof normalizeAxis;
+  gamepadDisplayName: typeof gamepadDisplayName;
+}
+interface Pad {
+  id: string;
+  mapping: string;
+  buttons: { pressed: boolean; value: number }[];
+  axes: number[];
+}
+interface PadInput {
+  buttons: number;
+  lx: number;
+  ly: number;
+  cx: number;
+  cy: number;
+}
+interface Manager {
+  start: (opts: { playerSlot: number }) => void;
+  stop: () => void;
+  readGamepad: (slot: number) => PadInput | null;
+  displayName: (id: string) => string;
+  saveGamepadProfile: (
+    id: string,
+    profile: AxisProfile & { buttons: Record<string, number>; deadzone: number },
+  ) => void;
+  setSetting: (key: string, value: number) => void;
+}
+interface ManagerWindow {
+  GamepadManager?: Manager;
+  KNCore?: AxesCore;
+  KNState: { romHash: null };
+  addEventListener: () => void;
+  removeEventListener: () => void;
+}
+
+const PAD_IDS = [
+  'Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)',
+  'Switch 2 Pro Controller (Vendor: 057e Product: 2069)',
+  '0079-0006-Generic USB Joystick',
+];
+
+/**
+ * Run web/static/gamepad-manager.js against scripted pads, profiles and
+ * settings, and return every input it read. -0 is kept apart from 0: the
+ * pipeline produces it and the values are sent to other peers.
+ */
+const runManager = (core?: AxesCore): string[] => {
+  const source = readFileSync(new URL('../../web/static/gamepad-manager.js', import.meta.url), 'utf8');
+  const pads: (Pad | null)[] = [];
+  const store = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => store.set(key, value),
+  };
+  const state = {
+    romHash: null,
+    safeGet: (_area: string, key: string) => store.get(key) ?? null,
+    safeSet: (_area: string, key: string, value: string) => store.set(key, value),
+    safeRemove: (_area: string, key: string) => store.delete(key),
+  };
+  const window: ManagerWindow = {
+    KNState: state,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+  };
+  if (core) window.KNCore = core;
+  let clock = 0;
+  vm.runInContext(
+    source,
+    vm.createContext({
+      window,
+      KNState: state,
+      APISandbox: { nativeGetGamepads: () => pads },
+      localStorage: storage,
+      // Advance past the settings cache on every read, so a changed range applies.
+      performance: { now: () => (clock += 2000) },
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+    }),
+  );
+  const manager = window.GamepadManager;
+  assert.ok(manager, 'gamepad-manager.js did not define window.GamepadManager');
+  const poll = (): void => {
+    manager.start({ playerSlot: 0 });
+    manager.stop();
+  };
+
+  const next = lcg(64);
+  const axis = (): number => {
+    const r = next() % 10;
+    if (r === 0) return 0;
+    if (r === 1) return next() % 2 === 0 ? 1 : -1;
+    // Mostly small values around the dead zone, sometimes anywhere.
+    return r < 6 ? ((next() % 600) - 300) / 1000 : ((next() % 2001) - 1000) / 1000;
+  };
+  const seen: string[] = [];
+  const show = (v: number): string => (Object.is(v, -0) ? '-0' : String(v));
+  for (let round = 0; round < 60; round++) {
+    const id = PAD_IDS[round % PAD_IDS.length]!;
+    pads[0] = null;
+    poll();
+    store.clear();
+    if (round % 4 === 1) {
+      // A remapped pad: both sticks' Y flipped, C stick on other axes.
+      manager.saveGamepadProfile(id, {
+        buttons: { 0: 1, 1: 2, 2: 1 << 20, 3: 1 << 23 },
+        axes: { stickX: { index: 0, bits: [17, 16] }, stickY: { index: 1, bits: [19, 18] } },
+        axisButtons: { 2: { pos: 1 << 20, neg: 1 << 21 }, 3: { pos: 1 << 23, neg: 1 << 22 } },
+        axisRange: 0.9,
+        deadzone: 0.15,
+      });
+    }
+    if (round % 3 === 1) manager.setSetting('kn-analog-range', [33, 66, 100][round % 3]!);
+    if (round % 5 === 2) manager.setSetting('kn-analog-sensitivity', [0.5, 1.5, 2][round % 3]!);
+    if (round % 7 === 3) manager.setSetting('kn-deadzone-lx', 0.3);
+    const rest = Array.from({ length: 6 }, () => ((next() % 200) - 100) / 1000);
+    const pad: Pad = {
+      id,
+      mapping: id.includes('STANDARD') ? 'standard' : '',
+      buttons: Array.from({ length: 21 }, () => ({ pressed: false, value: 0 })),
+      axes: rest,
+    };
+    pads[0] = pad;
+    // Two polls at rest, as a real pad gives before anyone touches it.
+    poll();
+    poll();
+    seen.push(manager.displayName(id));
+    for (let n = 0; n < 150; n++) {
+      pad.axes = Array.from({ length: 6 }, axis);
+      for (const b of pad.buttons) b.pressed = next() % 9 === 0;
+      const input = manager.readGamepad(0);
+      assert.ok(input, 'no gamepad assigned');
+      seen.push([input.buttons, input.lx, input.ly, input.cx, input.cy].map(show).join(','));
+    }
+  }
+  return plain(seen);
+};
+
+// What gamepad-manager.js read for this script at ff53345, before its axis
+// arithmetic moved to web/src/gamepad-axes.ts.
+const GOLDEN = { reads: 9060, sha256: '33589fc2a87b2f6d0cca1975ae0dee3d721e375c7120476a2992c81a76e70c45' };
+
+test('gamepad-manager.js reads the same inputs as before, with and without the bundle', () => {
+  const builtIn = runManager();
+  assert.equal(builtIn.length, GOLDEN.reads);
+  assert.equal(createHash('sha256').update(builtIn.join('\n')).digest('hex'), GOLDEN.sha256, 'built-in arithmetic');
+  const withCore = runManager({ analogScale, digitalSnap, axisSign, normalizeAxis, gamepadDisplayName });
+  assert.deepStrictEqual(withCore, builtIn, 'KNCore arithmetic');
+  // The script must move the sticks: more than a handful of distinct reads.
+  assert.ok(new Set(builtIn).size > 2000, `only ${new Set(builtIn).size} distinct reads`);
+  assert.ok(
+    builtIn.some((line) => line.includes('-0')),
+    'no negative zero in the script',
+  );
+});
+
+test('gamepad-manager.js calls KNCore for each computation when the bundle is loaded', () => {
+  const calls = { analogScale: 0, digitalSnap: 0, axisSign: 0, normalizeAxis: 0, gamepadDisplayName: 0 };
+  runManager({
+    analogScale: (...args) => {
+      calls.analogScale++;
+      return analogScale(...args);
+    },
+    digitalSnap: (...args) => {
+      calls.digitalSnap++;
+      return digitalSnap(...args);
+    },
+    axisSign: (...args) => {
+      calls.axisSign++;
+      return axisSign(...args);
+    },
+    normalizeAxis: (...args) => {
+      calls.normalizeAxis++;
+      return normalizeAxis(...args);
+    },
+    gamepadDisplayName: (id) => {
+      calls.gamepadDisplayName++;
+      return gamepadDisplayName(id);
+    },
+  });
+  for (const [name, count] of Object.entries(calls)) assert.ok(count > 0, `${name} was never called`);
+});
