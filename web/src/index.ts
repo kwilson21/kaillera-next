@@ -24,6 +24,7 @@ import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
 import * as observe from './play/observe.ts';
 import * as remapWizard from './play/remap-wizard.ts';
+import * as romTransfer from './play/rom-transfer.ts';
 import { newStoredRom, openRomLibrary, romLibraryHtml } from './play/rom-library.ts';
 import { escapeHtml, inviteUrl, roomClosedMessage, rosterToasts } from './play/room-text.ts';
 import {
@@ -190,6 +191,7 @@ export const KNCore = {
     delay,
     observe,
     remapWizard,
+    romTransfer,
     notices,
     menus,
   },

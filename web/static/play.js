@@ -135,6 +135,15 @@
       KNEvent(type, message, { issue });
       return true;
     }) ?? null;
+  // Decisions moved to web/src/play that play.js still makes itself are
+  // compared here (web/src/play/observe.ts); a difference is a play-disagree
+  // client event.
+  // Reports wait for the room's upload token (client events need one).
+  const _playObserver = window.KNCore.play.observe.createComparer(({ type, message, old, next }) => {
+    if (!_uploadToken) return false;
+    KNEvent(type, message, { old, next });
+    return true;
+  });
   let _sessionLateJoinPoll = null;
   const _sessionStopLateJoinPoll = () => {
     if (_sessionLateJoinPoll) clearInterval(_sessionLateJoinPoll);
@@ -1447,6 +1456,7 @@
         if (_romTransferState === 'idle') {
           _romTransferState = 'resuming';
         }
+        romShadow({ kind: 'game-started' });
         updateRomSharingUI();
         if (_preGamePC) {
           console.log('[play] game started — pre-game ROM transfer in progress');
@@ -1541,6 +1551,34 @@
 
   // ── ROM Sharing ──────────────────────────────────────────────────────
 
+  // The receiver below is in charge. Its rules are also
+  // web/src/play/rom-transfer.ts, which is given every event beside it
+  // (_romShadow): the two are compared after each one and a difference is
+  // reported as play-disagree. The TypeScript rules take over once
+  // production shows none.
+  const _romRules = window.KNCore.play.romTransfer;
+  let _romShadow = _romRules.IDLE;
+  // Set at the first difference, so one cause is not reported at every chunk.
+  let _romShadowOff = false;
+  const romShadow = (event) => {
+    if (_romShadowOff) return;
+    try {
+      _romShadow = _romRules.receiverStep(_romShadow, event).state;
+      const mine = {
+        phase: _romTransferState,
+        retries: _romTransferRetries,
+        received: _romTransferBytesReceived,
+        headerSize: _romTransferHeader?.size ?? null,
+        headerHash: _romTransferHeader?.hash ?? null,
+      };
+      if (!_playObserver.compare(`rom-transfer:${event.kind}`, mine, _romRules.comparable(_romShadow))) {
+        _romShadowOff = true;
+      }
+    } catch (_) {
+      _romShadowOff = true;
+    }
+  };
+
   const onRomSharingUpdated = (data) => {
     if (!_ROM_SHARING_FEATURE) return;
     const wasEnabled = _romSharingEnabled;
@@ -1566,6 +1604,7 @@
         _romTransferResumeTimer = null;
         _romTransferState = 'paused';
       }
+      romShadow({ kind: 'sharing-off' });
       cleanupPreGameConnections();
     }
 
@@ -1580,6 +1619,7 @@
         _romTransferState = 'resuming';
         requestResumeTransfer();
       }
+      romShadow({ kind: 'sharing-on' });
     }
 
     updateRomSharingUI();
@@ -1736,6 +1776,7 @@
     _romTransferBytesReceived = 0;
     _romTransferRetries = 0;
     _romTransferState = 'resuming';
+    romShadow({ kind: 'accept' });
     updateRomSharingUI();
 
     // Pre-game: initiate early ROM transfer via standalone WebRTC connection
@@ -1761,6 +1802,7 @@
         const hostPeer = peers[hostSid];
         if (hostPeer?.dc?.readyState === 'open') {
           hostPeer.dc.send(JSON.stringify({ type: 'rom-accepted' }));
+          armResumeDeadline();
           return;
         }
       }
@@ -1781,6 +1823,7 @@
         _romAcceptPollInterval = null;
         console.log('[play] DC open to host — sending rom-accepted');
         hostPeer.dc.send(JSON.stringify({ type: 'rom-accepted' }));
+        armResumeDeadline();
       }
     }, 200);
     setTimeout(() => {
@@ -1822,6 +1865,7 @@
     _romTransferHeader = null;
     _romTransferBytesReceived = 0;
     _romTransferRetries = 0;
+    romShadow({ kind: 'reset' });
     cleanupPreGameConnections();
     updateRomSharingUI();
     setRomTransferState('idle');
@@ -1831,6 +1875,7 @@
     if (_romTransferState !== 'paused' && _romTransferState !== 'idle') return;
     _romTransferRetries = 0;
     _romTransferState = 'resuming';
+    romShadow({ kind: 'retry' });
     updateRomSharingUI();
     setRomTransferState('retrying', 'Retrying ROM transfer…');
     requestResumeTransfer();
@@ -1863,6 +1908,7 @@
     _romTransferHeader = null;
     _romTransferBytesReceived = 0;
     _romTransferRetries = 0;
+    romShadow({ kind: 'reset' });
   };
 
   // ── Pre-game ROM Preloading ─────────────────────────────────────────
@@ -2202,6 +2248,7 @@
     }
 
     _romTransferState = 'receiving';
+    romShadow({ kind: 'channel' });
 
     // Always tell the host where to start sending from.
     // offset 0 = fresh (host sends header + all chunks)
@@ -2226,6 +2273,11 @@
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'rom-header') {
+            _playObserver.compare(
+              'rom-transfer:header-refused',
+              msg.size > ROM_MAX_SIZE,
+              _romRules.headerRefused(msg.size),
+            );
             if (msg.size > ROM_MAX_SIZE) {
               setRomTransferState('failed', 'ROM too large — loading manually');
               channel.close();
@@ -2239,6 +2291,7 @@
               _romTransferBytesReceived = 0;
             }
             _romTransferHeader = msg;
+            romShadow({ kind: 'header', size: msg.size, hash: msg.hash });
             if (_romTransferBytesReceived === 0) {
               updateRomProgress(0, msg.size);
             }
@@ -2246,11 +2299,24 @@
             stopStallTimer();
             _romTransferState = 'complete';
             finishRomTransfer();
+            romShadow({ kind: 'complete' });
           }
         } catch (_) {}
       } else if (e.data instanceof ArrayBuffer) {
         _romTransferChunks.push(new Uint8Array(e.data));
         _romTransferBytesReceived += e.data.byteLength;
+        _playObserver.compare(
+          'rom-transfer:chunk-taken',
+          !(
+            _romTransferBytesReceived > ROM_MAX_SIZE ||
+            (_romTransferHeader && _romTransferBytesReceived > _romTransferHeader.size * 1.1)
+          ),
+          _romRules.chunkTaken(
+            _romTransferBytesReceived - e.data.byteLength,
+            e.data.byteLength,
+            _romTransferHeader?.size ?? -1,
+          ),
+        );
         if (_romTransferBytesReceived > ROM_MAX_SIZE) {
           setRomTransferState('failed', 'ROM transfer too large — aborting');
           channel.close();
@@ -2263,6 +2329,7 @@
           cancelRomTransfer();
           return;
         }
+        romShadow({ kind: 'chunk', bytes: e.data.byteLength });
         _romTransferLastChunkAt = Date.now();
         resetStallTimer();
         if (_romTransferHeader) {
@@ -2285,12 +2352,14 @@
           _romTransferResumeTimer = setTimeout(() => {
             if (_romTransferState !== 'paused') return;
             _romTransferState = 'resuming';
+            romShadow({ kind: 'backoff-elapsed' });
             updateRomSharingUI();
             requestResumeTransfer();
           }, 2000);
         } else if (_romTransferRetries > 3) {
           setRomTransferState('stalled', 'ROM transfer stalled — cancel or wait for host');
         }
+        romShadow({ kind: 'closed' });
         updateRomSharingUI();
       }
     };
@@ -2301,7 +2370,15 @@
   const requestResumeTransfer = () => {
     // Re-request transfer from host via Socket.IO
     socket.emit('data-message', { type: 'rom-accepted', sender: socket.id });
-    // Timeout: if no DC arrives in 15s, fall back to paused
+    armResumeDeadline();
+  };
+
+  // The host has been asked for a channel. If none arrives in 15 s, fall
+  // back to paused and try again, however the request was sent: one sent
+  // over the engine channel used to start nothing, and a host that never
+  // answered left the guest on "reconnecting..." (specs/rom_transfer.qnt).
+  const armResumeDeadline = () => {
+    clearTimeout(_romTransferResumeTimer);
     _romTransferResumeTimer = setTimeout(() => {
       if (_romTransferState !== 'resuming') return;
       _romTransferState = 'paused';
@@ -2313,12 +2390,14 @@
         _romTransferResumeTimer = setTimeout(() => {
           if (_romTransferState !== 'paused') return;
           _romTransferState = 'resuming';
+          romShadow({ kind: 'backoff-elapsed' });
           updateRomSharingUI();
           requestResumeTransfer();
         }, 2000);
       } else {
         setRomTransferState('stalled', 'ROM transfer stalled — cancel or wait for host');
       }
+      romShadow({ kind: 'resume-timed-out' });
       updateRomSharingUI();
     }, 15000);
   };
@@ -2339,6 +2418,7 @@
     registerRomSignalHandler();
     _romTransferRetries = 0;
     _romTransferState = 'resuming';
+    romShadow({ kind: 'reconnected' });
     clearTimeout(_romTransferResumeTimer);
     _romTransferResumeTimer = null;
     requestResumeTransfer();
@@ -2369,13 +2449,9 @@
   const updateRomProgress = (received, total) => {
     const bar = document.getElementById('rom-progress-bar');
     const text = document.getElementById('rom-progress-text');
-    const pct = total > 0 ? Math.round((received / total) * 100) : 0;
-    if (bar) bar.style.width = `${pct}%`;
-    if (text) {
-      const recMB = (received / (1024 * 1024)).toFixed(1);
-      const totMB = (total / (1024 * 1024)).toFixed(1);
-      text.textContent = `Receiving ROM... ${pct}% (${recMB} / ${totMB} MB)`;
-    }
+    const progress = _romRules.romProgress(received, total);
+    if (bar) bar.style.width = `${progress.percent}%`;
+    if (text) text.textContent = progress.text;
     setRomTransferState('receiving');
   };
 
@@ -4656,12 +4732,6 @@
   // sanitizeFrameDelay, currentAutoDelayValue and getDelayPreference below
   // become calls into it.
   const _delay = window.KNCore.play.delay;
-  // Reports wait for the room's upload token (client events need one).
-  const _playObserver = window.KNCore.play.observe.createComparer(({ type, message, old, next }) => {
-    if (!_uploadToken) return false;
-    KNEvent(type, message, { old, next });
-    return true;
-  });
 
   const SOLO_FRAME_DELAY = 0;
   const DEFAULT_FRAME_DELAY = 2;

@@ -225,7 +225,11 @@ and each input is compared; whether an input is taken, ignored or rejected is
 `remap-step.ts`, proven with LemmaScript). Moved as they were, being page
 effects with nothing to compare: the page's passing messages and small menus
 (`notices.ts`: toasts, the error card, the room-full banner; `menus.ts`: the
-invite menu, share or copy, the More menu). Next: ROM transfer. Last: connect, the game
+invite menu, share or copy, the More menu). Observing: a guest receiving the
+host's ROM (`rom-transfer.ts`, decisions proved in `rom-transfer-step.ts`,
+modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
+keeps the channel, the timers and the page. The host's sending side and the
+WebRTC set-up are still `play.js`. Last: connect, the game
 lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
 
 **Stage 4: engine periphery [pure logic done]**

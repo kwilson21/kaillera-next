@@ -8,3 +8,4 @@ web/src/stick-axis.ts
 web/src/desync-fields.ts
 web/src/diagnostics.ts
 web/src/play/remap-step.ts
+web/src/play/rom-transfer-step.ts

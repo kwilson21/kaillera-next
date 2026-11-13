@@ -42,6 +42,11 @@ verify "$PEERS" peer_identity_current oneConnectionPerGuest
 expect_violation "$PEERS" peer_identity_before neverEvictsLiveConnection
 expect_violation "$PEERS" peer_identity_untagged neverEvictsLiveConnection
 
+ROMT=specs/rom_transfer.qnt
+verify "$ROMT" rom_transfer_current waitingHasAWayOut
+verify "$ROMT" rom_transfer_current timersAloneStop
+expect_violation "$ROMT" rom_transfer_before waitingHasAWayOut
+
 ROOM=specs/room_lifecycle.qnt
 verify "$ROOM" room_current ownerSeesGame
 verify "$ROOM" room_current lateJoinersChaseTheCurrentMatch

@@ -42,3 +42,16 @@ for invariant in neverEvictsLiveConnection oneConnectionPerGuest; do
   $QUINT run "$PEERS" --main=peer_identity_current --invariant="$invariant" \
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
+
+# ── ROM transfer: a guest waiting on the host always has a way out ──────────
+ROM=specs/rom_transfer.qnt
+$QUINT typecheck "$ROM"
+for variant in rom_transfer_before rom_transfer_current; do
+  $QUINT test "$ROM" --main="$variant" --backend=typescript
+done
+# Today: every waiting state has a running timer or a Retry button. Violated
+# before the request sent over the engine channel was given a deadline.
+for invariant in waitingHasAWayOut timersAloneStop; do
+  $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+done
