@@ -81,9 +81,22 @@ export const frozenRecoveries = (syncLogs) => {
 export const inFrozenRecovery = (recoveries, frame) =>
   recoveries.some((recovery) => recovery.proven && frame >= recovery.from && frame < recovery.to);
 
-/** What to tell the reader when frames were left out, or null when none were. */
-export const frozenRecoveryNote = (recoveries, framesExcluded, mismatchesExcluded) => {
-  if (framesExcluded === 0) return null;
+// While the two timelines are split, the dropped page's real inputs reach
+// the other past its rollback window, and its engine reports rollbacks it
+// could not make (`FAILED-ROLLBACK`, `DEEP-MISPREDICT-SKIP`). Those belong
+// to the split, up to this many frames after the resync that ends it: the
+// same margin the test's freeze mode gives its own recovery.
+const SETTLED_AFTER_FRAMES = 30;
+
+/** Is a rollback-integrity event at this frame part of a proven recovery? */
+export const inFrozenRecoveryAftermath = (recoveries, frame) =>
+  recoveries.some(
+    (recovery) => recovery.proven && frame >= recovery.from && frame < recovery.to + SETTLED_AFTER_FRAMES,
+  );
+
+/** What to tell the reader when anything was left out, or null when nothing was. */
+export const frozenRecoveryNote = (recoveries, framesExcluded, mismatchesExcluded, integrityExcluded = 0) => {
+  if (framesExcluded === 0 && integrityExcluded === 0) return null;
   const stops = recoveries
     .filter((recovery) => recovery.proven)
     .map(
@@ -93,7 +106,10 @@ export const frozenRecoveryNote = (recoveries, framesExcluded, mismatchesExclude
     );
   return (
     `Left out of the hash compare: ${framesExcluded} frames, ${mismatchesExcluded} of them differing, because ` +
-    `${stops.join('; ')}; the guest was resynced afterwards. A page stopping that long is the cloud ` +
-    'container, not the netcode.'
+    `${stops.join('; ')}; the guest was resynced afterwards. ` +
+    (integrityExcluded > 0
+      ? `${integrityExcluded} failed-rollback reports from the same frames are left out too. `
+      : '') +
+    'A page stopping that long is the cloud container, not the netcode.'
   );
 };

@@ -164,7 +164,12 @@
  */
 import { chromium, webkit } from 'playwright';
 import fs from 'fs';
-import { frozenRecoveries, frozenRecoveryNote, inFrozenRecovery } from './frozen-recovery.mjs';
+import {
+  frozenRecoveries,
+  frozenRecoveryNote,
+  inFrozenRecovery,
+  inFrozenRecoveryAftermath,
+} from './frozen-recovery.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -1118,6 +1123,34 @@ const signalingDropOf = (page, events, log) => ({
   meshHeals: count(log, /MESH-HEAL/g),
 });
 
+// Rollback-integrity reports made while a proven frozen-page recovery was
+// under way are part of it (tests/frozen-recovery.mjs). A sync-log line has
+// its frame in the third column; a C-log line names the frame it concerns;
+// one with no frame is never excused.
+const frameOfSyncLine = (line) => Number((line.split('\t')[2] || '').replace('f=', ''));
+const frameOfCLine = (line) => Number((line.match(/myF=(\d+)/) || line.match(/\bf=(\d+)/) || [])[1]);
+const excusedIn = (log, frameOf, weigh) =>
+  log
+    .split('\n')
+    .filter((line) => inFrozenRecoveryAftermath(recoveries, frameOf(line)))
+    .reduce((sum, line) => sum + weigh(line), 0);
+const recoveryIntegrity = {
+  integrityEventsExcluded:
+    excusedIn(H.sync, frameOfSyncLine, bad) +
+    excusedIn(G.sync, frameOfSyncLine, bad) +
+    excusedIn(H.clog, frameOfCLine, bad) +
+    excusedIn(G.clog, frameOfCLine, bad),
+  // The engine's own counter has no frames; the sync log says when it rose.
+  failedRollbacksExcluded: [H.sync, G.sync].reduce(
+    (sum, log) =>
+      sum +
+      excusedIn(log, frameOfSyncLine, (line) =>
+        Number((line.match(/FAILED-ROLLBACK detected: \+(\d+)/) || [])[1] || 0),
+      ),
+    0,
+  ),
+};
+
 const summary = {
   room,
   ...(DROP_SIGNALING_MS
@@ -1175,13 +1208,18 @@ const summary = {
     fullStateMismatches: fullMis,
     firstFullMismatch: firstFull,
   },
-  frozenRecovery: { recoveries, framesExcluded, mismatchesExcluded },
+  frozenRecovery: { recoveries, framesExcluded, mismatchesExcluded, ...recoveryIntegrity },
   ...(VISUAL_CHECK ? { visualCheck } : {}),
 };
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
-const recoveryNote = frozenRecoveryNote(recoveries, framesExcluded, mismatchesExcluded);
+const recoveryNote = frozenRecoveryNote(
+  recoveries,
+  framesExcluded,
+  mismatchesExcluded,
+  recoveryIntegrity.integrityEventsExcluded + recoveryIntegrity.failedRollbacksExcluded,
+);
 if (recoveryNote) console.log(recoveryNote);
 // Close each distinct browser instance once (host and guest may share one,
 // e.g. the Chromium/Chromium default, or both resolve to the one WebKit
@@ -1234,7 +1272,8 @@ if (FREEZE_MS > 0)
 const integrityFailed =
   FREEZE_MS > 0
     ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
-    : (H.failed || 0) + (G.failed || 0) > 0 || summary.integrityEvents.host + summary.integrityEvents.guest > 0;
+    : (H.failed || 0) + (G.failed || 0) - recoveryIntegrity.failedRollbacksExcluded > 0 ||
+      summary.integrityEvents.host + summary.integrityEvents.guest - recoveryIntegrity.integrityEventsExcluded > 0;
 const minGameFpsFailed = MIN_GAME_FPS !== null && (!(gameFps.host >= MIN_GAME_FPS) || !(gameFps.guest >= MIN_GAME_FPS));
 if (minGameFpsFailed) {
   console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));

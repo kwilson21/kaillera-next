@@ -1,7 +1,12 @@
 // Run: node --test tests/frozen-recovery.test.mjs
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { frozenRecoveries, frozenRecoveryNote, inFrozenRecovery } from './frozen-recovery.mjs';
+import {
+  frozenRecoveries,
+  frozenRecoveryNote,
+  inFrozenRecovery,
+  inFrozenRecoveryAftermath,
+} from './frozen-recovery.mjs';
 
 const line = (frame, text) => `1\t100.0\tf=${frame}\t${text}\n`;
 const PHANTOM = 'PEER-PHANTOM slot=0 lastAdvance=19620 staleSec=5.0 — excluded from pacing';
@@ -67,6 +72,18 @@ test('a run with no phantom leaves nothing out', () => {
   assert.deepEqual(recoveries, []);
   assert.equal(inFrozenRecovery(recoveries, 349), false);
   assert.equal(frozenRecoveryNote(recoveries, 0, 0), null);
+});
+
+test("a recovery's failed-rollback reports belong to it until 30 frames after the resync", () => {
+  const recoveries = frozenRecoveries(logs);
+  assert.deepEqual(
+    [176, 177, 208, 214, 243, 244, 500].map((frame) => inFrozenRecoveryAftermath(recoveries, frame)),
+    [false, true, true, true, true, false, false],
+  );
+  // An unproven phantom excuses nothing.
+  assert.equal(inFrozenRecoveryAftermath(frozenRecoveries({ host: '', guest }), 208), false);
+  assert.match(frozenRecoveryNote(recoveries, 28, 17, 11), /11 failed-rollback reports from the same frames/);
+  assert.match(frozenRecoveryNote(recoveries, 0, 0, 3), /3 failed-rollback reports/);
 });
 
 test('the note says who stopped, for how long, and what was left out', () => {
