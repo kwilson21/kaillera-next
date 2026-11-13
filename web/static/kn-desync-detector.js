@@ -156,31 +156,6 @@
     }
   }
 
-  function _firstReplayTrajectoryDivergence(replayStart, replayLength) {
-    if (!_module || typeof _module._kn_get_replay_frame_hash !== 'function') return null;
-    const cappedLength = Math.min(replayLength >>> 0, 64);
-    for (let offset = 0; offset < cappedLength; offset++) {
-      const absoluteFrame = replayStart + offset + 1;
-      for (let fid = 0; fid < FIELD.COUNT; fid++) {
-        const replayHash = _module._kn_get_replay_frame_hash(fid, offset) >>> 0;
-        const forwardHash = _readFieldHash(fid, absoluteFrame) >>> 0;
-        if (replayHash === 0 || forwardHash === 0) continue;
-        if (replayHash !== forwardHash) {
-          return {
-            offset,
-            absoluteFrame,
-            fieldId: fid,
-            field: _FIELD_NAMES[fid],
-            slot: _slotForField(fid),
-            replayHash,
-            forwardHash,
-          };
-        }
-      }
-    }
-    return null;
-  }
-
   function _buildReplayMeta() {
     const m = _module;
     const replayStart = m._kn_get_last_replay_target_frame() | 0;
@@ -201,7 +176,12 @@
       length,
       pre,
       post,
-      firstTrajectoryDivergence: _firstReplayTrajectoryDivergence(replayStart, length),
+      // Always null now. It was the first replay frame whose hash differed
+      // from the forward pass, read from the history rings; a replay now
+      // rewrites those entries (they must hold the confirmed hash), so the
+      // forward pass's value is no longer kept. The key stays for the
+      // server and for peers that decode it.
+      firstTrajectoryDivergence: null,
     };
   }
 
@@ -330,8 +310,17 @@
   const IN_GAME_SCENES = new Set([SCENE.IN_GAME_VS]);
   const CSS_PHASE_SCENES = new Set([SCENE.CSS_VS]);
 
-  function _readScenePhase() {
-    return _module && _module._kn_get_scene_curr ? _module._kn_get_scene_curr() : 0;
+  // The scene a digest's frame was in, from its match_phase hash (FNV-1a of
+  // the one scene byte). A digest is for a frame a rollback window old, so
+  // the live scene can already be the next one; gating on that dropped the
+  // character-select fields from the last digests of the character select.
+  // -1 when the hash is of no scene byte (0 = the registry had no entry).
+  const _SCENE_BY_HASH = new Map();
+  for (let scene = 0; scene < 256; scene++) {
+    _SCENE_BY_HASH.set(Math.imul(0x811c9dc5 ^ scene, 0x01000193) >>> 0, scene);
+  }
+  function _sceneOfDigest(hashes) {
+    return _SCENE_BY_HASH.get(hashes[FIELD.MATCH_PHASE] >>> 0) ?? -1;
   }
 
   function _fieldEligibleInPhase(fid, phase) {
@@ -379,7 +368,8 @@
       return;
     }
 
-    const phase = _readScenePhase();
+    // Both digests hold the same match_phase hash here.
+    const phase = _sceneOfDigest(ha);
     for (let fid = 0; fid < FIELD.COUNT; fid++) {
       if (fid === FIELD.MATCH_PHASE) continue;
       if (ha[fid] === hb[fid]) continue;
