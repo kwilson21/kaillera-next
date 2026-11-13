@@ -7096,6 +7096,34 @@
   // earlier id, in which case that connection is kept.
   const _rosterKey = (pid, p, prevKnown) => {
     const sid = p.socketId;
+    // The decision is KNCore.rosterKey (web/src/peer-identity.ts), whose
+    // search for a live connection of the same player is proved, and whose
+    // orderings are model-checked in specs/peer_identity.qnt. The code below
+    // it is the same rule, used only if the bundle did not load.
+    const decide = window.KNCore?.rosterKey;
+    if (decide) {
+      const connections = Object.entries(_peers).map(([key, peer]) => ({
+        key,
+        slot: peer.slot,
+        persistentId: peer.persistentId || '',
+        live: _peerConnectionLive(peer),
+      }));
+      const previouslyKnown = Object.entries(prevKnown).map(([key, info]) => ({
+        key,
+        persistentId: info.persistentId || '',
+        socketId: info.socketId,
+      }));
+      const key = decide(
+        { persistentId: pid, socketId: sid, slot: p.slot },
+        sid === socket?.id,
+        connections,
+        previouslyKnown,
+      );
+      if (key !== sid && prevKnown[key]?.socketId !== sid) {
+        _syncLog(`onUsersUpdated: slot ${p.slot} is ${sid} on the server now; keeping connection ${key}`);
+      }
+      return key;
+    }
     if (sid === socket?.id || _peers[sid]) return sid;
     for (const [key, info] of Object.entries(prevKnown)) {
       if (info.persistentId !== pid || key === sid) continue;

@@ -20,6 +20,9 @@
  *   late-join         a guest with no ROM joins a game already running, is
  *                     asked for one, then the host ends the game
  *   late-join-cached  the same, with the guest's ROM already in its library
+ *   late-join-shared  the guest has no ROM and accepts the host's: its engine
+ *                     first connects only to receive the ROM, then late-joins
+ *   late-join-two-player  a third player joins a two-player match in play
  *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
@@ -38,7 +41,15 @@ import { chromium } from 'playwright';
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
 const OUT = process.env.OUT || '/tmp/lifecycle-e2e';
-const SCENARIOS = ['late-join', 'late-join-cached', 'streaming-join', 'spectate', 'host-reload'];
+const SCENARIOS = [
+  'late-join',
+  'late-join-cached',
+  'late-join-shared',
+  'late-join-two-player',
+  'streaming-join',
+  'spectate',
+  'host-reload',
+];
 const wanted = process.env.SCENARIO ? [process.env.SCENARIO] : SCENARIOS;
 if (wanted.some((name) => !SCENARIOS.includes(name))) {
   console.log(`SCENARIO must be one of ${SCENARIOS.join(', ')}`);
@@ -92,29 +103,6 @@ const recordEvents = () => {
 
 // Uncaught exceptions on any page, for the scenario in progress.
 const pageErrors = [];
-// Pages that had a network request fail, for the scenario in progress.
-const failedRequests = [];
-let closing = false;
-// Uncaught errors that predate this test and are tracked separately. They are
-// printed and listed under `knownIssues` in the summary, never hidden.
-//   streaming-join / host: "Failed to fetch" while a streamed game starts.
-//   Present on main (2026-11-13); no failed network request and not the
-//   page's own window.fetch, so probably a blob: URL inside the emulator boot.
-// The error carries no stack to match on, so it is told apart from a new
-// fetch failure by what is known about it: it happens once, and no network
-// request on that page fails. A second one, or one alongside a failed
-// request (an API or asset that did not load), fails the scenario.
-const KNOWN_PAGE_ERRORS = [{ scenario: 'streaming-join', label: 'host', message: 'Failed to fetch' }];
-const isKnownPageError = (scenario, error, allErrors) =>
-  KNOWN_PAGE_ERRORS.some(
-    (known) =>
-      known.scenario === scenario &&
-      known.label === error.label &&
-      known.message === error.message &&
-      allErrors.filter((e) => e.label === error.label && e.message === error.message).length === 1 &&
-      !failedRequests.includes(error.label),
-  );
-
 /** A page in its own browser context, with a signaling socket the test can cut. */
 const openPlayer = async (label, query) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
@@ -128,7 +116,6 @@ const openPlayer = async (label, query) => {
   // page's bug or this machine's network.
   page.on('requestfailed', (request) => {
     console.log(`[${label}] request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText})`);
-    if (!closing) failedRequests.push(label);
   });
   const signaling = { down: false, sockets: [] };
   await page.routeWebSocket(/socket\.io/, (ws) => {
@@ -268,7 +255,7 @@ const scenarios = {
     if (stranded && waitedMs < LATE_JOIN_REPORT_AFTER_MS)
       failures.push(`the machine reported a stranded joiner after only ${waitedMs} ms`);
     if (stranded > 1) failures.push(`the machine reported the same stranded joiner ${stranded} times`);
-    await waitForFrames([host, guest], 60, 120000);
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after late join',
       [
@@ -309,7 +296,7 @@ const scenarios = {
       return (await frameOf(guest)) > 0;
     }, 240000);
     if (!synced) failures.push('the late joiner never received state');
-    await waitForFrames([host, guest], 60, 120000);
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after late join',
       [
@@ -320,6 +307,76 @@ const scenarios = {
       log,
     );
     return [host, guest];
+  },
+
+  'late-join-shared': async (room, failures, log) => {
+    const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
+    await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    await loadRom(host);
+    // The checkbox sits in a host-options row that may be collapsed, so it
+    // is clicked through the DOM rather than waited on as a visible element.
+    await host.page.waitForSelector('#opt-rom-sharing:not([disabled])', { state: 'attached', timeout: 60000 });
+    await host.page.evaluate(() => document.getElementById('opt-rom-sharing').click());
+    if (!(await host.page.evaluate(() => document.getElementById('opt-rom-sharing').checked)))
+      failures.push('the host could not turn ROM sharing on');
+    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await host.page.click('#start-btn');
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    await guest.page.waitForSelector('#rom-accept-btn', { state: 'visible', timeout: 30000 });
+    await guest.page.click('#rom-accept-btn');
+    // The ROM comes over a DataChannel before the guest's emulator can boot.
+    const synced = await waitUntil(async () => {
+      await clickGesturePrompt(guest);
+      await clickGesturePrompt(host);
+      return (await frameOf(guest)) > 0;
+    }, 420000);
+    if (!synced) failures.push('the late joiner never received the ROM and state');
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
+    await checkpoint(
+      'after shared-ROM late join',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'late-join-two-player': async (room, failures, log) => {
+    const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
+    await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    const first = await openPlayer('guest1', `room=${room}&name=First`);
+    await first.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    for (const p of [host, first]) await loadRom(p);
+    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await host.page.click('#start-btn');
+    if (!(await waitForFrames([host, first], 120, 240000))) failures.push('the two-player game never started');
+
+    const late = await openPlayer('guest2', `room=${room}&name=Late`);
+    await late.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+    await loadRom(late);
+    const synced = await waitUntil(async () => {
+      for (const p of [host, first, late]) await clickGesturePrompt(p);
+      return (await frameOf(late)) > 0;
+    }, 420000);
+    if (!synced) failures.push('the third player never received state');
+    if (!(await waitForFrames([host, first, late], 60, 240000)))
+      failures.push('the game stopped advancing after the join');
+    await checkpoint(
+      'after third player joins',
+      [
+        { player: host, lobby: false },
+        { player: first, lobby: false },
+        { player: late, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, first, late];
   },
 
   'streaming-join': async (room, failures, log) => {
@@ -374,7 +431,7 @@ const scenarios = {
     const watcher = await openPlayer('spectator', `room=${room}&name=Watcher&spectate=1`);
     if (!(await waitUntil(async () => !(await lobbyShownOn(watcher)), 30000)))
       failures.push('the spectator never left the lobby overlay');
-    await waitForFrames([host], 120, 120000);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'while spectating',
       [
@@ -445,18 +502,9 @@ for (const name of wanted) {
     const sync = await player.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '').catch(() => '');
     fs.writeFileSync(`${OUT}/${name}-${player.label}-sync.txt`, sync);
   }
-  // Closing a page aborts whatever it was loading; those are not failures.
-  closing = true;
   for (const ctx of browser.contexts()) await ctx.close();
-  const knownIssues = [];
-  const errors = pageErrors.splice(0);
-  for (const error of errors) {
-    const list = isKnownPageError(name, error, errors) ? knownIssues : failures;
-    list.push(`uncaught page error (${error.label}: ${error.message})`);
-  }
-  failedRequests.length = 0;
-  closing = false;
-  results.push({ scenario: name, room, checkpoints: log, knownIssues, failures });
+  for (const error of pageErrors.splice(0)) failures.push(`uncaught page error (${error.label}: ${error.message})`);
+  results.push({ scenario: name, room, checkpoints: log, failures });
 }
 
 await browser.close();

@@ -22,7 +22,23 @@
   // cached share links keep loading the patched core.
   const mode = rawMode === 'lockstep' ? 'rollback' : rawMode;
 
+  // EmulatorJS asks its CDN for the latest version when the page is served
+  // from localhost. The page's CSP blocks that request and EmulatorJS does not
+  // catch the rejection, so it surfaced as an uncaught "Failed to fetch".
+  // Answer it from the local copy instead.
+  const isVersionCheck = (u) => u.includes('cdn.emulatorjs.org') && u.includes('version.json');
+  const LOCAL_VERSION_URL = '/static/ejs/version.json';
+
   if (mode === 'streaming') {
+    // No core to redirect: the stock core is used. Only the version check
+    // is answered locally.
+    const nativeFetch = window.fetch;
+    // NOTE: kept as function — uses `this` and `arguments`
+    window.fetch = function (url, opts) {
+      const u = typeof url === 'string' ? url : (url?.url ?? '');
+      if (isVersionCheck(u)) return nativeFetch.call(this, LOCAL_VERSION_URL, opts);
+      return nativeFetch.apply(this, arguments);
+    };
     window._knCoreReady = Promise.resolve();
     window._knCoreRestore = () => {};
     return;
@@ -137,8 +153,8 @@
       return origFetch.call(this, LOCAL_CORE_URL, opts);
     }
     // Redirect EmulatorJS CDN version check to local file
-    if (u.includes('cdn.emulatorjs.org') && u.includes('version.json')) {
-      return origFetch.call(this, '/static/ejs/version.json', opts);
+    if (isVersionCheck(u)) {
+      return origFetch.call(this, LOCAL_VERSION_URL, opts);
     }
     return origFetch.apply(this, arguments);
   };
