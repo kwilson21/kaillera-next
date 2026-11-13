@@ -9,6 +9,7 @@ import {
   REPORT_LIMIT,
 } from '../../web/src/socket-boundary.ts';
 import { KNCore } from '../../web/src/index.ts';
+import { UsersUpdated } from '../../web/src/protocol.ts';
 
 const token = { token: '1762992000.9f8e7d' };
 
@@ -51,14 +52,31 @@ test('a message off its schema names the path, not the value', () => {
   assert.ok(!named?.includes('do-not-report-me'));
 });
 
-test('a record key in the path is payload data and is starred out', () => {
-  const players = { 'b955ef2d-e4c1-4f6c-ad85-861949b2fe25': { socketId: 7 } };
-  const issue = checkServerMessage('users-updated', { players });
-  assert.ok(issue?.includes('["players"]["*"]["socketId"]'), issue ?? '');
-  assert.ok(!issue?.includes('b955ef2d'));
-  // A socket id of letters only is still not a field name: too long.
-  assert.equal(redactPath('at ["players"]["PCVeuLuKjKBKLWHAAADx"]["slot"]'), 'at ["players"]["*"]["slot"]');
-  assert.equal(redactPath('at ["hostRom"]["game_id"]'), 'at ["hostRom"]["game_id"]');
+test('a record key in the path is payload data and is starred out, whatever it looks like', () => {
+  const underKey = (key: string): string =>
+    checkServerMessage('users-updated', { players: { [key]: { socketId: 7 } } }) ?? '';
+  for (const key of [
+    'b955ef2d-e4c1-4f6c-ad85-861949b2fe25',
+    // A client may call itself anything: short and letters-only is still not ours.
+    'Alice',
+    // Even the name of one of our own fields, when it sits where a key goes.
+    'slot',
+    'has"quote',
+    'has]bracket',
+  ]) {
+    const issue = underKey(key);
+    assert.ok(issue.includes('["players"]["*"]["socketId"]'), `${key}: ${issue}`);
+    assert.ok(!issue.includes(key), `${key}: ${issue}`);
+  }
+});
+
+test('field names survive at every depth, and array positions are starred', () => {
+  const ast = UsersUpdated.ast;
+  assert.equal(redactPath('at ["hostRom"]["game_id"]', ast), 'at ["hostRom"]["game_id"]');
+  assert.equal(redactPath('at ["players"]["Alice"]["slot"]', ast), 'at ["players"]["*"]["slot"]');
+  // A key that is not in the schema at all tells nothing about where to go next.
+  assert.equal(redactPath('at ["nope"]["slot"]', ast), 'at ["*"]["*"]');
+  assert.equal(redactPath('no path here', ast), 'no path here');
 });
 
 test('relays and unknown events are not judged', () => {
