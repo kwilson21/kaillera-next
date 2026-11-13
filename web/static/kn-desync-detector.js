@@ -72,6 +72,7 @@
   let _lastFlagFrame = new Map(); // "field:slot" → frame
   let _heartbeatTimerId = null;
   let _missingExportsLogged = false;
+  let _malformedDigestLogged = false;
   let _lastReplayTrajectoryEvent = null;
   const _events = new EventTarget();
 
@@ -240,8 +241,29 @@
     }
   }
 
-  function _ingestPeerDigest(peerId, payload) {
-    if (!payload || typeof payload.frame !== 'number') return;
+  // A peer's digest is JSON from another browser. It is decoded with
+  // KNCore.decodeDesyncDigest (web/src/desync-digest.ts, an Effect Schema)
+  // before anything reads it; without the bundle the check below covers the
+  // fields the comparison indexes. Returns null for anything else.
+  function _decodeDigest(payload) {
+    const decode = window.KNCore?.decodeDesyncDigest;
+    if (decode) return decode(payload);
+    if (!payload || !Number.isInteger(payload.frame)) return null;
+    const hashes = payload.hashes;
+    if (!Array.isArray(hashes) || hashes.length < FIELD.COUNT || !hashes.every(Number.isFinite)) return null;
+    const replayMeta = payload.replayMeta && typeof payload.replayMeta === 'object' ? payload.replayMeta : null;
+    return { frame: payload.frame, hashes, replayMeta };
+  }
+
+  function _ingestPeerDigest(peerId, received) {
+    const payload = _decodeDigest(received);
+    if (!payload) {
+      if (!_malformedDigestLogged) {
+        _malformedDigestLogged = true;
+        _log(`dropped a malformed digest from ${peerId}`);
+      }
+      return;
+    }
     const dropFloor = _localFrameTick - CONFIG.historyDepth;
     if (payload.frame < dropFloor) return;
     let perPeer = _peerDigests.get(peerId);
@@ -477,6 +499,7 @@
       _module = emModule;
       _mode = mode;
       _enabled = _hasRequiredExports(emModule);
+      _malformedDigestLogged = false;
       _peerDigests.clear();
       _localDigests.clear();
       _lastFlagFrame.clear();

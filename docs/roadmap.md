@@ -226,6 +226,9 @@ before the move.
   still runs before the bundle, because `core-redirector.js` reads it from a
   fetch callback.
 - Both engine roster loops ask `meshHealTargets`, one entry at a time.
+- Two inputs the scripts used as read are decoded with Effect Schema first:
+  a peer's desync digest (`desync-digest.ts`) and a saved gamepad profile
+  (`gamepad-profile.ts`). One that does not fit is dropped or ignored.
 
 Not done: the scripts themselves are still plain JavaScript. What is left in
 them is the part bound to the browser (reading pads and the canvas, DOM

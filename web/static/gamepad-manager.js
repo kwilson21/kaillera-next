@@ -232,14 +232,22 @@
   // ── Profile Resolution ───────────────────────────────────────────────
 
   function resolveProfile(id, mapping) {
-    // Check localStorage for custom profile
+    // Check localStorage for custom profile. What is stored is decoded with
+    // KNCore.decodeGamepadProfile (web/src/gamepad-profile.ts, an Effect
+    // Schema) before it is used; one that does not fit is ignored and the
+    // pad gets its built-in profile. Without the bundle it is used as read.
     try {
       const saved = KNState.safeGet('localStorage', `gamepad-profile:${id}`);
       if (saved) {
-        const profile = JSON.parse(saved);
-        profile.name = 'Custom';
-        profile.match = () => true;
-        return profile;
+        const stored = JSON.parse(saved);
+        const decode = window.KNCore?.decodeGamepadProfile;
+        const profile = decode ? decode(stored) : stored;
+        if (profile) {
+          profile.name = 'Custom';
+          profile.match = () => true;
+          return profile;
+        }
+        console.warn(`[gamepad] saved profile for "${id}" is not usable; using the built-in one`);
       }
     } catch (_) {}
 
