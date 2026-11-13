@@ -1213,6 +1213,10 @@
                 return;
               }
 
+              // A page that was in the lobby (it has just caught up with a
+              // match that replaced the one it was in) still has the lobby
+              // overlay up; a fresh page does not.
+              hideOverlay();
               showToolbar();
               initEngine();
               return;
