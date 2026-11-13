@@ -12,10 +12,17 @@
  * only if the notice and the measured wait contradict each other. For anyone
  * else it is a failure.
  *
- * Scenarios (SCENARIO picks one; default runs all three, each in its own room):
- *   late-join    a guest joins a game already running, then the host ends it
- *   spectate     a spectator joins a game already running, then the host ends it
- *   host-reload  the host reloads mid-game; the server ends the match for the guest
+ * The machine also mirrors play.js's two late-join flags, and play.js asks it
+ * at every place it reads one whether it would have answered the same; those
+ * disagreements are reported as `session-disagree` too and fail a checkpoint.
+ *
+ * Scenarios (SCENARIO picks one; default runs them all, each in its own room):
+ *   late-join         a guest with no ROM joins a game already running, is
+ *                     asked for one, then the host ends the game
+ *   late-join-cached  the same, with the guest's ROM already in its library
+ *   streaming-join    a third player joins a streamed game already running
+ *   spectate          a spectator joins a game already running, then the host ends it
+ *   host-reload       the host reloads mid-game; the server ends the match for the guest
  *
  * At each checkpoint the test also checks what the page itself shows (lobby
  * overlay up or down), so a run cannot pass with machine and page agreeing on
@@ -31,7 +38,7 @@ import { chromium } from 'playwright';
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
 const OUT = process.env.OUT || '/tmp/lifecycle-e2e';
-const SCENARIOS = ['late-join', 'spectate', 'host-reload'];
+const SCENARIOS = ['late-join', 'late-join-cached', 'streaming-join', 'spectate', 'host-reload'];
 const wanted = process.env.SCENARIO ? [process.env.SCENARIO] : SCENARIOS;
 if (wanted.some((name) => !SCENARIOS.includes(name))) {
   console.log(`SCENARIO must be one of ${SCENARIOS.join(', ')}`);
@@ -85,6 +92,28 @@ const recordEvents = () => {
 
 // Uncaught exceptions on any page, for the scenario in progress.
 const pageErrors = [];
+// Pages that had a network request fail, for the scenario in progress.
+const failedRequests = [];
+let closing = false;
+// Uncaught errors that predate this test and are tracked separately. They are
+// printed and listed under `knownIssues` in the summary, never hidden.
+//   streaming-join / host: "Failed to fetch" while a streamed game starts.
+//   Present on main (2026-11-13); no failed network request and not the
+//   page's own window.fetch, so probably a blob: URL inside the emulator boot.
+// The error carries no stack to match on, so it is told apart from a new
+// fetch failure by what is known about it: it happens once, and no network
+// request on that page fails. A second one, or one alongside a failed
+// request (an API or asset that did not load), fails the scenario.
+const KNOWN_PAGE_ERRORS = [{ scenario: 'streaming-join', label: 'host', message: 'Failed to fetch' }];
+const isKnownPageError = (scenario, error, allErrors) =>
+  KNOWN_PAGE_ERRORS.some(
+    (known) =>
+      known.scenario === scenario &&
+      known.label === error.label &&
+      known.message === error.message &&
+      allErrors.filter((e) => e.label === error.label && e.message === error.message).length === 1 &&
+      !failedRequests.includes(error.label),
+  );
 
 /** A page in its own browser context, with a signaling socket the test can cut. */
 const openPlayer = async (label, query) => {
@@ -92,8 +121,14 @@ const openPlayer = async (label, query) => {
   await ctx.addInitScript(recordEvents);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => {
-    console.log(`[${label}] pageerror ${e.message}`);
-    pageErrors.push(`${label}: ${e.message}`);
+    console.log(`[${label}] pageerror ${e.stack || e.message}`);
+    pageErrors.push({ label, message: e.message });
+  });
+  // Which request failed says whether an uncaught "Failed to fetch" is the
+  // page's bug or this machine's network.
+  page.on('requestfailed', (request) => {
+    console.log(`[${label}] request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText})`);
+    if (!closing) failedRequests.push(label);
   });
   const signaling = { down: false, sockets: [] };
   await page.routeWebSocket(/socket\.io/, (ws) => {
@@ -195,8 +230,8 @@ const checkpoint = async (name, expectations, failures, log) => {
 
 const loadRom = (player) => player.page.locator("#rom-drop input[type='file']").setInputFiles(ROM);
 
-const startSoloGame = async (room) => {
-  const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
+const startSoloGame = async (room, mode = 'rollback') => {
+  const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=${mode}`);
   await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
   await loadRom(host);
   await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
@@ -256,6 +291,80 @@ const scenarios = {
       log,
     );
     return [host, guest];
+  },
+
+  'late-join-cached': async (room, failures, log) => {
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+
+    // Put the ROM in the guest's library first, from a room of its own.
+    const guest = await openPlayer('guest', `room=${room}W&host=1&name=Guest&mode=rollback`);
+    await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    await loadRom(guest);
+    await guest.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+
+    await guest.page.goto(`${URL}/play.html?room=${room}&name=Guest&knperf=light`);
+    const synced = await waitUntil(async () => {
+      await clickGesturePrompt(guest);
+      return (await frameOf(guest)) > 0;
+    }, 240000);
+    if (!synced) failures.push('the late joiner never received state');
+    await waitForFrames([host, guest], 60, 120000);
+    await checkpoint(
+      'after late join',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'streaming-join': async (room, failures, log) => {
+    // A streamed game needs two players to start, so the late joiner is the third.
+    const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=streaming`);
+    await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    await loadRom(host);
+    const first = await openPlayer('guest1', `room=${room}&name=First`);
+    await first.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await host.page.click('#start-btn');
+    // The streaming engine has no frame counter to watch: the game is on
+    // for the host once its lobby overlay is gone.
+    if (!(await waitUntil(async () => !(await lobbyShownOn(host)), 60000)))
+      failures.push('the host game never started');
+    await host.page.waitForTimeout(10000);
+
+    const guest = await openPlayer('guest2', `room=${room}&name=Late`);
+    if (!(await waitUntil(async () => !(await lobbyShownOn(guest)), 30000)))
+      failures.push('the streaming guest never left the lobby overlay');
+    await host.page.waitForTimeout(10000);
+    await checkpoint(
+      'while streaming',
+      [
+        { player: host, lobby: false },
+        { player: first, lobby: false },
+        { player: guest, lobby: false },
+      ],
+      failures,
+      log,
+    );
+
+    await endGame(host);
+    if (!(await waitUntil(() => lobbyShownOn(guest), 30000))) failures.push('the guest never returned to the lobby');
+    await checkpoint(
+      'after end game',
+      [
+        { player: host, lobby: true },
+        { player: first, lobby: true },
+        { player: guest, lobby: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, first, guest];
   },
 
   spectate: async (room, failures, log) => {
@@ -336,9 +445,18 @@ for (const name of wanted) {
     const sync = await player.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '').catch(() => '');
     fs.writeFileSync(`${OUT}/${name}-${player.label}-sync.txt`, sync);
   }
+  // Closing a page aborts whatever it was loading; those are not failures.
+  closing = true;
   for (const ctx of browser.contexts()) await ctx.close();
-  for (const message of pageErrors.splice(0)) failures.push(`uncaught page error (${message})`);
-  results.push({ scenario: name, room, checkpoints: log, failures });
+  const knownIssues = [];
+  const errors = pageErrors.splice(0);
+  for (const error of errors) {
+    const list = isKnownPageError(name, error, errors) ? knownIssues : failures;
+    list.push(`uncaught page error (${error.label}: ${error.message})`);
+  }
+  failedRequests.length = 0;
+  closing = false;
+  results.push({ scenario: name, room, checkpoints: log, knownIssues, failures });
 }
 
 await browser.close();

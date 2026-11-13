@@ -158,6 +158,17 @@
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _emulatorBootInFlight = false; // true while ejs-loader is creating a fresh instance
   let _pendingLateJoin = false; // waiting for ROM before late-join init
+  // The machine mirrors the two late-join flags as states and is told of
+  // every change; each read below also asks it whether it would have said
+  // the same (session-disagree), so they can move into it once it does.
+  const _setPendingLateJoin = (pending) => {
+    _pendingLateJoin = pending;
+    _session?.send({ type: pending ? 'lateJoinRomNeeded' : 'lateJoinRomReady' });
+  };
+  const _isPendingLateJoin = () => {
+    _session?.check('pendingLateJoin', _pendingLateJoin);
+    return _pendingLateJoin;
+  };
   // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
   const _ROM_SHARING_FEATURE = window.KN_CONFIG?.romSharingEnabled !== false;
 
@@ -925,7 +936,13 @@
             return;
           }
           mySlot = 0;
-          _session?.send({ type: 'joined', status: 'lobby', matchId: null, spectator: false });
+          _session?.send({
+            type: 'joined',
+            status: 'lobby',
+            matchId: null,
+            spectator: false,
+            streaming: mode === 'streaming',
+          });
           KNEvent('room_created', '', { mode });
           sendDeviceType();
           if (mode === 'rollback' || mode === 'streaming') {
@@ -1080,12 +1097,15 @@
             }
             if (isReconnect) resumeRomTransferAfterReconnect();
 
-            _session?.send({
-              type: 'joined',
-              status: roomData.status === 'playing' ? 'playing' : 'lobby',
-              matchId: joinData?.matchId ?? null,
-              spectator: !!isSpectator,
-            });
+            if (roomData.status !== 'playing') {
+              _session?.send({
+                type: 'joined',
+                status: 'lobby',
+                matchId: null,
+                spectator: !!isSpectator,
+                streaming: mode === 'streaming',
+              });
+            }
             // Mid-game join handling
             if (roomData.status === 'playing') {
               crumb('mid-game-join', {
@@ -1109,13 +1129,19 @@
               // since the game is already running. Try REST then join callback.
               if (roomData.mode) mode = roomData.mode;
               else if (joinData?.mode) mode = joinData.mode;
+              // The machine needs the mode, which is only known here.
+              _session?.send({
+                type: 'joined',
+                status: 'playing',
+                matchId: joinData?.matchId ?? null,
+                spectator: !!isSpectator,
+                streaming: mode === 'streaming',
+              });
               _lateJoin = !isSpectator || mode === 'streaming';
-              if (!isSpectator) {
-                // A streaming guest watches the host's video: there is no
-                // state to wait for, and no frame counter to watch.
-                if (mode === 'streaming') _session?.send({ type: 'lateJoinSynced' });
-                else _sessionWatchLateJoin();
-              }
+              // A page that runs an emulator is in the game once it advances
+              // frames. Streaming guests and spectators have no frame counter:
+              // for them the engine start is the whole late join.
+              if (!isSpectator && mode !== 'streaming') _sessionWatchLateJoin();
               // Use joinData directly — the users-updated socket event may not
               // have arrived yet (ack returns before broadcast is delivered)
               if (joinData) lastUsersData = joinData;
@@ -1139,13 +1165,13 @@
                   // Show accept/decline prompt instead of ROM drop
                   crumb('late-join-sharing-prompt', { sharing: true });
                   _romSharingEnabled = true;
-                  _pendingLateJoin = true;
+                  _setPendingLateJoin(true);
                   showLateJoinRomPrompt();
                   updateRomSharingUI();
                   return;
                 }
                 crumb('late-join-rom-prompt', { sharing: false });
-                _pendingLateJoin = true;
+                _setPendingLateJoin(true);
                 showLateJoinRomPrompt();
                 return;
               }
@@ -1156,7 +1182,7 @@
                   // Cached ROM doesn't match but sharing is available —
                   // show sharing prompt instead of erroring out
                   _romSharingEnabled = true;
-                  _pendingLateJoin = true;
+                  _setPendingLateJoin(true);
                   showLateJoinRomPrompt();
                   updateRomSharingUI();
                   return;
@@ -1366,7 +1392,6 @@
   const onGameStarted = (data) => {
     // Keep match events from covering the fatal error modal.
     if (coreFatal) return;
-    _sessionStopLateJoinPoll();
     crumb('game-started', {
       mode: data.mode,
       hasRom: !!(_romBlob || _romBlobUrl),
@@ -1459,7 +1484,7 @@
   const onGameEnded = (data = {}) => {
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (endedMatchId && _lastHandledGameEndMatchId === endedMatchId) return;
-    if (!isGameRunning() && !engine && !_lateJoin && !_pendingLateJoin) return;
+    if (!isGameRunning() && !engine && !_lateJoin && !_isPendingLateJoin()) return;
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
     _endGameInFlight = false;
     console.log(
@@ -2480,7 +2505,7 @@
       bootEmulator();
     }
     // If we were in a pending late-join, dismiss the prompt
-    if (_pendingLateJoin) {
+    if (_isPendingLateJoin()) {
       crumb('rom-transfer-complete-late-join');
       dismissLateJoinPrompt();
     }
@@ -2979,7 +3004,7 @@
         if (ok) {
           ctx.drop.classList.add('loaded');
           if (ctx.statusEl) _setRomStatus(`Loaded: ${name} (drop to change)`);
-          if (_pendingLateJoin) dismissLateJoinPrompt();
+          if (_isPendingLateJoin()) dismissLateJoinPrompt();
         } else if (ctx.savedRom && ctx.statusEl) {
           ctx.statusEl.textContent = `Last used: ${ctx.savedRom} (file not cached — drop again)`;
         }
@@ -3113,7 +3138,7 @@
       hideRomMismatch();
       notifyRomReady();
       // Always proceed with late-join, even if hash computation failed
-      if (_pendingLateJoin) {
+      if (_isPendingLateJoin()) {
         dismissLateJoinPrompt();
       }
     };
@@ -3518,7 +3543,7 @@
         if (statusEl) _setRomStatus(`Loaded: ${displayName}`);
         hideRomMismatch();
         renderRomLibrary();
-        if (_pendingLateJoin) dismissLateJoinPrompt();
+        if (_isPendingLateJoin()) dismissLateJoinPrompt();
       }
     });
   };
@@ -3571,6 +3596,7 @@
 
     const resyncEnabled = _gameResyncEnabled;
 
+    _session?.check('lateJoin', _lateJoin);
     engine = Engine;
     engine.init({
       socket,
@@ -3641,6 +3667,11 @@
       lateJoin: _lateJoin,
     });
     _lateJoin = false;
+    _session?.send({
+      type: 'engineStarted',
+      connectOnly: needsEmulator && !(_romBlob || _romBlobUrl),
+      waitsForState: needsEmulator,
+    });
 
     // Connection timeout: if the game-loading overlay is still visible after
     // 30 seconds, the WebRTC handshake likely failed.
@@ -3840,7 +3871,7 @@
       sharingEnabled: _romSharingEnabled,
       sharingDecision: _romSharingDecision,
     });
-    _pendingLateJoin = false;
+    _setPendingLateJoin(false);
 
     // Verify ROM hash before joining (skip if ROM sharing — ROM comes from host)
     if (hostRomMismatch() && _romSharingDecision !== 'accepted') {
@@ -3848,7 +3879,7 @@
         // ROM sharing available but user hasn't decided yet (e.g. auto-loaded
         // a cached ROM from a previous game). Stay on the sharing prompt so
         // they can accept the host's ROM instead of erroring out.
-        _pendingLateJoin = true;
+        _setPendingLateJoin(true);
         return;
       }
       showError("Your ROM doesn't match the host's game. Drop the correct ROM to rejoin.");

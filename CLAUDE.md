@@ -130,7 +130,7 @@ kaillera-next/
 ├── tests/           # pytest + Playwright E2E tests
 ├── specs/           # Quint models (room lifecycle); `just spec` model-checks them
 ├── tools/           # match analysis scripts; oxlint/anti-slop/ = vendored lint rules
-├── docs/            # roadmap, netplay invariants, and design/research notes
+├── docs/            # roadmap, netplay invariants, session-machine.md (generated state diagram), design/research notes
 ├── Dockerfile       # production Docker image
 └── CHANGELOG.md     # version history
 ```
@@ -294,10 +294,32 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   `web/static/dist/kn-core.js`; CI fails if it is stale. Migration stages are
   in `docs/roadmap.md`. A module moves from observing to deciding only after
   production shows it agrees with the code it replaces.
-- **Model and prove before you patch state logic.** Room and page lifecycle
-  changes update `specs/room_lifecycle.qnt` in the same PR. Pure functions
-  with a contract worth proving are listed in `LemmaScript-files.txt` and
-  checked by the `proofs` CI job (Dafny is not installed locally by default).
+- **Model and prove before you patch state logic.** This applies to plans
+  as much as to code: a plan for anything involving state, ordering or
+  reconnects names the model, the invariant and the diagram it will change
+  before it names a file to edit. In order:
+  1. **Quint first.** Add the states and the property you expect to
+     `specs/room_lifecycle.qnt` (or a new spec) and run `just spec` before
+     writing the fix. A bug found by a test run is modelled before it is
+     patched, with the failing ordering as a scenario, so the model shows the
+     fix works and CI keeps it fixed. Properties today's code violates are
+     checked on a `*_fixed` variant and listed as violated in the spec, never
+     dropped.
+  2. **States go in the XState machine** (`web/src/session.ts`), not in new
+     boolean flags in `play.js` or the engine. `docs/session-machine.md` is
+     generated from the machine (`npm run diagram`); put the diagram in the
+     plan and in the PR when the states change.
+  3. **Decisions are pure functions with a contract** in `web/src`, listed
+     in `LemmaScript-files.txt` and checked by the `proofs` CI job (Dafny is
+     not installed locally by default). "Which connection does this player
+     keep", "who do we reconnect to" and the like are proved, not patched
+     inline in `netplay-rollback.js`.
+  4. **Effects with a deadline are Effect code** (timeouts, retries, scoped
+     cleanup), not bare callbacks and `setTimeout`.
+  Two bugs this would have caught earlier: the host evicting a live peer when
+  its signaling returned before the guest's (#119, an ordering a model
+  enumerates), and a late joiner chasing a match the host had already
+  replaced (found by the model the day the late-join states were added).
 - **Never tolerate a prediction mismatch.** Any "close enough" input match
   leaves peers with different state that nothing corrects. The C engine
   used to accept stick values in the same zone without a rollback; #14 made

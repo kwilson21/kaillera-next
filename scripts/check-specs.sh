@@ -11,10 +11,23 @@ QUINT="npx quint"
 
 $QUINT typecheck "$SPEC"
 
-# Scenario tests, against today's server behaviour and the proposed fix.
+# Scenario tests: today's code, the proposed reconnect fix, and the code
+# before #104 (hostReloadTest shows what that fix changed).
 $QUINT test "$SPEC" --main=room_current --backend=typescript
 $QUINT test "$SPEC" --main=room_fixed --backend=typescript
+$QUINT test "$SPEC" --main=room_before_104 --backend=typescript
 
-# With the fix, no reachable state has the host in the lobby of a playing room.
-$QUINT run "$SPEC" --main=room_fixed --invariant=ownerSeesGame \
-  --max-samples=20000 --max-steps=25 --backend=typescript
+check() { # module invariant
+  $QUINT run "$SPEC" --main="$1" --invariant="$2" \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+}
+
+# Today: no reachable state has the host in the lobby of a playing room.
+check room_current ownerSeesGame
+
+# With the reconnect fix (a page follows the status and match id its rejoin
+# returns), these hold as well. Both are violated by today's code; see the
+# properties section of the spec.
+check room_fixed ownerSeesGame
+check room_fixed lateJoinersChaseTheCurrentMatch
+check room_fixed pagesAgreeWithServer

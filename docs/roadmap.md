@@ -166,14 +166,23 @@ host reload) all show no `session-disagree`.
 - Done: `play.js` reads "is a game on" from the machine (`isGameRunning`).
   The old `gameRunning` flag is still written beside it and compared on every
   signaling reconnect; delete it once production shows no `session-disagree`.
-- Next: `_lateJoin` and `_pendingLateJoin` move into the machine (waiting for
-  a ROM, waiting for state, engine started). They do not map onto its current
-  states one to one, so the machine and the Quint model grow first.
-- Then: the reconnect handshake (open-room / join-room after a socket drop)
-  becomes Effect logic invoked by the machine, with a timeout and retry
-  instead of a bare callback.
-- Resolve the two open questions in `specs/room_lifecycle.qnt` using the
-  `late-join-stranded` reports.
+- Done (observing): the machine has the late-join states (`lateJoinAwaitingRom`,
+  `lateJoinStarting`, `lateJoinSyncing`; diagram in `docs/session-machine.md`,
+  same states in the Quint model). `play.js` still decides from `_lateJoin`
+  and `_pendingLateJoin` and reports `session-disagree` at each place it
+  reads one. `tests/lifecycle-e2e.mjs` covers late join with and without a
+  ROM, a streamed game, spectating and host reload.
+- Next: reconcile on reconnect. Today a page rejoins silently after a socket
+  drop and keeps whatever it was doing; the model shows that leaves a page in
+  a game the server has ended, or joining a match that has been replaced
+  (`pagesAgreeWithServer`, `lateJoinersChaseTheCurrentMatch`, both violated
+  in `room_current` and holding in `room_fixed`). The rejoin becomes a machine
+  event carrying the server's status and match id, handled as Effect logic
+  with a timeout and retry instead of a bare callback.
+- Then: `play.js` reads the late-join flags from the machine and the old
+  flags are deleted, once the reports above stay empty.
+- Still open in the model: `noGhostMatch` (a playing room whose only member
+  is a late joiner waiting for state).
 
 **Stage 3: the socket boundary**
 Every Socket.IO and DataChannel message is decoded with Effect Schema on
