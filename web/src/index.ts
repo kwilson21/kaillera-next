@@ -6,6 +6,7 @@ import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
+import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput } from './input-wire.ts';
 import {
   decodeGameEnded,
@@ -20,6 +21,7 @@ import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { startRejoin } from './rejoin-attempt.ts';
+import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
@@ -141,9 +143,11 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
 
 export const KNCore = {
   bootTimedOut,
+  checkRelayed,
   createConnectTracker,
   createSession,
   decodeInput,
+  digestFrame,
   encodeInput,
   createRomResumeAnswerer,
   heldAsLateJoiner,

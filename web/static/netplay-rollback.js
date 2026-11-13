@@ -6838,6 +6838,26 @@
 
   const onDataMessage = (msg) => {
     if (!msg?.type) return;
+    // Any member of the room, spectators included, can write to the server's
+    // relay, so nothing a message says about itself is believed. The server
+    // stamps the true sender (KNCore.checkRelayed, web/src/relay.ts): a
+    // message that installs emulator state is taken only from slot 0, and a
+    // request is answered to the socket that really sent it, not the one it
+    // names. A message with no stamp comes from a server older than the
+    // stamp and is handled as before: server and pages deploy together, and
+    // a member cannot remove a stamp the server adds. A stamped message this
+    // page cannot check (the bundle did not load) is refused.
+    const checkRelayed = window.KNCore?.checkRelayed;
+    if (!checkRelayed && Object.hasOwn(msg, 'knFrom')) {
+      _syncLog(`relayed ${msg.type} refused: no KNCore to check its sender`);
+      return;
+    }
+    const from = checkRelayed ? checkRelayed(msg) : null;
+    if (from && !from.allowed) {
+      _syncLog(`relayed ${msg.type} refused: sender ${from.sid} slot=${from.slot}`);
+      return;
+    }
+    if (from?.stamped) msg = { ...msg, requesterSid: from.sid, senderSid: from.sid };
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
@@ -12282,10 +12302,26 @@
     // _hasRequiredExports. Opt out with ?desync=off; ?desync=b promotes to
     // pairwise mode B with the 5s heartbeat (every-frame digests + always-on
     // vision sampling — for active triage only).
+    //
+    // The core's hash registry has one address map, for SSB64 US
+    // (build/kn_rollback/kn_gameplay_addrs.h). On any other ROM its fields
+    // would hash unrelated memory under SSB64's labels, so the detector
+    // stays off there. ?desync=force runs it anyway (triage and the
+    // two-player harness on another ROM; field names mean nothing then).
     const desyncParam = _urlParams.get('desync');
     if (lsMod && window.KNDesync && desyncParam !== 'off') {
-      const desyncMode = desyncParam === 'b' ? 'B' : 'C';
-      KNDesync.init(lsMod, desyncMode);
+      const hasAddressMap = !!_config?.romHash && _config.romHash === window.KNShared?.SSB64_HASH;
+      if (RB_WORKER_COPROC) {
+        // Mode 2 adopts the worker's corrected state without re-simulating
+        // those frames here, so the registry's history for them keeps the
+        // mispredicted hashes and a healthy match would be flagged.
+        _syncLog('KNDesync off: worker replay (Mode 2) does not rewrite field history');
+      } else if (hasAddressMap || desyncParam === 'force') {
+        const desyncMode = desyncParam === 'b' ? 'B' : 'C';
+        KNDesync.init(lsMod, desyncMode);
+      } else {
+        _syncLog('KNDesync off: no field address map for this ROM');
+      }
     }
 
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
@@ -12432,6 +12468,9 @@
           );
         }
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        // The desync detector reports a frame only once it is this far
+        // behind the newest one: the engine never replays further back.
+        window.KNDesync?.setConfirmWindow?.(rollbackMax);
         if (detMod._kn_get_state_backend) {
           const activeBackend = detMod._kn_get_state_backend() === 1 ? 'split-rdram' : 'retro';
           _syncLog(`C-ROLLBACK state backend active=${activeBackend}`);

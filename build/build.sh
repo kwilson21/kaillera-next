@@ -22,7 +22,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_DIR="${SCRIPT_DIR}/src"
 OUT_DIR="${SCRIPT_DIR}/output"
 PATCHES_DIR="${SCRIPT_DIR}/patches"
-KN_ENABLE_HASH_REGISTRY="${KN_ENABLE_HASH_REGISTRY:-0}"
+# Field-granular hash registry (kn_hash_registry.c). On by default: the
+# desync detector (web/static/kn-desync-detector.js REQUIRED_EXPORTS) disables
+# itself without these exports. Set KN_ENABLE_HASH_REGISTRY=0 for a core
+# without them.
+KN_ENABLE_HASH_REGISTRY="${KN_ENABLE_HASH_REGISTRY:-1}"
 KN_DISABLE_WASM_SIMD="${KN_DISABLE_WASM_SIMD:-0}"
 KN_DISABLE_GLIDEN64_VEC4="${KN_DISABLE_GLIDEN64_VEC4:-1}"
 KN_DISABLE_GLIDEN64_SIMD="${KN_DISABLE_GLIDEN64_SIMD:-1}"
@@ -269,7 +273,7 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    Added kn_hash_ft_buffer export"
         fi
     else
-        echo "    kn_hash_registry exports disabled (set KN_ENABLE_HASH_REGISTRY=1 for diagnostic builds)"
+        echo "    kn_hash_registry exports disabled (KN_ENABLE_HASH_REGISTRY=0): the desync detector will not run on this core"
     fi
 
     # mupen64plus: full reset + apply patches.
@@ -815,17 +819,17 @@ KNHLE_EOF
         python3 "${SCRIPT_DIR}/inject-rb-probes.py" "mupen64plus-core/src/main" \
             || { echo "FATAL: inject-rb-probes.py failed"; exit 1; }
     fi
-    # Add kn_rollback.c to SOURCES_C in Makefile.common. The hash registry is
-    # diagnostic-only so the default production core keeps the older WASM shape.
+    # Add kn_rollback.c to SOURCES_C in Makefile.common, and the hash registry
+    # the desync detector reads (skipped with KN_ENABLE_HASH_REGISTRY=0).
     sed -i 's|$(CORE_DIR)/src/main/savestates.c \\|$(CORE_DIR)/src/main/savestates.c \\\n\t$(CORE_DIR)/src/main/kn_rollback.c \\|' Makefile.common
     if [ "${KN_ENABLE_HASH_REGISTRY}" = "1" ]; then
         cp "${SCRIPT_DIR}/kn_rollback/kn_hash_registry.c" mupen64plus-core/src/main/kn_hash_registry.c
         cp "${SCRIPT_DIR}/kn_rollback/kn_hash_registry.h" mupen64plus-core/src/main/kn_hash_registry.h
         sed -i 's|$(CORE_DIR)/src/main/kn_rollback.c \\|$(CORE_DIR)/src/main/kn_rollback.c \\\n\t$(CORE_DIR)/src/main/kn_hash_registry.c \\|' Makefile.common
         echo 'CFLAGS += -DKN_ENABLE_HASH_REGISTRY' >> Makefile.common
-        echo "    Enabled kn_hash_registry diagnostic storage"
+        echo "    Enabled kn_hash_registry storage"
     else
-        echo "    Skipped kn_hash_registry object (set KN_ENABLE_HASH_REGISTRY=1 for diagnostic builds)"
+        echo "    Skipped kn_hash_registry object (KN_ENABLE_HASH_REGISTRY=0)"
     fi
     echo "    Done."
 
