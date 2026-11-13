@@ -7,7 +7,14 @@ import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
-import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
+import {
+  decodeGameEnded,
+  decodeGameStarted,
+  decodeJoinRoomAck,
+  decodeRomSharingUpdated,
+  decodeTokenMessage,
+  decodeUsersUpdated,
+} from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
@@ -135,7 +142,14 @@ export const KNCore = {
   meshHealTargets,
   rosterKey,
   shouldResumeRomTransfer,
-  protocol: { decodeUsersUpdated, decodeGameStarted, decodeGameEnded },
+  protocol: {
+    decodeUsersUpdated,
+    decodeGameStarted,
+    decodeGameEnded,
+    decodeJoinRoomAck,
+    decodeRomSharingUpdated,
+    decodeTokenMessage,
+  },
 };
 
 declare global {
