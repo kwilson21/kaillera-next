@@ -108,9 +108,11 @@ const SSB64_US: RomAddresses = {
 };
 
 /** ROM hash (as the page computes it: `S` + SHA-256) to its addresses. */
-export const ROM_ADDRESSES: Readonly<Record<string, RomAddresses>> = {
+export const ROM_ADDRESSES = {
   S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7ea99ef3d: SSB64_US,
-};
+} satisfies Record<string, RomAddresses>;
+
+const hasMap = (romHash: string): romHash is keyof typeof ROM_ADDRESSES => Object.hasOwn(ROM_ADDRESSES, romHash);
 
 const RDRAM_SIZE = 0x800000;
 const SPAN_MAX = 0x10000;
@@ -140,7 +142,7 @@ export const packAddressMap = (map: AddressMap): number[] => ADDRESS_MAP_ORDER.m
 
 /** The addresses for a ROM, packed for the registry; null if the ROM has no map. */
 export const addressMapFor = (romHash: string | null | undefined): PackedRomAddresses | null => {
-  const rom = romHash ? ROM_ADDRESSES[romHash] : undefined;
-  if (!rom) return null;
+  if (!romHash || !hasMap(romHash)) return null;
+  const rom = ROM_ADDRESSES[romHash];
   return { name: rom.name, values: packAddressMap(rom.map), scenes: rom.scenes };
 };
