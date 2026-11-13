@@ -55,11 +55,11 @@ const shortName = (name: string): string => {
   return at < 0 ? name : name.slice(at + 2);
 };
 
-/** The entries of a map keyed by strings, or undefined for anything else. */
+/** The entries of a map keyed by strings (or of an empty map), or undefined for anything else. */
 const stringKeyedMap = (value: unknown): Map<string, unknown> | undefined => {
   if (!isObject(value) || !Array.isArray(value['#map'])) return undefined;
   const entries = value['#map'] as [unknown, unknown][];
-  if (entries.length === 0 || !entries.every(([key]) => typeof key === 'string')) return undefined;
+  if (!entries.every(([key]) => typeof key === 'string')) return undefined;
   return new Map(entries as [string, unknown][]);
 };
 
@@ -69,6 +69,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 /** What changed from `before` to `after`: the fields of a record, or the whole value. */
 const change = (before: unknown, after: unknown): string => {
+  if (after === undefined) return 'removed';
   if (isRecord(before) && isRecord(after)) {
     return Object.keys(after)
       .filter((key) => show(before[key]) !== show(after[key]))
@@ -78,8 +79,36 @@ const change = (before: unknown, after: unknown): string => {
   return show(after);
 };
 
-/** Mermaid ends a message at `;` and reads `#` as the start of an entity. */
-const text = (raw: string): string => raw.replace(/[#;]/g, (char) => (char === '#' ? '#35;' : '#59;'));
+/**
+ * Text for a message or a note. Mermaid ends a statement at `;` or a line
+ * break and reads `#` as the start of an entity.
+ */
+const text = (raw: string): string =>
+  raw.replace(/\s*\r?\n\s*/g, ' ').replace(/[#;]/g, (char) => (char === '#' ? '#35;' : '#59;'));
+
+/** Several changes in one note or message, one per line. */
+const stacked = (parts: readonly string[]): string => parts.map(text).join('<br/>');
+
+/**
+ * Mermaid ids for the lifelines. A name that is a plain word is its own id,
+ * so the diagram source reads naturally; any other name (spaces, arrows, a
+ * line break) gets a generated id and is shown as the lifeline's label.
+ */
+const lifelineIds = (names: readonly string[]): Map<string, string> => {
+  const ids = new Map<string, string>();
+  const plain = new Set(names.filter((name) => /^[A-Za-z_]\w*$/.test(name)));
+  let next = 1;
+  for (const name of names) {
+    if (plain.has(name)) {
+      ids.set(name, name);
+      continue;
+    }
+    while (plain.has(`lifeline${next}`)) next += 1;
+    ids.set(name, `lifeline${next}`);
+    next += 1;
+  }
+  return ids;
+};
 
 export interface DiagramOptions {
   /** The lifeline for every variable that is not kept per player. */
@@ -98,10 +127,18 @@ export const sequenceDiagram = (trace: ItfTrace, labels: readonly string[], opti
     throw new Error(`${labels.length} step labels for ${states.length - 1} steps`);
   }
   const names = trace.vars.filter((name) => !name.startsWith('mbt::'));
-  const perActor = names.filter((name) => stringKeyedMap(first[name]) !== undefined);
+  // A variable is kept per player if it is a map keyed by strings in every
+  // state. It may start empty and players may be added to it later, so the
+  // players are collected over the whole trace.
+  const perActor = names.filter((name) => {
+    const maps = states.map((state) => stringKeyedMap(state[name]));
+    return maps.every((map) => map !== undefined) && maps.some((map) => (map?.size ?? 0) > 0);
+  });
   const hubVars = names.filter((name) => !perActor.includes(name));
   const everyone = new Set<string>();
-  for (const name of perActor) for (const key of stringKeyedMap(first[name])?.keys() ?? []) everyone.add(key);
+  for (const state of states) {
+    for (const name of perActor) for (const key of stringKeyedMap(state[name])?.keys() ?? []) everyone.add(key);
+  }
 
   const perActorState = (state: Readonly<Record<string, unknown>>, who: string): string =>
     perActor.map((name) => show(stringKeyedMap(state[name])?.get(who))).join(' ');
@@ -122,17 +159,25 @@ export const sequenceDiagram = (trace: ItfTrace, labels: readonly string[], opti
   const order = [options.hub];
   for (const actor of [...labels.map(actorOf), ...touched]) if (!order.includes(actor)) order.push(actor);
 
-  const lines = ['sequenceDiagram', ...order.map((name) => `  participant ${name}`)];
+  const ids = lifelineIds(order);
+  const id = (name: string): string => ids.get(name) ?? name;
+  const hub = id(options.hub);
+  const lines = [
+    'sequenceDiagram',
+    ...order.map((name) =>
+      id(name) === name ? `  participant ${name}` : `  participant ${id(name)} as ${text(name)}`,
+    ),
+  ];
   labels.forEach((label, index) => {
     const before = states[index] ?? {};
     const after = states[index + 1] ?? {};
     const actor = actorOf(label, index);
-    lines.push(`  ${actor}->>${options.hub}: ${text(label)}`);
+    lines.push(`  ${id(actor)}->>${hub}: ${text(label)}`);
 
     const hubChanges = hubVars
       .filter((name) => show(before[name]) !== show(after[name]))
       .map((name) => `${shortName(name)} = ${show(after[name])}`);
-    if (hubChanges.length > 0) lines.push(`  Note over ${options.hub}: ${text(hubChanges.join('<br/>'))}`);
+    if (hubChanges.length > 0) lines.push(`  Note over ${hub}: ${stacked(hubChanges)}`);
 
     for (const who of order) {
       const changes: string[] = [];
@@ -144,8 +189,8 @@ export const sequenceDiagram = (trace: ItfTrace, labels: readonly string[], opti
         changes.push(perActor.length > 1 ? `${shortName(name)}: ${what}` : what);
       }
       if (changes.length === 0) continue;
-      const said = text(changes.join('<br/>'));
-      lines.push(who === actor ? `  Note over ${who}: ${said}` : `  ${options.hub}-->>${who}: ${said}`);
+      const said = stacked(changes);
+      lines.push(who === actor ? `  Note over ${id(who)}: ${said}` : `  ${hub}-->>${id(who)}: ${said}`);
     }
   });
   return `${lines.join('\n')}\n`;

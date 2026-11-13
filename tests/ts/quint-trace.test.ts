@@ -130,6 +130,69 @@ test('for a record kept per player, only the fields that changed are shown', () 
   assert.match(diagram, /Note over lo: open: true\n/);
 });
 
+test('a player who appears after the first state still gets a lifeline', () => {
+  const diagram = sequenceDiagram(
+    trace(
+      { 'm::room::page': page(['host', 'Lobby']), 'm::room::status': 'lobby' },
+      { 'm::room::page': page(['guest', 'Lobby'], ['host', 'Lobby']), 'm::room::status': 'lobby' },
+      { 'm::room::page': page(['host', 'Lobby']), 'm::room::status': 'lobby' },
+    ),
+    ['join("guest")', 'leave("guest")'],
+    { hub: 'Server' },
+  );
+  assert.deepEqual(diagram.trimEnd().split('\n'), [
+    'sequenceDiagram',
+    '  participant Server',
+    '  participant guest',
+    '  guest->>Server: join("guest")',
+    '  Note over guest: Lobby',
+    '  guest->>Server: leave("guest")',
+    '  Note over guest: removed',
+  ]);
+});
+
+test('a map that starts empty is still kept per player', () => {
+  const diagram = sequenceDiagram(
+    trace(
+      { 'm::room::page': { '#map': [] }, 'm::room::status': 'lobby' },
+      { 'm::room::page': page(['host', 'Lobby']), 'm::room::status': 'lobby' },
+    ),
+    ['openRoom("host")'],
+    { hub: 'Server' },
+  );
+  assert.match(diagram, /host->>Server: openRoom\("host"\)\n {2}Note over host: Lobby\n/);
+  assert.doesNotMatch(diagram, /Note over Server/);
+});
+
+test('a name that is not a plain word gets an id of its own and is shown as the label', () => {
+  const diagram = sequenceDiagram(
+    trace(
+      { 'm::room::page': page(['a->>b', 'Closed'], ['lifeline1', 'Closed']), 'm::room::status': 'lobby' },
+      { 'm::room::page': page(['a->>b', 'Lobby'], ['lifeline1', 'Lobby']), 'm::room::status': 'lobby' },
+    ),
+    ['join("a->>b")'],
+    { hub: 'The server' },
+  );
+  assert.deepEqual(diagram.trimEnd().split('\n'), [
+    'sequenceDiagram',
+    '  participant lifeline2 as The server',
+    '  participant lifeline3 as a->>b',
+    '  participant lifeline1',
+    '  lifeline3->>lifeline2: join("a->>b")',
+    '  Note over lifeline3: Lobby',
+    '  lifeline2-->>lifeline1: Lobby',
+  ]);
+});
+
+test('a line break in a value does not end the note', () => {
+  const diagram = sequenceDiagram(
+    { vars: ['status'], states: [{ status: 'a' }, { status: 'two\nlines' }] },
+    ['step 1'],
+    { hub: 'Server' },
+  );
+  assert.match(diagram, /Note over Server: status = two lines\n$/);
+});
+
 test('the labels must match the trace, step for step', () => {
   assert.throws(() => sequenceDiagram(trace({}, {}), [], { hub: 'Server' }), /0 step labels for 1 steps/);
 });
