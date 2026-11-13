@@ -443,9 +443,8 @@
 
   function _dispatchCaptures(frame) {
     if (_pendingCaptures.size === 0) return;
-    for (const at of [..._pendingCaptures.keys()]) {
+    for (const [at, payloads] of _pendingCaptures) {
       if (at > frame) continue;
-      const payloads = _pendingCaptures.get(at);
       _pendingCaptures.delete(at);
       if (at < frame) {
         // The frame counter jumped over it (a resync). A picture now would
