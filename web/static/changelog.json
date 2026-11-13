@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.8",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "desync detection runs again (core exports the field hashes) (#143)"
+      }
+    ]
+  },
+  {
     "version": "0.67.7",
     "date": "2026-11-13",
     "changes": [
