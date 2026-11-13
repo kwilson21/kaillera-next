@@ -23,6 +23,8 @@
 //   netDrop         the connection dies under both pages
 //   notice          one page finds out (channel close, pc failed, the 3 s
 //                   grace after pc disconnected): handlePeerDisconnect
+//   silentClose     a channel stops being open with no event at all, which
+//                   is the case the mesh health check exists for
 //   oldChannelCloses  the close event of a channel whose connection was
 //                   replaced by a reconnect offer. Chromium 153 fires it; the
 //                   WebRTC spec says a local close skips the closing
@@ -44,7 +46,9 @@
 // HEAL_ONE_SIDE: who the mesh health check runs for.
 //   false  today: either page; both count the same frames, so both can heal
 //          at once, and the higher slot can heal while the lower reconnects
-//   true   proposed: only the page that initiates reconnects (the lower slot)
+//   true   proposed: only the page that initiates reconnects (the lower
+//          slot) offers from it; on the other page the check treats a dead
+//          channel as a drop it has just noticed
 // ANSWERER_HAS_DEADLINE: a page that answers a reconnect offer.
 //   false  today: marks the entry reconnecting; the 45 s give-up is armed
 //          only if that page also noticed the drop itself
@@ -64,7 +68,9 @@ module peer_connection {
   pure val SIDES = Set("lo", "hi")
   pure def other(s: str): str = if (s == "lo") "hi" else "lo"
   pure val MAX_ATTEMPTS = 3
-  // Offers are numbered; the bound keeps the model finite.
+  // Offers are numbered; the bound keeps the model finite. Once it is
+  // reached no page can offer again, so the properties about what is still
+  // to come are only claimed while an offer can still be made (canOffer).
   pure val MAX_OFFERS = 7
   // `link` of a connection that took an answer meant for another one.
   pure val MISWIRED = -1
@@ -84,7 +90,10 @@ module peer_connection {
     closePending: bool,  // a replaced channel may still fire its close event
     dirty: bool,         // per-peer input state from before a drop
   }
-  type Msg = { dest: str, kind: str, id: int }
+  // `mode` is what an offer says about itself: "first" (the roster's), or a
+  // replacement, "startup" before the match and "reconnect" in it
+  // (reconnect and startupReconnect in the engine). Empty for an answer.
+  type Msg = { dest: str, kind: str, id: int, mode: str }
 
   pure val ABSENT: Side = {
     has: false, made: 0, link: 0, open: false, chan: false, recon: false, giveUp: false,
@@ -103,7 +112,7 @@ module peer_connection {
   // ── helpers ────────────────────────────────────────────────────────────
 
   def canOffer: bool = nextId <= MAX_OFFERS
-  def offer(dest: str): Msg = { dest: dest, kind: "offer", id: nextId }
+  def offer(dest: str, mode: str): Msg = { dest: dest, kind: "offer", id: nextId, mode: mode }
 
   // The connection `s` completed is the one the other page completed too,
   // and the network has not killed it.
@@ -136,7 +145,7 @@ module peer_connection {
     else if (s == "lo") all {
       canOffer,
       side' = side.set(s, { ...ABSENT, has: true, made: nextId, chan: true, attempt: 1 }),
-      wire' = wire.union(Set(offer(other(s)))),
+      wire' = wire.union(Set(offer(other(s), "first"))),
       nextId' = nextId + 1,
     } else all {
       side' = side.set(s, { ...ABSENT, has: true }),
@@ -154,7 +163,7 @@ module peer_connection {
       if (s.attempt < MAX_ATTEMPTS) all {
         canOffer,
         side' = side.set("lo", { ...s, made: nextId, link: 0, chan: true, attempt: s.attempt + 1 }),
-        wire' = wire.union(Set(offer("hi"))),
+        wire' = wire.union(Set(offer("hi", "startup"))),
         nextId' = nextId + 1,
         stalled' = stalled,
       } else all {
@@ -176,22 +185,34 @@ module peer_connection {
   // ── signals ────────────────────────────────────────────────────────────
 
   // An offer arrives. With no entry, one is made on demand. Before the match
-  // the page just answers. In a match every offer is a reconnect offer: the
-  // page replaces its connection (dropping an offer of its own), marks the
-  // entry reconnecting, arms a timer that only closes the connection, and
-  // answers. Replacing the connection closes the channels the entry held.
+  // the page just answers. In a match, what happens depends on what the
+  // offer says it is:
+  //   reconnect  the page replaces its connection (dropping an offer of its
+  //              own), marks the entry reconnecting, arms a timer that only
+  //              closes the connection, and answers
+  //   startup    a startup retry delivered late: the same, but the entry is
+  //              not marked reconnecting
+  //   first      a roster offer delivered late: applied to the connection
+  //              the entry already has, which keeps its channels but is now
+  //              described by an offer from a connection that is gone
+  // Replacing the connection closes the channels the entry held.
   action receiveOffer(m: Msg): bool = {
     val s = side.get(m.dest)
-    val answered = { ...s, has: true, made: 0, link: m.id, open: false, chan: false }
+    val replaced = { ...s, has: true, made: 0, link: m.id, open: false, chan: false }
     all {
       side' = side.set(m.dest,
-        if (running) {
-          ...answered,
+        if (not(running)) replaced
+        else if (m.mode == "reconnect") {
+          ...replaced,
           recon: true, ansTimer: true,
           giveUp: s.giveUp or ANSWERER_HAS_DEADLINE,
           closePending: s.closePending or s.chan,
-        } else answered),
-      wire' = wire.exclude(Set(m)).union(Set({ dest: other(m.dest), kind: "answer", id: m.id })),
+        } else if (m.mode == "startup") {
+          ...replaced,
+          ansTimer: true,
+          closePending: s.closePending or s.chan,
+        } else { ...s, has: true, made: 0, link: m.id }),
+      wire' = wire.exclude(Set(m)).union(Set({ dest: other(m.dest), kind: "answer", id: m.id, mode: "" })),
       nextId' = nextId,
       unchangedPhase, unchangedHistory,
     }
@@ -257,7 +278,7 @@ module peer_connection {
   action disconnect(s: str, e: Side): bool = all {
     s == "lo" implies canOffer,
     side' = side.set(s, disconnected(s, e, nextId)),
-    wire' = if (s == "lo") wire.union(Set(offer("hi"))) else wire,
+    wire' = if (s == "lo") wire.union(Set(offer("hi", "reconnect"))) else wire,
     nextId' = if (s == "lo") nextId + 1 else nextId,
     unchangedPhase, unchangedHistory,
   }
@@ -266,6 +287,14 @@ module peer_connection {
   action notice(s: str): bool = all {
     running, side.get(s).has, side.get(s).open, not(alive(s)),
     disconnect(s, side.get(s)),
+  }
+
+  // A channel is no longer open and no event said so. Nothing runs; the
+  // entry just has no open channel until the health check looks.
+  action silentClose(s: str): bool = all {
+    running, side.get(s).has, side.get(s).open, not(alive(s)),
+    side' = side.set(s, { ...side.get(s), open: false, chan: false }),
+    wire' = wire, nextId' = nextId, unchangedPhase, unchangedHistory,
   }
 
   // The channel a reconnect offer replaced fires its close event: the page
@@ -293,7 +322,7 @@ module peer_connection {
       if (s.attempt < MAX_ATTEMPTS) all {
         canOffer,
         side' = side.set("lo", { ...s, made: nextId, link: 0, chan: true, attempt: s.attempt + 1 }),
-        wire' = wire.union(Set(offer("hi"))),
+        wire' = wire.union(Set(offer("hi", "reconnect"))),
         nextId' = nextId + 1,
         unchangedPhase, unchangedHistory,
       } else hardDisconnect("lo"),
@@ -319,14 +348,22 @@ module peer_connection {
   }
 
   // The mesh health check: the roster lists the other player, there is no
-  // open channel and no reconnect in progress. Whatever entry exists is
-  // reset and dropped; a new one offers.
+  // open channel and no reconnect in progress. On a page that offers from
+  // it, whatever entry exists is reset and dropped and a new one offers. On
+  // a page that does not (the higher slot, in the proposed rules), an entry
+  // with a dead channel is treated as a drop noticed now.
   action heal(s: str): bool = all {
-    running, healRunsFor(s), not(side.get(s).open), not(side.get(s).recon), canOffer,
-    side' = side.set(s, { ...ABSENT, has: true, made: nextId, chan: true }),
-    wire' = wire.union(Set(offer(other(s)))),
-    nextId' = nextId + 1,
-    unchangedPhase, unchangedHistory,
+    running, not(side.get(s).open), not(side.get(s).recon),
+    if (healRunsFor(s)) all {
+      canOffer,
+      side' = side.set(s, { ...ABSENT, has: true, made: nextId, chan: true }),
+      wire' = wire.union(Set(offer(other(s), "reconnect"))),
+      nextId' = nextId + 1,
+      unchangedPhase, unchangedHistory,
+    } else all {
+      side.get(s).has,
+      disconnect(s, side.get(s)),
+    },
   }
 
   // A roster lists the other player under a new socket id while the
@@ -371,7 +408,7 @@ module peer_connection {
     {
       nondet s = oneOf(SIDES)
       any {
-        roster(s), channelOpens(s), notice(s), oldChannelCloses(s), closeNeverComes(s),
+        roster(s), channelOpens(s), notice(s), silentClose(s), oldChannelCloses(s), closeNeverComes(s),
         giveUpTimeout(s), answerTimeout(s), heal(s), rosterRenames(s),
       }
     },
@@ -392,12 +429,16 @@ module peer_connection {
   // Violated today: a page that answers a reconnect offer without having
   // noticed the drop itself is reconnecting with no deadline, and the health
   // check skips entries that are reconnecting.
+  // The health check will act on this page's entry: it is not reconnecting,
+  // and the page either offers from the check or has an entry to notice on.
+  def healWillAct(s: str): bool =
+    not(side.get(s).open) and not(side.get(s).recon) and (healRunsFor(s) or side.get(s).has)
   def hasDeadline(s: str): bool = or {
     side.get(s).giveUp,
     side.get(s).attempt > 0,
-    healRunsFor(s) and not(side.get(s).recon),
+    healWillAct(s),
   }
-  val everyWaitHasADeadline = SIDES.forall(s =>
+  val everyWaitHasADeadline = canOffer implies SIDES.forall(s =>
     (running and side.get(s).has and not(side.get(s).open)) implies hasDeadline(s))
 
   // The pair as a whole is never left with nothing to wait for: in a match,
@@ -410,13 +451,14 @@ module peer_connection {
   def nothingPendingFor(s: str): bool = and {
     not(side.get(s).giveUp), side.get(s).attempt == 0,
     not(side.get(s).ansTimer), not(side.get(s).closePending),
-    not(healRunsFor(s) and not(side.get(s).open) and not(side.get(s).recon)),
+    not(healWillAct(s)),
     not(side.get(s).open and not(alive(s))),
     not(side.get(s).has and not(side.get(s).open) and alive(s)),
   }
   val connected = side.get("lo").open and side.get("hi").open and alive("lo")
   val neverLeftWithNothingPending =
-    (running and not(connected) and wire == Set()) implies not(SIDES.forall(s => nothingPendingFor(s)))
+    (canOffer and running and not(connected) and wire == Set())
+      implies not(SIDES.forall(s => nothingPendingFor(s)))
 
   // An answer is applied only to the connection that made the offer it
   // answers.
@@ -442,8 +484,10 @@ module peer_connection {
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
-  def answerTo(dest: str, id: int): Msg = { dest: dest, kind: "answer", id: id }
-  def offerTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id }
+  def answerTo(dest: str, id: int): Msg = { dest: dest, kind: "answer", id: id, mode: "" }
+  def offerTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "reconnect" }
+  def firstOfferTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "first" }
+  def startupOfferTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "startup" }
   def bothOpenOn(id: int): bool = SIDES.forall(s => side.get(s).open and side.get(s).link == id)
 
   // The roster reaches both pages, then the offer.
@@ -451,7 +495,7 @@ module peer_connection {
     initLobby
       .then(roster("lo"))
       .then(roster("hi"))
-      .then(deliver(offerTo("hi", 1)))
+      .then(deliver(firstOfferTo("hi", 1)))
       .then(deliver(answerTo("lo", 1)))
       .then(channelOpens("lo"))
       .then(channelOpens("hi"))
@@ -462,7 +506,7 @@ module peer_connection {
   run offerBeforeRosterTest =
     initLobby
       .then(roster("lo"))
-      .then(deliver(offerTo("hi", 1)))
+      .then(deliver(firstOfferTo("hi", 1)))
       .then(roster("hi"))
       .then(deliver(answerTo("lo", 1)))
       .then(channelOpens("hi"))
@@ -474,13 +518,62 @@ module peer_connection {
     initLobby
       .then(roster("lo"))
       .then(roster("hi"))
-      .then(lose(offerTo("hi", 1)))
+      .then(lose(firstOfferTo("hi", 1)))
       .then(startupTimeout)
-      .then(deliver(offerTo("hi", 2)))
+      .then(deliver(startupOfferTo("hi", 2)))
       .then(deliver(answerTo("lo", 2)))
       .then(channelOpens("lo"))
       .then(channelOpens("hi"))
       .expect(bothOpenOn(2))
+
+  // Every offer is lost. After the third attempt the watchdog stops and the
+  // player is told; no timer is left armed.
+  run startupGivesUpTest =
+    initLobby
+      .then(roster("lo"))
+      .then(roster("hi"))
+      .then(lose(firstOfferTo("hi", 1)))
+      .then(startupTimeout)
+      .then(lose(startupOfferTo("hi", 2)))
+      .then(startupTimeout)
+      .then(lose(startupOfferTo("hi", 3)))
+      .expect(not(stalled) and side.get("lo").attempt == MAX_ATTEMPTS)
+      .then(startupTimeout)
+      .expect(stalled and side.get("lo").attempt == 0 and nextId == 4 and wire == Set())
+
+  // The roster's offer is slow, the watchdog's retry connects the pair and
+  // the match starts; then the first offer arrives. It is not a reconnect
+  // offer, so the guest applies it to the connection it is playing on: the
+  // channel stays open on a connection that now matches nothing, until the
+  // guest notices.
+  run lateFirstOfferTest =
+    initLobby
+      .then(roster("lo"))
+      .then(roster("hi"))
+      .then(startupTimeout)
+      .then(deliver(startupOfferTo("hi", 2)))
+      .then(deliver(answerTo("lo", 2)))
+      .then(channelOpens("lo"))
+      .then(channelOpens("hi"))
+      .then(start)
+      .then(deliver(firstOfferTo("hi", 1)))
+      .expect(side.get("hi").open and not(side.get("hi").recon) and not(alive("hi")))
+      .then(notice("hi"))
+      .expect(side.get("hi").recon and side.get("hi").giveUp)
+
+  // The channel dies on both pages with no event. Only the health check can
+  // find it. Today each page's check offers; with one side offering, the
+  // guest's check treats it as a drop and waits for the lower slot.
+  run silentCloseTest =
+    init
+      .then(netDrop)
+      .then(silentClose("hi"))
+      .then(silentClose("lo"))
+      .expect(everyWaitHasADeadline and neverLeftWithNothingPending)
+      .then(heal("hi"))
+      .expect(side.get("hi").recon == HEAL_ONE_SIDE and (side.get("hi").made != 0) == not(HEAL_ONE_SIDE))
+      .then(heal("lo"))
+      .expect(oneInitiatorPerPair == HEAL_ONE_SIDE)
 
   // A drop both pages notice: the lower slot offers, the guest answers and
   // comes back with its input state cleared.
