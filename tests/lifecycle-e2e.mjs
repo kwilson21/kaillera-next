@@ -37,6 +37,10 @@
  *   dropped-host      the same for the host, whose room is handed to the guest
  *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
+ *   spectator-forgery a bare Socket.IO client joins a two-player room as a
+ *                     spectator and sends the relayed messages only the host
+ *                     or a player may send, each with a forged sender stamp:
+ *                     no page may act on any of them
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
  *
  * At each checkpoint the test also checks what the page itself shows (lobby
@@ -64,6 +68,7 @@ const SCENARIOS = [
   'dropped-host',
   'streaming-join',
   'spectate',
+  'spectator-forgery',
   'host-reload',
 ];
 const wanted = process.env.SCENARIO ? [process.env.SCENARIO] : SCENARIOS;
@@ -591,6 +596,105 @@ const scenarios = {
       [
         { player: host, lobby: false },
         { player: guest, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'spectator-forgery': async (room, failures, log) => {
+    const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
+    await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+
+    // The forger is not a play page: it speaks Socket.IO directly, so
+    // nothing the pages do limits what it can send.
+    const forgerCtx = await browser.newContext();
+    const forger = await forgerCtx.newPage();
+    await forger.goto(`${URL}/error.html`);
+    await forger.addScriptTag({ url: `${URL}/static/socket.io.min.js` });
+    const forgerSid = await forger.evaluate(
+      (roomCode) =>
+        new Promise((resolve) => {
+          const socket = io();
+          window.forgerSocket = socket;
+          window.roster = null;
+          socket.on('users-updated', (roster) => {
+            window.roster = roster;
+          });
+          socket.on('connect', () =>
+            socket.emit(
+              'join-room',
+              { extra: { sessionid: roomCode, player_name: 'Forger', spectate: true } },
+              (_error, roster) => {
+                window.roster = roster ?? window.roster;
+                resolve(socket.id);
+              },
+            ),
+          );
+        }),
+      room,
+    );
+    const sidInSlot = (slot) =>
+      forger.evaluate((s) => Object.values(window.roster?.players ?? {}).find((p) => p.slot === s)?.socketId, slot);
+    if (!(await waitUntil(async () => !!(await sidInSlot(0)) && !!(await sidInSlot(1)), 20000)))
+      failures.push('the forger never saw both players in the roster');
+    const hostSid = await sidInSlot(0);
+    const guestSid = await sidInSlot(1);
+    // Every forged message claims the host's stamp; the server must replace it.
+    const asHost = { sid: hostSid, slot: 0, owner: true };
+    const forge = (message) =>
+      forger.evaluate((m) => window.forgerSocket.emit('data-message', m), { ...message, knFrom: asHost });
+
+    const guestMode = () => guest.page.evaluate(() => document.getElementById('mode-select')?.value ?? null);
+    const modeBefore = await guestMode();
+    await forge({ type: 'mode-select', mode: 'streaming' });
+    await guest.page.waitForTimeout(2000);
+    if ((await guestMode()) !== modeBefore)
+      failures.push(`a spectator changed the guest's mode to ${await guestMode()}`);
+
+    for (const p of [host, guest]) await loadRom(p);
+    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await host.page.click('#start-btn');
+    if (!(await waitForFrames([host, guest], 120, 240000))) failures.push('the two-player game never started');
+
+    await forge({
+      type: 'sync-state-socket',
+      targetSid: guestSid,
+      senderSid: hostSid,
+      frame: 1,
+      full: true,
+      data: 'AAAA',
+    });
+    await forge({ type: 'late-join-state', targetSid: guestSid, frame: 1, data: 'AAAA' });
+    await forge({ type: 'save-state', data: 'AAAA' });
+    await forge({ type: 'request-late-join', requesterSid: guestSid });
+    await forge({ type: 'sync-request-full-socket', targetSid: hostSid, requesterSid: guestSid, reason: 'forged' });
+    await forge({ type: 'late-join-ready', senderSid: guestSid });
+    await host.page.waitForTimeout(6000);
+
+    const syncLogOf = (player) => player.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+    const guestLog = await syncLogOf(guest);
+    const hostLog = await syncLogOf(host);
+    const refusedBy = (text, type) => text.includes(`relayed ${type} refused: sender ${forgerSid} slot=null`);
+    for (const type of ['sync-state-socket', 'late-join-state', 'save-state'])
+      if (!refusedBy(guestLog, type)) failures.push(`the guest did not refuse the spectator's ${type}`);
+    for (const type of ['request-late-join', 'sync-request-full-socket', 'late-join-ready'])
+      if (!refusedBy(hostLog, type)) failures.push(`the host did not refuse the spectator's ${type}`);
+    if (/socket sync-state (received|failed)/.test(guestLog)) failures.push('the guest tried to load a forged state');
+    if (/received late-join request|received socket sync-request-full|sending late-join state/.test(hostLog))
+      failures.push('the host acted on a forged request for state');
+    log.push({ forger: forgerSid, refusedByGuest: 3, refusedByHost: 3 });
+
+    if (!(await waitForFrames([host, guest], 120, 240000)))
+      failures.push('the game stopped advancing after the forgery');
+    await checkpoint(
+      'after the forgery',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false },
       ],
       failures,
       log,

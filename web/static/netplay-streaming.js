@@ -577,22 +577,15 @@
     if (_playerSlot !== 0) return;
     // Who sent it is the server's stamp (KNCore.checkRelayed), not what the
     // message says: any room member can write to the relay and could name
-    // another socket here. A message with no stamp comes from a server older
-    // than the stamp and is read as before: server and pages deploy
-    // together, and a member cannot remove a stamp the server adds. A
-    // stamped message this page cannot check (the bundle did not load) is
-    // refused.
-    const checkRelayed = window.KNCore?.checkRelayed;
-    if (!checkRelayed && Object.hasOwn(data, 'knFrom')) return;
-    const from = checkRelayed ? checkRelayed(data) : null;
-    if (from && !from.allowed) return;
-    const declaredSid = typeof data.senderSid === 'string' ? data.senderSid : '';
-    const remoteSid = from?.stamped ? from.sid : declaredSid;
+    // another socket here. A message with no stamp, or one this page cannot
+    // check (the bundle did not load), is refused.
+    const from = window.KNCore?.checkRelayed?.(data) ?? null;
+    if (!from?.allowed) return;
+    const remoteSid = from.sid;
     if (!remoteSid || remoteSid === socket.id) return;
 
     const known = _knownPlayers[remoteSid];
-    const senderSpectates = from?.stamped ? from.slot === null : data.isSpectator === true;
-    if (!known && !senderSpectates) return;
+    if (!known && from.slot !== null) return;
     const remoteSlot = known ? known.slot : null;
     let peer = _peers[remoteSid];
     if (peer?.dc?.readyState === 'open' || peer?.pc?.connectionState === 'connected') return;

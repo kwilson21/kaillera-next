@@ -6841,23 +6841,16 @@
     // Any member of the room, spectators included, can write to the server's
     // relay, so nothing a message says about itself is believed. The server
     // stamps the true sender (KNCore.checkRelayed, web/src/relay.ts): a
-    // message that installs emulator state is taken only from slot 0, and a
-    // request is answered to the socket that really sent it, not the one it
-    // names. A message with no stamp comes from a server older than the
-    // stamp and is handled as before: server and pages deploy together, and
-    // a member cannot remove a stamp the server adds. A stamped message this
-    // page cannot check (the bundle did not load) is refused.
-    const checkRelayed = window.KNCore?.checkRelayed;
-    if (!checkRelayed && Object.hasOwn(msg, 'knFrom')) {
-      _syncLog(`relayed ${msg.type} refused: no KNCore to check its sender`);
+    // message that installs emulator state is taken only from slot 0, a
+    // request for state only from a player, and it is answered to the socket
+    // that really sent it, not the one it names. A message with no stamp, or
+    // one this page cannot check (the bundle did not load), is refused.
+    const from = window.KNCore?.checkRelayed?.(msg) ?? null;
+    if (!from?.allowed) {
+      _syncLog(`relayed ${msg.type} refused: sender ${from?.sid ?? 'unknown'} slot=${from?.slot ?? null}`);
       return;
     }
-    const from = checkRelayed ? checkRelayed(msg) : null;
-    if (from && !from.allowed) {
-      _syncLog(`relayed ${msg.type} refused: sender ${from.sid} slot=${from.slot}`);
-      return;
-    }
-    if (from?.stamped) msg = { ...msg, requesterSid: from.sid, senderSid: from.sid };
+    msg = { ...msg, requesterSid: from.sid, senderSid: from.sid };
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
@@ -8559,9 +8552,13 @@
         if (e.data.charAt(0) === '{') {
           try {
             const msg = JSON.parse(e.data);
-            if (msg.type === 'save-state') handleSaveStateMsg(msg);
-            else if (msg.type === 'late-join-state') handleLateJoinState(msg);
-            else if (msg.type === 'delay-ping') {
+            if (msg.type === 'save-state' || msg.type === 'late-join-state') {
+              // Emulator state is taken only from the host's own channel,
+              // as on the relay: any other peer could push one otherwise.
+              if (peer.slot !== 0) _syncLog(`${msg.type} on the channel of slot ${peer.slot} refused`);
+              else if (msg.type === 'save-state') handleSaveStateMsg(msg);
+              else handleLateJoinState(msg);
+            } else if (msg.type === 'delay-ping') {
               peer.dc.send(JSON.stringify({ type: 'delay-pong', ts: msg.ts }));
             } else if (msg.type === 'delay-pong') {
               handleDelayPong(msg.ts, peer);
