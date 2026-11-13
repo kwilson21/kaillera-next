@@ -25,19 +25,14 @@ const memoryStorage = (): SafeStorage & { calls: string[] } => {
   };
 };
 
-interface StateCore {
-  initialKNState: typeof initialKNState;
-}
 interface StateWindow {
   KNState?: PageState;
-  KNCore?: StateCore;
 }
 
 /** `window.KNState` as web/static/kn-state.js sets it up. */
-const loadState = (storage: SafeStorage, core?: StateCore): PageState => {
+const loadState = (storage: SafeStorage): PageState => {
   const source = readFileSync(new URL('../../web/static/kn-state.js', import.meta.url), 'utf8');
   const window: StateWindow = {};
-  if (core) window.KNCore = core;
   vm.runInContext(source, vm.createContext({ window, KNStorage: storage }));
   assert.ok(window.KNState, 'kn-state.js did not define window.KNState');
   return window.KNState;
@@ -59,37 +54,28 @@ test('the state built into kn-state.js and the typed one are the same', () => {
   assert.deepEqual(typed.DEFAULT_ICE_SERVERS, [{ urls: 'stun:stun.cloudflare.com:3478' }]);
 });
 
-test('kn-state.js takes the state from KNCore when the bundle is loaded', () => {
-  let calls = 0;
-  const storage = memoryStorage();
-  const state = loadState(storage, {
-    initialKNState: (given) => {
-      calls++;
-      return initialKNState(given);
-    },
-  });
-  assert.equal(calls, 1);
-  assert.equal(state.slot, -1);
-  state.safeSet('localStorage', 'k', 'v');
-  assert.equal(state.safeGet('localStorage', 'k'), 'v');
-  state.safeRemove('localStorage', 'k');
-  assert.equal(state.safeGet('localStorage', 'k'), null);
-  assert.deepEqual(storage.calls, [
-    'set localStorage k',
-    'get localStorage k',
-    'remove localStorage k',
-    'get localStorage k',
-  ]);
-});
-
-test('the storage helpers go to the storage either way', () => {
-  for (const core of [undefined, { initialKNState }]) {
+test('the storage helpers go to the storage in both', () => {
+  for (const build of [loadState, initialKNState]) {
     const storage = memoryStorage();
-    const state = loadState(storage, core);
+    const state = build(storage);
     state.safeSet('sessionStorage', 'a', '1');
     assert.equal(state.safeGet('sessionStorage', 'a'), '1');
-    assert.deepEqual(storage.calls, ['set sessionStorage a', 'get sessionStorage a']);
+    state.safeRemove('sessionStorage', 'a');
+    assert.equal(state.safeGet('sessionStorage', 'a'), null);
+    assert.deepEqual(storage.calls, [
+      'set sessionStorage a',
+      'get sessionStorage a',
+      'remove sessionStorage a',
+      'get sessionStorage a',
+    ]);
   }
+});
+
+test('a peer without a data channel yet fits the type', () => {
+  const state = initialKNState(memoryStorage());
+  // createBasePeer in shared.js starts every peer with `dc: null`.
+  state.peers['sid'] = { slot: 1, dc: null };
+  assert.equal(state.peers['sid']?.dc ?? null, null);
 });
 
 test('every page gets its own state objects', () => {

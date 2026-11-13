@@ -527,11 +527,6 @@
     <script src="/static/storage.js"></script>
     <script src="/static/kn-capture.js"></script>
 
-    <!-- The TypeScript core (window.KNCore). Loaded before the scripts that
-         build on it: kn-state.js, shared.js and the engines take the shared
-         state, input codec, stick dead-band and sync log from it as they load. -->
-    <script src="/static/dist/kn-core.js"></script>
-
     <!-- Centralized cross-module state -->
     <script src="/static/kn-state.js"></script>
 
@@ -540,6 +535,11 @@
 
     <!-- Switch 2 Pro Controller: WebUSB handshake that makes it appear as a gamepad -->
     <script src="/static/switch2-usb.js"></script>
+
+    <!-- The TypeScript core (window.KNCore). Loaded before the scripts that
+         build on it: shared.js and the engines take their input codec, stick
+         dead-band and sync log from it as they load. -->
+    <script src="/static/dist/kn-core.js"></script>
 
     <!-- Shared netplay utilities (cheats, keymap, input tracking) -->
     <script src="/static/shared.js"></script>
