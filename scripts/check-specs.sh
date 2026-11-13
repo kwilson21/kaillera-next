@@ -31,3 +31,16 @@ check room_current ownerSeesGame
 check room_fixed ownerSeesGame
 check room_fixed lateJoinersChaseTheCurrentMatch
 check room_fixed pagesAgreeWithServer
+
+# ── Peer identity: which connection a rejoining player keeps ────────────────
+PEERS=specs/peer_identity.qnt
+$QUINT typecheck "$PEERS"
+for variant in peer_identity_before peer_identity_untagged peer_identity_current; do
+  $QUINT test "$PEERS" --main="$variant" --backend=typescript
+done
+# Today: signaling coming and going, in any order, never costs a player a
+# connection that is up. Violated before #119 and by #119 as first written.
+for invariant in neverEvictsLiveConnection oneConnectionPerGuest; do
+  $QUINT run "$PEERS" --main=peer_identity_current --invariant="$invariant" \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+done
