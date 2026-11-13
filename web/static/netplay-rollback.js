@@ -12303,22 +12303,31 @@
     // pairwise mode B with the 5s heartbeat (every-frame digests + always-on
     // vision sampling — for active triage only).
     //
-    // The core's hash registry has one address map, for SSB64 US
-    // (build/kn_rollback/kn_gameplay_addrs.h). On any other ROM its fields
-    // would hash unrelated memory under SSB64's labels, so the detector
-    // stays off there. ?desync=force runs it anyway (triage and the
-    // two-player harness on another ROM; field names mean nothing then).
+    // Where the detector's fields live differs per game, so the page looks
+    // its ROM up (KNCore.addressMapFor, web/src/address-maps.ts) and the
+    // detector installs that map in the core. A ROM with no map gets no
+    // detector: under another game's map the fields would be hashes of
+    // unrelated memory with the wrong names on them.
+    //
+    // For trying a candidate map on a ROM that has none yet (see
+    // docs/address-maps.md): ?desync=force runs the detector anyway, with
+    // the map of the ROM whose hash is in ?desyncMap=, or SSB64 US's.
     const desyncParam = _urlParams.get('desync');
     if (lsMod && window.KNDesync && desyncParam !== 'off') {
-      const hasAddressMap = !!_config?.romHash && _config.romHash === window.KNShared?.SSB64_HASH;
+      const mapFor = window.KNCore?.addressMapFor;
+      const forced = desyncParam === 'force';
+      const rom =
+        mapFor?.(_config?.romHash) ??
+        (forced ? mapFor?.(_urlParams.get('desyncMap') ?? window.KNShared?.SSB64_HASH) : null) ??
+        null;
       if (RB_WORKER_COPROC) {
         // Mode 2 adopts the worker's corrected state without re-simulating
         // those frames here, so the registry's history for them keeps the
         // mispredicted hashes and a healthy match would be flagged.
         _syncLog('KNDesync off: worker replay (Mode 2) does not rewrite field history');
-      } else if (hasAddressMap || desyncParam === 'force') {
+      } else if (rom) {
         const desyncMode = desyncParam === 'b' ? 'B' : 'C';
-        KNDesync.init(lsMod, desyncMode);
+        KNDesync.init(lsMod, desyncMode, rom);
       } else {
         _syncLog('KNDesync off: no field address map for this ROM');
       }
