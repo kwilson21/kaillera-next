@@ -7,6 +7,7 @@
  * increasing and a reader can tell what it missed. `clear` starts a new
  * epoch, which tells the server the numbering began again.
  */
+import { fitsFlush } from './flush-fit.ts';
 
 /** What the engine logs. */
 export interface SyncLogEntry {
@@ -79,7 +80,7 @@ export function createSyncLogRing(maxSize: number): SyncLogRing {
         if (e.seq <= afterSeq) continue;
         // Estimate: the message plus ~64 bytes of JSON for seq, t and f.
         const size = (e.msg?.length || 0) + 64;
-        if (entries.length > 0 && bytes + size > maxBytes) break;
+        if (!fitsFlush(entries.length, bytes, size, maxBytes)) break;
         entries.push({ seq: e.seq, t: e.t, f: e.f, msg: e.msg });
         bytes += size;
         if (entries.length >= max) break;
