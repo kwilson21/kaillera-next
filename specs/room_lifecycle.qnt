@@ -32,16 +32,25 @@
 //   true   proposed fix: end the match and send everyone back to the lobby
 module room {
   const HOST_REOPEN_ENDS_MATCH: bool
+  // What a page does when its socket reconnects under it:
+  //   false  today's code: rejoin silently and keep whatever it was doing
+  //   true   proposed fix: compare with the status and match id the rejoin
+  //          returns, and follow the server when they differ
+  const RESUME_RECONCILES: bool
 
-  // web/src/session.ts is the page half of this model, and since stage 2 it
-  // is what play.js reads "is a game on" from (Waiting or Running). A room
-  // closed by the server (`roomClosed` there) is `closeTab` here: the page is
-  // no longer in the room.
+  // web/src/session.ts is the page half of this model, state for state:
+  //   Lobby = lobby, AwaitingRom = lateJoinAwaitingRom, Starting =
+  //   lateJoinStarting, Syncing = lateJoinSyncing, Running = running.
+  // play.js reads "is a game on" from it (anything but Lobby). A room closed
+  // by the server (`roomClosed` there) is `closeTab` here: the page is no
+  // longer in the room.
   type Page =
-    | Closed          // no tab
-    | Lobby           // tab open, lobby UI, no emulator
-    | Waiting(int)    // late joiner asking for the state of match n
-    | Running(int)    // emulator running match n
+    | Closed            // no tab
+    | Lobby             // tab open, lobby UI, no emulator
+    | AwaitingRom(int)  // joined match n in play; no usable ROM yet
+    | Starting(int)     // joined match n in play; the next engine start is the late join
+    | Syncing(int)      // late-join engine up, asking for the state of match n
+    | Running(int)      // emulator running match n
 
   pure val PLAYERS = Set("host", "guest1", "guest2")
   pure val NOBODY = ""
@@ -58,6 +67,35 @@ module room {
 
   pure def isOpen(pg: Page): bool = pg != Closed
 
+  pure def isLateJoining(pg: Page): bool = match pg {
+    | AwaitingRom(_) => true
+    | Starting(_) => true
+    | Syncing(_) => true
+    | _ => false
+  }
+
+  // Where a page lands when it joins a room: the lobby, or the late-join
+  // path of the match in play (asking for a ROM first if it has none).
+  pure def joinedPage(st: str, m: int, hasRom: bool): Page =
+    if (st != "playing") Lobby else if (hasRom) Starting(m) else AwaitingRom(m)
+
+  // A page told the room's status and match id on rejoin: keep going if it
+  // is already in (or joining) that match, otherwise do what a fresh join
+  // would. A page that missed game-ended lands in the lobby; one that missed
+  // a whole new match starts its late join.
+  pure def reconciled(pg: Page, st: str, m: int, hasRom: bool): Page =
+    if (st == "playing" and (pg == Running(m) or pg == AwaitingRom(m) or pg == Starting(m) or pg == Syncing(m))) pg
+    else joinedPage(st, m, hasRom)
+
+  // game-started moves a page into the match unless it is already on the
+  // late-join path, which it finishes for the new match id.
+  pure def onGameStarted(pg: Page, m: int): Page = match pg {
+    | AwaitingRom(_) => AwaitingRom(m)
+    | Starting(_) => Starting(m)
+    | Syncing(_) => Syncing(m)
+    | _ => Running(m)
+  }
+
   // ── helpers ────────────────────────────────────────────────────────────
 
   // Pages that hear a room broadcast: connected members with a tab open.
@@ -65,6 +103,9 @@ module room {
 
   def broadcast(target: Page): str -> Page =
     page.keys().mapBy(p => if (listeners.contains(p)) target else page.get(p))
+
+  def broadcastGameStarted(m: int): str -> Page =
+    page.keys().mapBy(p => if (listeners.contains(p)) onGameStarted(page.get(p), m) else page.get(p))
 
   // _leave: drop the player, hand the room on, delete it when empty.
   action removeMember(p: str, pageAfter: Page): bool = {
@@ -102,22 +143,38 @@ module room {
     page' = page.set(p, Lobby),
   }
 
-  action join(p: str): bool = all {
+  action join(p: str, hasRom: bool): bool = all {
     members != Set(), not(members.contains(p)), page.get(p) == Closed,
     // room_is_live, or a player in grace is on their way back
     online != Set() or grace != Set(),
     members' = members.union(Set(p)),
     online' = online.union(Set(p)),
-    page' = page.set(p, if (status == "playing") Waiting(matchId) else Lobby),
+    page' = page.set(p, joinedPage(status, matchId, hasRom)),
     owner' = owner, creator' = creator, status' = status, matchId' = matchId,
     nextMatch' = nextMatch, grace' = grace,
+  }
+
+  // The joiner dropped a ROM, or finished receiving the host's.
+  action romReady(p: str): bool = all {
+    page.get(p) == AwaitingRom(matchId), status == "playing",
+    page' = page.set(p, Starting(matchId)),
+    members' = members, owner' = owner, creator' = creator, status' = status,
+    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
+  }
+
+  // The joiner's engine starts as a late join and asks for the match state.
+  action startLateJoinEngine(p: str): bool = all {
+    page.get(p) == Starting(matchId), status == "playing",
+    page' = page.set(p, Syncing(matchId)),
+    members' = members, owner' = owner, creator' = creator, status' = status,
+    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
   }
 
   // The Start button lives in the lobby UI; the server checks only ownership.
   action startGame = all {
     online.contains(owner), page.get(owner) == Lobby,
     status' = "playing", matchId' = nextMatch, nextMatch' = nextMatch + 1,
-    page' = broadcast(Running(nextMatch)),
+    page' = broadcastGameStarted(nextMatch),
     members' = members, owner' = owner, creator' = creator,
     online' = online, grace' = grace,
   }
@@ -133,7 +190,7 @@ module room {
 
   // A late joiner gets the state from a connected peer that is running it.
   action serveLateJoin(p: str): bool = all {
-    status == "playing", online.contains(p), page.get(p) == Waiting(matchId),
+    status == "playing", online.contains(p), page.get(p) == Syncing(matchId),
     online.exists(q => q != p and page.get(q) == Running(matchId)),
     page' = page.set(p, Running(matchId)),
     members' = members, owner' = owner, creator' = creator, status' = status,
@@ -162,7 +219,7 @@ module room {
   }
 
   // Fresh page, back inside the grace window.
-  action reopen(p: str): bool = all {
+  action reopen(p: str, hasRom: bool): bool = all {
     grace.contains(p), page.get(p) == Closed,
     online' = online.union(Set(p)), grace' = grace.exclude(Set(p)),
     members' = members, owner' = owner, creator' = creator, nextMatch' = nextMatch,
@@ -177,16 +234,16 @@ module room {
     } else all {
       // join-room's reconnect path returns status; a playing room means late join.
       status' = status, matchId' = matchId,
-      page' = page.set(p, if (status == "playing") Waiting(matchId) else Lobby),
+      page' = page.set(p, joinedPage(status, matchId, hasRom)),
     },
   }
 
   // Socket reconnects under a page that kept running. The match must survive
   // this, so a fix for `reopen` has to tell a fresh page from a reconnect.
-  action resume(p: str): bool = all {
+  action resume(p: str, hasRom: bool): bool = all {
     grace.contains(p), isOpen(page.get(p)),
     online' = online.union(Set(p)), grace' = grace.exclude(Set(p)),
-    page' = page,
+    page' = if (RESUME_RECONCILES) page.set(p, reconciled(page.get(p), status, matchId, hasRom)) else page,
     members' = members, owner' = owner, creator' = creator, status' = status,
     matchId' = matchId, nextMatch' = nextMatch,
   }
@@ -208,9 +265,10 @@ module room {
     startGame,
     endGame,
     nondet p = oneOf(PLAYERS)
+    nondet hasRom = oneOf(Set(true, false))
     any {
-      openRoom(p), join(p), serveLateJoin(p), leave(p), reload(p), dropSocket(p),
-      reopen(p), resume(p), graceExpire(p), closeTab(p),
+      openRoom(p), join(p, hasRom), romReady(p), startLateJoinEngine(p), serveLateJoin(p),
+      leave(p), reload(p), dropSocket(p), reopen(p, hasRom), resume(p, hasRom), graceExpire(p), closeTab(p),
     },
   }
 
@@ -222,8 +280,28 @@ module room {
   val ownerSeesGame =
     (status == "playing" and listeners.contains(owner)) implies page.get(owner) != Lobby
 
-  // Open questions the model raises. Neither is confirmed against the client
-  // and neither is gated in CI.
+  // The next two fail today and hold with RESUME_RECONCILES. Both come from
+  // a page whose socket was down while the room moved on: on reconnect it
+  // rejoins silently and never compares itself with the server.
+  //
+  // A page on the late-join path is joining the match the server is running
+  // now. Fails today: a joiner at the ROM prompt loses its socket, the host
+  // ends that game and starts another, and the joiner carries on joining the
+  // old one (found by the model, 2026-11-13; not seen in production).
+  val lateJoinersChaseTheCurrentMatch =
+    PLAYERS.forall(p =>
+      (listeners.contains(p) and isLateJoining(page.get(p)) and status == "playing") implies or {
+        page.get(p) == AwaitingRom(matchId),
+        page.get(p) == Starting(matchId),
+        page.get(p) == Syncing(matchId),
+      })
+
+  // Every connected page agrees with the server about lobby vs playing.
+  // Fails today when a page misses game-ended while its socket is down.
+  val pagesAgreeWithServer =
+    listeners.forall(p => (page.get(p) == Lobby) iff (status == "lobby"))
+
+  // An open question, not gated in CI and not fixed by RESUME_RECONCILES.
   //
   // A playing room always has someone running the match, or someone on their
   // way back to it. Fails when the only player left is a late joiner still
@@ -234,11 +312,6 @@ module room {
       grace.exists(p => page.get(p) == Closed),
     }
 
-  // Every connected page agrees with the server about lobby vs playing.
-  // Fails when a page misses game-ended while its socket is down.
-  val pagesAgreeWithServer =
-    listeners.forall(p => (page.get(p) == Lobby) iff (status == "lobby"))
-
   // ── scenarios ──────────────────────────────────────────────────────────
 
   // The production sequence: host starts alone, reloads, a friend joins.
@@ -247,35 +320,66 @@ module room {
       .then(openRoom("host"))
       .then(startGame)
       .then(reload("host"))
-      .then(reopen("host"))
-      .then(join("guest1"))
+      .then(reopen("host", true))
+      .then(join("guest1", true))
       .expect(ownerSeesGame == HOST_REOPEN_ENDS_MATCH)
-      .expect(page.get("guest1") == (if (HOST_REOPEN_ENDS_MATCH) Lobby else Waiting(1)))
+      .expect(page.get("guest1") == (if (HOST_REOPEN_ENDS_MATCH) Lobby else Starting(1)))
 
   // A dropped socket under a running page must not end the match.
   run socketDropKeepsMatchTest =
     init
       .then(openRoom("host"))
-      .then(join("guest1"))
+      .then(join("guest1", true))
       .then(startGame)
       .then(dropSocket("host"))
-      .then(resume("host"))
+      .then(resume("host", true))
       .expect(status == "playing" and page.get("host") == Running(1) and page.get("guest1") == Running(1))
 
   run lateJoinTest =
     init
       .then(openRoom("host"))
       .then(startGame)
-      .then(join("guest1"))
+      .then(join("guest1", true))
+      .expect(page.get("guest1") == Starting(1))
+      .then(startLateJoinEngine("guest1"))
       .then(serveLateJoin("guest1"))
+      .expect(page.get("guest1") == Running(1))
       .then(endGame)
       .expect(status == "lobby" and page.get("guest1") == Lobby and ownerSeesGame)
+
+  // A joiner with no ROM is asked for one before its engine starts.
+  run lateJoinWithoutRomTest =
+    init
+      .then(openRoom("host"))
+      .then(startGame)
+      .then(join("guest1", false))
+      .expect(page.get("guest1") == AwaitingRom(1))
+      .then(romReady("guest1"))
+      .then(startLateJoinEngine("guest1"))
+      .then(serveLateJoin("guest1"))
+      .expect(page.get("guest1") == Running(1))
+
+  // The host ends the game while a joiner is still choosing a ROM.
+  run gameEndsWhileAwaitingRomTest =
+    init
+      .then(openRoom("host"))
+      .then(startGame)
+      .then(join("guest1", false))
+      .then(endGame)
+      .expect(page.get("guest1") == Lobby)
 }
 
+// The server and client as they are today.
 module room_current {
-  import room(HOST_REOPEN_ENDS_MATCH = false).*
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false).*
 }
 
+// With the proposed reconnect fix.
 module room_fixed {
-  import room(HOST_REOPEN_ENDS_MATCH = true).*
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true).*
+}
+
+// Before #104, kept so hostReloadTest still shows what that fix changed.
+module room_before_104 {
+  import room(HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false).*
 }

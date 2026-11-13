@@ -20,7 +20,7 @@
  *   late-join         a guest with no ROM joins a game already running, is
  *                     asked for one, then the host ends the game
  *   late-join-cached  the same, with the guest's ROM already in its library
- *   streaming-join    a guest joins a streamed game already running
+ *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
  *
@@ -295,10 +295,17 @@ const scenarios = {
   },
 
   'streaming-join': async (room, failures, log) => {
-    const host = await startSoloGame(room, 'streaming');
+    // A streamed game needs two players to start, so the late joiner is the third.
+    const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=streaming`);
+    await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    await loadRom(host);
+    const first = await openPlayer('guest1', `room=${room}&name=First`);
+    await first.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await host.page.click('#start-btn');
     if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
 
-    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    const guest = await openPlayer('guest2', `room=${room}&name=Late`);
     if (!(await waitUntil(async () => !(await lobbyShownOn(guest)), 30000)))
       failures.push('the streaming guest never left the lobby overlay');
     await waitForFrames([host], 120, 120000);
@@ -306,6 +313,7 @@ const scenarios = {
       'while streaming',
       [
         { player: host, lobby: false },
+        { player: first, lobby: false },
         { player: guest, lobby: false },
       ],
       failures,
@@ -318,12 +326,13 @@ const scenarios = {
       'after end game',
       [
         { player: host, lobby: true },
+        { player: first, lobby: true },
         { player: guest, lobby: true },
       ],
       failures,
       log,
     );
-    return [host, guest];
+    return [host, first, guest];
   },
 
   spectate: async (room, failures, log) => {

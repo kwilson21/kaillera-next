@@ -8,7 +8,9 @@
     "fmt:check": "oxfmt --check \"**/*.{js,mjs,mts,ts,css,json,jsonc,yaml,yml,html}\"",
     "lint": "oxlint web/static web/src deploy/static tests && biome lint",
     "spec": "bash scripts/check-specs.sh",
-    "check": "npm run fmt:check && npm run lint && npm run typecheck && npm run test:ts && npm run build:check && npm run spec"
+    "diagram": "node scripts/session-diagram.mjs",
+    "diagram:check": "node scripts/session-diagram.mjs --check",
+    "check": "npm run fmt:check && npm run lint && npm run typecheck && npm run test:ts && npm run build:check && npm run diagram:check && npm run spec"
   },
   "dependencies": {
     "@xstate/effect": "1.0.0-beta.1",
