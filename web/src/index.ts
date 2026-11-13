@@ -11,7 +11,14 @@ import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { initialKNState } from './kn-state.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
-import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
+import {
+  decodeGameEnded,
+  decodeGameStarted,
+  decodeJoinRoomAck,
+  decodeRomSharingUpdated,
+  decodeTokenMessage,
+  decodeUsersUpdated,
+} from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
@@ -150,7 +157,14 @@ export const KNCore = {
   rosterKey,
   screenshotCrop,
   shouldResumeRomTransfer,
-  protocol: { decodeUsersUpdated, decodeGameStarted, decodeGameEnded },
+  protocol: {
+    decodeUsersUpdated,
+    decodeGameStarted,
+    decodeGameEnded,
+    decodeJoinRoomAck,
+    decodeRomSharingUpdated,
+    decodeTokenMessage,
+  },
 };
 
 declare global {
