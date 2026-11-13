@@ -42,6 +42,18 @@ import {{ Schema }} from 'effect';
 """
 
 
+# Validators change what a model accepts in ways its annotations do not show,
+# and the schemas are built from the annotations. Each one has to be listed
+# here with what the generated schema does about it; an unlisted validator
+# stops generation, so the schema never silently disagrees with the model.
+KNOWN_VALIDATORS = {
+    # The server still takes the pre-rename mode "lockstep" from cached pages
+    # and reads it as "rollback". The client schema is for what a current page
+    # sends, so it accepts only the current names.
+    "_coerce_legacy_mode": "legacy input the client schema leaves out on purpose",
+}
+
+
 class Unsupported(TypeError):
     pass
 
@@ -176,8 +188,20 @@ class Generator:
             schema = f"Schema.optional({schema})"
         return f"  {_ts_key(field.alias or name)}: {schema},"
 
+    @staticmethod
+    def _check_validators(model: type[BaseModel]) -> None:
+        decorators = model.__pydantic_decorators__
+        for kind in ("validators", "field_validators", "root_validators", "model_validators"):
+            for validator in getattr(decorators, kind):
+                if validator not in KNOWN_VALIDATORS:
+                    raise Unsupported(
+                        f"{model.__name__}: validator {validator!r} is not in KNOWN_VALIDATORS; "
+                        "decide what the client schema does about it"
+                    )
+
     def _model(self, model: type[BaseModel]) -> str:
         name = model.__name__
+        self._check_validators(model)
         lines: list[str] = []
         doc = (model.__doc__ or "").strip() if "__doc__" in vars(model) else ""
         if doc:

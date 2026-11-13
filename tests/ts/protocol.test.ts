@@ -10,7 +10,10 @@ import {
   decodeJoinRoomPayload,
   decodeOpenRoomPayload,
   decodeRomReadyPayload,
+  decodeRenegotiateRequest,
   decodeRomSharingUpdated,
+  decodeSessionLogAck,
+  decodeSetModePayload,
   decodeSetNamePayload,
   decodeStartGamePayload,
   decodeTokenMessage,
@@ -180,6 +183,16 @@ test('rom-sharing-updated and the token messages decode', () => {
   assert.ok(Result.isFailure(decodeTokenMessage({})));
 });
 
+test("the server's own webrtc-signal and the session-log ack decode", () => {
+  assert.ok(Result.isSuccess(decodeRenegotiateRequest({ requestRenegotiate: true })));
+  assert.ok(Result.isFailure(decodeRenegotiateRequest({ requestRenegotiate: false })));
+  // A relayed signal from a peer is another message.
+  assert.ok(Result.isFailure(decodeRenegotiateRequest({ sender: 'sid-guest', target: 'sid-host', offer: {} })));
+  assert.ok(Result.isSuccess(decodeSessionLogAck({ lastSeq: 41, auditLastSeq: -1 })));
+  assert.ok(Result.isFailure(decodeSessionLogAck({ lastSeq: 41 })));
+  assert.ok(Result.isFailure(decodeSessionLogAck(null)));
+});
+
 test('RoomStatus keeps its two values for the lifecycle machine', () => {
   assert.deepEqual(RoomStatus.literals, ['lobby', 'playing']);
 });
@@ -212,6 +225,13 @@ test("the server's bounds are the client's bounds", () => {
   assert.ok(Result.isFailure(decodeRomReadyPayload({ size: 512 * 1024 * 1024 + 1 })));
   assert.ok(Result.isFailure(decodeStartGamePayload({ mode: 'turbo' })));
   assert.ok(Result.isSuccess(decodeStartGamePayload({ mode: 'streaming', resyncEnabled: false, romHash: null })));
+});
+
+test('the pre-rename mode is not something a current page sends', () => {
+  // The server still coerces "lockstep" from cached pages; the schema leaves it out on purpose.
+  assert.ok(Result.isFailure(decodeStartGamePayload({ mode: 'lockstep' })));
+  assert.ok(Result.isFailure(decodeSetModePayload({ mode: 'lockstep' })));
+  assert.ok(Result.isSuccess(decodeSetModePayload({ mode: 'rollback' })));
 });
 
 test('a name is measured in code points, as the server measures it', () => {

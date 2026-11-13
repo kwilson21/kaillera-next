@@ -220,6 +220,27 @@ export const RomSharingUpdated = Schema.Struct({
 });
 export type RomSharingUpdated = typeof RomSharingUpdated.Type;
 
+/**
+ * `webrtc-signal` as the server itself sends it, to a room's new owner.
+ *
+ * Every other `webrtc-signal` is a relay of what a peer sent.
+ */
+export const RenegotiateRequest = Schema.Struct({
+  requestRenegotiate: Schema.Literal(true),
+});
+export type RenegotiateRequest = typeof RenegotiateRequest.Type;
+
+/**
+ * The `session-log` ack: the last log and audit seq the server has stored.
+ *
+ * A flush the server turns away is acked with no data at all.
+ */
+export const SessionLogAck = Schema.Struct({
+  lastSeq: Schema.Int,
+  auditLastSeq: Schema.Int,
+});
+export type SessionLogAck = typeof SessionLogAck.Type;
+
 /** `upload-token` and `reconnect-token`. */
 export const TokenMessage = Schema.Struct({
   token: Schema.String,
@@ -251,4 +272,6 @@ export const decodeJoinRoomAck = Schema.decodeUnknownResult(JoinRoomAck);
 export const decodeGameStarted = Schema.decodeUnknownResult(GameStarted);
 export const decodeGameEnded = Schema.decodeUnknownResult(GameEnded);
 export const decodeRomSharingUpdated = Schema.decodeUnknownResult(RomSharingUpdated);
+export const decodeRenegotiateRequest = Schema.decodeUnknownResult(RenegotiateRequest);
+export const decodeSessionLogAck = Schema.decodeUnknownResult(SessionLogAck);
 export const decodeTokenMessage = Schema.decodeUnknownResult(TokenMessage);

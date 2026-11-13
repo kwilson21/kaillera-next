@@ -28,6 +28,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 
 class _ModeCompatMixin:
+    # The generated client schema does not accept "lockstep": it describes what
+    # a current page sends. scripts/gen_protocol.py lists this validator as
+    # known; any other validator stops generation until it is handled there.
     @field_validator("mode", mode="before")
     @classmethod
     def _coerce_legacy_mode(cls, v: Any) -> Any:
@@ -312,6 +315,25 @@ class RomSharingUpdated(_ServerMessage):
     """`rom-sharing-updated`."""
 
     romSharing: bool
+
+
+class RenegotiateRequest(_ServerMessage):
+    """`webrtc-signal` as the server itself sends it, to a room's new owner.
+
+    Every other `webrtc-signal` is a relay of what a peer sent.
+    """
+
+    requestRenegotiate: Literal[True]
+
+
+class SessionLogAck(_ServerMessage):
+    """The `session-log` ack: the last log and audit seq the server has stored.
+
+    A flush the server turns away is acked with no data at all.
+    """
+
+    lastSeq: int
+    auditLastSeq: int
 
 
 class TokenMessage(_ServerMessage):

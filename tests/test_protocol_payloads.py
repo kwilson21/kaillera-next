@@ -29,7 +29,9 @@ from src.api.payloads import (
     JoinRoomAck,
     JoinRoomPayload,
     OpenRoomPayload,
+    RenegotiateRequest,
     RomSharingUpdated,
+    SessionLogAck,
     StartGamePayload,
     TokenMessage,
     UsersUpdated,
@@ -37,6 +39,7 @@ from src.api.payloads import (
 from src.api.signaling import (
     _end_game_locked,
     _join_room_locked,
+    _leave,
     _open_room_locked,
     _players_payload,
     _sid_to_room,
@@ -48,12 +51,14 @@ from src.api.signaling import (
 REPO = Path(__file__).parent.parent
 
 # Every event signaling.py emits with a payload of its own making. Relayed
-# events (webrtc-signal, data-message, ...) carry what a client sent.
+# events (data-message, rom-signal, peers' webrtc-signal, ...) carry what a
+# client sent; the one webrtc-signal the server writes itself is listed.
 SERVER_EVENTS: dict[str, type[BaseModel]] = {
     "users-updated": UsersUpdated,
     "game-started": GameStarted,
     "game-ended": GameEnded,
     "rom-sharing-updated": RomSharingUpdated,
+    "webrtc-signal": RenegotiateRequest,
     "upload-token": TokenMessage,
     "reconnect-token": TokenMessage,
 }
@@ -83,9 +88,9 @@ def _extra(pid: str, **more) -> dict:
     return {"sessionid": "ROOM1", "persistentId": pid, "reconnectToken": make_reconnect_token(pid), **more}
 
 
-async def _room_life(emitted: list[tuple[str, dict]]) -> dict[str, dict]:
-    """Drive the handlers through one match; returns the join-room acks by name."""
-    acks: dict[str, dict] = {}
+async def _room_life_steps() -> dict[str, dict | None]:
+    """Drive the handlers through one match; returns the socket acks by name."""
+    acks: dict[str, dict | None] = {}
 
     async def join(name: str, sid: str, pid: str, **more) -> None:
         err, ack = await _join_room_locked(sid, JoinRoomPayload(extra=_extra(pid, player_name=name, **more)))
@@ -102,12 +107,28 @@ async def _room_life(emitted: list[tuple[str, dict]]) -> dict[str, dict]:
     assert await _start_game_locked("sid-host", StartGamePayload(mode="rollback", gameId="ssb64")) is None
     # The guest's socket drops and comes back while the match runs.
     await join("rejoin", "sid-guest-2", "pid-guest")
+    match_id = rooms["ROOM1"].match_id
+    flush = {"matchId": match_id, "epoch": "e1", "entries": [{"seq": 0, "msg": "boot"}, {"seq": 1, "msg": "tick"}]}
+    acks["session-log"] = await signaling.session_log_handler("sid-host", flush)
+    acks["session-log refused"] = await signaling.session_log_handler("sid-host", {**flush, "matchId": "other"})
     assert await _end_game_locked("sid-host", EndGamePayload()) is None
+    # The host leaves: the guest becomes the owner and is asked to renegotiate.
+    await _leave("sid-host")
     return acks
 
 
+async def _room_life(db_path: str) -> dict[str, dict | None]:
+    # The session-log ack comes from the database layer, so it runs for real.
+    # Always closed: an open SQLite worker thread keeps a failed run from exiting.
+    await signaling.db.init_db(db_path)
+    try:
+        return await _room_life_steps()
+    finally:
+        await signaling.db.close_db()
+
+
 @pytest.fixture
-def room_life():
+def room_life(tmp_path):
     emitted: list[tuple[str, dict]] = []
     emit = AsyncMock(side_effect=lambda event, data=None, **kw: emitted.append((event, data)))
     with ExitStack() as stack:
@@ -123,10 +144,12 @@ def room_life():
             (signaling.desync_vision, "run_postmortem"),
         ]:
             stack.enter_context(patch.object(target, name, new=emit if name == "emit" else AsyncMock()))
+        # The scenario runs once per test, from one "IP": the limiter is not under test.
+        stack.enter_context(patch.object(signaling, "check", new=lambda *a, **k: True))
         # A room only admits joiners while a player's socket is connected.
         sids = dict.fromkeys(("sid-host", "sid-guest", "sid-guest-2", "sid-spec"), "example.test")
         stack.enter_context(patch.dict(signaling._sid_host, sids))
-        acks = _run(_room_life(emitted))
+        acks = _run(_room_life(str(tmp_path / "test.db")))
     return emitted, acks
 
 
@@ -153,12 +176,24 @@ def test_users_updated_covers_lobby_and_match(room_life):
 
 def test_join_room_acks_match_the_model(room_life):
     _, acks = room_life
-    for ack in acks.values():
-        JoinRoomAck.model_validate(ack)
+    for name in ("guest", "spectator", "rejoin"):
+        JoinRoomAck.model_validate(acks[name])
     # In the lobby the key is absent (not null); mid-match it names the match.
     assert "matchId" not in acks["guest"] and "matchId" not in acks["spectator"]
     assert acks["rejoin"]["status"] == "playing"
     assert isinstance(acks["rejoin"]["matchId"], str)
+
+
+def test_session_log_ack_matches_the_model(room_life):
+    _, acks = room_life
+    assert SessionLogAck.model_validate(acks["session-log"]).lastSeq == 1
+    # A flush the server turns away carries no ack data.
+    assert acks["session-log refused"] is None
+
+
+def test_the_new_owner_is_asked_to_renegotiate(room_life):
+    emitted, _ = room_life
+    assert ("webrtc-signal", {"requestRenegotiate": True}) in emitted
 
 
 def test_game_started_and_ended_name_the_same_match(room_life):
@@ -238,6 +273,7 @@ def test_generator_refuses_what_it_cannot_translate():
     assert "value: Schema.NullOr(Schema.Literals(['a', 'b']))," in render(Literal["a", "b"] | None)
     assert "value: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(2)))," in render(int, default=3, ge=2)
     assert "value: Schema.Record(Schema.String, Schema.Array(Schema.Boolean))," in render(dict[str, list[bool]])
+    assert "value: Schema.Literal(true)," in render(Literal[True])
     for annotation, field in [
         (int | str, {}),
         (bytes, {}),
@@ -247,3 +283,28 @@ def test_generator_refuses_what_it_cannot_translate():
     ]:
         with pytest.raises(gen.Unsupported):
             render(annotation, **field)
+
+
+def test_generator_refuses_a_validator_it_does_not_know():
+    """A validator changes what a model accepts without changing its annotations."""
+    import types
+
+    from pydantic import field_validator
+
+    gen = _generator()
+
+    class Thing(BaseModel):
+        value: str
+
+        @field_validator("value", mode="before")
+        @classmethod
+        def _lowercase(cls, v):
+            return v.lower()
+
+    module = types.ModuleType("fake_payloads")
+    Thing.__module__ = "fake_payloads"
+    module.Thing = Thing
+    with pytest.raises(gen.Unsupported, match="_lowercase"):
+        gen.Generator(module).render()
+    # The one validator payloads.py has is listed, with what the schema does about it.
+    assert set(gen.KNOWN_VALIDATORS) == {"_coerce_legacy_mode"}
