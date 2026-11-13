@@ -151,10 +151,16 @@
     return _getSetting('kn-analog-sensitivity', parseFloat, (v) => v >= 0.5 && v <= 2.0, 1.0);
   }
 
+  // The axis arithmetic below (_analogScale, _digitalSnap, axisTransform,
+  // displayName) is KNCore's (web/src/gamepad-axes.ts) when the bundle is
+  // loaded. Each keeps the same computation in place for a page without it;
+  // tests/ts/gamepad-axes.test.ts holds the two to the same values.
   function _analogScale(value, dz) {
     const sign = Math.sign(value);
     const abs = Math.abs(value);
     if (abs < dz) return 0;
+    const scale = window.KNCore?.analogScale;
+    if (scale) return scale(value, dz, _getRange(), _getSensitivity());
     const n64Max = Math.floor(127 * (_getRange() / 100));
     const scaled = (abs - dz) / (1 - dz);
     const sens = _getSensitivity();
@@ -165,6 +171,8 @@
   function _digitalSnap(value, dz) {
     const abs = Math.abs(value);
     if (abs < dz) return 0;
+    const snap = window.KNCore?.digitalSnap;
+    if (snap) return snap(value, dz, _getRange());
     return Math.sign(value) * Math.floor(127 * (_getRange() / 100));
   }
 
@@ -176,6 +184,12 @@
   // (center, see axisCenter) is subtracted, then axisRange (the raw value of full deflection) is divided
   // out so pads that top out below 1 still reach the full N64 range.
   function axisTransform(profile, name) {
+    const core = window.KNCore;
+    if (core?.axisSign && core.normalizeAxis) {
+      const coreSign = core.axisSign(profile, name);
+      const coreRange = profile.axisRange ?? 1;
+      return (raw, center = 0) => core.normalizeAxis(raw, center, coreSign, coreRange);
+    }
     let sign = 1;
     if (name === 'lx' || name === 'ly') {
       const bits = profile.axes?.[name === 'lx' ? 'stickX' : 'stickY']?.bits;
@@ -395,6 +409,8 @@
   // Human-readable name for a gamepad id: drops Chrome's trailing "(STANDARD GAMEPAD Vendor: … Product: …)"
   // and Firefox's leading "045e-0b13-" vendor/product prefix.
   function displayName(id) {
+    const coreName = window.KNCore?.gamepadDisplayName;
+    if (coreName) return coreName(id);
     const name = id
       .replace(/^[0-9a-f]{1,4}-[0-9a-f]{1,4}-/i, '')
       .replace(/\s*\((?:XInput )?(?:STANDARD GAMEPAD|Vendor:)[^)]*\)\s*$/, '')
