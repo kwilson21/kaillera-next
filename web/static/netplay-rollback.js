@@ -9494,6 +9494,22 @@
     waitForEmu();
   };
 
+  // A page can reach the ready phase without passing its own all-loaded
+  // check (the host's state arrives first, or a sync that timed out is
+  // completed by a late state). The players it knows at that moment are the
+  // ones it starts with; without this record a newcomer would be counted by
+  // the ready barrier after all.
+  const _recordStartCohortIfMissing = (reason) => {
+    if (_startCohortSlots) return;
+    _startCohortSlots = new Set();
+    for (const [peerSid, p] of Object.entries(_peers)) {
+      if (p.slot === null || p.slot === undefined) continue;
+      if (_isPeerPendingLateJoin(peerSid, p)) continue;
+      _startCohortSlots.add(p.slot);
+    }
+    _syncLog(`start cohort: slots=[${[..._startCohortSlots].join(',')}] reason=${reason}`);
+  };
+
   const checkAllEmuReady = () => {
     if (_phase < PHASE_EMU_READY) return;
     if (_isSpectator) return;
@@ -9524,6 +9540,7 @@
     for (const [peerSid, p] of Object.entries(_peers)) {
       if (_startCohortSlots.has(p.slot)) _clearPendingLateJoinPeer(peerSid, p.slot, 'in the start cohort');
     }
+    _syncLog(`start cohort: slots=[${[..._startCohortSlots].join(',')}] reason=all-loaded`);
 
     _syncLog(`${readyPeers.length + 1} emulators ready -- syncing initial state`);
     setStatus('Syncing...');
@@ -10080,6 +10097,7 @@
   const _markInitialStateReady = () => {
     _clearHostInitialStateWait();
     _clearInputsForNewMatch('initial-state-ready');
+    _recordStartCohortIfMissing('initial-state-ready');
     _phase = PHASE_LOCKSTEP_READY;
     if (_rttComplete) broadcastLockstepReady();
     checkAllLockstepReady();
@@ -10244,6 +10262,7 @@
       _guestStateAudioFifo = captured.audioFifo;
       _guestStateCapturedLocally = captured.kind === 'kn-sync';
       _clearInputsForNewMatch('host-capture-ready');
+      _recordStartCohortIfMissing('host-capture-ready');
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
         broadcastLockstepReady();

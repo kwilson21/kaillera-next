@@ -789,7 +789,15 @@
   // Rollback redundancy (P2): each input packet carries the last N frames
   // of local inputs. Receivers dedupe by frame tag via kn_feed_input's
   // existing present/frame check, so duplicates are idempotent corrections.
+  //
+  // The encoder and decoder are KNCore.encodeInput / KNCore.decodeInput
+  // (web/src/input-wire.ts), where decode(encode(x)) == x is proved for every
+  // input that fits the format. The code below them is the same format, used
+  // only if the bundle did not load (the demo page does not load it);
+  // tests/ts/input-wire.test.ts holds the two to the same bytes.
   const encodeInput = (frame, input, ackFrame = -1, redundantFrames = null) => {
+    const encode = window.KNCore?.encodeInput;
+    if (encode) return encode(frame, input, ackFrame, redundantFrames);
     const redCount = redundantFrames ? redundantFrames.length : 0;
     const arr = new Int32Array(6 + redCount * 4);
     arr[0] = frame;
@@ -810,6 +818,8 @@
   };
 
   const decodeInput = (buf) => {
+    const decode = window.KNCore?.decodeInput;
+    if (decode) return decode(buf);
     const arr = new Int32Array(buf);
     const out = {
       frame: arr[0],

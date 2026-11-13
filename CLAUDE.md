@@ -70,7 +70,7 @@ kaillera-next/
 │           ├── og_card.py   # live per-room invite card composed from the host's latest frame (PIL)
 │           ├── turn.py      # Cloudflare Realtime TURN credentials for /ice-servers
 │           ├── signaling.py # Socket.IO events — rooms, WebRTC relay, game data
-│           ├── payloads.py  # Pydantic v2 payload models for Socket.IO validation
+│           ├── payloads.py  # Pydantic v2 payload models, both directions; source of web/src/protocol.gen.ts (`npm run protocol`)
 │           ├── desync_vision.py  # Claude vision endpoint for screenshot diff
 │           └── desync_prompts.py # Prompt templates for vision-based desync analysis
 ├── web/             # Static frontend
@@ -123,6 +123,7 @@ kaillera-next/
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
+│   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
