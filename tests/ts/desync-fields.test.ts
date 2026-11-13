@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { decodeDesyncDigest } from '../../web/src/desync-digest.ts';
 import {
   FIELD_COUNT,
   MATCH_PHASE_FIELD,
@@ -109,11 +110,16 @@ interface DetectorWindow {
   KNState: DetectorState;
   _peers: Record<string, { slot: number; dc: { readyState: string; send: () => void } }>;
 }
+/** Something a peer could send in place of a digest. */
+type MalformedDigest =
+  | null
+  | string
+  | { frame?: number | string; hashes?: (number | string | null)[] | string | null; replayMeta?: string | number };
 interface Detector {
   init: (module: CoreExports, mode: string) => void;
   tick: (frame: number) => void;
   setConfirmWindow: (frames: number) => void;
-  onPeerDigest: (peerId: string, payload: { frame: number; hashes: number[] }) => void;
+  onPeerDigest: (peerId: string, payload: { frame: number; hashes: number[] } | MalformedDigest) => void;
   events: EventTarget;
 }
 interface DetectorCore {
@@ -121,11 +127,14 @@ interface DetectorCore {
   // detector builds none without it.
   digestFrame: typeof digestFrame;
   desyncFieldsToFlag?: typeof fieldsToFlag;
+  decodeDesyncDigest?: typeof decodeDesyncDigest;
 }
+const CORE: DetectorCore = { digestFrame, desyncFieldsToFlag: fieldsToFlag, decodeDesyncDigest };
 
 /**
  * Run web/static/kn-desync-detector.js through a scripted match against one
  * peer whose digests now and then differ, and return every suspect it emits.
+ * `malformed`, if given, is sent as that peer's digest every tenth frame.
  */
 // The engine's rollback window in the scripted match: digests are for the
 // frame this many ticks back.
@@ -139,8 +148,9 @@ const runDetector = (
   mode: string,
   isLocalHost: boolean,
   core: DetectorCore = { digestFrame },
-  source: string = DETECTOR,
+  malformed?: readonly MalformedDigest[],
 ): Suspect[] => {
+  const source = DETECTOR;
   const slot = isLocalHost ? 1 : 0;
   const state: DetectorState = { isLocalHost, matchId: 'm1', peers: { peerA: { slot } } };
   const window: DetectorWindow = {
@@ -199,9 +209,8 @@ const runDetector = (
     const r = next() % 100;
     if (r < 12) theirs[next() % FIELD_COUNT] = 99;
     if (r === 12) theirs[MATCH_PHASE_FIELD] = 98;
-    // A digest cut short, which no honest peer sends.
-    if (r === 13) theirs.length = 10;
     detector.onPeerDigest('peerA', { frame, hashes: theirs });
+    if (malformed && frame % 10 === 0) detector.onPeerDigest('peerA', malformed[(frame / 10) % malformed.length]!);
   }
   return suspects;
 };
@@ -245,20 +254,85 @@ test("the detector emits what it did before, with its own rule and with KNCore's
     const builtIn = runDetector(g.mode, g.isLocalHost);
     assert.equal(builtIn.length, g.count, `${where}, built-in rule`);
     assert.equal(digestOf(builtIn), g.sha256, `${where}, built-in rule`);
-    const withCore = runDetector(g.mode, g.isLocalHost, { digestFrame, desyncFieldsToFlag: fieldsToFlag });
+    const withCore = runDetector(g.mode, g.isLocalHost, CORE);
     assert.deepStrictEqual(withCore, builtIn, `${where}, KNCore rule`);
     assert.ok(g.count > 10, `${where}: the script should produce suspects to compare`);
   }
 });
 
-test('the detector asks KNCore for the decision when the bundle is loaded', () => {
-  let calls = 0;
+test('the detector asks KNCore for the decision and the decoding when the bundle is loaded', () => {
+  const calls = { flag: 0, decode: 0 };
   runDetector('B', false, {
     digestFrame,
     desyncFieldsToFlag: (...args) => {
-      calls++;
+      calls.flag++;
       return fieldsToFlag(...args);
     },
+    decodeDesyncDigest: (input) => {
+      calls.decode++;
+      return decodeDesyncDigest(input);
+    },
   });
-  assert.ok(calls > 1000, `KNCore.desyncFieldsToFlag was called ${calls} times`);
+  assert.ok(calls.flag > 1000, `KNCore.desyncFieldsToFlag was called ${calls.flag} times`);
+  assert.equal(calls.decode, 1500, 'one decode per digest received');
+});
+
+// ── Digests from a peer are decoded before they are compared ──────────────
+
+const fullHashes = (): number[] => Array.from({ length: FIELD_COUNT }, (_, fid) => fid + 1);
+
+const MALFORMED: readonly MalformedDigest[] = [
+  null,
+  'digest',
+  {},
+  { frame: 30 },
+  { frame: 30, hashes: null },
+  { frame: 30, hashes: 'abc' },
+  { frame: 30, hashes: [1, 2, 3] },
+  { frame: 30, hashes: fullHashes().map(String) },
+  { frame: 30, hashes: [...fullHashes().slice(1), null] },
+  { frame: '30', hashes: fullHashes() },
+  { frame: 30.5, hashes: fullHashes() },
+  { hashes: fullHashes() },
+];
+
+test('a digest that is not one is dropped, with and without the bundle', () => {
+  for (const g of GOLDEN) {
+    const where = `mode ${g.mode}, ${g.isLocalHost ? 'host' : 'guest'}`;
+    // Every malformed digest is dropped, so the suspects are exactly those of
+    // the same match without them. Before, some of these threw inside the
+    // DataChannel handler and a short `hashes` flagged every missing field.
+    assert.equal(digestOf(runDetector(g.mode, g.isLocalHost, undefined, MALFORMED)), g.sha256, `${where}, built-in`);
+    assert.equal(digestOf(runDetector(g.mode, g.isLocalHost, CORE, MALFORMED)), g.sha256, `${where}, KNCore`);
+  }
+});
+
+test('decodeDesyncDigest accepts what the detector sends and nothing else', () => {
+  for (const bad of MALFORMED) assert.equal(decodeDesyncDigest(bad), null, JSON.stringify(bad));
+  // The message as sent: a type tag, the digest, and no replay data.
+  assert.deepStrictEqual(decodeDesyncDigest({ type: 'digest', frame: 7, hashes: fullHashes(), replayMeta: null }), {
+    frame: 7,
+    hashes: fullHashes(),
+    replayMeta: null,
+  });
+  const replayMeta = {
+    target: 100,
+    final: 104,
+    length: 4,
+    pre: fullHashes(),
+    post: fullHashes(),
+    firstTrajectoryDivergence: {
+      offset: 2,
+      absoluteFrame: 103,
+      fieldId: 16,
+      field: 'rng',
+      slot: null,
+      replayHash: 5,
+      forwardHash: 6,
+    },
+  };
+  assert.deepStrictEqual(decodeDesyncDigest({ frame: 7, hashes: fullHashes(), replayMeta })?.replayMeta, replayMeta);
+  // Replay data is forwarded with a desync report, so it must fit as well.
+  assert.equal(decodeDesyncDigest({ frame: 7, hashes: fullHashes(), replayMeta: 'x' }), null);
+  assert.equal(decodeDesyncDigest({ frame: 7, hashes: fullHashes(), replayMeta: { ...replayMeta, pre: ['a'] } }), null);
 });

@@ -13,6 +13,7 @@ import {
   type AxisName,
   type AxisProfile,
 } from '../../web/src/gamepad-axes.ts';
+import { decodeGamepadProfile } from '../../web/src/gamepad-profile.ts';
 import { lcg, plain } from './load-shared.ts';
 
 test('the default range of 66 gives the N64 maximum of 83', () => {
@@ -102,7 +103,16 @@ interface AxesCore {
   axisSign: typeof axisSign;
   normalizeAxis: typeof normalizeAxis;
   gamepadDisplayName: typeof gamepadDisplayName;
+  decodeGamepadProfile: typeof decodeGamepadProfile;
 }
+const CORE: AxesCore = {
+  analogScale,
+  digitalSnap,
+  axisSign,
+  normalizeAxis,
+  gamepadDisplayName,
+  decodeGamepadProfile,
+};
 interface Pad {
   id: string;
   mapping: string;
@@ -144,9 +154,11 @@ const PAD_IDS = [
 /**
  * Run web/static/gamepad-manager.js against scripted pads, profiles and
  * settings, and return every input it read. -0 is kept apart from 0: the
- * pipeline produces it and the values are sent to other peers.
+ * pipeline produces it and the values are sent to other peers. `stored`, if
+ * given, is put in storage as every pad's saved profile, exactly as written,
+ * in place of the profiles the script saves itself.
  */
-const runManager = (core?: AxesCore): string[] => {
+const runManager = (core?: AxesCore, stored?: string): string[] => {
   const source = readFileSync(new URL('../../web/static/gamepad-manager.js', import.meta.url), 'utf8');
   const pads: (Pad | null)[] = [];
   const store = new Map<string, string>();
@@ -173,6 +185,7 @@ const runManager = (core?: AxesCore): string[] => {
       window,
       KNState: state,
       APISandbox: { nativeGetGamepads: () => pads },
+      console: { warn: () => undefined },
       localStorage: storage,
       // Advance past the settings cache on every read, so a changed range applies.
       performance: { now: () => (clock += 2000) },
@@ -202,7 +215,8 @@ const runManager = (core?: AxesCore): string[] => {
     pads[0] = null;
     poll();
     store.clear();
-    if (round % 4 === 1) {
+    if (stored !== undefined) store.set(`gamepad-profile:${id}`, stored);
+    if (round % 4 === 1 && stored === undefined) {
       // A remapped pad: both sticks' Y flipped, C stick on other axes.
       manager.saveGamepadProfile(id, {
         buttons: { 0: 1, 1: 2, 2: 1 << 20, 3: 1 << 23 },
@@ -247,7 +261,7 @@ test('gamepad-manager.js reads the same inputs as before, with and without the b
   const builtIn = runManager();
   assert.equal(builtIn.length, GOLDEN.reads);
   assert.equal(createHash('sha256').update(builtIn.join('\n')).digest('hex'), GOLDEN.sha256, 'built-in arithmetic');
-  const withCore = runManager({ analogScale, digitalSnap, axisSign, normalizeAxis, gamepadDisplayName });
+  const withCore = runManager(CORE);
   assert.deepStrictEqual(withCore, builtIn, 'KNCore arithmetic');
   // The script must move the sticks: more than a handful of distinct reads.
   assert.ok(new Set(builtIn).size > 2000, `only ${new Set(builtIn).size} distinct reads`);
@@ -266,7 +280,14 @@ test('gamepad-manager.js reads the same inputs as before, with and without the b
 });
 
 test('gamepad-manager.js calls KNCore for each computation when the bundle is loaded', () => {
-  const calls = { analogScale: 0, digitalSnap: 0, axisSign: 0, normalizeAxis: 0, gamepadDisplayName: 0 };
+  const calls = {
+    analogScale: 0,
+    digitalSnap: 0,
+    axisSign: 0,
+    normalizeAxis: 0,
+    gamepadDisplayName: 0,
+    decodeGamepadProfile: 0,
+  };
   runManager({
     analogScale: (...args) => {
       calls.analogScale++;
@@ -288,6 +309,71 @@ test('gamepad-manager.js calls KNCore for each computation when the bundle is lo
       calls.gamepadDisplayName++;
       return gamepadDisplayName(id);
     },
+    decodeGamepadProfile: (stored) => {
+      calls.decodeGamepadProfile++;
+      return decodeGamepadProfile(stored);
+    },
   });
   for (const [name, count] of Object.entries(calls)) assert.ok(count > 0, `${name} was never called`);
+});
+
+// ── Saved profiles are decoded before they are used ───────────────────────
+
+test('decodeGamepadProfile accepts what the wizard saves and nothing unusable', () => {
+  // What play.js writes after a remap: JSON drops the undefined range and centre.
+  const saved = {
+    name: 'Custom',
+    buttons: { 0: 1, 1: 2, 9: 8 },
+    axes: { stickX: { index: 0, bits: [16, 17] }, stickY: { index: 1, bits: [19, 18] } },
+    axisButtons: { 2: { pos: 1 << 21, neg: 1 << 20 } },
+    deadzone: 0.3,
+  };
+  assert.deepStrictEqual(decodeGamepadProfile(JSON.parse(JSON.stringify(saved))), saved);
+  // The Switch 2 Pro's extra fields, and a null where JSON wrote a non-number.
+  const full = { ...saved, axisRange: 0.8, axisCenter: 'auto', axes: null };
+  assert.deepStrictEqual(decodeGamepadProfile(full), full);
+  // Keys this version does not know are left out, not an error.
+  assert.deepStrictEqual(decodeGamepadProfile({ buttons: {}, rumble: true }), { buttons: {} });
+
+  for (const bad of [
+    null,
+    'profile',
+    [],
+    {},
+    { buttons: null },
+    { buttons: { 0: 'A' } },
+    { buttons: { 0: 1.5 } },
+    { buttons: {}, axes: { stickX: { index: -1 } } },
+    { buttons: {}, axes: { stickX: { bits: [16, 17] } } },
+    { buttons: {}, axisButtons: { 2: { pos: 1 } } },
+    // An index below zero, or not a number, has no entry in the pad's arrays.
+    { buttons: { '-1': 1 } },
+    { buttons: { A: 1 } },
+    { buttons: { '1.5': 1 } },
+    { buttons: {}, axisButtons: { '-2': { pos: 1, neg: 2 } } },
+    { buttons: {}, axisRange: 0 },
+    { buttons: {}, axisCenter: 'manual' },
+  ]) {
+    assert.equal(decodeGamepadProfile(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('a saved profile that does not fit is ignored and the pad reads as built in', () => {
+  // The whole script with every pad's saved profile unusable, against the
+  // same script with nothing usable saved at all (an empty string, which the
+  // manager treats as no profile): the reads must be the same.
+  const builtIn = runManager(CORE, '');
+  assert.ok(new Set(builtIn).size > 2000);
+  for (const stored of [
+    '{}',
+    '{"buttons":null}',
+    '{"buttons":{"0":"A"}}',
+    '{"buttons":{"-1":1}}',
+    '{"buttons":{},"axisButtons":{"-2":{"pos":1,"neg":2}}}',
+    '[1,2,3]',
+    '"x"',
+    '{not json',
+  ]) {
+    assert.deepStrictEqual(runManager(CORE, stored), builtIn, `stored ${stored}`);
+  }
 });
