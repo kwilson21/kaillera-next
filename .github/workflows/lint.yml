@@ -28,7 +28,7 @@ permissions:
 jobs:
   js:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Install pinned tools
@@ -47,6 +47,20 @@ jobs:
         run: npm run diagram:check
       - name: Model-check specs (Quint)
         run: npm run spec
+
+  # Exhaustive model checking (Apalache): every run of the specs up to a
+  # bounded number of steps, where the js job's `npm run spec` samples deeper
+  # random runs. Separate job because it needs Java and takes several minutes.
+  spec-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # Apalache needs Java 17+, which the runner image already has.
+      - name: Install pinned tools
+        run: npm install --ignore-scripts --no-package-lock
+      - name: Verify specs for every run up to 6 steps
+        run: npm run spec:verify
 
   # Proofs for the files in LemmaScript-files.txt. `lsc check` regenerates the
   # Dafny from the annotated TypeScript and verifies it; the diff step fails
