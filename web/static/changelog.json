@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.4",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "close the unverified items from #117 to #120: proved connection identity, exhaustive spec checks, streaming boot error (#121)"
+      }
+    ]
+  },
+  {
     "version": "0.67.3",
     "date": "2026-11-13",
     "changes": [
