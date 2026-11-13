@@ -6837,7 +6837,6 @@
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
-    if (msg.type === 'join-the-start') handleJoinTheStart(msg);
     if (msg.type === 'sync-request-full-socket') handleSocketSyncRequest(msg);
     if (msg.type === 'sync-state-socket') handleSocketSyncState(msg);
     if (msg.type === 'late-join-ready') {
@@ -6941,21 +6940,19 @@
       _lateJoinWait = null;
       if (outcome === 'admitted') _joinTheStart('the host is not running yet');
       if (outcome !== 'timeout') return;
-      // I1: the deadline has a recovery action. A host that is running is
-      // sending frames; if none have arrived it is still waiting for
-      // players, so load as one of them. Otherwise say so and stop waiting.
-      if (!(_lastRemoteFrame > 0)) {
-        _joinTheStart('no answer and the host is not running');
-        return;
-      }
-      _syncLog(`LATE-JOIN-WAIT-TIMEOUT after ${LATE_JOIN_WAIT_TIMEOUT_MS}ms: the host is running but sent no state`);
+      // I1: the deadline has a recovery action: say so and stop waiting.
+      // It does not guess that the host is not running. A running host sends
+      // no input to a joiner that is still pending, so "no frames received"
+      // looks the same either way; only the host's own answer admits a
+      // player to the start.
+      _syncLog(`LATE-JOIN-WAIT-TIMEOUT after ${LATE_JOIN_WAIT_TIMEOUT_MS}ms: no answer from the host`);
       KNEvent('late-join-timeout', 'No game state from the host', { waitedMs: LATE_JOIN_WAIT_TIMEOUT_MS });
       setStatus('Could not get the game state from the host — reload to try again');
     });
   };
 
-  const handleJoinTheStart = (msg) => {
-    if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
+  // Called only for a message that arrived on the host's own data channel.
+  const handleJoinTheStart = () => {
     if (_lateJoinWait) _lateJoinWait.admitted();
     else _joinTheStart('the host is not running yet');
   };
@@ -6974,8 +6971,17 @@
       if (_phase !== PHASE_GAME_STARTED && _phase !== PHASE_EMU_READY) return;
       const joinerSid = _peerKey(msg.requesterSid);
       if (!joinerSid || !_peers[joinerSid]) return;
+      // Answered on the joiner's own data channel, not through the server
+      // relay: any room member can write to the relay, and a forged answer
+      // would pull a player out of a real late join. The joiner accepts it
+      // only from the connection it holds to slot 0. If the channel is not
+      // open yet, the joiner's repeated request gets its answer once it is.
+      const joinerDc = _peers[joinerSid].dc;
+      if (joinerDc?.readyState !== 'open') return;
       _syncLog(`late-join request from ${joinerSid} before the match is running: admitting to the start`);
-      _signalSocket.emit('data-message', { type: 'join-the-start', targetSid: joinerSid });
+      try {
+        joinerDc.send('join-the-start');
+      } catch (_) {}
       return;
     }
     const requesterSid = _peerKey(msg.requesterSid);
@@ -8088,6 +8094,7 @@
           _config?.onToast?.('Player joining...');
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
+        if (e.data === 'join-the-start' && peer.slot === 0) handleJoinTheStart();
         if (e.data === 'late-join-resume') {
           const wasPausedForLateJoin = _runSubstate === RUN_LATE_JOIN_PAUSE;
           if (wasPausedForLateJoin) _runSubstate = RUN_NORMAL;
