@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { checkPeerJson, checkPeerText, checkRelay, textKind } from '../../web/src/peer-protocol.ts';
-import { createProtocolObserver, PEER_SAMPLE, type ProtocolReport } from '../../web/src/socket-boundary.ts';
+import {
+  createProtocolObserver,
+  PEER_KINDS_MAX,
+  PEER_SAMPLE,
+  type ProtocolReport,
+} from '../../web/src/socket-boundary.ts';
 
 const ok = (channel: 'lockstep' | 'sync-state' | 'rom-transfer', text: string): void => {
   assert.equal(checkPeerText(channel, text).issue, null, text);
@@ -204,6 +209,15 @@ test("signal relays carry a sender; the server's own renegotiate request does no
   assert.equal(checkRelay('users-updated', {}), null);
 });
 
+test('a renegotiate request relayed from a peer is still held to the relay schema', () => {
+  // The server whitelists `requestRenegotiate` on relays and adds `sender`.
+  const relayed = { sender: 'a', target: 'b', requestRenegotiate: true };
+  assert.equal(checkRelay('webrtc-signal', relayed)?.kind, 'webrtc-signal');
+  assert.equal(issueOf('webrtc-signal', relayed), null);
+  assert.notEqual(issueOf('webrtc-signal', { ...relayed, offer: 'not-a-description' }), null);
+  assert.notEqual(issueOf('webrtc-signal', { ...relayed, candidate: 7 }), null);
+});
+
 test('checkPeerJson names the route and type', () => {
   assert.deepEqual(checkPeerJson('rom-transfer', { type: 'rom-complete' }), {
     kind: 'rom-transfer rom-complete',
@@ -243,4 +257,16 @@ test('only the first few messages of a kind are checked', () => {
   // Another kind still has its own sample.
   observer.peerText('lockstep', 'rb-delay:broken');
   assert.equal(reports.length, 1);
+});
+
+test('a flood of made-up kinds does not switch off the kinds already being checked', () => {
+  const { reports, observer } = collector();
+  observer.peerText('lockstep', 'rb-check:1:2:3');
+  for (let i = 0; i < PEER_KINDS_MAX + 50; i += 1) observer.peerText('lockstep', `junk${i}:x`);
+  // All the junk is one kind of mismatch: one report.
+  assert.equal(reports.length, 1);
+  // rb-check was in the table before the flood and still has sample left.
+  observer.peerText('lockstep', 'rb-check:broken');
+  assert.equal(reports.length, 2);
+  assert.equal(reports[1]?.message, 'dc lockstep rb-check');
 });
