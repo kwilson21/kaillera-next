@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.9",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the relay stamps the true sender and pages check it before acting (#149)"
+      }
+    ]
+  },
+  {
     "version": "0.67.8",
     "date": "2026-11-13",
     "changes": [

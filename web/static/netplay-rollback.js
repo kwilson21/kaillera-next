@@ -6838,6 +6838,26 @@
 
   const onDataMessage = (msg) => {
     if (!msg?.type) return;
+    // Any member of the room, spectators included, can write to the server's
+    // relay, so nothing a message says about itself is believed. The server
+    // stamps the true sender (KNCore.checkRelayed, web/src/relay.ts): a
+    // message that installs emulator state is taken only from slot 0, and a
+    // request is answered to the socket that really sent it, not the one it
+    // names. A message with no stamp comes from a server older than the
+    // stamp and is handled as before: server and pages deploy together, and
+    // a member cannot remove a stamp the server adds. A stamped message this
+    // page cannot check (the bundle did not load) is refused.
+    const checkRelayed = window.KNCore?.checkRelayed;
+    if (!checkRelayed && Object.hasOwn(msg, 'knFrom')) {
+      _syncLog(`relayed ${msg.type} refused: no KNCore to check its sender`);
+      return;
+    }
+    const from = checkRelayed ? checkRelayed(msg) : null;
+    if (from && !from.allowed) {
+      _syncLog(`relayed ${msg.type} refused: sender ${from.sid} slot=${from.slot}`);
+      return;
+    }
+    if (from?.stamped) msg = { ...msg, requesterSid: from.sid, senderSid: from.sid };
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);

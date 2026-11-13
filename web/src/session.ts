@@ -6,16 +6,17 @@
  * tell them apart). The scenario tests in tests/ts replay that model's runs
  * against it.
  *
- * Stage 2, in two steps:
+ * Stage 2:
  *  - "Is a game on" is read from this machine. play.js still writes its old
  *    `gameRunning` flag beside it and reports any disagreement
  *    (`session-disagree`) on every signaling reconnect; the flag goes once
  *    production shows none.
  *  - On a signaling reconnect the page reconciles with the server
  *    (`rejoined`): this one decides, there was no rule before it.
- *  - The late-join states observe. play.js still decides from `_lateJoin`
- *    and `_pendingLateJoin` and reports, at each place it reads one, whether
- *    the machine would have answered the same.
+ *  - The late-join states decide too: play.js reads "is the next engine
+ *    start a late join" and "is the page waiting for a ROM" from here. It
+ *    still writes `_lateJoin` and `_pendingLateJoin` beside the machine and
+ *    reports any disagreement at each read; they go with `gameRunning`.
  */
 import { Context, Effect, Schema } from 'effect';
 import { setupEffect } from '@xstate/effect';
