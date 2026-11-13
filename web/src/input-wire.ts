@@ -113,6 +113,8 @@ export function validRecord(frame: number, r: FrameInput): boolean {
 }
 
 /** The two inputs press the same buttons and hold the sticks in the same place. */
+//@ ensures \result === (a.buttons === b.buttons && a.lx === b.lx && a.ly === b.ly && a.cx === b.cx && a.cy === b.cy)
+//@ ensures a === b ==> \result
 export function inputEqual(a: WireInput, b: WireInput): boolean {
   return a.buttons === b.buttons && a.lx === b.lx && a.ly === b.ly && a.cx === b.cx && a.cy === b.cy;
 }
