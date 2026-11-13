@@ -1,20 +1,18 @@
 /**
- * Does the page lifecycle machine (web/src/session.ts) agree with play.js
- * through a late join, spectating and a host reload, against the real server?
+ * The page's lifecycle through a late join, spectating, reconnects and a
+ * host reload, in real browsers against the real server.
  *
- * The machine only observes: on every signaling reconnect play.js compares
- * the machine's state with its own `gameRunning` flag and reports
- * `session-disagree` if they differ. So each scenario walks the pages through
- * a lifecycle change and then blips their signaling socket to force that
- * comparison. The machine also reports `late-join-stranded` when a late
- * joiner has waited more than 20 s for state. For the late joiner that is a
- * notice, not a disagreement: the scenario times the wait itself and fails
- * only if the notice and the measured wait contradict each other. For anyone
- * else it is a failure.
- *
- * The machine also mirrors play.js's two late-join flags, and play.js asks it
- * at every place it reads one whether it would have answered the same; those
- * disagreements are reported as `session-disagree` too and fail a checkpoint.
+ * play.js reads its lifecycle from the machine in web/src/session.ts and
+ * keeps no flags of its own, so what is checked here is what the page shows
+ * (lobby up or down, frames advancing) at each step. Each checkpoint also
+ * blips the page's signaling socket, to take it through a rejoin, and fails
+ * on any disagreement an observing TypeScript module reported
+ * (`play-disagree`, `protocol-mismatch`; `session-disagree` from a page
+ * built before the old page flags were deleted). The machine reports
+ * `late-join-stranded` when a late joiner has waited more than 20 s for
+ * state. For the late joiner that is a notice: the scenario times the wait
+ * itself and fails only if the notice and the measured wait contradict each
+ * other. For anyone else it is a failure.
  *
  * Scenarios (SCENARIO picks one; default runs them all, each in its own room):
  *   late-join         a guest with no ROM joins a game already running, is
@@ -85,6 +83,8 @@ if (!ROM || !fs.existsSync(ROM)) {
 fs.mkdirSync(OUT, { recursive: true });
 
 const BLIP_MS = 3000;
+// Reports that mean a TypeScript module and the page (or the server) differ.
+const DISAGREEMENTS = ['session-disagree', 'play-disagree', 'protocol-mismatch'];
 const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
@@ -238,7 +238,7 @@ const checkpoint = async (name, expectations, failures, log) => {
   for (const { player, lobby, lateJoiner = false } of expectations) {
     const reconnects = await blip(player);
     const lobbyShown = await lobbyShownOn(player);
-    const disagreements = (await eventsOf(player)).filter((e) => e.type === 'session-disagree');
+    const disagreements = (await eventsOf(player)).filter((e) => DISAGREEMENTS.includes(e.type));
     const stranded = await countOf(player, 'late-join-stranded');
     log.push({ checkpoint: name, player: player.label, reconnects, lobbyShown, disagreements, stranded });
     console.log(
@@ -248,7 +248,7 @@ const checkpoint = async (name, expectations, failures, log) => {
     if (reconnects < 1) failures.push(`${name}: ${player.label} never reconnected, so nothing was compared`);
     if (lobbyShown !== lobby) failures.push(`${name}: ${player.label} ${lobby ? 'is not' : 'is'} showing the lobby`);
     if (disagreements.length)
-      failures.push(`${name}: ${player.label} machine disagreed with the page ${JSON.stringify(disagreements)}`);
+      failures.push(`${name}: ${player.label} reported a disagreement ${JSON.stringify(disagreements)}`);
     if (stranded && !lateJoiner) failures.push(`${name}: ${player.label} was reported as a stranded late joiner`);
   }
 };

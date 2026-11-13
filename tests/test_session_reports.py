@@ -1,11 +1,10 @@
 """The page lifecycle machine's reports must reach the database.
 
-The machine in web/src/session.ts observes before it decides: it reports
-`session-disagree` and `late-join-stranded` as client events, and it takes
-over from play.js only once production shows no disagreement. The server
+The machine in web/src/session.ts reports `late-join-stranded`, and the
+observers beside it report disagreements, as client events. The server
 accepts a fixed list of event types and answers 400 to anything else, so a
 report type missing from that list is dropped without a trace, and "no
-reports" would be read as "no disagreement".
+reports" would be read as "nothing to report".
 
 Run: cd server && uv run pytest ../tests/test_session_reports.py -v
 """
@@ -42,7 +41,7 @@ def _report_types() -> list[str]:
 
 
 def test_the_union_is_found():
-    assert set(_report_types()) >= {"session-disagree", "late-join-stranded", "protocol-mismatch", "play-disagree"}
+    assert set(_report_types()) >= {"late-join-stranded", "protocol-mismatch", "play-disagree"}
 
 
 @pytest.mark.parametrize("report_type", _report_types())

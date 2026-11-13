@@ -42,7 +42,7 @@ import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts
 import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
-import { startRejoin } from './rejoin-attempt.ts';
+import { startRejoin, type RejoinHandle, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
 import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
@@ -106,6 +106,15 @@ export const createSession = (
 
   let [snapshot] = initialTransition(sessionMachine, { lateJoinReportAfterMs });
   const state = (): SessionState => snapshot.value;
+  // The rejoin in flight, if any. The session owns it: it starts only while
+  // a game is on, ends with the socket or the game, and tells the machine
+  // when the server refuses it.
+  let currentRejoin: { cancel: () => void } | null = null;
+  const cancelRejoin = (): void => {
+    currentRejoin?.cancel();
+    currentRejoin = null;
+  };
+
   // This page came into its match by joining one already in play.
   let joinedMidMatch = false;
   /** The match this page joined in play and is now in; null otherwise. */
@@ -116,32 +125,13 @@ export const createSession = (
     [snapshot] = transition(sessionMachine, snapshot, event);
     if (snapshot.value === 'lobby') joinedMidMatch = false;
     else if (event.type === 'joined') joinedMidMatch = true;
+    // A rejoin in flight belongs to the socket and the game it started
+    // under: when either goes, so does it.
+    if (event.type === 'socketDown' || snapshot.value === 'lobby') cancelRejoin();
     if (actor) actor.send(event);
     else held.push(event);
     const now = joinedMatch();
     if (now !== null && now !== before) onMatchJoined(now);
-  };
-
-  // The last disagreement reported for each flag, so one that stays wrong is
-  // reported once and not at every read, whatever the other flags are doing.
-  const lastDisagreement = new Map<SessionCheck, string>();
-  /**
-   * Compare one of play.js's own flags with what the machine says it should
-   * be, and report a disagreement. Returns whether they agree.
-   */
-  const check = (name: SessionCheck, page: boolean): boolean => {
-    const machineState = state();
-    const agrees = sessionFlag(machineState, name) === page;
-    if (agrees) {
-      lastDisagreement.delete(name);
-      return true;
-    }
-    const key = `${machineState}:${page}`;
-    if (lastDisagreement.get(name) !== key) {
-      lastDisagreement.set(name, key);
-      sink({ type: 'session-disagree', machine: machineState, check: name, page });
-    }
-    return false;
   };
 
   return {
@@ -150,25 +140,36 @@ export const createSession = (
     joinedMatch,
     /** A game is on for this page: it is anywhere but the lobby. */
     gameOn: (): boolean => sessionFlag(state(), 'gameRunning'),
-    check,
     /**
-     * What the machine says one of the page's flags is. The machine decides;
-     * the page passes the flag it still keeps beside it, and a disagreement
-     * is reported so production can show when that flag can be deleted.
+     * One of the page's late-join questions, answered by the machine: is the
+     * next engine start a late join (`lateJoin`), is the page waiting for a
+     * ROM before it can late-join (`pendingLateJoin`).
      */
-    decide: (name: SessionCheck, page: boolean): boolean => {
-      check(name, page);
-      return sessionFlag(state(), name);
-    },
+    flag: (name: SessionCheck): boolean => sessionFlag(state(), name),
+    /** The signaling socket came back. */
+    socketUp: (): void => send({ type: 'socketUp' }),
     /**
-     * Called when the signaling socket comes back: does the machine agree
-     * with the `gameRunning` flag play.js still keeps beside it? The machine
-     * decides either way; a disagreement is reported so production can show
-     * when the flag can be deleted.
+     * Take this page's place in the room back after its socket returned
+     * (web/src/rejoin-attempt.ts). Does nothing in the lobby, where there is
+     * no game to resume. A newer call, a socket that drops again, or a game
+     * that ends cancels the one in flight, and its outcome is then never
+     * delivered. A refusal moves the machine to the lobby (`rejoinRefused`)
+     * before `onOutcome` hears of it, so the page only has to clean up and
+     * join again; on `resumed` the page reports what the room is doing with
+     * `rejoined`.
      */
-    socketUp: (page: { gameRunning: boolean }): Promise<boolean> => {
-      send({ type: 'socketUp' });
-      return Promise.resolve(check('gameRunning', page.gameRunning));
+    startRejoin: <Room>(options: RejoinOptions<Room>, onOutcome: (outcome: RejoinOutcome<Room>) => void): boolean => {
+      cancelRejoin();
+      if (state() === 'lobby') return false;
+      const handle: RejoinHandle<Room> = startRejoin(options);
+      currentRejoin = handle;
+      void handle.outcome.then((outcome) => {
+        if (currentRejoin !== handle) return;
+        currentRejoin = null;
+        if (outcome.kind === 'dropped') send({ type: 'rejoinRefused' });
+        onOutcome(outcome);
+      });
+      return true;
     },
     /**
      * The server acknowledged a rejoin after a socket drop. Moves the machine
@@ -184,7 +185,10 @@ export const createSession = (
       send({ type: 'rejoined', playing: room.playing, matchId: room.matchId });
       return verdict === 'gameEnded' || verdict === 'matchReplaced' ? verdict : 'keep';
     },
-    stop: (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void)),
+    stop: (): Promise<void> => {
+      cancelRejoin();
+      return Effect.runPromise(Scope.close(scope, Exit.void));
+    },
   };
 };
 

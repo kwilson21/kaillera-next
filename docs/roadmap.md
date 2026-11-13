@@ -156,22 +156,18 @@ Quint, LemmaScript) and CI. First modules: `protocol.ts` (Effect Schema for
 server messages), `session.ts` (page lifecycle machine, observing), `roster.ts`
 (mesh-heal target selection, proven never to return the player's own id).
 
-**Stage 2: the page lifecycle decides [in progress]**
-Production has had too little traffic to show that the machine agrees with
-the page, so the evidence comes from end-to-end runs:
-`tests/solo-signaling-drop.mjs`, `tests/rb-two-player.mjs` with
-`DROP_SIGNALING_MS`, and `tests/lifecycle-e2e.mjs` (late join, spectating,
-host reload) all show no `session-disagree`.
+**Stage 2: the page lifecycle decides [done]**
+`play.js` reads its lifecycle from the machine in `web/src/session.ts` and
+keeps no flags of its own. Production had too little traffic to show that
+the machine agreed with the page, so the evidence was end-to-end:
+`tests/lifecycle-e2e.mjs`, `tests/rb-two-player.mjs` with
+`DROP_SIGNALING_MS` and `tests/solo-signaling-drop.mjs` compared the two at
+every read and reported no disagreement before the old flags were deleted.
 
-- Done: `play.js` reads "is a game on" from the machine (`isGameRunning`).
-  The old `gameRunning` flag is still written beside it and compared on every
-  signaling reconnect; delete it once production shows no `session-disagree`.
-- Done (observing): the machine has the late-join states (`lateJoinAwaitingRom`,
-  `lateJoinStarting`, `lateJoinSyncing`; diagram in `docs/session-machine.md`,
-  same states in the Quint model). `play.js` still decides from `_lateJoin`
-  and `_pendingLateJoin` and reports `session-disagree` at each place it
-  reads one. `tests/lifecycle-e2e.mjs` covers late join with and without a
-  ROM, a streamed game, spectating and host reload.
+- Done: "is a game on", "is the next engine start a late join" and "is the
+  page waiting for a ROM" are the machine's states (diagram in
+  `docs/session-machine.md`, same states in the Quint model). The old
+  `gameRunning`, `_lateJoin` and `_pendingLateJoin` are deleted.
 - Done: which connection a rejoining player keeps is `rosterKey` in
   `web/src/peer-identity.ts`, called by the engine. Its search is proved
   (LemmaScript) and the reconnect orderings are model-checked in
@@ -199,18 +195,9 @@ host reload) all show no `session-disagree`.
   players' own connections: the server takes it back into the same match
   and slot, and refuses otherwise, in which case the page ends its game and
   joins again as a fresh page would (`rejoinRefused` in the machine).
-  `nobodyIsStrandedInADroppedMatch` holds on `room_current`. The program is
-  started by `play.js` when the socket connects, not yet invoked by the
-  machine. A dropped host that is taken back returns as a player; whether
-  it should get the room back is undecided.
-- Done: `play.js` reads the two late-join flags from the machine
-  (`_session.decide`). The old `_lateJoin` and `_pendingLateJoin` are still
-  written beside it and compared at every read, like `gameRunning`.
-  Production had no matches to show agreement, so the evidence is every
-  two-emulator scenario in `tests/lifecycle-e2e.mjs` reporting no
-  `session-disagree`.
-- Then: delete the three old flags once production shows no
-  `session-disagree`.
+  `nobodyIsStrandedInADroppedMatch` holds on `room_current`. A dropped host
+  that is taken back returns as a player; the room stays with whoever it was
+  handed to, and the page's host UI follows the server's owner.
 - Done: a playing room nobody is running is ended by the server. It
   tracks the players who joined after a match began and have not got into
   it (`Room.waiting_for_state`); a page says it is in with `match-joined`,
@@ -222,8 +209,12 @@ host reload) all show no `session-disagree`.
   as a guest when the room has been handed on, instead of failing to open
   it. (A host that still owns its room cannot fall behind it: only the
   owner starts and ends games.)
-- Not done: the rejoin program is still started by `play.js` on socket
-  connect, not invoked by the machine.
+- Done: the session owns the rejoin (`session.startRejoin`): it starts it
+  only while a game is on, cancels it when the socket drops again or the
+  game ends, and moves the machine on a refusal before the page hears of
+  it. It is not an XState `invoke`: the page reads the machine through
+  XState's pure `transition`, and a result that arrived inside the Effect
+  actor would not reach that state.
 
 **Stage 3: the socket boundary**
 Every Socket.IO and DataChannel message is decoded with Effect Schema on

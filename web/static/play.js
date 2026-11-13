@@ -111,18 +111,11 @@
   };
   let lastUsersData = null;
   let engine = null;
-  // The old "is a game on" flag. The lifecycle machine below decides now
-  // (isGameRunning); this is still written at the same places so the two can
-  // be compared on every signaling reconnect until production shows no
-  // session-disagree and it can be deleted. Also the answer if the TypeScript
-  // bundle failed to load.
-  let _pageGameRunning = false;
   let _endGameInFlight = false;
   let _lastHandledGameEndMatchId = null;
   let _gameResyncEnabled = true;
   let previousPlayers = {};
   let previousSpectators = {};
-  let _lateJoin = false;
 
   // Page lifecycle state machine from the TypeScript core (web/src/session.ts).
   // Stage 2: the machine says whether a game is on for this page.
@@ -135,7 +128,7 @@
   const _session =
     window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta), undefined, _tellServerMatchJoined) ??
     null;
-  const isGameRunning = () => (_session ? _session.gameOn() : _pageGameRunning);
+  const isGameRunning = () => _session?.gameOn() ?? false;
   // The observer holds its reports until the server has sent this page load
   // an upload token (client events need one).
   const _protocol =
@@ -181,20 +174,15 @@
   let _hibernated = false; // true when emulator is hibernated between games
   let _hibernatedRomHash = null; // ROM hash at time of hibernate (detect ROM changes)
   let _emulatorBootInFlight = false; // true while ejs-loader is creating a fresh instance
-  let _pendingLateJoin = false; // waiting for ROM before late-join init
-  // The machine has the two late-join flags as states and is told of every
-  // change. It decides: each read below returns what the machine says. The
-  // old flags are still written beside it and compared at every read
-  // (session-disagree); they go once production shows no disagreement.
+  // The late-join questions are the machine's to answer (web/src/session.ts):
+  // it is told of every change and the page keeps no flags of its own.
+  // "Waiting for a ROM before the late join can start":
   const _setPendingLateJoin = (pending) => {
-    _pendingLateJoin = pending;
     _session?.send({ type: pending ? 'lateJoinRomNeeded' : 'lateJoinRomReady' });
   };
-  // Is the next engine start a late join?
-  const _isLateJoin = () => (_session ? _session.decide('lateJoin', _lateJoin) : _lateJoin);
-  const _isPendingLateJoin = () => {
-    return _session ? _session.decide('pendingLateJoin', _pendingLateJoin) : _pendingLateJoin;
-  };
+  const _isPendingLateJoin = () => _session?.flag('pendingLateJoin') ?? false;
+  // "The next engine start is a late join":
+  const _isLateJoin = () => _session?.flag('lateJoin') ?? false;
   // Server-injected feature flag — false when ROM_SHARING_ENABLED=false in env.
   const _ROM_SHARING_FEATURE = window.KN_CONFIG?.romSharingEnabled !== false;
 
@@ -700,7 +688,7 @@
     socket.on('connect', () => {
       // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
       // on the socket, so 'connect' is the event that fires here.
-      _session?.socketUp({ gameRunning: _pageGameRunning });
+      _session?.socketUp();
       if (_initialConnectTimer) {
         clearTimeout(_initialConnectTimer);
         _initialConnectTimer = null;
@@ -721,9 +709,6 @@
     });
     socket.on('disconnect', (reason) => {
       _session?.send({ type: 'socketDown' });
-      // A rejoin in flight belongs to the socket that just went; the next
-      // connect starts its own.
-      _cancelRejoin();
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       if (reason === 'io client disconnect') return;
       // Show spinner banner after brief delay (lobby and in-game)
@@ -915,23 +900,18 @@
   // showing is over for it. End it and join again as a fresh page would:
   // that lands in the lobby or on the late-join path of the match in play,
   // or shows the player why it cannot get back in.
-  let _rejoin = null;
   // This page loaded as host and was told the room had dropped it: if its
   // fresh open-room finds the room still there, it belongs to someone else
   // now and the page joins it as a guest.
   let _droppedAsHost = false;
-  const _cancelRejoin = () => {
-    _rejoin?.cancel();
-    _rejoin = null;
-  };
   const _leaveDroppedGame = (reason) => {
     console.log('[play] mid-game rejoin refused:', reason);
     KNEvent('rejoin-refused', '', { reason });
-    onGameEnded({ matchId: KNState.matchId, reason: 'dropped' });
+    // The session has already moved the machine to the lobby (rejoinRefused).
+    onGameEnded({ matchId: KNState.matchId, reason: 'dropped', leftByMachine: true });
     // The match itself may still be on, and this page may be about to join
     // it again: its real game-ended must not be taken for a repeat.
     _lastHandledGameEndMatchId = null;
-    _session?.send({ type: 'rejoinRefused' });
     _droppedAsHost = isHost;
     onConnect(false);
   };
@@ -969,19 +949,15 @@
       payload.extra.resume = true;
       payload.extra.slot = isSpectator || mySlot === null || mySlot === undefined ? null : mySlot;
       payload.extra.matchId = KNState.matchId || '';
-      _cancelRejoin();
-      const rejoin = window.KNCore.startRejoin({
+      // The session owns the rejoin: it cancels it if the socket drops again
+      // or the game ends, and then this handler is never called.
+      const rejoinOptions = {
         send: (answer) => socket.emit(rejoinEvent, payload, answer),
         answerWithinMs: 5000,
         retryAfterMs: 2000,
         attempts: 4,
-      });
-      _rejoin = rejoin;
-      rejoin.outcome.then((outcome) => {
-        // An answer for a rejoin that is no longer the current one (its game
-        // ended, or a newer connect replaced it) changes nothing.
-        if (_rejoin !== rejoin) return;
-        _rejoin = null;
+      };
+      _session.startRejoin(rejoinOptions, (outcome) => {
         if (outcome.kind === 'noAnswer') {
           // Every attempt went unanswered on a socket that says it is
           // connected, so this page is not in the room's signaling. Take a
@@ -1242,7 +1218,6 @@
               console.log(
                 `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
               );
-              _pageGameRunning = true;
               // Set matchId for late joiners — game-started event doesn't fire
               // for them, so session logging would silently fail without this.
               // roomData (REST) doesn't include matchId — use joinData (Socket.IO ack).
@@ -1260,7 +1235,6 @@
                 spectator: !!isSpectator,
                 streaming: mode === 'streaming',
               });
-              _lateJoin = !isSpectator || mode === 'streaming';
               // A page that runs an emulator is in the game once it advances
               // frames. Streaming guests and spectators have no frame counter:
               // for them the engine start is the whole late join.
@@ -1519,7 +1493,6 @@
     _gfxRecoveryAttempt = 0;
 
     _session?.send({ type: 'gameStarted', matchId: String(data?.matchId ?? '') });
-    _pageGameRunning = true;
 
     // Spectators and streaming-mode guests don't run an emulator — they
     // receive a video stream from the host. Skip ROM checks and boot.
@@ -1598,12 +1571,8 @@
       `romBlobUrl=${!!_romBlobUrl}`,
       `matchId=${endedMatchId || 'none'}`,
     );
-    _cancelRejoin();
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
-    _pageGameRunning = false;
-    _lateJoin = false;
-    _pendingLateJoin = false;
     showToast(
       data?.reason === 'dropped' ? 'You were disconnected for too long. Rejoining...' : 'The host has ended the game',
     );
@@ -1640,10 +1609,8 @@
   };
 
   const onRoomClosed = (data) => {
-    _cancelRejoin();
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'roomClosed' });
-    _pageGameRunning = false;
     if (engine) {
       engine.stop();
       engine = null;
@@ -3175,7 +3142,7 @@
           ok,
           name,
           trigger,
-          pendingLateJoin: _pendingLateJoin,
+          pendingLateJoin: _isPendingLateJoin(),
           hostHash: _hostRomHash?.substring(0, 12),
           match: !_hostRomHash || !romHashMismatch(_hostRomHash, ctx.lastHash),
         });
@@ -3627,7 +3594,6 @@
         _session?.send({ type: 'admittedToStart' });
       },
     });
-    _lateJoin = false;
     _session?.send({
       type: 'engineStarted',
       connectOnly: needsEmulator && !(_romBlob || _romBlobUrl),
@@ -3866,10 +3832,9 @@
     _clearLateJoinRomPrompt();
     document.getElementById('overlay')?.classList.add('hidden');
 
-    // Ensure _lateJoin is set — dismissLateJoinPrompt only runs for mid-game
-    // joins. The flag may have been consumed by a prior initEngine() call
-    // (e.g., game-started handler for ROM sharing no-ROM path).
-    if (isGameRunning()) _lateJoin = true;
+    // The next engine start is the late join: the machine is in
+    // lateJoinStarting here (a connect-only start for ROM sharing does not
+    // leave it).
 
     // Now proceed with late join
     showToolbar();

@@ -148,6 +148,8 @@ _VALID_EVENT_TYPES = {
     "late-join-timeout",
     # Reports from the page lifecycle machine (web/src/session.ts). Every
     # SessionReport type must be listed: tests/test_session_reports.py.
+    # No longer sent: the page flags it compared with the machine are gone.
+    # Kept so a page loaded before that still has its report stored.
     "session-disagree",
     "late-join-stranded",
     # A message the server sent did not match the client's schema for it
