@@ -55,16 +55,23 @@ export const PEER_KINDS_MAX = 256;
 export const REPORT_LIMIT = 20;
 
 /**
- * Watch a socket's incoming events. `sink` returns false while it cannot take
- * a report yet (the page has no upload token until the server sends one); the
- * report is then held and offered again after the next event's handlers ran.
+ * Watch a socket's incoming events. Reports from an observed socket are held
+ * until the server has sent an upload token on it. `sink` may also return
+ * false while it cannot take a report; the report is then held and offered
+ * again after the next event's handlers ran.
  */
 export const createProtocolObserver = (sink: (report: ProtocolReport) => boolean) => {
   const seen = new Set<string>();
   const held: ProtocolReport[] = [];
   let sent = 0;
 
+  // True from the moment a socket is observed until the server sends that
+  // page load an upload token: client events need one, and a token the page
+  // restored from storage may have expired.
+  let awaitingToken = false;
+
   const flush = (): void => {
+    if (awaitingToken) return;
     while (held.length > 0 && sent < REPORT_LIMIT) {
       const next = held[0];
       if (next === undefined || !sink(next)) return;
@@ -117,11 +124,16 @@ export const createProtocolObserver = (sink: (report: ProtocolReport) => boolean
     checkAck: (event: keyof typeof serverAcks, data: WirePayload): boolean => check(`${event} ack`, data),
     /** Check every event the socket receives from now on. */
     observe: (socket: AnySocket): void => {
+      awaitingToken = true;
       socket.onAny((event, data) => {
-        check(event, data);
+        const matches = check(event, data);
         // Socket.IO calls this before the event's own handlers, and the
-        // upload-token handler is what lets the sink take reports.
-        queueMicrotask(flush);
+        // page's upload-token handler is what stores the token the sink
+        // sends with: reports go out once those handlers have run.
+        queueMicrotask(() => {
+          if (event === 'upload-token' && matches) awaitingToken = false;
+          flush();
+        });
       });
     },
     flush,
