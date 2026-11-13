@@ -72,6 +72,10 @@
   let _lastFlagFrame = new Map(); // "field:slot" → frame
   let _heartbeatTimerId = null;
   let _missingExportsLogged = false;
+  // Frames the engine may still replay (its rollback window). A digest is
+  // built for the frame this far behind the newest one; see tick().
+  let _confirmWindow = 0;
+  let _noDecisionLogged = false;
   const _events = new EventTarget();
 
   /* (Helpers _buildLocalDigest, _broadcastDigest, etc. added in
@@ -241,7 +245,7 @@
 
   function _ingestPeerDigest(peerId, payload) {
     if (!payload || typeof payload.frame !== 'number') return;
-    const dropFloor = _localFrameTick - CONFIG.historyDepth;
+    const dropFloor = _localFrameTick - _confirmWindow - CONFIG.historyDepth;
     if (payload.frame < dropFloor) return;
     let perPeer = _peerDigests.get(peerId);
     if (!perPeer) {
@@ -439,12 +443,23 @@
       _peerDigests.clear();
       _localDigests.clear();
       _lastFlagFrame.clear();
+      _noDecisionLogged = false;
       _log(`init mode=${mode}`);
       if (!_enabled) {
         _stopHeartbeat();
         return;
       }
       if (_mode === 'B') _startHeartbeat();
+    },
+
+    // The engine's rollback window in frames, set once it is known
+    // (kn_rollback_init). 0, the default, is right for strict lockstep,
+    // where no frame is simulated on a predicted input.
+    setConfirmWindow(frames) {
+      const n = Number.isInteger(frames) && frames > 0 ? frames : 0;
+      if (n === _confirmWindow) return;
+      _confirmWindow = n;
+      _log(`confirm window=${n}`);
     },
 
     setMode(mode) {
@@ -460,6 +475,7 @@
       _stopHeartbeat();
       _enabled = false;
       _module = null;
+      _confirmWindow = 0;
       _peerDigests.clear();
       _localDigests.clear();
       _lastFlagFrame.clear();
@@ -500,26 +516,39 @@
       // no-op DC and comparisons run against an empty peer-digest map;
       // the work is what we're measuring.
       if (!_hasRealPeer && !window.__knForceDesyncTick) return;
-      // Build a digest only on broadcast-cadence frames, and never while a
-      // rollback replay is in flight. Per-frame build was the dominant
-      // main-thread cost (~3-9 ms x 60 Hz on mobile at mode B), and the peer
-      // only broadcasts on its own cadence-aligned frames, so a digest
-      // between them had nothing to compare against. Detection latency is
-      // one cadence step (mode B = 1 frame; mode C = 6 frames, ~100 ms).
+      // Which frame to report, if any: KNCore.digestFrame
+      // (web/src/desync-confirm.ts). It is the frame one rollback window
+      // behind this tick, on the broadcast cadence (mode B = every frame;
+      // mode C = every 6th). The newest frame ran on predicted inputs and
+      // may still be replayed, so two healthy peers can hold different
+      // hashes for it; the frame a window back is final, and the registry
+      // rewrites a frame's history when a replay re-simulates it
+      // (specs/desync_digest.qnt). Building on the cadence only also keeps
+      // the cost down: a digest between cadence frames had nothing to
+      // compare against.
       //
-      // A replay's own trajectory is not flagged here. The forward pass ran
-      // on a mispredicted input, so the replay differing from it is what a
-      // rollback is for, not a desync; flagging it raised a `suspect` (and a
-      // canvas capture in kn-vision-client.js) on healthy matches. The
-      // first divergence still travels in replayMeta with a cross-peer flag.
-      const cadence = CONFIG.digestCadence[_mode];
+      // A replay's own trajectory is not flagged. The forward pass ran on a
+      // mispredicted input, so the replay differing from it is what a
+      // rollback is for; flagging it raised a `suspect` (and a canvas
+      // capture in kn-vision-client.js) on healthy matches. The first
+      // divergence still travels in replayMeta with a cross-peer flag.
+      const decide = window.KNCore?.digestFrame;
+      if (typeof decide !== 'function') {
+        if (!_noDecisionLogged) {
+          _noDecisionLogged = true;
+          _log('no digests: KNCore.digestFrame is not loaded');
+        }
+        return;
+      }
       const replayActive = typeof _module._kn_get_replay_depth === 'function' && _module._kn_get_replay_depth() > 0;
-      if (replayActive || frame % cadence !== 0) return;
+      if (replayActive) return;
+      const digestFor = decide(frame, _confirmWindow, CONFIG.digestCadence[_mode]);
+      if (digestFor < 0) return;
 
-      const localDigest = _buildLocalDigest(frame);
+      const localDigest = _buildLocalDigest(digestFor);
       if (!localDigest) return;
-      _localDigests.set(frame, localDigest);
-      _trimDigestMap(_localDigests, frame - CONFIG.historyDepth);
+      _localDigests.set(digestFor, localDigest);
+      _trimDigestMap(_localDigests, digestFor - CONFIG.historyDepth);
       _compareAtFrame(localDigest);
       _broadcastDigest(localDigest);
     },

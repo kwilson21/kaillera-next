@@ -42,3 +42,15 @@ for invariant in neverEvictsLiveConnection oneConnectionPerGuest; do
   $QUINT run "$PEERS" --main=peer_identity_current --invariant="$invariant" \
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
+
+# ── Desync digests: which frame a peer may report a hash for ────────────────
+DIGEST=specs/desync_digest.qnt
+$QUINT typecheck "$DIGEST"
+for variant in desync_digest_before desync_digest_lag_only desync_digest_current; do
+  $QUINT test "$DIGEST" --main="$variant" --backend=typescript
+done
+# Today: a healthy peer never reports a hash for a frame it may still replay.
+# Violated when the digest is built for the newest frame, and still violated
+# with the wait alone, while replays leave the history as first written.
+$QUINT run "$DIGEST" --main=desync_digest_current --invariant=neverReportsAnUnconfirmedHash \
+  --max-samples=20000 --max-steps=25 --backend=typescript

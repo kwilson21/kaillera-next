@@ -6,6 +6,7 @@ import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
+import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput } from './input-wire.ts';
 import {
   decodeGameEnded,
@@ -131,6 +132,7 @@ export const KNCore = {
   createConnectTracker,
   createSession,
   decodeInput,
+  digestFrame,
   encodeInput,
   meshHealTargets,
   rosterKey,

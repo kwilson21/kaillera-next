@@ -193,6 +193,22 @@ static uint32_t hash_rdram_slice(uint32_t offset, uint32_t len) {
     return kn_hash_fnv1a(base + offset, len);
 }
 
+/* RDRAM is stored as host-order (little-endian) 32-bit words, so the N64
+ * byte at address A lives at offset A ^ 3. A 4-byte-aligned slice hashes the
+ * same bytes on every peer either way, but a single N64 byte has to be read
+ * through this (netplay-rollback.js reads scene_curr the same way). */
+static uint8_t* rdram_u8(uint32_t n64_offset) {
+    uint8_t* base = (uint8_t*)kn_get_rdram_ptr();
+    uint32_t off  = n64_offset ^ 3u;
+    if (!base || off >= kn_get_rdram_size()) return NULL;
+    return base + off;
+}
+
+static uint32_t hash_rdram_u8(uint32_t n64_offset) {
+    const uint8_t* b = rdram_u8(n64_offset);
+    return b ? kn_hash_fnv1a(b, 1) : 0;
+}
+
 /* ── History rings ───────────────────────────────────────────────────
  * Each field gets a 600-entry ring of (frame, hash) pairs. Newest entry
  * lives at ring_head[field]; ring is circular. Initial state: all zeros.
@@ -231,7 +247,7 @@ uint32_t kn_hash_stocks(uint8_t player_idx, int32_t frame) {
     }
     /* Live read. */
     uint32_t off = KN_ADDR_PLAYER_STOCKS_BASE + (uint32_t)player_idx * KN_PLAYER_STRIDE;
-    return hash_rdram_slice(off, 1);
+    return hash_rdram_u8(off);
 }
 
 KN_KEEPALIVE
@@ -252,7 +268,7 @@ size_t kn_hash_history_stocks(uint8_t player_idx, uint32_t count, uint32_t* out_
 static void ring_append_stocks(int32_t frame) {
     for (uint8_t p = 0; p < 4; p++) {
         uint32_t off = KN_ADDR_PLAYER_STOCKS_BASE + (uint32_t)p * KN_PLAYER_STRIDE;
-        uint32_t h = hash_rdram_slice(off, 1);
+        uint32_t h = hash_rdram_u8(off);
         s_ring_stocks[p][s_head_stocks[p]] = (kn_ring_entry_t){ .frame = frame, .hash = h };
         s_head_stocks[p] = (s_head_stocks[p] + 1) % KN_RING_SIZE;
     }
@@ -411,7 +427,7 @@ uint32_t kn_hash_match_phase(int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_match_phase, s_head_match_phase, frame);
     }
-    return hash_rdram_slice(KN_ADDR_SCENE_CURR, 1);
+    return hash_rdram_u8(KN_ADDR_SCENE_CURR);
 }
 
 KN_KEEPALIVE
@@ -428,7 +444,7 @@ size_t kn_hash_history_match_phase(uint32_t count, uint32_t* out_pairs) {
 }
 
 static void ring_append_match_phase(int32_t frame) {
-    uint32_t h = hash_rdram_slice(KN_ADDR_SCENE_CURR, 1);
+    uint32_t h = hash_rdram_u8(KN_ADDR_SCENE_CURR);
     s_ring_match_phase[s_head_match_phase] = (kn_ring_entry_t){ .frame = frame, .hash = h };
     s_head_match_phase = (s_head_match_phase + 1) % KN_RING_SIZE;
 }
@@ -567,8 +583,14 @@ int kn_hash_registry_post_tick(int32_t frame, int in_replay) {
             s_replay_ring[f][s_replay_length] = snap[f];
         }
         s_replay_length++;
-    } else if (!in_replay) {
-        /* Forward-pass write: append to the per-field history rings as before. */
+    }
+    {
+        /* History rings, on forward and replay frames alike. A replay
+         * re-simulates frames the forward pass ran on a mispredicted input;
+         * appending again makes the corrected hash the newest entry for that
+         * frame, and ring_find_frame returns the newest. Without this the
+         * rings kept the mispredicted hash and two healthy peers could
+         * report different hashes for the same confirmed frame. */
         ring_append_stocks(frame);
         ring_append_character_id(frame);
         ring_append_css_cursor(frame);
@@ -618,14 +640,14 @@ static int32_t  s_last_replay_final  = -1;
 static void snapshot_all_fields(uint32_t* out) {
     for (uint8_t p = 0; p < 4; p++) {
         uint32_t off_stocks = KN_ADDR_PLAYER_STOCKS_BASE + (uint32_t)p * KN_PLAYER_STRIDE;
-        out[KN_FIELD_STOCKS_P0 + p]        = hash_rdram_slice(off_stocks, 1);
+        out[KN_FIELD_STOCKS_P0 + p]        = hash_rdram_u8(off_stocks);
         uint32_t css_base = KN_ADDR_P1_CSS_BASE + (uint32_t)p * KN_CSS_STRIDE;
         out[KN_FIELD_CHARACTER_ID_P0 + p]  = hash_rdram_slice(css_base + KN_CSS_OFF_CHAR_ID, 4);
         out[KN_FIELD_CSS_CURSOR_P0 + p]    = hash_rdram_slice(css_base + KN_CSS_OFF_CURSOR_STATE, 4);
         out[KN_FIELD_CSS_SELECTED_P0 + p]  = hash_rdram_slice(css_base + KN_CSS_OFF_SELECTED_FLAG, 4);
     }
     out[KN_FIELD_RNG]             = hash_rdram_slice(KN_ADDR_SY_UTILS_RANDOM_SEED, 4);
-    out[KN_FIELD_MATCH_PHASE]     = hash_rdram_slice(KN_ADDR_SCENE_CURR, 1);
+    out[KN_FIELD_MATCH_PHASE]     = hash_rdram_u8(KN_ADDR_SCENE_CURR);
     out[KN_FIELD_VS_BATTLE_HDR]   = hash_rdram_slice(KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER);
     out[KN_FIELD_PHYSICS_MOTION]  = hash_rdram_slice(KN_ADDR_FT_MOTION_COUNT, 4);
     out[KN_FIELD_FT_BUFFER]       = hash_ft_buffer_live();
@@ -664,9 +686,8 @@ KN_KEEPALIVE int32_t kn_get_last_replay_final_frame(void)  { return s_last_repla
 
 KN_KEEPALIVE
 uint8_t kn_get_scene_curr(void) {
-    uint8_t* base = (uint8_t*)kn_get_rdram_ptr();
-    if (!base || KN_ADDR_SCENE_CURR + 1 > kn_get_rdram_size()) return 0;
-    return base[KN_ADDR_SCENE_CURR];
+    const uint8_t* b = rdram_u8(KN_ADDR_SCENE_CURR);
+    return b ? *b : 0;
 }
 
 #endif

@@ -46,7 +46,8 @@ def test_kn_hash_stocks_matches_fixture_bytes(rdram_fixture):
     stride = 0x74   # KN_PLAYER_STRIDE
     for p in range(4):
         off = base + p * stride
-        observed = bytes([rdram_fixture[off]])
+        # RDRAM is host-order 32-bit words: N64 byte A is at offset A ^ 3.
+        observed = bytes([rdram_fixture[off ^ 3]])
         expected = fnv1a(observed)
         actual = lib.kn_hash_stocks(p, -1)
         assert actual == expected, (
@@ -180,8 +181,10 @@ def test_kn_hash_match_phase_matches_fixture_bytes(rdram_fixture):
     lib.kn_test_set_rdram(rdram_fixture, len(rdram_fixture))
 
     off = 0xA4AD0  # KN_ADDR_SCENE_CURR
-    size = 1
-    observed = bytes(rdram_fixture[off:off + size])
+    # RDRAM is host-order 32-bit words: N64 byte A is at offset A ^ 3. The
+    # fixture is mid-match, so the scene is nSCKindVSBattle (22).
+    observed = bytes([rdram_fixture[off ^ 3]])
+    assert observed[0] == 22
     expected = fnv1a(observed)
     actual = lib.kn_hash_match_phase(-1)
     assert actual == expected, (
@@ -256,3 +259,47 @@ def test_kn_hash_ft_buffer_matches_fixture_bytes(rdram_fixture):
         f"ft_buffer @ rdram_off=0x{rdram_off:X}: "
         f"expected hash=0x{expected:08x} got 0x{actual:08x}"
     )
+
+
+def test_kn_get_scene_curr_reads_the_scene_byte(rdram_fixture):
+    """The fixture is mid-match: scene_curr is nSCKindVSBattle (22). Reading
+    offset 0xA4AD0 without the ^3 byte swap returned 7, so the detector's
+    phase gate never saw a battle or the character select."""
+    lib = ctypes.CDLL(str(LIB_PATH))
+    lib.kn_test_set_rdram.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+    lib.kn_get_scene_curr.restype = ctypes.c_uint8
+    lib.kn_test_set_rdram(rdram_fixture, len(rdram_fixture))
+    assert lib.kn_get_scene_curr() == 22
+
+
+def test_replay_rewrites_the_history_for_its_frames(rdram_fixture):
+    """A frame's history entry is the hash from its latest simulation. The
+    forward pass of a frame can run on a mispredicted input; the replay that
+    corrects it must replace that frame's hash, or two healthy peers report
+    different hashes for the same confirmed frame."""
+    lib = ctypes.CDLL(str(LIB_PATH))
+    lib.kn_test_set_rdram.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+    lib.kn_hash_rng.argtypes = [ctypes.c_int32]
+    lib.kn_hash_rng.restype = ctypes.c_uint32
+    lib.kn_hash_registry_post_tick.argtypes = [ctypes.c_int32, ctypes.c_int]
+    lib.kn_hash_on_replay_enter.argtypes = [ctypes.c_int32]
+    lib.kn_hash_on_replay_exit.argtypes = [ctypes.c_int32]
+
+    seed = 0x03B940  # KN_ADDR_SY_UTILS_RANDOM_SEED
+    frame = 900_001  # a frame no other test in this process has written
+
+    lib.kn_test_set_rdram(rdram_fixture, len(rdram_fixture))
+    lib.kn_hash_registry_post_tick(frame, 0)
+    mispredicted = lib.kn_hash_rng(frame)
+    assert mispredicted == fnv1a(rdram_fixture[seed:seed + 4])
+
+    corrected_rdram = bytearray(rdram_fixture)
+    corrected_rdram[seed] ^= 0xFF
+    lib.kn_test_set_rdram(bytes(corrected_rdram), len(corrected_rdram))
+    lib.kn_hash_on_replay_enter(frame - 1)
+    lib.kn_hash_registry_post_tick(frame, 1)
+    lib.kn_hash_on_replay_exit(frame)
+
+    corrected = lib.kn_hash_rng(frame)
+    assert corrected == fnv1a(bytes(corrected_rdram[seed:seed + 4]))
+    assert corrected != mispredicted
