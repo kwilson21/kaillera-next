@@ -7,6 +7,7 @@ import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
 import { fieldsToFlag } from './desync-fields.ts';
+import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
@@ -124,6 +125,7 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
 };
 
 export const KNCore = {
+  audioTransition,
   bootTimedOut,
   classifyRunnerStep,
   createConnectTracker,
@@ -133,9 +135,12 @@ export const KNCore = {
   decodeInput,
   desyncFieldsToFlag: fieldsToFlag,
   encodeInput,
+  hashPixels,
   inputEqual,
+  measureCanvasHealth,
   meshHealTargets,
   rosterKey,
+  screenshotCrop,
   shouldResumeRomTransfer,
   protocol: { decodeUsersUpdated, decodeGameStarted, decodeGameEnded },
 };
