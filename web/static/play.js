@@ -1614,6 +1614,7 @@
     if (gameEl) gameEl.classList.remove('kn-playing');
     dismissGameLoading();
     hideToolbar();
+    _clearLateJoinRomPrompt();
     showOverlay();
     // Refresh player list with latest data (device/input types may have
     // been updated during gameplay while updatePlayerList was skipped)
@@ -3930,6 +3931,22 @@
 
   // ── Late-Join ROM Prompt ─────────────────────────────────────────────
 
+  // Undo showLateJoinRomPrompt: take its message away and show the lobby's
+  // sections again. Also run when the game ends under the prompt, which
+  // used to leave a lobby with only the ROM drop zone and "Game in progress".
+  const _clearLateJoinRomPrompt = () => {
+    const msg = document.getElementById('late-join-msg');
+    if (msg) msg.parentNode.removeChild(msg);
+    const overlay = document.getElementById('overlay');
+    if (!overlay) return;
+    const sections = overlay.querySelectorAll(
+      '.card-section, .card-header, #host-controls, #guest-status, #leave-btn, #engine-status',
+    );
+    for (const section of sections) {
+      section.style.display = '';
+    }
+  };
+
   const showLateJoinRomPrompt = () => {
     // Show the overlay with only the ROM drop zone visible
     const overlay = document.getElementById('overlay');
@@ -3983,21 +4000,8 @@
       return;
     }
 
-    // Remove the late-join message
-    const msg = document.getElementById('late-join-msg');
-    if (msg) msg.parentNode.removeChild(msg);
-
-    // Restore all sections visibility
-    const overlay = document.getElementById('overlay');
-    if (overlay) {
-      overlay.classList.add('hidden');
-      const sections = overlay.querySelectorAll(
-        '.card-section, .card-header, #host-controls, #guest-status, #leave-btn, #engine-status',
-      );
-      for (const section of sections) {
-        section.style.display = '';
-      }
-    }
+    _clearLateJoinRomPrompt();
+    document.getElementById('overlay')?.classList.add('hidden');
 
     // Ensure _lateJoin is set — dismissLateJoinPrompt only runs for mid-game
     // joins. The flag may have been consumed by a prior initEngine() call
