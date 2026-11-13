@@ -16,6 +16,7 @@ import {
   decodeUsersUpdated,
 } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
+import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { meshHealTargets } from './roster.ts';
@@ -142,6 +143,8 @@ export const KNCore = {
     decodeJoinRoomAck,
     decodeRomSharingUpdated,
     decodeTokenMessage,
+    checkServerMessage,
+    createObserver: createProtocolObserver,
   },
 };
 

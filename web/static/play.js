@@ -128,6 +128,13 @@
   // Stage 2: the machine says whether a game is on for this page.
   const _session = window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta)) ?? null;
   const isGameRunning = () => (_session ? _session.gameOn() : _pageGameRunning);
+  // Held until the server has sent the upload token client events need.
+  const _protocol =
+    window.KNCore?.protocol?.createObserver?.(({ type, message, issue }) => {
+      if (!KNState.uploadToken) return false;
+      KNEvent(type, message, { issue });
+      return true;
+    }) ?? null;
   let _sessionLateJoinPoll = null;
   const _sessionStopLateJoinPoll = () => {
     if (_sessionLateJoinPoll) clearInterval(_sessionLateJoinPoll);
@@ -648,6 +655,10 @@
 
   const connect = () => {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
+    // Stage 3, observing: each message the server authors is decoded against
+    // the schema generated from the server's models, and one that does not
+    // match is reported. The handlers below still get the raw payload.
+    _protocol?.observe(socket);
     window._isSpectator = isSpectator;
     startKeepalive();
 
@@ -927,6 +938,7 @@
         // join-room's reconnect path says what the room is doing now. (The
         // host's open-room does not: only the host starts and ends games, so
         // its page cannot fall behind while it is still the owner.)
+        if (!err && room) _protocol?.checkAck('join-room', room);
         if (!err && room?.status) _reconcileAfterRejoin(room);
       });
       return;
@@ -1051,6 +1063,7 @@
                       showError(`Failed to join: ${err2}`);
                       return;
                     }
+                    _protocol?.checkAck('join-room', joinData2);
                     mySlot = null;
                     if (joinData2) lastUsersData = joinData2;
                     sendDeviceType();
@@ -1074,6 +1087,7 @@
               return;
             }
 
+            _protocol?.checkAck('join-room', joinData);
             const joinGameId = joinData?.gameId || joinData?.game_id;
             if (joinGameId) {
               _gameId = joinGameId;

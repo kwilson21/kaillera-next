@@ -146,6 +146,9 @@ _VALID_EVENT_TYPES = {
     # SessionReport type must be listed: tests/test_session_reports.py.
     "session-disagree",
     "late-join-stranded",
+    # A message the server sent did not match the client's schema for it
+    # (web/src/socket-boundary.ts): tests/test_session_reports.py.
+    "protocol-mismatch",
 }
 _ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 

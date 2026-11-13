@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 SESSION_TS = Path(__file__).parent.parent / "web" / "src" / "session.ts"
+SOCKET_BOUNDARY_TS = SESSION_TS.parent / "socket-boundary.ts"
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -27,14 +28,18 @@ def _patch_browser_ssl():
 
 
 def _report_types() -> list[str]:
-    """The `type` literals of the SessionReport union in session.ts."""
+    """The `type` literals of the SessionReport union in session.ts, and of
+    the socket boundary's ProtocolReport."""
     source = SESSION_TS.read_text()
     union = source[source.index("export type SessionReport") : source.index("/** Where reports go.")]
-    return re.findall(r"readonly type: '([^']+)'", union)
+    boundary = SOCKET_BOUNDARY_TS.read_text()
+    report = boundary[boundary.index("export type ProtocolReport") :]
+    report = report[: report.index("};")]
+    return re.findall(r"readonly type: '([^']+)'", union + report)
 
 
 def test_the_union_is_found():
-    assert set(_report_types()) >= {"session-disagree", "late-join-stranded"}
+    assert set(_report_types()) >= {"session-disagree", "late-join-stranded", "protocol-mismatch"}
 
 
 @pytest.mark.parametrize("report_type", _report_types())
