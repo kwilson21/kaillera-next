@@ -6,12 +6,15 @@ import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
-import { decodeInput, encodeInput } from './input-wire.ts';
+import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { meshHealTargets } from './roster.ts';
+import { classifyRunnerStep } from './runner-step.ts';
+import { createStickDeadband } from './stick-deadband.ts';
+import { createSyncLogRing } from './sync-log-ring.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
   sessionFlag,
@@ -121,10 +124,14 @@ export const createSession = (sink: ReportSink, lateJoinReportAfterMs: number = 
 
 export const KNCore = {
   bootTimedOut,
+  classifyRunnerStep,
   createConnectTracker,
   createSession,
+  createStickDeadband,
+  createSyncLogRing,
   decodeInput,
   encodeInput,
+  inputEqual,
   meshHealTargets,
   rosterKey,
   shouldResumeRomTransfer,

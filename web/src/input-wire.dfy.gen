@@ -83,6 +83,11 @@ function validRecord(frame: int, r: FrameInput): bool
   (((((isInt32((frame - r.frame)) && isInt32(r.buttons)) && isInt16(r.lx)) && isInt16(r.ly)) && isInt16(r.cx)) && isInt16(r.cy))
 }
 
+function inputEqual(a: WireInput, b: WireInput): bool
+{
+  (((((a.buttons == b.buttons) && (a.lx == b.lx)) && (a.ly == b.ly)) && (a.cx == b.cx)) && (a.cy == b.cy))
+}
+
 function sameRecord(a: FrameInput, b: FrameInput): bool
 {
   ((((((a.frame == b.frame) && (a.buttons == b.buttons)) && (a.lx == b.lx)) && (a.ly == b.ly)) && (a.cx == b.cx)) && (a.cy == b.cy))
