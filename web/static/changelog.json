@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.10",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the gameplay hash covers the scene and the stock counts (#157)"
+      }
+    ]
+  },
+  {
     "version": "0.67.9",
     "date": "2026-11-13",
     "changes": [
