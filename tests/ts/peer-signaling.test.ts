@@ -85,6 +85,36 @@ test('a player who left on purpose is never reconnected to', () => {
   }
 });
 
+test('the answer is the one handlePeerDisconnect gives, for every input', () => {
+  // handlePeerDisconnect's own order of tests (web/static/netplay-rollback.js).
+  const engine = (
+    beforeStart: boolean,
+    initiator: boolean,
+    intentional: boolean,
+    pending: boolean,
+    running: boolean,
+  ): string => {
+    if (beforeStart && initiator && !intentional) return 'retryStartup';
+    if (pending) return 'hardDisconnect';
+    if (running && !intentional) return 'reconnect';
+    return 'hardDisconnect';
+  };
+  for (const beforeStart of BOOLS) {
+    for (const initiator of BOOLS) {
+      for (const intentional of BOOLS) {
+        for (const pending of BOOLS) {
+          for (const running of BOOLS) {
+            assert.equal(
+              disconnectDisposition(beforeStart, initiator, intentional, pending, running),
+              engine(beforeStart, initiator, intentional, pending, running),
+            );
+          }
+        }
+      }
+    }
+  }
+});
+
 test('before the match the page that offered offers again; the other drops the entry', () => {
   assert.equal(disconnectDisposition(true, true, false, false, false), 'retryStartup');
   assert.equal(disconnectDisposition(true, false, false, false, false), 'hardDisconnect');
