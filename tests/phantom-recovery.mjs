@@ -12,7 +12,8 @@
  * container it does: two emulators on software GL freeze for 3 to 7 s at
  * scene changes. So a run there can fail on hashes with nothing wrong in the
  * netcode. This reads the two sync logs and says, for a run that failed,
- * whether every mismatch is inside such a recovery. It never changes
+ * whether every mismatch is inside such a recovery, and only when the log
+ * also shows the dropped page's main thread stopped. It never changes
  * whether the run passed; it only tells the reader which kind of failure
  * they are looking at.
  */
@@ -24,6 +25,12 @@ const BEFORE_PHANTOM_FRAMES = 12;
 // The resync that ends a recovery follows the phantom within this many
 // frames; a later one is some other resync and explains nothing here.
 const RECOVERY_WITHIN_FRAMES = 60;
+
+// A phantom is declared after 5 s without progress (PEER_DEAD_MS). Only a
+// stop of about that length on the dropped page shows the page itself was
+// frozen; without one the cause may be the network or a data channel, which
+// is exactly the kind of failure this must not explain away.
+const FROZEN_AT_LEAST_MS = 4000;
 
 const framesOf = (log, pattern) => [...log.matchAll(pattern)].map((match) => Number(match[1]));
 
@@ -62,7 +69,15 @@ export const phantomRecovery = (syncLogs, mismatchFrames) => {
       });
     }
   }
-  const inside = (frame) => windows.some((window) => window.to !== null && frame >= window.from && frame < window.to);
+  const inside = (frame) =>
+    windows.some(
+      (window) =>
+        window.to !== null &&
+        window.stoppedMs !== null &&
+        window.stoppedMs >= FROZEN_AT_LEAST_MS &&
+        frame >= window.from &&
+        frame < window.to,
+    );
   const mismatchesInside = mismatchFrames.filter(inside).length;
   return {
     windows,
@@ -75,12 +90,8 @@ export const phantomRecovery = (syncLogs, mismatchFrames) => {
 export const phantomRecoveryVerdict = (recovery) => {
   if (recovery.mismatchesInside === 0 || recovery.mismatchesOutside > 0) return null;
   const stops = recovery.windows
-    .filter((window) => window.to !== null)
-    .map((window) =>
-      window.stoppedMs === null
-        ? `a page was dropped as a phantom near frame ${window.from + BEFORE_PHANTOM_FRAMES}`
-        : `the ${window.stoppedPage} stopped for ${window.stoppedMs} ms`,
-    );
+    .filter((window) => window.to !== null && window.stoppedMs !== null && window.stoppedMs >= FROZEN_AT_LEAST_MS)
+    .map((window) => `the ${window.stoppedPage} stopped for ${window.stoppedMs} ms`);
   return (
     `All ${recovery.mismatchesInside} hash mismatches are inside a peer-phantom recovery: ${stops.join('; ')}, ` +
     'the other page dropped it as a phantom and the guest was resynced. On the cloud container this is a ' +

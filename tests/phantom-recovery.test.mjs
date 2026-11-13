@@ -73,6 +73,17 @@ test('a resync long after the phantom is some other resync', () => {
   assert.equal(recovery.mismatchesOutside, 2);
 });
 
+test('a phantom with no stop on the dropped page is not explained as a freeze', () => {
+  // The same recovery, but the host never logged a freeze: it may have been
+  // the network or a data channel, and those mismatches stay unexplained.
+  for (const host of ['', line(183, 'LOCAL-FREEZE f=183 gap=1200ms — peer staleness clocks credited')]) {
+    const recovery = phantomRecovery({ host, guest: logs.guest }, [186, 199]);
+    assert.equal(recovery.windows[0].to, 214);
+    assert.deepEqual([recovery.mismatchesInside, recovery.mismatchesOutside], [0, 2]);
+    assert.equal(phantomRecoveryVerdict(recovery), null);
+  }
+});
+
 test('a run with no mismatches has no verdict', () => {
   assert.equal(phantomRecoveryVerdict(phantomRecovery(logs, [])), null);
 });
