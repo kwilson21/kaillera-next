@@ -893,7 +893,7 @@
     if (verdict === 'keep') return;
     console.log('[play] rejoin: the room moved on while the socket was down:', verdict);
     KNEvent('rejoin-reconciled', '', { verdict });
-    onGameEnded({ matchId: KNState.matchId });
+    onGameEnded({ matchId: KNState.matchId, leftByMachine: true });
     // The room is playing another match: join it as a fresh page would.
     if (verdict === 'matchReplaced') onConnect(false);
   };
@@ -1580,7 +1580,11 @@
   const onGameEnded = (data = {}) => {
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (endedMatchId && _lastHandledGameEndMatchId === endedMatchId) return;
-    if (!isGameRunning() && !engine && !_isLateJoin() && !_isPendingLateJoin()) return;
+    // Nothing to end if no game is on for this page. A caller that has
+    // already moved the machine to the lobby (a reconnect that found the
+    // game over) says so, because the machine can no longer answer whether
+    // there is a game to clean up.
+    if (!data?.leftByMachine && !isGameRunning() && !engine && !_isLateJoin() && !_isPendingLateJoin()) return;
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
     _endGameInFlight = false;
     console.log(
