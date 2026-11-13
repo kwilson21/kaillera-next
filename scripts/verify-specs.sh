@@ -24,10 +24,16 @@ verify() { # spec module invariant
 # counterexample within 6 steps.
 expect_violation() { # spec module invariant
   echo "== $2 / $3 must be violated within $STEPS steps"
-  if $QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$STEPS" >/dev/null 2>&1; then
-    echo "expected a counterexample for $3 in $2, found none" >&2
-    exit 1
+  local out status=0
+  out="$($QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$STEPS" 2>&1)" || status=$?
+  # Only a reported counterexample counts. A crash, a timeout or a
+  # translation error also exits non-zero and must not pass for one.
+  if [ "$status" -ne 0 ] && grep -q '\[violation\]' <<<"$out"; then
+    return 0
   fi
+  echo "$out" | tail -40 >&2
+  echo "expected a counterexample for $3 in $2 (exit $status)" >&2
+  exit 1
 }
 
 PEERS=specs/peer_identity.qnt

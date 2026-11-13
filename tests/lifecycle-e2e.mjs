@@ -255,7 +255,7 @@ const scenarios = {
     if (stranded && waitedMs < LATE_JOIN_REPORT_AFTER_MS)
       failures.push(`the machine reported a stranded joiner after only ${waitedMs} ms`);
     if (stranded > 1) failures.push(`the machine reported the same stranded joiner ${stranded} times`);
-    await waitForFrames([host, guest], 60, 120000);
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after late join',
       [
@@ -296,7 +296,7 @@ const scenarios = {
       return (await frameOf(guest)) > 0;
     }, 240000);
     if (!synced) failures.push('the late joiner never received state');
-    await waitForFrames([host, guest], 60, 120000);
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after late join',
       [
@@ -333,7 +333,7 @@ const scenarios = {
       return (await frameOf(guest)) > 0;
     }, 420000);
     if (!synced) failures.push('the late joiner never received the ROM and state');
-    await waitForFrames([host, guest], 60, 120000);
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after shared-ROM late join',
       [
@@ -364,7 +364,8 @@ const scenarios = {
       return (await frameOf(late)) > 0;
     }, 420000);
     if (!synced) failures.push('the third player never received state');
-    await waitForFrames([host, first, late], 60, 240000);
+    if (!(await waitForFrames([host, first, late], 60, 240000)))
+      failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after third player joins',
       [
@@ -430,7 +431,7 @@ const scenarios = {
     const watcher = await openPlayer('spectator', `room=${room}&name=Watcher&spectate=1`);
     if (!(await waitUntil(async () => !(await lobbyShownOn(watcher)), 30000)))
       failures.push('the spectator never left the lobby overlay');
-    await waitForFrames([host], 120, 120000);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'while spectating',
       [
