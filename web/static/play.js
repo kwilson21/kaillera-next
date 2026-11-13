@@ -1213,6 +1213,10 @@
                 return;
               }
 
+              // A page that was in the lobby (it has just caught up with a
+              // match that replaced the one it was in) still has the lobby
+              // overlay up; a fresh page does not.
+              hideOverlay();
               showToolbar();
               initEngine();
               return;
@@ -1976,21 +1980,7 @@
     dc.bufferedAmountLowThreshold = 256 * 1024;
     _romTransferDCs[peerSid] = dc;
 
-    dc.onopen = () => {
-      console.log('[play] pre-game rom-transfer DC open to', peerSid);
-      // Always wait for receiver's rom-resume message with offset.
-    };
-    dc.onmessage = (e) => {
-      if (typeof e.data === 'string') {
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'rom-resume' && msg.offset >= 0) {
-            console.log('[play] pre-game ROM resume from offset', msg.offset);
-            sendRomOverChannel(dc, peerSid, msg.offset);
-          }
-        } catch (_) {}
-      }
-    };
+    answerRomResumeOn(dc, peerSid, 'pre-game ');
     dc.onclose = () => {
       delete _romTransferDCs[peerSid];
       if (_preGamePCs[peerSid]) {
@@ -2036,6 +2026,22 @@
 
   // ── ROM Transfer: Host sending ──────────────────────────────────────
 
+  // The sender waits for the receiver's rom-resume, which names the offset to
+  // send from. KNCore.createRomResumeAnswerer keeps a request that arrives
+  // before this side's channel reports open and answers it on open
+  // (web/src/rom-resume.ts).
+  const answerRomResumeOn = (dc, peerSid, label) => {
+    const answer = window.KNCore.createRomResumeAnswerer((offset) => {
+      console.log(`[play] ${label}ROM resume requested from offset`, offset);
+      sendRomOverChannel(dc, peerSid, offset);
+    });
+    dc.onopen = () => {
+      console.log(`[play] ${label}rom-transfer DC open to`, peerSid);
+      answer.channelOpened();
+    };
+    dc.onmessage = (e) => answer.received(e.data, dc.readyState === 'open');
+  };
+
   const startRomTransferTo = (peerSid) => {
     // A server with ROM sharing off never sends a ROM, on any connection.
     if (!_ROM_SHARING_FEATURE || !_romBlob || !isHost) return;
@@ -2054,22 +2060,7 @@
     dc.bufferedAmountLowThreshold = 256 * 1024;
     _romTransferDCs[peerSid] = dc;
 
-    dc.onopen = () => {
-      console.log('[play] rom-transfer DC open to', peerSid);
-      // Always wait for receiver's rom-resume message with offset.
-      // This prevents double-sending when the guest also signals rom-resume.
-    };
-    dc.onmessage = (e) => {
-      if (typeof e.data === 'string') {
-        try {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'rom-resume' && msg.offset >= 0) {
-            console.log('[play] ROM resume requested from offset', msg.offset);
-            sendRomOverChannel(dc, peerSid, msg.offset);
-          }
-        } catch (_) {}
-      }
-    };
+    answerRomResumeOn(dc, peerSid, '');
     dc.onclose = () => {
       delete _romTransferDCs[peerSid];
     };
@@ -3687,6 +3678,12 @@
       },
       initialPlayers: lastUsersData,
       lateJoin: _lateJoin,
+      // The host had not started running, so this page loads as a player
+      // who was there at the start instead of waiting for state.
+      onLateJoinAdmitted: () => {
+        _sessionStopLateJoinPoll();
+        _session?.send({ type: 'admittedToStart' });
+      },
     });
     _lateJoin = false;
     _session?.send({

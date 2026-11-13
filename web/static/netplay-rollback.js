@@ -5068,6 +5068,10 @@
 
   // Lockstep state
   let _lockstepReadyPeers = {}; // remoteSid -> true when peer signals lockstep-ready
+  // Slots of the players who had loaded when this page began the initial
+  // state sync. The ready barrier waits for these and nobody else; a player
+  // who appears later is held as a late joiner (KNCore.heldAsLateJoiner).
+  let _startCohortSlots = null;
   let _startWaitRttLogged = false;
   let _guestStateBytes = null; // decompressed state bytes to load
   let _guestStateKind = 'savestate'; // 'savestate' or 'kn-sync'
@@ -6892,9 +6896,128 @@
   const _LATE_JOIN_COOLDOWN_MS = 8000;
   const _lateJoinLastSentAt = new Map(); // requesterSid -> ms timestamp
 
+  // The joiner's wait for an answer to its state request, as an Effect
+  // program (web/src/late-join-wait.ts): repeated request, deadline, and a
+  // race between "here is the state" and "join the start". null when the
+  // bundle did not load; the request is then sent once, as it used to be.
+  const LATE_JOIN_WAIT_RETRY_MS = 5000;
+  const LATE_JOIN_WAIT_TIMEOUT_MS = 60000;
+  let _lateJoinWait = null;
+
+  const _sendLateJoinRequest = () => {
+    socket.emit('data-message', { type: 'request-late-join', requesterSid: socket.id });
+  };
+
+  // A player waiting to be let into a match says so on each of its own data
+  // channels, so every other player agrees it is not one of the players the
+  // start waits for. Deciding that from the room list alone left each page
+  // to guess: a guest whose state arrived before its all-loaded check could
+  // count a newcomer the host had excluded, and wait for it for ever.
+  const _isWaitingAsLateJoiner = () =>
+    !_isSpectator && _playerSlot !== 0 && _phase !== PHASE_RUNNING && (_lateJoin || _awaitingLateJoinState);
+
+  const _declareLateJoiner = () => {
+    for (const p of Object.values(_peers)) {
+      if (p.dc?.readyState !== 'open') continue;
+      try {
+        p.dc.send('late-joiner');
+      } catch (_) {}
+    }
+  };
+
+  const handlePeerIsLateJoiner = (remoteSid, peer) => {
+    if (_isSpectator || !_isValidPlayerSlot(peer.slot)) return;
+    // In a running match a slot that is already playing is not a newcomer.
+    if (_phase === PHASE_RUNNING && _slotAlreadyActive(peer.slot)) return;
+    peer.emuReady = false;
+    _markPendingLateJoinPeer(remoteSid, peer.slot, 'declared by the joiner');
+    if (_startCohortSlots?.delete(peer.slot)) {
+      _syncLog(`start cohort: slot ${peer.slot} removed, it is a late joiner`);
+    }
+    checkAllLockstepReady();
+  };
+
+  // Leave the late-join path and load as a player who was here at the start.
+  const _joinTheStart = (reason) => {
+    if (!_awaitingLateJoinState || _isApplyingLateJoinState) return;
+    _syncLog(`late-join wait: joining the start instead (${reason})`);
+    _awaitingLateJoinState = false;
+    _lateJoin = false;
+    _config?.onLateJoinAdmitted?.();
+    for (const p of Object.values(_peers)) {
+      if (p.dc && p.dc.readyState === 'open') {
+        try {
+          p.dc.send('emu-ready');
+        } catch (_) {}
+      }
+    }
+    checkAllEmuReady();
+  };
+
+  const _beginLateJoinWait = () => {
+    _awaitingLateJoinState = true;
+    _declareLateJoiner();
+    setStatus('Requesting game state...');
+    const start = window.KNCore?.startLateJoinWait;
+    if (!start) {
+      _sendLateJoinRequest();
+      return;
+    }
+    const wait = start({
+      request: _sendLateJoinRequest,
+      retryEveryMs: LATE_JOIN_WAIT_RETRY_MS,
+      timeoutMs: LATE_JOIN_WAIT_TIMEOUT_MS,
+    });
+    _lateJoinWait = wait;
+    wait.outcome.then((outcome) => {
+      if (_lateJoinWait !== wait) return;
+      _lateJoinWait = null;
+      if (outcome === 'admitted') _joinTheStart('the host is not running yet');
+      if (outcome !== 'timeout') return;
+      // I1: the deadline has a recovery action: say so and stop waiting.
+      // It does not guess that the host is not running. A running host sends
+      // no input to a joiner that is still pending, so "no frames received"
+      // looks the same either way; only the host's own answer admits a
+      // player to the start.
+      _syncLog(`LATE-JOIN-WAIT-TIMEOUT after ${LATE_JOIN_WAIT_TIMEOUT_MS}ms: no answer from the host`);
+      KNEvent('late-join-timeout', 'No game state from the host', { waitedMs: LATE_JOIN_WAIT_TIMEOUT_MS });
+      setStatus('Could not get the game state from the host — reload to try again');
+    });
+  };
+
+  // Called only for a message that arrived on the host's own data channel.
+  const handleJoinTheStart = () => {
+    if (_lateJoinWait) _lateJoinWait.admitted();
+    else _joinTheStart('the host is not running yet');
+  };
+
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
-    if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
+    if (_playerSlot !== 0) return;
+    if (_phase !== PHASE_RUNNING) {
+      // Not running yet: there is no state to send, and this host will not
+      // start until that player has loaded. Without an answer both sides
+      // waited for ever (specs/room_lifecycle.qnt, admitToStart). Tell the
+      // joiner to load as a player who was here at the start.
+      // Only while still waiting for players. Once the initial sync has
+      // begun the joiner cannot be added to it; its request is repeated and
+      // answered with state as soon as this host is running.
+      if (_phase !== PHASE_GAME_STARTED && _phase !== PHASE_EMU_READY) return;
+      const joinerSid = _peerKey(msg.requesterSid);
+      if (!joinerSid || !_peers[joinerSid]) return;
+      // Answered on the joiner's own data channel, not through the server
+      // relay: any room member can write to the relay, and a forged answer
+      // would pull a player out of a real late join. The joiner accepts it
+      // only from the connection it holds to slot 0. If the channel is not
+      // open yet, the joiner's repeated request gets its answer once it is.
+      const joinerDc = _peers[joinerSid].dc;
+      if (joinerDc?.readyState !== 'open') return;
+      _syncLog(`late-join request from ${joinerSid} before the match is running: admitting to the start`);
+      try {
+        joinerDc.send('join-the-start');
+      } catch (_) {}
+      return;
+    }
     const requesterSid = _peerKey(msg.requesterSid);
     if (!requesterSid) return;
     const now = performance.now();
@@ -7231,12 +7354,20 @@
     // Late-join: joiner always initiates (host's offer would arrive before listener is ready)
     // Running host: DON'T initiate to new players — let them initiate after their init()
     for (const p of otherPlayers) {
-      const shouldHoldForLateJoin =
-        _phase === PHASE_RUNNING &&
-        !_lateJoin &&
-        !_isSpectator &&
-        _isValidPlayerSlot(p.slot) &&
-        !_slotAlreadyActive(p.slot);
+      // Held in a running match, and also once the initial sync has begun:
+      // that player was not sent the state and the ready barrier must not
+      // wait for them (specs/room_lifecycle.qnt, startIsNotHeldUpByALateJoiner).
+      const running = _phase === PHASE_RUNNING;
+      const syncBegun = !!_startCohortSlots && (_phase === PHASE_SYNCING || _phase === PHASE_LOCKSTEP_READY);
+      const held = window.KNCore?.heldAsLateJoiner
+        ? window.KNCore.heldAsLateJoiner(
+            running,
+            syncBegun,
+            !!_startCohortSlots?.has(p.slot),
+            _slotAlreadyActive(p.slot),
+          )
+        : running && !_slotAlreadyActive(p.slot);
+      const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && held;
 
       const key = _peerKey(p.socketId);
       if (_peers[key]) {
@@ -7271,6 +7402,9 @@
       } else if (_phase === PHASE_RUNNING) {
         shouldInitiate = false;
         reason = 'running — wait for late-joiner offer';
+      } else if (shouldHoldForLateJoin) {
+        shouldInitiate = false;
+        reason = 'initial sync under way — wait for late-joiner offer';
       } else if (_isSpectator) {
         shouldInitiate = false;
         reason = 'spectator never initiates';
@@ -7861,7 +7995,10 @@
       }
       ch.send('ready');
 
-      if (_phase >= PHASE_EMU_READY) ch.send('emu-ready');
+      // A late joiner is not loaded as far as the start is concerned: it says
+      // what it is instead, and sends emu-ready only if the host admits it.
+      if (_isWaitingAsLateJoiner()) ch.send('late-joiner');
+      else if (_phase >= PHASE_EMU_READY) ch.send('emu-ready');
 
       // Both sides measure RTT for auto delay
       startRttMeasurement(peer);
@@ -8005,6 +8142,8 @@
           _config?.onToast?.('Player joining...');
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
+        if (e.data === 'join-the-start' && peer.slot === 0) handleJoinTheStart();
+        if (e.data === 'late-joiner') handlePeerIsLateJoiner(remoteSid, peer);
         if (e.data === 'late-join-resume') {
           const wasPausedForLateJoin = _runSubstate === RUN_LATE_JOIN_PAUSE;
           if (wasPausedForLateJoin) _runSubstate = RUN_NORMAL;
@@ -9371,13 +9510,8 @@
       const hostAlreadyRunning = _lastRemoteFrame > 0;
       if ((_lateJoin || hostAlreadyRunning) && _playerSlot !== 0) {
         _syncLog(`using late-join path (lateJoin=${_lateJoin}, hostRunning=${hostAlreadyRunning})`);
-        _awaitingLateJoinState = true;
-        setStatus('Requesting game state...');
-        socket.emit('data-message', {
-          type: 'request-late-join',
-          requesterSid: socket.id,
-        });
-        return; // handleLateJoinState() will resume from here
+        _beginLateJoinWait();
+        return; // handleLateJoinState() or _joinTheStart() will resume from here
       }
 
       // Notify all connected peers
@@ -9392,6 +9526,22 @@
       checkAllEmuReady();
     };
     waitForEmu();
+  };
+
+  // A page can reach the ready phase without passing its own all-loaded
+  // check (the host's state arrives first, or a sync that timed out is
+  // completed by a late state). The players it knows at that moment are the
+  // ones it starts with; without this record a newcomer would be counted by
+  // the ready barrier after all.
+  const _recordStartCohortIfMissing = (reason) => {
+    if (_startCohortSlots) return;
+    _startCohortSlots = new Set();
+    for (const [peerSid, p] of Object.entries(_peers)) {
+      if (p.slot === null || p.slot === undefined) continue;
+      if (_isPeerPendingLateJoin(peerSid, p)) continue;
+      _startCohortSlots.add(p.slot);
+    }
+    _syncLog(`start cohort: slots=[${[..._startCohortSlots].join(',')}] reason=${reason}`);
   };
 
   const checkAllEmuReady = () => {
@@ -9418,6 +9568,13 @@
 
     if (_phase >= PHASE_SYNCING) return; // guard against re-entrant calls
     _phase = PHASE_SYNCING;
+    // Everyone loaded at this moment starts the match together, including a
+    // player who was held as a late joiner by an earlier sync that timed out.
+    _startCohortSlots = new Set(playerPeers.map((p) => p.slot));
+    for (const [peerSid, p] of Object.entries(_peers)) {
+      if (_startCohortSlots.has(p.slot)) _clearPendingLateJoinPeer(peerSid, p.slot, 'in the start cohort');
+    }
+    _syncLog(`start cohort: slots=[${[..._startCohortSlots].join(',')}] reason=all-loaded`);
 
     _syncLog(`${readyPeers.length + 1} emulators ready -- syncing initial state`);
     setStatus('Syncing...');
@@ -9455,6 +9612,7 @@
         _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
         _phase = PHASE_EMU_READY; // allow sync retry
         _lockstepReadyPeers = {};
+        _startCohortSlots = null;
       }
     }, syncTimeoutMs);
   };
@@ -9474,9 +9632,12 @@
     if (_phase === PHASE_RUNNING) return;
 
     // Check that at least 1 player peer is lockstep-ready
+    // Not the players held as late joiners: they joined after the initial
+    // sync began, were never sent its state and cannot become ready. Waiting
+    // for them left the match unstarted and their state request unanswered.
     const playerPeerSids = Object.keys(_peers).filter((sid) => {
       const p = _peers[sid];
-      return p.slot !== null && p.slot !== undefined;
+      return p.slot !== null && p.slot !== undefined && !_isPeerPendingLateJoin(sid, p);
     });
     const soloMode = playerPeerSids.length === 0;
     const readyCount = playerPeerSids.filter((sid) => _lockstepReadyPeers[sid]).length;
@@ -9970,6 +10131,7 @@
   const _markInitialStateReady = () => {
     _clearHostInitialStateWait();
     _clearInputsForNewMatch('initial-state-ready');
+    _recordStartCohortIfMissing('initial-state-ready');
     _phase = PHASE_LOCKSTEP_READY;
     if (_rttComplete) broadcastLockstepReady();
     checkAllLockstepReady();
@@ -10134,6 +10296,7 @@
       _guestStateAudioFifo = captured.audioFifo;
       _guestStateCapturedLocally = captured.kind === 'kn-sync';
       _clearInputsForNewMatch('host-capture-ready');
+      _recordStartCohortIfMissing('host-capture-ready');
       _phase = PHASE_LOCKSTEP_READY;
       if (_rttComplete) {
         broadcastLockstepReady();
@@ -10389,6 +10552,7 @@
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
     _awaitingLateJoinState = false;
+    _lateJoinWait?.stateArrived();
     // Ensure the loading overlay is up — the EJS canvas may already be
     // painting boot frames (N64 logo) and we don't want the joiner to see
     // them between now and the state restore that follows below.
@@ -13236,6 +13400,7 @@
     _setLastSyncState(null, 'stopSync');
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
+    _startCohortSlots = null;
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};
@@ -17851,11 +18016,14 @@
     window._knPreventRetroArchVisibilityPause = false;
     if (window._knSyncLog === _syncLog) window._knSyncLog = null;
     _awaitingLateJoinState = false;
+    _lateJoinWait?.cancel();
+    _lateJoinWait = null;
     _isApplyingLateJoinState = false;
     _lateJoinReadyHandled.clear();
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
+    _startCohortSlots = null;
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};

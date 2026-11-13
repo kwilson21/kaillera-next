@@ -1,5 +1,6 @@
 web/src/roster.ts
 web/src/peer-identity.ts
 web/src/rejoin.ts
+web/src/start-cohort.ts
 web/src/input-wire.ts
 web/src/desync-confirm.ts
