@@ -172,6 +172,11 @@ host reload) all show no `session-disagree`.
   and `_pendingLateJoin` and reports `session-disagree` at each place it
   reads one. `tests/lifecycle-e2e.mjs` covers late join with and without a
   ROM, a streamed game, spectating and host reload.
+- Done: which connection a rejoining player keeps is `rosterKey` in
+  `web/src/peer-identity.ts`, called by the engine. Its search is proved
+  (LemmaScript) and the reconnect orderings are model-checked in
+  `specs/peer_identity.qnt`, which reproduces #119 and its review finding on
+  the older variants.
 - Next: reconcile on reconnect. Today a page rejoins silently after a socket
   drop and keeps whatever it was doing; the model shows that leaves a page in
   a game the server has ended, or joining a match that has been replaced
