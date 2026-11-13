@@ -50,8 +50,8 @@ export interface PageState {
   gameId: string | null;
   /** The room code. play.js writes; the event beacon in shared.js reads. */
   room: string | null;
-  /** This player's slot, -1 before one is assigned. play.js writes; the event beacon reads. */
-  slot: number;
+  /** This player's slot: -1 before the room is joined, null for a spectator. play.js writes; the event beacon reads. */
+  slot: number | null;
   /** The token for the upload endpoints. play.js writes; the event beacon reads. */
   uploadToken: string | null;
   /** play.js and the engine write; the pagehide summary reads. */
