@@ -164,7 +164,7 @@
  *     3 s, long enough that no rollback restores it. The peers are then
  *     really desynced, and the desync detector (kn-desync-detector.js) must
  *     say so: the run passes only if both peers' sync logs have a
- *     `KNDesync suspect ... field=stocks ... trigger=flag` line after the
+ *     `KNDesync suspect ... field=stocks slot=0 trigger=flag` line after the
  *     change, and none before it. The gameplay-hash and integrity checks
  *     are reported but not judged. In the first run they did not see the
  *     change at all (zero mismatches): they hash the saved rollback states,
@@ -249,7 +249,14 @@ if (DROP_SIGNALING_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS >
 }
 if (
   DESYNC_GUEST &&
-  (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS > 0 || CLICK_DURING_BATTLE || DROP_SIGNALING_MS > 0 || VISUAL_CHECK)
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    VISUAL_CHECK ||
+    MIN_GAME_FPS !== null ||
+    SUSPEND_GUEST_AUDIO)
 ) {
   console.log('DESYNC_GUEST is mutually exclusive with the other knobs');
   process.exit(1);
@@ -1150,7 +1157,8 @@ const desyncFlagsOf = (log) => {
   return {
     before: flags.length - after.length,
     after: after.length,
-    stocksAfter: after.filter((f) => f.field === 'stocks').length,
+    // The change is to P1's stock count: slot 0, and no other player's.
+    stocksAfter: after.filter((f) => f.field === 'stocks' && f.slot === '0').length,
     firstAfter: after[0] ?? null,
     fields: [...new Set(after.map((f) => f.field))],
   };
