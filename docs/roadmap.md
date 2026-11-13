@@ -149,6 +149,9 @@ without the old code running beside it first.
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
 - State logic is modelled in Quint first; pure functions with a contract are
   proven with LemmaScript.
+- Every machine has a diagram generated from it, and the scenarios of the
+  Quint models are drawn as sequence diagrams from the traces the model
+  checker replays. `docs/netcode-diagrams.md` lists them all.
 
 **Stage 1: foundation [done]**
 Toolchain (TypeScript 7, esbuild, oxfmt, oxlint + anti-slop, Biome, antislop,
