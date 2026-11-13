@@ -6908,6 +6908,35 @@
     socket.emit('data-message', { type: 'request-late-join', requesterSid: socket.id });
   };
 
+  // A player waiting to be let into a match says so on each of its own data
+  // channels, so every other player agrees it is not one of the players the
+  // start waits for. Deciding that from the room list alone left each page
+  // to guess: a guest whose state arrived before its all-loaded check could
+  // count a newcomer the host had excluded, and wait for it for ever.
+  const _isWaitingAsLateJoiner = () =>
+    !_isSpectator && _playerSlot !== 0 && _phase !== PHASE_RUNNING && (_lateJoin || _awaitingLateJoinState);
+
+  const _declareLateJoiner = () => {
+    for (const p of Object.values(_peers)) {
+      if (p.dc?.readyState !== 'open') continue;
+      try {
+        p.dc.send('late-joiner');
+      } catch (_) {}
+    }
+  };
+
+  const handlePeerIsLateJoiner = (remoteSid, peer) => {
+    if (_isSpectator || !_isValidPlayerSlot(peer.slot)) return;
+    // In a running match a slot that is already playing is not a newcomer.
+    if (_phase === PHASE_RUNNING && _slotAlreadyActive(peer.slot)) return;
+    peer.emuReady = false;
+    _markPendingLateJoinPeer(remoteSid, peer.slot, 'declared by the joiner');
+    if (_startCohortSlots?.delete(peer.slot)) {
+      _syncLog(`start cohort: slot ${peer.slot} removed, it is a late joiner`);
+    }
+    checkAllLockstepReady();
+  };
+
   // Leave the late-join path and load as a player who was here at the start.
   const _joinTheStart = (reason) => {
     if (!_awaitingLateJoinState || _isApplyingLateJoinState) return;
@@ -6927,6 +6956,7 @@
 
   const _beginLateJoinWait = () => {
     _awaitingLateJoinState = true;
+    _declareLateJoiner();
     setStatus('Requesting game state...');
     const start = window.KNCore?.startLateJoinWait;
     if (!start) {
@@ -7965,7 +7995,10 @@
       }
       ch.send('ready');
 
-      if (_phase >= PHASE_EMU_READY) ch.send('emu-ready');
+      // A late joiner is not loaded as far as the start is concerned: it says
+      // what it is instead, and sends emu-ready only if the host admits it.
+      if (_isWaitingAsLateJoiner()) ch.send('late-joiner');
+      else if (_phase >= PHASE_EMU_READY) ch.send('emu-ready');
 
       // Both sides measure RTT for auto delay
       startRttMeasurement(peer);
@@ -8110,6 +8143,7 @@
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'join-the-start' && peer.slot === 0) handleJoinTheStart();
+        if (e.data === 'late-joiner') handlePeerIsLateJoiner(remoteSid, peer);
         if (e.data === 'late-join-resume') {
           const wasPausedForLateJoin = _runSubstate === RUN_LATE_JOIN_PAUSE;
           if (wasPausedForLateJoin) _runSubstate = RUN_NORMAL;
