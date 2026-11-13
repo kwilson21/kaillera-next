@@ -18,6 +18,13 @@ import {
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
+import {
+  disconnectDisposition,
+  hasAttemptLeft,
+  shouldInitiate,
+  signalDisposition,
+  staleHoldersOf,
+} from './peer-signaling.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { meshHealTargets } from './roster.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
@@ -136,9 +143,14 @@ export const KNCore = {
   decodeInput,
   encodeInput,
   createRomResumeAnswerer,
+  disconnectDisposition,
+  hasAttemptLeft,
   heldAsLateJoiner,
   meshHealTargets,
   rosterKey,
+  shouldInitiate,
+  signalDisposition,
+  staleHoldersOf,
   startLateJoinWait,
   shouldResumeRomTransfer,
   protocol: {
