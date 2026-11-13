@@ -165,7 +165,9 @@
  *     really desynced, and the desync detector (kn-desync-detector.js) must
  *     say so: the run passes only if both peers' sync logs have a
  *     `KNDesync suspect ... field=stocks slot=0 trigger=flag` line after the
- *     change, and none before it; and the gameplay hash (kn_gameplay_hash,
+ *     change, and none before it; both peers log `KNDesync capture` for the
+ *     first flagged frame at the same frame number (their screenshots are
+ *     compared with each other); and the gameplay hash (kn_gameplay_hash,
  *     which lists the stock counts) differs on at least one frame from the
  *     change on, and on none before it. The
  *     game-state and full-state hashes are reported but not judged: the
@@ -1174,6 +1176,13 @@ const desyncFlagsOf = (log) => {
     stocksAfter: after.filter((f) => f.field === 'stocks' && f.slot === '0').length,
     firstAfter: after[0] ?? null,
     fields: [...new Set(after.map((f) => f.field))],
+    // The frame this peer screenshot for each flagged frame: suspect -> capture.
+    captures: Object.fromEntries(
+      [...log.matchAll(/KNDesync capture frame=(\d+) suspect=(\d+) field=stocks slot=0/g)].map((m) => [
+        m[2],
+        Number(m[1]),
+      ]),
+    ),
   };
 };
 
@@ -1365,6 +1374,14 @@ if (signalingDropFailed) {
   console.log('DROP_SIGNALING_MS: a page never reconnected, stalled, or its lifecycle machine reported:');
   console.log(JSON.stringify(summary.signalingDrop));
 }
+// The peers' screenshots of a flagged frame are compared with each other, so
+// both must have captured the first flagged frame, and at the same frame.
+const desyncCapturesAgree = (hostSide, guestSide) => {
+  const suspect = hostSide.firstAfter?.frame;
+  if (suspect === undefined) return false;
+  const hostAt = hostSide.captures[suspect];
+  return hostAt !== undefined && hostAt === guestSide.captures[suspect];
+};
 // DESYNC_GUEST inverts the run: the peers were desynced on purpose. The
 // detector must flag the changed field on both peers, and nothing before
 // the change; and the gameplay hash, which lists the stock counts, must
@@ -1376,7 +1393,8 @@ const desyncGuestFailed =
   (desyncGuestAt < 0 ||
     gpMisAfterDesync < 1 ||
     gpMisBeforeDesync > 0 ||
-    [summary.desyncGuest.host, summary.desyncGuest.guest].some((side) => side.before > 0 || side.stocksAfter < 1));
+    [summary.desyncGuest.host, summary.desyncGuest.guest].some((side) => side.before > 0 || side.stocksAfter < 1) ||
+    !desyncCapturesAgree(summary.desyncGuest.host, summary.desyncGuest.guest));
 if (DESYNC_GUEST) {
   console.log(
     desyncGuestFailed ? 'DESYNC_GUEST: the detector did not flag the desync as expected:' : 'DESYNC_GUEST: flagged:',
