@@ -30,6 +30,11 @@
  *                     The host waits for the guest to load before it runs, so
  *                     the guest must be let into the start, not left asking
  *                     for a state nobody has yet
+ *   dropped-rejoin    a guest's signaling is down for longer than the server's
+ *                     grace window, so the room drops it while the match goes
+ *                     on over the players' own connections; on reconnect it
+ *                     must be taken back and neither page may leave the match
+ *   dropped-host      the same for the host, whose room is handed to the guest
  *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
@@ -55,6 +60,8 @@ const SCENARIOS = [
   'late-join-two-player',
   'missed-game-end',
   'missed-new-match',
+  'dropped-rejoin',
+  'dropped-host',
   'streaming-join',
   'spectate',
   'host-reload',
@@ -71,6 +78,7 @@ if (!ROM || !fs.existsSync(ROM)) {
 fs.mkdirSync(OUT, { recursive: true });
 
 const BLIP_MS = 3000;
+const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
 const browser = await chromium.launch({
@@ -236,6 +244,39 @@ const checkpoint = async (name, expectations, failures, log) => {
       failures.push(`${name}: ${player.label} machine disagreed with the page ${JSON.stringify(disagreements)}`);
     if (stranded && !lateJoiner) failures.push(`${name}: ${player.label} was reported as a stranded late joiner`);
   }
+};
+
+const playersInRoom = async (room) => {
+  const res = await fetch(`${URL}/room/${room}`);
+  return res.ok ? (await res.json()).player_count : 0;
+};
+
+// One player's signaling stays down past the server's grace window, so the
+// room drops it while the match goes on over the players' own connections.
+// When the socket returns the player must be taken back into the room and
+// neither page may leave the match.
+const droppedPlayerReturns = async (room, failures, log, who) => {
+  const [host, guest] = await startTwoPlayerGame(room, failures);
+  const dropped = who === 'host' ? host : guest;
+  await cutSignaling(dropped);
+  await dropped.page.waitForTimeout(SERVER_GRACE_MS + 8000);
+  if ((await playersInRoom(room)) !== 1) failures.push(`the room did not drop the ${who} after its grace window`);
+  dropped.signaling.down = false;
+  if (!(await waitUntil(async () => (await playersInRoom(room)) === 2, 60000)))
+    failures.push(`the ${who} was not taken back into the room`);
+  if (await countOf(dropped, 'rejoin-refused')) failures.push(`the ${who}'s rejoin was refused`);
+  if ((await lobbyShownOn(host)) || (await lobbyShownOn(guest))) failures.push('a page left the match');
+  if (!(await waitForFrames([host, guest], 120, 120000))) failures.push('the game stopped advancing after the return');
+  await checkpoint(
+    `after the dropped ${who} returned`,
+    [
+      { player: host, lobby: false },
+      { player: guest, lobby: false },
+    ],
+    failures,
+    log,
+  );
+  return [host, guest];
 };
 
 const loadRom = (player) => player.page.locator("#rom-drop input[type='file']").setInputFiles(ROM);
@@ -517,6 +558,9 @@ const scenarios = {
     );
     return [host, guest];
   },
+
+  'dropped-rejoin': async (room, failures, log) => droppedPlayerReturns(room, failures, log, 'guest'),
+  'dropped-host': async (room, failures, log) => droppedPlayerReturns(room, failures, log, 'host'),
 
   'missed-new-match': async (room, failures, log) => {
     const [host, guest] = await startTwoPlayerGame(room, failures);

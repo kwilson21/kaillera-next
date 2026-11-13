@@ -142,6 +142,8 @@ _VALID_EVENT_TYPES = {
     # play.js caught up with the room after a signaling reconnect: the game
     # had ended, or been replaced, while its socket was down.
     "rejoin-reconciled",
+    "rejoin-refused",
+    "rejoin-no-answer",
     # A late joiner got no game state from a running host before its deadline.
     "late-join-timeout",
     # Reports from the page lifecycle machine (web/src/session.ts). Every
