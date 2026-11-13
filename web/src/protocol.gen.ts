@@ -253,6 +253,20 @@ export const TokenMessage = Schema.Struct({
 });
 export type TokenMessage = typeof TokenMessage.Type;
 
+/**
+ * Who sent a relayed `data-message`, `snapshot` or `input`, as the server knows it.
+ *
+ * The server puts it on every message it relays, under `knFrom`
+ * (`RELAY_SENDER_KEY`), replacing anything the sender put there. The rest
+ * of a relayed message is the sender's own words.
+ */
+export const RelaySender = Schema.Struct({
+  sid: Schema.String,
+  slot: Schema.NullOr(Schema.Int),
+  owner: Schema.Boolean,
+});
+export type RelaySender = typeof RelaySender.Type;
+
 export const decodeOpenRoomExtra = Schema.decodeUnknownResult(OpenRoomExtra);
 export const decodeOpenRoomPayload = Schema.decodeUnknownResult(OpenRoomPayload);
 export const decodeJoinRoomExtra = Schema.decodeUnknownResult(JoinRoomExtra);
@@ -281,3 +295,4 @@ export const decodeRomSharingUpdated = Schema.decodeUnknownResult(RomSharingUpda
 export const decodeRenegotiateRequest = Schema.decodeUnknownResult(RenegotiateRequest);
 export const decodeSessionLogAck = Schema.decodeUnknownResult(SessionLogAck);
 export const decodeTokenMessage = Schema.decodeUnknownResult(TokenMessage);
+export const decodeRelaySender = Schema.decodeUnknownResult(RelaySender);

@@ -1703,6 +1703,19 @@
 
   const onDataMessage = (data) => {
     if (!data || typeof data !== 'object' || typeof data.type !== 'string') return;
+    // Any room member can write to the server's relay, so who sent a message
+    // is the server's stamp (KNCore.checkRelayed, web/src/relay.ts), not
+    // what the message says: `mode-select` is taken only from the room's
+    // owner, and `rom-accepted` starts a transfer to the socket that really
+    // sent it. A message with no stamp comes from a server older than the
+    // stamp and is handled as before: server and pages deploy together, and
+    // a member cannot remove a stamp the server adds. A stamped message this
+    // page cannot check (the bundle did not load) is refused.
+    const checkRelayed = window.KNCore?.checkRelayed;
+    if (!checkRelayed && Object.hasOwn(data, 'knFrom')) return;
+    const from = checkRelayed ? checkRelayed(data) : null;
+    if (from && !from.allowed) return;
+    if (from?.stamped) data = { ...data, sender: from.sid };
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
       const incoming = normalizeMode(data.mode);

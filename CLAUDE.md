@@ -173,7 +173,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `set-game-id` | client→server | `{game_id}` | Host updates game_id after ROM identification |
 | `webrtc-signal` | bidirectional | `{target, offer/answer/candidate/reconnect/requestRenegotiate}` | WebRTC relay |
 | `rom-signal` | bidirectional | `{target, ...}` | Pre-game ROM transfer signaling |
-| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max) |
+| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max). The server stamps every relayed `data-message`, `snapshot` and `input` with `knFrom: {sid, slot, owner}`, the true sender; pages check it (`KNCore.checkRelayed`) |
 | `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
 | `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
