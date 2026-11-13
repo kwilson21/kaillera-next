@@ -128,10 +128,12 @@
   // Stage 2: the machine says whether a game is on for this page.
   const _session = window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta)) ?? null;
   const isGameRunning = () => (_session ? _session.gameOn() : _pageGameRunning);
-  // Held until the server has sent the upload token client events need.
+  // Held until this page load has been sent an upload token: client events
+  // need one, and a token restored from storage may have expired.
+  let _freshUploadToken = false;
   const _protocol =
     window.KNCore?.protocol?.createObserver?.(({ type, message, issue }) => {
-      if (!KNState.uploadToken) return false;
+      if (!_freshUploadToken) return false;
       KNEvent(type, message, { issue });
       return true;
     }) ?? null;
@@ -759,6 +761,7 @@
     socket.on('upload-token', (data) => {
       _uploadToken = data?.token || '';
       KNState.uploadToken = _uploadToken;
+      _freshUploadToken = !!_uploadToken;
       try {
         if (_uploadTokenKey) _safeSet('localStorage', _uploadTokenKey, _uploadToken);
       } catch (_) {}
@@ -938,7 +941,7 @@
         // join-room's reconnect path says what the room is doing now. (The
         // host's open-room does not: only the host starts and ends games, so
         // its page cannot fall behind while it is still the owner.)
-        if (!err && room) _protocol?.checkAck('join-room', room);
+        if (!err && rejoinEvent === 'join-room') _protocol?.checkAck('join-room', room);
         if (!err && room?.status) _reconcileAfterRejoin(room);
       });
       return;

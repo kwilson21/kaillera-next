@@ -9,36 +9,17 @@
  * schemas and the server agree, before any handler is made to depend on a
  * decoded value.
  */
-import { Result, Schema } from 'effect';
 import { checkPeerText, checkRelay, type PeerChannel, textKind } from './peer-protocol.ts';
 import { JoinRoomAck, serverEvents, SessionLogAck } from './protocol.ts';
+import { issueFinder, type WirePayload } from './wire.ts';
+
+export { redactPath, type WirePayload } from './wire.ts';
 
 /** Acks the server builds itself, by the event they answer. */
 const serverAcks = {
   'join-room': JoinRoomAck,
   'session-log': SessionLogAck,
 } as const;
-
-/** Anything a Socket.IO message can carry: it arrives as parsed JSON. */
-export type WirePayload =
-  | null
-  | undefined
-  | boolean
-  | number
-  | string
-  | readonly WirePayload[]
-  | { readonly [key: string]: WirePayload };
-
-const ISSUE_MAX = 240;
-
-/** For one schema: what is wrong with a payload, or null. Names a path, never a value. */
-const issueFinder = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
-  const decode = Schema.decodeUnknownResult(schema);
-  return (data: WirePayload): string | null => {
-    const result = decode(data);
-    return Result.isFailure(result) ? result.failure.message.slice(0, ISSUE_MAX) : null;
-  };
-};
 
 const finders = new Map<string, (data: WirePayload) => string | null>();
 for (const [event, schema] of Object.entries(serverEvents)) finders.set(event, issueFinder(schema));

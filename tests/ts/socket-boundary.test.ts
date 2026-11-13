@@ -4,6 +4,7 @@ import {
   checkServerMessage,
   createProtocolObserver,
   type ProtocolReport,
+  redactPath,
   type WirePayload,
   REPORT_LIMIT,
 } from '../../web/src/socket-boundary.ts';
@@ -48,6 +49,16 @@ test('a message off its schema names the path, not the value', () => {
   const named = checkServerMessage('upload-token', { token: { leaked: 'do-not-report-me' } });
   assert.ok(named?.includes('token'));
   assert.ok(!named?.includes('do-not-report-me'));
+});
+
+test('a record key in the path is payload data and is starred out', () => {
+  const players = { 'b955ef2d-e4c1-4f6c-ad85-861949b2fe25': { socketId: 7 } };
+  const issue = checkServerMessage('users-updated', { players });
+  assert.ok(issue?.includes('["players"]["*"]["socketId"]'), issue ?? '');
+  assert.ok(!issue?.includes('b955ef2d'));
+  // A socket id of letters only is still not a field name: too long.
+  assert.equal(redactPath('at ["players"]["PCVeuLuKjKBKLWHAAADx"]["slot"]'), 'at ["players"]["*"]["slot"]');
+  assert.equal(redactPath('at ["hostRom"]["game_id"]'), 'at ["hostRom"]["game_id"]');
 });
 
 test('relays and unknown events are not judged', () => {

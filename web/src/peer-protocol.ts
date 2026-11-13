@@ -13,7 +13,7 @@
  */
 import { Result, Schema } from 'effect';
 import { GameMode, RenegotiateRequest } from './protocol.ts';
-import type { WirePayload } from './socket-boundary.ts';
+import { issueFinder, type WirePayload } from './wire.ts';
 
 // ── control strings ─────────────────────────────────────────────────────────
 
@@ -184,16 +184,6 @@ const JSON_MESSAGES = {
 } as const;
 
 export type JsonRoute = keyof typeof JSON_MESSAGES;
-
-const ISSUE_MAX = 240;
-
-const issueFinder = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
-  const decode = Schema.decodeUnknownResult(schema);
-  return (data: WirePayload): string | null => {
-    const result = decode(data);
-    return Result.isFailure(result) ? result.failure.message.slice(0, ISSUE_MAX) : null;
-  };
-};
 
 const jsonFinders = new Map<string, (data: WirePayload) => string | null>();
 for (const [route, messages] of Object.entries(JSON_MESSAGES)) {
