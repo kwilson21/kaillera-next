@@ -203,8 +203,14 @@ host reload) all show no `session-disagree`.
   started by `play.js` when the socket connects, not yet invoked by the
   machine. A dropped host that is taken back returns as a player; whether
   it should get the room back is undecided.
-- Then: `play.js` reads the late-join flags from the machine and the old
-  flags are deleted, once the reports above stay empty.
+- Done: `play.js` reads the two late-join flags from the machine
+  (`_session.decide`). The old `_lateJoin` and `_pendingLateJoin` are still
+  written beside it and compared at every read, like `gameRunning`.
+  Production had no matches to show agreement, so the evidence is every
+  two-emulator scenario in `tests/lifecycle-e2e.mjs` reporting no
+  `session-disagree`.
+- Then: delete the three old flags once production shows no
+  `session-disagree`.
 - Still open in the model: `noGhostMatch` (a playing room whose only member
   is a late joiner waiting for state).
 
