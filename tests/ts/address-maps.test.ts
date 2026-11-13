@@ -57,7 +57,7 @@ test('every map in the table is one the registry accepts', () => {
 });
 
 test('a map the registry would refuse is named', () => {
-  const base = ROM_ADDRESSES[SSB64_US]!.map;
+  const base = ROM_ADDRESSES[SSB64_US].map;
   assert.match(addressMapProblem({ ...base, sceneCurr: 0x800000 }) ?? '', /sceneCurr/);
   assert.match(addressMapProblem({ ...base, playerStride: 0x10000 }) ?? '', /playerStride/);
   assert.match(addressMapProblem({ ...base, vsBattleHeaderSize: 0 }) ?? '', /vsBattleHeaderSize/);
