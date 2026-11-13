@@ -22,6 +22,7 @@ from src.api import signaling
 from src.api.payloads import JoinRoomPayload, OpenRoomPayload
 from src.api.signaling import (
     NOT_IN_ROOM,
+    NOT_THE_OWNER,
     Room,
     _join_room_locked,
     _open_room_locked,
@@ -246,6 +247,32 @@ def test_a_dropped_host_is_refused_once_the_room_has_moved_on():
 
     assert err == NOT_IN_ROOM
     assert "pid-host" not in room.players
+
+
+def test_a_taken_back_host_that_reloads_is_sent_to_join_room():
+    """Its URL still says host, but the room is someone else's and is playing."""
+    room = _room_handed_on_from_the_host()
+    assert _open("pid-host", "sid-host-2", "ROOM1", resume=True, slot=0) is None
+
+    payload = OpenRoomPayload(
+        extra={
+            "sessionid": "ROOM1",
+            "persistentId": "pid-host",
+            "reconnectToken": make_reconnect_token("pid-host"),
+            "fresh": True,
+        }
+    )
+    err = _call(_open_room_locked, "sid-host-3", payload)
+
+    assert err == NOT_THE_OWNER
+    assert room.status == "playing"
+    # Nothing was changed: join-room does the reconnect.
+    assert room.players["pid-host"]["socketId"] == "sid-host-2"
+
+    err, resp = _join("pid-host", "sid-host-3", resume=False)
+    assert err is None
+    assert resp["status"] == "playing"
+    assert room.players["pid-host"]["socketId"] == "sid-host-3"
 
 
 def test_clients_from_before_the_field_are_not_resuming():

@@ -118,6 +118,9 @@ _DISCONNECT_GRACE_SECONDS = 30
 # The answer to a rejoin marked `resume` from a client the room no longer
 # counts as a member. The page matches on this text (web/src/rejoin-attempt.ts).
 NOT_IN_ROOM = "Not in room"
+# The answer to a fresh open-room from a member who is not the room's owner.
+# The page then joins with join-room instead (web/static/play.js).
+NOT_THE_OWNER = "Not the owner"
 # Short grace for lobby OWNER disconnects only — closes the ownership-churn
 # race where a brief network blip transferred host privileges to another
 # player. Mid-game already has the longer grace above; non-owner lobby
@@ -721,8 +724,14 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
     if existing and persistent_id in existing.players:
         if not payload.extra.reconnectToken or not verify_reconnect_token(persistent_id, payload.extra.reconnectToken):
             return "Invalid reconnect token"
-        _cancel_disconnect_grace(persistent_id)
         old_sid = existing.players[persistent_id]["socketId"]
+        # A fresh page asking to open a room it is in but no longer owns (it
+        # was dropped mid-match, the room was handed on, and it was taken
+        # back as a player; its URL still says host). Opening would show it a
+        # lobby over a match in play: it has to come in through join-room.
+        if payload.extra.fresh and existing.status == "playing" and existing.owner != old_sid:
+            return NOT_THE_OWNER
+        _cancel_disconnect_grace(persistent_id)
         _swap_sid(existing, persistent_id, old_sid, sid)
         _sid_to_room.pop(old_sid, None)
         _sid_to_room[sid] = (session_id, persistent_id, False)
