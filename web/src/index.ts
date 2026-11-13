@@ -44,7 +44,8 @@ import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts
 import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
-import { startRejoin, type RejoinHandle, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
+import { startRejoin, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
+import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from './rejoin-machine.ts';
 import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
@@ -108,13 +109,41 @@ export const createSession = (
 
   let [snapshot] = initialTransition(sessionMachine, { lateJoinReportAfterMs });
   const state = (): SessionState => snapshot.value;
-  // The rejoin in flight, if any. The session owns it: it starts only while
-  // a game is on, ends with the socket or the game, and tells the machine
-  // when the server refuses it.
-  let currentRejoin: { cancel: () => void } | null = null;
-  const cancelRejoin = (): void => {
-    currentRejoin?.cancel();
-    currentRejoin = null;
+  // The rejoin is its own machine (rejoin-machine.ts), run by an actor in
+  // this session's scope. The session gives it the request of the current
+  // connection, sends it the events it shares with the lifecycle machine,
+  // and hears each finished rejoin's outcome.
+  let rejoinOptions: RejoinOptions<RejoinedRoom> | null = null;
+  let rejoinListener: ((outcome: RejoinOutcome<RejoinedRoom>) => void) | null = null;
+  type RejoinEvent = Parameters<Awaited<typeof rejoinReady>['send']>[0];
+  const rejoinReady = Effect.runPromise(
+    createEffectActor(rejoinMachine).pipe(
+      Effect.provideService(Scope.Scope, scope),
+      Effect.provideService(RejoinTransport, {
+        options: () => {
+          if (rejoinOptions === null) throw new Error('rejoin started with no request');
+          return rejoinOptions;
+        },
+      }),
+      Effect.provideService(RejoinResults, {
+        deliver: (outcome) =>
+          Effect.sync(() => {
+            // A refusal ends the game in the lifecycle machine before the page hears of it.
+            if (outcome.kind === 'dropped') send({ type: 'rejoinRefused' });
+            rejoinListener?.(outcome);
+          }),
+      }),
+    ),
+  );
+  let rejoinActor: Awaited<typeof rejoinReady> | undefined;
+  const rejoinHeld: RejoinEvent[] = [];
+  void rejoinReady.then((a) => {
+    rejoinActor = a;
+    for (const event of rejoinHeld.splice(0)) a.send(event);
+  });
+  const sendRejoin = (event: RejoinEvent): void => {
+    if (rejoinActor) rejoinActor.send(event);
+    else rejoinHeld.push(event);
   };
 
   // This page came into its match by joining one already in play.
@@ -128,8 +157,9 @@ export const createSession = (
     if (snapshot.value === 'lobby') joinedMidMatch = false;
     else if (event.type === 'joined') joinedMidMatch = true;
     // A rejoin in flight belongs to the socket and the game it started
-    // under: when either goes, so does it.
-    if (event.type === 'socketDown' || snapshot.value === 'lobby') cancelRejoin();
+    // under; its machine leaves `rejoining` when either goes.
+    if (event.type === 'socketDown') sendRejoin({ type: 'socketDown' });
+    else if (snapshot.value === 'lobby') sendRejoin({ type: 'gameOver' });
     if (actor) actor.send(event);
     else held.push(event);
     const now = joinedMatch();
@@ -151,27 +181,27 @@ export const createSession = (
     /** The signaling socket came back. */
     socketUp: (): void => send({ type: 'socketUp' }),
     /**
-     * Take this page's place in the room back after its socket returned
-     * (web/src/rejoin-attempt.ts). Does nothing in the lobby, where there is
-     * no game to resume. A newer call, a socket that drops again, or a game
-     * that ends cancels the one in flight, and its outcome is then never
-     * delivered. A refusal moves the machine to the lobby (`rejoinRefused`)
-     * before `onOutcome` hears of it, so the page only has to clean up and
-     * join again; on `resumed` the page reports what the room is doing with
-     * `rejoined`.
+     * Take this page's place in the room back after its socket returned:
+     * starts the rejoin machine (rejoin-machine.ts) with this connection's
+     * request. Does nothing in the lobby, where there is no game to resume.
+     * A newer call, a socket that drops again, or a game that ends takes the
+     * machine out of `rejoining`, and that rejoin's outcome is then never
+     * delivered. A refusal moves the lifecycle machine to the lobby
+     * (`rejoinRefused`) before `onOutcome` hears of it, so the page only has
+     * to clean up and join again; on `resumed` the page reports what the
+     * room is doing with `rejoined`.
      */
-    startRejoin: <Room>(options: RejoinOptions<Room>, onOutcome: (outcome: RejoinOutcome<Room>) => void): boolean => {
-      cancelRejoin();
-      if (state() === 'lobby') return false;
-      const handle: RejoinHandle<Room> = startRejoin(options);
-      currentRejoin = handle;
-      void handle.outcome.then((outcome) => {
-        if (currentRejoin !== handle) return;
-        currentRejoin = null;
-        if (outcome.kind === 'dropped') send({ type: 'rejoinRefused' });
-        onOutcome(outcome);
-      });
-      return true;
+    startRejoin: (
+      options: RejoinOptions<RejoinedRoom>,
+      onOutcome: (outcome: RejoinOutcome<RejoinedRoom>) => void,
+    ): boolean => {
+      const gameOn = state() !== 'lobby';
+      if (gameOn) {
+        rejoinOptions = options;
+        rejoinListener = onOutcome;
+      }
+      sendRejoin({ type: 'socketUp', gameOn });
+      return gameOn;
     },
     /**
      * The server acknowledged a rejoin after a socket drop. Moves the machine
@@ -187,10 +217,7 @@ export const createSession = (
       send({ type: 'rejoined', playing: room.playing, matchId: room.matchId });
       return verdict === 'gameEnded' || verdict === 'matchReplaced' ? verdict : 'keep';
     },
-    stop: (): Promise<void> => {
-      cancelRejoin();
-      return Effect.runPromise(Scope.close(scope, Exit.void));
-    },
+    stop: (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void)),
   };
 };
 

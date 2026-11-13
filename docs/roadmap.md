@@ -209,12 +209,15 @@ every read and reported no disagreement before the old flags were deleted.
   as a guest when the room has been handed on, instead of failing to open
   it. (A host that still owns its room cannot fall behind it: only the
   owner starts and ends games.)
-- Done: the session owns the rejoin (`session.startRejoin`): it starts it
-  only while a game is on, cancels it when the socket drops again or the
-  game ends, and moves the machine on a refusal before the page hears of
-  it. It is not an XState `invoke`: the page reads the machine through
-  XState's pure `transition`, and a result that arrived inside the Effect
-  actor would not reach that state.
+- Done: the rejoin is a state machine of its own
+  (`web/src/rejoin-machine.ts`, diagram in `docs/session-machine.md`):
+  `rejoining` invokes the rejoin program, and leaving the state (the socket
+  drops again, the game ends, a newer connection arrives) interrupts it.
+  The session runs it beside the lifecycle machine, hands it the current
+  connection's request and turns a refusal into `rejoinRefused`. It is a
+  second machine, not a region of the first, so the lifecycle machine's
+  states, which the page reads in the same tick as each event, keep their
+  shape.
 
 **Stage 3: the socket boundary**
 Every Socket.IO and DataChannel message is decoded with Effect Schema on
