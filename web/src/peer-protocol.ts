@@ -250,6 +250,7 @@ const SignalRelay = Schema.Struct({
 
 const signalRelayIssue = issueFinder(SignalRelay);
 const renegotiateIssue = issueFinder(RenegotiateRequest);
+const senderIssue = issueFinder(Schema.Struct({ sender: Schema.String }));
 
 /**
  * A relayed Socket.IO event. Null for an event that is not a relay.
@@ -260,7 +261,10 @@ export const checkRelay = (event: string, data: WirePayload): PeerVerdict | null
   if (event === 'data-message') return checkPeerJson('data-message', data);
   if (event === 'rom-signal') return { kind: event, issue: signalRelayIssue(data) };
   if (event === 'webrtc-signal') {
-    return renegotiateIssue(data) === null
+    // A peer may relay `requestRenegotiate` too, and the server adds `sender`
+    // to everything it relays: only a message without one is the server's own.
+    const fromServer = senderIssue(data) !== null && renegotiateIssue(data) === null;
+    return fromServer
       ? { kind: `${event} (renegotiate)`, issue: null }
       : { kind: event, issue: signalRelayIssue(data) };
   }

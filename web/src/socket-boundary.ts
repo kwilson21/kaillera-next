@@ -49,7 +49,7 @@ export const PEER_SAMPLE = 16;
 /** JSON text is sampled by its opening characters, which hold the `type`. */
 const PEER_JSON_KEY = 24;
 /** A peer sending endless distinct kinds cannot grow the sample table. */
-const PEER_KINDS_MAX = 256;
+export const PEER_KINDS_MAX = 256;
 
 /** Reports a page may send in one session: a server that is wrong is wrong on every message. */
 export const REPORT_LIMIT = 20;
@@ -101,9 +101,10 @@ export const createProtocolObserver = (sink: (report: ProtocolReport) => boolean
   const sampled = new Map<string, number>();
   const peerText = (channel: PeerChannel | 'rom-transfer', text: string): void => {
     const sampleKey = `${channel} ${text.startsWith('{') ? text.slice(0, PEER_JSON_KEY) : textKind(text)}`;
-    const count = sampled.get(sampleKey) ?? 0;
-    if (count >= PEER_SAMPLE || sampled.size > PEER_KINDS_MAX) return;
-    sampled.set(sampleKey, count + 1);
+    const count = sampled.get(sampleKey);
+    // The table is capped only against new kinds: one already in it keeps its sample.
+    if (count === undefined ? sampled.size >= PEER_KINDS_MAX : count >= PEER_SAMPLE) return;
+    sampled.set(sampleKey, (count ?? 0) + 1);
     const verdict = checkPeerText(channel, text);
     note(`dc ${verdict.kind}`, verdict.issue);
   };
