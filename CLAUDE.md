@@ -276,11 +276,19 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   the menu autopilot can overshoot into Team Battle at delay ≥ 10. Treat
   multi-second freezes and menu timeouts there as environment first; confirm
   real bugs from the logs.
-- **Which hash to trust.** `kn_game_state_hash` is the determinism signal:
-  RDRAM minus blocks tainted by audio/framebuffer writes, plus the saved CPU
-  state unless `kn_skip_post_rdram_in_hash` is set, so equal hashes don't
-  always prove equal CPU state. `kn_full_state_hash` includes the tainted
-  blocks, which legitimately differ after headless replays.
+- **Which hash to trust.** None of the three covers the whole game state;
+  know what each one reads. `kn_gameplay_hash` hashes a short list of game
+  addresses (scene, VS battle header, stock counts, RNG seed, character
+  select); it is the one that sees a changed stock count. `kn_game_state_hash`
+  is RDRAM minus every 64 KB block tainted by an audio or framebuffer write,
+  sampled every 16th byte, plus the saved CPU state unless
+  `kn_skip_post_rdram_in_hash` is set. In an SSB64 match 107 of 128 blocks are
+  tainted, the battle state's among them, so equal hashes prove little; a
+  two-player run reports the coverage as `gameStateRdramBlocksHashed`.
+  `kn_full_state_hash` samples one byte in 64 and includes the tainted
+  blocks, which legitimately differ after headless replays. A run with
+  `DESYNC_GUEST=1` shows which of them (and the desync detector) notice a
+  real divergence.
 - **Core artifacts ship together.** The `.data` archive and the standalone
   `mupen64plus_next_libretro.{js,wasm}` (used by the Mode 2 worker) must come
   from the same build; URLs are content-hashed via `/api/core-info`.

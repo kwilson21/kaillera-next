@@ -2143,6 +2143,19 @@ const size_t kn_gameplay_addr_count = sizeof(kn_gameplay_addrs) / sizeof(kn_game
 
 /* Backward-compat for callers that used the legacy macro form. */
 #define KN_GAMEPLAY_ADDR_COUNT kn_gameplay_addr_count
+
+/* Where table entry `a` lives in an RDRAM image. RDRAM is stored as
+ * host-order (little-endian) 32-bit words, so the single N64 byte at
+ * address A is at offset A ^ 3; a 4-byte-aligned run of whole words is
+ * where its address says. Until this, the five one-byte entries (the scene
+ * and the four stock counts) were read at A itself, the byte three places
+ * along in the same word: the hash never covered a stock count or the
+ * scene. tests/rb-two-player.mjs with DESYNC_GUEST=1 changes one stock
+ * count on one peer and found this hash still equal on both. */
+static inline size_t kn_gameplay_addr_offset(size_t a) {
+    size_t off = kn_gameplay_addrs[a].rdram_offset;
+    return kn_gameplay_addrs[a].size == 1 ? (off ^ (size_t)3) : off;
+}
 /* Total bytes across all gameplay addresses (209 bytes as of writing).
  * Used for the stack-allocated stash buffer in kn_post_tick. Padded
  * to 256 for alignment and headroom if addresses are added. */
@@ -2475,7 +2488,7 @@ uint32_t kn_gameplay_hash(int frame) {
     uint32_t hash = KN_FNV1A_OFFSET;
 
     for (size_t a = 0; a < KN_GAMEPLAY_ADDR_COUNT; a++) {
-        size_t off = state_base + kn_gameplay_addrs[a].rdram_offset;
+        size_t off = state_base + kn_gameplay_addr_offset(a);
         uint32_t sz = kn_gameplay_addrs[a].size;
         if (off + sz > state_limit) continue; /* bounds check */
         hash = kn_fnv1a_stride(hash, state + off, sz, 1);
@@ -2507,7 +2520,7 @@ uint32_t kn_live_gameplay_hash(void) {
         if (!rb_ensure_rdram_base()) return 0;
         uint32_t hash = KN_FNV1A_OFFSET;
         for (int a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
-            size_t off = kn_gameplay_addrs[a].rdram_offset;
+            size_t off = kn_gameplay_addr_offset((size_t)a);
             uint32_t sz = kn_gameplay_addrs[a].size;
             if (off + sz > rb.split_rdram_size) continue;
             hash = kn_fnv1a_stride(hash, rb.rdram_base + off, sz, 1);
@@ -2532,7 +2545,7 @@ uint32_t kn_live_gameplay_hash(void) {
     /* Same address-list loop as kn_gameplay_hash but over scratch. */
     uint32_t hash = KN_FNV1A_OFFSET;
     for (int a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
-        size_t off = kn_rdram_offset_in_state + kn_gameplay_addrs[a].rdram_offset;
+        size_t off = kn_rdram_offset_in_state + kn_gameplay_addr_offset((size_t)a);
         uint32_t sz = kn_gameplay_addrs[a].size;
         if (off + sz > state_size) continue;
         hash = kn_fnv1a_stride(hash, scratch + off, sz, 1);

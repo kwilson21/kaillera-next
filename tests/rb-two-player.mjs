@@ -165,11 +165,12 @@
  *     really desynced, and the desync detector (kn-desync-detector.js) must
  *     say so: the run passes only if both peers' sync logs have a
  *     `KNDesync suspect ... field=stocks slot=0 trigger=flag` line after the
- *     change, and none before it. The gameplay-hash and integrity checks
- *     are reported but not judged. In the first run they did not see the
- *     change at all (zero mismatches): they hash the saved rollback states,
- *     and a byte poked into RDRAM from outside the emulator may not reach
- *     those, whereas the detector hashes live RDRAM after each tick.
+ *     change, and none before it; and the gameplay hash (kn_gameplay_hash,
+ *     which lists the stock counts) differs on at least one frame from the
+ *     change on, and on none before it. The
+ *     game-state and full-state hashes are reported but not judged: the
+ *     stock counts sit in an RDRAM block kn_game_state_hash leaves out as
+ *     tainted, and kn_full_state_hash samples one byte in 64.
  *     Reported as `desyncGuest` in summary.json. Mutually exclusive with the
  *     other knobs. This is the detector's positive test; every other run
  *     only shows that it stays quiet.
@@ -942,6 +943,8 @@ const collect = (p, VISUAL_CHECK) =>
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
+      // 64 KB RDRAM blocks kn_game_state_hash leaves out (of 128).
+      taintedBlocks: m._kn_get_tainted_block_count?.() ?? null,
       visual,
     };
   }, VISUAL_CHECK);
@@ -971,7 +974,9 @@ let both = 0,
   firstFull = null,
   battleCompared = 0,
   gsMis = 0,
-  firstGs = null;
+  firstGs = null,
+  gpMisBeforeDesync = 0,
+  gpMisAfterDesync = 0;
 const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f],
@@ -982,6 +987,12 @@ for (const f of Object.keys(H.hashes)) {
   if (a[0] !== b[0]) {
     gpMis++;
     if (firstGp === null) firstGp = +f;
+    // DESYNC_GUEST: the hash must differ because of the change, so only
+    // frames from the change on count, and none may differ before it.
+    if (DESYNC_GUEST && desyncGuestAt >= 0) {
+      if (+f >= desyncGuestAt) gpMisAfterDesync++;
+      else gpMisBeforeDesync++;
+    }
   }
   if (a[1] !== b[1]) {
     fullMis++;
@@ -1145,6 +1156,8 @@ if (VISUAL_CHECK) {
   };
 }
 
+const taintCoverage = (side) => (Number.isInteger(side.taintedBlocks) ? 128 - side.taintedBlocks : null);
+
 // DESYNC_GUEST: the detector's cross-peer flags in one peer's sync log, split
 // at the frame the guest was desynced.
 const desyncFlagsOf = (log) => {
@@ -1179,7 +1192,14 @@ const signalingDropOf = (page, events, log) => ({
 const summary = {
   room,
   ...(DESYNC_GUEST
-    ? { desyncGuest: { atFrame: desyncGuestAt, host: desyncFlagsOf(H.sync), guest: desyncFlagsOf(G.sync) } }
+    ? {
+        desyncGuest: {
+          atFrame: desyncGuestAt,
+          gameplayMismatches: { before: gpMisBeforeDesync, after: gpMisAfterDesync },
+          host: desyncFlagsOf(H.sync),
+          guest: desyncFlagsOf(G.sync),
+        },
+      }
     : {}),
   ...(DROP_SIGNALING_MS
     ? {
@@ -1235,6 +1255,10 @@ const summary = {
     firstGameStateMismatch: firstGs,
     fullStateMismatches: fullMis,
     firstFullMismatch: firstFull,
+    // What "zero game-state mismatches" covers: kn_game_state_hash skips
+    // every RDRAM block an audio or framebuffer write has tainted, and
+    // samples every 16th byte of the rest.
+    gameStateRdramBlocksHashed: { host: taintCoverage(H), guest: taintCoverage(G), of: 128 },
   },
   ...(VISUAL_CHECK ? { visualCheck } : {}),
 };
@@ -1341,12 +1365,17 @@ if (signalingDropFailed) {
   console.log('DROP_SIGNALING_MS: a page never reconnected, stalled, or its lifecycle machine reported:');
   console.log(JSON.stringify(summary.signalingDrop));
 }
-// DESYNC_GUEST inverts the run: the peers were desynced on purpose, so only
-// the detector is judged, not the hash and integrity checks. It must flag
-// the changed field on both peers, and nothing before the change.
+// DESYNC_GUEST inverts the run: the peers were desynced on purpose. The
+// detector must flag the changed field on both peers, and nothing before
+// the change; and the gameplay hash, which lists the stock counts, must
+// differ on at least one frame. The game-state and full-state hashes are
+// not judged: the stock counts are in a block the first leaves out, and the
+// second samples one byte in 64.
 const desyncGuestFailed =
   DESYNC_GUEST &&
   (desyncGuestAt < 0 ||
+    gpMisAfterDesync < 1 ||
+    gpMisBeforeDesync > 0 ||
     [summary.desyncGuest.host, summary.desyncGuest.guest].some((side) => side.before > 0 || side.stocksAfter < 1));
 if (DESYNC_GUEST) {
   console.log(
