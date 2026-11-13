@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.67.3",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep a player's live connection when they rejoin after the host; lifecycle machine decides \"is a game on\" (#119)"
+      }
+    ]
+  },
+  {
     "version": "0.67.2",
     "date": "2026-11-12",
     "changes": [
