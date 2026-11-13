@@ -109,6 +109,12 @@ export const sessionMachine = setupEffect({
         /** This page runs an emulator, so it needs the match state before it is in the game. */
         waitsForState: Schema.Boolean,
       }),
+      /**
+       * The host was not running yet when this joiner asked for state, so the
+       * joiner loads as a player who was there at the start
+       * (web/src/late-join-wait.ts; `admitToStart` in the Quint model).
+       */
+      admittedToStart: Empty,
       /** The late-join state arrived and the emulator is running it. */
       lateJoinSynced: Empty,
       socketDown: Empty,
@@ -195,6 +201,7 @@ export const sessionMachine = setupEffect({
         // A game-started for a page already in the match changes nothing but the match id.
         gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
         lateJoinSynced: { target: 'running' },
+        admittedToStart: { target: 'running' },
       },
     },
     running: {

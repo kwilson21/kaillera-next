@@ -6837,6 +6837,7 @@
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
+    if (msg.type === 'join-the-start') handleJoinTheStart(msg);
     if (msg.type === 'sync-request-full-socket') handleSocketSyncRequest(msg);
     if (msg.type === 'sync-state-socket') handleSocketSyncState(msg);
     if (msg.type === 'late-join-ready') {
@@ -6892,9 +6893,91 @@
   const _LATE_JOIN_COOLDOWN_MS = 8000;
   const _lateJoinLastSentAt = new Map(); // requesterSid -> ms timestamp
 
+  // The joiner's wait for an answer to its state request, as an Effect
+  // program (web/src/late-join-wait.ts): repeated request, deadline, and a
+  // race between "here is the state" and "join the start". null when the
+  // bundle did not load; the request is then sent once, as it used to be.
+  const LATE_JOIN_WAIT_RETRY_MS = 5000;
+  const LATE_JOIN_WAIT_TIMEOUT_MS = 60000;
+  let _lateJoinWait = null;
+
+  const _sendLateJoinRequest = () => {
+    socket.emit('data-message', { type: 'request-late-join', requesterSid: socket.id });
+  };
+
+  // Leave the late-join path and load as a player who was here at the start.
+  const _joinTheStart = (reason) => {
+    if (!_awaitingLateJoinState || _isApplyingLateJoinState) return;
+    _syncLog(`late-join wait: joining the start instead (${reason})`);
+    _awaitingLateJoinState = false;
+    _lateJoin = false;
+    _config?.onLateJoinAdmitted?.();
+    for (const p of Object.values(_peers)) {
+      if (p.dc && p.dc.readyState === 'open') {
+        try {
+          p.dc.send('emu-ready');
+        } catch (_) {}
+      }
+    }
+    checkAllEmuReady();
+  };
+
+  const _beginLateJoinWait = () => {
+    _awaitingLateJoinState = true;
+    setStatus('Requesting game state...');
+    const start = window.KNCore?.startLateJoinWait;
+    if (!start) {
+      _sendLateJoinRequest();
+      return;
+    }
+    const wait = start({
+      request: _sendLateJoinRequest,
+      retryEveryMs: LATE_JOIN_WAIT_RETRY_MS,
+      timeoutMs: LATE_JOIN_WAIT_TIMEOUT_MS,
+    });
+    _lateJoinWait = wait;
+    wait.outcome.then((outcome) => {
+      if (_lateJoinWait !== wait) return;
+      _lateJoinWait = null;
+      if (outcome === 'admitted') _joinTheStart('the host is not running yet');
+      if (outcome !== 'timeout') return;
+      // I1: the deadline has a recovery action. A host that is running is
+      // sending frames; if none have arrived it is still waiting for
+      // players, so load as one of them. Otherwise say so and stop waiting.
+      if (!(_lastRemoteFrame > 0)) {
+        _joinTheStart('no answer and the host is not running');
+        return;
+      }
+      _syncLog(`LATE-JOIN-WAIT-TIMEOUT after ${LATE_JOIN_WAIT_TIMEOUT_MS}ms: the host is running but sent no state`);
+      KNEvent('late-join-timeout', 'No game state from the host', { waitedMs: LATE_JOIN_WAIT_TIMEOUT_MS });
+      setStatus('Could not get the game state from the host — reload to try again');
+    });
+  };
+
+  const handleJoinTheStart = (msg) => {
+    if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
+    if (_lateJoinWait) _lateJoinWait.admitted();
+    else _joinTheStart('the host is not running yet');
+  };
+
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
-    if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
+    if (_playerSlot !== 0) return;
+    if (_phase !== PHASE_RUNNING) {
+      // Not running yet: there is no state to send, and this host will not
+      // start until that player has loaded. Without an answer both sides
+      // waited for ever (specs/room_lifecycle.qnt, admitToStart). Tell the
+      // joiner to load as a player who was here at the start.
+      // Only while still waiting for players. Once the initial sync has
+      // begun the joiner cannot be added to it; its request is repeated and
+      // answered with state as soon as this host is running.
+      if (_phase !== PHASE_GAME_STARTED && _phase !== PHASE_EMU_READY) return;
+      const joinerSid = _peerKey(msg.requesterSid);
+      if (!joinerSid || !_peers[joinerSid]) return;
+      _syncLog(`late-join request from ${joinerSid} before the match is running: admitting to the start`);
+      _signalSocket.emit('data-message', { type: 'join-the-start', targetSid: joinerSid });
+      return;
+    }
     const requesterSid = _peerKey(msg.requesterSid);
     if (!requesterSid) return;
     const now = performance.now();
@@ -9371,13 +9454,8 @@
       const hostAlreadyRunning = _lastRemoteFrame > 0;
       if ((_lateJoin || hostAlreadyRunning) && _playerSlot !== 0) {
         _syncLog(`using late-join path (lateJoin=${_lateJoin}, hostRunning=${hostAlreadyRunning})`);
-        _awaitingLateJoinState = true;
-        setStatus('Requesting game state...');
-        socket.emit('data-message', {
-          type: 'request-late-join',
-          requesterSid: socket.id,
-        });
-        return; // handleLateJoinState() will resume from here
+        _beginLateJoinWait();
+        return; // handleLateJoinState() or _joinTheStart() will resume from here
       }
 
       // Notify all connected peers
@@ -10389,6 +10467,7 @@
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
     _awaitingLateJoinState = false;
+    _lateJoinWait?.stateArrived();
     // Ensure the loading overlay is up — the EJS canvas may already be
     // painting boot frames (N64 logo) and we don't want the joiner to see
     // them between now and the state restore that follows below.
@@ -17837,6 +17916,8 @@
     window._knPreventRetroArchVisibilityPause = false;
     if (window._knSyncLog === _syncLog) window._knSyncLog = null;
     _awaitingLateJoinState = false;
+    _lateJoinWait?.cancel();
+    _lateJoinWait = null;
     _isApplyingLateJoinState = false;
     _lateJoinReadyHandled.clear();
     _pendingLateJoinReadySids.clear();

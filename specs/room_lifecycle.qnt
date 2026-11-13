@@ -39,9 +39,10 @@ module room {
   const RESUME_RECONCILES: bool
   // What happens to a player who asks for the match state while the others
   // are still loading (nobody is running the match yet):
-  //   false  today's code: the host only answers once it is running, and the
-  //          others will not start without that player, so everyone waits
-  //   true   proposed fix: the player is let into the start instead
+  //   false  before: the host only answered once it was running, and the
+  //          others would not start without that player, so everyone waited
+  //   true   today (web/src/late-join-wait.ts): the player is let into the
+  //          start instead
   const START_ADMITS_JOINERS: bool
 
   // web/src/session.ts is the page half of this model, state for state:
@@ -342,10 +343,10 @@ module room {
     listeners.forall(p => (page.get(p) == Lobby) iff (status == "lobby"))
 
   // A player asking for the match state while the others are still loading
-  // always has a way forward. Fails today (found by tests/lifecycle-e2e.mjs,
-  // 2026-11-13, then modelled): the host answers a state request only once
-  // it is running, and it will not run until that player has loaded, so
-  // both wait for ever. Typical cause: the player's socket was down when the
+  // always has a way forward. Failed before (found by tests/lifecycle-e2e.mjs,
+  // 2026-11-13, then modelled): the host answered a state request only once
+  // it was running, and it would not run until that player had loaded, so
+  // both waited for ever. Typical cause: the player's socket was down when the
   // host pressed start, so the page missed game-started and came back down
   // the late-join path.
   val joinersAreNotLeftWaitingAtTheStart =
@@ -446,12 +447,14 @@ module room {
 
 // The server and client as they are today.
 module room_current {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false).*
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true).*
 }
 
-// With the proposed start fix.
-module room_fixed {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true).*
+// Before a joiner who asks for state too early was admitted to the start
+// (web/src/late-join-wait.ts). joinersAreNotLeftWaitingAtTheStart is
+// violated here.
+module room_before_start_fix {
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false).*
 }
 
 // Before the page reconciled with the server on reconnect

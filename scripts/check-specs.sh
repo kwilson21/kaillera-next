@@ -11,9 +11,10 @@ QUINT="npx quint"
 
 $QUINT typecheck "$SPEC"
 
-# Scenario tests: today's code and the two earlier variants (the scenarios
+# Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend=typescript
+$QUINT test "$SPEC" --main=room_before_start_fix --backend=typescript
 $QUINT test "$SPEC" --main=room_before_reconcile --backend=typescript
 $QUINT test "$SPEC" --main=room_before_104 --backend=typescript
 
@@ -29,6 +30,9 @@ check() { # module invariant
 check room_current ownerSeesGame
 check room_current lateJoinersChaseTheCurrentMatch
 check room_current pagesAgreeWithServer
+# A joiner asking for state while the others are still loading always has a
+# way forward (violated on room_before_start_fix).
+check room_current joinersAreNotLeftWaitingAtTheStart
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt

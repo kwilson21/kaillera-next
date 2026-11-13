@@ -8,6 +8,7 @@ import { initialTransition, transition } from 'xstate';
 import { bootTimedOut } from './boot.ts';
 import { decodeGameEnded, decodeGameStarted, decodeUsersUpdated } from './protocol.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
+import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { meshHealTargets } from './roster.ts';
@@ -124,6 +125,7 @@ export const KNCore = {
   createSession,
   meshHealTargets,
   rosterKey,
+  startLateJoinWait,
   shouldResumeRomTransfer,
   protocol: { decodeUsersUpdated, decodeGameStarted, decodeGameEnded },
 };

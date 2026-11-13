@@ -39,6 +39,7 @@ const EVENTS = [
   ['engineStarted: needs state', { type: 'engineStarted', connectOnly: false, waitsForState: true }],
   ['engineStarted: no state needed', { type: 'engineStarted', connectOnly: false, waitsForState: false }],
   ['lateJoinSynced', { type: 'lateJoinSynced' }],
+  ['admittedToStart', { type: 'admittedToStart' }],
   ['rejoined: same match', { type: 'rejoined', playing: true, matchId: 'm' }],
   ['rejoined: game ended while away', { type: 'rejoined', playing: false, matchId: null }],
   ['rejoined: match replaced while away', { type: 'rejoined', playing: true, matchId: 'another' }],

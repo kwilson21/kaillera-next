@@ -183,6 +183,13 @@ host reload) all show no `session-disagree`.
   machine) and returns to the lobby, or rejoins the new match, when the room
   moved on without it. `pagesAgreeWithServer` and
   `lateJoinersChaseTheCurrentMatch` now hold on `room_current`.
+- Done: a joiner who asks for the match state before the host is running
+  is admitted to the start instead of waiting for ever (host replies
+  `join-the-start`). The joiner's wait is the first Effect program in the
+  engine's path (`web/src/late-join-wait.ts`): repeated request, a race
+  between the two answers, a deadline with a recovery action, cancelled when
+  the engine stops. `joinersAreNotLeftWaitingAtTheStart` holds on
+  `room_current`.
 - Next: the rejoin itself is still a bare callback with no timeout or retry,
   and a rejoin the server refuses (the grace window ran out) is only logged.
   It becomes Effect logic invoked by the machine.

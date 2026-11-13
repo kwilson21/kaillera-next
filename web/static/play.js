@@ -3687,6 +3687,12 @@
       },
       initialPlayers: lastUsersData,
       lateJoin: _lateJoin,
+      // The host had not started running, so this page loads as a player
+      // who was there at the start instead of waiting for state.
+      onLateJoinAdmitted: () => {
+        _sessionStopLateJoinPoll();
+        _session?.send({ type: 'admittedToStart' });
+      },
     });
     _lateJoin = false;
     _session?.send({
