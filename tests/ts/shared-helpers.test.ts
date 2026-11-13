@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { fitsFlush } from '../../web/src/flush-fit.ts';
 import { inputEqual, type WireInput } from '../../web/src/input-wire.ts';
 import { classifyRunnerStep } from '../../web/src/runner-step.ts';
 import { stepAxis, type AxisState } from '../../web/src/stick-axis.ts';
@@ -142,6 +143,13 @@ test('one oversized line is still flushed, alone', () => {
   ring.push({ t: 0, f: 0, msg: 'z' });
   assert.equal(ring.entriesAfter(-1, 10, 100).length, 1);
   assert.equal(ring.entriesAfter(0, 10, 100)[0]?.msg, 'z');
+});
+
+test('the first entry always fits a flush; later ones only within the byte budget', () => {
+  assert.equal(fitsFlush(0, 0, 5000, 100), true);
+  assert.equal(fitsFlush(1, 40, 60, 100), true);
+  assert.equal(fitsFlush(1, 40, 61, 100), false);
+  assert.equal(fitsFlush(3, 0, 0, 0), true);
 });
 
 // ── Runner step and input comparison ──────────────────────────────────────
