@@ -12291,7 +12291,12 @@
     const desyncParam = _urlParams.get('desync');
     if (lsMod && window.KNDesync && desyncParam !== 'off') {
       const hasAddressMap = !!_config?.romHash && _config.romHash === window.KNShared?.SSB64_HASH;
-      if (hasAddressMap || desyncParam === 'force') {
+      if (RB_WORKER_COPROC) {
+        // Mode 2 adopts the worker's corrected state without re-simulating
+        // those frames here, so the registry's history for them keeps the
+        // mispredicted hashes and a healthy match would be flagged.
+        _syncLog('KNDesync off: worker replay (Mode 2) does not rewrite field history');
+      } else if (hasAddressMap || desyncParam === 'force') {
         const desyncMode = desyncParam === 'b' ? 'B' : 'C';
         KNDesync.init(lsMod, desyncMode);
       } else {

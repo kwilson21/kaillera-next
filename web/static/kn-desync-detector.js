@@ -225,6 +225,7 @@
 
   function _ingestPeerDigest(peerId, payload) {
     if (!payload || typeof payload.frame !== 'number') return;
+    if (!Array.isArray(payload.hashes) || !_hasHistory(payload.hashes)) return;
     const dropFloor = _localFrameTick - _confirmWindow - CONFIG.historyDepth;
     if (payload.frame < dropFloor) return;
     let perPeer = _peerDigests.get(peerId);
@@ -318,6 +319,15 @@
   const _SCENE_BY_HASH = new Map();
   for (let scene = 0; scene < 256; scene++) {
     _SCENE_BY_HASH.set(Math.imul(0x811c9dc5 ^ scene, 0x01000193) >>> 0, scene);
+  }
+  // Whether the registry had an entry for the digest's frame. It returns 0
+  // for a frame this emulator never simulated: after a late join or a
+  // resync loads the host's state at frame F, the frames a rollback window
+  // before F were never run here. FNV-1a of one byte is never 0, so a zero
+  // match_phase hash means "no entry", not a scene; such a digest is neither
+  // sent nor compared.
+  function _hasHistory(hashes) {
+    return hashes[FIELD.MATCH_PHASE] >>> 0 !== 0;
   }
   function _sceneOfDigest(hashes) {
     return _SCENE_BY_HASH.get(hashes[FIELD.MATCH_PHASE] >>> 0) ?? -1;
@@ -536,7 +546,7 @@
       if (digestFor < 0) return;
 
       const localDigest = _buildLocalDigest(digestFor);
-      if (!localDigest) return;
+      if (!localDigest || !_hasHistory(localDigest.hashes)) return;
       _localDigests.set(digestFor, localDigest);
       _trimDigestMap(_localDigests, digestFor - CONFIG.historyDepth);
       _compareAtFrame(localDigest);
