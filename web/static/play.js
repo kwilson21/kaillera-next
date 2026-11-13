@@ -1709,8 +1709,11 @@
     // owner, and `rom-accepted` starts a transfer to the socket that really
     // sent it. A message with no stamp comes from a server older than the
     // stamp and is handled as before: server and pages deploy together, and
-    // a member cannot remove a stamp the server adds.
-    const from = window.KNCore?.checkRelayed?.(data) ?? null;
+    // a member cannot remove a stamp the server adds. A stamped message this
+    // page cannot check (the bundle did not load) is refused.
+    const checkRelayed = window.KNCore?.checkRelayed;
+    if (!checkRelayed && Object.hasOwn(data, 'knFrom')) return;
+    const from = checkRelayed ? checkRelayed(data) : null;
     if (from && !from.allowed) return;
     if (from?.stamped) data = { ...data, sender: from.sid };
     // Host broadcasts mode selection to guests pre-game

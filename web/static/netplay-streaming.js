@@ -579,8 +579,12 @@
     // message says: any room member can write to the relay and could name
     // another socket here. A message with no stamp comes from a server older
     // than the stamp and is read as before: server and pages deploy
-    // together, and a member cannot remove a stamp the server adds.
-    const from = window.KNCore?.checkRelayed?.(data) ?? null;
+    // together, and a member cannot remove a stamp the server adds. A
+    // stamped message this page cannot check (the bundle did not load) is
+    // refused.
+    const checkRelayed = window.KNCore?.checkRelayed;
+    if (!checkRelayed && Object.hasOwn(data, 'knFrom')) return;
+    const from = checkRelayed ? checkRelayed(data) : null;
     if (from && !from.allowed) return;
     const declaredSid = typeof data.senderSid === 'string' ? data.senderSid : '';
     const remoteSid = from?.stamped ? from.sid : declaredSid;

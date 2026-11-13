@@ -6845,9 +6845,14 @@
     // request is answered to the socket that really sent it, not the one it
     // names. A message with no stamp comes from a server older than the
     // stamp and is handled as before: server and pages deploy together, and
-    // a member cannot remove a stamp the server adds. Likewise when the
-    // bundle did not load.
-    const from = window.KNCore?.checkRelayed?.(msg) ?? null;
+    // a member cannot remove a stamp the server adds. A stamped message this
+    // page cannot check (the bundle did not load) is refused.
+    const checkRelayed = window.KNCore?.checkRelayed;
+    if (!checkRelayed && Object.hasOwn(msg, 'knFrom')) {
+      _syncLog(`relayed ${msg.type} refused: no KNCore to check its sender`);
+      return;
+    }
+    const from = checkRelayed ? checkRelayed(msg) : null;
     if (from && !from.allowed) {
       _syncLog(`relayed ${msg.type} refused: sender ${from.sid} slot=${from.slot}`);
       return;
