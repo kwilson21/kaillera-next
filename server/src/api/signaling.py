@@ -74,6 +74,7 @@ from src import db, state, stats
 from src.api import desync_vision, og_card
 from src.api.og import feature_enabled_for_host
 from src.api.payloads import (
+    RELAY_SENDER_KEY,
     ClaimSlotPayload,
     DeviceTypePayload,
     EndGamePayload,
@@ -82,7 +83,6 @@ from src.api.payloads import (
     JoinRoomPayload,
     OpenRoomExtra,
     OpenRoomPayload,
-    RELAY_SENDER_KEY,
     RelaySender,
     RomReadyPayload,
     RomSharingTogglePayload,
