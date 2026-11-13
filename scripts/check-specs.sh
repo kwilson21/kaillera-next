@@ -67,3 +67,16 @@ done
 # reports frames it never simulated; and with the detector on under Mode 2.
 $QUINT run "$DIGEST" --main=desync_digest_current --invariant=neverReportsAnUnconfirmedHash \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── Inputs around a resync: what a page may wait for afterwards ─────────────
+RESYNC=specs/resync_inputs.qnt
+$QUINT typecheck "$RESYNC"
+for variant in resync_inputs_before resync_inputs_current; do
+  $QUINT test "$RESYNC" --main="$variant" --backend=typescript
+done
+# Today: after a resync nobody waits for an input that cannot arrive, and the
+# two pages are never both waiting on nothing. Both were violated before a
+# resync settled the inputs from before its frame (resync_inputs_before): a
+# resync that moved the guest forward left holes on both pages.
+$QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript

@@ -280,7 +280,48 @@ def test_rollback_gap_check_ignores_frames_before_c_init():
     src = LOCKSTEP_JS.read_text()
     idx = src.index("const gapAtEdge =")
     gap_src = src[idx : src.index(";", idx)]
-    assert "windowEdge >= Math.max(0, _rbInitFrame - DELAY_FRAMES)" in gap_src
+    assert "windowEdge >= _inputFloor(p.slot)" in gap_src
+    floor_idx = src.index("const _inputFloor = (slot) =>")
+    assert "_rbInitFrame - DELAY_FRAMES" in src[floor_idx : src.index(";", floor_idx)]
+
+
+def test_resync_settles_the_inputs_before_its_frame():
+    # specs/resync_inputs.qnt: after a resync that moves the guest forward,
+    # neither page may wait for an input from the frames the guest skipped.
+    src = LOCKSTEP_JS.read_text()
+
+    floor_idx = src.index("const _inputFloor = (slot) =>")
+    assert "_inputSettledBefore[slot] ?? 0" in src[floor_idx : src.index(";", floor_idx)]
+
+    # Both gap checks use the same floor.
+    missing_idx = src.index("const _missingConsumedInputs = () => {")
+    missing_src = src[missing_idx : src.index("\n  };\n", missing_idx)]
+    assert "Math.max(_inputFloor(p.slot), windowStart)" in missing_src
+
+    # Guest: settles every peer's inputs, makes and sends the ones it skipped
+    # that are still to be applied, and asks for the peers' it lacks.
+    settle_idx = src.index("const _settleInputsAtResync = (mod, frame) => {")
+    settle_src = src[settle_idx : src.index("\n  };\n", settle_idx)]
+    for snippet in (
+        "const from = Math.max(0, frame - DELAY_FRAMES);",
+        "_localInputs[f] = KNShared.ZERO_INPUT;",
+        "_feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);",
+        "_settleInputsBefore(peer.slot, frame);",
+        "peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);",
+        "peer.dc.send(`resend:${f}`);",
+    ):
+        assert snippet in settle_src
+    apply_idx = src.index("const applySyncState = (bytes, frame, fromProactive = false) => {")
+    assert "if (timelineAligned) _settleInputsAtResync(gm.Module, frame);" in src[apply_idx:]
+
+    # Host: settles the guest's inputs when the state goes out, on both routes.
+    send_idx = src.index("const sendSyncChunks = async (")
+    assert "_settleInputsBefore(target.slot, frame);" in src[send_idx:]
+    assert "_settleInputsBefore(_peers[targetSid].slot, frame);" in src
+
+    # I2: the floor is per-peer state.
+    reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
+    assert "delete _inputSettledBefore[slot];" in src[reset_idx : src.index("\n  };\n", reset_idx)]
 
 
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():

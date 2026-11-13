@@ -55,3 +55,9 @@ expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
+
+RESYNC=specs/resync_inputs.qnt
+verify "$RESYNC" resync_inputs_current allHold
+# The counterexample on resync_inputs_before is 10 steps long (the host has to
+# run far enough ahead for the guest to drop its inputs), beyond this bound;
+# check-specs.sh's scenarios and samples reach it.

@@ -39,7 +39,7 @@ recovered.
 | `INPUT-STALL` hard-timeout (fabricate ZERO_INPUT after input missing) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Fabricate AND request full resync so divergence converges | `INPUT-STALL-RESYNC` | §MF4 |
 | PHASE-LOCK stall (strict menu/gameplay phase mismatch) | `MAX_STALL_MS`, repeat every `RESEND_TIMEOUT_MS` | Keep waiting; phase packets already rebroadcast at `PHASE_BROADCAST_INTERVAL_MS` | `PHASE-LOCK-WAIT` | rollback health audit 2026-04-27, corrected 2026-04-30 |
 | MENU-LOCKSTEP stall (strict controllable menu input missing) | `MAX_STALL_MS`, repeat per missing slot every `RESEND_TIMEOUT_MS` | Keep waiting, show the waiting overlay after 5s, and resend missing input request; never fabricate menu input | `MENU-LOCKSTEP-WAIT` / `MENU-LOCKSTEP resend-request` | rollback health audit 2026-04-27, corrected 2026-04-30 |
-| RB-INPUT-STALL (rollback gameplay input missing beyond budget) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer, release rollback input stall | `RB-INPUT-STALL-TIMEOUT` | rollback health audit 2026-04-27 |
+| RB-INPUT-STALL (rollback gameplay input missing beyond budget). An input from before the last resync's frame minus the delay is never waited for (`_inputFloor`): the state both pages loaded holds its effect, and a guest moved forward by the resync never made it | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer, release rollback input stall | `RB-INPUT-STALL-TIMEOUT` | rollback health audit 2026-04-27; specs/resync_inputs.qnt `noWaitForAnInputThatCannotArrive` |
 | `_rbShutdownHold` (Smash Remix GAMEPLAY→MENU: C-rollback shutdown waits until the live state is confirmed — no replay pending, every consumed remote input present and fed to C; the frame holds meanwhile, only replays step, in strict lockstep) | `RB_SHUTDOWN_HOLD_MS = 3000`, checked on each tick that reaches the C path (pacing and RB-INPUT-STALL skips before it have their own 5000ms deadlines) | Shut down anyway; the peers may now differ | `RB-SHUTDOWN-HOLD-TIMEOUT` | Remix pause follow-up to PR #25 |
 | Pending sync state held while a rollback replay is in flight (C refuses `kn_set_frame` mid-replay) | `SYNC_APPLY_REPLAY_WAIT_MS = 1000` | Drop the replay (`kn_clear_replay_state`) and load the state | `SYNC-APPLY-DEFERRED` | two-browser test 2026-09-24 |
 | `_lateJoinPaused` (host pauses tick loop while late-joiner loads state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Resume, broadcast roster, `hardDisconnectPeer()` the joining peer | `LATE-JOIN-TIMEOUT` | §MF5 |
@@ -66,6 +66,7 @@ separate path that discards all peer state at once instead.
 **Slot-indexed globals** (keyed by player slot 0-3):
 
 - `_remoteInputs[slot]` — input buffer (frame → input map)
+- `_inputSettledBefore[slot]` — first input frame the last resync left unsettled
 - `_peerInputStarted[slot]` — first-input-received flag
 - `_lastRemoteFramePerSlot[slot]` — highest received frame
 - `_peerLastAdvanceTime[slot]` — wall-clock of last new frame
