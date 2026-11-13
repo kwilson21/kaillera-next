@@ -15,6 +15,18 @@ import { flow, Option, Schema } from 'effect';
 /** A missing value, or the null that JSON writes for one that was not a number. */
 const maybe = <S extends Schema.Constraint>(schema: S) => Schema.optional(Schema.NullOr(schema));
 
+const PAD_INDEX = /^(0|[1-9][0-9]*)$/;
+
+/**
+ * Every key is a pad button or axis index: a non-negative whole number. The
+ * pad's arrays are indexed with it, and an index below zero has no entry.
+ * A record with any other key is refused whole; dropping the one entry would
+ * leave a mapping the player did not make.
+ */
+const padIndexKeys = Schema.makeFilter((record: { readonly [key: string]: object | number }) =>
+  Object.keys(record).every((key) => PAD_INDEX.test(key)),
+);
+
 /** One stick axis: the pad axis it reads and the N64 bit each end means. */
 const StickAxis = Schema.Struct({
   index: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -30,10 +42,10 @@ const AxisButton = Schema.Struct({
 export const GamepadProfile = Schema.Struct({
   name: maybe(Schema.String),
   /** Pad button index to N64 button mask. */
-  buttons: Schema.Record(Schema.String, Schema.Int),
+  buttons: Schema.Record(Schema.String, Schema.Int).check(padIndexKeys),
   axes: maybe(Schema.Struct({ stickX: maybe(StickAxis), stickY: maybe(StickAxis) })),
   /** Pad axis index to the two masks it presses. */
-  axisButtons: maybe(Schema.Record(Schema.String, AxisButton)),
+  axisButtons: maybe(Schema.Record(Schema.String, AxisButton).check(padIndexKeys)),
   /** The raw axis value of full deflection. */
   axisRange: maybe(Schema.Finite.check(Schema.isGreaterThan(0))),
   axisCenter: maybe(Schema.Literal('auto')),

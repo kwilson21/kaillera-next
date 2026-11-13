@@ -346,6 +346,11 @@ test('decodeGamepadProfile accepts what the wizard saves and nothing unusable', 
     { buttons: {}, axes: { stickX: { index: -1 } } },
     { buttons: {}, axes: { stickX: { bits: [16, 17] } } },
     { buttons: {}, axisButtons: { 2: { pos: 1 } } },
+    // An index below zero, or not a number, has no entry in the pad's arrays.
+    { buttons: { '-1': 1 } },
+    { buttons: { A: 1 } },
+    { buttons: { '1.5': 1 } },
+    { buttons: {}, axisButtons: { '-2': { pos: 1, neg: 2 } } },
     { buttons: {}, axisRange: 0 },
     { buttons: {}, axisCenter: 'manual' },
   ]) {
@@ -359,7 +364,16 @@ test('a saved profile that does not fit is ignored and the pad reads as built in
   // manager treats as no profile): the reads must be the same.
   const builtIn = runManager(CORE, '');
   assert.ok(new Set(builtIn).size > 2000);
-  for (const stored of ['{}', '{"buttons":null}', '{"buttons":{"0":"A"}}', '[1,2,3]', '"x"', '{not json']) {
+  for (const stored of [
+    '{}',
+    '{"buttons":null}',
+    '{"buttons":{"0":"A"}}',
+    '{"buttons":{"-1":1}}',
+    '{"buttons":{},"axisButtons":{"-2":{"pos":1,"neg":2}}}',
+    '[1,2,3]',
+    '"x"',
+    '{not json',
+  ]) {
     assert.deepStrictEqual(runManager(CORE, stored), builtIn, `stored ${stored}`);
   }
 });
