@@ -216,9 +216,10 @@ identity key, size text, hash and hash comparison, ROM out of an archive) and
 room text (`room-text.ts`: HTML escaping, closed-room message, invite links,
 join/leave toasts), and the ROM library (`rom-library.ts`: IndexedDB storage
 with its version-1 upgrade, and the list markup; `play.js` keeps what loading
-a ROM does to the page). Next, in order of how little shared state they
-touch: delay preference and advanced options, the remap wizard, toasts and
-the More menu, ROM transfer. Last: connect, the game
+a ROM does to the page), and input delay (`delay.ts`: a player's delay
+preference and the words beside the picker; `play.js` still reads and writes
+the controls). Next, in order of how little shared state they touch: the
+remap wizard, toasts and the More menu, ROM transfer. Last: connect, the game
 lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
 
 **Stage 4: engine periphery**

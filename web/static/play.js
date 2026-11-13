@@ -4823,18 +4823,10 @@
 
   // ── Delay Preference ────────────────────────────────────────────────
 
-  const SOLO_FRAME_DELAY = 0;
-  const DEFAULT_FRAME_DELAY = 2;
-  const MIN_FRAME_DELAY = 1;
-  const MAX_FRAME_DELAY = 9;
-
-  const sanitizeFrameDelay = (value, fallback = DEFAULT_FRAME_DELAY, { allowZero = false } = {}) => {
-    const parsed = parseInt(value, 10);
-    if (!Number.isFinite(parsed)) return fallback;
-    if (allowZero && parsed === SOLO_FRAME_DELAY) return SOLO_FRAME_DELAY;
-    if (parsed <= 0) return fallback;
-    return Math.min(MAX_FRAME_DELAY, Math.max(MIN_FRAME_DELAY, parsed));
-  };
+  // The arithmetic and the wording are web/src/play/delay.ts; the controls
+  // are read and written here.
+  const _delay = window.KNCore.play.delay;
+  const { DEFAULT_FRAME_DELAY, sanitizeFrameDelay } = _delay;
 
   KNState.delayAutoValue = DEFAULT_FRAME_DELAY;
 
@@ -4843,21 +4835,17 @@
     return Object.keys(lastUsersData.players).length <= 1;
   };
 
-  const currentAutoDelayValue = () =>
-    isSoloDelayContext() ? SOLO_FRAME_DELAY : sanitizeFrameDelay(KNState.delayAutoValue);
+  // The delay picker as it stands: who is in the room and what the controls say.
+  const delayPickerNow = () => ({
+    solo: isSoloDelayContext(),
+    auto: document.getElementById('delay-auto')?.checked,
+    selectValue: document.getElementById('delay-select')?.value,
+    autoValue: KNState.delayAutoValue,
+  });
 
-  const getDelayPreference = () => {
-    if (isSoloDelayContext()) return SOLO_FRAME_DELAY;
-    const autoEl = document.getElementById('delay-auto');
-    const selectEl = document.getElementById('delay-select');
-    if (autoEl?.checked) {
-      return currentAutoDelayValue();
-    }
-    if (selectEl) {
-      return sanitizeFrameDelay(selectEl.value);
-    }
-    return DEFAULT_FRAME_DELAY;
-  };
+  const currentAutoDelayValue = () => _delay.currentAutoDelay(delayPickerNow());
+
+  const getDelayPreference = () => _delay.delayPreference(delayPickerNow());
 
   window.getDelayPreference = getDelayPreference;
 
@@ -4873,35 +4861,15 @@
 
   window.setAutoDelay = setAutoDelay;
 
-  const KAILLERA_LABELS = ['LAN', 'Excellent', 'Excellent', 'Good', 'Good', 'Average', 'Average', 'Low', 'Bad', 'Bad'];
-
-  const delayQualityLabel = (delay) => {
-    const parsed = parseInt(delay, 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) return '';
-    return KAILLERA_LABELS[Math.min(MAX_FRAME_DELAY, Math.max(MIN_FRAME_DELAY, parsed))] ?? '';
-  };
-
   const updateDelayEffectiveHintFromPicker = () => {
     const el = document.getElementById('delay-effective');
     if (!el) return;
     syncDelaySelectSoloOption();
     syncDelaySelectVisibility();
-    const autoEl = document.getElementById('delay-auto');
+    const hint = _delay.pickerHint(delayPickerNow());
     const selectEl = document.getElementById('delay-select');
-    if (isSoloDelayContext()) {
-      if (autoEl?.checked && selectEl) selectEl.value = String(SOLO_FRAME_DELAY);
-      const manualDelay = sanitizeFrameDelay(selectEl?.value);
-      el.textContent = autoEl?.checked ? '(solo: no delay)' : `(solo: no delay · fixed ${manualDelay} for netplay)`;
-      updateAdvancedSummaryStatuses();
-      return;
-    }
-    let delay = selectEl?.value;
-    if (autoEl?.checked) {
-      delay = currentAutoDelayValue();
-      if (selectEl) selectEl.value = String(delay);
-    }
-    const label = delayQualityLabel(delay);
-    el.textContent = label ? `(${label})` : '';
+    if (selectEl && hint.selectValue !== undefined) selectEl.value = hint.selectValue;
+    el.textContent = hint.text;
     updateAdvancedSummaryStatuses();
   };
 
@@ -4922,17 +4890,15 @@
   const syncDelaySelectSoloOption = () => {
     const selectEl = document.getElementById('delay-select');
     if (!selectEl) return;
-    const autoEl = document.getElementById('delay-auto');
     let zeroOption = selectEl.querySelector('option[value="0"]');
     if (!zeroOption) {
       zeroOption = new Option('0', '0');
       selectEl.prepend(zeroOption);
     }
     zeroOption.textContent = '0';
-    zeroOption.disabled = !(isSoloDelayContext() && autoEl?.checked !== false);
-    if (zeroOption.disabled && selectEl.value === '0') {
-      selectEl.value = String(currentAutoDelayValue() || DEFAULT_FRAME_DELAY);
-    }
+    const solo = _delay.soloOption(delayPickerNow());
+    zeroOption.disabled = solo.disabled;
+    if (zeroOption.disabled && selectEl.value === '0') selectEl.value = solo.fallbackValue;
   };
 
   const normalizeDelaySelectOptions = () => {
@@ -4959,16 +4925,8 @@
     if (delayPicker) delayPicker.style.display = !isSpectator && isRollbackMode ? '' : 'none';
   };
 
-  const getDelaySummaryText = () => {
-    const autoEl = document.getElementById('delay-auto');
-    const selectEl = document.getElementById('delay-select');
-    if (isSoloDelayContext()) {
-      if (autoEl?.checked) return 'Solo · no delay';
-      return `Solo · no delay · Fixed ${sanitizeFrameDelay(selectEl?.value)} for netplay`;
-    }
-    const effective = document.getElementById('delay-effective')?.textContent.trim() || 'pending';
-    return autoEl?.checked ? `Auto · effective ${effective}` : `Fixed ${sanitizeFrameDelay(selectEl?.value)}`;
-  };
+  const getDelaySummaryText = () =>
+    _delay.delaySummary(delayPickerNow(), document.getElementById('delay-effective')?.textContent);
 
   const syncDelayPickerPlacement = (isRollbackMode = selectedModeIsRollback()) => {
     const hostDetails = document.querySelector('#host-controls .advanced-options');
@@ -5048,7 +5006,7 @@
     if (hostStatus) {
       const resyncOn = document.getElementById('opt-resync')?.checked ?? false;
       const romSharingOn = document.getElementById('opt-rom-sharing')?.checked ?? false;
-      hostStatus.textContent = `Resync ${resyncOn ? 'on' : 'off'} · ROM sharing ${romSharingOn ? 'on' : 'off'} · ${delayText}`;
+      hostStatus.textContent = _delay.hostOptionsSummary(resyncOn, romSharingOn, delayText);
     }
 
     const delayStatus = document.querySelector('#player-controls .advanced-options .summary-status');
@@ -5076,17 +5034,7 @@
   const showEffectiveDelay = (own, room) => {
     const el = document.getElementById('delay-effective');
     if (!el) return;
-    if (room <= 0) {
-      el.textContent = '(solo: no delay)';
-      updateAdvancedSummaryStatuses();
-      return;
-    }
-    const label = KAILLERA_LABELS[room] ?? '';
-    if (room > own) {
-      el.textContent = `(room: ${room} — ${label})`;
-    } else {
-      el.textContent = label ? `(${label})` : '';
-    }
+    el.textContent = _delay.effectiveDelayHint(own, room);
     updateAdvancedSummaryStatuses();
   };
 
