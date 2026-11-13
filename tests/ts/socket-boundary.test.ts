@@ -86,12 +86,13 @@ test('relays and unknown events are not judged', () => {
   assert.equal(checkServerMessage('connect', undefined), null);
 });
 
-test('the observer reports a mismatch on an incoming event', () => {
+test('the observer reports a mismatch on an incoming event', async () => {
   const { reports, observer } = collector();
   const socket = fakeSocket();
   observer.observe(socket);
   socket.receive('upload-token', token);
   socket.receive('game-ended', {});
+  await microtasks();
   assert.equal(reports.length, 1);
   assert.equal(reports[0]?.type, 'protocol-mismatch');
   assert.equal(reports[0]?.message, 'game-ended');
@@ -113,21 +114,37 @@ test('an ack is checked under the name of the event it answers', () => {
   assert.equal(reports[0]?.message, 'join-room ack');
 });
 
-test('reports wait for the sink, and go out after the handlers of a later event ran', async () => {
-  let haveToken = false;
-  const { reports, observer } = collector(() => haveToken);
+test('an observed socket holds its reports until the server sends an upload token', async () => {
+  // The sink is ready throughout, as a page with a token restored from storage would be.
+  const { reports, observer } = collector();
   const socket = fakeSocket();
   observer.observe(socket);
   // The first users-updated arrives before the upload token client events need.
   socket.receive('users-updated', { players: {} });
+  await microtasks();
+  assert.equal(reports.length, 0);
+  // A malformed token message is not a token.
+  socket.receive('upload-token', {});
+  await microtasks();
   assert.equal(reports.length, 0);
   socket.receive('upload-token', token);
-  // Socket.IO runs onAny listeners first; the page's handler sets the token after.
-  haveToken = true;
+  // Socket.IO runs onAny listeners first; the page's handler stores the token after.
   assert.equal(reports.length, 0);
   await microtasks();
+  assert.deepEqual(
+    reports.map((report) => report.message),
+    ['users-updated', 'upload-token'],
+  );
+});
+
+test('reports also wait for a sink that cannot take them yet', () => {
+  let ready = false;
+  const { reports, observer } = collector(() => ready);
+  assert.equal(observer.check('game-ended', {}), false);
+  assert.equal(reports.length, 0);
+  ready = true;
+  observer.flush();
   assert.equal(reports.length, 1);
-  assert.equal(reports[0]?.message, 'users-updated');
 });
 
 test('a page sends a bounded number of reports', () => {

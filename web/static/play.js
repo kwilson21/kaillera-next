@@ -128,12 +128,10 @@
   // Stage 2: the machine says whether a game is on for this page.
   const _session = window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta)) ?? null;
   const isGameRunning = () => (_session ? _session.gameOn() : _pageGameRunning);
-  // Held until this page load has been sent an upload token: client events
-  // need one, and a token restored from storage may have expired.
-  let _freshUploadToken = false;
+  // The observer holds its reports until the server has sent this page load
+  // an upload token (client events need one).
   const _protocol =
     window.KNCore?.protocol?.createObserver?.(({ type, message, issue }) => {
-      if (!_freshUploadToken) return false;
       KNEvent(type, message, { issue });
       return true;
     }) ?? null;
@@ -761,7 +759,6 @@
     socket.on('upload-token', (data) => {
       _uploadToken = data?.token || '';
       KNState.uploadToken = _uploadToken;
-      _freshUploadToken = !!_uploadToken;
       try {
         if (_uploadTokenKey) _safeSet('localStorage', _uploadTokenKey, _uploadToken);
       } catch (_) {}
