@@ -620,3 +620,8 @@ def test_a_resync_request_that_is_out_has_a_deadline():
     assert "const SYNC_COORD_TIMEOUT_MS = 3000;" in src
     tick_idx = src.index("const tick = () => {")
     assert "_checkResyncRequestDeadline();" in src[tick_idx : tick_idx + 1200]
+    # The page's own freeze does not count against a request that is out.
+    credit = src[src.index("const _creditLocalFreeze = () => {") :]
+    credit = credit[: credit.index("\n  };\n")]
+    assert "if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);" in credit
+    assert src.index("_creditLocalFreeze();", tick_idx) < src.index("_checkResyncRequestDeadline();", tick_idx)
