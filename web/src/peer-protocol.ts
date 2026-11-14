@@ -61,6 +61,9 @@ const TEXT_GRAMMAR = {
     'fpu-trace': `:${INT}:${INT}:${INT}`,
     'sync-request-full': '',
     'sync-request-full-at': `:${INT}`,
+    // The number of the request that follows on the same channel. A message
+    // of its own, so a host that does not know it still reads the request.
+    'sync-request-id': ':\\d+',
     // Read but no longer sent by a current page.
     'sync-hash': `:${INT}:${INT}`,
     'sync-request': '',
@@ -71,7 +74,11 @@ const TEXT_GRAMMAR = {
     // sync-start:<frame>:<chunks>:<full 0|1>:<proactive 0|1>
     'sync-start': `:${INT}:\\d+:[01]:[01]`,
     'sync-regions-start': `:${INT}:\\d+`,
+    // The request the state that follows on the same channel answers; a state
+    // the host sent for its own reasons has none.
+    'sync-answer-id': ':\\d+',
     'sync-request-full': '',
+    'sync-request-id': ':\\d+',
   },
 } as const;
 
@@ -152,6 +159,8 @@ const SyncStateSocket = Schema.Struct({
   rawSize: Schema.Number,
   compressedSize: Schema.Number,
   data: Encoded,
+  // The request this state answers; absent when it answers none.
+  requestId: Schema.optional(Schema.Number),
 });
 
 /** JSON messages by where they travel and their `type`. */
@@ -182,6 +191,8 @@ const JSON_MESSAGES = {
       requesterSid: Schema.String,
       reason: Schema.String,
       frame: Schema.Number,
+      // The request's number; absent from a page that does not number them.
+      requestId: Schema.optional(Schema.Number),
     }),
     'sync-state-socket': SyncStateSocket,
     'late-join-ready': Schema.Struct({ senderSid: Schema.String }),
