@@ -14,6 +14,7 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend=typescript
+$QUINT test "$SPEC" --main=room_before_grace_wait --backend=typescript
 $QUINT test "$SPEC" --main=room_before_abandoned_end --backend=typescript
 $QUINT test "$SPEC" --main=room_before_resume_flag --backend=typescript
 $QUINT test "$SPEC" --main=room_before_start_fix --backend=typescript
@@ -44,6 +45,10 @@ check room_current nobodyIsStrandedInADroppedMatch
 # A playing room nobody is running is ended by the server (violated on
 # room_before_abandoned_end).
 check room_current anAbandonedMatchIsEnded
+# A signaling outage that hits every player does not cost them the match:
+# the grace window never empties a playing room whose last player is still
+# in it (violated on room_before_grace_wait).
+check room_current aMatchIsNotLostToTheGraceWindow
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
@@ -117,15 +122,16 @@ pair peer_connection_fixed allHold initLobby
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
-for variant in late_join_pause_current late_join_pause_fixed; do
+for variant in late_join_pause_before late_join_pause_host_side late_join_pause_current; do
   $QUINT test "$PAUSE" --main="$variant" --backend=typescript
 done
-# The rule the per-joiner machine will be built to: the game stays paused
-# while a joiner has yet to load, a joiner who is playing is never
-# disconnected, and every pause has a deadline. All three are VIOLATED by
-# today's engine (late_join_pause_current); the scenarios above show each
-# ordering, and nothing is fixed yet.
-$QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
+# Today: the game stays paused while a joiner has yet to load, a joiner who
+# is playing is never disconnected, the host's pause has a deadline that a
+# repeated request does not push back, and a paused guest resumes on the
+# host's word or at its own deadline. The first three were violated before
+# the pause belonged to the joiners being served (late_join_pause_before);
+# the rest with only the host's side changed (late_join_pause_host_side).
+$QUINT run "$PAUSE" --main=late_join_pause_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── A resync from request to apply ──────────────────────────────────────────
