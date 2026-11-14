@@ -111,3 +111,41 @@ def test_smash_controller_presence_uses_core_mask_not_rdram_poke():
     assert "_applyControllerPresentMask('broadcast-roster')" in source
     assert "_applyControllerPresentMask('late-join-state')" in source
     assert "_resetControllerPresentMask()" in source
+
+
+def test_the_pause_belongs_to_the_joiners_being_served():
+    # specs/late_join_pause.qnt (holdToday): one joiner's "ready" or timer
+    # must not end the pause for another joiner who has yet to load, a timer
+    # must not disconnect a joiner who has since joined, and the pause must
+    # have its deadline from the moment it begins.
+    src = (Path(__file__).resolve().parent.parent / "web/static/netplay-rollback.js").read_text()
+
+    serve = src[src.index("async function sendLateJoinState(remoteSid) {") :]
+    serve = serve[: serve.index("const handleLateJoinState = async (msg) => {")]
+    # The timer is armed at the pause, before the state is compressed.
+    assert serve.index("_lateJoinServing.set(remoteSid, serveId);") < serve.index("await compressAndEncode(bytes)")
+    assert serve.index("}, LATE_JOIN_TIMEOUT_MS);") < serve.index("await compressAndEncode(bytes)")
+    # It acts only on its own serve, and ends the pause only if none is left.
+    assert "if (_lateJoinServing.get(remoteSid) !== serveId) return;" in serve
+    assert "_endLateJoinPauseIfNoneServed(`timeout for ${remoteSid}`);" in serve
+    assert "if (_runSubstate === RUN_LATE_JOIN_PAUSE) {\n          const elapsed" not in serve
+    # A serve ended while compressing sends nothing.
+    assert serve.index("await compressAndEncode(bytes)") < serve.index(
+        "if (_lateJoinServing.get(remoteSid) !== serveId) {"
+    )
+
+    ready = src[src.index("const finishLateJoinReady = (source, senderSid = null) => {") :]
+    ready = ready[: ready.index("const _syntheticSidForSlot")]
+    assert "_lateJoinServing.delete(senderSid);" in ready
+    assert "_runSubstate === RUN_LATE_JOIN_PAUSE && _playerSlot === 0 && _lateJoinServing.size > 0" in ready
+
+    helper = src[src.index("const _endLateJoinPauseIfNoneServed = (source) => {") :]
+    helper = helper[: helper.index("\n  };\n")]
+    assert "if (_lateJoinServing.size > 0) {" in helper
+    assert "return resumeLateJoinPause(source, true);" in helper
+
+    # I2: a joiner that is gone is no longer served, and the match stop clears the lot.
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "_lateJoinServing.delete(opts.sid)" in reset
+    assert "_lateJoinServing.clear();" in src

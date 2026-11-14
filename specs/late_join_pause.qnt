@@ -28,18 +28,21 @@
 // data channel is open, a repeated request for the same joiner, inputs and
 // frames, spectators, who may send each message.
 //
-// PAUSE_PER_JOINER: the pause belongs to the joiners being served. The game
-//   resumes when none is left, a timer acts only on its own joiner and only
-//   while that joiner is still held, and the guest resumes on the host's
-//   word alone. false = today: one pause, ended by any "ready" or any timer.
+// PAUSE_PER_JOINER: on the host, the pause belongs to the joiners being
+//   served. The game resumes when none is left, and a timer acts only on its
+//   own joiner and only while that joiner is still held. false = before: one
+//   pause, ended by any "ready" or any timer.
+// ARM_AT_PAUSE: the 15 s timer is armed when the pause begins. false =
+//   before: after the state has been compressed.
+// GUEST_RESUMES_ON_HOST_ONLY: a paused guest resumes on the host's word
+//   alone. false = today: also on any joiner's "ready" from the server.
 // GUEST_PAUSE_HAS_DEADLINE: a paused guest has a deadline of its own.
 //   false = today: it waits for the host's resume.
-// ARM_AT_PAUSE: the 15 s timer is armed when the pause begins. false =
-//   today: after the state has been compressed.
 module late_join_pause {
   const PAUSE_PER_JOINER: bool
-  const GUEST_PAUSE_HAS_DEADLINE: bool
   const ARM_AT_PAUSE: bool
+  const GUEST_RESUMES_ON_HOST_ONLY: bool
+  const GUEST_PAUSE_HAS_DEADLINE: bool
 
   pure val JOINERS = Set("a", "b")
 
@@ -176,8 +179,8 @@ module late_join_pause {
   action guestHearsReady(j: str): bool = all {
     relay.contains(ReadyToGuest(j)),
     relay' = relay.exclude(Set(ReadyToGuest(j))),
-    guestPaused' = if (PAUSE_PER_JOINER) guestPaused else false,
-    guestDeadline' = if (PAUSE_PER_JOINER) guestDeadline else false,
+    guestPaused' = if (GUEST_RESUMES_ON_HOST_ONLY) guestPaused else false,
+    guestDeadline' = if (GUEST_RESUMES_ON_HOST_ONLY) guestDeadline else false,
     hostUnchanged, joiner' = joiner, toGuest' = toGuest,
   }
 
@@ -224,32 +227,35 @@ module late_join_pause {
 
   // The game does not run on while a joiner has yet to load the state
   // captured for it: the joiner would start frames behind.
-  // VIOLATED today: another joiner's "ready", or its timer, ends the pause.
+  // Violated before the pause belonged to the joiners being served: another
+  // joiner's "ready", or its timer, ended the pause.
   val gameStaysPausedWhileAJoinerLoads =
     hostUp implies JOINERS.forall(j => stillToLoad(j) implies hostPaused)
 
   // The host never disconnects a joiner who is playing.
-  // VIOLATED today: a timer armed for one joiner fires during the pause for
-  // another and disconnects the first, who joined long ago.
+  // Violated before each timer acted only on its own joiner: one armed for a
+  // joiner who had since joined fired during the pause for another.
   val neverKicksAPlayerWhoJoined = not(kickedAPlayer)
 
   // A timer that will end the host's pause.
   def hostDeadline: bool = timers.exists(j => not(PAUSE_PER_JOINER) or held.contains(j))
 
-  // Netplay invariant I1 for the pause, on the host and on the guest.
-  // VIOLATED today, twice: the host has no timer while the state is being
-  // compressed, and the guest has none at all (a host that reloads leaves
-  // it paused).
-  val everyPauseHasADeadline = and {
-    (hostUp and hostPaused) implies hostDeadline,
-    guestPaused implies or {
-      guestDeadline,
-      toGuest.select(m => m == Resume).length() > 0,
-      hostUp and hostPaused and hostDeadline,
-    },
+  // Netplay invariant I1 for the host's pause.
+  // Violated before the timer was armed at the pause: the host had none
+  // while the state was being compressed.
+  val hostPauseHasADeadline = (hostUp and hostPaused) implies hostDeadline
+
+  // The same for the guest's pause.
+  // VIOLATED today: the guest has no deadline of its own, so a host that
+  // reloads leaves it paused.
+  val guestPauseHasADeadline = guestPaused implies or {
+    guestDeadline,
+    toGuest.select(m => m == Resume).length() > 0,
+    hostUp and hostPaused and hostDeadline,
   }
 
-  val allHold = and { gameStaysPausedWhileAJoinerLoads, neverKicksAPlayerWhoJoined, everyPauseHasADeadline }
+  val holdToday = and { gameStaysPausedWhileAJoinerLoads, neverKicksAPlayerWhoJoined, hostPauseHasADeadline }
+  val allHold = holdToday and guestPauseHasADeadline
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -286,22 +292,36 @@ module late_join_pause {
   run compressionHangsTest =
     init
       .then(ask("a")).then(beginServe("a"))
-      .expect(everyPauseHasADeadline == ARM_AT_PAUSE)
+      .expect(hostPauseHasADeadline == ARM_AT_PAUSE)
 
   // The host reloads while the guest is paused.
   run hostReloadsDuringThePauseTest =
     init
       .then(ask("a")).then(beginServe("a")).then(sendState("a")).then(guestHears)
       .then(hostReloads)
-      .expect(everyPauseHasADeadline == GUEST_PAUSE_HAS_DEADLINE)
+      .expect(guestPauseHasADeadline == GUEST_PAUSE_HAS_DEADLINE)
 }
 
-// Today.
+// Before: one pause for everyone, its timer armed after compression.
+module late_join_pause_before {
+  import late_join_pause(
+    PAUSE_PER_JOINER = false, ARM_AT_PAUSE = false,
+    GUEST_RESUMES_ON_HOST_ONLY = false, GUEST_PAUSE_HAS_DEADLINE = false
+  ).*
+}
+
+// Today: the host's side is fixed, the guest's is not yet.
 module late_join_pause_current {
-  import late_join_pause(PAUSE_PER_JOINER = false, GUEST_PAUSE_HAS_DEADLINE = false, ARM_AT_PAUSE = false).*
+  import late_join_pause(
+    PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true,
+    GUEST_RESUMES_ON_HOST_ONLY = false, GUEST_PAUSE_HAS_DEADLINE = false
+  ).*
 }
 
 // What the per-joiner machine will be built to.
 module late_join_pause_fixed {
-  import late_join_pause(PAUSE_PER_JOINER = true, GUEST_PAUSE_HAS_DEADLINE = true, ARM_AT_PAUSE = true).*
+  import late_join_pause(
+    PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true,
+    GUEST_RESUMES_ON_HOST_ONLY = true, GUEST_PAUSE_HAS_DEADLINE = true
+  ).*
 }
