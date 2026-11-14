@@ -93,7 +93,7 @@ kaillera-next/
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
 │       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming
-│       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
+│       ├── switch2-usb.js       # starts the WebUSB handshake that wakes the Switch 2 Pro Controller (window.Switch2USB) from web/src/page/switch2-usb.ts
 │       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
 │       ├── kn-audio.js          # starts the engine's audio pipeline (window.KNAudio) from web/src/page/audio.ts
@@ -107,7 +107,7 @@ kaillera-next/
 │       ├── fake-peer.js         # synthetic P2 for the demo page (simulated input/jitter)
 │       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo (reads RDRAM menu state)
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD
-│       ├── feedback.js          # in-app feedback collection
+│       ├── feedback.js          # in-app feedback collection (window.KNFeedback); starts web/src/site/feedback.ts
 │       ├── version.js           # version display + changelog modal; starts web/src/site/version.ts
 │       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
@@ -128,7 +128,7 @@ kaillera-next/
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing)
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
-│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts, version.ts)
+│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts, version.ts, feedback.ts)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
 │   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (join.ts: the invite page; wake.ts, wire.ts: shared)
 │   │   ├── join-entry.ts        # kn-join.js bundle entry
