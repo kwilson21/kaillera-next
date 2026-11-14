@@ -94,7 +94,7 @@ kaillera-next/
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
 │       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming
 │       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
-│       ├── controller-settings.js # in-game controller settings panel
+│       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
 │       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
 │       ├── kn-capture.js        # starts the diagnostic-image capture policy (window.KNCapture) from web/src/page/capture.ts
