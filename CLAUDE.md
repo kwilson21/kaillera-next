@@ -95,7 +95,7 @@ kaillera-next/
 │       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming
 │       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
 │       ├── controller-settings.js # in-game controller settings panel
-│       ├── virtual-gamepad.js   # on-screen touch controls for mobile
+│       ├── virtual-gamepad.js   # starts the on-screen touch controls (window.VirtualGamepad) from web/src/page/virtual-gamepad/
 │       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
 │       ├── kn-capture.js        # starts the diagnostic-image capture policy (window.KNCapture) from web/src/page/capture.ts
 │       ├── kn-vision-client.js  # starts the desync-vision client (window.KNVision) from web/src/page/vision-client.ts

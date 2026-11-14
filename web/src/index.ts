@@ -27,6 +27,7 @@ import {
 } from './protocol.ts';
 import { startCapture } from './page/capture.ts';
 import { startVisionClient } from './page/vision-client.ts';
+import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
 import { installShared } from './page/shared.ts';
@@ -292,6 +293,7 @@ export const KNCore = {
   page: {
     startCapture,
     startVisionClient,
+    startVirtualGamepad,
   },
   play: {
     escapeHtml,

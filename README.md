@@ -211,7 +211,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from web/src/streaming
     switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
     controller-settings.js In-game controller settings panel
-    virtual-gamepad.js     On-screen touch controls for mobile
+    virtual-gamepad.js     Starts the on-screen touch controls (web/src/page/virtual-gamepad/)
     kn-audio.js            AudioWorklet pump + rollback audio capture
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
     kn-vision-client.js    Starts the desync-vision client (web/src/page/vision-client.ts)
