@@ -1,17 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { installsState, relayAllowed } from '../../web/src/relay-sender.ts';
+import { asksForState, installsState, relayAllowed } from '../../web/src/relay-sender.ts';
 import { checkRelayed, RELAY_SENDER_KEY } from '../../web/src/relay.ts';
 
 const STATE_TYPES = ['save-state', 'late-join-state', 'sync-state-socket'];
-const REQUEST_TYPES = [
-  'request-late-join',
-  'sync-request-full-socket',
-  'late-join-ready',
-  'rom-accepted',
-  'streaming-late-join-ready',
-];
+const STATE_REQUESTS = ['request-late-join', 'sync-request-full-socket', 'late-join-ready'];
+const OTHER_TYPES = ['rom-accepted', 'streaming-late-join-ready'];
+const REQUEST_TYPES = [...STATE_REQUESTS, ...OTHER_TYPES];
 
 const stamped = (type: string, sid: string, slot: number | null, owner: boolean) => ({
   type,
@@ -41,24 +37,37 @@ test('mode-select is taken only from the owner', () => {
   assert.equal(relayAllowed('mode-select', true, -1, false), false);
 });
 
-test('requests are allowed from any member; the stamp says who to answer', () => {
-  for (const type of REQUEST_TYPES) {
+test('a request for emulator state is taken only from a player', () => {
+  for (const type of STATE_REQUESTS) {
+    assert.equal(asksForState(type), true);
+    assert.equal(relayAllowed(type, true, 0, true), true);
+    assert.equal(relayAllowed(type, true, 3, false), true);
+    // A spectator watches the host's video and never loads a state.
+    assert.equal(relayAllowed(type, true, -1, false), false);
+    assert.equal(relayAllowed(type, true, -1, true), false);
+  }
+  for (const type of [...STATE_TYPES, ...OTHER_TYPES, 'mode-select', '']) assert.equal(asksForState(type), false);
+});
+
+test('other messages are allowed from any member; the stamp says who sent them', () => {
+  for (const type of OTHER_TYPES) {
     assert.equal(relayAllowed(type, true, 1, false), true);
     assert.equal(relayAllowed(type, true, -1, false), true);
   }
 });
 
-test('a message with no stamp, from a server older than the stamp, is allowed as before', () => {
-  for (const type of [...STATE_TYPES, ...REQUEST_TYPES, 'mode-select']) {
-    assert.equal(relayAllowed(type, false, -1, false), true);
+test('a message with no stamp is refused, whatever it is', () => {
+  for (const type of [...STATE_TYPES, ...REQUEST_TYPES, 'mode-select', '']) {
+    assert.equal(relayAllowed(type, false, 0, true), false);
   }
   assert.deepEqual(checkRelayed({ type: 'save-state' }), {
-    allowed: true,
+    allowed: false,
     stamped: false,
     sid: null,
     slot: null,
     owner: false,
   });
+  assert.equal(checkRelayed({ type: 'rom-accepted' }).allowed, false);
 });
 
 test("a spectator's state is refused, and its declared sender is not the one reported", () => {

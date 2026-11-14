@@ -89,8 +89,8 @@ verify "$FLOW" resync_flow_fixed allHold
 expect_violation "$FLOW" resync_flow_current aRequestCanAlwaysEnd
 
 TICK=specs/tick_deadlines.qnt
-verify "$TICK" tick_deadlines_fixed ownFreezeIsNotHeldAgainstAPeer
-expect_violation "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
+verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
+expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
 
 
 RESYNC=specs/resync_inputs.qnt

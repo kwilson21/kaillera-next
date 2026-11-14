@@ -1,5 +1,25 @@
 [
   {
+    "version": "0.68.6",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a page's own freeze no longer counts toward the pacing-throttle deadline (#168)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.5",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "unstamped relay messages are refused; state is asked for by players and sent by the host only (#154)"
+      }
+    ]
+  },
+  {
     "version": "0.68.4",
     "date": "2026-11-14",
     "changes": [

@@ -94,14 +94,30 @@
   // through our intercept whenever the core file changes. The CORE_HASH
   // we read above is content-addressed, so this also handles the "WASM
   // rebuilt" case automatically — no manual constant to bump.
+  // The hash is kept in localStorage directly. This runs from a fetch
+  // callback that can fire before the later scripts (storage.js, the bundle
+  // that sets KNState) have loaded, so it depends on neither. A browser that
+  // blocks storage reads no hash and clears the cache on every load.
+  const readCoreHash = () => {
+    try {
+      return window.localStorage.getItem('kn-core-hash');
+    } catch (_) {
+      return null;
+    }
+  };
+  const writeCoreHash = (hash) => {
+    try {
+      window.localStorage.setItem('kn-core-hash', hash);
+    } catch (_) {}
+  };
   let idbClearPromise = coreInfoPromise.then(() => {
     try {
       const cacheKey = CORE_HASH || 'unknown';
-      if (KNState.safeGet('localStorage', 'kn-core-hash') === cacheKey) {
+      if (readCoreHash() === cacheKey) {
         return null;
       }
       if (typeof indexedDB === 'undefined' || !indexedDB.databases) {
-        KNState.safeSet('localStorage', 'kn-core-hash', cacheKey);
+        writeCoreHash(cacheKey);
         return null;
       }
       return indexedDB
@@ -133,7 +149,7 @@
           return Promise.all(deletes);
         })
         .then(() => {
-          KNState.safeSet('localStorage', 'kn-core-hash', cacheKey);
+          writeCoreHash(cacheKey);
           console.log('[core-redirector] IDB cache cleared for new core hash');
         });
     } catch (_) {

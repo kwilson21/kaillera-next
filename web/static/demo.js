@@ -1107,6 +1107,8 @@
       _menuPilot = window.KNMenuAutopilot.create({
         read32: (addr) => window.NetplayRollback.readRdram32(addr),
         log: (msg) => console.warn(`[demo] ${msg}`),
+        // The fake peer asks P2's actor for frames ahead of the engine.
+        currentFrame: () => window.NetplayRollback?.getHudCounters?.().currentFrame ?? 0,
       });
     }
     _installInputHook();
@@ -1147,7 +1149,7 @@
     _setEmuButtonsEnabled(true);
 
     // Start GamepadManager so a connected controller flows through the
-    // same readLocalInput pipeline the lobby uses (shared.js:486-495
+    // same readLocalInput pipeline the lobby uses (web/src/page/shared.ts
     // pulls from GamepadManager.readGamepad). Without this call P1 input
     // is keyboard-only even when a gamepad is plugged in.
     _ensureGamepadManager();
