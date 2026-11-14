@@ -5,8 +5,10 @@
  * caller of the same name in web/static.
  */
 import { startVersionGuard } from './version-guard.ts';
+import { startVersion } from './version.ts';
 
 export const KNSite = {
+  startVersion,
   startVersionGuard,
 };
 
