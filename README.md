@@ -209,7 +209,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from web/src/streaming
-    switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
+    switch2-usb.js         Starts the WebUSB handshake for the Switch 2 Pro Controller (web/src/page/switch2-usb.ts)
     controller-settings.js Starts the in-game controller settings panel (logic in web/src/page/controller-settings/)
     virtual-gamepad.js     On-screen touch controls for mobile
     kn-audio.js            Starts the AudioWorklet pump + rollback audio capture (web/src/page/audio.ts)

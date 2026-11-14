@@ -93,7 +93,7 @@ kaillera-next/
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
 │       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming
-│       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
+│       ├── switch2-usb.js       # starts the WebUSB handshake that wakes the Switch 2 Pro Controller (window.Switch2USB) from web/src/page/switch2-usb.ts
 │       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
 │       ├── kn-audio.js          # starts the engine's audio pipeline (window.KNAudio) from web/src/page/audio.ts
