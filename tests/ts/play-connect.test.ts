@@ -7,6 +7,7 @@ import {
   menuWait,
   openRoomAnswer,
   openRoomRequest,
+  pausedIn,
   resumeSlot,
   waitedNames,
   type WaitedPeer,
@@ -22,7 +23,7 @@ const JOINER = { roomCode: 'ROOM1', playerName: 'Ana', persistentId: 'pid-1', re
 // `playerId` on open-room and `userid` on join-room (the socket's own id).
 
 test('a page loading as host opens a fresh room', () => {
-  assert.deepEqual(openRoomRequest(JOINER, null, null), {
+  assert.deepEqual(openRoomRequest(JOINER, 'ssb64', null), {
     extra: {
       sessionid: 'ROOM1',
       player_name: 'Ana',
@@ -73,7 +74,7 @@ test('a guest joins to play or to watch, and resumes the same way as a host', ()
 
 test("every request is one the server's models accept", () => {
   for (const resume of [null, { slot: 3, matchId: 'm1' }, { slot: null, matchId: '' }]) {
-    assert.ok(Result.isSuccess(decodeOpenRoomPayload(openRoomRequest(JOINER, null, resume))));
+    assert.ok(Result.isSuccess(decodeOpenRoomPayload(openRoomRequest(JOINER, 'ssb64', resume))));
     for (const spectate of [true, false]) {
       assert.ok(Result.isSuccess(decodeJoinRoomPayload(joinRoomRequest(JOINER, spectate, resume))));
     }
@@ -205,10 +206,19 @@ test('waited-on peers are named as the old code named them', () => {
   assert.equal(waitedNames([{ name: 'Ana' }, { slot: 1 }, { name: 'Cy' }]), 'Ana, Player 2 and Cy');
 });
 
-test('the wait says whether a menu or the match is paused', () => {
-  assert.deepEqual(menuWait([{ name: 'Ana' }], 22), {
+test("the wait says whether a menu or the match is paused, from the ROM's own scene table", () => {
+  assert.deepEqual(menuWait([{ name: 'Ana' }], pausedIn(22, 22)), {
     title: 'Waiting on Ana',
     detail: 'The match is paused to stay in sync.',
   });
-  assert.equal(menuWait([], Number.NaN).detail, 'The menu is paused to stay in sync.');
+  assert.equal(menuWait([], pausedIn(22, 16)).detail, 'The menu is paused to stay in sync.');
+  // Another game's match scene is another number.
+  assert.equal(pausedIn(7, 22), 'menu');
+  assert.equal(pausedIn(7, 7), 'match');
+});
+
+test('a ROM with no scene table gets words that claim nothing about the game', () => {
+  assert.equal(pausedIn(null, 22), 'unknown');
+  assert.equal(pausedIn(22, Number.NaN), 'unknown');
+  assert.equal(menuWait([], 'unknown').detail, 'The game is paused to stay in sync.');
 });

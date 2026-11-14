@@ -20,19 +20,18 @@ export type Joiner = {
  */
 export type Resume = { readonly slot: number | null; readonly matchId: string };
 
-const DEFAULT_GAME = 'ssb64';
-
 /**
  * The host's `open-room`. With no `resume` it is a page loading as host,
  * which means to make the room and not take one over (`fresh`); with one it
- * is the host coming back to its own room mid-game.
+ * is the host coming back to its own room mid-game. `gameId` names the
+ * game the room is for; which game that is, is the page's business.
  */
-export const openRoomRequest = (joiner: Joiner, gameId: string | null, resume: Resume | null) => {
+export const openRoomRequest = (joiner: Joiner, gameId: string, resume: Resume | null) => {
   const who = {
     sessionid: joiner.roomCode,
     player_name: joiner.playerName,
     room_name: `${joiner.playerName}'s room`,
-    game_id: gameId || DEFAULT_GAME,
+    game_id: gameId,
     persistentId: joiner.persistentId,
     reconnectToken: joiner.reconnectToken,
   };
@@ -111,11 +110,27 @@ export const waitedNames = (peers: readonly WaitedPeer[]): string => {
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 };
 
-/** The battle scene; every other scene is a menu. */
-const BATTLE_SCENE = 22;
+/**
+ * What the game was doing when it paused. Scene numbers mean something only
+ * within one game, so this is `unknown` unless the ROM's own scene table
+ * (web/src/address-maps.ts) says which scene is the match.
+ */
+export type PausedIn = 'match' | 'menu' | 'unknown';
+
+/** `matchScene`: the loaded ROM's scene id for a match in play, or null for a ROM with no table. */
+export const pausedIn = (matchScene: number | null, scene: number): PausedIn => {
+  if (matchScene === null || !Number.isFinite(scene)) return 'unknown';
+  return scene === matchScene ? 'match' : 'menu';
+};
+
+const PAUSED_DETAIL = {
+  match: 'The match is paused to stay in sync.',
+  menu: 'The menu is paused to stay in sync.',
+  unknown: 'The game is paused to stay in sync.',
+} satisfies Record<PausedIn, string>;
 
 /** The overlay shown while the game is paused for a peer. */
-export const menuWait = (peers: readonly WaitedPeer[], scene: number) => ({
+export const menuWait = (peers: readonly WaitedPeer[], where: PausedIn) => ({
   title: `Waiting on ${waitedNames(peers)}`,
-  detail: scene === BATTLE_SCENE ? 'The match is paused to stay in sync.' : 'The menu is paused to stay in sync.',
+  detail: PAUSED_DETAIL[where],
 });

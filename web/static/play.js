@@ -849,7 +849,13 @@
     const title = document.getElementById('menu-wait-title');
     const detailEl = document.getElementById('menu-wait-detail');
     // The same wait covers menus and the match; the wording is connect.ts.
-    const wait = _connect.menuWait(Array.isArray(detail?.peers) ? detail.peers : [], Number(detail?.scene));
+    // Which scene is a match is the loaded ROM's own table: a scene number
+    // means nothing across games, and a ROM without a table gets neutral words.
+    const matchScene = window.KNCore.addressMapFor(_romHash)?.scenes.battle ?? null;
+    const wait = _connect.menuWait(
+      Array.isArray(detail?.peers) ? detail.peers : [],
+      _connect.pausedIn(matchScene, Number(detail?.scene)),
+    );
     if (title) title.textContent = wait.title;
     if (detailEl) detailEl.textContent = wait.detail;
     overlay.classList.remove('hidden');
@@ -924,7 +930,7 @@
       // refuses; it never lets it in as a new player or opens a new room.
       const resume = { slot: _connect.resumeSlot(isSpectator, mySlot), matchId: KNState.matchId || '' };
       const payload = isHost
-        ? _connect.openRoomRequest(joinerNow(), _gameId, resume)
+        ? _connect.openRoomRequest(joinerNow(), _gameId || 'ssb64', resume)
         : _connect.joinRoomRequest(joinerNow(), isSpectator, resume);
       // The session owns the rejoin: it cancels it if the socket drops again
       // or the game ends, and then this handler is never called.
@@ -972,7 +978,7 @@
     }
 
     if (isHost) {
-      socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId, null), (err) => {
+      socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || 'ssb64', null), (err) => {
         const roomHandedOn = err === 'Room already exists' && _droppedAsHost;
         _playObserver.compare(
           'open-room-answer',
