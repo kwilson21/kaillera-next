@@ -217,7 +217,7 @@ const runDetector = (
 
 const digestOf = (suspects: Suspect[]): string => createHash('sha256').update(JSON.stringify(suspects)).digest('hex');
 
-// What kn-desync-detector.js on main emitted for this script at 7641b88,
+// What kn-desync-detector.js on main emitted for this script at 9cb2e8b,
 // where the flag decision was still inline in it (digests for the frame a
 // rollback window back, the scene read from the digest): the number of
 // suspects and a hash of all of them, per comparison mode.
@@ -225,14 +225,14 @@ const GOLDEN: { mode: string; isLocalHost: boolean; count: number; sha256: strin
   {
     mode: 'B',
     isLocalHost: false,
-    count: 78,
-    sha256: '71e5b5f1133840aeeb800f362e72487d4b3cab7950651b44215f28e69e7894bf',
+    count: 82,
+    sha256: 'fa49d5f70fc2165d91ae91d2e6d77939d35c076386902763500a02cb81be5a71',
   },
   {
     mode: 'B',
     isLocalHost: true,
-    count: 78,
-    sha256: '71e5b5f1133840aeeb800f362e72487d4b3cab7950651b44215f28e69e7894bf',
+    count: 82,
+    sha256: 'fa49d5f70fc2165d91ae91d2e6d77939d35c076386902763500a02cb81be5a71',
   },
   {
     mode: 'C',

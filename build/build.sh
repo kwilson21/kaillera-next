@@ -267,6 +267,14 @@ if [ -d "${PATCHES_DIR}" ]; then
             echo "    Added kn_get_scene_curr export"
         fi
 
+        # The registry's address map (kn_field_map_set and its readers), so a
+        # page can install the map for the ROM it is running. Same anchor,
+        # additive.
+        if ! grep -q "_kn_field_map_set" Makefile.emulatorjs; then
+            sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output, \\\n                     _kn_field_map_set,_kn_field_map_count,_kn_field_map_value|' Makefile.emulatorjs
+            echo "    Added kn_field_map exports"
+        fi
+
         # ft_buffer hash export (per-fighter coverage). Same anchor, additive.
         if ! grep -q "_kn_hash_ft_buffer" Makefile.emulatorjs; then
             sed -i 's|_kn_get_skip_audio_output|_kn_get_skip_audio_output, \\\n                     _kn_hash_ft_buffer,_kn_hash_history_ft_buffer|' Makefile.emulatorjs

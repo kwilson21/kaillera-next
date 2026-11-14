@@ -303,3 +303,69 @@ def test_replay_rewrites_the_history_for_its_frames(rdram_fixture):
     corrected = lib.kn_hash_rng(frame)
     assert corrected == fnv1a(bytes(corrected_rdram[seed:seed + 4]))
     assert corrected != mispredicted
+
+
+MAP_COUNT = 14
+SSB64_MAP = [0xA4F23, 0x74, 0xA4AD0, 0xA4EF8, 32, 0x03B940, 0x13BA88, 0xBC, 0x48, 0x54, 0x58, 0x130D94, 0x130D84, 4096]
+
+
+def _map_lib():
+    lib = ctypes.CDLL(str(LIB_PATH))
+    lib.kn_test_set_rdram.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
+    lib.kn_field_map_set.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32]
+    lib.kn_field_map_set.restype = ctypes.c_int
+    lib.kn_field_map_count.restype = ctypes.c_uint32
+    lib.kn_field_map_value.argtypes = [ctypes.c_uint32]
+    lib.kn_field_map_value.restype = ctypes.c_uint32
+    lib.kn_hash_rng.argtypes = [ctypes.c_int32]
+    lib.kn_hash_rng.restype = ctypes.c_uint32
+    lib.kn_hash_registry_post_tick.argtypes = [ctypes.c_int32, ctypes.c_int]
+    return lib
+
+
+def _set_map(lib, values):
+    return lib.kn_field_map_set((ctypes.c_uint32 * len(values))(*values), len(values))
+
+
+def test_the_built_in_address_map_is_ssb64_us():
+    """web/src/address-maps.ts carries the same numbers for SSB64 US; the
+    TypeScript test compares its packed map with this list."""
+    lib = _map_lib()
+    assert _set_map(lib, SSB64_MAP) == 1
+    assert lib.kn_field_map_count() == MAP_COUNT
+    assert [lib.kn_field_map_value(i) for i in range(MAP_COUNT)] == SSB64_MAP
+    assert lib.kn_field_map_value(MAP_COUNT) == 0xFFFFFFFF
+
+
+def test_an_installed_map_moves_the_field_and_clears_the_history(rdram_fixture):
+    lib = _map_lib()
+    lib.kn_test_set_rdram(rdram_fixture, len(rdram_fixture))
+    assert _set_map(lib, SSB64_MAP) == 1
+    frame = 900_100
+    lib.kn_hash_registry_post_tick(frame, 0)
+    assert lib.kn_hash_rng(frame) == fnv1a(rdram_fixture[0x03B940:0x03B944])
+
+    moved = list(SSB64_MAP)
+    moved[5] = 0x03B944  # KN_MAP_RNG_SEED
+    assert _set_map(lib, moved) == 1
+    # A hash taken under the old map is of other memory: it is gone.
+    assert lib.kn_hash_rng(frame) == 0
+    assert lib.kn_hash_rng(-1) == fnv1a(rdram_fixture[0x03B944:0x03B948])
+    assert _set_map(lib, SSB64_MAP) == 1
+
+
+def test_a_map_that_does_not_fit_is_refused():
+    lib = _map_lib()
+    assert _set_map(lib, SSB64_MAP) == 1
+    assert _set_map(lib, SSB64_MAP[:-1]) == 0
+    outside_rdram = list(SSB64_MAP)
+    outside_rdram[2] = 0x800000
+    assert _set_map(lib, outside_rdram) == 0
+    huge_stride = list(SSB64_MAP)
+    huge_stride[1] = 0x10000
+    assert _set_map(lib, huge_stride) == 0
+    empty_header = list(SSB64_MAP)
+    empty_header[4] = 0
+    assert _set_map(lib, empty_header) == 0
+    # A refused map changes nothing.
+    assert [lib.kn_field_map_value(i) for i in range(MAP_COUNT)] == SSB64_MAP

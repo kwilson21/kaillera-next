@@ -83,3 +83,14 @@ done
 # reports frames it never simulated; and with the detector on under Mode 2.
 $QUINT run "$DIGEST" --main=desync_digest_current --invariant=neverReportsAnUnconfirmedHash \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── Desync screenshots: which frame each peer captures ──────────────────────
+CAPTURE=specs/desync_capture.qnt
+$QUINT typecheck "$CAPTURE"
+for variant in desync_capture_before desync_capture_current; do
+  $QUINT test "$CAPTURE" --main="$variant" --backend=typescript
+done
+# Today: two pictures that are compared show the same frame. Violated when
+# each peer captured at the moment it flagged.
+$QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPicturesShowOneFrame \
+  --max-samples=20000 --max-steps=25 --backend=typescript
