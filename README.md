@@ -212,7 +212,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
     controller-settings.js In-game controller settings panel
     virtual-gamepad.js     On-screen touch controls for mobile
-    kn-audio.js            AudioWorklet pump + rollback audio capture
+    kn-audio.js            Starts the AudioWorklet pump + rollback audio capture (web/src/page/audio.ts)
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
     kn-vision-client.js    Claude vision client for screenshot-diff desync analysis
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
