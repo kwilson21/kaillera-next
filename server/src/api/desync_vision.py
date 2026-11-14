@@ -55,7 +55,7 @@ class PeerScreenshot(BaseModel):
     png_b64: str = Field(..., description="base64-encoded PNG, downscaled to ≤512px")
     hash: int | None = None
     # The frame the picture shows. Peers capture at a frame they agree on
-    # (kn-desync-detector.js); None from a client older than that, or from a
+    # (web/src/page/desync-detector.ts); None from a client older than that, or from a
     # postmortem, which pairs stored screenshots by frame itself.
     captured_frame: int | None = None
 

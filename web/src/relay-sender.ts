@@ -11,10 +11,13 @@
  * is allowed only from slot 0 (the engine's host is always slot 0), and
  * `mode-select` only from the room's owner.
  *
- * A message with no stamp at all comes from a server older than the stamp.
- * It is allowed as before: the server and the pages deploy together, and a
- * member cannot remove a stamp the server adds, so "no stamp" is never
- * something an attacker can choose once the server stamps.
+ * A request for emulator state is allowed only from a player: a spectator
+ * watches the host's video and never loads a state, so it has no reason to
+ * make the host pause, capture and send one.
+ *
+ * A message with no stamp is refused. Every server that can reach a page has
+ * stamped since the release before this one, so "no stamp" now only means
+ * the message did not come through a server that vouches for its sender.
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */
@@ -25,19 +28,27 @@ export function installsState(type: string): boolean {
   return type === 'save-state' || type === 'late-join-state' || type === 'sync-state-socket';
 }
 
+/** The message asks the host to pause, capture or send emulator state, or to resume after it. */
+//@ ensures \result === (type === "request-late-join" || type === "sync-request-full-socket" || type === "late-join-ready")
+export function asksForState(type: string): boolean {
+  return type === 'request-late-join' || type === 'sync-request-full-socket' || type === 'late-join-ready';
+}
+
 /**
  * @param type     the message's `type`
  * @param stamped  the server put its sender stamp on the message
  * @param slot     the sender's player slot as the server knows it; -1 for none (a spectator)
  * @param owner    the sender owns the room
  */
-//@ ensures !stamped ==> \result === true
+//@ ensures !stamped ==> \result === false
 //@ ensures stamped && installsState(type) ==> \result === (slot === 0)
+//@ ensures stamped && asksForState(type) ==> \result === (slot >= 0)
 //@ ensures stamped && type === "mode-select" ==> \result === owner
-//@ ensures stamped && !installsState(type) && type !== "mode-select" ==> \result === true
+//@ ensures stamped && !installsState(type) && !asksForState(type) && type !== "mode-select" ==> \result === true
 export function relayAllowed(type: string, stamped: boolean, slot: number, owner: boolean): boolean {
-  if (!stamped) return true;
+  if (!stamped) return false;
   if (installsState(type)) return slot === 0;
+  if (asksForState(type)) return slot >= 0;
   if (type === 'mode-select') return owner;
   return true;
 }

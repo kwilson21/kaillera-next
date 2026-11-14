@@ -3,7 +3,7 @@
  * values that are recorded and sent: polarity, rest position, range,
  * dead zone, sensitivity curve and the N64 maximum.
  *
- * web/static/gamepad-manager.js reads the pads, the profiles and the
+ * web/src/page/gamepad-manager.ts reads the pads, the profiles and the
  * player's settings; these functions are given the numbers. What they return
  * for the left stick is what every peer applies, so the same raw value must
  * always give the same result.
@@ -13,7 +13,7 @@
 export interface StickAxisConfig {
   index: number;
   /** [bit for a positive value, bit for a negative value]; see `axisSign`. */
-  bits?: readonly number[];
+  bits?: readonly number[] | null | undefined;
 }
 
 /** A pad axis that acts as two buttons (the C buttons): the mask each end presses. */
@@ -22,12 +22,18 @@ export interface AxisButtonConfig {
   neg: number;
 }
 
-/** The parts of a gamepad profile that say how its axes are read. */
+/**
+ * The parts of a gamepad profile that say how its axes are read. A part may
+ * be null: a saved profile is JSON, which writes null for a missing number.
+ */
 export interface AxisProfile {
-  axes?: { stickX?: StickAxisConfig; stickY?: StickAxisConfig };
-  axisButtons?: Record<string, AxisButtonConfig>;
+  axes?:
+    | { stickX?: StickAxisConfig | null | undefined; stickY?: StickAxisConfig | null | undefined }
+    | null
+    | undefined;
+  axisButtons?: Readonly<Record<string, AxisButtonConfig>> | null | undefined;
   /** The raw value of full deflection, for pads that top out below 1. */
-  axisRange?: number;
+  axisRange?: number | null | undefined;
 }
 
 /** An N64 stick axis: the left stick or the C stick, x or y. */

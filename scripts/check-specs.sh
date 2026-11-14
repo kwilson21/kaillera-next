@@ -145,14 +145,12 @@ $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
 # ── The tick loop's deadlines and a page that freezes ───────────────────────
 TICK=specs/tick_deadlines.qnt
 $QUINT typecheck "$TICK"
-for variant in tick_deadlines_current tick_deadlines_fixed; do
+for variant in tick_deadlines_before tick_deadlines_current; do
   $QUINT test "$TICK" --main="$variant" --backend=typescript
 done
-# With a freeze credited to every deadline that drops a peer, a page's own
-# freeze is never held against its peer. VIOLATED by today's engine
-# (tick_deadlines_current): the pacing-throttle deadline is not credited.
-# Not fixed yet.
-$QUINT run "$TICK" --main=tick_deadlines_fixed --invariant=ownFreezeIsNotHeldAgainstAPeer \
+# Today: a page's own freeze is never held against its peer. Violated before
+# the pacing-throttle deadline was credited (tick_deadlines_before).
+$QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldAgainstAPeer \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 
