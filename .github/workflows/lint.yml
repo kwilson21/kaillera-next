@@ -45,6 +45,8 @@ jobs:
         run: npm run build:check
       - name: Machine diagram matches web/src/session.ts
         run: npm run diagram:check
+      - name: Spec scenario diagrams match the specs
+        run: npm run traces:check
       - name: Model-check specs (Quint)
         run: npm run spec
 

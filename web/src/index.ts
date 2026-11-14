@@ -45,6 +45,13 @@ import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
+import {
+  disconnectDisposition,
+  hasAttemptLeft,
+  shouldInitiate,
+  signalDisposition,
+  staleHoldersOf,
+} from './peer-signaling.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { startRejoin, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
 import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from './rejoin-machine.ts';
@@ -248,11 +255,16 @@ export const KNCore = {
   measureCanvasHealth,
   digestFrame,
   createRomResumeAnswerer,
+  disconnectDisposition,
+  hasAttemptLeft,
   heldAsLateJoiner,
   meshHealTargets,
   normalizeAxis,
   rosterKey,
   screenshotCrop,
+  shouldInitiate,
+  signalDisposition,
+  staleHoldersOf,
   startLateJoinWait,
   startRejoin,
   shouldResumeRomTransfer,
