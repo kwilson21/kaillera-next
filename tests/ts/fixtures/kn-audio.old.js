@@ -1,0 +1,566 @@
+/**
+ * kn-audio.js — Lockstep audio pipeline for kaillera-next.
+ *
+ * Extracted from netplay-lockstep.js. Handles:
+ *   - AudioContext lifecycle (creation, gesture resume, cleanup)
+ *   - AudioWorklet with ScriptProcessorNode fallback
+ *   - Per-frame PCM feed from WASM core exports
+ *   - Resync audio fade-out/fade-in
+ *   - Host MediaStream destination for spectator audio
+ *
+ * Interface:
+ *   window.KNAudio.init(ctx)   — initialize with context callbacks
+ *   window.KNAudio.feed()      — feed one frame of audio (call from tick loop)
+ *   window.KNAudio.cleanup()   — tear down all audio resources
+ *   window.KNAudio.destNode    — MediaStreamDestination for spectator stream (read-only)
+ *   window.KNAudio.ready       — true when audio is playing
+ *   window.KNAudio.ctx         — the AudioContext (for external checks)
+ */
+(function () {
+  'use strict';
+
+  // -- State --
+  let _audioCtx = null;
+  let _audioWorklet = null;
+  let _audioDestNode = null;
+  let _audioPtr = 0;
+  let _audioRate = 0;
+  let _audioReady = false;
+
+  // Feed diagnostics
+  let _audioFeedCount = 0;
+  let _audioEmptyCount = 0;
+  let _audioErrorLogged = false;
+  let _audioSuspendedToastShown = false;
+  let _resumeAudioHandler = null; // gesture-resume listener; cleaned up in cleanup()
+  let _lastResumeAttemptAt = 0;
+
+  // Zombie-context detection: iOS Safari can leave _audioCtx.state === 'running'
+  // after an audio-session interruption (silent-switch, ringer, headphone
+  // unplug) while currentTime stops advancing — feeding samples past that
+  // point goes nowhere. Track ctx clock vs wall clock to catch it.
+  let _ctxClockProbeTime = 0;
+  let _ctxClockProbeWallMs = 0;
+  let _zombieDetected = false;
+  let _zombieRecoveryAttempts = 0;
+  let _lastZombieRecoveryAt = 0;
+
+  // Context callbacks — set by init()
+  let _log = () => {}; // (msg: string) => void
+  let _getFrame = () => 0; // () => number (current frame)
+  let _getSlot = () => -1; // () => number (player slot, 0 = host)
+  let _getLastRbFrame = () => null; // () => number|null
+  let _getResetAudioCalls = () => 0; // () => number
+  let _knEvent = () => {}; // (name, msg, meta) => void
+
+  // -- Public API --
+
+  async function init(ctx) {
+    _log = ctx.log || _log;
+    _getFrame = ctx.getFrame || _getFrame;
+    _getSlot = ctx.getSlot || _getSlot;
+    _getLastRbFrame = ctx.getLastRbFrame || _getLastRbFrame;
+    _getResetAudioCalls = ctx.getResetAudioCalls || _getResetAudioCalls;
+    _knEvent = ctx.knEvent || _knEvent;
+
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod) return;
+
+    if (!mod._kn_get_audio_ptr || !mod._kn_get_audio_samples || !mod._kn_reset_audio || !mod._kn_get_audio_rate) {
+      _log('audio capture exports not found — audio disabled');
+      return;
+    }
+
+    _audioPtr = mod._kn_get_audio_ptr();
+    _audioRate = mod._kn_get_audio_rate();
+    const initSamples = mod._kn_get_audio_samples();
+    const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
+    _log(
+      `audio init: ptr=${_audioPtr} rate=${_audioRate} initSamples=${initSamples} alCtx=${alCtxCount} f=${_getFrame()}`,
+    );
+    if (!_audioRate || _audioRate <= 0) {
+      _log('audio rate not set yet, defaulting to 33600');
+      _audioRate = 33600;
+    }
+
+    try {
+      // Reuse gesture-created context if available (already running on mobile).
+      // For mobile hosts, play.js pre-creates one in the startGame() click handler
+      // (window._kn_preloadedAudioCtx) since the engine starts audio 30+ seconds
+      // after the gesture — past iOS's trust window.
+      if (!_audioCtx || _audioCtx.state === 'closed') {
+        const preloaded = window._kn_preloadedAudioCtx;
+        if (preloaded && preloaded.state !== 'closed') {
+          _audioCtx = preloaded;
+          delete window._kn_preloadedAudioCtx;
+          if (_audioCtx.state !== 'running') {
+            _audioCtx.resume().catch((e) => {
+              _log(`preloaded AudioContext resume failed: ${e.name}: ${e.message}`);
+            });
+          }
+          _log(
+            `reusing host gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate}, time: ${_audioCtx.currentTime.toFixed(2)})`,
+          );
+        } else {
+          _audioCtx = new AudioContext({ sampleRate: _audioRate, latencyHint: 'interactive' });
+        }
+      } else {
+        _log(`reusing gesture-created AudioContext (state: ${_audioCtx.state}, rate: ${_audioCtx.sampleRate})`);
+        // Keep the gesture oscillator alive until a real audio node is connected.
+        // Stopping it now would leave _audioCtx with no active sources during the
+        // async AudioWorklet probe, causing iOS to deactivate the audio session.
+      }
+
+      // Try AudioWorklet first (requires secure context), fall back to
+      // AudioBufferSourceNode scheduling (works everywhere including mobile HTTP).
+      let workletOk = false;
+      if (_audioCtx.audioWorklet) {
+        try {
+          await _audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
+          _audioWorklet = new AudioWorkletNode(_audioCtx, 'lockstep-audio-processor', {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [2],
+            processorOptions: { sampleRate: _audioRate },
+          });
+
+          if (_getSlot() === 0) {
+            _audioDestNode = _audioCtx.createMediaStreamDestination();
+            _audioWorklet.connect(_audioDestNode);
+          }
+
+          _audioWorklet.connect(_audioCtx.destination);
+          _audioWorklet.onprocessorerror = (e) => {
+            const msg = e?.message || 'AudioWorklet processor error';
+            _log(`AudioWorklet processor error: ${msg}`);
+            _knEvent('audio-fail', `AudioWorklet processor error: ${msg}`, { error: msg });
+          };
+          workletOk = true;
+          _log('audio using AudioWorklet');
+        } catch (wErr) {
+          _log(`AudioWorklet failed, using fallback: ${wErr.message}`);
+          _knEvent('audio-fail', `AudioWorklet failed: ${wErr.message}`, { error: wErr.message });
+        }
+      }
+
+      if (!workletOk) {
+        // Fallback: ScriptProcessorNode with ring buffer.
+        // AudioBufferSourceNode per-frame scheduling doesn't produce sound
+        // on iOS WKWebView (FxiOS). ScriptProcessorNode continuously pulls
+        // audio, keeping the iOS audio session active.
+        _audioWorklet = null;
+        const ringSize = Math.ceil(_audioRate * 0.1) * 2; // ~100ms stereo
+        window._kn_audioRing = new Float32Array(ringSize);
+        window._kn_audioRingWrite = 0;
+        window._kn_audioRingRead = 0;
+        window._kn_audioRingCount = 0;
+        const spNode = _audioCtx.createScriptProcessor(2048, 0, 2);
+        spNode.onaudioprocess = (e) => {
+          const outL = e.outputBuffer.getChannelData(0);
+          const outR = e.outputBuffer.getChannelData(1);
+          const ring = window._kn_audioRing;
+          const rSize = ring.length;
+          for (let si = 0; si < outL.length; si++) {
+            if (window._kn_audioRingCount >= 2) {
+              outL[si] = ring[window._kn_audioRingRead];
+              outR[si] = ring[(window._kn_audioRingRead + 1) % rSize];
+              window._kn_audioRingRead = (window._kn_audioRingRead + 2) % rSize;
+              window._kn_audioRingCount -= 2;
+            } else {
+              outL[si] = 0;
+              outR[si] = 0;
+            }
+          }
+        };
+        if (_getSlot() === 0) {
+          _audioDestNode = _audioCtx.createMediaStreamDestination();
+          spNode.connect(_audioDestNode);
+        }
+        const gestureDest = window._kn_gestureAudioDest;
+        if (gestureDest && gestureDest.context === _audioCtx) {
+          spNode.connect(gestureDest);
+          _log(`audio using ScriptProcessorNode fallback via <audio> element (ring=${ringSize})`);
+        } else {
+          if (gestureDest)
+            _log('gesture audio destination belongs to a different AudioContext; using direct destination');
+          spNode.connect(_audioCtx.destination);
+          _log(`audio using ScriptProcessorNode fallback (ring=${ringSize})`);
+        }
+        window._kn_scriptProcessor = spNode;
+      }
+
+      // NOW stop the keep-alive oscillator — a real audio node is connected,
+      // so the iOS audio session stays alive across the handoff.
+      if (window._kn_keepAliveOsc) {
+        try {
+          window._kn_keepAliveOsc.stop();
+        } catch (_) {}
+        window._kn_keepAliveOsc = null;
+      }
+
+      _audioReady = true;
+
+      if (_audioCtx.state !== 'running') {
+        ensureRunning('init');
+      }
+
+      _log(`audio playback initialized (rate: ${_audioRate})`);
+    } catch (err) {
+      _log(`audio init failed: ${err}`);
+      _audioReady = false;
+    }
+  }
+
+  function feed() {
+    try {
+      if (!_audioReady || !_audioCtx) return;
+      // BF1/BF8: don't feed audio into a suspended/interrupted context.
+      // Attempt a browser-allowed resume and keep gesture listeners armed
+      // until the context actually reports running.
+      if (_audioCtx.state !== 'running') {
+        ensureRunning('feed');
+        return;
+      }
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      if (!mod) return;
+
+      const n = mod._kn_get_audio_samples();
+      if (n <= 0) {
+        _audioEmptyCount++;
+        // Log first 30 empty frames for diagnostics on fresh boot
+        if (_audioEmptyCount <= 30) {
+          const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
+          const sdlAudioState = mod.SDL2?.audioContext?.state ?? 'n/a';
+          // RF6 Part A: rollback-correlation + subsystem state enrichment
+          const rbDelta = _getLastRbFrame() != null ? _getFrame() - _getLastRbFrame() : -1;
+          const ctxState = window.EJS_emulator?.audioContext?.state ?? 'unknown';
+          const workletPort = _audioWorklet?.port ? 'open' : 'closed';
+          _log(
+            `audio-empty f=${_getFrame()} #${_audioEmptyCount} ptr=${_audioPtr} alCtx=${alCtxCount} sdlAudio=${sdlAudioState} ` +
+              `lastRb=${_getLastRbFrame() ?? -1} ` +
+              `rbDelta=${rbDelta} ` +
+              `resetAudioCalls=${_getResetAudioCalls()} ` +
+              `ctxState=${ctxState} ` +
+              `workletPort=${workletPort}`,
+          );
+          // 2026-04-29 audio-diag: dump AI/cp0 state on first audio-empty
+          // so we can correlate post-restore state against actual sample
+          // production. Removed once silent-audio root cause is fixed.
+          if (_audioEmptyCount === 1) {
+            try {
+              window._knDumpAudioState?.(`first-audio-empty f=${_getFrame()}`);
+            } catch (_) {}
+          }
+        }
+        // Log once after 300 consecutive empty frames (~5s) to detect silent audio
+        if (_audioEmptyCount === 300) {
+          const alCtxCount = mod.AL?.contexts ? Object.keys(mod.AL.contexts).length : 0;
+          const sdlState = mod.SDL2?.audioContext?.state ?? 'n/a';
+          // RF6 Part A: rollback-correlation + subsystem state enrichment
+          const rbDelta = _getLastRbFrame() != null ? _getFrame() - _getLastRbFrame() : -1;
+          const ctxState = window.EJS_emulator?.audioContext?.state ?? 'unknown';
+          const workletPort = _audioWorklet?.port ? 'open' : 'closed';
+          _log(
+            `audio-silent: ${_audioEmptyCount} consecutive frames with 0 samples (ptr=${_audioPtr} ctx=${_audioCtx.state} alCtx=${alCtxCount} sdlAudio=${sdlState}) ` +
+              `lastRb=${_getLastRbFrame() ?? -1} ` +
+              `rbDelta=${rbDelta} ` +
+              `resetAudioCalls=${_getResetAudioCalls()} ` +
+              `ctxState=${ctxState} ` +
+              `workletPort=${workletPort}`,
+          );
+          // BF1: surface persistent audio failure to the user
+          if (_audioCtx.state === 'suspended' && !_audioSuspendedToastShown) {
+            _audioSuspendedToastShown = true;
+            window.knShowToast?.('Audio blocked \u2014 click anywhere to enable sound', 'warn');
+          }
+        }
+        return;
+      }
+      _audioEmptyCount = 0;
+
+      // Log audio state periodically (every 600 frames ≈ 10s)
+      _audioFeedCount++;
+      if (_audioFeedCount === 1 || _audioFeedCount % 600 === 0) {
+        // Check PCM level (RMS of first 100 samples)
+        const pcmCheck = new Int16Array(mod.HEAPU8.buffer, _audioPtr, Math.min(n * 2, 200));
+        let rms = 0;
+        for (let ci = 0; ci < pcmCheck.length; ci++) rms += pcmCheck[ci] * pcmCheck[ci];
+        rms = Math.sqrt(rms / pcmCheck.length);
+        _log(
+          `audio-feed #${_audioFeedCount} ctx=${_audioCtx.state} samples=${n} time=${_audioCtx.currentTime.toFixed(2)} worklet=${!!_audioWorklet} rms=${rms.toFixed(1)} ringCount=${window._kn_audioRingCount || 0}`,
+        );
+      }
+
+      _checkCtxClockHealth();
+
+      const pcm = new Int16Array(mod.HEAPU8.buffer, _audioPtr, n * 2);
+
+      if (_audioWorklet) {
+        // AudioWorklet path
+        const copy = new Int16Array(pcm);
+        _audioWorklet.port.postMessage(copy, [copy.buffer]);
+      } else {
+        // ScriptProcessorNode fallback — push PCM to ring buffer.
+        // The ScriptProcessorNode's onaudioprocess callback pulls from it.
+        const ring = window._kn_audioRing;
+        if (ring) {
+          const rSize = ring.length;
+          for (let i = 0; i < n; i++) {
+            if (window._kn_audioRingCount + 2 > rSize) {
+              // Drop the oldest stereo sample on overflow instead of letting
+              // the read pointer lag behind overwritten data.
+              window._kn_audioRingRead = (window._kn_audioRingRead + 2) % rSize;
+              window._kn_audioRingCount = Math.max(0, window._kn_audioRingCount - 2);
+            }
+            ring[window._kn_audioRingWrite] = pcm[i * 2] / 32768.0;
+            ring[(window._kn_audioRingWrite + 1) % rSize] = pcm[i * 2 + 1] / 32768.0;
+            window._kn_audioRingWrite = (window._kn_audioRingWrite + 2) % rSize;
+            window._kn_audioRingCount += 2;
+          }
+          if (window._kn_audioRingCount > rSize) window._kn_audioRingCount = rSize;
+        }
+      }
+    } catch (audioErr) {
+      if (!_audioErrorLogged) {
+        _log(`AUDIO-ERROR: ${audioErr.message}`);
+        _audioErrorLogged = true;
+      }
+    }
+  }
+
+  function _installResumeAudioListeners(reason) {
+    if (!_audioCtx || _audioCtx.state === 'running' || _audioCtx.state === 'closed') {
+      _removeResumeAudioListeners();
+      return;
+    }
+    if (_resumeAudioHandler) return;
+
+    // Resume AudioContext on user interaction (autoplay policy).
+    // Use capture phase so EmulatorJS virtual controls can't block via
+    // stopPropagation. Retry on every interaction until actually running.
+    // Stash the handler on a module-level var so cleanup() can drop it
+    // even when the user never gestures.
+    _resumeAudioHandler = async () => {
+      if (!_audioCtx || _audioCtx.state === 'running' || _audioCtx.state === 'closed') {
+        _removeResumeAudioListeners();
+        return;
+      }
+      try {
+        await _audioCtx.resume();
+        _log(`audio resumed via gesture (${reason}, state: ${_audioCtx.state})`);
+        if (_audioCtx.state === 'running') {
+          _audioSuspendedToastShown = false;
+          _removeResumeAudioListeners();
+        }
+      } catch (e) {
+        _log(`audio resume failed: ${e.name}: ${e.message}`);
+        _knEvent('audio-fail', `AudioContext resume failed: ${e.name}: ${e.message}`, { error: e.name, reason });
+      }
+    };
+    document.addEventListener('click', _resumeAudioHandler, true);
+    document.addEventListener('keydown', _resumeAudioHandler, true);
+    document.addEventListener('pointerdown', _resumeAudioHandler, true);
+    document.addEventListener('touchstart', _resumeAudioHandler, true);
+    _log(`audio context state: ${_audioCtx.state} — waiting for gesture to resume (${reason})`);
+  }
+
+  // Detect "zombie" AudioContext: state === 'running' but currentTime stops
+  // advancing. iOS Safari leaves the context in this state after an audio-
+  // session interruption (silent-switch toggle, ringer, AirPods unplug, brief
+  // background-app interruption). resume() resolves successfully but no
+  // samples actually reach the speaker. Without detection we keep pushing
+  // PCM into the void for the rest of the match.
+  //
+  // Strategy: every ~1s of wall time, compare AudioContext.currentTime delta
+  // against wall delta. If wall advances but ctx clock is stuck, fire a
+  // suspend()→resume() cycle which forces iOS to reactivate the audio
+  // session. After repeated automatic recoveries fail, install a gesture
+  // listener and toast the user — same pattern as the explicit-suspended
+  // path in ensureRunning().
+  function _checkCtxClockHealth() {
+    if (!_audioCtx || _audioCtx.state !== 'running') return;
+    const ctxNow = _audioCtx.currentTime;
+    const wallNow = performance.now();
+    if (_ctxClockProbeWallMs === 0) {
+      _ctxClockProbeTime = ctxNow;
+      _ctxClockProbeWallMs = wallNow;
+      return;
+    }
+    const wallDelta = (wallNow - _ctxClockProbeWallMs) / 1000;
+    if (wallDelta < 1.0) return;
+    const ctxDelta = ctxNow - _ctxClockProbeTime;
+    _ctxClockProbeTime = ctxNow;
+    _ctxClockProbeWallMs = wallNow;
+
+    // Healthy: ctx advances roughly with wall (allow some jitter).
+    if (ctxDelta >= wallDelta * 0.5) {
+      if (_zombieDetected) {
+        _log(
+          `audio-zombie recovered f=${_getFrame()} ctxDelta=${ctxDelta.toFixed(2)}s wallDelta=${wallDelta.toFixed(2)}s attempts=${_zombieRecoveryAttempts}`,
+        );
+        _knEvent('audio-recovered', `audio-zombie recovered after ${_zombieRecoveryAttempts} attempts`, {
+          attempts: _zombieRecoveryAttempts,
+        });
+        _zombieDetected = false;
+        _zombieRecoveryAttempts = 0;
+        _audioSuspendedToastShown = false;
+      }
+      return;
+    }
+
+    // Zombie: ctx clock stalled despite state === 'running'.
+    if (!_zombieDetected) {
+      _zombieDetected = true;
+      _log(
+        `audio-zombie f=${_getFrame()} ctx clock stalled (wallDelta=${wallDelta.toFixed(2)}s ctxDelta=${ctxDelta.toFixed(2)}s state=${_audioCtx.state})`,
+      );
+      _knEvent(
+        'audio-fail',
+        `audio-zombie ctx clock stalled wallDelta=${wallDelta.toFixed(2)}s ctxDelta=${ctxDelta.toFixed(2)}s`,
+        {
+          wallDelta,
+          ctxDelta,
+          state: _audioCtx.state,
+        },
+      );
+    }
+    _attemptZombieRecovery();
+  }
+
+  function _attemptZombieRecovery() {
+    if (!_audioCtx || _audioCtx.state === 'closed') return;
+    const now = performance.now();
+    if (now - _lastZombieRecoveryAt < 2000) return;
+    _lastZombieRecoveryAt = now;
+    _zombieRecoveryAttempts++;
+    const attempt = _zombieRecoveryAttempts;
+    // suspend() then resume() forces iOS to re-acquire the audio session.
+    // Plain resume() alone resolves successfully but doesn't reactivate
+    // a session that was interrupted.
+    _audioCtx
+      .suspend()
+      .then(() => _audioCtx.resume())
+      .then(() => {
+        _log(`audio-zombie recovery #${attempt}: state=${_audioCtx.state} time=${_audioCtx.currentTime.toFixed(2)}`);
+      })
+      .catch((e) => {
+        _log(`audio-zombie recovery #${attempt} failed: ${e.name}: ${e.message}`);
+      });
+    if (attempt >= 3 && !_audioSuspendedToastShown) {
+      _audioSuspendedToastShown = true;
+      window.knShowToast?.('Audio interrupted — tap anywhere to restart sound', 'warn');
+      _installResumeAudioListeners('zombie');
+    }
+  }
+
+  function ensureRunning(reason = 'manual') {
+    if (!_audioCtx || _audioCtx.state === 'closed') return false;
+    if (_audioCtx.state === 'running') {
+      _removeResumeAudioListeners();
+      _audioSuspendedToastShown = false;
+      return true;
+    }
+
+    const now = performance.now();
+    if (now - _lastResumeAttemptAt > 1000) {
+      _lastResumeAttemptAt = now;
+      _audioCtx
+        .resume()
+        .then(() => {
+          _log(`audio resume attempt (${reason}) -> ${_audioCtx?.state || 'none'}`);
+          if (_audioCtx?.state === 'running') {
+            _audioSuspendedToastShown = false;
+            _removeResumeAudioListeners();
+          }
+        })
+        .catch((e) => {
+          _log(`audio resume attempt failed (${reason}): ${e.name}: ${e.message}`);
+          _knEvent('audio-fail', `AudioContext resume failed: ${e.name}: ${e.message}`, {
+            error: e.name,
+            reason,
+          });
+        });
+    }
+
+    _installResumeAudioListeners(reason);
+    if (!_audioSuspendedToastShown && reason !== 'init' && !document.hidden) {
+      _audioSuspendedToastShown = true;
+      window.knShowToast?.('Audio blocked — click anywhere to enable sound', 'warn');
+    }
+    return false;
+  }
+
+  function _removeResumeAudioListeners() {
+    if (!_resumeAudioHandler) return;
+    document.removeEventListener('click', _resumeAudioHandler, true);
+    document.removeEventListener('keydown', _resumeAudioHandler, true);
+    document.removeEventListener('pointerdown', _resumeAudioHandler, true);
+    document.removeEventListener('touchstart', _resumeAudioHandler, true);
+    _resumeAudioHandler = null;
+  }
+
+  function cleanup() {
+    // The gesture-resume listeners normally self-detach on first user
+    // interaction. If cleanup runs first (game ends before any gesture),
+    // they would otherwise stay attached to document forever.
+    _removeResumeAudioListeners();
+    if (_audioWorklet) {
+      _audioWorklet.disconnect();
+      _audioWorklet = null;
+    }
+    if (window._kn_scriptProcessor) {
+      window._kn_scriptProcessor.disconnect();
+      window._kn_scriptProcessor = null;
+    }
+    if (window._kn_audioEl) {
+      window._kn_audioEl.pause();
+      window._kn_audioEl.srcObject = null;
+      window._kn_audioEl = null;
+    }
+    if (window._kn_keepAliveOsc) {
+      try {
+        window._kn_keepAliveOsc.stop();
+      } catch (_) {}
+      window._kn_keepAliveOsc = null;
+    }
+    window._kn_audioRing = null;
+    window._kn_audioRingCount = 0;
+    if (_audioDestNode) {
+      _audioDestNode.disconnect();
+      _audioDestNode = null;
+    }
+    if (_audioCtx) {
+      _audioCtx.close();
+      _audioCtx = null;
+    }
+    _audioReady = false;
+    _audioPtr = 0;
+    _audioRate = 0;
+    _audioFeedCount = 0;
+    _audioEmptyCount = 0;
+    _audioErrorLogged = false;
+    _audioSuspendedToastShown = false;
+    _lastResumeAttemptAt = 0;
+    _ctxClockProbeTime = 0;
+    _ctxClockProbeWallMs = 0;
+    _zombieDetected = false;
+    _zombieRecoveryAttempts = 0;
+    _lastZombieRecoveryAt = 0;
+  }
+
+  window.KNAudio = {
+    init,
+    feed,
+    ensureRunning,
+    cleanup,
+    get destNode() {
+      return _audioDestNode;
+    },
+    get ready() {
+      return _audioReady;
+    },
+    get ctx() {
+      return _audioCtx;
+    },
+  };
+})();

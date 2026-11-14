@@ -313,9 +313,11 @@ The scripts themselves are TypeScript too (#170 to #174): `kn-state.js`,
 right after `storage.js`. The JavaScript fallbacks are deleted; the tests
 import the TypeScript.
 
-Not done: the gamepad manager's poll loop and the two polling loops in
-`page/shared.ts` (`waitForEmulator`, `disableEJSInput`) are ported as they
-were, bare timers, not Effect code.
+The three waits that were bare timers are Effect code (`web/src/poll.ts`):
+the gamepad manager's hot-plug poll, and `waitForEmulator` and
+`disableEJSInput` in `page/shared.ts`. Each still looks first in the call
+that starts it and then every 200 ms (500 ms for the pads), for the same
+number of looks as before.
 
 **Stage 5: the engine**
 `netplay-rollback.js` (18k lines) is split by concern into typed modules:
@@ -350,14 +352,24 @@ Slice 1, the peer mesh and signaling:
   one initiator, every wait in a match has a deadline (delayed transitions,
   durations given as input), signals and channel events carry the attempt
   they belong to and one for another attempt is ignored, and a roster update
-  never replaces an open connection. It decides with the proved functions in
+  never replaces an open connection. An attempt is named by the page that
+  made the offer and that page's count of its offers: the count alone starts
+  again at 1 on a page that replaces another (a reload), and a signal or
+  channel event of the old page's connection then passes for the new one's
+  (the model's `reload`, violated on its `counter_only` variant). It decides
+  with the proved functions in
   `peer-signaling.ts` and makes no WebRTC call: what it wants done it issues
   as commands. `tests/ts/peer-connection.test.ts` replays the model's
   scenarios against it. Nothing calls it yet, so the four properties are
   still violated by the engine.
 - Next: run the machine beside the engine, observing: feed it the engine's
   events and compare its commands with what the engine does. That needs the
-  engine to number its offers (the attempt id on `webrtc-signal`).
+  engine to name each attempt on the wire: every `webrtc-signal` carries
+  `{page, attempt}`, a random id the offering page makes once when it loads
+  and that page's count of its offers. An offer carries its own, an answer
+  the offer's it answers, a candidate the offer's of the connection it was
+  gathered for; the engine reports a channel's open and close under the same
+  pair.
 
 **Stage 6: the remaining page scripts**
 The other hand-written scripts of the play, demo and landing pages move to

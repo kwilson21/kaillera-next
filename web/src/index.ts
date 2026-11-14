@@ -26,6 +26,7 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
 import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
@@ -76,6 +77,7 @@ import * as streamingInput from './streaming/input.ts';
 import { createStreamingObserver } from './streaming/observe.ts';
 import * as streamingRoster from './streaming/roster.ts';
 import * as streamingSignal from './streaming/signal.ts';
+import * as streamingVideo from './streaming/video.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
@@ -294,6 +296,7 @@ export const KNCore = {
   demo,
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
+    startAudio,
     startCapture,
     startControllerSettings,
     startVisionClient,
@@ -333,6 +336,7 @@ export const KNCore = {
     ...streamingRoster,
     ...streamingSignal,
     ...streamingInput,
+    ...streamingVideo,
     createObserver: createStreamingObserver,
   },
   protocol: {
