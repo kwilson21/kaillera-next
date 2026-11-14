@@ -6449,6 +6449,22 @@
   const SOCKET_SYNC_B64_SOFT_LIMIT = 3900000;
   let _lastResyncTime = 0; // timestamp of last resync request (10s cooldown)
   let _resyncRequestInFlight = false; // true while an explicit sync-request is in transit — prevents stacking
+  // I1: the request's own deadline. The host answers one request per guest
+  // every _SYNC_REQUEST_COOLDOWN_MS and drops the rest without a word; the
+  // flag above was then cleared only by a state that was not coming, and the
+  // guest never asked again (specs/resync_flow.qnt). Longer than the host's
+  // rate limit plus its capture deadline, so an answer on its way is not cut.
+  let _resyncRequestSentAt = 0;
+  const RESYNC_REQUEST_TIMEOUT_MS = 8000;
+  const _checkResyncRequestDeadline = () => {
+    if (!_resyncRequestInFlight) return;
+    // An answer is arriving or held: those waits have their own deadlines.
+    if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;
+    const waitedMs = performance.now() - _resyncRequestSentAt;
+    if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;
+    _resyncRequestInFlight = false;
+    _syncLog(`RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} — no state came, may ask again`);
+  };
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
@@ -6939,6 +6955,7 @@
     try {
       _beginLifecycleResyncGuard(reason);
       _resyncRequestInFlight = true;
+      _resyncRequestSentAt = performance.now();
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
       _signalSocket.emit('data-message', {
@@ -8050,6 +8067,7 @@
           _syncTargetFrame = _recoveryTarget;
           _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
           _resyncRequestInFlight = true;
+          _resyncRequestSentAt = performance.now();
           try {
             const peerDc = _peers[remoteSid]?.dc;
             if (peerDc?.readyState === 'open') {
@@ -8234,6 +8252,7 @@
             _syncTargetFrame = -1;
             _syncTargetDeadlineAt = 0;
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             try {
               hostDc.send('sync-request-full');
               _syncLog('reconnect resync: sent immediate sync-request-full to host DC');
@@ -8659,6 +8678,7 @@
           if (!_resyncRequestInFlight && cooldownElapsed > _resyncCooldownMs()) {
             _lastResyncTime = now2;
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             const _coordTarget = _frameNum + SYNC_COORD_DELTA;
             _syncTargetFrame = _coordTarget;
             _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
@@ -13196,6 +13216,7 @@
         if (!sentSocket && hostPeer?.dc?.readyState === 'open') {
           try {
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             hostPeer.dc.send('sync-request-full');
             _syncLog(`${reason}: sent sync-request-full to host over DC fallback`);
           } catch (_) {
@@ -13328,6 +13349,7 @@
         if (hostPeer?.dc?.readyState === 'open') {
           try {
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             hostPeer.dc.send('sync-request-full');
           } catch (_) {
             _resyncRequestInFlight = false;
@@ -13939,6 +13961,10 @@
     // tick before the throttle can end (specs/tick_deadlines.qnt): a page
     // that froze while held back would drop a peer that never stopped sending.
     if (_pacingThrottleStartAt > 0) _pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);
+    // A request for a resync that went out before the freeze: the answer
+    // could not have been handled while this page stood still, so the
+    // freeze does not count against it.
+    if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);
     _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
   };
 
@@ -13953,6 +13979,7 @@
     }
     _chk('post-phase');
     _creditLocalFreeze();
+    _checkResyncRequestDeadline();
     // Deadline-only pass: a tick that stalls returns before the per-frame
     // dispatch below, and a stall can outlast SYNC_COORD_TIMEOUT_MS. Never
     // mid-replay, where the live state isn't at a frame boundary.
@@ -17836,6 +17863,7 @@
           if (hostSyncDc?.readyState === 'open') {
             try {
               _resyncRequestInFlight = true;
+              _resyncRequestSentAt = performance.now();
               hostSyncDc.send('sync-request-full');
             } catch (_) {
               _resyncRequestInFlight = false;

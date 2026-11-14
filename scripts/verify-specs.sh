@@ -82,9 +82,8 @@ expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
 # them.
 
 FLOW=specs/resync_flow.qnt
-verify "$FLOW" resync_flow_current holdToday
-verify "$FLOW" resync_flow_fixed allHold
-expect_violation "$FLOW" resync_flow_current aRequestCanAlwaysEnd
+verify "$FLOW" resync_flow_current allHold
+expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
 
 TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
