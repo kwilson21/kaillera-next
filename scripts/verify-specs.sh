@@ -42,14 +42,23 @@ verify "$PEERS" peer_identity_current oneConnectionPerGuest
 expect_violation "$PEERS" peer_identity_before neverEvictsLiveConnection
 expect_violation "$PEERS" peer_identity_untagged neverEvictsLiveConnection
 
+ROMT=specs/rom_transfer.qnt
+verify "$ROMT" rom_transfer_current waitingHasAWayOut
+verify "$ROMT" rom_transfer_current timersAloneStop
+expect_violation "$ROMT" rom_transfer_before waitingHasAWayOut
+
 ROOM=specs/room_lifecycle.qnt
 verify "$ROOM" room_current ownerSeesGame
 verify "$ROOM" room_current lateJoinersChaseTheCurrentMatch
 verify "$ROOM" room_current pagesAgreeWithServer
 verify "$ROOM" room_current joinersAreNotLeftWaitingAtTheStart
 verify "$ROOM" room_current startIsNotHeldUpByALateJoiner
+verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
+verify "$ROOM" room_current anAbandonedMatchIsEnded
 expect_violation "$ROOM" room_before_start_fix joinersAreNotLeftWaitingAtTheStart
 expect_violation "$ROOM" room_before_start_fix startIsNotHeldUpByALateJoiner
+expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
+expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.

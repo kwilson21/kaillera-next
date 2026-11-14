@@ -109,15 +109,19 @@ def test_clients_from_before_the_field_keep_the_match():
 
 
 def test_fresh_reopen_by_a_non_owner_does_not_end_the_match():
-    """Ownership moved to the guest; a returning ex-host can't end their game."""
+    """Ownership moved to the guest; a returning ex-host can't end their game.
+
+    It is not shown a lobby over the match either: it is sent to join-room.
+    """
     room = _playing_room()
     room.owner = "sid-guest"
 
     err, events = _reopen("pid-host", "sid-host-2", fresh=True)
 
-    assert err is None
+    assert err == signaling.NOT_THE_OWNER
     assert room.status == "playing"
     assert "game-ended" not in events
+    assert room.players["pid-host"]["socketId"] == "sid-host"
 
 
 def test_fresh_reopen_in_the_lobby_changes_nothing():

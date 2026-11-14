@@ -142,12 +142,22 @@ _VALID_EVENT_TYPES = {
     # play.js caught up with the room after a signaling reconnect: the game
     # had ended, or been replaced, while its socket was down.
     "rejoin-reconciled",
+    "rejoin-refused",
+    "rejoin-no-answer",
     # A late joiner got no game state from a running host before its deadline.
     "late-join-timeout",
     # Reports from the page lifecycle machine (web/src/session.ts). Every
     # SessionReport type must be listed: tests/test_session_reports.py.
+    # No longer sent: the page flags it compared with the machine are gone.
+    # Kept so a page loaded before that still has its report stored.
     "session-disagree",
     "late-join-stranded",
+    # A message the server sent did not match the client's schema for it
+    # (web/src/socket-boundary.ts): tests/test_session_reports.py.
+    "protocol-mismatch",
+    # A decision moved out of play.js disagreed with the play.js code still in
+    # charge of it (web/src/play/observe.ts): tests/test_session_reports.py.
+    "play-disagree",
 }
 _ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 
