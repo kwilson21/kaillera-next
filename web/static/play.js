@@ -5159,6 +5159,14 @@
   // ── Init ───────────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', () => {
+    // The TypeScript core (dist/kn-core.js) is part of this page: the engine
+    // and the room logic call it. If it did not load (the request failed, or
+    // something blocked the script), nothing below can run correctly, so the
+    // page says so and stops here instead of joining a room half-working.
+    if (!window.KNCore) {
+      showError('Part of this page did not load. Reload the page to try again.');
+      return;
+    }
     console.log('kaillera-next — v0.9 forever');
     console.log('Welcome to a new EmuLinker Server!');
     console.log('Edit language.properties to setup your login announcements');
