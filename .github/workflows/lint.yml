@@ -62,6 +62,17 @@ jobs:
         run: npm run diagram:check
       - name: Spec scenario diagrams match the specs
         run: npm run traces:check
+
+  # Random-run model checking of every spec (Quint simulator). Its own job:
+  # it takes most of the time the js job used to need, and grows with each
+  # scenario, so it had started to hit the js job's limit.
+  spec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned tools
+        run: npm ci --ignore-scripts
       - name: Model-check specs (Quint)
         run: npm run spec
 
