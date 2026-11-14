@@ -23,7 +23,7 @@ SRC_DIR="${SCRIPT_DIR}/src"
 OUT_DIR="${SCRIPT_DIR}/output"
 PATCHES_DIR="${SCRIPT_DIR}/patches"
 # Field-granular hash registry (kn_hash_registry.c). On by default: the
-# desync detector (web/static/kn-desync-detector.js REQUIRED_EXPORTS) disables
+# desync detector (web/src/page/desync-detector.ts REQUIRED_EXPORTS) disables
 # itself without these exports. Set KN_ENABLE_HASH_REGISTRY=0 for a core
 # without them.
 KN_ENABLE_HASH_REGISTRY="${KN_ENABLE_HASH_REGISTRY:-1}"
