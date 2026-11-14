@@ -157,6 +157,7 @@ done
 $QUINT run "$TICK" --main=tick_deadlines_fixed --invariant=ownFreezeIsNotHeldAgainstAPeer \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+
 # ── Inputs around a resync: what a page may wait for afterwards ─────────────
 RESYNC=specs/resync_inputs.qnt
 $QUINT typecheck "$RESYNC"

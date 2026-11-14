@@ -90,6 +90,7 @@ TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_fixed ownFreezeIsNotHeldAgainstAPeer
 expect_violation "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
 
+
 RESYNC=specs/resync_inputs.qnt
 verify "$RESYNC" resync_inputs_current allHold
 # The counterexample on resync_inputs_before is 10 steps long (the host has to
