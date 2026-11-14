@@ -212,6 +212,14 @@ every read and reported no disagreement before the old flags were deleted.
   as a guest when the room has been handed on, instead of failing to open
   it. (A host that still owns its room cannot fall behind it: only the
   owner starts and ends games.)
+- Done: an outage that hits every player does not end their match. While
+  no player of a playing room is connected, the server keeps the dropped
+  players' places past the 30 s grace window (up to 5 minutes) instead of
+  emptying the room; before, both players came back to a deleted room and
+  were sent to the lobby (found by `tests/rb-two-player.mjs` with
+  `DROP_SIGNALING_MS=40000`, which the earlier stage 2 changes had only run
+  with a 3 s outage). `aMatchIsNotLostToTheGraceWindow` holds on
+  `room_current`.
 - Done: the rejoin is a state machine of its own
   (`web/src/rejoin-machine.ts`, diagram in `docs/session-machine.md`):
   `rejoining` invokes the rejoin program, and leaving the state (the socket
@@ -336,7 +344,20 @@ Slice 1, the peer mesh and signaling:
   to stop retrying, which entries a new player replaces) and reports a
   difference as a `mesh-disagree` client event. The engine's rules stay in
   charge until production shows none.
-- Next: one XState machine per peer connection, observing beside the engine.
+- Built, not yet wired in: the per-peer machine, `web/src/peer-connection.ts`
+  (diagram in `docs/peer-connection-machine.md`). One machine per other
+  player, built to the model's `fixed` variant: the lower slot is the pair's
+  one initiator, every wait in a match has a deadline (delayed transitions,
+  durations given as input), signals and channel events carry the attempt
+  they belong to and one for another attempt is ignored, and a roster update
+  never replaces an open connection. It decides with the proved functions in
+  `peer-signaling.ts` and makes no WebRTC call: what it wants done it issues
+  as commands. `tests/ts/peer-connection.test.ts` replays the model's
+  scenarios against it. Nothing calls it yet, so the four properties are
+  still violated by the engine.
+- Next: run the machine beside the engine, observing: feed it the engine's
+  events and compare its commands with what the engine does. That needs the
+  engine to number its offers (the attempt id on `webrtc-signal`).
 
 **Stage 6: the remaining page scripts**
 The other hand-written scripts of the play, demo and landing pages move to
@@ -402,9 +423,15 @@ Staying plain JavaScript:
 
 - `@xstate/effect` requires XState 6, which is in beta. Both are pinned to
   exact versions. Revisit when XState 6 is stable.
-- The bundle is 493 KB minified (162 KB gzipped), mostly Effect. It is
-  committed so that deploys need no Node step. Moving the build into the
-  Docker image is the alternative once the bundle changes often.
+- The bundle is mostly Effect. It was committed at first so that deploys
+  needed no Node step; with several branches changing `web/src` at once,
+  every merge put the committed file in conflict with every other open
+  branch. It is now build output (`web/static/dist` is git-ignored): the
+  Docker image builds it in a Node stage, CI builds it, and
+  `scripts/build_landing.py` / `scripts/build_demo.py` build it before
+  packaging. `package-lock.json` is committed so every build gives the same
+  bytes, which the landing build id depends on; CI's `image` job compares
+  the image's bundles with a local build.
 - The database stays on Cloudflare D1 (SQLite locally). Queries are built with
   SQLAlchemy from the model classes in `server/src/schema.py` and compiled to
   SQL for the existing backends; SQLAlchemy never opens a connection.

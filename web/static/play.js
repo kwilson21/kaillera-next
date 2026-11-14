@@ -147,6 +147,7 @@
     window.KNCore?.createSession(({ type, ...meta }) => KNEvent(type, '', meta), undefined, _tellServerMatchJoined) ??
     null;
   const isGameRunning = () => _session?.gameOn() ?? false;
+  KNState.gameOn = isGameRunning;
   // The observer holds its reports until the server has sent this page load
   // an upload token (client events need one).
   const _protocol =
