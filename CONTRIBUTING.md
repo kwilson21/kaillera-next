@@ -132,7 +132,7 @@ earlier ones to have set up their `window.*` exports:
 9. `gamepad-manager.js` — gamepad profiles and mapping
 10. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
 11. `shared.js` — input encoding/decoding, cheats, wire format
-12. `virtual-gamepad.js` — touch controls for mobile
+12. `virtual-gamepad.js` — starts the touch controls for mobile (`web/src/page/virtual-gamepad/`)
 13. `kn-audio.js` — AudioWorklet pump + rollback audio capture
 14. `kn-diagnostics.js` — rollback diagnostics ring buffer (RB-CHECK, audit log)
 15. `kn-desync-detector.js` — field-granular cross-peer desync detection
@@ -185,7 +185,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `gamepad-manager.js` | ~550 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
 | `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
-| `virtual-gamepad.js` | ~1,194 | On-screen touch controls for mobile | KNState |
+| `virtual-gamepad.js` | ~7 | Starts the on-screen touch controls for mobile; the logic is `web/src/page/virtual-gamepad/` | KNCore, KNState |
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
 | `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
 | `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |

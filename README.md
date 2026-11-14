@@ -212,7 +212,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
     switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
     controller-settings.js In-game controller settings panel
-    virtual-gamepad.js     On-screen touch controls for mobile
+    virtual-gamepad.js     Starts the on-screen touch controls (web/src/page/virtual-gamepad/)
     shared.js              Input encoding/decoding, wire format, input application to WASM
     kn-audio.js            AudioWorklet pump + rollback audio capture
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)

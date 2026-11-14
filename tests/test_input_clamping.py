@@ -6,7 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_JS = ROOT / "web/static/shared.js"
-VIRTUAL_GAMEPAD_JS = ROOT / "web/static/virtual-gamepad.js"
+# The touch stick's arithmetic, moved from web/static/virtual-gamepad.js.
+VIRTUAL_GAMEPAD_STICK = ROOT / "web/src/page/virtual-gamepad/stick.ts"
 LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 SIGNALING_PY = ROOT / "server/src/api/signaling.py"
 
@@ -23,7 +24,7 @@ def _run_node(script: str) -> None:
 
 
 def test_virtual_gamepad_axis_math_uses_clamped_distance():
-    source = VIRTUAL_GAMEPAD_JS.read_text()
+    source = VIRTUAL_GAMEPAD_STICK.read_text()
 
     assert "const rawDist = Math.sqrt(dx * dx + dy * dy);" in source
     assert "const clampedDist = Math.min(rawDist, STICK_RADIUS);" in source

@@ -36,7 +36,7 @@ export interface SafeStorage {
 export interface PageState {
   /** The controller remap wizard is open. play.js writes; the engine reads. */
   remapActive: boolean;
-  /** Touch-control values by input index. virtual-gamepad.js writes; the engine reads. */
+  /** Touch-control values by input index. The touch controls (page/virtual-gamepad/) write; the engine reads. */
   touchInput: Record<string, number>;
   /** The engine's peers by socket id. The engine writes; play.js and the desync detector read. */
   peers: Record<string, PeerView>;

@@ -1,5 +1,6 @@
 // Regression test for the iPad landscape "stuck at 0 width" bug: the
-// landscape rule in virtual-gamepad.js must give #game a definite width.
+// landscape rule of the touch controls (web/src/page/virtual-gamepad/markup.ts)
+// must give #game a definite width.
 // With width:auto it shrink-to-fits a 0-width canvas buffer after hibernate,
 // and the game never reappeared on iPad restarts.
 //
@@ -13,6 +14,8 @@ import { webkit } from 'playwright';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const playCss = path.join(dir, '../web/static/play.css');
 const emulatorCss = path.join(dir, '../web/static/ejs/emulator.min.css');
+// The controls are in the TypeScript bundle; virtual-gamepad.js starts them.
+const coreScript = path.join(dir, '../web/static/dist/kn-core.js');
 const vgpScript = path.join(dir, '../web/static/virtual-gamepad.js');
 
 test('#game keeps a definite width in landscape (does not collapse when the canvas buffer is 0)', async () => {
@@ -30,6 +33,7 @@ test('#game keeps a definite width in landscape (does not collapse when the canv
     );
     await page.addStyleTag({ path: playCss });
     await page.addStyleTag({ path: emulatorCss });
+    await page.addScriptTag({ path: coreScript });
     await page.addScriptTag({ path: vgpScript });
 
     await page.evaluate(() => window.VirtualGamepad.init());

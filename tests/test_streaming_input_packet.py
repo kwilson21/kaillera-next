@@ -6,7 +6,8 @@ STREAMING_JS = ROOT / "web/static/netplay-streaming.js"
 SHARED_JS = ROOT / "web/static/shared.js"
 PLAY_JS = ROOT / "web/static/play.js"
 PLAY_CSS = ROOT / "web/static/play.css"
-VIRTUAL_GAMEPAD_JS = ROOT / "web/static/virtual-gamepad.js"
+# The touch controls' stylesheet, moved from web/static/virtual-gamepad.js.
+VIRTUAL_GAMEPAD_MARKUP = ROOT / "web/src/page/virtual-gamepad/markup.ts"
 
 
 def test_streaming_host_accepts_current_shared_input_packets():
@@ -186,7 +187,7 @@ def test_streaming_host_normalizes_timing_after_lockstep_resume():
 def test_stream_overlay_uses_game_sized_flex_slot():
     css = PLAY_CSS.read_text()
     streaming = STREAMING_JS.read_text()
-    vgp = VIRTUAL_GAMEPAD_JS.read_text()
+    vgp = VIRTUAL_GAMEPAD_MARKUP.read_text()
 
     assert "#stream-overlay {" in css
     assert "max-height: calc(100vw * 3 / 4);" in css

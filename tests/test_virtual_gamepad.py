@@ -47,6 +47,7 @@ STREAMING_GUEST_PAGE = """<!DOCTYPE html>
       <button id="toolbar-more" class="toolbar-toggle" title="More options">&#x22EF;</button>
     </div>
   </div>
+  <script src="/static/dist/kn-core.js"></script>
   <script src="/static/virtual-gamepad.js"></script>
   <script>
     window._testTouchState = {};
@@ -58,6 +59,8 @@ def _init_page(page, html, server=SERVER):
     """Load a test page and inject the virtual gamepad script."""
     page.goto(server)
     page.set_content(html)
+    # The controls are in the TypeScript bundle; virtual-gamepad.js starts them.
+    page.add_script_tag(url=f"{server}/static/dist/kn-core.js")
     page.add_script_tag(url=f"{server}/static/virtual-gamepad.js")
     page.wait_for_timeout(200)
     # The layout checks below mean nothing on an unstyled page.
