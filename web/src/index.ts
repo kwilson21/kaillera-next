@@ -27,6 +27,7 @@ import {
 } from './protocol.ts';
 import { startCapture } from './page/capture.ts';
 import { startSwitch2Usb } from './page/switch2-usb.ts';
+import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
@@ -293,6 +294,7 @@ export const KNCore = {
   page: {
     startCapture,
     startSwitch2Usb,
+    startControllerSettings,
     startVisionClient,
   },
   play: {
