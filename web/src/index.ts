@@ -24,7 +24,9 @@ import {
   decodeUsersUpdated,
 } from './protocol.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
+import * as connect from './play/connect.ts';
 import * as delay from './play/delay.ts';
+import * as joinPlan from './play/join-plan.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
 import * as observe from './play/observe.ts';
@@ -272,6 +274,8 @@ export const KNCore = {
     openRomLibrary,
     romLibraryHtml,
     delay,
+    connect,
+    joinPlan,
     observe,
     remapWizard,
     romTransfer,
