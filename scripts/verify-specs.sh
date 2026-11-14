@@ -73,6 +73,9 @@ expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
 expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
 expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
 expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
+# A counter alone for the attempt: a replaced page's candidate reaches its
+# replacement's connection in 5 steps (oldCandidateReachesReplacementConnectionTest).
+expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
 
 PAUSE=specs/late_join_pause.qnt
 verify "$PAUSE" late_join_pause_fixed allHold

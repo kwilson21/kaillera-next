@@ -15,7 +15,9 @@
 // What is modelled, and where it comes from:
 //   roster          onUsersUpdated before the match: the lower slot offers
 //   deliver         onWebRTCSignal: an offer (creating the entry on demand if
-//                   the roster has not arrived yet) or an answer
+//                   the roster has not arrived yet), an answer or an ICE
+//                   candidate
+//   candidateSent   a page sends an ICE candidate of its connection
 //   lose            a signal sent while a socket was down is never delivered
 //   channelOpens    the lockstep DataChannel's onopen
 //   startupTimeout  the startup connect watchdog: 8 s, 3 attempts
@@ -37,11 +39,22 @@
 //                   to a player the roster lists and no reconnect in progress
 //   rosterRenames   a roster listing the other player under a new socket id
 //                   (#119; the rule itself is specs/peer_identity.qnt)
+//   reload          a page is replaced by a new page of the same player (a
+//                   reload, a second tab taking the seat). The new page has
+//                   no entry and numbers its offers from 1 again. The other
+//                   page keeps whatever it had: its entry, its connection,
+//                   its timers, and the signals already on their way to and
+//                   from the page that is gone
 //
-// Not modelled: more than two players, spectators, ICE candidates, a page
-// reload (a fresh offer under a kept connection), a drop before the match
+// Not modelled: more than two players, spectators, a drop before the match
 // starts, PEER-PHANTOM (which stops the health check for that slot), timers
-// that outlive the entry they were armed for, and the tick loop.
+// that outlive the entry they were armed for, and the tick loop. Of a
+// replaced page: the server refusing a signal addressed to a socket that is
+// gone (every signal in flight can still arrive, the worst case), the channel
+// events of its connection on the page that stays (`opened`, `lost`: the
+// machine checks them by the same identity as a candidate, which stands for
+// them here), and telling its late offer from its replacement's (an offer is
+// always answered).
 //
 // HEAL_ONE_SIDE: who the mesh health check runs for.
 //   false  today: either page; both count the same frames, so both can heal
@@ -57,12 +70,20 @@
 //   false  today: whatever connection the entry has now, if it is waiting
 //          for an answer
 //   true   proposed: only the connection that made the offer it answers
+// ATTEMPT_NAMES_PAGE: how a signal says which attempt it belongs to. It only
+//   matters with SIGNALS_CARRY_ATTEMPT.
+//   false  a number the offering page counts up from 1. A page that replaces
+//          another counts from 1 again, so two attempts can carry the same
+//          number
+//   true   that number beside an id of the page that made the offer, new
+//          with every page: no two attempts are the same on the wire
 // ROSTER_KEEPS_LIVE: false = before #119, a roster under a new id replaced a
 //   connection that was up.
 module peer_connection {
   const HEAL_ONE_SIDE: bool
   const ANSWERER_HAS_DEADLINE: bool
   const SIGNALS_CARRY_ATTEMPT: bool
+  const ATTEMPT_NAMES_PAGE: bool
   const ROSTER_KEEPS_LIVE: bool
 
   pure val SIDES = Set("lo", "hi")
@@ -72,6 +93,9 @@ module peer_connection {
   // reached no page can offer again, so the properties about what is still
   // to come are only claimed while an offer can still be made (canOffer).
   pure val MAX_OFFERS = 7
+  // Pages are numbered as they load: "lo" is page 1 and "hi" page 2, and each
+  // reload makes the next. The bound allows two reloads.
+  pure val MAX_PAGES = 4
   // `link` of a connection that took an answer meant for another one.
   pure val MISWIRED = -1
 
@@ -90,10 +114,17 @@ module peer_connection {
     closePending: bool,  // a replaced channel may still fire its close event
     dirty: bool,         // per-peer input state from before a drop
   }
+  // `id` says which connection a signal belongs to. It is the model's own
+  // knowledge: no page can read it. What a page can read is the id's label.
   // `mode` is what an offer says about itself: "first" (the roster's), or a
   // replacement, "startup" before the match and "reconnect" in it
   // (reconnect and startupReconnect in the engine). Empty for an answer.
   type Msg = { dest: str, kind: str, id: int, mode: str }
+  // What a signal carries to say which attempt it is for: the offering
+  // page's own count, and with ATTEMPT_NAMES_PAGE that page's id (else 0).
+  type Label = { page: int, n: int }
+  // One loaded page: its id, and how many offers it has made.
+  type Page = { id: int, offers: int }
 
   pure val ABSENT: Side = {
     has: false, made: 0, link: 0, open: false, chan: false, recon: false, giveUp: false,
@@ -103,16 +134,38 @@ module peer_connection {
   var side: str -> Side
   var wire: Set[Msg]       // signals the server has yet to deliver
   var nextId: int
+  var labels: int -> Label // the label each offer went out under
+  var pages: str -> Page   // the page each player has loaded now
+  var nextPage: int
   var dead: Set[int]       // connections the network has killed
   var running: bool        // the match is under way
   var stalled: bool        // the startup watchdog gave up and told the player
-  var staleApplied: bool   // history: an answer was applied to a connection it was not made for
+  var staleApplied: bool   // history: an answer or a candidate was applied to a connection it was not for
   var evictedLive: bool    // history: a roster update replaced a connection that was up
 
   // ── helpers ────────────────────────────────────────────────────────────
 
   def canOffer: bool = nextId <= MAX_OFFERS
   def offer(dest: str, mode: str): Msg = { dest: dest, kind: "offer", id: nextId, mode: mode }
+
+  // No offer is made in this step.
+  action noOffer = all { nextId' = nextId, labels' = labels, pages' = pages, nextPage' = nextPage }
+  // Page `s` makes offer `nextId`, under its next number.
+  action offered(s: str): bool = {
+    val mine = pages.get(s)
+    all {
+      nextId' = nextId + 1,
+      labels' = labels.put(nextId, { page: if (ATTEMPT_NAMES_PAGE) mine.id else 0, n: mine.offers + 1 }),
+      pages' = pages.set(s, { ...mine, offers: mine.offers + 1 }),
+      nextPage' = nextPage,
+    }
+  }
+  // All a page can tell: the two attempts go under the same label. A
+  // connection that took the wrong answer (MISWIRED) is under none.
+  def sameLabel(a: int, b: int): bool =
+    if (a > 0 and b > 0) labels.get(a) == labels.get(b) else false
+  // The attempt of the entry's connection: the offer it made or took.
+  pure def connectionOf(e: Side): int = if (e.made != 0) e.made else e.link
 
   // The connection `s` completed is the one the other page completed too,
   // and the network has not killed it.
@@ -141,15 +194,15 @@ module peer_connection {
   // an offer that arrived first is left as it is.
   action roster(s: str): bool = all {
     not(running),
-    if (side.get(s).has) all { side' = side, wire' = wire, nextId' = nextId }
+    if (side.get(s).has) all { side' = side, wire' = wire, noOffer }
     else if (s == "lo") all {
       canOffer,
       side' = side.set(s, { ...ABSENT, has: true, made: nextId, chan: true, attempt: 1 }),
       wire' = wire.union(Set(offer(other(s), "first"))),
-      nextId' = nextId + 1,
+      offered(s),
     } else all {
       side' = side.set(s, { ...ABSENT, has: true }),
-      wire' = wire, nextId' = nextId,
+      wire' = wire, noOffer,
     },
     unchangedPhase, unchangedHistory,
   }
@@ -164,11 +217,11 @@ module peer_connection {
         canOffer,
         side' = side.set("lo", { ...s, made: nextId, link: 0, chan: true, attempt: s.attempt + 1 }),
         wire' = wire.union(Set(offer("hi", "startup"))),
-        nextId' = nextId + 1,
+        offered("lo"),
         stalled' = stalled,
       } else all {
         side' = side.set("lo", { ...s, attempt: 0 }),
-        wire' = wire, nextId' = nextId,
+        wire' = wire, noOffer,
         stalled' = true,
       },
       running' = running, dead' = dead, unchangedHistory,
@@ -178,7 +231,7 @@ module peer_connection {
   action start = all {
     not(running), side.get("lo").open, side.get("hi").open,
     running' = true,
-    side' = side, wire' = wire, nextId' = nextId, stalled' = stalled, dead' = dead,
+    side' = side, wire' = wire, noOffer, stalled' = stalled, dead' = dead,
     unchangedHistory,
   }
 
@@ -213,19 +266,21 @@ module peer_connection {
           closePending: s.closePending or s.chan,
         } else { ...s, has: true, made: 0, link: m.id }),
       wire' = wire.exclude(Set(m)).union(Set({ dest: other(m.dest), kind: "answer", id: m.id, mode: "" })),
-      nextId' = nextId,
+      noOffer,
       unchangedPhase, unchangedHistory,
     }
   }
 
   // An answer arrives. A page that is not waiting for one drops it (the
   // browser refuses it). One that is waiting takes it, today whichever offer
-  // it was made for.
+  // it was made for. With SIGNALS_CARRY_ATTEMPT it takes only one under the
+  // label of its own offer, and that is the answer to another offer when a
+  // replaced page made an offer under the same label.
   action receiveAnswer(m: Msg): bool = {
     val s = side.get(m.dest)
     val waiting = s.has and s.made != 0
     val mine = waiting and s.made == m.id
-    val takenAnyway = waiting and not(mine) and not(SIGNALS_CARRY_ATTEMPT)
+    val takenAnyway = waiting and not(mine) and (not(SIGNALS_CARRY_ATTEMPT) or sameLabel(s.made, m.id))
     all {
       side' = side.set(m.dest,
         if (mine) { ...s, made: 0, link: m.id }
@@ -234,19 +289,47 @@ module peer_connection {
       wire' = wire.exclude(Set(m)),
       staleApplied' = (staleApplied or takenAnyway),
       evictedLive' = evictedLive,
-      nextId' = nextId, unchangedPhase,
+      noOffer, unchangedPhase,
+    }
+  }
+
+  // A page sends an ICE candidate of the connection its entry has.
+  action candidateSent(s: str): bool = {
+    val m = { dest: other(s), kind: "candidate", id: connectionOf(side.get(s)), mode: "" }
+    all {
+      side.get(s).has, m.id > 0, not(wire.contains(m)),
+      wire' = wire.union(Set(m)),
+      side' = side, noOffer, unchangedPhase, unchangedHistory,
+    }
+  }
+
+  // A candidate arrives. Today it is added to whatever connection the entry
+  // has. With SIGNALS_CARRY_ATTEMPT, only to one under the candidate's label.
+  // The entry does not change; a candidate from another connection is one
+  // the browser was never meant to be given.
+  action receiveCandidate(m: Msg): bool = {
+    val mine = connectionOf(side.get(m.dest))
+    val applied = side.get(m.dest).has and mine != 0
+      and (not(SIGNALS_CARRY_ATTEMPT) or sameLabel(mine, m.id))
+    all {
+      wire' = wire.exclude(Set(m)),
+      staleApplied' = (staleApplied or (applied and mine != m.id)),
+      evictedLive' = evictedLive,
+      side' = side, noOffer, unchangedPhase,
     }
   }
 
   action deliver(m: Msg): bool = all {
     wire.contains(m),
-    if (m.kind == "offer") receiveOffer(m) else receiveAnswer(m),
+    if (m.kind == "offer") receiveOffer(m)
+    else if (m.kind == "answer") receiveAnswer(m)
+    else receiveCandidate(m),
   }
 
   action lose(m: Msg): bool = all {
     wire.contains(m),
     wire' = wire.exclude(Set(m)),
-    side' = side, nextId' = nextId, unchangedPhase, unchangedHistory,
+    side' = side, noOffer, unchangedPhase, unchangedHistory,
   }
 
   // The channel opens on one page. After a drop the guest clears its
@@ -261,7 +344,7 @@ module peer_connection {
         open: true, chan: true, recon: false, giveUp: false, attempt: 0, ansTimer: false,
         dirty: e.dirty and not(e.recon and s == "hi"),
       }),
-      wire' = wire, nextId' = nextId, unchangedPhase, unchangedHistory,
+      wire' = wire, noOffer, unchangedPhase, unchangedHistory,
     }
   }
 
@@ -270,7 +353,7 @@ module peer_connection {
   action netDrop = all {
     running, side.get("lo").open, alive("lo"), alive("hi"),
     dead' = dead.union(Set(side.get("lo").link)),
-    side' = side, wire' = wire, nextId' = nextId,
+    side' = side, wire' = wire, noOffer,
     running' = running, stalled' = stalled, unchangedHistory,
   }
 
@@ -279,7 +362,7 @@ module peer_connection {
     s == "lo" implies canOffer,
     side' = side.set(s, disconnected(s, e, nextId)),
     wire' = if (s == "lo") wire.union(Set(offer("hi", "reconnect"))) else wire,
-    nextId' = if (s == "lo") nextId + 1 else nextId,
+    if (s == "lo") offered(s) else noOffer,
     unchangedPhase, unchangedHistory,
   }
 
@@ -294,7 +377,7 @@ module peer_connection {
   action silentClose(s: str): bool = all {
     running, side.get(s).has, side.get(s).open, not(alive(s)),
     side' = side.set(s, { ...side.get(s), open: false, chan: false }),
-    wire' = wire, nextId' = nextId, unchangedPhase, unchangedHistory,
+    wire' = wire, noOffer, unchangedPhase, unchangedHistory,
   }
 
   // The channel a reconnect offer replaced fires its close event: the page
@@ -307,12 +390,12 @@ module peer_connection {
   action closeNeverComes(s: str): bool = all {
     side.get(s).closePending,
     side' = side.set(s, { ...side.get(s), closePending: false }),
-    wire' = wire, nextId' = nextId, unchangedPhase, unchangedHistory,
+    wire' = wire, noOffer, unchangedPhase, unchangedHistory,
   }
 
   action hardDisconnect(s: str): bool = all {
     side' = side.set(s, ABSENT),
-    wire' = wire, nextId' = nextId, unchangedPhase, unchangedHistory,
+    wire' = wire, noOffer, unchangedPhase, unchangedHistory,
   }
 
   action attemptTimeout = {
@@ -323,7 +406,7 @@ module peer_connection {
         canOffer,
         side' = side.set("lo", { ...s, made: nextId, link: 0, chan: true, attempt: s.attempt + 1 }),
         wire' = wire.union(Set(offer("hi", "reconnect"))),
-        nextId' = nextId + 1,
+        offered("lo"),
         unchangedPhase, unchangedHistory,
       } else hardDisconnect("lo"),
     }
@@ -344,7 +427,7 @@ module peer_connection {
       made: 0, link: 0, ansTimer: false, chan: false,
       closePending: side.get(s).closePending or side.get(s).chan,
     }),
-    wire' = wire, nextId' = nextId, unchangedPhase, unchangedHistory,
+    wire' = wire, noOffer, unchangedPhase, unchangedHistory,
   }
 
   // The mesh health check: the roster lists the other player, there is no
@@ -358,7 +441,7 @@ module peer_connection {
       canOffer,
       side' = side.set(s, { ...ABSENT, has: true, made: nextId, chan: true }),
       wire' = wire.union(Set(offer(other(s), "reconnect"))),
-      nextId' = nextId + 1,
+      offered(s),
       unchangedPhase, unchangedHistory,
     } else all {
       side.get(s).has,
@@ -374,19 +457,34 @@ module peer_connection {
     side' = if (ROSTER_KEEPS_LIVE) side else side.set(s, { ...ABSENT, has: true }),
     evictedLive' = (evictedLive or not(ROSTER_KEEPS_LIVE)),
     staleApplied' = staleApplied,
-    wire' = wire, nextId' = nextId, unchangedPhase,
+    wire' = wire, noOffer, unchangedPhase,
+  }
+
+  // A new page of player `s` takes the place of the one that was there. It
+  // knows nothing of the other player yet and has made no offers. Nothing
+  // else changes: not the other page's entry, and not the signals in flight,
+  // which the server may still deliver to either of them.
+  action reload(s: str): bool = all {
+    nextPage <= MAX_PAGES,
+    side' = side.set(s, ABSENT),
+    pages' = pages.set(s, { id: nextPage, offers: 0 }),
+    nextPage' = nextPage + 1,
+    nextId' = nextId, labels' = labels,
+    wire' = wire, unchangedPhase, unchangedHistory,
   }
 
   action stutter = all {
-    side' = side, wire' = wire, nextId' = nextId, unchangedPhase, unchangedHistory,
+    side' = side, wire' = wire, noOffer, unchangedPhase, unchangedHistory,
   }
 
   // ── initial states and steps ───────────────────────────────────────────
 
-  // The match is under way on connection 1.
+  // The match is under way on connection 1, the first offer of "lo".
   action init = all {
     side' = SIDES.mapBy(s => { ...ABSENT, has: true, link: 1, open: true, chan: true }),
     wire' = Set(), nextId' = 2, dead' = Set(),
+    labels' = Map(1 -> { page: if (ATTEMPT_NAMES_PAGE) 1 else 0, n: 1 }),
+    pages' = Map("lo" -> { id: 1, offers: 1 }, "hi" -> { id: 2, offers: 0 }), nextPage' = 3,
     running' = true, stalled' = false,
     staleApplied' = false, evictedLive' = false,
   }
@@ -395,6 +493,8 @@ module peer_connection {
   action initLobby = all {
     side' = SIDES.mapBy(s => ABSENT),
     wire' = Set(), nextId' = 1, dead' = Set(),
+    labels' = Map(),
+    pages' = Map("lo" -> { id: 1, offers: 0 }, "hi" -> { id: 2, offers: 0 }), nextPage' = 3,
     running' = false, stalled' = false,
     staleApplied' = false, evictedLive' = false,
   }
@@ -410,6 +510,7 @@ module peer_connection {
       any {
         roster(s), channelOpens(s), notice(s), silentClose(s), oldChannelCloses(s), closeNeverComes(s),
         giveUpTimeout(s), answerTimeout(s), heal(s), rosterRenames(s),
+        candidateSent(s), reload(s),
       }
     },
   }
@@ -461,9 +562,12 @@ module peer_connection {
       implies not(SIDES.forall(s => nothingPendingFor(s)))
 
   // An answer is applied only to the connection that made the offer it
-  // answers.
+  // answers, and a candidate only to the connection it was gathered for.
   // Violated today: a retry replaces the connection, and the answer to the
   // earlier offer is then applied to the new one.
+  // Violated with a counter alone (peer_connection_counter_only): a page
+  // that replaces another numbers its offers from 1 again, so what was sent
+  // for the old page's attempt passes for the new page's.
   val staleSignalsAreNotApplied = not(staleApplied)
 
   // I2 for a connection: the guest never has an open channel beside input
@@ -475,6 +579,13 @@ module peer_connection {
 
   // The two that hold on today's engine.
   val holdToday = reconnectStartsClean and neverEvictsLiveConnection
+
+  // What still holds when attempts go by a counter alone: all but
+  // staleSignalsAreNotApplied.
+  val holdWithACounterAlone = and {
+    oneInitiatorPerPair, everyWaitHasADeadline, neverLeftWithNothingPending,
+    reconnectStartsClean, neverEvictsLiveConnection,
+  }
 
   // Every property at once.
   val allHold = and {
@@ -488,6 +599,9 @@ module peer_connection {
   def offerTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "reconnect" }
   def firstOfferTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "first" }
   def startupOfferTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "startup" }
+  def candidateTo(dest: str, id: int): Msg = { dest: dest, kind: "candidate", id: id, mode: "" }
+  // A signal sent for a replaced page's attempt passes for its replacement's.
+  val replacedPageIsMistaken = not(SIGNALS_CARRY_ATTEMPT) or not(ATTEMPT_NAMES_PAGE)
   def bothOpenOn(id: int): bool = SIDES.forall(s => side.get(s).open and side.get(s).link == id)
 
   // The roster reaches both pages, then the offer.
@@ -676,23 +790,74 @@ module peer_connection {
     init
       .then(rosterRenames("lo"))
       .expect(evictedLive == not(ROSTER_KEEPS_LIVE) and side.get("lo").open == ROSTER_KEEPS_LIVE)
+
+  // The lower slot's page is replaced while the answer to its offer is on
+  // its way. The new page's first offer is number 1 again, as the old page's
+  // was. By the number alone the old answer is the one it is waiting for: it
+  // is applied to a connection it was not made for, and the answer that was
+  // made for it then finds a page no longer waiting. With the page named
+  // beside the number the old answer is dropped and the pair connects.
+  run oldAnswerTakenByReplacementPageTest =
+    initLobby
+      .then(roster("lo"))
+      .then(roster("hi"))
+      .then(deliver(firstOfferTo("hi", 1)))
+      .then(reload("lo"))
+      .expect(not(side.get("lo").has) and side.get("hi").link == 1 and wire == Set(answerTo("lo", 1)))
+      .then(roster("lo"))
+      .expect(side.get("lo").made == 2 and labels.get(2).n == labels.get(1).n)
+      .expect((labels.get(2) == labels.get(1)) == not(ATTEMPT_NAMES_PAGE))
+      .then(deliver(answerTo("lo", 1)))
+      .expect(staleApplied == replacedPageIsMistaken)
+      .then(deliver(firstOfferTo("hi", 2)))
+      .then(deliver(answerTo("lo", 2)))
+      .expect(alive("lo") == not(replacedPageIsMistaken))
+
+  // The same from the page that stays. The host's page is replaced in a
+  // match with a candidate of its connection still on its way. The new page
+  // offers, number 1 again; the guest answers, and then the old page's
+  // candidate arrives: by the number alone it is for the connection the
+  // guest has now. A channel event of the old connection (`opened`, `lost`)
+  // reaches the guest's entry the same way.
+  run oldCandidateReachesReplacementConnectionTest =
+    init
+      .then(candidateSent("lo"))
+      .then(reload("lo"))
+      .then(heal("lo"))
+      .then(deliver(offerTo("hi", 2)))
+      .expect(side.get("hi").link == 2 and labels.get(2).n == labels.get(1).n)
+      .then(deliver(candidateTo("hi", 1)))
+      .expect(staleApplied == replacedPageIsMistaken)
+      .then(candidateSent("lo"))
+      .then(deliver(candidateTo("hi", 2)))
+      .expect(staleApplied == replacedPageIsMistaken)
 }
 
 // Before #119.
 module peer_connection_before_119 {
   import peer_connection(HEAL_ONE_SIDE = false, ANSWERER_HAS_DEADLINE = false,
-         SIGNALS_CARRY_ATTEMPT = false, ROSTER_KEEPS_LIVE = false).*
+         SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = false).*
 }
 
 // The engine as it is today. oneInitiatorPerPair, everyWaitHasADeadline,
 // neverLeftWithNothingPending and staleSignalsAreNotApplied are violated here.
 module peer_connection_current {
   import peer_connection(HEAL_ONE_SIDE = false, ANSWERER_HAS_DEADLINE = false,
-         SIGNALS_CARRY_ATTEMPT = false, ROSTER_KEEPS_LIVE = true).*
+         SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true).*
 }
 
-// With the three proposed changes: the rules the per-peer machine is built to.
+// The three proposed changes with attempts told apart by the offering page's
+// counter alone, as the per-peer machine was first written.
+// staleSignalsAreNotApplied is violated here: a page that replaces another
+// reuses its numbers.
+module peer_connection_counter_only {
+  import peer_connection(HEAL_ONE_SIDE = true, ANSWERER_HAS_DEADLINE = true,
+         SIGNALS_CARRY_ATTEMPT = true, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true).*
+}
+
+// With the three proposed changes, and each attempt named by the page that
+// offered and that page's counter: the rules the per-peer machine is built to.
 module peer_connection_fixed {
   import peer_connection(HEAL_ONE_SIDE = true, ANSWERER_HAS_DEADLINE = true,
-         SIGNALS_CARRY_ATTEMPT = true, ROSTER_KEEPS_LIVE = true).*
+         SIGNALS_CARRY_ATTEMPT = true, ATTEMPT_NAMES_PAGE = true, ROSTER_KEEPS_LIVE = true).*
 }
