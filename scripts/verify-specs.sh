@@ -85,3 +85,7 @@ FLOW=specs/resync_flow.qnt
 verify "$FLOW" resync_flow_current holdToday
 verify "$FLOW" resync_flow_fixed allHold
 expect_violation "$FLOW" resync_flow_current aRequestCanAlwaysEnd
+
+TICK=specs/tick_deadlines.qnt
+verify "$TICK" tick_deadlines_fixed ownFreezeIsNotHeldAgainstAPeer
+expect_violation "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
