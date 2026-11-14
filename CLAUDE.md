@@ -122,6 +122,7 @@ kaillera-next/
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
 │   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
+│   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); not wired into the engine yet
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── page/shared.ts       # window.KNShared and window.KNEvent: cheats, key tracking, local input, input wire format, WebRTC peer helpers (was web/static/shared.js)
@@ -134,7 +135,7 @@ kaillera-next/
 ├── tests/           # pytest + Playwright E2E tests
 ├── specs/           # Quint models (room lifecycle, peer identity, peer connection); `just spec` model-checks them
 ├── tools/           # match analysis scripts; oxlint/anti-slop/ = vendored lint rules
-├── docs/            # roadmap, netplay invariants, netcode-diagrams.md (index of the generated diagrams: session-machine.md, spec-traces.md), design/research notes
+├── docs/            # roadmap, netplay invariants, netcode-diagrams.md (index of the generated diagrams: session-machine.md, peer-connection-machine.md, spec-traces.md), design/research notes
 ├── Dockerfile       # production Docker image
 └── CHANGELOG.md     # version history
 ```

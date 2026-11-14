@@ -325,7 +325,20 @@ Slice 1, the peer mesh and signaling:
   reconnecting with nothing armed: the match is frozen) and
   `staleSignalsAreNotApplied` (an answer to an earlier attempt is applied to
   the connection that replaced it). None is fixed yet.
-- Next: one XState machine per peer connection, observing beside the engine.
+- Built, not yet wired in: the per-peer machine, `web/src/peer-connection.ts`
+  (diagram in `docs/peer-connection-machine.md`). One machine per other
+  player, built to the model's `fixed` variant: the lower slot is the pair's
+  one initiator, every wait in a match has a deadline (delayed transitions,
+  durations given as input), signals and channel events carry the attempt
+  they belong to and one for another attempt is ignored, and a roster update
+  never replaces an open connection. It decides with the proved functions in
+  `peer-signaling.ts` and makes no WebRTC call: what it wants done it issues
+  as commands. `tests/ts/peer-connection.test.ts` replays the model's
+  scenarios against it. Nothing calls it yet, so the four properties are
+  still violated by the engine.
+- Next: run the machine beside the engine, observing: feed it the engine's
+  events and compare its commands with what the engine does. That needs the
+  engine to number its offers (the attempt id on `webrtc-signal`).
 
 **Open decisions**
 
