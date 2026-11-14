@@ -105,7 +105,7 @@ def test_internal_lockstep_vocabulary_is_preserved():
     assert "type: 'lockstep-ready'" in src
     # Console-log prefix.
     assert "console.log(`[lockstep] " in src
-    # Cheat-context name (internal contract with shared.js).
+    # Cheat-context name (internal contract with web/src/page/shared.ts).
     assert "KNShared.bootWithCheats('lockstep')" in src
     # Window flag set during a lockstep stall window.
     assert "window._lockstepActive" in src

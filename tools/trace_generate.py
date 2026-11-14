@@ -151,9 +151,9 @@ R1–R6 — Rollback integrity: the C engine must produce bit-correct state
   loop, mesh management, input relay, resetPeerState
 - web/static/play.js (~3300 lines) — play page orchestrator, EmulatorJS
   lifecycle, UI, mode transitions
-- web/static/shared.js — input encoding (N64 button-map), cheats, wire
-  format; all modules import from here via window globals
-- web/static/kn-state.js — cross-module state bus (KNState.*)
+- web/src/page/shared.ts — input encoding (N64 button-map), cheats, wire
+  format; all modules reach it as window.KNShared (built into dist/kn-core.js)
+- web/src/kn-state.ts — cross-module state bus (KNState.*)
 - build/kn_rollback/kn_rollback.c — C rollback engine, input prediction,
   save ring, amortized replay
 - build/patches/ — all deterministic-timing patches to mupen64plus-next
