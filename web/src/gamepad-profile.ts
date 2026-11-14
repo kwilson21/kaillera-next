@@ -1,7 +1,7 @@
 /**
  * A gamepad profile the player saved from the remap wizard or the
  * controller settings panel: which pad button is which N64 button, and how
- * the pad's axes are read. web/static/gamepad-manager.js keeps one per pad
+ * the pad's axes are read. web/src/page/gamepad-manager.ts keeps one per pad
  * id in localStorage and reads it back when the pad connects.
  *
  * What comes back from storage is whatever is there: an older build's

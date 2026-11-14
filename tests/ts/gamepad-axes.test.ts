@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import vm from 'node:vm';
 import {
   analogScale,
   axisSign,
@@ -14,7 +12,8 @@ import {
   type AxisProfile,
 } from '../../web/src/gamepad-axes.ts';
 import { decodeGamepadProfile } from '../../web/src/gamepad-profile.ts';
-import { lcg, plain } from './load-shared.ts';
+import { createGamepadManager, type PadReading } from '../../web/src/page/gamepad-manager.ts';
+import { lcg } from './load-shared.ts';
 
 test('the default range of 66 gives the N64 maximum of 83', () => {
   assert.equal(n64StickMax(66), 83);
@@ -95,55 +94,7 @@ test('gamepadDisplayName strips the vendor decorations browsers add', () => {
   assert.equal(gamepadDisplayName('(Vendor: 057e Product: 2069)'), '(Vendor: 057e Product: 2069)');
 });
 
-// ── gamepad-manager.js itself ─────────────────────────────────────────────
-
-interface AxesCore {
-  analogScale: typeof analogScale;
-  digitalSnap: typeof digitalSnap;
-  axisSign: typeof axisSign;
-  normalizeAxis: typeof normalizeAxis;
-  gamepadDisplayName: typeof gamepadDisplayName;
-  decodeGamepadProfile: typeof decodeGamepadProfile;
-}
-const CORE: AxesCore = {
-  analogScale,
-  digitalSnap,
-  axisSign,
-  normalizeAxis,
-  gamepadDisplayName,
-  decodeGamepadProfile,
-};
-interface Pad {
-  id: string;
-  mapping: string;
-  buttons: { pressed: boolean; value: number }[];
-  axes: number[];
-}
-interface PadInput {
-  buttons: number;
-  lx: number;
-  ly: number;
-  cx: number;
-  cy: number;
-}
-interface Manager {
-  start: (opts: { playerSlot: number }) => void;
-  stop: () => void;
-  readGamepad: (slot: number) => PadInput | null;
-  displayName: (id: string) => string;
-  saveGamepadProfile: (
-    id: string,
-    profile: AxisProfile & { buttons: Record<string, number>; deadzone: number },
-  ) => void;
-  setSetting: (key: string, value: number) => void;
-}
-interface ManagerWindow {
-  GamepadManager?: Manager;
-  KNCore?: AxesCore;
-  KNState: { romHash: null };
-  addEventListener: () => void;
-  removeEventListener: () => void;
-}
+// ── The manager itself (web/src/page/gamepad-manager.ts) ──────────────────
 
 const PAD_IDS = [
   'Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)',
@@ -152,49 +103,32 @@ const PAD_IDS = [
 ];
 
 /**
- * Run web/static/gamepad-manager.js against scripted pads, profiles and
- * settings, and return every input it read. -0 is kept apart from 0: the
- * pipeline produces it and the values are sent to other peers. `stored`, if
- * given, is put in storage as every pad's saved profile, exactly as written,
- * in place of the profiles the script saves itself.
+ * Run the gamepad manager against scripted pads, profiles and settings, and
+ * return every input it read. -0 is kept apart from 0: the pipeline produces
+ * it and the values are sent to other peers. `stored`, if given, is put in
+ * storage as every pad's saved profile, exactly as written, in place of the
+ * profiles the script saves itself.
  */
-const runManager = (core?: AxesCore, stored?: string): string[] => {
-  const source = readFileSync(new URL('../../web/static/gamepad-manager.js', import.meta.url), 'utf8');
-  const pads: (Pad | null)[] = [];
+const runManager = (stored?: string): string[] => {
+  const pads: (PadReading | null)[] = [];
   const store = new Map<string, string>();
-  const storage = {
-    getItem: (key: string) => store.get(key) ?? null,
-    setItem: (key: string, value: string) => store.set(key, value),
-  };
-  const state = {
-    romHash: null,
-    safeGet: (_area: string, key: string) => store.get(key) ?? null,
-    safeSet: (_area: string, key: string, value: string) => store.set(key, value),
-    safeRemove: (_area: string, key: string) => store.delete(key),
-  };
-  const window: ManagerWindow = {
-    KNState: state,
-    addEventListener: () => undefined,
-    removeEventListener: () => undefined,
-  };
-  if (core) window.KNCore = core;
   let clock = 0;
-  vm.runInContext(
-    source,
-    vm.createContext({
-      window,
-      KNState: state,
-      APISandbox: { nativeGetGamepads: () => pads },
-      console: { warn: () => undefined },
-      localStorage: storage,
-      // Advance past the settings cache on every read, so a changed range applies.
-      performance: { now: () => (clock += 2000) },
-      setInterval: () => 1,
-      clearInterval: () => undefined,
+  const manager = createGamepadManager({
+    getGamepads: () => pads,
+    state: () => ({
+      romHash: null,
+      safeGet: (_area, key) => store.get(key) ?? null,
+      safeSet: (_area, key, value) => void store.set(key, value),
+      safeRemove: (_area, key) => void store.delete(key),
     }),
-  );
-  const manager = window.GamepadManager;
-  assert.ok(manager, 'gamepad-manager.js did not define window.GamepadManager');
+    // Advance past the settings cache on every read, so a changed range applies.
+    now: () => (clock += 2000),
+    setItem: (key, value) => void store.set(key, value),
+    listen: () => undefined,
+    unlisten: () => undefined,
+    every: () => () => undefined,
+    warn: () => undefined,
+  });
   const poll = (): void => {
     manager.start({ playerSlot: 0 });
     manager.stop();
@@ -231,7 +165,7 @@ const runManager = (core?: AxesCore, stored?: string): string[] => {
     if (round % 5 === 2) manager.setSetting('kn-analog-sensitivity', [0.5, 1.5, 2][round % 3]!);
     if (round % 7 === 3) manager.setSetting('kn-deadzone-lx', 0.3);
     const rest = Array.from({ length: 6 }, () => ((next() % 200) - 100) / 1000);
-    const pad: Pad = {
+    const pad = {
       id,
       mapping: id.includes('STANDARD') ? 'standard' : '',
       buttons: Array.from({ length: 21 }, () => ({ pressed: false, value: 0 })),
@@ -250,71 +184,31 @@ const runManager = (core?: AxesCore, stored?: string): string[] => {
       seen.push([input.buttons, input.lx, input.ly, input.cx, input.cy].map(show).join(','));
     }
   }
-  return plain(seen);
+  return seen;
 };
 
-// What gamepad-manager.js read for this script at ff53345, before its axis
-// arithmetic moved to web/src/gamepad-axes.ts.
+// What web/static/gamepad-manager.js read for this script at ff53345, while
+// it was a plain script with its own axis arithmetic.
 const GOLDEN = { reads: 9060, sha256: '004d3d10d0df8e00a9424fd55c8157cceabdeab429c58fdb6a6863dc45d8d790' };
 
-test('gamepad-manager.js reads the same inputs as before, with and without the bundle', () => {
-  const builtIn = runManager();
-  assert.equal(builtIn.length, GOLDEN.reads);
-  assert.equal(createHash('sha256').update(builtIn.join('\n')).digest('hex'), GOLDEN.sha256, 'built-in arithmetic');
-  const withCore = runManager(CORE);
-  assert.deepStrictEqual(withCore, builtIn, 'KNCore arithmetic');
+test('the gamepad manager reads the same inputs as the plain script it replaced', () => {
+  const reads = runManager();
+  assert.equal(reads.length, GOLDEN.reads);
+  assert.equal(createHash('sha256').update(reads.join('\n')).digest('hex'), GOLDEN.sha256);
   // The script must move the sticks: more than a handful of distinct reads.
-  assert.ok(new Set(builtIn).size > 2000, `only ${new Set(builtIn).size} distinct reads`);
+  assert.ok(new Set(reads).size > 2000, `only ${new Set(reads).size} distinct reads`);
   // The range setting must have taken effect: full deflection reaches the
   // maximum of each range the script sets (100 gives 127, 33 gives 41).
   for (const max of ['127', '41']) {
     assert.ok(
-      builtIn.some((line) => line.split(',').includes(max)),
+      reads.some((line) => line.split(',').includes(max)),
       `no read at the maximum ${max}`,
     );
   }
   assert.ok(
-    builtIn.some((line) => line.includes('-0')),
+    reads.some((line) => line.includes('-0')),
     'no negative zero in the script',
   );
-});
-
-test('gamepad-manager.js calls KNCore for each computation when the bundle is loaded', () => {
-  const calls = {
-    analogScale: 0,
-    digitalSnap: 0,
-    axisSign: 0,
-    normalizeAxis: 0,
-    gamepadDisplayName: 0,
-    decodeGamepadProfile: 0,
-  };
-  runManager({
-    analogScale: (...args) => {
-      calls.analogScale++;
-      return analogScale(...args);
-    },
-    digitalSnap: (...args) => {
-      calls.digitalSnap++;
-      return digitalSnap(...args);
-    },
-    axisSign: (...args) => {
-      calls.axisSign++;
-      return axisSign(...args);
-    },
-    normalizeAxis: (...args) => {
-      calls.normalizeAxis++;
-      return normalizeAxis(...args);
-    },
-    gamepadDisplayName: (id) => {
-      calls.gamepadDisplayName++;
-      return gamepadDisplayName(id);
-    },
-    decodeGamepadProfile: (stored) => {
-      calls.decodeGamepadProfile++;
-      return decodeGamepadProfile(stored);
-    },
-  });
-  for (const [name, count] of Object.entries(calls)) assert.ok(count > 0, `${name} was never called`);
 });
 
 // ── Saved profiles are decoded before they are used ───────────────────────
@@ -362,7 +256,7 @@ test('a saved profile that does not fit is ignored and the pad reads as built in
   // The whole script with every pad's saved profile unusable, against the
   // same script with nothing usable saved at all (an empty string, which the
   // manager treats as no profile): the reads must be the same.
-  const builtIn = runManager(CORE, '');
+  const builtIn = runManager('');
   assert.ok(new Set(builtIn).size > 2000);
   for (const stored of [
     '{}',
@@ -374,6 +268,6 @@ test('a saved profile that does not fit is ignored and the pad reads as built in
     '"x"',
     '{not json',
   ]) {
-    assert.deepStrictEqual(runManager(CORE, stored), builtIn, `stored ${stored}`);
+    assert.deepStrictEqual(runManager(stored), builtIn, `stored ${stored}`);
   }
 });

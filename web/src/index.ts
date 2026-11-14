@@ -12,6 +12,7 @@ import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
+import { installGamepadManager } from './page/gamepad-manager.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { captureFrame } from './desync-capture.ts';
 import { digestFrame } from './desync-confirm.ts';
@@ -24,8 +25,12 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { startCapture } from './page/capture.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
+import * as connect from './play/connect.ts';
+import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
+import * as joinPlan from './play/join-plan.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
 import * as observe from './play/observe.ts';
@@ -53,12 +58,14 @@ import {
   signalDisposition,
   staleHoldersOf,
 } from './peer-signaling.ts';
+import { installKNState } from './kn-state.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { startRejoin, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
 import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from './rejoin-machine.ts';
 import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
+import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
 import * as streamingInput from './streaming/input.ts';
 import { createStreamingObserver } from './streaming/observe.ts';
@@ -275,6 +282,10 @@ export const KNCore = {
   startRejoin,
   shouldResumeRomTransfer,
   /** The play page's own logic, moving here from web/static/play.js piece by piece. */
+  /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
+  page: {
+    startCapture,
+  },
   play: {
     escapeHtml,
     inviteUrl,
@@ -290,6 +301,8 @@ export const KNCore = {
     openRomLibrary,
     romLibraryHtml,
     delay,
+    connect,
+    joinPlan,
     observe,
     remapWizard,
     romTransfer,
@@ -329,6 +342,11 @@ declare global {
 
 if (typeof window !== 'undefined') {
   window.KNCore = KNCore;
+  // First: KNState, built next, carries the storage helpers.
+  installSafeStorage();
+  installKNState(window);
+  installShared();
+  installGamepadManager();
   installDiagnostics();
   installDesyncDetector();
 }
