@@ -723,18 +723,31 @@ const scenarios = {
     await host.page.click('#start-btn');
     if (!(await waitForFrames([host, guest], 120, 240000))) failures.push('the two-player game never started');
 
+    // Each forgery has every field the real message has (web/src/
+    // peer-protocol.ts), so the page's protocol observer has nothing to
+    // report and the sender stamp is the only thing that can refuse it.
     await forge({
       type: 'sync-state-socket',
       targetSid: guestSid,
       senderSid: hostSid,
       frame: 1,
       full: true,
+      proactive: false,
+      reason: 'forged',
+      rawSize: 3,
+      compressedSize: 3,
       data: 'AAAA',
     });
     await forge({ type: 'late-join-state', targetSid: guestSid, frame: 1, data: 'AAAA' });
-    await forge({ type: 'save-state', data: 'AAAA' });
+    await forge({ type: 'save-state', frame: 0, data: 'AAAA' });
     await forge({ type: 'request-late-join', requesterSid: guestSid });
-    await forge({ type: 'sync-request-full-socket', targetSid: hostSid, requesterSid: guestSid, reason: 'forged' });
+    await forge({
+      type: 'sync-request-full-socket',
+      targetSid: hostSid,
+      requesterSid: guestSid,
+      reason: 'forged',
+      frame: 1,
+    });
     await forge({ type: 'late-join-ready', senderSid: guestSid });
     await host.page.waitForTimeout(6000);
 
