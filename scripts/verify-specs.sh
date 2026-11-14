@@ -73,3 +73,10 @@ expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
 expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
 expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
 expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
+
+PAUSE=specs/late_join_pause.qnt
+verify "$PAUSE" late_join_pause_fixed allHold
+expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
+# The other two violations on late_join_pause_current need two joiners and
+# are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
+# them.

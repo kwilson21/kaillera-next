@@ -113,3 +113,17 @@ pair() { # module invariant init
 pair peer_connection_current holdToday init
 pair peer_connection_fixed allHold init
 pair peer_connection_fixed allHold initLobby
+
+# ── The pause around a late join ────────────────────────────────────────────
+PAUSE=specs/late_join_pause.qnt
+$QUINT typecheck "$PAUSE"
+for variant in late_join_pause_current late_join_pause_fixed; do
+  $QUINT test "$PAUSE" --main="$variant" --backend=typescript
+done
+# The rule the per-joiner machine will be built to: the game stays paused
+# while a joiner has yet to load, a joiner who is playing is never
+# disconnected, and every pause has a deadline. All three are VIOLATED by
+# today's engine (late_join_pause_current); the scenarios above show each
+# ordering, and nothing is fixed yet.
+$QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
