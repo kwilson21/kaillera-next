@@ -57,6 +57,24 @@
 (function () {
   'use strict';
 
+  // The TypeScript core (dist/kn-core.js) is part of this page: the room
+  // logic, the error card and the engine all call it, from the first lines
+  // below. If it did not load (the request failed, or something blocked the
+  // script), nothing here can run, so the page says so and stops instead of
+  // throwing half way through setting up.
+  if (!window.KNCore) {
+    const sayReload = () => {
+      const box = document.getElementById('error-msg');
+      const card = box?.querySelector('.error-card');
+      if (!box || !card) return;
+      card.textContent = 'Part of this page did not load. Reload the page to try again.';
+      box.classList.remove('hidden');
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', sayReload);
+    else sayReload();
+    return;
+  }
+
   const { safeGet: _safeGet, safeSet: _safeSet, safeRemove: _safeRemove } = KNState;
 
   // ── State ──────────────────────────────────────────────────────────────
@@ -1678,15 +1696,11 @@
     // is the server's stamp (KNCore.checkRelayed, web/src/relay.ts), not
     // what the message says: `mode-select` is taken only from the room's
     // owner, and `rom-accepted` starts a transfer to the socket that really
-    // sent it. A message with no stamp comes from a server older than the
-    // stamp and is handled as before: server and pages deploy together, and
-    // a member cannot remove a stamp the server adds. A stamped message this
-    // page cannot check (the bundle did not load) is refused.
-    const checkRelayed = window.KNCore?.checkRelayed;
-    if (!checkRelayed && Object.hasOwn(data, 'knFrom')) return;
-    const from = checkRelayed ? checkRelayed(data) : null;
-    if (from && !from.allowed) return;
-    if (from?.stamped) data = { ...data, sender: from.sid };
+    // sent it. A message with no stamp, or one this page cannot check (the
+    // bundle did not load), is refused.
+    const from = window.KNCore?.checkRelayed?.(data) ?? null;
+    if (!from?.allowed) return;
+    data = { ...data, sender: from.sid };
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
       const incoming = normalizeMode(data.mode);

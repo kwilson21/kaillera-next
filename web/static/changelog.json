@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.68.5",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "unstamped relay messages are refused; state is asked for by players and sent by the host only (#154)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.4",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync that moves the guest forward no longer leaves both pages waiting 5 s (#160)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.3",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the play and demo pages say to reload when kn-core.js did not load (#153)"
+      }
+    ]
+  },
+  {
     "version": "0.68.2",
     "date": "2026-11-14",
     "changes": [

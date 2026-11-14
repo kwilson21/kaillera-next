@@ -44,6 +44,8 @@ const TEXT_GRAMMAR = {
     // menu-ready:<frame>:<scene>
     'menu-ready': `:${INT}:${INT}`,
     resend: `:${INT}`,
+    // A guest moved forward by a resync: its inputs before this frame are settled.
+    'inputs-settled': `:${INT}`,
     // rb-check:<frame>:<gameplay hash>[:<game state hash>]
     'rb-check': `:${INT}:${INT}(?::${INT})?`,
     // rb-blocks:<frame>:<8 hex digits per block, no separator>

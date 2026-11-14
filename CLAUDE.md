@@ -279,7 +279,12 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   `?knperf=light`), measured RTT is inflated (so negotiated delay is too), and
   the menu autopilot can overshoot into Team Battle at delay ≥ 10. Treat
   multi-second freezes and menu timeouts there as environment first; confirm
-  real bugs from the logs.
+  real bugs from the logs. A page that freezes for 5 s there is dropped as a
+  phantom and resynced (about one match in three). `tests/rb-two-player.mjs`
+  leaves the frames of such a recovery out of its hash compare when the logs
+  prove the dropped page's main thread stopped, and says so
+  (`frozenRecovery` in its summary, `tests/frozen-recovery.mjs`). Any other
+  mismatch is real.
 - **Which hash to trust.** None of the three covers the whole game state;
   know what each one reads. `kn_gameplay_hash` hashes a short list of game
   addresses (scene, VS battle header, stock counts, RNG seed, character
@@ -303,6 +308,10 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   web/src TypeScript but ships in its own small bundle rather than through
   window.KNCore, because those pages must stay light and are served while the
   server sleeps.
+  The play and demo pages require the bundle: if `window.KNCore` is missing
+  they tell the player to reload and stop, so `play.js`, `demo.js` and the
+  engine call `window.KNCore` without a fallback. `shared.js` keeps its own
+  fallback because tests load it outside a page.
   After changing `web/src`, run `just build` and commit
   `web/static/dist/kn-core.js`; CI fails if it is stale. Migration stages are
   in `docs/roadmap.md`. A module moves from observing to deciding only after
