@@ -118,6 +118,7 @@ kaillera-next/
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
+│   │   ├── poll.ts              # looking again at intervals as Effect code: a bounded poll and a repeating one (emulator boot, gamepad hot-plug)
 │   │   ├── kn-state.ts          # cross-module shared state: the type and starting values of window.KNState, set by the bundle
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
 │   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
