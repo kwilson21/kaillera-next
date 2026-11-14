@@ -1,5 +1,11 @@
 name: Capture privacy
 on:
+  # Main itself is checked after every merge: two pull requests that were
+  # each green on the main they last merged in can still break it together.
+  push:
+    branches: [main]
+  # Lets a merge queue run these checks, if one is ever switched on.
+  merge_group:
   pull_request:
     paths:
       - '.github/workflows/capture-privacy.yml'
