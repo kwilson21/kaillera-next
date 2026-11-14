@@ -25,6 +25,7 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
 import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
@@ -291,6 +292,7 @@ export const KNCore = {
   shouldResumeRomTransfer,
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
+    startAudio,
     startCapture,
     startControllerSettings,
     startVisionClient,

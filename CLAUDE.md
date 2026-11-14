@@ -96,7 +96,7 @@ kaillera-next/
 │       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
 │       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
-│       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
+│       ├── kn-audio.js          # starts the engine's audio pipeline (window.KNAudio) from web/src/page/audio.ts
 │       ├── kn-capture.js        # starts the diagnostic-image capture policy (window.KNCapture) from web/src/page/capture.ts
 │       ├── kn-vision-client.js  # starts the desync-vision client (window.KNVision) from web/src/page/vision-client.ts
 │       ├── api-sandbox.js       # save/restore native browser APIs
