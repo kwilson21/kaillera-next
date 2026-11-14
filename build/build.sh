@@ -313,7 +313,7 @@ if [ -d "${PATCHES_DIR}" ]; then
     # nothing changed), so GLideN64's readback path operates on a null
     # binding and corrupts the guest's framebuffer — observed as the
     # guest freezing the moment the match countdown ends. The warning is
-    # silenced by the JS-side guard in kn-diagnostics.js (skip readPixels
+    # silenced by the guard in web/src/page/diagnostics.ts (skip readPixels
     # when a PBO is bound) which avoids touching GL state entirely. The
     # patch file is kept under build/patches/ for reference but unused.
 
