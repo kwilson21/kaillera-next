@@ -25,8 +25,9 @@
 //
 // Not modelled: the joiner's own wait (room_lifecycle.qnt and
 // web/src/late-join-wait.ts), a "ready" that arrives before the joiner's
-// data channel is open, a repeated request for the same joiner, inputs and
-// frames, spectators, who may send each message.
+// data channel is open, inputs and frames, spectators, the joiner that has
+// become a player while the host is still paused for another (the host tells
+// it to pause with everyone else).
 //
 // PAUSE_PER_JOINER: on the host, the pause belongs to the joiners being
 //   served. The game resumes when none is left, and a timer acts only on its
@@ -34,13 +35,17 @@
 //   pause, ended by any "ready" or any timer.
 // ARM_AT_PAUSE: the 15 s timer is armed when the pause begins. false =
 //   before: after the state has been compressed.
+// KEEP_FIRST_DEADLINE: a repeated request for a joiner already being served
+//   is the same serve and keeps its timer. false = as first written: each
+//   repeat was a new serve, and the timer of the one before did nothing.
 // GUEST_RESUMES_ON_HOST_ONLY: a paused guest resumes on the host's word
-//   alone. false = today: also on any joiner's "ready" from the server.
+//   alone. false = before: also on any joiner's "ready".
 // GUEST_PAUSE_HAS_DEADLINE: a paused guest has a deadline of its own.
-//   false = today: it waits for the host's resume.
+//   false = before: it waited for the host's resume.
 module late_join_pause {
   const PAUSE_PER_JOINER: bool
   const ARM_AT_PAUSE: bool
+  const KEEP_FIRST_DEADLINE: bool
   const GUEST_RESUMES_ON_HOST_ONLY: bool
   const GUEST_PAUSE_HAS_DEADLINE: bool
 
@@ -61,6 +66,8 @@ module late_join_pause {
   var toGuest: List[ToGuest] // the host's data channel to the guest, in order
   var relay: Set[Relayed]    // through the server, any order
   var kickedAPlayer: bool    // history: the host disconnected a joiner who was playing
+  var pushedBack: bool       // history: a repeated request replaced a serve's deadline
+  var guestResumedBy: str    // history: what last ended the guest's pause
 
   // ── actions ────────────────────────────────────────────────────────────
 
@@ -70,14 +77,17 @@ module late_join_pause {
     held' = Set(), compressing' = Set(), timers' = Set(),
     guestPaused' = false, guestDeadline' = false,
     toGuest' = [], relay' = Set(),
-    kickedAPlayer' = false,
+    kickedAPlayer' = false, pushedBack' = false, guestResumedBy' = "",
   }
 
   action hostUnchanged = all {
     hostUp' = hostUp, hostPaused' = hostPaused, held' = held,
     compressing' = compressing, timers' = timers, kickedAPlayer' = kickedAPlayer,
+    pushedBack' = pushedBack,
   }
-  action guestUnchanged = all { guestPaused' = guestPaused, guestDeadline' = guestDeadline }
+  action guestUnchanged = all {
+    guestPaused' = guestPaused, guestDeadline' = guestDeadline, guestResumedBy' = guestResumedBy,
+  }
 
   // The joiner's page is in the room and its emulator is up: it asks.
   action ask(j: str): bool = all {
@@ -97,7 +107,23 @@ module late_join_pause {
     compressing' = compressing.union(Set(j)),
     timers' = if (ARM_AT_PAUSE) timers.union(Set(j)) else timers,
     toGuest' = toGuest.append(Pause),
-    hostUp' = hostUp, kickedAPlayer' = kickedAPlayer,
+    hostUp' = hostUp, kickedAPlayer' = kickedAPlayer, pushedBack' = pushedBack,
+    joiner' = joiner, guestUnchanged, relay' = relay,
+  }
+
+  // The joiner repeats its request (every 5 s until it has a state) and the
+  // host takes it while still serving that joiner: it captures and compresses
+  // again. As first written this was a new serve with a new timer, and the
+  // timer armed for the one before no longer acted.
+  action serveAgain(j: str): bool = all {
+    hostUp,
+    joiner.get(j) == Asking,
+    held.contains(j),
+    compressing' = compressing.union(Set(j)),
+    pushedBack' = (pushedBack or not(KEEP_FIRST_DEADLINE)),
+    toGuest' = toGuest.append(Pause),
+    hostUp' = hostUp, hostPaused' = hostPaused, held' = held, timers' = timers,
+    kickedAPlayer' = kickedAPlayer,
     joiner' = joiner, guestUnchanged, relay' = relay,
   }
 
@@ -110,6 +136,7 @@ module late_join_pause {
     timers' = timers.union(Set(j)),
     relay' = relay.union(Set(State(j))),
     hostUp' = hostUp, hostPaused' = hostPaused, held' = held, kickedAPlayer' = kickedAPlayer,
+    pushedBack' = pushedBack,
     joiner' = joiner, guestUnchanged, toGuest' = toGuest,
   }
 
@@ -140,7 +167,7 @@ module late_join_pause {
         held' = held, joiner' = joiner, hostPaused' = hostPaused, toGuest' = toGuest,
       },
       hostUp' = hostUp, compressing' = compressing, timers' = timers,
-      kickedAPlayer' = kickedAPlayer, guestUnchanged,
+      kickedAPlayer' = kickedAPlayer, pushedBack' = pushedBack, guestUnchanged,
     }
   }
 
@@ -159,7 +186,7 @@ module late_join_pause {
       kickedAPlayer' = (kickedAPlayer or (acts and joiner.get(j) == Playing)),
       hostPaused' = if (resumes) false else hostPaused,
       toGuest' = if (resumes) toGuest.append(Resume) else toGuest,
-      hostUp' = hostUp, guestUnchanged, relay' = relay,
+      hostUp' = hostUp, pushedBack' = pushedBack, guestUnchanged, relay' = relay,
     }
   }
 
@@ -168,25 +195,31 @@ module late_join_pause {
     toGuest.length() > 0,
     toGuest' = toGuest.tail(),
     match toGuest.head() {
-      | Pause => all { guestPaused' = true, guestDeadline' = GUEST_PAUSE_HAS_DEADLINE }
-      | Resume => all { guestPaused' = false, guestDeadline' = false }
+      | Pause => all {
+          guestPaused' = true, guestDeadline' = GUEST_PAUSE_HAS_DEADLINE, guestResumedBy' = guestResumedBy,
+        }
+      | Resume => all {
+          guestPaused' = false, guestDeadline' = false,
+          guestResumedBy' = if (guestPaused) "host" else guestResumedBy,
+        }
     },
     hostUnchanged, joiner' = joiner, relay' = relay,
   }
 
-  // The joiner's "ready" reaches the guest through the server. Today the
-  // guest resumes on it, whichever joiner it is from.
+  // The joiner's "ready" reaches the guest. Before, the guest resumed on it,
+  // whichever joiner it was from and whatever the host was doing.
   action guestHearsReady(j: str): bool = all {
     relay.contains(ReadyToGuest(j)),
     relay' = relay.exclude(Set(ReadyToGuest(j))),
     guestPaused' = if (GUEST_RESUMES_ON_HOST_ONLY) guestPaused else false,
     guestDeadline' = if (GUEST_RESUMES_ON_HOST_ONLY) guestDeadline else false,
+    guestResumedBy' = if (guestPaused and not(GUEST_RESUMES_ON_HOST_ONLY)) "joiner" else guestResumedBy,
     hostUnchanged, joiner' = joiner, toGuest' = toGuest,
   }
 
   action guestDeadlineFires = all {
     guestPaused, guestDeadline,
-    guestPaused' = false, guestDeadline' = false,
+    guestPaused' = false, guestDeadline' = false, guestResumedBy' = "deadline",
     hostUnchanged, joiner' = joiner, toGuest' = toGuest, relay' = relay,
   }
 
@@ -202,7 +235,8 @@ module late_join_pause {
     hostUp' = false, hostPaused' = false,
     held' = Set(), compressing' = Set(), timers' = Set(),
     toGuest' = [],
-    kickedAPlayer' = kickedAPlayer, joiner' = joiner, guestUnchanged, relay' = relay,
+    kickedAPlayer' = kickedAPlayer, pushedBack' = pushedBack,
+    joiner' = joiner, guestUnchanged, relay' = relay,
   }
 
   action step = any {
@@ -211,7 +245,7 @@ module late_join_pause {
     hostReloads,
     nondet j = oneOf(JOINERS)
     any {
-      ask(j), beginServe(j), sendState(j), loadState(j), hostHearsReady(j),
+      ask(j), beginServe(j), serveAgain(j), sendState(j), loadState(j), hostHearsReady(j),
       timerFires(j), guestHearsReady(j), joinerLeaves(j),
     },
   }
@@ -245,9 +279,20 @@ module late_join_pause {
   // while the state was being compressed.
   val hostPauseHasADeadline = (hostUp and hostPaused) implies hostDeadline
 
+  // The deadline of a serve is the one armed when it began.
+  // Violated as first written: the joiner repeats its request every 5 s, and
+  // each one the host took put the deadline 15 s out again.
+  val aRepeatedRequestKeepsTheDeadline = not(pushedBack)
+
+  // A paused guest runs again on the host's word, or at its own deadline.
+  // Violated before: any joiner's "ready" resumed it, and with the pause
+  // kept for a second joiner the guest then ran on while the host stood
+  // still.
+  val guestResumesOnTheHostsWord = guestResumedBy != "joiner"
+
   // The same for the guest's pause.
-  // VIOLATED today: the guest has no deadline of its own, so a host that
-  // reloads leaves it paused.
+  // Violated before the guest had a deadline of its own: a host that
+  // reloaded left it paused.
   val guestPauseHasADeadline = guestPaused implies or {
     guestDeadline,
     toGuest.select(m => m == Resume).length() > 0,
@@ -255,7 +300,9 @@ module late_join_pause {
   }
 
   val holdToday = and { gameStaysPausedWhileAJoinerLoads, neverKicksAPlayerWhoJoined, hostPauseHasADeadline }
-  val allHold = holdToday and guestPauseHasADeadline
+  val allHold = and {
+    holdToday, aRepeatedRequestKeepsTheDeadline, guestResumesOnTheHostsWord, guestPauseHasADeadline,
+  }
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -300,28 +347,48 @@ module late_join_pause {
       .then(ask("a")).then(beginServe("a")).then(sendState("a")).then(guestHears)
       .then(hostReloads)
       .expect(guestPauseHasADeadline == GUEST_PAUSE_HAS_DEADLINE)
+
+  // Two joiners and a guest. The first joiner's "ready" reaches the guest
+  // while the host is still paused for the second.
+  run guestRunsOnWhileTheHostIsPausedTest =
+    init
+      .then(ask("a")).then(beginServe("a")).then(guestHears).then(sendState("a"))
+      .then(ask("b")).then(beginServe("b")).then(guestHears).then(sendState("b"))
+      .then(loadState("a")).then(hostHearsReady("a")).then(guestHearsReady("a"))
+      .expect(PAUSE_PER_JOINER implies hostPaused)
+      .expect(guestPaused == GUEST_RESUMES_ON_HOST_ONLY)
+      .expect(guestResumesOnTheHostsWord == GUEST_RESUMES_ON_HOST_ONLY)
+
+  // The worker hangs and the joiner asks again.
+  run repeatedRequestTest =
+    init
+      .then(ask("a")).then(beginServe("a"))
+      .then(serveAgain("a"))
+      .expect(aRepeatedRequestKeepsTheDeadline == KEEP_FIRST_DEADLINE)
+      .expect(hostPauseHasADeadline == ARM_AT_PAUSE)
 }
 
 // Before: one pause for everyone, its timer armed after compression.
 module late_join_pause_before {
   import late_join_pause(
-    PAUSE_PER_JOINER = false, ARM_AT_PAUSE = false,
+    PAUSE_PER_JOINER = false, ARM_AT_PAUSE = false, KEEP_FIRST_DEADLINE = true,
     GUEST_RESUMES_ON_HOST_ONLY = false, GUEST_PAUSE_HAS_DEADLINE = false
   ).*
 }
 
-// Today: the host's side is fixed, the guest's is not yet.
+// The host's side as first written: the pause per joiner, but a repeated
+// request re-armed it and the guest still resumed on a joiner's word.
+module late_join_pause_host_side {
+  import late_join_pause(
+    PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true, KEEP_FIRST_DEADLINE = false,
+    GUEST_RESUMES_ON_HOST_ONLY = false, GUEST_PAUSE_HAS_DEADLINE = false
+  ).*
+}
+
+// Today.
 module late_join_pause_current {
   import late_join_pause(
-    PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true,
-    GUEST_RESUMES_ON_HOST_ONLY = false, GUEST_PAUSE_HAS_DEADLINE = false
-  ).*
-}
-
-// What the per-joiner machine will be built to.
-module late_join_pause_fixed {
-  import late_join_pause(
-    PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true,
+    PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true, KEEP_FIRST_DEADLINE = true,
     GUEST_RESUMES_ON_HOST_ONLY = true, GUEST_PAUSE_HAS_DEADLINE = true
   ).*
 }

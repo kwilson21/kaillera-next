@@ -117,19 +117,16 @@ pair peer_connection_fixed allHold initLobby
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
-for variant in late_join_pause_before late_join_pause_current late_join_pause_fixed; do
+for variant in late_join_pause_before late_join_pause_host_side late_join_pause_current; do
   $QUINT test "$PAUSE" --main="$variant" --backend=typescript
 done
 # Today: the game stays paused while a joiner has yet to load, a joiner who
-# is playing is never disconnected, and the host's pause has a deadline. All
-# three were violated before the pause belonged to the joiners being served
-# and its timer was armed at the pause (late_join_pause_before).
-$QUINT run "$PAUSE" --main=late_join_pause_current --invariant=holdToday \
-  --max-samples=20000 --max-steps=25 --backend=typescript
-# Still VIOLATED today: a paused guest has no deadline of its own
-# (guestPauseHasADeadline). It holds on late_join_pause_fixed, the rule the
-# per-joiner machine will be built to.
-$QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
+# is playing is never disconnected, the host's pause has a deadline that a
+# repeated request does not push back, and a paused guest resumes on the
+# host's word or at its own deadline. The first three were violated before
+# the pause belonged to the joiners being served (late_join_pause_before);
+# the rest with only the host's side changed (late_join_pause_host_side).
+$QUINT run "$PAUSE" --main=late_join_pause_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── A resync from request to apply ──────────────────────────────────────────

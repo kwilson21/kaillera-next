@@ -68,7 +68,7 @@ def test_late_join_ready_retries_until_resume():
     assert "if (_phase !== PHASE_RUNNING || readyAttempts >= 20)" in source
     assert "if (!_lateJoin || _phase !== PHASE_RUNNING || readyAttempts >= 20)" not in source
 
-    resume_idx = source.find("if (e.data === 'late-join-resume')")
+    resume_idx = source.find("if (e.data === 'late-join-resume' && peer.slot === 0) {")
     assert resume_idx != -1
     resume_window = source[resume_idx : resume_idx + 500]
     assert "_lateJoin = false" in resume_window
@@ -124,7 +124,9 @@ def test_the_pause_belongs_to_the_joiners_being_served():
     serve = serve[: serve.index("const handleLateJoinState = async (msg) => {")]
     # The timer is armed at the pause, before the state is compressed.
     assert serve.index("_lateJoinServing.set(remoteSid, serveId);") < serve.index("await compressAndEncode(bytes)")
-    assert serve.index("}, LATE_JOIN_TIMEOUT_MS);") < serve.index("await compressAndEncode(bytes)")
+    assert serve.index("setTimeout(onServeDeadline, LATE_JOIN_TIMEOUT_MS);") < serve.index(
+        "await compressAndEncode(bytes)"
+    )
     # It acts only on its own serve, and ends the pause only if none is left.
     assert "if (_lateJoinServing.get(remoteSid) !== serveId) return;" in serve
     assert "_endLateJoinPauseIfNoneServed(`timeout for ${remoteSid}`);" in serve
@@ -149,3 +151,51 @@ def test_the_pause_belongs_to_the_joiners_being_served():
     reset = reset[: reset.index("\n  };\n")]
     assert "_lateJoinServing.delete(opts.sid)" in reset
     assert "_lateJoinServing.clear();" in src
+
+
+def test_a_repeated_request_keeps_the_first_deadline():
+    # specs/late_join_pause.qnt (aRepeatedRequestKeepsTheDeadline): the joiner
+    # repeats its request every 5 s. Each one the host took used to be a new
+    # serve with a new timer, and the old timer then did nothing.
+    src = (Path(__file__).resolve().parent.parent / "web/static/netplay-rollback.js").read_text()
+    serve = src[src.index("async function sendLateJoinState(remoteSid) {") :]
+    serve = serve[: serve.index("const handleLateJoinState = async (msg) => {")]
+    assert "const servedAs = _lateJoinServing.get(remoteSid);" in serve
+    assert "const serveId = servedAs ?? ++_lateJoinServeSeq;" in serve
+    assert "const armTimer = servedAs === undefined;" in serve
+    assert "if (armTimer) setTimeout(onServeDeadline, LATE_JOIN_TIMEOUT_MS);" in serve
+
+
+def test_only_the_host_pauses_and_resumes_a_page():
+    # specs/late_join_pause.qnt (guestResumesOnTheHostsWord,
+    # guestPauseHasADeadline): a page that is not the host stays paused until
+    # the host says resume, or its own deadline. A joiner's "ready" used to
+    # resume it while the host was still paused for another joiner.
+    src = (Path(__file__).resolve().parent.parent / "web/static/netplay-rollback.js").read_text()
+    assert "if (e.data === 'late-join-pause' && peer.slot === 0) {" in src
+    assert "if (e.data === 'late-join-resume' && peer.slot === 0) {" in src
+
+    ready = src[src.index("const finishLateJoinReady = (source, senderSid = null) => {") :]
+    ready = ready[: ready.index("const _syntheticSidForSlot")]
+    assert ready.index("if (_playerSlot !== 0) return;") < ready.index("let newlyHandled = false;")
+    # The joiner that just became a player waits with everyone else.
+    assert "readyDc.send('late-join-pause');" in ready
+
+    # I1: the page's own deadline, longer than the host's per joiner.
+    assert "const LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000;" in src
+    assert "const LATE_JOIN_TIMEOUT_MS = 15000;" in src
+    tick = src[src.index("const tick = () => {") :]
+    pause = tick[tick.index("if (_runSubstate === RUN_LATE_JOIN_PAUSE) {") :][:1200]
+    assert "if (guestPausedMs <= LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS) {" in pause
+    assert "LATE-JOIN-GUEST-PAUSE-TIMEOUT f=${_frameNum}" in pause
+    assert "_runSubstate = RUN_NORMAL;" in pause
+
+
+def test_the_resume_for_a_joiner_that_left_waits_for_the_peer_to_be_dropped():
+    # resetPeerState runs before its caller deletes the peer. A resume from
+    # inside it broadcast a roster that listed the joiner as a player.
+    src = (Path(__file__).resolve().parent.parent / "web/static/netplay-rollback.js").read_text()
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "queueMicrotask(() => _endLateJoinPauseIfNoneServed(`${reason} for ${leftSid}`));" in reset
+    assert "      _endLateJoinPauseIfNoneServed(`${reason} for ${opts.sid}`);" not in reset

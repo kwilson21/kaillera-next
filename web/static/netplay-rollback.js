@@ -5262,6 +5262,11 @@
   const REMIX_INITIAL_SYNC_USE_KN_SYNC = true;
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
+  // I1: wall-clock of the host's latest `late-join-pause` on a page that is
+  // not the host. The host's own deadline (LATE_JOIN_TIMEOUT_MS per joiner)
+  // normally ends the pause; this one is for a host that never says resume.
+  let _lateJoinGuestPausedAt = 0;
+  const LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000;
   const _lateJoinReadyHandled = new Set(); // senderSid values already resumed
   // Host: the joiners being served, sid -> the id of that serve. The pause
   // belongs to them: it ends when none is left, and a serve's timer acts only
@@ -7158,6 +7163,10 @@
   };
 
   const finishLateJoinReady = (source, senderSid = null) => {
+    // A joiner's "ready" is for the host. Every other page stays paused
+    // until the host says resume: the host may still be paused for another
+    // joiner, and a page that ran on would leave it behind.
+    if (_playerSlot !== 0) return;
     let newlyHandled = false;
     if (_playerSlot === 0 && senderSid) {
       if (_lateJoinReadyHandled.has(senderSid)) return;
@@ -7189,6 +7198,14 @@
       // Resuming now would leave it frames behind; its own "ready" or its
       // timer ends the pause.
       _broadcastRoster();
+      // The joiner that is now a player was never told of this pause (it is
+      // not sent to a joiner being served). It waits with everyone else.
+      const readyDc = senderSid ? _peers[senderSid]?.dc : null;
+      if (newlyHandled && readyDc?.readyState === 'open') {
+        try {
+          readyDc.send('late-join-pause');
+        } catch (_) {}
+      }
       _syncLog(`late-join-ready (${source}) — ${_lateJoinServing.size} joiner(s) still loading, pause kept`);
       if (newlyHandled) _config?.onToast?.(`${name} joined`);
     } else if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
@@ -8237,17 +8254,23 @@
           peer.emuReady = true;
           checkAllEmuReady();
         }
-        if (e.data === 'late-join-pause') {
+        // Pause and resume are the host's word alone: no other peer can hold
+        // or release this page's game.
+        if (e.data === 'late-join-pause' && peer.slot === 0) {
           _runSubstate = RUN_LATE_JOIN_PAUSE;
+          // Stamped at every pause the host sends: it sends one per joiner
+          // it starts serving, so the deadline runs from the latest.
+          _lateJoinGuestPausedAt = performance.now();
           setStatus('Player joining...');
           _config?.onToast?.('Player joining...');
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'join-the-start' && peer.slot === 0) handleJoinTheStart();
         if (e.data === 'late-joiner') handlePeerIsLateJoiner(remoteSid, peer);
-        if (e.data === 'late-join-resume') {
+        if (e.data === 'late-join-resume' && peer.slot === 0) {
           const wasPausedForLateJoin = _runSubstate === RUN_LATE_JOIN_PAUSE;
           if (wasPausedForLateJoin) _runSubstate = RUN_NORMAL;
+          _lateJoinGuestPausedAt = 0;
           _lateJoin = false;
           clearLateJoinReadyRetry();
           _resetPacingAfterLateJoin();
@@ -8866,8 +8889,12 @@
     if (slot === null || slot === undefined) return;
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A joiner that was being served is gone: the pause is not kept for it.
+    // The resume broadcasts the roster, and the caller has yet to drop this
+    // peer from `_peers`: done now, the roster would list the joiner as a
+    // player for one message. It goes out once the caller has finished.
     if (opts.sid && _lateJoinServing.delete(opts.sid) && _runSubstate === RUN_LATE_JOIN_PAUSE) {
-      _endLateJoinPauseIfNoneServed(`${reason} for ${opts.sid}`);
+      const leftSid = opts.sid;
+      queueMicrotask(() => _endLateJoinPauseIfNoneServed(`${reason} for ${leftSid}`));
     }
 
     // Slot-indexed globals
@@ -10531,7 +10558,11 @@
       return;
     }
     _markPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer');
-    const serveId = ++_lateJoinServeSeq;
+    // A repeated request for a joiner already being served (its state was
+    // lost, or is still being compressed) is the same serve: it keeps the
+    // deadline of the first, or each repeat would push the pause back.
+    const servedAs = _lateJoinServing.get(remoteSid);
+    const serveId = servedAs ?? ++_lateJoinServeSeq;
 
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) {
@@ -10547,7 +10578,7 @@
       // moment we read _frameNum, causing the late joiner to load state
       // from frame X but think they're at frame X+N (cursor desync).
       _runSubstate = RUN_LATE_JOIN_PAUSE;
-      _lateJoinPausedAt = performance.now();
+      if (servedAs === undefined || _lateJoinPausedAt === 0) _lateJoinPausedAt = performance.now();
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
       // I1 (MF5): the pause has a wall-clock deadline from the moment it
       // begins, not from when the state has been compressed: a worker that
@@ -10557,7 +10588,8 @@
       // The timer acts only on its own serve: by the time it fires this
       // joiner may be playing and the pause may be for someone else.
       _lateJoinServing.set(remoteSid, serveId);
-      setTimeout(() => {
+      const armTimer = servedAs === undefined;
+      const onServeDeadline = () => {
         if (_lateJoinServing.get(remoteSid) !== serveId) return;
         _lateJoinServing.delete(remoteSid);
         const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
@@ -10573,7 +10605,8 @@
           _clearPendingLateJoinPeer(remoteSid, peerSlot, 'late-join timeout');
         }
         _endLateJoinPauseIfNoneServed(`timeout for ${remoteSid}`);
-      }, LATE_JOIN_TIMEOUT_MS);
+      };
+      if (armTimer) setTimeout(onServeDeadline, LATE_JOIN_TIMEOUT_MS);
       for (const [sid, p] of Object.entries(_peers)) {
         // The pause is for existing players while the host captures a stable
         // state. The joiner is not part of the running timeline yet; pausing
@@ -10850,6 +10883,7 @@
       if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
         _syncLog('late-join: clearing self pause after state load');
         _runSubstate = RUN_NORMAL;
+        _lateJoinGuestPausedAt = 0;
       }
 
       // Re-establish WebRTC connections to any players whose peer connections
@@ -13896,8 +13930,21 @@
     }
 
     if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
-      _markTickReturn('skip:late-join-pause');
-      return; // frozen while late-joiner loads state
+      const guestPausedMs = _playerSlot !== 0 && _lateJoinGuestPausedAt > 0 ? _tickNow - _lateJoinGuestPausedAt : 0;
+      if (guestPausedMs <= LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS) {
+        _markTickReturn('skip:late-join-pause');
+        return; // frozen while late-joiner loads state
+      }
+      // I1: the host paused this page and never said resume (it reloaded,
+      // its channel died). Longer than the host's own per-joiner deadline,
+      // so a host that is still there has resumed first.
+      _syncLog(
+        `LATE-JOIN-GUEST-PAUSE-TIMEOUT f=${_frameNum} pausedMs=${Math.round(guestPausedMs)} — ` +
+          `no resume from the host, resuming`,
+      );
+      _runSubstate = RUN_NORMAL;
+      _lateJoinGuestPausedAt = 0;
+      _resetPacingAfterLateJoin();
     }
     // Guests defer the entire tick loop until the host's authoritative
     // rb-delay broadcast arrives and the C rollback engine is initialized
@@ -18170,6 +18217,7 @@
     _isApplyingLateJoinState = false;
     _lateJoinReadyHandled.clear();
     _lateJoinServing.clear();
+    _lateJoinGuestPausedAt = 0;
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
