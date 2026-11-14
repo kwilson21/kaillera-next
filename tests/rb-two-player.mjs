@@ -184,7 +184,8 @@
  *     the run fails unless, on both peers: the scene byte read the
  *     character select and then the battle; both players' character ids at
  *     the character select are fighter kinds (and, without
- *     MENU_AUTOPILOT=any-fighter, the two the autopilot picks); stock counts
+ *     MENU_AUTOPILOT=any-fighter, the two the autopilot picks); the battle
+ *     header's status says the match gets under way and stays so; stock counts
  *     in battle are plausible; the battle header is not empty; the RNG seed
  *     moves; and the fighter-buffer pointer, once set, points into RAM. Reported as
  *     `addressMapCheck` in summary.json. This shows a map is plausible, not
@@ -630,6 +631,7 @@ const install = async (p, role) => {
       const rom = ADDRESS_MAP_CHECK ? window.KNCore.addressMapFor(ADDRESS_MAP_OF || window.KNState?.romHash) : null;
       W.mapRom = rom ? rom.name : null;
       W.mapScenes = rom ? rom.scenes : null;
+      W.mapOngoing = rom ? rom.battleStatus.ongoing : null;
       W.mapSamples = [];
       const byteAt = (off) => {
         const word = rb.readRdram32(off & ~3);
@@ -644,6 +646,7 @@ const install = async (p, role) => {
         for (let off = 0; off < vsHeaderSize; off += 4) if (rb.readRdram32(vsHeader + off)) headerNonZero = true;
         W.mapSamples.push({
           f,
+          status: byteAt(vsHeader + rom.battleStatus.offset),
           scene: byteAt(sceneCurr),
           stocks: [0, 1].map((p) => byteAt(stocksBase + p * playerStride)),
           charIds: [0, 1].map((p) => rb.readRdram32(cssBase + p * cssStride + cssCharId)),
@@ -1017,6 +1020,7 @@ const collect = (p, VISUAL_CHECK) =>
       taintedBlocks: m._kn_get_tainted_block_count?.() ?? null,
       mapRom: window.__tp.mapRom,
       mapScenes: window.__tp.mapScenes,
+      mapOngoing: window.__tp.mapOngoing,
       mapSamples: window.__tp.mapSamples,
       visual,
     };
@@ -1239,6 +1243,7 @@ const addressMapChecksOf = (side) => {
   const atSelect = samples.filter((x) => x.scene === scenes.characterSelect);
   const inBattle = samples.filter((x) => x.scene === scenes.battle);
   const lastSelect = atSelect.at(-1);
+  const underWayFrom = inBattle.findIndex((x) => x.status === side.mapOngoing);
   const strict = MENU_AUTOPILOT !== 'any-fighter';
   const inRam = (x) => x.ftPtr >>> 24 === 0x80 && (x.ftPtr & 0xffffff) + x.ftBufferSize <= 0x800000;
   const checks = [
@@ -1257,6 +1262,17 @@ const addressMapChecksOf = (side) => {
       detail: lastSelect
         ? `P1,P2 = ${lastSelect.charIds.join(',')} at frame ${lastSelect.f}`
         : 'no sample at the character select',
+    },
+    {
+      // A dormant copy of the battle state has everything in range and
+      // never says a match is on; this is the check that tells them apart.
+      // The scene opens on the countdown, before the status changes.
+      name: 'the battle header says the match gets under way and stays so',
+      ok: underWayFrom >= 0 && inBattle.slice(underWayFrom).every((x) => x.status === side.mapOngoing),
+      detail:
+        underWayFrom < 0
+          ? `status never read ${side.mapOngoing}; values seen ${[...new Set(inBattle.map((x) => x.status))].join(',')}`
+          : `status ${side.mapOngoing} from battle sample ${underWayFrom + 1} of ${inBattle.length} on`,
     },
     {
       name: 'stock counts in battle are plausible',

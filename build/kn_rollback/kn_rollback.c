@@ -2024,6 +2024,21 @@ const kn_gameplay_addr_t kn_gameplay_addrs[] = {
      * rollback engine into thousands of spurious replays and masking
      * actual determinism status with noise.
      *
+     * CORRECTION (2026-11): the labels above are the wrong way round. A
+     * normal VS match runs from the transfer struct at 0x800A4D08
+     * (gSCManagerBattleState points at it; a RAM dump of a match shows its
+     * game_status 1 and live stock counts). gSCManagerVSBattleState at
+     * 0x800A4EF8 is used for sudden death and is dormant otherwise, which
+     * is why the mismatches stopped: this hash has compared a struct that
+     * does not change ever since. The entries below are left on the
+     * dormant struct on purpose. This hash is compared in every scene, and
+     * the note above reports the transfer struct differing between peers
+     * from frame 149, in the menus; that has not been re-tested. The live
+     * battle state is covered by the desync registry (kn_hash_registry.c),
+     * which compares it in the battle scene only, where four healthy
+     * matches on confirmed frames showed no difference. See
+     * kn_gameplay_addrs.h.
+     *
      * The old "P1-P4 stock count" entries also used offset 0x2B within
      * the player struct. In SCPlayerData, offset 0x2B is the LSB of
      * the undocumented u32 `unk_pblock_0x28` field, NOT stock_count

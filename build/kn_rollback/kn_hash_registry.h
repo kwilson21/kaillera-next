@@ -78,10 +78,14 @@ uint32_t kn_field_map_value(uint32_t index);
 int kn_hash_registry_post_tick(int32_t frame, int in_replay);
 
 /* kn_hash_stocks
- * Source:  SCManagerVSBattleState.players[player_idx].stock_count
+ * Source:  gSCManagerTransferBattleState.players[player_idx].stock_count,
+ *          the battle state a normal VS match runs from (the map's
+ *          STOCKS_BASE; see kn_gameplay_addrs.h on the two copies)
  * decomp:  lib/ssb-decomp-re/include/sc/sctypes.h:218 (SCPlayerData.stock_count @ +0xB)
- *          lib/ssb-decomp-re/include/sc/sctypes.h:301 (SCManagerVSBattleState.players @ +0x20)
- * Address: KN_ADDR_PLAYER_STOCKS_BASE + player_idx * KN_PLAYER_STRIDE  (1 byte)
+ *          lib/ssb-decomp-re/include/sc/sctypes.h:301 (SCBattleState.players @ +0x20)
+ *          lib/ssb-decomp-re/src/sc/sccommon/scvsbattle.c (scVSBattleStartScene
+ *          points gSCManagerBattleState at the transfer struct)
+ * Address: KN_ADDR_LIVE_PLAYER_STOCKS_BASE + player_idx * KN_PLAYER_STRIDE  (1 byte)
  * Sampling: kn_post_tick (post-physics, pre-render)
  *
  * Returns FNV-1a of the single byte. Returns 0 if RDRAM unavailable
@@ -140,13 +144,14 @@ uint32_t kn_hash_match_phase(int32_t frame);
 size_t kn_hash_history_match_phase(uint32_t count, uint32_t* out_pairs);
 
 /* kn_hash_vs_battle_hdr
- * Source:  gSCManagerVSBattleState header (32 bytes — game_type, gkind,
+ * Source:  gSCManagerTransferBattleState header, the live battle state
+ *          (32 bytes — game_type, gkind,
  *          is_team_battle, game_rules, pl_count, cp_count, time_limit,
  *          stocks, handicap, is_team_attack, is_stage_select,
  *          damage_ratio, item_toggles, is_reset_players, game_status,
  *          time_remain, time_passed, item_appearance_rate)
- * decomp:  lib/ssb-decomp-re/include/sc/sctypes.h (SCManagerVSBattleState)
- * Address: KN_ADDR_VS_BATTLE_HEADER  (KN_SIZE_VS_BATTLE_HEADER bytes)
+ * decomp:  lib/ssb-decomp-re/include/sc/sctypes.h (SCBattleState)
+ * Address: KN_ADDR_LIVE_BATTLE_HEADER  (KN_SIZE_VS_BATTLE_HEADER bytes)
  * Sampling: kn_post_tick (post-physics, pre-render)
  */
 uint32_t kn_hash_vs_battle_hdr(int32_t frame);
