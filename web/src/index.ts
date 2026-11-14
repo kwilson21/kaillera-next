@@ -27,6 +27,7 @@ import {
 } from './protocol.ts';
 import { startCapture } from './page/capture.ts';
 import { rollbackTimeline } from './page/rollback-timeline.ts';
+import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
@@ -293,6 +294,7 @@ export const KNCore = {
   page: {
     rollbackTimeline,
     startCapture,
+    startControllerSettings,
     startVisionClient,
   },
   play: {
