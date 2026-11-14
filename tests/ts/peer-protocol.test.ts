@@ -46,6 +46,10 @@ test('menu and phase messages carry integers', () => {
   ok('lockstep', 'rb-init-frame:0');
   ok('lockstep', 'fpu-trace:600:-1234567:42');
   ok('lockstep', 'sync-request-full-at:980');
+  // The number of the request that follows it.
+  ok('lockstep', 'sync-request-id:3');
+  bad('lockstep', 'sync-request-id:');
+  bad('lockstep', 'sync-request-id:-1');
   bad('lockstep', 'phase:412:7');
   bad('lockstep', 'menu-ready:300:NaN');
   bad('lockstep', 'resend:undefined');
@@ -78,6 +82,10 @@ test('the transport is one of two words', () => {
 test('the sync-state channel has its own headers', () => {
   ok('sync-state', 'sync-start:900:23:1:0');
   ok('sync-state', 'sync-regions-start:900:4');
+  // The request the state that follows answers.
+  ok('sync-state', 'sync-answer-id:3');
+  ok('sync-state', 'sync-request-id:3');
+  bad('sync-state', 'sync-answer-id:x');
   bad('sync-state', 'sync-start:900:23:yes:no');
   bad('sync-state', 'sync-start:900:23:1');
   // A lockstep word on the wrong channel is unknown there.
@@ -149,6 +157,9 @@ test('data-message relays match by type', () => {
   assert.equal(issueOf('data-message', lateJoinReady), null);
   const request = { type: 'sync-request-full-socket', targetSid: 'h', requesterSid: 'g', reason: 'stall', frame: 9 };
   assert.equal(issueOf('data-message', request), null);
+  // Numbered, and as a page that does not number its requests sends it.
+  assert.equal(issueOf('data-message', { ...request, requestId: 3 }), null);
+  assert.notEqual(issueOf('data-message', { ...request, requestId: '3' }), null);
   assert.notEqual(issueOf('data-message', { type: 'request-late-join' }), null);
   assert.equal(checkRelay('data-message', { type: 'made-up' })?.kind, 'data-message (unknown type)');
 });
@@ -192,6 +203,7 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
     data: 'H4sI',
   };
   assert.equal(issueOf('data-message', syncState), null);
+  assert.equal(issueOf('data-message', { ...syncState, requestId: 3 }), null);
   assert.notEqual(issueOf('data-message', { ...syncState, full: 'yes' }), null);
 });
 
