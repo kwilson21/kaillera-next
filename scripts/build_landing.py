@@ -22,6 +22,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import web_bundles
+
 REPO = Path(__file__).resolve().parent.parent
 WEB = REPO / "web"
 DIST = REPO / "dist-landing"
@@ -38,6 +40,8 @@ FALLBACK_METADATA = {"static/version.json", "static/changelog.json"}
 
 
 def main() -> None:
+    # The pages load bundles from web/static/dist, which is build output.
+    web_bundles.build()
     if DIST.exists():
         shutil.rmtree(DIST)
     files: set[str] = set(EXTRA) | FALLBACK_METADATA
