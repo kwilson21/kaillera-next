@@ -63,8 +63,10 @@ test('a page starts with the state kn-state.js built', () => {
   assert.deepEqual(dataOf(typed), BUILT_BY_THE_SCRIPT);
   assert.deepEqual(
     Object.keys(typed).sort(),
-    [...Object.keys(BUILT_BY_THE_SCRIPT), 'safeGet', 'safeSet', 'safeRemove'].sort(),
+    [...Object.keys(BUILT_BY_THE_SCRIPT), 'gameOn', 'safeGet', 'safeSet', 'safeRemove'].sort(),
   );
+  // Added after the script was retired: no game until play.js points it at the session machine.
+  assert.equal(typed.gameOn(), false);
 });
 
 test('the storage helpers go to the storage', () => {

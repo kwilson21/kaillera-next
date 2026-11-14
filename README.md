@@ -208,7 +208,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
     rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
-    netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
+    netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from web/src/streaming
     switch2-usb.js         Starts the WebUSB handshake for the Switch 2 Pro Controller (web/src/page/switch2-usb.ts)
     controller-settings.js In-game controller settings panel
     virtual-gamepad.js     On-screen touch controls for mobile

@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.11",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a deploy, or an outage that hits every player, no longer ends a match in play (#182)"
+      }
+    ]
+  },
+  {
     "version": "0.68.10",
     "date": "2026-11-14",
     "changes": [
