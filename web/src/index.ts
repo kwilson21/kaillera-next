@@ -25,7 +25,9 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
+import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
@@ -67,12 +69,14 @@ import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from
 import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
+import { installSite, KNSite } from './site/index.ts';
 import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
 import * as streamingInput from './streaming/input.ts';
 import { createStreamingObserver } from './streaming/observe.ts';
 import * as streamingRoster from './streaming/roster.ts';
 import * as streamingSignal from './streaming/signal.ts';
+import * as streamingVideo from './streaming/video.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
@@ -287,12 +291,16 @@ export const KNCore = {
   startLateJoinWait,
   startRejoin,
   shouldResumeRomTransfer,
-  /** The play page's own logic, moving here from web/static/play.js piece by piece. */
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
+    startAudio,
     startCapture,
+    startControllerSettings,
     startVisionClient,
   },
+  /** What these pages share with the front page; the same object is `window.KNSite` on both. */
+  site: KNSite,
+  /** The play page's own logic, moving here from web/static/play.js piece by piece. */
   play: {
     escapeHtml,
     inviteUrl,
@@ -325,6 +333,7 @@ export const KNCore = {
     ...streamingRoster,
     ...streamingSignal,
     ...streamingInput,
+    ...streamingVideo,
     createObserver: createStreamingObserver,
   },
   protocol: {
@@ -356,4 +365,5 @@ if (typeof window !== 'undefined') {
   installGamepadManager();
   installDiagnostics();
   installDesyncDetector();
+  installSite();
 }

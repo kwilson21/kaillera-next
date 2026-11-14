@@ -196,11 +196,20 @@
  *     candidate map for a ROM that has none yet): the pages run the
  *     detector with it (?desync=force&desyncMap=) and ADDRESS_MAP_CHECK
  *     reads through it.
- *   MENU_AUTOPILOT=any-fighter   The autopilot takes whatever fighter its
- *     puck lands on and the stage the cursor starts on, for a ROM whose
- *     menus are laid out differently from SSB64's (Smash Remix).
+ *   MENU_AUTOPILOT=any-fighter | ssb64   any-fighter: the autopilot takes
+ *     whatever fighter its puck lands on and the stage the cursor starts on,
+ *     for a ROM whose menus are laid out differently from SSB64's (Smash
+ *     Remix). ssb64: it picks its two fighters and its stage. Unset, the ROM
+ *     decides: ssb64 for SSB64 US, any-fighter for anything else.
  *
- * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
+ * Besides summary.json, OUT gets menu-inputs.json: what each page's driver
+ * sent on the way to the battle, as the frames each input changed on, with
+ * the ROM's hash and the input delay (negotiated, and each page's extra delay). It is a record of a run that reached a
+ * match, to read or compare between runs. The driver decides from the game's
+ * memory each frame, so a later run is driven again, not replayed from it.
+ *
+ * Needs an SSB64 ROM: US, or one built on it such as Smash Remix (the menu
+ * autopilot reads SSB64's RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
  * compare runs with each other; HEADED=1 on a real machine is closer to play.
  */
@@ -240,11 +249,17 @@ const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const ADDRESS_MAP_CHECK = process.env.ADDRESS_MAP_CHECK === '1';
 const ADDRESS_MAP_OF = process.env.ADDRESS_MAP_OF || '';
-const MENU_AUTOPILOT = process.env.MENU_AUTOPILOT || '';
-if (MENU_AUTOPILOT && MENU_AUTOPILOT !== 'any-fighter') {
-  console.log(`MENU_AUTOPILOT=${MENU_AUTOPILOT} invalid: the only value is "any-fighter"`);
+const SSB64_US_HASH = 'S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7ea99ef3d';
+if (process.env.MENU_AUTOPILOT && !['any-fighter', 'ssb64'].includes(process.env.MENU_AUTOPILOT)) {
+  console.log(`MENU_AUTOPILOT=${process.env.MENU_AUTOPILOT} invalid: "any-fighter" or "ssb64"`);
   process.exit(1);
 }
+// Unset: SSB64 US gets the strict driver, any other ROM the one that takes
+// whatever fighter and stage it lands on. Decided once the host page has
+// loaded the ROM, from the hash the page computed: for an archive that is
+// the ROM inside it, not the file given here.
+let MENU_AUTOPILOT = process.env.MENU_AUTOPILOT || '';
+let ROM_HASH = '';
 if (ADDRESS_MAP_OF && !/^S[0-9a-f]{64}$/.test(ADDRESS_MAP_OF)) {
   console.log('ADDRESS_MAP_OF must be a ROM hash: S followed by 64 hex digits');
   process.exit(1);
@@ -559,6 +574,11 @@ await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
 await guest.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 for (const p of [host, guest]) await p.locator("#rom-drop input[type='file']").setInputFiles(ROM);
 await host.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+ROM_HASH = (await host.evaluate(() => window.KNState?.romHash)) || '';
+if (!MENU_AUTOPILOT) {
+  MENU_AUTOPILOT = ROM_HASH && ROM_HASH !== SSB64_US_HASH ? 'any-fighter' : 'ssb64';
+  if (MENU_AUTOPILOT === 'any-fighter') console.log('ROM is not SSB64 US: MENU_AUTOPILOT=any-fighter');
+}
 console.log('room', room, 'both ROM-ready; starting');
 await host.click('#start-btn');
 
@@ -606,6 +626,7 @@ const install = async (p, role) => {
         scene: -1,
         inBattleAt: -1,
         pilotFail: null,
+        menuInputs: [],
         btnCool: 0,
         btnHeld: 0,
         visualFrames: [],
@@ -679,14 +700,23 @@ const install = async (p, role) => {
           // Space button presses by the input delay so a press lands (and the
           // closed loop sees it) before the next one; sticks pass through.
           const d = (rb.getHudCounters?.()?.delay ?? 2) + 6;
-          const inp = actor(f);
+          let inp = actor(f);
           if (inp.buttons) {
-            if (W.btnCool > f && W.btnHeld !== inp.buttons) return { ...inp, buttons: 0 };
-            W.btnHeld = inp.buttons;
-            W.btnCool = f + d + 4;
+            if (W.btnCool > f && W.btnHeld !== inp.buttons) inp = { ...inp, buttons: 0 };
+            else {
+              W.btnHeld = inp.buttons;
+              W.btnCool = f + d + 4;
+            }
           } else if (W.btnHeld) {
             W.btnHeld = 0;
             W.btnCool = f + d;
+          }
+          // What was sent, kept as the frames it changed on. A sync that
+          // takes the page back replaces the frames from there on.
+          while (W.menuInputs.length && W.menuInputs.at(-1).f >= f) W.menuInputs.pop();
+          const last = W.menuInputs.at(-1);
+          if (!last || last.buttons !== inp.buttons || last.lx !== inp.lx || last.ly !== inp.ly) {
+            W.menuInputs.push({ f, scene: sc, buttons: inp.buttons, lx: inp.lx, ly: inp.ly });
           }
           return inp;
         }
@@ -898,12 +928,12 @@ if (inBattle) {
   } else if (DESYNC_GUEST) {
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
     // P1's stock count, at the address the core's map has for it (SSB64 US:
-    // SCPlayerData.stock_count, 0xA4F23). RDRAM is host-order words, so the byte
+    // SCPlayerData.stock_count, 0xA4D33). RDRAM is host-order words, so the byte
     // is at offset ^ 3. Held for 3 s so that every state the rollback ring
     // can still restore carries the change.
     ({ frame: desyncGuestAt, stocksBase: desyncGuestStocksBase } = await guest.evaluate(async () => {
       const mod = window.EJS_emulator.gameManager.Module;
-      const stocksBase = mod._kn_field_map_value?.(0) ?? 0xa4f23;
+      const stocksBase = mod._kn_field_map_value?.(0) ?? 0xa4d33;
       const at = mod._kn_get_rdram_ptr() + (stocksBase ^ 3);
       const wrong = mod.HEAPU8[at] ^ 1;
       const frame = window.NetplayRollback.getHudCounters?.()?.currentFrame ?? 0;
@@ -1027,6 +1057,9 @@ const collect = (p, VISUAL_CHECK) =>
     return {
       hashes: window.__tp.hashes,
       inBattleAt: window.__tp.inBattleAt,
+      menuInputs: window.__tp.menuInputs,
+      delay: window.NetplayRollback.getHudCounters?.()?.delay ?? null,
+      extraDelay: window.NetplayRollback.getHudCounters?.()?.extraDelay ?? null,
       frame: window.NetplayRollback.getHudCounters().currentFrame,
       fpsWindowStart: window.__tp.fpsWindowStart,
       fpsWindowEnd,
@@ -1052,6 +1085,22 @@ fs.writeFileSync(`${OUT}/host-clog.txt`, H.clog);
 fs.writeFileSync(`${OUT}/guest-clog.txt`, G.clog);
 fs.writeFileSync(`${OUT}/host-sync.txt`, H.sync);
 fs.writeFileSync(`${OUT}/guest-sync.txt`, G.sync);
+fs.writeFileSync(
+  `${OUT}/menu-inputs.json`,
+  JSON.stringify(
+    {
+      romHash: ROM_HASH,
+      menuAutopilot: MENU_AUTOPILOT,
+      delay: { host: H.delay, guest: G.delay },
+      extraDelay: { host: H.extraDelay, guest: G.extraDelay },
+      battleStart: { host: H.inBattleAt, guest: G.inBattleAt },
+      host: H.menuInputs,
+      guest: G.menuInputs,
+    },
+    null,
+    1,
+  ),
+);
 
 // Freeze mode: peers legitimately diverge while the host is a phantom, so
 // only frames from the guest's last applied resync onward must match.
@@ -1079,6 +1128,11 @@ let both = 0,
 const recoveries = FREEZE_MS > 0 ? [] : frozenRecoveries({ host: H.sync, guest: G.sync });
 let framesExcluded = 0,
   mismatchesExcluded = 0;
+// DESYNC_GUEST holds its change for 3 s. A rollback in that time re-runs
+// frames from before the change with the change already in memory, so the
+// hashes and digests of up to a rollback window of earlier frames (22, the
+// engine's rollbackMax) carry it too. Those belong to the change.
+const DESYNC_REACHES_BACK_FRAMES = 22;
 const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f],
@@ -1097,7 +1151,7 @@ for (const f of Object.keys(H.hashes)) {
     // DESYNC_GUEST: the hash must differ because of the change, so only
     // frames from the change on count, and none may differ before it.
     if (DESYNC_GUEST && desyncGuestAt >= 0) {
-      if (+f >= desyncGuestAt) gpMisAfterDesync++;
+      if (+f >= desyncGuestAt - DESYNC_REACHES_BACK_FRAMES) gpMisAfterDesync++;
       else gpMisBeforeDesync++;
     }
   }
@@ -1316,7 +1370,10 @@ const addressMapChecksOf = (side) => {
     },
     {
       name: 'the RNG seed moves',
-      ok: new Set(inBattle.map((x) => x.rng)).size >= Math.min(5, inBattle.length),
+      // Three, not more: on a slow machine most battle samples are the
+      // countdown, where the game hardly draws from it. An address that is
+      // not the seed reads one value throughout.
+      ok: new Set(inBattle.map((x) => x.rng)).size >= Math.min(3, inBattle.length),
       detail: `${new Set(inBattle.map((x) => x.rng)).size} distinct values in ${inBattle.length} battle samples`,
     },
     {
@@ -1340,9 +1397,13 @@ const desyncFlagsOf = (log) => {
     field: m[2],
     slot: m[3],
   }));
-  const after = flags.filter((f) => f.frame >= desyncGuestAt);
+  const after = flags.filter((f) => f.frame >= desyncGuestAt - DESYNC_REACHES_BACK_FRAMES);
+  // A page the container froze splits the two timelines until the resync;
+  // the detector is right to flag those frames, and they are not the change.
+  const inRecovery = flags.filter((f) => inFrozenRecoveryAftermath(recoveries, f.frame)).length;
   return {
-    before: flags.length - after.length,
+    before: flags.length - after.length - inRecovery,
+    inFrozenRecovery: inRecovery,
     after: after.length,
     // The change is to P1's stock count: slot 0, and no other player's.
     stocksAfter: after.filter((f) => f.field === 'stocks' && f.slot === '0').length,
@@ -1611,8 +1672,9 @@ const desyncCapturesAgree = (hostSide, guestSide) => {
 };
 // kn_gameplay_hash has its own table of addresses, compiled in and SSB64's.
 // It sees the changed stock count only when the map's stock address is the
-// one in that table, so only then is it required to.
-const desyncGuestGameplayHashCovers = desyncGuestStocksBase === 0xa4f23;
+// one in that table (the live battle state's, 0xA4D33), so only then is it
+// required to.
+const desyncGuestGameplayHashCovers = desyncGuestStocksBase === 0xa4d33;
 // DESYNC_GUEST inverts the run: the peers were desynced on purpose. The
 // detector must flag the changed field on both peers, and nothing before
 // the change; and the gameplay hash, which lists the stock counts, must
