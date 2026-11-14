@@ -298,8 +298,11 @@ def test_resync_settles_the_inputs_before_its_frame():
     missing_src = src[missing_idx : src.index("\n  };\n", missing_idx)]
     assert "Math.max(_inputFloor(p.slot), windowStart)" in missing_src
 
-    # Guest: settles every peer's inputs, makes and sends the ones it skipped
-    # that are still to be applied, and asks for the peers' it lacks.
+    # Guest: settles every peer's inputs, makes the ones it skipped that are
+    # still to be applied, sends every one of its own for that range (one made
+    # earlier may have been dropped by a peer as out of range:
+    # specs/resync_inputs.qnt, resync_inputs_only_new), and asks for the
+    # peers' it lacks.
     settle_idx = src.index("const _settleInputsAtResync = (mod, frame) => {")
     settle_src = src[settle_idx : src.index("\n  };\n", settle_idx)]
     for snippet in (
@@ -307,8 +310,8 @@ def test_resync_settles_the_inputs_before_its_frame():
         "_localInputs[f] = KNShared.ZERO_INPUT;",
         "_feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);",
         "_settleInputsBefore(peer.slot, frame);",
-        "if (made.length) peer.dc.send(`inputs-settled:${from}`);",
-        "peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);",
+        "if (own.length) peer.dc.send(`inputs-settled:${from}`);",
+        "for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);",
         "peer.dc.send(`resend:${f}`);",
     ):
         assert snippet in settle_src
