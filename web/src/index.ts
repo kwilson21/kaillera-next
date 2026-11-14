@@ -24,6 +24,7 @@ import {
   decodeUsersUpdated,
 } from './protocol.ts';
 import { startCapture } from './page/capture.ts';
+import { startFakePeer } from './page/fake-peer.ts';
 import { menuAutopilot } from './page/menu-autopilot.ts';
 import { rollbackTimeline } from './page/rollback-timeline.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
@@ -278,6 +279,7 @@ export const KNCore = {
     menuAutopilot,
     rollbackTimeline,
     startCapture,
+    startFakePeer,
   },
   play: {
     escapeHtml,

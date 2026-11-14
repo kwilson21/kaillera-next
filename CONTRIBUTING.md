@@ -206,7 +206,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `dist/kn-site.js` | — | Small TypeScript bundle for pages without the core: `KNStorage` | index.html, admin.html |
 | `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
 | `demo.js` | ~1,818 | Demo page orchestrator (fake peer + menu autopilot) | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
-| `fake-peer.js` | ~559 | Synthetic P2 for the demo page (simulated input/jitter) | demo.js |
+| `fake-peer.js` | — | Synthetic P2 for the demo page (simulated input/jitter); the logic is `web/src/page/fake-peer.ts` | demo.js |
 | `ssb64-menu-autopilot.js` | — | Closed-loop menu driver for the demo (reads RDRAM menu state); the logic is `web/src/page/menu-autopilot.ts` | demo.js, tests/rb-two-player.mjs |
 | `rollback-timeline.js` | — | Demo page's live rollback-metrics HUD; the logic is `web/src/page/rollback-timeline.ts` | demo.js |
 
