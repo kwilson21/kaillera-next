@@ -42,10 +42,26 @@ test("SSB64 US's map is the registry's built-in one", () => {
 });
 
 test('a ROM with no map gets none', () => {
-  assert.equal(addressMapFor('S7efec9e0983656bb0219a23c511cd1505a5f84d524e50ad4284dc1c7eb4d1403'), null);
+  // Smash Remix 2.0.0: only 2.0.1 has been through the steps.
+  assert.equal(addressMapFor('S73855bdf5e8753c546a31e278dfe558c3eaa575b97752c1d95950d66b1161130'), null);
   assert.equal(addressMapFor(null), null);
   assert.equal(addressMapFor(undefined), null);
   assert.equal(addressMapFor(''), null);
+});
+
+test('Smash Remix 2.0.1 has a map of its own name', () => {
+  const remix = addressMapFor('S7efec9e0983656bb0219a23c511cd1505a5f84d524e50ad4284dc1c7eb4d1403');
+  assert.equal(remix?.name, 'smash-remix-2.0.1');
+  assert.deepEqual(remix?.battleStatus, { offset: 0x11, ongoing: 1 });
+});
+
+test("a map's battle state is the one whose status byte the ROM is known by", () => {
+  // The dormant copy at 0xa4ef8 passes every range check; only this ties
+  // the map to the struct a match runs from (status at 0x800A4D19).
+  for (const rom of Object.values(ROM_ADDRESSES)) {
+    assert.equal(rom.map.vsBattleHeader + rom.battleStatus.offset, 0xa4d19, rom.name);
+    assert.equal(rom.map.stocksBase, rom.map.vsBattleHeader + 0x20 + 0xb, rom.name);
+  }
 });
 
 test('every map in the table is one the registry accepts', () => {
