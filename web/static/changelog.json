@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.3",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the play and demo pages say to reload when kn-core.js did not load (#153)"
+      }
+    ]
+  },
+  {
     "version": "0.68.2",
     "date": "2026-11-14",
     "changes": [
