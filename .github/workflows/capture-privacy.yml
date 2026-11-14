@@ -4,6 +4,7 @@ on:
     paths:
       - '.github/workflows/capture-privacy.yml'
       - 'web/static/kn-capture.js'
+      - 'web/src/page/capture.ts'
       - 'web/src/page/diagnostics.ts'
       - 'web/src/diagnostics.ts'
       - 'web/static/dist/kn-core.js'
@@ -34,6 +35,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # The test imports web/src/page/capture.ts directly, which needs a Node
+      # that strips types without a flag (22.18 or later).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: Test image opt-outs and async cancellation
         run: node --test tests/capture-privacy.test.mjs
 

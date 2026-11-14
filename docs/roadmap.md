@@ -262,8 +262,13 @@ modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
 keeps the channel, the timers and the page. The host's sending side and the
 WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
 (each player slot, the spectator line, the in-game info panel; the Start
-button's rule is observed, `play.js` still decides it). Last: connect, the game
-lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
+button's rule is observed, `play.js` still decides it). Joining a room:
+the `open-room` and `join-room` requests are built in `connect.ts` and typed
+against the generated schemas, with what each refusal means; whether a page
+comes in as a spectator and how it gets into a match already under way are
+`join-plan.ts` (proved), observed, with `onConnect` still deciding. Left in
+`play.js`: the reconnect banner's timers, the game lifecycle handlers and
+engine start-up, which are effects on the page, the socket and the emulator.
 
 **Stage 4: engine periphery [done]**
 `shared.js` (input wire format; prove encode/decode round-trips with
@@ -325,7 +330,73 @@ Slice 1, the peer mesh and signaling:
   reconnecting with nothing armed: the match is frozen) and
   `staleSignalsAreNotApplied` (an answer to an earlier attempt is applied to
   the connection that replaced it). None is fixed yet.
+- Done (observing): the engine runs the proved functions of
+  `web/src/peer-signaling.ts` beside its own decisions (who offers, what a
+  signal does to the connection table, what a lost connection leads to, when
+  to stop retrying, which entries a new player replaces) and reports a
+  difference as a `mesh-disagree` client event. The engine's rules stay in
+  charge until production shows none.
 - Next: one XState machine per peer connection, observing beside the engine.
+
+**Stage 6: the remaining page scripts**
+The other hand-written scripts of the play, demo and landing pages move to
+`web/src` the way `play.js` does: the logic becomes strict TypeScript and the
+script shrinks to a thin caller or leaves the page. A decision the old code
+also makes starts by observing; a page effect with nothing to compare moves
+as it is. One file, or one small group, per change, smallest risk first:
+
+1. `feedback.js`, `version.js`, `version-guard.js`, `storage.js`,
+   `kn-capture.js`, `kn-vision-client.js`, `switch2-usb.js`
+2. `controller-settings.js`, `virtual-gamepad.js`
+3. `kn-audio.js`
+4. `netplay-streaming.js`
+5. `demo.js`, `fake-peer.js`, `ssb64-menu-autopilot.js`,
+   `rollback-timeline.js`
+6. `landing.js`, `join.js`
+
+Not every page has `window.KNCore`, and some of these scripts run before it:
+
+- The play and demo pages load `kn-core.js` early, before the first script
+  that needs it, and reach the moved logic through `window.KNCore`.
+- The front page and the admin dashboard load no core. What they share with
+  the play page (`storage.js`, `version.js`, `version-guard.js`,
+  `feedback.js`) is written without Effect and also built into a small
+  bundle of its own for them.
+- `landing.js` and `join.js` ship in their own small bundles beside
+  `kn-wake-art.js`: the landing pages must stay light and are served while
+  the server sleeps.
+
+What each needs before merge:
+
+- `kn-audio.js` is on the audio path of a rollback match and needs
+  `tests/rb-two-player.mjs` with `JITTER=20`.
+- `virtual-gamepad.js` is on the input path, but the two-player test feeds
+  inputs from the menu autopilot and never touches the touch controls. Its
+  evidence is `tests/test_virtual_gamepad.py` and the device run in
+  `tests/VGP-DEVICE-TEST.md`, with the two-player test as the check that
+  nothing else moved.
+- `netplay-streaming.js` needs the streaming end-to-end run.
+
+Not in this stage:
+
+- `admin.js`, the admin dashboard's controller. It is one page with no
+  netplay in it and comes after the pages players use.
+
+Staying plain JavaScript:
+
+- `audio-worklet-processor.js` and `rollback-shadow-worker.js` run in their
+  own worker contexts, where `window.KNCore` does not exist. Building them
+  from TypeScript as separate entries is a change of its own, after the rest.
+- `kn-state.js`, `core-redirector.js` and `api-sandbox.js` run before the
+  bundle loads (`kn-state.js` is Stage 4's; its type is
+  `web/src/kn-state.ts`).
+- `ejs-loader.js` is EmulatorJS's loader with our boot hooks, injected by
+  the page when the emulator starts. It stays in the shape of the upstream
+  file it tracks.
+- `netplay-lockstep.js` is a deprecated shim: a `play.html` cached from
+  before the engine was renamed still asks for it, and it loads
+  `netplay-rollback.js` for that page. It is deleted once those cached pages
+  have expired, whatever the current pages load, and is not converted.
 
 **Open decisions**
 
