@@ -355,8 +355,12 @@ const onOpened = (place: Place, context: PeerContext, attempt: number): Step => 
   if (place === 'open') return stay(context);
   const reconnected = place === 'reconnecting' || place === 'reconnectingAnswering';
   return {
-    // The guest clears its per-peer input state; the host keeps its own (I2).
-    commands: reconnected && !lowerSlot(context) ? [{ type: 'reset', reason: 'reconnect' }] : [],
+    // Every page but the host clears its per-peer input state; the host keeps
+    // its own (I2). This goes by the page's slot, not by which of the pair
+    // offers: between two guests the lower slot offers and still resets, as
+    // the engine does (`_playerSlot !== 0`). In the model's pair the lower
+    // slot is the host, so the two rules agree there.
+    commands: reconnected && context.mySlot !== 0 ? [{ type: 'reset', reason: 'reconnect' }] : [],
     context: { ...context, tries: 0, answerDeadline: false },
     target: '#peer.open',
   };

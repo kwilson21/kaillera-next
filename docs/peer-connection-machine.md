@@ -62,6 +62,8 @@ flowchart LR
 An arrow reads `event (who, when) / commands`: the event or deadline, the page and phase it is taken
 in when the state can be met in more than one, and what the machine wants done (it does none of it
 itself). The walk is made as the lower slot and as the higher slot of a pair, before and in a match.
+The pair walked is the host (slot 0, the lower slot) and one guest. The `reset` on a reconnect goes by
+the page, not the pair: every page but the host issues it, so between two guests the lower slot does too.
 
 Not drawn, because every state it moves goes to `absent` on it: `left`.
 Not drawn, because every state it moves goes to `absent` on it: `matchEnded`.

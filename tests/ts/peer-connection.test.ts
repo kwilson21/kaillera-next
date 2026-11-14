@@ -102,9 +102,9 @@ const page = (mySlot: number, theirSlot: number, timing: PeerTiming = PEER_TIMIN
 type Page = ReturnType<typeof page>;
 
 /** The model's two pages. Signals travel only when the scenario delivers them. */
-const pair = (timing: PeerTiming = PEER_TIMING) => {
-  const lo = page(0, 1, timing);
-  const hi = page(1, 0, timing);
+const pair = (timing: PeerTiming = PEER_TIMING, loSlot = 0, hiSlot = 1) => {
+  const lo = page(loSlot, hiSlot, timing);
+  const hi = page(hiSlot, loSlot, timing);
   const other = (to: Page): Page => (to === lo ? hi : lo);
   return {
     lo,
@@ -133,8 +133,8 @@ const pair = (timing: PeerTiming = PEER_TIMING) => {
 };
 
 /** The model's `init`: the match is under way on connection 1. */
-const inMatch = (timing: PeerTiming = PEER_TIMING) => {
-  const p = pair(timing);
+const inMatch = (timing: PeerTiming = PEER_TIMING, loSlot = 0, hiSlot = 1) => {
+  const p = pair(timing, loSlot, hiSlot);
   p.lo.send({ type: 'roster' });
   p.hi.send({ type: 'roster' });
   p.offer(p.hi, 1, 'first');
@@ -297,6 +297,26 @@ test('a drop both pages notice: the guest comes back with its input state cleare
   assert.ok(bothOpenOn(2));
   assert.equal(peerFacts(hi.state()).reconnecting, false);
   assert.deepEqual([...lo.armed(), ...hi.armed()], []);
+});
+
+test('reconnectStartsClean between two guests: both clear their input state, the lower slot too', () => {
+  // The model has the host and one guest. Between slots 1 and 2 neither page
+  // is the host, and the engine resets on every page that is not.
+  const { lo, hi, offer, answer, opens, notice, bothOpenOn } = inMatch(PEER_TIMING, 1, 2);
+  notice(hi);
+  notice(lo);
+  lo.issued();
+  offer(hi, 2, 'reconnect');
+  hi.issued();
+  answer(lo, 2);
+  opens(hi);
+  assert.deepEqual(hi.issued(), [{ type: 'reset', reason: 'reconnect' }]);
+  opens(lo);
+  assert.deepEqual(lo.issued(), [
+    { type: 'applyAnswer', attempt: 2 },
+    { type: 'reset', reason: 'reconnect' },
+  ]);
+  assert.ok(bothOpenOn(2));
 });
 
 test('the guest gave up, then answers a reconnect offer: the give-up is armed (guestGaveUpThenAnswersTest)', () => {
