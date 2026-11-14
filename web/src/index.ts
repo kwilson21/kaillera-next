@@ -51,6 +51,7 @@ import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
+import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
 import {
   disconnectDisposition,
   hasAttemptLeft,
@@ -249,6 +250,8 @@ export const KNCore = {
   captureFrame,
   checkRelayed,
   createConnectTracker,
+  /** The per-peer connection machine (peer-connection.ts). Built, not yet run beside the engine. */
+  createPeerConnection,
   createSession,
   createStickDeadband,
   createSyncLogRing,
@@ -269,6 +272,8 @@ export const KNCore = {
   heldAsLateJoiner,
   meshHealTargets,
   normalizeAxis,
+  peerFacts,
+  peerTiming: PEER_TIMING,
   rosterKey,
   screenshotCrop,
   shouldInitiate,
