@@ -55,3 +55,7 @@ expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
+
+TICK=specs/tick_deadlines.qnt
+verify "$TICK" tick_deadlines_fixed ownFreezeIsNotHeldAgainstAPeer
+expect_violation "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer

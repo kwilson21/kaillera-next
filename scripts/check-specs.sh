@@ -78,3 +78,16 @@ done
 # each peer captured at the moment it flagged.
 $QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPicturesShowOneFrame \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── The tick loop's deadlines and a page that freezes ───────────────────────
+TICK=specs/tick_deadlines.qnt
+$QUINT typecheck "$TICK"
+for variant in tick_deadlines_current tick_deadlines_fixed; do
+  $QUINT test "$TICK" --main="$variant" --backend=typescript
+done
+# With a freeze credited to every deadline that drops a peer, a page's own
+# freeze is never held against its peer. VIOLATED by today's engine
+# (tick_deadlines_current): the pacing-throttle deadline is not credited.
+# Not fixed yet.
+$QUINT run "$TICK" --main=tick_deadlines_fixed --invariant=ownFreezeIsNotHeldAgainstAPeer \
+  --max-samples=20000 --max-steps=25 --backend=typescript
