@@ -91,9 +91,11 @@ verify "$FLOW" resync_flow_current allHold
 verify "$FLOW" resync_flow_any_answer holdWithoutNumbers
 expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
 expect_violation "$FLOW" resync_flow_any_answer onlyItsAnswerEndsARequest
-# The counterexample to aLateAnswerDoesNotTakeTheGuestBack on
-# resync_flow_any_answer is over ten steps long, beyond this bound;
-# lateAnswerTest holds it.
+# The counterexamples to aLateAnswerDoesNotTakeTheGuestBack and
+# theAwaitedAnswerIsNotLost on resync_flow_any_answer are over ten steps
+# long, beyond this bound; lateAnswerTest,
+# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
+# hold them.
 
 TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer

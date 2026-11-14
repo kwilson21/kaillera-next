@@ -556,7 +556,7 @@ def test_a_resync_request_that_is_out_has_a_deadline():
         assert snippet in check_src
     # Every site that sends a request stamps it: they all go through the one
     # function that sets the flag.
-    begin = src[src.index("const _beginResyncRequest = () => {") :]
+    begin = src[src.index("const _beginResyncRequest = (at = -1) => {") :]
     begin = begin[: begin.index("\n  };\n")]
     assert "_resyncRequestInFlight = true;\n    _resyncRequestSentAt = performance.now();" in begin
     assert src.count("_resyncRequestInFlight = true;") == 1
@@ -576,16 +576,29 @@ def test_a_resync_request_that_is_out_has_a_deadline():
 def test_every_resync_request_that_is_out_is_numbered():
     # specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST: a request has a number.
     src = LOCKSTEP_JS.read_text()
-    begin = src[src.index("const _beginResyncRequest = () => {") :]
+    begin = src[src.index("const _beginResyncRequest = (at = -1) => {") :]
     begin = begin[: begin.index("\n  };\n")]
-    for snippet in ("_resyncRequestInFlight = true;", "_resyncRequestId++;", "return _resyncRequestId;"):
+    for snippet in (
+        "_resyncRequestInFlight = true;",
+        "_resyncRequestId++;",
+        "_resyncRequestAt = at;",
+        "return _resyncRequestId;",
+    ):
         assert snippet in begin
     # The flag is set nowhere else, so a request that is out always has one.
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Seven sites ask: one over Socket.IO, six on a DataChannel.
-    assert src.count("_beginResyncRequest()") == 7
+    # Seven sites ask: one over Socket.IO, six on a DataChannel. The two that
+    # name a target frame give it to the request, which keeps it after the
+    # target's deadline (specs/resync_flow.qnt, askedAt).
+    assert src.count("_beginResyncRequest(") == 7
+    assert src.count("_beginResyncRequest()") == 5
+    assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
+    assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
+    assert "let _resyncRequestAt = -1;" in src
+    stop = src[src.index("const stopSync = () => {") :]
+    assert "_resyncRequestAt = -1;" in stop[: stop.index("\n  };\n")]
     socket_req = src[src.index("function _requestSocketFullResync(reason) {") :]
     socket_req = socket_req[: socket_req.index("\n  }\n")]
     assert "const requestId = _beginResyncRequest();" in socket_req
@@ -680,32 +693,75 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert "if (slot === 0) _hostNumbersAnswers = false;" in reset
 
 
-def test_a_late_answer_below_the_target_is_dropped():
-    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate).
+def test_a_late_answer_from_before_the_frame_asked_is_dropped():
+    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate),
+    # with lateAnswerAfterTheTargetDeadlineTest: the frame is the request's,
+    # not the live target, so the drop holds after the target's deadline too.
     src = LOCKSTEP_JS.read_text()
     assert (
         "const _answersAnOlderRequest = (answerFor) => answerFor > 0 && answerFor !== _resyncRequestId;"
     ) in src
+    late = src[src.index("const _isLateAnswerBeforeFrameAsked = (state) =>") :]
+    late = late[: late.index(";\n")]
+    assert "_answersAnOlderRequest(state.answerFor || 0)" in late
+    assert "_resyncRequestAt > 0 && state.frame < _resyncRequestAt" in late
+    assert "_syncTargetFrame" not in late
     tick = src[src.index("const tick = () => {") :]
-    at_target = tick[tick.index("if (_frameNum >= _syncTargetFrame) {") :]
-    at_target = at_target[: at_target.index("_chk('post-sync-target');")]
-    drop = (
-        "if (\n"
-        "          _pendingResyncState &&\n"
-        "          _answersAnOlderRequest(_pendingResyncState.answerFor || 0) &&\n"
-        "          _pendingResyncState.frame < _syncTargetFrame\n"
-        "        ) {"
-    )
-    assert drop in at_target
-    dropped = at_target[at_target.index(drop) :]
-    dropped = dropped[: dropped.index("\n        }\n")]
-    assert "SYNC-LATE-ANSWER-DROPPED f=${_frameNum} answerFor=${_pendingResyncState.answerFor} " in dropped
-    assert "newest=${_resyncRequestId} frame=${_pendingResyncState.frame} target=${_syncTargetFrame}" in dropped
+    drop_at = tick.index("if (_isLateAnswerBeforeFrameAsked(_pendingResyncState)) {")
+    dropped = tick[drop_at : tick.index("\n    }\n", drop_at)]
+    assert "SYNC-LATE-ANSWER-DROPPED f=${_frameNum}" in dropped
     assert "_pendingResyncState = null;" in dropped
     # The wait goes on: the target and its deadline are left as they are.
     assert "_syncTargetFrame = " not in dropped and "_syncTargetDeadlineAt" not in dropped
-    # Before anything is held or applied there.
-    assert at_target.index(drop) < at_target.index("_pendingResyncState.held = true;")
-    assert at_target.index(drop) < at_target.index("applySyncState(pending.bytes, pending.frame, pending.fromProactive);")
+    # After the target's deadline gives the target up, before either branch
+    # holds or applies anything.
+    assert tick.index("COORD-SYNC-TIMEOUT target=") < drop_at
+    assert drop_at < tick.index("const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;")
+    assert drop_at < tick.index("if (_frameNum >= _syncTargetFrame) {")
+    assert drop_at < tick.index("} else if (_pendingResyncState && !syncApplyBlocked) {")
     # The stale-state check stays.
     assert "explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}" in src
+
+
+def test_a_late_answer_does_not_replace_the_awaited_one():
+    # specs/resync_flow.qnt theAwaitedAnswerIsNotLost.
+    src = LOCKSTEP_JS.read_text()
+    keep = src[src.index("const _keepsAwaitedAnswer = (answerFor, frame) => {") :]
+    keep = keep[: keep.index("\n  };\n")]
+    assert (
+        "if (!_answersAnOlderRequest(answerFor) || _pendingResyncState?.answerFor !== _resyncRequestId) return false;"
+    ) in keep
+    assert "SYNC-LATE-ANSWER-IGNORED" in keep
+    payload = src[src.index("async function _handleDecodedSyncPayload({") :]
+    payload = payload[: payload.index("const handleSyncChunksComplete = async () => {")]
+    for pending in (
+        "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };",
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor };",
+    ):
+        at = payload.index(pending)
+        assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 200
+
+
+def test_a_stale_late_answer_keeps_the_lifecycle_guard():
+    # The guard belongs to the request that is out; the answer to an older
+    # request does not end it. The guard keeps its own 15 s timeout (I1).
+    src = LOCKSTEP_JS.read_text()
+    payload = src[src.index("async function _handleDecodedSyncPayload({") :]
+    payload = payload[: payload.index("const handleSyncChunksComplete = async () => {")]
+    assert "if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('regions sync stale');" in payload
+    assert "if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('explicit sync stale');" in payload
+    assert payload.count("_clearLifecycleResyncGuard(") == 2
+    assert "_clearLifecycleResyncGuard('lifecycle resync guard timeout');" in src
+
+
+def test_a_chunk_timeout_is_scoped_to_the_request_its_transfer_answers():
+    src = LOCKSTEP_JS.read_text()
+    start = src.index("if (e.data.startsWith('sync-start:')) {")
+    header = src[start : src.index("if (e.data.startsWith('sync-regions-start:')) {", start)]
+    assert "const transferAnswers = _syncAnswerFor;" in header
+    older = header.index("if (_answersAnOlderRequest(transferAnswers)) {")
+    branch = header[older : header.index("\n            }\n", older)]
+    assert "return;" in branch
+    assert "_resyncRequestInFlight" not in branch and "_requestSocketFullResync" not in branch
+    assert older < header.index("_resyncRequestInFlight = false;")
+    assert older < header.index("_requestSocketFullResync('sync-chunk-timeout');")

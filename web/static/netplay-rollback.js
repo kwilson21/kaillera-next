@@ -6363,11 +6363,17 @@
   // request as it always did, or the flag would only clear at its deadline.
   let _hostNumbersAnswers = false;
   let _syncAnswerFor = 0; // the request the state being assembled answers
+  // The frame the newest request named (-1 = it named none). A late answer
+  // from before it is dropped whether or not the target is still live: the
+  // target's deadline gives the target up, not the frame the guest asked at
+  // (specs/resync_flow.qnt, beforeTheFrameAsked).
+  let _resyncRequestAt = -1;
   const _requestIdFrom = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
-  const _beginResyncRequest = () => {
+  const _beginResyncRequest = (at = -1) => {
     _resyncRequestInFlight = true;
     _resyncRequestSentAt = performance.now();
     _resyncRequestId++;
+    _resyncRequestAt = at;
     return _resyncRequestId;
   };
   // The number travels in a message of its own, just ahead of the request on
@@ -6380,6 +6386,10 @@
   // Only its own answer ends a request (onlyItsAnswerEndsARequest).
   const _endsResyncRequest = (answerFor) => (answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers);
   const _answersAnOlderRequest = (answerFor) => answerFor > 0 && answerFor !== _resyncRequestId;
+  // A state answering an older request, from before the frame the newest one
+  // named: applied, it would take this guest back below that frame.
+  const _isLateAnswerBeforeFrameAsked = (state) =>
+    !!state && _answersAnOlderRequest(state.answerFor || 0) && _resyncRequestAt > 0 && state.frame < _resyncRequestAt;
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
@@ -8023,7 +8033,7 @@
           const _recoveryTarget = _frameNum + SYNC_COORD_DELTA;
           _syncTargetFrame = _recoveryTarget;
           _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
-          const _recoveryRequestId = _beginResyncRequest();
+          const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);
           try {
             const peerDc = _peers[remoteSid]?.dc;
             if (peerDc?.readyState === 'open') {
@@ -8612,8 +8622,8 @@
           const cooldownElapsed = now2 - _lastResyncTime;
           if (!_resyncRequestInFlight && cooldownElapsed > _resyncCooldownMs()) {
             _lastResyncTime = now2;
-            const _desyncRequestId = _beginResyncRequest();
             const _coordTarget = _frameNum + SYNC_COORD_DELTA;
+            const _desyncRequestId = _beginResyncRequest(_coordTarget);
             _syncTargetFrame = _coordTarget;
             _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
             _syncLog(
@@ -8769,9 +8779,21 @@
           _syncChunkSessionId++;
           if (_syncChunkTimeoutTimer) clearTimeout(_syncChunkTimeoutTimer);
           const sessionId = _syncChunkSessionId;
+          const transferAnswers = _syncAnswerFor;
           _syncChunkTimeoutTimer = setTimeout(() => {
             if (sessionId !== _syncChunkSessionId || _syncExpected <= 0) return;
             const received = _syncChunks.length;
+            if (_answersAnOlderRequest(transferAnswers)) {
+              // The transfer answered a request given up on: the newer one
+              // that is out keeps its own deadline and is not asked again.
+              _syncLog(
+                `sync chunks timeout: ${received}/${_syncExpected} for older request ${transferAnswers} ` +
+                  `(newest=${_resyncRequestId}) — dropped`,
+              );
+              _syncChunks = [];
+              _syncExpected = 0;
+              return;
+            }
             _syncLog(
               `sync chunks timeout: ${received}/${_syncExpected} chunks after ${SYNC_CHUNK_TIMEOUT_MS}ms — requesting socket full sync`,
             );
@@ -13266,6 +13288,7 @@
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
     _resyncRequestId = 0;
+    _resyncRequestAt = -1;
     _hostNumbersAnswers = false;
     _syncAnswerFor = 0;
     _lastAppliedSyncHostFrame = -1;
@@ -13920,25 +13943,23 @@
     // kn_set_frame then, so JS would rewind its frame counter while C kept
     // its own and finished the old replay over the new state (the peers
     // split from that frame). Hold the state until the replay finishes.
+    // The answer to a request given up on, from before the frame the newest
+    // request named: applied, it would take this guest back below that frame
+    // (specs/resync_flow.qnt, aLateAnswerDoesNotTakeTheGuestBack). Dropped
+    // here, before either branch below, so it is dropped after the target's
+    // deadline too (lateAnswerAfterTheTargetDeadlineTest). A wait at the
+    // target goes on, to that deadline (I1).
+    if (_isLateAnswerBeforeFrameAsked(_pendingResyncState)) {
+      _syncLog(
+        `SYNC-LATE-ANSWER-DROPPED f=${_frameNum} answerFor=${_pendingResyncState.answerFor} ` +
+          `newest=${_resyncRequestId} frame=${_pendingResyncState.frame} asked=${_resyncRequestAt} ` +
+          `target=${_syncTargetFrame}`,
+      );
+      _pendingResyncState = null;
+    }
     const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;
     if (_syncTargetFrame > 0) {
       if (_frameNum >= _syncTargetFrame) {
-        if (
-          _pendingResyncState &&
-          _answersAnOlderRequest(_pendingResyncState.answerFor || 0) &&
-          _pendingResyncState.frame < _syncTargetFrame
-        ) {
-          // The answer to a request given up on, from before the frame the
-          // newest request said to wait at: applied here it would take this
-          // guest back below that frame (specs/resync_flow.qnt,
-          // aLateAnswerDoesNotTakeTheGuestBack). Dropped; the wait goes on,
-          // to the target's deadline above (I1).
-          _syncLog(
-            `SYNC-LATE-ANSWER-DROPPED f=${_frameNum} answerFor=${_pendingResyncState.answerFor} ` +
-              `newest=${_resyncRequestId} frame=${_pendingResyncState.frame} target=${_syncTargetFrame}`,
-          );
-          _pendingResyncState = null;
-        }
         if (_pendingResyncState && syncApplyBlocked) {
           // Replay in flight: apply on a later tick (bounded, see above).
         } else if (
@@ -17325,6 +17346,18 @@
     return skipped;
   };
 
+  // The answer to the newest request is buffered: an older request's answer
+  // finishing its decode later (one over the socket, one over the channel)
+  // does not take its place (specs/resync_flow.qnt, theAwaitedAnswerIsNotLost).
+  const _keepsAwaitedAnswer = (answerFor, frame) => {
+    if (!_answersAnOlderRequest(answerFor) || _pendingResyncState?.answerFor !== _resyncRequestId) return false;
+    _syncLog(
+      `SYNC-LATE-ANSWER-IGNORED answerFor=${answerFor} frame=${frame} ` +
+        `kept=${_pendingResyncState.frame} newest=${_resyncRequestId}`,
+    );
+    return true;
+  };
+
   async function _handleDecodedSyncPayload({
     decompressed,
     frame,
@@ -17340,9 +17373,10 @@
       if (_endsResyncRequest(answerFor)) _resyncRequestInFlight = false;
       if (frame <= _lastAppliedSyncHostFrame) {
         _syncLog(`regions sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
-        _clearLifecycleResyncGuard('regions sync stale');
+        if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('regions sync stale');
         return;
       }
+      if (_keepsAwaitedAnswer(answerFor, frame)) return;
       _pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };
       _syncLog(`regions resync ready: ${Math.round(wireSize / 1024)}KB wire frame=${frame}`);
       return;
@@ -17400,9 +17434,12 @@
       // fast-path already jumped us forward — applying an older explicit would roll back).
       if (frame <= _lastAppliedSyncHostFrame) {
         _syncLog(`explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
-        _clearLifecycleResyncGuard('explicit sync stale');
+        // The guard belongs to the request that is out; the answer to an
+        // older one does not end it.
+        if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('explicit sync stale');
         return;
       }
+      if (_keepsAwaitedAnswer(answerFor, frame)) return;
       _pendingResyncState = { bytes: fullBytes, frame, answerFor };
       _syncLog(
         `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +

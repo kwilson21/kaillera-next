@@ -147,10 +147,13 @@ done
 # the guest never asked again. These held before requests were numbered too.
 $QUINT run "$FLOW" --main=resync_flow_any_answer --invariant=holdWithoutNumbers \
   --max-samples=20000 --max-steps=25 --backend=typescript
-# And only its own answer ends a request, and a late answer does not take
-# the guest back below the frame it was told to wait at. Both were violated
-# before a request had a number its answer carries (resync_flow_any_answer;
-# lateAnswerTest holds the ordering).
+# And only its own answer ends a request, a late answer does not take the
+# guest back below the frame its newest request named (at the target or
+# after the target's deadline), and a late answer does not take the place of
+# the awaited one. All three were violated before a request had a number its
+# answer carries (resync_flow_any_answer; lateAnswerTest,
+# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
+# hold the orderings).
 $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
