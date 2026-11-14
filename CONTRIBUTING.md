@@ -137,7 +137,7 @@ earlier ones to have set up their `window.*` exports:
 12. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
 13. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
 14. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
-15. `controller-settings.js` — in-game controller settings panel
+15. `controller-settings.js` — starts the in-game controller settings panel (logic in `web/src/page/controller-settings/`)
 16. `play.js` — page orchestrator (connects everything)
 17. `version.js` — version display + changelog modal
 18. `feedback.js` — in-app feedback collection
@@ -181,7 +181,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `web/src/page/shared.ts` (in `dist/kn-core.js`)          | ~650    | `window.KNShared`: input encoding/decoding, N64 button map, cheat codes, wire format                                                                                                   | rollback, streaming                                         |
 | `web/src/page/gamepad-manager.ts` (in `dist/kn-core.js`) | ~570    | Profile-based gamepad detection, deadzone, analog mapping (`window.GamepadManager`)                                                                                                    | play.js, KNState                                            |
 | `switch2-usb.js`                                         | ~250    | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line                                                                           | play.html                                                   |
-| `controller-settings.js`                                 | ~980    | In-game controller settings panel (deadzone, sensitivity, profiles)                                                                                                                    | play.js, gamepad-manager                                    |
+| `controller-settings.js`                                 | —       | Starts the in-game controller settings panel (deadzone, sensitivity, profiles); the logic is `web/src/page/controller-settings/`                                                       | play.js, gamepad-manager                                    |
 | `virtual-gamepad.js`                                     | ~1,194  | On-screen touch controls for mobile                                                                                                                                                    | KNState                                                     |
 | `kn-audio.js`                                            | —       | AudioWorklet pump + rollback audio capture                                                                                                                                             | rollback, play.js                                           |
 | `kn-vision-client.js`                                    | —       | Claude vision client for screenshot-diff desync analysis                                                                                                                               | rollback                                                    |
