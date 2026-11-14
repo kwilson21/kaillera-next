@@ -92,11 +92,11 @@ kaillera-next/
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
-│       ├── netplay-streaming.js # streaming engine (host video → guests)
+│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming
 │       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
-│       ├── controller-settings.js # in-game controller settings panel
+│       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
-│       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
+│       ├── kn-audio.js          # starts the engine's audio pipeline (window.KNAudio) from web/src/page/audio.ts
 │       ├── kn-capture.js        # starts the diagnostic-image capture policy (window.KNCapture) from web/src/page/capture.ts
 │       ├── kn-vision-client.js  # starts the desync-vision client (window.KNVision) from web/src/page/vision-client.ts
 │       ├── api-sandbox.js       # save/restore native browser APIs
@@ -109,15 +109,16 @@ kaillera-next/
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD
 │       ├── feedback.js          # in-app feedback collection
 │       ├── version.js           # version display + changelog modal
-│       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)
+│       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
-│       ├── dist/kn-core.js       # built from web/src by `just build`; committed, never edited by hand
+│       ├── dist/kn-core.js       # built from web/src by `npm run build`; build output, not in git (the Docker image and CI build it)
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
 │       ├── dist/kn-join.js       # the invite page's own small bundle: room lookup, full/closed/in-app states
-│       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage
+│       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage, window.KNSite
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
+│   │   ├── poll.ts              # looking again at intervals as Effect code: a bounded poll and a repeating one (emulator boot, gamepad hot-plug)
 │   │   ├── kn-state.ts          # cross-module shared state: the type and starting values of window.KNState, set by the bundle
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
 │   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
@@ -125,8 +126,9 @@ kaillera-next/
 │   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); not wired into the engine yet
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
+│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing)
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
-│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage)
+│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
 │   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (join.ts: the invite page; wake.ts, wire.ts: shared)
 │   │   ├── join-entry.ts        # kn-join.js bundle entry
@@ -210,9 +212,10 @@ All events go through the default Socket.IO namespace (`/`).
   emulator; the C-level GGPO-style rollback engine (`build/kn_rollback/kn_rollback.c`)
   predicts remote inputs, advances locally, and replays via state ring buffer +
   amortized restore on misprediction. Cross-platform determinism via SoftFloat FPU.
-  Strict lockstep is the silent stall fallback inside the same engine (boot
-  convergence, menu phase-lock gate) and the path used when the core does not
-  export `kn_pre_tick`. Menu lockstep gate reads `game_status` from RDRAM.
+  Rollback runs on every screen, menus included; nothing in the engine's tick
+  depends on the scene the game is showing. Strict lockstep is the path used
+  when the core does not export `kn_pre_tick` (or the C engine was disabled
+  after repeated throws).
   Host-authoritative resync remains as fallback for reconnection and late join.
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
   video via WebRTC MediaStream. Guests send input back over DataChannel.
@@ -321,9 +324,13 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   engine call `window.KNCore` without a fallback. `window.KNShared` is
   defined by the bundle too (`web/src/page/shared.ts`); tests import that
   module directly instead of loading a script outside a page.
-  After changing `web/src`, run `just build` and commit
-  `web/static/dist/kn-core.js`; CI fails if it is stale. Migration stages are
-  in `docs/roadmap.md`. A module moves from observing to deciding only after
+  The bundles in `web/static/dist` are build output and are not in git: run
+  `npm ci` once and `npm run build` after a fresh checkout and after changing
+  `web/src`, before starting the server or any browser test (the server logs
+  an error at startup when the core bundle is missing). Never commit them.
+  The Docker image, CI and the landing and demo builds build them from
+  `package-lock.json`, so the bytes are the same everywhere. Migration stages
+  are in `docs/roadmap.md`. A module moves from observing to deciding only after
   production shows it agrees with the code it replaces.
 - **Model and prove before you patch state logic.** This applies to plans
   as much as to code: a plan for anything involving state, ordering or

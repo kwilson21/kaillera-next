@@ -198,9 +198,16 @@ static host (Cloudflare Pages / Worker)   game server (Render)
 **Redeploying**, after any change to the landing pages or `worker.js`:
 
 ```sh
-python scripts/build_landing.py
+git pull                                         # the same commit the server runs
+npm ci                                           # the versions in package-lock.json
+python scripts/build_landing.py                  # builds the TypeScript bundles first
 npx wrangler deploy -c wrangler.landing.jsonc   # keeps the route and secrets
 ```
+
+The pages' TypeScript bundles (`web/static/dist`) are build output, not in
+git. `build_landing.py` builds them, and the server's image builds them too;
+both use `package-lock.json`, so the bytes and therefore the build ids match.
+A build from a different commit or with other installed versions does not.
 
 The route was added and both proxy secrets were set once, on first-time
 setup (2026-09-26). Secrets persist across `wrangler deploy`, so a routine

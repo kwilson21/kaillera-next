@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import vm from 'node:vm';
-
-const source = readFileSync(new URL('../../web/static/version-guard.js', import.meta.url), 'utf8');
+import { startVersionGuard, type MismatchReport } from '../../web/src/site/version-guard.ts';
 
 interface Page {
   /** Run the guard's version check as a regained focus does. */
@@ -17,24 +15,22 @@ const loadGuard = (state: { gameOn?: () => boolean } | undefined, hidden = false
   const listeners = new Map<string, () => void>();
   const actions: string[] = [];
   let reloads = 0;
-  const window = {
+  startVersionGuard({
     KNState: state,
-    KNEvent: (_type: string, _line: string, meta: { action: string }) => actions.push(meta.action),
+    KNEvent: (_type: string, _line: string, meta: MismatchReport) => actions.push(meta.action),
     addEventListener: (name: string, fn: () => void) => listeners.set(name, fn),
     location: { reload: () => reloads++, href: '' },
-  };
-  const context = vm.createContext({
-    window,
     document: { hidden, querySelector: () => ({ getAttribute: () => 'old' }) },
     fetch: () => Promise.resolve({ ok: true, json: () => Promise.resolve({ version: 'new' }) }),
     console: { warn: () => undefined },
-    setInterval: () => 0,
+    setInterval: () => undefined,
     setTimeout: (fn: () => void) => fn(),
   });
-  vm.runInContext(source, context);
   return {
     focus: async () => {
-      await listeners.get('focus')?.();
+      listeners.get('focus')?.();
+      // The check is a fetch and a json(), both already settled.
+      for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
     },
     reloads: () => reloads,
     actions,

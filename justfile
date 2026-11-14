@@ -36,7 +36,8 @@ lint-js:
 # Install dev dependencies
 setup:
     uv pip install -e "server/[dev]"
-    npm install --no-package-lock
+    npm ci
+    npm run --silent build
     uv tool install pre-commit
     pre-commit install
 

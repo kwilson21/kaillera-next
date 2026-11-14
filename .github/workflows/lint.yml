@@ -1,5 +1,11 @@
 name: Lint, types, specs and proofs
 on:
+  # Main itself is checked after every merge: two pull requests that were
+  # each green on the main they last merged in can still break it together.
+  push:
+    branches: [main]
+  # Lets a merge queue run these checks, if one is ever switched on.
+  merge_group:
   pull_request:
     paths:
       - '.github/workflows/lint.yml'
@@ -10,6 +16,9 @@ on:
       - 'tools/oxlint/**'
       - 'scripts/check-specs.sh'
       - 'package.json'
+      - 'package-lock.json'
+      - 'Dockerfile'
+      - '.dockerignore'
       - 'tsconfig.json'
       - 'LemmaScript-files.txt'
       - 'scripts/build-web.mjs'
@@ -32,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install pinned tools
-        run: npm install --ignore-scripts --no-package-lock
+        run: npm ci --ignore-scripts
       - name: Format check (oxfmt)
         run: npm run fmt:check
       - name: Lint (oxlint + anti-slop, Biome)
@@ -47,8 +56,8 @@ jobs:
       # a simulated SSB64 menu at every input delay the engine can set.
       - name: Menu autopilot against a simulated menu
         run: node --test tests/ssb64-menu-autopilot.test.mjs
-      - name: Committed bundle matches web/src
-        run: npm run build:check
+      - name: Bundles build from web/src
+        run: npm run build
       - name: Machine diagram matches web/src/session.ts
         run: npm run diagram:check
       - name: Spec scenario diagrams match the specs
@@ -66,7 +75,7 @@ jobs:
       - uses: actions/checkout@v7
       # Apalache needs Java 17+, which the runner image already has.
       - name: Install pinned tools
-        run: npm install --ignore-scripts --no-package-lock
+        run: npm ci --ignore-scripts
       - name: Verify specs for every run up to 6 steps
         run: npm run spec:verify
 
@@ -79,7 +88,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install pinned tools
-        run: npm install --ignore-scripts --no-package-lock
+        run: npm ci --ignore-scripts
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
@@ -159,3 +168,34 @@ jobs:
         run: |
           uv run --directory server --frozen --extra dev pytest -p no:playwright -q \
             --confcutdir ../tests/hash-golden ../tests/hash-golden
+
+  # The production image builds the TypeScript bundles itself (Dockerfile,
+  # stage `web`). This builds the image as Render and the VPS do, and checks
+  # that its bundles are byte-for-byte the ones `npm run build` gives here:
+  # the landing Worker is built outside the image and its build id must match
+  # the server's (server/src/landing_build.py).
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the image
+        run: docker build -t kaillera-next:ci .
+      - name: Bundles in the image
+        run: |
+          docker run --rm --entrypoint sh kaillera-next:ci -c \
+            'cd /app/web/static/dist && sha256sum kn-core.js kn-join.js kn-site.js kn-wake-art.js' > image.sha
+          cat image.sha
+      - name: Bundles built here
+        run: |
+          npm ci --ignore-scripts --omit=dev
+          npm run build
+          (cd web/static/dist && sha256sum kn-core.js kn-join.js kn-site.js kn-wake-art.js) > local.sha
+          diff image.sha local.sha
+      - name: The image serves the play page with its bundle
+        run: |
+          docker run -d --name kn -p 27888:27888 -e ADMIN_KEY=ci -e DISABLE_HTTPS=1 kaillera-next:ci
+          for i in $(seq 1 30); do curl -fsS http://localhost:27888/health && break; sleep 1; done
+          curl -fsS http://localhost:27888/static/dist/kn-core.js -o /dev/null
+          curl -fsS http://localhost:27888/api/landing-build
+          docker logs kn | tail -20

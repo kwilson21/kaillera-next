@@ -313,9 +313,11 @@ The scripts themselves are TypeScript too (#170 to #174): `kn-state.js`,
 right after `storage.js`. The JavaScript fallbacks are deleted; the tests
 import the TypeScript.
 
-Not done: the gamepad manager's poll loop and the two polling loops in
-`page/shared.ts` (`waitForEmulator`, `disableEJSInput`) are ported as they
-were, bare timers, not Effect code.
+The three waits that were bare timers are Effect code (`web/src/poll.ts`):
+the gamepad manager's hot-plug poll, and `waitForEmulator` and
+`disableEJSInput` in `page/shared.ts`. Each still looks first in the call
+that starts it and then every 200 ms (500 ms for the pads), for the same
+number of looks as before.
 
 **Stage 5: the engine**
 `netplay-rollback.js` (18k lines) is split by concern into typed modules:
@@ -423,9 +425,15 @@ Staying plain JavaScript:
 
 - `@xstate/effect` requires XState 6, which is in beta. Both are pinned to
   exact versions. Revisit when XState 6 is stable.
-- The bundle is 493 KB minified (162 KB gzipped), mostly Effect. It is
-  committed so that deploys need no Node step. Moving the build into the
-  Docker image is the alternative once the bundle changes often.
+- The bundle is mostly Effect. It was committed at first so that deploys
+  needed no Node step; with several branches changing `web/src` at once,
+  every merge put the committed file in conflict with every other open
+  branch. It is now build output (`web/static/dist` is git-ignored): the
+  Docker image builds it in a Node stage, CI builds it, and
+  `scripts/build_landing.py` / `scripts/build_demo.py` build it before
+  packaging. `package-lock.json` is committed so every build gives the same
+  bytes, which the landing build id depends on; CI's `image` job compares
+  the image's bundles with a local build.
 - The database stays on Cloudflare D1 (SQLite locally). Queries are built with
   SQLAlchemy from the model classes in `server/src/schema.py` and compiled to
   SQL for the existing backends; SQLAlchemy never opens a connection.
