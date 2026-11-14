@@ -6,7 +6,7 @@
  * no driver for that interface, so nothing else ever sends it. Once the
  * handshake is done the HID interface streams reports and the pad appears in
  * navigator.getGamepads() like any other; the 'Switch 2 Pro' profile in
- * gamepad-manager.js does the rest. The controller forgets the handshake on
+ * web/src/page/gamepad-manager.ts does the rest. The controller forgets the handshake on
  * every power cycle, so it is re-sent whenever the device (re)connects.
  *
  * Chrome needs one click and its device chooser to grant USB access. After that
