@@ -31,7 +31,20 @@ def test_no_caller_runs_before_its_bundle(page, server_url, room, path):
     page.wait_for_timeout(1000)
     assert page.evaluate("typeof window.KNSite.startVersionGuard") == "function"
     assert page.evaluate("typeof window.KNSite.startVersion") == "function"
-    assert [e for e in errors if "KNSite" in e or "startVersion" in e] == []
+    assert page.evaluate("typeof window.KNSite.startFeedback") == "function"
+    assert [e for e in errors if "KNSite" in e or "startVersion" in e or "startFeedback" in e] == []
+
+
+@pytest.mark.parametrize("path", [FRONT, PLAY])
+def test_the_feedback_api_keeps_its_shape(page, server_url, room, path):
+    """play.js calls window.KNFeedback.prompt after a game."""
+    page.goto(_url(server_url, path, room))
+    page.wait_for_selector(".kn-feedback-fab", state="attached", timeout=10000)
+    assert page.evaluate("Object.keys(window.KNFeedback)") == ["prompt", "open"]
+    page.evaluate("window.KNFeedback.prompt()")
+    page.locator(".kn-feedback-session-prompt a").click()
+    page.locator(".kn-feedback-backdrop.open").wait_for(state="visible", timeout=5000)
+    assert page.evaluate("document.activeElement.id") == "kn-fb-message"
 
 
 @pytest.mark.parametrize("path", [FRONT, PLAY])
