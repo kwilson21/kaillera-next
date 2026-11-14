@@ -97,6 +97,8 @@ verify "$RESYNC" resync_inputs_current allHold
 # again) is over 15 steps long, beyond this bound;
 # guestMovedOverInputsItMadeBeforeTest holds it and check-specs.sh's samples
 # reach it.
+# The no-refeed counterexample is over 13 steps long, beyond this bound;
+# guestMovedOverAnInputItsEngineWroteOverTest holds it.
 # The solo-holes counterexample (run alone past the limit, then resync) is 9
 # steps long, beyond this bound; hostRanAloneThenResyncsTest holds it.
 # The counterexample on resync_inputs_before is 10 steps long (the host has to

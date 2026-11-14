@@ -53,6 +53,16 @@
 //   forward again) may have been dropped by the host as out of range, and
 //   nothing sent it again (found by the sampler in CI, 2026-11).
 //
+// REFEED_OWN_AT_RESYNC: at a resync the guest hands its engine every input of
+//   its own from F - DELAY up to F again. false = as first written: only the
+//   ones it had never made. The engine keeps a page's inputs in a ring (256
+//   frames; RING here). A guest that ran further ahead than that before it
+//   was taken back has written over the slot of an input it made earlier.
+//   Moved forward again over that frame, it sent the input to the host and
+//   applied nothing for it itself (review finding on the resend, 2026-11;
+//   the likely cause of a desync an earlier attempt at the resend saw in 2
+//   of 8 freeze runs).
+//
 // KEEP_OWN_INPUT_WHEN_ALONE: a page that has given up on the other keeps its
 //   own input for every frame it runs alone. false = before: it had run out
 //   of prediction room when it gave up, the engine's pacing gate stayed shut,
@@ -65,6 +75,7 @@ module resync_inputs {
   const SETTLE_AT_RESYNC: bool
   const KEEP_OWN_INPUT_WHEN_ALONE: bool
   const RESEND_OWN_AT_RESYNC: bool
+  const REFEED_OWN_AT_RESYNC: bool
 
   pure val DELAY = 1
   pure val CAP = 2
@@ -72,6 +83,10 @@ module resync_inputs {
   // Wide enough that a page that has not been given up on never trips it.
   pure val MARGIN = 2
   pure val LAST_FRAME = 9
+  // How many of its own inputs a page's engine holds: making the input for
+  // frame f writes over the one for f - RING. Wide enough to hold every
+  // input a page can still apply or roll back to (DELAY + CAP + 1).
+  pure val RING = 4
 
   pure val PAGES = Set("host", "guest")
   pure def other(p: str): str = if (p == "host") "guest" else "host"
@@ -136,7 +151,8 @@ module resync_inputs {
         ...pg,
         frame: pg.frame + 1,
         made: pg.made.union(Set(pg.frame)),
-        kept: if (pg.alone and pg.capped and not(KEEP_OWN_INPUT_WHEN_ALONE)) pg.kept else pg.kept.union(Set(pg.frame)),
+        kept: if (pg.alone and pg.capped and not(KEEP_OWN_INPUT_WHEN_ALONE)) pg.kept
+          else pg.kept.union(Set(pg.frame)).exclude(Set(pg.frame - RING)),
       }),
       wire' = wire.union(Set({ dest: other(p), key: pg.frame })),
       resyncDue' = resyncDue,
@@ -194,7 +210,8 @@ module resync_inputs {
         "host" -> { ...h, floor: settled, alone: false, capped: false },
         "guest" -> {
           ...g, frame: f, floor: settled, alone: false, capped: false,
-          made: g.made.union(skipped), kept: g.kept.union(skipped),
+          made: g.made.union(skipped),
+          kept: g.kept.union(if (REFEED_OWN_AT_RESYNC) keysFrom(settled, f) else skipped),
         },
       ) else Map(
         "host" -> { ...h, alone: false, capped: false },
@@ -240,12 +257,17 @@ module resync_inputs {
     resyncDue or wire != Set() or PAGES.exists(p => not(waits(pages.get(p))))
 
   // A page applies for itself what it sent the other: every input of its own
-  // that is still to be applied after the last resync is in its engine.
-  // Violated while a page that ran alone did not keep its own inputs.
+  // that it can still apply or roll back to (not settled, keyed within
+  // DELAY + CAP of its frame, and before the frame it will make next) is in
+  // its engine.
+  // Violated while a page that ran alone did not keep its own inputs, and
+  // while a resync did not hand the engine the inputs the guest already had.
   val aPageAppliesWhatItSent =
     resyncDue or PAGES.forall(p => {
       val pg = pages.get(p)
-      pg.made.forall(k => k >= pg.floor implies pg.kept.contains(k))
+      pg.made.forall(k =>
+        (k >= pg.floor and k >= pg.frame - DELAY - CAP and k < pg.frame) implies pg.kept.contains(k)
+      )
     })
 
   val allHold = and { noWaitForAnInputThatCannotArrive, neverBothWaitingOnNothing, aPageAppliesWhatItSent }
@@ -357,12 +379,34 @@ module resync_inputs {
       // still roll back to.
       .expect(SETTLE_AT_RESYNC implies (waitsOnGap(pages.get("host")) == not(RESEND_OWN_AT_RESYNC)))
       .expect(SETTLE_AT_RESYNC implies (noWaitForAnInputThatCannotArrive == RESEND_OWN_AT_RESYNC))
+  // The ring. The guest runs alone until its engine has written over its
+  // input 2, is taken back to the host, and is then moved forward to frame
+  // 3: input 2 is still to be applied, the guest made it long ago, and its
+  // engine no longer holds it.
+  run guestMovedOverAnInputItsEngineWroteOverTest =
+    init
+      .then(3.reps(_ => tick("guest")))
+      .then(giveUp("guest"))
+      .then(4.reps(_ => tick("guest")))
+      // (A page that keeps nothing while alone has not written over it either.)
+      .expect(KEEP_OWN_INPUT_WHEN_ALONE implies not(pages.get("guest").kept.contains(2)))
+      .then(drain)
+      .then(resync)
+      .expect(pages.get("guest").frame == 0)
+      .then(3.reps(_ => tick("host")))
+      .then(giveUp("host"))
+      .then(resync)
+      .expect(pages.get("guest").frame == 3)
+      .expect(
+        (SETTLE_AT_RESYNC and KEEP_OWN_INPUT_WHEN_ALONE) implies (aPageAppliesWhatItSent == REFEED_OWN_AT_RESYNC)
+      )
 }
 
 // Before: a resync changed the guest's frame counter and nothing else.
 module resync_inputs_before {
   import resync_inputs(
-    SETTLE_AT_RESYNC = false, KEEP_OWN_INPUT_WHEN_ALONE = false, RESEND_OWN_AT_RESYNC = false
+    SETTLE_AT_RESYNC = false, KEEP_OWN_INPUT_WHEN_ALONE = false,
+    RESEND_OWN_AT_RESYNC = false, REFEED_OWN_AT_RESYNC = false
   ).*
 }
 
@@ -370,20 +414,32 @@ module resync_inputs_before {
 // still not keeping its own inputs.
 module resync_inputs_solo_holes {
   import resync_inputs(
-    SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = false, RESEND_OWN_AT_RESYNC = true
+    SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = false,
+    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = true
   ).*
 }
 
 // The settle as first written: the guest sent only the inputs it had never made.
 module resync_inputs_only_new {
   import resync_inputs(
-    SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true, RESEND_OWN_AT_RESYNC = false
+    SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true,
+    RESEND_OWN_AT_RESYNC = false, REFEED_OWN_AT_RESYNC = true
+  ).*
+}
+
+// The resend without the refeed: the guest sent the host an input its own
+// engine no longer held.
+module resync_inputs_no_refeed {
+  import resync_inputs(
+    SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true,
+    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = false
   ).*
 }
 
 // Today.
 module resync_inputs_current {
   import resync_inputs(
-    SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true, RESEND_OWN_AT_RESYNC = true
+    SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true,
+    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = true
   ).*
 }
