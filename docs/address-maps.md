@@ -50,7 +50,8 @@ which fields mean anything in a given frame.
 
    Every 30 frames each page reads the map's fields from RAM, and the run
    fails unless, on both peers, the scene byte read the character select and
-   then the battle, the character ids are the fighters picked, stock counts
+   then the battle, the character ids are the fighters picked, the battle
+   header's status says the match gets under way and stays so, stock counts
    are plausible, the battle header is not empty, the RNG seed moves and the
    fighter-buffer pointer, once set, points into RAM. The checks and what they read are
    printed, and written to `summary.json` as `addressMapCheck`.
@@ -82,6 +83,26 @@ which fields mean anything in a given frame.
    addresses read the values the dump was taken at: the scene number, the
    stock counts on screen. That is what keeps the map right when someone
    edits it later.
+
+## The trap this procedure exists for
+
+SSB64 keeps two copies of its battle state. For two years of this project
+the addresses named the one the game only uses for sudden death. Everything
+about it looked right: it is where the decompilation says a battle state
+is, its values are in range, and two healthy peers always agreed about it.
+They agreed because it never changes during a normal match: its status
+reads 0 and every stock count reads 0, start to finish. A detector reading
+it stays quiet on a healthy match and on a desynced one alike, and a test
+that changes a byte *at the mapped address* and sees it flagged proves only
+that the plumbing works.
+
+Two things in the steps above catch this, and neither is optional:
+
+- the verifier's status check (step 3): the mapped battle state has to say
+  a match is under way;
+- watching the values, not just their range: over a match the stock counts
+  printed by step 3 must move when fighters are KO'd. `0/0` for a whole
+  match is the dormant copy.
 
 ## What these steps do not show
 

@@ -179,12 +179,13 @@ extern void*    kn_get_rdram_ptr(void);
 extern uint32_t kn_get_rdram_size(void);
 
 /* ── The address map (see kn_hash_registry.h) ────────────────────────
- * Defaults are SSB64 US, from kn_gameplay_addrs.h. */
+ * Defaults are SSB64 US, from kn_gameplay_addrs.h; the battle state is the
+ * live copy (see the note there on the two copies). */
 static uint32_t s_map[KN_MAP_COUNT] = {
-    [KN_MAP_STOCKS_BASE]           = KN_ADDR_PLAYER_STOCKS_BASE,
+    [KN_MAP_STOCKS_BASE]           = KN_ADDR_LIVE_PLAYER_STOCKS_BASE,
     [KN_MAP_PLAYER_STRIDE]         = KN_PLAYER_STRIDE,
     [KN_MAP_SCENE_CURR]            = KN_ADDR_SCENE_CURR,
-    [KN_MAP_VS_BATTLE_HEADER]      = KN_ADDR_VS_BATTLE_HEADER,
+    [KN_MAP_VS_BATTLE_HEADER]      = KN_ADDR_LIVE_BATTLE_HEADER,
     [KN_MAP_VS_BATTLE_HEADER_SIZE] = KN_SIZE_VS_BATTLE_HEADER,
     [KN_MAP_RNG_SEED]              = KN_ADDR_SY_UTILS_RANDOM_SEED,
     [KN_MAP_CSS_BASE]              = KN_ADDR_P1_CSS_BASE,

@@ -1,11 +1,10 @@
 """The page lifecycle machine's reports must reach the database.
 
-The machine in web/src/session.ts observes before it decides: it reports
-`session-disagree` and `late-join-stranded` as client events, and it takes
-over from play.js only once production shows no disagreement. The server
+The machine in web/src/session.ts reports `late-join-stranded`, and the
+observers beside it report disagreements, as client events. The server
 accepts a fixed list of event types and answers 400 to anything else, so a
 report type missing from that list is dropped without a trace, and "no
-reports" would be read as "no disagreement".
+reports" would be read as "nothing to report".
 
 Run: cd server && uv run pytest ../tests/test_session_reports.py -v
 """
@@ -18,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 SESSION_TS = Path(__file__).parent.parent / "web" / "src" / "session.ts"
+SOCKET_BOUNDARY_TS = SESSION_TS.parent / "socket-boundary.ts"
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -27,14 +27,21 @@ def _patch_browser_ssl():
 
 
 def _report_types() -> list[str]:
-    """The `type` literals of the SessionReport union in session.ts."""
+    """The `type` literals of the SessionReport union in session.ts, and of
+    the socket boundary's ProtocolReport."""
     source = SESSION_TS.read_text()
     union = source[source.index("export type SessionReport") : source.index("/** Where reports go.")]
-    return re.findall(r"readonly type: '([^']+)'", union)
+    boundary = SOCKET_BOUNDARY_TS.read_text()
+    report = boundary[boundary.index("export type ProtocolReport") :]
+    report = report[: report.index("};")]
+    observe = (SESSION_TS.parent / "play" / "observe.ts").read_text()
+    disagree = observe[observe.index("export type DisagreeReport") :]
+    disagree = disagree[: disagree.index("};")]
+    return re.findall(r"readonly type: '([^']+)'", union + report + disagree)
 
 
 def test_the_union_is_found():
-    assert set(_report_types()) >= {"session-disagree", "late-join-stranded"}
+    assert set(_report_types()) >= {"late-join-stranded", "protocol-mismatch", "play-disagree"}
 
 
 @pytest.mark.parametrize("report_type", _report_types())

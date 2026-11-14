@@ -18,7 +18,10 @@ import {
   decodeStartGamePayload,
   decodeTokenMessage,
   decodeUsersUpdated,
+  GameMode,
   RoomStatus,
+  serverEvents,
+  UsersUpdated,
 } from '../../web/src/protocol.ts';
 import { KNCore } from '../../web/src/index.ts';
 
@@ -93,7 +96,7 @@ const gameStarted = {
   matchId: MATCH_ID,
 };
 
-const joinAck = { ...usersUpdated, rom_hash: ROM_HASH, rom_sharing: false };
+const joinAck = { ...usersUpdated, rom_hash: ROM_HASH, rom_sharing: false, matchId: null };
 
 const without = <T extends object, K extends keyof T>(payload: T, key: K): Omit<T, K> => {
   const { [key]: _dropped, ...rest } = payload;
@@ -161,10 +164,11 @@ test('game-ended decodes with and without a match id, and rejects a missing key'
   assert.ok(Result.isFailure(decodeGameEnded({ matchId: 7 })));
 });
 
-test('the join-room ack decodes in the lobby (no matchId key) and mid-match', () => {
+test('the join-room ack decodes in the lobby (null matchId) and mid-match', () => {
   const lobby = decodeJoinRoomAck(joinAck);
   assert.ok(Result.isSuccess(lobby));
-  if (Result.isSuccess(lobby)) assert.equal(lobby.success.matchId, undefined);
+  if (Result.isSuccess(lobby)) assert.equal(lobby.success.matchId, null);
+  assert.ok(Result.isFailure(decodeJoinRoomAck(without(joinAck, 'matchId'))));
   const playing = decodeJoinRoomAck({ ...joinAck, status: 'playing', matchId: MATCH_ID });
   assert.ok(Result.isSuccess(playing));
   if (Result.isSuccess(playing)) assert.equal(playing.success.matchId, MATCH_ID);
@@ -191,6 +195,26 @@ test("the server's own webrtc-signal and the session-log ack decode", () => {
   assert.ok(Result.isSuccess(decodeSessionLogAck({ lastSeq: 41, auditLastSeq: -1 })));
   assert.ok(Result.isFailure(decodeSessionLogAck({ lastSeq: 41 })));
   assert.ok(Result.isFailure(decodeSessionLogAck(null)));
+});
+
+test('a room mode is one of the two modes, or null before one is picked', () => {
+  assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: 'streaming' })));
+  assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: null })));
+  assert.ok(Result.isFailure(decodeUsersUpdated({ ...usersUpdated, mode: 'lockstep' })));
+  assert.deepEqual(GameMode.literals, ['rollback', 'streaming']);
+});
+
+test('serverEvents maps each server-authored event to its schema, relays left out', () => {
+  assert.deepEqual(Object.keys(serverEvents).sort(), [
+    'game-ended',
+    'game-started',
+    'reconnect-token',
+    'rom-sharing-updated',
+    'upload-token',
+    'users-updated',
+  ]);
+  assert.equal(serverEvents['users-updated'], UsersUpdated);
+  assert.ok(!('webrtc-signal' in serverEvents));
 });
 
 test('RoomStatus keeps its two values for the lifecycle machine', () => {
