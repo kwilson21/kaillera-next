@@ -10,9 +10,10 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-globalThis.window = globalThis;
-await import(path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/static/shared.js'));
-const { createSyncLogRing } = globalThis.KNShared;
+const { createShared } = await import(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/src/page/shared.ts')
+);
+const { createSyncLogRing } = createShared();
 
 test('entriesAfter returns nothing on an empty ring', () => {
   const ring = createSyncLogRing(10);
