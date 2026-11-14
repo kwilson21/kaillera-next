@@ -14155,6 +14155,10 @@
             _syncLog('PACING-THROTTLE released — all peers phantom');
           }
         }
+        // With nobody left to be ahead of there is no advantage. Left at its
+        // last value it kept the C engine's pacing gate shut for the whole
+        // time this page ran alone (see the solo re-run after _kn_pre_tick).
+        if (activePacingPeers === 0) _frameAdvRaw = 0;
         if (activePacingPeers > 0 && minRemoteFrame >= 0) {
           _frameAdvRaw = _frameNum - minRemoteFrame;
 
@@ -15185,6 +15189,28 @@
           preTickLocalInput.cy,
           _frameAdvForC,
         );
+        // A return of 3 is the C engine's pacing gate: it leaves before it
+        // stores this page's own input for the frame, records what it applied
+        // or saves the frame's state. With every peer a phantom there is
+        // nobody to wait for and the frame is run all the same, so it must go
+        // through the forward path: ask again with pacing off. Running it on
+        // the 3 left the page's own input out of its engine for every frame it
+        // ran alone; it applied nothing for itself while its peer, back after
+        // a resync, applied what it had been sent (specs/resync_inputs.qnt).
+        if (catchingUp === 3 && getInputPeers().every((p) => _peerPhantom[p.slot])) {
+          if (window._knLastSoloPretickFrame === undefined) {
+            _syncLog(`PACING-SOLO f=${_frameNum} — every peer is a phantom, running the frame with pacing off`);
+          }
+          window._knLastSoloPretickFrame = _frameNum;
+          catchingUp = tickMod._kn_pre_tick(
+            preTickLocalInput.buttons,
+            preTickLocalInput.lx,
+            preTickLocalInput.ly,
+            preTickLocalInput.cx,
+            preTickLocalInput.cy,
+            -1,
+          );
+        }
         _chk('cr:post-pretick');
         _refreshRunnerAfterRollbackRestore(tickMod);
         _chk('cr:post-refresh-runner');
@@ -15330,7 +15356,8 @@
                 _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
               }
             }
-            // Fall through to normal tick instead of returning
+            // Not reached with every peer a phantom: the solo re-run right
+            // after _kn_pre_tick took this frame through the forward path.
           } else {
             _pacingCapsFrames++;
             if (_runSubstate !== RUN_PACING) {

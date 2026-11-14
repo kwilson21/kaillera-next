@@ -93,6 +93,8 @@ expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
 
 RESYNC=specs/resync_inputs.qnt
 verify "$RESYNC" resync_inputs_current allHold
+# The solo-holes counterexample (run alone past the limit, then resync) is 9
+# steps long, beyond this bound; hostRanAloneThenResyncsTest holds it.
 # The counterexample on resync_inputs_before is 10 steps long (the host has to
 # run far enough ahead for the guest to drop its inputs), beyond this bound;
 # check-specs.sh's scenarios and samples reach it.

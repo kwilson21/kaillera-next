@@ -44,8 +44,18 @@
 //   waits for one); the guest makes and sends its inputs for the frames it
 //   skipped from F - DELAY on, and the host sends its own for that range
 //   again. false = before.
+//
+// KEEP_OWN_INPUT_WHEN_ALONE: a page that has given up on the other keeps its
+//   own input for every frame it runs alone. false = before: it had run out
+//   of prediction room when it gave up, the engine's pacing gate stayed shut,
+//   and each frame was run past the gate without the page's own input being
+//   stored. The page applied nothing for itself on those frames while it
+//   sent the other page its real input. A resync hides that for the frames
+//   before it, but the inputs from F - DELAY on are applied after it: the
+//   two pages then differ for good (found in a two-player run, 2026-11).
 module resync_inputs {
   const SETTLE_AT_RESYNC: bool
+  const KEEP_OWN_INPUT_WHEN_ALONE: bool
 
   pure val DELAY = 1
   pure val CAP = 2
@@ -59,7 +69,9 @@ module resync_inputs {
 
   type Page = {
     frame: int,      // the next frame to run
-    made: Set[int],  // keys of the inputs this page has made
+    made: Set[int],  // keys of the inputs this page has made (and sent)
+    kept: Set[int],  // keys of its own inputs its engine holds, to apply them
+    capped: bool,    // was out of prediction room when it gave up on the other
     got: Set[int],   // keys of the other page's inputs it holds
     floor: int,      // inputs keyed below this are settled
     alone: bool,     // has given up on the other page and runs without it
@@ -97,7 +109,9 @@ module resync_inputs {
   // ── actions ────────────────────────────────────────────────────────────
 
   action init = all {
-    pages' = PAGES.mapBy(p => { frame: 0, made: Set(), got: Set(), floor: 0, alone: false }),
+    pages' = PAGES.mapBy(p => {
+      frame: 0, made: Set(), kept: Set(), capped: false, got: Set(), floor: 0, alone: false,
+    }),
     wire' = Set(),
     resyncDue' = false,
   }
@@ -109,7 +123,12 @@ module resync_inputs {
     all {
       not(waits(pg)),
       pg.frame < LAST_FRAME,
-      pages' = pages.set(p, { ...pg, frame: pg.frame + 1, made: pg.made.union(Set(pg.frame)) }),
+      pages' = pages.set(p, {
+        ...pg,
+        frame: pg.frame + 1,
+        made: pg.made.union(Set(pg.frame)),
+        kept: if (pg.alone and pg.capped and not(KEEP_OWN_INPUT_WHEN_ALONE)) pg.kept else pg.kept.union(Set(pg.frame)),
+      }),
       wire' = wire.union(Set({ dest: other(p), key: pg.frame })),
       resyncDue' = resyncDue,
     }
@@ -144,7 +163,7 @@ module resync_inputs {
     val pg = pages.get(p)
     all {
       not(pg.alone),
-      pages' = pages.set(p, { ...pg, alone: true }),
+      pages' = pages.set(p, { ...pg, alone: true, capped: waits(pg) }),
       wire' = wire,
       resyncDue' = true,
     }
@@ -163,11 +182,14 @@ module resync_inputs {
     all {
       resyncDue,
       pages' = if (SETTLE_AT_RESYNC) Map(
-        "host" -> { ...h, floor: settled, alone: false },
-        "guest" -> { ...g, frame: f, floor: settled, alone: false, made: g.made.union(skipped) },
+        "host" -> { ...h, floor: settled, alone: false, capped: false },
+        "guest" -> {
+          ...g, frame: f, floor: settled, alone: false, capped: false,
+          made: g.made.union(skipped), kept: g.kept.union(skipped),
+        },
       ) else Map(
-        "host" -> { ...h, alone: false },
-        "guest" -> { ...g, frame: f, alone: false },
+        "host" -> { ...h, alone: false, capped: false },
+        "guest" -> { ...g, frame: f, alone: false, capped: false },
       ),
       wire' = if (SETTLE_AT_RESYNC)
         wire
@@ -208,7 +230,16 @@ module resync_inputs {
   val neverBothWaitingOnNothing =
     resyncDue or wire != Set() or PAGES.exists(p => not(waits(pages.get(p))))
 
-  val allHold = noWaitForAnInputThatCannotArrive and neverBothWaitingOnNothing
+  // A page applies for itself what it sent the other: every input of its own
+  // that is still to be applied after the last resync is in its engine.
+  // Violated while a page that ran alone did not keep its own inputs.
+  val aPageAppliesWhatItSent =
+    resyncDue or PAGES.forall(p => {
+      val pg = pages.get(p)
+      pg.made.forall(k => k >= pg.floor implies pg.kept.contains(k))
+    })
+
+  val allHold = and { noWaitForAnInputThatCannotArrive, neverBothWaitingOnNothing, aPageAppliesWhatItSent }
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -257,6 +288,18 @@ module resync_inputs {
       .then(drain)
       .expect(waitsOnGap(pages.get("host")) == not(SETTLE_AT_RESYNC))
 
+  // The host ran alone past its prediction limit, then the pages resync. Its
+  // input for the frame just before the resync is applied after it.
+  run hostRanAloneThenResyncsTest =
+    init
+      .then(3.reps(_ => tick("host")))
+      .then(giveUp("host"))
+      .expect(pages.get("host").capped)
+      .then(4.reps(_ => tick("host")))
+      .then(drain)
+      .then(resync)
+      .expect(SETTLE_AT_RESYNC implies (aPageAppliesWhatItSent == KEEP_OWN_INPUT_WHEN_ALONE))
+
   // The order that always worked: the guest is ahead and is taken back. It
   // made and sent every input up to where it was, so nothing is missing.
   run backwardResyncTest =
@@ -270,18 +313,24 @@ module resync_inputs {
       .then(drain)
       .then(resync)
       .expect(pages.get("guest").frame == 1)
-      .expect(allHold)
+      .expect(noWaitForAnInputThatCannotArrive and neverBothWaitingOnNothing)
       .then(tick("host"))
       .then(drain)
-      .expect(allHold)
+      .expect(noWaitForAnInputThatCannotArrive and neverBothWaitingOnNothing)
 }
 
 // Before: a resync changed the guest's frame counter and nothing else.
 module resync_inputs_before {
-  import resync_inputs(SETTLE_AT_RESYNC = false).*
+  import resync_inputs(SETTLE_AT_RESYNC = false, KEEP_OWN_INPUT_WHEN_ALONE = false).*
+}
+
+// With the inputs before the resync frame settled, but a page that ran alone
+// still not keeping its own inputs.
+module resync_inputs_solo_holes {
+  import resync_inputs(SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = false).*
 }
 
 // Today.
 module resync_inputs_current {
-  import resync_inputs(SETTLE_AT_RESYNC = true).*
+  import resync_inputs(SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true).*
 }

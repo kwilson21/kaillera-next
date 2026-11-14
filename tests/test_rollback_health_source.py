@@ -590,3 +590,30 @@ def test_local_freeze_is_credited_to_every_deadline_that_drops_a_peer():
     # The credit runs before the pacing deadline is checked in the same tick.
     tick_idx = src.index("const tick = () => {")
     assert src.index("_creditLocalFreeze();", tick_idx) < src.index("PACING-THROTTLE-TIMEOUT f=", tick_idx)
+
+
+def test_a_page_running_alone_keeps_its_own_input():
+    # specs/resync_inputs.qnt (aPageAppliesWhatItSent). kn_pre_tick's pacing
+    # gate returns 3 before it stores the page's own input, records what it
+    # applied or saves the frame. A frame must not be run on that 3.
+    src = LOCKSTEP_JS.read_text()
+    c_src = (LOCKSTEP_JS.parents[2] / "build" / "kn_rollback" / "kn_rollback.c").read_text()
+    pre_tick = c_src[c_src.index("int kn_pre_tick(") :]
+    assert pre_tick.index("return 3; /* ring maintained, skip frame advance */") < pre_tick.index(
+        "/* ── Store local input ── */"
+    )
+
+    # With nobody left to be ahead of, the advantage is 0, so the gate is open.
+    pacing = src[src.index("// If no active pacing peers remain, release any active cap") :]
+    pacing = pacing[: pacing.index("_frameAdvRaw = _frameNum - minRemoteFrame;")]
+    assert "if (activePacingPeers === 0) _frameAdvRaw = 0;" in pacing
+
+    # And a 3 with every peer a phantom is asked again with pacing off,
+    # before anything acts on it.
+    tick = src[src.index("let catchingUp = tickMod._kn_pre_tick(") :]
+    solo = tick[: tick.index("_refreshRunnerAfterRollbackRestore(tickMod);")]
+    assert "if (catchingUp === 3 && getInputPeers().every((p) => _peerPhantom[p.slot])) {" in solo
+    rerun = solo[solo.index("if (catchingUp === 3 && getInputPeers()") :]
+    rerun = rerun[rerun.index("catchingUp = tickMod._kn_pre_tick(") :]
+    assert "-1,\n" in rerun[: rerun.index(");")]
+    assert "// Fall through to normal tick instead of returning" not in src
