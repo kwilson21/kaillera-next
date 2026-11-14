@@ -32,6 +32,10 @@ from src.api.signaling import (
 )
 
 
+# Stands in for db.reopen_session; reset before each test.
+REOPENED = AsyncMock()
+
+
 def _run(coro):
     with ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(lambda: asyncio.run(coro)).result()
@@ -41,6 +45,7 @@ def _run(coro):
 def clean_state():
     rooms.clear()
     _sid_to_room.clear()
+    REOPENED.reset_mock()
     yield
     rooms.clear()
     _sid_to_room.clear()
@@ -62,6 +67,7 @@ def _call(handler, sid, payload):
         stack.enter_context(patch.object(signaling.sio, "emit", new=AsyncMock()))
         stack.enter_context(patch.object(signaling.sio, "enter_room", new=AsyncMock()))
         stack.enter_context(patch.object(signaling.state, "save_room", new=AsyncMock()))
+        stack.enter_context(patch.object(signaling.db, "reopen_session", new=REOPENED))
         # No real sockets here: the host counts as connected.
         stack.enter_context(patch.object(signaling, "room_is_live", new=lambda room: True))
         stack.enter_context(patch.object(signaling, "_leave", new=AsyncMock()))
@@ -107,6 +113,8 @@ def test_a_dropped_guest_still_playing_the_match_is_taken_back_into_its_slot():
     assert room.slots[1] == "pid-guest"
     assert room.players["pid-guest"]["socketId"] == "sid-guest-2"
     assert room.owner == "sid-host"
+    # Its session record no longer says it left the match.
+    REOPENED.assert_awaited_once_with("match-1", 1)
 
 
 @pytest.mark.parametrize(
@@ -273,6 +281,27 @@ def test_a_taken_back_host_that_reloads_is_sent_to_join_room():
     assert err is None
     assert resp["status"] == "playing"
     assert room.players["pid-host"]["socketId"] == "sid-host-3"
+
+
+def test_a_taken_back_host_that_reloads_in_the_lobby_is_sent_to_join_room_too():
+    """Opening would give it host controls the server refuses: it is not the owner."""
+    room = _room_handed_on_from_the_host()
+    assert _open("pid-host", "sid-host-2", "ROOM1", resume=True, slot=0) is None
+    room.status = "lobby"
+    room.match_id = None
+
+    payload = OpenRoomPayload(
+        extra={
+            "sessionid": "ROOM1",
+            "persistentId": "pid-host",
+            "reconnectToken": make_reconnect_token("pid-host"),
+            "fresh": True,
+        }
+    )
+    err = _call(_open_room_locked, "sid-host-3", payload)
+
+    assert err == NOT_THE_OWNER
+    assert room.owner == "sid-guest"
 
 
 def test_clients_from_before_the_field_are_not_resuming():

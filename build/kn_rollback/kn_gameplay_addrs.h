@@ -27,11 +27,34 @@ typedef struct {
 /* Match phase / scene state */
 #define KN_ADDR_SCENE_CURR              0xA4AD0   /* gSCManagerSceneData.scene_curr (1 byte) */
 
-/* VS battle state header (32 bytes covering game_type, stocks, status, etc.) */
+/* SSB64 keeps two copies of the battle state (SCBattleState, sctypes.h):
+ *
+ *   gSCManagerTransferBattleState @ 0x800A4D08  the one a normal VS match
+ *       runs from: gSCManagerBattleState (0x800A50E8) points at it
+ *       (scvsbattle.c scVSBattleStartScene), its game_status reads 1 while
+ *       the match is on and its stock counts fall as fighters are KO'd.
+ *   gSCManagerVSBattleState       @ 0x800A4EF8  used for sudden death. In a
+ *       normal VS match it is dormant: game_status stays 0 and every stock
+ *       count stays 0.
+ *
+ * tests/hash-golden reads both from a RAM dump of a match (pointer
+ * 0x800A4D08, live status 1 and stocks 3,3; dormant status 0 and stocks 0).
+ *
+ * The desync registry (kn_hash_registry.c) reads the LIVE struct, and only
+ * compares it while the scene is the battle. kn_gameplay_hash still reads
+ * the dormant one, below: it has no scene gate, and an earlier note (on
+ * kn_gameplay_addrs[] in kn_rollback.c) reports the live struct differing
+ * between peers in the menus, which has not been re-tested. So that hash
+ * does not cover the battle state; the registry does. */
+
+/* Live battle state: header (32 bytes) and per-player stock counts
+ * (SCPlayerData.stock_count at +0xB; players[] starts at +0x20). */
+#define KN_ADDR_LIVE_BATTLE_HEADER      0xA4D08
+#define KN_ADDR_LIVE_PLAYER_STOCKS_BASE 0xA4D33   /* P1; +0x74 per player */
+
+/* Dormant copy, read by kn_gameplay_hash only. */
 #define KN_ADDR_VS_BATTLE_HEADER        0xA4EF8
 #define KN_SIZE_VS_BATTLE_HEADER        32
-
-/* Per-player stocks (offset 0xB inside SCPlayerData; players[] starts at +0x20) */
 #define KN_ADDR_PLAYER_STOCKS_BASE      0xA4F23   /* P1; +0x74 per player */
 
 /* RNG */
