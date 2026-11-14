@@ -80,3 +80,8 @@ expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
 # The other two violations on late_join_pause_current need two joiners and
 # are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
 # them.
+
+FLOW=specs/resync_flow.qnt
+verify "$FLOW" resync_flow_current holdToday
+verify "$FLOW" resync_flow_fixed allHold
+expect_violation "$FLOW" resync_flow_current aRequestCanAlwaysEnd
