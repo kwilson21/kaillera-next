@@ -145,8 +145,10 @@
  *     health check at the frame rate this machine manages (40000 in the cloud
  *     container). The outage starts a third of the way in, so two thirds of
  *     BATTLE_SECONDS must cover n plus 20 s to reconnect. On top of the normal
- *     checks the run fails if either page: never reconnected; logged any
- *     TICK-STUCK or INPUT-STALL; or had its lifecycle machine report
+ *     checks the run fails if either page: never reconnected; logged a
+ *     TICK-STUCK or INPUT-STALL after the outage began (one
+ *     before it is reported as tickStuckBeforeOutage and does not fail the
+ *     run); or had its lifecycle machine report
  *     session-disagree or late-join-stranded (web/src/session.ts). This does
  *     not cover the host stalling on its own slot (2026-11-09): that lives in
  *     the lockstep path a solo game takes, see solo-signaling-drop.mjs.
@@ -922,6 +924,16 @@ if (inBattle) {
       signaling.get(p).reconnectsBefore = await p.evaluate(
         () => window.__knEvents.filter((e) => e.type === 'reconnect').length,
       );
+      // Stalls count from here too. One before the outage is not its doing:
+      // on a slow machine a page that freezes for 2 s during boot leaves the
+      // other waiting on it, and that wait is logged as TICK-STUCK.
+      // The boundary is the last line logged, by its sequence number: a
+      // stuck page logs on one frame for seconds, so a frame cannot tell a
+      // line from just before the outage from one after it.
+      signaling.get(p).outageAt = await p.evaluate(() => {
+        const last = (window.NetplayRollback?.exportSyncLog?.() || '').trimEnd().split('\n').at(-1)?.split('\t') ?? [];
+        return { seq: Number(last[0]) || 0, frame: Number((last[2] || '').replace('f=', '')) || 0 };
+      });
     }
     await Promise.all([setSignalingDown(host, true), setSignalingDown(guest, true)]);
     console.log(`signaling sockets cut on both pages for ${DROP_SIGNALING_MS} ms`);
@@ -1346,17 +1358,28 @@ const desyncFlagsOf = (log) => {
   };
 };
 
-const signalingDropOf = (page, events, log) => ({
-  reconnectsAfterOutage:
-    events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
-  lifecycleReports: events.filter((e) => e.type === 'session-disagree' || e.type === 'late-join-stranded'),
-  tickStuck: count(log, /TICK-STUCK/g),
-  // The lockstep-path stall (waiting on a peer's input), not the rollback engine's routine RB-INPUT-STALL.
-  inputStalls: count(log, /(?<!RB-)INPUT-STALL (start|hard-timeout)/g),
-  // The rollback engine gave up waiting on a peer's input (not its routine RB-INPUT-STALL pacing).
-  rbStallTimeouts: count(log, /RB-INPUT-STALL-TIMEOUT/g),
-  meshHeals: count(log, /MESH-HEAL/g),
-});
+const signalingDropOf = (page, events, log) => {
+  // Stalls are counted from the log line the outage began after; the ones
+  // before it are reported beside them and do not fail the run.
+  const outageAt = signaling.get(page)?.outageAt ?? { seq: 0, frame: 0 };
+  const seqOf = (line) => Number(line.split('\t')[0]);
+  const lines = log.split('\n');
+  const sinceOutage = lines.filter((line) => seqOf(line) > outageAt.seq).join('\n');
+  const beforeOutage = lines.filter((line) => seqOf(line) <= outageAt.seq).join('\n');
+  return {
+    reconnectsAfterOutage:
+      events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
+    lifecycleReports: events.filter((e) => e.type === 'session-disagree' || e.type === 'late-join-stranded'),
+    outageFrame: outageAt.frame,
+    tickStuck: count(sinceOutage, /TICK-STUCK/g),
+    tickStuckBeforeOutage: count(beforeOutage, /TICK-STUCK/g),
+    // The lockstep-path stall (waiting on a peer's input), not the rollback engine's routine RB-INPUT-STALL.
+    inputStalls: count(sinceOutage, /(?<!RB-)INPUT-STALL (start|hard-timeout)/g),
+    // The rollback engine gave up waiting on a peer's input (not its routine RB-INPUT-STALL pacing).
+    rbStallTimeouts: count(sinceOutage, /RB-INPUT-STALL-TIMEOUT/g),
+    meshHeals: count(log, /MESH-HEAL/g),
+  };
+};
 
 // Rollback-integrity reports made while a proven frozen-page recovery was
 // under way are part of it (tests/frozen-recovery.mjs). A sync-log line has
