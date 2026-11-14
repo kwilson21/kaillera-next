@@ -57,6 +57,24 @@
 (function () {
   'use strict';
 
+  // The TypeScript core (dist/kn-core.js) is part of this page: the room
+  // logic, the error card and the engine all call it, from the first lines
+  // below. If it did not load (the request failed, or something blocked the
+  // script), nothing here can run, so the page says so and stops instead of
+  // throwing half way through setting up.
+  if (!window.KNCore) {
+    const sayReload = () => {
+      const box = document.getElementById('error-msg');
+      const card = box?.querySelector('.error-card');
+      if (!box || !card) return;
+      card.textContent = 'Part of this page did not load. Reload the page to try again.';
+      box.classList.remove('hidden');
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', sayReload);
+    else sayReload();
+    return;
+  }
+
   const { safeGet: _safeGet, safeSet: _safeSet, safeRemove: _safeRemove } = KNState;
 
   // ── State ──────────────────────────────────────────────────────────────

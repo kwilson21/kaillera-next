@@ -303,6 +303,10 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   web/src TypeScript but ships in its own small bundle rather than through
   window.KNCore, because those pages must stay light and are served while the
   server sleeps.
+  The play and demo pages require the bundle: if `window.KNCore` is missing
+  they tell the player to reload and stop, so `play.js`, `demo.js` and the
+  engine call `window.KNCore` without a fallback. `shared.js` keeps its own
+  fallback because tests load it outside a page.
   After changing `web/src`, run `just build` and commit
   `web/static/dist/kn-core.js`; CI fails if it is stale. Migration stages are
   in `docs/roadmap.md`. A module moves from observing to deciding only after
