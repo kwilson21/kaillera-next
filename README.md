@@ -224,7 +224,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
     kn-state.js            Shared cross-module state
     feedback.js            In-app feedback collection
-    version.js             Version display + changelog modal
+    version.js             Version display + changelog modal; starts web/src/site/version.ts
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
     demo.js                Demo page orchestrator (fake peer + menu autopilot)

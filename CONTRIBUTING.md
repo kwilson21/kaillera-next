@@ -142,7 +142,7 @@ earlier ones to have set up their `window.*` exports:
 19. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
 20. `controller-settings.js` — in-game controller settings panel
 21. `play.js` — page orchestrator (connects everything)
-22. `version.js` — version display + changelog modal
+22. `version.js` — version display + changelog modal; starts `web/src/site/version.ts`
 23. `feedback.js` — in-app feedback collection
 
 #### Server structure
@@ -197,7 +197,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `dist/kn-core.js` | — | The TypeScript core built from `web/src`; sets `KNStorage`, the safe localStorage/sessionStorage wrapper (`web/src/site/storage.ts`) | all modules |
 | `kn-capture.js` | — | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag) | rollback, streaming |
 | `kn-state.js` | ~37 | Cross-module shared state namespace | all modules |
-| `version.js` | ~350 | Version display + changelog modal | play.js |
+| `version.js` | — | Version display + changelog modal; a small caller of `web/src/site/version.ts` | dist/kn-core.js or dist/kn-site.js |
 | `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands; a small caller of `web/src/site/version-guard.ts` | dist/kn-core.js or dist/kn-site.js |
 | `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |
 | `landing.js` | — | Front-page board controller (room creation, open-rooms board) on index.html | — |
