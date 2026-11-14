@@ -5,7 +5,8 @@
 import { Effect, Exit, Scope } from 'effect';
 import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
-import { addressMapFor } from './address-maps.ts';
+import { addressMapFor, scenesFor } from './address-maps.ts';
+import { isSteeredMenu, matchState } from './game-phase.ts';
 import { bootTimedOut } from './boot.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
@@ -237,6 +238,9 @@ export const KNCore = {
   bootTimedOut,
   classifyRunnerStep,
   addressMapFor,
+  scenesFor,
+  matchState,
+  isSteeredMenu,
   captureFrame,
   checkRelayed,
   createConnectTracker,

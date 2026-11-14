@@ -38,7 +38,14 @@ test("SSB64 US's map is the registry's built-in one", () => {
   const builtIn = (list[1] ?? '').split(',').map((n) => Number(n.trim()));
   assert.deepEqual(addressMapFor(SSB64_US)?.values, builtIn);
   assert.equal(addressMapFor(SSB64_US)?.name, 'ssb64-us');
-  assert.deepEqual(addressMapFor(SSB64_US)?.scenes, { characterSelect: 16, stageSelect: 21, battle: 22 });
+  assert.deepEqual(addressMapFor(SSB64_US)?.scenes, {
+    characterSelect: 16,
+    stageSelect: 21,
+    battle: 22,
+    title: 1,
+    menuFirst: 7,
+    menuLast: 21,
+  });
 });
 
 test('a ROM with no map gets none', () => {

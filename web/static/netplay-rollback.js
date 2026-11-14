@@ -5670,26 +5670,45 @@
     return mod.HEAPU8[_rdramBase + (KN_SCENE_CURR_RDRAM ^ 3)] & 0xff;
   };
 
+  // A scene number means something only within one game, so none is
+  // compared with a literal here: the game's own numbers come from
+  // KNCore.scenesFor (web/src/address-maps.ts), and what they mean to the
+  // netcode is KNCore.matchState / isSteeredMenu (web/src/game-phase.ts,
+  // proved). A game nobody has described has no table; every scene is then
+  // "elsewhere" and no menu is steered.
+  const _gameScenes = () =>
+    window.KNCore?.scenesFor?.(
+      _config?.romHash,
+      _isSmashRemix() ? 'smash-remix' : (_config?.gameId ?? KNState?.gameId),
+    ) ?? null;
+
+  // Where a match stands: 'elsewhere' | 'starting' | 'playing' | 'paused' | 'other'.
+  const _matchState = (scene, status) =>
+    window.KNCore?.matchState?.(scene, status, _gameScenes()?.battle ?? -1) ?? 'elsewhere';
+
   const _isControllableMenuScene = (scene) => {
-    // Smash Remix / SSB64 scenes: 1=Title, 7=Mode Select, 8-21=menus,
-    // CSS, stage select, and 55=Remix startup/menu shell. These screens
-    // are edge-sensitive: predicting or fabricating one A/Start/down frame
-    // can put peers on different paths.
-    return scene === 1 || (scene >= 7 && scene <= 21) || INITIAL_SMASH_FALLBACK_SCENES.has(scene);
+    // The title screen and the menus from mode select to stage select (for
+    // Smash Remix / SSB64: 1, and 7-21), plus Remix's startup shell (55).
+    // These screens are edge-sensitive: predicting or fabricating one
+    // A/Start/down frame can put peers on different paths.
+    const scenes = _gameScenes();
+    const steered =
+      window.KNCore?.isSteeredMenu?.(scene, scenes?.title ?? -1, scenes?.menuFirst ?? -1, scenes?.menuLast ?? -1) ??
+      false;
+    return steered || INITIAL_SMASH_FALLBACK_SCENES.has(scene);
   };
 
   const _readMenuLockstepPhase = (enabled) => {
     const gameStatus = _readGameStatus();
     const sceneCurr = _readSceneCurr();
     const inControllableMenu = _isControllableMenuScene(sceneCurr);
-    const inBattleTransition = sceneCurr === 22 && gameStatus === 0;
-    const gameplay = sceneCurr === 22 && gameStatus === 1;
+    const match = _matchState(sceneCurr, gameStatus);
+    const inBattleTransition = match === 'starting';
+    const gameplay = match === 'playing';
     // Without the C engine (no kn_pre_tick, or disabled after repeated
     // throws) nothing can roll a menu frame back, so the strict gate stays.
     const strictInputLockstep =
-      (_remixMenuLockstep() || !_useCRollback) &&
-      !inBattleTransition &&
-      (inControllableMenu || (sceneCurr === 22 && gameStatus === 2));
+      (_remixMenuLockstep() || !_useCRollback) && !inBattleTransition && (inControllableMenu || match === 'paused');
     return {
       gameStatus,
       sceneCurr,
@@ -8278,7 +8297,7 @@
               frame: Number.isFinite(phaseFrame) ? phaseFrame : -1,
               sceneCurr: safeScene,
               gameStatus: safeStatus,
-              gameplay: safeScene === 22 && safeStatus === 1,
+              gameplay: _matchState(safeScene, safeStatus) === 'playing',
               seenAt: performance.now(),
             };
             const prevKey = prev ? `${prev.sceneCurr}:${prev.gameStatus}` : '';
@@ -10133,7 +10152,7 @@
         const frame = mod._get_current_frame_count?.() ?? 0;
         const elapsed = performance.now() - start;
 
-        if (scene === 1) {
+        if (scene === (_gameScenes()?.title ?? -1)) {
           if (titleFrame < 0) {
             titleFrame = frame;
             _syncLog(`Smash Remix initial sync: title reached at coreFrame=${frame}`);
@@ -18694,13 +18713,11 @@
         return null;
       }
     },
-    // Precise in-match check. Currently uses the well-known Smash Remix
-    // semantics (scene 22 + status 1). For SSB64 this is unverified — the
-    // demo's HUD now shows raw scene/status so we can confirm the actual
-    // in-match values empirically.
+    // Precise in-match check: the game's own match scene (KNCore.scenesFor)
+    // with status 1. For a game with no scene table this is never true.
     isInMatch: () => {
       const s = NetplayRollbackApi.getSceneStatus();
-      return s.ready && s.scene === 22 && s.status === 1;
+      return s.ready && _matchState(s.scene, s.status) === 'playing';
     },
     // Inclusive: true when in the battle scene including the in-game pause
     // menu (status 2) and unpause animation (status 3). Demo UI uses this
@@ -18714,7 +18731,9 @@
     // lib/ssb-decomp-re/src/sc/scdef.h SCBattleGameStatus.
     isInMatchOrPaused: () => {
       const s = NetplayRollbackApi.getSceneStatus();
-      return s.ready && s.scene === 22 && (s.status === 1 || s.status === 2 || s.status === 3);
+      return (
+        s.ready && s.scene === (_gameScenes()?.battle ?? -1) && (s.status === 1 || s.status === 2 || s.status === 3)
+      );
     },
   };
 

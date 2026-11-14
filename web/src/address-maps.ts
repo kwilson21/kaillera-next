@@ -59,11 +59,25 @@ export const ADDRESS_MAP_ORDER = [
   'ftBufferSize',
 ] as const satisfies readonly (keyof AddressMap)[];
 
-/** The scene numbers the detector gates fields on. */
+/**
+ * A game's scene numbers: what its "current scene" byte reads on each
+ * screen the netcode cares about. They mean nothing across games, so nothing
+ * outside this table may compare a scene with a literal number.
+ */
 export interface SceneIds {
   readonly characterSelect: number;
   readonly stageSelect: number;
+  /** A match in play (the game's status byte says whether it has begun, is paused, or is over). */
   readonly battle: number;
+  /** The title screen. */
+  readonly title: number;
+  /**
+   * The menus a player steers with single presses, as an inclusive range:
+   * mode select through stage select. One predicted or invented press there
+   * puts peers on different paths.
+   */
+  readonly menuFirst: number;
+  readonly menuLast: number;
 }
 
 export interface RomAddresses {
@@ -123,7 +137,8 @@ const SSB64_US: RomAddresses = {
     ftBufferPtr: 0x130d84,
     ftBufferSize: 4096,
   },
-  scenes: { characterSelect: 16, stageSelect: 21, battle: 22 },
+  // nSCKindTitle, nSCKindModeSelect .. nSCKindMaps, nSCKindVSBattle (ssb-decomp scdef.h).
+  scenes: { characterSelect: 16, stageSelect: 21, battle: 22, title: 1, menuFirst: 7, menuLast: 21 },
   battleStatus: { offset: 0x11, ongoing: 1 },
 };
 
@@ -196,6 +211,30 @@ export const addressMapProblem = (map: AddressMap): string | null => {
 export const packAddressMap = (map: AddressMap): number[] => ADDRESS_MAP_ORDER.map((key) => map[key]);
 
 /** The addresses for a ROM, packed for the registry; null if the ROM has no map. */
+/**
+ * Scene numbers by game, for a ROM of a known game whose build is not in
+ * `ROM_ADDRESSES` (its addresses are unverified, but a romhack keeps the
+ * base game's scene numbering).
+ */
+const SCENES_BY_GAME = {
+  ssb64: SSB64_US.scenes,
+  'smash-remix': SSB64_US.scenes,
+} satisfies Record<string, SceneIds>;
+
+const isDescribedGame = (gameId: string): gameId is keyof typeof SCENES_BY_GAME =>
+  Object.hasOwn(SCENES_BY_GAME, gameId);
+
+/**
+ * The scene numbers of the game a page is running: the ROM's own entry, or
+ * its game's, or null for a game nobody has described. With null the
+ * netcode treats every scene alike.
+ */
+export const scenesFor = (romHash: string | null | undefined, gameId: string | null | undefined): SceneIds | null => {
+  if (romHash && hasMap(romHash)) return ROM_ADDRESSES[romHash].scenes;
+  if (gameId && isDescribedGame(gameId)) return SCENES_BY_GAME[gameId];
+  return null;
+};
+
 export const addressMapFor = (romHash: string | null | undefined): PackedRomAddresses | null => {
   if (!romHash || !hasMap(romHash)) return null;
   const rom = ROM_ADDRESSES[romHash];

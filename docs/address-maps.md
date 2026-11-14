@@ -26,9 +26,19 @@ step below.
 enum in `build/kn_rollback/kn_hash_registry.h`. Offsets are N64 RDRAM
 offsets (the address with the top byte dropped). One-byte fields (stock
 counts, the scene) are given by their N64 address; the registry applies the
-byte swap. With the map come the ROM's scene numbers for the character
-select, the stage select and the battle, which the detector uses to decide
-which fields mean anything in a given frame.
+byte swap. With the map come the ROM's scene numbers (`SceneIds`): the
+character select, the stage select and the battle, which the detector uses
+to decide which fields mean anything in a given frame, and the title screen
+and the range of menus steered by single presses, which the engine uses to
+decide which frames may be predicted (`web/src/game-phase.ts`).
+
+A scene number means something only within one game. Nothing outside this
+table compares a scene with a literal number: the engine and the detector
+ask `KNCore.scenesFor(romHash, gameId)`, which answers from the ROM's entry,
+or from its game's (`SCENES_BY_GAME`, for a build of a known game that has
+no verified map), or with null. For a game with no scene table the engine
+treats every scene alike. `tests/ts/game-phase.test.ts` fails if a literal
+comes back.
 
 ## Adding a ROM
 

@@ -424,18 +424,23 @@
     // rollback window old. When the two match_phase hashes differ, that
     // alone is flagged and the scene is not used.
     const phase = _sceneOfDigest(ha);
-    // KNCore's rule has SSB64's scene ids built in, so it is asked only
-    // while the ROM's map uses those; another ROM's scenes go through the
-    // same rule below, which reads them from the map.
-    const ssb64Scenes =
-      _scenes.battle === SSB64_SCENES.battle && _scenes.characterSelect === SSB64_SCENES.characterSelect;
-    const decide = ssb64Scenes ? window.KNCore?.desyncFieldsToFlag : undefined;
+    // KNCore's rule takes the scenes from this ROM's map, as the copy below does.
+    const decide = window.KNCore?.desyncFieldsToFlag;
     if (decide && Array.isArray(ha) && Array.isArray(hb) && ha.length >= FIELD.COUNT && hb.length >= FIELD.COUNT) {
       const lastFlagged = [];
       for (let fid = 0; fid < FIELD.COUNT; fid++) {
         lastFlagged.push(_lastFlagFrame.get(_dedupKey(fid)) ?? -1);
       }
-      return decide(ha, hb, phase, frame, lastFlagged, CONFIG.dedupWindowFrames);
+      return decide(
+        ha,
+        hb,
+        phase,
+        frame,
+        lastFlagged,
+        CONFIG.dedupWindowFrames,
+        _scenes.battle,
+        _scenes.characterSelect,
+      );
     }
 
     // GATING RULE: phase mismatch is itself the high-priority flag and

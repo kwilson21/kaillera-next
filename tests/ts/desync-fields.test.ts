@@ -7,8 +7,6 @@ import { decodeDesyncDigest } from '../../web/src/desync-digest.ts';
 import {
   FIELD_COUNT,
   MATCH_PHASE_FIELD,
-  SCENE_CSS_VS,
-  SCENE_IN_GAME_VS,
   fieldEligibleInPhase,
   fieldName,
   fieldsToFlag,
@@ -16,6 +14,13 @@ import {
 } from '../../web/src/desync-fields.ts';
 import { digestFrame } from '../../web/src/desync-confirm.ts';
 import { lcg } from './load-shared.ts';
+import { scenesFor } from '../../web/src/address-maps.ts';
+
+// The rule takes the game's own scene numbers; these tests use SSB64's.
+const SSB64_SCENES = scenesFor(null, 'ssb64');
+assert.ok(SSB64_SCENES);
+const SCENE_IN_GAME_VS = SSB64_SCENES.battle;
+const SCENE_CSS_VS = SSB64_SCENES.characterSelect;
 
 const never = (): number[] => Array.from({ length: FIELD_COUNT }, () => -1);
 const hashes = (seed: number): number[] => Array.from({ length: FIELD_COUNT }, (_, fid) => seed * 100 + fid);
@@ -40,12 +45,14 @@ test('field names and slots follow the registry layout', () => {
 test('a phase mismatch is the only thing flagged for the frame', () => {
   const a = hashes(1);
   const b = hashes(2);
-  assert.deepEqual(fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60), [MATCH_PHASE_FIELD]);
+  assert.deepEqual(fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), [
+    MATCH_PHASE_FIELD,
+  ]);
 });
 
 test('equal digests flag nothing, in any scene', () => {
   for (const phase of [0, SCENE_CSS_VS, SCENE_IN_GAME_VS]) {
-    assert.deepEqual(fieldsToFlag(hashes(1), hashes(1), phase, 100, never(), 60), []);
+    assert.deepEqual(fieldsToFlag(hashes(1), hashes(1), phase, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), []);
   }
 });
 
@@ -53,9 +60,15 @@ test('battle fields are flagged only in a battle, select-screen fields only ther
   const a = hashes(1);
   const b = hashes(2);
   b[MATCH_PHASE_FIELD] = a[MATCH_PHASE_FIELD]!;
-  assert.deepEqual(fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60), [0, 1, 2, 3, 4, 5, 6, 7, 16, 18, 19, 20]);
-  assert.deepEqual(fieldsToFlag(a, b, SCENE_CSS_VS, 100, never(), 60), [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-  assert.deepEqual(fieldsToFlag(a, b, 21, 100, never(), 60), [4, 5, 6, 7, 16]);
+  assert.deepEqual(
+    fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS),
+    [0, 1, 2, 3, 4, 5, 6, 7, 16, 18, 19, 20],
+  );
+  assert.deepEqual(
+    fieldsToFlag(a, b, SCENE_CSS_VS, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS),
+    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+  );
+  assert.deepEqual(fieldsToFlag(a, b, 21, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), [4, 5, 6, 7, 16]);
 });
 
 test('a field flagged within the dedup window stays quiet until it has passed', () => {
@@ -64,8 +77,8 @@ test('a field flagged within the dedup window stays quiet until it has passed', 
   b[16] = 7;
   const last = never();
   last[16] = 100;
-  assert.deepEqual(fieldsToFlag(a, b, 0, 159, last, 60), []);
-  assert.deepEqual(fieldsToFlag(a, b, 0, 160, last, 60), [16]);
+  assert.deepEqual(fieldsToFlag(a, b, 0, 159, last, 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), []);
+  assert.deepEqual(fieldsToFlag(a, b, 0, 160, last, 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), [16]);
 });
 
 test('fieldsToFlag keeps its contract on random digests', () => {
@@ -76,7 +89,7 @@ test('fieldsToFlag keeps its contract on random digests', () => {
     const last = Array.from({ length: FIELD_COUNT }, () => (next() % 200) - 1);
     const phase = [0, SCENE_CSS_VS, SCENE_IN_GAME_VS][next() % 3]!;
     const frame = next() % 260;
-    const flagged = fieldsToFlag(a, b, phase, frame, last, 60);
+    const flagged = fieldsToFlag(a, b, phase, frame, last, 60, SCENE_IN_GAME_VS, SCENE_CSS_VS);
     if (a[MATCH_PHASE_FIELD] !== b[MATCH_PHASE_FIELD]) {
       assert.deepEqual(flagged, [MATCH_PHASE_FIELD]);
       continue;
@@ -84,7 +97,12 @@ test('fieldsToFlag keeps its contract on random digests', () => {
     // Exactly the fields that differ, mean something here and are not muted.
     const expected: number[] = [];
     for (let fid = 0; fid < FIELD_COUNT; fid++) {
-      if (a[fid] !== b[fid] && fieldEligibleInPhase(fid, phase) && frame - last[fid]! >= 60) expected.push(fid);
+      if (
+        a[fid] !== b[fid] &&
+        fieldEligibleInPhase(fid, phase, SCENE_IN_GAME_VS, SCENE_CSS_VS) &&
+        frame - last[fid]! >= 60
+      )
+        expected.push(fid);
     }
     assert.deepEqual(flagged, expected);
   }
