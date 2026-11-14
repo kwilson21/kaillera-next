@@ -1818,11 +1818,22 @@
   const _drainPendingCInputs = (tickMod) => {
     if (_pendingCInputs.length === 0 || !tickMod._kn_feed_input) return;
     if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
+    let settledSkipped = 0;
     for (let i = 0; i < _pendingCInputs.length; i++) {
       const qi = _pendingCInputs[i];
+      // An input from before a resync's settled point is not the engine's to
+      // judge: the state that resync carries holds what was applied for it.
+      // Fed, a returning peer's backlog would be compared with what this page
+      // predicted while it ran alone, dozens of frames too deep to roll back,
+      // and counted as failed rollbacks the resync is about to make moot.
+      if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {
+        settledSkipped++;
+        continue;
+      }
       tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
     }
     _pendingCInputs.length = 0;
+    if (settledSkipped > 0) _syncLog(`C-INPUT-SETTLED-SKIP f=${_frameNum} count=${settledSkipped}`);
   };
   const _formatSlotMap = (obj) => {
     const keys = Object.keys(obj || {}).sort((a, b) => Number(a) - Number(b));
@@ -7983,6 +7994,11 @@
             forceFull: true,
             deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
           });
+          // That state will be for this frame or a later one, so the
+          // guest's inputs from before this frame minus the delay are
+          // settled by it already. (Only the host can say so here: a guest
+          // may be taken back to an earlier frame and still need them.)
+          _settleInputsBefore(peer.slot, _frameNum);
           _syncLog(`peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum}`);
         }
       }
@@ -14155,6 +14171,10 @@
             _syncLog('PACING-THROTTLE released — all peers phantom');
           }
         }
+        // With nobody left to be ahead of there is no advantage. Left at its
+        // last value it kept the C engine's pacing gate shut for the whole
+        // time this page ran alone (see the solo re-run after _kn_pre_tick).
+        if (activePacingPeers === 0) _frameAdvRaw = 0;
         if (activePacingPeers > 0 && minRemoteFrame >= 0) {
           _frameAdvRaw = _frameNum - minRemoteFrame;
 
@@ -15185,6 +15205,28 @@
           preTickLocalInput.cy,
           _frameAdvForC,
         );
+        // A return of 3 is the C engine's pacing gate: it leaves before it
+        // stores this page's own input for the frame, records what it applied
+        // or saves the frame's state. With every peer a phantom there is
+        // nobody to wait for and the frame is run all the same, so it must go
+        // through the forward path: ask again with pacing off. Running it on
+        // the 3 left the page's own input out of its engine for every frame it
+        // ran alone; it applied nothing for itself while its peer, back after
+        // a resync, applied what it had been sent (specs/resync_inputs.qnt).
+        if (catchingUp === 3 && getInputPeers().every((p) => _peerPhantom[p.slot])) {
+          if (window._knLastSoloPretickFrame === undefined) {
+            _syncLog(`PACING-SOLO f=${_frameNum} — every peer is a phantom, running the frame with pacing off`);
+          }
+          window._knLastSoloPretickFrame = _frameNum;
+          catchingUp = tickMod._kn_pre_tick(
+            preTickLocalInput.buttons,
+            preTickLocalInput.lx,
+            preTickLocalInput.ly,
+            preTickLocalInput.cx,
+            preTickLocalInput.cy,
+            -1,
+          );
+        }
         _chk('cr:post-pretick');
         _refreshRunnerAfterRollbackRestore(tickMod);
         _chk('cr:post-refresh-runner');
@@ -15330,7 +15372,8 @@
                 _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
               }
             }
-            // Fall through to normal tick instead of returning
+            // Not reached with every peer a phantom: the solo re-run right
+            // after _kn_pre_tick took this frame through the forward path.
           } else {
             _pacingCapsFrames++;
             if (_runSubstate !== RUN_PACING) {
