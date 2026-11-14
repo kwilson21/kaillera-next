@@ -265,17 +265,16 @@ WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
 button's rule is observed, `play.js` still decides it). Last: connect, the game
 lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
 
-**Stage 4: engine periphery [pure logic done]**
+**Stage 4: engine periphery [done]**
 `shared.js` (input wire format; prove encode/decode round-trips with
 LemmaScript), `kn-state.js`, `gamepad-manager.js`, `kn-diagnostics.js`,
 `kn-desync-detector.js`. The engine calls `KNCore.meshHealTargets` instead of
 its inline roster loops.
 
-Done: the decisions and arithmetic of each script are typed functions in
-`web/src`, called through `KNCore`, with the script's own code kept as the
-fallback for a page without the bundle (the demo page). A test per script
-runs the real script with and without the bundle against output captured
-before the move.
+Done, first: the decisions and arithmetic of each script became typed
+functions in `web/src`, with the script's own code kept as a fallback until
+production showed no difference. A test per script holds the TypeScript to
+output captured from the script before the move.
 
 - Proved (LemmaScript): the input packet round trip (`input-wire.ts`), the
   stick dead-band's per-axis rule (`stick-axis.ts`), `classifyRunnerStep`,
@@ -293,12 +292,17 @@ before the move.
   a peer's desync digest (`desync-digest.ts`) and a saved gamepad profile
   (`gamepad-profile.ts`). One that does not fit is dropped or ignored.
 
-Not done: the scripts themselves are still plain JavaScript. What is left in
-them is the part bound to the browser (reading pads and the canvas, DOM
-hooks, peer-connection helpers, cheats, storage) and their mutable state.
-The fallbacks can be deleted, and `play.html` can stop loading the scripts
-in favour of the bundle, once production shows no difference; the demo page
-needs the bundle first.
+The scripts themselves are TypeScript too (#170 to #174): `kn-state.js`,
+`shared.js`, `gamepad-manager.js`, `kn-diagnostics.js` and
+`kn-desync-detector.js` are gone, their code is `web/src/kn-state.ts` and
+`web/src/page/*.ts`, and the bundle sets the same globals (`KNState`,
+`KNShared`, `KNEvent`, `GamepadManager`, `KNDiag`, `KNDesync`) as it loads,
+right after `storage.js`. The JavaScript fallbacks are deleted; the tests
+import the TypeScript.
+
+Not done: the gamepad manager's poll loop and the two polling loops in
+`page/shared.ts` (`waitForEmulator`, `disableEJSInput`) are ported as they
+were, bare timers, not Effect code.
 
 **Stage 5: the engine**
 `netplay-rollback.js` (18k lines) is split by concern into typed modules:

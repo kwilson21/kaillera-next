@@ -40,7 +40,6 @@ type MainLoopControl = (this: DiagModule, ...args: number[]) => void;
 interface DiagWindow extends Window {
   KNCapture?: { allowed: () => boolean };
   KNAudio?: { ctx?: { state: string } | null };
-  KNEvent?: (type: string, message: string, meta: SolidPaleMeta) => void;
   EJS_emulator?: { paused?: boolean; gameManager?: { Module?: DiagModule } };
 }
 

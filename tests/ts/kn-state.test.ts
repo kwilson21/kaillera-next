@@ -101,7 +101,7 @@ test('a page that did not load storage.js gets no state', (t) => {
 
 test('a peer without a data channel yet fits the type', () => {
   const state = initialKNState(memoryStorage());
-  // createBasePeer in shared.js starts every peer with `dc: null`.
+  // createBasePeer (web/src/page/peer-connection.ts) starts every peer with `dc: null`.
   state.peers['sid'] = { slot: 1, dc: null };
   assert.equal(state.peers['sid']?.dc ?? null, null); // play.js sets the slot to null for a spectator.
   state.slot = null;
