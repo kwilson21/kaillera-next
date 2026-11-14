@@ -131,17 +131,15 @@ $QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
-for variant in resync_flow_current resync_flow_fixed; do
+for variant in resync_flow_before resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
-# Today: a guest stopped at its target has a deadline, and a state no newer
-# than the last one applied is never applied.
-$QUINT run "$FLOW" --main=resync_flow_current --invariant=holdToday \
-  --max-samples=20000 --max-steps=25 --backend=typescript
-# With a deadline on the request itself, a request that is out can always
-# end. VIOLATED by today's engine (resync_flow_current): the host drops a
-# request inside its rate limit and the guest never asks again. Not fixed yet.
-$QUINT run "$FLOW" --main=resync_flow_fixed --invariant=allHold \
+# Today: a guest stopped at its target has a deadline, a state no newer than
+# the last one applied is never applied, and a request that is out can always
+# end. The last was violated before the request had a deadline of its own
+# (resync_flow_before): the host drops a request inside its rate limit and
+# the guest never asked again.
+$QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── The tick loop's deadlines and a page that freezes ───────────────────────
