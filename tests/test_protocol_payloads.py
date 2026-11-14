@@ -13,6 +13,7 @@ Run: cd server && uv run pytest ../tests/test_protocol_payloads.py -v
 
 import asyncio
 import importlib.util
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
@@ -23,6 +24,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 from src.api import payloads, signaling
 from src.api.payloads import (
+    SERVER_EVENTS,
     EndGamePayload,
     GameEnded,
     GameStarted,
@@ -49,19 +51,6 @@ from src.api.signaling import (
 )
 
 REPO = Path(__file__).parent.parent
-
-# Every event signaling.py emits with a payload of its own making. Relayed
-# events (data-message, rom-signal, peers' webrtc-signal, ...) carry what a
-# client sent; the one webrtc-signal the server writes itself is listed.
-SERVER_EVENTS: dict[str, type[BaseModel]] = {
-    "users-updated": UsersUpdated,
-    "game-started": GameStarted,
-    "game-ended": GameEnded,
-    "rom-sharing-updated": RomSharingUpdated,
-    "webrtc-signal": RenegotiateRequest,
-    "upload-token": TokenMessage,
-    "reconnect-token": TokenMessage,
-}
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -178,8 +167,8 @@ def test_join_room_acks_match_the_model(room_life):
     _, acks = room_life
     for name in ("guest", "spectator", "rejoin"):
         JoinRoomAck.model_validate(acks[name])
-    # In the lobby the key is absent (not null); mid-match it names the match.
-    assert "matchId" not in acks["guest"] and "matchId" not in acks["spectator"]
+    # Null in the lobby; mid-match it names the match.
+    assert acks["guest"]["matchId"] is None and acks["spectator"]["matchId"] is None
     assert acks["rejoin"]["status"] == "playing"
     assert isinstance(acks["rejoin"]["matchId"], str)
 
@@ -224,6 +213,52 @@ def test_models_reject_drift():
         UsersUpdated.model_validate({**good, "romSize": "12"})
 
 
+# ── the check on the way out ─────────────────────────────────────────────────
+
+
+def test_no_server_built_emit_bypasses_the_check():
+    """Every emit with a literal event name goes through `_emit`, which checks it.
+
+    The emits left on `sio.emit` are the relays, whose event name is a variable.
+    """
+    source = (REPO / "server" / "src" / "api" / "signaling.py").read_text(encoding="utf-8")
+    direct = re.findall(r"sio\.emit\(\s*[\"']([a-z-]+)[\"']", source)
+    assert direct == [], f"use _emit for {direct}"
+    checked_events = set(re.findall(r"_emit\(\s*[\"']([a-z-]+)[\"']", source))
+    assert checked_events == set(SERVER_EVENTS), "SERVER_EVENTS and the _emit call sites disagree"
+
+
+def test_a_payload_off_its_model_raises_under_tests_and_logs_in_production(caplog):
+    bad = {"matchId": 7}
+    assert payloads.RAISE_ON_CONTRACT_FAILURE
+    with pytest.raises(payloads.PayloadContractError, match="GameEnded"):
+        payloads.checked(GameEnded, bad, "game-ended")
+    with patch.object(payloads, "RAISE_ON_CONTRACT_FAILURE", new=False), caplog.at_level("ERROR"):
+        # The payload still goes out: a broken contract must not take a room down.
+        assert payloads.checked(GameEnded, bad, "game-ended") is bad
+    assert "PAYLOAD-CONTRACT game-ended does not match GameEnded" in caplog.text
+
+
+def test_an_event_without_a_model_cannot_be_emitted():
+    with pytest.raises(KeyError):
+        _run(signaling._emit("brand-new-event", {}))
+
+
+def test_a_restored_room_with_a_legacy_mode_still_matches():
+    """A room saved before the rename comes back as "rollback", so `mode` can be the two-value literal."""
+    import json
+
+    from src import state
+
+    room = signaling.Room(owner="sid-host", room_name="Test", game_id="ssb64", password=None, max_players=4)
+    room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+    room.mode = "rollback"
+    saved = json.loads(state._serialize_room(room))
+    saved["mode"] = "lockstep"
+    restored = state._deserialize_room(saved)
+    assert UsersUpdated.model_validate(_players_payload(restored)).mode == "rollback"
+
+
 # ── the generator ────────────────────────────────────────────────────────────
 
 
@@ -254,6 +289,16 @@ def test_every_public_model_gets_a_schema_and_a_decoder():
         assert f"export const {name} = Schema.Struct(" in text
         assert f"export const decode{name} = Schema.decodeUnknownResult({name});" in text
     assert "_ServerMessage" not in text
+
+
+def test_the_client_event_map_leaves_out_relayed_events():
+    text = _generator().generate()
+    block = text[text.index("export const serverEvents = {") :]
+    block = block[: block.index("} as const;")]
+    for event, model in SERVER_EVENTS.items():
+        row = f"'{event}': {model.__name__},"
+        assert (row in block) == (event not in payloads.RELAYED_EVENTS)
+    assert "webrtc-signal" not in block
 
 
 def test_generator_refuses_what_it_cannot_translate():

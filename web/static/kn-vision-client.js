@@ -1,6 +1,10 @@
 /**
- * kn-vision-client.js — Bridges KNDesync.events 'desync-suspect' to
+ * kn-vision-client.js — Bridges KNDesync.events 'desync-capture' to
  * /api/desync-vision. Captures canvas, downscales to ≤512px, POSTs.
+ *
+ * 'desync-capture' fires on the frame every peer agreed to screenshot for a
+ * suspect (kn-desync-detector.js), not when the suspect was raised: the
+ * server compares the peers' pictures, so they must be of one frame.
  *
  * Design intent: thin. No business logic. The detector decided this
  * frame deserves a verdict; the vision client just delivers the
@@ -50,7 +54,14 @@
       field: detail.field,
       slot: detail.slot,
       trigger: detail.trigger,
-      peers: [{ slot: KNState.slot ?? 0, png_b64: localPng, hash: detail.hashes?.local ?? null }],
+      peers: [
+        {
+          slot: KNState.slot ?? 0,
+          png_b64: localPng,
+          hash: detail.hashes?.local ?? null,
+          captured_frame: detail.captureFrame ?? null,
+        },
+      ],
       replay_meta: detail.replayMeta,
     };
 
@@ -69,7 +80,7 @@
 
   function _wire() {
     if (window.KNDesync && KNDesync.events) {
-      KNDesync.events.addEventListener('desync-suspect', (e) => _onSuspect(e.detail));
+      KNDesync.events.addEventListener('desync-capture', (e) => _onSuspect(e.detail));
     }
   }
 

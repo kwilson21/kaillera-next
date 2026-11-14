@@ -54,6 +54,10 @@ class PeerScreenshot(BaseModel):
     slot: int
     png_b64: str = Field(..., description="base64-encoded PNG, downscaled to ≤512px")
     hash: int | None = None
+    # The frame the picture shows. Peers capture at a frame they agree on
+    # (kn-desync-detector.js); None from a client older than that, or from a
+    # postmortem, which pairs stored screenshots by frame itself.
+    captured_frame: int | None = None
 
 
 class VisionRequest(BaseModel):
@@ -158,6 +162,12 @@ async def _fire_vision(key: tuple) -> dict[str, Any] | None:
         timer.cancel()
     if len(peers) < 2 or base_req is None:
         return None
+    # Two pictures of different frames of a moving game differ whether or not
+    # the peers do; a verdict on them would be a false "desynced".
+    frames = {p.captured_frame for p in peers[:2]}
+    if len(frames) > 1:
+        log.info("desync-vision: not comparing pictures of different frames %s for %s", sorted(frames, key=str), key)
+        return {"skipped": "captured_at_different_frames", "match_id": base_req.match_id, "frame": base_req.frame}
     base_req.peers = peers
     return await _do_vision_call(base_req)
 
