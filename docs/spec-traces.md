@@ -67,6 +67,102 @@ sequenceDiagram
   Note over Server: online = {guest1, host}<br/>grace = {}
 ```
 
+### returnAfterGraceTest
+
+A guest's socket is down for longer than the grace window while the match goes on, then comes back: it is taken back and keeps playing, in every variant. The players' connections never depended on the server.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over host: Lobby
+  guest1->>Server: join("guest1", true)
+  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over guest1: Lobby
+  Server->>Server: startGame
+  Note over Server: matchId = 1<br/>nextMatch = 2<br/>status = playing
+  Server-->>host: Loading(1)
+  Server-->>guest1: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server-->>guest1: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  Server-->>guest1: Running(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: online = {host}<br/>grace = {guest1}
+  Server->>Server: graceExpire("guest1")
+  Note over Server: members = {host}<br/>grace = {}
+  guest1->>Server: returnAfterExpiry("guest1", true, false)
+  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+```
+
+### hostReturnsAfterGraceTest
+
+The host's socket is down for longer than the grace window: the room is handed to the guest and the match goes on. Before, the returning host was told "Room already exists" and never got its signaling back.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over host: Lobby
+  guest1->>Server: join("guest1", true)
+  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over guest1: Lobby
+  Server->>Server: startGame
+  Note over Server: matchId = 1<br/>nextMatch = 2<br/>status = playing
+  Server-->>host: Loading(1)
+  Server-->>guest1: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server-->>guest1: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  Server-->>guest1: Running(1)
+  host->>Server: dropSocket("host")
+  Note over Server: online = {guest1}<br/>grace = {host}
+  Server->>Server: graceExpire("host")
+  Note over Server: members = {guest1}<br/>owner = guest1<br/>creator = ""<br/>grace = {}
+  host->>Server: returnAfterExpiry("host", true, true)
+  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+```
+
+### abandonedMatchTest
+
+The host leaves for good while a joiner is still getting in. Before, the room stayed "playing" with nobody running the match.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over host: Lobby
+  Server->>Server: startGame
+  Note over Server: matchId = 1<br/>nextMatch = 2<br/>status = playing
+  Server-->>host: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  guest1->>Server: join("guest1", false)
+  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over guest1: AwaitingRom(1)
+  host->>Server: leave("host")
+  Note over Server: members = {guest1}<br/>owner = guest1<br/>online = {guest1}<br/>creator = ""
+  Note over host: Closed
+  Server->>Server: endAbandonedMatch
+  Note over Server: matchId = 0<br/>status = lobby
+  Server-->>guest1: Lobby
+```
+
 ### lateJoinTest
 
 ```mermaid
