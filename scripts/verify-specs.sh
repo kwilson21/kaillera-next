@@ -61,3 +61,8 @@ verify "$RESYNC" resync_inputs_current allHold
 # The counterexample on resync_inputs_before is 10 steps long (the host has to
 # run far enough ahead for the guest to drop its inputs), beyond this bound;
 # check-specs.sh's scenarios and samples reach it.
+
+MESH=specs/resync_mesh.qnt
+verify "$MESH" resync_mesh_current allHold
+expect_violation "$MESH" resync_mesh_untold noWaitForAnInputThatCannotArrive
+expect_violation "$MESH" resync_mesh_kept settledPointIsNotAhead

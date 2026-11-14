@@ -34,8 +34,8 @@
 //
 // Not modelled: the time a state takes to cross (the host keeps running and
 // the guest lands a few frames behind, the ordinary "behind" wait), more than
-// two players (a third page is told where the moved guest's inputs start
-// again, `inputs-settled`, and applies the same floor), packet loss on the
+// two players and a new match in the same session (both in
+// specs/resync_mesh.qnt), packet loss on the
 // unreliable input channel, the contents of inputs and the rollbacks that
 // follow a wrong prediction.
 //

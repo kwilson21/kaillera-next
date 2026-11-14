@@ -80,3 +80,16 @@ done
 # resync that moved the guest forward left holes on both pages.
 $QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# The same from a third page's side, and across matches.
+MESH=specs/resync_mesh.qnt
+$QUINT typecheck "$MESH"
+for variant in resync_mesh_untold resync_mesh_kept resync_mesh_current; do
+  $QUINT test "$MESH" --main="$variant" --backend=typescript
+done
+# Today: no page waits on a hole the moved guest will never fill (violated
+# while only the host was told the settled point, resync_mesh_untold), and
+# the settled point never runs ahead of the inputs still to be made (violated
+# while a new match kept the last one's, resync_mesh_kept).
+$QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
