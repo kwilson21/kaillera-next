@@ -5922,6 +5922,25 @@
     if (wait <= 0) flush();
     else _criticalFlushTimer = setTimeout(flush, wait);
   };
+  // Stage 5, observing: the peer mesh's decisions are made by the code below
+  // as before; the proved functions of web/src/peer-signaling.ts run on the
+  // same inputs and a difference is reported as a mesh-disagree client event.
+  // They take over once production shows none. Looked up on first use:
+  // kn-core.js loads after this file.
+  let _meshObserver;
+  const _meshCompare = (what, engineValue, provedValue) => {
+    if (_meshObserver === undefined) {
+      _meshObserver =
+        window.KNCore?.play?.observe?.createComparer?.(({ message, old, next }) => {
+          if (!window.KNState?.uploadToken) return false;
+          window.KNEvent?.('mesh-disagree', message, { old, next });
+          return true;
+        }) ?? null;
+    }
+    _meshObserver?.compare(what, engineValue, provedValue);
+  };
+  const _meshCore = () => window.KNCore ?? null;
+
   // Stage 3, observing: the strings peers send over the DataChannels (and the
   // session-log ack) are checked against web/src/peer-protocol.ts and a
   // mismatch is reported; the handlers below still read the raw message.
@@ -7457,6 +7476,21 @@
       // Socket.IO ID and the connection didn't survive — _rosterKey keeps a
       // live one). Clean up the old entry so _peers never has duplicate slots.
       if (p.slot !== null && p.slot !== undefined) {
+        const core = _meshCore();
+        if (core) {
+          const entries = Object.entries(_peers);
+          _meshCompare(
+            'stale-holders',
+            entries
+              .filter(([oldSid, oldPeer]) => oldSid !== p.socketId && oldPeer.slot === p.slot)
+              .map(([oldSid]) => oldSid),
+            core.staleHoldersOf(
+              entries.map(([key, held]) => ({ key, slot: held.slot ?? -1 })),
+              p.socketId,
+              p.slot,
+            ),
+          );
+        }
         for (const [oldSid, oldPeer] of Object.entries(_peers)) {
           if (oldSid !== p.socketId && oldPeer.slot === p.slot) {
             _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
@@ -7484,6 +7518,18 @@
         reason = `slot comparison: ${_playerSlot} < ${p.slot} = ${shouldInitiate}`;
       }
       _syncLog(`onUsersUpdated: new peer ${p.socketId} slot=${p.slot}, initiate=${shouldInitiate} (${reason})`);
+      _meshCompare(
+        'should-initiate',
+        shouldInitiate,
+        _meshCore()?.shouldInitiate(
+          _isSpectator,
+          _lateJoin,
+          _phase === PHASE_RUNNING,
+          shouldHoldForLateJoin,
+          _playerSlot,
+          p.slot,
+        ) ?? shouldInitiate,
+      );
       if (shouldHoldForLateJoin) _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated running peer');
 
       createPeer(p.socketId, p.slot, shouldInitiate);
@@ -7573,6 +7619,12 @@
     if (peer.dc?.readyState === 'open') return;
 
     const nextAttempt = (peer._startupConnectAttempt || 1) + 1;
+    _meshCompare(
+      'startup-attempt-left',
+      !(nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS),
+      _meshCore()?.hasAttemptLeft(nextAttempt - 1, STARTUP_CONNECT_MAX_ATTEMPTS) ??
+        !(nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS),
+    );
     if (nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS) {
       clearStartupConnectWatchdog(peer);
       _syncLog(
@@ -7742,6 +7794,22 @@
     // A fresh offer from a player whose connection was kept across their
     // Socket.IO reconnect means their page reloaded: that connection is a
     // leftover. Drop it, then let the roster set them up as a new peer.
+    // Observing: the step the code below takes first with this signal,
+    // compared with the proved rule's answer for the same table.
+    {
+      const fresh = !!data.offer && !data.reconnect && key !== senderSid;
+      const hasEntry = !!_peers[key];
+      let engineStep;
+      if (fresh) engineStep = 'replaceKept';
+      else if (data.offer && !hasEntry) engineStep = 'create';
+      else if (!hasEntry) engineStep = 'drop';
+      else engineStep = data.offer && data.reconnect ? 'reset' : 'apply';
+      _meshCompare(
+        'signal',
+        engineStep,
+        _meshCore()?.signalDisposition(!!data.offer, !!data.reconnect, key !== senderSid, hasEntry) ?? engineStep,
+      );
+    }
     if (data.offer && !data.reconnect && key !== senderSid) {
       _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
       _evictPeer(key, 'replaced-by-new-page');
@@ -8896,13 +8964,28 @@
       peer._disconnectTimer = null;
     }
 
+    // Observing: what the proved rule would do with this lost connection,
+    // compared with the branch taken below.
+    const provedDisposition = _meshCore()?.disconnectDisposition(
+      _phase < PHASE_GAME_STARTED,
+      !!peer.isInitiator,
+      !!peer._intentionalLeave,
+      _isPeerPendingLateJoin(remoteSid, peer),
+      _phase === PHASE_RUNNING,
+    );
+    const observeDisposition = (taken) => {
+      if (provedDisposition !== undefined) _meshCompare('disconnect', taken, provedDisposition);
+    };
+
     if (_phase < PHASE_GAME_STARTED && peer.isInitiator && !peer._intentionalLeave) {
+      observeDisposition('retryStartup');
       _syncLog(`startup peer ${remoteSid} disconnected before game start — retrying`);
       retryStartupConnection(remoteSid);
       return;
     }
 
     if (_isPeerPendingLateJoin(remoteSid, peer)) {
+      observeDisposition('hardDisconnect');
       _syncLog(`pending late-join peer ${remoteSid} disconnected before activation`);
       hardDisconnectPeer(remoteSid);
       return;
@@ -8910,6 +8993,7 @@
 
     // If game is running and not an intentional leave, attempt reconnect
     if (_phase === PHASE_RUNNING && !peer._intentionalLeave) {
+      observeDisposition('reconnect');
       _syncLog(`peer ${remoteSid} DC died — attempting reconnect`);
 
       // Zero their input but keep peer in _peers
@@ -8942,6 +9026,7 @@
       return;
     }
 
+    observeDisposition('hardDisconnect');
     hardDisconnectPeer(remoteSid);
   };
 
@@ -9020,6 +9105,11 @@
 
     const retryOrGiveUp = () => {
       if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
+      _meshCompare(
+        'reconnect-attempt-left',
+        attempt < _MAX_RECONNECT_ATTEMPTS,
+        _meshCore()?.hasAttemptLeft(attempt, _MAX_RECONNECT_ATTEMPTS) ?? attempt < _MAX_RECONNECT_ATTEMPTS,
+      );
       if (attempt < _MAX_RECONNECT_ATTEMPTS) {
         _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
         setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
