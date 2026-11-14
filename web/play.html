@@ -527,12 +527,10 @@
     <script src="/static/storage.js"></script>
     <script src="/static/kn-capture.js"></script>
 
-    <!-- Centralized cross-module state -->
-    <script src="/static/kn-state.js"></script>
-
-    <!-- The TypeScript core (window.KNCore), which also defines the shared
-         netplay utilities (window.KNShared: cheats, keymap, input tracking,
-         input codec). Loaded before the scripts that build on it. -->
+    <!-- The TypeScript core (window.KNCore), the state the scripts share
+         (window.KNState) and the shared netplay utilities (window.KNShared:
+         cheats, keymap, input tracking, input codec). Loaded before every
+         script that builds on any of them. -->
     <script src="/static/dist/kn-core.js"></script>
 
     <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->

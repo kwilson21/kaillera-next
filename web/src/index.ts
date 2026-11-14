@@ -54,6 +54,7 @@ import {
   signalDisposition,
   staleHoldersOf,
 } from './peer-signaling.ts';
+import { installKNState } from './kn-state.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { startRejoin, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
 import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from './rejoin-machine.ts';
@@ -316,6 +317,7 @@ declare global {
 
 if (typeof window !== 'undefined') {
   window.KNCore = KNCore;
+  installKNState(window);
   installShared();
   installDiagnostics();
   installDesyncDetector();
