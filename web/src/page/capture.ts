@@ -170,9 +170,3 @@ export const startCapture = (host: CaptureHost): CapturePolicy => {
     },
   };
 };
-
-declare global {
-  interface Window {
-    KNCapture?: CapturePolicy;
-  }
-}
