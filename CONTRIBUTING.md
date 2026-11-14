@@ -140,7 +140,7 @@ earlier ones to have set up their `window.*` exports:
 15. `controller-settings.js` — starts the in-game controller settings panel (logic in `web/src/page/controller-settings/`)
 16. `play.js` — page orchestrator (connects everything)
 17. `version.js` — version display + changelog modal; starts `web/src/site/version.ts`
-18. `feedback.js` — in-app feedback collection
+18. `feedback.js` — in-app feedback collection (`window.KNFeedback`); starts `web/src/site/feedback.ts`
 
 #### Server structure
 
@@ -186,7 +186,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `kn-audio.js`                                            | —       | AudioWorklet pump + rollback audio capture                                                                                                                                             | rollback, play.js                                           |
 | `kn-vision-client.js`                                    | —       | Starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)                                                                                  | rollback                                                    |
 | `audio-worklet-processor.js`                             | ~85     | AudioWorklet ring buffer for rollback audio                                                                                                                                            | kn-audio.js                                                 |
-| `feedback.js`                                            | ~540    | In-app feedback collection UI                                                                                                                                                          | play.js                                                     |
+| `feedback.js`                                            | —       | In-app feedback collection UI (`window.KNFeedback`); a small caller of `web/src/site/feedback.ts`                                                                                      | dist/kn-core.js or dist/kn-site.js                          |
 | `api-sandbox.js`                                         | —       | Saves/restores native rAF, performance.now, getGamepads                                                                                                                                | rollback, core-redirector                                   |
 | `core-redirector.js`                                     | —       | Intercepts EJS core download → serves patched WASM from IDB                                                                                                                            | api-sandbox                                                 |
 | `web/src/site/storage.ts` (in `dist/kn-core.js`)         | —       | Safe localStorage/sessionStorage wrapper (`window.KNStorage`), set by the bundle                                                                                                       | all modules                                                 |
