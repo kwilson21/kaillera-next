@@ -13819,6 +13819,10 @@
       _peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);
     }
     if (_rbInputStallStartTime > 0) _rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);
+    // The pacing throttle's deadline drops a peer too, and is checked on this
+    // tick before the throttle can end (specs/tick_deadlines.qnt): a page
+    // that froze while held back would drop a peer that never stopped sending.
+    if (_pacingThrottleStartAt > 0) _pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);
     _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
   };
 
