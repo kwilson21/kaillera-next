@@ -15,10 +15,14 @@ model, regenerate and commit it.
 
 from __future__ import annotations
 
+import logging
+import sys
 from functools import wraps
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+log = logging.getLogger(__name__)
 
 # ── Mode coercion (back-compat) ──────────────────────────────────────────────
 # Pre-rename clients send mode="lockstep". The product-facing engine is now
@@ -81,6 +85,13 @@ class OpenRoomExtra(BaseModel):
     # reload. A page whose socket merely reconnected under a running game
     # leaves it False (as do clients from before the field existed).
     fresh: bool = False
+    # A page that still has a game running, taking its place in the room back
+    # after a socket drop; `slot` and `matchId` say what it is playing. The
+    # rule is the one on JoinRoomExtra. A dropped host that is taken back
+    # comes back as a player: the room was handed on when it was dropped.
+    resume: bool = False
+    slot: int | None = Field(default=None, ge=0, le=3)
+    matchId: str = Field(default="", max_length=64)
 
 
 class OpenRoomPayload(BaseModel):
@@ -98,6 +109,18 @@ class JoinRoomExtra(BaseModel):
     reconnectToken: str = ""
     player_name: str = Field(default="Player", max_length=32)
     spectate: bool = False
+    # `resume` is true when the page still has a game running and is taking
+    # its place in the room back after a socket drop; `slot` and `matchId`
+    # are the slot it plays and the match it is in. A member is taken back as
+    # always. A player the room dropped meanwhile (the grace window ran out)
+    # may still be playing, since the players' connections are their own: it
+    # is taken back into that slot if the room is still playing that match
+    # and the slot is free, and refused with NOT_IN_ROOM otherwise, so the
+    # page ends its game instead of carrying on with no signaling
+    # (specs/room_lifecycle.qnt, nobodyIsStrandedInADroppedMatch).
+    resume: bool = False
+    slot: int | None = Field(default=None, ge=0, le=3)
+    matchId: str = Field(default="", max_length=64)
 
 
 class JoinRoomPayload(BaseModel):
@@ -127,6 +150,19 @@ class StartGamePayload(_ModeCompatMixin, BaseModel):
     resyncEnabled: bool = True
     romHash: str | None = None
     gameId: str | None = Field(default=None, max_length=32)
+
+
+# ── match-joined ─────────────────────────────────────────────────────────────
+
+
+class MatchJoinedPayload(BaseModel):
+    """A player who joined a match in play says it is now in it.
+
+    Until then the server counts it as waiting, and ends a match in which
+    every player left is waiting (signaling.match_is_abandoned).
+    """
+
+    matchId: str = Field(max_length=64)
 
 
 # ── end-game ─────────────────────────────────────────────────────────────────
@@ -220,14 +256,16 @@ class FeedbackPayload(BaseModel):
 
 
 # ── server → client ──────────────────────────────────────────────────────────
-# What signaling.py sends, as it sends it today, duplicate snake_case keys
-# included (older cached pages read them). The dicts are still built by hand
-# in signaling.py; these models are their contract. `extra="forbid"` and
-# `strict` make the server test fail on a key the model does not name or a
-# value of another type, so a new field has to be added here (and so to the
-# generated client schema) before it ships.
+# What signaling.py sends, duplicate snake_case keys included (older cached
+# pages read them). signaling.py builds each payload as a dict and passes it
+# through `checked` on its way out (`_emit`, and the two structured acks), so
+# every send is held to its model where it happens. `extra="forbid"` and
+# `strict` make a key the model does not name, or a value of another type, a
+# contract failure: a new field has to be added here (and so to the generated
+# client schema) before it ships.
 
 RoomStatus = Literal["lobby", "playing"]
+GameMode = Literal["rollback", "streaming"]
 
 
 class _ServerMessage(BaseModel):
@@ -275,7 +313,7 @@ class UsersUpdated(_ServerMessage):
     gameId: str
     game_id: str
     # None until the host picks a mode or starts a game.
-    mode: str | None
+    mode: GameMode | None
     status: RoomStatus
     listed: bool
 
@@ -285,14 +323,14 @@ class JoinRoomAck(UsersUpdated):
 
     rom_hash: str | None
     rom_sharing: bool
-    # Sent only while a match is running: the key is absent otherwise, never null.
-    matchId: str | None = None
+    # The running match, or None in the lobby.
+    matchId: str | None
 
 
 class GameStarted(_ServerMessage):
     """`game-started`."""
 
-    mode: Literal["rollback", "streaming"]
+    mode: GameMode
     resyncEnabled: bool
     romHash: str | None
     romName: str | None
@@ -340,3 +378,63 @@ class TokenMessage(_ServerMessage):
     """`upload-token` and `reconnect-token`."""
 
     token: str
+
+
+class RelaySender(_ServerMessage):
+    """Who sent a relayed `data-message`, `snapshot` or `input`, as the server knows it.
+
+    The server puts it on every message it relays, under `knFrom`
+    (`RELAY_SENDER_KEY`), replacing anything the sender put there. The rest
+    of a relayed message is the sender's own words.
+    """
+
+    sid: str
+    # None for a spectator, and for a player holding no slot.
+    slot: int | None
+    owner: bool
+
+
+RELAY_SENDER_KEY = "knFrom"
+
+
+# Each event the server sends with a payload of its own making, and its model.
+# `webrtc-signal` is also a relay of what peers send each other, so only the
+# server's own use of it is described here (see RELAYED_EVENTS).
+SERVER_EVENTS: dict[str, type[BaseModel]] = {
+    "users-updated": UsersUpdated,
+    "game-started": GameStarted,
+    "game-ended": GameEnded,
+    "rom-sharing-updated": RomSharingUpdated,
+    "upload-token": TokenMessage,
+    "reconnect-token": TokenMessage,
+    "webrtc-signal": RenegotiateRequest,
+}
+
+# Events that (also) carry what another client sent, forwarded as received.
+# The client cannot decode these as server messages by event name alone.
+RELAYED_EVENTS = frozenset({"webrtc-signal", "rom-signal", "data-message", "snapshot", "input"})
+
+
+class PayloadContractError(Exception):
+    """A payload the server built does not match its model."""
+
+
+# Under pytest a mismatch raises, so every server test that drives a handler
+# also checks the contract. In production it is logged and the payload still
+# goes out: a broken contract must not take a room down.
+RAISE_ON_CONTRACT_FAILURE = "pytest" in sys.modules
+
+
+def checked(model_cls: type[BaseModel], data: dict, what: str) -> dict:
+    """Hold a payload the server built to its model, then return it unchanged.
+
+    Logs `PAYLOAD-CONTRACT` on a mismatch (or raises, under tests).
+    """
+    try:
+        model_cls.model_validate(data)
+    except ValidationError as exc:
+        problems = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:5])
+        if RAISE_ON_CONTRACT_FAILURE:
+            raise PayloadContractError(f"{what} does not match {model_cls.__name__}: {problems}") from exc
+        log.error("PAYLOAD-CONTRACT %s does not match %s: %s", what, model_cls.__name__, problems)
+    return data

@@ -42,3 +42,25 @@ export function reconcileRejoin(
   if (pageMatchId.length > 0 && roomMatchId.length > 0 && pageMatchId !== roomMatchId) return 'matchReplaced';
   return 'keep';
 }
+
+/**
+ * What one answer to a rejoin means.
+ *
+ * `resumed`: the page has its place in the room back. `retry`: ask again
+ * (the server answered "Rate limited"). `dropped`: the page is not in the room any more, or cannot
+ * get back into it (the grace window ran out, the room is gone, the token is
+ * no good): its game is over, and it joins again as a fresh page would,
+ * which shows the player whatever error that join meets.
+ *
+ * @param error  the error text of the server's answer; empty for none
+ */
+export type RejoinAnswer = 'resumed' | 'retry' | 'dropped';
+
+//@ ensures error.length === 0 ==> \result === "resumed"
+//@ ensures error === "Rate limited" ==> \result === "retry"
+//@ ensures error.length > 0 && error !== "Rate limited" ==> \result === "dropped"
+export function rejoinAnswer(error: string): string {
+  if (error.length === 0) return 'resumed';
+  if (error === 'Rate limited') return 'retry';
+  return 'dropped';
+}

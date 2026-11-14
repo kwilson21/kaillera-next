@@ -219,6 +219,26 @@ class Generator:
         self.emitted.add(name)
         return "\n".join(lines)
 
+    def _server_events(self) -> str:
+        """The event-name-to-schema map for events only the server authors."""
+        events = getattr(self.module, "SERVER_EVENTS", {})
+        relayed = getattr(self.module, "RELAYED_EVENTS", frozenset())
+        rows = [f"  {_ts_key(e)}: {m.__name__}," for e, m in events.items() if e not in relayed]
+        if not rows:
+            return ""
+        return "\n".join(
+            [
+                "/**",
+                " * Server-authored events by name. Events that also relay what another",
+                " * client sent (`webrtc-signal`, `data-message`, ...) are not listed.",
+                " */",
+                "export const serverEvents = {",
+                *rows,
+                "} as const;",
+                "export type ServerEventName = keyof typeof serverEvents;",
+            ]
+        )
+
     def render(self) -> str:
         blocks = [HEADER.rstrip("\n")]
         for name, alias in self.literals.items():
@@ -230,6 +250,9 @@ class Generator:
                 f"export const decode{m.__name__} = Schema.decodeUnknownResult({m.__name__});" for m in self.models
             )
         )
+        events = self._server_events()
+        if events:
+            blocks.append(events)
         return "\n\n".join(blocks) + "\n"
 
 

@@ -1,5 +1,85 @@
 [
   {
+    "version": "0.68.2",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the server ends a match nobody is running; the play page's rules, schemas and lifecycle move to TypeScript (#155)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.1",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "desync detector reads the live battle state; enable it on Smash Remix 2.0.1 (#162)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.0",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "the desync detector's addresses are a per-ROM map, with a verifier (#159)"
+      }
+    ]
+  },
+  {
+    "version": "0.67.11",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "both peers screenshot a flagged frame at the same frame (#158)"
+      }
+    ]
+  },
+  {
+    "version": "0.67.10",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the gameplay hash covers the scene and the stock counts (#157)"
+      }
+    ]
+  },
+  {
+    "version": "0.67.9",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the relay stamps the true sender and pages check it before acting (#149)"
+      }
+    ]
+  },
+  {
+    "version": "0.67.8",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "desync detection runs again (core exports the field hashes) (#143)"
+      }
+    ]
+  },
+  {
+    "version": "0.67.7",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a rejoin after the grace window takes a playing player back, and a refusal is acted on (#144)"
+      }
+    ]
+  },
+  {
     "version": "0.67.6",
     "date": "2026-11-13",
     "changes": [

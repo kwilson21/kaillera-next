@@ -14,6 +14,8 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend=typescript
+$QUINT test "$SPEC" --main=room_before_abandoned_end --backend=typescript
+$QUINT test "$SPEC" --main=room_before_resume_flag --backend=typescript
 $QUINT test "$SPEC" --main=room_before_start_fix --backend=typescript
 $QUINT test "$SPEC" --main=room_before_reconcile --backend=typescript
 $QUINT test "$SPEC" --main=room_before_104 --backend=typescript
@@ -36,6 +38,12 @@ check room_current joinersAreNotLeftWaitingAtTheStart
 # Players who have synced the start are not held up by someone who joined
 # after the sync began (violated on room_before_start_fix).
 check room_current startIsNotHeldUpByALateJoiner
+# A page whose rejoin the server answered is never left showing a match the
+# room dropped it from (violated on room_before_resume_flag).
+check room_current nobodyIsStrandedInADroppedMatch
+# A playing room nobody is running is ended by the server (violated on
+# room_before_abandoned_end).
+check room_current anAbandonedMatchIsEnded
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
@@ -49,6 +57,43 @@ for invariant in neverEvictsLiveConnection oneConnectionPerGuest; do
   $QUINT run "$PEERS" --main=peer_identity_current --invariant="$invariant" \
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
+
+# ── ROM transfer: a guest waiting on the host always has a way out ──────────
+ROM=specs/rom_transfer.qnt
+$QUINT typecheck "$ROM"
+for variant in rom_transfer_before rom_transfer_current; do
+  $QUINT test "$ROM" --main="$variant" --backend=typescript
+done
+# Today: every waiting state has a running timer or a Retry button. Violated
+# before the request sent over the engine channel was given a deadline.
+for invariant in waitingHasAWayOut timersAloneStop; do
+  $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+done
+# ── Desync digests: which frame a peer may report a hash for ────────────────
+DIGEST=specs/desync_digest.qnt
+$QUINT typecheck "$DIGEST"
+for variant in desync_digest_before desync_digest_lag_only desync_digest_unsimulated \
+  desync_digest_worker_replay desync_digest_current; do
+  $QUINT test "$DIGEST" --main="$variant" --backend=typescript
+done
+# Today: a healthy peer never reports a hash for a frame it may still replay.
+# Violated when the digest is built for the newest frame; with the wait alone,
+# while replays leave the history as first written; when a late joiner
+# reports frames it never simulated; and with the detector on under Mode 2.
+$QUINT run "$DIGEST" --main=desync_digest_current --invariant=neverReportsAnUnconfirmedHash \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── Desync screenshots: which frame each peer captures ──────────────────────
+CAPTURE=specs/desync_capture.qnt
+$QUINT typecheck "$CAPTURE"
+for variant in desync_capture_before desync_capture_current; do
+  $QUINT test "$CAPTURE" --main="$variant" --backend=typescript
+done
+# Today: two pictures that are compared show the same frame. Violated when
+# each peer captured at the moment it flagged.
+$QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPicturesShowOneFrame \
+  --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── Peer connection: one pair of pages, offers and answers between them ─────
 PAIR=specs/peer_connection.qnt

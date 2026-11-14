@@ -2,6 +2,8 @@
 
 datatype RejoinVerdict = keep | gameEnded | matchReplaced
 
+datatype RejoinAnswer = resumed | retry | dropped
+
 function reconcileRejoin(inGame: bool, pageMatchId: string, roomPlaying: bool, roomMatchId: string): string
 {
   if !(inGame) then
@@ -22,5 +24,23 @@ lemma reconcileRejoin_ensures(inGame: bool, pageMatchId: string, roomPlaying: bo
   ensures ((reconcileRejoin(inGame, pageMatchId, roomPlaying, roomMatchId) == "matchReplaced") ==> ((inGame && roomPlaying) && (pageMatchId != roomMatchId)))
   ensures (inGame ==> roomPlaying ==> (pageMatchId == roomMatchId) ==> (reconcileRejoin(inGame, pageMatchId, roomPlaying, roomMatchId) == "keep"))
   ensures (inGame ==> roomPlaying ==> (|pageMatchId| > 0) ==> (|roomMatchId| > 0) ==> (pageMatchId != roomMatchId) ==> (reconcileRejoin(inGame, pageMatchId, roomPlaying, roomMatchId) == "matchReplaced"))
+{
+}
+
+function rejoinAnswer(error: string): string
+{
+  if (|error| == 0) then
+    "resumed"
+  else
+    if (error == "Rate limited") then
+      "retry"
+    else
+      "dropped"
+}
+
+lemma rejoinAnswer_ensures(error: string)
+  ensures ((|error| == 0) ==> (rejoinAnswer(error) == "resumed"))
+  ensures ((error == "Rate limited") ==> (rejoinAnswer(error) == "retry"))
+  ensures ((|error| > 0) ==> (error != "Rate limited") ==> (rejoinAnswer(error) == "dropped"))
 {
 }

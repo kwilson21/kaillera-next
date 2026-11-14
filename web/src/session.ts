@@ -6,16 +6,15 @@
  * tell them apart). The scenario tests in tests/ts replay that model's runs
  * against it.
  *
- * Stage 2, in two steps:
- *  - "Is a game on" is read from this machine. play.js still writes its old
- *    `gameRunning` flag beside it and reports any disagreement
- *    (`session-disagree`) on every signaling reconnect; the flag goes once
- *    production shows none.
- *  - On a signaling reconnect the page reconciles with the server
- *    (`rejoined`): this one decides, there was no rule before it.
- *  - The late-join states observe. play.js still decides from `_lateJoin`
- *    and `_pendingLateJoin` and reports, at each place it reads one, whether
- *    the machine would have answered the same.
+ * play.js reads its lifecycle from here and keeps no flags of its own:
+ *  - "is a game on" (anything but the lobby);
+ *  - "is the next engine start a late join" and "is the page waiting for a
+ *    ROM before it can late-join" (the late-join states);
+ *  - on a signaling reconnect the page reconciles with the server
+ *    (`rejoined`), and a refused rejoin ends its game (`rejoinRefused`).
+ * The flags it used to keep (`gameRunning`, `_lateJoin`, `_pendingLateJoin`)
+ * were written beside the machine and compared with it at every read until
+ * every end-to-end scenario showed no disagreement; then they were deleted.
  */
 import { Context, Effect, Schema } from 'effect';
 import { setupEffect } from '@xstate/effect';
@@ -32,10 +31,10 @@ export type SessionState =
   | 'lateJoinSyncing'
   | 'running';
 
-/** The page flags the machine can be compared with. */
+/** The questions play.js asks of the machine. */
 export type SessionCheck = 'gameRunning' | 'lateJoin' | 'pendingLateJoin';
 
-/** What the machine says each page flag should be in a given state. */
+/** The answer to each question in a given state. */
 export const sessionFlag = (state: SessionState, check: SessionCheck): boolean => {
   switch (check) {
     case 'gameRunning':
@@ -49,15 +48,7 @@ export const sessionFlag = (state: SessionState, check: SessionCheck): boolean =
 };
 
 /** What the machine reports. It never acts on these; the page logs them. */
-export type SessionReport =
-  | { readonly type: 'late-join-stranded'; readonly matchId: string | null }
-  | {
-      readonly type: 'session-disagree';
-      readonly machine: SessionState;
-      readonly check: SessionCheck;
-      /** What play.js's own flag said. */
-      readonly page: boolean;
-    };
+export type SessionReport = { readonly type: 'late-join-stranded'; readonly matchId: string | null };
 
 /** Where reports go. Provided by the host page. */
 export class Telemetry extends Context.Service<
@@ -98,6 +89,13 @@ export const sessionMachine = setupEffect({
        * lobby; play.js then does what a fresh join would (web/src/rejoin.ts).
        */
       rejoined: Schema.Struct({ playing: Schema.Boolean, matchId: Schema.NullOr(Schema.String) }),
+      /**
+       * The socket came back but the room has dropped this page (its grace
+       * window ran out) or will not take it back. Its game is over; play.js
+       * then joins again as a fresh page would (web/src/rejoin-attempt.ts;
+       * `returnAfterExpiry` in the Quint model).
+       */
+      rejoinRefused: Empty,
       /** A late joiner has no usable ROM and has been asked for one. */
       lateJoinRomNeeded: Empty,
       /** The ROM question is settled; the late join can go ahead. */
@@ -139,6 +137,7 @@ export const sessionMachine = setupEffect({
     socketUp: ({ context }) => ({ context: { ...context, socketUp: true } }),
     gameEnded: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
     roomClosed: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
+    rejoinRefused: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
   },
   states: {
     lobby: {

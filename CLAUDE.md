@@ -124,6 +124,9 @@ kaillera-next/
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
+│   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
+│   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
+│   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
@@ -161,19 +164,20 @@ All events go through the default Socket.IO namespace (`/`).
 
 | Event | Direction | Payload | Description |
 |---|---|---|---|
-| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id}, password, maxPlayers}` | Create room |
-| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}, password}` | Join/spectate |
+| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id, fresh, resume, slot, matchId}, password, maxPlayers}` | Create room (`fresh`: the page has no game running; `resume`: it has one, in `slot` of `matchId`, and is taking its place back. A player the room dropped is taken back into that match and slot, or refused with `Not in room`) |
+| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate, resume, slot, matchId}, password}` | Join/spectate (`resume`, `slot`, `matchId` as for `open-room`) |
 | `leave-room` | client→server | `{}` | Leave room |
 | `claim-slot` | client→server | `{slot}` | Spectator → player |
 | `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
 | `start-game` | client→server | `{mode, resyncEnabled, romHash, gameId}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
 | `end-game` | client→server | `{}` | Host ends game |
+| `match-joined` | client→server | `{matchId}` | A player who joined a match in play is now in it. Until then the server counts it as waiting, and ends a match only waiting players are left in |
 | `set-name` | client→server | `{name}` | Update player display name |
 | `set-mode` | client→server | `{mode}` | Host sets game mode |
 | `set-game-id` | client→server | `{game_id}` | Host updates game_id after ROM identification |
 | `webrtc-signal` | bidirectional | `{target, offer/answer/candidate/reconnect/requestRenegotiate}` | WebRTC relay |
 | `rom-signal` | bidirectional | `{target, ...}` | Pre-game ROM transfer signaling |
-| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max) |
+| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max). The server stamps every relayed `data-message`, `snapshot` and `input` with `knFrom: {sid, slot, owner}`, the true sender; pages check it (`KNCore.checkRelayed`) |
 | `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
 | `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
 | `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
@@ -276,11 +280,19 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   the menu autopilot can overshoot into Team Battle at delay ≥ 10. Treat
   multi-second freezes and menu timeouts there as environment first; confirm
   real bugs from the logs.
-- **Which hash to trust.** `kn_game_state_hash` is the determinism signal:
-  RDRAM minus blocks tainted by audio/framebuffer writes, plus the saved CPU
-  state unless `kn_skip_post_rdram_in_hash` is set, so equal hashes don't
-  always prove equal CPU state. `kn_full_state_hash` includes the tainted
-  blocks, which legitimately differ after headless replays.
+- **Which hash to trust.** None of the three covers the whole game state;
+  know what each one reads. `kn_gameplay_hash` hashes a short list of game
+  addresses (scene, VS battle header, stock counts, RNG seed, character
+  select); it is the one that sees a changed stock count. `kn_game_state_hash`
+  is RDRAM minus every 64 KB block tainted by an audio or framebuffer write,
+  sampled every 16th byte, plus the saved CPU state unless
+  `kn_skip_post_rdram_in_hash` is set. In an SSB64 match 107 of 128 blocks are
+  tainted, the battle state's among them, so equal hashes prove little; a
+  two-player run reports the coverage as `gameStateRdramBlocksHashed`.
+  `kn_full_state_hash` samples one byte in 64 and includes the tainted
+  blocks, which legitimately differ after headless replays. A run with
+  `DESYNC_GUEST=1` shows which of them (and the desync detector) notice a
+  real divergence.
 - **Core artifacts ship together.** The `.data` archive and the standalone
   `mupen64plus_next_libretro.{js,wasm}` (used by the Mode 2 worker) must come
   from the same build; URLs are content-hashed via `/api/core-info`.

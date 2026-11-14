@@ -23,7 +23,11 @@ async def _open(tmp_path, *, d1=False, blobs=None):
     from src.blobstore import LocalBlobStore
     from src.dbbackend.d1 import D1Backend
 
-    backend = D1Backend("acct", "db", FAKE_TOKEN, transport=FakeD1().transport()) if d1 else None
+    backend = (
+        D1Backend("acct", "db", FAKE_TOKEN, transport=FakeD1().transport())
+        if d1
+        else None
+    )
     await db.init_db(
         None if d1 else str(tmp_path / "kn.db"),
         backend=backend,
@@ -38,7 +42,9 @@ def test_insert_stores_bytes_in_blob_store_and_key_in_row(tmp_path, d1):
         db = await _open(tmp_path, d1=d1)
         try:
             row_id = await db.insert_screenshot("m1", 0, 300, JPEG)
-            rows = await db.query("SELECT blob_key, size, data FROM screenshots WHERE id = ?", (row_id,))
+            rows = await db.query(
+                "SELECT blob_key, size, data FROM screenshots WHERE id = ?", (row_id,)
+            )
             listing = await db.get_screenshots("m1")
             data = await db.get_screenshot_data(row_id)
             return rows, listing, data
@@ -46,13 +52,23 @@ def test_insert_stores_bytes_in_blob_store_and_key_in_row(tmp_path, d1):
             await db.close_db()
 
     rows, listing, data = run_async(scenario())
-    assert rows == [{"blob_key": "matches/m1/screenshots/0-300.jpg", "size": len(JPEG), "data": None}]
-    assert [(s["slot"], s["frame"], s["size"]) for s in listing] == [(0, 300, len(JPEG))]
+    assert rows == [
+        {
+            "blob_key": "matches/m1/screenshots/0-300.jpg",
+            "size": len(JPEG),
+            "data": None,
+        }
+    ]
+    assert [(s["slot"], s["frame"], s["size"]) for s in listing] == [
+        (0, 300, len(JPEG))
+    ]
     assert data == JPEG
     assert (tmp_path / "blobs/matches/m1/screenshots/0-300.jpg").read_bytes() == JPEG
 
 
-@pytest.mark.parametrize(("slot", "frame"), [("../x", 300), (0, "12/../../x"), (None, 300), (0, None)])
+@pytest.mark.parametrize(
+    ("slot", "frame"), [("../x", 300), (0, "12/../../x"), (None, 300), (0, None)]
+)
 def test_insert_rejects_non_integer_slot_or_frame(tmp_path, slot, frame):
     async def scenario():
         db = await _open(tmp_path)
@@ -99,7 +115,8 @@ def test_legacy_row_with_bytes_in_database_is_still_readable(tmp_path):
         db = await _open(tmp_path)
         try:
             await db.execute_write(
-                "INSERT INTO screenshots (match_id, slot, frame, data) VALUES (?, ?, ?, ?)", ("m-old", 1, 60, JPEG)
+                "INSERT INTO screenshots (match_id, slot, frame, data) VALUES (?, ?, ?, ?)",
+                ("m-old", 1, 60, JPEG),
             )
             listing = await db.get_screenshots("m-old")
             return listing, await db.get_screenshot_data(listing[0]["id"])
@@ -124,10 +141,15 @@ def test_desync_vision_loads_screenshots_from_blob_store(tmp_path):
             await db.close_db()
 
     shots = run_async(scenario())
-    assert [(s.slot, base64.b64decode(s.png_b64)) for s in shots] == [(0, JPEG), (1, JPEG + b"-p2")]
+    assert [(s.slot, base64.b64decode(s.png_b64)) for s in shots] == [
+        (0, JPEG),
+        (1, JPEG + b"-p2"),
+    ]
 
 
-def test_postmortem_reads_unverified_events_and_stores_the_verdict(tmp_path, monkeypatch):
+def test_postmortem_reads_unverified_events_and_stores_the_verdict(
+    tmp_path, monkeypatch
+):
     """run_postmortem end to end with a stand-in for the vision API: it finds
     the desync event with no verdict, loads both peers' screenshots, and
     records what the model said."""
@@ -141,9 +163,13 @@ def test_postmortem_reads_unverified_events_and_stores_the_verdict(tmp_path, mon
             self.messages = SimpleNamespace(create=self._create)
 
         async def _create(self, **_kwargs):
-            return SimpleNamespace(content=[SimpleNamespace(text='{"equal": false, "confidence": "high"}')])
+            return SimpleNamespace(
+                content=[SimpleNamespace(text='{"equal": false, "confidence": "high"}')]
+            )
 
-    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(AsyncAnthropic=FakeAnthropic))
+    monkeypatch.setitem(
+        sys.modules, "anthropic", SimpleNamespace(AsyncAnthropic=FakeAnthropic)
+    )
     monkeypatch.setenv("DESYNC_VISION_ENABLED", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(desync_vision, "_CACHE", {})
@@ -177,7 +203,73 @@ def test_postmortem_reads_unverified_events_and_stores_the_verdict(tmp_path, mon
     # one; it sits within two frames of both screenshots, so only the
     # "no verdict yet" filter keeps it from being sent too.
     assert processed == 1
-    assert [(row["frame"], row["field"], row["vision_equal"], row["vision_confidence"]) for row in stored] == [
-        (300, "stocks", 0, "high")
-    ]
+    assert [
+        (row["frame"], row["field"], row["vision_equal"], row["vision_confidence"])
+        for row in stored
+    ] == [(300, "stocks", 0, "high")]
     assert "png_b64" not in stored[0]["hashes_json"]
+
+
+def test_live_vision_compares_only_pictures_of_one_frame(tmp_path, monkeypatch):
+    """Each peer posts its own screenshot for a flagged frame. They are sent
+    to the model together only if both say they show the same frame: two
+    frames of a moving game differ whether or not the peers do."""
+    import sys
+    from types import SimpleNamespace
+
+    from src.api import desync_vision
+
+    calls = []
+
+    class FakeAnthropic:
+        def __init__(self, api_key):
+            self.messages = SimpleNamespace(create=self._create)
+
+        async def _create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                content=[SimpleNamespace(text='{"equal": true, "confidence": "high"}')]
+            )
+
+    monkeypatch.setitem(
+        sys.modules, "anthropic", SimpleNamespace(AsyncAnthropic=FakeAnthropic)
+    )
+    monkeypatch.setenv("DESYNC_VISION_ENABLED", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(desync_vision, "_CACHE", {})
+
+    def post(frame, slot, captured_frame):
+        return desync_vision.desync_vision(
+            desync_vision.VisionRequest(
+                match_id="m1",
+                frame=frame,
+                field="stocks",
+                slot=0,
+                trigger="flag",
+                peers=[
+                    desync_vision.PeerScreenshot(
+                        slot=slot,
+                        png_b64=f"png-{frame}-{slot}",
+                        captured_frame=captured_frame,
+                    )
+                ],
+            )
+        )
+
+    async def scenario():
+        db = await _open(tmp_path)
+        try:
+            first = await post(942, 0, 1032)
+            different = await post(942, 1, 1040)
+            await post(1002, 0, 1092)
+            same = await post(1002, 1, 1092)
+            return first, different, same
+        finally:
+            await db.close_db()
+
+    first, different, same = run_async(scenario())
+    assert first["queued"] is True
+    assert different["skipped"] == "captured_at_different_frames"
+    assert same["verdict"] == {"equal": True, "confidence": "high"}
+    # Only the pair captured at one frame reached the model.
+    assert len(calls) == 1
