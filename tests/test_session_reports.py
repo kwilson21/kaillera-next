@@ -37,11 +37,14 @@ def _report_types() -> list[str]:
     observe = (SESSION_TS.parent / "play" / "observe.ts").read_text()
     disagree = observe[observe.index("export type DisagreeReport") :]
     disagree = disagree[: disagree.index("};")]
-    return re.findall(r"readonly type: '([^']+)'", union + report + disagree)
+    streaming = (SESSION_TS.parent / "streaming" / "observe.ts").read_text()
+    streaming = streaming[streaming.index("export type StreamingDisagreeReport") :]
+    streaming = streaming[: streaming.index("};")]
+    return re.findall(r"readonly type: '([^']+)'", union + report + disagree + streaming)
 
 
 def test_the_union_is_found():
-    assert set(_report_types()) >= {"late-join-stranded", "protocol-mismatch", "play-disagree"}
+    assert set(_report_types()) >= {"late-join-stranded", "protocol-mismatch", "play-disagree", "streaming-disagree"}
 
 
 @pytest.mark.parametrize("report_type", _report_types())
