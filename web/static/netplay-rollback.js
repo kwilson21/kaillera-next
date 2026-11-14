@@ -5070,10 +5070,16 @@
     if (_playerSlot !== null && _playerSlot !== undefined) {
       for (let f = from; f < frame; f++) {
         own.push(f);
-        if (_localInputs[f] !== undefined) continue;
-        _localInputs[f] = KNShared.ZERO_INPUT;
-        _feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);
-        made.push(f);
+        if (_localInputs[f] === undefined) {
+          _localInputs[f] = KNShared.ZERO_INPUT;
+          made.push(f);
+        }
+        // Every one is handed to the engine again, the ones made earlier
+        // too: its input ring holds 256 frames, and a page that ran further
+        // ahead than that before it was taken back has written over the
+        // slot. The peers apply what is sent below; this page must apply
+        // the same.
+        _feedCInput(mod, _playerSlot, f, _localInputs[f]);
       }
     }
     const asked = [];
