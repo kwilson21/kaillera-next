@@ -126,7 +126,7 @@ earlier ones to have set up their `window.*` exports:
 3. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
 4. `socket.io.min.js` — self-hosted Socket.IO client
 5. `vendor/fflate.min.js` — compression lib used to extract ROM ZIP archives
-6. `storage.js` — safe localStorage/sessionStorage wrapper
+6. `dist/kn-core.js` — the TypeScript core (`window.KNCore`); also sets `window.KNStorage`, the safe localStorage/sessionStorage wrapper
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
 8. `kn-state.js` — shared state namespace
 9. `gamepad-manager.js` — gamepad profiles and mapping
@@ -194,7 +194,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `feedback.js` | ~540 | In-app feedback collection UI | play.js |
 | `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | rollback, core-redirector |
 | `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
-| `storage.js` | ~24 | Safe localStorage/sessionStorage wrapper (KNStorage) | all modules |
+| `dist/kn-core.js` | — | The TypeScript core built from `web/src`; sets `KNStorage`, the safe localStorage/sessionStorage wrapper (`web/src/site/storage.ts`) | all modules |
 | `kn-capture.js` | — | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag) | rollback, streaming |
 | `kn-state.js` | ~37 | Cross-module shared state namespace | all modules |
 | `version.js` | ~350 | Version display + changelog modal | play.js |
@@ -203,6 +203,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `landing.js` | — | Front-page board controller (room creation, open-rooms board) on index.html | — |
 | `join.js` | — | Invite-page controller (room lookup, join/watch states) on join.html | — |
 | `dist/kn-wake-art.js` | — | Standalone TypeScript bundle for waking-state art while a room wakes | index.html, join.html |
+| `dist/kn-site.js` | — | Small TypeScript bundle for pages without the core: `KNStorage` | index.html, admin.html |
 | `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
 | `demo.js` | ~1,818 | Demo page orchestrator (fake peer + menu autopilot) | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
 | `fake-peer.js` | ~559 | Synthetic P2 for the demo page (simulated input/jitter) | demo.js |

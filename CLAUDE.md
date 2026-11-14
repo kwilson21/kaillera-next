@@ -105,7 +105,6 @@ kaillera-next/
 │       ├── kn-desync-detector.js # field-granular cross-peer desync detection
 │       ├── kn-diagnostics.js    # rollback diagnostics (RB-CHECK, audit log)
 │       ├── kn-vision-client.js  # Claude vision API client for screenshot diff
-│       ├── storage.js           # safe localStorage/sessionStorage wrapper
 │       ├── api-sandbox.js       # save/restore native browser APIs
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
@@ -120,6 +119,7 @@ kaillera-next/
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
 │       ├── dist/kn-core.js       # built from web/src by `just build`; committed, never edited by hand
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
+│       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
@@ -127,6 +127,8 @@ kaillera-next/
 │   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
+│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage)
+│   │   ├── site-entry.ts        # kn-site.js bundle entry
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
