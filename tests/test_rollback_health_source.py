@@ -573,3 +573,20 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
     input_guard_end = src.index("const recvInput =", input_guard_start)
     input_guard = src[input_guard_start:input_guard_end]
     assert "INPUT_FUTURE_MARGIN_FRAMES" in input_guard
+
+
+def test_local_freeze_is_credited_to_every_deadline_that_drops_a_peer():
+    # specs/tick_deadlines.qnt: a page's own freeze must not count against a
+    # peer. Three deadlines drop a peer; all three stamps move with the gap.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const _creditLocalFreeze = () => {")
+    credit_src = src[idx : src.index("\n  };\n", idx)]
+    for snippet in (
+        "_peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);",
+        "_rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);",
+        "_pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);",
+    ):
+        assert snippet in credit_src
+    # The credit runs before the pacing deadline is checked in the same tick.
+    tick_idx = src.index("const tick = () => {")
+    assert src.index("_creditLocalFreeze();", tick_idx) < src.index("PACING-THROTTLE-TIMEOUT f=", tick_idx)

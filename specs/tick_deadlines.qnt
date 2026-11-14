@@ -18,10 +18,10 @@
 // loop measures the gap since the last tick and, when it is a second or
 // more, moves the stamps forward by it ("crediting" the freeze).
 //
-// It credits two of the three. The pacing-throttle stamp is not moved, and
-// its deadline is checked in the tick before anything can end the throttle:
-// a page that froze for 5 s while it was being held back drops its peer on
-// the first tick after.
+// It used to credit two of the three. The pacing-throttle stamp was not
+// moved, and its deadline is checked in the tick before anything can end the
+// throttle: a page that froze for 5 s while it was being held back dropped
+// its peer on the first tick after. All three are credited now.
 //
 // What is modelled: one page, the three deadlines as clocks, seconds passing
 // while the page runs, a freeze of several seconds, the credit, a wait
@@ -34,7 +34,7 @@
 // credited: its handlers keep running), more than one peer.
 //
 // CREDIT_ALL: a freeze is credited to every deadline that drops a peer.
-//   false = today: peer-stale and input-stall only.
+//   false = before: peer-stale and input-stall only.
 module tick_deadlines {
   const CREDIT_ALL: bool
 
@@ -110,7 +110,7 @@ module tick_deadlines {
 
   // A peer is dropped only on a deadline the page ran through: its own
   // freeze is never held against the peer.
-  // VIOLATED today, by the pacing-throttle deadline.
+  // Violated before the pacing-throttle deadline was credited.
   val ownFreezeIsNotHeldAgainstAPeer = not(unfair)
 
   // The page is held back for its peer, then freezes for 5 s. The peer was
@@ -143,12 +143,12 @@ module tick_deadlines {
       .expect(dropped and not(unfair))
 }
 
-// Today.
-module tick_deadlines_current {
+// Before: the pacing-throttle deadline was not credited.
+module tick_deadlines_before {
   import tick_deadlines(CREDIT_ALL = false).*
 }
 
-// With the freeze credited to every deadline that drops a peer.
-module tick_deadlines_fixed {
+// Today.
+module tick_deadlines_current {
   import tick_deadlines(CREDIT_ALL = true).*
 }
