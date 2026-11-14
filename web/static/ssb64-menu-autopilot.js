@@ -159,8 +159,12 @@
    * @param {object} opts
    * @param {(addr: number) => number|null} opts.read32  aligned big-endian RDRAM word
    * @param {(msg: string) => void} [opts.log]
+   * @param {boolean} [opts.anyFighter]  press A on whatever portrait the
+   *   puck reaches, and take the stage the cursor starts on. For a ROM whose
+   *   character grid and stage list are not SSB64's (Smash Remix): the menu
+   *   structs are where SSB64's are, the layout is not.
    */
-  const create = ({ read32, log = () => {} }) => {
+  const create = ({ read32, log = () => {}, anyFighter = false }) => {
     let failed = null;
     let lastScene = -1;
     let sceneSince = 0;
@@ -231,7 +235,7 @@
       if (Math.abs(dx) <= AIM_TOLERANCE && Math.abs(dy) <= AIM_TOLERANCE) {
         // On the portrait. The hover registers a frame after the puck
         // arrives; A only selects while grabbing a puck over a fighter.
-        if (slot.cursorStatus === CURSOR_GRAB && slot.fkind === target.fkind) return _tap(BTN.A);
+        if (slot.cursorStatus === CURSOR_GRAB && (anyFighter || slot.fkind === target.fkind)) return _tap(BTN.A);
         return _idle(2);
       }
       return _stick(_axis(dx), _axis(dy));
@@ -267,6 +271,7 @@
         case SCENE.PLAYERS_VS:
           return cssBothPicked() ? _tap(BTN.START) : cssPick(0);
         case SCENE.MAPS: {
+          if (anyFighter) return _tap(BTN.A);
           const slot = s32(MAPS_CURSOR_SLOT);
           if (!(slot >= 0 && slot <= 9)) return notReady(`mapsCursorSlot=${slot}`);
           if (slot < 5) return _tap(BTN.DOWN);
