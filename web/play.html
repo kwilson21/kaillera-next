@@ -156,7 +156,7 @@
             <label for="mode-select" class="mode-label">Mode:</label>
             <select
               id="mode-select"
-              title="Rollback: GGPO-style prediction in-game with lockstep stall in menus (recommended). Streaming: host runs the emulator, guests watch a video stream."
+              title="Rollback: every player runs the game and late inputs are corrected by replay (recommended). Streaming: host runs the emulator, guests watch a video stream."
             >
               <option value="rollback">Rollback</option>
               <option value="streaming">Streaming</option>
@@ -388,9 +388,6 @@
         });
     </script>
 
-    <!-- Version-mismatch force-reload guard (must load first so stale
-         tabs are caught before app code initializes) -->
-    <script src="/static/version-guard.js"></script>
     <!-- Native API reference management (must load before everything) -->
     <script src="/static/api-sandbox.js"></script>
 
@@ -529,6 +526,9 @@
          (window.KNShared: cheats, keymap, input tracking, input codec). Loaded
          before every script that builds on any of them. -->
     <script src="/static/dist/kn-core.js"></script>
+    <!-- Version-mismatch reload guard (window.KNSite, set by the core): a
+         stale tab is caught before the engine scripts start. -->
+    <script src="/static/version-guard.js"></script>
     <script src="/static/kn-capture.js"></script>
 
     <!-- Switch 2 Pro Controller: WebUSB handshake that makes it appear as a gamepad -->

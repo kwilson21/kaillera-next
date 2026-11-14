@@ -201,26 +201,26 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     landing.css        Front-page styles (direction A tokens)
     dist/kn-join.js    Invite-page controller (room lookup, join/watch states), built from web/src/landing/join.ts
     dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
-    dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper)
+    dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper, window.KNSite)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     admin.css          Admin dashboard styles
     play.css           Play page styles (room overlay tokens, direction A)
     netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
     rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
-    netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
+    netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from web/src/streaming
     switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
-    controller-settings.js In-game controller settings panel
+    controller-settings.js Starts the in-game controller settings panel (logic in web/src/page/controller-settings/)
     virtual-gamepad.js     On-screen touch controls for mobile
     kn-audio.js            AudioWorklet pump + rollback audio capture
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
-    kn-vision-client.js    Claude vision client for screenshot-diff desync analysis
+    kn-vision-client.js    Starts the desync-vision client (web/src/page/vision-client.ts)
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
     feedback.js            In-app feedback collection
     version.js             Version display + changelog modal
-    version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)
+    version-guard.js       Cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
     demo.js                Demo page orchestrator (fake peer + menu autopilot)
     fake-peer.js           Synthetic P2 for the demo page (simulated input/jitter)

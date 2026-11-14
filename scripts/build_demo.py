@@ -4,7 +4,8 @@ The demo runs entirely in the browser: the emulator, the rollback engine and
 the synthetic second player. So the deploy is just files:
 
     dist/index.html      web/demo.html, minus the lobby link (no server yet)
-    dist/static/...      git-tracked files under web/static/ (never ROMs:
+    dist/static/...      git-tracked files under web/static/ plus the built
+                         TypeScript bundles (never ROMs:
                          .gitignore keeps those out of git, so out of here)
     dist/api/core-info   the JSON the Python server would compute on the fly
     dist/_headers        the security headers the Python server would send
@@ -18,6 +19,8 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+
+import web_bundles
 
 REPO = Path(__file__).resolve().parent.parent
 WEB = REPO / "web"
@@ -61,6 +64,8 @@ def tracked_static_files() -> list[str]:
     out = subprocess.run(
         ["git", "ls-files", "web/static"], cwd=REPO, check=True, capture_output=True, text=True
     ).stdout.split()
+    # The TypeScript bundles are build output, so git does not list them.
+    out += web_bundles.build()
     return [f for f in out if not f.startswith(SKIP_PREFIXES)]
 
 
