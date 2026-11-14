@@ -95,6 +95,25 @@ done
 $QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPicturesShowOneFrame \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+# ── Peer connection: one pair of pages, offers and answers between them ─────
+PAIR=specs/peer_connection.qnt
+$QUINT typecheck "$PAIR"
+# The scenarios say what each variant does with the same ordering.
+for variant in peer_connection_before_119 peer_connection_current peer_connection_fixed; do
+  $QUINT test "$PAIR" --main="$variant" --backend=typescript
+done
+pair() { # module invariant init
+  $QUINT run "$PAIR" --main="$1" --invariant="$2" --init="$3" \
+    --max-samples=10000 --max-steps=25 --backend=typescript
+}
+# Today: a reconnect leaves the guest's input state clean and a roster update
+# never replaces a connection that is up. The other four properties are
+# violated today (the scenarios above show how) and hold on
+# peer_connection_fixed, the rules the per-peer machine is built to.
+pair peer_connection_current holdToday init
+pair peer_connection_fixed allHold init
+pair peer_connection_fixed allHold initLobby
+
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"

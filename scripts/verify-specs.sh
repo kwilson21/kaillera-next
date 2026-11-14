@@ -63,6 +63,17 @@ expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
 
+PAIR=specs/peer_connection.qnt
+verify "$PAIR" peer_connection_fixed allHold
+verify "$PAIR" peer_connection_current holdToday
+# Today's engine: each of these has a counterexample within 5 steps.
+# (neverLeftWithNothingPending is violated too, but its shortest
+# counterexample is longer than this bound; crossedHealOffersTest replays it.)
+expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
+expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
+expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
+expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
+
 PAUSE=specs/late_join_pause.qnt
 verify "$PAUSE" late_join_pause_fixed allHold
 expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
