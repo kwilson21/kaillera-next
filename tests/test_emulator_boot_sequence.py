@@ -47,14 +47,14 @@ def test_library_rom_updates_ejs_identity_for_next_boot():
 
 
 def test_non_ssb64_boot_clears_stale_standard_cheats():
-    source = (REPO_ROOT / "web/static/shared.js").read_text()
-    boot_idx = source.find("function bootWithCheats(label)")
+    source = (REPO_ROOT / "web/src/page/shared.ts").read_text()
+    boot_idx = source.find("function bootWithCheats(label?: string)")
     assert boot_idx != -1
     window = source[boot_idx : boot_idx + 700]
 
     assert "window.KNState?.romHash === SSB64_HASH" in window
     assert "applyStandardCheats(SSB64_ONLINE_CHEATS)" in window
-    assert "window.EJS_cheats = []" in window
+    assert "page().EJS_cheats = []" in window
     assert "clearCheats(false)" in window
     assert "gm.resetCheat()" in source or "gm.Module?._reset_cheat" in source
     assert "async function clearCheats(disableKnownCheats = true)" in source

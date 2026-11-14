@@ -171,17 +171,20 @@ def test_resync_settles_the_inputs_before_its_frame():
     missing_src = src[missing_idx : src.index("\n  };\n", missing_idx)]
     assert "Math.max(_inputFloor(p.slot), windowStart)" in missing_src
 
-    # Guest: settles every peer's inputs, makes and sends the ones it skipped
-    # that are still to be applied, and asks for the peers' it lacks.
+    # Guest: settles every peer's inputs, makes the ones it skipped that are
+    # still to be applied, sends every one of its own for that range (one made
+    # earlier may have been dropped by a peer as out of range:
+    # specs/resync_inputs.qnt, resync_inputs_only_new), and asks for the
+    # peers' it lacks.
     settle_idx = src.index("const _settleInputsAtResync = (mod, frame) => {")
     settle_src = src[settle_idx : src.index("\n  };\n", settle_idx)]
     for snippet in (
         "const from = Math.max(0, frame - DELAY_FRAMES);",
         "_localInputs[f] = KNShared.ZERO_INPUT;",
-        "_feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);",
+        "_feedCInput(mod, _playerSlot, f, _localInputs[f]);",
         "_settleInputsBefore(peer.slot, frame);",
-        "if (made.length) peer.dc.send(`inputs-settled:${from}`);",
-        "peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);",
+        "if (own.length) peer.dc.send(`inputs-settled:${from}`);",
+        "for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);",
         "peer.dc.send(`resend:${f}`);",
     ):
         assert snippet in settle_src
@@ -446,3 +449,91 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
     input_guard_end = src.index("const recvInput =", input_guard_start)
     input_guard = src[input_guard_start:input_guard_end]
     assert "INPUT_FUTURE_MARGIN_FRAMES" in input_guard
+
+
+def test_local_freeze_is_credited_to_every_deadline_that_drops_a_peer():
+    # specs/tick_deadlines.qnt: a page's own freeze must not count against a
+    # peer. Three deadlines drop a peer; all three stamps move with the gap.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const _creditLocalFreeze = () => {")
+    credit_src = src[idx : src.index("\n  };\n", idx)]
+    for snippet in (
+        "_peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);",
+        "_rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);",
+        "_pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);",
+    ):
+        assert snippet in credit_src
+    # The credit runs before the pacing deadline is checked in the same tick.
+    tick_idx = src.index("const tick = () => {")
+    assert src.index("_creditLocalFreeze();", tick_idx) < src.index("PACING-THROTTLE-TIMEOUT f=", tick_idx)
+
+
+def test_a_page_running_alone_keeps_its_own_input():
+    # specs/resync_inputs.qnt (aPageAppliesWhatItSent). kn_pre_tick's pacing
+    # gate returns 3 before it stores the page's own input, records what it
+    # applied or saves the frame. A frame must not be run on that 3.
+    src = LOCKSTEP_JS.read_text()
+    c_src = (LOCKSTEP_JS.parents[2] / "build" / "kn_rollback" / "kn_rollback.c").read_text()
+    pre_tick = c_src[c_src.index("int kn_pre_tick(") :]
+    assert pre_tick.index("return 3; /* ring maintained, skip frame advance */") < pre_tick.index(
+        "/* ── Store local input ── */"
+    )
+
+    # With nobody left to be ahead of, the advantage is 0, so the gate is open.
+    pacing = src[src.index("// If no active pacing peers remain, release any active cap") :]
+    pacing = pacing[: pacing.index("_frameAdvRaw = _frameNum - minRemoteFrame;")]
+    assert "if (activePacingPeers === 0) _frameAdvRaw = 0;" in pacing
+
+    # And a 3 with every peer a phantom is asked again with pacing off,
+    # before anything acts on it.
+    tick = src[src.index("let catchingUp = tickMod._kn_pre_tick(") :]
+    solo = tick[: tick.index("_refreshRunnerAfterRollbackRestore(tickMod);")]
+    assert "if (catchingUp === 3 && getInputPeers().every((p) => _peerPhantom[p.slot])) {" in solo
+    rerun = solo[solo.index("if (catchingUp === 3 && getInputPeers()") :]
+    rerun = rerun[rerun.index("catchingUp = tickMod._kn_pre_tick(") :]
+    assert "-1,\n" in rerun[: rerun.index(");")]
+    assert "// Fall through to normal tick instead of returning" not in src
+
+
+def test_a_settled_input_is_not_fed_to_the_engine():
+    # A returning peer's backlog is from frames the resync's state already
+    # covers. Fed to the C engine it is compared with what was predicted while
+    # this page ran alone, too deep to roll back, and counted as failed
+    # rollbacks.
+    src = LOCKSTEP_JS.read_text()
+    drain = src[src.index("const _drainPendingCInputs = (tickMod) => {") :]
+    drain = drain[: drain.index("\n  };\n")]
+    skip = drain.index("if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {")
+    assert skip < drain.index("tickMod._kn_feed_input(qi.slot, qi.frame,")
+    # The host settles the guest's backlog when it schedules the recovery
+    # resync: that state is for this frame or a later one. A guest does not:
+    # it may be taken back to an earlier frame.
+    recovered = src[src.index("} else if (_playerSlot === 0 && peer.slot !== 0 && _syncEnabled) {") :]
+    recovered = recovered[: recovered.index("peer-recovery resync: host scheduled full sync")]
+    assert "_settleInputsBefore(peer.slot, _frameNum);" in recovered
+
+
+def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
+    # specs/resync_inputs.qnt (aPageAppliesWhatItSent, the keys it leaves
+    # out): a resync that takes the guest back puts it on frames whose inputs
+    # it has already made and sent. It must apply those, not read the
+    # controller again: the host may hold the first copy, and a second value
+    # for the same key replaces a real input in the engine without a rollback.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);")
+    use = src[idx : idx + 1400]
+    assert "const localInput = hadLocalInputForFrame\n      ? _localInputs[_frameNum]\n      : _applyExtraInputDelay(" in use
+    # A new input is stored once; the cached one is never overwritten.
+    assert use.index("if (!hadLocalInputForFrame) {") < use.index("_localInputs[_frameNum] = localInput;")
+    # It is sent on every tick of the frame, cached or new, so a host that
+    # dropped the first copy as out of range gets it again.
+    send = src[idx : src.index("DC health monitor", idx)]
+    assert "const peerBuf = KNShared.encodeInput(\n          _frameNum,\n          localInput," in send
+    assert send.index("if (!hadLocalInputForFrame) {") < send.index("const peerBuf = KNShared.encodeInput(")
+    # No resync path drops the cached inputs: only a new match, a stop, and
+    # the fast-forward at lockstep start do (and the declaration).
+    assert src.count("_localInputs = {};") == 4
+    settle = src[src.index("const _settleInputsAtResync = (mod, frame) => {") :]
+    settle = settle[: settle.index("\n  };\n")]
+    assert "delete _localInputs" not in settle and "_localInputs = {}" not in settle
+

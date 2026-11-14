@@ -1,21 +1,28 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import vm from 'node:vm';
 import { decodeDesyncDigest } from '../../web/src/desync-digest.ts';
 import {
   FIELD_COUNT,
   MATCH_PHASE_FIELD,
-  SCENE_CSS_VS,
-  SCENE_IN_GAME_VS,
   fieldEligibleInPhase,
   fieldName,
   fieldsToFlag,
   slotForField,
 } from '../../web/src/desync-fields.ts';
-import { digestFrame } from '../../web/src/desync-confirm.ts';
+import type { SceneIds } from '../../web/src/address-maps.ts';
+import {
+  createDesyncDetector,
+  type DesyncSuspect,
+  type DetectorCore,
+  type DetectorPage,
+  type DetectorPeer,
+} from '../../web/src/page/desync-detector.ts';
 import { lcg } from './load-shared.ts';
+
+// The rule takes the game's own scene numbers; these tests use SSB64's.
+const SCENE_IN_GAME_VS = 22;
+const SCENE_CSS_VS = 16;
 
 const never = (): number[] => Array.from({ length: FIELD_COUNT }, () => -1);
 const hashes = (seed: number): number[] => Array.from({ length: FIELD_COUNT }, (_, fid) => seed * 100 + fid);
@@ -40,12 +47,14 @@ test('field names and slots follow the registry layout', () => {
 test('a phase mismatch is the only thing flagged for the frame', () => {
   const a = hashes(1);
   const b = hashes(2);
-  assert.deepEqual(fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60), [MATCH_PHASE_FIELD]);
+  assert.deepEqual(fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), [
+    MATCH_PHASE_FIELD,
+  ]);
 });
 
 test('equal digests flag nothing, in any scene', () => {
   for (const phase of [0, SCENE_CSS_VS, SCENE_IN_GAME_VS]) {
-    assert.deepEqual(fieldsToFlag(hashes(1), hashes(1), phase, 100, never(), 60), []);
+    assert.deepEqual(fieldsToFlag(hashes(1), hashes(1), phase, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), []);
   }
 });
 
@@ -53,9 +62,26 @@ test('battle fields are flagged only in a battle, select-screen fields only ther
   const a = hashes(1);
   const b = hashes(2);
   b[MATCH_PHASE_FIELD] = a[MATCH_PHASE_FIELD]!;
-  assert.deepEqual(fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60), [0, 1, 2, 3, 4, 5, 6, 7, 16, 18, 19, 20]);
-  assert.deepEqual(fieldsToFlag(a, b, SCENE_CSS_VS, 100, never(), 60), [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-  assert.deepEqual(fieldsToFlag(a, b, 21, 100, never(), 60), [4, 5, 6, 7, 16]);
+  assert.deepEqual(
+    fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS),
+    [0, 1, 2, 3, 4, 5, 6, 7, 16, 18, 19, 20],
+  );
+  assert.deepEqual(
+    fieldsToFlag(a, b, SCENE_CSS_VS, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS),
+    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+  );
+  assert.deepEqual(fieldsToFlag(a, b, 21, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), [4, 5, 6, 7, 16]);
+});
+
+test("another game's scene numbers decide which fields count", () => {
+  const a = hashes(1);
+  const b = hashes(2);
+  b[MATCH_PHASE_FIELD] = a[MATCH_PHASE_FIELD]!;
+  // A game whose battle is scene 5 and whose character select is scene 9.
+  assert.deepEqual(fieldsToFlag(a, b, 5, 100, never(), 60, 5, 9), [0, 1, 2, 3, 4, 5, 6, 7, 16, 18, 19, 20]);
+  assert.deepEqual(fieldsToFlag(a, b, 9, 100, never(), 60, 5, 9), [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+  // SSB64's battle scene means nothing to it.
+  assert.deepEqual(fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60, 5, 9), [4, 5, 6, 7, 16]);
 });
 
 test('a field flagged within the dedup window stays quiet until it has passed', () => {
@@ -64,8 +90,8 @@ test('a field flagged within the dedup window stays quiet until it has passed', 
   b[16] = 7;
   const last = never();
   last[16] = 100;
-  assert.deepEqual(fieldsToFlag(a, b, 0, 159, last, 60), []);
-  assert.deepEqual(fieldsToFlag(a, b, 0, 160, last, 60), [16]);
+  assert.deepEqual(fieldsToFlag(a, b, 0, 159, last, 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), []);
+  assert.deepEqual(fieldsToFlag(a, b, 0, 160, last, 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), [16]);
 });
 
 test('fieldsToFlag keeps its contract on random digests', () => {
@@ -76,7 +102,7 @@ test('fieldsToFlag keeps its contract on random digests', () => {
     const last = Array.from({ length: FIELD_COUNT }, () => (next() % 200) - 1);
     const phase = [0, SCENE_CSS_VS, SCENE_IN_GAME_VS][next() % 3]!;
     const frame = next() % 260;
-    const flagged = fieldsToFlag(a, b, phase, frame, last, 60);
+    const flagged = fieldsToFlag(a, b, phase, frame, last, 60, SCENE_IN_GAME_VS, SCENE_CSS_VS);
     if (a[MATCH_PHASE_FIELD] !== b[MATCH_PHASE_FIELD]) {
       assert.deepEqual(flagged, [MATCH_PHASE_FIELD]);
       continue;
@@ -84,7 +110,12 @@ test('fieldsToFlag keeps its contract on random digests', () => {
     // Exactly the fields that differ, mean something here and are not muted.
     const expected: number[] = [];
     for (let fid = 0; fid < FIELD_COUNT; fid++) {
-      if (a[fid] !== b[fid] && fieldEligibleInPhase(fid, phase) && frame - last[fid]! >= 60) expected.push(fid);
+      if (
+        a[fid] !== b[fid] &&
+        fieldEligibleInPhase(fid, phase, SCENE_IN_GAME_VS, SCENE_CSS_VS) &&
+        frame - last[fid]! >= 60
+      )
+        expected.push(fid);
     }
     assert.deepEqual(flagged, expected);
   }
@@ -92,91 +123,49 @@ test('fieldsToFlag keeps its contract on random digests', () => {
 
 // ── The detector itself ───────────────────────────────────────────────────
 
-interface Suspect {
-  frame: number;
-  field: string;
-  trigger: string;
-}
-/** The core exports the detector reads; each returns a hash or a counter. */
-type CoreExports = Record<string, (a: number, b: number) => number>;
-interface DetectorState {
-  isLocalHost: boolean;
-  matchId: string;
-  peers: Record<string, { slot: number }>;
-}
-interface DetectorWindow {
-  KNDesync?: Detector;
-  KNCore?: DetectorCore;
-  KNState: DetectorState;
-  _peers: Record<string, { slot: number; dc: { readyState: string; send: () => void } }>;
-}
 /** Something a peer could send in place of a digest. */
 type MalformedDigest =
   | null
   | string
   | { frame?: number | string; hashes?: (number | string | null)[] | string | null; replayMeta?: string | number };
-interface Detector {
-  init: (module: CoreExports, mode: string) => void;
-  tick: (frame: number) => void;
-  setConfirmWindow: (frames: number) => void;
-  onPeerDigest: (peerId: string, payload: { frame: number; hashes: number[] } | MalformedDigest) => void;
-  events: EventTarget;
-}
-interface DetectorCore {
-  // Which frame a digest is built for (web/src/desync-confirm.ts). The
-  // detector builds none without it.
-  digestFrame: typeof digestFrame;
-  desyncFieldsToFlag?: typeof fieldsToFlag;
-  decodeDesyncDigest?: typeof decodeDesyncDigest;
-}
-const CORE: DetectorCore = { digestFrame, desyncFieldsToFlag: fieldsToFlag, decodeDesyncDigest };
 
-/**
- * Run web/static/kn-desync-detector.js through a scripted match against one
- * peer whose digests now and then differ, and return every suspect it emits.
- * `malformed`, if given, is sent as that peer's digest every tenth frame.
- */
 // The engine's rollback window in the scripted match: digests are for the
 // frame this many ticks back.
 const CONFIRM_WINDOW = 7;
-const DETECTOR = readFileSync(new URL('../../web/static/kn-desync-detector.js', import.meta.url), 'utf8');
 // FNV-1a of one byte: what the core's match_phase hash is for a scene.
 const sceneHash = (scene: number): number => Math.imul(0x811c9dc5 ^ scene, 0x01000193) >>> 0;
-const sceneAt = (frame: number): number => (frame < 500 ? SCENE_CSS_VS : frame < 1200 ? SCENE_IN_GAME_VS : 21);
+const SSB64: SceneIds = { characterSelect: SCENE_CSS_VS, stageSelect: 21, battle: SCENE_IN_GAME_VS };
 
+/**
+ * Run the detector (web/src/page/desync-detector.ts) through a scripted
+ * match against one peer whose digests now and then differ, and return every
+ * suspect it emits. `malformed`, if given, is sent as that peer's digest
+ * every tenth frame. `scenes`, if given, is another ROM's scene numbering,
+ * handed over with an address map as the engine does.
+ */
 const runDetector = (
   mode: string,
   isLocalHost: boolean,
-  core: DetectorCore = { digestFrame },
   malformed?: readonly MalformedDigest[],
-): Suspect[] => {
-  const source = DETECTOR;
+  scenes?: SceneIds,
+): DesyncSuspect[] => {
   const slot = isLocalHost ? 1 : 0;
-  const state: DetectorState = { isLocalHost, matchId: 'm1', peers: { peerA: { slot } } };
-  const window: DetectorWindow = {
-    KNState: state,
-    _peers: { peerA: { slot, dc: { readyState: 'open', send: () => undefined } } },
+  const peer: DetectorPeer = { slot, dc: { readyState: 'open', send: () => undefined } };
+  const page: DetectorPage = {
+    KNState: { isLocalHost, matchId: 'm1', peers: { peerA: { slot } } },
+    _peers: { peerA: peer },
   };
-  window.KNCore = core;
-  const context = vm.createContext({
-    window,
-    KNState: state,
-    console: { log: () => undefined, warn: () => undefined },
-    EventTarget,
-    CustomEvent,
-    URLSearchParams,
-    setInterval: () => 1,
-    clearInterval: () => undefined,
-  });
-  vm.runInContext(source, context);
-  const detector = window.KNDesync;
-  assert.ok(detector, 'kn-desync-detector.js did not define window.KNDesync');
+  const detector = createDesyncDetector(page);
 
+  const ids = scenes ?? SSB64;
+  const sceneAt = (frame: number): number =>
+    frame < 500 ? ids.characterSelect : frame < 1200 ? ids.battle : ids.stageSelect;
   // The match_phase hash says which scene a frame was in; the detector reads
   // the scene from the digest, since a digest is a rollback window old.
   const local = (fid: number, frame: number): number =>
     fid === MATCH_PHASE_FIELD ? sceneHash(sceneAt(frame)) : fid * 1000 + (frame % 7) + 1;
   const perSlot = (base: number) => (slot: number, frame: number) => local(base + slot, frame);
+  const installed: number[][] = [];
   const module = {
     _kn_hash_stocks: perSlot(0),
     _kn_hash_character_id: perSlot(4),
@@ -194,13 +183,23 @@ const runDetector = (
     _kn_get_replay_frame_hash: () => 0,
     _kn_get_last_replay_length: () => 0,
     _kn_get_scene_curr: () => sceneAt(0),
-  } satisfies CoreExports;
+    _malloc: () => 64,
+    _free: () => undefined,
+    _kn_field_map_set: () => 1,
+    HEAPU32: { set: (values: readonly number[]) => void installed.push([...values]) },
+  } satisfies DetectorCore;
 
-  const suspects: Suspect[] = [];
+  const suspects: DesyncSuspect[] = [];
   detector.events.addEventListener('desync-suspect', (event) => {
     if (event instanceof CustomEvent) suspects.push(structuredClone(event.detail));
   });
-  detector.init(module, mode);
+  if (scenes) {
+    const rom = { name: 'other-rom', values: [1, 2, 3], scenes, battleStatus: { offset: 0, ongoing: 1 } };
+    detector.init(module, mode, rom);
+    assert.deepEqual(installed, [[1, 2, 3]], "the ROM's address map is handed to the core");
+  } else {
+    detector.init(module, mode);
+  }
   detector.setConfirmWindow(CONFIRM_WINDOW);
   const next = lcg(2026);
   for (let frame = 0; frame < 1500; frame++) {
@@ -215,12 +214,14 @@ const runDetector = (
   return suspects;
 };
 
-const digestOf = (suspects: Suspect[]): string => createHash('sha256').update(JSON.stringify(suspects)).digest('hex');
+const digestOf = (suspects: DesyncSuspect[]): string =>
+  createHash('sha256').update(JSON.stringify(suspects)).digest('hex');
 
 // What kn-desync-detector.js on main emitted for this script at 9cb2e8b,
 // where the flag decision was still inline in it (digests for the frame a
 // rollback window back, the scene read from the digest): the number of
-// suspects and a hash of all of them, per comparison mode.
+// suspects and a hash of all of them, per comparison mode. The detector has
+// since moved to TypeScript and must still emit exactly these.
 const GOLDEN: { mode: string; isLocalHost: boolean; count: number; sha256: string }[] = [
   {
     mode: 'B',
@@ -248,33 +249,30 @@ const GOLDEN: { mode: string; isLocalHost: boolean; count: number; sha256: strin
   },
 ];
 
-test("the detector emits what it did before, with its own rule and with KNCore's", () => {
+test('the detector emits what the plain script did', () => {
   for (const g of GOLDEN) {
     const where = `mode ${g.mode}, ${g.isLocalHost ? 'host' : 'guest'}`;
-    const builtIn = runDetector(g.mode, g.isLocalHost);
-    assert.equal(builtIn.length, g.count, `${where}, built-in rule`);
-    assert.equal(digestOf(builtIn), g.sha256, `${where}, built-in rule`);
-    const withCore = runDetector(g.mode, g.isLocalHost, CORE);
-    assert.deepStrictEqual(withCore, builtIn, `${where}, KNCore rule`);
+    const suspects = runDetector(g.mode, g.isLocalHost);
+    assert.equal(suspects.length, g.count, where);
+    assert.equal(digestOf(suspects), g.sha256, where);
     assert.ok(g.count > 10, `${where}: the script should produce suspects to compare`);
   }
 });
 
-test('the detector asks KNCore for the decision and the decoding when the bundle is loaded', () => {
-  const calls = { flag: 0, decode: 0 };
-  runDetector('B', false, {
-    digestFrame,
-    desyncFieldsToFlag: (...args) => {
-      calls.flag++;
-      return fieldsToFlag(...args);
-    },
-    decodeDesyncDigest: (input) => {
-      calls.decode++;
-      return decodeDesyncDigest(input);
-    },
-  });
-  assert.ok(calls.flag > 1000, `KNCore.desyncFieldsToFlag was called ${calls.flag} times`);
-  assert.equal(calls.decode, 1500, 'one decode per digest received');
+test("a ROM with its own scene numbers is gated on those, not on SSB64's", () => {
+  // The same match under a map whose battle and character-select scenes have
+  // other numbers (and whose stage select is SSB64's battle id): the same
+  // fields are flagged on the same frames.
+  const others: SceneIds = { characterSelect: 40, stageSelect: SCENE_IN_GAME_VS, battle: 42 };
+  const what = (s: DesyncSuspect) => [s.frame, s.field, s.slot, s.trigger];
+  for (const g of GOLDEN) {
+    const where = `mode ${g.mode}, ${g.isLocalHost ? 'host' : 'guest'}`;
+    assert.deepEqual(
+      runDetector(g.mode, g.isLocalHost, undefined, others).map(what),
+      runDetector(g.mode, g.isLocalHost).map(what),
+      where,
+    );
+  }
 });
 
 // ── Digests from a peer are decoded before they are compared ──────────────
@@ -296,14 +294,13 @@ const MALFORMED: readonly MalformedDigest[] = [
   { hashes: fullHashes() },
 ];
 
-test('a digest that is not one is dropped, with and without the bundle', () => {
+test('a digest that is not one is dropped', () => {
   for (const g of GOLDEN) {
     const where = `mode ${g.mode}, ${g.isLocalHost ? 'host' : 'guest'}`;
     // Every malformed digest is dropped, so the suspects are exactly those of
     // the same match without them. Before, some of these threw inside the
     // DataChannel handler and a short `hashes` flagged every missing field.
-    assert.equal(digestOf(runDetector(g.mode, g.isLocalHost, undefined, MALFORMED)), g.sha256, `${where}, built-in`);
-    assert.equal(digestOf(runDetector(g.mode, g.isLocalHost, CORE, MALFORMED)), g.sha256, `${where}, KNCore`);
+    assert.equal(digestOf(runDetector(g.mode, g.isLocalHost, MALFORMED)), g.sha256, where);
   }
 });
 

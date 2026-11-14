@@ -1788,11 +1788,22 @@
   const _drainPendingCInputs = (tickMod) => {
     if (_pendingCInputs.length === 0 || !tickMod._kn_feed_input) return;
     if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
+    let settledSkipped = 0;
     for (let i = 0; i < _pendingCInputs.length; i++) {
       const qi = _pendingCInputs[i];
+      // An input from before a resync's settled point is not the engine's to
+      // judge: the state that resync carries holds what was applied for it.
+      // Fed, a returning peer's backlog would be compared with what this page
+      // predicted while it ran alone, dozens of frames too deep to roll back,
+      // and counted as failed rollbacks the resync is about to make moot.
+      if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {
+        settledSkipped++;
+        continue;
+      }
       tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
     }
     _pendingCInputs.length = 0;
+    if (settledSkipped > 0) _syncLog(`C-INPUT-SETTLED-SKIP f=${_frameNum} count=${settledSkipped}`);
   };
   const _formatSlotMap = (obj) => {
     const keys = Object.keys(obj || {}).sort((a, b) => Number(a) - Number(b));
@@ -5007,17 +5018,28 @@
   //  - Inputs keyed before frame - delay are in the loaded state already:
   //    settled, never waited for.
   //  - This page's inputs from there up to `frame` are still to be applied.
-  //    The ones it never made are made now (neutral) and sent.
+  //    The ones it never made are made now (neutral). All of them are sent,
+  //    the ones made earlier too: this page may have made one while it ran
+  //    ahead, before it was taken back and moved forward again, and a peer
+  //    far behind at the time dropped it as out of range.
   //  - The peers' inputs for the same range that are missing are asked for.
   const _settleInputsAtResync = (mod, frame) => {
     const from = Math.max(0, frame - DELAY_FRAMES);
     const made = [];
+    const own = [];
     if (_playerSlot !== null && _playerSlot !== undefined) {
       for (let f = from; f < frame; f++) {
-        if (_localInputs[f] !== undefined) continue;
-        _localInputs[f] = KNShared.ZERO_INPUT;
-        _feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);
-        made.push(f);
+        own.push(f);
+        if (_localInputs[f] === undefined) {
+          _localInputs[f] = KNShared.ZERO_INPUT;
+          made.push(f);
+        }
+        // Every one is handed to the engine again, the ones made earlier
+        // too: its input ring holds 256 frames, and a page that ran further
+        // ahead than that before it was taken back has written over the
+        // slot. The peers apply what is sent below; this page must apply
+        // the same.
+        _feedCInput(mod, _playerSlot, f, _localInputs[f]);
       }
     }
     const asked = [];
@@ -5028,8 +5050,8 @@
       try {
         // Every peer waits on this page's inputs, not only the host that
         // sent the state: tell each one where they start again.
-        if (made.length) peer.dc.send(`inputs-settled:${from}`);
-        for (const f of made) peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);
+        if (own.length) peer.dc.send(`inputs-settled:${from}`);
+        for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
         for (let f = from; f < frame; f++) {
           const have = _remoteInputs[peer.slot]?.[f];
           if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
@@ -5040,8 +5062,10 @@
         _syncLog(`RESYNC-INPUTS send failed slot=${peer.slot}: ${err}`);
       }
     }
-    if (made.length || asked.length) {
-      _syncLog(`RESYNC-INPUTS f=${frame} settledBefore=${from} made=[${made.join(',')}] asked=[${asked.join(',')}]`);
+    if (own.length || asked.length) {
+      _syncLog(
+        `RESYNC-INPUTS f=${frame} settledBefore=${from} sent=[${own.join(',')}] made=[${made.join(',')}] asked=[${asked.join(',')}]`,
+      );
     }
   };
 
@@ -5798,6 +5822,25 @@
     if (wait <= 0) flush();
     else _criticalFlushTimer = setTimeout(flush, wait);
   };
+  // Stage 5, observing: the peer mesh's decisions are made by the code below
+  // as before; the proved functions of web/src/peer-signaling.ts run on the
+  // same inputs and a difference is reported as a mesh-disagree client event.
+  // They take over once production shows none. Looked up on first use:
+  // kn-core.js loads after this file.
+  let _meshObserver;
+  const _meshCompare = (what, engineValue, provedValue) => {
+    if (_meshObserver === undefined) {
+      _meshObserver =
+        window.KNCore?.play?.observe?.createComparer?.(({ message, old, next }) => {
+          if (!window.KNState?.uploadToken) return false;
+          window.KNEvent?.('mesh-disagree', message, { old, next });
+          return true;
+        }) ?? null;
+    }
+    _meshObserver?.compare(what, engineValue, provedValue);
+  };
+  const _meshCore = () => window.KNCore ?? null;
+
   // Stage 3, observing: the strings peers send over the DataChannels (and the
   // session-log ack) are checked against web/src/peer-protocol.ts and a
   // mismatch is reported; the handlers below still read the raw message.
@@ -7332,6 +7375,21 @@
       // Socket.IO ID and the connection didn't survive — _rosterKey keeps a
       // live one). Clean up the old entry so _peers never has duplicate slots.
       if (p.slot !== null && p.slot !== undefined) {
+        const core = _meshCore();
+        if (core) {
+          const entries = Object.entries(_peers);
+          _meshCompare(
+            'stale-holders',
+            entries
+              .filter(([oldSid, oldPeer]) => oldSid !== p.socketId && oldPeer.slot === p.slot)
+              .map(([oldSid]) => oldSid),
+            core.staleHoldersOf(
+              entries.map(([key, held]) => ({ key, slot: held.slot ?? -1 })),
+              p.socketId,
+              p.slot,
+            ),
+          );
+        }
         for (const [oldSid, oldPeer] of Object.entries(_peers)) {
           if (oldSid !== p.socketId && oldPeer.slot === p.slot) {
             _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
@@ -7359,6 +7417,18 @@
         reason = `slot comparison: ${_playerSlot} < ${p.slot} = ${shouldInitiate}`;
       }
       _syncLog(`onUsersUpdated: new peer ${p.socketId} slot=${p.slot}, initiate=${shouldInitiate} (${reason})`);
+      _meshCompare(
+        'should-initiate',
+        shouldInitiate,
+        _meshCore()?.shouldInitiate(
+          _isSpectator,
+          _lateJoin,
+          _phase === PHASE_RUNNING,
+          shouldHoldForLateJoin,
+          _playerSlot,
+          p.slot,
+        ) ?? shouldInitiate,
+      );
       if (shouldHoldForLateJoin) _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated running peer');
 
       createPeer(p.socketId, p.slot, shouldInitiate);
@@ -7448,6 +7518,12 @@
     if (peer.dc?.readyState === 'open') return;
 
     const nextAttempt = (peer._startupConnectAttempt || 1) + 1;
+    _meshCompare(
+      'startup-attempt-left',
+      !(nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS),
+      _meshCore()?.hasAttemptLeft(nextAttempt - 1, STARTUP_CONNECT_MAX_ATTEMPTS) ??
+        !(nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS),
+    );
     if (nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS) {
       clearStartupConnectWatchdog(peer);
       _syncLog(
@@ -7617,6 +7693,22 @@
     // A fresh offer from a player whose connection was kept across their
     // Socket.IO reconnect means their page reloaded: that connection is a
     // leftover. Drop it, then let the roster set them up as a new peer.
+    // Observing: the step the code below takes first with this signal,
+    // compared with the proved rule's answer for the same table.
+    {
+      const fresh = !!data.offer && !data.reconnect && key !== senderSid;
+      const hasEntry = !!_peers[key];
+      let engineStep;
+      if (fresh) engineStep = 'replaceKept';
+      else if (data.offer && !hasEntry) engineStep = 'create';
+      else if (!hasEntry) engineStep = 'drop';
+      else engineStep = data.offer && data.reconnect ? 'reset' : 'apply';
+      _meshCompare(
+        'signal',
+        engineStep,
+        _meshCore()?.signalDisposition(!!data.offer, !!data.reconnect, key !== senderSid, hasEntry) ?? engineStep,
+      );
+    }
     if (data.offer && !data.reconnect && key !== senderSid) {
       _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
       _evictPeer(key, 'replaced-by-new-page');
@@ -7858,6 +7950,11 @@
             forceFull: true,
             deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
           });
+          // That state will be for this frame or a later one, so the
+          // guest's inputs from before this frame minus the delay are
+          // settled by it already. (Only the host can say so here: a guest
+          // may be taken back to an earlier frame and still need them.)
+          _settleInputsBefore(peer.slot, _frameNum);
           _syncLog(`peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum}`);
         }
       }
@@ -8723,13 +8820,28 @@
       peer._disconnectTimer = null;
     }
 
+    // Observing: what the proved rule would do with this lost connection,
+    // compared with the branch taken below.
+    const provedDisposition = _meshCore()?.disconnectDisposition(
+      _phase < PHASE_GAME_STARTED,
+      !!peer.isInitiator,
+      !!peer._intentionalLeave,
+      _isPeerPendingLateJoin(remoteSid, peer),
+      _phase === PHASE_RUNNING,
+    );
+    const observeDisposition = (taken) => {
+      if (provedDisposition !== undefined) _meshCompare('disconnect', taken, provedDisposition);
+    };
+
     if (_phase < PHASE_GAME_STARTED && peer.isInitiator && !peer._intentionalLeave) {
+      observeDisposition('retryStartup');
       _syncLog(`startup peer ${remoteSid} disconnected before game start — retrying`);
       retryStartupConnection(remoteSid);
       return;
     }
 
     if (_isPeerPendingLateJoin(remoteSid, peer)) {
+      observeDisposition('hardDisconnect');
       _syncLog(`pending late-join peer ${remoteSid} disconnected before activation`);
       hardDisconnectPeer(remoteSid);
       return;
@@ -8737,6 +8849,7 @@
 
     // If game is running and not an intentional leave, attempt reconnect
     if (_phase === PHASE_RUNNING && !peer._intentionalLeave) {
+      observeDisposition('reconnect');
       _syncLog(`peer ${remoteSid} DC died — attempting reconnect`);
 
       // Zero their input but keep peer in _peers
@@ -8769,6 +8882,7 @@
       return;
     }
 
+    observeDisposition('hardDisconnect');
     hardDisconnectPeer(remoteSid);
   };
 
@@ -8847,6 +8961,11 @@
 
     const retryOrGiveUp = () => {
       if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
+      _meshCompare(
+        'reconnect-attempt-left',
+        attempt < _MAX_RECONNECT_ATTEMPTS,
+        _meshCore()?.hasAttemptLeft(attempt, _MAX_RECONNECT_ATTEMPTS) ?? attempt < _MAX_RECONNECT_ATTEMPTS,
+      );
       if (attempt < _MAX_RECONNECT_ATTEMPTS) {
         _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
         setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
@@ -13471,6 +13590,10 @@
       _peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);
     }
     if (_rbInputStallStartTime > 0) _rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);
+    // The pacing throttle's deadline drops a peer too, and is checked on this
+    // tick before the throttle can end (specs/tick_deadlines.qnt): a page
+    // that froze while held back would drop a peer that never stopped sending.
+    if (_pacingThrottleStartAt > 0) _pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);
     _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
   };
 
@@ -13804,6 +13927,10 @@
             _syncLog('PACING-THROTTLE released — all peers phantom');
           }
         }
+        // With nobody left to be ahead of there is no advantage. Left at its
+        // last value it kept the C engine's pacing gate shut for the whole
+        // time this page ran alone (see the solo re-run after _kn_pre_tick).
+        if (activePacingPeers === 0) _frameAdvRaw = 0;
         if (activePacingPeers > 0 && minRemoteFrame >= 0) {
           _frameAdvRaw = _frameNum - minRemoteFrame;
 
@@ -14510,6 +14637,28 @@
           preTickLocalInput.cy,
           _frameAdvForC,
         );
+        // A return of 3 is the C engine's pacing gate: it leaves before it
+        // stores this page's own input for the frame, records what it applied
+        // or saves the frame's state. With every peer a phantom there is
+        // nobody to wait for and the frame is run all the same, so it must go
+        // through the forward path: ask again with pacing off. Running it on
+        // the 3 left the page's own input out of its engine for every frame it
+        // ran alone; it applied nothing for itself while its peer, back after
+        // a resync, applied what it had been sent (specs/resync_inputs.qnt).
+        if (catchingUp === 3 && getInputPeers().every((p) => _peerPhantom[p.slot])) {
+          if (window._knLastSoloPretickFrame === undefined) {
+            _syncLog(`PACING-SOLO f=${_frameNum} — every peer is a phantom, running the frame with pacing off`);
+          }
+          window._knLastSoloPretickFrame = _frameNum;
+          catchingUp = tickMod._kn_pre_tick(
+            preTickLocalInput.buttons,
+            preTickLocalInput.lx,
+            preTickLocalInput.ly,
+            preTickLocalInput.cx,
+            preTickLocalInput.cy,
+            -1,
+          );
+        }
         _chk('cr:post-pretick');
         _refreshRunnerAfterRollbackRestore(tickMod);
         _chk('cr:post-refresh-runner');
@@ -14655,7 +14804,8 @@
                 _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
               }
             }
-            // Fall through to normal tick instead of returning
+            // Not reached with every peer a phantom: the solo re-run right
+            // after _kn_pre_tick took this frame through the forward path.
           } else {
             _pacingCapsFrames++;
             if (_runSubstate !== RUN_PACING) {

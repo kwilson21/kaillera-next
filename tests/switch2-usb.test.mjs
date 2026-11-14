@@ -10,7 +10,8 @@ import path from 'node:path';
 
 globalThis.window = globalThis;
 const staticDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/static');
-await import(path.join(staticDir, 'gamepad-manager.js'));
+const { installGamepadManager } = await import(path.join(staticDir, '../src/page/gamepad-manager.ts'));
+installGamepadManager();
 await import(path.join(staticDir, 'switch2-usb.js'));
 const { GamepadManager, Switch2USB } = globalThis;
 
