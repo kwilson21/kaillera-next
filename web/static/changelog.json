@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.0",
+    "date": "2026-11-13",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "the desync detector's addresses are a per-ROM map, with a verifier (#159)"
+      }
+    ]
+  },
+  {
     "version": "0.67.11",
     "date": "2026-11-13",
     "changes": [
