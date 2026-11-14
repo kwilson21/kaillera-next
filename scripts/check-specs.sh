@@ -159,7 +159,7 @@ $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldA
 # ── Inputs around a resync: what a page may wait for afterwards ─────────────
 RESYNC=specs/resync_inputs.qnt
 $QUINT typecheck "$RESYNC"
-for variant in resync_inputs_before resync_inputs_solo_holes resync_inputs_current; do
+for variant in resync_inputs_before resync_inputs_solo_holes resync_inputs_only_new resync_inputs_current; do
   $QUINT test "$RESYNC" --main="$variant" --backend=typescript
 done
 # Today: after a resync nobody waits for an input that cannot arrive, and the
@@ -168,6 +168,9 @@ done
 # resync that moved the guest forward left holes on both pages. A page also
 # applies for itself what it sent: violated while a page that ran alone did
 # not keep its own inputs (resync_inputs_solo_holes).
+# The guest's inputs for the frames a resync moves it over all reach the host:
+# violated while it sent only the ones it had never made
+# (resync_inputs_only_new).
 $QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
