@@ -19,15 +19,7 @@ import type { PackedRomAddresses, SceneIds } from '../address-maps.ts';
 import { captureFrame } from '../desync-capture.ts';
 import { digestFrame } from '../desync-confirm.ts';
 import { decodeDesyncDigest, type DesyncDigest } from '../desync-digest.ts';
-import {
-  FIELD_COUNT,
-  MATCH_PHASE_FIELD,
-  SCENE_CSS_VS,
-  SCENE_IN_GAME_VS,
-  fieldName,
-  fieldsToFlag,
-  slotForField,
-} from '../desync-fields.ts';
+import { FIELD_COUNT, MATCH_PHASE_FIELD, fieldName, fieldsToFlag, slotForField } from '../desync-fields.ts';
 
 /* ── Configuration ───────────────────────────────────────────── */
 const CONFIG = {
@@ -183,9 +175,9 @@ type ReceivedDigest = Parameters<typeof decodeDesyncDigest>[0];
 // (web/src/address-maps.ts); these are SSB64 US's, the registry's
 // built-in map: nSCKindVSBattle and nSCKindPlayersVS.
 const SSB64_SCENES: SceneIds = Object.freeze({
-  characterSelect: SCENE_CSS_VS,
+  characterSelect: 16,
   stageSelect: 21,
-  battle: SCENE_IN_GAME_VS,
+  battle: 22,
 });
 
 // The scene a digest's frame was in, from its match_phase hash (FNV-1a of
@@ -432,16 +424,22 @@ export const createDesyncDetector = (page: DetectorPage) => {
     // The scene the digest's frame was in, not the live one: a digest is a
     // rollback window old. When the two match_phase hashes differ, that
     // alone is flagged and the scene is not used.
-    const scene = sceneOfDigest(ha);
-    // The rule gates on SSB64's scene ids. Another ROM's map names its own
-    // battle and character-select scenes, so the digest's scene is put in
-    // SSB64's terms first: one of those two, or neither.
-    const phase = scene === scenes.battle ? SCENE_IN_GAME_VS : scene === scenes.characterSelect ? SCENE_CSS_VS : -1;
+    // The rule takes the battle and character-select scenes from this ROM's map.
+    const phase = sceneOfDigest(ha);
     const lastFlagged: number[] = [];
     for (let fid = 0; fid < FIELD.COUNT; fid++) {
       lastFlagged.push(lastFlagFrame.get(dedupKey(fid)) ?? -1);
     }
-    return fieldsToFlag([...ha], [...hb], phase, frame, lastFlagged, CONFIG.dedupWindowFrames);
+    return fieldsToFlag(
+      [...ha],
+      [...hb],
+      phase,
+      frame,
+      lastFlagged,
+      CONFIG.dedupWindowFrames,
+      scenes.battle,
+      scenes.characterSelect,
+    );
   };
 
   const diffDigests = (a: PeerDigest, b: PeerDigest): void => {
