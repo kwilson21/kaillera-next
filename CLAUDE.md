@@ -94,7 +94,6 @@ kaillera-next/
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
 │       ├── netplay-streaming.js # streaming engine (host video → guests)
-│       ├── gamepad-manager.js   # gamepad profiles, remapping, slot assignment
 │       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
 │       ├── controller-settings.js # in-game controller settings panel
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
@@ -126,6 +125,7 @@ kaillera-next/
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── page/shared.ts       # window.KNShared and window.KNEvent: cheats, key tracking, local input, input wire format, WebRTC peer helpers (was web/static/shared.js)
+│   │   ├── page/gamepad-manager.ts # window.GamepadManager: gamepad profiles, remapping, slot assignment
 │   │   ├── page/desync-detector.ts # window.KNDesync: field-granular cross-peer desync detection, installed by the bundle
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
