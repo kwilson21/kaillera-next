@@ -2033,7 +2033,8 @@ const kn_gameplay_addr_t kn_gameplay_addrs[] = {
      * struct that does not change, and could not see a stock count that
      * differed between peers.
      *
-     * The entries below read the live struct again. The mismatches from
+     * The entries below read the live struct again, and the other one
+     * as well. The mismatches from
      * f=149 that the note above reports did not come back: two-player runs
      * compare this hash on every frame, menus included, and the PR that
      * made this change lists them. One-byte entries are also read at the
@@ -2071,6 +2072,16 @@ const kn_gameplay_addr_t kn_gameplay_addrs[] = {
     { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE, 1 },   /* P2 stock_count */
     { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE, 1 },   /* P3 stock_count */
     { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE, 1 },   /* P4 stock_count */
+
+    /* The copy the game uses for sudden death, same layout. It was all
+     * this table read of the battle state until 2026-11, and two peers
+     * never differed on it in a healthy match, so keeping it costs nothing
+     * and keeps a sudden death covered. */
+    { KN_ADDR_SUDDEN_DEATH_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER },
+    { KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE + 0*KN_PLAYER_STRIDE, 1 },
+    { KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE, 1 },
+    { KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE, 1 },
+    { KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE, 1 },
     /* RNG seed — sample the REAL game RNG so cross-peer divergence at
      * char-pick time surfaces via RB-CHECK. Prior table sampled 0x05B940
      * which was thought to be the seed but is actually gSYAudioHeapBuffer
