@@ -1,5 +1,5 @@
 /* Room overlay tokens (docs/landing-design.md §7.5, direction A) — shared
-   with web/static/landing.css and join.js/join.html. Only the pre-game
+   with web/static/landing.css and the invite page (join.html). Only the pre-game
    overlay and its states are restyled to this direction (§7.2 M3); the
    in-game toolbar/HUD keep their existing look. */
 @font-face {
