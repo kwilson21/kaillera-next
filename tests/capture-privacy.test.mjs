@@ -3,10 +3,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import fs from 'node:fs';
+import { startCapture } from '../web/src/page/capture.ts';
 
 const read = (file) => fs.readFileSync(new URL(`../web/${file}`, import.meta.url), 'utf8');
+// The policy itself is web/src/page/capture.ts, started on the fake page the
+// way web/static/kn-capture.js starts it on a real one.
 const sources = Object.fromEntries(
-  ['kn-capture', 'kn-diagnostics', 'kn-vision-client'].map((name) => [name, read(`static/${name}.js`)]),
+  ['kn-diagnostics', 'kn-vision-client'].map((name) => [name, read(`static/${name}.js`)]),
 );
 const key = 'kn-diagnostic-images';
 
@@ -122,9 +125,8 @@ function harness({
     },
   });
   context.window = context;
-  for (const name of Object.keys(sources)) {
-    if (name !== 'kn-capture' || policy) vm.runInContext(sources[name], context);
-  }
+  if (policy) context.KNCapture = startCapture(context);
+  for (const name of Object.keys(sources)) vm.runInContext(sources[name], context);
   context.KNDiag.init({
     getFrame: () => frame,
     getSlot: () => 0,
@@ -274,10 +276,24 @@ test('input and audio diagnostics remain functional with images off', () => {
   assert.equal(h.counts.draws, 0);
 });
 
+test('the page script starts the policy from the core and nothing else', () => {
+  const calls = [];
+  const policy = {};
+  const startCapture = (host) => {
+    calls.push(host);
+    return policy;
+  };
+  const window = { KNCore: { page: { startCapture } } };
+  vm.runInNewContext(read('static/kn-capture.js'), { window });
+  assert.deepEqual(calls, [window]);
+  assert.equal(window.KNCapture, policy);
+});
+
 test('all diagnostic pages load shared policy before any capturing module', () => {
   for (const page of ['play.html', 'demo.html']) {
     const html = read(page);
-    assert.ok(html.indexOf('/static/kn-capture.js') >= 0);
+    assert.ok(html.indexOf('/static/dist/kn-core.js') >= 0);
+    assert.ok(html.indexOf('/static/dist/kn-core.js') < html.indexOf('/static/kn-capture.js'));
     assert.ok(html.indexOf('/static/kn-capture.js') < html.indexOf('/static/kn-diagnostics.js'));
     assert.ok(html.indexOf('/static/kn-capture.js') < html.indexOf('/static/netplay-rollback.js'));
   }
