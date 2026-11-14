@@ -100,7 +100,6 @@ kaillera-next/
 │       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
 │       ├── kn-capture.js        # diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
 │       ├── kn-vision-client.js  # Claude vision API client for screenshot diff
-│       ├── storage.js           # safe localStorage/sessionStorage wrapper
 │       ├── api-sandbox.js       # save/restore native browser APIs
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
@@ -115,6 +114,7 @@ kaillera-next/
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
 │       ├── dist/kn-core.js       # built from web/src by `just build`; committed, never edited by hand
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
+│       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
@@ -124,6 +124,8 @@ kaillera-next/
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
+│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage)
+│   │   ├── site-entry.ts        # kn-site.js bundle entry
 │   │   ├── page/shared.ts       # window.KNShared and window.KNEvent: cheats, key tracking, local input, input wire format, WebRTC peer helpers (was web/static/shared.js)
 │   │   ├── page/gamepad-manager.ts # window.GamepadManager: gamepad profiles, remapping, slot assignment
 │   │   ├── page/desync-detector.ts # window.KNDesync: field-granular cross-peer desync detection, installed by the bundle

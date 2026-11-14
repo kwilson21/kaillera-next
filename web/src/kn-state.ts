@@ -24,7 +24,7 @@ export interface SessionStats {
   stalls: number;
 }
 
-/** The storage helpers the state carries (web/static/storage.js). */
+/** The storage helpers the state carries (web/src/site/storage.ts). */
 export interface SafeStorage {
   get: (store: 'localStorage' | 'sessionStorage', key: string) => string | null;
   set: (store: 'localStorage' | 'sessionStorage', key: string, value: string) => void;
