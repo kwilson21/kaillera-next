@@ -1480,8 +1480,8 @@ for (const b of new Set([hostBrowser, guestBrowser])) await b.close();
 // A freeze makes deep mispredictions and skipped rollbacks expected before
 // the resync; what must hold is that the resync happened, fixed it, and held:
 // no integrity events once recovery settled (each peer's lines after its last
-// recovery marker, 30+ frames past the resync; late pre-resync inputs can
-// still land just after it), and a meaningful window of matching frames.
+// recovery marker, about a frame 30+ past the resync; late pre-resync inputs
+// can still land just after it), and a meaningful window of matching frames.
 const POST_RECOVERY_MIN_FRAMES = 120;
 const integrityAfterRecovery = (log, marker) => {
   const lines = log.split('\n');
@@ -1492,7 +1492,14 @@ const integrityAfterRecovery = (log, marker) => {
   return from < 0
     ? 0
     : lines.slice(from + 1).filter((l) => {
-        const f = +(l.split('\t')[2] || '').replace('f=', '');
+        // A line the C engine wrote is copied into this log in batches, under
+        // the frame it was copied at. It names the frame it is about (myF= /
+        // f=); go by that, as cIntegrityAfterRecovery does for the same lines
+        // in the C log. Dated by the copy, a skipped rollback from just
+        // before the resync counted as one long after it.
+        // (A C line that names no frame keeps the frame it was copied at.)
+        const named = l.includes('[C]') ? frameOfCLine(l.split('\t').slice(3).join('\t')) : NaN;
+        const f = Number.isFinite(named) ? named : frameOfSyncLine(l);
         return f >= recoveredAt + 30 && count(l, INTEGRITY) > 0;
       }).length;
 };
