@@ -1492,7 +1492,11 @@ const integrityAfterRecovery = (log, marker) => {
   return from < 0
     ? 0
     : lines.slice(from + 1).filter((l) => {
-        const f = +(l.split('\t')[2] || '').replace('f=', '');
+        // A line the engine's C log wrote is copied here in batches, under
+        // the frame of the copy. The frame it concerns is the one it names
+        // (myF=), as cIntegrityAfterRecovery reads the same line below.
+        const named = l.includes('[C] ') ? l.match(/myF=(\d+)/) : null;
+        const f = named ? +named[1] : +(l.split('\t')[2] || '').replace('f=', '');
         return f >= recoveredAt + 30 && count(l, INTEGRITY) > 0;
       }).length;
 };
