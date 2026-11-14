@@ -75,16 +75,18 @@ expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
 expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
 
 PAUSE=specs/late_join_pause.qnt
-verify "$PAUSE" late_join_pause_fixed allHold
-expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
-# The other two violations on late_join_pause_current need two joiners and
+verify "$PAUSE" late_join_pause_current allHold
+expect_violation "$PAUSE" late_join_pause_before hostPauseHasADeadline
+expect_violation "$PAUSE" late_join_pause_host_side guestPauseHasADeadline
+expect_violation "$PAUSE" late_join_pause_host_side guestResumesOnTheHostsWord
+expect_violation "$PAUSE" late_join_pause_host_side aRepeatedRequestKeepsTheDeadline
+# The other two violations on late_join_pause_before need two joiners and
 # are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
 # them.
 
 FLOW=specs/resync_flow.qnt
-verify "$FLOW" resync_flow_current holdToday
-verify "$FLOW" resync_flow_fixed allHold
-expect_violation "$FLOW" resync_flow_current aRequestCanAlwaysEnd
+verify "$FLOW" resync_flow_current allHold
+expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
 
 TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
