@@ -25,6 +25,7 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
 import { rollbackTimeline } from './page/rollback-timeline.ts';
 import { startControllerSettings } from './page/controller-settings/panel.ts';
@@ -69,6 +70,7 @@ import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from
 import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
+import { installSite, KNSite } from './site/index.ts';
 import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
 import * as streamingInput from './streaming/input.ts';
@@ -289,14 +291,17 @@ export const KNCore = {
   startLateJoinWait,
   startRejoin,
   shouldResumeRomTransfer,
-  /** The play page's own logic, moving here from web/static/play.js piece by piece. */
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
     rollbackTimeline,
+    startAudio,
     startCapture,
     startControllerSettings,
     startVisionClient,
   },
+  /** What these pages share with the front page; the same object is `window.KNSite` on both. */
+  site: KNSite,
+  /** The play page's own logic, moving here from web/static/play.js piece by piece. */
   play: {
     escapeHtml,
     inviteUrl,
@@ -360,4 +365,5 @@ if (typeof window !== 'undefined') {
   installGamepadManager();
   installDiagnostics();
   installDesyncDetector();
+  installSite();
 }
