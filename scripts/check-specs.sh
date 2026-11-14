@@ -147,14 +147,23 @@ $QUINT run "$PAUSE" --main=late_join_pause_current --invariant=allHold \
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
-for variant in resync_flow_before resync_flow_current; do
+for variant in resync_flow_before resync_flow_any_answer resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
-# Today: a guest stopped at its target has a deadline, a state no newer than
-# the last one applied is never applied, and a request that is out can always
+# A guest stopped at its target has a deadline, a state no newer than the
+# last one applied is never applied, and a request that is out can always
 # end. The last was violated before the request had a deadline of its own
 # (resync_flow_before): the host drops a request inside its rate limit and
-# the guest never asked again.
+# the guest never asked again. These held before requests were numbered too.
+$QUINT run "$FLOW" --main=resync_flow_any_answer --invariant=holdWithoutNumbers \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+# And only its own answer ends a request, a late answer does not take the
+# guest back below the frame its newest request named (at the target or
+# after the target's deadline), and a late answer does not take the place of
+# the awaited one. All three were violated before a request had a number its
+# answer carries (resync_flow_any_answer; lateAnswerTest,
+# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
+# hold the orderings).
 $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 

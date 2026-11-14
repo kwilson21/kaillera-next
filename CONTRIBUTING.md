@@ -131,7 +131,7 @@ earlier ones to have set up their `window.*` exports:
 6. `version-guard.js` — cross-tab version mismatch guard (forces reload after deploys); starts `web/src/site/version-guard.ts`
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
 8. `switch2-usb.js` — starts the WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad (`web/src/page/switch2-usb.ts`)
-9. `virtual-gamepad.js` — touch controls for mobile
+9. `virtual-gamepad.js` — starts the touch controls for mobile (`web/src/page/virtual-gamepad/`)
 10. `kn-audio.js` — AudioWorklet pump + rollback audio capture (the logic is `web/src/page/audio.ts`)
 11. `kn-vision-client.js` — starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)
 12. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
@@ -182,7 +182,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `web/src/page/gamepad-manager.ts` (in `dist/kn-core.js`) | ~570    | Profile-based gamepad detection, deadzone, analog mapping (`window.GamepadManager`)                                                                                                    | play.js, KNState                                            |
 | `switch2-usb.js`                                         | —       | Starts the WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C), which owns the Connect button and its status line (`web/src/page/switch2-usb.ts`)                          | play.html                                                   |
 | `controller-settings.js`                                 | —       | Starts the in-game controller settings panel (deadzone, sensitivity, profiles); the logic is `web/src/page/controller-settings/`                                                       | play.js, gamepad-manager                                    |
-| `virtual-gamepad.js`                                     | ~1,194  | On-screen touch controls for mobile                                                                                                                                                    | KNState                                                     |
+| `virtual-gamepad.js`                                     | ~7      | Starts the on-screen touch controls for mobile; the logic is `web/src/page/virtual-gamepad/`                                                                                           | KNCore, KNState                                             |
 | `kn-audio.js`                                            | —       | AudioWorklet pump + rollback audio capture; starts `web/src/page/audio.ts` as `window.KNAudio`                                                                                         | rollback, play.js                                           |
 | `kn-vision-client.js`                                    | —       | Starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)                                                                                  | rollback                                                    |
 | `audio-worklet-processor.js`                             | ~85     | AudioWorklet ring buffer for rollback audio                                                                                                                                            | kn-audio.js                                                 |
