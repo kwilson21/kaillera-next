@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 
 
@@ -9,113 +8,18 @@ PLAY_HTML = ROOT / "web/play.html"
 PLAY_CSS = ROOT / "web/static/play.css"
 
 
-def test_menu_phase_lock_allows_scene_transition_grace():
-    """Prod regression: guest froze at title while host reached mode select.
-
-    The menu phase lock should still freeze true stuck phase mismatches, but
-    only after a short catch-up window. Remote inputs are still required by the
-    existing menu lockstep path before a local frame can advance.
-    """
-    src = LOCKSTEP_JS.read_text()
-
-    assert "PHASE_TRANSITION_GRACE_FRAMES = 12" in src
-    assert "let _phaseMismatchGrace = {}" in src
-    assert "_phaseMismatchGrace[p.slot] = { key: mismatchKey, frame: _frameNum }" in src
-    assert "_frameNum - grace.frame < PHASE_TRANSITION_GRACE_FRAMES" in src
-
-    grace_idx = src.index("_frameNum - grace.frame < PHASE_TRANSITION_GRACE_FRAMES")
-    wait_idx = src.index("if (peerPhase.frame < _frameNum) waitingPeerSlots.push(p.slot);", grace_idx)
-    assert wait_idx > grace_idx
-
-
-def test_menu_phase_lock_grace_state_is_cleaned_up():
-    src = LOCKSTEP_JS.read_text()
-
-    assert "delete _phaseMismatchGrace[slot];" in src
-    assert "_phaseMismatchGrace = {};" in src
-
-
 def test_match_loading_transition_is_not_strict_menu_lockstep():
     """Regression: peers froze at scene=22/gameStatus=0 after stage select.
 
-    That phase is the non-controllable battle-loading transition. It should
-    still be phase-aware, but it must not use the no-timeout menu stall path.
+    That phase is the non-controllable battle-loading transition. It must
+    not use the no-timeout menu stall path.
     """
     src = LOCKSTEP_JS.read_text()
 
     assert "const inBattleTransition = sceneCurr === 22 && gameStatus === 0;" in src
-    assert "(_remixMenuLockstep() || !_useCRollback) &&" in src
-    assert "(inControllableMenu || (sceneCurr === 22 && gameStatus === 2));" in src
-    assert "const shouldAlignPhase = phase.gameplay || phase.strictInputLockstep;" in src
-    assert "const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;" in src
+    assert "!_useCRollback &&\n        !inBattleTransition &&" in src
     assert "getInputPeers(menuLockstepPhase.strictInputLockstep)" in src
     assert "if (menuLockstepPhase.strictInputLockstep)" in src
-
-
-def test_phase_lock_resolution_clears_strict_menu_wait():
-    """Regression guard for Greptile P1 (commit after 582a479): the
-    phase-lock-wait branch emits _emitStrictMenuWait, so the symmetric
-    resolution branch (the `else` next to `if (phaseLockSlots.length)`)
-    must call _clearStrictMenuWait — otherwise the overlay sticks for
-    the rest of the session once the phase mismatch resolves.
-    """
-    src = LOCKSTEP_JS.read_text()
-
-    # The full-resolution branch resets these three pieces of state in
-    # order. Locate it and require _clearStrictMenuWait inside the same
-    # block.
-    # Indentation-insensitive (the branch may sit inside extra nesting), and
-    # anchored to the `} else {` that follows `if (phaseLockSlots.length)` so
-    # other resets of the same three fields don't match first.
-    lock_idx = src.find("if (phaseLockSlots.length) {")
-    assert lock_idx >= 0, "phase-lock branch not found"
-    m = re.compile(
-        r"\} else \{\n\s*_phaseLockStallKey = '';\n\s*_phaseLockStallStartTime = 0;\n\s*_phaseLockLastWaitLogAt = 0;\n"
-    ).search(src, lock_idx)
-    assert m, "phase-lock resolution branch not found in expected shape"
-    idx = m.start()
-    block = src[idx : idx + 600]
-    assert "_clearStrictMenuWait()" in block, (
-        "phase-lock resolution must clear the strict-menu overlay (mirror the boot-sync/JS-menu paths)"
-    )
-
-
-def test_phase_lock_middle_case_clears_strict_menu_wait():
-    """Regression guard for codex follow-up (commit after b54d1be):
-    in addition to the full-resolution `else` branch, the inner
-    fallthrough — phaseLockSlots > 0 but phaseWaitSlots === 0 — must
-    also clear the overlay. Otherwise transitioning from "waiting on
-    Player X" to "mismatch still present, no one currently blocking"
-    leaves the overlay stuck.
-    """
-    src = LOCKSTEP_JS.read_text()
-
-    # The wait branch ends with `_emitStrictMenuWait(...); return; }` and
-    # the middle case falls through right after that closing brace. The
-    # _clearStrictMenuWait call must appear between the wait-branch's
-    # closing `}` and the outer `else {` that handles full resolution.
-    emit_idx = src.find("_emitStrictMenuWait(phaseWaitSlots, _frameNum, stallMs, sceneCurr, gameStatus);")
-    assert emit_idx >= 0, "phase-lock wait emit not found"
-    outer_else_idx = src.find("} else {", emit_idx)
-    assert outer_else_idx >= 0, "phase-lock outer else not found"
-    middle_block = src[emit_idx:outer_else_idx]
-    assert "_clearStrictMenuWait()" in middle_block, (
-        "phase-lock middle case (mismatch present, no one waiting) must "
-        "clear the overlay so it doesn't stick on transition"
-    )
-
-
-def test_phase_lock_wait_does_not_drive_gameplay_lifecycle():
-    """A peer phase wait is a stall condition, not proof we left gameplay."""
-    src = LOCKSTEP_JS.read_text()
-
-    assert "lifecycleActive: phase.active," in src
-    assert "active: phase.active || waitingPeerSlots.length > 0," in src
-    assert "const inMenu = menuPhase.lifecycleActive;" in src
-
-    in_menu_idx = src.index("const inMenu = menuPhase.lifecycleActive;")
-    transition_idx = src.index("MENU→GAMEPLAY transition", in_menu_idx)
-    assert in_menu_idx < transition_idx
 
 
 def test_strict_menu_wait_has_visible_overlay():
@@ -134,28 +38,33 @@ def test_strict_menu_wait_has_visible_overlay():
     assert "#menu-wait-overlay" in css_src
 
 
-def test_remix_menus_run_rollback_by_default():
+def test_rollback_does_not_depend_on_the_games_scene():
     """Room 5AB4NK8U: strict Remix menu lockstep at a rollback-sized delay
-    capped the menus at ~35fps over ~100ms RTT. Remix now runs rollback from
-    the start like SSB64; ?remixMenuLockstep=1 restores the old gates, and
-    peers that disagree refuse to start instead of splitting timelines.
+    capped the menus at ~35fps over ~100ms RTT. Rollback has run through the
+    Remix menus since, and the lockstep it replaced is gone: the C engine is
+    never held back for, or shut down on, a scene the game is showing.
+    A page from before that change is refused rather than paired.
     """
     src = LOCKSTEP_JS.read_text()
 
-    assert (
-        "const RB_REMIX_MENU_ROLLBACK = !RB_REMIX_MENU_LOCKSTEP && RB_ROLLBACK_STATE_BACKEND === 'split-rdram';"
-    ) in src
-    assert "const _remixMenuLockstep = () => !RB_REMIX_MENU_ROLLBACK && _isSmashRemix();" in src
-    flag = src[src.index("const RB_REMIX_MENU_LOCKSTEP = (() => {") :]
-    flag = flag[: flag.index("})();")]
-    assert "return raw === '1';" in flag
-    assert "return false;" in flag
+    for gone in (
+        "remixMenuLockstep",
+        "RB_REMIX_MENU",
+        "_rbDeferredForGameplay",
+        "_shutdownCRollbackForMenu",
+        "_rbShutdownHold",
+        "_peerPhases",
+        "PHASE-LOCK",
+        "_broadcastPhaseIfNeeded",
+    ):
+        assert gone not in src, gone
 
-    # Every Remix menu gate keys off the flag, not off _isSmashRemix().
-    assert "if (_remixMenuLockstep()) {\n          // Smash Remix's title/menu code path" in src
-    assert "active: _remixMenuLockstep() && (inControllableMenu" in src
-    assert "if (_remixMenuLockstep() && !!enabled) {" in src
-    assert "const localGameplay = !_remixMenuLockstep() || menuPhase.gameplay;" in src
+    # With the C engine running, a missing input is predicted on every screen.
+    phase = src[src.index("const _readMenuPhase = () => {") :]
+    phase = phase[: phase.index("\n  };\n")]
+    assert "strictInputLockstep:\n        !_useCRollback &&" in phase
 
-    assert "remixMenuRollback: RB_REMIX_MENU_ROLLBACK," in src
-    assert "!!peerCaps.remixMenuRollback !== localCaps.remixMenuRollback" in src
+    assert "remixMenuRollback: true," in src
+    assert "if (_isSmashRemix() && !peerCaps.remixMenuRollback) {" in src
+    # Still read (and ignored) from a page that sends it.
+    assert "if (e.data.startsWith('phase:')) return;" in src

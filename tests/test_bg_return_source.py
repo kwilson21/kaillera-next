@@ -21,7 +21,7 @@ def test_stall_threshold_formula_is_not_duplicated():
 
     # The tick loop's gameplay stall must call the shared helper, not inline
     # its own copy of the formula.
-    tick_idx = src.index("_rbBootConverged && rbApplyFrame >= 0")
+    tick_idx = src.index("// Stall only when too far ahead for rollback to help")
     assert "const stallThreshold = _rbInputStallThreshold();" in src[tick_idx:]
 
 

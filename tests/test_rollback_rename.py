@@ -96,8 +96,8 @@ def test_engine_getinfo_reports_rollback_mode():
 
 def test_internal_lockstep_vocabulary_is_preserved():
     """The rename intentionally keeps 'lockstep' as implementation vocabulary
-    for strict input stalls (boot convergence, menu phase-lock gate, the
-    in-engine fallback) and as stable protocol/log labels. Guard against
+    for strict input stalls (the in-engine fallback when the C engine
+    is not running) and as stable protocol/log labels. Guard against
     accidental over-renames that would break the analyzer or the cheat
     pipeline."""
     src = ROLLBACK_JS.read_text()

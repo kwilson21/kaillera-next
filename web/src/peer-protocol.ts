@@ -39,8 +39,6 @@ const TEXT_GRAMMAR = {
     'peer-resumed': '',
     // roster:<frame>:<slot>,<slot>,...   (no slots: the part after the colon is empty)
     roster: `:${INT}:(?:\\d+(?:,\\d+)*)?`,
-    // phase:<frame>:<scene>:<game status>
-    phase: `:${INT}:${INT}:${INT}`,
     // menu-ready:<frame>:<scene>
     'menu-ready': `:${INT}:${INT}`,
     resend: `:${INT}`,
@@ -62,6 +60,8 @@ const TEXT_GRAMMAR = {
     'sync-request-full': '',
     'sync-request-full-at': `:${INT}`,
     // Read but no longer sent by a current page.
+    // phase:<frame>:<scene>:<game status>
+    phase: `:${INT}:${INT}:${INT}`,
     'sync-hash': `:${INT}:${INT}`,
     'sync-request': '',
     'sync-request-regions': '',
