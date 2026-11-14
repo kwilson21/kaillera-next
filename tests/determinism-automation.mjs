@@ -85,7 +85,7 @@ const ADMIN_KEY = '1234';
 const ROOM = argValue('room', process.env.KN_ROOM || 'AUTO' + (Date.now() % 10000));
 /* 2026-04-25: extended from 60s → 180s (3 min) per user request to
  * "let random inputs play out for a few mins and continuously capture
- * screenshots". Combined with kn-diagnostics.js SCREENSHOT_INTERVAL=60
+ * screenshots". Combined with KNDiag's SCREENSHOT_INTERVAL=60
  * (~1s upload cadence), this gives us ~180 cross-peer screenshot pairs
  * to feed DeepSeek for visual desync detection beyond what SSIM catches. */
 const RANDOM_INPUT_INTERVAL_MS = 200; // every 200ms, new input
@@ -2906,7 +2906,7 @@ async function setupPeer(browser, urlSuffix, name) {
       console.log(`[${name}] PAGE ERROR: ${err.message}`);
     }
   });
-  // Count noisy WebGL warnings — used to verify the kn-diagnostics
+  // Count noisy WebGL warnings — used to verify the KNDiag
   // captureCanvasHash fix (skip readPixels when GLideN64 leaves a PBO
   // bound). Surface in the final summary so a regression is immediately
   // visible.
@@ -4253,7 +4253,7 @@ async function main() {
   await host.page.waitForTimeout(3000);
 
   // Surface the PIXEL_PACK_BUFFER warning count up front. If the
-  // kn-diagnostics captureCanvasHash fix regresses, this jumps from 0
+  // KNDiag captureCanvasHash fix regresses, this jumps from 0
   // to "many per second" and is visible without combing through logs.
   console.log(
     `\n[pbo-warn] host=${host.page.pboWarningCount?.() ?? 'n/a'} ` +

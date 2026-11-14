@@ -5,9 +5,14 @@ import vm from 'node:vm';
 import fs from 'node:fs';
 
 const read = (file) => fs.readFileSync(new URL(`../web/${file}`, import.meta.url), 'utf8');
-const sources = Object.fromEntries(
-  ['kn-capture', 'kn-diagnostics', 'kn-vision-client'].map((name) => [name, read(`static/${name}.js`)]),
-);
+// window.KNDiag comes from the TypeScript bundle (web/src/page/diagnostics.ts),
+// so the bundle is run as the pages run it: one classic script, before the
+// scripts that build on it.
+const sources = {
+  'kn-core': read('static/dist/kn-core.js'),
+  'kn-capture': read('static/kn-capture.js'),
+  'kn-vision-client': read('static/kn-vision-client.js'),
+};
 const key = 'kn-diagnostic-images';
 
 function harness({
@@ -78,6 +83,13 @@ function harness({
   let frame = 60;
   const context = vm.createContext({
     URLSearchParams,
+    // What the bundle's libraries expect of any browser as they load.
+    TextEncoder,
+    TextDecoder,
+    setTimeout,
+    clearTimeout,
+    queueMicrotask,
+    EventTarget,
     console: { log() {}, warn() {} },
     CustomEvent: class {
       constructor(type, init) {
@@ -122,8 +134,12 @@ function harness({
     },
   });
   context.window = context;
+  // The bundle sets window.KNStorage on a real page. Here the harness's own
+  // stand-in (which can be made to fail) is put back after the bundle runs.
+  const fakeStorage = context.KNStorage;
   for (const name of Object.keys(sources)) {
     if (name !== 'kn-capture' || policy) vm.runInContext(sources[name], context);
+    if (name === 'kn-core') context.KNStorage = fakeStorage;
   }
   context.KNDiag.init({
     getFrame: () => frame,
@@ -274,11 +290,13 @@ test('input and audio diagnostics remain functional with images off', () => {
   assert.equal(h.counts.draws, 0);
 });
 
-test('all diagnostic pages load shared policy before any capturing module', () => {
+// The diagnostics in the bundle ask the policy at each capture, and capture
+// nothing when it is missing (the `policy: false` case above), so what must
+// come after the policy is the engine that drives them.
+test('all diagnostic pages load shared policy before the engine that captures', () => {
   for (const page of ['play.html', 'demo.html']) {
     const html = read(page);
     assert.ok(html.indexOf('/static/kn-capture.js') >= 0);
-    assert.ok(html.indexOf('/static/kn-capture.js') < html.indexOf('/static/kn-diagnostics.js'));
     assert.ok(html.indexOf('/static/kn-capture.js') < html.indexOf('/static/netplay-rollback.js'));
   }
 });
