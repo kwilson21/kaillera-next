@@ -1,6 +1,6 @@
 /**
  * What the front page and the invite page share: where the game server is,
- * the links into a room, and waking a server that naps when nobody is around
+ * the links into a room, a room's slot markers, and waking a server that naps when nobody is around
  * (docs/landing-design.md §7.2). Moved from web/static/landing.js and
  * web/static/join.js, which each had a copy.
  */
@@ -48,6 +48,10 @@ export const playUrl = (api: string, code: string, spectate: boolean): string =>
 
 /** The room page for a new room this visitor hosts. */
 export const hostUrl = (api: string, code: string): string => `${api}/play.html?room=${code}&host=1&mode=rollback`;
+
+/** The class of a room's `index`th slot marker: taken slots carry their player colour. */
+export const slotClass = (index: number, playerCount: number): string =>
+  index < playerCount ? `slot p${(index % 4) + 1} on` : 'slot';
 
 const CODE_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 

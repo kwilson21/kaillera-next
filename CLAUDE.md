@@ -82,7 +82,6 @@ kaillera-next/
 │   ├── demo.html            # interactive rollback demo (user-supplied ROM required)
 │   ├── error.html           # error/fallback page
 │   └── static/
-│       ├── landing.js           # front page: board poll, waking state, header marks
 │       ├── landing.css          # front page styles (direction A tokens)
 │       ├── play.css             # play page styles (room overlay tokens, direction A)
 │       ├── admin.css            # admin dashboard styles
@@ -118,6 +117,7 @@ kaillera-next/
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
 │       ├── dist/kn-core.js       # built from web/src by `just build`; committed, never edited by hand
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
+│       ├── dist/kn-landing.js    # the front page's own small bundle: board poll, waking state, header marks
 │       ├── dist/kn-join.js       # the invite page's own small bundle: room lookup, full/closed/in-app states
 │       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
@@ -130,7 +130,8 @@ kaillera-next/
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
 │   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
-│   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (join.ts: the invite page; wake.ts, wire.ts: shared)
+│   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (front.ts, board.ts: the front page and its decisions; join.ts: the invite page; wake.ts, wire.ts: shared)
+│   │   ├── landing-entry.ts     # kn-landing.js bundle entry
 │   │   ├── join-entry.ts        # kn-join.js bundle entry
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry

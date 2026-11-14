@@ -1,7 +1,7 @@
 {
   "scripts": {
     "build": "node scripts/build-web.mjs",
-    "build:check": "node scripts/build-web.mjs && git diff --exit-code -- web/static/dist/kn-core.js web/static/dist/kn-wake-art.js web/static/dist/kn-site.js web/static/dist/kn-join.js",
+    "build:check": "node scripts/build-web.mjs && git diff --exit-code -- web/static/dist/kn-core.js web/static/dist/kn-wake-art.js web/static/dist/kn-site.js web/static/dist/kn-join.js web/static/dist/kn-landing.js",
     "typecheck": "tsc -p tsconfig.json",
     "test:ts": "node --test \"tests/ts/*.test.ts\"",
     "fmt": "oxfmt \"**/*.{js,mjs,mts,ts,css,json,jsonc,yaml,yml,html}\"",

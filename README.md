@@ -197,8 +197,8 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
-    landing.js         Front-page board controller (room creation, open-rooms board)
     landing.css        Front-page styles (direction A tokens)
+    dist/kn-landing.js Front-page board controller (room creation, open-rooms board), built from web/src/landing/front.ts
     dist/kn-join.js    Invite-page controller (room lookup, join/watch states), built from web/src/landing/join.ts
     dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
     dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper)
