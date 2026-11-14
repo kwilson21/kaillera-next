@@ -229,7 +229,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
     demo.js                Demo page orchestrator (fake peer + menu autopilot)
     fake-peer.js           Synthetic P2 for the demo page (simulated input/jitter)
-    ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (reads RDRAM menu state)
+    ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (logic in web/src/page/menu-autopilot.ts)
     rollback-timeline.js   Demo page's live rollback-metrics HUD (logic in web/src/page/rollback-timeline.ts)
     socket.io.min.js       Self-hosted Socket.IO client (v4.8.4)
     vendor/fflate.min.js   Self-hosted compression lib used to extract ROM ZIP archives
