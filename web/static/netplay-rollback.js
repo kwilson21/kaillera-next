@@ -5863,6 +5863,23 @@
     if (wait <= 0) flush();
     else _criticalFlushTimer = setTimeout(flush, wait);
   };
+  // Stage 3, observing: the strings peers send over the DataChannels (and the
+  // session-log ack) are checked against web/src/peer-protocol.ts and a
+  // mismatch is reported; the handlers below still read the raw message.
+  // Looked up on first use: kn-core.js loads after this file.
+  let _peerProtocolObserver;
+  const _peerProtocol = () => {
+    if (_peerProtocolObserver === undefined) {
+      _peerProtocolObserver =
+        window.KNCore?.protocol?.createObserver?.(({ type, message, issue }) => {
+          if (!window.KNState?.uploadToken) return false;
+          window.KNEvent?.(type, message, { issue });
+          return true;
+        }) ?? null;
+    }
+    return _peerProtocolObserver;
+  };
+
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: _frameNum, msg });
     if (_knVerboseSyncConsole || _isConsoleCriticalSyncLog(msg)) {
@@ -6212,6 +6229,8 @@
         socket.emit('session-log', payload, (ack) => {
           acked = true;
           _socketFlushFails = 0;
+          // The server acks a flush it turned away with no data at all.
+          if (ack) _peerProtocol()?.checkAck('session-log', ack);
           _ackSyncLogFlush(ack, payload);
         });
         // If no ack within 5s, count as failure and try HTTP next time
@@ -6838,6 +6857,26 @@
 
   const onDataMessage = (msg) => {
     if (!msg?.type) return;
+    // Any member of the room, spectators included, can write to the server's
+    // relay, so nothing a message says about itself is believed. The server
+    // stamps the true sender (KNCore.checkRelayed, web/src/relay.ts): a
+    // message that installs emulator state is taken only from slot 0, and a
+    // request is answered to the socket that really sent it, not the one it
+    // names. A message with no stamp comes from a server older than the
+    // stamp and is handled as before: server and pages deploy together, and
+    // a member cannot remove a stamp the server adds. A stamped message this
+    // page cannot check (the bundle did not load) is refused.
+    const checkRelayed = window.KNCore?.checkRelayed;
+    if (!checkRelayed && Object.hasOwn(msg, 'knFrom')) {
+      _syncLog(`relayed ${msg.type} refused: no KNCore to check its sender`);
+      return;
+    }
+    const from = checkRelayed ? checkRelayed(msg) : null;
+    if (from && !from.allowed) {
+      _syncLog(`relayed ${msg.type} refused: sender ${from.sid} slot=${from.slot}`);
+      return;
+    }
+    if (from?.stamped) msg = { ...msg, requesterSid: from.sid, senderSid: from.sid };
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
@@ -7205,6 +7244,21 @@
   };
 
   const _isOwnSid = (sid) => !!sid && (sid === socket?.id || _ownSids.has(sid));
+
+  // Does the mesh need a new connection to this roster player? The decision
+  // is KNCore.meshHealTargets (web/src/roster.ts), proved never to return one
+  // of our own ids: the host once opened a connection to itself here and
+  // stalled on input from its own slot. The line below it is the same rule,
+  // used only if the bundle did not load.
+  const _needsMeshHeal = (sid, healthy, reconnecting) => {
+    const targets = window.KNCore?.meshHealTargets;
+    if (targets) {
+      const ownSids = [..._ownSids];
+      if (socket?.id) ownSids.push(socket.id);
+      return targets([{ sid, healthy, reconnecting }], ownSids).length > 0;
+    }
+    return !_isOwnSid(sid) && !healthy && !reconnecting;
+  };
 
   const _peerConnectionLive = (peer) =>
     peer?.pc?.connectionState === 'connected' && (peer.dc?.readyState === 'open' || peer.rbDc?.readyState === 'open');
@@ -8094,6 +8148,7 @@
 
       // String messages
       if (typeof e.data === 'string') {
+        _peerProtocol()?.peerText('lockstep', e.data);
         if (e.data === 'ready') {
           peer.ready = true;
         }
@@ -8556,6 +8611,7 @@
     _syncChunks = [];
     ch.onmessage = (e) => {
       if (typeof e.data === 'string') {
+        _peerProtocol()?.peerText('sync-state', e.data);
         // Guest: incoming state transfer header
         if (e.data.startsWith('sync-start:')) {
           const parts = e.data.split(':');
@@ -10701,10 +10757,10 @@
       // removed by hardDisconnectPeer (_running was false) or left as zombies
       // by the reconnect timeout (which closes PC but doesn't delete from _peers).
       for (const [sid, info] of Object.entries(_knownPlayers)) {
-        if (_isOwnSid(sid)) continue;
         const existing = _peers[sid];
         const pcState = existing?.pc?.connectionState;
-        if (existing && pcState === 'connected' && existing.dc?.readyState === 'open') continue;
+        const working = !!existing && pcState === 'connected' && existing.dc?.readyState === 'open';
+        if (!_needsMeshHeal(sid, working, false)) continue;
         // Peer is missing, dead, or has no working DC — clean up and recreate
         if (existing) {
           _syncLog(
@@ -12246,10 +12302,35 @@
     // _hasRequiredExports. Opt out with ?desync=off; ?desync=b promotes to
     // pairwise mode B with the 5s heartbeat (every-frame digests + always-on
     // vision sampling — for active triage only).
+    //
+    // Where the detector's fields live differs per game, so the page looks
+    // its ROM up (KNCore.addressMapFor, web/src/address-maps.ts) and the
+    // detector installs that map in the core. A ROM with no map gets no
+    // detector: under another game's map the fields would be hashes of
+    // unrelated memory with the wrong names on them.
+    //
+    // For trying a candidate map on a ROM that has none yet (see
+    // docs/address-maps.md): ?desync=force runs the detector anyway, with
+    // the map of the ROM whose hash is in ?desyncMap=, or SSB64 US's.
     const desyncParam = _urlParams.get('desync');
     if (lsMod && window.KNDesync && desyncParam !== 'off') {
-      const desyncMode = desyncParam === 'b' ? 'B' : 'C';
-      KNDesync.init(lsMod, desyncMode);
+      const mapFor = window.KNCore?.addressMapFor;
+      const forced = desyncParam === 'force';
+      const rom =
+        mapFor?.(_config?.romHash) ??
+        (forced ? mapFor?.(_urlParams.get('desyncMap') ?? window.KNShared?.SSB64_HASH) : null) ??
+        null;
+      if (RB_WORKER_COPROC) {
+        // Mode 2 adopts the worker's corrected state without re-simulating
+        // those frames here, so the registry's history for them keeps the
+        // mispredicted hashes and a healthy match would be flagged.
+        _syncLog('KNDesync off: worker replay (Mode 2) does not rewrite field history');
+      } else if (rom) {
+        const desyncMode = desyncParam === 'b' ? 'B' : 'C';
+        KNDesync.init(lsMod, desyncMode, rom);
+      } else {
+        _syncLog('KNDesync off: no field address map for this ROM');
+      }
     }
 
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
@@ -12396,6 +12477,9 @@
           );
         }
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        // The desync detector reports a frame only once it is this far
+        // behind the newest one: the engine never replays further back.
+        window.KNDesync?.setConfirmWindow?.(rollbackMax);
         if (detMod._kn_get_state_backend) {
           const activeBackend = detMod._kn_get_state_backend() === 1 ? 'split-rdram' : 'retro';
           _syncLog(`C-ROLLBACK state backend active=${activeBackend}`);
@@ -16855,15 +16939,15 @@
       // failed initial connections, and silent DC deaths that no event fires for.
       if (_frameNum % 300 === 0) {
         for (const [sid, info] of Object.entries(_knownPlayers)) {
-          // _isOwnSid, not `sid === socket.id`: while the signaling socket is
-          // down socket.id is undefined, and after it reconnects the roster
-          // still lists us under the old id until users-updated arrives.
-          if (_isOwnSid(sid)) continue;
           if (_isPeerPendingLateJoin(sid)) continue;
-          const p = _peers[sid];
-          if (p && p.dc?.readyState === 'open') continue; // healthy
-          if (p?.reconnecting) continue; // already in progress
           if (_peerPhantom[info.slot]) continue; // confirmed dead during gameplay
+          const p = _peers[sid];
+          // Skips our own entry (under any id we have had: while the
+          // signaling socket is down socket.id is undefined, and after it
+          // reconnects the roster still lists us under the old id until
+          // users-updated arrives), a peer with an open DC, and a reconnect
+          // already in progress.
+          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) continue;
           const pcState = p?.pc?.connectionState;
           _syncLog(
             `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
