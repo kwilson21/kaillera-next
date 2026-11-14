@@ -15,10 +15,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 
-globalThis.window = globalThis;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-await import(path.join(__dirname, '../web/static/shared.js'));
-const { isMainLoopRunner } = globalThis.KNShared;
+const { createShared } = await import(path.join(__dirname, '../web/src/page/shared.ts'));
+const { isMainLoopRunner } = createShared();
 
 test('Emscripten main-loop runner is recognized', () => {
   function MainLoop_runner() {}

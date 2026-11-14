@@ -10,7 +10,9 @@ import { bootTimedOut } from './boot.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
+import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
+import { installGamepadManager } from './page/gamepad-manager.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { captureFrame } from './desync-capture.ts';
 import { digestFrame } from './desync-confirm.ts';
@@ -24,6 +26,7 @@ import {
   decodeUsersUpdated,
 } from './protocol.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
+import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
@@ -52,6 +55,7 @@ import {
   signalDisposition,
   staleHoldersOf,
 } from './peer-signaling.ts';
+import { installKNState } from './kn-state.ts';
 import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { startRejoin, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
 import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from './rejoin-machine.ts';
@@ -62,6 +66,7 @@ import { createStickDeadband } from './stick-deadband.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
+import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
   sessionFlag,
@@ -311,4 +316,11 @@ declare global {
   }
 }
 
-if (typeof window !== 'undefined') window.KNCore = KNCore;
+if (typeof window !== 'undefined') {
+  window.KNCore = KNCore;
+  installKNState(window);
+  installShared();
+  installGamepadManager();
+  installDiagnostics();
+  installDesyncDetector();
+}
