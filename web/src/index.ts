@@ -66,6 +66,7 @@ import * as streamingSignal from './streaming/signal.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
+import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
   sessionFlag,
@@ -325,4 +326,7 @@ declare global {
   }
 }
 
-if (typeof window !== 'undefined') window.KNCore = KNCore;
+if (typeof window !== 'undefined') {
+  window.KNCore = KNCore;
+  installDesyncDetector();
+}
