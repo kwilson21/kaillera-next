@@ -262,6 +262,17 @@ module resync_inputs {
   // its engine.
   // Violated while a page that ran alone did not keep its own inputs, and
   // while a resync did not hand the engine the inputs the guest already had.
+  //
+  // Inputs keyed at or past the page's frame are left out: the page stores
+  // one in its engine when it runs that frame. For a guest taken BACK that
+  // covers inputs it has already made and sent. This model has keys, not
+  // values, so it cannot show which value the guest then applies. The engine
+  // uses the one it made the first time and sends it again on every tick of
+  // that frame (the tick loop's `hadLocalInputForFrame`, in
+  // web/static/netplay-rollback.js): it does not read the controller again,
+  // so the host, which may hold the first copy, is never sent a different
+  // value for the same key. A source test holds that
+  // (test_a_guest_taken_back_reuses_the_inputs_it_already_sent).
   val aPageAppliesWhatItSent =
     resyncDue or PAGES.forall(p => {
       val pg = pages.get(p)
