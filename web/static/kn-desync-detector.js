@@ -81,6 +81,7 @@
   // built for the frame this far behind the newest one; see tick().
   let _confirmWindow = 0;
   let _noDecisionLogged = false;
+  let _malformedDigestLogged = false;
   // Screenshots waiting for their frame: capture frame -> suspect payloads.
   let _pendingCaptures = new Map();
   const _events = new EventTarget();
@@ -257,9 +258,31 @@
     }
   }
 
-  function _ingestPeerDigest(peerId, payload) {
-    if (!payload || typeof payload.frame !== 'number') return;
-    if (!Array.isArray(payload.hashes) || !_hasHistory(payload.hashes)) return;
+  // A peer's digest is JSON from another browser. It is decoded with
+  // KNCore.decodeDesyncDigest (web/src/desync-digest.ts, an Effect Schema)
+  // before anything reads it; without the bundle the check below covers the
+  // fields the comparison indexes. Returns null for anything else.
+  function _decodeDigest(payload) {
+    const decode = window.KNCore?.decodeDesyncDigest;
+    if (decode) return decode(payload);
+    if (!payload || !Number.isInteger(payload.frame)) return null;
+    const hashes = payload.hashes;
+    if (!Array.isArray(hashes) || hashes.length < FIELD.COUNT || !hashes.every(Number.isFinite)) return null;
+    const replayMeta = payload.replayMeta && typeof payload.replayMeta === 'object' ? payload.replayMeta : null;
+    return { frame: payload.frame, hashes, replayMeta };
+  }
+
+  function _ingestPeerDigest(peerId, received) {
+    const payload = _decodeDigest(received);
+    if (!payload) {
+      if (!_malformedDigestLogged) {
+        _malformedDigestLogged = true;
+        _log(`dropped a malformed digest from ${peerId}`);
+      }
+      return;
+    }
+    // A digest for a frame the sender never simulated (see _hasHistory).
+    if (!_hasHistory(payload.hashes)) return;
     const dropFloor = _localFrameTick - _confirmWindow - CONFIG.historyDepth;
     if (payload.frame < dropFloor) return;
     let perPeer = _peerDigests.get(peerId);
@@ -391,42 +414,71 @@
     }
   }
 
-  function _diffDigests(a, b) {
-    const ha = a.digest.hashes;
-    const hb = b.digest.hashes;
+  // The field ids to flag for one pair of digests. The decision is
+  // KNCore.desyncFieldsToFlag (web/src/desync-fields.ts), which is proved
+  // never to flag a field whose hashes are equal. The code below it is the
+  // same rule, used if the bundle did not load or a peer sent a digest
+  // that is not a full array of hashes.
+  function _fieldsToFlag(ha, hb, frame) {
+    // The scene the digest's frame was in, not the live one: a digest is a
+    // rollback window old. When the two match_phase hashes differ, that
+    // alone is flagged and the scene is not used.
+    const phase = _sceneOfDigest(ha);
+    // KNCore's rule has SSB64's scene ids built in, so it is asked only
+    // while the ROM's map uses those; another ROM's scenes go through the
+    // same rule below, which reads them from the map.
+    const ssb64Scenes =
+      _scenes.battle === SSB64_SCENES.battle && _scenes.characterSelect === SSB64_SCENES.characterSelect;
+    const decide = ssb64Scenes ? window.KNCore?.desyncFieldsToFlag : undefined;
+    if (decide && Array.isArray(ha) && Array.isArray(hb) && ha.length >= FIELD.COUNT && hb.length >= FIELD.COUNT) {
+      const lastFlagged = [];
+      for (let fid = 0; fid < FIELD.COUNT; fid++) {
+        lastFlagged.push(_lastFlagFrame.get(_dedupKey(fid)) ?? -1);
+      }
+      return decide(ha, hb, phase, frame, lastFlagged, CONFIG.dedupWindowFrames);
+    }
 
     // GATING RULE: phase mismatch is itself the high-priority flag and
     // suppresses other field comparisons for this frame.
-    if (ha[FIELD.MATCH_PHASE] !== hb[FIELD.MATCH_PHASE]) {
-      _emitSuspect({
-        frame: a.digest.frame,
-        field: 'match_phase',
-        slot: null,
-        hashes: { [a.peerId]: ha[FIELD.MATCH_PHASE], [b.peerId]: hb[FIELD.MATCH_PHASE] },
-        trigger: 'flag',
-        severity: 'high',
-        replayMeta: null,
-      });
-      return;
-    }
-
-    // Both digests hold the same match_phase hash here.
-    const phase = _sceneOfDigest(ha);
+    if (ha[FIELD.MATCH_PHASE] !== hb[FIELD.MATCH_PHASE]) return [FIELD.MATCH_PHASE];
+    const flagged = [];
     for (let fid = 0; fid < FIELD.COUNT; fid++) {
       if (fid === FIELD.MATCH_PHASE) continue;
       if (ha[fid] === hb[fid]) continue;
       if (!_fieldEligibleInPhase(fid, phase)) continue;
+      const lastFlagged = _lastFlagFrame.get(_dedupKey(fid)) ?? -1;
+      if (frame - lastFlagged < CONFIG.dedupWindowFrames) continue;
+      flagged.push(fid);
+    }
+    return flagged;
+  }
 
-      const slot = _slotForField(fid);
-      const dedupKey = `${fid}:${slot ?? 'g'}`;
-      const lastFlagged = _lastFlagFrame.get(dedupKey) ?? -1;
-      if (a.digest.frame - lastFlagged < CONFIG.dedupWindowFrames) continue;
-      _lastFlagFrame.set(dedupKey, a.digest.frame);
+  function _dedupKey(fid) {
+    return `${fid}:${_slotForField(fid) ?? 'g'}`;
+  }
 
+  function _diffDigests(a, b) {
+    const ha = a.digest.hashes;
+    const hb = b.digest.hashes;
+
+    for (const fid of _fieldsToFlag(ha, hb, a.digest.frame)) {
+      if (fid === FIELD.MATCH_PHASE) {
+        _emitSuspect({
+          frame: a.digest.frame,
+          field: 'match_phase',
+          slot: null,
+          hashes: { [a.peerId]: ha[FIELD.MATCH_PHASE], [b.peerId]: hb[FIELD.MATCH_PHASE] },
+          trigger: 'flag',
+          severity: 'high',
+          replayMeta: null,
+        });
+        continue;
+      }
+      _lastFlagFrame.set(_dedupKey(fid), a.digest.frame);
       _emitSuspect({
         frame: a.digest.frame,
         field: _FIELD_NAMES[fid],
-        slot,
+        slot: _slotForField(fid),
         hashes: { [a.peerId]: ha[fid], [b.peerId]: hb[fid] },
         trigger: 'flag',
         replayMeta: a.digest.replayMeta || b.digest.replayMeta || null,
@@ -523,6 +575,7 @@
       _module = emModule;
       _mode = mode;
       _enabled = _hasRequiredExports(emModule);
+      _malformedDigestLogged = false;
       _peerDigests.clear();
       _localDigests.clear();
       _lastFlagFrame.clear();

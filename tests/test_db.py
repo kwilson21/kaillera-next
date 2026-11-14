@@ -187,6 +187,37 @@ async def _run_insert_client_event(tmp_db):
     await close_db()
 
 
+def test_reopen_session(tmp_db):
+    """A player taken back into its match is no longer marked as having left it."""
+    _run_async(_run_reopen_session(tmp_db))
+
+
+async def _run_reopen_session(tmp_db):
+    from src.db import append_session_log, close_db, init_db, query, reopen_session, set_session_ended
+
+    await init_db(tmp_db)
+    await append_session_log({
+        "match_id": "reopen-1",
+        "room": "XYZ",
+        "slot": 1,
+        "player_name": "P2",
+        "mode": "rollback",
+        "entries": [],
+        "summary": "{}",
+        "context": "{}",
+        "ip_hash": "abc",
+    })
+    await set_session_ended("reopen-1", 1, "disconnect")
+    await reopen_session("reopen-1", 1)
+    rows = await query("SELECT ended_by FROM session_logs WHERE match_id='reopen-1' AND slot=1", ())
+    assert rows[0]["ended_by"] is None
+    # The game-end update can now record how the match really ended for it.
+    await set_session_ended("reopen-1", None, "game-end")
+    rows = await query("SELECT ended_by FROM session_logs WHERE match_id='reopen-1' AND slot=1", ())
+    assert rows[0]["ended_by"] == "game-end"
+    await close_db()
+
+
 def test_set_session_ended(tmp_db):
     """set_session_ended updates the ended_by field."""
     _run_async(_run_set_session_ended(tmp_db))
