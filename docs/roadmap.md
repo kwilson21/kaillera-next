@@ -212,6 +212,14 @@ every read and reported no disagreement before the old flags were deleted.
   as a guest when the room has been handed on, instead of failing to open
   it. (A host that still owns its room cannot fall behind it: only the
   owner starts and ends games.)
+- Done: an outage that hits every player does not end their match. While
+  no player of a playing room is connected, the server keeps the dropped
+  players' places past the 30 s grace window (up to 5 minutes) instead of
+  emptying the room; before, both players came back to a deleted room and
+  were sent to the lobby (found by `tests/rb-two-player.mjs` with
+  `DROP_SIGNALING_MS=40000`, which the earlier stage 2 changes had only run
+  with a 3 s outage). `aMatchIsNotLostToTheGraceWindow` holds on
+  `room_current`.
 - Done: the rejoin is a state machine of its own
   (`web/src/rejoin-machine.ts`, diagram in `docs/session-machine.md`):
   `rejoining` invokes the rejoin program, and leaving the state (the socket
