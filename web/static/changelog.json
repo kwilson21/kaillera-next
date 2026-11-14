@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.2",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the server ends a match nobody is running; the play page's rules, schemas and lifecycle move to TypeScript (#155)"
+      }
+    ]
+  },
+  {
     "version": "0.68.1",
     "date": "2026-11-14",
     "changes": [

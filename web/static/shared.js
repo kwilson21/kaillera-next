@@ -770,8 +770,16 @@
 
   const ZERO_INPUT = Object.freeze({ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 });
 
-  const inputEqual = (a, b) =>
-    a.buttons === b.buttons && a.lx === b.lx && a.ly === b.ly && a.cx === b.cx && a.cy === b.cy;
+  // inputEqual, createSyncLogRing, createStickDeadband and classifyRunnerStep
+  // below are the KNCore functions of the same names (web/src) when the
+  // bundle is loaded, which play.html does before this script. The code in
+  // each is the same logic, used only where the bundle is absent (the demo
+  // page); tests/ts/shared-helpers.test.ts holds the two to the same results.
+  const inputEqual = (a, b) => {
+    const equal = window.KNCore?.inputEqual;
+    if (equal) return equal(a, b);
+    return a.buttons === b.buttons && a.lx === b.lx && a.ly === b.ly && a.cx === b.cx && a.cy === b.cy;
+  };
 
   const packStick = (x, y) => (x & 0xffff) | ((y & 0xffff) << 16);
   const unpackX = (packed) => (packed << 16) >> 16;
@@ -892,6 +900,8 @@
   const _ENTRIES_AFTER_DEFAULT_MAX_BYTES = 1024 * 1024;
 
   const createSyncLogRing = (maxSize) => {
+    const create = window.KNCore?.createSyncLogRing;
+    if (create) return create(maxSize);
     const ring = new Array(maxSize);
     let head = 0;
     let count = 0;
@@ -965,6 +975,8 @@
   // maps JS axes to N64 bytes in polar form, so no per-axis grid lines up.
   const STICK_AXES = ['lx', 'ly', 'cx', 'cy'];
   const createStickDeadband = ({ band = 2, settleFrames = 4 } = {}) => {
+    const create = window.KNCore?.createStickDeadband;
+    if (create) return create({ band, settleFrames });
     const held = { lx: 0, ly: 0, cx: 0, cy: 0 };
     const cand = { lx: 0, ly: 0, cx: 0, cy: 0 };
     const count = { lx: 0, ly: 0, cx: 0, cy: 0 };
@@ -1013,6 +1025,8 @@
   // Pure so it's testable without a WASM/DOM harness — see
   // tests/step-runner-classify.test.mjs.
   const classifyRunnerStep = (rescheduled, cycleBefore, cycleAfter) => {
+    const classify = window.KNCore?.classifyRunnerStep;
+    if (classify) return classify(rescheduled, cycleBefore, cycleAfter);
     // Stock core (no kn_get_cycle_time_ms export): can't distinguish stale
     // from legit mid-frame pause by cycle time, so don't re-step — same as
     // pre-#62 behavior.

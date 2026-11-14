@@ -14,6 +14,7 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend=typescript
+$QUINT test "$SPEC" --main=room_before_abandoned_end --backend=typescript
 $QUINT test "$SPEC" --main=room_before_resume_flag --backend=typescript
 $QUINT test "$SPEC" --main=room_before_start_fix --backend=typescript
 $QUINT test "$SPEC" --main=room_before_reconcile --backend=typescript
@@ -40,6 +41,9 @@ check room_current startIsNotHeldUpByALateJoiner
 # A page whose rejoin the server answered is never left showing a match the
 # room dropped it from (violated on room_before_resume_flag).
 check room_current nobodyIsStrandedInADroppedMatch
+# A playing room nobody is running is ended by the server (violated on
+# room_before_abandoned_end).
+check room_current anAbandonedMatchIsEnded
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
@@ -54,6 +58,18 @@ for invariant in neverEvictsLiveConnection oneConnectionPerGuest; do
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
 
+# ── ROM transfer: a guest waiting on the host always has a way out ──────────
+ROM=specs/rom_transfer.qnt
+$QUINT typecheck "$ROM"
+for variant in rom_transfer_before rom_transfer_current; do
+  $QUINT test "$ROM" --main="$variant" --backend=typescript
+done
+# Today: every waiting state has a running timer or a Retry button. Violated
+# before the request sent over the engine channel was given a deadline.
+for invariant in waitingHasAWayOut timersAloneStop; do
+  $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+done
 # ── Desync digests: which frame a peer may report a hash for ────────────────
 DIGEST=specs/desync_digest.qnt
 $QUINT typecheck "$DIGEST"

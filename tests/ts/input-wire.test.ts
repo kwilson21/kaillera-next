@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import vm from 'node:vm';
 import {
   decodeInput,
   decodeOfEncode,
@@ -20,8 +18,8 @@ import {
   type ShortPacket,
   type WireInput,
 } from '../../web/src/input-wire.ts';
+import { lcg, loadShared, plain, type EncodeArgs } from './load-shared.ts';
 
-type EncodeArgs = [number, WireInput, number?, (FrameInput[] | null)?];
 interface EncodeVector {
   name: string;
   args: EncodeArgs;
@@ -39,11 +37,6 @@ const fromHex = (hex: string): ArrayBuffer => {
   const bytes = Buffer.from(hex, 'hex');
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
-// Objects made inside a vm context have another realm's prototypes, which
-// deepStrictEqual treats as a difference; structuredClone copies them into
-// this one and, unlike a JSON round trip, keeps `undefined` fields.
-const plain = structuredClone;
-
 // Captured from web/static/shared.js at 241d4a4, before it delegated to this
 // module: the bytes encodeInput produced for `args`, and what decodeInput
 // made of them. Native byte order, which is little-endian wherever this runs.
@@ -226,28 +219,6 @@ test('decodeInput rejects a buffer that is not whole words, as before', () => {
 
 // ── The shipped fallback in shared.js ─────────────────────────────────────
 
-interface Shared {
-  encodeInput: (...args: EncodeArgs) => Int32Array<ArrayBuffer>;
-  decodeInput: (buf: ArrayBuffer) => DecodedInput | ShortPacket;
-}
-
-/** Load web/static/shared.js as a page would, with or without `window.KNCore`. */
-const loadShared = (core?: Shared): Shared => {
-  const source = readFileSync(new URL('../../web/static/shared.js', import.meta.url), 'utf8');
-  const window: { KNCore?: Shared; KNShared?: Shared } = core ? { KNCore: core } : {};
-  vm.runInContext(source, vm.createContext({ window, KNState: {}, console }));
-  assert.ok(window.KNShared, 'shared.js did not define window.KNShared');
-  return window.KNShared;
-};
-
-// A small deterministic generator, so a failure names a reproducible case.
-const lcg = (seed: number) => {
-  let state = seed >>> 0;
-  return (): number => {
-    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-    return state;
-  };
-};
 const AWKWARD = [0, 1, -1, 83, -83, 127, -128, 32767, -32768, 32768, 65535, 65536, -65537, 2147483647, -2147483648];
 
 test('shared.js without the bundle encodes and decodes exactly as this module does', () => {
