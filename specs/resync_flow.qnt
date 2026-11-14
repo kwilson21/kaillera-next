@@ -26,17 +26,24 @@
 // (specs/resync_inputs.qnt), a replay delaying the apply, and the 15 s guard
 // the request sent when a hidden tab is shown again already has (the
 // requests after a desync, a dropped peer's return, a reconnect and a
-// network change have none).
+// network change have none). Nor a host on a version that does not number
+// its answers: until the host has numbered one, the guest treats its states
+// as with ANSWERS_CARRY_REQUEST false. Nor the two requests the guest sends
+// without marking a request as out (boot sync, input stall): they have no
+// number, and their answers are UNASKED to the guest.
 //
 // ANSWERS_CARRY_REQUEST: a request has a number and the state that answers
-//   it carries that number. false = today: any state that arrives ends
-//   whatever request is out and is taken as its answer. Since a request can
-//   be given up on (its deadline, or a reconnect that asks again over it)
-//   while its answer is still on the way, a late answer then ends the newer
-//   request, and is applied at the newer request's target, which takes the
-//   guest back below the frame it was told to wait at. true = proposed: only
-//   its own answer ends a request, and at its target the guest drops an
-//   answer to an older request that is from before that frame.
+//   it carries that number (`sync-request-id:` / `sync-answer-id:` ahead of
+//   the request and of the state's header, `requestId` over Socket.IO).
+//   false = before: any state that arrived ended whatever request was out
+//   and was taken as its answer. Since a request can be given up on (its
+//   deadline, or a reconnect that asks again over it) while its answer is
+//   still on the way, a late answer then ended the newer request, and was
+//   applied at the newer request's target, which took the guest back below
+//   the frame it was told to wait at. true = today: only its own answer ends
+//   a request (_endsResyncRequest), and at its target the guest drops an
+//   answer to an older request that is from before that frame
+//   (SYNC-LATE-ANSWER-DROPPED).
 //
 // REQUEST_HAS_DEADLINE: a request that is out has a deadline of its own,
 //   after which the guest may ask again (RESYNC-REQUEST-TIMEOUT). false =
@@ -229,8 +236,8 @@ module resync_flow {
     pending.frame < target,
   }
 
-  // Proposed: such a state is not what the guest is waiting for. It is
-  // dropped and the wait goes on, to its own deadline.
+  // Such a state is not what the guest is waiting for. It is dropped and
+  // the wait goes on, to its own deadline.
   action dropLate = all {
     pending' = noPending, stalled' = true,
     guestFrame' = guestFrame, target' = target, targetDeadline' = targetDeadline,
@@ -259,7 +266,7 @@ module resync_flow {
     // The answer to the request that is out, or to one given up on before it.
     val own = asked and st.req == askedId
     val late = asked and st.req != UNASKED and st.req != askedId
-    // Today any state ends the request that is out. Proposed: only its own.
+    // Before, any state ended the request that was out. Now only its own.
     val ends = if (ANSWERS_CARRY_REQUEST) own else true
     all {
       states.length() > 0,
@@ -321,20 +328,22 @@ module resync_flow {
   }
 
   // Only its own answer ends a request.
-  // VIOLATED today: the answer to a request the guest gave up on (its
-  // deadline, or a reconnect asking again over it) ends the request that is
-  // out now, so the guest may ask a third time while the second is still to
-  // be answered.
+  // Violated before requests were numbered (resync_flow_any_answer): the
+  // answer to a request the guest gave up on (its deadline, or a reconnect
+  // asking again over it) ended the request that was out, so the guest could
+  // ask a third time while the second was still to be answered.
   val onlyItsAnswerEndsARequest = not(lateEnded)
 
   // A late answer does not take the guest back below the frame it was told
   // to wait at.
-  // VIOLATED today: it is held until the newer request's target and applied
-  // there, although it is the host's state from before that frame.
+  // Violated before requests were numbered (resync_flow_any_answer): it was
+  // held until the newer request's target and applied there, although it is
+  // the host's state from before that frame.
   val aLateAnswerDoesNotTakeTheGuestBack = not(takenBack)
 
-  val holdToday = everyStallHasADeadline and neverAppliesAnOlderState and aRequestCanAlwaysEnd
-  val allHold = holdToday and onlyItsAnswerEndsARequest and aLateAnswerDoesNotTakeTheGuestBack
+  // What held once a request had a deadline, before requests had numbers.
+  val holdWithoutNumbers = everyStallHasADeadline and neverAppliesAnOlderState and aRequestCanAlwaysEnd
+  val allHold = holdWithoutNumbers and onlyItsAnswerEndsARequest and aLateAnswerDoesNotTakeTheGuestBack
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -407,12 +416,14 @@ module resync_flow_before {
   import resync_flow(REQUEST_HAS_DEADLINE = false, ANSWERS_CARRY_REQUEST = false).*
 }
 
-// Today.
-module resync_flow_current {
+// Before requests were numbered: any state that arrived ended the request
+// that was out.
+module resync_flow_any_answer {
   import resync_flow(REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = false).*
 }
 
-// With numbered requests: the rule the request id on the wire is for.
-module resync_flow_fixed {
+// Today: a request has a deadline and a number, and its answer carries the
+// number.
+module resync_flow_current {
   import resync_flow(REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true).*
 }
