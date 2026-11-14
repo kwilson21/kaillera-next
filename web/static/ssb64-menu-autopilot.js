@@ -84,12 +84,14 @@
   const STICK_MAX = 83;
   const STICK_MIN = 20; // SSB64 ignores |stick| <= 8 on the CSS
   const TAP_HOLD = 3;
-  const TAP_RELEASE = 9;
+  // After a press, wait out the input delay before deciding again, or the
+  // next decision reads the menu as it was before the press landed and
+  // presses a second time (two DOWNs, then A on the wrong option).
+  const TAP_RELEASE = 16;
 
   const ZERO = Object.freeze({ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 });
   const _tap = (buttons) => ({ input: { ...ZERO, buttons }, hold: TAP_HOLD, release: TAP_RELEASE });
   const _idle = (frames = 1) => ({ input: ZERO, hold: 0, release: frames });
-  const _stick = (lx, ly) => ({ input: { ...ZERO, lx, ly }, hold: 1, release: 0 });
 
   const _f32 = (() => {
     const buf = new DataView(new ArrayBuffer(4));
@@ -101,12 +103,29 @@
 
   const _isPtr = (p) => p != null && p >= 0x80000000 && p < 0x80800000 && (p & 3) === 0;
 
-  // Axis command toward a target: same sign as the error, speed proportional
-  // to distance so the few frames of input delay don't overshoot a cell.
-  const _axis = (err) => {
-    if (Math.abs(err) <= AIM_TOLERANCE / 2) return 0;
-    const mag = Math.min(STICK_MAX, Math.max(STICK_MIN, Math.round(Math.abs(err) * 3)));
-    return err < 0 ? -mag : mag;
+  // The puck moves stick/20 px a frame (mnPlayersVS cursor update), and the
+  // game ignores a stick at or under 8.
+  const PX_PER_FRAME_PER_STICK = 1 / 20;
+  const PULSE_MAX_FRAMES = 40;
+  // Longer than the engine's largest input delay (12 frames,
+  // ROLLBACK_MAX_DELAY_FRAMES in netplay-rollback.js). A puck that has not
+  // moved for this many frames while only neutral input was issued has
+  // nothing of ours still on its way to the game.
+  const SETTLE_FRAMES = 16;
+
+  // One burst of stick that should carry the puck (dx, dy): how many frames
+  // to hold it and at what deflection. An axis whose share would be under
+  // the smallest deflection the game reads is left for the next burst.
+  const _pulse = (dx, dy) => {
+    const far = Math.max(Math.abs(dx), Math.abs(dy));
+    const frames = Math.min(PULSE_MAX_FRAMES, Math.max(1, Math.ceil(far / (PX_PER_FRAME_PER_STICK * STICK_MAX))));
+    const axis = (err) => {
+      if (Math.abs(err) <= AIM_TOLERANCE / 2) return 0;
+      const mag = Math.min(STICK_MAX, Math.round(Math.abs(err) / (PX_PER_FRAME_PER_STICK * frames)));
+      if (mag < STICK_MIN) return 0;
+      return err < 0 ? -mag : mag;
+    };
+    return { input: { ...ZERO, lx: axis(dx), ly: axis(dy) }, hold: frames, release: 0 };
   };
 
   // Checks the N64 header: internal name "SMASH BROTHERS", game code NALE.
@@ -223,22 +242,42 @@
       };
     };
 
-    // Steer slot i's puck onto its target portrait, then press A.
+    // Per slot: where the puck was at the last decision, and for how many
+    // decisions in a row it has sat there while this actor sent neutral.
+    const steer = [0, 1].map(() => ({ x: NaN, y: NaN, still: 0 }));
+
+    // Move slot i's puck onto its target portrait, then press A.
+    //
+    // Input reaches the game some frames after it is decided (the engine's
+    // input delay), so what is read here is where the puck was, not where
+    // it will be when a press lands. Steering continuously and pressing A
+    // on arrival put the press wherever the puck had coasted to: another
+    // fighter, or the bar above the portraits, where A toggles Team Battle
+    // and changes the stock count. So this moves in bursts and decides only
+    // at rest: send a burst, send neutral until the puck has been still for
+    // SETTLE_FRAMES, then look. A press sent from rest lands at rest.
     const cssPick = (i) => {
       const slot = readSlot(i);
       if (typeof slot === 'string') return notReady(slot);
       if (slot.fighterSelected) return _idle(6);
       if (slot.heldPlayer !== i) return notReady(`slot${i}.held_player=${slot.heldPlayer}`);
+      const st = steer[i];
+      st.still = slot.x === st.x && slot.y === st.y ? st.still + 1 : 0;
+      st.x = slot.x;
+      st.y = slot.y;
+      if (st.still < SETTLE_FRAMES) return _idle(1);
       const target = PORTRAIT_TARGETS[i];
       const dx = target.x - slot.x;
       const dy = target.y - slot.y;
       if (Math.abs(dx) <= AIM_TOLERANCE && Math.abs(dy) <= AIM_TOLERANCE) {
-        // On the portrait. The hover registers a frame after the puck
-        // arrives; A only selects while grabbing a puck over a fighter.
-        if (slot.cursorStatus === CURSOR_GRAB && (anyFighter || slot.fkind === target.fkind)) return _tap(BTN.A);
-        return _idle(2);
+        // On the portrait and at rest. A only selects while grabbing a puck
+        // over a fighter. A press the game drops is sent again from rest.
+        if (slot.cursorStatus !== CURSOR_GRAB || !(anyFighter || slot.fkind === target.fkind)) return _idle(1);
+        st.still = 0;
+        return _tap(BTN.A);
       }
-      return _stick(_axis(dx), _axis(dy));
+      st.still = 0;
+      return _pulse(dx, dy);
     };
 
     const cssBothPicked = () => {

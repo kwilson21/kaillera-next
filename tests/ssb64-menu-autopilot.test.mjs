@@ -61,6 +61,9 @@ function simulate({ seed, delayP1, delayP2, dropProb, mapsStart, stageSelect = t
   let mapsScrollWait = 0;
   let proceedWait = 0;
   let isStart = false;
+  // A presses that landed on the bar above the portraits. In the game that
+  // bar holds the Free-For-All / Team Battle toggle and the stock arrows.
+  let strayPresses = 0;
   const slots = [0, 1].map((i) => ({
     cursor: { x: 60 + 70 * i, y: 170 },
     puckGobj: 0x80200000 + i * 0x100,
@@ -120,7 +123,7 @@ function simulate({ seed, delayP1, delayP2, dropProb, mapsStart, stageSelect = t
 
   for (let frame = 0; frame < maxFrames; frame++) {
     writeState();
-    if (scene === SCENE.VS_BATTLE && loading === 0) return { ok: true, frame, slots, mapsSlot, trace };
+    if (scene === SCENE.VS_BATTLE && loading === 0) return { ok: true, frame, slots, mapsSlot, trace, strayPresses };
     q1.push(pilot.p1(frame));
     q2.push(pilot.p2(frame));
     const in1 = q1.length > delayP1 ? q1.shift() : { buttons: 0, lx: 0, ly: 0 };
@@ -189,6 +192,7 @@ function simulate({ seed, delayP1, delayP2, dropProb, mapsStart, stageSelect = t
           else if (s.selected) s.status = 2;
           else s.status = 1;
           if (!s.selected) s.fkind = puckFkind(s);
+          if (taps[i] & BTN.A && s.cursor.y < 36) strayPresses++;
           if (ready && taps[i] & BTN.A && s.status === 1 && s.fkind !== NULL_FKIND) {
             s.selected = true;
             s.held = -1;
@@ -230,7 +234,7 @@ function simulate({ seed, delayP1, delayP2, dropProb, mapsStart, stageSelect = t
         }
     }
   }
-  return { ok: false, scene, pending, slots, mapsSlot, failure: pilot.failure(), trace };
+  return { ok: false, scene, pending, slots, mapsSlot, failure: pilot.failure(), trace, strayPresses };
 }
 
 test('reaches the VS battle with both fighters picked, across seeds, delays and dropped presses', () => {
@@ -250,6 +254,32 @@ test('reaches the VS battle with both fighters picked, across seeds, delays and 
     assert.equal(res.slots[1].fkind, 2, `seed ${seed}: P2 should be DK`);
     if (opts.stageSelect) assert.equal(res.mapsSlot, MAPS_TARGET_SLOT, `seed ${seed}: stage`);
     assert.ok(res.frame < 3600, `seed ${seed}: took ${res.frame} frames`);
+  }
+});
+
+// The engine's input delay goes up to 12 frames (ROLLBACK_MAX_DELAY_FRAMES)
+// and a slow machine negotiates the top of that range. A press decided on
+// where the puck is now lands where the puck is that many frames later.
+test('picks the right fighters and presses nothing else at every input delay up to 14 frames', () => {
+  for (let delay = 0; delay <= 14; delay++) {
+    for (let seed = 1; seed <= 40; seed++) {
+      const r = rng(seed * 104729 + delay);
+      const opts = {
+        seed: seed + delay * 1000,
+        delayP1: delay,
+        delayP2: Math.max(0, delay - Math.floor(r() * 3)),
+        dropProb: r() * 0.2,
+        mapsStart: [0, 1, 2, 3, 5, 7, 8, 9][Math.floor(r() * 8)],
+        stageSelect: true,
+        maxFrames: 9000,
+      };
+      const res = simulate(opts);
+      const at = `delay ${delay} seed ${seed}`;
+      assert.ok(res.ok, `${at} stuck: ${JSON.stringify({ ...res, trace: undefined })}`);
+      assert.equal(res.slots[0].fkind, 0, `${at}: P1 should be Mario`);
+      assert.equal(res.slots[1].fkind, 2, `${at}: P2 should be DK`);
+      assert.equal(res.strayPresses, 0, `${at}: A pressed on the bar above the portraits`);
+    }
   }
 });
 
