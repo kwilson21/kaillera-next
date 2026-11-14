@@ -10,6 +10,7 @@ import { bootTimedOut } from './boot.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
+import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { captureFrame } from './desync-capture.ts';
@@ -62,6 +63,7 @@ import { createStickDeadband } from './stick-deadband.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
+import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
   sessionFlag,
@@ -311,4 +313,8 @@ declare global {
   }
 }
 
-if (typeof window !== 'undefined') window.KNCore = KNCore;
+if (typeof window !== 'undefined') {
+  window.KNCore = KNCore;
+  installDiagnostics();
+  installDesyncDetector();
+}
