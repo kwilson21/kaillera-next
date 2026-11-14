@@ -135,15 +135,14 @@ earlier ones to have set up their `window.*` exports:
 12. `virtual-gamepad.js` — touch controls for mobile
 13. `kn-audio.js` — AudioWorklet pump + rollback audio capture
 14. (`window.KNDiag`, the freeze and canvas diagnostics, is defined by `dist/kn-core.js`: `web/src/page/diagnostics.ts`)
-15. `kn-desync-detector.js` — field-granular cross-peer desync detection
-16. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
-17. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
-18. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
-19. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
-20. `controller-settings.js` — in-game controller settings panel
-21. `play.js` — page orchestrator (connects everything)
-22. `version.js` — version display + changelog modal
-23. `feedback.js` — in-app feedback collection
+15. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
+16. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
+17. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
+18. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
+19. `controller-settings.js` — in-game controller settings panel
+20. `play.js` — page orchestrator (connects everything)
+21. `version.js` — version display + changelog modal
+22. `feedback.js` — in-app feedback collection
 
 #### Server structure
 
@@ -187,7 +186,6 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
 | `virtual-gamepad.js` | ~1,194 | On-screen touch controls for mobile | KNState |
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
-| `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
 | `kn-vision-client.js` | — | Claude vision client for screenshot-diff desync analysis | rollback |
 | `audio-worklet-processor.js` | ~85 | AudioWorklet ring buffer for rollback audio | kn-audio.js |
 | `feedback.js` | ~540 | In-app feedback collection UI | play.js |

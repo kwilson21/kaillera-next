@@ -88,6 +88,7 @@ function harness({
     setTimeout,
     clearTimeout,
     queueMicrotask,
+    EventTarget,
     console: { log() {}, warn() {} },
     CustomEvent: class {
       constructor(type, init) {
