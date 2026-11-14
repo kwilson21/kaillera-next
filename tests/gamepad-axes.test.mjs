@@ -1,4 +1,4 @@
-// Stick polarity and range in gamepad-manager.js: a profile records what a positive
+// Stick polarity and range in the gamepad manager (web/src/page/gamepad-manager.ts): a profile records what a positive
 // axis value means (axes.stickX/stickY bits[0], axisButtons pos) and, optionally, the
 // raw value of full deflection (axisRange). readGamepad must honor both, and leave
 // Standard pads exactly as they were.
@@ -20,7 +20,10 @@ globalThis.KNState = {
 };
 globalThis.addEventListener = () => {};
 globalThis.removeEventListener = () => {};
-await import(path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/static/gamepad-manager.js'));
+const { installGamepadManager } = await import(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/src/page/gamepad-manager.ts')
+);
+installGamepadManager();
 const { GamepadManager } = globalThis;
 
 const XBOX_ID = 'Xbox Wireless Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)';
