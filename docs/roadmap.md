@@ -323,6 +323,40 @@ Slice 1, the peer mesh and signaling:
   the connection that replaced it). None is fixed yet.
 - Next: one XState machine per peer connection, observing beside the engine.
 
+**Stage 6: the remaining page scripts**
+Every other hand-written script in `web/static` moves to `web/src` the way
+`play.js` does: the logic becomes strict TypeScript reached through
+`window.KNCore`, and the script shrinks to a thin caller or leaves the page.
+A decision the old code also makes starts by observing; a page effect with
+nothing to compare moves as it is. One file, or one small group, per change,
+smallest risk first:
+
+1. `feedback.js`, `version.js`, `version-guard.js`, `storage.js`,
+   `kn-capture.js`, `kn-vision-client.js`, `switch2-usb.js`
+2. `controller-settings.js`, `virtual-gamepad.js`
+3. `kn-audio.js`
+4. `netplay-streaming.js`
+5. `demo.js`, `fake-peer.js`, `ssb64-menu-autopilot.js`,
+   `rollback-timeline.js`
+6. `landing.js`, `join.js`. These ship in their own small bundle beside
+   `kn-wake-art.js`, not through `window.KNCore`: the landing pages must stay
+   light and are served while the server sleeps.
+
+`kn-audio.js` and `virtual-gamepad.js` are on the input and audio path of a
+rollback match and need `tests/rb-two-player.mjs` with `JITTER=20`;
+`netplay-streaming.js` needs the streaming end-to-end run.
+
+Staying plain JavaScript:
+
+- `audio-worklet-processor.js` and `rollback-shadow-worker.js` run in their
+  own worker contexts, where `window.KNCore` does not exist. Building them
+  from TypeScript as separate entries is a change of its own, after the rest.
+- `kn-state.js`, `core-redirector.js`, `api-sandbox.js` and `ejs-loader.js`
+  run before the bundle loads (`kn-state.js` is Stage 4's; its type is
+  `web/src/kn-state.ts`).
+- `netplay-lockstep.js` is a deprecated shim that only aliases the rollback
+  engine; it goes when its last caller does, and is not worth converting.
+
 **Open decisions**
 
 - `@xstate/effect` requires XState 6, which is in beta. Both are pinned to
