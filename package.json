@@ -11,8 +11,8 @@
     "spec:verify": "bash scripts/verify-specs.sh",
     "protocol": "uv run --directory server --frozen --extra dev python ../scripts/gen_protocol.py",
     "protocol:check": "uv run --directory server --frozen --extra dev python ../scripts/gen_protocol.py --check",
-    "diagram": "node scripts/session-diagram.mjs",
-    "diagram:check": "node scripts/session-diagram.mjs --check",
+    "diagram": "node scripts/session-diagram.mjs && node scripts/peer-connection-diagram.mjs",
+    "diagram:check": "node scripts/session-diagram.mjs --check && node scripts/peer-connection-diagram.mjs --check",
     "traces": "node scripts/trace-diagram.mjs",
     "traces:check": "node scripts/trace-diagram.mjs --check",
     "check": "npm run fmt:check && npm run lint && npm run typecheck && npm run test:ts && npm run protocol:check && npm run build:check && npm run diagram:check && npm run traces:check && npm run spec"
