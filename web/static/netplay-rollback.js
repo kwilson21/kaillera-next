@@ -1818,11 +1818,22 @@
   const _drainPendingCInputs = (tickMod) => {
     if (_pendingCInputs.length === 0 || !tickMod._kn_feed_input) return;
     if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
+    let settledSkipped = 0;
     for (let i = 0; i < _pendingCInputs.length; i++) {
       const qi = _pendingCInputs[i];
+      // An input from before a resync's settled point is not the engine's to
+      // judge: the state that resync carries holds what was applied for it.
+      // Fed, a returning peer's backlog would be compared with what this page
+      // predicted while it ran alone, dozens of frames too deep to roll back,
+      // and counted as failed rollbacks the resync is about to make moot.
+      if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {
+        settledSkipped++;
+        continue;
+      }
       tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
     }
     _pendingCInputs.length = 0;
+    if (settledSkipped > 0) _syncLog(`C-INPUT-SETTLED-SKIP f=${_frameNum} count=${settledSkipped}`);
   };
   const _formatSlotMap = (obj) => {
     const keys = Object.keys(obj || {}).sort((a, b) => Number(a) - Number(b));
@@ -5047,17 +5058,28 @@
   //  - Inputs keyed before frame - delay are in the loaded state already:
   //    settled, never waited for.
   //  - This page's inputs from there up to `frame` are still to be applied.
-  //    The ones it never made are made now (neutral) and sent.
+  //    The ones it never made are made now (neutral). All of them are sent,
+  //    the ones made earlier too: this page may have made one while it ran
+  //    ahead, before it was taken back and moved forward again, and a peer
+  //    far behind at the time dropped it as out of range.
   //  - The peers' inputs for the same range that are missing are asked for.
   const _settleInputsAtResync = (mod, frame) => {
     const from = Math.max(0, frame - DELAY_FRAMES);
     const made = [];
+    const own = [];
     if (_playerSlot !== null && _playerSlot !== undefined) {
       for (let f = from; f < frame; f++) {
-        if (_localInputs[f] !== undefined) continue;
-        _localInputs[f] = KNShared.ZERO_INPUT;
-        _feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);
-        made.push(f);
+        own.push(f);
+        if (_localInputs[f] === undefined) {
+          _localInputs[f] = KNShared.ZERO_INPUT;
+          made.push(f);
+        }
+        // Every one is handed to the engine again, the ones made earlier
+        // too: its input ring holds 256 frames, and a page that ran further
+        // ahead than that before it was taken back has written over the
+        // slot. The peers apply what is sent below; this page must apply
+        // the same.
+        _feedCInput(mod, _playerSlot, f, _localInputs[f]);
       }
     }
     const asked = [];
@@ -5068,8 +5090,8 @@
       try {
         // Every peer waits on this page's inputs, not only the host that
         // sent the state: tell each one where they start again.
-        if (made.length) peer.dc.send(`inputs-settled:${from}`);
-        for (const f of made) peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);
+        if (own.length) peer.dc.send(`inputs-settled:${from}`);
+        for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
         for (let f = from; f < frame; f++) {
           const have = _remoteInputs[peer.slot]?.[f];
           if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
@@ -5080,8 +5102,10 @@
         _syncLog(`RESYNC-INPUTS send failed slot=${peer.slot}: ${err}`);
       }
     }
-    if (made.length || asked.length) {
-      _syncLog(`RESYNC-INPUTS f=${frame} settledBefore=${from} made=[${made.join(',')}] asked=[${asked.join(',')}]`);
+    if (own.length || asked.length) {
+      _syncLog(
+        `RESYNC-INPUTS f=${frame} settledBefore=${from} sent=[${own.join(',')}] made=[${made.join(',')}] asked=[${asked.join(',')}]`,
+      );
     }
   };
 
@@ -5262,7 +5286,18 @@
   const REMIX_INITIAL_SYNC_USE_KN_SYNC = true;
   let _lateJoin = false; // true when joining a game already in progress
   let _lateJoinPausedAt = 0; // I1 (MF5): wall-clock when late-join pause began
+  // I1: wall-clock of the host's latest `late-join-pause` on a page that is
+  // not the host. The host's own deadline (LATE_JOIN_TIMEOUT_MS per joiner)
+  // normally ends the pause; this one is for a host that never says resume.
+  let _lateJoinGuestPausedAt = 0;
+  const LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000;
   const _lateJoinReadyHandled = new Set(); // senderSid values already resumed
+  // Host: the joiners being served, sid -> the id of that serve. The pause
+  // belongs to them: it ends when none is left, and a serve's timer acts only
+  // while its own serve is still the one on record
+  // (specs/late_join_pause.qnt).
+  const _lateJoinServing = new Map();
+  let _lateJoinServeSeq = 0;
   const _pendingLateJoinReadySids = new Set(); // ready arrived before host DC opened
   const _pendingLateJoinPeerSids = new Set(); // running-phase players not active until late-join-ready
   const _pendingLateJoinPeerSlots = new Set(); // same gate, indexed by slot for non-host roster updates
@@ -5922,6 +5957,25 @@
     if (wait <= 0) flush();
     else _criticalFlushTimer = setTimeout(flush, wait);
   };
+  // Stage 5, observing: the peer mesh's decisions are made by the code below
+  // as before; the proved functions of web/src/peer-signaling.ts run on the
+  // same inputs and a difference is reported as a mesh-disagree client event.
+  // They take over once production shows none. Looked up on first use:
+  // kn-core.js loads after this file.
+  let _meshObserver;
+  const _meshCompare = (what, engineValue, provedValue) => {
+    if (_meshObserver === undefined) {
+      _meshObserver =
+        window.KNCore?.play?.observe?.createComparer?.(({ message, old, next }) => {
+          if (!window.KNState?.uploadToken) return false;
+          window.KNEvent?.('mesh-disagree', message, { old, next });
+          return true;
+        }) ?? null;
+    }
+    _meshObserver?.compare(what, engineValue, provedValue);
+  };
+  const _meshCore = () => window.KNCore ?? null;
+
   // Stage 3, observing: the strings peers send over the DataChannels (and the
   // session-log ack) are checked against web/src/peer-protocol.ts and a
   // mismatch is reported; the handlers below still read the raw message.
@@ -6406,6 +6460,22 @@
   const SOCKET_SYNC_B64_SOFT_LIMIT = 3900000;
   let _lastResyncTime = 0; // timestamp of last resync request (10s cooldown)
   let _resyncRequestInFlight = false; // true while an explicit sync-request is in transit — prevents stacking
+  // I1: the request's own deadline. The host answers one request per guest
+  // every _SYNC_REQUEST_COOLDOWN_MS and drops the rest without a word; the
+  // flag above was then cleared only by a state that was not coming, and the
+  // guest never asked again (specs/resync_flow.qnt). Longer than the host's
+  // rate limit plus its capture deadline, so an answer on its way is not cut.
+  let _resyncRequestSentAt = 0;
+  const RESYNC_REQUEST_TIMEOUT_MS = 8000;
+  const _checkResyncRequestDeadline = () => {
+    if (!_resyncRequestInFlight) return;
+    // An answer is arriving or held: those waits have their own deadlines.
+    if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;
+    const waitedMs = performance.now() - _resyncRequestSentAt;
+    if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;
+    _resyncRequestInFlight = false;
+    _syncLog(`RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} — no state came, may ask again`);
+  };
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
@@ -6896,6 +6966,7 @@
     try {
       _beginLifecycleResyncGuard(reason);
       _resyncRequestInFlight = true;
+      _resyncRequestSentAt = performance.now();
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
       _signalSocket.emit('data-message', {
@@ -7141,7 +7212,21 @@
     return true;
   };
 
+  // Host: end the pause once no joiner is being served any more. Peers that
+  // are still paused are told; the roster goes out with it.
+  const _endLateJoinPauseIfNoneServed = (source) => {
+    if (_lateJoinServing.size > 0) {
+      _syncLog(`late-join pause kept (${source}): ${_lateJoinServing.size} joiner(s) still loading`);
+      return false;
+    }
+    return resumeLateJoinPause(source, true);
+  };
+
   const finishLateJoinReady = (source, senderSid = null) => {
+    // A joiner's "ready" is for the host. Every other page stays paused
+    // until the host says resume: the host may still be paused for another
+    // joiner, and a page that ran on would leave it behind.
+    if (_playerSlot !== 0) return;
     let newlyHandled = false;
     if (_playerSlot === 0 && senderSid) {
       if (_lateJoinReadyHandled.has(senderSid)) return;
@@ -7149,6 +7234,11 @@
       if (peer?.dc?.readyState !== 'open') {
         if (_pendingLateJoinReadySids.has(senderSid)) return;
         _pendingLateJoinReadySids.add(senderSid);
+        _lateJoinServing.delete(senderSid);
+        if (_lateJoinServing.size > 0) {
+          _syncLog(`late-join-ready via ${source}: DC not open for ${senderSid}; another joiner is still loading`);
+          return;
+        }
         _syncLog(`late-join-ready via ${source}: DC not open for ${senderSid}; resuming existing players`);
         resumeLateJoinPause(`${source} ready from ${senderSid}`, false);
         return;
@@ -7158,11 +7248,27 @@
         activate: true,
       });
       _lateJoinReadyHandled.add(senderSid);
+      _lateJoinServing.delete(senderSid);
       newlyHandled = true;
     }
 
     const name = senderSid ? _knownPlayers[senderSid]?.playerName || 'Player' : 'Player';
-    if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
+    if (_runSubstate === RUN_LATE_JOIN_PAUSE && _playerSlot === 0 && _lateJoinServing.size > 0) {
+      // Another joiner has yet to load the state captured for this pause.
+      // Resuming now would leave it frames behind; its own "ready" or its
+      // timer ends the pause.
+      _broadcastRoster();
+      // The joiner that is now a player was never told of this pause (it is
+      // not sent to a joiner being served). It waits with everyone else.
+      const readyDc = senderSid ? _peers[senderSid]?.dc : null;
+      if (newlyHandled && readyDc?.readyState === 'open') {
+        try {
+          readyDc.send('late-join-pause');
+        } catch (_) {}
+      }
+      _syncLog(`late-join-ready (${source}) — ${_lateJoinServing.size} joiner(s) still loading, pause kept`);
+      if (newlyHandled) _config?.onToast?.(`${name} joined`);
+    } else if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
       resumeLateJoinPause(`joiner ready (via ${source})`, true);
       if (newlyHandled || senderSid) _config?.onToast?.(`${name} joined`);
     } else {
@@ -7457,6 +7563,21 @@
       // Socket.IO ID and the connection didn't survive — _rosterKey keeps a
       // live one). Clean up the old entry so _peers never has duplicate slots.
       if (p.slot !== null && p.slot !== undefined) {
+        const core = _meshCore();
+        if (core) {
+          const entries = Object.entries(_peers);
+          _meshCompare(
+            'stale-holders',
+            entries
+              .filter(([oldSid, oldPeer]) => oldSid !== p.socketId && oldPeer.slot === p.slot)
+              .map(([oldSid]) => oldSid),
+            core.staleHoldersOf(
+              entries.map(([key, held]) => ({ key, slot: held.slot ?? -1 })),
+              p.socketId,
+              p.slot,
+            ),
+          );
+        }
         for (const [oldSid, oldPeer] of Object.entries(_peers)) {
           if (oldSid !== p.socketId && oldPeer.slot === p.slot) {
             _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
@@ -7484,6 +7605,18 @@
         reason = `slot comparison: ${_playerSlot} < ${p.slot} = ${shouldInitiate}`;
       }
       _syncLog(`onUsersUpdated: new peer ${p.socketId} slot=${p.slot}, initiate=${shouldInitiate} (${reason})`);
+      _meshCompare(
+        'should-initiate',
+        shouldInitiate,
+        _meshCore()?.shouldInitiate(
+          _isSpectator,
+          _lateJoin,
+          _phase === PHASE_RUNNING,
+          shouldHoldForLateJoin,
+          _playerSlot,
+          p.slot,
+        ) ?? shouldInitiate,
+      );
       if (shouldHoldForLateJoin) _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated running peer');
 
       createPeer(p.socketId, p.slot, shouldInitiate);
@@ -7573,6 +7706,12 @@
     if (peer.dc?.readyState === 'open') return;
 
     const nextAttempt = (peer._startupConnectAttempt || 1) + 1;
+    _meshCompare(
+      'startup-attempt-left',
+      !(nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS),
+      _meshCore()?.hasAttemptLeft(nextAttempt - 1, STARTUP_CONNECT_MAX_ATTEMPTS) ??
+        !(nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS),
+    );
     if (nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS) {
       clearStartupConnectWatchdog(peer);
       _syncLog(
@@ -7742,6 +7881,22 @@
     // A fresh offer from a player whose connection was kept across their
     // Socket.IO reconnect means their page reloaded: that connection is a
     // leftover. Drop it, then let the roster set them up as a new peer.
+    // Observing: the step the code below takes first with this signal,
+    // compared with the proved rule's answer for the same table.
+    {
+      const fresh = !!data.offer && !data.reconnect && key !== senderSid;
+      const hasEntry = !!_peers[key];
+      let engineStep;
+      if (fresh) engineStep = 'replaceKept';
+      else if (data.offer && !hasEntry) engineStep = 'create';
+      else if (!hasEntry) engineStep = 'drop';
+      else engineStep = data.offer && data.reconnect ? 'reset' : 'apply';
+      _meshCompare(
+        'signal',
+        engineStep,
+        _meshCore()?.signalDisposition(!!data.offer, !!data.reconnect, key !== senderSid, hasEntry) ?? engineStep,
+      );
+    }
     if (data.offer && !data.reconnect && key !== senderSid) {
       _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
       _evictPeer(key, 'replaced-by-new-page');
@@ -7958,6 +8113,7 @@
           _syncTargetFrame = _recoveryTarget;
           _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
           _resyncRequestInFlight = true;
+          _resyncRequestSentAt = performance.now();
           try {
             const peerDc = _peers[remoteSid]?.dc;
             if (peerDc?.readyState === 'open') {
@@ -7983,6 +8139,11 @@
             forceFull: true,
             deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
           });
+          // That state will be for this frame or a later one, so the
+          // guest's inputs from before this frame minus the delay are
+          // settled by it already. (Only the host can say so here: a guest
+          // may be taken back to an earlier frame and still need them.)
+          _settleInputsBefore(peer.slot, _frameNum);
           _syncLog(`peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum}`);
         }
       }
@@ -8137,6 +8298,7 @@
             _syncTargetFrame = -1;
             _syncTargetDeadlineAt = 0;
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             try {
               hostDc.send('sync-request-full');
               _syncLog('reconnect resync: sent immediate sync-request-full to host DC');
@@ -8208,17 +8370,23 @@
           peer.emuReady = true;
           checkAllEmuReady();
         }
-        if (e.data === 'late-join-pause') {
+        // Pause and resume are the host's word alone: no other peer can hold
+        // or release this page's game.
+        if (e.data === 'late-join-pause' && peer.slot === 0) {
           _runSubstate = RUN_LATE_JOIN_PAUSE;
+          // Stamped at every pause the host sends: it sends one per joiner
+          // it starts serving, so the deadline runs from the latest.
+          _lateJoinGuestPausedAt = performance.now();
           setStatus('Player joining...');
           _config?.onToast?.('Player joining...');
           _syncLog(`paused by host for late-join sync at frame ${_frameNum}`);
         }
         if (e.data === 'join-the-start' && peer.slot === 0) handleJoinTheStart();
         if (e.data === 'late-joiner') handlePeerIsLateJoiner(remoteSid, peer);
-        if (e.data === 'late-join-resume') {
+        if (e.data === 'late-join-resume' && peer.slot === 0) {
           const wasPausedForLateJoin = _runSubstate === RUN_LATE_JOIN_PAUSE;
           if (wasPausedForLateJoin) _runSubstate = RUN_NORMAL;
+          _lateJoinGuestPausedAt = 0;
           _lateJoin = false;
           clearLateJoinReadyRetry();
           _resetPacingAfterLateJoin();
@@ -8562,6 +8730,7 @@
           if (!_resyncRequestInFlight && cooldownElapsed > _resyncCooldownMs()) {
             _lastResyncTime = now2;
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             const _coordTarget = _frameNum + SYNC_COORD_DELTA;
             _syncTargetFrame = _coordTarget;
             _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
@@ -8836,6 +9005,14 @@
   const resetPeerState = (slot, reason, opts = {}) => {
     if (slot === null || slot === undefined) return;
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
+    // A joiner that was being served is gone: the pause is not kept for it.
+    // The resume broadcasts the roster, and the caller has yet to drop this
+    // peer from `_peers`: done now, the roster would list the joiner as a
+    // player for one message. It goes out once the caller has finished.
+    if (opts.sid && _lateJoinServing.delete(opts.sid) && _runSubstate === RUN_LATE_JOIN_PAUSE) {
+      const leftSid = opts.sid;
+      queueMicrotask(() => _endLateJoinPauseIfNoneServed(`${reason} for ${leftSid}`));
+    }
 
     // Slot-indexed globals
     delete _remoteInputs[slot];
@@ -8896,13 +9073,28 @@
       peer._disconnectTimer = null;
     }
 
+    // Observing: what the proved rule would do with this lost connection,
+    // compared with the branch taken below.
+    const provedDisposition = _meshCore()?.disconnectDisposition(
+      _phase < PHASE_GAME_STARTED,
+      !!peer.isInitiator,
+      !!peer._intentionalLeave,
+      _isPeerPendingLateJoin(remoteSid, peer),
+      _phase === PHASE_RUNNING,
+    );
+    const observeDisposition = (taken) => {
+      if (provedDisposition !== undefined) _meshCompare('disconnect', taken, provedDisposition);
+    };
+
     if (_phase < PHASE_GAME_STARTED && peer.isInitiator && !peer._intentionalLeave) {
+      observeDisposition('retryStartup');
       _syncLog(`startup peer ${remoteSid} disconnected before game start — retrying`);
       retryStartupConnection(remoteSid);
       return;
     }
 
     if (_isPeerPendingLateJoin(remoteSid, peer)) {
+      observeDisposition('hardDisconnect');
       _syncLog(`pending late-join peer ${remoteSid} disconnected before activation`);
       hardDisconnectPeer(remoteSid);
       return;
@@ -8910,6 +9102,7 @@
 
     // If game is running and not an intentional leave, attempt reconnect
     if (_phase === PHASE_RUNNING && !peer._intentionalLeave) {
+      observeDisposition('reconnect');
       _syncLog(`peer ${remoteSid} DC died — attempting reconnect`);
 
       // Zero their input but keep peer in _peers
@@ -8942,6 +9135,7 @@
       return;
     }
 
+    observeDisposition('hardDisconnect');
     hardDisconnectPeer(remoteSid);
   };
 
@@ -9020,6 +9214,11 @@
 
     const retryOrGiveUp = () => {
       if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
+      _meshCompare(
+        'reconnect-attempt-left',
+        attempt < _MAX_RECONNECT_ATTEMPTS,
+        _meshCore()?.hasAttemptLeft(attempt, _MAX_RECONNECT_ATTEMPTS) ?? attempt < _MAX_RECONNECT_ATTEMPTS,
+      );
       if (attempt < _MAX_RECONNECT_ATTEMPTS) {
         _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
         setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
@@ -10498,6 +10697,11 @@
       return;
     }
     _markPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer');
+    // A repeated request for a joiner already being served (its state was
+    // lost, or is still being compressed) is the same serve: it keeps the
+    // deadline of the first, or each repeat would push the pause back.
+    const servedAs = _lateJoinServing.get(remoteSid);
+    const serveId = servedAs ?? ++_lateJoinServeSeq;
 
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) {
@@ -10513,8 +10717,35 @@
       // moment we read _frameNum, causing the late joiner to load state
       // from frame X but think they're at frame X+N (cursor desync).
       _runSubstate = RUN_LATE_JOIN_PAUSE;
-      _lateJoinPausedAt = performance.now();
+      if (servedAs === undefined || _lateJoinPausedAt === 0) _lateJoinPausedAt = performance.now();
       _syncLog(`pausing for late-join at frame ${_frameNum}`);
+      // I1 (MF5): the pause has a wall-clock deadline from the moment it
+      // begins, not from when the state has been compressed: a worker that
+      // never answers would otherwise leave the host paused. If the joiner's
+      // "ready" does not come (its DC died mid-transfer, its worker hung),
+      // resume and hard-disconnect it so it retries from a clean slate.
+      // The timer acts only on its own serve: by the time it fires this
+      // joiner may be playing and the pause may be for someone else.
+      _lateJoinServing.set(remoteSid, serveId);
+      const armTimer = servedAs === undefined;
+      const onServeDeadline = () => {
+        if (_lateJoinServing.get(remoteSid) !== serveId) return;
+        _lateJoinServing.delete(remoteSid);
+        const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
+        _syncLog(
+          `LATE-JOIN-TIMEOUT elapsed=${elapsed}ms joiner=${remoteSid} — ` +
+            `resuming without joiner, hard-disconnecting so they can retry`,
+        );
+        // Force the joiner out so it retries fresh. If the peer object is
+        // already gone, only the pending mark is left to clear.
+        if (_peers[remoteSid]) {
+          hardDisconnectPeer(remoteSid);
+        } else {
+          _clearPendingLateJoinPeer(remoteSid, peerSlot, 'late-join timeout');
+        }
+        _endLateJoinPauseIfNoneServed(`timeout for ${remoteSid}`);
+      };
+      if (armTimer) setTimeout(onServeDeadline, LATE_JOIN_TIMEOUT_MS);
       for (const [sid, p] of Object.entries(_peers)) {
         // The pause is for existing players while the host captures a stable
         // state. The joiner is not part of the running timeline yet; pausing
@@ -10568,41 +10799,12 @@
       // Async compression is safe now — tick loop is frozen
       const encoded = await compressAndEncode(bytes);
       const saveRam = saveRamBytes ? (await compressAndEncode(saveRamBytes)).data : null;
-      // I1 (MF5): late-join pause must have a wall-clock deadline.
-      // If the joiner's ready signal never arrives (their DC dies
-      // mid-transfer, worker hangs on decompression, etc.) we need
-      // to resume the game AND hard-disconnect the joiner so they
-      // retry from a clean slate rather than living in a half-loaded
-      // limbo. See spec §MF5, audit §D3.
-      setTimeout(() => {
-        if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
-          const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
-          _syncLog(
-            `LATE-JOIN-TIMEOUT elapsed=${elapsed}ms joiner=${remoteSid} — ` +
-              `resuming without joiner, hard-disconnecting so they can retry`,
-          );
-          if (_runSubstate === RUN_LATE_JOIN_PAUSE) _runSubstate = RUN_NORMAL;
-          _lateJoinPausedAt = 0;
-          _resetPacingAfterLateJoin();
-          _broadcastRoster();
-          // Send resume to peers that are still paused
-          for (const p of Object.values(_peers)) {
-            if (p.dc?.readyState === 'open') {
-              try {
-                p.dc.send('late-join-resume');
-              } catch (_) {}
-            }
-          }
-          // Force the joiner out so they retry fresh. If the peer
-          // object still exists we hard-disconnect; if not (already
-          // gone), we just log.
-          if (_peers[remoteSid]) {
-            hardDisconnectPeer(remoteSid);
-          } else {
-            _clearPendingLateJoinPeer(remoteSid, peerSlot, 'late-join timeout');
-          }
-        }
-      }, LATE_JOIN_TIMEOUT_MS);
+      // The serve was ended while the state was being compressed (its timer
+      // fired, the joiner left, the match stopped): nothing to send.
+      if (_lateJoinServing.get(remoteSid) !== serveId) {
+        _syncLog(`late-join state for ${remoteSid} not sent: the serve ended while compressing`);
+        return;
+      }
 
       _syncLog(
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${capturedFrame}`,
@@ -10623,11 +10825,8 @@
     } catch (err) {
       _syncLog(`failed to send late-join state: ${err}`);
       _clearPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer failed');
-      if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
-        _runSubstate = RUN_NORMAL;
-        _lateJoinPausedAt = 0;
-        _resetPacingAfterLateJoin();
-      }
+      if (_lateJoinServing.get(remoteSid) === serveId) _lateJoinServing.delete(remoteSid);
+      _endLateJoinPauseIfNoneServed(`state transfer to ${remoteSid} failed`);
     }
   }
 
@@ -10823,6 +11022,7 @@
       if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
         _syncLog('late-join: clearing self pause after state load');
         _runSubstate = RUN_NORMAL;
+        _lateJoinGuestPausedAt = 0;
       }
 
       // Re-establish WebRTC connections to any players whose peer connections
@@ -13077,6 +13277,7 @@
         if (!sentSocket && hostPeer?.dc?.readyState === 'open') {
           try {
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             hostPeer.dc.send('sync-request-full');
             _syncLog(`${reason}: sent sync-request-full to host over DC fallback`);
           } catch (_) {
@@ -13209,6 +13410,7 @@
         if (hostPeer?.dc?.readyState === 'open') {
           try {
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             hostPeer.dc.send('sync-request-full');
           } catch (_) {
             _resyncRequestInFlight = false;
@@ -13816,6 +14018,14 @@
       _peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);
     }
     if (_rbInputStallStartTime > 0) _rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);
+    // The pacing throttle's deadline drops a peer too, and is checked on this
+    // tick before the throttle can end (specs/tick_deadlines.qnt): a page
+    // that froze while held back would drop a peer that never stopped sending.
+    if (_pacingThrottleStartAt > 0) _pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);
+    // A request for a resync that went out before the freeze: the answer
+    // could not have been handled while this page stood still, so the
+    // freeze does not count against it.
+    if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);
     _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
   };
 
@@ -13830,6 +14040,7 @@
     }
     _chk('post-phase');
     _creditLocalFreeze();
+    _checkResyncRequestDeadline();
     // Deadline-only pass: a tick that stalls returns before the per-frame
     // dispatch below, and a stall can outlast SYNC_COORD_TIMEOUT_MS. Never
     // mid-replay, where the live state isn't at a frame boundary.
@@ -13865,8 +14076,21 @@
     }
 
     if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
-      _markTickReturn('skip:late-join-pause');
-      return; // frozen while late-joiner loads state
+      const guestPausedMs = _playerSlot !== 0 && _lateJoinGuestPausedAt > 0 ? _tickNow - _lateJoinGuestPausedAt : 0;
+      if (guestPausedMs <= LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS) {
+        _markTickReturn('skip:late-join-pause');
+        return; // frozen while late-joiner loads state
+      }
+      // I1: the host paused this page and never said resume (it reloaded,
+      // its channel died). Longer than the host's own per-joiner deadline,
+      // so a host that is still there has resumed first.
+      _syncLog(
+        `LATE-JOIN-GUEST-PAUSE-TIMEOUT f=${_frameNum} pausedMs=${Math.round(guestPausedMs)} — ` +
+          `no resume from the host, resuming`,
+      );
+      _runSubstate = RUN_NORMAL;
+      _lateJoinGuestPausedAt = 0;
+      _resetPacingAfterLateJoin();
     }
     // Guests defer the entire tick loop until the host's authoritative
     // rb-delay broadcast arrives and the C rollback engine is initialized
@@ -14151,6 +14375,10 @@
             _syncLog('PACING-THROTTLE released — all peers phantom');
           }
         }
+        // With nobody left to be ahead of there is no advantage. Left at its
+        // last value it kept the C engine's pacing gate shut for the whole
+        // time this page ran alone (see the solo re-run after _kn_pre_tick).
+        if (activePacingPeers === 0) _frameAdvRaw = 0;
         if (activePacingPeers > 0 && minRemoteFrame >= 0) {
           _frameAdvRaw = _frameNum - minRemoteFrame;
 
@@ -15181,6 +15409,28 @@
           preTickLocalInput.cy,
           _frameAdvForC,
         );
+        // A return of 3 is the C engine's pacing gate: it leaves before it
+        // stores this page's own input for the frame, records what it applied
+        // or saves the frame's state. With every peer a phantom there is
+        // nobody to wait for and the frame is run all the same, so it must go
+        // through the forward path: ask again with pacing off. Running it on
+        // the 3 left the page's own input out of its engine for every frame it
+        // ran alone; it applied nothing for itself while its peer, back after
+        // a resync, applied what it had been sent (specs/resync_inputs.qnt).
+        if (catchingUp === 3 && getInputPeers().every((p) => _peerPhantom[p.slot])) {
+          if (window._knLastSoloPretickFrame === undefined) {
+            _syncLog(`PACING-SOLO f=${_frameNum} — every peer is a phantom, running the frame with pacing off`);
+          }
+          window._knLastSoloPretickFrame = _frameNum;
+          catchingUp = tickMod._kn_pre_tick(
+            preTickLocalInput.buttons,
+            preTickLocalInput.lx,
+            preTickLocalInput.ly,
+            preTickLocalInput.cx,
+            preTickLocalInput.cy,
+            -1,
+          );
+        }
         _chk('cr:post-pretick');
         _refreshRunnerAfterRollbackRestore(tickMod);
         _chk('cr:post-refresh-runner');
@@ -15326,7 +15576,8 @@
                 _syncLog(`PACING-THROTTLE released — all peers phantom (C-level override)`);
               }
             }
-            // Fall through to normal tick instead of returning
+            // Not reached with every peer a phantom: the solo re-run right
+            // after _kn_pre_tick took this frame through the forward path.
           } else {
             _pacingCapsFrames++;
             if (_runSubstate !== RUN_PACING) {
@@ -17686,6 +17937,7 @@
           if (hostSyncDc?.readyState === 'open') {
             try {
               _resyncRequestInFlight = true;
+              _resyncRequestSentAt = performance.now();
               hostSyncDc.send('sync-request-full');
             } catch (_) {
               _resyncRequestInFlight = false;
@@ -18138,6 +18390,8 @@
     _lateJoinWait = null;
     _isApplyingLateJoinState = false;
     _lateJoinReadyHandled.clear();
+    _lateJoinServing.clear();
+    _lateJoinGuestPausedAt = 0;
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();

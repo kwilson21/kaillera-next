@@ -1,7 +1,7 @@
 /**
  * The desync digest one peer sends another over the DataChannel: one hash
  * per game-state field for one frame, plus what the sender's last rollback
- * replay looked like. web/static/kn-desync-detector.js builds and compares
+ * replay looked like. web/src/page/desync-detector.ts builds and compares
  * them; which fields get flagged is decided in desync-fields.ts.
  *
  * A digest arrives as JSON from another player's browser, so it is decoded

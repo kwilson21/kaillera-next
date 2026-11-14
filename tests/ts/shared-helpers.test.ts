@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { fitsFlush } from '../../web/src/flush-fit.ts';
 import { inputEqual, type WireInput } from '../../web/src/input-wire.ts';
@@ -6,7 +7,8 @@ import { classifyRunnerStep } from '../../web/src/runner-step.ts';
 import { stepAxis, type AxisState } from '../../web/src/stick-axis.ts';
 import { createStickDeadband } from '../../web/src/stick-deadband.ts';
 import { createSyncLogRing } from '../../web/src/sync-log-ring.ts';
-import { lcg, loadShared, plain } from './load-shared.ts';
+import { createShared } from '../../web/src/page/shared.ts';
+import { lcg } from './load-shared.ts';
 
 const stick = (lx: number, ly = 0, cx = 0, cy = 0): WireInput => ({ buttons: 0, lx, ly, cx, cy });
 
@@ -53,8 +55,15 @@ test('no value is held back for more than settleFrames reads', () => {
   }
 });
 
-test('the filter matches the one built into shared.js, read for read', () => {
-  const legacy = loadShared();
+// The digests below are of what the code built into web/static/shared.js
+// returned for the same calls, taken from that script at d7dc88c, the last
+// commit that had it. Each function was compared with it call by call until
+// then.
+const LEGACY_DEADBAND_DIGEST = '90a833e34fde1039f40449f4a5014cf128353ec815ebe153873e70a6b0c15c86';
+const LEGACY_RING_DIGEST = 'fdc2f67635c4a07a981c041d778a093988f969cbe0d8859a0e32089ea323c58a';
+
+test('the filter matches the plain-JavaScript one it replaced, read for read', () => {
+  const hash = createHash('sha256');
   const next = lcg(53);
   const settings = [
     undefined,
@@ -63,8 +72,7 @@ test('the filter matches the one built into shared.js, read for read', () => {
     { band: 5, settleFrames: 2 },
   ];
   for (const options of settings) {
-    const ours = createStickDeadband(options);
-    const theirs = legacy.createStickDeadband(options);
+    const filter = createStickDeadband(options);
     let centre = 0;
     for (let n = 0; n < 20000; n++) {
       const r = next() % 100;
@@ -73,13 +81,11 @@ test('the filter matches the one built into shared.js, read for read', () => {
       if (r < 3) centre = (next() % 167) - 83;
       const axis = (): number => (r === 3 ? 0 : centre + (next() % 5) - 2 + (r === 4 ? 0.5 : 0));
       const input = { buttons: next() | 0, lx: axis(), ly: axis(), cx: axis(), cy: axis(), extra: n };
-      if (r === 5) {
-        ours.reset();
-        theirs.reset();
-      }
-      assert.deepStrictEqual(ours(input), plain(theirs(input)), `read ${n} options=${JSON.stringify(options)}`);
+      if (r === 5) filter.reset();
+      hash.update(JSON.stringify(filter(input)));
     }
   }
+  assert.equal(hash.digest('hex'), LEGACY_DEADBAND_DIGEST);
 });
 
 test('the filter returns a new object and keeps the fields it does not filter', () => {
@@ -92,36 +98,29 @@ test('the filter returns a new object and keeps the fields it does not filter', 
 
 // ── Sync log ring ─────────────────────────────────────────────────────────
 
-test('the sync log ring matches the one built into shared.js', () => {
-  const legacy = loadShared();
+test('the sync log ring matches the plain-JavaScript one it replaced', () => {
+  const hash = createHash('sha256');
   const next = lcg(1024);
   for (const maxSize of [1, 2, 7, 64]) {
-    const ours = createSyncLogRing(maxSize);
-    const theirs = legacy.createSyncLogRing(maxSize);
+    const ring = createSyncLogRing(maxSize);
     for (let n = 0; n < 3000; n++) {
       const r = next() % 100;
       if (r < 70) {
-        const entry = { t: (next() % 100000) / 7, f: next() % 5000, msg: 'x'.repeat(next() % 40) + n };
-        ours.push(entry);
-        theirs.push(entry);
+        ring.push({ t: (next() % 100000) / 7, f: next() % 5000, msg: 'x'.repeat(next() % 40) + n });
       } else if (r < 72) {
-        ours.clear();
-        theirs.clear();
+        ring.clear();
       } else if (r < 86) {
         const after = (next() % (maxSize * 3)) - 2;
         const max = 1 + (next() % 10);
         const maxBytes = r % 2 === 0 ? undefined : 64 + (next() % 400);
-        assert.deepStrictEqual(
-          ours.entriesAfter(after, max, maxBytes),
-          plain(theirs.entriesAfter(after, max, maxBytes)),
-          `entriesAfter(${after}, ${max}, ${maxBytes}) at op ${n}, maxSize=${maxSize}`,
-        );
+        hash.update(JSON.stringify(ring.entriesAfter(after, max, maxBytes)));
       } else {
-        assert.equal(ours.export(), theirs.export(), `export at op ${n}, maxSize=${maxSize}`);
+        hash.update(ring.export());
       }
-      assert.equal(ours.length, theirs.length);
+      hash.update(String(ring.length));
     }
   }
+  assert.equal(hash.digest('hex'), LEGACY_RING_DIGEST);
 });
 
 test('clearing the ring restarts the numbering under a new epoch', () => {
@@ -154,15 +153,20 @@ test('the first entry always fits a flush; later ones only within the byte budge
 
 // ── Runner step and input comparison ──────────────────────────────────────
 
-test('classifyRunnerStep agrees with shared.js on every kind of argument', () => {
-  const legacy = loadShared();
+test('classifyRunnerStep decides as the plain-JavaScript rule did on every kind of argument', () => {
+  // The rule as web/static/shared.js had it.
+  const rule = (rescheduled: boolean, before: number | null | undefined, after: number | null | undefined): string => {
+    if (before == null || after == null) return 'unknown';
+    if (!rescheduled && after === before) return 'stale';
+    return 'emulated';
+  };
   const cycles = [null, undefined, 0, 3.2, 8.65];
   for (const rescheduled of [true, false]) {
     for (const before of cycles) {
       for (const after of cycles) {
         assert.equal(
           classifyRunnerStep(rescheduled, before, after),
-          legacy.classifyRunnerStep(rescheduled, before, after),
+          rule(rescheduled, before, after),
           `${rescheduled} ${before} ${after}`,
         );
       }
@@ -174,8 +178,7 @@ test('classifyRunnerStep agrees with shared.js on every kind of argument', () =>
   assert.equal(classifyRunnerStep(false, null, 5), 'unknown');
 });
 
-test('inputEqual compares every field, as shared.js does', () => {
-  const legacy = loadShared();
+test('inputEqual compares every field', () => {
   const base: WireInput = { buttons: 3, lx: 1, ly: 2, cx: 3, cy: 4 };
   const variants: WireInput[] = [
     base,
@@ -186,46 +189,30 @@ test('inputEqual compares every field, as shared.js does', () => {
     { ...base, cx: 0 },
     { ...base, cy: 0 },
   ];
-  for (const a of variants) {
-    for (const b of variants) {
-      assert.equal(inputEqual(a, b), legacy.inputEqual(a, b));
-    }
-  }
+  variants.forEach((a, i) => {
+    variants.forEach((b, j) => {
+      // The first two are the same input; every other pair differs in a field.
+      assert.equal(inputEqual(a, b), i === j || (i < 2 && j < 2), `${i} ${j}`);
+    });
+  });
   assert.equal(inputEqual(base, { ...base }), true);
   assert.equal(inputEqual(base, { ...base, cy: 5 }), false);
 });
 
-// ── Delegation ────────────────────────────────────────────────────────────
+// ── KNShared ──────────────────────────────────────────────────────────────
 
-test('shared.js uses KNCore for each helper when the bundle is loaded', () => {
-  const calls: string[] = [];
-  const shared = loadShared({
-    inputEqual: (a, b) => {
-      calls.push('inputEqual');
-      return inputEqual(a, b);
-    },
-    createSyncLogRing: (maxSize) => {
-      calls.push('createSyncLogRing');
-      return createSyncLogRing(maxSize);
-    },
-    createStickDeadband: (options) => {
-      calls.push(`createStickDeadband ${JSON.stringify(options)}`);
-      return createStickDeadband(options);
-    },
-    classifyRunnerStep: (rescheduled, before, after) => {
-      calls.push('classifyRunnerStep');
-      return classifyRunnerStep(rescheduled, before, after);
-    },
-  });
-  assert.equal(shared.inputEqual(stick(1), stick(1)), true);
-  assert.equal(shared.createSyncLogRing(8).length, 0);
-  // The engine calls it with no options; the defaults must reach KNCore.
+test('KNShared carries these helpers themselves', () => {
+  const shared = createShared();
+  assert.equal(shared.inputEqual, inputEqual);
+  assert.equal(shared.createSyncLogRing, createSyncLogRing);
+  assert.equal(shared.createStickDeadband, createStickDeadband);
+  assert.equal(shared.classifyRunnerStep, classifyRunnerStep);
+  // The engine calls it with no options.
   assert.equal(shared.createStickDeadband()(stick(40)).lx, 40);
-  assert.equal(shared.classifyRunnerStep(false, 1, 1), 'stale');
-  assert.deepEqual(calls, [
-    'inputEqual',
-    'createSyncLogRing',
-    'createStickDeadband {"band":2,"settleFrames":4}',
-    'classifyRunnerStep',
-  ]);
+});
+
+test('building KNShared touches nothing on the page', () => {
+  // No window or document exists here; createShared would throw if it read one.
+  assert.equal(typeof window, 'undefined');
+  assert.equal(createShared().N64_MAX, 83);
 });
