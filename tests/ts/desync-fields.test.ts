@@ -68,6 +68,17 @@ test('battle fields are flagged only in a battle, select-screen fields only ther
   assert.deepEqual(fieldsToFlag(a, b, 21, 100, never(), 60, SCENE_IN_GAME_VS, SCENE_CSS_VS), [4, 5, 6, 7, 16]);
 });
 
+test("another game's scene numbers decide which fields count", () => {
+  const a = hashes(1);
+  const b = hashes(2);
+  b[MATCH_PHASE_FIELD] = a[MATCH_PHASE_FIELD]!;
+  // A game whose battle is scene 5 and whose character select is scene 9.
+  assert.deepEqual(fieldsToFlag(a, b, 5, 100, never(), 60, 5, 9), [0, 1, 2, 3, 4, 5, 6, 7, 16, 18, 19, 20]);
+  assert.deepEqual(fieldsToFlag(a, b, 9, 100, never(), 60, 5, 9), [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+  // SSB64's battle scene means nothing to it.
+  assert.deepEqual(fieldsToFlag(a, b, SCENE_IN_GAME_VS, 100, never(), 60, 5, 9), [4, 5, 6, 7, 16]);
+});
+
 test('a field flagged within the dedup window stays quiet until it has passed', () => {
   const a = hashes(1);
   const b = hashes(1);
