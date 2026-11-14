@@ -44,8 +44,19 @@
 //   waits for one); the guest makes and sends its inputs for the frames it
 //   skipped from F - DELAY on, and the host sends its own for that range
 //   again. false = before.
+//
+// A resync can also move the guest back: the host froze, the guest gave up on
+// it and ran on. The guest made and sent every input up to where it was, but
+// the host, far behind, dropped the later ones as out of range. The guest is
+// taken back to F and plays on from there; it never sends the inputs keyed
+// F - DELAY to F - 1 again, and the host waits 5 s for them.
+//
+// RESEND_HELD: at a resync the guest sends its inputs keyed F - DELAY to
+//   F - 1 again whether it has just made them or held them already. false =
+//   only the ones it has just made, which is what the engine does today.
 module resync_inputs {
   const SETTLE_AT_RESYNC: bool
+  const RESEND_HELD: bool
 
   pure val DELAY = 1
   pure val CAP = 2
@@ -171,7 +182,7 @@ module resync_inputs {
       ),
       wire' = if (SETTLE_AT_RESYNC)
         wire
-          .union(skipped.map(k => { dest: "host", key: k }))
+          .union((if (RESEND_HELD) keysFrom(settled, f) else skipped).map(k => { dest: "host", key: k }))
           .union(keysFrom(settled, f).intersect(h.made).map(k => { dest: "guest", key: k }))
       else wire,
       resyncDue' = false,
@@ -257,8 +268,8 @@ module resync_inputs {
       .then(drain)
       .expect(waitsOnGap(pages.get("host")) == not(SETTLE_AT_RESYNC))
 
-  // The order that always worked: the guest is ahead and is taken back. It
-  // made and sent every input up to where it was, so nothing is missing.
+  // The guest is ahead and is taken back, and the host has every input the
+  // guest sent: nothing is missing, with or without the fix.
   run backwardResyncTest =
     init
       .then(3.reps(_ => tick("guest")))
@@ -274,14 +285,46 @@ module resync_inputs {
       .then(tick("host"))
       .then(drain)
       .expect(allHold)
+
+  // Found by `quint run` on today's rule (seed 0xc4580084f3094).
+  // The host freezes at frame 0; the guest gives up on it and runs to frame
+  // 9; the host keeps the guest's inputs 0..3 and drops the rest as out of
+  // range, gives up in turn and runs to frame 7 alone; the pages resync
+  // there. The guest made input 6 long ago and is not taken back past it, so
+  // only sending it again can fill the hole.
+  run hostFreezesThenResyncsBackwardTest =
+    init
+      .then(3.reps(_ => tick("guest")))
+      .then(giveUp("guest"))
+      .then(6.reps(_ => tick("guest")))
+      .then(drain)
+      .expect(pages.get("host").got == Set(0, 1, 2, 3))
+      .then(giveUp("host"))
+      .then(7.reps(_ => tick("host")))
+      .then(resync)
+      .expect(pages.get("guest").frame == 7)
+      .expect(waitsBehind(pages.get("host")))
+      .expect(noWaitForAnInputThatCannotArrive == RESEND_HELD)
+      .then(drain)
+      .expect(waits(pages.get("host")) == not(RESEND_HELD))
 }
 
 // Before: a resync changed the guest's frame counter and nothing else.
 module resync_inputs_before {
-  import resync_inputs(SETTLE_AT_RESYNC = false).*
+  import resync_inputs(SETTLE_AT_RESYNC = false, RESEND_HELD = false).*
 }
 
-// Today.
+// Today (#160): a resync settles the inputs before its frame, and the guest
+// makes and sends the ones it skipped. noWaitForAnInputThatCannotArrive is
+// still violated: a resync that moves the guest back past inputs the host
+// dropped leaves the host waiting (hostFreezesThenResyncsBackwardTest).
+// neverBothWaitingOnNothing holds.
 module resync_inputs_current {
-  import resync_inputs(SETTLE_AT_RESYNC = true).*
+  import resync_inputs(SETTLE_AT_RESYNC = true, RESEND_HELD = false).*
+}
+
+// With the guest's inputs for the frames before the resync sent again
+// whether it has just made them or held them already. Not in the engine.
+module resync_inputs_fixed {
+  import resync_inputs(SETTLE_AT_RESYNC = true, RESEND_HELD = true).*
 }
