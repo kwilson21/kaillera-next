@@ -55,3 +55,10 @@ expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
+
+PAUSE=specs/late_join_pause.qnt
+verify "$PAUSE" late_join_pause_fixed allHold
+expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
+# The other two violations on late_join_pause_current need two joiners and
+# are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
+# them.
