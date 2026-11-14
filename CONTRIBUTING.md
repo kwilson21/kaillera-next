@@ -100,7 +100,7 @@ Do not convert to ES modules.
 
 #### Cross-module communication: KNState
 
-Modules communicate through `window.KNState` (defined in `kn-state.js`). Each
+Modules communicate through `window.KNState` (typed and built in `web/src/kn-state.ts`, part of the bundle). Each
 property documents its writer and readers inline:
 
 ```js
@@ -128,8 +128,8 @@ earlier ones to have set up their `window.*` exports:
 5. `vendor/fflate.min.js` — compression lib used to extract ROM ZIP archives
 6. `storage.js` — safe localStorage/sessionStorage wrapper
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
-8. `kn-state.js` — shared state namespace
 9. `dist/kn-core.js` — the TypeScript core (`window.KNCore`), built from `web/src`; also defines `window.GamepadManager` (gamepad profiles and mapping, `web/src/page/gamepad-manager.ts`)
+8. `dist/kn-core.js` — the TypeScript bundle: `window.KNCore` and the shared state `window.KNState`
 10. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
 11. `shared.js` — input encoding/decoding, cheats, wire format
 12. `virtual-gamepad.js` — touch controls for mobile
@@ -193,7 +193,6 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
 | `storage.js` | ~24 | Safe localStorage/sessionStorage wrapper (KNStorage) | all modules |
 | `kn-capture.js` | — | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag) | rollback, streaming |
-| `kn-state.js` | ~37 | Cross-module shared state namespace | all modules |
 | `version.js` | ~350 | Version display + changelog modal | play.js |
 | `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands | play.js |
 | `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |

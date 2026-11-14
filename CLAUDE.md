@@ -98,7 +98,6 @@ kaillera-next/
 │       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
 │       ├── controller-settings.js # in-game controller settings panel
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
-│       ├── kn-state.js          # cross-module shared state (KNState)
 │       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
 │       ├── kn-capture.js        # diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
 │       ├── kn-vision-client.js  # Claude vision API client for screenshot diff
@@ -120,6 +119,7 @@ kaillera-next/
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
+│   │   ├── kn-state.ts          # cross-module shared state: the type and starting values of window.KNState, set by the bundle
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
 │   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
@@ -141,60 +141,60 @@ kaillera-next/
 
 ## V1 scope
 
-| Feature | Status |
-|---|---|
-| Socket.IO signaling server (rooms + WebRTC relay) | done |
-| Web lobby (create/join/spectate) | done |
-| EmulatorJS embed + ROM drag-and-drop | done |
-| Rollback netplay (up to 4 players, GGPO-style C-level engine, mesh WebRTC, lockstep stall fallback) | done |
-| Streaming netplay (host video → guests via WebRTC MediaStream) | done |
-| Spectators (canvas video stream from host) | done |
-| Gamepad support (profiles, remapping wizard) | done |
-| Late join (mid-game join with state sync) | done |
-| Desync detection + resync (opt-in) | done |
-| Security hardening (CSP, rate limiting, non-root Docker) | done |
-| User auth / persistent rooms | later |
-| Mupen64Plus desktop client | v2 |
-| Kaillera protocol compat | v2 |
-| KREC recording/playback | v2 |
+| Feature                                                                                             | Status |
+| --------------------------------------------------------------------------------------------------- | ------ |
+| Socket.IO signaling server (rooms + WebRTC relay)                                                   | done   |
+| Web lobby (create/join/spectate)                                                                    | done   |
+| EmulatorJS embed + ROM drag-and-drop                                                                | done   |
+| Rollback netplay (up to 4 players, GGPO-style C-level engine, mesh WebRTC, lockstep stall fallback) | done   |
+| Streaming netplay (host video → guests via WebRTC MediaStream)                                      | done   |
+| Spectators (canvas video stream from host)                                                          | done   |
+| Gamepad support (profiles, remapping wizard)                                                        | done   |
+| Late join (mid-game join with state sync)                                                           | done   |
+| Desync detection + resync (opt-in)                                                                  | done   |
+| Security hardening (CSP, rate limiting, non-root Docker)                                            | done   |
+| User auth / persistent rooms                                                                        | later  |
+| Mupen64Plus desktop client                                                                          | v2     |
+| Kaillera protocol compat                                                                            | v2     |
+| KREC recording/playback                                                                             | v2     |
 
 ## Socket.IO events
 
 All events go through the default Socket.IO namespace (`/`).
 
-| Event | Direction | Payload | Description |
-|---|---|---|---|
-| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id, fresh, resume, slot, matchId}, password, maxPlayers}` | Create room (`fresh`: the page has no game running; `resume`: it has one, in `slot` of `matchId`, and is taking its place back. A player the room dropped is taken back into that match and slot, or refused with `Not in room`) |
-| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate, resume, slot, matchId}, password}` | Join/spectate (`resume`, `slot`, `matchId` as for `open-room`) |
-| `leave-room` | client→server | `{}` | Leave room |
-| `claim-slot` | client→server | `{slot}` | Spectator → player |
-| `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
-| `start-game` | client→server | `{mode, resyncEnabled, romHash, gameId}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
-| `end-game` | client→server | `{}` | Host ends game |
-| `match-joined` | client→server | `{matchId}` | A player who joined a match in play is now in it. Until then the server counts it as waiting, and ends a match only waiting players are left in |
-| `set-name` | client→server | `{name}` | Update player display name |
-| `set-mode` | client→server | `{mode}` | Host sets game mode |
-| `set-game-id` | client→server | `{game_id}` | Host updates game_id after ROM identification |
-| `webrtc-signal` | bidirectional | `{target, offer/answer/candidate/reconnect/requestRenegotiate}` | WebRTC relay |
-| `rom-signal` | bidirectional | `{target, ...}` | Pre-game ROM transfer signaling |
-| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max). The server stamps every relayed `data-message`, `snapshot` and `input` with `knFrom: {sid, slot, owner}`, the true sender; pages check it (`KNCore.checkRelayed`) |
-| `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
-| `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
-| `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
-| `set-listed` | client→server | `{listed}` | Host lists the room on the front-page board (never with a password) |
-| `rom-ready` | client→server | `{ready, hash, name, size}` | Player signals ROM loaded (hash/name/size establish or check ROM identity) |
-| `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
-| `device-type` | client→server | `{type}` | Player reports device type |
-| `session-log` | client→server | `{matchId, epoch, entries, summary, context, audit}` | Periodic sync log flush: only the log entries and input audit records (`audit: {epoch, entries}`) the server hasn't acked; acks `{lastSeq, auditLastSeq}` |
-| `debug-sync` | client→server | `{...}` | Upload sync diagnostic log |
-| `debug-logs` | client→server | `{...}` | Upload debug console log |
-| `game-screenshot` | client→server | `{matchId, slot, frame, data}` | Periodic gameplay screenshot (debug mode) |
-| `users-updated` | server→room | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}` | Room state broadcast |
-| `upload-token` | server→client | `{token}` | HMAC token for upload endpoints |
-| `reconnect-token` | server→client | `{token}` | HMAC token for session reconnection |
-| `rom-sharing-updated` | server→room | `{romSharing}` | ROM sharing state changed |
-| `game-started` | server→room | `{mode, resyncEnabled, romHash, romName, romSize, hostRom, gameId, matchId}` | Game started |
-| `game-ended` | server→room | `{matchId}` | Back to lobby |
+| Event                 | Direction          | Payload                                                                                                                                   | Description                                                                                                                                                                                                                      |
+| --------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `open-room`           | client→server      | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id, fresh, resume, slot, matchId}, password, maxPlayers}` | Create room (`fresh`: the page has no game running; `resume`: it has one, in `slot` of `matchId`, and is taking its place back. A player the room dropped is taken back into that match and slot, or refused with `Not in room`) |
+| `join-room`           | client→server      | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate, resume, slot, matchId}, password}`                              | Join/spectate (`resume`, `slot`, `matchId` as for `open-room`)                                                                                                                                                                   |
+| `leave-room`          | client→server      | `{}`                                                                                                                                      | Leave room                                                                                                                                                                                                                       |
+| `claim-slot`          | client→server      | `{slot}`                                                                                                                                  | Spectator → player                                                                                                                                                                                                               |
+| `release-slot`        | client→server      | `{}`                                                                                                                                      | Player → spectator ("Watch instead"), lobby only                                                                                                                                                                                 |
+| `start-game`          | client→server      | `{mode, resyncEnabled, romHash, gameId}`                                                                                                  | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`)                                                                                                                            |
+| `end-game`            | client→server      | `{}`                                                                                                                                      | Host ends game                                                                                                                                                                                                                   |
+| `match-joined`        | client→server      | `{matchId}`                                                                                                                               | A player who joined a match in play is now in it. Until then the server counts it as waiting, and ends a match only waiting players are left in                                                                                  |
+| `set-name`            | client→server      | `{name}`                                                                                                                                  | Update player display name                                                                                                                                                                                                       |
+| `set-mode`            | client→server      | `{mode}`                                                                                                                                  | Host sets game mode                                                                                                                                                                                                              |
+| `set-game-id`         | client→server      | `{game_id}`                                                                                                                               | Host updates game_id after ROM identification                                                                                                                                                                                    |
+| `webrtc-signal`       | bidirectional      | `{target, offer/answer/candidate/reconnect/requestRenegotiate}`                                                                           | WebRTC relay                                                                                                                                                                                                                     |
+| `rom-signal`          | bidirectional      | `{target, ...}`                                                                                                                           | Pre-game ROM transfer signaling                                                                                                                                                                                                  |
+| `data-message`        | client→server→room | `{type, ...}`                                                                                                                             | Save state / late-join relay (4MB max). The server stamps every relayed `data-message`, `snapshot` and `input` with `knFrom: {sid, slot, owner}`, the true sender; pages check it (`KNCore.checkRelayed`)                        |
+| `snapshot`            | client→server→room | `{...}`                                                                                                                                   | Game snapshot relay (64KB max)                                                                                                                                                                                                   |
+| `input`               | client→server→room | `{...}`                                                                                                                                   | Input relay (streaming mode, 64KB max)                                                                                                                                                                                           |
+| `rom-sharing-toggle`  | client→server      | `{enabled}`                                                                                                                               | Toggle host ROM sharing                                                                                                                                                                                                          |
+| `set-listed`          | client→server      | `{listed}`                                                                                                                                | Host lists the room on the front-page board (never with a password)                                                                                                                                                              |
+| `rom-ready`           | client→server      | `{ready, hash, name, size}`                                                                                                               | Player signals ROM loaded (hash/name/size establish or check ROM identity)                                                                                                                                                       |
+| `input-type`          | client→server      | `{type}`                                                                                                                                  | Player reports input type (keyboard/gamepad)                                                                                                                                                                                     |
+| `device-type`         | client→server      | `{type}`                                                                                                                                  | Player reports device type                                                                                                                                                                                                       |
+| `session-log`         | client→server      | `{matchId, epoch, entries, summary, context, audit}`                                                                                      | Periodic sync log flush: only the log entries and input audit records (`audit: {epoch, entries}`) the server hasn't acked; acks `{lastSeq, auditLastSeq}`                                                                        |
+| `debug-sync`          | client→server      | `{...}`                                                                                                                                   | Upload sync diagnostic log                                                                                                                                                                                                       |
+| `debug-logs`          | client→server      | `{...}`                                                                                                                                   | Upload debug console log                                                                                                                                                                                                         |
+| `game-screenshot`     | client→server      | `{matchId, slot, frame, data}`                                                                                                            | Periodic gameplay screenshot (debug mode)                                                                                                                                                                                        |
+| `users-updated`       | server→room        | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}`                              | Room state broadcast                                                                                                                                                                                                             |
+| `upload-token`        | server→client      | `{token}`                                                                                                                                 | HMAC token for upload endpoints                                                                                                                                                                                                  |
+| `reconnect-token`     | server→client      | `{token}`                                                                                                                                 | HMAC token for session reconnection                                                                                                                                                                                              |
+| `rom-sharing-updated` | server→room        | `{romSharing}`                                                                                                                            | ROM sharing state changed                                                                                                                                                                                                        |
+| `game-started`        | server→room        | `{mode, resyncEnabled, romHash, romName, romSize, hostRom, gameId, matchId}`                                                              | Game started                                                                                                                                                                                                                     |
+| `game-ended`          | server→room        | `{matchId}`                                                                                                                               | Back to lobby                                                                                                                                                                                                                    |
 
 ## Key decisions
 
@@ -242,7 +242,7 @@ A detection-only tick watchdog (MF6) logs `TICK-STUCK` for any residual
 stall past I1/I2. **It takes no recovery action by design** — its only
 job is to surface bugs we haven't found yet. Auto-recovery was
 considered and rejected; see the rejected-alternatives section in the
-invariants doc before proposing any watchdog that *acts* on stalls.
+invariants doc before proposing any watchdog that _acts_ on stalls.
 
 ## Versioning
 
@@ -342,10 +342,10 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
      inline in `netplay-rollback.js`.
   4. **Effects with a deadline are Effect code** (timeouts, retries, scoped
      cleanup), not bare callbacks and `setTimeout`.
-  Two bugs this would have caught earlier: the host evicting a live peer when
-  its signaling returned before the guest's (#119, an ordering a model
-  enumerates), and a late joiner chasing a match the host had already
-  replaced (found by the model the day the late-join states were added).
+     Two bugs this would have caught earlier: the host evicting a live peer when
+     its signaling returned before the guest's (#119, an ordering a model
+     enumerates), and a late joiner chasing a match the host had already
+     replaced (found by the model the day the late-join states were added).
 - **Never tolerate a prediction mismatch.** Any "close enough" input match
   leaves peers with different state that nothing corrects. The C engine
   used to accept stick values in the same zone without a rollback; #14 made
