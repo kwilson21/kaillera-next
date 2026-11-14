@@ -42,7 +42,7 @@ const PAGES = {
 const ASSET_PREFIXES = ['/static/fonts/', '/static/shots/'];
 const ASSET_FILES = new Set([
   '/static/landing.css',
-  '/static/landing.js',
+  '/static/dist/kn-landing.js',
   '/static/dist/kn-wake-art.js',
   '/static/dist/kn-join.js',
   '/static/dist/kn-site.js',

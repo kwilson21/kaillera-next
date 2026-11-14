@@ -11,7 +11,6 @@ import {
   inviteView,
   lookupResult,
   looksUpOnReturn,
-  slotClass,
 } from '../../web/src/landing/join.ts';
 import {
   directWakeUrl,
@@ -21,11 +20,13 @@ import {
   nextPingTimeout,
   playUrl,
   roomCodeFrom,
+  slotClass,
   wakeReport,
 } from '../../web/src/landing/wake.ts';
 import { isHealthAnswer, isRoomAnswer, type RoomAnswer } from '../../web/src/landing/wire.ts';
 import {
   FakePage,
+  PagePair,
   bundleInputs,
   runBundle,
   runOldScript,
@@ -41,37 +42,9 @@ import {
 
 const ORIGIN = 'https://kn.example';
 
-/** The old script and the new bundle, each on its own copy of the page. */
-class Pair {
-  readonly old: FakePage;
-  readonly next: FakePage;
-
-  constructor(search: string, options: Partial<PageOptions> = {}) {
-    const all: PageOptions = { file: 'join.html', url: `${ORIGIN}/join${search}`, ...options };
-    this.old = new FakePage(all);
-    this.next = new FakePage(all);
-  }
-
-  /** Do the same thing to both pages, let them settle, and require them equal. */
-  async step(what: string, act: (page: FakePage) => void | Promise<void>): Promise<void> {
-    for (const page of [this.old, this.next]) {
-      await act(page);
-      await page.settle();
-    }
-    assert.equal(this.next.snapshot(), this.old.snapshot(), what);
-  }
-
-  serve(server: (url: string) => Reply): void {
-    this.old.server = server;
-    this.next.server = server;
-  }
-
-  async load(): Promise<void> {
-    runOldScript('join.js', this.old);
-    runBundle('join-entry.ts', this.next);
-    await this.step('after loading', () => {});
-  }
-}
+/** The old script and the new bundle on the invite page at `/join<search>`. */
+const invite = (search: string, options: Partial<PageOptions> = {}): PagePair =>
+  new PagePair({ file: 'join.html', url: `${ORIGIN}/join${search}`, ...options });
 
 /** A `/room/<code>` answer as the server sends it, with some fields changed. */
 interface RoomFields {
@@ -105,7 +78,7 @@ const shown = (page: FakePage): string[] =>
 
 test('a link with no usable room code is a closed room, with no request made', async () => {
   for (const search of ['', '?room=', '?room=ab', '?room=has%20space', '?room=WAYTOOLONGFORAROOMCODE', '?spectate=1']) {
-    const pair = new Pair(search);
+    const pair = invite(search);
     pair.serve(awake({ status: 200, json: room() }));
     await pair.load();
     assert.deepEqual(shown(pair.next), ['inv-closed'], search);
@@ -115,7 +88,7 @@ test('a link with no usable room code is a closed room, with no request made', a
 });
 
 test('a browser with no WebRTC is told so without a lookup', async () => {
-  const pair = new Pair('?room=KAZ64', { webrtc: false });
+  const pair = invite('?room=KAZ64', { webrtc: false });
   pair.serve(awake({ status: 200, json: room() }));
   await pair.load();
   assert.deepEqual(shown(pair.next), ['inv-unsupported']);
@@ -145,7 +118,7 @@ test('every kind of open room reads the same as it did, for a player link and a 
               { game_id: null, romName: null },
               { game_id: null, romName: '' },
             ]) {
-              const pair = new Pair(search, { wasm });
+              const pair = invite(search, { wasm });
               pair.serve(awake({ status: 200, json: room({ status, player_count, max_players, host_name, ...game }) }));
               await pair.load();
               assert.deepEqual(shown(pair.next), ['inv-main']);
@@ -198,7 +171,7 @@ test('the invite view says what the old page put on screen', async () => {
 });
 
 test('a room on screen is looked up again every 15 s, and follows what the lookups say', async () => {
-  const pair = new Pair('?room=KAZ64');
+  const pair = invite('?room=KAZ64');
   let answer: Reply = { status: 200, json: room() };
   pair.serve((url) => awake(answer)(url));
   await pair.load();
@@ -239,7 +212,7 @@ test('a room on screen is looked up again every 15 s, and follows what the looku
 
 test('a lookup the server does not answer shows the waiting screen and its clock', async () => {
   for (const reply of [{ status: 500, json: {} }, { status: 200, text: '<html>' }, 'fail'] satisfies Reply[]) {
-    const pair = new Pair('?room=KAZ64');
+    const pair = invite('?room=KAZ64');
     let answer: Reply = reply;
     pair.serve((url) => awake(answer)(url));
     await pair.load();
@@ -255,7 +228,7 @@ test('a lookup the server does not answer shows the waiting screen and its clock
 });
 
 test('a lookup that hangs is given up after 8 s', async () => {
-  const pair = new Pair('?room=KAZ64');
+  const pair = invite('?room=KAZ64');
   pair.serve(awake('hold'));
   await pair.load();
   assert.deepEqual(shown(pair.next), ['inv-loading']);
@@ -267,7 +240,7 @@ test('a lookup that hangs is given up after 8 s', async () => {
 });
 
 test('a napping server is pinged with a growing timeout, then the wake is reported and the room looked up', async () => {
-  const pair = new Pair('?room=KAZ64');
+  const pair = invite('?room=KAZ64');
   let up = false;
   pair.serve((url) => {
     if (url.endsWith('/health')) return up ? { status: 200, json: { status: 'ok' } } : 'hold';
@@ -306,7 +279,7 @@ test('the server origin the Worker wrote in is pinged directly, once', async () 
     ['', false],
     ['__KN_ORIGIN__', false],
   ] as const) {
-    const pair = new Pair('?room=KAZ64', { edit: ['content="__KN_ORIGIN__"', `content="${configured}"`] });
+    const pair = invite('?room=KAZ64', { edit: ['content="__KN_ORIGIN__"', `content="${configured}"`] });
     let up = false;
     pair.serve((url) => {
       if (url === 'https://origin.example/health') return 'fail';
@@ -325,7 +298,7 @@ test('the server origin the Worker wrote in is pinged directly, once', async () 
 });
 
 test('a wake that took over an hour is not reported', async () => {
-  const pair = new Pair('?room=KAZ64');
+  const pair = invite('?room=KAZ64');
   let up = false;
   pair.serve((url) => (up ? awake({ status: 200, json: room() })(url) : 'fail'));
   await pair.load();
@@ -340,14 +313,14 @@ test('a wake that took over an hour is not reported', async () => {
 });
 
 test('a 404 from /health counts as an answer, as it always has', async () => {
-  const pair = new Pair('?room=KAZ64');
+  const pair = invite('?room=KAZ64');
   pair.serve((url) => (url.endsWith('/health') ? { status: 404, text: '' } : { status: 200, json: room() }));
   await pair.load();
   assert.deepEqual(shown(pair.next), ['inv-main']);
 });
 
 test('answers that come back out of order: the older one is dropped', async () => {
-  const pair = new Pair('?room=KAZ64');
+  const pair = invite('?room=KAZ64');
   let answer: Reply = { status: 200, json: room() };
   pair.serve((url) => awake(answer)(url));
   await pair.load();
@@ -379,7 +352,7 @@ test('coming back to the tab looks the room up only when there is one to look up
     [room({ closed: true }), true],
     [null, false],
   ] as const) {
-    const pair = new Pair('?room=KAZ64');
+    const pair = invite('?room=KAZ64');
     pair.serve(awake(json === null ? { status: 404, text: '' } : { status: 200, json }));
     await pair.load();
     const asked = pair.next.requests.length;
@@ -398,7 +371,7 @@ test('coming back to the tab looks the room up only when there is one to look up
 
 test('an in-app browser gets the banner, and Copy link copies the address either way', async () => {
   for (const clipboard of [true, false]) {
-    const pair = new Pair('?room=KAZ64', {
+    const pair = invite('?room=KAZ64', {
       clipboard,
       userAgent: 'Mozilla/5.0 (iPhone) AppleWebKit/605 Mobile Instagram 300.0',
     });
@@ -419,7 +392,7 @@ test('an in-app browser gets the banner, and Copy link copies the address either
 });
 
 test('Open your own room goes to a new room as its host', async () => {
-  const pair = new Pair('?room=KAZ64');
+  const pair = invite('?room=KAZ64');
   pair.serve(awake({ status: 404, text: '' }));
   await pair.load();
   await pair.step('open', (page) => page.el('open-own').click());
@@ -429,7 +402,7 @@ test('Open your own room goes to a new room as its host', async () => {
 });
 
 test('a page pointed at another server asks that server and links to it', async () => {
-  const pair = new Pair('?room=KAZ64', {
+  const pair = invite('?room=KAZ64', {
     edit: ['<meta charset="UTF-8" />', '<meta charset="UTF-8" /><meta name="kn-api" content="https://game.example" />'],
   });
   pair.serve(awake({ status: 200, json: room() }));
