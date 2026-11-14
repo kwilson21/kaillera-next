@@ -19,8 +19,6 @@ type EngineState = {
   known: Map<string, { slot?: Slot }>;
   running: boolean;
   live: boolean;
-  capture: { mode: string; scale: number };
-  cooldownUntil: number;
 };
 
 /** An engine's state a test can change, an observer on it, and the handlers' "afterwards" run by hand. */
@@ -33,8 +31,6 @@ const engine = (ready: () => boolean = () => true) => {
     known: new Map(),
     running: false,
     live: false,
-    capture: { mode: 'none', scale: 1 },
-    cooldownUntil: 0,
   };
   const view: EngineView = {
     sid: () => state.sid,
@@ -44,10 +40,7 @@ const engine = (ready: () => boolean = () => true) => {
     known: () => Object.fromEntries(state.known),
     running: () => state.running,
     live: () => state.live,
-    capture: () => state.capture,
-    cooldownUntil: () => state.cooldownUntil,
     packet: (input) => guestPacket(input),
-    page: () => ({ search: '', stored: null, userAgent: 'Chrome' }),
   };
   const sent: StreamingDisagreeReport[] = [];
   const later: (() => void)[] = [];
@@ -82,7 +75,6 @@ test('an engine doing what the rules say reports nothing, and every decision is 
   const p2: PeerView = { slot: 1, pc: { connectionState: 'new', localDescription: null, getSenders: () => [] } };
   state.peers.set('p2', p2);
   observer.offered('p2');
-  observer.offerSdp('v=0\r\nm=video 9 X 96\r\nc=IN\r\n', 'v=0\r\nm=video 9 X 96\r\nc=IN\r\nb=AS:3000\r\n');
   settle();
   observer.controllerMask(0b0011);
 
@@ -94,27 +86,7 @@ test('an engine doing what the rules say reports nothing, and every decision is 
   state.running = true;
   settle();
 
-  // Capture starts; a sender is tuned.
-  observer.capture('direct', false, { width: 1280, height: 960 });
-  state.capture = { mode: 'direct', scale: 2 };
   state.live = true;
-  const params: RTCRtpSendParameters = {
-    transactionId: 't',
-    encodings: [{}],
-    codecs: [],
-    headerExtensions: [],
-    rtcp: {},
-  };
-  observer.encoding(params);
-  Object.assign(params.encodings[0] ?? {}, {
-    maxBitrate: 2_500_000,
-    maxFramerate: 60,
-    networkPriority: 'high',
-    scaleResolutionDownBy: 2,
-  });
-  params.degradationPreference = 'maintain-framerate';
-  observer.blitCrop({ sx: 240, sy: 0, sw: 1440, sh: 1080 }, 1920, 1080);
-  settle();
 
   // Input arrives; a third player joins the stream in play.
   const decoded = { ...INPUT, frame: 0, ackFrame: -1 };
@@ -127,12 +99,7 @@ test('an engine doing what the rules say reports nothing, and every decision is 
   observer.lateJoinReady({ type: 'mode-select' });
   settle();
 
-  // The watchdog samples; the guest's connection fails and is dropped.
-  observer.fpsWatchdog(10_000, 1000, 60);
-  settle();
-  observer.fpsWatchdog(11_000, 1000, 90);
-  state.cooldownUntil = 16_000;
-  settle();
+  // The guest's connection fails and is dropped.
   observer.connectionState('p2', p2, 'failed');
   state.peers.delete('p2');
   settle();
@@ -140,18 +107,13 @@ test('an engine doing what the rules say reports nothing, and every decision is 
   assert.deepEqual(sent, []);
   assert.deepEqual(observer.counts(), {
     compared: {
-      'offer-sdp': 1,
       roster: 2,
       'controller-mask': 1,
       'signal:answer': 1,
       'signal:candidate': 2,
       'channel-open': 1,
-      capture: 1,
-      encoding: 1,
-      'blit-crop': 1,
       'input-packet': 1,
       'late-join-ready': 1,
-      'fps-watchdog': 2,
       'connection-state': 1,
     },
     disagreed: 0,
@@ -238,10 +200,7 @@ test('nothing the observer does can throw into the engine', () => {
       known: broken,
       running: broken,
       live: broken,
-      capture: broken,
-      cooldownUntil: broken,
       packet: broken,
-      page: broken,
     },
     (run) => later.push(run),
   );
@@ -254,13 +213,11 @@ test('nothing the observer does can throw into the engine', () => {
   observer.inputPacket('p2', new ArrayBuffer(24)).applied = [1, INPUT];
   observer.guestSend(true, INPUT, INPUT).send = true;
   observer.connectionState('p2', {}, 'failed');
-  observer.capture('direct', false, { width: 1, height: 1 });
-  observer.fpsWatchdog(0, 0, 0);
   observer.offered('p2');
   for (const run of later.splice(0)) run();
   const counts = observer.counts();
-  assert.ok(counts.failed >= 9, `failed ${counts.failed}`);
+  assert.ok(counts.failed >= 8, `failed ${counts.failed}`);
   // A rule that cannot run is one disagreement the sink could not take, never an exception.
-  observer.offerSdp('a', 'a');
+  observer.controllerMask(1);
   observer.flush();
 });
