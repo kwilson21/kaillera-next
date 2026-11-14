@@ -472,6 +472,47 @@ test('gameInProgress and safeToReload agree with the old code', () => {
   }
 });
 
+// ── the caller left in web/static ────────────────────────────────────────────
+
+const CALLER = readFileSync(new URL('../../web/static/version-guard.js', import.meta.url), 'utf8');
+
+test('the caller starts the guard at once when its bundle has run', () => {
+  const started: string[] = [];
+  const listeners = new Map<string, () => void>();
+  const window = {
+    KNSite: { startVersionGuard: () => started.push('start') },
+    addEventListener: (type: string, listener: () => void) => listeners.set(type, listener),
+  };
+  vm.runInNewContext(CALLER, { window });
+  assert.deepEqual(started, ['start']);
+  assert.equal(listeners.size, 0);
+});
+
+/** A page as the caller sees it before its bundle has run. */
+interface LatePage {
+  KNSite?: { startVersionGuard: () => void };
+  addEventListener: (type: string, listener: () => void) => void;
+}
+
+test('on a page that loads the bundle after the caller, the guard starts once the scripts have run', () => {
+  // HTML from before the script order changed, with this deploy's scripts.
+  const starts = { count: 0 };
+  const listeners = new Map<string, () => void>();
+  const window: LatePage = { addEventListener: (type, listener) => listeners.set(type, listener) };
+  vm.runInNewContext(CALLER, { window });
+  assert.equal(starts.count, 0);
+  window.KNSite = { startVersionGuard: () => starts.count++ };
+  listeners.get('DOMContentLoaded')?.();
+  assert.equal(starts.count, 1);
+});
+
+test('a page whose bundle never arrives is left alone', () => {
+  const listeners = new Map<string, () => void>();
+  const window = { addEventListener: (type: string, listener: () => void) => listeners.set(type, listener) };
+  vm.runInNewContext(CALLER, { window });
+  assert.doesNotThrow(() => listeners.get('DOMContentLoaded')?.());
+});
+
 test('a real window is a host the guard accepts', () => {
   // The caller in web/static is plain script, so the compiler checks the fit here.
   const fits: typeof window extends VersionGuardHost ? true : false = true;
