@@ -276,10 +276,12 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   unrelated edits in a separate `git worktree`.
 - **The cloud container distorts results.** Two headless emulators run at
   ~7–11 fps with software GL; canvas readbacks take seconds (use
-  `?knperf=light`), measured RTT is inflated (so negotiated delay is too), and
-  the menu autopilot can overshoot into Team Battle at delay ≥ 10. Treat
-  multi-second freezes and menu timeouts there as environment first; confirm
-  real bugs from the logs. A page that freezes for 5 s there is dropped as a
+  `?knperf=light`), and measured RTT is inflated (so negotiated delay is too).
+  Treat multi-second freezes there as environment first; confirm real bugs
+  from the logs. A menu timeout is not one of them: the run that sat on the
+  character select in Team Battle at delay ≥ 9 was the menu autopilot pressing
+  A where the puck had coasted to, fixed in #166. A menu timeout now leaves
+  `host-stuck.png` in the run's `OUT` folder; look at it before rerunning. A page that freezes for 5 s there is dropped as a
   phantom and resynced (about one match in three). `tests/rb-two-player.mjs`
   leaves the frames of such a recovery out of its hash compare when the logs
   prove the dropped page's main thread stopped, and says so
