@@ -303,6 +303,19 @@ test('the page script starts the policy from the core and nothing else', () => {
   assert.equal(window.KNCapture, policy);
 });
 
+test('the vision page script starts the client from the core and nothing else', () => {
+  const calls = [];
+  const client = {};
+  const startVisionClient = (host) => {
+    calls.push(host);
+    return client;
+  };
+  const window = { KNCore: { page: { startVisionClient } } };
+  vm.runInNewContext(read('static/kn-vision-client.js'), { window });
+  assert.deepEqual(calls, [window]);
+  assert.equal(window.KNVision, client);
+});
+
 // The diagnostics in the bundle ask the policy at each capture, and capture
 // nothing when it is missing (the `policy: false` case above), so what must
 // come after the policy is the engine that drives them.
