@@ -134,7 +134,7 @@ earlier ones to have set up their `window.*` exports:
 11. `shared.js` — input encoding/decoding, cheats, wire format
 12. `virtual-gamepad.js` — touch controls for mobile
 13. `kn-audio.js` — AudioWorklet pump + rollback audio capture
-14. `kn-diagnostics.js` — rollback diagnostics ring buffer (RB-CHECK, audit log)
+14. (`window.KNDiag`, the freeze and canvas diagnostics, is defined by `dist/kn-core.js`: `web/src/page/diagnostics.ts`)
 15. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
 16. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
 17. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
@@ -186,7 +186,6 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
 | `virtual-gamepad.js` | ~1,194 | On-screen touch controls for mobile | KNState |
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
-| `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
 | `kn-vision-client.js` | — | Claude vision client for screenshot-diff desync analysis | rollback |
 | `audio-worklet-processor.js` | ~85 | AudioWorklet ring buffer for rollback audio | kn-audio.js |
 | `feedback.js` | ~540 | In-app feedback collection UI | play.js |
