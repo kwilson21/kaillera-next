@@ -95,6 +95,39 @@ done
 $QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPicturesShowOneFrame \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+# ── Peer connection: one pair of pages, offers and answers between them ─────
+PAIR=specs/peer_connection.qnt
+$QUINT typecheck "$PAIR"
+# The scenarios say what each variant does with the same ordering.
+for variant in peer_connection_before_119 peer_connection_current peer_connection_fixed; do
+  $QUINT test "$PAIR" --main="$variant" --backend=typescript
+done
+pair() { # module invariant init
+  $QUINT run "$PAIR" --main="$1" --invariant="$2" --init="$3" \
+    --max-samples=10000 --max-steps=25 --backend=typescript
+}
+# Today: a reconnect leaves the guest's input state clean and a roster update
+# never replaces a connection that is up. The other four properties are
+# violated today (the scenarios above show how) and hold on
+# peer_connection_fixed, the rules the per-peer machine is built to.
+pair peer_connection_current holdToday init
+pair peer_connection_fixed allHold init
+pair peer_connection_fixed allHold initLobby
+
+# ── The pause around a late join ────────────────────────────────────────────
+PAUSE=specs/late_join_pause.qnt
+$QUINT typecheck "$PAUSE"
+for variant in late_join_pause_current late_join_pause_fixed; do
+  $QUINT test "$PAUSE" --main="$variant" --backend=typescript
+done
+# The rule the per-joiner machine will be built to: the game stays paused
+# while a joiner has yet to load, a joiner who is playing is never
+# disconnected, and every pause has a deadline. All three are VIOLATED by
+# today's engine (late_join_pause_current); the scenarios above show each
+# ordering, and nothing is fixed yet.
+$QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
