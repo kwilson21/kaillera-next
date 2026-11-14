@@ -162,7 +162,7 @@
  *     halfway through the battle the guest's copy of P1's stock count
  *     (SCPlayerData.stock_count, one byte of RDRAM) is changed and held for
  *     3 s, long enough that no rollback restores it. The peers are then
- *     really desynced, and the desync detector (kn-desync-detector.js) must
+ *     really desynced, and the desync detector (web/src/page/desync-detector.ts) must
  *     say so: the run passes only if both peers' sync logs have a
  *     `KNDesync suspect ... field=stocks slot=0 trigger=flag` line after the
  *     change, and none before it; both peers log `KNDesync capture` for the
@@ -1492,7 +1492,11 @@ const integrityAfterRecovery = (log, marker) => {
   return from < 0
     ? 0
     : lines.slice(from + 1).filter((l) => {
-        const f = +(l.split('\t')[2] || '').replace('f=', '');
+        // A line the engine's C log wrote is copied here in batches, under
+        // the frame of the copy. The frame it concerns is the one it names
+        // (myF=), as cIntegrityAfterRecovery reads the same line below.
+        const named = l.includes('[C] ') ? l.match(/myF=(\d+)/) : null;
+        const f = named ? +named[1] : +(l.split('\t')[2] || '').replace('f=', '');
         return f >= recoveredAt + 30 && count(l, INTEGRITY) > 0;
       }).length;
 };
