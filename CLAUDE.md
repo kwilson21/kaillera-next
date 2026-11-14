@@ -109,7 +109,7 @@ kaillera-next/
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
-│       ├── demo.js              # demo page orchestrator (fake peer + menu autopilot)
+│       ├── demo.js              # demo page orchestrator (emulator boot, engine start, fake peer + menu autopilot wiring); its options, network settings, HUD text and menu script are web/src/demo
 │       ├── fake-peer.js         # synthetic P2 for the demo page (simulated input/jitter)
 │       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo (reads RDRAM menu state)
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD
@@ -127,6 +127,7 @@ kaillera-next/
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── page/desync-detector.ts # window.KNDesync: field-granular cross-peer desync detection, installed by the bundle
+│   │   ├── demo/                # the demo page's logic, moving out of web/static/demo.js in slices (window.KNCore.demo)
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
