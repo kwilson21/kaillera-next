@@ -109,8 +109,8 @@
   const PULSE_MAX_FRAMES = 40;
   // Longer than the engine's largest input delay (12 frames,
   // ROLLBACK_MAX_DELAY_FRAMES in netplay-rollback.js). A puck that has not
-  // moved for this many frames while only neutral input was issued has
-  // nothing of ours still on its way to the game.
+  // moved for this many game frames, all of them after the last frame a
+  // stick or button was sent for, has nothing of ours still on its way.
   const SETTLE_FRAMES = 16;
 
   // One burst of stick that should carry the puck (dx, dy): how many frames
@@ -182,8 +182,13 @@
    *   puck reaches, and take the stage the cursor starts on. For a ROM whose
    *   character grid and stage list are not SSB64's (Smash Remix): the menu
    *   structs are where SSB64's are, the layout is not.
+   * @param {() => number} [opts.currentFrame]  the game frame read32 is
+   *   reading. Needed when an actor is asked for frames ahead of the game
+   *   (the demo's fake peer does, while the engine is stalled): those calls
+   *   read the same memory and must not count as time gone by. Without it,
+   *   the frame an actor is asked for is taken to be the game's.
    */
-  const create = ({ read32, log = () => {}, anyFighter = false }) => {
+  const create = ({ read32, log = () => {}, anyFighter = false, currentFrame = null }) => {
     let failed = null;
     let lastScene = -1;
     let sceneSince = 0;
@@ -242,9 +247,9 @@
       };
     };
 
-    // Per slot: where the puck was at the last decision, and for how many
-    // decisions in a row it has sat there while this actor sent neutral.
-    const steer = [0, 1].map(() => ({ x: NaN, y: NaN, still: 0 }));
+    // Per slot: where the puck was last read, the game frame it was last
+    // seen to move, and the first frame after the last stick or button sent.
+    const steer = [0, 1].map(() => ({ x: NaN, y: NaN, movedAt: 0, quietFrom: 0 }));
 
     // Move slot i's puck onto its target portrait, then press A.
     //
@@ -256,16 +261,21 @@
     // and changes the stock count. So this moves in bursts and decides only
     // at rest: send a burst, send neutral until the puck has been still for
     // SETTLE_FRAMES, then look. A press sent from rest lands at rest.
-    const cssPick = (i) => {
+    const cssPick = (i, frame) => {
       const slot = readSlot(i);
       if (typeof slot === 'string') return notReady(slot);
       if (slot.fighterSelected) return _idle(6);
       if (slot.heldPlayer !== i) return notReady(`slot${i}.held_player=${slot.heldPlayer}`);
       const st = steer[i];
-      st.still = slot.x === st.x && slot.y === st.y ? st.still + 1 : 0;
+      const now = currentFrame ? currentFrame() : frame;
+      if (slot.x !== st.x || slot.y !== st.y) st.movedAt = now;
       st.x = slot.x;
       st.y = slot.y;
-      if (st.still < SETTLE_FRAMES) return _idle(1);
+      if (now - Math.max(st.movedAt, st.quietFrom) < SETTLE_FRAMES) return _idle(1);
+      const sending = (action) => {
+        st.quietFrom = frame + action.hold;
+        return action;
+      };
       const target = PORTRAIT_TARGETS[i];
       const dx = target.x - slot.x;
       const dy = target.y - slot.y;
@@ -273,11 +283,9 @@
         // On the portrait and at rest. A only selects while grabbing a puck
         // over a fighter. A press the game drops is sent again from rest.
         if (slot.cursorStatus !== CURSOR_GRAB || !(anyFighter || slot.fkind === target.fkind)) return _idle(1);
-        st.still = 0;
-        return _tap(BTN.A);
+        return sending(_tap(BTN.A));
       }
-      st.still = 0;
-      return _pulse(dx, dy);
+      return sending(_pulse(dx, dy));
     };
 
     const cssBothPicked = () => {
@@ -308,7 +316,7 @@
           return cur === VSMODE_START ? _tap(BTN.A) : _tap(BTN.UP);
         }
         case SCENE.PLAYERS_VS:
-          return cssBothPicked() ? _tap(BTN.START) : cssPick(0);
+          return cssBothPicked() ? _tap(BTN.START) : cssPick(0, frame);
         case SCENE.MAPS: {
           if (anyFighter) return _tap(BTN.A);
           const slot = s32(MAPS_CURSOR_SLOT);
@@ -338,7 +346,7 @@
     // idle so it never fights P1 for menus that accept any controller.
     const decideP2 = (frame) => {
       if (failed || observeScene(frame) !== SCENE.PLAYERS_VS) return _idle(6);
-      return cssPick(1);
+      return cssPick(1, frame);
     };
 
     return {

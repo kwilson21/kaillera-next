@@ -33,7 +33,19 @@ const rng = (seed) => () => {
   return seed / 2 ** 32;
 };
 
-function simulate({ seed, delayP1, delayP2, dropProb, mapsStart, stageSelect = true, maxFrames = 6000 }) {
+// lookaheadP2: P2's actor is asked for this many frames past the one being
+// simulated, as the demo's fake peer does while the engine is stalled. Those
+// calls read the same memory: no game frame has gone by between them.
+function simulate({
+  seed,
+  delayP1,
+  delayP2,
+  dropProb,
+  mapsStart,
+  stageSelect = true,
+  maxFrames = 6000,
+  lookaheadP2 = 0,
+}) {
   const rand = rng(seed);
   const mem = new Map();
   const w32 = (addr, v) => mem.set(addr >>> 0, v >>> 0);
@@ -115,19 +127,23 @@ function simulate({ seed, delayP1, delayP2, dropProb, mapsStart, stageSelect = t
     garbage();
   };
 
-  const pilot = create({ read32: (addr) => mem.get(addr >>> 0) ?? 0, log: () => {} });
-  const q1 = [];
-  const q2 = [];
+  let simFrame = 0;
+  const pilot = create({ read32: (addr) => mem.get(addr >>> 0) ?? 0, log: () => {}, currentFrame: () => simFrame });
+  const NEUTRAL = { buttons: 0, lx: 0, ly: 0 };
+  const sent1 = [];
+  const sent2 = [];
   let prev = [0, 0];
   const trace = [];
 
   for (let frame = 0; frame < maxFrames; frame++) {
     writeState();
     if (scene === SCENE.VS_BATTLE && loading === 0) return { ok: true, frame, slots, mapsSlot, trace, strayPresses };
-    q1.push(pilot.p1(frame));
-    q2.push(pilot.p2(frame));
-    const in1 = q1.length > delayP1 ? q1.shift() : { buttons: 0, lx: 0, ly: 0 };
-    const in2 = q2.length > delayP2 ? q2.shift() : { buttons: 0, lx: 0, ly: 0 };
+    simFrame = frame;
+    sent1[frame] = pilot.p1(frame);
+    for (let f = sent2.length; f <= frame + lookaheadP2; f++) sent2[f] = pilot.p2(f);
+    // The input sent for a frame reaches the game an input delay later.
+    const in1 = sent1[frame - delayP1] ?? NEUTRAL;
+    const in2 = sent2[frame - delayP2] ?? NEUTRAL;
     const inputs = [in1, in2];
     // A dropped press: the game doesn't see this frame's buttons (e.g. it
     // landed inside a transition).
@@ -277,6 +293,28 @@ test('picks the right fighters and presses nothing else at every input delay up 
       const at = `delay ${delay} seed ${seed}`;
       assert.ok(res.ok, `${at} stuck: ${JSON.stringify({ ...res, trace: undefined })}`);
       assert.equal(res.slots[0].fkind, 0, `${at}: P1 should be Mario`);
+      assert.equal(res.slots[1].fkind, 2, `${at}: P2 should be DK`);
+      assert.equal(res.strayPresses, 0, `${at}: A pressed on the bar above the portraits`);
+    }
+  }
+});
+
+test('an actor asked for frames ahead of the game does not take them for time gone by', () => {
+  for (const delay of [0, 4, 8, 10, 11, 12, 13, 14]) {
+    for (let seed = 1; seed <= 40; seed++) {
+      const opts = {
+        seed: seed + delay * 1000,
+        delayP1: delay,
+        delayP2: delay,
+        dropProb: 0.1,
+        mapsStart: 5,
+        stageSelect: true,
+        maxFrames: 9000,
+        lookaheadP2: 6,
+      };
+      const res = simulate(opts);
+      const at = `delay ${delay} seed ${seed}`;
+      assert.ok(res.ok, `${at} stuck: ${JSON.stringify({ ...res, trace: undefined })}`);
       assert.equal(res.slots[1].fkind, 2, `${at}: P2 should be DK`);
       assert.equal(res.strayPresses, 0, `${at}: A pressed on the bar above the portraits`);
     }
