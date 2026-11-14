@@ -5,7 +5,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SHARED_JS = ROOT / "web/static/shared.js"
 VIRTUAL_GAMEPAD_JS = ROOT / "web/static/virtual-gamepad.js"
 LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 SIGNALING_PY = ROOT / "server/src/api/signaling.py"
@@ -13,7 +12,7 @@ SIGNALING_PY = ROOT / "server/src/api/signaling.py"
 
 def _run_node(script: str) -> None:
     result = subprocess.run(
-        ["node", "-e", textwrap.dedent(script)],
+        ["node", "--input-type=module", "-e", textwrap.dedent(script)],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -34,7 +33,6 @@ def test_virtual_gamepad_axis_math_uses_clamped_distance():
 
 def test_shared_writer_clamps_axes_for_native_controller_writer():
     script = r"""
-      const fs = require('fs');
       global.performance = { now: () => 0 };
       global.document = { hasFocus: () => true };
       global.window = {
@@ -42,8 +40,7 @@ def test_shared_writer_clamps_axes_for_native_controller_writer():
         KNState: { remapActive: false, touchInput: {} },
       };
       global.KNState = window.KNState;
-      global.navigator = {};
-      eval(fs.readFileSync('web/static/shared.js', 'utf8'));
+      (await import('./web/src/page/shared.ts')).installShared();
 
       const writes = [];
       window.EJS_emulator = {
@@ -73,7 +70,6 @@ def test_shared_writer_clamps_axes_for_native_controller_writer():
 
 def test_shared_touch_reader_clamps_oversized_touch_axes():
     script = r"""
-      const fs = require('fs');
       global.performance = { now: () => 0 };
       global.document = { hasFocus: () => true };
       global.window = {
@@ -84,8 +80,7 @@ def test_shared_touch_reader_clamps_oversized_touch_axes():
         },
       };
       global.KNState = window.KNState;
-      global.navigator = {};
-      eval(fs.readFileSync('web/static/shared.js', 'utf8'));
+      (await import('./web/src/page/shared.ts')).installShared();
 
       const input = window.KNShared.readLocalInput(0, null, new Set());
       if (input.lx !== 83 || input.ly !== -83) {
