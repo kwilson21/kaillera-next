@@ -313,9 +313,11 @@ The scripts themselves are TypeScript too (#170 to #174): `kn-state.js`,
 right after `storage.js`. The JavaScript fallbacks are deleted; the tests
 import the TypeScript.
 
-Not done: the gamepad manager's poll loop and the two polling loops in
-`page/shared.ts` (`waitForEmulator`, `disableEJSInput`) are ported as they
-were, bare timers, not Effect code.
+The three waits that were bare timers are Effect code (`web/src/poll.ts`):
+the gamepad manager's hot-plug poll, and `waitForEmulator` and
+`disableEJSInput` in `page/shared.ts`. Each still looks first in the call
+that starts it and then every 200 ms (500 ms for the pads), for the same
+number of looks as before.
 
 **Stage 5: the engine**
 `netplay-rollback.js` (18k lines) is split by concern into typed modules:
