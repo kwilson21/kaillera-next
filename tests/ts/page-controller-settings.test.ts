@@ -797,6 +797,9 @@ test('without play.js’s toast, Done shows the panel’s own for 1.5 s and remo
   const newPage = page({ ownToast: true });
   const oldPanel = startOld(oldPage);
   const newPanel = startNew(newPage);
+  // Read the clock before Done arms the panel's 1.5 s timer: read after it,
+  // a fade that is on time can measure a few ms short (seen in CI on main).
+  const started = Date.now();
   for (const step of [{ kind: 'open' }, { kind: 'done' }] satisfies Step[]) {
     apply(oldPage, oldPanel, step);
     apply(newPage, newPanel, step);
@@ -807,7 +810,6 @@ test('without play.js’s toast, Done shows the panel’s own for 1.5 s and remo
   assert.deepEqual(toast(newPage), toast(oldPage));
 
   const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-  const started = Date.now();
   // The old script's first timer: fade.
   apply(oldPage, oldPanel, { kind: 'timers' });
   await pause(1200);
