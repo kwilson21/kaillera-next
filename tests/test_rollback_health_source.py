@@ -43,7 +43,7 @@ def test_rollback_stall_sites_have_wall_clock_action_markers():
     src = LOCKSTEP_JS.read_text()
     doc = INVARIANTS_DOC.read_text()
 
-    for marker in ("PHASE-LOCK-WAIT", "MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT"):
+    for marker in ("MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT"):
         assert marker in src
         assert marker in doc
 
@@ -59,7 +59,6 @@ def test_strict_menu_lockstep_never_fabricates_or_phantoms_inputs():
     assert "phase-lock-timeout" not in src
     assert "menu-lockstep-timeout" not in src
     assert "MENU-LOCKSTEP-WAIT" in src
-    assert "PHASE-LOCK-WAIT" in src
     assert "holding strict menu lockstep" in src
 
 
@@ -71,7 +70,6 @@ def test_strict_menu_resend_cadence_is_per_slot():
     assert "const resendKey = `${source}:${slot}:${applyFrame}`;" in src
     assert "prev?.key === resendKey && nowMs - prev.lastAt < RESEND_TIMEOUT_MS" in src
     assert "_strictMenuResendState[slot] = { key: resendKey, lastAt: nowMs };" in src
-    assert re.search(r"_requestStrictMenuResends\(\s*bootInputPeers,\s*missingSlots,", src)
     assert "_requestStrictMenuResends(inputPeers, _missingSlots, applyFrame, now, 'js-menu')" in src
 
 
@@ -120,16 +118,6 @@ def test_solo_delay_does_not_initialize_rollback():
     assert "C-ROLLBACK disabled for zero-delay solo play" in src
 
 
-def test_phase_lock_deadline_tracks_intermittent_phase_mismatch():
-    src = LOCKSTEP_JS.read_text()
-
-    assert "const phaseMismatchSlots = [];" in src
-    assert "notePhaseMismatch(p.slot);" in src
-    assert "phaseMismatchSlots," in src
-    assert "const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);" in src
-    assert "mismatchPeers=[${phaseLockSlots.join(',')}]" in src
-    assert "if (phaseWaitSlots.length && !holdReplayDue) {" in src
-
 
 def test_resync_state_load_clears_pending_c_inputs():
     src = LOCKSTEP_JS.read_text()
@@ -157,121 +145,6 @@ def test_pre_tick_local_input_uses_c_frame_after_host_authoritative_init():
     assert "preTickLocalInput.ly" in pre_tick_call
     assert "localInput.buttons" not in pre_tick_call
 
-
-def test_gameplay_to_menu_schedules_per_match_input_reset():
-    src = LOCKSTEP_JS.read_text()
-
-    helper_idx = src.index("const _resetMatchInputState = (reason) => {")
-    helper_src = src[helper_idx : src.index("const _scheduleMatchInputReset", helper_idx)]
-    for snippet in (
-        "_localInputs = {};",
-        "_remoteInputs = {};",
-        "_peerInputStarted = {};",
-        "_lastRemoteFramePerSlot = {};",
-        "_rbLocalHistory.length = 0;",
-        "for (const k of Object.keys(_lastKnownInput)) delete _lastKnownInput[k];",
-        "peer.lastAckFromPeer = -1;",
-        "peer.lastFrameFromPeer = -1;",
-        "peer.lastAckAdvanceTime = 0;",
-        "MATCH-INPUT-RESET reason=${reason}",
-    ):
-        assert snippet in helper_src
-
-    assert "let _pendingMatchInputResetReason = '';" in src
-    assert (
-        "_scheduleMatchInputReset(`gameplay-menu:f${_frameNum}:scene${sceneCurr}:status${gameStatus}`);"
-        in src
-    )
-    assert "_flushPendingMatchInputReset('post-c-replay-tick')" in src
-    assert "_flushPendingMatchInputReset('post-c-tick')" in src
-    assert "if (_pendingMatchInputResetReason && _frameNum <= 0) _flushPendingMatchInputReset('tick-start');" in src
-
-    transition_idx = src.index("GAMEPLAY→MENU transition")
-    schedule_idx = src.index("_scheduleMatchInputReset(`gameplay-menu", transition_idx)
-    shutdown_idx = src.index("_shutdownCRollbackForMenu(tickMod", transition_idx)
-    assert transition_idx < schedule_idx < shutdown_idx
-
-
-def test_gameplay_to_menu_c_shutdown_keeps_frame_timeline():
-    # Smash Remix pause (scene 22, status 2) tears down the C engine. The
-    # tick must stop right there: running on into _kn_post_tick resets
-    # _frameNum to -1 on only the peer that got that far, and the other
-    # peer's lockstep waits on frames that never come.
-    src = LOCKSTEP_JS.read_text()
-    transition_idx = src.index("GAMEPLAY→MENU transition")
-    branch_src = src[transition_idx : src.index("MENU-LOCKSTEP armed at", transition_idx)]
-
-    guard = "if (!_shutdownCRollback) {"
-    assert guard in branch_src
-    assert branch_src.index(guard) < branch_src.index("_scheduleMatchInputReset(`gameplay-menu")
-
-    call_idx = branch_src.index("_shutdownCRollbackForMenu(tickMod")
-    after_shutdown = branch_src[call_idx:]
-    assert "_markTickReturn('skip:rb-shutdown');" in after_shutdown
-    assert after_shutdown.index("_markTickReturn('skip:rb-shutdown');") < after_shutdown.index("return;")
-
-    helper_idx = src.index("const _shutdownCRollbackForMenu = (tickMod")
-    helper_src = src[helper_idx : src.index("\n  };\n", helper_idx)]
-    assert "C-ROLLBACK shutdown on GAMEPLAY→MENU" in helper_src
-    # Skipping the reset must not keep a whole match of input history alive.
-    assert "const keepFrom = _frameNum - 600;" in helper_src
-
-
-def test_gameplay_to_menu_c_shutdown_waits_for_confirmed_state():
-    # Shutting down with mispredicted frames still uncorrected leaves the
-    # peers on different states that the lockstep path never repairs. Hold
-    # the shutdown until the live state is final, with a deadline (I1).
-    src = LOCKSTEP_JS.read_text()
-    doc = INVARIANTS_DOC.read_text()
-    transition_idx = src.index("GAMEPLAY→MENU transition")
-    branch_src = src[transition_idx : src.index("MENU-LOCKSTEP armed at", transition_idx)]
-
-    assert "const RB_SHUTDOWN_HOLD_MS = " in src
-    assert "_rbShutdownHold = { since: performance.now(), frame: _frameNum };" in branch_src
-    drain_idx = branch_src.index("_drainPendingCInputs(tickMod);")
-    confirm_idx = branch_src.index("_liveStateConfirmed(tickMod)")
-    deadline_idx = branch_src.index("RB_SHUTDOWN_HOLD_MS")
-    call_idx = branch_src.index("_shutdownCRollbackForMenu(tickMod")
-    # Arrived inputs are fed before judging, so a stalled tab can't time out
-    # on inputs that are already here.
-    assert drain_idx < confirm_idx < call_idx and deadline_idx < call_idx
-    assert "RB-SHUTDOWN-HOLD-TIMEOUT" in branch_src
-    assert "RB-SHUTDOWN-HOLD-TIMEOUT" in doc and "RB_SHUTDOWN_HOLD_MS" in doc
-
-    # While held the frame doesn't advance unless a replay is due, and any
-    # step it does take is strict lockstep (no prediction at match end).
-    hold_wait = branch_src[call_idx:]
-    assert "_kn_peek_pending_rollback" in hold_wait
-    assert hold_wait.index("_markTickReturn('skip:rb-shutdown-hold');") > hold_wait.index("holdReplayDue =")
-    assert "const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;" in src
-    # Missing inputs are requested, not just waited on until the deadline.
-    resend = "_requestStrictMenuResends([m.peer], [m.peer.slot], m.frame, nowMs, 'rb-hold');"
-    assert "for (const m of _missingConsumedInputs()) {" in hold_wait
-    assert hold_wait.index(resend) < hold_wait.index("_markTickReturn('skip:rb-shutdown-hold');")
-    # A due replay is never blocked by the strict phase/menu stalls.
-    assert "if (phaseWaitSlots.length && !holdReplayDue) {" in src
-    assert "if (_menuLockstepActive && !holdReplayDue) {" in src
-    assert "return _missingConsumedInputs().length === 0;" in src
-
-    # A hold never outlives the engine it was for.
-    init_idx = src.index("const doRollbackInit = (effectiveDelay")
-    assert "_rbShutdownHold = null;" in src[init_idx : src.index("if (!detMod?._kn_rollback_init)", init_idx)]
-    fallback_idx = src.index("if (consecutiveThrows >= 3 && _useCRollback) {")
-    assert "_rbShutdownHold = null;" in src[fallback_idx : src.index("C-ROLLBACK-FALLBACK", fallback_idx)]
-    helper_idx = src.index("const _shutdownCRollbackForMenu = (tickMod")
-    assert "_clearPendingCInputs('rb-shutdown');" in src[helper_idx : src.index("\n  };\n", helper_idx)]
-
-    # Back in gameplay before the hold ends: the engine never stopped.
-    menu_to_gameplay = src[src.index("MENU→GAMEPLAY transition at") : transition_idx]
-    assert "_rbShutdownHold = null;" in menu_to_gameplay
-
-    # The confirmation check is shared with the host's sync dispatch.
-    assert "_hostStateConfirmed" not in src
-    assert "_dispatchScheduledSyncs(() => _liveStateConfirmed(tickMod));" in src
-
-    # Match stop clears a hold left over from the finished match.
-    stop_idx = src.index("const stopSync = () => {")
-    assert "_rbShutdownHold = null;" in src[stop_idx : src.index("\n  };\n", stop_idx)]
 
 
 def test_rollback_gap_check_ignores_frames_before_c_init():
@@ -525,8 +398,8 @@ def test_start_wait_rtt_timer_does_not_gate_on_phase_floor():
 
 
 def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
-    # Nonzero-frame rollback inits (RB-INIT-CATCHUP, the remixMenuLockstep
-    # deferred init, RB-INIT-TIMEOUT at f>0) left remote frames past the init
+    # Nonzero-frame rollback inits (RB-INIT-CATCHUP, RB-INIT-TIMEOUT
+    # at f>0) left remote frames past the init
     # frame that arrived before init JS-only: the receive path dedups later
     # copies against _remoteInputs, so C predicted them and never verified.
     # Past _frameNum a ZERO_INPUT placeholder (late join) must stay unfed.

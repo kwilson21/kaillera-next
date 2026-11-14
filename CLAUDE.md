@@ -204,9 +204,10 @@ All events go through the default Socket.IO namespace (`/`).
   emulator; the C-level GGPO-style rollback engine (`build/kn_rollback/kn_rollback.c`)
   predicts remote inputs, advances locally, and replays via state ring buffer +
   amortized restore on misprediction. Cross-platform determinism via SoftFloat FPU.
-  Strict lockstep is the silent stall fallback inside the same engine (boot
-  convergence, menu phase-lock gate) and the path used when the core does not
-  export `kn_pre_tick`. Menu lockstep gate reads `game_status` from RDRAM.
+  Rollback runs on every screen, menus included; nothing in the engine's tick
+  depends on the scene the game is showing. Strict lockstep is the path used
+  when the core does not export `kn_pre_tick` (or the C engine was disabled
+  after repeated throws).
   Host-authoritative resync remains as fallback for reconnection and late join.
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
   video via WebRTC MediaStream. Guests send input back over DataChannel.

@@ -37,15 +37,12 @@ recovered.
 | `_syncTargetFrame` (guest holds state for coordinated frame-boundary apply; also a non-coordinated state 1-2 frames ahead of the guest, `sync held`) | `SYNC_COORD_TIMEOUT_MS = 3000` | Drop target, apply pending state at current frame (non-coord branch) | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `_scheduledSyncRequests` entries (host captures state at scheduled target frame; in rollback mode also waits until its state is confirmed — no replay pending, every live peer's consumed input real) | `SYNC_COORD_TIMEOUT_MS = 3000` | Dispatch request at current frame | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `INPUT-STALL` hard-timeout (fabricate ZERO_INPUT after input missing) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Fabricate AND request full resync so divergence converges | `INPUT-STALL-RESYNC` | §MF4 |
-| PHASE-LOCK stall (strict menu/gameplay phase mismatch) | `MAX_STALL_MS`, repeat every `RESEND_TIMEOUT_MS` | Keep waiting; phase packets already rebroadcast at `PHASE_BROADCAST_INTERVAL_MS` | `PHASE-LOCK-WAIT` | rollback health audit 2026-04-27, corrected 2026-04-30 |
-| MENU-LOCKSTEP stall (strict controllable menu input missing) | `MAX_STALL_MS`, repeat per missing slot every `RESEND_TIMEOUT_MS` | Keep waiting, show the waiting overlay after 5s, and resend missing input request; never fabricate menu input | `MENU-LOCKSTEP-WAIT` / `MENU-LOCKSTEP resend-request` | rollback health audit 2026-04-27, corrected 2026-04-30 |
+| MENU-LOCKSTEP stall (lockstep path only, when the C rollback engine is not running: a controllable Smash Remix menu's input is missing) | `MAX_STALL_MS`, repeat per missing slot every `RESEND_TIMEOUT_MS` | Keep waiting, show the waiting overlay after 5s, and resend missing input request; never fabricate menu input | `MENU-LOCKSTEP-WAIT` / `MENU-LOCKSTEP resend-request` | rollback health audit 2026-04-27, corrected 2026-04-30 |
 | RB-INPUT-STALL (rollback gameplay input missing beyond budget). An input from before the last resync's frame minus the delay is never waited for (`_inputFloor`): the state both pages loaded holds its effect, and a guest moved forward by the resync never made it | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer, release rollback input stall | `RB-INPUT-STALL-TIMEOUT` | rollback health audit 2026-04-27; specs/resync_inputs.qnt `noWaitForAnInputThatCannotArrive` |
-| `_rbShutdownHold` (Smash Remix GAMEPLAY→MENU: C-rollback shutdown waits until the live state is confirmed — no replay pending, every consumed remote input present and fed to C; the frame holds meanwhile, only replays step, in strict lockstep) | `RB_SHUTDOWN_HOLD_MS = 3000`, checked on each tick that reaches the C path (pacing and RB-INPUT-STALL skips before it have their own 5000ms deadlines) | Shut down anyway; the peers may now differ | `RB-SHUTDOWN-HOLD-TIMEOUT` | Remix pause follow-up to PR #25 |
 | Pending sync state held while a rollback replay is in flight (C refuses `kn_set_frame` mid-replay) | `SYNC_APPLY_REPLAY_WAIT_MS = 1000` | Drop the replay (`kn_clear_replay_state`) and load the state | `SYNC-APPLY-DEFERRED` | two-browser test 2026-09-24 |
 | `_lateJoinPaused` (host pauses tick loop while late-joiner loads state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Resume, broadcast roster, `hardDisconnectPeer()` the joining peer | `LATE-JOIN-TIMEOUT` | §MF5 |
 | Joiner waiting for an answer to its state request (`_awaitingLateJoinState`). The request is repeated every `LATE_JOIN_WAIT_RETRY_MS = 5000`; the wait is an Effect program (`web/src/late-join-wait.ts`) | `LATE_JOIN_WAIT_TIMEOUT_MS = 60000` | Report `late-join-timeout` and tell the player to reload. No guess is made about the host: a running host sends no input to a pending joiner, so silence does not mean it is still waiting. A host that is not running yet answers each request with `join-the-start` on the joiner's own data channel, and the joiner then loads as a starter (`emu-ready`) | `LATE-JOIN-WAIT-TIMEOUT` | specs/room_lifecycle.qnt `joinersAreNotLeftWaitingAtTheStart` |
 | Late-join worker round-trip (joiner decompresses initial state) | `LATE_JOIN_TIMEOUT_MS = 15000` | Abort late-join; host's timeout cleans up the joiner | `WORKER-STALL` | §MF5 |
-| BOOT-LOCKSTEP stall (pre-menu boot convergence, before `_menuLockstepActive`) | `max(33, min(250, rttMedian*2))`ms (in tick loop) | Fabricate zero input for the missing slot and continue | `BOOT-LOCKSTEP` | commit 788add0 |
 | `_awaitingResync` (guest waiting for state after coord stall) | 3000ms | Resume without corrected state (known livelock, see SF5) | (timeout log only) | spec SF5 |
 | `_runSubstate === RUN_PACING` (pacing throttle skipping frame advance) | `PACING_THROTTLE_TIMEOUT_MS = 5000` | Force-phantom slowest peer, release pacing | `PACING-THROTTLE-TIMEOUT` | match f0566d95 |
 | Peer staleness (`ROLLBACK-STALL`, `PEER-PHANTOM`) | `ROLLBACK_STALL_MS = 3000`, `PEER_DEAD_MS = 5000`; clocks shifted forward by any gap ≥ `LOCAL_FREEZE_CREDIT_MS = 1000` between our own ticks (not while the tab is hidden, where 1 Hz ticks are normal) | Freeze sim, then phantom the peer. A local freeze doesn't count against the peer; a peer still quiet after we resume times out on the normal schedule | `ROLLBACK-STALL start` / `PEER-PHANTOM` / `LOCAL-FREEZE` | two-browser test 2026-09-24 |
@@ -71,8 +68,6 @@ separate path that discards all peer state at once instead.
 - `_lastRemoteFramePerSlot[slot]` — highest received frame
 - `_peerLastAdvanceTime[slot]` — wall-clock of last new frame
 - `_peerPhantom[slot]` — dead-peer flag
-- `_peerPhases[slot]` — last menu/gameplay phase broadcast
-- `_phaseMismatchGrace[slot]` — phase transition grace window
 - `_consecutiveFabrications[slot]` — fabrication counter
 - `_inputLateLogTime[slot]` — rate-limit timestamp
 - `_auditLastRemote[slot]` — last audited remote input
@@ -89,10 +84,6 @@ separate path that discards all peer state at once instead.
 
 - `_pendingCInputs` (entries filtered by slot)
 - `_scheduledSyncRequests` (entries filtered by targetSid when provided)
-
-**Boot-stall tracking** (when currently stalled):
-
-- `_bootStallFrame`, `_bootStallStartTime`, `_bootStallRecoveryFired`
 
 Rollback-input DC close is intentionally lighter than a full peer
 reset: `resetPeerRollbackTransport(peer, sid, 'rb-dc-close')` clears
