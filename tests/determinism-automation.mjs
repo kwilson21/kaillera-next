@@ -125,7 +125,7 @@ const YELLOW_SCREEN_SAMPLE_DELAY_MS = 500;
 const RENDERED_CANVAS_SAMPLE_W = 48;
 const RENDERED_CANVAS_SAMPLE_H = 36;
 
-// Keyboard-based input (matches DEFAULT_N64_KEYMAP in web/static/shared.js).
+// Keyboard-based input (matches DEFAULT_N64_KEYMAP in web/src/page/shared.ts).
 // Using real keyboard events routes through the netplay engine's local-input
 // capture (readLocalInput → heldKeys), which is what gets sent to peers.
 // Calling _simulate_input directly bypasses the netplay capture layer and

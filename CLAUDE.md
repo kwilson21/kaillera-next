@@ -94,7 +94,6 @@ kaillera-next/
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
 │       ├── netplay-streaming.js # streaming engine (host video → guests)
-│       ├── shared.js            # input encoding/decoding, cheats, wire format
 │       ├── gamepad-manager.js   # gamepad profiles, remapping, slot assignment
 │       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
 │       ├── controller-settings.js # in-game controller settings panel
@@ -127,6 +126,7 @@ kaillera-next/
 │   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
+│   │   ├── page/shared.ts       # window.KNShared and window.KNEvent: cheats, key tracking, local input, input wire format, WebRTC peer helpers (was web/static/shared.js)
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
@@ -310,8 +310,9 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   server sleeps.
   The play and demo pages require the bundle: if `window.KNCore` is missing
   they tell the player to reload and stop, so `play.js`, `demo.js` and the
-  engine call `window.KNCore` without a fallback. `shared.js` keeps its own
-  fallback because tests load it outside a page.
+  engine call `window.KNCore` without a fallback. `window.KNShared` is
+  defined by the bundle too (`web/src/page/shared.ts`); tests import that
+  module directly instead of loading a script outside a page.
   After changing `web/src`, run `just build` and commit
   `web/static/dist/kn-core.js`; CI fails if it is stale. Migration stages are
   in `docs/roadmap.md`. A module moves from observing to deciding only after

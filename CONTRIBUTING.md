@@ -129,9 +129,9 @@ earlier ones to have set up their `window.*` exports:
 6. `storage.js` — safe localStorage/sessionStorage wrapper
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
 8. `kn-state.js` — shared state namespace
-9. `gamepad-manager.js` — gamepad profiles and mapping
-10. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
-11. `shared.js` — input encoding/decoding, cheats, wire format
+9. `dist/kn-core.js` — the TypeScript bundle (`window.KNCore`); also defines `window.KNShared` (`web/src/page/shared.ts`: input encoding/decoding, cheats, wire format)
+10. `gamepad-manager.js` — gamepad profiles and mapping
+11. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
 12. `virtual-gamepad.js` — touch controls for mobile
 13. `kn-audio.js` — AudioWorklet pump + rollback audio capture
 14. `kn-diagnostics.js` — rollback diagnostics ring buffer (RB-CHECK, audit log)
@@ -177,11 +177,11 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | File | Lines | What it does | Talks to |
 |---|---|---|---|
 | `play.js` | ~5,820 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
-| `netplay-rollback.js` | ~18,250 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file | play.js, KNState, shared.js |
+| `netplay-rollback.js` | ~18,250 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file | play.js, KNState, KNShared |
 | `rollback-shadow-worker.js` | — | Shadow worker (OffscreenCanvas overlay, second forward-only mupen64plus instance): presentation in Mode 1, a replay coprocessor whose corrected state main adopts in Mode 2 | netplay-rollback.js |
 | `netplay-lockstep.js` | ~52 | Deprecated compat shim — if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work. Remove once cached tabs are gone. | (none) |
-| `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
-| `shared.js` | ~1,060 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
+| `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, KNShared |
+| `web/src/page/shared.ts` (in `dist/kn-core.js`) | ~650 | `window.KNShared`: input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
 | `gamepad-manager.js` | ~550 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
 | `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |

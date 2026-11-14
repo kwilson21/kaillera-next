@@ -24,6 +24,7 @@ import {
   decodeUsersUpdated,
 } from './protocol.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
+import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
@@ -311,4 +312,7 @@ declare global {
   }
 }
 
-if (typeof window !== 'undefined') window.KNCore = KNCore;
+if (typeof window !== 'undefined') {
+  window.KNCore = KNCore;
+  installShared();
+}
