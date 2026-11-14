@@ -2,7 +2,6 @@
 import os
 
 import pytest
-from playwright.sync_api import sync_playwright
 
 # Device viewports matching real phones
 IPHONE_14_PORTRAIT = {"width": 390, "height": 844}
@@ -14,53 +13,40 @@ IPAD_PORTRAIT = {"width": 820, "height": 1180}
 # KN_TEST_PORT lets parallel checkouts each run their own test server.
 SERVER = f"http://localhost:{os.environ.get('KN_TEST_PORT', '27888')}"
 
-# Minimal page simulating play.html for a streaming guest
+# The play page in a game, as far as layout goes: the real stylesheet and the
+# real in-game toolbar (Leave is a button in it), with a 4:3 block standing in
+# for the video. The same markup as tests/vgp-test.html.
 STREAMING_GUEST_PAGE = """<!DOCTYPE html>
 <html>
 <head>
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<link rel="stylesheet" href="/static/play.css">
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body {
-  background:#111; color:#eee; font-family:sans-serif;
-  height:100vh; height:100dvh;
-  display:flex; flex-direction:column; align-items:center;
-  overflow:hidden; overscroll-behavior:none;
-}
-#game {
-  width:100vw; max-width:100vw; flex:1 1 0; min-height:0;
-  margin:auto 0; order:1;
-}
-#game video, #game .fake-video {
-  max-width:100%; width:100%; height:100%; object-fit:contain; display:block;
-}
-#toolbar {
-  width:100%; flex-shrink:0; order:10;
-  display:flex; flex-wrap:wrap; gap:8px; padding:8px 12px;
-  background:rgba(17,17,17,0.95); z-index:50; align-items:center;
-}
-#toolbar button { padding:6px 12px; font-size:12px; min-height:36px;
-  background:#333; color:#eee; border:1px solid #555; border-radius:4px; cursor:pointer; }
-#leave-btn {
-  display:block; width:100%; background:#3a2a2a; order:11;
-  font-size:13px; padding:10px; min-height:38px; color:#eee; border:none; cursor:pointer;
+#game .fake-video {
+  height:100%; aspect-ratio:4/3; max-width:100%; margin:0 auto;
+  background:#234; display:flex; align-items:center; justify-content:center;
+  color:#555; font-size:20px;
 }
 </style>
 </head>
 <body>
   <div id="game">
-    <div class="fake-video" style="background:#234;display:flex;align-items:center;
-      justify-content:center;color:#555;font-size:20px;aspect-ratio:4/3;">
-      STREAMING VIDEO
+    <div class="fake-video">STREAMING VIDEO</div>
+  </div>
+  <div id="info-overlay">
+    <span id="info-header">Room TEST1234</span>
+    <span id="info-stats">f=1234 delay=4f ping=32ms</span>
+  </div>
+  <div id="gamepad-indicator" class="hidden">Gamepad connected</div>
+  <div id="toolbar">
+    <span id="toolbar-room">TEST1234</span>
+    <span id="toolbar-status"></span>
+    <div class="toolbar-spacer"></div>
+    <button id="toolbar-leave">Leave</button>
+    <div id="more-wrapper">
+      <button id="toolbar-more" class="toolbar-toggle" title="More options">&#x22EF;</button>
     </div>
   </div>
-  <div id="toolbar">
-    <span style="font-size:12px;color:#888;">Room: TEST</span>
-    <span style="font-size:12px;color:#6f6;">Connected</span>
-    <button>Share</button>
-    <button>Info</button>
-  </div>
-  <button id="leave-btn">Leave Game</button>
   <script src="/static/virtual-gamepad.js"></script>
   <script>
     window._testTouchState = {};
@@ -74,6 +60,8 @@ def _init_page(page, html, server=SERVER):
     page.set_content(html)
     page.add_script_tag(url=f"{server}/static/virtual-gamepad.js")
     page.wait_for_timeout(200)
+    # The layout checks below mean nothing on an unstyled page.
+    assert page.evaluate("getComputedStyle(document.body).display") == "flex", "play.css did not load"
 
 
 def _init_gamepad(page):
@@ -94,40 +82,47 @@ def _screenshot(page, name):
     return path
 
 
+# Z and Start are on the page twice: one copy for portrait and one for
+# landscape, and the stylesheet shows one of them. A selector is therefore
+# resolved to the copy that is shown, never to the first match.
+_SHOWN = """
+    const shown = (sel) => [...document.querySelectorAll(sel)].filter((el) => {
+        if (window.getComputedStyle(el).display === 'none') return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    });
+"""
+
+
 def _check_no_overlap(page, sel_a, sel_b):
-    """Check that two elements don't visually overlap. Returns True if NO overlap."""
-    return page.evaluate("""([selA, selB]) => {
-        const a = document.querySelector(selA);
-        const b = document.querySelector(selB);
-        if (!a || !b) return true;  // missing element = no overlap
-        const ra = a.getBoundingClientRect();
-        const rb = b.getBoundingClientRect();
+    """Check that no shown element of one selector overlaps one of the other. True if NO overlap."""
+    return page.evaluate("""([selA, selB]) => {""" + _SHOWN + """
         // No overlap if one is entirely above/below/left/right of the other
-        return ra.bottom <= rb.top || rb.bottom <= ra.top ||
-               ra.right <= rb.left || rb.right <= ra.left;
+        return shown(selA).every((a) => shown(selB).every((b) => {
+            const ra = a.getBoundingClientRect();
+            const rb = b.getBoundingClientRect();
+            return ra.bottom <= rb.top || rb.bottom <= ra.top ||
+                   ra.right <= rb.left || rb.right <= ra.left;
+        }));
     }""", [sel_a, sel_b])
 
 
 def _check_within_viewport(page, selector):
-    """Check element is fully within viewport bounds."""
-    return page.evaluate("""(sel) => {
-        const el = document.querySelector(sel);
-        if (!el) return false;
-        const r = el.getBoundingClientRect();
-        return r.top >= 0 && r.left >= 0 &&
-               r.bottom <= window.innerHeight && r.right <= window.innerWidth;
+    """Check the shown element is fully within viewport bounds."""
+    return page.evaluate("""(sel) => {""" + _SHOWN + """
+        const els = shown(sel);
+        return els.length > 0 && els.every((el) => {
+            const r = el.getBoundingClientRect();
+            return r.top >= 0 && r.left >= 0 &&
+                   r.bottom <= window.innerHeight && r.right <= window.innerWidth;
+        });
     }""", selector)
 
 
 def _check_element_visible(page, selector):
-    """Check element exists and is visible (display != none, has dimensions)."""
-    return page.evaluate("""(sel) => {
-        const el = document.querySelector(sel);
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none') return false;
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
+    """Check exactly one element of the selector is shown (display != none, has dimensions)."""
+    return page.evaluate("""(sel) => {""" + _SHOWN + """
+        return shown(sel).length === 1;
     }""", selector)
 
 
@@ -137,16 +132,17 @@ class TestGamepadLayout:
     """Virtual gamepad doesn't overlap video or toolbar on any device."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
-        self.pw = sync_playwright().start()
-        yield
-        self.pw.stop()
+    def setup(self, browser, server_url):
+        # The session's own browser (pytest-playwright), not a second
+        # Playwright: conftest.py already starts one for every test, and the
+        # sync API refuses to start another on the same thread.
+        self.browser = browser
+        self.server = server_url
 
     def _test_device(self, viewport, name):
-        browser = self.pw.chromium.launch()
-        ctx = browser.new_context(viewport=viewport, has_touch=True, is_mobile=True)
+        ctx = self.browser.new_context(viewport=viewport, has_touch=True, is_mobile=True)
         page = ctx.new_page()
-        _init_page(page, STREAMING_GUEST_PAGE)
+        _init_page(page, STREAMING_GUEST_PAGE, self.server)
         _init_gamepad(page)
         _screenshot(page, name)
 
@@ -162,8 +158,8 @@ class TestGamepadLayout:
             if not _check_no_overlap(page, btn_sel, '#toolbar'):
                 print(f"  OVERLAP: {btn_sel} overlaps #toolbar")
                 no_toolbar_overlap = False
-            if not _check_no_overlap(page, btn_sel, '#leave-btn'):
-                print(f"  OVERLAP: {btn_sel} overlaps #leave-btn")
+            if not _check_no_overlap(page, btn_sel, '#toolbar-leave'):
+                print(f"  OVERLAP: {btn_sel} overlaps #toolbar-leave")
                 no_leave_overlap = False
 
         # Check all critical buttons exist and are visible
@@ -176,7 +172,7 @@ class TestGamepadLayout:
         # Check stick zone visible
         assert _check_element_visible(page, '.vgp-stick-zone'), f"{name}: stick not visible"
 
-        browser.close()
+        ctx.close()
 
         # Soft assertions — print but don't fail on toolbar overlap (will fix iteratively)
         if not no_toolbar_overlap:
@@ -207,16 +203,17 @@ class TestTouchInput:
     """Touch events properly update state."""
 
     @pytest.fixture(autouse=True)
-    def setup(self):
-        self.pw = sync_playwright().start()
-        yield
-        self.pw.stop()
+    def setup(self, browser, server_url):
+        # The session's own browser (pytest-playwright), not a second
+        # Playwright: conftest.py already starts one for every test, and the
+        # sync API refuses to start another on the same thread.
+        self.browser = browser
+        self.server = server_url
 
     def test_a_button_tap(self):
-        browser = self.pw.chromium.launch()
-        ctx = browser.new_context(viewport=IPHONE_14_PORTRAIT, has_touch=True, is_mobile=True)
+        ctx = self.browser.new_context(viewport=IPHONE_14_PORTRAIT, has_touch=True, is_mobile=True)
         page = ctx.new_page()
-        _init_page(page, STREAMING_GUEST_PAGE)
+        _init_page(page, STREAMING_GUEST_PAGE, self.server)
         _init_gamepad(page)
 
         # Verify A button exists
@@ -226,7 +223,7 @@ class TestTouchInput:
         has_gp = page.evaluate("() => !!document.getElementById('virtual-gamepad')")
         assert has_gp, "Virtual gamepad not in DOM"
 
-        browser.close()
+        ctx.close()
 
 
 if __name__ == "__main__":
