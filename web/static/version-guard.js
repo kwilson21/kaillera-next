@@ -50,16 +50,7 @@
   const _logMismatch = (serverVersion, action) => {
     const line = `VERSION-MISMATCH page=${pageLoadedVersion} server=${serverVersion} action=${action}`;
     console.warn(`${LOG_PREFIX} ${line}`);
-    // Forward to lockstep sync log if available so analyze_match.py can
-    // surface the event from session-log exports.
-    try {
-      if (window.KNLockstep?.logSync) {
-        window.KNLockstep.logSync(line);
-      } else if (window.KNState?._syncLog) {
-        window.KNState._syncLog(line);
-      }
-    } catch (_e) {}
-    // Also emit as a KNEvent so the session timeline picks it up.
+    // Emit as a KNEvent so the session timeline picks it up.
     try {
       if (typeof window.KNEvent === 'function') {
         window.KNEvent('version_mismatch', line, {
@@ -71,17 +62,14 @@
     } catch (_e) {}
   };
 
+  // The play page answers from its session machine (KNState.gameOn, set by
+  // play.js). Pages with no game (front page, admin) have no KNState.
   const _gameInProgress = () => {
-    // Rough heuristic: netplay-lockstep flips KNState.running or
-    // KNState.sessionStats when a match is active.
     try {
-      if (window.KNState?.running === true) return true;
-      const stats = window.KNState?.sessionStats;
-      if (stats && typeof stats.frames === 'number' && stats.frames > 0) {
-        return true;
-      }
-    } catch (_e) {}
-    return false;
+      return window.KNState?.gameOn?.() === true;
+    } catch (_e) {
+      return false;
+    }
   };
 
   const _safeToReload = () => {

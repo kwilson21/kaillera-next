@@ -33,6 +33,7 @@
     matchId: null, // signaling game-started → lockstep flush interval
     isLocalHost: false, // play.js → kn-desync-detector.js
     boardFrame: false, // play.js → kn-diagnostics.js (host of a listed room: larger screenshots)
+    gameOn: () => false, // play.js (its session machine) → version-guard.js: no reload mid-game
 
     // ── Constants ──
     DEFAULT_ICE_SERVERS: [{ urls: 'stun:stun.cloudflare.com:3478' }],
