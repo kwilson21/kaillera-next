@@ -483,7 +483,7 @@
           window.__knInstallUnpackAlignmentShim();
         }
       })();
-      // Sync EJS keyboard defaults with our DEFAULT_N64_KEYMAP (shared.js).
+      // Sync EJS keyboard defaults with our DEFAULT_N64_KEYMAP (web/src/page/shared.ts).
       // This ensures the Emscripten SDL keyboard layer uses the same keys
       // as our netplay input system, preventing EJS TFGH defaults from
       // conflicting with our WASD analog mapping.
@@ -523,25 +523,16 @@
     <!-- fflate — fast ZIP extraction for ROM .zip files -->
     <script src="/static/vendor/fflate.min.js"></script>
 
-    <!-- The TypeScript core (window.KNCore). Loaded before the scripts that
-         build on it: it sets window.KNStorage (safe storage, with an
-         in-memory fallback for privacy browsers), which kn-state.js reads as
-         it loads, and shared.js and the engines take their input codec, stick
-         dead-band and sync log from it. -->
+    <!-- The TypeScript core (window.KNCore), safe storage (window.KNStorage,
+         with an in-memory fallback for privacy browsers), the state the
+         scripts share (window.KNState) and the shared netplay utilities
+         (window.KNShared: cheats, keymap, input tracking, input codec). Loaded
+         before every script that builds on any of them. -->
     <script src="/static/dist/kn-core.js"></script>
     <script src="/static/kn-capture.js"></script>
 
-    <!-- Centralized cross-module state -->
-    <script src="/static/kn-state.js"></script>
-
-    <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->
-    <script src="/static/gamepad-manager.js"></script>
-
     <!-- Switch 2 Pro Controller: WebUSB handshake that makes it appear as a gamepad -->
     <script src="/static/switch2-usb.js"></script>
-
-    <!-- Shared netplay utilities (cheats, keymap, input tracking) -->
-    <script src="/static/shared.js"></script>
 
     <!-- Virtual gamepad for mobile streaming guests -->
     <script src="/static/virtual-gamepad.js"></script>
