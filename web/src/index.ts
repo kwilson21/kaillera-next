@@ -64,6 +64,7 @@ import { createStickDeadband } from './stick-deadband.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
+import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
   sessionFlag,
@@ -321,4 +322,5 @@ if (typeof window !== 'undefined') {
   window.KNCore = KNCore;
   // The scripts that load after the bundle read window.KNStorage as they load.
   installSafeStorage();
+  installDesyncDetector();
 }
