@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.9",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync request that gets no answer has a deadline (#190)"
+      }
+    ]
+  },
+  {
     "version": "0.68.8",
     "date": "2026-11-14",
     "changes": [
