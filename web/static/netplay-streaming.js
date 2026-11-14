@@ -163,7 +163,14 @@
         known: () => _knownPlayers,
         running: () => _gameRunning,
         live: () => !!_hostStream,
+        capture: () => ({ mode: _captureMode, scale: _captureScaleDownBy }),
+        cooldownUntil: () => _hostFrameRateResetCooldownUntil,
         packet: (input) => KNShared.encodeInput(0, input),
+        page: () => ({
+          search: window.location.search,
+          stored: KNStorage.get('localStorage', 'kn-stream-capture'),
+          userAgent: navigator.userAgent,
+        }),
       },
     );
   } catch (_) {}
@@ -286,6 +293,7 @@
       const frame = mod._get_current_frame_count?.() || 0;
       const elapsed = now - lastAt;
       const delta = frame - lastFrame;
+      _observer.fpsWatchdog(now, elapsed, delta);
       lastAt = now;
       lastFrame = frame;
       if (elapsed <= 0 || delta <= 0) return;
@@ -561,7 +569,9 @@
     _observer.offered(remoteSid);
     try {
       const offer = await peer.pc.createOffer();
+      const browserSdp = offer.sdp;
       offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
+      _observer.offerSdp(browserSdp, offer.sdp);
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
     } catch (err) {
@@ -839,6 +849,7 @@
       return { sx: 0, sy: 0, sw, sh };
     };
     let crop = computeCrop();
+    _observer.blitCrop(crop, srcCanvas.width, srcCanvas.height);
 
     _syncLog(
       `source canvas: ${srcCanvas.width}x${srcCanvas.height} → capture canvas: 640x480 (crop: ${crop.sx},${crop.sy} ${crop.sw}x${crop.sh})`,
@@ -888,6 +899,7 @@
   const startCanvasCapture = (srcCanvas) => {
     const preference = getCaptureModePreference();
     const isSafari = isSafariBrowser();
+    _observer.capture(preference, isSafari, srcCanvas);
     if (preference === 'direct' && !isSafari) {
       try {
         startDirectCanvasCapture(srcCanvas);
@@ -1003,7 +1015,9 @@
     if (!peer) return;
     try {
       const offer = await peer.pc.createOffer();
+      const browserSdp = offer.sdp;
       offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
+      _observer.offerSdp(browserSdp, offer.sdp);
       await peer.pc.setLocalDescription(offer);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
     } catch (err) {
@@ -1081,6 +1095,7 @@
     for (const sender of pc.getSenders()) {
       if (sender.track?.kind === 'video') {
         const params = sender.getParameters();
+        _observer.encoding(params);
         if (!params.encodings || params.encodings.length === 0) {
           params.encodings = [{}];
         }

@@ -63,6 +63,7 @@ import * as streamingInput from './streaming/input.ts';
 import { createStreamingObserver } from './streaming/observe.ts';
 import * as streamingRoster from './streaming/roster.ts';
 import * as streamingSignal from './streaming/signal.ts';
+import * as streamingVideo from './streaming/video.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
@@ -303,6 +304,7 @@ export const KNCore = {
     ...streamingRoster,
     ...streamingSignal,
     ...streamingInput,
+    ...streamingVideo,
     createObserver: createStreamingObserver,
   },
   protocol: {
