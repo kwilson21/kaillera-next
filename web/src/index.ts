@@ -10,6 +10,7 @@ import { bootTimedOut } from './boot.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
+import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { captureFrame } from './desync-capture.ts';
@@ -317,5 +318,6 @@ if (typeof window !== 'undefined') {
   window.KNCore = KNCore;
   // The scripts that load after the bundle read window.KNStorage as they load.
   installSafeStorage();
+  installDiagnostics();
   installDesyncDetector();
 }

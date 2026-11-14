@@ -1,10 +1,10 @@
 /**
  * The arithmetic of the freeze and render diagnostics
- * (web/static/kn-diagnostics.js): what a canvas's pixels hash to, whether
+ * (web/src/page/diagnostics.ts, `window.KNDiag`): what a canvas's pixels hash to, whether
  * they look like the solid pale frame of a broken renderer, which part of
  * the canvas a screenshot takes, and what an audio state change means.
  *
- * kn-diagnostics.js reads the pixels and the audio state from the browser
+ * page/diagnostics.ts reads the pixels and the audio state from the browser
  * and writes the log lines; these functions are given the numbers. None of
  * this feeds the emulator or the netplay engine: it only decides what is
  * logged and reported.
