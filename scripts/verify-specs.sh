@@ -92,10 +92,13 @@ expect_violation "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
 
 
 RESYNC=specs/resync_inputs.qnt
-verify "$RESYNC" resync_inputs_current allHold
+verify "$RESYNC" resync_inputs_current neverBothWaitingOnNothing
+verify "$RESYNC" resync_inputs_fixed allHold
 # The counterexample on resync_inputs_before is 10 steps long (the host has to
 # run far enough ahead for the guest to drop its inputs), beyond this bound;
 # check-specs.sh's scenarios and samples reach it.
+# So is the one on resync_inputs_current for noWaitForAnInputThatCannotArrive
+# (a resync that moves the guest back past inputs the host dropped).
 
 MESH=specs/resync_mesh.qnt
 verify "$MESH" resync_mesh_current allHold

@@ -161,14 +161,21 @@ $QUINT run "$TICK" --main=tick_deadlines_fixed --invariant=ownFreezeIsNotHeldAga
 # ── Inputs around a resync: what a page may wait for afterwards ─────────────
 RESYNC=specs/resync_inputs.qnt
 $QUINT typecheck "$RESYNC"
-for variant in resync_inputs_before resync_inputs_current; do
+for variant in resync_inputs_before resync_inputs_current resync_inputs_fixed; do
   $QUINT test "$RESYNC" --main="$variant" --backend=typescript
 done
-# Today: after a resync nobody waits for an input that cannot arrive, and the
-# two pages are never both waiting on nothing. Both were violated before a
-# resync settled the inputs from before its frame (resync_inputs_before): a
-# resync that moved the guest forward left holes on both pages.
-$QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
+# Today: after a resync the two pages are never both waiting on nothing.
+# Violated before a resync settled the inputs from before its frame
+# (resync_inputs_before): a resync that moved the guest forward left holes on
+# both pages.
+$QUINT run "$RESYNC" --main=resync_inputs_current --invariant=neverBothWaitingOnNothing \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+# Not yet: nobody waits for an input that cannot arrive. Today's engine still
+# violates it when a resync moves the guest back past inputs the host dropped
+# while it was behind (the scenario hostFreezesThenResyncsBackwardTest shows
+# it on resync_inputs_current). It holds once the guest sends its inputs for
+# the frames before the resync again, held or just made.
+$QUINT run "$RESYNC" --main=resync_inputs_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # The same from a third page's side, and across matches.
