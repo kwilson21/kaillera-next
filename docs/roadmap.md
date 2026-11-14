@@ -262,8 +262,13 @@ modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
 keeps the channel, the timers and the page. The host's sending side and the
 WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
 (each player slot, the spectator line, the in-game info panel; the Start
-button's rule is observed, `play.js` still decides it). Last: connect, the game
-lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
+button's rule is observed, `play.js` still decides it). Joining a room:
+the `open-room` and `join-room` requests are built in `connect.ts` and typed
+against the generated schemas, with what each refusal means; whether a page
+comes in as a spectator and how it gets into a match already under way are
+`join-plan.ts` (proved), observed, with `onConnect` still deciding. Left in
+`play.js`: the reconnect banner's timers, the game lifecycle handlers and
+engine start-up, which are effects on the page, the socket and the emulator.
 
 **Stage 4: engine periphery [pure logic done]**
 `shared.js` (input wire format; prove encode/decode round-trips with
