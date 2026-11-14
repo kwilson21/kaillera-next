@@ -33,7 +33,7 @@ const After = Schema.Struct({
   stateId: Schema.String,
 });
 type After = typeof After.Type;
-/** What a transition asks its host to do: issue a command, arm a deadline, disarm one. */
+/** What a transition asks of its host: issue a command, arm a deadline, disarm one. */
 const decodeEffect = Schema.decodeUnknownOption(
   Schema.Union([
     Schema.Struct({ type: Schema.Literal('issue'), args: Schema.Tuple([Schema.Struct({ command: PeerCommand })]) }),
