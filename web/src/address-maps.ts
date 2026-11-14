@@ -71,6 +71,18 @@ export interface RomAddresses {
   readonly name: string;
   readonly map: AddressMap;
   readonly scenes: SceneIds;
+  /**
+   * Where the battle header says a match is under way: a byte at `offset`
+   * within it reads `ongoing`. Not hashed; the verifier in
+   * tests/rb-two-player.mjs uses it to tell the live battle state from a
+   * dormant copy of it.
+   */
+  readonly battleStatus: BattleStatus;
+}
+
+export interface BattleStatus {
+  readonly offset: number;
+  readonly ongoing: number;
 }
 
 /** What the page hands the detector: the map packed in registry order. */
@@ -78,21 +90,28 @@ export interface PackedRomAddresses {
   readonly name: string;
   readonly values: readonly number[];
   readonly scenes: SceneIds;
+  readonly battleStatus: BattleStatus;
 }
 
 /**
  * SSB64 US. Each address is cited to the decomp in
- * build/kn_rollback/kn_gameplay_addrs.h and kn_hash_registry.h, which hold
- * the same numbers as the registry's built-in map; tests/hash-golden checks
- * them against a RAM dump of a match.
+ * build/kn_rollback/kn_gameplay_addrs.h and kn_hash_registry.h.
+ *
+ * The battle state is the struct the game is running the match from:
+ * gSCManagerTransferBattleState at 0x800A4D08, which gSCManagerBattleState
+ * (0x800A50E8) points at for a normal VS match. gSCManagerVSBattleState at
+ * 0x800A4EF8, which this map used to name, is only used for sudden death;
+ * during a match its status stays 0 and its stock counts stay 0, so hashes
+ * of it never differed whatever the peers did. tests/hash-golden reads both
+ * from a RAM dump of a match.
  */
 const SSB64_US: RomAddresses = {
   name: 'ssb64-us',
   map: {
-    stocksBase: 0xa4f23,
+    stocksBase: 0xa4d33,
     playerStride: 0x74,
     sceneCurr: 0xa4ad0,
-    vsBattleHeader: 0xa4ef8,
+    vsBattleHeader: 0xa4d08,
     vsBattleHeaderSize: 32,
     rngSeed: 0x03b940,
     cssBase: 0x13ba88,
@@ -105,11 +124,25 @@ const SSB64_US: RomAddresses = {
     ftBufferSize: 4096,
   },
   scenes: { characterSelect: 16, stageSelect: 21, battle: 22 },
+  battleStatus: { offset: 0x11, ongoing: 1 },
 };
+
+/**
+ * Smash Remix 2.0.1. Remix is built on SSB64 US and leaves these globals
+ * where they are. One address has a source: smashremix/src/Global.asm:165
+ * gives `game_status` as 0x800A4D19, the status byte of the battle state at
+ * 0x800A4D08. The rest are SSB64's, taken on the evidence of
+ * docs/address-maps.md steps 3 to 5 run on this ROM: the verifier's checks
+ * pass, healthy matches raise no flag, and a changed stock count is flagged.
+ * Other Remix releases are other ROM hashes and have no map until those
+ * steps are run on them.
+ */
+const SMASH_REMIX_2_0_1: RomAddresses = { ...SSB64_US, name: 'smash-remix-2.0.1' };
 
 /** ROM hash (as the page computes it: `S` + SHA-256) to its addresses. */
 export const ROM_ADDRESSES = {
   S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7ea99ef3d: SSB64_US,
+  S7efec9e0983656bb0219a23c511cd1505a5f84d524e50ad4284dc1c7eb4d1403: SMASH_REMIX_2_0_1,
 } satisfies Record<string, RomAddresses>;
 
 const hasMap = (romHash: string): romHash is keyof typeof ROM_ADDRESSES => Object.hasOwn(ROM_ADDRESSES, romHash);
@@ -169,5 +202,5 @@ export const addressMapFor = (romHash: string | null | undefined): PackedRomAddr
   // The table is checked by its tests; this keeps an unsound entry from
   // reaching the core if one ever slips in.
   if (addressMapProblem(rom.map) !== null) return null;
-  return { name: rom.name, values: packAddressMap(rom.map), scenes: rom.scenes };
+  return { name: rom.name, values: packAddressMap(rom.map), scenes: rom.scenes, battleStatus: rom.battleStatus };
 };
