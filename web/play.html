@@ -523,17 +523,16 @@
     <!-- fflate — fast ZIP extraction for ROM .zip files -->
     <script src="/static/vendor/fflate.min.js"></script>
 
-    <!-- Safe storage (in-memory fallback for privacy browsers) -->
-    <script src="/static/storage.js"></script>
+    <!-- The TypeScript core (window.KNCore). Loaded before the scripts that
+         build on it: it sets window.KNStorage (safe storage, with an
+         in-memory fallback for privacy browsers), which kn-state.js reads as
+         it loads, and shared.js and the engines take their input codec, stick
+         dead-band and sync log from it. -->
+    <script src="/static/dist/kn-core.js"></script>
     <script src="/static/kn-capture.js"></script>
 
     <!-- Centralized cross-module state -->
     <script src="/static/kn-state.js"></script>
-
-    <!-- The TypeScript core (window.KNCore). Loaded before the scripts that
-         build on it: shared.js and the engines take their input codec, stick
-         dead-band and sync log from it as they load. -->
-    <script src="/static/dist/kn-core.js"></script>
 
     <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->
     <script src="/static/gamepad-manager.js"></script>
