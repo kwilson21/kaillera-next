@@ -5058,17 +5058,28 @@
   //  - Inputs keyed before frame - delay are in the loaded state already:
   //    settled, never waited for.
   //  - This page's inputs from there up to `frame` are still to be applied.
-  //    The ones it never made are made now (neutral) and sent.
+  //    The ones it never made are made now (neutral). All of them are sent,
+  //    the ones made earlier too: this page may have made one while it ran
+  //    ahead, before it was taken back and moved forward again, and a peer
+  //    far behind at the time dropped it as out of range.
   //  - The peers' inputs for the same range that are missing are asked for.
   const _settleInputsAtResync = (mod, frame) => {
     const from = Math.max(0, frame - DELAY_FRAMES);
     const made = [];
+    const own = [];
     if (_playerSlot !== null && _playerSlot !== undefined) {
       for (let f = from; f < frame; f++) {
-        if (_localInputs[f] !== undefined) continue;
-        _localInputs[f] = KNShared.ZERO_INPUT;
-        _feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);
-        made.push(f);
+        own.push(f);
+        if (_localInputs[f] === undefined) {
+          _localInputs[f] = KNShared.ZERO_INPUT;
+          made.push(f);
+        }
+        // Every one is handed to the engine again, the ones made earlier
+        // too: its input ring holds 256 frames, and a page that ran further
+        // ahead than that before it was taken back has written over the
+        // slot. The peers apply what is sent below; this page must apply
+        // the same.
+        _feedCInput(mod, _playerSlot, f, _localInputs[f]);
       }
     }
     const asked = [];
@@ -5079,8 +5090,8 @@
       try {
         // Every peer waits on this page's inputs, not only the host that
         // sent the state: tell each one where they start again.
-        if (made.length) peer.dc.send(`inputs-settled:${from}`);
-        for (const f of made) peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);
+        if (own.length) peer.dc.send(`inputs-settled:${from}`);
+        for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
         for (let f = from; f < frame; f++) {
           const have = _remoteInputs[peer.slot]?.[f];
           if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
@@ -5091,8 +5102,10 @@
         _syncLog(`RESYNC-INPUTS send failed slot=${peer.slot}: ${err}`);
       }
     }
-    if (made.length || asked.length) {
-      _syncLog(`RESYNC-INPUTS f=${frame} settledBefore=${from} made=[${made.join(',')}] asked=[${asked.join(',')}]`);
+    if (own.length || asked.length) {
+      _syncLog(
+        `RESYNC-INPUTS f=${frame} settledBefore=${from} sent=[${own.join(',')}] made=[${made.join(',')}] asked=[${asked.join(',')}]`,
+      );
     }
   };
 
@@ -5933,6 +5946,25 @@
     if (wait <= 0) flush();
     else _criticalFlushTimer = setTimeout(flush, wait);
   };
+  // Stage 5, observing: the peer mesh's decisions are made by the code below
+  // as before; the proved functions of web/src/peer-signaling.ts run on the
+  // same inputs and a difference is reported as a mesh-disagree client event.
+  // They take over once production shows none. Looked up on first use:
+  // kn-core.js loads after this file.
+  let _meshObserver;
+  const _meshCompare = (what, engineValue, provedValue) => {
+    if (_meshObserver === undefined) {
+      _meshObserver =
+        window.KNCore?.play?.observe?.createComparer?.(({ message, old, next }) => {
+          if (!window.KNState?.uploadToken) return false;
+          window.KNEvent?.('mesh-disagree', message, { old, next });
+          return true;
+        }) ?? null;
+    }
+    _meshObserver?.compare(what, engineValue, provedValue);
+  };
+  const _meshCore = () => window.KNCore ?? null;
+
   // Stage 3, observing: the strings peers send over the DataChannels (and the
   // session-log ack) are checked against web/src/peer-protocol.ts and a
   // mismatch is reported; the handlers below still read the raw message.
@@ -6417,6 +6449,22 @@
   const SOCKET_SYNC_B64_SOFT_LIMIT = 3900000;
   let _lastResyncTime = 0; // timestamp of last resync request (10s cooldown)
   let _resyncRequestInFlight = false; // true while an explicit sync-request is in transit — prevents stacking
+  // I1: the request's own deadline. The host answers one request per guest
+  // every _SYNC_REQUEST_COOLDOWN_MS and drops the rest without a word; the
+  // flag above was then cleared only by a state that was not coming, and the
+  // guest never asked again (specs/resync_flow.qnt). Longer than the host's
+  // rate limit plus its capture deadline, so an answer on its way is not cut.
+  let _resyncRequestSentAt = 0;
+  const RESYNC_REQUEST_TIMEOUT_MS = 8000;
+  const _checkResyncRequestDeadline = () => {
+    if (!_resyncRequestInFlight) return;
+    // An answer is arriving or held: those waits have their own deadlines.
+    if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;
+    const waitedMs = performance.now() - _resyncRequestSentAt;
+    if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;
+    _resyncRequestInFlight = false;
+    _syncLog(`RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} — no state came, may ask again`);
+  };
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
@@ -6907,6 +6955,7 @@
     try {
       _beginLifecycleResyncGuard(reason);
       _resyncRequestInFlight = true;
+      _resyncRequestSentAt = performance.now();
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
       _signalSocket.emit('data-message', {
@@ -7468,6 +7517,21 @@
       // Socket.IO ID and the connection didn't survive — _rosterKey keeps a
       // live one). Clean up the old entry so _peers never has duplicate slots.
       if (p.slot !== null && p.slot !== undefined) {
+        const core = _meshCore();
+        if (core) {
+          const entries = Object.entries(_peers);
+          _meshCompare(
+            'stale-holders',
+            entries
+              .filter(([oldSid, oldPeer]) => oldSid !== p.socketId && oldPeer.slot === p.slot)
+              .map(([oldSid]) => oldSid),
+            core.staleHoldersOf(
+              entries.map(([key, held]) => ({ key, slot: held.slot ?? -1 })),
+              p.socketId,
+              p.slot,
+            ),
+          );
+        }
         for (const [oldSid, oldPeer] of Object.entries(_peers)) {
           if (oldSid !== p.socketId && oldPeer.slot === p.slot) {
             _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
@@ -7495,6 +7559,18 @@
         reason = `slot comparison: ${_playerSlot} < ${p.slot} = ${shouldInitiate}`;
       }
       _syncLog(`onUsersUpdated: new peer ${p.socketId} slot=${p.slot}, initiate=${shouldInitiate} (${reason})`);
+      _meshCompare(
+        'should-initiate',
+        shouldInitiate,
+        _meshCore()?.shouldInitiate(
+          _isSpectator,
+          _lateJoin,
+          _phase === PHASE_RUNNING,
+          shouldHoldForLateJoin,
+          _playerSlot,
+          p.slot,
+        ) ?? shouldInitiate,
+      );
       if (shouldHoldForLateJoin) _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated running peer');
 
       createPeer(p.socketId, p.slot, shouldInitiate);
@@ -7584,6 +7660,12 @@
     if (peer.dc?.readyState === 'open') return;
 
     const nextAttempt = (peer._startupConnectAttempt || 1) + 1;
+    _meshCompare(
+      'startup-attempt-left',
+      !(nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS),
+      _meshCore()?.hasAttemptLeft(nextAttempt - 1, STARTUP_CONNECT_MAX_ATTEMPTS) ??
+        !(nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS),
+    );
     if (nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS) {
       clearStartupConnectWatchdog(peer);
       _syncLog(
@@ -7753,6 +7835,22 @@
     // A fresh offer from a player whose connection was kept across their
     // Socket.IO reconnect means their page reloaded: that connection is a
     // leftover. Drop it, then let the roster set them up as a new peer.
+    // Observing: the step the code below takes first with this signal,
+    // compared with the proved rule's answer for the same table.
+    {
+      const fresh = !!data.offer && !data.reconnect && key !== senderSid;
+      const hasEntry = !!_peers[key];
+      let engineStep;
+      if (fresh) engineStep = 'replaceKept';
+      else if (data.offer && !hasEntry) engineStep = 'create';
+      else if (!hasEntry) engineStep = 'drop';
+      else engineStep = data.offer && data.reconnect ? 'reset' : 'apply';
+      _meshCompare(
+        'signal',
+        engineStep,
+        _meshCore()?.signalDisposition(!!data.offer, !!data.reconnect, key !== senderSid, hasEntry) ?? engineStep,
+      );
+    }
     if (data.offer && !data.reconnect && key !== senderSid) {
       _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
       _evictPeer(key, 'replaced-by-new-page');
@@ -7969,6 +8067,7 @@
           _syncTargetFrame = _recoveryTarget;
           _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
           _resyncRequestInFlight = true;
+          _resyncRequestSentAt = performance.now();
           try {
             const peerDc = _peers[remoteSid]?.dc;
             if (peerDc?.readyState === 'open') {
@@ -8153,6 +8252,7 @@
             _syncTargetFrame = -1;
             _syncTargetDeadlineAt = 0;
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             try {
               hostDc.send('sync-request-full');
               _syncLog('reconnect resync: sent immediate sync-request-full to host DC');
@@ -8578,6 +8678,7 @@
           if (!_resyncRequestInFlight && cooldownElapsed > _resyncCooldownMs()) {
             _lastResyncTime = now2;
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             const _coordTarget = _frameNum + SYNC_COORD_DELTA;
             _syncTargetFrame = _coordTarget;
             _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
@@ -8912,13 +9013,28 @@
       peer._disconnectTimer = null;
     }
 
+    // Observing: what the proved rule would do with this lost connection,
+    // compared with the branch taken below.
+    const provedDisposition = _meshCore()?.disconnectDisposition(
+      _phase < PHASE_GAME_STARTED,
+      !!peer.isInitiator,
+      !!peer._intentionalLeave,
+      _isPeerPendingLateJoin(remoteSid, peer),
+      _phase === PHASE_RUNNING,
+    );
+    const observeDisposition = (taken) => {
+      if (provedDisposition !== undefined) _meshCompare('disconnect', taken, provedDisposition);
+    };
+
     if (_phase < PHASE_GAME_STARTED && peer.isInitiator && !peer._intentionalLeave) {
+      observeDisposition('retryStartup');
       _syncLog(`startup peer ${remoteSid} disconnected before game start — retrying`);
       retryStartupConnection(remoteSid);
       return;
     }
 
     if (_isPeerPendingLateJoin(remoteSid, peer)) {
+      observeDisposition('hardDisconnect');
       _syncLog(`pending late-join peer ${remoteSid} disconnected before activation`);
       hardDisconnectPeer(remoteSid);
       return;
@@ -8926,6 +9042,7 @@
 
     // If game is running and not an intentional leave, attempt reconnect
     if (_phase === PHASE_RUNNING && !peer._intentionalLeave) {
+      observeDisposition('reconnect');
       _syncLog(`peer ${remoteSid} DC died — attempting reconnect`);
 
       // Zero their input but keep peer in _peers
@@ -8958,6 +9075,7 @@
       return;
     }
 
+    observeDisposition('hardDisconnect');
     hardDisconnectPeer(remoteSid);
   };
 
@@ -9036,6 +9154,11 @@
 
     const retryOrGiveUp = () => {
       if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
+      _meshCompare(
+        'reconnect-attempt-left',
+        attempt < _MAX_RECONNECT_ATTEMPTS,
+        _meshCore()?.hasAttemptLeft(attempt, _MAX_RECONNECT_ATTEMPTS) ?? attempt < _MAX_RECONNECT_ATTEMPTS,
+      );
       if (attempt < _MAX_RECONNECT_ATTEMPTS) {
         _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
         setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
@@ -13093,6 +13216,7 @@
         if (!sentSocket && hostPeer?.dc?.readyState === 'open') {
           try {
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             hostPeer.dc.send('sync-request-full');
             _syncLog(`${reason}: sent sync-request-full to host over DC fallback`);
           } catch (_) {
@@ -13225,6 +13349,7 @@
         if (hostPeer?.dc?.readyState === 'open') {
           try {
             _resyncRequestInFlight = true;
+            _resyncRequestSentAt = performance.now();
             hostPeer.dc.send('sync-request-full');
           } catch (_) {
             _resyncRequestInFlight = false;
@@ -13836,6 +13961,10 @@
     // tick before the throttle can end (specs/tick_deadlines.qnt): a page
     // that froze while held back would drop a peer that never stopped sending.
     if (_pacingThrottleStartAt > 0) _pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);
+    // A request for a resync that went out before the freeze: the answer
+    // could not have been handled while this page stood still, so the
+    // freeze does not count against it.
+    if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);
     _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
   };
 
@@ -13850,6 +13979,7 @@
     }
     _chk('post-phase');
     _creditLocalFreeze();
+    _checkResyncRequestDeadline();
     // Deadline-only pass: a tick that stalls returns before the per-frame
     // dispatch below, and a stall can outlast SYNC_COORD_TIMEOUT_MS. Never
     // mid-replay, where the live state isn't at a frame boundary.
@@ -17733,6 +17863,7 @@
           if (hostSyncDc?.readyState === 'open') {
             try {
               _resyncRequestInFlight = true;
+              _resyncRequestSentAt = performance.now();
               hostSyncDc.send('sync-request-full');
             } catch (_) {
               _resyncRequestInFlight = false;

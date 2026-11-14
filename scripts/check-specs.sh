@@ -131,17 +131,15 @@ $QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
-for variant in resync_flow_current resync_flow_fixed; do
+for variant in resync_flow_before resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
-# Today: a guest stopped at its target has a deadline, and a state no newer
-# than the last one applied is never applied.
-$QUINT run "$FLOW" --main=resync_flow_current --invariant=holdToday \
-  --max-samples=20000 --max-steps=25 --backend=typescript
-# With a deadline on the request itself, a request that is out can always
-# end. VIOLATED by today's engine (resync_flow_current): the host drops a
-# request inside its rate limit and the guest never asks again. Not fixed yet.
-$QUINT run "$FLOW" --main=resync_flow_fixed --invariant=allHold \
+# Today: a guest stopped at its target has a deadline, a state no newer than
+# the last one applied is never applied, and a request that is out can always
+# end. The last was violated before the request had a deadline of its own
+# (resync_flow_before): the host drops a request inside its rate limit and
+# the guest never asked again.
+$QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── The tick loop's deadlines and a page that freezes ───────────────────────
@@ -159,7 +157,8 @@ $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldA
 # ── Inputs around a resync: what a page may wait for afterwards ─────────────
 RESYNC=specs/resync_inputs.qnt
 $QUINT typecheck "$RESYNC"
-for variant in resync_inputs_before resync_inputs_solo_holes resync_inputs_current; do
+for variant in resync_inputs_before resync_inputs_solo_holes resync_inputs_only_new \
+  resync_inputs_no_refeed resync_inputs_current; do
   $QUINT test "$RESYNC" --main="$variant" --backend=typescript
 done
 # Today: after a resync nobody waits for an input that cannot arrive, and the
@@ -168,6 +167,12 @@ done
 # resync that moved the guest forward left holes on both pages. A page also
 # applies for itself what it sent: violated while a page that ran alone did
 # not keep its own inputs (resync_inputs_solo_holes).
+# The guest's inputs for the frames a resync moves it over all reach the host:
+# violated while it sent only the ones it had never made
+# (resync_inputs_only_new).
+# And the guest applies them itself: violated while a resync did not hand its
+# engine the ones it already had, which the engine's ring may have written
+# over (resync_inputs_no_refeed).
 $QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 

@@ -298,17 +298,20 @@ def test_resync_settles_the_inputs_before_its_frame():
     missing_src = src[missing_idx : src.index("\n  };\n", missing_idx)]
     assert "Math.max(_inputFloor(p.slot), windowStart)" in missing_src
 
-    # Guest: settles every peer's inputs, makes and sends the ones it skipped
-    # that are still to be applied, and asks for the peers' it lacks.
+    # Guest: settles every peer's inputs, makes the ones it skipped that are
+    # still to be applied, sends every one of its own for that range (one made
+    # earlier may have been dropped by a peer as out of range:
+    # specs/resync_inputs.qnt, resync_inputs_only_new), and asks for the
+    # peers' it lacks.
     settle_idx = src.index("const _settleInputsAtResync = (mod, frame) => {")
     settle_src = src[settle_idx : src.index("\n  };\n", settle_idx)]
     for snippet in (
         "const from = Math.max(0, frame - DELAY_FRAMES);",
         "_localInputs[f] = KNShared.ZERO_INPUT;",
-        "_feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);",
+        "_feedCInput(mod, _playerSlot, f, _localInputs[f]);",
         "_settleInputsBefore(peer.slot, frame);",
-        "if (made.length) peer.dc.send(`inputs-settled:${from}`);",
-        "peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);",
+        "if (own.length) peer.dc.send(`inputs-settled:${from}`);",
+        "for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);",
         "peer.dc.send(`resend:${f}`);",
     ):
         assert snippet in settle_src
@@ -635,3 +638,63 @@ def test_a_settled_input_is_not_fed_to_the_engine():
     recovered = src[src.index("} else if (_playerSlot === 0 && peer.slot !== 0 && _syncEnabled) {") :]
     recovered = recovered[: recovered.index("peer-recovery resync: host scheduled full sync")]
     assert "_settleInputsBefore(peer.slot, _frameNum);" in recovered
+
+
+def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
+    # specs/resync_inputs.qnt (aPageAppliesWhatItSent, the keys it leaves
+    # out): a resync that takes the guest back puts it on frames whose inputs
+    # it has already made and sent. It must apply those, not read the
+    # controller again: the host may hold the first copy, and a second value
+    # for the same key replaces a real input in the engine without a rollback.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);")
+    use = src[idx : idx + 1400]
+    assert "const localInput = hadLocalInputForFrame\n      ? _localInputs[_frameNum]\n      : _applyExtraInputDelay(" in use
+    # A new input is stored once; the cached one is never overwritten.
+    assert use.index("if (!hadLocalInputForFrame) {") < use.index("_localInputs[_frameNum] = localInput;")
+    # It is sent on every tick of the frame, cached or new, so a host that
+    # dropped the first copy as out of range gets it again.
+    send = src[idx : src.index("DC health monitor", idx)]
+    assert "const peerBuf = KNShared.encodeInput(\n          _frameNum,\n          localInput," in send
+    assert send.index("if (!hadLocalInputForFrame) {") < send.index("const peerBuf = KNShared.encodeInput(")
+    # No resync path drops the cached inputs: only a new match, a stop, and
+    # the fast-forward at lockstep start do (and the declaration).
+    assert src.count("_localInputs = {};") == 5
+    settle = src[src.index("const _settleInputsAtResync = (mod, frame) => {") :]
+    settle = settle[: settle.index("\n  };\n")]
+    assert "delete _localInputs" not in settle and "_localInputs = {}" not in settle
+
+
+def test_a_resync_request_that_is_out_has_a_deadline():
+    # specs/resync_flow.qnt: the host drops a request inside its rate limit
+    # without answering, so the guest's "a request is out" flag needs a
+    # deadline of its own or the guest never asks again.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const _checkResyncRequestDeadline = () => {")
+    check_src = src[idx : src.index("\n  };\n", idx)]
+    for snippet in (
+        "if (!_resyncRequestInFlight) return;",
+        # An answer arriving, held, or waited for at a target has its own deadline.
+        "if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;",
+        "if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;",
+        "_resyncRequestInFlight = false;",
+        "RESYNC-REQUEST-TIMEOUT f=${_frameNum}",
+    ):
+        assert snippet in check_src
+    # Every site that sends a request stamps it.
+    sent = src.count("_resyncRequestInFlight = true;")
+    assert sent >= 7
+    assert (
+        len(re.findall(r"_resyncRequestInFlight = true;\n\s+_resyncRequestSentAt = performance\.now\(\);", src)) == sent
+    )
+    # Longer than the host's rate limit plus its capture deadline.
+    assert "const RESYNC_REQUEST_TIMEOUT_MS = 8000;" in src
+    assert "const _SYNC_REQUEST_COOLDOWN_MS = 5000;" in src
+    assert "const SYNC_COORD_TIMEOUT_MS = 3000;" in src
+    tick_idx = src.index("const tick = () => {")
+    assert "_checkResyncRequestDeadline();" in src[tick_idx : tick_idx + 1200]
+    # The page's own freeze does not count against a request that is out.
+    credit = src[src.index("const _creditLocalFreeze = () => {") :]
+    credit = credit[: credit.index("\n  };\n")]
+    assert "if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);" in credit
+    assert src.index("_creditLocalFreeze();", tick_idx) < src.index("_checkResyncRequestDeadline();", tick_idx)
