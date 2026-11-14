@@ -179,7 +179,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `netplay-rollback.js` | ~18,250 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file | play.js, KNState, shared.js |
 | `rollback-shadow-worker.js` | — | Shadow worker (OffscreenCanvas overlay, second forward-only mupen64plus instance): presentation in Mode 1, a replay coprocessor whose corrected state main adopts in Mode 2 | netplay-rollback.js |
 | `netplay-lockstep.js` | ~52 | Deprecated compat shim — if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work. Remove once cached tabs are gone. | (none) |
-| `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
+| `netplay-streaming.js` | ~1,600 | Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from `web/src/streaming` | play.js, KNState, shared.js, KNCore |
 | `shared.js` | ~1,060 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
 | `gamepad-manager.js` | ~550 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
 | `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
