@@ -47,11 +47,11 @@ const MODEL = {
   'reconnecting.answering': '`recon` and `giveUp`; `link` is their offer, `ansTimer`',
 };
 
-const offer = (mode, underEarlierId = false) => ({ type: 'offer', attempt: 90, mode, underEarlierId });
+const offer = (mode, underEarlierId = false) => ({ type: 'offer', page: 'theirs', attempt: 90, mode, underEarlierId });
 // One sample of each event, for the connection the entry has now.
 const eventsFor = (snapshot) => {
   const name = peerStateName(snapshot.value);
-  const attempt = snapshot.context.connection;
+  const id = { page: snapshot.context.connectionPage, attempt: snapshot.context.connection };
   const armed = Object.entries(DEADLINES).flatMap(([delay, { states }]) =>
     states
       .filter((state) => name === state || name.startsWith(`${state}.`))
@@ -66,16 +66,16 @@ const eventsFor = (snapshot) => {
     ['offer: first, from a new page', offer('first', true)],
     ['offer: startup', offer('startup')],
     ['offer: reconnect', offer('reconnect')],
-    ['answer', { type: 'answer', attempt }],
-    ['opened', { type: 'opened', attempt }],
-    ['lost', { type: 'lost', attempt }],
+    ['answer', { type: 'answer', ...id }],
+    ['opened', { type: 'opened', ...id }],
+    ['lost', { type: 'lost', ...id }],
     ...armed,
   ];
 };
 
 const ROLES = [
-  ['lower slot', { mySlot: 0, theirSlot: 1, timing: PEER_TIMING }],
-  ['higher slot', { mySlot: 1, theirSlot: 0, timing: PEER_TIMING }],
+  ['lower slot', { mySlot: 0, theirSlot: 1, timing: PEER_TIMING, page: 'mine' }],
+  ['higher slot', { mySlot: 1, theirSlot: 0, timing: PEER_TIMING, page: 'mine' }],
 ];
 const PHASES = ['before the match', 'in a match'];
 

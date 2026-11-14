@@ -104,7 +104,8 @@ $QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPictures
 PAIR=specs/peer_connection.qnt
 $QUINT typecheck "$PAIR"
 # The scenarios say what each variant does with the same ordering.
-for variant in peer_connection_before_119 peer_connection_current peer_connection_fixed; do
+for variant in peer_connection_before_119 peer_connection_current peer_connection_counter_only \
+  peer_connection_fixed; do
   $QUINT test "$PAIR" --main="$variant" --backend=typescript
 done
 pair() { # module invariant init
@@ -118,6 +119,15 @@ pair() { # module invariant init
 pair peer_connection_current holdToday init
 pair peer_connection_fixed allHold init
 pair peer_connection_fixed allHold initLobby
+# With attempts told apart by the offering page's counter alone (the per-peer
+# machine as first written), staleSignalsAreNotApplied is VIOLATED: a page
+# that replaces another numbers its offers from 1 again, and what was sent for
+# the old page's attempt passes for the new one's
+# (oldAnswerTakenByReplacementPageTest, oldCandidateReachesReplacementConnectionTest).
+# The other five still hold there. peer_connection_fixed names the page
+# beside the counter.
+pair peer_connection_counter_only holdWithACounterAlone init
+pair peer_connection_counter_only holdWithACounterAlone initLobby
 
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt

@@ -27,6 +27,7 @@ import {
   signalKind,
   type LateJoinReadyInput,
 } from './signal.ts';
+import { blitCrop, capturePlan, coreFpsReset, sdpSummary, tuneEncoding, tuneOfferSdp } from './video.ts';
 
 /** One disagreement between the streaming engine and the function meant to replace part of it. */
 export type StreamingDisagreeReport = {
@@ -64,8 +65,11 @@ export interface EngineView {
   known: () => Readonly<Record<string, { slot?: Slot }>>;
   running: () => boolean;
   live: () => boolean;
+  capture: () => { mode: string; scale: number };
+  cooldownUntil: () => number;
   /** The packet the engine's own encoder makes for a guest's input. */
   packet: (input: WireInput) => ArrayLike<number>;
+  page: () => { search: string; stored: string | null; userAgent: string };
 }
 
 type RosterMessage = {
@@ -88,6 +92,11 @@ const canonical = (value: WirePayload): WirePayload => {
       .sort()
       .map((key) => [key, canonical(value[key])]),
   );
+};
+
+const clone = (value: RTCRtpSendParameters): WirePayload => {
+  const copy: WirePayload = JSON.parse(JSON.stringify(value));
+  return copy;
 };
 
 /**
@@ -362,6 +371,69 @@ export const createStreamingObserver = (
         return seen;
       },
     ),
+
+    /** The engine rewrote an offer's SDP from `before` to `after`. */
+    offerSdp: safe(nothing, (before: string, after: string): void =>
+      check(
+        'offer-sdp',
+        () => ({ ...sdpSummary(after), same: true }),
+        () => {
+          const mine = tuneOfferSdp(before);
+          return { ...sdpSummary(mine), same: mine === after };
+        },
+      ),
+    ),
+
+    /** The engine read a video sender's parameters and is about to change them. */
+    encoding: safe(nothing, (params: RTCRtpSendParameters): void => {
+      const before = clone(params);
+      const { mode, scale } = view.capture();
+      defer(() =>
+        check(
+          'encoding',
+          () => clone(params),
+          () => tuneEncoding(before, mode, scale),
+        ),
+      );
+    }),
+
+    /** The engine chose how to capture the canvas, from what it read as `preference` and `safari`. */
+    capture: safe(nothing, (preference: string, safari: boolean, canvas: { width: number; height: number }): void => {
+      const page = { ...view.page(), width: canvas.width, height: canvas.height };
+      // Direct capture threw and the engine fell back to blit: an effect, so only what was read is compared.
+      const fellBack = (): boolean => preference === 'direct' && !safari && view.capture().mode === 'blit';
+      defer(() =>
+        check(
+          'capture',
+          () => (fellBack() ? { preference, safari } : { preference, safari, ...view.capture() }),
+          () => {
+            const plan = capturePlan(page);
+            return fellBack() ? { preference: plan.preference, safari: plan.safari } : plan;
+          },
+        ),
+      );
+    }),
+
+    /** The engine cropped a canvas for the blit path. */
+    blitCrop: safe(nothing, (crop: { sx: number; sy: number; sw: number; sh: number }, width: number, height: number) =>
+      check(
+        'blit-crop',
+        () => ({ ...crop }),
+        () => blitCrop(width, height),
+      ),
+    ),
+
+    /** The frame-rate watchdog took a sample. Call before it decides. */
+    fpsWatchdog: safe(nothing, (now: number, elapsedMs: number, frames: number): void => {
+      const cooldownUntil = view.cooldownUntil();
+      defer(() =>
+        check(
+          'fps-watchdog',
+          () => view.cooldownUntil() !== cooldownUntil,
+          () => coreFpsReset(elapsedMs, frames, now, cooldownUntil),
+        ),
+      );
+    }),
 
     /** How many comparisons ran, by decision; how many differed; how many the observer itself failed at. */
     counts: () => ({ compared: Object.fromEntries(compared), disagreed, failed }),
