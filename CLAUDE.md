@@ -112,7 +112,7 @@ kaillera-next/
 │       ├── demo.js              # demo page orchestrator (fake peer + menu autopilot)
 │       ├── fake-peer.js         # synthetic P2 for the demo page (simulated input/jitter)
 │       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo (reads RDRAM menu state)
-│       ├── rollback-timeline.js # demo page's live rollback-metrics HUD
+│       ├── rollback-timeline.js # demo page's live rollback-metrics HUD (window.KNRollbackTimeline) from web/src/page/rollback-timeline.ts
 │       ├── feedback.js          # in-app feedback collection
 │       ├── version.js           # version display + changelog modal
 │       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)

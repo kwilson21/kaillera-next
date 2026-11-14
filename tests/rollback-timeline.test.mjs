@@ -1,4 +1,4 @@
-// Pure state-machine tests for web/static/rollback-timeline.js — the demo
+// Pure state-machine tests for web/src/page/rollback-timeline.ts — the demo
 // page's live Rollback timeline (docs/landing-design.md §5.7f #3, §7.2 M3).
 // No DOM: only createState/reduce/clampDepth, driven with explicit `now`
 // timestamps so the tests are deterministic.
@@ -6,11 +6,7 @@
 //   node --test tests/rollback-timeline.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-
-await import(path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/static/rollback-timeline.js'));
-const { createState, reduce, clampDepth } = globalThis.KNRollbackTimeline;
+import { createState, reduce, clampDepth } from '../web/src/page/rollback-timeline.ts';
 
 const baseInput = (overrides) =>
   Object.assign(

@@ -208,7 +208,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `demo.js` | ~1,818 | Demo page orchestrator (fake peer + menu autopilot) | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
 | `fake-peer.js` | ~559 | Synthetic P2 for the demo page (simulated input/jitter) | demo.js |
 | `ssb64-menu-autopilot.js` | ~308 | Closed-loop menu driver for the demo (reads RDRAM menu state) | demo.js |
-| `rollback-timeline.js` | ~229 | Demo page's live rollback-metrics HUD | demo.js |
+| `rollback-timeline.js` | — | Demo page's live rollback-metrics HUD; the logic is `web/src/page/rollback-timeline.ts` | demo.js |
 
 ### Conventions
 
