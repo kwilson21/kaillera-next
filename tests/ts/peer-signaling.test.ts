@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   disconnectDisposition,
@@ -182,4 +183,22 @@ test('a new player replaces whatever else holds their slot, and nothing more', (
   ];
   assert.deepEqual(staleHoldersOf(holders, 'new', 1), ['old']);
   assert.deepEqual(staleHoldersOf(holders, 'new', 3), []);
+});
+
+test('the engine asks these functions and no longer decides inline', () => {
+  const engine = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
+  for (const name of [
+    'shouldInitiate',
+    'signalDisposition',
+    'disconnectDisposition',
+    'hasAttemptLeft',
+    'staleHoldersOf',
+  ]) {
+    assert.ok(engine.includes(`window.KNCore.${name}(`), `${name} is not called by the engine`);
+  }
+  // The inline rules these replaced.
+  assert.ok(!engine.includes('shouldInitiate = _playerSlot < p.slot'));
+  assert.ok(!engine.includes('nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS'));
+  assert.ok(!engine.includes('attempt < _MAX_RECONNECT_ATTEMPTS'));
+  assert.ok(!engine.includes('data.offer && !data.reconnect && key !== senderSid'));
 });

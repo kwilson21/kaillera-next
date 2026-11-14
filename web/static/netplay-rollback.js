@@ -7464,32 +7464,29 @@
       // Socket.IO ID and the connection didn't survive — _rosterKey keeps a
       // live one). Clean up the old entry so _peers never has duplicate slots.
       if (p.slot !== null && p.slot !== undefined) {
-        for (const [oldSid, oldPeer] of Object.entries(_peers)) {
-          if (oldSid !== p.socketId && oldPeer.slot === p.slot) {
-            _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
-            _evictPeer(oldSid, 'zombie-eviction');
-          }
+        const holders = Object.entries(_peers).map(([key, held]) => ({ key, slot: held.slot ?? -1 }));
+        for (const oldSid of window.KNCore.staleHoldersOf(holders, p.socketId, p.slot)) {
+          _syncLog(`onUsersUpdated: evicting zombie peer ${oldSid} (slot ${p.slot}) — replaced by ${p.socketId}`);
+          _evictPeer(oldSid, 'zombie-eviction');
         }
       }
 
-      let shouldInitiate;
+      // The rule is KNCore.shouldInitiate (web/src/peer-signaling.ts, proved);
+      // the reason is only for the log.
+      const shouldInitiate = window.KNCore.shouldInitiate(
+        _isSpectator,
+        _lateJoin,
+        _phase === PHASE_RUNNING,
+        shouldHoldForLateJoin,
+        _playerSlot,
+        p.slot,
+      );
       let reason;
-      if (_lateJoin && !_isSpectator) {
-        shouldInitiate = true;
-        reason = 'late-joiner always initiates';
-      } else if (_phase === PHASE_RUNNING) {
-        shouldInitiate = false;
-        reason = 'running — wait for late-joiner offer';
-      } else if (shouldHoldForLateJoin) {
-        shouldInitiate = false;
-        reason = 'initial sync under way — wait for late-joiner offer';
-      } else if (_isSpectator) {
-        shouldInitiate = false;
-        reason = 'spectator never initiates';
-      } else {
-        shouldInitiate = _playerSlot < p.slot;
-        reason = `slot comparison: ${_playerSlot} < ${p.slot} = ${shouldInitiate}`;
-      }
+      if (_isSpectator) reason = 'spectator never initiates';
+      else if (_lateJoin) reason = 'late-joiner always initiates';
+      else if (_phase === PHASE_RUNNING) reason = 'running — wait for late-joiner offer';
+      else if (shouldHoldForLateJoin) reason = 'initial sync under way — wait for late-joiner offer';
+      else reason = `slot comparison: ${_playerSlot} < ${p.slot} = ${shouldInitiate}`;
       _syncLog(`onUsersUpdated: new peer ${p.socketId} slot=${p.slot}, initiate=${shouldInitiate} (${reason})`);
       if (shouldHoldForLateJoin) _markPendingLateJoinPeer(p.socketId, p.slot, 'users-updated running peer');
 
@@ -7580,7 +7577,7 @@
     if (peer.dc?.readyState === 'open') return;
 
     const nextAttempt = (peer._startupConnectAttempt || 1) + 1;
-    if (nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS) {
+    if (!window.KNCore.hasAttemptLeft(nextAttempt - 1, STARTUP_CONNECT_MAX_ATTEMPTS)) {
       clearStartupConnectWatchdog(peer);
       _syncLog(
         `startup connect failed sid=${remoteSid} slot=${peer.slot} ` +
@@ -7749,22 +7746,29 @@
     // A fresh offer from a player whose connection was kept across their
     // Socket.IO reconnect means their page reloaded: that connection is a
     // leftover. Drop it, then let the roster set them up as a new peer.
-    if (data.offer && !data.reconnect && key !== senderSid) {
+    // The rule is KNCore.signalDisposition (web/src/peer-signaling.ts, proved).
+    // It is asked again after each step that changes the table.
+    const dispositionNow = (underEarlierId) =>
+      window.KNCore.signalDisposition(!!data.offer, !!data.reconnect, underEarlierId, !!_peers[key]);
+    let disposition = dispositionNow(key !== senderSid);
+    if (disposition === 'replaceKept') {
       _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
       _evictPeer(key, 'replaced-by-new-page');
       if (_lastUsersUpdated) onUsersUpdated(_lastUsersUpdated);
       key = _peerKey(senderSid);
+      disposition = dispositionNow(false);
     }
 
     // Create peer on demand if offer arrives before users-updated
-    if (data.offer && !_peers[key]) {
+    if (disposition === 'create') {
       const known = _knownPlayers[key];
       _syncLog(`onWebRTCSignal: on-demand createPeer for ${key}, slot=${known?.slot ?? 'null'}`);
       createPeer(key, known ? known.slot : null, false);
+      disposition = dispositionNow(false);
     }
 
     let peer = _peers[key];
-    if (!peer) {
+    if (disposition === 'drop' || !peer) {
       _syncLog(`onWebRTCSignal: no peer for ${key}, dropping ${sigType}`);
       return;
     }
@@ -7772,7 +7776,7 @@
     try {
       if (data.offer) {
         // Reconnect: if peer exists and reconnect flag set, replace old PC
-        if (data.reconnect && _peers[key]) {
+        if (disposition === 'reset') {
           const existingPeer = _peers[key];
           const startupReconnect = !!data.startupReconnect || _phase < PHASE_GAME_STARTED;
           _syncLog(`received ${startupReconnect ? 'startup ' : ''}reconnect offer from ${senderSid}`);
@@ -8899,20 +8903,26 @@
       peer._disconnectTimer = null;
     }
 
-    if (_phase < PHASE_GAME_STARTED && peer.isInitiator && !peer._intentionalLeave) {
+    // The rule is KNCore.disconnectDisposition (web/src/peer-signaling.ts, proved).
+    const pendingLateJoin = _isPeerPendingLateJoin(remoteSid, peer);
+    const disposition = window.KNCore.disconnectDisposition(
+      _phase < PHASE_GAME_STARTED,
+      !!peer.isInitiator,
+      !!peer._intentionalLeave,
+      pendingLateJoin,
+      _phase === PHASE_RUNNING,
+    );
+    if (disposition === 'retryStartup') {
       _syncLog(`startup peer ${remoteSid} disconnected before game start — retrying`);
       retryStartupConnection(remoteSid);
       return;
     }
 
-    if (_isPeerPendingLateJoin(remoteSid, peer)) {
+    if (disposition === 'hardDisconnect' && pendingLateJoin && !peer._intentionalLeave) {
       _syncLog(`pending late-join peer ${remoteSid} disconnected before activation`);
-      hardDisconnectPeer(remoteSid);
-      return;
     }
 
-    // If game is running and not an intentional leave, attempt reconnect
-    if (_phase === PHASE_RUNNING && !peer._intentionalLeave) {
+    if (disposition === 'reconnect') {
       _syncLog(`peer ${remoteSid} DC died — attempting reconnect`);
 
       // Zero their input but keep peer in _peers
@@ -9023,7 +9033,7 @@
 
     const retryOrGiveUp = () => {
       if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
-      if (attempt < _MAX_RECONNECT_ATTEMPTS) {
+      if (window.KNCore.hasAttemptLeft(attempt, _MAX_RECONNECT_ATTEMPTS)) {
         _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
         setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
         setTimeout(() => attemptReconnect(remoteSid, attempt + 1), _RECONNECT_RETRY_DELAY);

@@ -321,6 +321,10 @@ Slice 1, the peer mesh and signaling:
   reconnecting with nothing armed: the match is frozen) and
   `staleSignalsAreNotApplied` (an answer to an earlier attempt is applied to
   the connection that replaced it). None is fixed yet.
+- Done: the engine asks the proved functions of `web/src/peer-signaling.ts`
+  (who offers, what a signal does to the connection table, what a lost
+  connection leads to, when to stop retrying, which entries a new player
+  replaces) instead of deciding inline.
 - Next: one XState machine per peer connection, observing beside the engine.
 
 **Open decisions**
