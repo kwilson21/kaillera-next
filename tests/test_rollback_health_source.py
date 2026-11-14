@@ -307,10 +307,22 @@ def test_resync_settles_the_inputs_before_its_frame():
         "_localInputs[f] = KNShared.ZERO_INPUT;",
         "_feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);",
         "_settleInputsBefore(peer.slot, frame);",
+        "if (made.length) peer.dc.send(`inputs-settled:${from}`);",
         "peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);",
         "peer.dc.send(`resend:${f}`);",
     ):
         assert snippet in settle_src
+
+    # Every peer waits on the moved page's inputs, so each is told the floor;
+    # a floor past what this page could be waiting on is refused.
+    told_idx = src.index("if (e.data.startsWith('inputs-settled:')) {")
+    told_src = src[told_idx : src.index("if (e.data === 'peer-resumed')", told_idx)]
+    assert "settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES" in told_src
+    assert "_inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);" in told_src
+
+    # A new match starts a new input timeline.
+    clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
+    assert "_inputSettledBefore = {};" in src[clear_idx : src.index("\n  };\n", clear_idx)]
     apply_idx = src.index("const applySyncState = (bytes, frame, fromProactive = false) => {")
     assert "if (timelineAligned) _settleInputsAtResync(gm.Module, frame);" in src[apply_idx:]
 

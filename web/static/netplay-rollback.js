@@ -5066,6 +5066,9 @@
       _settleInputsBefore(peer.slot, frame);
       if (peer.dc?.readyState !== 'open') continue;
       try {
+        // Every peer waits on this page's inputs, not only the host that
+        // sent the state: tell each one where they start again.
+        if (made.length) peer.dc.send(`inputs-settled:${from}`);
         for (const f of made) peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);
         for (let f = from; f < frame; f++) {
           const have = _remoteInputs[peer.slot]?.[f];
@@ -8320,6 +8323,23 @@
             try {
               peer.dc.send(KNShared.encodeInput(resendFrame, localInput).buffer);
             } catch (_) {}
+          }
+          return;
+        }
+        if (e.data.startsWith('inputs-settled:')) {
+          // The peer was moved forward by a resync and never made its inputs
+          // from before this frame (_settleInputsAtResync). Only a frame this
+          // page could be waiting on is accepted, so the message cannot
+          // switch the gap check off for inputs still to come.
+          const settled = parseInt(e.data.split(':')[1], 10);
+          if (
+            _isValidPlayerSlot(peer.slot) &&
+            Number.isFinite(settled) &&
+            settled >= 0 &&
+            settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES
+          ) {
+            _inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);
+            _syncLog(`INPUTS-SETTLED slot=${peer.slot} before=${settled} f=${_frameNum}`);
           }
           return;
         }
@@ -12203,6 +12223,7 @@
     }
     _localInputs = {};
     _remoteInputs = preservedRemoteInputs;
+    _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
     _peerInputStarted = preservedPeerStarted;
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
   };

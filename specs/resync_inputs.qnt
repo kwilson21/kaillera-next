@@ -34,8 +34,10 @@
 //
 // Not modelled: the time a state takes to cross (the host keeps running and
 // the guest lands a few frames behind, the ordinary "behind" wait), more than
-// two players, packet loss on the unreliable input channel, the contents of
-// inputs and the rollbacks that follow a wrong prediction.
+// two players (a third page is told where the moved guest's inputs start
+// again, `inputs-settled`, and applies the same floor), packet loss on the
+// unreliable input channel, the contents of inputs and the rollbacks that
+// follow a wrong prediction.
 //
 // SETTLE_AT_RESYNC: a resync at frame F settles every input keyed before
 //   F - DELAY (they are already in the state both pages now hold, so neither
@@ -195,7 +197,10 @@ module resync_inputs {
   // come. (While a resync is due the wait has that resync to end it.)
   // Violated before the fix: after a forward resync both pages hold gaps.
   val noWaitForAnInputThatCannotArrive =
-    resyncDue or PAGES.forall(p => waitsOnGap(pages.get(p)) implies canArrive(p, edge(pages.get(p))))
+    resyncDue or PAGES.forall(p => and {
+      waitsOnGap(pages.get(p)) implies canArrive(p, edge(pages.get(p))),
+      waitsBehind(pages.get(p)) implies canArrive(p, pages.get(p).frame - DELAY),
+    })
 
   // The two pages are never both waiting with nothing on the wire and no
   // resync due: only the 5 s deadline would end that.
