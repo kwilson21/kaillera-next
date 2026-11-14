@@ -69,6 +69,10 @@ import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
 import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
+import * as streamingInput from './streaming/input.ts';
+import { createStreamingObserver } from './streaming/observe.ts';
+import * as streamingRoster from './streaming/roster.ts';
+import * as streamingSignal from './streaming/signal.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
@@ -312,6 +316,16 @@ export const KNCore = {
     roomView,
     notices,
     menus,
+  },
+  /**
+   * The streaming engine's decisions (web/static/netplay-streaming.js still
+   * makes them; `createObserver` compares).
+   */
+  streaming: {
+    ...streamingRoster,
+    ...streamingSignal,
+    ...streamingInput,
+    createObserver: createStreamingObserver,
   },
   protocol: {
     decodeUsersUpdated,

@@ -172,6 +172,9 @@ def test_a_started_match_decodes_cleanly_peer_messages_included(browser, server_
         host.click("#toolbar-more")
         host.click("#toolbar-end")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        # The guest's lobby can be back before the host has had its own copy.
+        for page in (host, guest):
+            page.wait_for_function("window.__peer.some((m) => m.kind === 'game-ended')", timeout=10000)
 
         for page in (host, guest):
             seen = page.evaluate("window.__peer")
