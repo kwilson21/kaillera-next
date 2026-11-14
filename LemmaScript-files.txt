@@ -13,4 +13,5 @@ web/src/play/rom-transfer-step.ts
 web/src/relay-sender.ts
 web/src/desync-confirm.ts
 web/src/desync-capture.ts
+web/src/peer-signaling.ts
 web/src/play/join-plan.ts

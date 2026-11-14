@@ -149,6 +149,9 @@ without the old code running beside it first.
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
 - State logic is modelled in Quint first; pure functions with a contract are
   proven with LemmaScript.
+- Every machine has a diagram generated from it, and the scenarios of the
+  Quint models are drawn as sequence diagrams from the traces the model
+  checker replays. `docs/netcode-diagrams.md` lists them all.
 
 **Stage 1: foundation [done]**
 Toolchain (TypeScript 7, esbuild, oxfmt, oxlint + anti-slop, Biome, antislop,
@@ -308,6 +311,22 @@ peer mesh, signaling, late join, resync, tick loop. The per-peer and boot
 phase state become machines; the per-frame tick loop stays plain code. The
 netplay invariants I1 (every wait has a deadline) and I2 (all peer cleanup
 through one function) become Effect timeouts and scoped finalizers.
+
+Slice 1, the peer mesh and signaling:
+
+- Done: the connection between two players is modelled in
+  `specs/peer_connection.qnt` (who offers, offer and roster in either order,
+  reconnect, the mesh health check, #119 from the pair's side). Four
+  properties are violated by today's engine and hold on the model's `fixed`
+  variant, which is what the per-peer machine will be built to:
+  `oneInitiatorPerPair` (both pages can run the health check and offer at
+  once), `everyWaitHasADeadline` (a page that answers a reconnect offer
+  without having noticed the drop is reconnecting with no deadline),
+  `neverLeftWithNothingPending` (after crossed offers both pages can be left
+  reconnecting with nothing armed: the match is frozen) and
+  `staleSignalsAreNotApplied` (an answer to an earlier attempt is applied to
+  the connection that replaced it). None is fixed yet.
+- Next: one XState machine per peer connection, observing beside the engine.
 
 **Open decisions**
 
