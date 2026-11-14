@@ -133,7 +133,7 @@ earlier ones to have set up their `window.*` exports:
 8. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
 9. `virtual-gamepad.js` — touch controls for mobile
 10. `kn-audio.js` — AudioWorklet pump + rollback audio capture
-11. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
+11. `kn-vision-client.js` — starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)
 12. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
 13. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
 14. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
@@ -184,7 +184,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `controller-settings.js`                                 | ~980    | In-game controller settings panel (deadzone, sensitivity, profiles)                                                                                                                    | play.js, gamepad-manager                                    |
 | `virtual-gamepad.js`                                     | ~1,194  | On-screen touch controls for mobile                                                                                                                                                    | KNState                                                     |
 | `kn-audio.js`                                            | —       | AudioWorklet pump + rollback audio capture                                                                                                                                             | rollback, play.js                                           |
-| `kn-vision-client.js`                                    | —       | Claude vision client for screenshot-diff desync analysis                                                                                                                               | rollback                                                    |
+| `kn-vision-client.js`                                    | —       | Starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)                                                                                  | rollback                                                    |
 | `audio-worklet-processor.js`                             | ~85     | AudioWorklet ring buffer for rollback audio                                                                                                                                            | kn-audio.js                                                 |
 | `feedback.js`                                            | ~540    | In-app feedback collection UI                                                                                                                                                          | play.js                                                     |
 | `api-sandbox.js`                                         | —       | Saves/restores native rAF, performance.now, getGamepads                                                                                                                                | rollback, core-redirector                                   |
