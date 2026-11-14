@@ -55,10 +55,12 @@ verify "$ROOM" room_current joinersAreNotLeftWaitingAtTheStart
 verify "$ROOM" room_current startIsNotHeldUpByALateJoiner
 verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
 verify "$ROOM" room_current anAbandonedMatchIsEnded
+verify "$ROOM" room_current aMatchIsNotLostToTheGraceWindow
 expect_violation "$ROOM" room_before_start_fix joinersAreNotLeftWaitingAtTheStart
 expect_violation "$ROOM" room_before_start_fix startIsNotHeldUpByALateJoiner
 expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
 expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
+expect_violation "$ROOM" room_before_grace_wait aMatchIsNotLostToTheGraceWindow
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
