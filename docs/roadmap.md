@@ -293,9 +293,9 @@ before the move.
   verifier does not model): the sync log ring, the diagnostics' pixel hash,
   canvas health, screenshot crop and audio transition (`diagnostics.ts`),
   and the gamepad axis scaling and polarity (`gamepad-axes.ts`).
-- `KNState` has a type (`kn-state.ts`); `kn-state.js` still builds it and
-  still runs before the bundle, because `core-redirector.js` reads it from a
-  fetch callback.
+- `KNState` is typed and built in `kn-state.ts`; the bundle sets it as it
+  loads and `kn-state.js` is gone. `core-redirector.js`, whose fetch callback
+  can run before the bundle, keeps its one value in `localStorage` itself.
 - Both engine roster loops ask `meshHealTargets`, one entry at a time.
 - Two inputs the scripts used as read are decoded with Effect Schema first:
   a peer's desync digest (`desync-digest.ts`) and a saved gamepad profile

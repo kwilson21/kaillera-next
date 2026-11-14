@@ -527,12 +527,8 @@
     <script src="/static/storage.js"></script>
     <script src="/static/kn-capture.js"></script>
 
-    <!-- Centralized cross-module state -->
-    <script src="/static/kn-state.js"></script>
-
-    <!-- The TypeScript core (window.KNCore). Loaded before the scripts that
-         build on it: shared.js and the engines take their input codec, stick
-         dead-band and sync log from it as they load. -->
+    <!-- The TypeScript core (window.KNCore) and the state the scripts share
+         (window.KNState). Loaded before every script that builds on either. -->
     <script src="/static/dist/kn-core.js"></script>
 
     <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->

@@ -153,7 +153,7 @@ R1–R6 — Rollback integrity: the C engine must produce bit-correct state
   lifecycle, UI, mode transitions
 - web/static/shared.js — input encoding (N64 button-map), cheats, wire
   format; all modules import from here via window globals
-- web/static/kn-state.js — cross-module state bus (KNState.*)
+- web/src/kn-state.ts — cross-module state bus (KNState.*)
 - build/kn_rollback/kn_rollback.c — C rollback engine, input prediction,
   save ring, amortized replay
 - build/patches/ — all deterministic-timing patches to mupen64plus-next

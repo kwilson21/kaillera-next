@@ -1,9 +1,7 @@
 /**
  * `window.KNState`: the state the plain-script pages share between modules,
- * in place of scattered `window.*` globals. This file is its type and its
- * starting values, for TypeScript modules that read the state.
- * web/static/kn-state.js builds the object itself, before the bundle loads,
- * and tests/ts/kn-state.test.ts holds the two to the same fields and values.
+ * in place of scattered `window.*` globals. The bundle builds it as it
+ * loads (`installKNState`), before any script that reads it.
  *
  * Each field has one or two writers and a few readers, named beside it. The
  * engines are "the engine" below whichever mode is running.
@@ -102,5 +100,26 @@ export function initialKNState(storage: SafeStorage): PageState {
 declare global {
   interface Window {
     KNState?: PageState;
+    /** web/static/storage.js, loaded before the bundle. */
+    KNStorage?: SafeStorage;
   }
+}
+
+/** The part of `window` the state lives on. */
+export interface StatePage {
+  KNStorage?: SafeStorage;
+  KNState?: PageState;
+}
+
+/**
+ * Put the starting state on `window.KNState`. The pages load storage.js
+ * first; a page that did not gets no state, and says so.
+ */
+export function installKNState(page: StatePage): void {
+  const storage = page.KNStorage;
+  if (!storage) {
+    console.error('[kn-state] storage.js was not loaded before the bundle; KNState is not set');
+    return;
+  }
+  page.KNState = initialKNState(storage);
 }
