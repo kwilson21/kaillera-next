@@ -214,7 +214,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     controller-settings.js In-game controller settings panel
     virtual-gamepad.js     On-screen touch controls for mobile
     shared.js              Input encoding/decoding, wire format, input application to WASM
-    kn-audio.js            AudioWorklet pump + rollback audio capture
+    kn-audio.js            Starts the AudioWorklet pump + rollback audio capture (web/src/page/audio.ts)
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
     kn-desync-detector.js  Field-granular cross-peer desync detection (RDRAM probes)
     kn-diagnostics.js      Rollback diagnostics ring buffer (RB-CHECK, audit log)

@@ -133,7 +133,7 @@ earlier ones to have set up their `window.*` exports:
 10. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
 11. `shared.js` — input encoding/decoding, cheats, wire format
 12. `virtual-gamepad.js` — touch controls for mobile
-13. `kn-audio.js` — AudioWorklet pump + rollback audio capture
+13. `kn-audio.js` — AudioWorklet pump + rollback audio capture (the logic is `web/src/page/audio.ts`)
 14. `kn-diagnostics.js` — rollback diagnostics ring buffer (RB-CHECK, audit log)
 15. `kn-desync-detector.js` — field-granular cross-peer desync detection
 16. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
@@ -186,7 +186,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
 | `virtual-gamepad.js` | ~1,194 | On-screen touch controls for mobile | KNState |
-| `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
+| `kn-audio.js` | — | AudioWorklet pump + rollback audio capture; starts `web/src/page/audio.ts` as `window.KNAudio` | rollback, play.js |
 | `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
 | `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
 | `kn-vision-client.js` | — | Claude vision client for screenshot-diff desync analysis | rollback |

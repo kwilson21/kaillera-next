@@ -100,7 +100,7 @@ kaillera-next/
 │       ├── controller-settings.js # in-game controller settings panel
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
 │       ├── kn-state.js          # cross-module shared state (KNState)
-│       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
+│       ├── kn-audio.js          # starts the engine's audio pipeline (window.KNAudio) from web/src/page/audio.ts
 │       ├── kn-capture.js        # starts the diagnostic-image capture policy (window.KNCapture) from web/src/page/capture.ts
 │       ├── kn-desync-detector.js # field-granular cross-peer desync detection
 │       ├── kn-diagnostics.js    # rollback diagnostics (RB-CHECK, audit log)
