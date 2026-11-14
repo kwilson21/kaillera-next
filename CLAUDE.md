@@ -102,7 +102,6 @@ kaillera-next/
 │       ├── kn-state.js          # cross-module shared state (KNState)
 │       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
 │       ├── kn-capture.js        # diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
-│       ├── kn-desync-detector.js # field-granular cross-peer desync detection
 │       ├── kn-diagnostics.js    # rollback diagnostics (RB-CHECK, audit log)
 │       ├── kn-vision-client.js  # Claude vision API client for screenshot diff
 │       ├── api-sandbox.js       # save/restore native browser APIs
@@ -129,6 +128,7 @@ kaillera-next/
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
+│   │   ├── page/desync-detector.ts # window.KNDesync: field-granular cross-peer desync detection, installed by the bundle
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
