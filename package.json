@@ -1,7 +1,6 @@
 {
   "scripts": {
     "build": "node scripts/build-web.mjs",
-    "build:check": "node scripts/build-web.mjs && git diff --exit-code -- web/static/dist/kn-core.js web/static/dist/kn-wake-art.js web/static/dist/kn-site.js web/static/dist/kn-join.js",
     "typecheck": "tsc -p tsconfig.json",
     "test:ts": "node --test \"tests/ts/*.test.ts\"",
     "fmt": "oxfmt \"**/*.{js,mjs,mts,ts,css,json,jsonc,yaml,yml,html}\"",
@@ -15,11 +14,12 @@
     "diagram:check": "node scripts/session-diagram.mjs --check && node scripts/peer-connection-diagram.mjs --check",
     "traces": "node scripts/trace-diagram.mjs",
     "traces:check": "node scripts/trace-diagram.mjs --check",
-    "check": "npm run fmt:check && npm run lint && npm run typecheck && npm run test:ts && npm run protocol:check && npm run build:check && npm run diagram:check && npm run traces:check && npm run spec"
+    "check": "npm run fmt:check && npm run lint && npm run typecheck && npm run test:ts && npm run protocol:check && npm run build && npm run diagram:check && npm run traces:check && npm run spec"
   },
   "dependencies": {
     "@xstate/effect": "1.0.0-beta.1",
     "effect": "4.1.4",
+    "esbuild": "0.28.2",
     "xstate": "6.0.0-beta.2"
   },
   "devDependencies": {
@@ -27,7 +27,6 @@
     "@informalsystems/quint": "0.33.1",
     "@oxlint/plugins": "1.93.0",
     "@types/node": "22.20.5",
-    "esbuild": "0.28.2",
     "lemmascript": "0.6.8",
     "oxfmt": "0.78.0",
     "oxlint": "1.93.0",
