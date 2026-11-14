@@ -201,7 +201,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     landing.css        Front-page styles (direction A tokens)
     dist/kn-join.js    Invite-page controller (room lookup, join/watch states), built from web/src/landing/join.ts
     dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
-    dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper)
+    dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper, window.KNSite)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     admin.css          Admin dashboard styles
     play.css           Play page styles (room overlay tokens, direction A)
@@ -220,7 +220,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
     feedback.js            In-app feedback collection
     version.js             Version display + changelog modal
-    version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)
+    version-guard.js       Cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
     demo.js                Demo page orchestrator (fake peer + menu autopilot)
     fake-peer.js           Synthetic P2 for the demo page (simulated input/jitter)
