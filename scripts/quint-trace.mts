@@ -1,0 +1,373 @@
+/**
+ * Turns a Quint trace into a Mermaid sequence diagram, so an ordering the
+ * model found (a scenario, or the counterexample to a property) can be read
+ * as a picture.
+ *
+ * A trace is a list of states in the Informal Trace Format, which is what
+ * `quint test --out-itf` and `quint run --out-itf` write. Nothing here knows
+ * a particular spec. The lifelines are found in the trace itself: every
+ * state variable that is a map keyed by strings (`page` in
+ * specs/room_lifecycle.qnt) has one lifeline per key, and everything else
+ * belongs to one more lifeline, the hub (the server).
+ *
+ * Each step of the trace is drawn as:
+ *   - an arrow from whoever acted to the hub, labelled with the action
+ *   - a note on the hub with the hub variables the step changed
+ *   - a note on the actor, and a dashed arrow from the hub to anyone else,
+ *     with what the step changed for them
+ *
+ * Used by scripts/trace-diagram.mjs.
+ */
+
+export interface ItfTrace {
+  readonly vars: readonly string[];
+  readonly states: readonly Readonly<Record<string, unknown>>[];
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * A sum-type value as ITF writes it: exactly a `tag` and a `value`. A record
+ * of the spec that merely has a field called `tag` is not one.
+ */
+const isVariant = (value: Record<string, unknown>): boolean =>
+  typeof value['tag'] === 'string' && 'value' in value && Object.keys(value).length === 2;
+
+/**
+ * A value of the trace, written the way the spec writes it. Sets and maps
+ * have no order, so their entries are sorted: the same set always reads the
+ * same, however the trace happened to list it.
+ */
+export const show = (value: unknown): string => {
+  if (typeof value === 'string') return value === '' ? '""' : value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return `[${value.map(show).join(', ')}]`;
+  if (!isObject(value)) return String(value);
+  if (typeof value['#bigint'] === 'string') return value['#bigint'];
+  if (Array.isArray(value['#set'])) return `{${value['#set'].map(show).sort().join(', ')}}`;
+  if (Array.isArray(value['#tup'])) return `(${value['#tup'].map(show).join(', ')})`;
+  if (Array.isArray(value['#map'])) {
+    const entries = value['#map'] as [unknown, unknown][];
+    return `{${entries
+      .map(([key, entry]) => `${show(key)}: ${show(entry)}`)
+      .sort()
+      .join(', ')}}`;
+  }
+  if (isVariant(value)) {
+    const inner = show(value['value']);
+    return inner === '()' ? String(value['tag']) : `${String(value['tag'])}(${inner})`;
+  }
+  return `{${Object.entries(value)
+    .map(([key, entry]) => `${key}: ${show(entry)}`)
+    .join(', ')}}`;
+};
+
+/** `room_current::room::page` is `page` to a reader. */
+const shortName = (name: string): string => {
+  const at = name.lastIndexOf('::');
+  return at < 0 ? name : name.slice(at + 2);
+};
+
+/** The entries of a map keyed by strings (or of an empty map), or undefined for anything else. */
+const stringKeyedMap = (value: unknown): Map<string, unknown> | undefined => {
+  if (!isObject(value) || !Array.isArray(value['#map'])) return undefined;
+  const entries = value['#map'] as [unknown, unknown][];
+  if (!entries.every(([key]) => typeof key === 'string')) return undefined;
+  return new Map(entries as [string, unknown][]);
+};
+
+/** A plain record of the spec, as opposed to a set, map, tuple or variant. */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  isObject(value) && !Object.keys(value).some((key) => key.startsWith('#')) && !isVariant(value);
+
+/** What changed from `before` to `after`: the fields of a record, or the whole value. */
+const change = (before: unknown, after: unknown): string => {
+  if (after === undefined) return 'removed';
+  if (isRecord(before) && isRecord(after)) {
+    return Object.keys(after)
+      .filter((key) => show(before[key]) !== show(after[key]))
+      .map((key) => `${key}: ${show(after[key])}`)
+      .join(', ');
+  }
+  return show(after);
+};
+
+/**
+ * Text for a message or a note. Mermaid ends a statement at `;` or a line
+ * break and reads `#` as the start of an entity.
+ */
+const text = (raw: string): string =>
+  raw.replace(/\s*\r?\n\s*/g, ' ').replace(/[#;]/g, (char) => (char === '#' ? '#35;' : '#59;'));
+
+/** Several changes in one note or message, one per line. */
+const stacked = (parts: readonly string[]): string => parts.map(text).join('<br/>');
+
+/**
+ * Mermaid ids for the lifelines. A name that is a plain word is its own id,
+ * so the diagram source reads naturally; any other name (spaces, arrows, a
+ * line break) gets a generated id and is shown as the lifeline's label.
+ * `label` gives the name a lifeline is shown under.
+ */
+const lifelineIds = (lifelines: readonly string[], label: (lifeline: string) => string): Map<string, string> => {
+  const ids = new Map<string, string>();
+  const plain = new Set(lifelines.map(label).filter((name) => /^[A-Za-z_]\w*$/.test(name)));
+  const taken = new Set<string>();
+  let next = 1;
+  for (const lifeline of lifelines) {
+    const name = label(lifeline);
+    // A plain name is its own id, once: a player called the same as the hub
+    // is a different lifeline and gets a generated one.
+    if (plain.has(name) && !taken.has(name)) {
+      ids.set(lifeline, name);
+      taken.add(name);
+      continue;
+    }
+    while (plain.has(`lifeline${next}`)) next += 1;
+    ids.set(lifeline, `lifeline${next}`);
+    next += 1;
+  }
+  return ids;
+};
+
+export interface DiagramOptions {
+  /** The lifeline for every variable that is not kept per player. */
+  readonly hub: string;
+  /**
+   * Actions that are the hub's own although they name a player, such as the
+   * server expiring a player's grace period. Without this, a step is drawn
+   * as coming from the player its label names.
+   */
+  readonly hubActions?: readonly string[] | undefined;
+}
+
+/** The hub among the lifelines; no player can be called this. */
+const HUB = '\u0000hub';
+
+/**
+ * The diagram for a trace. `labels[i]` names the step from state i to state
+ * i + 1, so there is one label fewer than there are states.
+ */
+export const sequenceDiagram = (trace: ItfTrace, labels: readonly string[], options: DiagramOptions): string => {
+  const { states } = trace;
+  const first = states[0];
+  if (first === undefined) throw new Error('the trace has no states');
+  if (labels.length !== states.length - 1) {
+    throw new Error(`${labels.length} step labels for ${states.length - 1} steps`);
+  }
+  const names = trace.vars.filter((name) => !name.startsWith('mbt::'));
+  // A variable is kept per player if it is a map keyed by strings in every
+  // state. It may start empty and players may be added to it later, so the
+  // players are collected over the whole trace.
+  const perActor = names.filter((name) => {
+    const maps = states.map((state) => stringKeyedMap(state[name]));
+    return maps.every((map) => map !== undefined) && maps.some((map) => (map?.size ?? 0) > 0);
+  });
+  const hubVars = names.filter((name) => !perActor.includes(name));
+  const everyone = new Set<string>();
+  for (const state of states) {
+    for (const name of perActor) for (const key of stringKeyedMap(state[name])?.keys() ?? []) everyone.add(key);
+  }
+
+  const perActorState = (state: Readonly<Record<string, unknown>>, who: string): string =>
+    perActor.map((name) => show(stringKeyedMap(state[name])?.get(who))).join(' ');
+  // Lifelines in the order they first act, then anyone a step changes
+  // without their acting. Someone the trace never touches is left out.
+  const touched = [...everyone].filter((who) =>
+    states.some((state) => perActorState(state, who) !== perActorState(first, who)),
+  );
+  // Who acted: a player the label names, unless the action is one of the
+  // hub's own. When the label names several players (a trace from `--mbt`
+  // lists every value the step picked), the one the step changed.
+  const hubActions = new Set(options.hubActions ?? []);
+  const actorOf = (label: string, index: number): string => {
+    if (hubActions.has(/^\w+/.exec(label)?.[0] ?? '')) return HUB;
+    const named = [...label.matchAll(/"([^"]*)"/g)].map((match) => match[1] ?? '').filter((name) => everyone.has(name));
+    const before = states[index] ?? {};
+    const after = states[index + 1] ?? {};
+    const changed = named.find((who) => perActorState(before, who) !== perActorState(after, who));
+    return changed ?? named[0] ?? HUB;
+  };
+  const order = [HUB];
+  for (const actor of [...labels.map(actorOf), ...touched]) if (!order.includes(actor)) order.push(actor);
+
+  const shown = (lifeline: string): string => (lifeline === HUB ? options.hub : lifeline);
+  const ids = lifelineIds(order, shown);
+  const id = (lifeline: string): string => ids.get(lifeline) ?? lifeline;
+  const hub = id(HUB);
+  const lines = [
+    'sequenceDiagram',
+    ...order.map((lifeline) =>
+      id(lifeline) === shown(lifeline)
+        ? `  participant ${id(lifeline)}`
+        : `  participant ${id(lifeline)} as ${text(shown(lifeline))}`,
+    ),
+  ];
+  labels.forEach((label, index) => {
+    const before = states[index] ?? {};
+    const after = states[index + 1] ?? {};
+    const actor = actorOf(label, index);
+    lines.push(`  ${id(actor)}->>${hub}: ${text(label)}`);
+
+    const hubChanges = hubVars
+      .filter((name) => show(before[name]) !== show(after[name]))
+      .map((name) => `${shortName(name)} = ${show(after[name])}`);
+    if (hubChanges.length > 0) lines.push(`  Note over ${hub}: ${stacked(hubChanges)}`);
+
+    for (const who of order) {
+      if (who === HUB) continue;
+      const changes: string[] = [];
+      for (const name of perActor) {
+        const was = stringKeyedMap(before[name])?.get(who);
+        const now = stringKeyedMap(after[name])?.get(who);
+        if (show(was) === show(now)) continue;
+        const what = change(was, now);
+        changes.push(perActor.length > 1 ? `${shortName(name)}: ${what}` : what);
+      }
+      if (changes.length === 0) continue;
+      const said = stacked(changes);
+      lines.push(who === actor ? `  Note over ${id(who)}: ${said}` : `  ${hub}-->>${id(who)}: ${said}`);
+    }
+  });
+  return `${lines.join('\n')}\n`;
+};
+
+// ── step labels for a `run` scenario ────────────────────────────────────
+
+/** The index just past the parenthesis that closes the one opened before `from`. */
+const closing = (source: string, from: number): number => {
+  let depth = 1;
+  let i = from;
+  while (i < source.length && depth > 0) {
+    const char = source[i];
+    if (char === '(') depth += 1;
+    if (char === ')') depth -= 1;
+    i += 1;
+  }
+  if (depth !== 0) throw new Error('unbalanced parentheses in a run');
+  return i;
+};
+
+/** The arguments of each `.then(...)` at the top level of `chain`, and what comes before the first. */
+const thens = (chain: string): { head: string; args: string[] } => {
+  const args: string[] = [];
+  let head: string | undefined;
+  let depth = 0;
+  let i = 0;
+  while (i < chain.length) {
+    const char = chain[i];
+    if (char === '(') depth += 1;
+    if (char === ')') depth -= 1;
+    if (depth === 0 && chain.startsWith('.then(', i)) {
+      head ??= chain.slice(0, i);
+      const end = closing(chain, i + 6);
+      args.push(chain.slice(i + 6, end - 1).trim());
+      i = end;
+    } else if (depth === 0 && chain.startsWith('.expect(', i)) {
+      head ??= chain.slice(0, i);
+      i = closing(chain, i + 8);
+    } else {
+      i += 1;
+    }
+  }
+  return { head: (head ?? chain).trim(), args };
+};
+
+/**
+ * The actions one `.then(...)` argument stands for. An `if` picks a branch on
+ * a constant of the module instance, which `constants` gives; any other
+ * condition cannot be decided here and is an error, never a guess.
+ */
+const actionsOf = (expression: string, constants: ReadonlyMap<string, boolean>): string[] => {
+  if (!expression.startsWith('if (')) {
+    const { head, args } = thens(expression);
+    return [head, ...args.flatMap((arg) => actionsOf(arg, constants))];
+  }
+  const conditionEnd = closing(expression, 4);
+  const condition = expression.slice(4, conditionEnd - 1).trim();
+  const negated = /^not\((\w+)\)$/.exec(condition);
+  const name = negated?.[1] ?? condition;
+  const value = constants.get(name);
+  if (value === undefined) throw new Error(`cannot tell which branch a run takes on: ${condition}`);
+  const rest = expression.slice(conditionEnd);
+  let depth = 0;
+  let split = -1;
+  for (let i = 0; i < rest.length && split < 0; i += 1) {
+    if (rest[i] === '(') depth += 1;
+    if (rest[i] === ')') depth -= 1;
+    if (depth === 0 && rest.startsWith(' else ', i)) split = i;
+  }
+  if (split < 0) throw new Error(`an if without an else in a run: ${expression}`);
+  const taken = value !== (negated !== null) ? rest.slice(0, split) : rest.slice(split + 6);
+  return actionsOf(taken.trim(), constants);
+};
+
+/** The constants `module main { import base(A = true, B = false).* }` sets. */
+export const instanceConstants = (source: string, main: string): Map<string, boolean> => {
+  const constants = new Map<string, boolean>();
+  const instance = new RegExp(`module ${main} \\{\\s*import \\w+\\(([^)]*)\\)`).exec(source);
+  for (const pair of (instance?.[1] ?? '').split(',')) {
+    const [name, value] = pair.split('=').map((part) => part.trim());
+    if (name !== undefined && (value === 'true' || value === 'false')) constants.set(name, value === 'true');
+  }
+  return constants;
+};
+
+export interface RunScenario {
+  readonly name: string;
+  /** The comment above the run in the spec. */
+  readonly comment: string;
+  /** One label per step, in order. */
+  readonly steps: string[];
+}
+
+/** Every `run` of a spec, with the action each of its steps takes in module `main`. */
+export const runScenarios = (source: string, main: string): RunScenario[] => {
+  const constants = instanceConstants(source, main);
+  const lines = source.split('\n');
+  const scenarios: RunScenario[] = [];
+  lines.forEach((line, at) => {
+    const declared = /^\s*run (\w+) =\s*(.*)$/.exec(line);
+    const name = declared?.[1];
+    if (name === undefined) return;
+    // The run goes on to the next blank line, comment, definition or closing
+    // brace; a `.then(` may spread its argument over several lines.
+    // It may also begin on the line that declares it.
+    const body: string[] = declared?.[2] ? [declared[2]] : [];
+    for (let i = at + 1; i < lines.length; i += 1) {
+      const part = (lines[i] ?? '').trim();
+      if (part === '' || part === '}' || /^(\/\/|run |val |def |action |pure )/.test(part)) break;
+      body.push(part);
+    }
+    const comment: string[] = [];
+    for (let i = at - 1; i >= 0 && /^\s*\/\//.test(lines[i] ?? ''); i -= 1) {
+      comment.unshift((lines[i] ?? '').replace(/^\s*\/\/ ?/, ''));
+    }
+    const { args } = thens(body.join(' '));
+    scenarios.push({
+      name,
+      comment: comment.join(' '),
+      steps: args.flatMap((arg) => actionsOf(arg, constants)),
+    });
+  });
+  return scenarios;
+};
+
+/**
+ * Step labels for a trace written with `quint run --mbt`, which records the
+ * action taken and the values it picked in every state.
+ */
+export const mbtLabels = (trace: ItfTrace): string[] =>
+  trace.states.slice(1).map((state, index) => {
+    const action = state['mbt::actionTaken'];
+    if (typeof action !== 'string') return `step ${index + 1}`;
+    const picks = state['mbt::nondetPicks'];
+    const picked = isRecord(picks)
+      ? Object.entries(picks).flatMap(([name, pick]) => {
+          if (!isObject(pick) || pick['tag'] !== 'Some') return [];
+          const value = pick['value'];
+          return [`${name}: ${typeof value === 'string' ? `"${value}"` : show(value)}`];
+        })
+      : [];
+    return picked.length > 0 ? `${action}(${picked.join(', ')})` : action;
+  });

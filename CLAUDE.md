@@ -134,7 +134,7 @@ kaillera-next/
 ├── tests/           # pytest + Playwright E2E tests
 ├── specs/           # Quint models (room lifecycle, peer identity, peer connection); `just spec` model-checks them
 ├── tools/           # match analysis scripts; oxlint/anti-slop/ = vendored lint rules
-├── docs/            # roadmap, netplay invariants, session-machine.md (generated state diagram), design/research notes
+├── docs/            # roadmap, netplay invariants, netcode-diagrams.md (index of the generated diagrams: session-machine.md, spec-traces.md), design/research notes
 ├── Dockerfile       # production Docker image
 └── CHANGELOG.md     # version history
 ```
@@ -321,7 +321,9 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   2. **States go in the XState machine** (`web/src/session.ts`), not in new
      boolean flags in `play.js` or the engine. `docs/session-machine.md` is
      generated from the machine (`npm run diagram`); put the diagram in the
-     plan and in the PR when the states change.
+     plan and in the PR when the states change. A failing ordering can
+     be drawn from the model too (`scripts/trace-diagram.mjs`);
+     `docs/netcode-diagrams.md` lists every generated diagram.
   3. **Decisions are pure functions with a contract** in `web/src`, listed
      in `LemmaScript-files.txt` and checked by the `proofs` CI job (Dafny is
      not installed locally by default). "Which connection does this player
