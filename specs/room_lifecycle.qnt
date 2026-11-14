@@ -72,6 +72,13 @@ module room {
   //   true   today: the server ends the match (signaling.py,
   //          _end_match_if_abandoned) and everyone is back in the lobby
   const SERVER_ENDS_ABANDONED_MATCH: bool
+  // The server keeps a dropped player's place while no player of the room is
+  // connected at all, instead of dropping each after its own grace window.
+  // Before, a signaling outage longer than the window that hit every player
+  // (a server restart, a network drop) emptied the room, and the match the
+  // players were still running over their own connections was ended when
+  // they came back (seen in a two-player run with a 40 s outage, 2026-11-14).
+  const GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED: bool
 
   // web/src/session.ts is the page half of this model, state for state:
   //   Lobby = lobby, AwaitingRom = lateJoinAwaitingRom, Starting =
@@ -102,6 +109,9 @@ module room {
   var online: Set[str]      // members whose signaling socket is connected
   var grace: Set[str]       // members inside the disconnect grace window
   var page: str -> Page
+  // History: a grace window running out removed the last player of a
+  // playing room while that player's page was still in the match.
+  var lostToGrace: bool
 
   pure def isOpen(pg: Page): bool = pg != Closed
 
@@ -157,9 +167,10 @@ module room {
     page.keys().mapBy(p => if (listeners.contains(p)) onGameStarted(page.get(p), m) else page.get(p))
 
   // _leave: drop the player, hand the room on, delete it when empty.
-  action removeMember(p: str, pageAfter: Page): bool = {
+  action removeMember(p: str, pageAfter: Page, byGrace: bool): bool = {
     val rest = members.exclude(Set(p))
     all {
+      lostToGrace' = (lostToGrace or (byGrace and rest == Set() and status == "playing" and gameOf(page.get(p)) == matchId)),
       members' = rest,
       online' = online.exclude(Set(p)),
       grace' = grace.exclude(Set(p)),
@@ -179,7 +190,7 @@ module room {
 
   action init = all {
     members' = Set(), owner' = NOBODY, creator' = NOBODY,
-    status' = "lobby", matchId' = 0, nextMatch' = 1,
+    status' = "lobby", matchId' = 0, nextMatch' = 1, lostToGrace' = false,
     online' = Set(), grace' = Set(),
     page' = PLAYERS.mapBy(_ => Closed),
   }
@@ -187,7 +198,7 @@ module room {
   action openRoom(p: str): bool = all {
     members == Set(), page.get(p) == Closed,
     members' = Set(p), owner' = p, creator' = p,
-    status' = "lobby", matchId' = 0, nextMatch' = nextMatch,
+    status' = "lobby", matchId' = 0, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
     online' = Set(p), grace' = Set(),
     page' = page.set(p, Lobby),
   }
@@ -200,7 +211,7 @@ module room {
     online' = online.union(Set(p)),
     page' = page.set(p, joinedPage(status, matchId, hasRom)),
     owner' = owner, creator' = creator, status' = status, matchId' = matchId,
-    nextMatch' = nextMatch, grace' = grace,
+    nextMatch' = nextMatch, lostToGrace' = lostToGrace, grace' = grace,
   }
 
   // The joiner dropped a ROM, or finished receiving the host's.
@@ -208,7 +219,7 @@ module room {
     page.get(p) == AwaitingRom(matchId), status == "playing",
     page' = page.set(p, Starting(matchId)),
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
   }
 
   // The joiner's engine starts as a late join and asks for the match state.
@@ -216,13 +227,13 @@ module room {
     page.get(p) == Starting(matchId), status == "playing",
     page' = page.set(p, Syncing(matchId)),
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
   }
 
   // The Start button lives in the lobby UI; the server checks only ownership.
   action startGame = all {
     online.contains(owner), page.get(owner) == Lobby,
-    status' = "playing", matchId' = nextMatch, nextMatch' = nextMatch + 1,
+    status' = "playing", matchId' = nextMatch, nextMatch' = nextMatch + 1, lostToGrace' = lostToGrace,
     page' = broadcastGameStarted(nextMatch),
     members' = members, owner' = owner, creator' = creator,
     online' = online, grace' = grace,
@@ -242,7 +253,7 @@ module room {
     page' = page.keys().mapBy(p =>
       if (members.contains(p) or page.get(p) == Loading(matchId)) StartSync(matchId) else page.get(p)),
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
   }
 
   // The players who synced are ready to run (checkAllLockstepReady).
@@ -258,7 +269,7 @@ module room {
     status == "playing", startCanRun,
     page' = page.keys().mapBy(p => if (page.get(p) == StartSync(matchId)) Running(matchId) else page.get(p)),
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
   }
 
   // Can a player who is asking for the match state get it? Only from a
@@ -279,7 +290,7 @@ module room {
     canBeAdmitted(p),
     page' = page.set(p, Loading(matchId)),
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
   }
 
   // The End button lives in the game UI.
@@ -290,7 +301,7 @@ module room {
     status' = "lobby", matchId' = 0,
     page' = broadcast(Lobby),
     members' = members, owner' = owner, creator' = creator,
-    online' = online, grace' = grace, nextMatch' = nextMatch,
+    online' = online, grace' = grace, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
   }
 
   // A late joiner gets the state from a connected peer that is running it.
@@ -299,12 +310,12 @@ module room {
     canBeServed(p),
     page' = page.set(p, Running(matchId)),
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
   }
 
   action leave(p: str): bool = all {
     online.contains(p),
-    removeMember(p, Closed),
+    removeMember(p, Closed, false),
   }
 
   action reload(p: str): bool = all {
@@ -312,7 +323,7 @@ module room {
     online' = online.exclude(Set(p)), grace' = grace.union(Set(p)),
     page' = page.set(p, Closed),
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
   }
 
   action dropSocket(p: str): bool = all {
@@ -320,14 +331,14 @@ module room {
     online' = online.exclude(Set(p)), grace' = grace.union(Set(p)),
     page' = page,
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
   }
 
   // Fresh page, back inside the grace window.
   action reopen(p: str, hasRom: bool): bool = all {
     grace.contains(p), page.get(p) == Closed,
     online' = online.union(Set(p)), grace' = grace.exclude(Set(p)),
-    members' = members, owner' = owner, creator' = creator, nextMatch' = nextMatch,
+    members' = members, owner' = owner, creator' = creator, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
     if (p == creator and HOST_REOPEN_ENDS_MATCH) all {
       // Proposed: the host's emulator is gone, so the match is over.
       status' = "lobby", matchId' = 0,
@@ -350,12 +361,24 @@ module room {
     online' = online.union(Set(p)), grace' = grace.exclude(Set(p)),
     page' = if (RESUME_RECONCILES) page.set(p, reconciled(page.get(p), status, matchId, hasRom)) else page,
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
   }
 
   action graceExpire(p: str): bool = all {
     grace.contains(p),
-    removeMember(p, page.get(p)),
+    not(GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED) or status != "playing" or online != Set(),
+    removeMember(p, page.get(p), true),
+  }
+
+  // Nobody has come back to a playing room for far longer than the grace
+  // window (minutes, not seconds): the server gives the room up. The players
+  // may still be in their match; this is the bound on how long an outage the
+  // room survives, not a state the server can tell apart from closed tabs.
+  action giveUpOnSilentRoom = all {
+    GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED, status == "playing", members != Set(), online == Set(),
+    members' = Set(), online' = Set(), grace' = Set(),
+    owner' = NOBODY, creator' = NOBODY, status' = "lobby", matchId' = 0,
+    page' = page, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
   }
 
   // The socket of a page the server dropped comes back and it sends its
@@ -367,7 +390,7 @@ module room {
     val roomTakesJoiners = members != Set() and (online != Set() or grace != Set())
     all {
       was != 0, not(members.contains(p)),
-      nextMatch' = nextMatch, grace' = grace,
+      nextMatch' = nextMatch, lostToGrace' = lostToGrace, grace' = grace,
       if (roomTakesJoiners and sameMatch and (RESUME_KNOWS_IT_WAS_DROPPED or not(asHost))) all {
         // Back into the match it never stopped playing. Before, only a guest
         // got this (by accident: join-room took it for a new player); a host
@@ -412,7 +435,7 @@ module room {
     status' = "lobby", matchId' = 0,
     page' = broadcast(Lobby),
     members' = members, owner' = owner, creator' = creator,
-    online' = online, grace' = grace, nextMatch' = nextMatch,
+    online' = online, grace' = grace, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
   }
 
   // A page that is no longer in the room is closed by its user.
@@ -420,7 +443,7 @@ module room {
     not(members.contains(p)), isOpen(page.get(p)),
     page' = page.set(p, Closed),
     members' = members, owner' = owner, creator' = creator, status' = status,
-    matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
   }
 
   action step = any {
@@ -429,6 +452,7 @@ module room {
     startRunning,
     endGame,
     endAbandonedMatch,
+    giveUpOnSilentRoom,
     nondet p = oneOf(PLAYERS)
     nondet hasRom = oneOf(Set(true, false))
     nondet asHost = oneOf(Set(true, false))
@@ -516,6 +540,15 @@ module room {
   val anAbandonedMatchIsEnded =
     matchHasNobody implies (SERVER_ENDS_ABANDONED_MATCH and everyoneIsWaiting)
 
+  // A signaling outage alone never costs the players their match: a grace
+  // window running out does not remove the last player of a playing room
+  // while that player is still in the match. Failed before: every player's
+  // signaling was down for longer than the window, the room was emptied and
+  // deleted, and the returning players were sent to the lobby or shown a
+  // closed room. Now the server waits while nobody is connected, up to the
+  // much longer bound in `giveUpOnSilentRoom`.
+  val aMatchIsNotLostToTheGraceWindow = not(lostToGrace)
+
   // ── scenarios ──────────────────────────────────────────────────────────
 
   // The production sequence: host starts alone, reloads, a friend joins.
@@ -573,6 +606,26 @@ module room {
       .then(returnAfterExpiry("host", true, true))
       .expect(page.get("host") == (if (RESUME_KNOWS_IT_WAS_DROPPED) Running(1) else Stranded(1)))
       .expect(members.contains("host") == RESUME_KNOWS_IT_WAS_DROPPED)
+
+  // Every player's signaling is down for longer than the grace window while
+  // the match runs on over their own connections. Before, the room was
+  // emptied and the returning host was handed a new, empty room and sent to
+  // its lobby. Now their places are kept and both resume the match.
+  run everyoneDropsTest =
+    init
+      .then(openRoom("host"))
+      .then(join("guest1", true))
+      .then(startGame)
+      .then(beginSync)
+      .then(startRunning)
+      .then(dropSocket("host"))
+      .then(dropSocket("guest1"))
+      .then(if (GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED) resume("host", true)
+            else graceExpire("host").then(graceExpire("guest1")).then(returnAfterExpiry("host", true, true)))
+      .expect(lostToGrace == not(GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED))
+      .expect(page.get("host") == (if (GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED) Running(1)
+                                   else if (RESUME_KNOWS_IT_WAS_DROPPED) Lobby else Stranded(1)))
+      .expect((status == "playing") == GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED)
 
   // The host leaves for good while a joiner is still getting in. Before, the
   // room stayed "playing" with nobody running the match.
@@ -662,7 +715,15 @@ module room {
 module room_current {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
-         SERVER_ENDS_ABANDONED_MATCH = true).*
+         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true).*
+}
+
+// Before the server kept the places of a room nobody was connected to.
+// aMatchIsNotLostToTheGraceWindow is violated here.
+module room_before_grace_wait {
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
+         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
 }
 
 // Before the server ended a match nobody was running.
@@ -670,7 +731,7 @@ module room_current {
 module room_before_abandoned_end {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
-         SERVER_ENDS_ABANDONED_MATCH = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
 }
 
 // Before a rejoin said it was a resume and a refusal was acted on.
@@ -678,7 +739,7 @@ module room_before_abandoned_end {
 module room_before_resume_flag {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = false,
-         SERVER_ENDS_ABANDONED_MATCH = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
 }
 
 // Before a joiner who asks for state too early was admitted to the start
@@ -687,7 +748,7 @@ module room_before_resume_flag {
 module room_before_start_fix {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
-         SERVER_ENDS_ABANDONED_MATCH = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
 }
 
 // Before the page reconciled with the server on reconnect
@@ -696,12 +757,12 @@ module room_before_start_fix {
 module room_before_reconcile {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
-         SERVER_ENDS_ABANDONED_MATCH = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
 }
 
 // Before #104, kept so hostReloadTest still shows what that fix changed.
 module room_before_104 {
   import room(HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
-         SERVER_ENDS_ABANDONED_MATCH = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
 }

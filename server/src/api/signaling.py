@@ -49,6 +49,9 @@ Disconnect grace period:
   Mid-game Socket.IO disconnects defer player removal for 30 seconds
   (_DISCONNECT_GRACE_SECONDS), allowing auto-reconnect to reclaim the
   slot. Cancelled on explicit leave-room or successful reconnect.
+  While no player of the room is connected at all, removal waits longer
+  (up to _SILENT_ROOM_GRACE_SECONDS): everyone dropping at once is an
+  outage, and the match is still running between the players.
   Periodic 5-second re-stall prevents the host from running free
   indefinitely if the peer never reconnects.
 """
@@ -122,6 +125,14 @@ _PER_IP_SPECTATOR_CAP = int(os.environ.get("PER_IP_SPECTATOR_CAP", "3"))
 _RELAY_MAX_BYTES = 65_536
 _SIGNAL_MAX_BYTES = 65_536
 _DISCONNECT_GRACE_SECONDS = 30
+# While no player of a playing room is connected, a dropped player's place is
+# kept past the grace window: an outage that hits everyone (a server restart,
+# a network drop) is not the players leaving, and their match runs on over
+# their own connections. This is how long the server waits for any of them
+# before giving the room up (`aMatchIsNotLostToTheGraceWindow` and
+# `giveUpOnSilentRoom` in specs/room_lifecycle.qnt).
+_SILENT_ROOM_GRACE_SECONDS = 300
+_SILENT_ROOM_POLL_SECONDS = 5
 # The answer to a rejoin marked `resume` from a client the room no longer
 # counts as a member. The page matches on this text (web/src/rejoin-attempt.ts).
 NOT_IN_ROOM = "Not in room"
@@ -553,6 +564,12 @@ def _cancel_disconnect_grace(persistent_id: str) -> None:
         log.info("Disconnect grace cancelled for %s (reconnected)", persistent_id)
 
 
+def _nobody_is_connected_to_match(session_id: str) -> bool:
+    """True for a playing room none of whose players has a socket here."""
+    room = rooms.get(session_id)
+    return room is not None and room.status == "playing" and connected_players(room) == 0
+
+
 async def _disconnect_grace_expiry(
     sid: str,
     session_id: str,
@@ -563,6 +580,10 @@ async def _disconnect_grace_expiry(
     """Called after grace period expires — do the actual _leave cleanup."""
     try:
         await asyncio.sleep(grace_seconds)
+        waited = grace_seconds
+        while waited < _SILENT_ROOM_GRACE_SECONDS and _nobody_is_connected_to_match(session_id):
+            await asyncio.sleep(_SILENT_ROOM_POLL_SECONDS)
+            waited += _SILENT_ROOM_POLL_SECONDS
     except asyncio.CancelledError:
         return  # Reconnected in time
     async with _room_lock:
