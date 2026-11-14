@@ -83,7 +83,6 @@ kaillera-next/
 │   ├── error.html           # error/fallback page
 │   └── static/
 │       ├── landing.js           # front page: board poll, waking state, header marks
-│       ├── join.js              # invite page: room lookup, full/closed/in-app states
 │       ├── landing.css          # front page styles (direction A tokens)
 │       ├── play.css             # play page styles (room overlay tokens, direction A)
 │       ├── admin.css            # admin dashboard styles
@@ -119,6 +118,7 @@ kaillera-next/
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
 │       ├── dist/kn-core.js       # built from web/src by `just build`; committed, never edited by hand
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
+│       ├── dist/kn-join.js       # the invite page's own small bundle: room lookup, full/closed/in-app states
 │       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 │   ├── src/                     # strict TypeScript frontend
@@ -129,6 +129,8 @@ kaillera-next/
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
+│   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (join.ts: the invite page; wake.ts, wire.ts: shared)
+│   │   ├── join-entry.ts        # kn-join.js bundle entry
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)

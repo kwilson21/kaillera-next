@@ -201,7 +201,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands | play.js |
 | `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |
 | `landing.js` | — | Front-page board controller (room creation, open-rooms board) on index.html | — |
-| `join.js` | — | Invite-page controller (room lookup, join/watch states) on join.html | — |
+| `dist/kn-join.js` | — | Invite-page controller (room lookup, join/watch states), built from `web/src/landing/join.ts` | join.html |
 | `dist/kn-wake-art.js` | — | Standalone TypeScript bundle for waking-state art while a room wakes | index.html, join.html |
 | `dist/kn-site.js` | — | Small TypeScript bundle for pages without the core: `KNStorage` | index.html, admin.html |
 | `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
@@ -218,8 +218,10 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 - **TypeScript** — new frontend logic lives in `web/src/` (strict mode,
   Effect, Effect Schema, XState). `just build` type-checks, runs
   `tests/ts`, and bundles it to `web/static/dist/kn-core.js`, which is
-  committed. Static landing-page waking art is strict TypeScript too, built
-  as its own small `web/static/dist/kn-wake-art.js` bundle. The existing
+  committed. The static landing pages are strict TypeScript too, without
+  Effect (`web/src/landing/`): the waking art and the invite page are built
+  as their own small bundles, `web/static/dist/kn-wake-art.js` and
+  `web/static/dist/kn-join.js`. The existing
   `web/static/*.js` files stay plain scripts until their turn in the
   migration (`docs/roadmap.md`).
 - **JS/TS/HTML/CSS** — formatted by oxfmt (`just fmt`), same style Prettier

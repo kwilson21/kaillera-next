@@ -203,7 +203,7 @@ def test_build_lists_exactly_the_files_the_pages_load():
     dist = REPO / "dist-landing"
     assert (dist / "index.html").is_file() and (dist / "join.html").is_file()
     assert (dist / "privacy.html").read_bytes() == (REPO / "web" / "privacy.html").read_bytes()
-    assert (dist / "static" / "join.js").is_file()
+    assert (dist / "static" / "dist" / "kn-join.js").is_file()
     assert (dist / "static" / "og" / "home.png").is_file()  # the static pages' og:image
     assert (dist / "static" / "version.json").is_file()
     assert (dist / "static" / "changelog.json").is_file()
