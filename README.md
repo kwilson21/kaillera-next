@@ -223,7 +223,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
     kn-state.js            Shared cross-module state
-    feedback.js            In-app feedback collection
+    feedback.js            In-app feedback collection; starts web/src/site/feedback.ts
     version.js             Version display + changelog modal; starts web/src/site/version.ts
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)

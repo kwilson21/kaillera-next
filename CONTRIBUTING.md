@@ -143,7 +143,7 @@ earlier ones to have set up their `window.*` exports:
 20. `controller-settings.js` — in-game controller settings panel
 21. `play.js` — page orchestrator (connects everything)
 22. `version.js` — version display + changelog modal; starts `web/src/site/version.ts`
-23. `feedback.js` — in-app feedback collection
+23. `feedback.js` — in-app feedback collection (`window.KNFeedback`); starts `web/src/site/feedback.ts`
 
 #### Server structure
 
@@ -191,7 +191,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
 | `kn-vision-client.js` | — | Claude vision client for screenshot-diff desync analysis | rollback |
 | `audio-worklet-processor.js` | ~85 | AudioWorklet ring buffer for rollback audio | kn-audio.js |
-| `feedback.js` | ~540 | In-app feedback collection UI | play.js |
+| `feedback.js` | — | In-app feedback collection UI (`window.KNFeedback`); a small caller of `web/src/site/feedback.ts` | dist/kn-core.js or dist/kn-site.js |
 | `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | rollback, core-redirector |
 | `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
 | `dist/kn-core.js` | — | The TypeScript core built from `web/src`; sets `KNStorage`, the safe localStorage/sessionStorage wrapper (`web/src/site/storage.ts`) | all modules |
