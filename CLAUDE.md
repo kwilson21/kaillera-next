@@ -111,7 +111,7 @@ kaillera-next/
 │       ├── version.js           # version display + changelog modal
 │       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
-│       ├── dist/kn-core.js       # built from web/src by `just build`; committed, never edited by hand
+│       ├── dist/kn-core.js       # built from web/src by `npm run build`; build output, not in git (the Docker image and CI build it)
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
 │       ├── dist/kn-join.js       # the invite page's own small bundle: room lookup, full/closed/in-app states
 │       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage
@@ -321,9 +321,13 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   engine call `window.KNCore` without a fallback. `window.KNShared` is
   defined by the bundle too (`web/src/page/shared.ts`); tests import that
   module directly instead of loading a script outside a page.
-  After changing `web/src`, run `just build` and commit
-  `web/static/dist/kn-core.js`; CI fails if it is stale. Migration stages are
-  in `docs/roadmap.md`. A module moves from observing to deciding only after
+  The bundles in `web/static/dist` are build output and are not in git: run
+  `npm ci` once and `npm run build` after a fresh checkout and after changing
+  `web/src`, before starting the server or any browser test (the server logs
+  an error at startup when the core bundle is missing). Never commit them.
+  The Docker image, CI and the landing and demo builds build them from
+  `package-lock.json`, so the bytes are the same everywhere. Migration stages
+  are in `docs/roadmap.md`. A module moves from observing to deciding only after
   production shows it agrees with the code it replaces.
 - **Model and prove before you patch state logic.** This applies to plans
   as much as to code: a plan for anything involving state, ordering or

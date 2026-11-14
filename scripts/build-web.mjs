@@ -1,7 +1,9 @@
 // Build the TypeScript core, the small bundle for pages without the core, the
 // standalone landing-page waking art and the invite page as classic scripts.
-// The bundles are committed so serving and deploying need no Node
-// step; CI rebuilds them and fails if a committed copy is stale.
+// The bundles are build output (web/static/dist is git-ignored): the Docker
+// image, CI, the landing and demo builds and local development each run this.
+// With package-lock.json the output is the same bytes everywhere, which the
+// landing build id relies on (server/src/landing_build.py).
 //
 //   node scripts/build-web.mjs
 import { build } from 'esbuild';
