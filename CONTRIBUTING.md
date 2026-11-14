@@ -140,7 +140,7 @@ earlier ones to have set up their `window.*` exports:
 17. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
 18. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
 19. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
-20. `controller-settings.js` — in-game controller settings panel
+20. `controller-settings.js` — starts the in-game controller settings panel (logic in `web/src/page/controller-settings/`)
 21. `play.js` — page orchestrator (connects everything)
 22. `version.js` — version display + changelog modal
 23. `feedback.js` — in-app feedback collection
@@ -184,7 +184,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `shared.js` | ~1,060 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
 | `gamepad-manager.js` | ~550 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
 | `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
-| `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
+| `controller-settings.js` | — | Starts the in-game controller settings panel (deadzone, sensitivity, profiles); the logic is `web/src/page/controller-settings/` | play.js, gamepad-manager |
 | `virtual-gamepad.js` | ~1,194 | On-screen touch controls for mobile | KNState |
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
 | `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |

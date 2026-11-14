@@ -211,7 +211,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
     switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
-    controller-settings.js In-game controller settings panel
+    controller-settings.js Starts the in-game controller settings panel (logic in web/src/page/controller-settings/)
     virtual-gamepad.js     On-screen touch controls for mobile
     shared.js              Input encoding/decoding, wire format, input application to WASM
     kn-audio.js            AudioWorklet pump + rollback audio capture
