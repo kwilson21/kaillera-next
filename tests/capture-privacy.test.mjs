@@ -290,13 +290,27 @@ test('input and audio diagnostics remain functional with images off', () => {
   assert.equal(h.counts.draws, 0);
 });
 
+test('the page script starts the policy from the core and nothing else', () => {
+  const calls = [];
+  const policy = {};
+  const startCapture = (host) => {
+    calls.push(host);
+    return policy;
+  };
+  const window = { KNCore: { page: { startCapture } } };
+  vm.runInNewContext(read('static/kn-capture.js'), { window });
+  assert.deepEqual(calls, [window]);
+  assert.equal(window.KNCapture, policy);
+});
+
 // The diagnostics in the bundle ask the policy at each capture, and capture
 // nothing when it is missing (the `policy: false` case above), so what must
 // come after the policy is the engine that drives them.
 test('all diagnostic pages load shared policy before the engine that captures', () => {
   for (const page of ['play.html', 'demo.html']) {
     const html = read(page);
-    assert.ok(html.indexOf('/static/kn-capture.js') >= 0);
+    assert.ok(html.indexOf('/static/dist/kn-core.js') >= 0);
+    assert.ok(html.indexOf('/static/dist/kn-core.js') < html.indexOf('/static/kn-capture.js'));
     assert.ok(html.indexOf('/static/kn-capture.js') < html.indexOf('/static/netplay-rollback.js'));
   }
 });

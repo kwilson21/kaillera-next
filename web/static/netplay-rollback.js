@@ -5058,17 +5058,28 @@
   //  - Inputs keyed before frame - delay are in the loaded state already:
   //    settled, never waited for.
   //  - This page's inputs from there up to `frame` are still to be applied.
-  //    The ones it never made are made now (neutral) and sent.
+  //    The ones it never made are made now (neutral). All of them are sent,
+  //    the ones made earlier too: this page may have made one while it ran
+  //    ahead, before it was taken back and moved forward again, and a peer
+  //    far behind at the time dropped it as out of range.
   //  - The peers' inputs for the same range that are missing are asked for.
   const _settleInputsAtResync = (mod, frame) => {
     const from = Math.max(0, frame - DELAY_FRAMES);
     const made = [];
+    const own = [];
     if (_playerSlot !== null && _playerSlot !== undefined) {
       for (let f = from; f < frame; f++) {
-        if (_localInputs[f] !== undefined) continue;
-        _localInputs[f] = KNShared.ZERO_INPUT;
-        _feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);
-        made.push(f);
+        own.push(f);
+        if (_localInputs[f] === undefined) {
+          _localInputs[f] = KNShared.ZERO_INPUT;
+          made.push(f);
+        }
+        // Every one is handed to the engine again, the ones made earlier
+        // too: its input ring holds 256 frames, and a page that ran further
+        // ahead than that before it was taken back has written over the
+        // slot. The peers apply what is sent below; this page must apply
+        // the same.
+        _feedCInput(mod, _playerSlot, f, _localInputs[f]);
       }
     }
     const asked = [];
@@ -5079,8 +5090,8 @@
       try {
         // Every peer waits on this page's inputs, not only the host that
         // sent the state: tell each one where they start again.
-        if (made.length) peer.dc.send(`inputs-settled:${from}`);
-        for (const f of made) peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);
+        if (own.length) peer.dc.send(`inputs-settled:${from}`);
+        for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
         for (let f = from; f < frame; f++) {
           const have = _remoteInputs[peer.slot]?.[f];
           if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
@@ -5091,8 +5102,10 @@
         _syncLog(`RESYNC-INPUTS send failed slot=${peer.slot}: ${err}`);
       }
     }
-    if (made.length || asked.length) {
-      _syncLog(`RESYNC-INPUTS f=${frame} settledBefore=${from} made=[${made.join(',')}] asked=[${asked.join(',')}]`);
+    if (own.length || asked.length) {
+      _syncLog(
+        `RESYNC-INPUTS f=${frame} settledBefore=${from} sent=[${own.join(',')}] made=[${made.join(',')}] asked=[${asked.join(',')}]`,
+      );
     }
   };
 
