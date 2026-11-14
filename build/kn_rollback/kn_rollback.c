@@ -2029,15 +2029,16 @@ const kn_gameplay_addr_t kn_gameplay_addrs[] = {
      * (gSCManagerBattleState points at it; a RAM dump of a match shows its
      * game_status 1 and live stock counts). gSCManagerVSBattleState at
      * 0x800A4EF8 is used for sudden death and is dormant otherwise, which
-     * is why the mismatches stopped: this hash has compared a struct that
-     * does not change ever since. The entries below are left on the
-     * dormant struct on purpose. This hash is compared in every scene, and
-     * the note above reports the transfer struct differing between peers
-     * from frame 149, in the menus; that has not been re-tested. The live
-     * battle state is covered by the desync registry (kn_hash_registry.c),
-     * which compares it in the battle scene only, where four healthy
-     * matches on confirmed frames showed no difference. See
-     * kn_gameplay_addrs.h.
+     * is why the mismatches stopped: from then on this hash compared a
+     * struct that does not change, and could not see a stock count that
+     * differed between peers.
+     *
+     * The entries below read the live struct again. The mismatches from
+     * f=149 that the note above reports did not come back: two-player runs
+     * compare this hash on every frame, menus included, and the PR that
+     * made this change lists them. One-byte entries are also read at the
+     * right byte now (kn_gameplay_addr_offset), which they were not then.
+     * See kn_gameplay_addrs.h.
      *
      * The old "P1-P4 stock count" entries also used offset 0x2B within
      * the player struct. In SCPlayerData, offset 0x2B is the LSB of
@@ -2055,21 +2056,21 @@ const kn_gameplay_addr_t kn_gameplay_addrs[] = {
      */
     { KN_ADDR_SCENE_CURR, 1 },   /* gSCManagerSceneData.scene_curr */
 
-    /* gSCManagerVSBattleState: full header (32 bytes) covers
+    /* The live battle state's header (32 bytes) covers
      * game_type, gkind, is_team_battle, game_rules, pl_count,
      * cp_count, time_limit, stocks, handicap, is_team_attack,
      * is_stage_select, damage_ratio, item_toggles, is_reset_players,
      * game_status, time_remain, time_passed, item_appearance_rate,
      * and is_show_score/is_not_teamshadows bitfields. */
-    { KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER },
+    { KN_ADDR_LIVE_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER },
 
-    /* gSCManagerVSBattleState.players[N].stock_count
-     *   base 0xA4EF8 + players offset 0x20 + player index * 0x74
+    /* The live battle state's players[N].stock_count
+     *   base 0xA4D08 + players offset 0x20 + player index * 0x74
      *   + stock_count offset 0xB within SCPlayerData. */
-    { KN_ADDR_PLAYER_STOCKS_BASE + 0*KN_PLAYER_STRIDE, 1 },   /* P1 stock_count */
-    { KN_ADDR_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE, 1 },   /* P2 stock_count */
-    { KN_ADDR_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE, 1 },   /* P3 stock_count */
-    { KN_ADDR_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE, 1 },   /* P4 stock_count */
+    { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 0*KN_PLAYER_STRIDE, 1 },   /* P1 stock_count */
+    { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE, 1 },   /* P2 stock_count */
+    { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE, 1 },   /* P3 stock_count */
+    { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE, 1 },   /* P4 stock_count */
     /* RNG seed — sample the REAL game RNG so cross-peer divergence at
      * char-pick time surfaces via RB-CHECK. Prior table sampled 0x05B940
      * which was thought to be the seed but is actually gSYAudioHeapBuffer

@@ -40,22 +40,15 @@ typedef struct {
  * tests/hash-golden reads both from a RAM dump of a match (pointer
  * 0x800A4D08, live status 1 and stocks 3,3; dormant status 0 and stocks 0).
  *
- * The desync registry (kn_hash_registry.c) reads the LIVE struct, and only
- * compares it while the scene is the battle. kn_gameplay_hash still reads
- * the dormant one, below: it has no scene gate, and an earlier note (on
- * kn_gameplay_addrs[] in kn_rollback.c) reports the live struct differing
- * between peers in the menus, which has not been re-tested. So that hash
- * does not cover the battle state; the registry does. */
+ * Both the desync registry (kn_hash_registry.c) and kn_gameplay_hash read
+ * the LIVE struct. Until 2026-11 they read the dormant one, so neither
+ * could see a stock count that differed between peers. */
 
 /* Live battle state: header (32 bytes) and per-player stock counts
  * (SCPlayerData.stock_count at +0xB; players[] starts at +0x20). */
 #define KN_ADDR_LIVE_BATTLE_HEADER      0xA4D08
-#define KN_ADDR_LIVE_PLAYER_STOCKS_BASE 0xA4D33   /* P1; +0x74 per player */
-
-/* Dormant copy, read by kn_gameplay_hash only. */
-#define KN_ADDR_VS_BATTLE_HEADER        0xA4EF8
 #define KN_SIZE_VS_BATTLE_HEADER        32
-#define KN_ADDR_PLAYER_STOCKS_BASE      0xA4F23   /* P1; +0x74 per player */
+#define KN_ADDR_LIVE_PLAYER_STOCKS_BASE 0xA4D33   /* P1; +0x74 per player */
 
 /* RNG */
 #define KN_ADDR_SY_UTILS_RANDOM_SEED    0x03B940  /* sSYUtilsRandomSeed (4 bytes) */

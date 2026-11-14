@@ -896,12 +896,12 @@ if (inBattle) {
   } else if (DESYNC_GUEST) {
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
     // P1's stock count, at the address the core's map has for it (SSB64 US:
-    // SCPlayerData.stock_count, 0xA4F23). RDRAM is host-order words, so the byte
+    // SCPlayerData.stock_count, 0xA4D33). RDRAM is host-order words, so the byte
     // is at offset ^ 3. Held for 3 s so that every state the rollback ring
     // can still restore carries the change.
     ({ frame: desyncGuestAt, stocksBase: desyncGuestStocksBase } = await guest.evaluate(async () => {
       const mod = window.EJS_emulator.gameManager.Module;
-      const stocksBase = mod._kn_field_map_value?.(0) ?? 0xa4f23;
+      const stocksBase = mod._kn_field_map_value?.(0) ?? 0xa4d33;
       const at = mod._kn_get_rdram_ptr() + (stocksBase ^ 3);
       const wrong = mod.HEAPU8[at] ^ 1;
       const frame = window.NetplayRollback.getHudCounters?.()?.currentFrame ?? 0;
@@ -1584,8 +1584,9 @@ const desyncCapturesAgree = (hostSide, guestSide) => {
 };
 // kn_gameplay_hash has its own table of addresses, compiled in and SSB64's.
 // It sees the changed stock count only when the map's stock address is the
-// one in that table, so only then is it required to.
-const desyncGuestGameplayHashCovers = desyncGuestStocksBase === 0xa4f23;
+// one in that table (the live battle state's, 0xA4D33), so only then is it
+// required to.
+const desyncGuestGameplayHashCovers = desyncGuestStocksBase === 0xa4d33;
 // DESYNC_GUEST inverts the run: the peers were desynced on purpose. The
 // detector must flag the changed field on both peers, and nothing before
 // the change; and the gameplay hash, which lists the stock counts, must
