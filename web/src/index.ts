@@ -62,6 +62,7 @@ import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from
 import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
+import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
@@ -318,6 +319,8 @@ declare global {
 
 if (typeof window !== 'undefined') {
   window.KNCore = KNCore;
+  // First: KNState, built next, carries the storage helpers.
+  installSafeStorage();
   installKNState(window);
   installShared();
   installGamepadManager();

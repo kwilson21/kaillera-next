@@ -6,10 +6,11 @@ import fs from 'node:fs';
 
 const read = (file) => fs.readFileSync(new URL(`../web/${file}`, import.meta.url), 'utf8');
 // window.KNDiag comes from the TypeScript bundle (web/src/page/diagnostics.ts),
-// so the bundle is run as the pages run it: one classic script.
+// so the bundle is run as the pages run it: one classic script, before the
+// scripts that build on it.
 const sources = {
-  'kn-capture': read('static/kn-capture.js'),
   'kn-core': read('static/dist/kn-core.js'),
+  'kn-capture': read('static/kn-capture.js'),
   'kn-vision-client': read('static/kn-vision-client.js'),
 };
 const key = 'kn-diagnostic-images';
@@ -133,8 +134,12 @@ function harness({
     },
   });
   context.window = context;
+  // The bundle sets window.KNStorage on a real page. Here the harness's own
+  // stand-in (which can be made to fail) is put back after the bundle runs.
+  const fakeStorage = context.KNStorage;
   for (const name of Object.keys(sources)) {
     if (name !== 'kn-capture' || policy) vm.runInContext(sources[name], context);
+    if (name === 'kn-core') context.KNStorage = fakeStorage;
   }
   context.KNDiag.init({
     getFrame: () => frame,
