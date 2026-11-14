@@ -10,15 +10,38 @@ lemma installsState_ensures(type_: string)
 {
 }
 
+function asksForState(type_: string): bool
+{
+  (((type_ == "request-late-join") || (type_ == "sync-request-full-socket")) || (type_ == "late-join-ready"))
+}
+
+lemma asksForState_ensures(type_: string)
+  ensures (asksForState(type_) == (((type_ == "request-late-join") || (type_ == "sync-request-full-socket")) || (type_ == "late-join-ready")))
+{
+}
+
 function relayAllowed(type_: string, stamped: bool, slot: int, owner: bool): bool
 {
-  (!(stamped) || (if installsState(type_) then (slot == 0) else (if (type_ == "mode-select") then owner else true)))
+  if !(stamped) then
+    false
+  else
+    if installsState(type_) then
+      (slot == 0)
+    else
+      if asksForState(type_) then
+        (slot >= 0)
+      else
+        if (type_ == "mode-select") then
+          owner
+        else
+          true
 }
 
 lemma relayAllowed_ensures(type_: string, stamped: bool, slot: int, owner: bool)
-  ensures (!(stamped) ==> (relayAllowed(type_, stamped, slot, owner) == true))
+  ensures (!(stamped) ==> (relayAllowed(type_, stamped, slot, owner) == false))
   ensures (stamped ==> installsState(type_) ==> (relayAllowed(type_, stamped, slot, owner) == (slot == 0)))
+  ensures (stamped ==> asksForState(type_) ==> (relayAllowed(type_, stamped, slot, owner) == (slot >= 0)))
   ensures (stamped ==> (type_ == "mode-select") ==> (relayAllowed(type_, stamped, slot, owner) == owner))
-  ensures (stamped ==> !(installsState(type_)) ==> (type_ != "mode-select") ==> (relayAllowed(type_, stamped, slot, owner) == true))
+  ensures (stamped ==> !(installsState(type_)) ==> !(asksForState(type_)) ==> (type_ != "mode-select") ==> (relayAllowed(type_, stamped, slot, owner) == true))
 {
 }
