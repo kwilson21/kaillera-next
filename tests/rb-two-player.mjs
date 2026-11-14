@@ -145,8 +145,10 @@
  *     health check at the frame rate this machine manages (40000 in the cloud
  *     container). The outage starts a third of the way in, so two thirds of
  *     BATTLE_SECONDS must cover n plus 20 s to reconnect. On top of the normal
- *     checks the run fails if either page: never reconnected; logged any
- *     TICK-STUCK or INPUT-STALL; or had its lifecycle machine report
+ *     checks the run fails if either page: never reconnected; logged a
+ *     TICK-STUCK or INPUT-STALL from the frame the outage began at (one
+ *     before it is reported as tickStuckBeforeOutage and does not fail the
+ *     run); or had its lifecycle machine report
  *     session-disagree or late-join-stranded (web/src/session.ts). This does
  *     not cover the host stalling on its own slot (2026-11-09): that lives in
  *     the lockstep path a solo game takes, see solo-signaling-drop.mjs.
@@ -922,6 +924,13 @@ if (inBattle) {
       signaling.get(p).reconnectsBefore = await p.evaluate(
         () => window.__knEvents.filter((e) => e.type === 'reconnect').length,
       );
+      // Stalls count from here too. One before the outage is not its doing:
+      // on a slow machine a page that freezes for 2 s during boot leaves the
+      // other waiting on it, and that wait is logged as TICK-STUCK.
+      signaling.get(p).outageFrame = await p.evaluate(() => {
+        const lines = (window.NetplayRollback?.exportSyncLog?.() || '').trimEnd().split('\n');
+        return Number((lines.at(-1)?.split('\t')[2] || '').replace('f=', '')) || 0;
+      });
     }
     await Promise.all([setSignalingDown(host, true), setSignalingDown(guest, true)]);
     console.log(`signaling sockets cut on both pages for ${DROP_SIGNALING_MS} ms`);
@@ -1346,17 +1355,27 @@ const desyncFlagsOf = (log) => {
   };
 };
 
-const signalingDropOf = (page, events, log) => ({
-  reconnectsAfterOutage:
-    events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
-  lifecycleReports: events.filter((e) => e.type === 'session-disagree' || e.type === 'late-join-stranded'),
-  tickStuck: count(log, /TICK-STUCK/g),
-  // The lockstep-path stall (waiting on a peer's input), not the rollback engine's routine RB-INPUT-STALL.
-  inputStalls: count(log, /(?<!RB-)INPUT-STALL (start|hard-timeout)/g),
-  // The rollback engine gave up waiting on a peer's input (not its routine RB-INPUT-STALL pacing).
-  rbStallTimeouts: count(log, /RB-INPUT-STALL-TIMEOUT/g),
-  meshHeals: count(log, /MESH-HEAL/g),
-});
+const signalingDropOf = (page, events, log) => {
+  // Stalls are counted from the frame the outage began at; the ones before
+  // it are reported beside them and do not fail the run.
+  const outageFrame = signaling.get(page)?.outageFrame ?? 0;
+  const lines = log.split('\n');
+  const sinceOutage = lines.filter((line) => frameOfSyncLine(line) >= outageFrame).join('\n');
+  const beforeOutage = lines.filter((line) => frameOfSyncLine(line) < outageFrame).join('\n');
+  return {
+    reconnectsAfterOutage:
+      events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
+    lifecycleReports: events.filter((e) => e.type === 'session-disagree' || e.type === 'late-join-stranded'),
+    outageFrame,
+    tickStuck: count(sinceOutage, /TICK-STUCK/g),
+    tickStuckBeforeOutage: count(beforeOutage, /TICK-STUCK/g),
+    // The lockstep-path stall (waiting on a peer's input), not the rollback engine's routine RB-INPUT-STALL.
+    inputStalls: count(sinceOutage, /(?<!RB-)INPUT-STALL (start|hard-timeout)/g),
+    // The rollback engine gave up waiting on a peer's input (not its routine RB-INPUT-STALL pacing).
+    rbStallTimeouts: count(sinceOutage, /RB-INPUT-STALL-TIMEOUT/g),
+    meshHeals: count(log, /MESH-HEAL/g),
+  };
+};
 
 // Rollback-integrity reports made while a proven frozen-page recovery was
 // under way are part of it (tests/frozen-recovery.mjs). A sync-log line has
