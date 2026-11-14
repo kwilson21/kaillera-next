@@ -136,7 +136,7 @@ earlier ones to have set up their `window.*` exports:
 13. `kn-audio.js` — AudioWorklet pump + rollback audio capture
 14. `kn-diagnostics.js` — rollback diagnostics ring buffer (RB-CHECK, audit log)
 15. `kn-desync-detector.js` — field-granular cross-peer desync detection
-16. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
+16. `kn-vision-client.js` — starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)
 17. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
 18. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
 19. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
@@ -189,7 +189,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
 | `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
 | `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
-| `kn-vision-client.js` | — | Claude vision client for screenshot-diff desync analysis | rollback |
+| `kn-vision-client.js` | — | Starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`) | rollback |
 | `audio-worklet-processor.js` | ~85 | AudioWorklet ring buffer for rollback audio | kn-audio.js |
 | `feedback.js` | ~540 | In-app feedback collection UI | play.js |
 | `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | rollback, core-redirector |

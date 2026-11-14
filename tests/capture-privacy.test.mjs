@@ -4,13 +4,14 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import fs from 'node:fs';
 import { startCapture } from '../web/src/page/capture.ts';
+import { startVisionClient } from '../web/src/page/vision-client.ts';
 
 const read = (file) => fs.readFileSync(new URL(`../web/${file}`, import.meta.url), 'utf8');
-// The policy itself is web/src/page/capture.ts, started on the fake page the
-// way web/static/kn-capture.js starts it on a real one.
-const sources = Object.fromEntries(
-  ['kn-diagnostics', 'kn-vision-client'].map((name) => [name, read(`static/${name}.js`)]),
-);
+// The policy and the vision client are web/src/page/capture.ts and
+// web/src/page/vision-client.ts, started on the fake page the way
+// web/static/kn-capture.js and web/static/kn-vision-client.js start them on a
+// real one.
+const sources = Object.fromEntries(['kn-diagnostics'].map((name) => [name, read(`static/${name}.js`)]));
 const key = 'kn-diagnostic-images';
 
 function harness({
@@ -127,6 +128,7 @@ function harness({
   context.window = context;
   if (policy) context.KNCapture = startCapture(context);
   for (const name of Object.keys(sources)) vm.runInContext(sources[name], context);
+  context.KNVision = startVisionClient(context);
   context.KNDiag.init({
     getFrame: () => frame,
     getSlot: () => 0,
@@ -287,6 +289,19 @@ test('the page script starts the policy from the core and nothing else', () => {
   vm.runInNewContext(read('static/kn-capture.js'), { window });
   assert.deepEqual(calls, [window]);
   assert.equal(window.KNCapture, policy);
+});
+
+test('the vision page script starts the client from the core and nothing else', () => {
+  const calls = [];
+  const client = {};
+  const startVisionClient = (host) => {
+    calls.push(host);
+    return client;
+  };
+  const window = { KNCore: { page: { startVisionClient } } };
+  vm.runInNewContext(read('static/kn-vision-client.js'), { window });
+  assert.deepEqual(calls, [window]);
+  assert.equal(window.KNVision, client);
 });
 
 test('all diagnostic pages load shared policy before any capturing module', () => {

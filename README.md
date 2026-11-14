@@ -218,7 +218,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
     kn-desync-detector.js  Field-granular cross-peer desync detection (RDRAM probes)
     kn-diagnostics.js      Rollback diagnostics ring buffer (RB-CHECK, audit log)
-    kn-vision-client.js    Claude vision client for screenshot-diff desync analysis
+    kn-vision-client.js    Starts the desync-vision client (web/src/page/vision-client.ts)
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)

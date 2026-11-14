@@ -8,6 +8,7 @@ on:
       - 'web/static/dist/kn-core.js'
       - 'web/static/kn-diagnostics.js'
       - 'web/static/kn-vision-client.js'
+      - 'web/src/page/vision-client.ts'
       - 'web/static/netplay-rollback.js'
       - 'web/play.html'
       - 'web/demo.html'
