@@ -3,7 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 STREAMING_JS = ROOT / "web/static/netplay-streaming.js"
-SHARED_JS = ROOT / "web/static/shared.js"
+INPUT_WIRE_TS = ROOT / "web/src/input-wire.ts"
 PLAY_JS = ROOT / "web/static/play.js"
 PLAY_CSS = ROOT / "web/static/play.css"
 VIRTUAL_GAMEPAD_JS = ROOT / "web/static/virtual-gamepad.js"
@@ -11,9 +11,10 @@ VIRTUAL_GAMEPAD_JS = ROOT / "web/static/virtual-gamepad.js"
 
 def test_streaming_host_accepts_current_shared_input_packets():
     streaming = STREAMING_JS.read_text()
-    shared = SHARED_JS.read_text()
+    wire = INPUT_WIRE_TS.read_text()
 
-    assert "const arr = new Int32Array(6 + redCount * 4);" in shared
+    # The packet KNShared.encodeInput builds: 6 header words, then 4 per repeated frame.
+    assert "//@ ensures \\result.length === 6 + 4 * redundant.length" in wire
     assert "hostPeer.dc.send(KNShared.encodeInput(0, localInput).buffer)" in streaming
 
     receive_idx = streaming.find("ch.onmessage = (e) => {")

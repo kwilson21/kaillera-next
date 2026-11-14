@@ -1,5 +1,25 @@
 [
   {
+    "version": "0.68.8",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "at a resync the guest sends every input still to be applied, not only the ones it had never made (#193)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.7",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a page running alone keeps its own input, and settled inputs are not fed to the engine (#188)"
+      }
+    ]
+  },
+  {
     "version": "0.68.6",
     "date": "2026-11-14",
     "changes": [

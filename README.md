@@ -199,8 +199,9 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
     landing.js         Front-page board controller (room creation, open-rooms board)
     landing.css        Front-page styles (direction A tokens)
-    join.js            Invite-page controller (room lookup, join/watch states)
+    dist/kn-join.js    Invite-page controller (room lookup, join/watch states), built from web/src/landing/join.ts
     dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
+    dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     admin.css          Admin dashboard styles
     play.css           Play page styles (room overlay tokens, direction A)
@@ -208,19 +209,15 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
-    gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
     switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
     controller-settings.js In-game controller settings panel
     virtual-gamepad.js     On-screen touch controls for mobile
-    shared.js              Input encoding/decoding, wire format, input application to WASM
     kn-audio.js            AudioWorklet pump + rollback audio capture
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
     kn-vision-client.js    Claude vision client for screenshot-diff desync analysis
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
-    storage.js             Safe localStorage/sessionStorage wrapper
-    kn-state.js            Shared cross-module state
     feedback.js            In-app feedback collection
     version.js             Version display + changelog modal
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)
