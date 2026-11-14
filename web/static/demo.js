@@ -7,7 +7,7 @@
   // The demo's own logic (web/src/demo) and the rollback engine are in the
   // TypeScript core (dist/kn-core.js). Without it the page cannot run: say so
   // and stop here, before anything below calls window.KNCore.
-  if (!window.KNCore) {
+  if (!window.KNCore?.demo) {
     document.addEventListener('DOMContentLoaded', () => {
       const message = 'Part of this page did not load. Reload the page to try again.';
       const status = document.getElementById('demo-status');
