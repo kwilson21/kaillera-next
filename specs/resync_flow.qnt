@@ -21,7 +21,8 @@
 // frame with its deadline, the hold, the stall at the target, and the stale
 // state check.
 //
-// Not modelled: what the state contains, deltas, chunks and their timeout,
+// Not checked: an unasked state applied below the guest's target (see
+// belowTheTarget). Not modelled: what the state contains, deltas, chunks and their timeout,
 // proactive pushes, more than one guest, the inputs around the apply
 // (specs/resync_inputs.qnt), a replay delaying the apply, and the 15 s guard
 // the request sent when a hidden tab is shown again already has (the
@@ -230,6 +231,13 @@ module resync_flow {
 
   // The state held is the answer to a request older than the newest one, and
   // is from before the frame the guest is waiting at.
+  // A state the host sent for its own reasons (UNASKED) is left out on
+  // purpose, and is still applied at the target as today, though it too can
+  // be from before that frame. The host sends one when it has decided this
+  // guest needs its state (a dropped peer is back); the guest's own request
+  // for the same event may be the one the host's rate limit drops, and then
+  // the unasked state is the only one coming. Nor can a guest tell it from an
+  // answer when the host is on a build that does not number its answers.
   def belowTheTarget: bool = and {
     pending.frame != NONE, target != NONE,
     pending.req != UNASKED, pending.req != askedId,
