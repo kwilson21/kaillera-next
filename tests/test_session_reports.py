@@ -44,7 +44,18 @@ def test_the_union_is_found():
     assert set(_report_types()) >= {"late-join-stranded", "protocol-mismatch", "play-disagree"}
 
 
-@pytest.mark.parametrize("report_type", _report_types())
+# The engine reports with createComparer too, under its own type (the peer
+# mesh's decisions against web/src/peer-signaling.ts, in netplay-rollback.js).
+ENGINE_REPORT_TYPES = ["mesh-disagree"]
+
+
+def test_the_engine_sends_the_type_it_is_allowed():
+    engine = (SESSION_TS.parents[1] / "static" / "netplay-rollback.js").read_text()
+    for report_type in ENGINE_REPORT_TYPES:
+        assert f"window.KNEvent?.('{report_type}'," in engine
+
+
+@pytest.mark.parametrize("report_type", _report_types() + ENGINE_REPORT_TYPES)
 def test_server_stores_every_report_type(report_type, monkeypatch):
     import src.db as db
     from src.api import app as appmod
