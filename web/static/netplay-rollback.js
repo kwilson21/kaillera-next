@@ -17404,7 +17404,10 @@
         return;
       }
       _pendingResyncState = { bytes: fullBytes, frame, answerFor };
-      _syncLog(`resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source})`);
+      _syncLog(
+        `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +
+          `answerFor=${answerFor} newest=${_resyncRequestId} endsRequest=${endsRequest})`,
+      );
     }
   }
 
