@@ -26,8 +26,12 @@
 // past the rollback window, so a split can show this far before the frame
 // at which the phantom was declared.
 const BEFORE_PHANTOM_FRAMES = 12;
-// The resync that ends a recovery follows the phantom within this many
-// frames; a later one is some other resync.
+// The resync that ends a recovery follows it within this many frames; a
+// later one is some other resync. Counted from the frame the dropped page
+// was seen again (`PEER-RECOVERED`) when the log has one, because the page
+// that plays on has no limit on how far it gets while the other is stopped:
+// a page that stops twice in a row comes back 80 or more frames later.
+// Without that line it is counted from the phantom.
 const RECOVERY_WITHIN_FRAMES = 60;
 // A phantom is declared after 5 s without progress. Only a stop of about
 // that length on the dropped page shows the page itself was frozen.
@@ -52,9 +56,13 @@ export const frozenRecoveries = (syncLogs) => {
   const resyncedAt = framesOf(syncLogs.guest, /sync #\d+ applied \(frame \d+ -> (\d+)/g);
   const recoveries = [];
   for (const [page, log] of Object.entries(syncLogs)) {
+    const seenAgainAt = framesOf(log, /\tf=(\d+)\tPEER-RECOVERED /g);
     for (const frame of framesOf(log, /\tf=(\d+)\tPEER-PHANTOM /g)) {
-      const later = resyncedAt.filter((at) => at >= frame).sort((a, b) => a - b);
-      let to = later[0] !== undefined && later[0] <= frame + RECOVERY_WITHIN_FRAMES ? later[0] : null;
+      const seenAgain = seenAgainAt.filter((at) => at >= frame).sort((a, b) => a - b)[0] ?? frame;
+      // The resync that ends this recovery comes once the page is seen
+      // again; one before that ended an earlier recovery.
+      const later = resyncedAt.filter((at) => at >= seenAgain).sort((a, b) => a - b);
+      let to = later[0] !== undefined && later[0] <= seenAgain + RECOVERY_WITHIN_FRAMES ? later[0] : null;
       // Recovery can take a second resync right after the first; the split
       // ends at the last of them.
       for (const at of later) if (to !== null && at > to && at <= to + BEFORE_PHANTOM_FRAMES) to = at;

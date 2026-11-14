@@ -20,6 +20,7 @@ import {
   peerFacts,
   peerStateName,
   createPeerConnection,
+  type Attempt,
   type OfferMode,
   type PeerEvent,
   type PeerState,
@@ -48,9 +49,14 @@ const raised = (event: PeerEvent | After): PeerEvent => event as PeerEvent;
 
 type Timer = { readonly at: number; readonly event: After };
 
+/** The ids of the model's two pages, and of a page that replaces the lower slot's. */
+const LO = 'page-lo';
+const HI = 'page-hi';
+const LO_AGAIN = 'page-lo-again';
+
 /** One page's machine for the other player, with its commands and its armed deadlines. */
-const page = (mySlot: number, theirSlot: number, timing: PeerTiming = PEER_TIMING) => {
-  let [snapshot, effects] = initialTransition(peerConnectionMachine, { mySlot, theirSlot, timing });
+const page = (id: string, mySlot: number, theirSlot: number, timing: PeerTiming = PEER_TIMING) => {
+  let [snapshot, effects] = initialTransition(peerConnectionMachine, { mySlot, theirSlot, timing, page: id });
   let now = 0;
   let timers: Timer[] = [];
   const commands: PeerCommand[] = [];
@@ -73,7 +79,11 @@ const page = (mySlot: number, theirSlot: number, timing: PeerTiming = PEER_TIMIN
     timers = timers.filter((t) => t !== timer);
     step(raised(timer.event));
   };
+  /** The attempt of the page's connection, as its channel events report it. */
+  const connection = (): Attempt => ({ page: snapshot.context.connectionPage, attempt: snapshot.context.connection });
   return {
+    id,
+    connection,
     send: step,
     state: (): PeerState => peerStateName(snapshot.value),
     context: () => snapshot.context,
@@ -103,21 +113,21 @@ type Page = ReturnType<typeof page>;
 
 /** The model's two pages. Signals travel only when the scenario delivers them. */
 const pair = (timing: PeerTiming = PEER_TIMING, loSlot = 0, hiSlot = 1) => {
-  const lo = page(loSlot, hiSlot, timing);
-  const hi = page(hiSlot, loSlot, timing);
+  const lo = page(LO, loSlot, hiSlot, timing);
+  const hi = page(HI, hiSlot, loSlot, timing);
   const other = (to: Page): Page => (to === lo ? hi : lo);
   return {
     lo,
     hi,
-    /** `deliver` of an offer in the model. */
+    /** `deliver` of an offer in the model: the other page's offer `attempt`. */
     offer: (to: Page, attempt: number, mode: OfferMode): void =>
-      to.send({ type: 'offer', attempt, mode, underEarlierId: false }),
-    /** `deliver` of an answer. */
-    answer: (to: Page, attempt: number): void => to.send({ type: 'answer', attempt }),
+      to.send({ type: 'offer', page: other(to).id, attempt, mode, underEarlierId: false }),
+    /** `deliver` of an answer, to the page's own offer `attempt`. */
+    answer: (to: Page, attempt: number): void => to.send({ type: 'answer', page: to.id, attempt }),
     /** `channelOpens`: the channel of the page's connection opens. */
-    opens: (on: Page): void => on.send({ type: 'opened', attempt: on.context().connection }),
+    opens: (on: Page): void => on.send({ type: 'opened', ...on.connection() }),
     /** `notice`: the page finds out its connection is gone. */
-    notice: (on: Page): void => on.send({ type: 'lost', attempt: on.context().connection }),
+    notice: (on: Page): void => on.send({ type: 'lost', ...on.connection() }),
     /** `start`. */
     start: (): void => {
       lo.send({ type: 'matchStarted' });
@@ -154,15 +164,15 @@ test('the roster reaches both pages, then the offer (rosterThenOfferTest)', () =
   const { lo, hi, offer, answer, opens, start, bothOpenOn, oneInitiator } = pair();
   lo.send({ type: 'roster' });
   assert.equal(lo.state(), 'offering');
-  assert.deepEqual(lo.issued(), [{ type: 'offer', attempt: 1, mode: 'first' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'offer', page: LO, attempt: 1, mode: 'first' }]);
   hi.send({ type: 'roster' });
   assert.equal(hi.state(), 'awaitingOffer');
   assert.deepEqual(hi.issued(), []);
   offer(hi, 1, 'first');
   assert.equal(hi.state(), 'answering');
-  assert.deepEqual(hi.issued(), [{ type: 'answer', attempt: 1, connection: 'kept' }]);
+  assert.deepEqual(hi.issued(), [{ type: 'answer', page: LO, attempt: 1, connection: 'kept' }]);
   answer(lo, 1);
-  assert.deepEqual(lo.issued(), [{ type: 'applyAnswer', attempt: 1 }]);
+  assert.deepEqual(lo.issued(), [{ type: 'applyAnswer', page: LO, attempt: 1 }]);
   opens(lo);
   opens(hi);
   start();
@@ -177,7 +187,7 @@ test('the offer reaches the higher slot before its roster does (offerBeforeRoste
   offer(hi, 1, 'first');
   // The entry is made on demand.
   assert.equal(hi.state(), 'answering');
-  assert.deepEqual(hi.issued(), [{ type: 'answer', attempt: 1, connection: 'new' }]);
+  assert.deepEqual(hi.issued(), [{ type: 'answer', page: LO, attempt: 1, connection: 'new' }]);
   hi.send({ type: 'roster' });
   assert.equal(hi.state(), 'answering');
   assert.deepEqual(hi.issued(), []);
@@ -193,7 +203,7 @@ test('the first offer is lost; the startup deadline sends another (startupRetryT
   hi.send({ type: 'roster' });
   lo.issued();
   lo.fire('startupAfter');
-  assert.deepEqual(lo.issued(), [{ type: 'offer', attempt: 2, mode: 'startup' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'offer', page: LO, attempt: 2, mode: 'startup' }]);
   offer(hi, 2, 'startup');
   answer(lo, 2);
   opens(lo);
@@ -254,11 +264,11 @@ test('a roster offer that arrives after the match began on a retry (lateFirstOff
   // Not a replacement offer: applied to the connection the guest is playing
   // on. The channel stays open on a connection that now matches nothing.
   assert.equal(hi.state(), 'open');
-  assert.deepEqual(hi.issued(), [{ type: 'answer', attempt: 1, connection: 'kept' }]);
+  assert.deepEqual(hi.issued(), [{ type: 'answer', page: LO, attempt: 1, connection: 'kept' }]);
   assert.notEqual(hi.context().connection, lo.context().connection);
   // Its answer finds a page that is no longer waiting for one.
   answer(lo, 1);
-  assert.deepEqual(lo.issued(), [{ type: 'ignore', signal: 'answer', attempt: 1, reason: 'stale' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'ignore', signal: 'answer', page: LO, attempt: 1, reason: 'stale' }]);
   assert.equal(lo.state(), 'open');
   notice(hi);
   assert.equal(hi.state(), 'reconnecting.awaitingOffer');
@@ -274,7 +284,7 @@ test('a channel found dead by the health check: only the lower slot offers (sile
   assert.equal(hi.context().awaitingAnswer, false);
   assert.deepEqual(hi.issued(), []);
   notice(lo);
-  assert.deepEqual(lo.issued(), [{ type: 'offer', attempt: 2, mode: 'reconnect' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'offer', page: LO, attempt: 2, mode: 'reconnect' }]);
   assert.ok(oneInitiator());
 });
 
@@ -286,14 +296,14 @@ test('a drop both pages notice: the guest comes back with its input state cleare
   lo.issued();
   offer(hi, 2, 'reconnect');
   assert.equal(hi.state(), 'reconnecting.answering');
-  assert.deepEqual(hi.issued(), [{ type: 'answer', attempt: 2, connection: 'new' }]);
+  assert.deepEqual(hi.issued(), [{ type: 'answer', page: LO, attempt: 2, connection: 'new' }]);
   answer(lo, 2);
   opens(hi);
   // reconnectStartsClean: resetPeerState before the guest plays on.
   assert.deepEqual(hi.issued(), [{ type: 'reset', reason: 'reconnect' }]);
   opens(lo);
   // The host keeps its own state and pushes the match's.
-  assert.deepEqual(lo.issued(), [{ type: 'applyAnswer', attempt: 2 }]);
+  assert.deepEqual(lo.issued(), [{ type: 'applyAnswer', page: LO, attempt: 2 }]);
   assert.ok(bothOpenOn(2));
   assert.equal(peerFacts(hi.state()).reconnecting, false);
   assert.deepEqual([...lo.armed(), ...hi.armed()], []);
@@ -313,7 +323,7 @@ test('reconnectStartsClean between two guests: both clear their input state, the
   assert.deepEqual(hi.issued(), [{ type: 'reset', reason: 'reconnect' }]);
   opens(lo);
   assert.deepEqual(lo.issued(), [
-    { type: 'applyAnswer', attempt: 2 },
+    { type: 'applyAnswer', page: LO, attempt: 2 },
     { type: 'reset', reason: 'reconnect' },
   ]);
   assert.ok(bothOpenOn(2));
@@ -337,13 +347,13 @@ test('only the lower slot notices the drop: the guest that answers has a deadlin
   notice(lo);
   offer(hi, 2, 'reconnect');
   assert.equal(hi.state(), 'reconnecting.answering');
-  assert.deepEqual(hi.issued(), [{ type: 'answer', attempt: 2, connection: 'new' }]);
+  assert.deepEqual(hi.issued(), [{ type: 'answer', page: LO, attempt: 2, connection: 'new' }]);
   // closeNeverComes: no close event for the channel the offer replaced.
   assert.deepEqual(hi.armed(), ['answerAfter', 'giveUpAfter']);
   // And where the browser does fire it, it is the close of connection 1, not of the entry's.
-  hi.send({ type: 'lost', attempt: 1 });
+  hi.send({ type: 'lost', page: LO, attempt: 1 });
   assert.equal(hi.state(), 'reconnecting.answering');
-  assert.deepEqual(hi.issued(), [{ type: 'ignore', signal: 'lost', attempt: 1, reason: 'stale' }]);
+  assert.deepEqual(hi.issued(), [{ type: 'ignore', signal: 'lost', page: LO, attempt: 1, reason: 'stale' }]);
 });
 
 test('the guest gives up while the lower slot reconnects: it never offers (bothOfferAtOnceTest)', () => {
@@ -368,14 +378,14 @@ test('both pages gave up; the lower slot heals and the pair reconnects (crossedH
   lo.fire('giveUpAfter');
   assert.equal(lo.state(), 'absent');
   assert.deepEqual(lo.issued(), [
-    { type: 'offer', attempt: 2, mode: 'reconnect' },
+    { type: 'offer', page: LO, attempt: 2, mode: 'reconnect' },
     { type: 'drop', reason: 'gaveUp' },
   ]);
   // neverLeftWithNothingPending: the lower slot's health check is still to come.
   assert.deepEqual(lo.armed(), ['healAfter']);
   lo.fire('healAfter');
   assert.equal(lo.state(), 'healing');
-  assert.deepEqual(lo.issued(), [{ type: 'offer', attempt: 3, mode: 'reconnect' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'offer', page: LO, attempt: 3, mode: 'reconnect' }]);
   offer(hi, 3, 'reconnect');
   answer(lo, 3);
   opens(lo);
@@ -389,12 +399,12 @@ test('an answer to the first attempt arrives after the second replaced it (lateA
   offer(hi, 2, 'reconnect');
   lo.fire('attemptAfter');
   assert.deepEqual(lo.issued(), [
-    { type: 'offer', attempt: 2, mode: 'reconnect' },
-    { type: 'offer', attempt: 3, mode: 'reconnect' },
+    { type: 'offer', page: LO, attempt: 2, mode: 'reconnect' },
+    { type: 'offer', page: LO, attempt: 3, mode: 'reconnect' },
   ]);
   answer(lo, 2);
   // staleSignalsAreNotApplied.
-  assert.deepEqual(lo.issued(), [{ type: 'ignore', signal: 'answer', attempt: 2, reason: 'stale' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'ignore', signal: 'answer', page: LO, attempt: 2, reason: 'stale' }]);
   assert.equal(lo.context().awaitingAnswer, true);
   assert.equal(lo.context().connection, 3);
 });
@@ -408,6 +418,80 @@ test('a roster that lists the player again under a new id keeps the open connect
     assert.equal(p.context().connection, 1);
     assert.deepEqual(p.issued(), []);
   }
+});
+
+test('a replaced page counts from 1 again; the old answer is not taken for its own (oldAnswerTakenByReplacementPageTest)', () => {
+  const { lo, hi, offer } = pair();
+  lo.send({ type: 'roster' });
+  hi.send({ type: 'roster' });
+  offer(hi, 1, 'first');
+  assert.deepEqual(hi.issued(), [{ type: 'answer', page: LO, attempt: 1, connection: 'kept' }]);
+  // `reload`: a new page of the lower slot's player. The answer to the old page's offer is on its way.
+  const again = page(LO_AGAIN, 0, 1);
+  again.send({ type: 'roster' });
+  assert.deepEqual(again.issued(), [{ type: 'offer', page: LO_AGAIN, attempt: 1, mode: 'first' }]);
+  assert.equal(again.context().connection, lo.context().connection);
+  const before = again.context();
+  // staleSignalsAreNotApplied: the same count from the page that is gone.
+  for (const signal of ['answer', 'candidate', 'opened', 'lost'] as const) {
+    again.send({ type: signal, page: LO, attempt: 1 });
+    assert.deepEqual(again.issued(), [{ type: 'ignore', signal, page: LO, attempt: 1, reason: 'stale' }]);
+  }
+  assert.equal(again.state(), 'offering');
+  assert.deepEqual(again.context(), before);
+  // The new page's own offer and its answer connect the pair.
+  // A new page has a new socket id, so the entry hi kept is under the earlier one.
+  hi.send({ type: 'offer', page: LO_AGAIN, attempt: 1, mode: 'first', underEarlierId: true });
+  assert.deepEqual(hi.issued(), [
+    { type: 'drop', reason: 'replaced' },
+    { type: 'answer', page: LO_AGAIN, attempt: 1, connection: 'new' },
+  ]);
+  again.send({ type: 'answer', page: LO_AGAIN, attempt: 1 });
+  assert.deepEqual(again.issued(), [{ type: 'applyAnswer', page: LO_AGAIN, attempt: 1 }]);
+  again.send({ type: 'opened', ...again.connection() });
+  hi.send({ type: 'opened', ...hi.connection() });
+  assert.equal(again.state(), 'open');
+  assert.equal(hi.state(), 'open');
+  assert.deepEqual(hi.connection(), again.connection());
+});
+
+test('the page that stays ignores what the replaced page left behind (oldCandidateReachesReplacementConnectionTest)', () => {
+  const { hi } = inMatch();
+  assert.deepEqual(hi.connection(), { page: LO, attempt: 1 });
+  // `reload`, then `heal`: the host's new page offers in the match, count 1 again.
+  const again = page(LO_AGAIN, 0, 1);
+  again.send({ type: 'matchStarted' });
+  again.send({ type: 'roster' });
+  again.fire('healAfter');
+  assert.deepEqual(again.issued(), [{ type: 'offer', page: LO_AGAIN, attempt: 1, mode: 'reconnect' }]);
+  hi.send({ type: 'offer', page: LO_AGAIN, attempt: 1, mode: 'reconnect', underEarlierId: true });
+  assert.equal(hi.state(), 'reconnecting.answering');
+  assert.deepEqual(hi.issued(), [{ type: 'answer', page: LO_AGAIN, attempt: 1, connection: 'new' }]);
+  // The old page's candidate, and its channel opening late: neither is the new connection's.
+  hi.send({ type: 'candidate', page: LO, attempt: 1 });
+  hi.send({ type: 'opened', page: LO, attempt: 1 });
+  assert.deepEqual(hi.issued(), [
+    { type: 'ignore', signal: 'candidate', page: LO, attempt: 1, reason: 'stale' },
+    { type: 'ignore', signal: 'opened', page: LO, attempt: 1, reason: 'stale' },
+  ]);
+  assert.equal(hi.state(), 'reconnecting.answering');
+  // The new connection's own are taken.
+  hi.send({ type: 'candidate', page: LO_AGAIN, attempt: 1 });
+  hi.send({ type: 'opened', page: LO_AGAIN, attempt: 1 });
+  assert.deepEqual(hi.issued(), [
+    { type: 'applyCandidate', page: LO_AGAIN, attempt: 1 },
+    { type: 'reset', reason: 'reconnect' },
+  ]);
+  assert.equal(hi.state(), 'open');
+  // The old connection closing does not drop the channel that is live now, nor does an answer meant for it.
+  hi.send({ type: 'lost', page: LO, attempt: 1 });
+  hi.send({ type: 'answer', page: LO, attempt: 1 });
+  assert.deepEqual(hi.issued(), [
+    { type: 'ignore', signal: 'lost', page: LO, attempt: 1, reason: 'stale' },
+    { type: 'ignore', signal: 'answer', page: LO, attempt: 1, reason: 'stale' },
+  ]);
+  assert.equal(hi.state(), 'open');
+  assert.deepEqual(hi.armed(), []);
 });
 
 // ── the orderings behind the properties ──────────────────────────────────
@@ -503,7 +587,7 @@ test('everyWaitHasADeadline: the lower slot gives a reconnect three attempts, th
  * states the same, so the walk ends.
  */
 const reachable = (mySlot: number, theirSlot: number) => {
-  const input = { mySlot, theirSlot, timing: PEER_TIMING };
+  const input = { mySlot, theirSlot, timing: PEER_TIMING, page: 'mine' };
   type Snapshot = ReturnType<typeof initialTransition<typeof peerConnectionMachine>>[0];
   const key = (s: Snapshot): string => {
     const { running, listed, connection, awaitingAnswer, mine, tries, answerDeadline } = s.context;
@@ -529,21 +613,33 @@ const reachable = (mySlot: number, theirSlot: number) => {
       : own;
   };
   const events = (s: Snapshot): PeerEvent[] => {
-    const attempt = s.context.connection;
+    const { connection, connectionPage } = s.context;
     const offers = (['first', 'startup', 'reconnect'] as const).flatMap((mode) =>
-      [false, true].map((underEarlierId) => ({ type: 'offer' as const, attempt: 90, mode, underEarlierId })),
+      [false, true].map((underEarlierId) => ({
+        type: 'offer' as const,
+        page: 'theirs',
+        attempt: 90,
+        mode,
+        underEarlierId,
+      })),
     );
+    // The entry's connection, the same count from a page that is gone, and another count.
+    const ids: Attempt[] = [
+      { page: connectionPage, attempt: connection },
+      { page: 'gone', attempt: connection },
+      { page: connectionPage, attempt: 77 },
+    ];
     return [
       { type: 'roster' },
       { type: 'left' },
       { type: 'matchStarted' },
       { type: 'matchEnded' },
       ...offers,
-      ...[attempt, 77].flatMap((id): PeerEvent[] => [
-        { type: 'answer', attempt: id },
-        { type: 'candidate', attempt: id },
-        { type: 'opened', attempt: id },
-        { type: 'lost', attempt: id },
+      ...ids.flatMap((id): PeerEvent[] => [
+        { type: 'answer', ...id },
+        { type: 'candidate', ...id },
+        { type: 'opened', ...id },
+        { type: 'lost', ...id },
       ]),
     ];
   };
@@ -614,28 +710,28 @@ test('staleSignalsAreNotApplied: an answer, candidate or channel event for anoth
   lo.issued();
   const before = lo.context();
   for (const signal of ['answer', 'candidate', 'opened', 'lost'] as const) {
-    lo.send({ type: signal, attempt: 2 });
-    assert.deepEqual(lo.issued(), [{ type: 'ignore', signal, attempt: 2, reason: 'stale' }]);
+    lo.send({ type: signal, page: LO, attempt: 2 });
+    assert.deepEqual(lo.issued(), [{ type: 'ignore', signal, page: LO, attempt: 2, reason: 'stale' }]);
   }
   assert.equal(lo.state(), 'reconnecting.offering');
   assert.deepEqual(lo.context(), before);
   // A channel cannot be open on an offer that has no answer yet.
-  lo.send({ type: 'opened', attempt: 3 });
+  lo.send({ type: 'opened', page: LO, attempt: 3 });
   assert.equal(lo.state(), 'reconnecting.offering');
-  assert.deepEqual(lo.issued(), [{ type: 'ignore', signal: 'opened', attempt: 3, reason: 'stale' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'ignore', signal: 'opened', page: LO, attempt: 3, reason: 'stale' }]);
   // The ones for the entry's connection are applied.
-  lo.send({ type: 'candidate', attempt: 3 });
-  lo.send({ type: 'answer', attempt: 3 });
+  lo.send({ type: 'candidate', page: LO, attempt: 3 });
+  lo.send({ type: 'answer', page: LO, attempt: 3 });
   assert.deepEqual(lo.issued(), [
-    { type: 'applyCandidate', attempt: 3 },
-    { type: 'applyAnswer', attempt: 3 },
+    { type: 'applyCandidate', page: LO, attempt: 3 },
+    { type: 'applyAnswer', page: LO, attempt: 3 },
   ]);
   // With no entry there is nothing to apply a signal to.
   notice(hi);
   hi.fire('giveUpAfter');
   hi.issued();
-  hi.send({ type: 'answer', attempt: 1 });
-  assert.deepEqual(hi.issued(), [{ type: 'ignore', signal: 'answer', attempt: 1, reason: 'noEntry' }]);
+  hi.send({ type: 'answer', page: LO, attempt: 1 });
+  assert.deepEqual(hi.issued(), [{ type: 'ignore', signal: 'answer', page: LO, attempt: 1, reason: 'noEntry' }]);
   offer(hi, 3, 'reconnect');
   assert.equal(hi.state(), 'reconnecting.answering');
 });
@@ -678,7 +774,7 @@ test('a player who leaves is dropped from any state, and a roster starts over', 
   assert.equal(lo.state(), 'absent');
   lo.advance(PEER_TIMING.healAfterMs);
   assert.equal(lo.state(), 'healing');
-  assert.deepEqual(lo.issued(), [{ type: 'offer', attempt: 3, mode: 'reconnect' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'offer', page: LO, attempt: 3, mode: 'reconnect' }]);
 });
 
 test('a connection lost before the match: the page that offered offers again, the other drops its entry', () => {
@@ -693,7 +789,7 @@ test('a connection lost before the match: the page that offered offers again, th
   hi.issued();
   notice(lo);
   assert.equal(lo.state(), 'offering');
-  assert.deepEqual(lo.issued(), [{ type: 'offer', attempt: 2, mode: 'startup' }]);
+  assert.deepEqual(lo.issued(), [{ type: 'offer', page: LO, attempt: 2, mode: 'startup' }]);
   notice(hi);
   assert.equal(hi.state(), 'absent');
   assert.deepEqual(hi.issued(), [{ type: 'drop', reason: 'lostBeforeStart' }]);
@@ -704,11 +800,11 @@ test('a connection lost before the match: the page that offered offers again, th
 
 test('an offer from a new page of a player whose connection was kept replaces the leftover', () => {
   const { hi } = inMatch();
-  hi.send({ type: 'offer', attempt: 1, mode: 'first', underEarlierId: true });
+  hi.send({ type: 'offer', page: LO_AGAIN, attempt: 1, mode: 'first', underEarlierId: true });
   assert.equal(hi.state(), 'answering');
   assert.deepEqual(hi.issued(), [
     { type: 'drop', reason: 'replaced' },
-    { type: 'answer', attempt: 1, connection: 'new' },
+    { type: 'answer', page: LO_AGAIN, attempt: 1, connection: 'new' },
   ]);
 });
 
@@ -735,15 +831,15 @@ test('what the engine keeps as flags can be read from each state', () => {
 test('run as an actor, the deadlines fire on the real clock and the commands reach the host', async () => {
   const commands: PeerCommand[] = [];
   const timing = { ...PEER_TIMING, startupAfterMs: 15 };
-  const peer = createPeerConnection({ mySlot: 0, theirSlot: 1, timing }, (command) => commands.push(command));
+  const peer = createPeerConnection({ mySlot: 0, theirSlot: 1, timing, page: LO }, (command) => commands.push(command));
   assert.equal(peer.state(), 'absent');
   peer.send({ type: 'roster' });
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(peer.state(), 'stalled');
   assert.deepEqual(commands, [
-    { type: 'offer', attempt: 1, mode: 'first' },
-    { type: 'offer', attempt: 2, mode: 'startup' },
-    { type: 'offer', attempt: 3, mode: 'startup' },
+    { type: 'offer', page: LO, attempt: 1, mode: 'first' },
+    { type: 'offer', page: LO, attempt: 2, mode: 'startup' },
+    { type: 'offer', page: LO, attempt: 3, mode: 'startup' },
     { type: 'stalled' },
   ]);
   await peer.stop();
