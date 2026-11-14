@@ -28,11 +28,22 @@
 // requests after a desync, a dropped peer's return, a reconnect and a
 // network change have none).
 //
+// ANSWERS_CARRY_REQUEST: a request has a number and the state that answers
+//   it carries that number. false = today: any state that arrives ends
+//   whatever request is out and is taken as its answer. Since a request can
+//   be given up on (its deadline, or a reconnect that asks again over it)
+//   while its answer is still on the way, a late answer then ends the newer
+//   request, and is applied at the newer request's target, which takes the
+//   guest back below the frame it was told to wait at. true = proposed: only
+//   its own answer ends a request, and at its target the guest drops an
+//   answer to an older request that is from before that frame.
+//
 // REQUEST_HAS_DEADLINE: a request that is out has a deadline of its own,
 //   after which the guest may ask again (RESYNC-REQUEST-TIMEOUT). false =
 //   before: only an arriving state ended it.
 module resync_flow {
   const REQUEST_HAS_DEADLINE: bool
+  const ANSWERS_CARRY_REQUEST: bool
 
   pure val DELTA = 2        // how far ahead the guest sets its target
   pure val HOLD = 1         // a state this far ahead is held, not applied early
@@ -40,9 +51,16 @@ module resync_flow {
   pure val LAST_FRAME = 8
   pure val NONE = -1
   pure val NOW = -1         // a request with no target frame
+  // Requests are numbered; the bound keeps the model finite.
+  pure val MAX_REQUESTS = 3
+  pure val UNASKED = 0      // a state the host sent for its own reasons
 
-  type Pending = { frame: int, held: bool }
-  type Scheduled = { target: int, followUp: int }
+  // `req`: the request the state answers (UNASKED for one the host sent
+  // for its own reasons).
+  type Pending = { frame: int, held: bool, req: int }
+  type Scheduled = { target: int, followUp: int, req: int }
+  type Request = { at: int, id: int }
+  type State = { frame: int, req: int }
 
   var guestFrame: int
   var hostFrame: int
@@ -50,34 +68,40 @@ module resync_flow {
   var target: int            // stop here until the state arrives; NONE = no target
   var targetDeadline: bool
   var asked: bool            // a request is out
+  var askedId: int           // the number of the newest request
   var askDeadline: bool
   var stalled: bool          // stopped at the target, waiting for the state
   var pending: Pending       // a state received and not yet applied; frame NONE = none
   var lastApplied: int
   var appliedOlder: bool     // history: applied a state no newer than the last
+  var lateEnded: bool        // history: an answer to an older request ended the one that was out
+  var takenBack: bool        // history: a late answer was applied below the target the guest waited at
   // host
   var scheduled: Scheduled   // a capture owed to the guest; target NONE = none
   var cooling: bool          // answered this guest less than 5 s ago
   // channels
-  var requests: List[int]
-  var states: List[int]
+  var requests: List[Request]
+  var states: List[State]
 
-  pure val noPending: Pending = { frame: NONE, held: false }
-  pure val noSchedule: Scheduled = { target: NONE, followUp: 0 }
+  pure val noPending: Pending = { frame: NONE, held: false, req: UNASKED }
+  pure val noSchedule: Scheduled = { target: NONE, followUp: 0, req: UNASKED }
 
   action init = all {
     guestFrame' = 0, hostFrame' = 0,
-    target' = NONE, targetDeadline' = false, asked' = false, askDeadline' = false,
+    target' = NONE, targetDeadline' = false, asked' = false, askedId' = 0, askDeadline' = false,
     stalled' = false, pending' = noPending, lastApplied' = NONE, appliedOlder' = false,
+    lateEnded' = false, takenBack' = false,
     scheduled' = noSchedule, cooling' = false,
     requests' = [], states' = [],
   }
 
   action framesUnchanged = all { guestFrame' = guestFrame, hostFrame' = hostFrame }
   action hostUnchanged = all { scheduled' = scheduled, cooling' = cooling }
+  action historyUnchanged = all { appliedOlder' = appliedOlder, lateEnded' = lateEnded, takenBack' = takenBack }
   action guestUnchanged = all {
-    target' = target, targetDeadline' = targetDeadline, asked' = asked, askDeadline' = askDeadline,
-    stalled' = stalled, pending' = pending, lastApplied' = lastApplied, appliedOlder' = appliedOlder,
+    target' = target, targetDeadline' = targetDeadline, asked' = asked, askedId' = askedId,
+    askDeadline' = askDeadline, stalled' = stalled, pending' = pending, lastApplied' = lastApplied,
+    historyUnchanged,
   }
 
   // ── the guest asks ─────────────────────────────────────────────────────
@@ -85,28 +109,31 @@ module resync_flow {
   // A desync was detected: ask for the state at a frame a little ahead.
   action guestAsksAt = all {
     not(asked),
+    askedId < MAX_REQUESTS,
     guestFrame + DELTA <= LAST_FRAME,
-    asked' = true, askDeadline' = REQUEST_HAS_DEADLINE,
+    asked' = true, askedId' = askedId + 1, askDeadline' = REQUEST_HAS_DEADLINE,
     target' = guestFrame + DELTA, targetDeadline' = true,
-    requests' = requests.append(guestFrame + DELTA),
-    stalled' = stalled, pending' = pending, lastApplied' = lastApplied, appliedOlder' = appliedOlder,
+    requests' = requests.append({ at: guestFrame + DELTA, id: askedId + 1 }),
+    stalled' = stalled, pending' = pending, lastApplied' = lastApplied, historyUnchanged,
     framesUnchanged, hostUnchanged, states' = states,
   }
 
   // Reconnect or network change: ask for it now. This one
   // goes out even when a request is already out.
   action guestAsksNow = all {
-    asked' = true, askDeadline' = REQUEST_HAS_DEADLINE,
+    askedId < MAX_REQUESTS,
+    asked' = true, askedId' = askedId + 1, askDeadline' = REQUEST_HAS_DEADLINE,
     target' = NONE, targetDeadline' = false, stalled' = false,
-    requests' = requests.append(NOW),
-    pending' = pending, lastApplied' = lastApplied, appliedOlder' = appliedOlder,
+    requests' = requests.append({ at: NOW, id: askedId + 1 }),
+    pending' = pending, lastApplied' = lastApplied, historyUnchanged,
     framesUnchanged, hostUnchanged, states' = states,
   }
 
   // ── the host ───────────────────────────────────────────────────────────
 
   action hostHearsRequest = {
-    val t = requests.head()
+    val r = requests.head()
+    val t = r.at
     all {
       requests.length() > 0,
       requests' = requests.tail(),
@@ -114,9 +141,9 @@ module resync_flow {
         // Rate limited: dropped, and the guest is not told.
         scheduled' = scheduled, cooling' = cooling, states' = states,
       } else if (t > hostFrame) all {
-        scheduled' = { target: t, followUp: 0 }, cooling' = true, states' = states,
+        scheduled' = { target: t, followUp: 0, req: r.id }, cooling' = true, states' = states,
       } else all {
-        scheduled' = scheduled, cooling' = true, states' = states.append(hostFrame),
+        scheduled' = scheduled, cooling' = true, states' = states.append({ frame: hostFrame, req: r.id }),
       },
       framesUnchanged, guestUnchanged,
     }
@@ -129,7 +156,7 @@ module resync_flow {
 
   // The host's own reason to send: a guest it had dropped is back.
   action hostOwesASync = all {
-    scheduled' = { target: hostFrame, followUp: 0 },
+    scheduled' = { target: hostFrame, followUp: 0, req: UNASKED },
     cooling' = cooling, framesUnchanged, guestUnchanged, requests' = requests, states' = states,
   }
 
@@ -137,7 +164,7 @@ module resync_flow {
   action hostSendsConfirmed = all {
     scheduled.target != NONE,
     scheduled.target <= hostFrame,
-    states' = states.append(hostFrame),
+    states' = states.append({ frame: hostFrame, req: scheduled.req }),
     scheduled' = noSchedule,
     cooling' = cooling, framesUnchanged, guestUnchanged, requests' = requests,
   }
@@ -146,9 +173,10 @@ module resync_flow {
   // a follow-up is left (what went out may still change here).
   action hostDeadline = all {
     scheduled.target != NONE,
-    states' = states.append(hostFrame),
-    scheduled' = if (scheduled.followUp < FOLLOW_UPS) { target: hostFrame, followUp: scheduled.followUp + 1 }
-      else noSchedule,
+    states' = states.append({ frame: hostFrame, req: scheduled.req }),
+    scheduled' = if (scheduled.followUp < FOLLOW_UPS)
+      { target: hostFrame, followUp: scheduled.followUp + 1, req: scheduled.req }
+    else noSchedule,
     cooling' = cooling, framesUnchanged, guestUnchanged, requests' = requests,
   }
 
@@ -164,37 +192,56 @@ module resync_flow {
     guestFrame' = pending.frame,
     lastApplied' = pending.frame,
     appliedOlder' = (appliedOlder or pending.frame <= lastApplied),
+    takenBack' = (takenBack or belowTheTarget),
+    lateEnded' = lateEnded,
     pending' = noPending, target' = NONE, targetDeadline' = false, stalled' = false,
-    asked' = asked, askDeadline' = askDeadline,
+    asked' = asked, askedId' = askedId, askDeadline' = askDeadline,
   }
 
   action advance = all {
     guestFrame < LAST_FRAME,
     guestFrame' = guestFrame + 1,
     target' = target, targetDeadline' = targetDeadline, stalled' = stalled, pending' = pending,
-    lastApplied' = lastApplied, appliedOlder' = appliedOlder, asked' = asked, askDeadline' = askDeadline,
+    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askDeadline' = askDeadline,
   }
 
   action hold = all {
     target' = pending.frame, targetDeadline' = true, stalled' = false,
     pending' = { ...pending, held: true },
-    guestFrame' = guestFrame, lastApplied' = lastApplied, appliedOlder' = appliedOlder,
-    asked' = asked, askDeadline' = askDeadline,
+    guestFrame' = guestFrame, lastApplied' = lastApplied, historyUnchanged,
+    asked' = asked, askedId' = askedId, askDeadline' = askDeadline,
   }
 
   action stall = all {
     not(stalled),
     stalled' = true,
     guestFrame' = guestFrame, target' = target, targetDeadline' = targetDeadline, pending' = pending,
-    lastApplied' = lastApplied, appliedOlder' = appliedOlder, asked' = asked, askDeadline' = askDeadline,
+    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askDeadline' = askDeadline,
   }
 
   def ahead: int = pending.frame - guestFrame
 
+  // The state held is the answer to a request older than the newest one, and
+  // is from before the frame the guest is waiting at.
+  def belowTheTarget: bool = and {
+    pending.frame != NONE, target != NONE,
+    pending.req != UNASKED, pending.req != askedId,
+    pending.frame < target,
+  }
+
+  // Proposed: such a state is not what the guest is waiting for. It is
+  // dropped and the wait goes on, to its own deadline.
+  action dropLate = all {
+    pending' = noPending, stalled' = true,
+    guestFrame' = guestFrame, target' = target, targetDeadline' = targetDeadline,
+    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askDeadline' = askDeadline,
+  }
+
   action guestTick = all {
     if (target != NONE and guestFrame >= target) {
       // At the target.
-      if (pending.frame != NONE and ahead > 0 and ahead <= HOLD) hold
+      if (ANSWERS_CARRY_REQUEST and belowTheTarget) dropLate
+      else if (pending.frame != NONE and ahead > 0 and ahead <= HOLD) hold
       else if (pending.frame != NONE) apply
       else stall
     } else if (target != NONE) {
@@ -207,15 +254,24 @@ module resync_flow {
   }
 
   action guestHearsState = {
-    val f = states.head()
+    val st = states.head()
+    val f = st.frame
+    // The answer to the request that is out, or to one given up on before it.
+    val own = asked and st.req == askedId
+    val late = asked and st.req != UNASKED and st.req != askedId
+    // Today any state ends the request that is out. Proposed: only its own.
+    val ends = if (ANSWERS_CARRY_REQUEST) own else true
     all {
       states.length() > 0,
       states' = states.tail(),
-      asked' = false, askDeadline' = false,
+      asked' = if (ends) false else asked,
+      askDeadline' = if (ends) false else askDeadline,
+      askedId' = askedId,
+      lateEnded' = (lateEnded or (late and ends)),
       // A state no newer than the last one applied is dropped.
-      pending' = if (f <= lastApplied) pending else { frame: f, held: false },
+      pending' = if (f <= lastApplied) pending else { frame: f, held: false, req: st.req },
       target' = target, targetDeadline' = targetDeadline, stalled' = stalled,
-      lastApplied' = lastApplied, appliedOlder' = appliedOlder,
+      lastApplied' = lastApplied, appliedOlder' = appliedOlder, takenBack' = takenBack,
       framesUnchanged, hostUnchanged, requests' = requests,
     }
   }
@@ -225,16 +281,16 @@ module resync_flow {
   action targetDeadlineFires = all {
     target != NONE, targetDeadline,
     target' = NONE, targetDeadline' = false, stalled' = false,
-    asked' = asked, askDeadline' = askDeadline, pending' = pending,
-    lastApplied' = lastApplied, appliedOlder' = appliedOlder,
+    asked' = asked, askedId' = askedId, askDeadline' = askDeadline, pending' = pending,
+    lastApplied' = lastApplied, historyUnchanged,
     framesUnchanged, hostUnchanged, requests' = requests, states' = states,
   }
 
   action askDeadlineFires = all {
     asked, askDeadline,
-    asked' = false, askDeadline' = false,
+    asked' = false, askedId' = askedId, askDeadline' = false,
     target' = target, targetDeadline' = targetDeadline, stalled' = stalled, pending' = pending,
-    lastApplied' = lastApplied, appliedOlder' = appliedOlder,
+    lastApplied' = lastApplied, historyUnchanged,
     framesUnchanged, hostUnchanged, requests' = requests, states' = states,
   }
 
@@ -264,8 +320,21 @@ module resync_flow {
     askDeadline,
   }
 
-  val holdToday = everyStallHasADeadline and neverAppliesAnOlderState
-  val allHold = holdToday and aRequestCanAlwaysEnd
+  // Only its own answer ends a request.
+  // VIOLATED today: the answer to a request the guest gave up on (its
+  // deadline, or a reconnect asking again over it) ends the request that is
+  // out now, so the guest may ask a third time while the second is still to
+  // be answered.
+  val onlyItsAnswerEndsARequest = not(lateEnded)
+
+  // A late answer does not take the guest back below the frame it was told
+  // to wait at.
+  // VIOLATED today: it is held until the newer request's target and applied
+  // there, although it is the host's state from before that frame.
+  val aLateAnswerDoesNotTakeTheGuestBack = not(takenBack)
+
+  val holdToday = everyStallHasADeadline and neverAppliesAnOlderState and aRequestCanAlwaysEnd
+  val allHold = holdToday and onlyItsAnswerEndsARequest and aLateAnswerDoesNotTakeTheGuestBack
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -312,14 +381,38 @@ module resync_flow {
       .then(targetDeadlineFires)
       .then(guestTick)
       .expect(asked and askDeadline == REQUEST_HAS_DEADLINE)
+  // The guest gives up on its first request and asks again at a later
+  // frame; the host then answers the first.
+  run lateAnswerTest =
+    init
+      .then(guestAsksAt)
+      .then(hostHearsRequest)
+      .then(targetDeadlineFires)
+      .then(if (REQUEST_HAS_DEADLINE) askDeadlineFires else guestAsksNow)
+      .then(2.reps(_ => guestTick))
+      .then(if (REQUEST_HAS_DEADLINE) guestAsksAt else guestTick)
+      .expect(asked and askedId == 2)
+      .then(hostTick)
+      .then(hostDeadline)
+      // The state on its way is the host's at frame 1, for request 1.
+      .then(guestHearsState)
+      .expect(asked == ANSWERS_CARRY_REQUEST)
+      .expect(onlyItsAnswerEndsARequest == ANSWERS_CARRY_REQUEST)
+      .then(3.reps(_ => guestTick))
+      .expect(REQUEST_HAS_DEADLINE implies (aLateAnswerDoesNotTakeTheGuestBack == ANSWERS_CARRY_REQUEST))
 }
 
 // Before: a request that was out had no deadline.
 module resync_flow_before {
-  import resync_flow(REQUEST_HAS_DEADLINE = false).*
+  import resync_flow(REQUEST_HAS_DEADLINE = false, ANSWERS_CARRY_REQUEST = false).*
 }
 
 // Today.
 module resync_flow_current {
-  import resync_flow(REQUEST_HAS_DEADLINE = true).*
+  import resync_flow(REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = false).*
+}
+
+// With numbered requests: the rule the request id on the wire is for.
+module resync_flow_fixed {
+  import resync_flow(REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true).*
 }

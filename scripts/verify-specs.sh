@@ -82,8 +82,13 @@ expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
 # them.
 
 FLOW=specs/resync_flow.qnt
-verify "$FLOW" resync_flow_current allHold
+verify "$FLOW" resync_flow_current holdToday
+verify "$FLOW" resync_flow_fixed allHold
 expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
+expect_violation "$FLOW" resync_flow_current onlyItsAnswerEndsARequest
+# The counterexample to aLateAnswerDoesNotTakeTheGuestBack on
+# resync_flow_current is over ten steps long, beyond this bound; lateAnswerTest
+# holds it and check-specs.sh's samples reach it.
 
 TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
