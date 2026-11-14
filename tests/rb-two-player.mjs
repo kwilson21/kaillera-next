@@ -204,7 +204,7 @@
  *
  * Besides summary.json, OUT gets menu-inputs.json: what each page's driver
  * sent on the way to the battle, as the frames each input changed on, with
- * the ROM's hash and the input delay. It is a record of a run that reached a
+ * the ROM's hash and the input delay (negotiated, and each page's extra delay). It is a record of a run that reached a
  * match, to read or compare between runs. The driver decides from the game's
  * memory each frame, so a later run is driven again, not replayed from it.
  *
@@ -215,7 +215,6 @@
  */
 import { chromium, webkit } from 'playwright';
 import fs from 'fs';
-import { createHash } from 'crypto';
 import {
   frozenRecoveries,
   frozenRecoveryNote,
@@ -250,19 +249,17 @@ const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const ADDRESS_MAP_CHECK = process.env.ADDRESS_MAP_CHECK === '1';
 const ADDRESS_MAP_OF = process.env.ADDRESS_MAP_OF || '';
-// The ROM's identity as the pages compute it: S + SHA-256 of the file.
 const SSB64_US_HASH = 'S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7ea99ef3d';
-const ROM_HASH = ROM && fs.existsSync(ROM) ? `S${createHash('sha256').update(fs.readFileSync(ROM)).digest('hex')}` : '';
 if (process.env.MENU_AUTOPILOT && !['any-fighter', 'ssb64'].includes(process.env.MENU_AUTOPILOT)) {
   console.log(`MENU_AUTOPILOT=${process.env.MENU_AUTOPILOT} invalid: "any-fighter" or "ssb64"`);
   process.exit(1);
 }
 // Unset: SSB64 US gets the strict driver, any other ROM the one that takes
-// whatever fighter and stage it lands on.
-const MENU_AUTOPILOT = process.env.MENU_AUTOPILOT || (ROM_HASH && ROM_HASH !== SSB64_US_HASH ? 'any-fighter' : 'ssb64');
-if (!process.env.MENU_AUTOPILOT && MENU_AUTOPILOT === 'any-fighter') {
-  console.log('ROM is not SSB64 US: MENU_AUTOPILOT=any-fighter');
-}
+// whatever fighter and stage it lands on. Decided once the host page has
+// loaded the ROM, from the hash the page computed: for an archive that is
+// the ROM inside it, not the file given here.
+let MENU_AUTOPILOT = process.env.MENU_AUTOPILOT || '';
+let ROM_HASH = '';
 if (ADDRESS_MAP_OF && !/^S[0-9a-f]{64}$/.test(ADDRESS_MAP_OF)) {
   console.log('ADDRESS_MAP_OF must be a ROM hash: S followed by 64 hex digits');
   process.exit(1);
@@ -577,6 +574,11 @@ await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
 await guest.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 for (const p of [host, guest]) await p.locator("#rom-drop input[type='file']").setInputFiles(ROM);
 await host.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+ROM_HASH = (await host.evaluate(() => window.KNState?.romHash)) || '';
+if (!MENU_AUTOPILOT) {
+  MENU_AUTOPILOT = ROM_HASH && ROM_HASH !== SSB64_US_HASH ? 'any-fighter' : 'ssb64';
+  if (MENU_AUTOPILOT === 'any-fighter') console.log('ROM is not SSB64 US: MENU_AUTOPILOT=any-fighter');
+}
 console.log('room', room, 'both ROM-ready; starting');
 await host.click('#start-btn');
 
@@ -709,7 +711,9 @@ const install = async (p, role) => {
             W.btnHeld = 0;
             W.btnCool = f + d;
           }
-          // What was sent, kept as the frames it changed on.
+          // What was sent, kept as the frames it changed on. A sync that
+          // takes the page back replaces the frames from there on.
+          while (W.menuInputs.length && W.menuInputs.at(-1).f >= f) W.menuInputs.pop();
           const last = W.menuInputs.at(-1);
           if (!last || last.buttons !== inp.buttons || last.lx !== inp.lx || last.ly !== inp.ly) {
             W.menuInputs.push({ f, scene: sc, buttons: inp.buttons, lx: inp.lx, ly: inp.ly });
@@ -1055,6 +1059,7 @@ const collect = (p, VISUAL_CHECK) =>
       inBattleAt: window.__tp.inBattleAt,
       menuInputs: window.__tp.menuInputs,
       delay: window.NetplayRollback.getHudCounters?.()?.delay ?? null,
+      extraDelay: window.NetplayRollback.getHudCounters?.()?.extraDelay ?? null,
       frame: window.NetplayRollback.getHudCounters().currentFrame,
       fpsWindowStart: window.__tp.fpsWindowStart,
       fpsWindowEnd,
@@ -1087,6 +1092,7 @@ fs.writeFileSync(
       romHash: ROM_HASH,
       menuAutopilot: MENU_AUTOPILOT,
       delay: { host: H.delay, guest: G.delay },
+      extraDelay: { host: H.extraDelay, guest: G.extraDelay },
       battleStart: { host: H.inBattleAt, guest: G.inBattleAt },
       host: H.menuInputs,
       guest: G.menuInputs,
