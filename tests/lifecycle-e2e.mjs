@@ -44,6 +44,9 @@
  *                     spectator and sends the relayed messages only the host
  *                     or a player may send, each with a forged sender stamp:
  *                     no page may act on any of them
+ *   peer-channel-forgery  a player sends emulator state to the host on its
+ *                     own data channel, where only the host's channel may
+ *                     carry one: the host must refuse it
  *   host-reload       the host reloads mid-game; the server ends the match for the guest
  *
  * At each checkpoint the test also checks what the page itself shows (lobby
@@ -74,6 +77,7 @@ const SCENARIOS = [
   'streaming-join',
   'spectate',
   'spectator-forgery',
+  'peer-channel-forgery',
   'host-reload',
 ];
 const wanted = process.env.SCENARIO ? [process.env.SCENARIO] : SCENARIOS;
@@ -133,9 +137,10 @@ const recordEvents = () => {
 // Uncaught exceptions on any page, for the scenario in progress.
 const pageErrors = [];
 /** A page in its own browser context, with a signaling socket the test can cut. */
-const openPlayer = async (label, query) => {
+const openPlayer = async (label, query, initScript = null) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(recordEvents);
+  if (initScript) await ctx.addInitScript(initScript);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => {
     console.log(`[${label}] pageerror ${e.stack || e.message}`);
@@ -168,6 +173,26 @@ const openPlayer = async (label, query) => {
   });
   await page.goto(`${URL}/play.html?${query}&knperf=light`);
   return { label, page, ctx, signaling };
+};
+
+// Keep every 'lockstep' data channel a page opens or is given, so a scenario
+// can send on one as that page (the engine keeps them in a closure).
+const keepLockstepChannels = () => {
+  window.__knLockstepChannels = [];
+  const keep = (channel) => {
+    if (channel.label === 'lockstep') window.__knLockstepChannels.push(channel);
+    return channel;
+  };
+  const Native = window.RTCPeerConnection;
+  window.RTCPeerConnection = class extends Native {
+    constructor(...args) {
+      super(...args);
+      this.addEventListener('datachannel', (e) => keep(e.channel));
+    }
+    createDataChannel(...args) {
+      return keep(super.createDataChannel(...args));
+    }
+  };
 };
 
 const eventsOf = (player) => player.page.evaluate(() => window.__knEvents);
@@ -763,6 +788,52 @@ const scenarios = {
     if (/received late-join request|received socket sync-request-full|sending late-join state/.test(hostLog))
       failures.push('the host acted on a forged request for state');
     log.push({ forger: forgerSid, refusedByGuest: 3, refusedByHost: 3 });
+
+    if (!(await waitForFrames([host, guest], 120, 240000)))
+      failures.push('the game stopped advancing after the forgery');
+    await checkpoint(
+      'after the forgery',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'peer-channel-forgery': async (room, failures, log) => {
+    const host = await openPlayer('host', `room=${room}&host=1&name=Host&mode=rollback`);
+    await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`, keepLockstepChannels);
+    await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+    for (const p of [host, guest]) await loadRom(p);
+    await host.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await host.page.click('#start-btn');
+    if (!(await waitForFrames([host, guest], 120, 240000))) failures.push('the two-player game never started');
+
+    // The guest is slot 1. It sends what only the host sends, complete as
+    // the real messages are (web/src/peer-protocol.ts), on its own channel
+    // to the host.
+    const sent = await guest.page.evaluate(() => {
+      const open = window.__knLockstepChannels.filter((channel) => channel.readyState === 'open');
+      for (const channel of open) {
+        channel.send(JSON.stringify({ type: 'save-state', frame: 0, data: 'AAAA' }));
+        channel.send(JSON.stringify({ type: 'late-join-state', targetSid: 'anyone', frame: 1, data: 'AAAA' }));
+      }
+      return open.length;
+    });
+    if (sent < 1) failures.push('the guest had no open channel to forge on');
+    await host.page.waitForTimeout(4000);
+
+    const hostLog = await host.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+    for (const type of ['save-state', 'late-join-state'])
+      if (!hostLog.includes(`${type} on the channel of slot 1 refused`))
+        failures.push(`the host did not refuse a ${type} sent on a player's channel`);
+    if (/received initial state|received late-join state/.test(hostLog))
+      failures.push('the host passed a forged state to its loader');
+    log.push({ channelsForgedOn: sent });
 
     if (!(await waitForFrames([host, guest], 120, 240000)))
       failures.push('the game stopped advancing after the forgery');
