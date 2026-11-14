@@ -1818,11 +1818,22 @@
   const _drainPendingCInputs = (tickMod) => {
     if (_pendingCInputs.length === 0 || !tickMod._kn_feed_input) return;
     if (_pendingCInputs.length > 1) _pendingCInputs.sort(_pendingCInputsSortFn);
+    let settledSkipped = 0;
     for (let i = 0; i < _pendingCInputs.length; i++) {
       const qi = _pendingCInputs[i];
+      // An input from before a resync's settled point is not the engine's to
+      // judge: the state that resync carries holds what was applied for it.
+      // Fed, a returning peer's backlog would be compared with what this page
+      // predicted while it ran alone, dozens of frames too deep to roll back,
+      // and counted as failed rollbacks the resync is about to make moot.
+      if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {
+        settledSkipped++;
+        continue;
+      }
       tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
     }
     _pendingCInputs.length = 0;
+    if (settledSkipped > 0) _syncLog(`C-INPUT-SETTLED-SKIP f=${_frameNum} count=${settledSkipped}`);
   };
   const _formatSlotMap = (obj) => {
     const keys = Object.keys(obj || {}).sort((a, b) => Number(a) - Number(b));
@@ -7983,6 +7994,11 @@
             forceFull: true,
             deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
           });
+          // That state will be for this frame or a later one, so the
+          // guest's inputs from before this frame minus the delay are
+          // settled by it already. (Only the host can say so here: a guest
+          // may be taken back to an earlier frame and still need them.)
+          _settleInputsBefore(peer.slot, _frameNum);
           _syncLog(`peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum}`);
         }
       }

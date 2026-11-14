@@ -617,3 +617,21 @@ def test_a_page_running_alone_keeps_its_own_input():
     rerun = rerun[rerun.index("catchingUp = tickMod._kn_pre_tick(") :]
     assert "-1,\n" in rerun[: rerun.index(");")]
     assert "// Fall through to normal tick instead of returning" not in src
+
+
+def test_a_settled_input_is_not_fed_to_the_engine():
+    # A returning peer's backlog is from frames the resync's state already
+    # covers. Fed to the C engine it is compared with what was predicted while
+    # this page ran alone, too deep to roll back, and counted as failed
+    # rollbacks.
+    src = LOCKSTEP_JS.read_text()
+    drain = src[src.index("const _drainPendingCInputs = (tickMod) => {") :]
+    drain = drain[: drain.index("\n  };\n")]
+    skip = drain.index("if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {")
+    assert skip < drain.index("tickMod._kn_feed_input(qi.slot, qi.frame,")
+    # The host settles the guest's backlog when it schedules the recovery
+    # resync: that state is for this frame or a later one. A guest does not:
+    # it may be taken back to an earlier frame.
+    recovered = src[src.index("} else if (_playerSlot === 0 && peer.slot !== 0 && _syncEnabled) {") :]
+    recovered = recovered[: recovered.index("peer-recovery resync: host scheduled full sync")]
+    assert "_settleInputsBefore(peer.slot, _frameNum);" in recovered

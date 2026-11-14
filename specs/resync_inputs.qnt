@@ -35,9 +35,10 @@
 // Not modelled: the time a state takes to cross (the host keeps running and
 // the guest lands a few frames behind, the ordinary "behind" wait), more than
 // two players and a new match in the same session (both in
-// specs/resync_mesh.qnt), packet loss on the
-// unreliable input channel, the contents of inputs and the rollbacks that
-// follow a wrong prediction.
+// specs/resync_mesh.qnt), packet loss on the unreliable input channel, the
+// contents of inputs and the rollbacks that follow a wrong prediction. (A
+// settled input is not handed to the engine at all, so a returning peer's
+// backlog is never judged against what was predicted for it.)
 //
 // SETTLE_AT_RESYNC: a resync at frame F settles every input keyed before
 //   F - DELAY (they are already in the state both pages now hold, so neither
