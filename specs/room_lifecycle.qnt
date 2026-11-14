@@ -234,7 +234,13 @@ module room {
   action beginSync = all {
     status == "playing", members != Set(),
     members.forall(p => page.get(p) == Loading(matchId)),
-    page' = page.keys().mapBy(p => if (members.contains(p)) StartSync(matchId) else page.get(p)),
+    // The sync is among the players' own connections, not the server's list:
+    // a player the server dropped while it was loading (its grace ran out)
+    // is still connected to the others and syncs with them. Leaving it
+    // behind in Loading made a start no late joiner could be let into
+    // (joinersAreNotLeftWaitingAtTheStart, found by simulation 2026-11-14).
+    page' = page.keys().mapBy(p =>
+      if (members.contains(p) or page.get(p) == Loading(matchId)) StartSync(matchId) else page.get(p)),
     members' = members, owner' = owner, creator' = creator, status' = status,
     matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
   }
