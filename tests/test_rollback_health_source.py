@@ -664,3 +664,37 @@ def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
     settle = settle[: settle.index("\n  };\n")]
     assert "delete _localInputs" not in settle and "_localInputs = {}" not in settle
 
+
+def test_a_resync_request_that_is_out_has_a_deadline():
+    # specs/resync_flow.qnt: the host drops a request inside its rate limit
+    # without answering, so the guest's "a request is out" flag needs a
+    # deadline of its own or the guest never asks again.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const _checkResyncRequestDeadline = () => {")
+    check_src = src[idx : src.index("\n  };\n", idx)]
+    for snippet in (
+        "if (!_resyncRequestInFlight) return;",
+        # An answer arriving, held, or waited for at a target has its own deadline.
+        "if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;",
+        "if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;",
+        "_resyncRequestInFlight = false;",
+        "RESYNC-REQUEST-TIMEOUT f=${_frameNum}",
+    ):
+        assert snippet in check_src
+    # Every site that sends a request stamps it.
+    sent = src.count("_resyncRequestInFlight = true;")
+    assert sent >= 7
+    assert (
+        len(re.findall(r"_resyncRequestInFlight = true;\n\s+_resyncRequestSentAt = performance\.now\(\);", src)) == sent
+    )
+    # Longer than the host's rate limit plus its capture deadline.
+    assert "const RESYNC_REQUEST_TIMEOUT_MS = 8000;" in src
+    assert "const _SYNC_REQUEST_COOLDOWN_MS = 5000;" in src
+    assert "const SYNC_COORD_TIMEOUT_MS = 3000;" in src
+    tick_idx = src.index("const tick = () => {")
+    assert "_checkResyncRequestDeadline();" in src[tick_idx : tick_idx + 1200]
+    # The page's own freeze does not count against a request that is out.
+    credit = src[src.index("const _creditLocalFreeze = () => {") :]
+    credit = credit[: credit.index("\n  };\n")]
+    assert "if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);" in credit
+    assert src.index("_creditLocalFreeze();", tick_idx) < src.index("_checkResyncRequestDeadline();", tick_idx)
