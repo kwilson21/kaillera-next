@@ -14,7 +14,7 @@ export const RELAY_SENDER_KEY = 'knFrom';
 export interface RelayVerdict {
   /** Act on the message. */
   allowed: boolean;
-  /** The server stamped it. False only for a server older than the stamp. */
+  /** The server stamped it. */
   stamped: boolean;
   /** The sender's socket id as the server knows it; null when not stamped. */
   sid: string | null;
@@ -38,10 +38,8 @@ export interface Relayed {
 }
 
 export const checkRelayed = (msg: Relayed): RelayVerdict => {
-  // No stamp: a server older than this check. Accepted as before, since the
-  // server and the pages deploy together and a member cannot remove a stamp
-  // the server adds.
-  if (!Object.hasOwn(msg, RELAY_SENDER_KEY)) return verdict(true, false);
+  // No stamp: it did not come through a server that vouches for its sender.
+  if (!Object.hasOwn(msg, RELAY_SENDER_KEY)) return verdict(relayAllowed('', false, -1, false), false);
   const stamp = decodeRelaySender(msg.knFrom);
   // A stamp this page cannot read says nothing about the sender: refused.
   if (Result.isFailure(stamp)) return verdict(false, true);
