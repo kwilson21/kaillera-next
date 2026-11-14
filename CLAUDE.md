@@ -279,7 +279,12 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   `?knperf=light`), measured RTT is inflated (so negotiated delay is too), and
   the menu autopilot can overshoot into Team Battle at delay ≥ 10. Treat
   multi-second freezes and menu timeouts there as environment first; confirm
-  real bugs from the logs.
+  real bugs from the logs. A page that freezes for 5 s there is dropped as a
+  phantom and resynced (about one match in three). `tests/rb-two-player.mjs`
+  leaves the frames of such a recovery out of its hash compare when the logs
+  prove the dropped page's main thread stopped, and says so
+  (`frozenRecovery` in its summary, `tests/frozen-recovery.mjs`). Any other
+  mismatch is real.
 - **Which hash to trust.** None of the three covers the whole game state;
   know what each one reads. `kn_gameplay_hash` hashes a short list of game
   addresses (scene, VS battle header, stock counts, RNG seed, character
