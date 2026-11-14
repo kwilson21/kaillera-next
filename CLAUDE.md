@@ -124,6 +124,9 @@ kaillera-next/
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
+│   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
+│   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
+│   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
@@ -168,6 +171,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
 | `start-game` | client→server | `{mode, resyncEnabled, romHash, gameId}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
 | `end-game` | client→server | `{}` | Host ends game |
+| `match-joined` | client→server | `{matchId}` | A player who joined a match in play is now in it. Until then the server counts it as waiting, and ends a match only waiting players are left in |
 | `set-name` | client→server | `{name}` | Update player display name |
 | `set-mode` | client→server | `{mode}` | Host sets game mode |
 | `set-game-id` | client→server | `{game_id}` | Host updates game_id after ROM identification |

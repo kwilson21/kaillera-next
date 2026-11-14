@@ -47,6 +47,25 @@
   let _healthCtx = null;
   let _solidPaleLogged = false;
 
+  // The arithmetic below is KNCore's (web/src/diagnostics.ts) when the
+  // bundle is loaded. Each helper keeps the same computation in place for a
+  // page without it; tests/ts/diagnostics.test.ts holds the two to the same
+  // results.
+
+  // FNV-1a hash — stride every 16 pixels, quantize to top 4 bits.
+  function _hashPixels(buf) {
+    const hashPixels = window.KNCore?.hashPixels;
+    if (hashPixels) return hashPixels(buf);
+    let hash = 2166136261;
+    const stride = 16 * 4;
+    for (let i = 0; i < buf.length; i += stride) {
+      hash = Math.imul(hash ^ (buf[i] >> 4), 16777619) >>> 0;
+      hash = Math.imul(hash ^ (buf[i + 1] >> 4), 16777619) >>> 0;
+      hash = Math.imul(hash ^ (buf[i + 2] >> 4), 16777619) >>> 0;
+    }
+    return hash;
+  }
+
   function captureCanvasHash() {
     if (!window.KNCapture?.allowed()) return 0;
     const canvas = document.querySelector('#game canvas');
@@ -98,15 +117,7 @@
         const pboBound = gl.PIXEL_PACK_BUFFER_BINDING ? gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING) : null;
         if (!pboBound) {
           gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, _glPixelBuf);
-          // FNV-1a hash — stride every 16 pixels, quantize to top 4 bits.
-          let hash = 2166136261;
-          const stride = 16 * 4;
-          for (let i = 0; i < totalBytes; i += stride) {
-            hash = Math.imul(hash ^ (_glPixelBuf[i] >> 4), 16777619) >>> 0;
-            hash = Math.imul(hash ^ (_glPixelBuf[i + 1] >> 4), 16777619) >>> 0;
-            hash = Math.imul(hash ^ (_glPixelBuf[i + 2] >> 4), 16777619) >>> 0;
-          }
-          return hash;
+          return _hashPixels(_glPixelBuf);
         }
         // PBO bound — drop through to the 2D-canvas fallback below, which
         // doesn't share GL state with the core.
@@ -120,17 +131,72 @@
       }
       _offscreenCtx.drawImage(canvas, 0, 0);
       const data = _offscreenCtx.getImageData(0, 0, canvas.width, canvas.height).data;
-      let h2 = 2166136261;
-      const stride2 = 16 * 4;
-      for (let i = 0; i < data.length; i += stride2) {
-        h2 = Math.imul(h2 ^ (data[i] >> 4), 16777619) >>> 0;
-        h2 = Math.imul(h2 ^ (data[i + 1] >> 4), 16777619) >>> 0;
-        h2 = Math.imul(h2 ^ (data[i + 2] >> 4), 16777619) >>> 0;
-      }
-      return h2;
+      return _hashPixels(data);
     } catch (_) {
       return 0;
     }
+  }
+
+  function _measureHealth(data) {
+    const measure = window.KNCore?.measureCanvasHealth;
+    if (measure) return measure(data);
+    const n = data.length / 4;
+    let sumR = 0;
+    let sumG = 0;
+    let sumB = 0;
+    let min = 255;
+    let max = 0;
+    let palePixels = 0;
+    let yellowGreenPixels = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      sumR += r;
+      sumG += g;
+      sumB += b;
+      if (r < min) min = r;
+      if (g < min) min = g;
+      if (b < min) min = b;
+      if (r > max) max = r;
+      if (g > max) max = g;
+      if (b > max) max = b;
+      if (r >= 200 && g >= 205 && b >= 175 && g >= b + 2 && Math.max(r, g, b) - Math.min(r, g, b) <= 80) {
+        palePixels++;
+      }
+      if (r >= 145 && g >= 145 && b <= 165 && g >= b + 18 && Math.abs(r - g) <= 55) {
+        yellowGreenPixels++;
+      }
+    }
+    const meanR = sumR / n;
+    const meanG = sumG / n;
+    const meanB = sumB / n;
+    let variance = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      variance += (data[i] - meanR) ** 2 + (data[i + 1] - meanG) ** 2 + (data[i + 2] - meanB) ** 2;
+    }
+    const stdev = Math.sqrt(variance / (n * 3));
+    const brightness = (meanR + meanG + meanB) / 3;
+    const range = max - min;
+    const paleRatio = palePixels / n;
+    const yellowGreenRatio = yellowGreenPixels / n;
+    const solidPale =
+      brightness >= 130 &&
+      stdev <= 24 &&
+      range <= 75 &&
+      (paleRatio >= 0.78 || yellowGreenRatio >= 0.82) &&
+      meanG >= meanB + 8;
+    return {
+      meanR: Math.round(meanR),
+      meanG: Math.round(meanG),
+      meanB: Math.round(meanB),
+      brightness: Math.round(brightness),
+      stdev: Number(stdev.toFixed(1)),
+      range,
+      paleRatio: Number(paleRatio.toFixed(3)),
+      yellowGreenRatio: Number(yellowGreenRatio.toFixed(3)),
+      solidPale,
+    };
   }
 
   // Local-only startup renderer repair needs this even when image sharing is
@@ -149,62 +215,8 @@
       }
       _healthCtx.drawImage(canvas, 0, 0, sampleW, sampleH);
       const data = _healthCtx.getImageData(0, 0, sampleW, sampleH).data;
-      const n = data.length / 4;
-      let sumR = 0;
-      let sumG = 0;
-      let sumB = 0;
-      let min = 255;
-      let max = 0;
-      let palePixels = 0;
-      let yellowGreenPixels = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
-        sumR += r;
-        sumG += g;
-        sumB += b;
-        if (r < min) min = r;
-        if (g < min) min = g;
-        if (b < min) min = b;
-        if (r > max) max = r;
-        if (g > max) max = g;
-        if (b > max) max = b;
-        if (r >= 200 && g >= 205 && b >= 175 && g >= b + 2 && Math.max(r, g, b) - Math.min(r, g, b) <= 80) {
-          palePixels++;
-        }
-        if (r >= 145 && g >= 145 && b <= 165 && g >= b + 18 && Math.abs(r - g) <= 55) {
-          yellowGreenPixels++;
-        }
-      }
-      const meanR = sumR / n;
-      const meanG = sumG / n;
-      const meanB = sumB / n;
-      let variance = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        variance += (data[i] - meanR) ** 2 + (data[i + 1] - meanG) ** 2 + (data[i + 2] - meanB) ** 2;
-      }
-      const stdev = Math.sqrt(variance / (n * 3));
-      const brightness = (meanR + meanG + meanB) / 3;
-      const range = max - min;
-      const paleRatio = palePixels / n;
-      const yellowGreenRatio = yellowGreenPixels / n;
-      const solidPale =
-        brightness >= 130 &&
-        stdev <= 24 &&
-        range <= 75 &&
-        (paleRatio >= 0.78 || yellowGreenRatio >= 0.82) &&
-        meanG >= meanB + 8;
       return {
-        meanR: Math.round(meanR),
-        meanG: Math.round(meanG),
-        meanB: Math.round(meanB),
-        brightness: Math.round(brightness),
-        stdev: Number(stdev.toFixed(1)),
-        range,
-        paleRatio: Number(paleRatio.toFixed(3)),
-        yellowGreenRatio: Number(yellowGreenRatio.toFixed(3)),
-        solidPale,
+        ..._measureHealth(data),
         canvas: {
           width: canvas.width,
           height: canvas.height,
@@ -386,6 +398,15 @@
     _log('DIAG hooks installed');
   }
 
+  // What an AudioContext state change means: 'stall', 'resume' or null.
+  function _audioTransition(previous, current) {
+    const transition = window.KNCore?.audioTransition;
+    if (transition) return transition(previous, current);
+    if (current !== 'running' && previous === 'running') return 'stall';
+    if (current === 'running' && previous !== '' && previous !== 'running') return 'resume';
+    return null;
+  }
+
   // -- Freeze detection (called from tick loop) --
 
   function checkFreeze(localInput) {
@@ -449,9 +470,10 @@
     const actx = window.KNAudio?.ctx;
     const aState = actx?.state ?? 'none';
     if (aState !== _audioLastState) {
-      if (aState !== 'running' && _audioLastState === 'running') {
+      const change = _audioTransition(_audioLastState, aState);
+      if (change === 'stall') {
         _log(`AUDIO-STALL state=${aState} prev=${_audioLastState} f=${frameNum}`);
-      } else if (aState === 'running' && _audioLastState !== '' && _audioLastState !== 'running') {
+      } else if (change === 'resume') {
         _log(`AUDIO-RESUME state=${aState} prev=${_audioLastState} f=${frameNum}`);
       }
       _audioLastState = aState;
@@ -468,6 +490,26 @@
   let _screenshotCtx = null;
   let _lastScreenshotFrame = -1;
   let _screenshotDebugLogged = false;
+
+  // The centred 4:3 part of a w-by-h canvas.
+  function _screenshotCrop(w, h) {
+    const crop = window.KNCore?.screenshotCrop;
+    if (crop) return crop(w, h);
+    const targetRatio = 4 / 3;
+    const srcRatio = w / h;
+    let sx = 0,
+      sy = 0,
+      sw = w,
+      sh = h;
+    if (srcRatio > targetRatio) {
+      sw = Math.round(h * targetRatio);
+      sx = Math.round((w - sw) / 2);
+    } else if (srcRatio < targetRatio) {
+      sh = Math.round(w / targetRatio);
+      sy = Math.round((h - sh) / 2);
+    }
+    return { sx, sy, sw, sh };
+  }
 
   function captureAndSendScreenshot() {
     if (!window.KNCapture?.allowed() || !_sendScreenshot) return;
@@ -495,19 +537,7 @@
       }
       const w = canvas.width;
       const h = canvas.height;
-      const targetRatio = 4 / 3;
-      const srcRatio = w / h;
-      let sx = 0,
-        sy = 0,
-        sw = w,
-        sh = h;
-      if (srcRatio > targetRatio) {
-        sw = Math.round(h * targetRatio);
-        sx = Math.round((w - sw) / 2);
-      } else if (srcRatio < targetRatio) {
-        sh = Math.round(w / targetRatio);
-        sy = Math.round((h - sh) / 2);
-      }
+      const { sx, sy, sw, sh } = _screenshotCrop(w, h);
       _screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, outW, outH);
       const dataUrl = _screenshotCanvas.toDataURL('image/jpeg', 0.6);
       if (!dataUrl || dataUrl.length < 100) {

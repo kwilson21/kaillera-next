@@ -63,6 +63,15 @@ module room {
   //          refused page ends its game and joins again as a fresh page
   //          would (web/src/rejoin-attempt.ts)
   const RESUME_KNOWS_IT_WAS_DROPPED: bool
+  // What the server does with a playing room once every player left in it
+  // joined after the match began and is still waiting to get into it (at
+  // the ROM prompt, starting its engine, or asking for state): nobody is
+  // running the match, so nobody can ever serve them.
+  //   false  before: nothing. The room stayed "playing", each joiner timed
+  //          out, and a reload put it straight back on the late-join path
+  //   true   today: the server ends the match (signaling.py,
+  //          _end_match_if_abandoned) and everyone is back in the lobby
+  const SERVER_ENDS_ABANDONED_MATCH: bool
 
   // web/src/session.ts is the page half of this model, state for state:
   //   Lobby = lobby, AwaitingRom = lateJoinAwaitingRom, Starting =
@@ -225,7 +234,13 @@ module room {
   action beginSync = all {
     status == "playing", members != Set(),
     members.forall(p => page.get(p) == Loading(matchId)),
-    page' = page.keys().mapBy(p => if (members.contains(p)) StartSync(matchId) else page.get(p)),
+    // The sync is among the players' own connections, not the server's list:
+    // a player the server dropped while it was loading (its grace ran out)
+    // is still connected to the others and syncs with them. Leaving it
+    // behind in Loading made a start no late joiner could be let into
+    // (joinersAreNotLeftWaitingAtTheStart, found by simulation 2026-11-14).
+    page' = page.keys().mapBy(p =>
+      if (members.contains(p) or page.get(p) == Loading(matchId)) StartSync(matchId) else page.get(p)),
     members' = members, owner' = owner, creator' = creator, status' = status,
     matchId' = matchId, nextMatch' = nextMatch, online' = online, grace' = grace,
   }
@@ -360,10 +375,12 @@ module room {
         members' = members.union(Set(p)), online' = online.union(Set(p)),
         owner' = owner, creator' = creator, status' = status, matchId' = matchId,
         page' = page,
-      } else if (roomTakesJoiners and not(asHost)) all {
-        // The room has moved on to the lobby or another match. Before, the
+      } else if (roomTakesJoiners and (not(asHost) or RESUME_KNOWS_IT_WAS_DROPPED)) all {
+        // The room has moved on to the lobby or another match. Before, a
         // guest was let in and reconciled; now it is refused and joins
-        // afresh. Either way it lands where a fresh join would.
+        // afresh. Either way it lands where a fresh join would. A page that
+        // loaded as host does the same now: its room has another owner, so
+        // it comes in as a guest instead of failing to open the room.
         members' = members.union(Set(p)), online' = online.union(Set(p)),
         owner' = owner, creator' = creator, status' = status, matchId' = matchId,
         page' = page.set(p, joinedPage(status, matchId, hasRom)),
@@ -384,6 +401,20 @@ module room {
     }
   }
 
+  // Every player in the room joined after the match began and has not got
+  // into it yet. This is what the server can see: who joined mid-match, and
+  // who has since said it is in (`match-joined`).
+  def everyoneIsWaiting: bool =
+    members != Set() and members.forall(p => isLateJoining(page.get(p)))
+
+  action endAbandonedMatch = all {
+    SERVER_ENDS_ABANDONED_MATCH, status == "playing", everyoneIsWaiting,
+    status' = "lobby", matchId' = 0,
+    page' = broadcast(Lobby),
+    members' = members, owner' = owner, creator' = creator,
+    online' = online, grace' = grace, nextMatch' = nextMatch,
+  }
+
   // A page that is no longer in the room is closed by its user.
   action closeTab(p: str): bool = all {
     not(members.contains(p)), isOpen(page.get(p)),
@@ -397,6 +428,7 @@ module room {
     beginSync,
     startRunning,
     endGame,
+    endAbandonedMatch,
     nondet p = oneOf(PLAYERS)
     nondet hasRom = oneOf(Set(true, false))
     nondet asHost = oneOf(Set(true, false))
@@ -470,17 +502,19 @@ module room {
       | _ => true
     })
 
-  // An open question, not gated in CI and not fixed by RESUME_RECONCILES.
-  //
-  // A playing room always has someone running the match, or someone on their
-  // way back to it. Fails when the only player left is a late joiner still
-  // waiting for state.
-  val noGhostMatch =
-    status == "playing" implies or {
-      members.exists(p => page.get(p) == Running(matchId) or page.get(p) == Loading(matchId)
-        or page.get(p) == StartSync(matchId)),
-      grace.exists(p => page.get(p) == Closed),
-    }
+  // A playing room nobody is running is ended. "Nobody" leaves out players
+  // inside their grace window, who may be on their way back. Failed before
+  // (found by the model when the late-join states were added, listed as
+  // open until now): the players running a match left, the one player
+  // still in the room was a late joiner waiting for its state, and the room
+  // stayed "playing" for good.
+  val matchHasNobody = and {
+    status == "playing", members != Set(), grace == Set(),
+    not(members.exists(p => page.get(p) == Running(matchId) or page.get(p) == Loading(matchId)
+      or page.get(p) == StartSync(matchId))),
+  }
+  val anAbandonedMatchIsEnded =
+    matchHasNobody implies (SERVER_ENDS_ABANDONED_MATCH and everyoneIsWaiting)
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -539,6 +573,22 @@ module room {
       .then(returnAfterExpiry("host", true, true))
       .expect(page.get("host") == (if (RESUME_KNOWS_IT_WAS_DROPPED) Running(1) else Stranded(1)))
       .expect(members.contains("host") == RESUME_KNOWS_IT_WAS_DROPPED)
+
+  // The host leaves for good while a joiner is still getting in. Before, the
+  // room stayed "playing" with nobody running the match.
+  run abandonedMatchTest =
+    init
+      .then(openRoom("host"))
+      .then(startGame)
+      .then(beginSync)
+      .then(startRunning)
+      .then(join("guest1", false))
+      .expect(page.get("guest1") == AwaitingRom(1))
+      .then(leave("host"))
+      .expect(status == "playing" and owner == "guest1" and matchHasNobody)
+      .then(if (SERVER_ENDS_ABANDONED_MATCH) endAbandonedMatch else romReady("guest1"))
+      .expect(page.get("guest1") == (if (SERVER_ENDS_ABANDONED_MATCH) Lobby else Starting(1)))
+      .expect((status == "lobby") == SERVER_ENDS_ABANDONED_MATCH)
 
   run lateJoinTest =
     init
@@ -611,14 +661,24 @@ module room {
 // The server and client as they are today.
 module room_current {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
-         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
+         SERVER_ENDS_ABANDONED_MATCH = true).*
+}
+
+// Before the server ended a match nobody was running.
+// anAbandonedMatchIsEnded is violated here.
+module room_before_abandoned_end {
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
+         SERVER_ENDS_ABANDONED_MATCH = false).*
 }
 
 // Before a rejoin said it was a resume and a refusal was acted on.
 // nobodyIsStrandedInADroppedMatch is violated here.
 module room_before_resume_flag {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
-         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = false).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = false,
+         SERVER_ENDS_ABANDONED_MATCH = false).*
 }
 
 // Before a joiner who asks for state too early was admitted to the start
@@ -626,7 +686,8 @@ module room_before_resume_flag {
 // violated here.
 module room_before_start_fix {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false,
-         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
+         SERVER_ENDS_ABANDONED_MATCH = false).*
 }
 
 // Before the page reconciled with the server on reconnect
@@ -634,11 +695,13 @@ module room_before_start_fix {
 // pagesAgreeWithServer are violated here.
 module room_before_reconcile {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
-         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
+         SERVER_ENDS_ABANDONED_MATCH = false).*
 }
 
 // Before #104, kept so hostReloadTest still shows what that fix changed.
 module room_before_104 {
   import room(HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
-         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false).*
+         START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
+         SERVER_ENDS_ABANDONED_MATCH = false).*
 }
