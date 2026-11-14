@@ -125,7 +125,10 @@ pair peer_connection_fixed allHold initLobby
 # the old page's attempt passes for the new one's
 # (oldAnswerTakenByReplacementPageTest, oldCandidateReachesReplacementConnectionTest).
 # The other five still hold there. peer_connection_fixed names the page
-# beside the counter.
+# beside the counter. A page from before signals carried an attempt
+# (`reloadOld`) sends none; only pages that check labels are held to
+# staleSignalsAreNotApplied, and oldPageAnswersWithNoLabelTest shows that a
+# page that checks them never connects to an old one.
 pair peer_connection_counter_only holdWithACounterAlone init
 pair peer_connection_counter_only holdWithACounterAlone initLobby
 
