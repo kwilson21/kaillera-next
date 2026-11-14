@@ -21,7 +21,8 @@ const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test('a new page is fresh and in the lobby', async () => {
   const { session } = open();
-  assert.equal(await session.socketUp({ gameRunning: false }), true);
+  session.socketUp();
+  assert.equal(session.gameOn(), false);
   assert.equal(session.state(), 'lobby');
   await session.stop();
 });
@@ -30,10 +31,12 @@ test('game-started runs the match; game-ended returns to the lobby', async () =>
   const { session, reported } = open();
   session.send({ type: 'joined', status: 'lobby', matchId: null, spectator: false, streaming: false });
   session.send({ type: 'gameStarted', matchId: 'm1' });
-  assert.equal(await session.socketUp({ gameRunning: true }), true);
+  session.socketUp();
+  assert.equal(session.gameOn(), true);
   assert.equal(session.state(), 'running');
   session.send({ type: 'gameEnded' });
-  assert.equal(await session.socketUp({ gameRunning: false }), true);
+  session.socketUp();
+  assert.equal(session.gameOn(), false);
   assert.equal(session.state(), 'lobby');
   assert.deepEqual(reported, []);
   await session.stop();
@@ -44,12 +47,12 @@ test('joining a match in play with a ROM: start the engine, wait for state, run 
   session.send(joinMidGame);
   assert.equal(session.state(), 'lateJoinStarting');
   // play.js: _lateJoin is set, nothing is pending.
-  assert.equal(session.check('lateJoin', true), true);
-  assert.equal(session.check('pendingLateJoin', false), true);
+  assert.equal(session.flag('lateJoin'), true);
+  assert.equal(session.flag('pendingLateJoin'), false);
   session.send(engineUp);
   assert.equal(session.state(), 'lateJoinSyncing');
   // play.js clears _lateJoin once initEngine has consumed it.
-  assert.equal(session.check('lateJoin', false), true);
+  assert.equal(session.flag('lateJoin'), false);
   session.send({ type: 'lateJoinSynced' });
   assert.equal(session.state(), 'running');
   assert.deepEqual(reported, []);
@@ -61,12 +64,12 @@ test('joining a match in play without a ROM waits for one before the late join',
   session.send(joinMidGame);
   session.send({ type: 'lateJoinRomNeeded' });
   assert.equal(session.state(), 'lateJoinAwaitingRom');
-  assert.equal(session.check('pendingLateJoin', true), true);
-  assert.equal(session.check('lateJoin', true), true);
+  assert.equal(session.flag('pendingLateJoin'), true);
+  assert.equal(session.flag('lateJoin'), true);
   assert.equal(session.gameOn(), true);
   session.send({ type: 'lateJoinRomReady' });
   assert.equal(session.state(), 'lateJoinStarting');
-  assert.equal(session.check('pendingLateJoin', false), true);
+  assert.equal(session.flag('pendingLateJoin'), false);
   session.send(engineUp);
   session.send({ type: 'lateJoinSynced' });
   assert.equal(session.state(), 'running');
@@ -83,7 +86,7 @@ test('an engine started only to fetch the ROM is not the late join', async () =>
   session.send({ type: 'engineStarted', connectOnly: true, waitsForState: true });
   assert.equal(session.state(), 'lateJoinAwaitingRom');
   session.send({ type: 'lateJoinRomReady' });
-  assert.equal(session.check('lateJoin', true), true);
+  assert.equal(session.flag('lateJoin'), true);
   session.send(engineUp);
   assert.equal(session.state(), 'lateJoinSyncing');
   await session.stop();
@@ -103,7 +106,7 @@ test('a guest joining a streamed match needs no state: it is running once its en
   const { session, reported } = open(30);
   session.send({ ...joinMidGame, streaming: true });
   assert.equal(session.state(), 'lateJoinStarting');
-  assert.equal(session.check('lateJoin', true), true);
+  assert.equal(session.flag('lateJoin'), true);
   session.send({ type: 'engineStarted', connectOnly: false, waitsForState: false });
   assert.equal(session.state(), 'running');
   await pause(120);
@@ -115,9 +118,10 @@ test('a spectator of a rollback match is in the game at once, and is never repor
   const { session, reported } = open(30);
   session.send({ ...joinMidGame, spectator: true });
   // play.js sets gameRunning for any mid-game join, but not _lateJoin for this one.
-  assert.equal(await session.socketUp({ gameRunning: true }), true);
+  session.socketUp();
+  assert.equal(session.gameOn(), true);
   assert.equal(session.state(), 'running');
-  assert.equal(session.check('lateJoin', false), true);
+  assert.equal(session.flag('lateJoin'), false);
   await pause(120);
   assert.deepEqual(reported, []);
   await session.stop();
@@ -134,7 +138,8 @@ test('a dropped socket under a running game keeps the match (socketDropKeepsMatc
   const { session } = open();
   session.send({ type: 'gameStarted', matchId: 'm1' });
   session.send({ type: 'socketDown' });
-  assert.equal(await session.socketUp({ gameRunning: true }), true);
+  session.socketUp();
+  assert.equal(session.gameOn(), true);
   assert.equal(session.state(), 'running');
   await session.stop();
 });
@@ -145,42 +150,6 @@ test('game-started for a page already joining the match does not skip the late j
   session.send({ type: 'lateJoinRomNeeded' });
   session.send({ type: 'gameStarted', matchId: 'm2' });
   assert.equal(session.state(), 'lateJoinAwaitingRom');
-  await session.stop();
-});
-
-test('the page and the machine disagreeing is reported, not acted on', async () => {
-  const { session, reported } = open();
-  session.send({ type: 'gameStarted', matchId: 'm1' });
-  assert.equal(await session.socketUp({ gameRunning: false }), false);
-  assert.equal(session.state(), 'running');
-  assert.deepEqual(reported, [{ type: 'session-disagree', machine: 'running', check: 'gameRunning', page: false }]);
-  await session.stop();
-});
-
-test('a flag that stays wrong is reported once, and again only after it changes', async () => {
-  const { session, reported } = open();
-  session.send(joinMidGame);
-  const wrong = { type: 'session-disagree', machine: 'lateJoinStarting', check: 'pendingLateJoin', page: true };
-  assert.equal(session.check('pendingLateJoin', true), false);
-  assert.equal(session.check('pendingLateJoin', true), false);
-  assert.deepEqual(reported, [wrong]);
-  assert.equal(session.check('pendingLateJoin', false), true);
-  assert.equal(session.check('pendingLateJoin', true), false);
-  assert.deepEqual(reported, [wrong, wrong]);
-  await session.stop();
-});
-
-test('two flags that are both wrong are each reported once, however the reads interleave', async () => {
-  const { session, reported } = open();
-  session.send(joinMidGame);
-  for (let read = 0; read < 3; read++) {
-    session.check('pendingLateJoin', true);
-    session.check('lateJoin', false);
-  }
-  assert.deepEqual(
-    reported.map((r) => (r.type === 'session-disagree' ? r.check : r.type)),
-    ['pendingLateJoin', 'lateJoin'],
-  );
   await session.stop();
 });
 
@@ -231,7 +200,8 @@ test('a room closed by the server puts the page back in the lobby', async () => 
   session.send(engineUp);
   session.send({ type: 'roomClosed' });
   assert.equal(session.state(), 'lobby');
-  assert.equal(await session.socketUp({ gameRunning: false }), true);
+  session.socketUp();
+  assert.equal(session.gameOn(), false);
   // The stranded-joiner timer died with the wait.
   await pause(120);
   assert.deepEqual(reported, []);
@@ -254,4 +224,137 @@ test('a rejoin the server refuses ends the game for this page, from any state (r
     assert.deepEqual(reported, []);
     await session.stop();
   }
+});
+
+test('a page that joined a match in play says so once it is in it, however it got in (abandonedMatchTest)', async () => {
+  const ways = [
+    [engineUp, { type: 'lateJoinSynced' }],
+    [engineUp, { type: 'admittedToStart' }],
+    [{ type: 'engineStarted', connectOnly: false, waitsForState: false }],
+  ] as const;
+  for (const way of ways) {
+    const joined: string[] = [];
+    const session = createSession(
+      () => undefined,
+      5000,
+      (matchId) => joined.push(matchId),
+    );
+    session.send(joinMidGame);
+    assert.equal(session.joinedMatch(), null);
+    assert.deepEqual(joined, [], 'not in the match while still joining');
+    for (const event of way) session.send(event);
+    assert.equal(session.state(), 'running');
+    assert.deepEqual(joined, ['m1']);
+    assert.equal(session.joinedMatch(), 'm1');
+    // Said once: later events in the same match do not repeat it.
+    session.send({ type: 'socketDown' });
+    session.send({ type: 'socketUp' });
+    assert.deepEqual(joined, ['m1']);
+    session.send({ type: 'gameEnded' });
+    assert.equal(session.joinedMatch(), null);
+    await session.stop();
+  }
+});
+
+test('a page that was there when the match started has nothing to say', async () => {
+  const joined: string[] = [];
+  const session = createSession(
+    () => undefined,
+    5000,
+    (matchId) => joined.push(matchId),
+  );
+  session.send({ type: 'gameStarted', matchId: 'm1' });
+  assert.equal(session.state(), 'running');
+  assert.deepEqual(joined, []);
+  assert.equal(session.joinedMatch(), null);
+  await session.stop();
+});
+
+// ── the rejoin the session owns ─────────────────────────────────────────────
+
+type Room = { status: string };
+const rejoinOptions = (reply: (answer: (error: string | null, room?: Room) => void) => void) => ({
+  send: reply,
+  answerWithinMs: 40,
+  retryAfterMs: 10,
+  attempts: 3,
+});
+
+test('no rejoin is started in the lobby: there is no game to resume', async () => {
+  const { session } = open();
+  let asked = 0;
+  const started = session.startRejoin(
+    rejoinOptions(() => {
+      asked++;
+    }),
+    () => assert.fail('no outcome expected'),
+  );
+  assert.equal(started, false);
+  await pause(30);
+  assert.equal(asked, 0);
+  await session.stop();
+});
+
+test('a rejoin the server accepts is handed to the page with the room', async () => {
+  const { session } = open();
+  session.send({ type: 'gameStarted', matchId: 'm1' });
+  const outcomes: string[] = [];
+  session.startRejoin(
+    rejoinOptions((answer) => answer(null, { status: 'playing' })),
+    (outcome) => outcomes.push(outcome.kind === 'resumed' ? `resumed:${outcome.room?.status}` : outcome.kind),
+  );
+  await pause(30);
+  assert.deepEqual(outcomes, ['resumed:playing']);
+  assert.equal(session.state(), 'running');
+  await session.stop();
+});
+
+test('a refused rejoin ends the game in the machine before the page hears of it', async () => {
+  const { session } = open();
+  session.send({ type: 'gameStarted', matchId: 'm1' });
+  const seen: string[] = [];
+  session.startRejoin(
+    rejoinOptions((answer) => answer('Not in room')),
+    (outcome) => seen.push(`${outcome.kind} while ${session.state()}`),
+  );
+  await pause(30);
+  assert.deepEqual(seen, ['dropped while lobby']);
+  await session.stop();
+});
+
+test('a socket that drops again, or a game that ends, cancels the rejoin: no outcome is delivered', async () => {
+  for (const event of [{ type: 'socketDown' }, { type: 'gameEnded' }, { type: 'roomClosed' }] as const) {
+    const { session } = open();
+    session.send({ type: 'gameStarted', matchId: 'm1' });
+    let asked = 0;
+    session.startRejoin(
+      rejoinOptions(() => {
+        asked++;
+      }),
+      () => assert.fail(`no outcome expected after ${event.type}`),
+    );
+    await pause(5);
+    session.send(event);
+    const askedBy = asked;
+    await pause(150);
+    assert.equal(asked, askedBy, `still asking after ${event.type}`);
+    await session.stop();
+  }
+});
+
+test('a newer rejoin replaces the one in flight', async () => {
+  const { session } = open();
+  session.send({ type: 'gameStarted', matchId: 'm1' });
+  const outcomes: string[] = [];
+  session.startRejoin(
+    rejoinOptions(() => undefined),
+    () => outcomes.push('first'),
+  );
+  session.startRejoin(
+    rejoinOptions((answer) => answer(null, { status: 'playing' })),
+    () => outcomes.push('second'),
+  );
+  await pause(200);
+  assert.deepEqual(outcomes, ['second']);
+  await session.stop();
 });

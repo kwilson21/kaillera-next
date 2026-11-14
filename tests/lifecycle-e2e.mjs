@@ -1,20 +1,18 @@
 /**
- * Does the page lifecycle machine (web/src/session.ts) agree with play.js
- * through a late join, spectating and a host reload, against the real server?
+ * The page's lifecycle through a late join, spectating, reconnects and a
+ * host reload, in real browsers against the real server.
  *
- * The machine only observes: on every signaling reconnect play.js compares
- * the machine's state with its own `gameRunning` flag and reports
- * `session-disagree` if they differ. So each scenario walks the pages through
- * a lifecycle change and then blips their signaling socket to force that
- * comparison. The machine also reports `late-join-stranded` when a late
- * joiner has waited more than 20 s for state. For the late joiner that is a
- * notice, not a disagreement: the scenario times the wait itself and fails
- * only if the notice and the measured wait contradict each other. For anyone
- * else it is a failure.
- *
- * The machine also mirrors play.js's two late-join flags, and play.js asks it
- * at every place it reads one whether it would have answered the same; those
- * disagreements are reported as `session-disagree` too and fail a checkpoint.
+ * play.js reads its lifecycle from the machine in web/src/session.ts and
+ * keeps no flags of its own, so what is checked here is what the page shows
+ * (lobby up or down, frames advancing) at each step. Each checkpoint also
+ * blips the page's signaling socket, to take it through a rejoin, and fails
+ * on any disagreement an observing TypeScript module reported
+ * (`play-disagree`, `protocol-mismatch`; `session-disagree` from a page
+ * built before the old page flags were deleted). The machine reports
+ * `late-join-stranded` when a late joiner has waited more than 20 s for
+ * state. For the late joiner that is a notice: the scenario times the wait
+ * itself and fails only if the notice and the measured wait contradict each
+ * other. For anyone else it is a failure.
  *
  * Scenarios (SCENARIO picks one; default runs them all, each in its own room):
  *   late-join         a guest with no ROM joins a game already running, is
@@ -25,11 +23,16 @@
  *   late-join-two-player  a third player joins a two-player match in play
  *   missed-game-end   a guest's signaling is down while the host ends the
  *                     game; on reconnect it must return to the lobby
+ *   missed-game-end-at-rom-prompt  the same for a guest that joined mid-game
+ *                     and is still being asked for a ROM (no engine yet)
  *   missed-new-match  the same, and the host starts another game before the
  *                     guest is back; on reconnect it must join the new match.
  *                     The host waits for the guest to load before it runs, so
  *                     the guest must be let into the start, not left asking
  *                     for a state nobody has yet
+ *   abandoned-match   the only player running a match leaves while a guest
+ *                     is still at the ROM prompt; the server must end the
+ *                     match and give the guest the lobby back
  *   dropped-rejoin    a guest's signaling is down for longer than the server's
  *                     grace window, so the room drops it while the match goes
  *                     on over the players' own connections; on reconnect it
@@ -59,7 +62,9 @@ const SCENARIOS = [
   'late-join-shared',
   'late-join-two-player',
   'missed-game-end',
+  'missed-game-end-at-rom-prompt',
   'missed-new-match',
+  'abandoned-match',
   'dropped-rejoin',
   'dropped-host',
   'streaming-join',
@@ -78,6 +83,8 @@ if (!ROM || !fs.existsSync(ROM)) {
 fs.mkdirSync(OUT, { recursive: true });
 
 const BLIP_MS = 3000;
+// Reports that mean a TypeScript module and the page (or the server) differ.
+const DISAGREEMENTS = ['session-disagree', 'play-disagree', 'protocol-mismatch'];
 const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
@@ -231,7 +238,7 @@ const checkpoint = async (name, expectations, failures, log) => {
   for (const { player, lobby, lateJoiner = false } of expectations) {
     const reconnects = await blip(player);
     const lobbyShown = await lobbyShownOn(player);
-    const disagreements = (await eventsOf(player)).filter((e) => e.type === 'session-disagree');
+    const disagreements = (await eventsOf(player)).filter((e) => DISAGREEMENTS.includes(e.type));
     const stranded = await countOf(player, 'late-join-stranded');
     log.push({ checkpoint: name, player: player.label, reconnects, lobbyShown, disagreements, stranded });
     console.log(
@@ -241,7 +248,7 @@ const checkpoint = async (name, expectations, failures, log) => {
     if (reconnects < 1) failures.push(`${name}: ${player.label} never reconnected, so nothing was compared`);
     if (lobbyShown !== lobby) failures.push(`${name}: ${player.label} ${lobby ? 'is not' : 'is'} showing the lobby`);
     if (disagreements.length)
-      failures.push(`${name}: ${player.label} machine disagreed with the page ${JSON.stringify(disagreements)}`);
+      failures.push(`${name}: ${player.label} reported a disagreement ${JSON.stringify(disagreements)}`);
     if (stranded && !lateJoiner) failures.push(`${name}: ${player.label} was reported as a stranded late joiner`);
   }
 };
@@ -561,6 +568,62 @@ const scenarios = {
 
   'dropped-rejoin': async (room, failures, log) => droppedPlayerReturns(room, failures, log, 'guest'),
   'dropped-host': async (room, failures, log) => droppedPlayerReturns(room, failures, log, 'host'),
+
+  'missed-game-end-at-rom-prompt': async (room, failures, log) => {
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+    // The guest joins mid-game with no ROM: it is asked for one and has no engine yet.
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+    const before = await countOf(guest, 'reconnect');
+    await cutSignaling(guest);
+    await endGame(host);
+    if (!(await waitUntil(() => lobbyShownOn(host), 30000))) failures.push('the host never returned to the lobby');
+    guest.signaling.down = false;
+    if (!(await waitUntil(async () => (await countOf(guest, 'reconnect')) > before, 40000)))
+      failures.push('the guest never reconnected');
+    await guest.page.waitForTimeout(3000);
+    // The page must have dropped its late join: a ROM loaded now is a ROM
+    // for the lobby, not the start of a late join into a game that is over.
+    await loadRom(guest);
+    await guest.page.waitForTimeout(8000);
+    if (!(await lobbyShownOn(guest))) failures.push('the guest started a late join into a game that had ended');
+    if (await guest.page.locator('#late-join-msg').count())
+      failures.push('the guest is still showing the late-join prompt');
+    if ((await frameOf(guest)) > 0) failures.push('the guest booted an emulator for a game that had ended');
+    await checkpoint(
+      'after the guest caught up at the ROM prompt',
+      [
+        { player: host, lobby: true },
+        { player: guest, lobby: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  'abandoned-match': async (room, failures, log) => {
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+    // The guest joins mid-game with no ROM and is asked for one.
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+    // The only player running the match leaves for good.
+    await host.ctx.close();
+    // The server drops the host after its grace window and, with only a
+    // waiting joiner left, ends the match: the guest gets the lobby back.
+    const ended = await waitUntil(
+      async () => (await lobbyShownOn(guest)) && !(await guest.page.locator('#late-join-msg').count()),
+      SERVER_GRACE_MS + 30000,
+    );
+    if (!ended) failures.push('the guest was left joining a match nobody was running');
+    const res = await fetch(`${URL}/room/${room}`);
+    const status = res.ok ? (await res.json()).status : `HTTP ${res.status}`;
+    if (status !== 'lobby') failures.push(`the room is still ${status} with nobody running the match`);
+    await checkpoint('after the abandoned match was ended', [{ player: guest, lobby: true }], failures, log);
+    return [guest];
+  },
 
   'missed-new-match': async (room, failures, log) => {
     const [host, guest] = await startTwoPlayerGame(room, failures);

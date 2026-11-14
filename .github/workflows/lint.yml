@@ -126,6 +126,8 @@ jobs:
             ../tests/test_session_reports.py \
             ../tests/test_host_reload.py \
             ../tests/test_resume_refused.py \
+            ../tests/test_abandoned_match.py \
+            ../tests/test_relay_sender.py \
             ../tests/test_schema.py \
             ../tests/test_query_builder.py \
             ../tests/test_room_logic.py \
@@ -142,4 +144,12 @@ jobs:
             ../tests/test_retention_sweep.py \
             ../tests/test_screenshots.py \
             ../tests/test_state.py \
-            ../tests/test_emulator_boot_sequence.py
+            ../tests/test_emulator_boot_sequence.py \
+            ../tests/test_core_desync_exports.py
+      # The desync registry compiled natively and read against a RAM dump of
+      # a match: its addresses, the byte order of one-byte fields, the replay
+      # rewrite and the address map. Its own conftest builds the library.
+      - name: Hash registry against a RAM dump
+        run: |
+          uv run --directory server --frozen --extra dev pytest -p no:playwright -q \
+            --confcutdir ../tests/hash-golden ../tests/hash-golden

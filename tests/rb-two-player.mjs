@@ -158,6 +158,46 @@
  *     host has not seen that roster within n ms. BATTLE_SECONDS must cover
  *     this too.
  *
+ *   DESYNC_GUEST=1   The one knob that makes the match unhealthy on purpose:
+ *     halfway through the battle the guest's copy of P1's stock count
+ *     (SCPlayerData.stock_count, one byte of RDRAM) is changed and held for
+ *     3 s, long enough that no rollback restores it. The peers are then
+ *     really desynced, and the desync detector (kn-desync-detector.js) must
+ *     say so: the run passes only if both peers' sync logs have a
+ *     `KNDesync suspect ... field=stocks slot=0 trigger=flag` line after the
+ *     change, and none before it; both peers log `KNDesync capture` for the
+ *     first flagged frame at the same frame number (their screenshots are
+ *     compared with each other); and the gameplay hash (kn_gameplay_hash,
+ *     which lists SSB64's stock counts) differs on at least one frame from
+ *     the change on, where the map's stock address is the one it lists, and
+ *     on none before it. The
+ *     game-state and full-state hashes are reported but not judged: the
+ *     stock counts sit in an RDRAM block kn_game_state_hash leaves out as
+ *     tainted, and kn_full_state_hash samples one byte in 64.
+ *     Reported as `desyncGuest` in summary.json. Mutually exclusive with the
+ *     other knobs. This is the detector's positive test; every other run
+ *     only shows that it stays quiet.
+ *
+ *   ADDRESS_MAP_CHECK=1   Checks the desync detector's address map for the
+ *     ROM (web/src/address-maps.ts) against the running game: every 30
+ *     frames each page reads the map's fields from RAM, and after the match
+ *     the run fails unless, on both peers: the scene byte read the
+ *     character select and then the battle; both players' character ids at
+ *     the character select are fighter kinds (and, without
+ *     MENU_AUTOPILOT=any-fighter, the two the autopilot picks); the battle
+ *     header's status says the match gets under way and stays so; stock counts
+ *     in battle are plausible; the battle header is not empty; the RNG seed
+ *     moves; and the fighter-buffer pointer, once set, points into RAM. Reported as
+ *     `addressMapCheck` in summary.json. This shows a map is plausible, not
+ *     that it is right: see docs/address-maps.md for the rest.
+ *   ADDRESS_MAP_OF=<rom hash>   Try the map of another ROM on this one (a
+ *     candidate map for a ROM that has none yet): the pages run the
+ *     detector with it (?desync=force&desyncMap=) and ADDRESS_MAP_CHECK
+ *     reads through it.
+ *   MENU_AUTOPILOT=any-fighter   The autopilot takes whatever fighter its
+ *     puck lands on and the stage the cursor starts on, for a ROM whose
+ *     menus are laid out differently from SSB64's (Smash Remix).
+ *
  * Needs the SSB64 US ROM (the menu autopilot reads its RAM layout). Two
  * emulators headless on one machine run slowly and measure noisy RTTs, so
  * compare runs with each other; HEADED=1 on a real machine is closer to play.
@@ -183,7 +223,6 @@ const FREEZE_HOST_MS = Number(process.env.FREEZE_HOST_MS || 0);
 const FREEZE_GUEST_MS = Number(process.env.FREEZE_GUEST_MS || 0);
 const FREEZE_MS = FREEZE_HOST_MS || FREEZE_GUEST_MS;
 const OUT = process.env.OUT || '/tmp/two-player';
-const QUERY = process.env.KN_QUERY || '';
 const HOST_BROWSER = process.env.HOST_BROWSER || 'chromium';
 const GUEST_BROWSER = process.env.GUEST_BROWSER || 'chromium';
 const THROTTLE_GUEST = process.env.THROTTLE_GUEST === '1';
@@ -196,6 +235,20 @@ const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
 const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
 const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
+const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
+const ADDRESS_MAP_CHECK = process.env.ADDRESS_MAP_CHECK === '1';
+const ADDRESS_MAP_OF = process.env.ADDRESS_MAP_OF || '';
+const MENU_AUTOPILOT = process.env.MENU_AUTOPILOT || '';
+if (MENU_AUTOPILOT && MENU_AUTOPILOT !== 'any-fighter') {
+  console.log(`MENU_AUTOPILOT=${MENU_AUTOPILOT} invalid: the only value is "any-fighter"`);
+  process.exit(1);
+}
+if (ADDRESS_MAP_OF && !/^S[0-9a-f]{64}$/.test(ADDRESS_MAP_OF)) {
+  console.log('ADDRESS_MAP_OF must be a ROM hash: S followed by 64 hex digits');
+  process.exit(1);
+}
+// Appended to both pages' URLs as it stands, so it starts with `&`.
+const QUERY = (process.env.KN_QUERY || '') + (ADDRESS_MAP_OF ? `&desync=force&desyncMap=${ADDRESS_MAP_OF}` : '');
 
 // Validate knobs before launching anything: a typo here should fail fast,
 // not surface as a confusing result after minutes of gameplay.
@@ -234,6 +287,21 @@ if (!(Number.isFinite(DROP_SIGNALING_MS) && DROP_SIGNALING_MS >= 0)) {
 }
 if (DROP_SIGNALING_MS > 0 && (FREEZE_MS > 0 || THROTTLE_GUEST || HIDE_GUEST_MS > 0 || CLICK_DURING_BATTLE)) {
   console.log('DROP_SIGNALING_MS is mutually exclusive with the FREEZE, THROTTLE, HIDE and CLICK knobs');
+  process.exit(1);
+}
+if (
+  DESYNC_GUEST &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    VISUAL_CHECK ||
+    MIN_GAME_FPS !== null ||
+    SUSPEND_GUEST_AUDIO ||
+    ADDRESS_MAP_CHECK)
+) {
+  console.log('DESYNC_GUEST is mutually exclusive with the other knobs');
   process.exit(1);
 }
 // The outage starts a third of the way in, so it and the reconnect that
@@ -529,7 +597,7 @@ const install = async (p, role) => {
   await p.addScriptTag({ url: `${URL}/static/ssb64-menu-autopilot.js` });
   await p.evaluate(
     (args) => {
-      const { role, VISUAL_CHECK } = args;
+      const { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter } = args;
       const W = (window.__tp = {
         role,
         hashes: {},
@@ -559,7 +627,41 @@ const install = async (p, role) => {
       window.__tp.markFpsWindowStart = () => {
         W.fpsWindowStart = { f: W.lastR ?? frameNow(), t: performance.now() };
       };
-      const pilot = window.KNMenuAutopilot.create({ read32: (a) => rb.readRdram32(a), log: (m) => (W.pilotFail = m) });
+      const pilot = window.KNMenuAutopilot.create({
+        read32: (a) => rb.readRdram32(a),
+        log: (m) => (W.pilotFail = m),
+        anyFighter,
+      });
+      // ADDRESS_MAP_CHECK: read the map's fields from RAM as the game runs.
+      // readRdram32 returns the N64 word; a single byte is picked out of it.
+      const rom = ADDRESS_MAP_CHECK ? window.KNCore.addressMapFor(ADDRESS_MAP_OF || window.KNState?.romHash) : null;
+      W.mapRom = rom ? rom.name : null;
+      W.mapScenes = rom ? rom.scenes : null;
+      W.mapOngoing = rom ? rom.battleStatus.ongoing : null;
+      W.mapSamples = [];
+      const byteAt = (off) => {
+        const word = rb.readRdram32(off & ~3);
+        return word === null ? null : (word >>> (8 * (3 - (off & 3)))) & 0xff;
+      };
+      const sampleMap = (f) => {
+        const [stocksBase, playerStride, sceneCurr, vsHeader, vsHeaderSize, rngSeed, cssBase, cssStride, cssCharId] =
+          rom.values;
+        const ftBufferPtr = rom.values[12];
+        const ftBufferSize = rom.values[13];
+        let headerNonZero = false;
+        for (let off = 0; off < vsHeaderSize; off += 4) if (rb.readRdram32(vsHeader + off)) headerNonZero = true;
+        W.mapSamples.push({
+          f,
+          status: byteAt(vsHeader + rom.battleStatus.offset),
+          scene: byteAt(sceneCurr),
+          stocks: [0, 1].map((p) => byteAt(stocksBase + p * playerStride)),
+          charIds: [0, 1].map((p) => rb.readRdram32(cssBase + p * cssStride + cssCharId)),
+          rng: rb.readRdram32(rngSeed),
+          headerNonZero,
+          ftPtr: rb.readRdram32(ftBufferPtr),
+          ftBufferSize,
+        });
+      };
       const actor = role === 'host' ? pilot.p1 : pilot.p2;
       let held = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 },
         until = 0;
@@ -570,6 +672,7 @@ const install = async (p, role) => {
         const f = frameNow();
         const sc = (rb.readRdram32(0x800a4ad0) >>> 24) & 0xff;
         W.scene = sc;
+        if (rom && f % 30 === 0 && W.mapSamples.at(-1)?.f !== f) sampleMap(f);
         if (sc !== 22) {
           // Space button presses by the input delay so a press lands (and the
           // closed loop sees it) before the next one; sticks pass through.
@@ -638,7 +741,7 @@ const install = async (p, role) => {
         return r;
       };
     },
-    { role, VISUAL_CHECK },
+    { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter: MENU_AUTOPILOT === 'any-fighter' },
   );
 };
 await install(host, 'host');
@@ -677,6 +780,8 @@ const tb = Date.now();
 const MENU_MS = Number(process.env.MENU_SECONDS || 600) * 1000;
 let lastLog = 0;
 let inBattle = false;
+let desyncGuestStocksBase = -1; // DESYNC_GUEST: the map's address of P1's stock count
+let desyncGuestAt = -1; // DESYNC_GUEST: the guest's frame when its stock count was changed
 let throttleFlipped = null; // null until the 15s mark; then whether the flip Promise.all resolved or rejected
 for (;;) {
   const s = await Promise.all(
@@ -788,6 +893,27 @@ if (inBattle) {
       console.log('guest tab shown again');
     }
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+  } else if (DESYNC_GUEST) {
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+    // P1's stock count, at the address the core's map has for it (SSB64 US:
+    // SCPlayerData.stock_count, 0xA4F23). RDRAM is host-order words, so the byte
+    // is at offset ^ 3. Held for 3 s so that every state the rollback ring
+    // can still restore carries the change.
+    ({ frame: desyncGuestAt, stocksBase: desyncGuestStocksBase } = await guest.evaluate(async () => {
+      const mod = window.EJS_emulator.gameManager.Module;
+      const stocksBase = mod._kn_field_map_value?.(0) ?? 0xa4f23;
+      const at = mod._kn_get_rdram_ptr() + (stocksBase ^ 3);
+      const wrong = mod.HEAPU8[at] ^ 1;
+      const frame = window.NetplayRollback.getHudCounters?.()?.currentFrame ?? 0;
+      const until = performance.now() + 3000;
+      while (performance.now() < until) {
+        mod.HEAPU8[at] = wrong;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      return { frame, stocksBase };
+    }));
+    console.log('guest desynced on purpose: P1 stock count changed at frame', desyncGuestAt);
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
   } else if (DROP_SIGNALING_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
@@ -896,6 +1022,12 @@ const collect = (p, VISUAL_CHECK) =>
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
+      // 64 KB RDRAM blocks kn_game_state_hash leaves out (of 128).
+      taintedBlocks: m._kn_get_tainted_block_count?.() ?? null,
+      mapRom: window.__tp.mapRom,
+      mapScenes: window.__tp.mapScenes,
+      mapOngoing: window.__tp.mapOngoing,
+      mapSamples: window.__tp.mapSamples,
       visual,
     };
   }, VISUAL_CHECK);
@@ -925,7 +1057,9 @@ let both = 0,
   firstFull = null,
   battleCompared = 0,
   gsMis = 0,
-  firstGs = null;
+  firstGs = null,
+  gpMisBeforeDesync = 0,
+  gpMisAfterDesync = 0;
 // A page that froze, was dropped as a phantom and resynced: its frames
 // differ by design and are left out, like the frames before the resync in
 // freeze mode (tests/frozen-recovery.mjs says what counts as proof). Freeze
@@ -948,6 +1082,12 @@ for (const f of Object.keys(H.hashes)) {
   if (a[0] !== b[0]) {
     gpMis++;
     if (firstGp === null) firstGp = +f;
+    // DESYNC_GUEST: the hash must differ because of the change, so only
+    // frames from the change on count, and none may differ before it.
+    if (DESYNC_GUEST && desyncGuestAt >= 0) {
+      if (+f >= desyncGuestAt) gpMisAfterDesync++;
+      else gpMisBeforeDesync++;
+    }
   }
   if (a[1] !== b[1]) {
     fullMis++;
@@ -1111,6 +1251,101 @@ if (VISUAL_CHECK) {
   };
 }
 
+// ADDRESS_MAP_CHECK: what one peer read through the map, judged against
+// what the game must have been doing. Each check is {name, ok, detail}.
+const addressMapChecksOf = (side) => {
+  if (!side.mapRom)
+    return [{ name: 'the ROM has an address map', ok: false, detail: 'KNCore.addressMapFor gave none' }];
+  const samples = side.mapSamples;
+  const scenes = side.mapScenes;
+  const atSelect = samples.filter((x) => x.scene === scenes.characterSelect);
+  const inBattle = samples.filter((x) => x.scene === scenes.battle);
+  const lastSelect = atSelect.at(-1);
+  const underWayFrom = inBattle.findIndex((x) => x.status === side.mapOngoing);
+  const strict = MENU_AUTOPILOT !== 'any-fighter';
+  const inRam = (x) => x.ftPtr >>> 24 === 0x80 && (x.ftPtr & 0xffffff) + x.ftBufferSize <= 0x800000;
+  const checks = [
+    {
+      name: 'scene reads the character select, then the battle',
+      ok: atSelect.length > 0 && inBattle.length > 0 && atSelect[0].f < inBattle[0].f,
+      detail: `${atSelect.length} samples at scene ${scenes.characterSelect}, ${inBattle.length} at ${scenes.battle}; scenes seen ${[...new Set(samples.map((x) => x.scene))].join(',')}`,
+    },
+    {
+      name: strict
+        ? "character ids are the autopilot's picks (Mario 0, Donkey Kong 2)"
+        : 'character ids are fighter kinds',
+      ok:
+        !!lastSelect &&
+        (strict ? lastSelect.charIds.join() === '0,2' : lastSelect.charIds.every((id) => id !== null && id < 64)),
+      detail: lastSelect
+        ? `P1,P2 = ${lastSelect.charIds.join(',')} at frame ${lastSelect.f}`
+        : 'no sample at the character select',
+    },
+    {
+      // A dormant copy of the battle state has everything in range and
+      // never says a match is on; this is the check that tells them apart.
+      // The scene opens on the countdown, before the status changes.
+      name: 'the battle header says the match gets under way and stays so',
+      ok: underWayFrom >= 0 && inBattle.slice(underWayFrom).every((x) => x.status === side.mapOngoing),
+      detail:
+        underWayFrom < 0
+          ? `status never read ${side.mapOngoing}; values seen ${[...new Set(inBattle.map((x) => x.status))].join(',')}`
+          : `status ${side.mapOngoing} from battle sample ${underWayFrom + 1} of ${inBattle.length} on`,
+    },
+    {
+      name: 'stock counts in battle are plausible',
+      ok: inBattle.length > 0 && inBattle.every((x) => x.stocks.every((n) => n !== null && n <= 98)),
+      detail: `P1,P2 values seen: ${[...new Set(inBattle.map((x) => x.stocks.join('/')))].slice(0, 6).join(' ')}`,
+    },
+    {
+      name: 'the battle header is not empty',
+      ok: inBattle.length > 0 && inBattle.every((x) => x.headerNonZero),
+      detail: `${inBattle.filter((x) => x.headerNonZero).length} of ${inBattle.length} battle samples non-zero`,
+    },
+    {
+      name: 'the RNG seed moves',
+      ok: new Set(inBattle.map((x) => x.rng)).size >= Math.min(5, inBattle.length),
+      detail: `${new Set(inBattle.map((x) => x.rng)).size} distinct values in ${inBattle.length} battle samples`,
+    },
+    {
+      // Null while the battle scene is still loading; once set it must be
+      // an address whose buffer lies inside RAM.
+      name: 'the fighter-buffer pointer, once set, points into RAM',
+      ok: inBattle.some((x) => x.ftPtr) && inBattle.filter((x) => x.ftPtr).every(inRam),
+      detail: `values seen: ${[...new Set(inBattle.map((x) => (x.ftPtr ?? 0).toString(16)))].slice(0, 4).join(' ')}`,
+    },
+  ];
+  return checks;
+};
+
+const taintCoverage = (side) => (Number.isInteger(side.taintedBlocks) ? 128 - side.taintedBlocks : null);
+
+// DESYNC_GUEST: the detector's cross-peer flags in one peer's sync log, split
+// at the frame the guest was desynced.
+const desyncFlagsOf = (log) => {
+  const flags = [...log.matchAll(/KNDesync suspect frame=(\d+) field=(\w+) slot=(\w+) trigger=flag/g)].map((m) => ({
+    frame: Number(m[1]),
+    field: m[2],
+    slot: m[3],
+  }));
+  const after = flags.filter((f) => f.frame >= desyncGuestAt);
+  return {
+    before: flags.length - after.length,
+    after: after.length,
+    // The change is to P1's stock count: slot 0, and no other player's.
+    stocksAfter: after.filter((f) => f.field === 'stocks' && f.slot === '0').length,
+    firstAfter: after[0] ?? null,
+    fields: [...new Set(after.map((f) => f.field))],
+    // The frame this peer screenshot for each flagged frame: suspect -> capture.
+    captures: Object.fromEntries(
+      [...log.matchAll(/KNDesync capture frame=(\d+) suspect=(\d+) field=stocks slot=0/g)].map((m) => [
+        m[2],
+        Number(m[1]),
+      ]),
+    ),
+  };
+};
+
 const signalingDropOf = (page, events, log) => ({
   reconnectsAfterOutage:
     events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
@@ -1153,6 +1388,19 @@ const recoveryIntegrity = {
 
 const summary = {
   room,
+  ...(ADDRESS_MAP_CHECK
+    ? { addressMapCheck: { rom: H.mapRom, host: addressMapChecksOf(H), guest: addressMapChecksOf(G) } }
+    : {}),
+  ...(DESYNC_GUEST
+    ? {
+        desyncGuest: {
+          atFrame: desyncGuestAt,
+          gameplayMismatches: { before: gpMisBeforeDesync, after: gpMisAfterDesync },
+          host: desyncFlagsOf(H.sync),
+          guest: desyncFlagsOf(G.sync),
+        },
+      }
+    : {}),
   ...(DROP_SIGNALING_MS
     ? {
         signalingDrop: {
@@ -1207,6 +1455,10 @@ const summary = {
     firstGameStateMismatch: firstGs,
     fullStateMismatches: fullMis,
     firstFullMismatch: firstFull,
+    // What "zero game-state mismatches" covers: kn_game_state_hash skips
+    // every RDRAM block an audio or framebuffer write has tainted, and
+    // samples every 16th byte of the rest.
+    gameStateRdramBlocksHashed: { host: taintCoverage(H), guest: taintCoverage(G), of: 128 },
   },
   frozenRecovery: { recoveries, framesExcluded, mismatchesExcluded, ...recoveryIntegrity },
   ...(VISUAL_CHECK ? { visualCheck } : {}),
@@ -1322,7 +1574,47 @@ if (signalingDropFailed) {
   console.log('DROP_SIGNALING_MS: a page never reconnected, stalled, or its lifecycle machine reported:');
   console.log(JSON.stringify(summary.signalingDrop));
 }
+// The peers' screenshots of a flagged frame are compared with each other, so
+// both must have captured the first flagged frame, and at the same frame.
+const desyncCapturesAgree = (hostSide, guestSide) => {
+  const suspect = hostSide.firstAfter?.frame;
+  if (suspect === undefined) return false;
+  const hostAt = hostSide.captures[suspect];
+  return hostAt !== undefined && hostAt === guestSide.captures[suspect];
+};
+// kn_gameplay_hash has its own table of addresses, compiled in and SSB64's.
+// It sees the changed stock count only when the map's stock address is the
+// one in that table, so only then is it required to.
+const desyncGuestGameplayHashCovers = desyncGuestStocksBase === 0xa4f23;
+// DESYNC_GUEST inverts the run: the peers were desynced on purpose. The
+// detector must flag the changed field on both peers, and nothing before
+// the change; and the gameplay hash, which lists the stock counts, must
+// differ on at least one frame. The game-state and full-state hashes are
+// not judged: the stock counts are in a block the first leaves out, and the
+// second samples one byte in 64.
+const desyncGuestFailed =
+  DESYNC_GUEST &&
+  (desyncGuestAt < 0 ||
+    (desyncGuestGameplayHashCovers && gpMisAfterDesync < 1) ||
+    gpMisBeforeDesync > 0 ||
+    [summary.desyncGuest.host, summary.desyncGuest.guest].some((side) => side.before > 0 || side.stocksAfter < 1) ||
+    !desyncCapturesAgree(summary.desyncGuest.host, summary.desyncGuest.guest));
+if (DESYNC_GUEST) {
+  console.log(
+    desyncGuestFailed ? 'DESYNC_GUEST: the detector did not flag the desync as expected:' : 'DESYNC_GUEST: flagged:',
+    JSON.stringify(summary.desyncGuest),
+  );
+  process.exit(desyncGuestFailed || H.inBattleAt < 0 || G.inBattleAt < 0 ? 1 : 0);
+}
+const addressMapFailed =
+  ADDRESS_MAP_CHECK && [...summary.addressMapCheck.host, ...summary.addressMapCheck.guest].some((check) => !check.ok);
+if (ADDRESS_MAP_CHECK) {
+  for (const side of ['host', 'guest'])
+    for (const check of summary.addressMapCheck[side])
+      console.log(`ADDRESS_MAP_CHECK ${side} ${check.ok ? 'ok  ' : 'FAIL'} ${check.name}: ${check.detail}`);
+}
 const failed =
+  addressMapFailed ||
   signalingDropFailed ||
   gpMis > 0 ||
   gsMis > 0 ||
