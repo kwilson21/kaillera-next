@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.10",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the late-join pause belongs to the joiners being served, with its timer armed at the pause (#187)"
+      }
+    ]
+  },
+  {
     "version": "0.68.9",
     "date": "2026-11-14",
     "changes": [
