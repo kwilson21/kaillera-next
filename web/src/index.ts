@@ -25,9 +25,12 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { startCapture } from './page/capture.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
+import * as connect from './play/connect.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
+import * as joinPlan from './play/join-plan.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
 import * as observe from './play/observe.ts';
@@ -275,6 +278,10 @@ export const KNCore = {
   startRejoin,
   shouldResumeRomTransfer,
   /** The play page's own logic, moving here from web/static/play.js piece by piece. */
+  /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
+  page: {
+    startCapture,
+  },
   play: {
     escapeHtml,
     inviteUrl,
@@ -290,6 +297,8 @@ export const KNCore = {
     openRomLibrary,
     romLibraryHtml,
     delay,
+    connect,
+    joinPlan,
     observe,
     remapWizard,
     romTransfer,
