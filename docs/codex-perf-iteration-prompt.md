@@ -155,7 +155,7 @@ single mutable input buffer.
   GGPO-style C-level rollback engine wrapper. ~12k lines. The hot path is
   in the `tick()` function (search for `const tick = () =>`). `_syncLog`
   at line 2023.
-- [web/static/kn-diagnostics.js](../web/static/kn-diagnostics.js) — canvas
+- [web/src/page/diagnostics.ts](../web/src/page/diagnostics.ts) — canvas
   hash, freeze detection, DIAG-INPUT.
 - [web/static/kn-audio.js](../web/static/kn-audio.js) — audio worklet and
   capture buffer.
