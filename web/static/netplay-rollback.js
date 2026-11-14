@@ -1740,6 +1740,17 @@
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbRollbackMax = 12; // set during C-rollback init (ring buffer depth)
   let _rbInitFrame = -1; // frame at which C-rollback was initialized (convergence guard)
+  // slot -> first input frame not settled by a resync. A state for frame F
+  // already holds the effect of every input keyed before F - delay, so no
+  // page waits for one of those afterwards. See _settleInputsAtResync and
+  // specs/resync_inputs.qnt.
+  let _inputSettledBefore = {};
+  // The oldest input from `slot` that can still be missing: nothing before
+  // the rollback init or the last resync is waited for.
+  const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
+  const _settleInputsBefore = (slot, frame) => {
+    _inputSettledBefore[slot] = Math.max(_inputSettledBefore[slot] ?? 0, frame - DELAY_FRAMES);
+  };
   let _rbConvergedLogged = false; // one-shot log when convergence window ends
   let _rbStallLogged = 0; // frame at which last RB-INPUT-STALL was logged (rate limit)
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
@@ -5027,6 +5038,53 @@
     }
   };
 
+  // Guest: a resync has just put this page on the host's frame `frame`
+  // (specs/resync_inputs.qnt). When the page was behind, the jump skipped
+  // frames: it never made its own inputs for them, and it may have dropped
+  // the host's as out of range while it was far behind. Neither side resends
+  // on its own, so both would wait on the hole until the stall deadline,
+  // give up on each other and resync again.
+  //  - Inputs keyed before frame - delay are in the loaded state already:
+  //    settled, never waited for.
+  //  - This page's inputs from there up to `frame` are still to be applied.
+  //    The ones it never made are made now (neutral) and sent.
+  //  - The peers' inputs for the same range that are missing are asked for.
+  const _settleInputsAtResync = (mod, frame) => {
+    const from = Math.max(0, frame - DELAY_FRAMES);
+    const made = [];
+    if (_playerSlot !== null && _playerSlot !== undefined) {
+      for (let f = from; f < frame; f++) {
+        if (_localInputs[f] !== undefined) continue;
+        _localInputs[f] = KNShared.ZERO_INPUT;
+        _feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);
+        made.push(f);
+      }
+    }
+    const asked = [];
+    for (const [sid, peer] of Object.entries(_peers)) {
+      if (peer.slot === null || peer.slot === undefined || _isPeerPendingLateJoin(sid, peer)) continue;
+      _settleInputsBefore(peer.slot, frame);
+      if (peer.dc?.readyState !== 'open') continue;
+      try {
+        // Every peer waits on this page's inputs, not only the host that
+        // sent the state: tell each one where they start again.
+        if (made.length) peer.dc.send(`inputs-settled:${from}`);
+        for (const f of made) peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);
+        for (let f = from; f < frame; f++) {
+          const have = _remoteInputs[peer.slot]?.[f];
+          if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
+          peer.dc.send(`resend:${f}`);
+          asked.push(`${peer.slot}@${f}`);
+        }
+      } catch (err) {
+        _syncLog(`RESYNC-INPUTS send failed slot=${peer.slot}: ${err}`);
+      }
+    }
+    if (made.length || asked.length) {
+      _syncLog(`RESYNC-INPUTS f=${frame} settledBefore=${from} made=[${made.join(',')}] asked=[${asked.join(',')}]`);
+    }
+  };
+
   // -- Audio (delegated to kn-audio.js / window.KNAudio) --
   // Canvas hash checks only run after reconnect events — during steady-state
   // gameplay, trust AI DMA determinism. GPU rendering differences between platforms
@@ -5354,6 +5412,7 @@
     _pendingLateJoinPeerSlots.add(slot);
     delete _lateJoinActivatedAtFrame[slot];
     delete _remoteInputs[slot];
+    delete _inputSettledBefore[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _peerPhases[slot];
@@ -8267,6 +8326,23 @@
           }
           return;
         }
+        if (e.data.startsWith('inputs-settled:')) {
+          // The peer was moved forward by a resync and never made its inputs
+          // from before this frame (_settleInputsAtResync). Only a frame this
+          // page could be waiting on is accepted, so the message cannot
+          // switch the gap check off for inputs still to come.
+          const settled = parseInt(e.data.split(':')[1], 10);
+          if (
+            _isValidPlayerSlot(peer.slot) &&
+            Number.isFinite(settled) &&
+            settled >= 0 &&
+            settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES
+          ) {
+            _inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);
+            _syncLog(`INPUTS-SETTLED slot=${peer.slot} before=${settled} f=${_frameNum}`);
+          }
+          return;
+        }
         if (e.data === 'peer-resumed') {
           const known = _knownPlayers[remoteSid];
           const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
@@ -8766,6 +8842,7 @@
 
     // Slot-indexed globals
     delete _remoteInputs[slot];
+    delete _inputSettledBefore[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _peerLastAdvanceTime[slot];
@@ -12081,6 +12158,7 @@
     _localInputs = {};
     _extraDelayRaw.clear();
     _remoteInputs = {};
+    _inputSettledBefore = {};
     _peerInputStarted = {};
     _lastRemoteFramePerSlot = {};
     _peerLastAdvanceTime = {};
@@ -12145,6 +12223,7 @@
     }
     _localInputs = {};
     _remoteInputs = preservedRemoteInputs;
+    _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
     _peerInputStarted = preservedPeerStarted;
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
   };
@@ -12981,6 +13060,7 @@
         KNState.frameNum = _frameNum;
         _localInputs = {};
         _remoteInputs = {};
+        _inputSettledBefore = {};
         for (let d = 0; d < DELAY_FRAMES; d++) {
           _localInputs[_frameNum + d] = KNShared.ZERO_INPUT;
         }
@@ -13656,14 +13736,11 @@
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     // Frames applied before a deferred init ran on the lockstep path, which
     // deletes each remote input once applied (same floor as the gap check).
-    const firstInWindow = Math.max(
-      0,
-      _rbInitFrame - DELAY_FRAMES,
-      lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES,
-    );
+    const windowStart = lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES;
     const missing = [];
     for (const p of getInputPeers()) {
       if (_peerPhantom[p.slot]) continue;
+      const firstInWindow = Math.max(_inputFloor(p.slot), windowStart);
       const got = _remoteInputs[p.slot];
       if (!got) {
         missing.push({ peer: p, frame: firstInWindow });
@@ -14847,9 +14924,12 @@
             // Without this, a deferred init (Smash Remix, at MENU→GAMEPLAY)
             // stalls both peers for the full timeout on each of the first
             // delay+cap frames.
+            // Nor is one from before the last resync: the state both pages
+            // loaded already holds its effect, and after a resync that moved
+            // the guest forward the input may never have been made.
             const gapAtEdge =
               RB_TRUE_ROLLBACK &&
-              windowEdge >= Math.max(0, _rbInitFrame - DELAY_FRAMES) &&
+              windowEdge >= _inputFloor(p.slot) &&
               windowEdge < peerFrame &&
               !_remoteInputs[p.slot]?.[windowEdge];
             if (gapAtEdge || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
@@ -17484,6 +17564,7 @@
             compressedSize: encoded.compressedSize,
             data: encoded.data,
           });
+          _settleInputsBefore(_peers[targetSid].slot, frame);
           _syncLog(
             `socket sync sent to slot=${_peers[targetSid].slot}: ${isFull ? 'full' : 'delta'} ` +
               `${wireKB}KB gzip (${b64KB}KB b64) frame=${frame}`,
@@ -17560,6 +17641,10 @@
           // (not during gameplay). No need to yield — get the state to the
           // guest as fast as possible to minimize the coord stall duration.
         }
+        // The guest will be on `frame` once it loads this: its inputs from
+        // before frame - delay are in the state, and it may never have made
+        // them (specs/resync_inputs.qnt).
+        _settleInputsBefore(target.slot, frame);
         _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
       } catch (err) {
         _syncLog(`sync send failed to slot=${target.slot}: ${err}`);
@@ -17831,6 +17916,7 @@
         delete inputs[f];
       }
     }
+    if (timelineAligned) _settleInputsAtResync(gm.Module, frame);
 
     _syncMismatchStreak = 0;
     _lastAppliedSyncHostFrame = frame; // discard any explicit state older than this
@@ -18024,6 +18110,7 @@
 
     // Reset lockstep state
     _remoteInputs = {};
+    _inputSettledBefore = {};
     _peerInputStarted = {};
     _pendingMatchInputResetReason = '';
     _activeRoster = null;
