@@ -1,5 +1,45 @@
 [
   {
+    "version": "0.68.4",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync that moves the guest forward no longer leaves both pages waiting 5 s (#160)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.3",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the play and demo pages say to reload when kn-core.js did not load (#153)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.2",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the server ends a match nobody is running; the play page's rules, schemas and lifecycle move to TypeScript (#155)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.1",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "desync detector reads the live battle state; enable it on Smash Remix 2.0.1 (#162)"
+      }
+    ]
+  },
+  {
     "version": "0.68.0",
     "date": "2026-11-13",
     "changes": [

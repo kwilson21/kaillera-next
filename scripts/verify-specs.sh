@@ -42,6 +42,11 @@ verify "$PEERS" peer_identity_current oneConnectionPerGuest
 expect_violation "$PEERS" peer_identity_before neverEvictsLiveConnection
 expect_violation "$PEERS" peer_identity_untagged neverEvictsLiveConnection
 
+ROMT=specs/rom_transfer.qnt
+verify "$ROMT" rom_transfer_current waitingHasAWayOut
+verify "$ROMT" rom_transfer_current timersAloneStop
+expect_violation "$ROMT" rom_transfer_before waitingHasAWayOut
+
 ROOM=specs/room_lifecycle.qnt
 verify "$ROOM" room_current ownerSeesGame
 verify "$ROOM" room_current lateJoinersChaseTheCurrentMatch
@@ -49,9 +54,50 @@ verify "$ROOM" room_current pagesAgreeWithServer
 verify "$ROOM" room_current joinersAreNotLeftWaitingAtTheStart
 verify "$ROOM" room_current startIsNotHeldUpByALateJoiner
 verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
+verify "$ROOM" room_current anAbandonedMatchIsEnded
 expect_violation "$ROOM" room_before_start_fix joinersAreNotLeftWaitingAtTheStart
 expect_violation "$ROOM" room_before_start_fix startIsNotHeldUpByALateJoiner
 expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
+expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
+
+PAIR=specs/peer_connection.qnt
+verify "$PAIR" peer_connection_fixed allHold
+verify "$PAIR" peer_connection_current holdToday
+# Today's engine: each of these has a counterexample within 5 steps.
+# (neverLeftWithNothingPending is violated too, but its shortest
+# counterexample is longer than this bound; crossedHealOffersTest replays it.)
+expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
+expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
+expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
+expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
+
+PAUSE=specs/late_join_pause.qnt
+verify "$PAUSE" late_join_pause_fixed allHold
+expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
+# The other two violations on late_join_pause_current need two joiners and
+# are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
+# them.
+
+FLOW=specs/resync_flow.qnt
+verify "$FLOW" resync_flow_current holdToday
+verify "$FLOW" resync_flow_fixed allHold
+expect_violation "$FLOW" resync_flow_current aRequestCanAlwaysEnd
+
+TICK=specs/tick_deadlines.qnt
+verify "$TICK" tick_deadlines_fixed ownFreezeIsNotHeldAgainstAPeer
+expect_violation "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
+
+
+RESYNC=specs/resync_inputs.qnt
+verify "$RESYNC" resync_inputs_current allHold
+# The counterexample on resync_inputs_before is 10 steps long (the host has to
+# run far enough ahead for the guest to drop its inputs), beyond this bound;
+# check-specs.sh's scenarios and samples reach it.
+
+MESH=specs/resync_mesh.qnt
+verify "$MESH" resync_mesh_current allHold
+expect_violation "$MESH" resync_mesh_untold noWaitForAnInputThatCannotArrive
+expect_violation "$MESH" resync_mesh_kept settledPointIsNotAhead

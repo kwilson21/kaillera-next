@@ -280,7 +280,60 @@ def test_rollback_gap_check_ignores_frames_before_c_init():
     src = LOCKSTEP_JS.read_text()
     idx = src.index("const gapAtEdge =")
     gap_src = src[idx : src.index(";", idx)]
-    assert "windowEdge >= Math.max(0, _rbInitFrame - DELAY_FRAMES)" in gap_src
+    assert "windowEdge >= _inputFloor(p.slot)" in gap_src
+    floor_idx = src.index("const _inputFloor = (slot) =>")
+    assert "_rbInitFrame - DELAY_FRAMES" in src[floor_idx : src.index(";", floor_idx)]
+
+
+def test_resync_settles_the_inputs_before_its_frame():
+    # specs/resync_inputs.qnt: after a resync that moves the guest forward,
+    # neither page may wait for an input from the frames the guest skipped.
+    src = LOCKSTEP_JS.read_text()
+
+    floor_idx = src.index("const _inputFloor = (slot) =>")
+    assert "_inputSettledBefore[slot] ?? 0" in src[floor_idx : src.index(";", floor_idx)]
+
+    # Both gap checks use the same floor.
+    missing_idx = src.index("const _missingConsumedInputs = () => {")
+    missing_src = src[missing_idx : src.index("\n  };\n", missing_idx)]
+    assert "Math.max(_inputFloor(p.slot), windowStart)" in missing_src
+
+    # Guest: settles every peer's inputs, makes and sends the ones it skipped
+    # that are still to be applied, and asks for the peers' it lacks.
+    settle_idx = src.index("const _settleInputsAtResync = (mod, frame) => {")
+    settle_src = src[settle_idx : src.index("\n  };\n", settle_idx)]
+    for snippet in (
+        "const from = Math.max(0, frame - DELAY_FRAMES);",
+        "_localInputs[f] = KNShared.ZERO_INPUT;",
+        "_feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);",
+        "_settleInputsBefore(peer.slot, frame);",
+        "if (made.length) peer.dc.send(`inputs-settled:${from}`);",
+        "peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);",
+        "peer.dc.send(`resend:${f}`);",
+    ):
+        assert snippet in settle_src
+
+    # Every peer waits on the moved page's inputs, so each is told the floor;
+    # a floor past what this page could be waiting on is refused.
+    told_idx = src.index("if (e.data.startsWith('inputs-settled:')) {")
+    told_src = src[told_idx : src.index("if (e.data === 'peer-resumed')", told_idx)]
+    assert "settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES" in told_src
+    assert "_inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);" in told_src
+
+    # A new match starts a new input timeline.
+    clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
+    assert "_inputSettledBefore = {};" in src[clear_idx : src.index("\n  };\n", clear_idx)]
+    apply_idx = src.index("const applySyncState = (bytes, frame, fromProactive = false) => {")
+    assert "if (timelineAligned) _settleInputsAtResync(gm.Module, frame);" in src[apply_idx:]
+
+    # Host: settles the guest's inputs when the state goes out, on both routes.
+    send_idx = src.index("const sendSyncChunks = async (")
+    assert "_settleInputsBefore(target.slot, frame);" in src[send_idx:]
+    assert "_settleInputsBefore(_peers[targetSid].slot, frame);" in src
+
+    # I2: the floor is per-peer state.
+    reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
+    assert "delete _inputSettledBefore[slot];" in src[reset_idx : src.index("\n  };\n", reset_idx)]
 
 
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():

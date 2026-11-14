@@ -1677,6 +1677,12 @@
   };
 
   document.addEventListener('DOMContentLoaded', () => {
+    // The rollback engine calls the TypeScript core (dist/kn-core.js).
+    // Without it the demo cannot run; say so instead of starting.
+    if (!window.KNCore) {
+      _setStatus('Part of this page did not load. Reload the page to try again.');
+      return;
+    }
     _bindDom();
     // Auto-restore a cached ROM if one exists. Lets Reset (location.reload)
     // come back into a running engine instead of dumping the user back at
