@@ -882,6 +882,7 @@
         _lastSrcW = srcCanvas.width;
         _lastSrcH = srcCanvas.height;
         crop = computeCrop();
+        _observer.blitCrop(crop, srcCanvas.width, srcCanvas.height);
       }
       ctx.drawImage(srcCanvas, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, 640, 480);
       if (captureTrack.requestFrame) captureTrack.requestFrame();
