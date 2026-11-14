@@ -158,6 +158,9 @@ _VALID_EVENT_TYPES = {
     # A decision moved out of play.js disagreed with the play.js code still in
     # charge of it (web/src/play/observe.ts): tests/test_session_reports.py.
     "play-disagree",
+    # A streaming rule in web/src/streaming disagreed with the engine still in
+    # charge of it (web/src/streaming/observe.ts): tests/test_session_reports.py.
+    "streaming-disagree",
 }
 _ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 
