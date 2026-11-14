@@ -45,7 +45,7 @@ const ASSET_FILES = new Set([
   '/static/landing.js',
   '/static/dist/kn-wake-art.js',
   '/static/join.js',
-  '/static/storage.js',
+  '/static/dist/kn-site.js',
   '/static/version.js',
   '/static/version-guard.js',
   '/static/feedback.js',
