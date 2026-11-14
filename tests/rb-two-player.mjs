@@ -146,7 +146,7 @@
  *     container). The outage starts a third of the way in, so two thirds of
  *     BATTLE_SECONDS must cover n plus 20 s to reconnect. On top of the normal
  *     checks the run fails if either page: never reconnected; logged a
- *     TICK-STUCK or INPUT-STALL from the frame the outage began at (one
+ *     TICK-STUCK or INPUT-STALL after the outage began (one
  *     before it is reported as tickStuckBeforeOutage and does not fail the
  *     run); or had its lifecycle machine report
  *     session-disagree or late-join-stranded (web/src/session.ts). This does
@@ -927,9 +927,12 @@ if (inBattle) {
       // Stalls count from here too. One before the outage is not its doing:
       // on a slow machine a page that freezes for 2 s during boot leaves the
       // other waiting on it, and that wait is logged as TICK-STUCK.
-      signaling.get(p).outageFrame = await p.evaluate(() => {
-        const lines = (window.NetplayRollback?.exportSyncLog?.() || '').trimEnd().split('\n');
-        return Number((lines.at(-1)?.split('\t')[2] || '').replace('f=', '')) || 0;
+      // The boundary is the last line logged, by its sequence number: a
+      // stuck page logs on one frame for seconds, so a frame cannot tell a
+      // line from just before the outage from one after it.
+      signaling.get(p).outageAt = await p.evaluate(() => {
+        const last = (window.NetplayRollback?.exportSyncLog?.() || '').trimEnd().split('\n').at(-1)?.split('\t') ?? [];
+        return { seq: Number(last[0]) || 0, frame: Number((last[2] || '').replace('f=', '')) || 0 };
       });
     }
     await Promise.all([setSignalingDown(host, true), setSignalingDown(guest, true)]);
@@ -1356,17 +1359,18 @@ const desyncFlagsOf = (log) => {
 };
 
 const signalingDropOf = (page, events, log) => {
-  // Stalls are counted from the frame the outage began at; the ones before
-  // it are reported beside them and do not fail the run.
-  const outageFrame = signaling.get(page)?.outageFrame ?? 0;
+  // Stalls are counted from the log line the outage began after; the ones
+  // before it are reported beside them and do not fail the run.
+  const outageAt = signaling.get(page)?.outageAt ?? { seq: 0, frame: 0 };
+  const seqOf = (line) => Number(line.split('\t')[0]);
   const lines = log.split('\n');
-  const sinceOutage = lines.filter((line) => frameOfSyncLine(line) >= outageFrame).join('\n');
-  const beforeOutage = lines.filter((line) => frameOfSyncLine(line) < outageFrame).join('\n');
+  const sinceOutage = lines.filter((line) => seqOf(line) > outageAt.seq).join('\n');
+  const beforeOutage = lines.filter((line) => seqOf(line) <= outageAt.seq).join('\n');
   return {
     reconnectsAfterOutage:
       events.filter((e) => e.type === 'reconnect').length - (signaling.get(page)?.reconnectsBefore ?? 0),
     lifecycleReports: events.filter((e) => e.type === 'session-disagree' || e.type === 'late-join-stranded'),
-    outageFrame,
+    outageFrame: outageAt.frame,
     tickStuck: count(sinceOutage, /TICK-STUCK/g),
     tickStuckBeforeOutage: count(beforeOutage, /TICK-STUCK/g),
     // The lockstep-path stall (waiting on a peer's input), not the rollback engine's routine RB-INPUT-STALL.
