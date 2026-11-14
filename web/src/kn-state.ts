@@ -60,7 +60,7 @@ export interface PageState {
   matchId: string | null;
   /** This page is the room's host. play.js writes; the desync detector reads. */
   isLocalHost: boolean;
-  /** The host of a listed room: larger screenshots. play.js writes; kn-diagnostics.js reads. */
+  /** The host of a listed room: larger screenshots. play.js writes; the diagnostics (page/diagnostics.ts) read. */
   boardFrame: boolean;
 
   DEFAULT_ICE_SERVERS: { urls: string }[];
