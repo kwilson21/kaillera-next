@@ -142,6 +142,32 @@
     _syncLog(msg);
   };
 
+  // The typed rules in web/src/streaming run beside this engine and are
+  // compared with what it does (KNCore.streaming.createObserver); a difference
+  // is a streaming-disagree client event. This file still makes every
+  // decision. If the observer cannot be made, calls to it do nothing.
+  let _observer = new Proxy({}, { get: () => () => ({}) });
+  try {
+    _observer = window.KNCore.streaming.createObserver(
+      ({ type, message, old, next }) => {
+        // Client events need the room's upload token.
+        if (!KNState.uploadToken) return false;
+        KNEvent(type, message, { old, next });
+        return true;
+      },
+      {
+        sid: () => socket?.id,
+        slot: () => _playerSlot,
+        spectator: () => _isSpectator,
+        peers: () => _peers,
+        known: () => _knownPlayers,
+        running: () => _gameRunning,
+        live: () => !!_hostStream,
+        packet: (input) => KNShared.encodeInput(0, input),
+      },
+    );
+  } catch (_) {}
+
   const _isValidPlayerSlot = (slot) => Number.isInteger(slot) && slot >= 0 && slot < 4;
 
   const _controllerPresentMask = () => {
@@ -164,6 +190,7 @@
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?._kn_set_controller_present_mask) return;
     const mask = _controllerPresentMask();
+    _observer.controllerMask(mask);
     if (!mask) return;
     if (mod === _lastControllerPresentMaskModule && mask === _lastControllerPresentMask) return;
     _lastControllerPresentMaskModule = mod;
@@ -276,6 +303,7 @@
   // ── users-updated (star topology) ──────────────────────────────────────
 
   const onUsersUpdated = (data) => {
+    _observer.roster(data);
     const players = data.players || {};
     const spectators = data.spectators || {};
 
@@ -337,6 +365,7 @@
 
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
+      _observer.connectionState(remoteSid, peer, s);
       if (s === 'failed' || s === 'disconnected') {
         if (_peers[remoteSid] !== peer) return;
         _syncLog(`peer ${remoteSid} connection ${s}`);
@@ -529,6 +558,7 @@
   const sendOffer = async (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
+    _observer.offered(remoteSid);
     try {
       const offer = await peer.pc.createOffer();
       offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
@@ -540,6 +570,7 @@
   };
 
   const onWebRTCSignal = async (data) => {
+    const seen = _observer.signal(data);
     if (!data) return;
     const senderSid = data.sender;
     if (!senderSid) return;
@@ -554,6 +585,7 @@
 
     try {
       if (data.offer) {
+        seen.act = 'offer';
         peer._offerCount = (peer._offerCount || 0) + 1;
         const hasVideo = data.offer.sdp?.includes('m=video') ?? false;
         _syncLog(`received offer #${peer._offerCount} from ${senderSid} (hasVideo=${hasVideo})`);
@@ -561,10 +593,12 @@
         await KNShared.drainCandidates(peer);
         await KNShared.createAndSendAnswer(peer.pc, socket, senderSid);
       } else if (data.answer) {
+        seen.act = 'answer';
         _syncLog(`received answer from ${senderSid}`);
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         await KNShared.drainCandidates(peer);
       } else if (data.candidate) {
+        seen.act = 'candidate';
         await KNShared.addBufferedCandidate(peer, data.candidate);
       }
     } catch (err) {
@@ -573,6 +607,7 @@
   };
 
   const onDataMessage = (data) => {
+    const seen = _observer.lateJoinReady(data);
     if (!data || data.type !== 'streaming-late-join-ready') return;
     if (_playerSlot !== 0) return;
     // Who sent it is the server's stamp (KNCore.checkRelayed), not what the
@@ -598,12 +633,14 @@
 
     const offer = peer.pc.localDescription;
     if (offer?.type === 'offer') {
+      seen.act = 'resend';
       _syncLog(`late join ready: resending pending offer for ${remoteSid} slot=${remoteSlot}`);
       socket.emit('webrtc-signal', { target: remoteSid, offer });
       return;
     }
 
     _syncLog(`late join ready: sending offer for ${remoteSid} slot=${remoteSlot}`);
+    seen.act = 'offer';
     sendOffer(remoteSid);
   };
 
@@ -613,6 +650,7 @@
     ch.binaryType = 'arraybuffer';
 
     const onOpen = () => {
+      const seen = _observer.channelOpen(remoteSid);
       const peer = _peers[remoteSid];
       _syncLog(
         `DC open with ${remoteSid} slot=${peer ? peer.slot : '?'} mySlot=${_playerSlot} gameRunning=${_gameRunning} isSpectator=${_isSpectator}`,
@@ -621,6 +659,7 @@
       if (_playerSlot === 0) {
         if (!_gameRunning) {
           _syncLog('DC open: starting host emulator');
+          seen.act = 'startHost';
           startHost();
         } else if (_hostStream) {
           // Late-joiner: host already streaming — add tracks if needed
@@ -629,6 +668,7 @@
             const hasTracks = lateJoinPeer.pc.getSenders().some((s) => s.track);
             if (!hasTracks) {
               _syncLog('DC open: adding stream to late-join peer');
+              seen.act = 'addTracks';
               for (const track of _hostStream.getTracks()) {
                 lateJoinPeer.pc.addTrack(track, _hostStream);
               }
@@ -636,16 +676,20 @@
               renegotiate(remoteSid);
             } else {
               _syncLog('DC open: late-join peer already has tracks');
+              seen.act = 'tracksPresent';
             }
           }
         } else {
           _syncLog('DC open: host running but stream not ready');
+          seen.act = 'streamNotReady';
         }
       } else if (!_isSpectator) {
         _syncLog('DC open: starting guest input loop');
+        seen.act = 'startGuestInput';
         startGuestInputLoop();
       } else {
         _syncLog('DC open: spectator, no input loop');
+        seen.act = 'spectator';
       }
     };
     ch.onopen = onOpen;
@@ -663,6 +707,7 @@
     ch.onerror = (e) => _syncLog(`DC error: ${remoteSid} ${e?.error?.message || e?.error || e}`);
 
     ch.onmessage = (e) => {
+      const seen = _observer.inputPacket(remoteSid, e.data);
       if (_playerSlot !== 0) return; // only host processes input
       const peer = _peers[remoteSid];
       if (!peer || peer.slot === null || peer.slot === undefined) return;
@@ -677,6 +722,7 @@
         e.data.byteLength % Int32Array.BYTES_PER_ELEMENT === 0
       ) {
         const decoded = KNShared.decodeInput(e.data);
+        seen.applied = [peer.slot, decoded];
         applyInputForSlot(peer.slot, {
           buttons: decoded.buttons,
           lx: decoded.lx,
@@ -1126,11 +1172,13 @@
       if (!_guestLoopStarted) return false;
       if (!_p1KeyMap) setupKeyTracking();
       const localInput = readLocalInput();
+      const seen = _observer.guestSend(force, localInput, _lastSentInput);
 
       if (!force && KNShared.inputEqual(localInput, _lastSentInput)) return false;
 
       const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
       if (hostPeer?.dc?.readyState === 'open') {
+        seen.send = true;
         try {
           hostPeer.dc.send(KNShared.encodeInput(0, localInput).buffer);
           _lastSentInput = localInput;
@@ -1529,6 +1577,8 @@
     stop,
     exportSyncLog,
     getInfo: () => _cachedInfo,
+    // How many decisions the web/src/streaming observer compared, and how many differed.
+    observed: () => _observer.counts(),
     getPeerConnection: (sid) => {
       const p = _peers[sid];
       return p ? p.pc : null;
