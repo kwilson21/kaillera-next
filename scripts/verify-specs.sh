@@ -55,3 +55,8 @@ expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
+
+FLOW=specs/resync_flow.qnt
+verify "$FLOW" resync_flow_current holdToday
+verify "$FLOW" resync_flow_fixed allHold
+expect_violation "$FLOW" resync_flow_current aRequestCanAlwaysEnd
