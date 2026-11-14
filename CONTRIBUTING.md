@@ -133,7 +133,7 @@ earlier ones to have set up their `window.*` exports:
 8. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
 9. `virtual-gamepad.js` — touch controls for mobile
 10. `kn-audio.js` — AudioWorklet pump + rollback audio capture (the logic is `web/src/page/audio.ts`)
-11. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
+11. `kn-vision-client.js` — starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)
 12. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
 13. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
 14. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
@@ -177,14 +177,14 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `netplay-rollback.js`                                    | ~18,250 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file        | play.js, KNState, KNShared                                  |
 | `rollback-shadow-worker.js`                              | —       | Shadow worker (OffscreenCanvas overlay, second forward-only mupen64plus instance): presentation in Mode 1, a replay coprocessor whose corrected state main adopts in Mode 2            | netplay-rollback.js                                         |
 | `netplay-lockstep.js`                                    | ~52     | Deprecated compat shim — if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work. Remove once cached tabs are gone. | (none)                                                      |
-| `netplay-streaming.js`                                   | ~1,530  | Streaming engine (host video → guests via WebRTC MediaStream)                                                                                                                          | play.js, KNState, KNShared                                  |
+| `netplay-streaming.js`                                   | ~1,600  | Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from `web/src/streaming`                                                                     | play.js, KNState, KNShared                                  |
 | `web/src/page/shared.ts` (in `dist/kn-core.js`)          | ~650    | `window.KNShared`: input encoding/decoding, N64 button map, cheat codes, wire format                                                                                                   | rollback, streaming                                         |
 | `web/src/page/gamepad-manager.ts` (in `dist/kn-core.js`) | ~570    | Profile-based gamepad detection, deadzone, analog mapping (`window.GamepadManager`)                                                                                                    | play.js, KNState                                            |
 | `switch2-usb.js`                                         | ~250    | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line                                                                           | play.html                                                   |
 | `controller-settings.js`                                 | ~980    | In-game controller settings panel (deadzone, sensitivity, profiles)                                                                                                                    | play.js, gamepad-manager                                    |
 | `virtual-gamepad.js`                                     | ~1,194  | On-screen touch controls for mobile                                                                                                                                                    | KNState                                                     |
 | `kn-audio.js`                                            | —       | AudioWorklet pump + rollback audio capture; starts `web/src/page/audio.ts` as `window.KNAudio`                                                                                         | rollback, play.js                                           |
-| `kn-vision-client.js`                                    | —       | Claude vision client for screenshot-diff desync analysis                                                                                                                               | rollback                                                    |
+| `kn-vision-client.js`                                    | —       | Starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)                                                                                  | rollback                                                    |
 | `audio-worklet-processor.js`                             | ~85     | AudioWorklet ring buffer for rollback audio                                                                                                                                            | kn-audio.js                                                 |
 | `feedback.js`                                            | ~540    | In-app feedback collection UI                                                                                                                                                          | play.js                                                     |
 | `api-sandbox.js`                                         | —       | Saves/restores native rAF, performance.now, getGamepads                                                                                                                                | rollback, core-redirector                                   |
@@ -211,8 +211,10 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 - **Python** — formatted by ruff, type hints encouraged.
 - **TypeScript** — new frontend logic lives in `web/src/` (strict mode,
   Effect, Effect Schema, XState). `just build` type-checks, runs
-  `tests/ts`, and bundles it to `web/static/dist/kn-core.js`, which is
-  committed. The static landing pages are strict TypeScript too, without
+  `tests/ts`, and bundles it to `web/static/dist/kn-core.js`. The bundles
+  are build output and not in git: run `npm ci && npm run build` after a
+  fresh checkout and after changing `web/src`. The Docker image builds them
+  itself. The static landing pages are strict TypeScript too, without
   Effect (`web/src/landing/`): the waking art and the invite page are built
   as their own small bundles, `web/static/dist/kn-wake-art.js` and
   `web/static/dist/kn-join.js`. The existing
