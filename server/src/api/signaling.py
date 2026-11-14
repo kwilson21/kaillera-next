@@ -1576,7 +1576,11 @@ async def _relay_signal(sid: str, data: dict, event: str, keys: tuple[str, ...])
     await sio.emit(event, payload, to=target)
 
 
-_WEBRTC_KEYS = ("offer", "answer", "candidate", "reconnect", "requestRenegotiate")
+# `attemptId` ({page, attempt}) says which connection attempt a signal belongs
+# to (web/src/peer-observe.ts); pages from before it send none. Like the rest,
+# it is relayed as the sender wrote it. Keys not listed here are dropped:
+# `startupReconnect`, which the rollback engine also sends, never arrives.
+_WEBRTC_KEYS = ("offer", "answer", "candidate", "reconnect", "requestRenegotiate", "attemptId")
 _ROM_SIGNAL_KEYS = ("offer", "answer", "candidate")
 
 
