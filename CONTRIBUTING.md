@@ -139,7 +139,7 @@ earlier ones to have set up their `window.*` exports:
 14. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
 15. `controller-settings.js` — in-game controller settings panel
 16. `play.js` — page orchestrator (connects everything)
-17. `version.js` — version display + changelog modal
+17. `version.js` — version display + changelog modal; starts `web/src/site/version.ts`
 18. `feedback.js` — in-app feedback collection
 
 #### Server structure
@@ -191,7 +191,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `core-redirector.js`                                     | —       | Intercepts EJS core download → serves patched WASM from IDB                                                                                                                            | api-sandbox                                                 |
 | `web/src/site/storage.ts` (in `dist/kn-core.js`)         | —       | Safe localStorage/sessionStorage wrapper (`window.KNStorage`), set by the bundle                                                                                                       | all modules                                                 |
 | `kn-capture.js`                                          | —       | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)                                                                                                                  | rollback, streaming                                         |
-| `version.js`                                             | ~350    | Version display + changelog modal                                                                                                                                                      | play.js                                                     |
+| `version.js`                                             | —       | Version display + changelog modal; a small caller of `web/src/site/version.ts`                                                                                                         | dist/kn-core.js or dist/kn-site.js                          |
 | `version-guard.js`                                       | —       | Cross-tab version mismatch guard — forces reload when a deploy lands; a small caller of `web/src/site/version-guard.ts`                                                                | dist/kn-core.js or dist/kn-site.js                          |
 | `ejs-loader.js`                                          | —       | EmulatorJS loader shim (booting + script setup hooks)                                                                                                                                  | play.js                                                     |
 | `landing.js`                                             | —       | Front-page board controller (room creation, open-rooms board) on index.html                                                                                                            | —                                                           |

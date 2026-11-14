@@ -13,25 +13,31 @@ import json
 import pytest
 
 FRONT = "/"
-PLAY = "/play.html?room=SITE01&host=1&name=Host&mode=rollback"
+PLAY = "/play.html?host=1&name=Host&mode=rollback&room="
 DEMO = "/demo.html"
 
 
+def _url(server_url, path, room):
+    """The page's address; the play page gets this test's own room."""
+    return f"{server_url}{path}{room}" if path == PLAY else f"{server_url}{path}"
+
+
 @pytest.mark.parametrize("path", [FRONT, PLAY, DEMO])
-def test_no_caller_runs_before_its_bundle(page, server_url, path):
+def test_no_caller_runs_before_its_bundle(page, server_url, room, path):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
-    page.goto(f"{server_url}{path}")
+    page.goto(_url(server_url, path, room))
     page.wait_for_function("window.KNSite !== undefined", timeout=10000)
     page.wait_for_timeout(1000)
     assert page.evaluate("typeof window.KNSite.startVersionGuard") == "function"
-    assert [e for e in errors if "KNSite" in e or "startVersionGuard" in e] == []
+    assert page.evaluate("typeof window.KNSite.startVersion") == "function"
+    assert [e for e in errors if "KNSite" in e or "startVersion" in e] == []
 
 
 @pytest.mark.parametrize("path", [FRONT, PLAY])
-def test_the_version_guard_asks_the_server_as_the_page_loads(page, server_url, path):
+def test_the_version_guard_asks_the_server_as_the_page_loads(page, server_url, room, path):
     with page.expect_request("**/api/version") as asked:
-        page.goto(f"{server_url}{path}")
+        page.goto(_url(server_url, path, room))
     assert asked.value.method == "GET"
 
 
@@ -53,3 +59,32 @@ def test_a_front_page_older_than_the_server_reloads(page, server_url):
     page.goto(f"{server_url}{FRONT}")
     page.wait_for_function("() => performance.getEntriesByType('navigation')[0].type === 'reload'", timeout=10000)
     assert any("VERSION-MISMATCH" in w and "server=not-this-page action=reload" in w for w in warnings)
+
+
+@pytest.mark.parametrize("path", [FRONT, PLAY])
+def test_the_footer_shows_the_version_and_opens_the_changelog(page, server_url, room, path):
+    page.goto(_url(server_url, path, room))
+    page.wait_for_function("document.getElementById('kn-version').textContent.startsWith('v')", timeout=10000)
+    shipped = page.request.get(f"{server_url}/static/version.json").json()["version"]
+    version = page.locator("#kn-version")
+    assert version.inner_text() == f"v{shipped}"
+    version.click()
+    changelog = page.locator("#kn-changelog-modal")
+    changelog.wait_for(state="visible", timeout=10000)
+    assert "Changelog" in changelog.inner_text()
+    assert f"v{shipped}" in changelog.inner_text()
+    page.keyboard.press("Escape")
+    changelog.wait_for(state="detached", timeout=5000)
+
+
+@pytest.mark.parametrize("path", [FRONT, PLAY])
+def test_about_opens_and_closes(page, server_url, room, path):
+    page.goto(_url(server_url, path, room))
+    page.locator("#kn-about").click()
+    about = page.locator("#kn-about-modal")
+    about.wait_for(state="visible", timeout=10000)
+    assert "Kaillera (2001)" in about.inner_text()
+    assert about.locator("a", has_text="GitHub").get_attribute("href") == "https://github.com/kwilson21/kaillera-next"
+    assert about.locator("a", has_text="GitHub").get_attribute("rel") == "noopener"
+    about.locator("button").click()
+    about.wait_for(state="detached", timeout=5000)
