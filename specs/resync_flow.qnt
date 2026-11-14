@@ -29,8 +29,8 @@
 // network change have none).
 //
 // REQUEST_HAS_DEADLINE: a request that is out has a deadline of its own,
-//   after which the guest may ask again. false = today: only an arriving
-//   state ends it.
+//   after which the guest may ask again (RESYNC-REQUEST-TIMEOUT). false =
+//   before: only an arriving state ended it.
 module resync_flow {
   const REQUEST_HAS_DEADLINE: bool
 
@@ -255,8 +255,8 @@ module resync_flow {
   // A request that is out can still end: it is on its way, the host owes or
   // has sent an answer, or it has a deadline. Otherwise the guest never asks
   // again, however many desyncs it detects.
-  // VIOLATED today: the host drops a request inside its 5 s rate limit and
-  // nothing tells the guest.
+  // Violated before the request had a deadline: the host drops a request
+  // inside its 5 s rate limit and nothing tells the guest.
   val aRequestCanAlwaysEnd = asked implies or {
     requests.length() > 0,
     scheduled.target != NONE,
@@ -314,12 +314,12 @@ module resync_flow {
       .expect(asked and askDeadline == REQUEST_HAS_DEADLINE)
 }
 
-// Today.
-module resync_flow_current {
+// Before: a request that was out had no deadline.
+module resync_flow_before {
   import resync_flow(REQUEST_HAS_DEADLINE = false).*
 }
 
-// With a deadline on the request itself.
-module resync_flow_fixed {
+// Today.
+module resync_flow_current {
   import resync_flow(REQUEST_HAS_DEADLINE = true).*
 }
