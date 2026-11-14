@@ -92,7 +92,7 @@ kaillera-next/
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
-│       ├── netplay-streaming.js # streaming engine (host video → guests)
+│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming
 │       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
 │       ├── controller-settings.js # in-game controller settings panel
 │       ├── virtual-gamepad.js   # on-screen touch controls for mobile
@@ -125,6 +125,7 @@ kaillera-next/
 │   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); not wired into the engine yet
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
+│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing)
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
 │   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
