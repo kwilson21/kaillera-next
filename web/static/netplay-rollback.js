@@ -1740,6 +1740,17 @@
   let rb_numPlayers = 2; // set during C-rollback init
   let _rbRollbackMax = 12; // set during C-rollback init (ring buffer depth)
   let _rbInitFrame = -1; // frame at which C-rollback was initialized (convergence guard)
+  // slot -> first input frame not settled by a resync. A state for frame F
+  // already holds the effect of every input keyed before F - delay, so no
+  // page waits for one of those afterwards. See _settleInputsAtResync and
+  // specs/resync_inputs.qnt.
+  let _inputSettledBefore = {};
+  // The oldest input from `slot` that can still be missing: nothing before
+  // the rollback init or the last resync is waited for.
+  const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
+  const _settleInputsBefore = (slot, frame) => {
+    _inputSettledBefore[slot] = Math.max(_inputSettledBefore[slot] ?? 0, frame - DELAY_FRAMES);
+  };
   let _rbConvergedLogged = false; // one-shot log when convergence window ends
   let _rbStallLogged = 0; // frame at which last RB-INPUT-STALL was logged (rate limit)
   let _rbInputPtr = 0; // WASM heap pointer for kn_get_input output (5 × int32)
@@ -5027,6 +5038,53 @@
     }
   };
 
+  // Guest: a resync has just put this page on the host's frame `frame`
+  // (specs/resync_inputs.qnt). When the page was behind, the jump skipped
+  // frames: it never made its own inputs for them, and it may have dropped
+  // the host's as out of range while it was far behind. Neither side resends
+  // on its own, so both would wait on the hole until the stall deadline,
+  // give up on each other and resync again.
+  //  - Inputs keyed before frame - delay are in the loaded state already:
+  //    settled, never waited for.
+  //  - This page's inputs from there up to `frame` are still to be applied.
+  //    The ones it never made are made now (neutral) and sent.
+  //  - The peers' inputs for the same range that are missing are asked for.
+  const _settleInputsAtResync = (mod, frame) => {
+    const from = Math.max(0, frame - DELAY_FRAMES);
+    const made = [];
+    if (_playerSlot !== null && _playerSlot !== undefined) {
+      for (let f = from; f < frame; f++) {
+        if (_localInputs[f] !== undefined) continue;
+        _localInputs[f] = KNShared.ZERO_INPUT;
+        _feedCInput(mod, _playerSlot, f, KNShared.ZERO_INPUT);
+        made.push(f);
+      }
+    }
+    const asked = [];
+    for (const [sid, peer] of Object.entries(_peers)) {
+      if (peer.slot === null || peer.slot === undefined || _isPeerPendingLateJoin(sid, peer)) continue;
+      _settleInputsBefore(peer.slot, frame);
+      if (peer.dc?.readyState !== 'open') continue;
+      try {
+        // Every peer waits on this page's inputs, not only the host that
+        // sent the state: tell each one where they start again.
+        if (made.length) peer.dc.send(`inputs-settled:${from}`);
+        for (const f of made) peer.dc.send(KNShared.encodeInput(f, KNShared.ZERO_INPUT).buffer);
+        for (let f = from; f < frame; f++) {
+          const have = _remoteInputs[peer.slot]?.[f];
+          if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
+          peer.dc.send(`resend:${f}`);
+          asked.push(`${peer.slot}@${f}`);
+        }
+      } catch (err) {
+        _syncLog(`RESYNC-INPUTS send failed slot=${peer.slot}: ${err}`);
+      }
+    }
+    if (made.length || asked.length) {
+      _syncLog(`RESYNC-INPUTS f=${frame} settledBefore=${from} made=[${made.join(',')}] asked=[${asked.join(',')}]`);
+    }
+  };
+
   // -- Audio (delegated to kn-audio.js / window.KNAudio) --
   // Canvas hash checks only run after reconnect events — during steady-state
   // gameplay, trust AI DMA determinism. GPU rendering differences between platforms
@@ -5354,6 +5412,7 @@
     _pendingLateJoinPeerSlots.add(slot);
     delete _lateJoinActivatedAtFrame[slot];
     delete _remoteInputs[slot];
+    delete _inputSettledBefore[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _peerPhases[slot];
@@ -5863,6 +5922,23 @@
     if (wait <= 0) flush();
     else _criticalFlushTimer = setTimeout(flush, wait);
   };
+  // Stage 3, observing: the strings peers send over the DataChannels (and the
+  // session-log ack) are checked against web/src/peer-protocol.ts and a
+  // mismatch is reported; the handlers below still read the raw message.
+  // Looked up on first use: kn-core.js loads after this file.
+  let _peerProtocolObserver;
+  const _peerProtocol = () => {
+    if (_peerProtocolObserver === undefined) {
+      _peerProtocolObserver =
+        window.KNCore?.protocol?.createObserver?.(({ type, message, issue }) => {
+          if (!window.KNState?.uploadToken) return false;
+          window.KNEvent?.(type, message, { issue });
+          return true;
+        }) ?? null;
+    }
+    return _peerProtocolObserver;
+  };
+
   const _syncLog = (msg) => {
     _syncLogRing.push({ t: performance.now(), f: _frameNum, msg });
     if (_knVerboseSyncConsole || _isConsoleCriticalSyncLog(msg)) {
@@ -6212,6 +6288,8 @@
         socket.emit('session-log', payload, (ack) => {
           acked = true;
           _socketFlushFails = 0;
+          // The server acks a flush it turned away with no data at all.
+          if (ack) _peerProtocol()?.checkAck('session-log', ack);
           _ackSyncLogFlush(ack, payload);
         });
         // If no ack within 5s, count as failure and try HTTP next time
@@ -6971,12 +7049,7 @@
     _awaitingLateJoinState = true;
     _declareLateJoiner();
     setStatus('Requesting game state...');
-    const start = window.KNCore?.startLateJoinWait;
-    if (!start) {
-      _sendLateJoinRequest();
-      return;
-    }
-    const wait = start({
+    const wait = window.KNCore.startLateJoinWait({
       request: _sendLateJoinRequest,
       retryEveryMs: LATE_JOIN_WAIT_RETRY_MS,
       timeoutMs: LATE_JOIN_WAIT_TIMEOUT_MS,
@@ -7224,6 +7297,21 @@
 
   const _isOwnSid = (sid) => !!sid && (sid === socket?.id || _ownSids.has(sid));
 
+  // Does the mesh need a new connection to this roster player? The decision
+  // is KNCore.meshHealTargets (web/src/roster.ts), proved never to return one
+  // of our own ids: the host once opened a connection to itself here and
+  // stalled on input from its own slot. The line below it is the same rule,
+  // used only if the bundle did not load.
+  const _needsMeshHeal = (sid, healthy, reconnecting) => {
+    const targets = window.KNCore?.meshHealTargets;
+    if (targets) {
+      const ownSids = [..._ownSids];
+      if (socket?.id) ownSids.push(socket.id);
+      return targets([{ sid, healthy, reconnecting }], ownSids).length > 0;
+    }
+    return !_isOwnSid(sid) && !healthy && !reconnecting;
+  };
+
   const _peerConnectionLive = (peer) =>
     peer?.pc?.connectionState === 'connected' && (peer.dc?.readyState === 'open' || peer.rbDc?.readyState === 'open');
 
@@ -7234,56 +7322,28 @@
     const sid = p.socketId;
     // The decision is KNCore.rosterKey (web/src/peer-identity.ts), whose
     // search for a live connection of the same player is proved, and whose
-    // orderings are model-checked in specs/peer_identity.qnt. The code below
-    // it is the same rule, used only if the bundle did not load.
-    const decide = window.KNCore?.rosterKey;
-    if (decide) {
-      const connections = Object.entries(_peers).map(([key, peer]) => ({
-        key,
-        slot: peer.slot,
-        persistentId: peer.persistentId || '',
-        live: _peerConnectionLive(peer),
-      }));
-      const previouslyKnown = Object.entries(prevKnown).map(([key, info]) => ({
-        key,
-        persistentId: info.persistentId || '',
-        socketId: info.socketId,
-      }));
-      const key = decide(
-        { persistentId: pid, socketId: sid, slot: p.slot },
-        sid === socket?.id,
-        connections,
-        previouslyKnown,
-      );
-      if (key !== sid && prevKnown[key]?.socketId !== sid) {
-        _syncLog(`onUsersUpdated: slot ${p.slot} is ${sid} on the server now; keeping connection ${key}`);
-      }
-      return key;
+    // orderings are model-checked in specs/peer_identity.qnt.
+    const connections = Object.entries(_peers).map(([key, peer]) => ({
+      key,
+      slot: peer.slot,
+      persistentId: peer.persistentId || '',
+      live: _peerConnectionLive(peer),
+    }));
+    const previouslyKnown = Object.entries(prevKnown).map(([key, info]) => ({
+      key,
+      persistentId: info.persistentId || '',
+      socketId: info.socketId,
+    }));
+    const key = window.KNCore.rosterKey(
+      { persistentId: pid, socketId: sid, slot: p.slot },
+      sid === socket?.id,
+      connections,
+      previouslyKnown,
+    );
+    if (key !== sid && prevKnown[key]?.socketId !== sid) {
+      _syncLog(`onUsersUpdated: slot ${p.slot} is ${sid} on the server now; keeping connection ${key}`);
     }
-    if (sid === socket?.id || _peers[sid]) return sid;
-    for (const [key, info] of Object.entries(prevKnown)) {
-      if (info.persistentId !== pid || key === sid) continue;
-      const peer = _peers[key];
-      if (!peer || peer.slot !== p.slot) continue;
-      // Already mapped to this id: keep it, even while the connection
-      // recovers (an ICE reconnect isn't connected yet).
-      if (info.socketId === sid) return key;
-      if (_peerConnectionLive(peer)) {
-        _syncLog(`onUsersUpdated: slot ${p.slot} reconnected to the server as ${sid}; keeping connection ${key}`);
-        return key;
-      }
-    }
-    // The player was missing from the last roster (their signaling was down
-    // when ours came back), so prevKnown no longer lists them. The connection
-    // itself remembers whose it is.
-    for (const [key, peer] of Object.entries(_peers)) {
-      if (key === sid || peer.persistentId !== pid || peer.slot !== p.slot) continue;
-      if (_peerConnectionLive(peer)) {
-        _syncLog(`onUsersUpdated: slot ${p.slot} rejoined the room as ${sid}; keeping connection ${key}`);
-        return key;
-      }
-    }
-    return sid;
+    return key;
   };
 
   // Record on each player connection which player (persistentId) it belongs
@@ -7372,14 +7432,12 @@
       // wait for them (specs/room_lifecycle.qnt, startIsNotHeldUpByALateJoiner).
       const running = _phase === PHASE_RUNNING;
       const syncBegun = !!_startCohortSlots && (_phase === PHASE_SYNCING || _phase === PHASE_LOCKSTEP_READY);
-      const held = window.KNCore?.heldAsLateJoiner
-        ? window.KNCore.heldAsLateJoiner(
-            running,
-            syncBegun,
-            !!_startCohortSlots?.has(p.slot),
-            _slotAlreadyActive(p.slot),
-          )
-        : running && !_slotAlreadyActive(p.slot);
+      const held = window.KNCore.heldAsLateJoiner(
+        running,
+        syncBegun,
+        !!_startCohortSlots?.has(p.slot),
+        _slotAlreadyActive(p.slot),
+      );
       const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && held;
 
       const key = _peerKey(p.socketId);
@@ -8142,6 +8200,7 @@
 
       // String messages
       if (typeof e.data === 'string') {
+        _peerProtocol()?.peerText('lockstep', e.data);
         if (e.data === 'ready') {
           peer.ready = true;
         }
@@ -8257,6 +8316,23 @@
             try {
               peer.dc.send(KNShared.encodeInput(resendFrame, localInput).buffer);
             } catch (_) {}
+          }
+          return;
+        }
+        if (e.data.startsWith('inputs-settled:')) {
+          // The peer was moved forward by a resync and never made its inputs
+          // from before this frame (_settleInputsAtResync). Only a frame this
+          // page could be waiting on is accepted, so the message cannot
+          // switch the gap check off for inputs still to come.
+          const settled = parseInt(e.data.split(':')[1], 10);
+          if (
+            _isValidPlayerSlot(peer.slot) &&
+            Number.isFinite(settled) &&
+            settled >= 0 &&
+            settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES
+          ) {
+            _inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);
+            _syncLog(`INPUTS-SETTLED slot=${peer.slot} before=${settled} f=${_frameNum}`);
           }
           return;
         }
@@ -8608,6 +8684,7 @@
     _syncChunks = [];
     ch.onmessage = (e) => {
       if (typeof e.data === 'string') {
+        _peerProtocol()?.peerText('sync-state', e.data);
         // Guest: incoming state transfer header
         if (e.data.startsWith('sync-start:')) {
           const parts = e.data.split(':');
@@ -8762,6 +8839,7 @@
 
     // Slot-indexed globals
     delete _remoteInputs[slot];
+    delete _inputSettledBefore[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _peerLastAdvanceTime[slot];
@@ -9309,15 +9387,14 @@
       // Terminal boot deadline (I1). A stalled boot gets 300 polls (~30s); one
       // whose frame count is still advancing is slow, not stuck, and keeps
       // waiting up to a hard cap. The rule is KNCore.bootTimedOut
-      // (web/src/boot.ts); without the bundle the fixed 300-poll limit applies.
+      // (web/src/boot.ts).
       const bootNowMs = performance.now();
       if (!_bootPollStartedAt) _bootPollStartedAt = bootNowMs;
-      const bootGaveUp =
-        window.KNCore?.bootTimedOut?.({
-          polls: _bootPollCount,
-          elapsedMs: bootNowMs - _bootPollStartedAt,
-          sinceProgressMs: bootNowMs - _bootFrameProgressAt,
-        }) ?? _bootPollCount > 300;
+      const bootGaveUp = window.KNCore.bootTimedOut({
+        polls: _bootPollCount,
+        elapsedMs: bootNowMs - _bootPollStartedAt,
+        sinceProgressMs: bootNowMs - _bootFrameProgressAt,
+      });
       if (bootGaveUp) {
         _syncLog(`boot timed out after ${_bootPollCount} polls`);
         setStatus('Emulator failed to start — try reloading the page');
@@ -10754,10 +10831,10 @@
       // removed by hardDisconnectPeer (_running was false) or left as zombies
       // by the reconnect timeout (which closes PC but doesn't delete from _peers).
       for (const [sid, info] of Object.entries(_knownPlayers)) {
-        if (_isOwnSid(sid)) continue;
         const existing = _peers[sid];
         const pcState = existing?.pc?.connectionState;
-        if (existing && pcState === 'connected' && existing.dc?.readyState === 'open') continue;
+        const working = !!existing && pcState === 'connected' && existing.dc?.readyState === 'open';
+        if (!_needsMeshHeal(sid, working, false)) continue;
         // Peer is missing, dead, or has no working DC — clean up and recreate
         if (existing) {
           _syncLog(
@@ -12078,6 +12155,7 @@
     _localInputs = {};
     _extraDelayRaw.clear();
     _remoteInputs = {};
+    _inputSettledBefore = {};
     _peerInputStarted = {};
     _lastRemoteFramePerSlot = {};
     _peerLastAdvanceTime = {};
@@ -12142,6 +12220,7 @@
     }
     _localInputs = {};
     _remoteInputs = preservedRemoteInputs;
+    _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
     _peerInputStarted = preservedPeerStarted;
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
   };
@@ -12300,22 +12379,31 @@
     // pairwise mode B with the 5s heartbeat (every-frame digests + always-on
     // vision sampling — for active triage only).
     //
-    // The core's hash registry has one address map, for SSB64 US
-    // (build/kn_rollback/kn_gameplay_addrs.h). On any other ROM its fields
-    // would hash unrelated memory under SSB64's labels, so the detector
-    // stays off there. ?desync=force runs it anyway (triage and the
-    // two-player harness on another ROM; field names mean nothing then).
+    // Where the detector's fields live differs per game, so the page looks
+    // its ROM up (KNCore.addressMapFor, web/src/address-maps.ts) and the
+    // detector installs that map in the core. A ROM with no map gets no
+    // detector: under another game's map the fields would be hashes of
+    // unrelated memory with the wrong names on them.
+    //
+    // For trying a candidate map on a ROM that has none yet (see
+    // docs/address-maps.md): ?desync=force runs the detector anyway, with
+    // the map of the ROM whose hash is in ?desyncMap=, or SSB64 US's.
     const desyncParam = _urlParams.get('desync');
     if (lsMod && window.KNDesync && desyncParam !== 'off') {
-      const hasAddressMap = !!_config?.romHash && _config.romHash === window.KNShared?.SSB64_HASH;
+      const mapFor = window.KNCore?.addressMapFor;
+      const forced = desyncParam === 'force';
+      const rom =
+        mapFor?.(_config?.romHash) ??
+        (forced ? mapFor?.(_urlParams.get('desyncMap') ?? window.KNShared?.SSB64_HASH) : null) ??
+        null;
       if (RB_WORKER_COPROC) {
         // Mode 2 adopts the worker's corrected state without re-simulating
         // those frames here, so the registry's history for them keeps the
         // mispredicted hashes and a healthy match would be flagged.
         _syncLog('KNDesync off: worker replay (Mode 2) does not rewrite field history');
-      } else if (hasAddressMap || desyncParam === 'force') {
+      } else if (rom) {
         const desyncMode = desyncParam === 'b' ? 'B' : 'C';
-        KNDesync.init(lsMod, desyncMode);
+        KNDesync.init(lsMod, desyncMode, rom);
       } else {
         _syncLog('KNDesync off: no field address map for this ROM');
       }
@@ -12969,6 +13057,7 @@
         KNState.frameNum = _frameNum;
         _localInputs = {};
         _remoteInputs = {};
+        _inputSettledBefore = {};
         for (let d = 0; d < DELAY_FRAMES; d++) {
           _localInputs[_frameNum + d] = KNShared.ZERO_INPUT;
         }
@@ -13644,14 +13733,11 @@
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     // Frames applied before a deferred init ran on the lockstep path, which
     // deletes each remote input once applied (same floor as the gap check).
-    const firstInWindow = Math.max(
-      0,
-      _rbInitFrame - DELAY_FRAMES,
-      lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES,
-    );
+    const windowStart = lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES;
     const missing = [];
     for (const p of getInputPeers()) {
       if (_peerPhantom[p.slot]) continue;
+      const firstInWindow = Math.max(_inputFloor(p.slot), windowStart);
       const got = _remoteInputs[p.slot];
       if (!got) {
         missing.push({ peer: p, frame: firstInWindow });
@@ -14835,9 +14921,12 @@
             // Without this, a deferred init (Smash Remix, at MENU→GAMEPLAY)
             // stalls both peers for the full timeout on each of the first
             // delay+cap frames.
+            // Nor is one from before the last resync: the state both pages
+            // loaded already holds its effect, and after a resync that moved
+            // the guest forward the input may never have been made.
             const gapAtEdge =
               RB_TRUE_ROLLBACK &&
-              windowEdge >= Math.max(0, _rbInitFrame - DELAY_FRAMES) &&
+              windowEdge >= _inputFloor(p.slot) &&
               windowEdge < peerFrame &&
               !_remoteInputs[p.slot]?.[windowEdge];
             if (gapAtEdge || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
@@ -16927,15 +17016,15 @@
       // failed initial connections, and silent DC deaths that no event fires for.
       if (_frameNum % 300 === 0) {
         for (const [sid, info] of Object.entries(_knownPlayers)) {
-          // _isOwnSid, not `sid === socket.id`: while the signaling socket is
-          // down socket.id is undefined, and after it reconnects the roster
-          // still lists us under the old id until users-updated arrives.
-          if (_isOwnSid(sid)) continue;
           if (_isPeerPendingLateJoin(sid)) continue;
-          const p = _peers[sid];
-          if (p && p.dc?.readyState === 'open') continue; // healthy
-          if (p?.reconnecting) continue; // already in progress
           if (_peerPhantom[info.slot]) continue; // confirmed dead during gameplay
+          const p = _peers[sid];
+          // Skips our own entry (under any id we have had: while the
+          // signaling socket is down socket.id is undefined, and after it
+          // reconnects the roster still lists us under the old id until
+          // users-updated arrives), a peer with an open DC, and a reconnect
+          // already in progress.
+          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) continue;
           const pcState = p?.pc?.connectionState;
           _syncLog(
             `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
@@ -17472,6 +17561,7 @@
             compressedSize: encoded.compressedSize,
             data: encoded.data,
           });
+          _settleInputsBefore(_peers[targetSid].slot, frame);
           _syncLog(
             `socket sync sent to slot=${_peers[targetSid].slot}: ${isFull ? 'full' : 'delta'} ` +
               `${wireKB}KB gzip (${b64KB}KB b64) frame=${frame}`,
@@ -17548,6 +17638,10 @@
           // (not during gameplay). No need to yield — get the state to the
           // guest as fast as possible to minimize the coord stall duration.
         }
+        // The guest will be on `frame` once it loads this: its inputs from
+        // before frame - delay are in the state, and it may never have made
+        // them (specs/resync_inputs.qnt).
+        _settleInputsBefore(target.slot, frame);
         _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
       } catch (err) {
         _syncLog(`sync send failed to slot=${target.slot}: ${err}`);
@@ -17819,6 +17913,7 @@
         delete inputs[f];
       }
     }
+    if (timelineAligned) _settleInputsAtResync(gm.Module, frame);
 
     _syncMismatchStreak = 0;
     _lastAppliedSyncHostFrame = frame; // discard any explicit state older than this
@@ -18012,6 +18107,7 @@
 
     // Reset lockstep state
     _remoteInputs = {};
+    _inputSettledBefore = {};
     _peerInputStarted = {};
     _pendingMatchInputResetReason = '';
     _activeRoster = null;

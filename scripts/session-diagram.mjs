@@ -11,6 +11,7 @@
  */
 import fs from 'node:fs';
 import { initialTransition, transition } from 'xstate';
+import { rejoinMachine } from '../web/src/rejoin-machine.ts';
 import { sessionFlag, sessionMachine } from '../web/src/session.ts';
 
 const OUT = new URL('../docs/session-machine.md', import.meta.url);
@@ -64,6 +65,56 @@ while (queue.length) {
       queue.push(to);
     }
   }
+}
+
+// ── The rejoin machine (web/src/rejoin-machine.ts), walked the same way ─────
+function rejoinSection() {
+  // The invoked rejoin program finishing is an event too.
+  const events = [
+    ['socketUp, a game is on', { type: 'socketUp', gameOn: true }],
+    ['socketUp, in the lobby', { type: 'socketUp', gameOn: false }],
+    ['socketDown', { type: 'socketDown' }],
+    ['gameOver', { type: 'gameOver' }],
+    [
+      'the rejoin program ends (its outcome is delivered)',
+      { type: 'xstate.done.actor', actorId: 'attempt', output: { kind: 'noAnswer' } },
+    ],
+  ];
+  const [first] = initialTransition(rejoinMachine);
+  const seen = new Map([[first.value, first]]);
+  const found = new Map(); // "from to" -> labels
+  const queue = [first];
+  while (queue.length) {
+    const from = queue.shift();
+    for (const [label, event] of events) {
+      const [to] = transition(rejoinMachine, from, event);
+      // Re-entering `rejoining` on a newer connection restarts the program.
+      const restarts = from.value === 'rejoining' && to.value === 'rejoining' && event.type === 'socketUp';
+      if (to.value === from.value && !restarts) continue;
+      const key = `${from.value} ${to.value}`;
+      found.set(key, [...(found.get(key) ?? []), restarts ? `${label} (asks again on the new connection)` : label]);
+      if (!seen.has(to.value)) {
+        seen.set(to.value, to);
+        queue.push(to);
+      }
+    }
+  }
+  return [
+    '# Rejoin machine',
+    '',
+    'Generated from `web/src/rejoin-machine.ts` by the same script. `rejoining` invokes the rejoin',
+    'program (`web/src/rejoin-attempt.ts`); leaving the state interrupts it.',
+    '',
+    '```mermaid',
+    'flowchart LR',
+    `  rejoinStart(( )) --> ${first.value}`,
+    ...[...found.entries()].map(([key, labels]) => {
+      const [from, to] = key.split(' ');
+      return `  ${from} -->|"${labels.join('<br/>')}"| ${to}`;
+    }),
+    '```',
+    '',
+  ];
 }
 
 const states = [...snapshots.keys()];
@@ -124,6 +175,7 @@ const lines = [
   '',
   'The Quint model of the same states, with the server beside them, is `specs/room_lifecycle.qnt`.',
   '',
+  ...rejoinSection(),
 ];
 const text = lines.join('\n');
 

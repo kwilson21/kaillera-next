@@ -14,6 +14,7 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend=typescript
+$QUINT test "$SPEC" --main=room_before_abandoned_end --backend=typescript
 $QUINT test "$SPEC" --main=room_before_resume_flag --backend=typescript
 $QUINT test "$SPEC" --main=room_before_start_fix --backend=typescript
 $QUINT test "$SPEC" --main=room_before_reconcile --backend=typescript
@@ -40,6 +41,9 @@ check room_current startIsNotHeldUpByALateJoiner
 # A page whose rejoin the server answered is never left showing a match the
 # room dropped it from (violated on room_before_resume_flag).
 check room_current nobodyIsStrandedInADroppedMatch
+# A playing room nobody is running is ended by the server (violated on
+# room_before_abandoned_end).
+check room_current anAbandonedMatchIsEnded
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
@@ -54,6 +58,18 @@ for invariant in neverEvictsLiveConnection oneConnectionPerGuest; do
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
 
+# ── ROM transfer: a guest waiting on the host always has a way out ──────────
+ROM=specs/rom_transfer.qnt
+$QUINT typecheck "$ROM"
+for variant in rom_transfer_before rom_transfer_current; do
+  $QUINT test "$ROM" --main="$variant" --backend=typescript
+done
+# Today: every waiting state has a running timer or a Retry button. Violated
+# before the request sent over the engine channel was given a deadline.
+for invariant in waitingHasAWayOut timersAloneStop; do
+  $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+done
 # ── Desync digests: which frame a peer may report a hash for ────────────────
 DIGEST=specs/desync_digest.qnt
 $QUINT typecheck "$DIGEST"
@@ -66,4 +82,104 @@ done
 # while replays leave the history as first written; when a late joiner
 # reports frames it never simulated; and with the detector on under Mode 2.
 $QUINT run "$DIGEST" --main=desync_digest_current --invariant=neverReportsAnUnconfirmedHash \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── Desync screenshots: which frame each peer captures ──────────────────────
+CAPTURE=specs/desync_capture.qnt
+$QUINT typecheck "$CAPTURE"
+for variant in desync_capture_before desync_capture_current; do
+  $QUINT test "$CAPTURE" --main="$variant" --backend=typescript
+done
+# Today: two pictures that are compared show the same frame. Violated when
+# each peer captured at the moment it flagged.
+$QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPicturesShowOneFrame \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── Peer connection: one pair of pages, offers and answers between them ─────
+PAIR=specs/peer_connection.qnt
+$QUINT typecheck "$PAIR"
+# The scenarios say what each variant does with the same ordering.
+for variant in peer_connection_before_119 peer_connection_current peer_connection_fixed; do
+  $QUINT test "$PAIR" --main="$variant" --backend=typescript
+done
+pair() { # module invariant init
+  $QUINT run "$PAIR" --main="$1" --invariant="$2" --init="$3" \
+    --max-samples=10000 --max-steps=25 --backend=typescript
+}
+# Today: a reconnect leaves the guest's input state clean and a roster update
+# never replaces a connection that is up. The other four properties are
+# violated today (the scenarios above show how) and hold on
+# peer_connection_fixed, the rules the per-peer machine is built to.
+pair peer_connection_current holdToday init
+pair peer_connection_fixed allHold init
+pair peer_connection_fixed allHold initLobby
+
+# ── The pause around a late join ────────────────────────────────────────────
+PAUSE=specs/late_join_pause.qnt
+$QUINT typecheck "$PAUSE"
+for variant in late_join_pause_current late_join_pause_fixed; do
+  $QUINT test "$PAUSE" --main="$variant" --backend=typescript
+done
+# The rule the per-joiner machine will be built to: the game stays paused
+# while a joiner has yet to load, a joiner who is playing is never
+# disconnected, and every pause has a deadline. All three are VIOLATED by
+# today's engine (late_join_pause_current); the scenarios above show each
+# ordering, and nothing is fixed yet.
+$QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── A resync from request to apply ──────────────────────────────────────────
+FLOW=specs/resync_flow.qnt
+$QUINT typecheck "$FLOW"
+for variant in resync_flow_current resync_flow_fixed; do
+  $QUINT test "$FLOW" --main="$variant" --backend=typescript
+done
+# Today: a guest stopped at its target has a deadline, and a state no newer
+# than the last one applied is never applied.
+$QUINT run "$FLOW" --main=resync_flow_current --invariant=holdToday \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+# With a deadline on the request itself, a request that is out can always
+# end. VIOLATED by today's engine (resync_flow_current): the host drops a
+# request inside its rate limit and the guest never asks again. Not fixed yet.
+$QUINT run "$FLOW" --main=resync_flow_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── The tick loop's deadlines and a page that freezes ───────────────────────
+TICK=specs/tick_deadlines.qnt
+$QUINT typecheck "$TICK"
+for variant in tick_deadlines_current tick_deadlines_fixed; do
+  $QUINT test "$TICK" --main="$variant" --backend=typescript
+done
+# With a freeze credited to every deadline that drops a peer, a page's own
+# freeze is never held against its peer. VIOLATED by today's engine
+# (tick_deadlines_current): the pacing-throttle deadline is not credited.
+# Not fixed yet.
+$QUINT run "$TICK" --main=tick_deadlines_fixed --invariant=ownFreezeIsNotHeldAgainstAPeer \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+
+# ── Inputs around a resync: what a page may wait for afterwards ─────────────
+RESYNC=specs/resync_inputs.qnt
+$QUINT typecheck "$RESYNC"
+for variant in resync_inputs_before resync_inputs_current; do
+  $QUINT test "$RESYNC" --main="$variant" --backend=typescript
+done
+# Today: after a resync nobody waits for an input that cannot arrive, and the
+# two pages are never both waiting on nothing. Both were violated before a
+# resync settled the inputs from before its frame (resync_inputs_before): a
+# resync that moved the guest forward left holes on both pages.
+$QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# The same from a third page's side, and across matches.
+MESH=specs/resync_mesh.qnt
+$QUINT typecheck "$MESH"
+for variant in resync_mesh_untold resync_mesh_kept resync_mesh_current; do
+  $QUINT test "$MESH" --main="$variant" --backend=typescript
+done
+# Today: no page waits on a hole the moved guest will never fill (violated
+# while only the host was told the settled point, resync_mesh_untold), and
+# the settled point never runs ahead of the inputs still to be made (violated
+# while a new match kept the last one's, resync_mesh_kept).
+$QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript

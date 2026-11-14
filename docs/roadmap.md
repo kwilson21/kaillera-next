@@ -149,6 +149,9 @@ without the old code running beside it first.
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
 - State logic is modelled in Quint first; pure functions with a contract are
   proven with LemmaScript.
+- Every machine has a diagram generated from it, and the scenarios of the
+  Quint models are drawn as sequence diagrams from the traces the model
+  checker replays. `docs/netcode-diagrams.md` lists them all.
 
 **Stage 1: foundation [done]**
 Toolchain (TypeScript 7, esbuild, oxfmt, oxlint + anti-slop, Biome, antislop,
@@ -156,22 +159,18 @@ Quint, LemmaScript) and CI. First modules: `protocol.ts` (Effect Schema for
 server messages), `session.ts` (page lifecycle machine, observing), `roster.ts`
 (mesh-heal target selection, proven never to return the player's own id).
 
-**Stage 2: the page lifecycle decides [in progress]**
-Production has had too little traffic to show that the machine agrees with
-the page, so the evidence comes from end-to-end runs:
-`tests/solo-signaling-drop.mjs`, `tests/rb-two-player.mjs` with
-`DROP_SIGNALING_MS`, and `tests/lifecycle-e2e.mjs` (late join, spectating,
-host reload) all show no `session-disagree`.
+**Stage 2: the page lifecycle decides [done]**
+`play.js` reads its lifecycle from the machine in `web/src/session.ts` and
+keeps no flags of its own. Production had too little traffic to show that
+the machine agreed with the page, so the evidence was end-to-end:
+`tests/lifecycle-e2e.mjs`, `tests/rb-two-player.mjs` with
+`DROP_SIGNALING_MS` and `tests/solo-signaling-drop.mjs` compared the two at
+every read and reported no disagreement before the old flags were deleted.
 
-- Done: `play.js` reads "is a game on" from the machine (`isGameRunning`).
-  The old `gameRunning` flag is still written beside it and compared on every
-  signaling reconnect; delete it once production shows no `session-disagree`.
-- Done (observing): the machine has the late-join states (`lateJoinAwaitingRom`,
-  `lateJoinStarting`, `lateJoinSyncing`; diagram in `docs/session-machine.md`,
-  same states in the Quint model). `play.js` still decides from `_lateJoin`
-  and `_pendingLateJoin` and reports `session-disagree` at each place it
-  reads one. `tests/lifecycle-e2e.mjs` covers late join with and without a
-  ROM, a streamed game, spectating and host reload.
+- Done: "is a game on", "is the next engine start a late join" and "is the
+  page waiting for a ROM" are the machine's states (diagram in
+  `docs/session-machine.md`, same states in the Quint model). The old
+  `gameRunning`, `_lateJoin` and `_pendingLateJoin` are deleted.
 - Done: which connection a rejoining player keeps is `rosterKey` in
   `web/src/peer-identity.ts`, called by the engine. Its search is proved
   (LemmaScript) and the reconnect orderings are model-checked in
@@ -199,20 +198,29 @@ host reload) all show no `session-disagree`.
   players' own connections: the server takes it back into the same match
   and slot, and refuses otherwise, in which case the page ends its game and
   joins again as a fresh page would (`rejoinRefused` in the machine).
-  `nobodyIsStrandedInADroppedMatch` holds on `room_current`. The program is
-  started by `play.js` when the socket connects, not yet invoked by the
-  machine. A dropped host that is taken back returns as a player; whether
-  it should get the room back is undecided.
-- Done: `play.js` reads the two late-join flags from the machine
-  (`_session.decide`). The old `_lateJoin` and `_pendingLateJoin` are still
-  written beside it and compared at every read, like `gameRunning`.
-  Production had no matches to show agreement, so the evidence is every
-  two-emulator scenario in `tests/lifecycle-e2e.mjs` reporting no
-  `session-disagree`.
-- Then: delete the three old flags once production shows no
-  `session-disagree`.
-- Still open in the model: `noGhostMatch` (a playing room whose only member
-  is a late joiner waiting for state).
+  `nobodyIsStrandedInADroppedMatch` holds on `room_current`. A dropped host
+  that is taken back returns as a player; the room stays with whoever it was
+  handed to, and the page's host UI follows the server's owner.
+- Done: a playing room nobody is running is ended by the server. It
+  tracks the players who joined after a match began and have not got into
+  it (`Room.waiting_for_state`); a page says it is in with `match-joined`,
+  sent when the machine reaches `running` after a mid-match join. When only
+  waiting players are left the match ends (`match_is_abandoned`). This was
+  the open `noGhostMatch` question; the property is now
+  `anAbandonedMatchIsEnded` and holds on `room_current`.
+- Done: a page that loaded as host and was dropped from its room joins it
+  as a guest when the room has been handed on, instead of failing to open
+  it. (A host that still owns its room cannot fall behind it: only the
+  owner starts and ends games.)
+- Done: the rejoin is a state machine of its own
+  (`web/src/rejoin-machine.ts`, diagram in `docs/session-machine.md`):
+  `rejoining` invokes the rejoin program, and leaving the state (the socket
+  drops again, the game ends, a newer connection arrives) interrupts it.
+  The session runs it beside the lifecycle machine, hands it the current
+  connection's request and turns a refusal into `rejoinRefused`. It is a
+  second machine, not a region of the first, so the lifecycle machine's
+  states, which the page reads in the same tick as each event, keep their
+  shape.
 
 **Stage 3: the socket boundary**
 Every Socket.IO and DataChannel message is decoded with Effect Schema on
@@ -220,16 +228,77 @@ arrival. Generate the client schemas from the server's Pydantic models so
 there is one source of truth. `play.js` becomes `web/src/play/*.ts`.
 
 Done so far: `scripts/gen_protocol.py` writes `web/src/protocol.gen.ts` from
-`server/src/api/payloads.py` (`npm run protocol`; CI fails when it is stale),
-and the payloads the server sends have models there too, held to the real
-handlers by `tests/test_protocol_payloads.py`. Not done: the page does not
-decode with them yet, and DataChannel messages have no schemas.
+`server/src/api/payloads.py` (`npm run protocol`; CI fails when it is stale).
+The payloads the server sends have models there too, and `signaling.py` holds
+every one to its model as it goes out (`_emit`, `checked`): a mismatch raises
+under tests and logs `PAYLOAD-CONTRACT` in production. The page decodes every
+server-authored event and the `join-room` ack (`web/src/socket-boundary.ts`),
+observing: a message off its schema is reported as `protocol-mismatch` and the
+handlers still run on the raw payload. Handlers move onto decoded values once
+production shows no reports. Messages peers author (DataChannel control
+strings and JSON, and the `data-message` / `webrtc-signal` / `rom-signal`
+relays) are described in `web/src/peer-protocol.ts` and checked the same way;
+DataChannel strings are sampled (the first 16 of each kind) because they
+arrive on the tick path. The per-frame input packet is `input-wire.ts`.
 
-**Stage 4: engine periphery**
+`play.js` is moving to `web/src/play/*.ts` in slices, each read back through
+`window.KNCore.play`. Moved: ROM identity (`rom.ts`: host ROM from a payload,
+identity key, size text, hash and hash comparison, ROM out of an archive) and
+room text (`room-text.ts`: HTML escaping, closed-room message, invite links,
+join/leave toasts), and the ROM library (`rom-library.ts`: IndexedDB storage
+with its version-1 upgrade, and the list markup; `play.js` keeps what loading
+a ROM does to the page), and input delay (`delay.ts`: the words beside the picker, and, observing,
+a player's delay preference: `play.js` still decides it and a difference is
+reported as `play-disagree` through `observe.ts`), and, observing, the control
+remap wizard (`remap-wizard.ts`: the steps, what a captured button, stick or
+key does to the mapping, Back and Skip; `play.js`'s wizard is still in charge
+and each input is compared; whether an input is taken, ignored or rejected is
+`remap-step.ts`, proven with LemmaScript). Moved as they were, being page
+effects with nothing to compare: the page's passing messages and small menus
+(`notices.ts`: toasts, the error card, the room-full banner; `menus.ts`: the
+invite menu, share or copy, the More menu). Observing: a guest receiving the
+host's ROM (`rom-transfer.ts`, decisions proved in `rom-transfer-step.ts`,
+modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
+keeps the channel, the timers and the page. The host's sending side and the
+WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
+(each player slot, the spectator line, the in-game info panel; the Start
+button's rule is observed, `play.js` still decides it). Last: connect, the game
+lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
+
+**Stage 4: engine periphery [pure logic done]**
 `shared.js` (input wire format; prove encode/decode round-trips with
 LemmaScript), `kn-state.js`, `gamepad-manager.js`, `kn-diagnostics.js`,
 `kn-desync-detector.js`. The engine calls `KNCore.meshHealTargets` instead of
 its inline roster loops.
+
+Done: the decisions and arithmetic of each script are typed functions in
+`web/src`, called through `KNCore`, with the script's own code kept as the
+fallback for a page without the bundle (the demo page). A test per script
+runs the real script with and without the bundle against output captured
+before the move.
+
+- Proved (LemmaScript): the input packet round trip (`input-wire.ts`), the
+  stick dead-band's per-axis rule (`stick-axis.ts`), `classifyRunnerStep`,
+  `inputEqual`, and which fields the desync detector flags
+  (`desync-fields.ts`).
+- Typed and tested, not proved (floating point and typed arrays, which the
+  verifier does not model): the sync log ring, the diagnostics' pixel hash,
+  canvas health, screenshot crop and audio transition (`diagnostics.ts`),
+  and the gamepad axis scaling and polarity (`gamepad-axes.ts`).
+- `KNState` has a type (`kn-state.ts`); `kn-state.js` still builds it and
+  still runs before the bundle, because `core-redirector.js` reads it from a
+  fetch callback.
+- Both engine roster loops ask `meshHealTargets`, one entry at a time.
+- Two inputs the scripts used as read are decoded with Effect Schema first:
+  a peer's desync digest (`desync-digest.ts`) and a saved gamepad profile
+  (`gamepad-profile.ts`). One that does not fit is dropped or ignored.
+
+Not done: the scripts themselves are still plain JavaScript. What is left in
+them is the part bound to the browser (reading pads and the canvas, DOM
+hooks, peer-connection helpers, cheats, storage) and their mutable state.
+The fallbacks can be deleted, and `play.html` can stop loading the scripts
+in favour of the bundle, once production shows no difference; the demo page
+needs the bundle first.
 
 **Stage 5: the engine**
 `netplay-rollback.js` (18k lines) is split by concern into typed modules:
@@ -237,6 +306,22 @@ peer mesh, signaling, late join, resync, tick loop. The per-peer and boot
 phase state become machines; the per-frame tick loop stays plain code. The
 netplay invariants I1 (every wait has a deadline) and I2 (all peer cleanup
 through one function) become Effect timeouts and scoped finalizers.
+
+Slice 1, the peer mesh and signaling:
+
+- Done: the connection between two players is modelled in
+  `specs/peer_connection.qnt` (who offers, offer and roster in either order,
+  reconnect, the mesh health check, #119 from the pair's side). Four
+  properties are violated by today's engine and hold on the model's `fixed`
+  variant, which is what the per-peer machine will be built to:
+  `oneInitiatorPerPair` (both pages can run the health check and offer at
+  once), `everyWaitHasADeadline` (a page that answers a reconnect offer
+  without having noticed the drop is reconnecting with no deadline),
+  `neverLeftWithNothingPending` (after crossed offers both pages can be left
+  reconnecting with nothing armed: the match is frozen) and
+  `staleSignalsAreNotApplied` (an answer to an earlier attempt is applied to
+  the connection that replaced it). None is fixed yet.
+- Next: one XState machine per peer connection, observing beside the engine.
 
 **Open decisions**
 
