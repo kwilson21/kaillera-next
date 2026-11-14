@@ -23,10 +23,6 @@ export const FIELD_COUNT = 21;
 /** The id of the match-phase field (`KN_FIELD_MATCH_PHASE`). */
 export const MATCH_PHASE_FIELD = 17;
 
-/** Scene ids the game reports (`kn_get_scene_curr`). */
-export const SCENE_IN_GAME_VS = 22;
-export const SCENE_CSS_VS = 16;
-
 /**
  * The player slot a per-player field belongs to, or null for a field of the
  * whole game. Fields 0-15 are four groups of four: stocks, character id,
@@ -61,9 +57,9 @@ export function fieldName(fid: number): string {
  * Stocks and the battle-only fields (18-20) hold leftovers outside a battle,
  * and the character-select fields (8-15) outside that screen.
  */
-export function fieldEligibleInPhase(fid: number, phase: number): boolean {
-  if (fid <= 3 || fid === 18 || fid === 19 || fid === 20) return phase === SCENE_IN_GAME_VS;
-  if (8 <= fid && fid <= 15) return phase === SCENE_CSS_VS;
+export function fieldEligibleInPhase(fid: number, phase: number, battleScene: number, cssScene: number): boolean {
+  if (fid <= 3 || fid === 18 || fid === 19 || fid === 20) return phase === battleScene;
+  if (8 <= fid && fid <= 15) return phase === cssScene;
   return true;
 }
 
@@ -76,12 +72,14 @@ export function fieldEligibleInPhase(fid: number, phase: number): boolean {
  *                      the peers disagree on the match phase)
  * @param lastFlagged   the frame each field was last flagged on, -1 if never
  * @param dedupWindow   frames a flagged field stays quiet for
+ * @param battleScene, cssScene   the game's own scene numbers for a match
+ *                      and for character select (web/src/address-maps.ts)
  */
 //@ requires ha.length >= 21 && hb.length >= 21 && lastFlagged.length >= 21
 //@ ensures \result.length <= 21
 //@ ensures forall(j: nat, j < \result.length ==> 0 <= \result[j] && \result[j] < 21 && ha[\result[j]] !== hb[\result[j]])
 //@ ensures ha[17] !== hb[17] ==> \result.length === 1 && \result[0] === 17
-//@ ensures ha[17] === hb[17] ==> forall(j: nat, j < \result.length ==> 0 <= \result[j] && \result[j] < 21 && \result[j] !== 17 && fieldEligibleInPhase(\result[j], phase) && frame - lastFlagged[\result[j]] >= dedupWindow)
+//@ ensures ha[17] === hb[17] ==> forall(j: nat, j < \result.length ==> 0 <= \result[j] && \result[j] < 21 && \result[j] !== 17 && fieldEligibleInPhase(\result[j], phase, battleScene, cssScene) && frame - lastFlagged[\result[j]] >= dedupWindow)
 export function fieldsToFlag(
   ha: number[],
   hb: number[],
@@ -89,6 +87,8 @@ export function fieldsToFlag(
   frame: number,
   lastFlagged: number[],
   dedupWindow: number,
+  battleScene: number,
+  cssScene: number,
 ): number[] {
   if (ha[17] !== hb[17]) return [17];
   const flagged: number[] = [];
@@ -96,12 +96,12 @@ export function fieldsToFlag(
   while (fid < 21) {
     //@ invariant 0 <= fid && fid <= 21
     //@ invariant flagged.length <= fid
-    //@ invariant forall(j: nat, j < flagged.length ==> 0 <= flagged[j] && flagged[j] < 21 && ha[flagged[j]] !== hb[flagged[j]] && flagged[j] !== 17 && fieldEligibleInPhase(flagged[j], phase) && frame - lastFlagged[flagged[j]] >= dedupWindow)
+    //@ invariant forall(j: nat, j < flagged.length ==> 0 <= flagged[j] && flagged[j] < 21 && ha[flagged[j]] !== hb[flagged[j]] && flagged[j] !== 17 && fieldEligibleInPhase(flagged[j], phase, battleScene, cssScene) && frame - lastFlagged[flagged[j]] >= dedupWindow)
     //@ decreases 21 - fid
     if (
       fid !== 17 &&
       ha[fid] !== hb[fid] &&
-      fieldEligibleInPhase(fid, phase) &&
+      fieldEligibleInPhase(fid, phase, battleScene, cssScene) &&
       frame - lastFlagged[fid]! >= dedupWindow
     ) {
       flagged.push(fid);

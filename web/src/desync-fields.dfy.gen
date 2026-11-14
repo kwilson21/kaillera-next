@@ -56,13 +56,13 @@ function fieldName(fid: int): string
                   "ft_buffer"
 }
 
-function fieldEligibleInPhase(fid: int, phase: int): bool
+function fieldEligibleInPhase(fid: int, phase: int, battleScene: int, cssScene: int): bool
 {
   if ((((fid <= 3) || (fid == 18)) || (fid == 19)) || (fid == 20)) then
-    (phase == SCENE_IN_GAME_VS)
+    (phase == battleScene)
   else
     if ((8 <= fid) && (fid <= 15)) then
-      (phase == SCENE_CSS_VS)
+      (phase == cssScene)
     else
       true
 }
@@ -71,18 +71,14 @@ const FIELD_COUNT: int := 21
 
 const MATCH_PHASE_FIELD: int := 17
 
-const SCENE_IN_GAME_VS: int := 22
-
-const SCENE_CSS_VS: int := 16
-
-method fieldsToFlag(ha: seq<int>, hb: seq<int>, phase: int, frame: int, lastFlagged: seq<int>, dedupWindow: int) returns (res: seq<int>)
+method fieldsToFlag(ha: seq<int>, hb: seq<int>, phase: int, frame: int, lastFlagged: seq<int>, dedupWindow: int, battleScene: int, cssScene: int) returns (res: seq<int>)
   requires (|ha| >= 21)
   requires (|hb| >= 21)
   requires (|lastFlagged| >= 21)
   ensures (|res| <= 21)
   ensures forall j: nat :: ((j < |res|) ==> (((0 <= res[j]) && (res[j] < 21)) && (ha[res[j]] != hb[res[j]])))
   ensures ((ha[17] != hb[17]) ==> ((|res| == 1) && (res[0] == 17)))
-  ensures ((ha[17] == hb[17]) ==> forall j: nat :: ((j < |res|) ==> (((((0 <= res[j]) && (res[j] < 21)) && (res[j] != 17)) && fieldEligibleInPhase(res[j], phase)) && ((frame - lastFlagged[res[j]]) >= dedupWindow))))
+  ensures ((ha[17] == hb[17]) ==> forall j: nat :: ((j < |res|) ==> (((((0 <= res[j]) && (res[j] < 21)) && (res[j] != 17)) && fieldEligibleInPhase(res[j], phase, battleScene, cssScene)) && ((frame - lastFlagged[res[j]]) >= dedupWindow))))
 {
   if (ha[17] != hb[17]) {
     return [17];
@@ -93,12 +89,12 @@ method fieldsToFlag(ha: seq<int>, hb: seq<int>, phase: int, frame: int, lastFlag
     invariant (0 <= fid)
     invariant (fid <= 21)
     invariant (|flagged| <= fid)
-    invariant forall j: nat :: ((j < |flagged|) ==> ((((((0 <= flagged[j]) && (flagged[j] < 21)) && (ha[flagged[j]] != hb[flagged[j]])) && (flagged[j] != 17)) && fieldEligibleInPhase(flagged[j], phase)) && ((frame - lastFlagged[flagged[j]]) >= dedupWindow)))
+    invariant forall j: nat :: ((j < |flagged|) ==> ((((((0 <= flagged[j]) && (flagged[j] < 21)) && (ha[flagged[j]] != hb[flagged[j]])) && (flagged[j] != 17)) && fieldEligibleInPhase(flagged[j], phase, battleScene, cssScene)) && ((frame - lastFlagged[flagged[j]]) >= dedupWindow)))
     decreases (21 - fid)
   {
     var i_branch0 := ((fid != 17) && (ha[fid] != hb[fid]));
     if i_branch0 {
-      var i_t0 := fieldEligibleInPhase(fid, phase);
+      var i_t0 := fieldEligibleInPhase(fid, phase, battleScene, cssScene);
       i_branch0 := i_t0;
     }
     if (i_branch0 && ((frame - lastFlagged[fid]) >= dedupWindow)) {
