@@ -15,10 +15,11 @@ import {
   validRecord,
   type DecodedInput,
   type FrameInput,
-  type ShortPacket,
   type WireInput,
 } from '../../web/src/input-wire.ts';
-import { lcg, loadShared, plain, type EncodeArgs } from './load-shared.ts';
+import { createHash } from 'node:crypto';
+import { createShared } from '../../web/src/page/shared.ts';
+import { lcg, type EncodeArgs } from './load-shared.ts';
 
 interface EncodeVector {
   name: string;
@@ -217,19 +218,17 @@ test('decodeInput rejects a buffer that is not whole words, as before', () => {
   assert.throws(() => decodeInput(new ArrayBuffer(7)), RangeError);
 });
 
-// ── The shipped fallback in shared.js ─────────────────────────────────────
+// ── The plain-JavaScript codec this module replaced ───────────────────────
 
 const AWKWARD = [0, 1, -1, 83, -83, 127, -128, 32767, -32768, 32768, 65535, 65536, -65537, 2147483647, -2147483648];
 
-test('shared.js without the bundle encodes and decodes exactly as this module does', () => {
-  const legacy = loadShared();
-  for (const v of ENCODE_VECTORS) {
-    assert.equal(toHex(legacy.encodeInput(...v.args)), v.hex, v.name);
-  }
-  for (const v of [...ENCODE_VECTORS, ...DECODE_VECTORS]) {
-    assert.deepStrictEqual(plain(legacy.decodeInput(fromHex(v.hex))), v.decoded, v.name);
-  }
+// The digest of what web/static/shared.js's own encoder and decoder produced
+// for the cases below, taken from that script at d7dc88c, the last commit
+// that had it. This module was compared with it case by case until then.
+const LEGACY_CODEC_DIGEST = 'bd29e04fe96581ee8cd568d005ba28ae3aab2a44b13c7ff8f7a18a332c4148e8';
 
+test('random packets encode and decode exactly as the plain-JavaScript codec did', () => {
+  const hash = createHash('sha256');
   const next = lcg(20261113);
   const pick = (): number => {
     const r = next();
@@ -244,39 +243,25 @@ test('shared.js without the bundle encodes and decodes exactly as this module do
     const redundant: FrameInput[] = [];
     for (let k = next() % 5; k > 0; k--) redundant.push({ frame: frame - (next() % 40), ...input() });
     const args: EncodeArgs = [frame, input(), pick(), redundant.length > 0 || n % 2 === 0 ? redundant : null];
-    const ours = encodeInput(...args);
-    const hex = toHex(ours);
-    assert.equal(toHex(legacy.encodeInput(...args)), hex, JSON.stringify(args));
-    assert.deepStrictEqual(plain(legacy.decodeInput(fromHex(hex))), decodeInput(ours.buffer), JSON.stringify(args));
+    const encoded = encodeInput(...args);
+    hash.update(toHex(encoded));
+    hash.update(JSON.stringify(decodeInput(encoded.buffer)));
   }
 
   // Any words at all, including lengths and counts no encoder produces.
   for (let n = 0; n < 5000; n++) {
     const words = Array.from({ length: next() % 24 }, () => (next() % 4 === 0 ? (next() % 9) - 2 : next() | 0));
-    const buf = Int32Array.from(words).buffer;
-    assert.deepStrictEqual(plain(legacy.decodeInput(buf)), decodeInput(buf), JSON.stringify(words));
+    hash.update(JSON.stringify(decodeInput(Int32Array.from(words).buffer)));
   }
+  assert.equal(hash.digest('hex'), LEGACY_CODEC_DIGEST);
 });
 
-test('shared.js uses KNCore when the bundle is loaded', () => {
-  const calls: string[] = [];
-  const shared = loadShared({
-    encodeInput: (...args: EncodeArgs) => {
-      calls.push('encode');
-      return encodeInput(...args);
-    },
-    decodeInput: (buf: ArrayBuffer) => {
-      calls.push('decode');
-      return decodeInput(buf);
-    },
-  });
-  const v = ENCODE_VECTORS.find((x) => x.name === 'redundant x3')!;
-  const encoded = shared.encodeInput(...v.args);
-  assert.equal(toHex(encoded), v.hex);
-  assert.deepStrictEqual(shared.decodeInput(encoded.buffer), v.decoded);
+test('KNShared carries this codec itself', () => {
+  const shared = createShared();
+  assert.equal(shared.encodeInput, encodeInput);
+  assert.equal(shared.decodeInput, decodeInput);
   // Called with defaults left out, the way the engines call it.
   assert.equal(toHex(shared.encodeInput(7, ENCODE_VECTORS[2]!.args[1])), ENCODE_VECTORS[2]!.hex);
-  assert.deepEqual(calls, ['encode', 'decode', 'encode']);
 });
 
 // ── Round trips over the whole range ──────────────────────────────────────

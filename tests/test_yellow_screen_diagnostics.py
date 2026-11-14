@@ -3,7 +3,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DETERMINISM_JS = ROOT / "tests/determinism-automation.mjs"
-DIAGNOSTICS_JS = ROOT / "web/static/kn-diagnostics.js"
+DIAGNOSTICS_TS = ROOT / "web/src/page/diagnostics.ts"
+DIAGNOSTICS_MATH_TS = ROOT / "web/src/diagnostics.ts"
 LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 PLAY_JS = ROOT / "web/static/play.js"
 STREAMING_JS = ROOT / "web/static/netplay-streaming.js"
@@ -25,13 +26,14 @@ def test_determinism_harness_checks_rendered_canvas_screenshots_for_yellow_scree
 
 
 def test_runtime_canvas_health_logs_yellow_pixel_ratios_and_screenshot():
-    source = DIAGNOSTICS_JS.read_text()
+    source = DIAGNOSTICS_TS.read_text()
+    arithmetic = DIAGNOSTICS_MATH_TS.read_text()
 
-    assert "let palePixels = 0" in source
-    assert "let yellowGreenPixels = 0" in source
+    assert "let palePixels = 0" in arithmetic
+    assert "let yellowGreenPixels = 0" in arithmetic
     assert "paleRatio=" in source
     assert "yellowGreenRatio=" in source
-    assert "window.KNEvent?.('canvas_solid_pale'" in source
+    assert "KNEvent?.('canvas_solid_pale'" in source
     assert "captureAndSendScreenshot()" in source
     assert "new CustomEvent('kn-canvas-solid-pale'" in source
     assert "sampleCanvasHealth," in source

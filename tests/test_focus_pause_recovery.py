@@ -4,14 +4,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SHARED_JS = ROOT / "web/static/shared.js"
+SHARED_TS = ROOT / "web/src/page/shared.ts"
 LOCKSTEP_JS = ROOT / "web/static/netplay-rollback.js"
 RETROARCH_PATCH = ROOT / "build/patches/retroarch-deterministic-timing.patch"
 CORE_JS = ROOT / "web/static/ejs/cores/mupen64plus_next_libretro.js"
 
 
 def test_key_tracking_releases_held_keys_on_focus_loss():
-    source = SHARED_JS.read_text()
+    source = SHARED_TS.read_text()
 
     assert "function clearHeldKeysOnFocusLoss()" in source
     assert "function ensureKeyTrackingListeners()" in source
@@ -31,11 +31,12 @@ def test_key_tracking_releases_held_keys_on_focus_loss():
 
 
 def test_key_tracking_reinstalls_listeners_when_reusing_cached_keymap():
-    source = SHARED_JS.read_text()
+    source = SHARED_TS.read_text()
 
-    setup_idx = source.find("function setupKeyTracking(keymap, heldKeys) {")
+    setup_idx = source.find("function setupKeyTracking(keymap: KeyMap | null | undefined, heldKeys: Set<number>): KeyMap {")
     assert setup_idx != -1
-    setup_window = source[setup_idx : setup_idx + 1800]
+    # The whole function body.
+    setup_window = source[setup_idx : source.find("\n  }\n", setup_idx)]
 
     cached_idx = setup_window.find("if (keymap) {")
     cached_ensure_idx = setup_window.find("ensureKeyTrackingListeners();", cached_idx)
@@ -52,7 +53,6 @@ def test_key_tracking_reinstalls_listeners_when_reusing_cached_keymap():
 def test_key_tracking_cached_keymap_captures_after_teardown_behavior():
     script = textwrap.dedent(
         r"""
-        const fs = require('fs');
         const listeners = new Map();
         const key = (scope, type) => `${scope}:${type}`;
         const add = (scope, type, fn) => {
@@ -76,8 +76,7 @@ def test_key_tracking_cached_keymap_captures_after_teardown_behavior():
           addEventListener: (type, fn) => add('window', type, fn),
           removeEventListener: (type, fn) => remove('window', type, fn),
         };
-        global.navigator = {};
-        eval(fs.readFileSync('web/static/shared.js', 'utf8'));
+        (await import('./web/src/page/shared.ts')).installShared();
 
         const firstHeld = new Set();
         const cachedKeymap = window.KNShared.setupKeyTracking({ 65: 0 }, firstHeld);
@@ -96,14 +95,13 @@ def test_key_tracking_cached_keymap_captures_after_teardown_behavior():
         """
     )
 
-    result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_key_tracking_window_capture_survives_document_blocker():
     script = textwrap.dedent(
         r"""
-        const fs = require('fs');
         const listeners = new Map();
         const key = (scope, type) => `${scope}:${type}`;
         const add = (scope, type, fn) => {
@@ -137,8 +135,7 @@ def test_key_tracking_window_capture_survives_document_blocker():
           addEventListener: (type, fn) => add('window', type, fn),
           removeEventListener: (type, fn) => remove('window', type, fn),
         };
-        global.navigator = {};
-        eval(fs.readFileSync('web/static/shared.js', 'utf8'));
+        (await import('./web/src/page/shared.ts')).installShared();
 
         document.addEventListener('keydown', (evt) => evt.stopImmediatePropagation(), true);
         document.addEventListener('keyup', (evt) => evt.stopImmediatePropagation(), true);
@@ -162,19 +159,21 @@ def test_key_tracking_window_capture_survives_document_blocker():
         """
     )
 
-    result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
+    result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_unfocused_keyboard_input_is_suppressed_and_cleared():
-    source = SHARED_JS.read_text()
+    source = SHARED_TS.read_text()
 
-    read_idx = source.find("const readLocalInput = (playerSlot, keyMap, heldKeys) => {")
+    read_idx = source.find("const readLocalInput = (playerSlot: number, keyMap: KeyMap | null | undefined, heldKeys: Set<number>)")
     assert read_idx != -1
-    read_window = source[read_idx : read_idx + 2200]
+    # The whole function body.
+    read_window = source[read_idx : source.find("\n  };\n", read_idx)]
 
     assert "const pageFocused =" in read_window
-    assert "if (pageFocused && window.GamepadManager)" in read_window
+    assert "const gamepads = page().GamepadManager;" in read_window
+    assert "if (pageFocused && gamepads)" in read_window
     assert "if (!pageFocused)" in read_window
     assert "heldKeys?.clear?.()" in read_window
     assert "readKeyboardAxes(keyMap, heldKeys)" in read_window

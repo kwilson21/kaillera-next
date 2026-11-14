@@ -147,27 +147,27 @@ $QUINT run "$FLOW" --main=resync_flow_fixed --invariant=allHold \
 # ── The tick loop's deadlines and a page that freezes ───────────────────────
 TICK=specs/tick_deadlines.qnt
 $QUINT typecheck "$TICK"
-for variant in tick_deadlines_current tick_deadlines_fixed; do
+for variant in tick_deadlines_before tick_deadlines_current; do
   $QUINT test "$TICK" --main="$variant" --backend=typescript
 done
-# With a freeze credited to every deadline that drops a peer, a page's own
-# freeze is never held against its peer. VIOLATED by today's engine
-# (tick_deadlines_current): the pacing-throttle deadline is not credited.
-# Not fixed yet.
-$QUINT run "$TICK" --main=tick_deadlines_fixed --invariant=ownFreezeIsNotHeldAgainstAPeer \
+# Today: a page's own freeze is never held against its peer. Violated before
+# the pacing-throttle deadline was credited (tick_deadlines_before).
+$QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldAgainstAPeer \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 
 # ── Inputs around a resync: what a page may wait for afterwards ─────────────
 RESYNC=specs/resync_inputs.qnt
 $QUINT typecheck "$RESYNC"
-for variant in resync_inputs_before resync_inputs_current; do
+for variant in resync_inputs_before resync_inputs_solo_holes resync_inputs_current; do
   $QUINT test "$RESYNC" --main="$variant" --backend=typescript
 done
 # Today: after a resync nobody waits for an input that cannot arrive, and the
 # two pages are never both waiting on nothing. Both were violated before a
 # resync settled the inputs from before its frame (resync_inputs_before): a
-# resync that moved the guest forward left holes on both pages.
+# resync that moved the guest forward left holes on both pages. A page also
+# applies for itself what it sent: violated while a page that ran alone did
+# not keep its own inputs (resync_inputs_solo_holes).
 $QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 

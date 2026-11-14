@@ -4,7 +4,9 @@ on:
     paths:
       - '.github/workflows/capture-privacy.yml'
       - 'web/static/kn-capture.js'
-      - 'web/static/kn-diagnostics.js'
+      - 'web/src/page/diagnostics.ts'
+      - 'web/src/diagnostics.ts'
+      - 'web/static/dist/kn-core.js'
       - 'web/static/kn-vision-client.js'
       - 'web/static/netplay-rollback.js'
       - 'web/play.html'

@@ -4,7 +4,7 @@
  *
  * A digest is one hash per field for one frame; the field ids mirror
  * `KN_FIELD_*` in build/kn_rollback/kn_hash_registry.h. The detector
- * (web/static/kn-desync-detector.js) builds and exchanges the digests and
+ * (web/src/page/desync-detector.ts) builds and exchanges the digests and
  * emits the `desync-suspect` events; the decision of what to flag is here:
  *
  *   - If the peers disagree on the match phase, that alone is flagged and

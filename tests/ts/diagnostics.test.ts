@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import { buildSync } from 'esbuild';
 import {
   audioTransition,
   hashPixels,
   measureCanvasHealth,
   screenshotCrop,
-  type CanvasHealth,
   type Crop,
 } from '../../web/src/diagnostics.ts';
+import type { CanvasSample, Diagnostics } from '../../web/src/page/diagnostics.ts';
 import { lcg, plain } from './load-shared.ts';
 
 const solid = (r: number, g: number, b: number, pixels = 32 * 24): Uint8ClampedArray => {
@@ -84,24 +85,10 @@ test('audio transitions: only leaving and re-entering running are reported', () 
   assert.equal(audioTransition('running', 'running'), null);
 });
 
-// ── kn-diagnostics.js itself ──────────────────────────────────────────────
+// ── window.KNDiag (web/src/page/diagnostics.ts) ───────────────────────────
 
-interface DiagCore {
-  hashPixels: typeof hashPixels;
-  measureCanvasHealth: typeof measureCanvasHealth;
-  screenshotCrop: typeof screenshotCrop;
-  audioTransition: typeof audioTransition;
-}
-interface Diag {
-  init: (ctx: { log: (line: string) => void; getFrame: () => number; sendScreenshot: () => void }) => void;
-  sampleCanvasHealth: () => CanvasHealth | null;
-  captureCanvasHash: () => number;
-  captureAndSendScreenshot: () => void;
-  checkFreeze: (input: { buttons: number; lx: number; ly: number; cx: number; cy: number }) => void;
-}
 interface DiagWindow {
-  KNDiag?: Diag;
-  KNCore?: DiagCore;
+  KNDiag?: Diagnostics;
   KNCapture: { allowed: () => boolean };
   KNAudio: { ctx: { state: string } };
   addEventListener: () => void;
@@ -114,18 +101,34 @@ interface GameCanvas {
   getContext: () => null;
 }
 interface Observed {
-  health: (CanvasHealth | null)[];
+  health: (CanvasSample | null)[];
   hashes: number[];
   crops: Crop[];
   log: string[];
 }
 
 /**
- * Run web/static/kn-diagnostics.js against a scripted canvas and audio
- * context and return what it measured, cropped and logged.
+ * The page script as the bundle carries it: the module and what it imports,
+ * as one classic script that installs `window.KNDiag` when run.
  */
-const runDiagnostics = (core?: DiagCore): Observed => {
-  const source = readFileSync(new URL('../../web/static/kn-diagnostics.js', import.meta.url), 'utf8');
+const pageScript = (): string => {
+  const built = buildSync({
+    stdin: {
+      contents: "import { installDiagnostics } from './web/src/page/diagnostics.ts'; installDiagnostics();",
+      resolveDir: fileURLToPath(new URL('../..', import.meta.url)),
+    },
+    bundle: true,
+    format: 'iife',
+    write: false,
+  });
+  return built.outputFiles[0]?.text ?? '';
+};
+
+/**
+ * Run the diagnostics against a scripted canvas and audio context and
+ * return what they measured, cropped and logged.
+ */
+const runDiagnostics = (): Observed => {
   const next = lcg(77);
   let pixels = new Uint8ClampedArray(0);
   const seen: Observed = { health: [], hashes: [], crops: [], log: [] };
@@ -147,11 +150,10 @@ const runDiagnostics = (core?: DiagCore): Observed => {
     KNAudio: { ctx: { state: 'running' } },
     addEventListener: () => undefined,
   };
-  if (core) window.KNCore = core;
   const document = { querySelector: () => game, createElement: scratch, hasFocus: () => true };
-  vm.runInContext(source, vm.createContext({ window, document, navigator: {}, console, CustomEvent }));
+  vm.runInContext(pageScript(), vm.createContext({ window, document, navigator: {}, console, CustomEvent }));
   const diag = window.KNDiag;
-  assert.ok(diag, 'kn-diagnostics.js did not define window.KNDiag');
+  assert.ok(diag, 'the page script did not define window.KNDiag');
 
   let frame = 0;
   diag.init({ log: (line) => seen.log.push(line), getFrame: () => frame, sendScreenshot: () => undefined });
@@ -196,8 +198,8 @@ const runDiagnostics = (core?: DiagCore): Observed => {
 
 const digestOf = (seen: Observed): string => createHash('sha256').update(JSON.stringify(seen)).digest('hex');
 
-// What kn-diagnostics.js produced for this script at ff53345, before its
-// arithmetic moved to web/src/diagnostics.ts.
+// What kn-diagnostics.js produced for this script at ff53345, while it was a
+// plain script with its own arithmetic.
 const GOLDEN = {
   health: 400,
   crops: 200,
@@ -205,43 +207,19 @@ const GOLDEN = {
   sha256: '43d1faf77321ba3ea4a1e4e0131a63232c0ac29c724954f07b636ef5a171b167',
 };
 
-test('kn-diagnostics.js measures, crops and logs what it did before, with and without the bundle', () => {
-  const builtIn = runDiagnostics();
-  assert.equal(builtIn.health.length, GOLDEN.health);
-  assert.equal(builtIn.crops.length, GOLDEN.crops);
-  assert.equal(builtIn.log.length, GOLDEN.log);
-  assert.equal(digestOf(builtIn), GOLDEN.sha256, 'built-in arithmetic');
-  const withCore = runDiagnostics({ hashPixels, measureCanvasHealth, screenshotCrop, audioTransition });
-  assert.deepStrictEqual(withCore, builtIn, 'KNCore arithmetic');
+test('window.KNDiag measures, crops and logs what kn-diagnostics.js did', () => {
+  const seen = runDiagnostics();
+  assert.equal(seen.health.length, GOLDEN.health);
+  assert.equal(seen.crops.length, GOLDEN.crops);
+  assert.equal(seen.log.length, GOLDEN.log);
+  assert.equal(digestOf(seen), GOLDEN.sha256);
   // The script must reach every kind of line it is meant to compare.
   for (const kind of ['RENDER-STALL', 'AUDIO-STALL', 'AUDIO-RESUME', 'CANVAS-HEALTH', 'INPUT-DEAD']) {
     assert.ok(
-      builtIn.log.some((line) => line.startsWith(kind)),
+      seen.log.some((line) => line.startsWith(kind)),
       `no ${kind} line in the script`,
     );
   }
-  assert.ok(builtIn.health.some((h) => h?.solidPale === true) && builtIn.health.some((h) => h?.solidPale === false));
-});
-
-test('kn-diagnostics.js calls KNCore for each computation when the bundle is loaded', () => {
-  const calls = { hashPixels: 0, measureCanvasHealth: 0, screenshotCrop: 0, audioTransition: 0 };
-  runDiagnostics({
-    hashPixels: (rgba) => {
-      calls.hashPixels++;
-      return hashPixels(rgba);
-    },
-    measureCanvasHealth: (rgba) => {
-      calls.measureCanvasHealth++;
-      return measureCanvasHealth(rgba);
-    },
-    screenshotCrop: (w, h) => {
-      calls.screenshotCrop++;
-      return screenshotCrop(w, h);
-    },
-    audioTransition: (previous, current) => {
-      calls.audioTransition++;
-      return audioTransition(previous, current);
-    },
-  });
-  for (const [name, count] of Object.entries(calls)) assert.ok(count > 0, `${name} was never called`);
+  const solid = seen.health.map((h) => h !== null && !('error' in h) && h.solidPale);
+  assert.ok(solid.includes(true) && solid.includes(false));
 });
