@@ -25,6 +25,7 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { startCapture } from './page/capture.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
@@ -62,6 +63,7 @@ import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from
 import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
+import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
@@ -274,6 +276,10 @@ export const KNCore = {
   startRejoin,
   shouldResumeRomTransfer,
   /** The play page's own logic, moving here from web/static/play.js piece by piece. */
+  /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
+  page: {
+    startCapture,
+  },
   play: {
     escapeHtml,
     inviteUrl,
@@ -318,6 +324,8 @@ declare global {
 
 if (typeof window !== 'undefined') {
   window.KNCore = KNCore;
+  // First: KNState, built next, carries the storage helpers.
+  installSafeStorage();
   installKNState(window);
   installShared();
   installGamepadManager();

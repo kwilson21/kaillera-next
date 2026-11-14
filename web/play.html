@@ -523,15 +523,13 @@
     <!-- fflate — fast ZIP extraction for ROM .zip files -->
     <script src="/static/vendor/fflate.min.js"></script>
 
-    <!-- Safe storage (in-memory fallback for privacy browsers) -->
-    <script src="/static/storage.js"></script>
-    <script src="/static/kn-capture.js"></script>
-
-    <!-- The TypeScript core (window.KNCore), the state the scripts share
-         (window.KNState) and the shared netplay utilities (window.KNShared:
-         cheats, keymap, input tracking, input codec). Loaded before every
-         script that builds on any of them. -->
+    <!-- The TypeScript core (window.KNCore), safe storage (window.KNStorage,
+         with an in-memory fallback for privacy browsers), the state the
+         scripts share (window.KNState) and the shared netplay utilities
+         (window.KNShared: cheats, keymap, input tracking, input codec). Loaded
+         before every script that builds on any of them. -->
     <script src="/static/dist/kn-core.js"></script>
+    <script src="/static/kn-capture.js"></script>
 
     <!-- Switch 2 Pro Controller: WebUSB handshake that makes it appear as a gamepad -->
     <script src="/static/switch2-usb.js"></script>

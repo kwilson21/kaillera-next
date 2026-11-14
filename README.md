@@ -201,6 +201,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     landing.css        Front-page styles (direction A tokens)
     join.js            Invite-page controller (room lookup, join/watch states)
     dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
+    dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     admin.css          Admin dashboard styles
     play.css           Play page styles (room overlay tokens, direction A)
@@ -217,7 +218,6 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
-    storage.js             Safe localStorage/sessionStorage wrapper
     feedback.js            In-app feedback collection
     version.js             Version display + changelog modal
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)

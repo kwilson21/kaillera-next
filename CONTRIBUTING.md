@@ -128,20 +128,19 @@ earlier ones to have set up their `window.*` exports:
 3. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
 4. `socket.io.min.js` — self-hosted Socket.IO client
 5. `vendor/fflate.min.js` — compression lib used to extract ROM ZIP archives
-6. `storage.js` — safe localStorage/sessionStorage wrapper
+6. `dist/kn-core.js` — the TypeScript bundle built from `web/src`: `window.KNCore`, safe storage `window.KNStorage` (`web/src/site/storage.ts`), the shared state `window.KNState`, and the page globals that used to be scripts of their own: `window.KNShared` and `window.KNEvent` (`page/shared.ts`), `window.GamepadManager` (`page/gamepad-manager.ts`), `window.KNDiag` (`page/diagnostics.ts`) and `window.KNDesync` (`page/desync-detector.ts`)
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
-8. `dist/kn-core.js` — the TypeScript bundle built from `web/src`: `window.KNCore`, the shared state `window.KNState`, and the page globals that used to be scripts of their own: `window.KNShared` and `window.KNEvent` (`page/shared.ts`), `window.GamepadManager` (`page/gamepad-manager.ts`), `window.KNDiag` (`page/diagnostics.ts`) and `window.KNDesync` (`page/desync-detector.ts`)
-9. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
-10. `virtual-gamepad.js` — touch controls for mobile
-11. `kn-audio.js` — AudioWorklet pump + rollback audio capture
-12. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
-13. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
-14. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
-15. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
-16. `controller-settings.js` — in-game controller settings panel
-17. `play.js` — page orchestrator (connects everything)
-18. `version.js` — version display + changelog modal
-19. `feedback.js` — in-app feedback collection
+8. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
+9. `virtual-gamepad.js` — touch controls for mobile
+10. `kn-audio.js` — AudioWorklet pump + rollback audio capture
+11. `kn-vision-client.js` — Claude vision client for screenshot-diff desync analysis
+12. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
+13. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
+14. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
+15. `controller-settings.js` — in-game controller settings panel
+16. `play.js` — page orchestrator (connects everything)
+17. `version.js` — version display + changelog modal
+18. `feedback.js` — in-app feedback collection
 
 #### Server structure
 
@@ -190,7 +189,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `feedback.js`                                            | ~540    | In-app feedback collection UI                                                                                                                                                          | play.js                                                     |
 | `api-sandbox.js`                                         | —       | Saves/restores native rAF, performance.now, getGamepads                                                                                                                                | rollback, core-redirector                                   |
 | `core-redirector.js`                                     | —       | Intercepts EJS core download → serves patched WASM from IDB                                                                                                                            | api-sandbox                                                 |
-| `storage.js`                                             | ~24     | Safe localStorage/sessionStorage wrapper (KNStorage)                                                                                                                                   | all modules                                                 |
+| `web/src/site/storage.ts` (in `dist/kn-core.js`)         | —       | Safe localStorage/sessionStorage wrapper (`window.KNStorage`), set by the bundle                                                                                                       | all modules                                                 |
 | `kn-capture.js`                                          | —       | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)                                                                                                                  | rollback, streaming                                         |
 | `version.js`                                             | ~350    | Version display + changelog modal                                                                                                                                                      | play.js                                                     |
 | `version-guard.js`                                       | —       | Cross-tab version mismatch guard — forces reload when a deploy lands                                                                                                                   | play.js                                                     |
@@ -198,6 +197,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `landing.js`                                             | —       | Front-page board controller (room creation, open-rooms board) on index.html                                                                                                            | —                                                           |
 | `join.js`                                                | —       | Invite-page controller (room lookup, join/watch states) on join.html                                                                                                                   | —                                                           |
 | `dist/kn-wake-art.js`                                    | —       | Standalone TypeScript bundle for waking-state art while a room wakes                                                                                                                   | index.html, join.html                                       |
+| `dist/kn-site.js`                                        | —       | Small TypeScript bundle for pages without the core: `KNStorage`                                                                                                                        | index.html, admin.html                                      |
 | `admin.js`                                               | —       | Admin dashboard logic (sessions, events, feedback, screenshots)                                                                                                                        | admin.html only                                             |
 | `demo.js`                                                | ~1,818  | Demo page orchestrator (fake peer + menu autopilot)                                                                                                                                    | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
 | `fake-peer.js`                                           | ~559    | Synthetic P2 for the demo page (simulated input/jitter)                                                                                                                                | demo.js                                                     |
