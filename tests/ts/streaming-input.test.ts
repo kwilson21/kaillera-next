@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { WireInput } from '../../web/src/input-wire.ts';
+import { decodeInput, encodeInput, inputEqual, type WireInput } from '../../web/src/input-wire.ts';
 import {
   guestPacket,
   guestSends,
@@ -9,14 +9,13 @@ import {
   type ChannelMessage,
 } from '../../web/src/streaming/input.ts';
 import type { Slot } from '../../web/src/streaming/roster.ts';
-import { lcg, loadShared, plain } from './load-shared.ts';
+import { lcg, plain } from './load-shared.ts';
 
 // ── the engine's own code, kept as an oracle ─────────────────────────────────
 // web/static/netplay-streaming.js at this commit, with the engine's variables
-// turned into parameters. `shared` is the codec built into web/static/shared.js
-// (no bundle loaded), which is what KNShared.encodeInput / decodeInput were
-// before input-wire.ts.
-const shared = loadShared();
+// turned into parameters. `shared` is the codec the engine reaches as
+// KNShared.encodeInput / decodeInput / inputEqual, which is input-wire.ts.
+const shared = { decodeInput, encodeInput, inputEqual };
 
 type Peer = { slot: Slot; channel: string | undefined };
 

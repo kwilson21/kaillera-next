@@ -55,10 +55,12 @@ verify "$ROOM" room_current joinersAreNotLeftWaitingAtTheStart
 verify "$ROOM" room_current startIsNotHeldUpByALateJoiner
 verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
 verify "$ROOM" room_current anAbandonedMatchIsEnded
+verify "$ROOM" room_current aMatchIsNotLostToTheGraceWindow
 expect_violation "$ROOM" room_before_start_fix joinersAreNotLeftWaitingAtTheStart
 expect_violation "$ROOM" room_before_start_fix startIsNotHeldUpByALateJoiner
 expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
 expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
+expect_violation "$ROOM" room_before_grace_wait aMatchIsNotLostToTheGraceWindow
 # Before the page reconciled on reconnect, the last two have counterexamples
 # 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
 # check-specs.sh samples deep enough to reach them.
@@ -75,16 +77,18 @@ expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
 expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
 
 PAUSE=specs/late_join_pause.qnt
-verify "$PAUSE" late_join_pause_fixed allHold
-expect_violation "$PAUSE" late_join_pause_current everyPauseHasADeadline
-# The other two violations on late_join_pause_current need two joiners and
+verify "$PAUSE" late_join_pause_current allHold
+expect_violation "$PAUSE" late_join_pause_before hostPauseHasADeadline
+expect_violation "$PAUSE" late_join_pause_host_side guestPauseHasADeadline
+expect_violation "$PAUSE" late_join_pause_host_side guestResumesOnTheHostsWord
+expect_violation "$PAUSE" late_join_pause_host_side aRepeatedRequestKeepsTheDeadline
+# The other two violations on late_join_pause_before need two joiners and
 # are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
 # them.
 
 FLOW=specs/resync_flow.qnt
-verify "$FLOW" resync_flow_current holdToday
-verify "$FLOW" resync_flow_fixed allHold
-expect_violation "$FLOW" resync_flow_current aRequestCanAlwaysEnd
+verify "$FLOW" resync_flow_current allHold
+expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
 
 TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
@@ -93,6 +97,14 @@ expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
 
 RESYNC=specs/resync_inputs.qnt
 verify "$RESYNC" resync_inputs_current allHold
+# The only-new counterexample (run ahead, be taken back, be moved forward
+# again) is over 15 steps long, beyond this bound;
+# guestMovedOverInputsItMadeBeforeTest holds it and check-specs.sh's samples
+# reach it.
+# The no-refeed counterexample is over 13 steps long, beyond this bound;
+# guestMovedOverAnInputItsEngineWroteOverTest holds it.
+# The solo-holes counterexample (run alone past the limit, then resync) is 9
+# steps long, beyond this bound; hostRanAloneThenResyncsTest holds it.
 # The counterexample on resync_inputs_before is 10 steps long (the host has to
 # run far enough ahead for the guest to drop its inputs), beyond this bound;
 # check-specs.sh's scenarios and samples reach it.

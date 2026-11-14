@@ -17,9 +17,10 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-globalThis.window = globalThis;
-await import(path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/static/shared.js'));
-const { classifyRunnerStep } = globalThis.KNShared;
+const { createShared } = await import(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/src/page/shared.ts')
+);
+const { classifyRunnerStep } = createShared();
 
 test('a normal step (rescheduled, cycle time advanced) is emulated', () => {
   assert.equal(classifyRunnerStep(true, 0, 8.65), 'emulated');

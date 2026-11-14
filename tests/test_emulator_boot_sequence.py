@@ -47,14 +47,14 @@ def test_library_rom_updates_ejs_identity_for_next_boot():
 
 
 def test_non_ssb64_boot_clears_stale_standard_cheats():
-    source = (REPO_ROOT / "web/static/shared.js").read_text()
-    boot_idx = source.find("function bootWithCheats(label)")
+    source = (REPO_ROOT / "web/src/page/shared.ts").read_text()
+    boot_idx = source.find("function bootWithCheats(label?: string)")
     assert boot_idx != -1
     window = source[boot_idx : boot_idx + 700]
 
     assert "window.KNState?.romHash === SSB64_HASH" in window
     assert "applyStandardCheats(SSB64_ONLINE_CHEATS)" in window
-    assert "window.EJS_cheats = []" in window
+    assert "page().EJS_cheats = []" in window
     assert "clearCheats(false)" in window
     assert "gm.resetCheat()" in source or "gm.Module?._reset_cheat" in source
     assert "async function clearCheats(disableKnownCheats = true)" in source
@@ -62,7 +62,7 @@ def test_non_ssb64_boot_clears_stale_standard_cheats():
     assert "SSB64_HASH: SSB64_HASH" in source
 
 
-def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
+def test_smash_remix_startup_uses_kn_sync_and_starts_c_rollback_at_once():
     source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "const REMIX_INITIAL_SYNC_USE_KN_SYNC = true" in source
@@ -75,8 +75,9 @@ def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
     assert "const INITIAL_SMASH_CONFIRM_INPUT = Object.freeze({ buttons: (1 << 0) | (1 << 3)" in source
     assert "Smash Remix initial sync: confirm pulse scene=${scene} coreFrame=${frame}" in source
     assert "Smash Remix initial sync: capturing fallback scene=${scene}" in source
-    assert "C-ROLLBACK deferred for Smash Remix" in source
-    assert "window._rbDeferredForGameplay = tryInitRollback" in source
+    # Rollback starts with the match, not at the first battle frame.
+    assert "C-ROLLBACK deferred for Smash Remix" not in source
+    assert "_rbDeferredForGameplay" not in source
     assert "KNShared.clearCheats(false)" in source
 
 

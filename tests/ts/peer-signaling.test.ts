@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   disconnectDisposition,
@@ -182,4 +183,25 @@ test('a new player replaces whatever else holds their slot, and nothing more', (
   ];
   assert.deepEqual(staleHoldersOf(holders, 'new', 1), ['old']);
   assert.deepEqual(staleHoldersOf(holders, 'new', 3), []);
+});
+
+test('the engine runs each proved function beside its own decision and reports a difference', () => {
+  const engine = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
+  const observed = {
+    'stale-holders': 'staleHoldersOf',
+    'should-initiate': 'shouldInitiate',
+    disconnect: 'disconnectDisposition',
+    'startup-attempt-left': 'hasAttemptLeft',
+    'reconnect-attempt-left': 'hasAttemptLeft',
+    signal: 'signalDisposition',
+  };
+  for (const [what, name] of Object.entries(observed)) {
+    assert.ok(engine.includes(`'${what}',`), `${what} is not compared`);
+    assert.ok(new RegExp(`\\.${name}\\(`).test(engine), `${name} is not called by the engine`);
+  }
+  assert.ok(engine.includes("window.KNEvent?.('mesh-disagree', message, { old, next });"));
+  // Observing only: the engine's own rules are still the ones in charge.
+  assert.ok(engine.includes('shouldInitiate = _playerSlot < p.slot'));
+  assert.ok(engine.includes('if (nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS) {'));
+  assert.ok(engine.includes('if (attempt < _MAX_RECONNECT_ATTEMPTS) {'));
 });

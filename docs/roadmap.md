@@ -212,6 +212,14 @@ every read and reported no disagreement before the old flags were deleted.
   as a guest when the room has been handed on, instead of failing to open
   it. (A host that still owns its room cannot fall behind it: only the
   owner starts and ends games.)
+- Done: an outage that hits every player does not end their match. While
+  no player of a playing room is connected, the server keeps the dropped
+  players' places past the 30 s grace window (up to 5 minutes) instead of
+  emptying the room; before, both players came back to a deleted room and
+  were sent to the lobby (found by `tests/rb-two-player.mjs` with
+  `DROP_SIGNALING_MS=40000`, which the earlier stage 2 changes had only run
+  with a 3 s outage). `aMatchIsNotLostToTheGraceWindow` holds on
+  `room_current`.
 - Done: the rejoin is a state machine of its own
   (`web/src/rejoin-machine.ts`, diagram in `docs/session-machine.md`):
   `rejoining` invokes the rejoin program, and leaving the state (the socket
@@ -262,20 +270,24 @@ modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
 keeps the channel, the timers and the page. The host's sending side and the
 WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
 (each player slot, the spectator line, the in-game info panel; the Start
-button's rule is observed, `play.js` still decides it). Last: connect, the game
-lifecycle and engine start-up, which wait on Stage 2 (the machine deciding).
+button's rule is observed, `play.js` still decides it). Joining a room:
+the `open-room` and `join-room` requests are built in `connect.ts` and typed
+against the generated schemas, with what each refusal means; whether a page
+comes in as a spectator and how it gets into a match already under way are
+`join-plan.ts` (proved), observed, with `onConnect` still deciding. Left in
+`play.js`: the reconnect banner's timers, the game lifecycle handlers and
+engine start-up, which are effects on the page, the socket and the emulator.
 
-**Stage 4: engine periphery [pure logic done]**
+**Stage 4: engine periphery [done]**
 `shared.js` (input wire format; prove encode/decode round-trips with
 LemmaScript), `kn-state.js`, `gamepad-manager.js`, `kn-diagnostics.js`,
 `kn-desync-detector.js`. The engine calls `KNCore.meshHealTargets` instead of
 its inline roster loops.
 
-Done: the decisions and arithmetic of each script are typed functions in
-`web/src`, called through `KNCore`, with the script's own code kept as the
-fallback for a page without the bundle (the demo page). A test per script
-runs the real script with and without the bundle against output captured
-before the move.
+Done, first: the decisions and arithmetic of each script became typed
+functions in `web/src`, with the script's own code kept as a fallback until
+production showed no difference. A test per script holds the TypeScript to
+output captured from the script before the move.
 
 - Proved (LemmaScript): the input packet round trip (`input-wire.ts`), the
   stick dead-band's per-axis rule (`stick-axis.ts`), `classifyRunnerStep`,
@@ -285,20 +297,25 @@ before the move.
   verifier does not model): the sync log ring, the diagnostics' pixel hash,
   canvas health, screenshot crop and audio transition (`diagnostics.ts`),
   and the gamepad axis scaling and polarity (`gamepad-axes.ts`).
-- `KNState` has a type (`kn-state.ts`); `kn-state.js` still builds it and
-  still runs before the bundle, because `core-redirector.js` reads it from a
-  fetch callback.
+- `KNState` is typed and built in `kn-state.ts`; the bundle sets it as it
+  loads and `kn-state.js` is gone. `core-redirector.js`, whose fetch callback
+  can run before the bundle, keeps its one value in `localStorage` itself.
 - Both engine roster loops ask `meshHealTargets`, one entry at a time.
 - Two inputs the scripts used as read are decoded with Effect Schema first:
   a peer's desync digest (`desync-digest.ts`) and a saved gamepad profile
   (`gamepad-profile.ts`). One that does not fit is dropped or ignored.
 
-Not done: the scripts themselves are still plain JavaScript. What is left in
-them is the part bound to the browser (reading pads and the canvas, DOM
-hooks, peer-connection helpers, cheats, storage) and their mutable state.
-The fallbacks can be deleted, and `play.html` can stop loading the scripts
-in favour of the bundle, once production shows no difference; the demo page
-needs the bundle first.
+The scripts themselves are TypeScript too (#170 to #174): `kn-state.js`,
+`shared.js`, `gamepad-manager.js`, `kn-diagnostics.js` and
+`kn-desync-detector.js` are gone, their code is `web/src/kn-state.ts` and
+`web/src/page/*.ts`, and the bundle sets the same globals (`KNState`,
+`KNShared`, `KNEvent`, `GamepadManager`, `KNDiag`, `KNDesync`) as it loads,
+right after `storage.js`. The JavaScript fallbacks are deleted; the tests
+import the TypeScript.
+
+Not done: the gamepad manager's poll loop and the two polling loops in
+`page/shared.ts` (`waitForEmulator`, `disableEJSInput`) are ported as they
+were, bare timers, not Effect code.
 
 **Stage 5: the engine**
 `netplay-rollback.js` (18k lines) is split by concern into typed modules:
@@ -321,15 +338,100 @@ Slice 1, the peer mesh and signaling:
   reconnecting with nothing armed: the match is frozen) and
   `staleSignalsAreNotApplied` (an answer to an earlier attempt is applied to
   the connection that replaced it). None is fixed yet.
-- Next: one XState machine per peer connection, observing beside the engine.
+- Done (observing): the engine runs the proved functions of
+  `web/src/peer-signaling.ts` beside its own decisions (who offers, what a
+  signal does to the connection table, what a lost connection leads to, when
+  to stop retrying, which entries a new player replaces) and reports a
+  difference as a `mesh-disagree` client event. The engine's rules stay in
+  charge until production shows none.
+- Built, not yet wired in: the per-peer machine, `web/src/peer-connection.ts`
+  (diagram in `docs/peer-connection-machine.md`). One machine per other
+  player, built to the model's `fixed` variant: the lower slot is the pair's
+  one initiator, every wait in a match has a deadline (delayed transitions,
+  durations given as input), signals and channel events carry the attempt
+  they belong to and one for another attempt is ignored, and a roster update
+  never replaces an open connection. It decides with the proved functions in
+  `peer-signaling.ts` and makes no WebRTC call: what it wants done it issues
+  as commands. `tests/ts/peer-connection.test.ts` replays the model's
+  scenarios against it. Nothing calls it yet, so the four properties are
+  still violated by the engine.
+- Next: run the machine beside the engine, observing: feed it the engine's
+  events and compare its commands with what the engine does. That needs the
+  engine to number its offers (the attempt id on `webrtc-signal`).
+
+**Stage 6: the remaining page scripts**
+The other hand-written scripts of the play, demo and landing pages move to
+`web/src` the way `play.js` does: the logic becomes strict TypeScript and the
+script shrinks to a thin caller or leaves the page. A decision the old code
+also makes starts by observing; a page effect with nothing to compare moves
+as it is. One file, or one small group, per change, smallest risk first:
+
+1. `feedback.js`, `version.js`, `version-guard.js`, `storage.js`,
+   `kn-capture.js`, `kn-vision-client.js`, `switch2-usb.js`
+2. `controller-settings.js`, `virtual-gamepad.js`
+3. `kn-audio.js`
+4. `netplay-streaming.js`
+5. `demo.js`, `fake-peer.js`, `ssb64-menu-autopilot.js`,
+   `rollback-timeline.js`
+6. `landing.js`, `join.js`
+
+Not every page has `window.KNCore`, and some of these scripts run before it:
+
+- The play and demo pages load `kn-core.js` early, before the first script
+  that needs it, and reach the moved logic through `window.KNCore`.
+- The front page and the admin dashboard load no core. What they share with
+  the play page (`storage.js`, `version.js`, `version-guard.js`,
+  `feedback.js`) is written without Effect and also built into a small
+  bundle of its own for them.
+- `landing.js` and `join.js` ship in their own small bundles beside
+  `kn-wake-art.js`: the landing pages must stay light and are served while
+  the server sleeps.
+
+What each needs before merge:
+
+- `kn-audio.js` is on the audio path of a rollback match and needs
+  `tests/rb-two-player.mjs` with `JITTER=20`.
+- `virtual-gamepad.js` is on the input path, but the two-player test feeds
+  inputs from the menu autopilot and never touches the touch controls. Its
+  evidence is `tests/test_virtual_gamepad.py` and the device run in
+  `tests/VGP-DEVICE-TEST.md`, with the two-player test as the check that
+  nothing else moved.
+- `netplay-streaming.js` needs the streaming end-to-end run.
+
+Not in this stage:
+
+- `admin.js`, the admin dashboard's controller. It is one page with no
+  netplay in it and comes after the pages players use.
+
+Staying plain JavaScript:
+
+- `audio-worklet-processor.js` and `rollback-shadow-worker.js` run in their
+  own worker contexts, where `window.KNCore` does not exist. Building them
+  from TypeScript as separate entries is a change of its own, after the rest.
+- `kn-state.js`, `core-redirector.js` and `api-sandbox.js` run before the
+  bundle loads (`kn-state.js` is Stage 4's; its type is
+  `web/src/kn-state.ts`).
+- `ejs-loader.js` is EmulatorJS's loader with our boot hooks, injected by
+  the page when the emulator starts. It stays in the shape of the upstream
+  file it tracks.
+- `netplay-lockstep.js` is a deprecated shim: a `play.html` cached from
+  before the engine was renamed still asks for it, and it loads
+  `netplay-rollback.js` for that page. It is deleted once those cached pages
+  have expired, whatever the current pages load, and is not converted.
 
 **Open decisions**
 
 - `@xstate/effect` requires XState 6, which is in beta. Both are pinned to
   exact versions. Revisit when XState 6 is stable.
-- The bundle is 493 KB minified (162 KB gzipped), mostly Effect. It is
-  committed so that deploys need no Node step. Moving the build into the
-  Docker image is the alternative once the bundle changes often.
+- The bundle is mostly Effect. It was committed at first so that deploys
+  needed no Node step; with several branches changing `web/src` at once,
+  every merge put the committed file in conflict with every other open
+  branch. It is now build output (`web/static/dist` is git-ignored): the
+  Docker image builds it in a Node stage, CI builds it, and
+  `scripts/build_landing.py` / `scripts/build_demo.py` build it before
+  packaging. `package-lock.json` is committed so every build gives the same
+  bytes, which the landing build id depends on; CI's `image` job compares
+  the image's bundles with a local build.
 - The database stays on Cloudflare D1 (SQLite locally). Queries are built with
   SQLAlchemy from the model classes in `server/src/schema.py` and compiled to
   SQL for the existing backends; SQLAlchemy never opens a connection.

@@ -10,9 +10,10 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-globalThis.window = globalThis;
-await import(path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/static/shared.js'));
-const { createStickDeadband } = globalThis.KNShared;
+const { createShared } = await import(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/src/page/shared.ts')
+);
+const { createStickDeadband } = createShared();
 
 const run = (filter, lxs) => lxs.map((lx) => filter({ buttons: 0, lx, ly: 0, cx: 0, cy: 0 }).lx);
 
