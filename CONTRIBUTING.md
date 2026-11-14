@@ -130,7 +130,7 @@ earlier ones to have set up their `window.*` exports:
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
 8. `kn-state.js` — shared state namespace
 9. `gamepad-manager.js` — gamepad profiles and mapping
-10. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
+10. `switch2-usb.js` — starts the WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad (`web/src/page/switch2-usb.ts`)
 11. `shared.js` — input encoding/decoding, cheats, wire format
 12. `virtual-gamepad.js` — touch controls for mobile
 13. `kn-audio.js` — AudioWorklet pump + rollback audio capture
@@ -183,7 +183,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
 | `shared.js` | ~1,060 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
 | `gamepad-manager.js` | ~550 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
-| `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
+| `switch2-usb.js` | — | Starts the WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C), which owns the Connect button and its status line (`web/src/page/switch2-usb.ts`) | play.html |
 | `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
 | `virtual-gamepad.js` | ~1,194 | On-screen touch controls for mobile | KNState |
 | `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |

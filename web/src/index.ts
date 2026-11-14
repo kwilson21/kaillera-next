@@ -24,6 +24,7 @@ import {
   decodeUsersUpdated,
 } from './protocol.ts';
 import { startCapture } from './page/capture.ts';
+import { startSwitch2Usb } from './page/switch2-usb.ts';
 import { startVisionClient } from './page/vision-client.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as delay from './play/delay.ts';
@@ -275,6 +276,7 @@ export const KNCore = {
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
     startCapture,
+    startSwitch2Usb,
     startVisionClient,
   },
   play: {

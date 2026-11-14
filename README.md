@@ -210,7 +210,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
     gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
-    switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
+    switch2-usb.js         Starts the WebUSB handshake for the Switch 2 Pro Controller (web/src/page/switch2-usb.ts)
     controller-settings.js In-game controller settings panel
     virtual-gamepad.js     On-screen touch controls for mobile
     shared.js              Input encoding/decoding, wire format, input application to WASM

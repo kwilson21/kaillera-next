@@ -1,18 +1,25 @@
 // Switch 2 Pro Controller support: the built-in gamepad profile and the WebUSB
 // handshake module, exercised against a mock USBDevice (no hardware needed).
+// The handshake is web/src/page/switch2-usb.ts, which imports `effect`, so
+// this needs the repository's node_modules (npm install).
 //
 //   node --test tests/switch2-usb.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { startSwitch2Usb } from '../web/src/page/switch2-usb.ts';
 
 globalThis.window = globalThis;
 const staticDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../web/static');
 await import(path.join(staticDir, 'gamepad-manager.js'));
-await import(path.join(staticDir, 'switch2-usb.js'));
-const { GamepadManager, Switch2USB } = globalThis;
+const { GamepadManager } = globalThis;
+// Started the way web/static/switch2-usb.js starts it on a page, on Node's
+// global object: no document yet, so nothing is wired and only enable() runs.
+// The tests below give it a status line and window events as they need them.
+const Switch2USB = startSwitch2Usb(globalThis);
 
 const FAST = { replyTimeoutMs: 5, gapMs: 0 };
 const COMMAND_COUNT = 17;
@@ -253,12 +260,8 @@ test('a pad exposed before the handshake finished is ready straight away', async
 
 // ── Auto-enable and the Connect button ───────────────────────────────
 
-// _start() runs when the script loads once a document exists, so each scenario re-evaluates
-// the script (a plain CommonJS file: drop it from the require cache) against a fake page
-// and navigator.usb.
-const require = createRequire(import.meta.url);
-const modulePath = path.join(staticDir, 'switch2-usb.js');
-const realNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+// The module wires a page when it is started on one, so each scenario starts it on its own
+// fake page and navigator.usb.
 
 function loadOnPage({ buttonHidden = true, devices = [], getDevicesError = null, requestDevice = null } = {}) {
   const status = { textContent: '', hidden: true };
@@ -278,17 +281,9 @@ function loadOnPage({ buttonHidden = true, devices = [], getDevicesError = null,
     requestDevice,
     addEventListener: () => {},
   };
-  globalThis.document = { readyState: 'complete', getElementById: (id) => elements[id] ?? null };
-  Object.defineProperty(globalThis, 'navigator', { value: { usb }, configurable: true, writable: true });
-  delete require.cache[modulePath];
-  require(modulePath);
+  const document = { readyState: 'complete', getElementById: (id) => elements[id] ?? null };
+  startSwitch2Usb({ document, navigator: { usb } });
   return { status, button };
-}
-
-function leavePage() {
-  delete globalThis.document;
-  if (realNavigator) Object.defineProperty(globalThis, 'navigator', realNavigator);
-  else delete globalThis.navigator;
 }
 
 async function until(condition, timeoutMs = 3000) {
@@ -309,66 +304,59 @@ const finished = async (device) => {
 
 test('a granted controller is enabled automatically and the Connect button stays hidden', async () => {
   const device = responsiveDevice();
-  try {
-    const { button } = loadOnPage({ buttonHidden: false, devices: [device] });
-    await until(() => button.hidden);
-    assert.equal(count(device, 'close'), 0); // hidden while the handshake runs, not only after it
-    await finished(device);
-    assert.equal(count(device, 'transferOut'), COMMAND_COUNT);
-    assert.equal(button.hidden, true);
-  } finally {
-    leavePage();
-  }
+  const { button } = loadOnPage({ buttonHidden: false, devices: [device] });
+  await until(() => button.hidden);
+  assert.equal(count(device, 'close'), 0); // hidden while the handshake runs, not only after it
+  await finished(device);
+  assert.equal(count(device, 'transferOut'), COMMAND_COUNT);
+  assert.equal(button.hidden, true);
 });
 
 test('the Connect button is shown when no matching controller has been granted', async () => {
   const switch1Pro = mockDevice();
   switch1Pro.productId = 0x2009;
-  try {
-    const { button } = loadOnPage({ devices: [switch1Pro] });
-    await until(() => !button.hidden);
-    assert.equal(count(switch1Pro, 'open'), 0);
-  } finally {
-    leavePage();
-  }
+  const { button } = loadOnPage({ devices: [switch1Pro] });
+  await until(() => !button.hidden);
+  assert.equal(count(switch1Pro, 'open'), 0);
 });
 
 test('the Connect button is shown when the granted devices cannot be listed', async () => {
-  try {
-    const { button } = loadOnPage({ getDevicesError: new DOMException('blocked', 'SecurityError') });
-    await until(() => !button.hidden);
-  } finally {
-    leavePage();
-  }
+  const { button } = loadOnPage({ getDevicesError: new DOMException('blocked', 'SecurityError') });
+  await until(() => !button.hidden);
 });
 
 test('the Connect button comes back when the automatic enable fails', async () => {
   const device = responsiveDevice({ claimError: new DOMException('Unable to claim interface.', 'NetworkError') });
-  try {
-    const { button, status } = loadOnPage({ devices: [device] });
-    await finished(device);
-    assert.equal(button.hidden, false);
-    assert.match(status.textContent, /NetworkError: Unable to claim interface\./);
-  } finally {
-    leavePage();
-  }
+  const { button, status } = loadOnPage({ devices: [device] });
+  await finished(device);
+  assert.equal(button.hidden, false);
+  assert.match(status.textContent, /NetworkError: Unable to claim interface\./);
 });
 
 test('clicking Connect: cancelling the chooser keeps the button, a successful enable hides it', async () => {
   const device = responsiveDevice();
   const answers = [() => Promise.reject(new DOMException('No device selected.', 'NotFoundError')), async () => device];
-  try {
-    const { button, status } = loadOnPage({ requestDevice: () => answers.shift()() });
-    await until(() => !button.hidden);
+  const { button, status } = loadOnPage({ requestDevice: () => answers.shift()() });
+  await until(() => !button.hidden);
 
-    await button.onClick();
-    assert.equal(status.textContent, 'No controller selected.');
-    assert.equal(button.hidden, false);
+  await button.onClick();
+  assert.equal(status.textContent, 'No controller selected.');
+  assert.equal(button.hidden, false);
 
-    await button.onClick();
-    assert.equal(count(device, 'transferOut'), COMMAND_COUNT);
-    assert.equal(button.hidden, true);
-  } finally {
-    leavePage();
-  }
+  await button.onClick();
+  assert.equal(count(device, 'transferOut'), COMMAND_COUNT);
+  assert.equal(button.hidden, true);
+});
+
+test('the page script starts the module from the core and nothing else', () => {
+  const calls = [];
+  const api = {};
+  const startSwitch2Usb = (host) => {
+    calls.push(host);
+    return api;
+  };
+  const window = { KNCore: { page: { startSwitch2Usb } } };
+  vm.runInNewContext(fs.readFileSync(path.join(staticDir, 'switch2-usb.js'), 'utf8'), { window });
+  assert.deepEqual(calls, [window]);
+  assert.equal(window.Switch2USB, api);
 });
