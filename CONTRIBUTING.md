@@ -211,8 +211,10 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 - **Python** — formatted by ruff, type hints encouraged.
 - **TypeScript** — new frontend logic lives in `web/src/` (strict mode,
   Effect, Effect Schema, XState). `just build` type-checks, runs
-  `tests/ts`, and bundles it to `web/static/dist/kn-core.js`, which is
-  committed. The static landing pages are strict TypeScript too, without
+  `tests/ts`, and bundles it to `web/static/dist/kn-core.js`. The bundles
+  are build output and not in git: run `npm ci && npm run build` after a
+  fresh checkout and after changing `web/src`. The Docker image builds them
+  itself. The static landing pages are strict TypeScript too, without
   Effect (`web/src/landing/`): the waking art and the invite page are built
   as their own small bundles, `web/static/dist/kn-wake-art.js` and
   `web/static/dist/kn-join.js`. The existing
