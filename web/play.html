@@ -388,9 +388,6 @@
         });
     </script>
 
-    <!-- Version-mismatch force-reload guard (must load first so stale
-         tabs are caught before app code initializes) -->
-    <script src="/static/version-guard.js"></script>
     <!-- Native API reference management (must load before everything) -->
     <script src="/static/api-sandbox.js"></script>
 
@@ -529,6 +526,9 @@
          it loads, and shared.js and the engines take their input codec, stick
          dead-band and sync log from it. -->
     <script src="/static/dist/kn-core.js"></script>
+    <!-- Version-mismatch reload guard (window.KNSite, set by the core): a
+         stale tab is caught before the engine scripts start. -->
+    <script src="/static/version-guard.js"></script>
     <script src="/static/kn-capture.js"></script>
 
     <!-- Centralized cross-module state -->

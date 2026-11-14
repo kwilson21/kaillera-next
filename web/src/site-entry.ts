@@ -5,6 +5,8 @@
  * Effect, so it stays a few kilobytes. The play and demo pages get the same
  * modules from kn-core.js.
  */
+import { installSite } from './site/index.ts';
 import { installSafeStorage } from './site/storage.ts';
 
 installSafeStorage();
+installSite();

@@ -115,11 +115,11 @@ kaillera-next/
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD
 │       ├── feedback.js          # in-app feedback collection
 │       ├── version.js           # version display + changelog modal
-│       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)
+│       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
 │       ├── dist/kn-core.js       # built from web/src by `just build`; committed, never edited by hand
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
-│       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage
+│       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage, window.KNSite
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
 │   ├── src/                     # strict TypeScript frontend
 │   │   ├── index.ts             # core entry, bundled as window.KNCore
@@ -128,7 +128,7 @@ kaillera-next/
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
-│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage)
+│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry

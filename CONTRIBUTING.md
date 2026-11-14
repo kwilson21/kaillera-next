@@ -121,12 +121,12 @@ To trace data flow between modules, grep for the `KNState` property name.
 Scripts are loaded in `play.html` in dependency order. Later scripts expect
 earlier ones to have set up their `window.*` exports:
 
-1. `version-guard.js` — cross-tab version mismatch guard (forces reload after deploys)
-2. `api-sandbox.js` — saves native browser APIs before anything overrides them
-3. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
-4. `socket.io.min.js` — self-hosted Socket.IO client
-5. `vendor/fflate.min.js` — compression lib used to extract ROM ZIP archives
-6. `dist/kn-core.js` — the TypeScript core (`window.KNCore`); also sets `window.KNStorage`, the safe localStorage/sessionStorage wrapper
+1. `api-sandbox.js` — saves native browser APIs before anything overrides them
+2. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
+3. `socket.io.min.js` — self-hosted Socket.IO client
+4. `vendor/fflate.min.js` — compression lib used to extract ROM ZIP archives
+5. `dist/kn-core.js` — the TypeScript core (`window.KNCore`); also sets `window.KNStorage`, the safe localStorage/sessionStorage wrapper, and `window.KNSite`, what this page shares with the front page
+6. `version-guard.js` — cross-tab version mismatch guard (forces reload after deploys); starts `web/src/site/version-guard.ts`
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
 8. `kn-state.js` — shared state namespace
 9. `gamepad-manager.js` — gamepad profiles and mapping
@@ -198,12 +198,12 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `kn-capture.js` | — | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag) | rollback, streaming |
 | `kn-state.js` | ~37 | Cross-module shared state namespace | all modules |
 | `version.js` | ~350 | Version display + changelog modal | play.js |
-| `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands | play.js |
+| `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands; a small caller of `web/src/site/version-guard.ts` | dist/kn-core.js or dist/kn-site.js |
 | `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |
 | `landing.js` | — | Front-page board controller (room creation, open-rooms board) on index.html | — |
 | `join.js` | — | Invite-page controller (room lookup, join/watch states) on join.html | — |
 | `dist/kn-wake-art.js` | — | Standalone TypeScript bundle for waking-state art while a room wakes | index.html, join.html |
-| `dist/kn-site.js` | — | Small TypeScript bundle for pages without the core: `KNStorage` | index.html, admin.html |
+| `dist/kn-site.js` | — | Small TypeScript bundle for pages without the core: `KNStorage`, and `KNSite` (`web/src/site/`), which the play page gets from the core | index.html, admin.html |
 | `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
 | `demo.js` | ~1,818 | Demo page orchestrator (fake peer + menu autopilot) | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
 | `fake-peer.js` | ~559 | Synthetic P2 for the demo page (simulated input/jitter) | demo.js |
