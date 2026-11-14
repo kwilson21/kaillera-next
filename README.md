@@ -225,7 +225,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     version.js             Version display + changelog modal
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
-    demo.js                Demo page orchestrator (fake peer + menu autopilot)
+    demo.js                Demo page orchestrator (fake peer + menu autopilot); its options, network settings and HUD text are web/src/demo
     fake-peer.js           Synthetic P2 for the demo page (simulated input/jitter)
     ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (reads RDRAM menu state)
     rollback-timeline.js   Demo page's live rollback-metrics HUD

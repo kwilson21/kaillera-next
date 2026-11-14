@@ -4,15 +4,29 @@
   const DEMO_SOCKET_ID = 'demo-local';
   const _nativeRAF = window.APISandbox?.nativeRAF || window.requestAnimationFrame.bind(window);
 
+  // The demo's own logic (web/src/demo) and the rollback engine are in the
+  // TypeScript core (dist/kn-core.js). Without it the page cannot run: say so
+  // and stop here, before anything below calls window.KNCore.
+  if (!window.KNCore?.demo) {
+    document.addEventListener('DOMContentLoaded', () => {
+      const message = 'Part of this page did not load. Reload the page to try again.';
+      const status = document.getElementById('demo-status');
+      if (status) status.textContent = message;
+      const loadingText = document.getElementById('game-loading-text');
+      if (loadingText) loadingText.textContent = message;
+    });
+    return;
+  }
+  const _demo = window.KNCore.demo;
+
   const _installEjsGlobals = () => {
+    const settings = _demo.options.ejsSettings(window.location.search || '');
     window.EJS_player = '#game';
     window.EJS_core = 'n64';
     window.EJS_gameID = 'kaillera-next-demo';
     window.EJS_startOnLoaded = true;
     window.EJS_pathtodata = '/static/ejs/';
-    window.EJS_defaultOptions = {
-      'mupen64plus-cpucore': 'cached_interpreter',
-    };
+    window.EJS_defaultOptions = settings.defaultOptions;
 
     window.__knInstallUnpackAlignmentShim = () => {
       [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach((ctor) => {
@@ -32,31 +46,8 @@
       });
     };
 
-    const params = new URLSearchParams(window.location.search || '');
-    const gfxProfile = params.get('kngfx');
-    if (gfxProfile === 'texrect') {
-      Object.assign(window.EJS_defaultOptions, {
-        'mupen64plus-EnableNativeResTexrects': 'Optimized',
-        'mupen64plus-EnableTexCoordBounds': 'True',
-        'mupen64plus-CorrectTexrectCoords': 'Force',
-      });
-    } else if (gfxProfile === 'texrect-unopt') {
-      Object.assign(window.EJS_defaultOptions, {
-        'mupen64plus-EnableNativeResTexrects': 'Unoptimized',
-        'mupen64plus-EnableTexCoordBounds': 'True',
-        'mupen64plus-CorrectTexrectCoords': 'Force',
-        'mupen64plus-BackgroundMode': 'Stripped',
-      });
-    } else if (gfxProfile === 'webgl1') {
-      window.EJS_forceLegacyCores = true;
-      window.EJS_defaultOptions.webgl2Enabled = 'disabled';
-    } else if (gfxProfile === 'angrylion') {
-      window.EJS_defaultOptions['mupen64plus-rdp-plugin'] = 'angrylion';
-    } else if (gfxProfile === 'parallel') {
-      window.EJS_defaultOptions['mupen64plus-rdp-plugin'] = 'parallel';
-    } else if (gfxProfile === 'unpack1') {
-      window.__knInstallUnpackAlignmentShim();
-    }
+    if (settings.forceLegacyCores) window.EJS_forceLegacyCores = true;
+    if (settings.unpackAlignmentShim) window.__knInstallUnpackAlignmentShim();
 
     window.EJS_defaultControls = {
       0: {
@@ -199,19 +190,17 @@
   // Record modes (URL param):
   //   ?record=1  → user controls P1, P2 follows the baked P2 autopilot. The
   //                user's inputs are captured to bake as a new
-  //                MENU_AUTOPILOT_P1_TRANSITIONS list.
+  //                P1_TRANSITIONS list (web/src/demo/autopilot.ts).
   //   ?record=p2 → P1 follows the baked P1 autopilot, user's input is captured
   //                as P2's input AND routed to fake-peer so the user can steer
   //                P2's CSS cursor in real time. Captured stream gets baked as
-  //                MENU_AUTOPILOT_P2_TRANSITIONS for fake-peer to mirror onto
+  //                P2_TRANSITIONS for fake-peer to mirror onto
   //                slot 1 during normal playback.
   // The replay path suppresses real keyboard/touch during autopilot so the
   // user's first sensation of input is on match start.
-  const _urlParams = new URLSearchParams(window.location.search || '');
-  const _recordParam = _urlParams.get('record');
-  const _randomP1InMatch =
-    _urlParams.get('randomP1') === '1' || _urlParams.get('demoRandomP1') === '1' || _urlParams.get('p1Random') === '1';
-  let _recordMode = _recordParam === '1' ? 'p1' : _recordParam === 'p2' ? 'p2' : false;
+  const _options = _demo.options.demoOptions(window.location.search || '');
+  const _randomP1InMatch = _options.randomP1InMatch;
+  let _recordMode = _options.record;
   const _recordedInputs = [];
   let _recordingActive = false;
   let _recordingDone = false;
@@ -219,143 +208,27 @@
   let _wrappedReadLocalInput = false;
   let _heldRandomP1Input = null;
   let _heldRandomP1UntilFrame = -1;
-  const RANDOM_P1_BUTTON_BITS = [0, 1, 4, 5, 6, 7, 11, 12];
-  const _randomP1Axis = () => {
-    const max = window.KNShared?.N64_MAX ?? 83;
-    const mag = Math.max(18, Math.round((0.35 + Math.random() * 0.65) * max));
-    return Math.random() < 0.5 ? -mag : mag;
-  };
-  const _randomP1Input = () => {
-    if (Math.random() < 0.65) {
-      const bit = RANDOM_P1_BUTTON_BITS[Math.floor(Math.random() * RANDOM_P1_BUTTON_BITS.length)];
-      return { buttons: 1 << bit, lx: 0, ly: 0, cx: 0, cy: 0 };
-    }
-    if (Math.random() < 0.5) {
-      return { buttons: 0, lx: _randomP1Axis(), ly: _randomP1Axis(), cx: 0, cy: 0 };
-    }
-    return { buttons: 0, lx: 0, ly: 0, cx: _randomP1Axis(), cy: _randomP1Axis() };
-  };
   const _randomP1InputForFrame = (frame) => {
     if (frame > _heldRandomP1UntilFrame || !_heldRandomP1Input) {
-      _heldRandomP1Input = _randomP1Input();
+      _heldRandomP1Input = _demo.autopilot.randomP1Input(Math.random, window.KNShared?.N64_MAX ?? 83);
       // Match the fake peer's 30-90 frame hold so prediction misses align
       // with real human-cadence input changes, not per-150ms churn.
-      _heldRandomP1UntilFrame = frame + 30 + Math.floor(Math.random() * 60);
+      _heldRandomP1UntilFrame = _demo.autopilot.randomP1HoldUntil(frame, Math.random);
     }
     return _heldRandomP1Input;
   };
-  // P2 menu autopilot — sparse list of input transitions for the synthetic
-  // opponent so it picks a CSS character without us scripting per-frame
-  // inputs. Format: [frame, buttons, lx, ly, cx, cy] sorted by frame. Replay
-  // at frame N returns the entry with the largest frame <= N (or zero if no
-  // entry yet). To regenerate: visit ?record=p2, play through CSS as P2,
-  // download kn-demo-autopilot-p2.json, trim to transitions only.
-  const MENU_AUTOPILOT_P2_TRANSITIONS = [
-    [591, 0, 83, 0, 0, 0],
-    [600, 0, 83, -83, 0, 0],
-    [620, 0, 83, 0, 0, 0],
-    [636, 0, 0, 0, 0, 0],
-    [654, 0, 0, -83, 0, 0],
-    [659, 0, 0, 0, 0, 0],
-    [682, 1, 0, 0, 0, 0],
-    [687, 0, 0, 0, 0, 0],
-  ];
-  const _p2InputAtFrame = (frame) => {
-    let lo = 0;
-    let hi = MENU_AUTOPILOT_P2_TRANSITIONS.length - 1;
-    let best = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (MENU_AUTOPILOT_P2_TRANSITIONS[mid][0] <= frame) {
-        best = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    if (best < 0) return null;
-    const e = MENU_AUTOPILOT_P2_TRANSITIONS[best];
-    return { buttons: e[1], lx: e[2], ly: e[3], cx: e[4], cy: e[5] };
-  };
-
-  // P1 menu autopilot — sparse list of input transitions captured via
-  // ?record=1, then hand-extracted to deduplicate consecutive same-input
-  // frames. Format: [frame, buttons, lx, ly, cx, cy]. Replay returns the
-  // entry with the largest frame <= currentFrame (or zero if no entry
-  // yet). To regenerate: visit ?record=1, play to a match, download
-  // kn-demo-autopilot.json, then dedupe consecutive same-input frames.
-  // Min hold ≥5 frames for any button-press transition: the recording
-  // captures the exact press width the user produced, but at runtime
-  // the engine's tick cadence (rAF jitter, delay drift between
-  // recording and replay) can shrink the effective window by 1-2
-  // frames. CSS character-confirm A-presses captured at 3 frames
-  // (released at 680 originally) intermittently fell outside their
-  // window and the autopilot stalled on the character grid.
-  const MENU_AUTOPILOT_P1_TRANSITIONS = [
-    [101, 0, 0, 0, 0, 0],
-    [162, 8, 0, 0, 0, 0],
-    [167, 0, 0, 0, 0, 0],
-    [411, 8, 0, 0, 0, 0],
-    [415, 0, 0, 0, 0, 0],
-    [439, 0, 0, 83, 0, 0],
-    [443, 0, 0, 0, 0, 0],
-    [460, 1, 0, 0, 0, 0],
-    [464, 0, 0, 0, 0, 0],
-    [484, 1, 0, 0, 0, 0],
-    [490, 0, 0, 0, 0, 0],
-    [586, 0, 83, 0, 0, 0],
-    [597, 0, 83, -83, 0, 0],
-    [616, 0, 83, 0, 0, 0],
-    [645, 0, 0, 0, 0, 0],
-    [659, 0, 83, 0, 0, 0],
-    [662, 0, 0, 0, 0, 0],
-    [677, 1, 0, 0, 0, 0],
-    [683, 0, 0, 0, 0, 0],
-    [736, 8, 0, 0, 0, 0],
-    [742, 0, 0, 0, 0, 0],
-    [871, 0, -83, 0, 0, 0],
-    [875, 0, 0, 0, 0, 0],
-    [895, 0, 0, -83, 0, 0],
-    [899, 0, 0, 0, 0, 0],
-    [917, 1, 0, 0, 0, 0],
-    [922, 0, 0, 0, 0, 0],
-  ];
-  const _p1InputAtFrame = (frame) => {
-    let lo = 0;
-    let hi = MENU_AUTOPILOT_P1_TRANSITIONS.length - 1;
-    let best = -1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (MENU_AUTOPILOT_P1_TRANSITIONS[mid][0] <= frame) {
-        best = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    if (best < 0) return null;
-    const e = MENU_AUTOPILOT_P1_TRANSITIONS[best];
-    return { buttons: e[1], lx: e[2], ly: e[3], cx: e[4], cy: e[5] };
-  };
+  // The recorded menu scripts (player 1's from ?record=1, player 2's from
+  // ?record=p2) and their lookup are web/src/demo/autopilot.ts.
+  const _p2InputAtFrame = (frame) => _demo.autopilot.p2ScriptedInput(frame);
+  const _p1InputAtFrame = (frame) => _demo.autopilot.p1ScriptedInput(frame);
 
   // Compute SHA-256 of ROM bytes in the format the engine's _SMASH_REMIX_HASHES
   // set uses ('S' + 64 hex chars). This lets _isSmashRemix() detect Smash
   // Remix ROMs without us hardcoding gameId. Wrong gameId means the engine
   // reads from the wrong RDRAM addresses (Smash Remix and SSB64 use different
   // game_status offsets), and isInMatch returns wrong values.
-  const _hashRom = async (bytes) => {
-    try {
-      const digest = await crypto.subtle.digest('SHA-256', bytes);
-      const hex = Array.from(new Uint8Array(digest))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
-      return 'S' + hex;
-    } catch (_) {
-      return null;
-    }
-  };
+  const _hashRom = (bytes) => _demo.rom.demoRomHash(bytes);
 
-  const AUTO_COMPARE_PERIOD_MS = 6000;
   let _autoCompareTimer = 0;
   let _autoCompareStart = 0;
   let _autoCompareCycle = 0;
@@ -506,45 +379,15 @@
   // shipping fighters consider a connection viable for tournament
   // play (Skullgirls / MK11 max-prediction is also 7 frames),
   // making this a truthful framing rather than an artificial limit.
-  const DEFAULT_MATCH_RTT_MS = 100;
-  const RTT_SLIDER_MAX = 110;
+  const DEFAULT_MATCH_RTT_MS = _demo.network.DEFAULT_MATCH_RTT_MS;
   // Animation handle for the slider's 0 → target transition.
   let _lagAnimRaf = 0;
 
-  const _readRtt = () => {
-    const rtt = Number($('lag')?.value ?? 0);
-    return Number.isFinite(rtt) ? Math.max(0, Math.min(RTT_SLIDER_MAX, rtt)) : 0;
-  };
+  const _readRtt = () => _demo.network.rttFromSlider($('lag')?.value);
 
-  const _networkFromControls = () => {
-    // Slider value is RTT (ms) and acts as a single "how rough is your
-    // network" dial — every knob below scales with it so cranking the
-    // slider drives more rollbacks, not just more latency. Latency is
-    // the one-way travel cost (rtt/2) added once per packet by
-    // fake-peer. The remaining knobs each provide an independent path
-    // for inputs to miss the C engine's prediction window:
-    //   - jitter: ramps from 10 % of RTT at the low end to ~15 % near
-    //     the slider max. Real WAN is in this range; under-modeling it
-    //     (the old 5 %) made even 150 ms RTT look smoother than reality.
-    //   - lossProb: superlinear (rtt/150)^1.5 ramp, capped at 2 %.
-    //     Forces the redundant-frames recovery path; when redundancy
-    //     fails to bridge a gap the engine has to predict longer and
-    //     occasionally rolls back deeper.
-    //   - reorderProb: same ramp shape as loss, exercises the C
-    //     engine's out-of-order input handling.
-    // mispredictProb stays 0 — fake-peer's pre-match path uses it to
-    // inject random divergence outside a match, which would derail the
-    // baked menu autopilot before the user reaches gameplay.
-    const rtt = _readRtt();
-    const ramp = rtt > 0 ? Math.pow(rtt / RTT_SLIDER_MAX, 1.5) : 0;
-    return {
-      latencyMs: rtt / 2,
-      jitterMs: rtt * (0.1 + rtt * 0.0003),
-      lossProb: Math.min(0.02, ramp * 0.02),
-      reorderProb: Math.min(0.02, ramp * 0.02),
-      mispredictProb: 0,
-    };
-  };
+  // The slider is the one "how rough is your network" dial: latency, jitter,
+  // loss and reordering all scale with it (web/src/demo/network.ts).
+  const _networkFromControls = () => _demo.network.networkForRtt(_readRtt());
 
   // Smoothly animate the slider value from its current position to `target`
   // over `durationMs`, easing out, applying _applyNetwork() each frame so
@@ -556,21 +399,19 @@
       cancelAnimationFrame(_lagAnimRaf);
       _lagAnimRaf = 0;
     }
-    const start = Number(slider.value) || 0;
-    const delta = target - start;
-    if (Math.abs(delta) < 1) {
+    const start = _demo.network.lagAnimationStart(slider.value);
+    if (_demo.network.lagMoveIsInstant(start, target)) {
       slider.value = String(target);
       _applyNetwork();
       return;
     }
     const t0 = performance.now();
     const step = (now) => {
-      const t = Math.min(1, (now - t0) / durationMs);
-      // Cubic ease-out: 1 - (1 - t)^3 — fast start, soft landing.
-      const eased = 1 - Math.pow(1 - t, 3);
-      slider.value = String(Math.round(start + delta * eased));
+      // Cubic ease-out: fast start, soft landing.
+      const frame = _demo.network.lagAnimationFrame(start, target, now - t0, durationMs);
+      slider.value = frame.value;
       _applyNetwork();
-      if (t < 1) {
+      if (!frame.done) {
         _lagAnimRaf = _nativeRAF(step);
       } else {
         _lagAnimRaf = 0;
@@ -582,7 +423,7 @@
   const _updateSliderLabels = () => {
     const rtt = _readRtt();
     const label = $('lag-value');
-    if (label) label.textContent = `${rtt.toFixed(0)} ms RTT`;
+    if (label) label.textContent = _demo.network.rttLabel(rtt);
   };
 
   const _applyNetwork = () => {
@@ -593,9 +434,10 @@
   const _updateRollbackToggle = () => {
     const toggle = $('rollback-toggle');
     if (!toggle) return;
-    toggle.textContent = `Rollback: ${_rollbackEnabled ? 'ON' : 'OFF'}`;
-    toggle.setAttribute('aria-pressed', _rollbackEnabled ? 'true' : 'false');
-    toggle.classList.toggle('is-off', !_rollbackEnabled);
+    const look = _demo.hud.rollbackToggleLook(_rollbackEnabled);
+    toggle.textContent = look.text;
+    toggle.setAttribute('aria-pressed', look.pressed);
+    toggle.classList.toggle('is-off', look.off);
   };
 
   const _setRollbackEnabled = (enabled) => {
@@ -622,7 +464,7 @@
     _updateRollbackToggle();
   };
 
-  const _zeroLocalInput = () => ({ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 });
+  const _zeroLocalInput = () => _demo.autopilot.zeroInput();
 
   // No input-lag simulation here: the engine applies every player's input,
   // yours included, `delay` frames after it's read, so each mode's delay is
@@ -631,7 +473,7 @@
 
   // Wrap KNShared.readLocalInput once. In record mode, capture inputs to a
   // buffer indexed by current engine frame. Otherwise, replay scripted inputs
-  // from MENU_AUTOPILOT_P1_TRANSITIONS via _p1InputAtFrame (or pass real
+  // from the recorded script via _p1InputAtFrame (or pass real
   // input through if the autopilot has no entry for this frame yet).
   const _installInputHook = () => {
     if (_wrappedReadLocalInput || !window.KNShared?.readLocalInput) return;
@@ -641,14 +483,7 @@
       if (_recordMode === 'p1') {
         if (_recordingActive && !_recordingDone) {
           const frame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1;
-          _recordedInputs.push({
-            f: frame,
-            b: realInput.buttons | 0,
-            lx: realInput.lx | 0,
-            ly: realInput.ly | 0,
-            cx: realInput.cx | 0,
-            cy: realInput.cy | 0,
-          });
+          _recordedInputs.push(_demo.autopilot.recordedFrame(frame, realInput));
         }
         return realInput;
       }
@@ -658,24 +493,11 @@
         // for fake-peer to read this frame.
         const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1;
         if (_recordingActive && !_recordingDone) {
-          _recordedInputs.push({
-            f: currentFrame,
-            b: realInput.buttons | 0,
-            lx: realInput.lx | 0,
-            ly: realInput.ly | 0,
-            cx: realInput.cx | 0,
-            cy: realInput.cy | 0,
-          });
+          _recordedInputs.push(_demo.autopilot.recordedFrame(currentFrame, realInput));
         }
         // Publish live input so fake-peer's _scheduleFrame consumes it as
         // P2's input this frame instead of zero / random.
-        window.__knDemoP2LiveInput = {
-          buttons: realInput.buttons | 0,
-          lx: realInput.lx | 0,
-          ly: realInput.ly | 0,
-          cx: realInput.cx | 0,
-          cy: realInput.cy | 0,
-        };
+        window.__knDemoP2LiveInput = _demo.autopilot.wholeInput(realInput);
         // Return autopilot's scripted P1 input for slot 0.
         const scripted = _p1InputAtFrame(currentFrame);
         if (scripted) return scripted;
@@ -703,7 +525,7 @@
       _recordingActive = true;
       const label = _recordMode === 'p2' ? 'P2' : 'P1';
       _setStatus(`REC mode (${label}) — play through to a match. Recording stops automatically.`);
-    } else if (MENU_AUTOPILOT_P1_TRANSITIONS.length > 0) {
+    } else if (_demo.autopilot.P1_TRANSITIONS.length > 0) {
       _autopilotActive = true;
       // Freeze DELAY_FRAMES while the autopilot is running. Scripted button
       // presses use ~5-frame windows; if delay shifts mid-press the engine
@@ -750,7 +572,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = _recordMode === 'p2' ? 'kn-demo-autopilot-p2.json' : 'kn-demo-autopilot.json';
+      a.download = _demo.autopilot.recordingFileName(_recordMode);
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
@@ -785,16 +607,9 @@
   // input plus the battle load + 3-2-1 countdown, if the game still isn't in
   // the battle scene: reload once (a fresh run usually lines up), then hand
   // the keyboard to the user.
-  const AUTOPILOT_GRACE_FRAMES = 600; // ~10 s at 60 fps
-  const AUTOPILOT_DEADLINE_FRAME =
-    Math.max(
-      MENU_AUTOPILOT_P1_TRANSITIONS[MENU_AUTOPILOT_P1_TRANSITIONS.length - 1]?.[0] ?? 0,
-      MENU_AUTOPILOT_P2_TRANSITIONS[MENU_AUTOPILOT_P2_TRANSITIONS.length - 1]?.[0] ?? 0,
-    ) + AUTOPILOT_GRACE_FRAMES;
-  // The closed-loop autopilot re-issues dropped presses, so it has no script
-  // end to measure from; a minute of frames without a battle means a real bug.
-  const CLOSED_LOOP_DEADLINE_FRAME = 3600;
-  const BATTLE_SCENE = 22;
+  // The deadlines themselves (the script's last press plus the battle load,
+  // and a minute of frames for the closed-loop autopilot) are
+  // web/src/demo/autopilot.ts.
   const AUTOPILOT_RETRY_KEY = 'kn-demo-autopilot-retried';
   let _autopilotLastScene = -1;
   let _autopilotStalled = false;
@@ -810,15 +625,10 @@
       _autopilotLastScene = s.scene;
     }
     const pilotFailure = _menuPilot?.failure?.() ?? null;
-    const deadline = _menuPilot ? CLOSED_LOOP_DEADLINE_FRAME : AUTOPILOT_DEADLINE_FRAME;
-    if (!pilotFailure && (frame < deadline || s.scene === BATTLE_SCENE)) return;
+    const check = { frame, scene: s.scene, closedLoop: !!_menuPilot, pilotFailure };
+    if (!_demo.autopilot.autopilotStalled(check)) return;
     _autopilotStalled = true;
-    console.warn(
-      `[demo] AUTOPILOT-STALL frame=${frame} scene=${s.scene} status=${s.status} ` +
-        `delay=${counters?.delay ?? '?'} mode=${_menuPilot ? 'closed-loop' : 'script'}` +
-        (pilotFailure ? ` failure=${pilotFailure}` : '') +
-        ' — match not reached',
-    );
+    console.warn(_demo.autopilot.stallLogLine(check, s.status, counters?.delay));
     let retried = false;
     try {
       retried = sessionStorage.getItem(AUTOPILOT_RETRY_KEY) === '1';
@@ -1025,15 +835,15 @@
     try {
       const savedRtt = localStorage.getItem('kn-demo-rtt');
       if (savedRtt != null) {
-        const n = Number(savedRtt);
-        if (Number.isFinite(n) && n >= 0 && n <= RTT_SLIDER_MAX) _savedRttPreference = n;
+        const preference = _demo.network.savedRttPreference(savedRtt);
+        if (preference != null) _savedRttPreference = preference;
       } else {
         // One-time migration from the old one-way key
         const legacy = localStorage.getItem('kn-demo-lag');
         if (legacy != null) {
-          const n = Number(legacy);
-          if (Number.isFinite(n) && n >= 0) {
-            _savedRttPreference = Math.min(RTT_SLIDER_MAX, n * 2);
+          const preference = _demo.network.legacyRttPreference(legacy);
+          if (preference != null) {
+            _savedRttPreference = preference;
             try {
               localStorage.setItem('kn-demo-rtt', String(_savedRttPreference));
               localStorage.removeItem('kn-demo-lag');
@@ -1176,13 +986,12 @@
     if (!el) return;
     const detected = window.GamepadManager?.getDetected?.() || [];
     if (detected.length === 0) {
-      el.textContent = 'No gamepad detected — keyboard works (keys below).';
+      el.textContent = _demo.hud.NO_GAMEPAD.text;
       el.classList.remove('is-detected');
       return;
     }
-    const name = GamepadManager.displayName(detected[0].id) || 'Gamepad';
-    const more = detected.length > 1 ? ` (+${detected.length - 1} more)` : '';
-    el.textContent = `Gamepad detected: ${name}${more}. Open Controls to remap.`;
+    const status = _demo.hud.gamepadDetected(detected.length, GamepadManager.displayName(detected[0].id));
+    el.textContent = status.text;
     el.classList.add('is-detected');
   };
 
@@ -1201,7 +1010,7 @@
 
   const _loadRomFile = async (file) => {
     if (!file) return;
-    if (!/\.(z64|n64|v64)$/i.test(file.name)) {
+    if (!_demo.rom.isRawRomName(file.name)) {
       _setStatus('Use a raw .z64, .n64, or .v64 ROM');
       return;
     }
@@ -1231,151 +1040,19 @@
     }
   };
 
-  // Kaillera-style frame-delay tier. Match the labels real netplay clients
-  // (Kaillera, Fightcade, Slippi) put on their netcode quality readouts.
-  // Boundaries chosen so 60 Hz fighters cluster like this:
-  //   1-2 frames = LAN / same-city, you can't feel it
-  //   3 frames   = good regional internet, feels fine
-  //   4 frames   = playable but you can feel it
-  //   5+ frames  = tournament-illegal territory in classic netcode
-  const _connectionTier = (delayFrames) => {
-    if (delayFrames <= 0) return { label: 'No connection', tone: 'idle' };
-    if (delayFrames <= 2) return { label: 'Excellent', tone: 'great' };
-    if (delayFrames === 3) return { label: 'Good', tone: 'great' };
-    if (delayFrames === 4) return { label: 'Fair', tone: 'okay' };
-    if (delayFrames === 5) return { label: 'Poor', tone: 'bad' };
-    if (delayFrames === 6) return { label: 'Bad', tone: 'bad' };
-    return { label: 'Terrible', tone: 'bad' };
-  };
-
-  const _inputFeel = (isCRollback, isInMatch, delayFrames) => {
-    const delay = Number.isFinite(delayFrames) ? Math.max(0, delayFrames | 0) : 0;
-    const delayMs = delay * 16.67;
-    // Pre-match: rollback engine is loaded but no netplay activity is
-    // happening (no peer inputs contesting the local engine, so no
-    // predictions, no rollbacks, and no input lag from any delay budget
-    // — even lockstep mode has nothing to wait for). Tell the user
-    // that, instead of pretending the network conditions are felt.
-    if (!isInMatch) {
-      return {
-        text: 'WAITING',
-        sub: 'Start a match to see rollback in action. Nothing is being predicted in menus.',
-        state: 'idle',
-        showTier: false,
-        effectiveDelay: 0,
-        networkDelay: delay,
-      };
-    }
-    if (delay <= 0) {
-      return {
-        text: 'NO LAG',
-        sub: 'Crank the RTT slider — both modes feel the same at 0 ms.',
-        state: 'idle',
-        showTier: false,
-        effectiveDelay: 0,
-        networkDelay: 0,
-      };
-    }
-    if (_rollbackEnabled) {
-      // Rollback's promise: network latency doesn't become input lag. Every
-      // player's input (yours too) runs a small, jitter-sized delay after
-      // it's pressed — that keeps both machines applying it on the same
-      // frame — and prediction + rewind hides the rest of the RTT. More RTT
-      // means more visible rewinds, not more lag.
-      return {
-        text: `${delayMs.toFixed(0)} ms · RTT HIDDEN`,
-        sub: `Rollback keeps a ${delay}-frame input delay (${delayMs.toFixed(0)} ms) whatever the RTT, just enough to absorb jitter. The rest of the network lag is hidden by predicting the opponent and rewinding when the guess was wrong, so more RTT means more visible rewinds, not more lag.`,
-        state: 'instant',
-        showTier: true,
-        effectiveDelay: delay,
-        networkDelay: delay,
-      };
-    }
-    return {
-      text: `${delayMs.toFixed(0)} ms LATE`,
-      sub: `Lockstep makes you feel the full ${delay}-frame delay because it can't predict the peer's input. Visuals stay smooth (no rewinds), but every press is delayed.`,
-      state: 'late',
-      showTier: true,
-      effectiveDelay: delay,
-      networkDelay: delay,
-    };
-  };
-
-  const _renderHudText = (counters, totalPreds) => {
-    const rtt = _readRtt();
-    const delay = counters?.delay ?? 0;
-    // Pause-inclusive: keep the result panel showing the current mode's
-    // feel (INSTANT INPUT / X ms LATE) while the player has the SSB64
-    // pause menu open, instead of flipping to WAITING the moment status=2.
-    const isInMatch = !!window.NetplayRollback?.isInMatchOrPaused?.();
-    const feel = _inputFeel(counters?.isCRollback, isInMatch, delay);
-    const feelEl = $('hud-feel');
-    if (feelEl) {
-      feelEl.textContent = feel.text;
-      feelEl.classList.toggle('is-instant', feel.state === 'instant');
-      feelEl.classList.toggle('is-late', feel.state === 'late');
-    }
-
-    const subEl = $('hud-feel-sub');
-    if (subEl) subEl.textContent = feel.sub;
-
-    // Connection-quality pill — Kaillera-style tier based on the EFFECTIVE
-    // (felt) frame delay, which differs by mode:
-    //   Rollback ON  → effective delay = 0 (rollback hides the network)
-    //   Rollback OFF → effective delay = full network delay
-    // Toggling the rollback button flips the tier, making the contrast
-    // visible at a glance. When not in a match, the pill explicitly says
-    // so instead of misleading "Excellent" or "Terrible" labels for a
-    // network that isn't being exercised yet.
-    const delayEl = $('hud-frame-delay');
-    if (delayEl) {
-      if (!feel.showTier) {
-        delayEl.innerHTML = isInMatch
-          ? '<strong>No active rollback</strong> &middot; Crank the RTT slider'
-          : '<strong>Engine waiting</strong> &middot; Start a match to test rollback';
-        delayEl.classList.remove('is-great', 'is-okay', 'is-bad');
-      } else {
-        const tier = _connectionTier(feel.effectiveDelay);
-        const label = _rollbackEnabled
-          ? `Rollback feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${feel.effectiveDelay} frame${feel.effectiveDelay === 1 ? '' : 's'}</strong>`
-          : `Lockstep feels <strong>${tier.label}</strong> &middot; Effective delay: <strong>${feel.effectiveDelay} frame${feel.effectiveDelay === 1 ? '' : 's'}</strong>`;
-        delayEl.innerHTML = label;
-        delayEl.classList.toggle('is-great', tier.tone === 'great');
-        delayEl.classList.toggle('is-okay', tier.tone === 'okay');
-        delayEl.classList.toggle('is-bad', tier.tone === 'bad');
-      }
-    }
-
-    const details = $('hud-details');
-    if (!details) return;
-    const mode = _rollbackEnabled ? 'Rollback' : 'Lockstep';
-    const frame = counters?.currentFrame ?? 0;
-    // C engine engagement state. For Smash Remix this is FALSE in the menu
-    // and only flips TRUE after the user starts a match.
-    const cEngine = counters?.isCRollback ? 'Active' : 'Waiting (start a match)';
-    // Rollback activity — what the user actually wants to see. Total
-    // count + recent rate (smoothed by the engine's 5 s window). Drops
-    // the prediction-vs-correct ratio + scene/status diagnostic noise
-    // from the prior version.
-    const rollbacks = counters?.rollbackEventsTotal ?? 0;
-    const rollbacksPerSec = counters?.rollbackEventsPerSec ?? 0;
-    const rollbackText =
-      rollbacksPerSec > 0
-        ? `${rollbacks} (${rollbacksPerSec.toFixed(1)}/s)`
-        : rollbacks > 0
-          ? `${rollbacks} (idle)`
-          : 'none yet';
-    // FPS: rAF cadence over a 1 s window (engine maintains _fpsCurrent
-    // internally — exposed via getHudCounters as of 60 Hz tick path).
-    // At high RTT rollback bursts can drop the visible framerate even
-    // though tick work itself is well under the vsync budget. The
-    // framerate readout makes that cost visible — it's the "what
-    // rollback can't hide" the headline copy now acknowledges.
-    const fps = counters?.fps ?? 0;
-    const fpsText = fps > 0 ? `${fps} fps` : '— fps';
-    details.textContent =
-      `Engine: ${cEngine} · Mode: ${mode} · RTT: ${rtt.toFixed(0)} ms · ` +
-      `${fpsText} · Frame: ${frame} · Rollbacks: ${rollbackText}`;
+  // The result card: what the current delay feels like in this mode, the
+  // connection pill (a Kaillera-style tier for the delay the player feels),
+  // and the details line. The words and the drawing are web/src/demo/hud.ts.
+  const _renderHudText = (counters) => {
+    _demo.hud.renderHud(document, {
+      counters,
+      rollbackEnabled: _rollbackEnabled,
+      rtt: _readRtt(),
+      // Pause-inclusive: keep the result panel showing the current mode's
+      // feel while the player has the SSB64 pause menu open, instead of
+      // flipping to WAITING the moment status=2.
+      isInMatch: !!window.NetplayRollback?.isInMatchOrPaused?.(),
+    });
   };
 
   const _updateHud = () => {
@@ -1395,7 +1072,7 @@
 
     if (now - _lastHudRenderAt >= HUD_RENDER_INTERVAL_MS) {
       _lastHudRenderAt = now;
-      _renderHudText(counters, totalPreds);
+      _renderHudText(counters);
     }
 
     // The timeline needs its own per-frame drive (not throttled to
@@ -1462,7 +1139,7 @@
         _userInteractedThisMatch = false;
         // ?autoCompare=0 disables auto-compare (for testing pure-rollback freeze
         // profile without the periodic lockstep flips).
-        const _autoCompareDisabled = _urlParams.get('autoCompare') === '0';
+        const _autoCompareDisabled = _options.autoCompareDisabled;
         _setStatus(
           _autoCompareDisabled
             ? 'Match started — pure rollback (auto-compare disabled)'
@@ -1519,15 +1196,11 @@
     }
     _setRollbackEnabled(next);
     const delay = rb.getHudCounters?.()?.delay ?? 0;
+    const label = _demo.hud.modeSwitchLabel(next, delay);
     const title = $('mode-switch-title');
-    if (title) title.textContent = next ? 'Switched to rollback' : 'Switched to lockstep';
+    if (title) title.textContent = label.title;
     const sub = $('mode-switch-sub');
-    if (sub) {
-      const ms = Math.round(delay * 16.67);
-      sub.textContent = next
-        ? `${delay}-frame input delay (${ms} ms) — predicts the opponent, rewinds on a wrong guess`
-        : `${delay}-frame input delay (${ms} ms) — waits for the opponent's input every frame`;
-    }
+    if (sub) sub.textContent = label.sub;
     $('mode-switch')?.classList.remove('hidden');
     if (_modeSwitchTimer) clearTimeout(_modeSwitchTimer);
     _modeSwitchTimer = setTimeout(() => {
@@ -1570,14 +1243,12 @@
   };
 
   const _tickAutoCompare = () => {
-    const elapsed = performance.now() - _autoCompareStart;
-    const cycle = Math.floor(elapsed / AUTO_COMPARE_PERIOD_MS);
-    const phase = elapsed % AUTO_COMPARE_PERIOD_MS;
+    const phase = _demo.hud.autoComparePhase(performance.now() - _autoCompareStart);
     const fill = $('auto-progress');
-    if (fill) fill.style.width = `${(phase / AUTO_COMPARE_PERIOD_MS) * 100}%`;
-    if (cycle !== _autoCompareCycle) {
-      _autoCompareCycle = cycle;
-      _switchMode(cycle % 2 === 0);
+    if (fill) fill.style.width = phase.fillWidth;
+    if (phase.cycle !== _autoCompareCycle) {
+      _autoCompareCycle = phase.cycle;
+      _switchMode(phase.rollbackOn);
     }
   };
 
@@ -1679,12 +1350,6 @@
   };
 
   document.addEventListener('DOMContentLoaded', () => {
-    // The rollback engine calls the TypeScript core (dist/kn-core.js).
-    // Without it the demo cannot run; say so instead of starting.
-    if (!window.KNCore) {
-      _setStatus('Part of this page did not load. Reload the page to try again.');
-      return;
-    }
     _bindDom();
     // Auto-restore a cached ROM if one exists. Lets Reset (location.reload)
     // come back into a running engine instead of dumping the user back at
@@ -1710,14 +1375,7 @@
     if (document.getElementById('kn-demo-indicator-anim')) return;
     const style = document.createElement('style');
     style.id = 'kn-demo-indicator-anim';
-    // Pulse the box-shadow only — no transform/size change keeps the badge
-    // on a single GPU compositor layer (no repaint of underlying page).
-    // fadeOut also opacity-only so the swap from amber to green doesn't
-    // trigger any layout recalculation.
-    style.textContent =
-      '@keyframes inputPulse{0%,100%{box-shadow:0 0 0 0 rgba(245,200,75,0.5)}50%{box-shadow:0 0 0 10px rgba(245,200,75,0)}}' +
-      '@keyframes inputFadeIn{0%{opacity:0}100%{opacity:1}}' +
-      '@keyframes inputFadeOut{0%{opacity:1}66%{opacity:1}100%{opacity:0}}';
+    style.textContent = _demo.hud.INPUT_INDICATOR_KEYFRAMES;
     document.head.appendChild(style);
   };
   // Always remove the existing indicator before creating a new one. Mutating
@@ -1734,28 +1392,19 @@
     _ensureIndicatorAnim();
     const el = document.createElement('div');
     el.id = 'input-indicator';
-    el.style.cssText =
-      'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:9999;' +
-      'padding:8px 16px;border-radius:6px;color:#111;' +
-      'font-family:sans-serif;font-weight:800;font-size:13px;letter-spacing:0.08em;' +
-      'pointer-events:none;text-transform:uppercase;will-change:opacity;';
-    if (state === 'disabled') {
-      el.textContent = 'Setting up demo, inputs disabled';
-      el.style.background = '#f5c84b';
-      el.style.animation = 'inputFadeIn 200ms ease-out, inputPulse 1.6s ease-in-out 200ms infinite';
-    } else if (state === 'enabled') {
-      el.textContent = 'Setup finished, inputs enabled';
-      el.style.background = '#7ddc8a';
-      el.style.animation = 'inputFadeIn 200ms ease-out, inputFadeOut 2.2s ease-out 200ms forwards';
-      _inputIndicatorTimer = setTimeout(() => {
-        const cur = document.getElementById('input-indicator');
-        if (cur) cur.remove();
-        _inputIndicatorTimer = null;
-      }, 2400);
-    } else if (state === 'post-match') {
-      el.textContent = 'Match ended — hit Reset for another round';
-      el.style.background = '#f5c84b';
-      el.style.animation = 'inputFadeIn 200ms ease-out, inputPulse 1.6s ease-in-out 200ms infinite';
+    el.style.cssText = _demo.hud.INPUT_INDICATOR_CSS;
+    const look = _demo.hud.inputIndicator(state);
+    if (look) {
+      el.textContent = look.text;
+      el.style.background = look.background;
+      el.style.animation = look.animation;
+      if (look.removeAfterMs != null) {
+        _inputIndicatorTimer = setTimeout(() => {
+          const cur = document.getElementById('input-indicator');
+          if (cur) cur.remove();
+          _inputIndicatorTimer = null;
+        }, look.removeAfterMs);
+      }
     }
     document.body.appendChild(el);
   };
