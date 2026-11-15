@@ -29,9 +29,11 @@
 // pages' scripts are `defer`, so one proxied script behind a napping server
 // would hold up the waking screen itself.
 //
-// version.json and changelog.json are packaged for instant footer fallback,
-// but deliberately excluded from the landing build id because CI rewrites
-// them on nearly every merge (server/src/landing_build.py has the reason).
+// version.json and changelog.json are not here: CI rewrites them on every
+// release and never redeploys this Worker, so a copy of them here would name
+// an old release (it named v0.67.0 while v0.69.3 was live). They go
+// to the game server like the API; the footer fetches the version without
+// blocking anything, and asks again while the server wakes.
 const PAGES = {
   '/': '/index.html',
   '/index.html': '/index.html',
@@ -49,8 +51,6 @@ const ASSET_FILES = new Set([
   '/static/version.js',
   '/static/version-guard.js',
   '/static/feedback.js',
-  '/static/version.json',
-  '/static/changelog.json',
   '/static/favicon.svg',
   '/static/kn-logo.svg',
   '/static/apple-touch-icon.png',
@@ -213,21 +213,17 @@ async function proxy(request, env, url) {
 // timeout or any error this returns null so the caller falls back to this
 // Worker's own (possibly outdated, but instant) copy instead.
 const STALE_PROXY_TIMEOUT_MS = 3000;
-const METADATA_PROXY_TIMEOUT_MS = 800;
 const ORIGIN_SLOW_COOLDOWN_MS = 30_000;
 let _originSlowUntil = 0;
-let _metadataSlowUntil = 0;
 
 function originSucceeded() {
   _originSlowUntil = 0;
-  _metadataSlowUntil = 0;
 }
 
-async function proxyLanding(request, env, url, timeoutMs = STALE_PROXY_TIMEOUT_MS, isMetadata = false) {
+async function proxyLanding(request, env, url) {
   if (Date.now() < _originSlowUntil) return null;
-  if (isMetadata && Date.now() < _metadataSlowUntil) return null;
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const timer = setTimeout(() => ctl.abort(), STALE_PROXY_TIMEOUT_MS);
   try {
     const target = new URL(url.pathname + url.search, env.ORIGIN);
     const req = new Request(target, request);
@@ -237,11 +233,7 @@ async function proxyLanding(request, env, url, timeoutMs = STALE_PROXY_TIMEOUT_M
     if (!res.ok && res.status !== 304) return null;
     return await rewriteOriginHost(res, env, url, request.method);
   } catch {
-    if (isMetadata) {
-      _metadataSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
-    } else {
-      _originSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
-    }
+    _originSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
     return null; // timed out or errored: caller falls back to our own copy
   } finally {
     clearTimeout(timer);
@@ -401,11 +393,6 @@ export default {
     }
     if (isAsset) {
       if (url.pathname === '/static/landing-build.json') {
-        return withHeaders(await env.ASSETS.fetch(request), false);
-      }
-      if (url.pathname === '/static/version.json' || url.pathname === '/static/changelog.json') {
-        const proxied = await proxyLanding(request, env, url, METADATA_PROXY_TIMEOUT_MS, true);
-        if (proxied) return proxied;
         return withHeaders(await env.ASSETS.fetch(request), false);
       }
       const verdict = await currentVerdict(env, ctx, false);
