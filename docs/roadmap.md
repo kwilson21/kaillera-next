@@ -274,8 +274,11 @@ button's rule is observed, `play.js` still decides it). Joining a room:
 the `open-room` and `join-room` requests are built in `connect.ts` and typed
 against the generated schemas, with what each refusal means; whether a page
 comes in as a spectator and how it gets into a match already under way are
-`join-plan.ts` (proved), observed, with `onConnect` still deciding. Left in
-`play.js`: the reconnect banner's timers, the game lifecycle handlers and
+`join-plan.ts` (proved), observed, with `onConnect` still deciding. What the
+player is told while the socket is down (the reconnecting banner, the
+in-game "server unreachable" note, the lobby error, the slow-first-connection
+toast) is `connection-notices.ts`: one Effect fiber per notice, interrupted
+when the socket returns. Left in `play.js`: the game lifecycle handlers and
 engine start-up, which are effects on the page, the socket and the emulator.
 
 **Stage 4: engine periphery [done]**
