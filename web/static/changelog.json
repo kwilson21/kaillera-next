@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.7",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the footer shows the live version, not the landing Worker's old copy (#275)"
+      }
+    ]
+  },
+  {
     "version": "0.69.6",
     "date": "2026-11-15",
     "changes": [
