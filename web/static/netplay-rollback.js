@@ -7877,24 +7877,26 @@
           attempt: healFound?.attempt ?? 0,
         }) ?? null;
       const offers = decided === null || decided.some((command) => command.type === 'offer');
-      if (offers && p && _playerSlot < info.slot) {
-        // The lower slot heals as for any drop it noticed: the entry is
-        // reset (I2: resetPeerState, which on the host also clears the
-        // guest's phantom flag and staleness clock), then marked
-        // reconnecting with the 45 s give-up armed, and attemptReconnect
-        // offers with its attempt deadline and retries. When the channel
-        // opens, a lower slot that is not the host resyncs from the host
-        // like any guest whose drop reconnected: it may have run on
-        // predicted inputs of a phantom it now reaches again.
+      if (offers && p && _playerSlot !== 0 && _playerSlot < info.slot) {
+        // A lower slot that is not the host (slot 1 healing slot 2) heals as
+        // for any drop it noticed: the entry is reset (I2: resetPeerState),
+        // then marked reconnecting with the 45 s give-up armed, and
+        // attemptReconnect offers with its attempt deadline and retries.
+        // When the channel opens it resyncs from the host like any guest
+        // whose drop reconnected: it may have run on predicted inputs of a
+        // phantom it now reaches again (specs/mesh_heal.qnt,
+        // aNonHostLowerResyncsAfterAHeal). The host as the lower slot needs
+        // no resync and offers on a fresh entry, below.
         try {
           p.pc.close();
         } catch (_) {}
         resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });
         _handlePeerDisconnect(sid, p);
       } else if (offers || !p) {
-        // A higher slot the machine does not drive heals as before, both
-        // slots offering; so does a page with no entry for the player (the
-        // give-up already dropped it), which has nothing to wait on.
+        // The host as the lower slot offers on a fresh entry. A higher slot
+        // the machine does not drive heals as before, both slots offering;
+        // so does a page with no entry for the player (the give-up already
+        // dropped it), which has nothing to wait on.
         if (!offers) {
           _syncLog(`MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid}: no entry to wait on, offering`);
         }

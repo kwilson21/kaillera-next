@@ -79,13 +79,18 @@ def test_the_check_carries_out_the_machines_decision():
     assert "type: 'heal'" not in check
 
 
-def test_the_lower_slot_heals_through_the_drop_path():
-    # The lower slot with an entry: reset (I2), then the engine's drop
-    # handling, which marks it reconnecting, arms the 45 s give-up and offers
-    # (attemptReconnect). On open, a lower slot that is not the host resyncs
-    # from the host like any guest whose drop reconnected.
+def test_a_lower_slot_that_is_not_the_host_heals_through_the_drop_path():
+    # A lower slot that is not the host, with an entry: reset (I2), then the
+    # engine's drop handling, which marks it reconnecting, arms the 45 s
+    # give-up and offers (attemptReconnect). On open it resyncs from the host
+    # like any guest whose drop reconnected. The host as the lower slot keeps
+    # the fresh entry (the old path below), which needs no resync.
     check = _health_check()
-    lower = check[check.index("if (offers && p && _playerSlot < info.slot) {") :]
+    lower = check[
+        check.index(
+            "if (offers && p && _playerSlot !== 0 && _playerSlot < info.slot) {"
+        ) :
+    ]
     lower = lower[: lower.index("} else if (offers || !p) {")]
     assert lower.index("resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });") < (
         lower.index("_handlePeerDisconnect(sid, p);")

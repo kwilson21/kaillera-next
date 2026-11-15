@@ -73,10 +73,12 @@ module mesh_heal {
   // healing its channel to slot 2) is a guest of the host too, and may have
   // run on as if the other were gone.
   const LO_IS_HOST: bool
-  // The lower slot heals through the engine's drop path (_handlePeerDisconnect:
-  // reconnecting), so the channel's open handler asks the host for state when
-  // it is not the host. 35634ed made a fresh entry instead, not reconnecting,
-  // whose open handler skips that.
+  // A lower slot that is not the host heals through the engine's drop path
+  // (_handlePeerDisconnect: reconnecting), so the channel's open handler asks
+  // the host for state. 35634ed made a fresh entry instead, not reconnecting,
+  // whose open handler skips that. (The host as the lower slot still offers
+  // on a fresh entry: it needs no resync, so the constant does not matter
+  // there.)
   const LO_THROUGH_DROP: bool
 
   pure val SIDES = Set("lo", "hi")
