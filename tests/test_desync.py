@@ -157,7 +157,14 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
         time.sleep(3)
         stalls = {}
         for name, page, idx in (("Host", host, 0), ("Guest", guest, 1)):
-            lines = _stall_lines(sync_log(page), samples[0][idx], samples[-1][idx])
+            log = sync_log(page)
+            # The log is a ring: one that rolled over past the window's start
+            # would hold no stall lines because it holds none of the window.
+            held_from = int(log.split("\t", 3)[2][2:]) if log else None
+            assert held_from is not None and held_from <= samples[0][idx], (
+                f"{name}'s sync log starts at f={held_from}, after the window's first frame {samples[0][idx]}"
+            )
+            lines = _stall_lines(log, samples[0][idx], samples[-1][idx])
             if lines:
                 stalls[name] = lines
         assert not stalls, "a page waited on its peer in the window:\n" + "\n".join(
