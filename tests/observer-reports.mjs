@@ -30,13 +30,26 @@ export const observerEventsIn = (events) => {
   return counts;
 };
 
+// node:sqlite, which reads the database, ships unflagged from Node 22.13.
+const SQLITE_MIN_NODE = [22, 13];
+export const SQLITE_NODE_ERROR = 'observer reports need Node >= 22.13 (node:sqlite)';
+
+/** Does this Node version (process.versions.node, e.g. "22.12.0") have node:sqlite? */
+export const nodeHasSqlite = (version) => {
+  const [major, minor] = String(version).split('.').map(Number);
+  return major > SQLITE_MIN_NODE[0] || (major === SQLITE_MIN_NODE[0] && minor >= SQLITE_MIN_NODE[1]);
+};
+
 /**
  * The observers' rows in the server's client_events table for these rooms,
  * by type, or null when no database was named. node:sqlite is loaded only
- * then.
+ * then. Throws when the database cannot be read, or this Node has no
+ * node:sqlite (`nodeVersion` stands in for process.versions.node in tests);
+ * callers count either as a failure.
  */
-export const observerEventsInDb = async (dbPath, rooms) => {
+export const observerEventsInDb = async (dbPath, rooms, { nodeVersion = process.versions.node } = {}) => {
   if (!dbPath) return null;
+  if (!nodeHasSqlite(nodeVersion)) throw new Error(`${SQLITE_NODE_ERROR}; this is Node ${nodeVersion}`);
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {

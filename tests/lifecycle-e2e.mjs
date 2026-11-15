@@ -71,11 +71,13 @@
  * in the client events at a checkpoint, and in each page's sync log
  * (`PEER-DISAGREE`, `RESYNC-DISAGREE`) at the end. With KN_DB set to the
  * server's DB_PATH, the server's client_events rows for the scenario's room
- * are counted too; without it the query to run by hand is printed.
+ * are counted too; without it the query to run by hand is printed. Reading
+ * KN_DB needs Node >= 22.13 (node:sqlite); on an older Node, or a database
+ * that cannot be read, the scenario fails.
  *
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [KN_URL=http://localhost:27888] [SCENARIO=late-join] \
- *     [CHROMIUM_PATH=...] [OUT=/tmp/lifecycle-e2e] [KN_DB=server DB_PATH] node tests/lifecycle-e2e.mjs
+ *     [CHROMIUM_PATH=...] [OUT=/tmp/lifecycle-e2e] [KN_DB=server DB_PATH, Node >= 22.13] node tests/lifecycle-e2e.mjs
  */
 import fs from 'node:fs';
 import { chromium } from 'playwright';
