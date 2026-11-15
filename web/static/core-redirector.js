@@ -17,10 +17,8 @@
   'use strict';
 
   const params = new URLSearchParams(window.location.search);
-  const rawMode = params.get('mode') || 'rollback';
-  // Legacy "lockstep" is the same engine as "rollback" — coerce here so
-  // cached share links keep loading the patched core.
-  const mode = rawMode === 'lockstep' ? 'rollback' : rawMode;
+  // Rollback and lockstep both run the patched core; only streaming does not.
+  const mode = params.get('mode') || 'rollback';
 
   // EmulatorJS asks its CDN for the latest version when the page is served
   // from localhost. The page's CSP blocks that request and EmulatorJS does not
