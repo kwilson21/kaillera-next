@@ -296,9 +296,9 @@
  *     unconfirmed (specs/sync_follow_up.qnt). A third of the way in the
  *     guest's input is held neutral and the host page is frozen for 7 s: the
  *     guest's peer recovery asks for a resync at a frame, as with
- *     UNANSWERED_SOCKET_RESYNC=letgo. From the host's return the guest page
- *     keeps its input packets back, so the host stalls on predicted ones and
- *     answers at its deadline with a state taken on them
+ *     UNANSWERED_SOCKET_RESYNC=letgo. From before the freeze the guest page
+ *     keeps its input packets back, so the host comes back to stale inputs,
+ *     stalls, and answers at its deadline with a state it cannot confirm
  *     (SYNC-FOLLOW-UP-WATCH). That answer waits in a busy `sync-state`
  *     channel for 1.5 s (under the guest's chunk timeout), as on a slow
  *     link, and the kept-back inputs are let go as soon as the state is
@@ -1840,16 +1840,12 @@ if (inBattle) {
     await host.evaluate((ms) => {
       window.__knSyncBusyMs = ms;
     }, SYNC_FOLLOW_UP_BUSY_MS);
-    console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: freezing the host for ${SYNC_FOLLOW_UP_FREEZE_MS} ms`);
-    await host.evaluate((ms) => {
-      const t = performance.now();
-      while (performance.now() - t < ms);
-    }, SYNC_FOLLOW_UP_FREEZE_MS);
-    // From the moment the host is back the guest's inputs are kept back (its
-    // recovery request still goes): the host stalls on predicted inputs and
-    // answers at its deadline with a state taken on them. With `changed` a
-    // button is held down meanwhile, so the kept-back inputs differ from the
-    // prediction.
+    // The guest's input packets are kept back from before the freeze (its
+    // recovery request still goes): the host comes back to inputs already
+    // stale, stalls (ROLLBACK-STALL), and its request's deadline is met by
+    // the tick's deadline-only pass, which answers unconfirmed with the
+    // state taken at the stall. With `changed` a button is held down
+    // meanwhile, so the kept-back inputs differ from the prediction.
     await guest.evaluate(
       ({ changed, n }) => {
         window.__knGateInputs = true;
@@ -1857,6 +1853,11 @@ if (inBattle) {
       },
       { changed: SYNC_FOLLOW_UP === 'changed', n: NEUTRAL },
     );
+    console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: freezing the host for ${SYNC_FOLLOW_UP_FREEZE_MS} ms`);
+    await host.evaluate((ms) => {
+      const t = performance.now();
+      while (performance.now() - t < ms);
+    }, SYNC_FOLLOW_UP_FREEZE_MS);
     syncFollowUp.asked = await waitForLine(guest, syncFollowUp.guestAt.seq, /peer-recovery resync: sent/, 20000);
     // The host has taken its state: the inputs go now, and reach it while the
     // state is still being handed over. Inputs that arrive after that are
