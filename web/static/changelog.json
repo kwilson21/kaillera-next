@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.28",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a ROM the site does not know is not labelled as Super Smash Bros. (#226)"
+      }
+    ]
+  },
+  {
     "version": "0.68.27",
     "date": "2026-11-15",
     "changes": [
