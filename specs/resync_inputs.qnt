@@ -71,18 +71,33 @@
 //   sent the other page its real input. A resync hides that for the frames
 //   before it, but the inputs from F - DELAY on are applied after it: the
 //   two pages then differ for good (found in a two-player run, 2026-11).
+//
+// ASK_FOR_MISSING: a page waiting for an input the other page has made asks
+//   for it (`resend:<frame>`), and the other sends it again. false = before:
+//   nothing asked. The ordering that needed it (a two-player run, 2026-11):
+//   the guest freezes, the host gives up on it and runs on alone, and the
+//   host's inputs reach the guest while it is far behind, so it drops them
+//   as out of range. The guest comes back; the host hears it again, stops
+//   running alone, schedules the resync that ends the split and waits for
+//   the guest's inputs, because a resync may only carry a state built on
+//   real inputs. The guest catches up to the inputs it dropped and waits on
+//   that hole. Each page now waits for the other and nothing is on its way:
+//   the host's resync waits for inputs the guest cannot make until the hole
+//   is filled. Only the resync's deadline (3 s) ends it, and if that runs
+//   late the guest gives up on the host (5 s) and the pages split again.
 module resync_inputs {
   const SETTLE_AT_RESYNC: bool
   const KEEP_OWN_INPUT_WHEN_ALONE: bool
   const RESEND_OWN_AT_RESYNC: bool
   const REFEED_OWN_AT_RESYNC: bool
+  const ASK_FOR_MISSING: bool
 
   pure val DELAY = 1
   pure val CAP = 2
   // How far past its own frame a page accepts an input (the range check).
   // Wide enough that a page that has not been given up on never trips it.
   pure val MARGIN = 2
-  pure val LAST_FRAME = 9
+  pure val LAST_FRAME = 12
   // How many of its own inputs a page's engine holds: making the input for
   // frame f writes over the one for f - RING. Wide enough to hold every
   // input a page can still apply or roll back to (DELAY + CAP + 1).
@@ -99,6 +114,7 @@ module resync_inputs {
     got: Set[int],   // keys of the other page's inputs it holds
     floor: int,      // inputs keyed below this are settled
     alone: bool,     // has given up on the other page and runs without it
+    newestAtGiveUp: int, // the newest of the other's inputs it held when it gave up
   }
   type Packet = { dest: str, key: int }
 
@@ -130,11 +146,15 @@ module resync_inputs {
 
   pure def waits(pg: Page): bool = waitsOnGap(pg) or waitsBehind(pg)
 
+  // The input a waiting page waits for.
+  pure def missing(pg: Page): int = if (waitsOnGap(pg)) edge(pg) else pg.frame - DELAY
+
   // ── actions ────────────────────────────────────────────────────────────
 
   action init = all {
     pages' = PAGES.mapBy(p => {
       frame: 0, made: Set(), kept: Set(), capped: false, got: Set(), floor: 0, alone: false,
+      newestAtGiveUp: -1,
     }),
     wire' = Set(),
     resyncDue' = false,
@@ -188,9 +208,40 @@ module resync_inputs {
     val pg = pages.get(p)
     all {
       not(pg.alone),
-      pages' = pages.set(p, { ...pg, alone: true, capped: waits(pg) }),
+      pages' = pages.set(p, { ...pg, alone: true, capped: waits(pg), newestAtGiveUp: newest(pg.got) }),
       wire' = wire,
       resyncDue' = true,
+    }
+  }
+
+  // A page that gave up hears the other again (a newer input arrives,
+  // PEER-RECOVERED): it stops running alone. The resync that ends the split
+  // is still due; it goes once the host's state is built on real inputs
+  // (`confirmed`) or at its deadline.
+  action hearAgain(p: str): bool = {
+    val pg = pages.get(p)
+    all {
+      pg.alone,
+      newest(pg.got) > pg.newestAtGiveUp,
+      pages' = pages.set(p, { ...pg, alone: false, capped: false }),
+      wire' = wire,
+      resyncDue' = resyncDue,
+    }
+  }
+
+  // A waiting page asks the other for the input it waits for, which the
+  // other has made and will send again.
+  action ask(p: str): bool = {
+    val pg = pages.get(p)
+    val key = missing(pg)
+    all {
+      ASK_FOR_MISSING,
+      waits(pg),
+      pages.get(other(p)).made.contains(key),
+      not(wire.contains({ dest: p, key: key })),
+      wire' = wire.union(Set({ dest: p, key: key })),
+      pages' = pages,
+      resyncDue' = resyncDue,
     }
   }
 
@@ -228,7 +279,7 @@ module resync_inputs {
 
   action step = any {
     nondet p = oneOf(PAGES)
-    any { tick(p), giveUp(p) },
+    any { tick(p), giveUp(p), hearAgain(p), ask(p) },
     nondet m = oneOf(wire)
     deliver(m),
     resync,
@@ -281,7 +332,33 @@ module resync_inputs {
       )
     })
 
-  val allHold = and { noWaitForAnInputThatCannotArrive, neverBothWaitingOnNothing, aPageAppliesWhatItSent }
+  // The host's state is built on real inputs: it holds every input of the
+  // guest's it has applied since the last resync. Only then may it send its
+  // state without waiting for the resync's deadline.
+  pure def confirmed(h: Page): bool = keysFrom(h.floor, h.frame - DELAY).forall(k => h.got.contains(k))
+
+  // The input is on its way to the page, or the page can ask for it.
+  def onItsWay(p: str, key: int): bool =
+    wire.contains({ dest: p, key: key }) or (ASK_FOR_MISSING and pages.get(other(p)).made.contains(key))
+
+  // A due resync is never left to its deadline: when both pages wait, the
+  // host may send its state now, or an input one of them waits for is on
+  // its way.
+  // Violated before ASK_FOR_MISSING: the guest waits on inputs it dropped
+  // as out of range, and the host waits on inputs the guest cannot make
+  // until it has them.
+  val aDueResyncIsNotLeftToItsDeadline =
+    not(resyncDue)
+      or PAGES.exists(p => not(waits(pages.get(p))))
+      or confirmed(pages.get("host"))
+      or PAGES.exists(p => onItsWay(p, missing(pages.get(p))))
+
+  val allHold = and {
+    noWaitForAnInputThatCannotArrive,
+    neverBothWaitingOnNothing,
+    aPageAppliesWhatItSent,
+    aDueResyncIsNotLeftToItsDeadline,
+  }
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -411,13 +488,70 @@ module resync_inputs {
       .expect(
         (SETTLE_AT_RESYNC and KEEP_OWN_INPUT_WHEN_ALONE) implies (aPageAppliesWhatItSent == REFEED_OWN_AT_RESYNC)
       )
+
+  // The run that found ASK_FOR_MISSING (2026-11). The guest freezes; the
+  // host gives up on it and runs on alone; the host's inputs reach the guest
+  // while it is far behind and are dropped. The guest comes back, the host
+  // hears it again and waits for its inputs, the guest catches up to the
+  // inputs it dropped.
+  run guestWaitsOnInputsItDroppedTest =
+    init
+      .then(3.reps(_ => tick("host")))
+      .then(giveUp("host"))
+      .then(6.reps(_ => tick("host")))
+      .then(drain)
+      // The guest, still at frame 0, kept inputs 0..3 and dropped 4..8.
+      .expect(pages.get("guest").got == Set(0, 1, 2, 3))
+      .then(3.reps(_ => tick("guest")))
+      .then(drain)
+      .then(hearAgain("host"))
+      // The host, at frame 9, waits for the guest's inputs.
+      .expect(waits(pages.get("host")) and resyncDue)
+      .then(4.reps(_ => tick("guest")))
+      .then(drain)
+      .then(tick("host"))
+      .then(drain)
+      // The guest, at frame 7, waits on input 4, which it dropped; the host,
+      // at frame 10, waits on the guest's input 9, which the guest cannot
+      // make before it has input 4. The host's state is not confirmed, so
+      // its resync waits for its deadline.
+      .expect(waitsOnGap(pages.get("guest")) and missing(pages.get("guest")) == 4)
+      .expect(waits(pages.get("host")) and not(confirmed(pages.get("host"))))
+      .expect(aDueResyncIsNotLeftToItsDeadline == ASK_FOR_MISSING)
+      // Fixed: the guest asks for input 4, gets it and runs on.
+      // Before: nothing comes, and the guest gives up on the host.
+      .then(if (ASK_FOR_MISSING) ask("guest") else giveUp("guest"))
+      .then(if (ASK_FOR_MISSING) drain else tick("guest"))
+      .expect(pages.get("guest").alone == not(ASK_FOR_MISSING))
+      .expect(ASK_FOR_MISSING implies not(waits(pages.get("guest"))))
+
+  // With asking, the pages get from there to a resync the host can send
+  // without its deadline: the guest fills its hole input by input, catches
+  // up and its inputs confirm the host's state.
+  run theGuestAsksItsWayToAConfirmedResyncTest =
+    if (not(ASK_FOR_MISSING)) init else init
+      .then(3.reps(_ => tick("host")))
+      .then(giveUp("host"))
+      .then(6.reps(_ => tick("host")))
+      .then(drain)
+      .then(3.reps(_ => tick("guest")))
+      .then(drain)
+      .then(hearAgain("host"))
+      .then(4.reps(_ => tick("guest")))
+      .then(drain)
+      .then(tick("host"))
+      .then(drain)
+      // Each dropped input (4..8) is asked for as the guest reaches it.
+      .then(5.reps(_ => ask("guest").then(drain).then(tick("guest"))))
+      .then(drain)
+      .expect(confirmed(pages.get("host")) and not(waits(pages.get("host"))))
 }
 
 // Before: a resync changed the guest's frame counter and nothing else.
 module resync_inputs_before {
   import resync_inputs(
     SETTLE_AT_RESYNC = false, KEEP_OWN_INPUT_WHEN_ALONE = false,
-    RESEND_OWN_AT_RESYNC = false, REFEED_OWN_AT_RESYNC = false
+    RESEND_OWN_AT_RESYNC = false, REFEED_OWN_AT_RESYNC = false, ASK_FOR_MISSING = false
   ).*
 }
 
@@ -426,7 +560,7 @@ module resync_inputs_before {
 module resync_inputs_solo_holes {
   import resync_inputs(
     SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = false,
-    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = true
+    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = true, ASK_FOR_MISSING = false
   ).*
 }
 
@@ -434,7 +568,7 @@ module resync_inputs_solo_holes {
 module resync_inputs_only_new {
   import resync_inputs(
     SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true,
-    RESEND_OWN_AT_RESYNC = false, REFEED_OWN_AT_RESYNC = true
+    RESEND_OWN_AT_RESYNC = false, REFEED_OWN_AT_RESYNC = true, ASK_FOR_MISSING = false
   ).*
 }
 
@@ -443,7 +577,16 @@ module resync_inputs_only_new {
 module resync_inputs_no_refeed {
   import resync_inputs(
     SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true,
-    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = false
+    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = false, ASK_FOR_MISSING = false
+  ).*
+}
+
+// Every fix at a resync, but a waiting page did not ask for an input it
+// had dropped.
+module resync_inputs_no_ask {
+  import resync_inputs(
+    SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true,
+    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = true, ASK_FOR_MISSING = false
   ).*
 }
 
@@ -451,6 +594,6 @@ module resync_inputs_no_refeed {
 module resync_inputs_current {
   import resync_inputs(
     SETTLE_AT_RESYNC = true, KEEP_OWN_INPUT_WHEN_ALONE = true,
-    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = true
+    RESEND_OWN_AT_RESYNC = true, REFEED_OWN_AT_RESYNC = true, ASK_FOR_MISSING = true
   ).*
 }

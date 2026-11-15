@@ -254,7 +254,7 @@ $QUINT run "$TICK" --main=input_link_paced --invariant=allHold \
 RESYNC=specs/resync_inputs.qnt
 $QUINT typecheck "$RESYNC"
 for variant in resync_inputs_before resync_inputs_solo_holes resync_inputs_only_new \
-  resync_inputs_no_refeed resync_inputs_current; do
+  resync_inputs_no_refeed resync_inputs_no_ask resync_inputs_current; do
   $QUINT test "$RESYNC" --main="$variant" --backend=typescript
 done
 # Today: after a resync nobody waits for an input that cannot arrive, and the
@@ -269,6 +269,9 @@ done
 # And the guest applies them itself: violated while a resync did not hand its
 # engine the ones it already had, which the engine's ring may have written
 # over (resync_inputs_no_refeed).
+# A due resync is never left to its deadline: violated while a page waiting
+# on inputs it had dropped as out of range did not ask for them
+# (resync_inputs_no_ask; guestWaitsOnInputsItDroppedTest holds the ordering).
 $QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 

@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.21",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a page stalled on inputs it dropped asks the peer for them (#235)"
+      }
+    ]
+  },
+  {
     "version": "0.68.20",
     "date": "2026-11-15",
     "changes": [
