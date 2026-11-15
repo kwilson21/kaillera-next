@@ -85,7 +85,11 @@ test('the host leaves out the guest another guest cannot reach, both in the star
                   slot > 0 &&
                   slot < 4 &&
                   from !== slot;
-                assert.equal(leaves, expected, `${isHost} ${running} ${from} ${slot} ${reporterIn} ${namedIn} ${since}`);
+                assert.equal(
+                  leaves,
+                  expected,
+                  `${isHost} ${running} ${from} ${slot} ${reporterIn} ${namedIn} ${since}`,
+                );
               }
   // Slot 1 says it cannot reach slot 2: slot 2 is out. Slot 2 then says the
   // same of slot 1: it is out of the start itself, so its word does not count.
