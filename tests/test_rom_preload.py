@@ -10,10 +10,9 @@ Run: pytest tests/test_rom_preload.py -v -s
 from playwright.sync_api import expect
 
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
 
 
-def test_rom_preload_before_game_start(browser, server_url):
+def test_rom_preload_before_game_start(browser, server_url, rom_path, room):
     """ROM transfers immediately when guest accepts sharing, before game starts."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -25,18 +24,22 @@ def test_rom_preload_before_game_start(browser, server_url):
 
     try:
         # Host creates room, loads ROM, enables sharing
-        host.goto(f"{server_url}/play.html?room=PRELOAD1&host=1&name=Host&mode=rollback")
+        # The pages print their console logs, which these checks read, only with
+        # ?debug (play.html mutes console.log without it).
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback&debug")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
-        host.locator("#rom-drop input[type='file']").set_input_files(ROM_PATH)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
         assert host.evaluate("document.getElementById('rom-drop').classList.contains('loaded')")
+        # The sharing checkbox is in the host's Advanced options
+        host.click("#host-controls .advanced-options > summary")
         rom_share_cb = host.locator("#opt-rom-sharing")
         expect(rom_share_cb).to_be_enabled(timeout=5000)
         rom_share_cb.check()
         host.wait_for_timeout(300)
 
         # Guest joins, sees sharing prompt, accepts
-        guest.goto(f"{server_url}/play.html?room=PRELOAD1&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest&debug")
         expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
         guest.click("#rom-accept-btn")
 

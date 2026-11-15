@@ -155,11 +155,18 @@ resync_flow() {
   verify "$FLOW" resync_flow_any_answer holdWithoutNumbers
   expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
   expect_violation "$FLOW" resync_flow_any_answer onlyItsAnswerEndsARequest
-  # The counterexamples to aLateAnswerDoesNotTakeTheGuestBack and
-  # theAwaitedAnswerIsNotLost on resync_flow_any_answer are over ten steps
-  # long, beyond this bound; lateAnswerTest,
-  # lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
-  # hold them.
+  # Six steps: two requests "now", the host answers the first, the guest
+  # moves on, the answer arrives, and it is applied behind the guest
+  # (immediateLateAnswerTest; lateAnswerFromAfterTheAskTest for rule b).
+  expect_violation "$FLOW" resync_flow_any_answer aLateAnswerDoesNotTakeTheGuestBack
+  expect_violation "$FLOW" resync_flow_frame_named aLateAnswerDoesNotTakeTheGuestBack
+  expect_violation "$FLOW" resync_flow_asked_from aLateAnswerDoesNotTakeTheGuestBack
+  # Rule a, not taken, holds them too (onlyStateComingTest shows its cost).
+  verify "$FLOW" resync_flow_drop_older allHold
+  # The counterexample to theAwaitedAnswerIsNotLost on resync_flow_any_answer
+  # is over ten steps long, beyond this bound; lateAnswerOverTheAwaitedOneTest
+  # holds it, as lateAnswerTest and lateAnswerAfterTheTargetDeadlineTest hold
+  # the orderings at a named frame.
 }
 
 tick_deadlines() {
@@ -184,6 +191,9 @@ resync_inputs() {
   # The counterexample on resync_inputs_before is 10 steps long (the host has to
   # run far enough ahead for the guest to drop its inputs), beyond this bound;
   # check-specs.sh's scenarios and samples reach it.
+  # The no-ask counterexample (the guest freezes, the host runs on alone and is
+  # heard from again, the guest catches up to the inputs it dropped) is over 20
+  # steps long, beyond this bound; guestWaitsOnInputsItDroppedTest holds it.
 }
 
 resync_mesh() {

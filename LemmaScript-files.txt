@@ -19,3 +19,4 @@ web/src/streaming/offer-gate.ts
 web/src/streaming/attempt.ts
 web/src/resync-request.ts
 web/src/lockstep-wait.ts
+web/src/input-ask.ts

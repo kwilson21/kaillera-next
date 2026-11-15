@@ -29,21 +29,22 @@ lemma answersAnOlderRequest_ensures(answerFor: int, newest: int)
 {
 }
 
-function isLateAnswerBeforeFrameAsked(answerFor: int, frame: int, newest: int, askedAt: int): bool
+function isLateAnswerBehind(answerFor: int, frame: int, newest: int, askedAt: int, guestFrame: int): bool
 {
   if ((answerFor <= 0) || (answerFor == newest)) then
     false
   else
-    ((askedAt > 0) && (frame < askedAt))
+    ((frame < guestFrame) || ((askedAt > 0) && (frame < askedAt)))
 }
 
-lemma isLateAnswerBeforeFrameAsked_ensures(answerFor: int, frame: int, newest: int, askedAt: int)
-  ensures (isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt) == ((((answerFor > 0) && (answerFor != newest)) && (askedAt > 0)) && (frame < askedAt)))
-  ensures (isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt) ==> (frame < askedAt))
-  ensures ((answerFor == newest) ==> !(isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt)))
-  ensures ((answerFor <= 0) ==> !(isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt)))
-  ensures ((askedAt <= 0) ==> !(isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt)))
-  ensures ((frame >= askedAt) ==> !(isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt)))
+lemma isLateAnswerBehind_ensures(answerFor: int, frame: int, newest: int, askedAt: int, guestFrame: int)
+  ensures (isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame) == (((answerFor > 0) && (answerFor != newest)) && ((frame < guestFrame) || ((askedAt > 0) && (frame < askedAt)))))
+  ensures (isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame) ==> ((frame < guestFrame) || (frame < askedAt)))
+  ensures ((answerFor > 0) ==> (answerFor != newest) ==> (frame < guestFrame) ==> isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame))
+  ensures ((answerFor == newest) ==> !(isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame)))
+  ensures ((answerFor <= 0) ==> !(isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame)))
+  ensures ((frame >= guestFrame) ==> (askedAt <= 0) ==> !(isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame)))
+  ensures ((frame >= guestFrame) ==> (frame >= askedAt) ==> !(isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame)))
 {
 }
 

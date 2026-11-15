@@ -479,16 +479,17 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   `web/src/resync-request.ts`, checked by the `proofs` CI job: which state
   ends the request that is out (`endsRequest`, the model's
   `onlyItsAnswerEndsARequest`), which state answers an older request
-  (`answersAnOlderRequest`), which late answer is dropped because it is from
-  before the frame the newest request named (`isLateAnswerBeforeFrameAsked`,
-  `aLateAnswerDoesNotTakeTheGuestBack` / `beforeTheFrameAsked`), which is set
+  (`answersAnOlderRequest`), which late answer is dropped because, applied,
+  it would take the guest back: from before the frame the guest is on or the
+  frame the newest request named (`isLateAnswerBehind`,
+  `aLateAnswerDoesNotTakeTheGuestBack` / `lateAndBehind`), which is set
   aside because the newest request's answer is already held
   (`keepsAwaitedAnswer`, `theAwaitedAnswerIsNotLost`), and what a late
   joiner that lost its channel to the host does next: nothing, wait for the
   channel, wait for the request already out, give up after
   `LATE_JOIN_LOST_HOST_MAX_ASKS`, or ask (`lateJoinLostHostStep`). The
   engine keeps its own rules in charge (`_endsResyncRequest`,
-  `_answersAnOlderRequest`, `_isLateAnswerBeforeFrameAsked`,
+  `_answersAnOlderRequest`, `_isLateAnswerBehind`,
   `_keepsAwaitedAnswer`, `_resyncAfterLostHost`), runs the proved function
   beside each on the same inputs through `window.KNCore.resyncRequest`, and
   reports a difference as a `resync-disagree` client event (and
@@ -502,9 +503,17 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   as the state arrives (marker, `LATE-JOIN-LOST-HOST-RESYNC`, then `the
   lost-host resync is done`). No disagreement in either. In the first, the
   late answer to an immediate request was applied and took the guest back
-  130 frames before the awaited answer took it forward again: the rules
-  allow it (only a request that names a frame drops an earlier answer), and
-  the hashes still matched.
+  130 frames before the awaited answer took it forward again (the hashes
+  still matched, but for about 1.5 s the guest made no new frame, so input
+  in that window was never sampled): the rules then dropped a late answer
+  only when the newest request named a frame. The model now forbids it
+  (`immediateLateAnswerTest`, violated on `resync_flow_frame_named`), and a
+  late answer is dropped when it is behind the guest's own frame too
+  (`SYNC-LATE-ANSWER-DROPPED`). Dropping every older answer (rule a,
+  `resync_flow_drop_older`) holds the properties as well, but also drops a
+  late answer ahead of the guest when the host's rate limit dropped the
+  newest request (`onlyStateComingTest`); dropping only below the frame the
+  guest asked from (rule b, `resync_flow_asked_from`) still takes it back.
 - Next: read the production reports; once they show none, the engine calls
   the proved functions instead of its own copies.
 
