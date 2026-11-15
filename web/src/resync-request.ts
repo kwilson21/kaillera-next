@@ -4,7 +4,7 @@
  * such a late answer is dropped or kept out of the way of the awaited one,
  * and what a late joiner that lost its channel to the host does next. Each
  * is the rule the engine applies today (web/static/netplay-rollback.js:
- * _endsResyncRequest, _answersAnOlderRequest, _isLateAnswerBeforeFrameAsked,
+ * _endsResyncRequest, _answersAnOlderRequest, _isLateAnswerBehind,
  * _keepsAwaitedAnswer, _resyncAfterLostHost), written as a function with a
  * contract so the rule can be proved and then called from one place.
  *
@@ -56,36 +56,41 @@ export function answersAnOlderRequest(answerFor: number, newest: number): boolea
 }
 
 /**
- * Is the held state an older request's answer from before the frame the
- * newest request named? Applied, it would take the guest back below that
- * frame (aLateAnswerDoesNotTakeTheGuestBack, the model's
- * beforeTheFrameAsked), so it is dropped. The frame is the request's, not the
- * live target: the target's deadline gives the target up, and the state is
- * as old after it as before.
+ * Is the held state an older request's answer that, applied now, would take
+ * the guest back: from before the frame the guest is on, or from before the
+ * frame the newest request named (aLateAnswerDoesNotTakeTheGuestBack, the
+ * model's lateAndBehind)? It is dropped. Checked on each tick before the
+ * state is held or applied, so a late answer is applied only at or ahead of
+ * the guest, whether or not the newest request named a frame. The frame
+ * named is the request's, not the live target: the target's deadline gives
+ * the target up, and the state is as old after it as before.
  *
  * Never the newest request's own answer, and never a state with no number:
  * a state the host sent for its own reasons is applied as before (the model
  * leaves it out on purpose).
  *
- * @param answerFor  the number of the request the held state answers; 0 for none
- * @param frame      the held state's frame
- * @param newest     the number of the newest request this page sent
- * @param askedAt    the frame the newest request named; 0 or less when it named none
+ * @param answerFor   the number of the request the held state answers; 0 for none
+ * @param frame       the held state's frame
+ * @param newest      the number of the newest request this page sent
+ * @param askedAt     the frame the newest request named; 0 or less when it named none
+ * @param guestFrame  the frame this page is on
  */
-//@ ensures \result === (answerFor > 0 && answerFor !== newest && askedAt > 0 && frame < askedAt)
-//@ ensures \result ==> frame < askedAt
+//@ ensures \result === (answerFor > 0 && answerFor !== newest && (frame < guestFrame || (askedAt > 0 && frame < askedAt)))
+//@ ensures \result ==> frame < guestFrame || frame < askedAt
+//@ ensures answerFor > 0 && answerFor !== newest && frame < guestFrame ==> \result
 //@ ensures answerFor === newest ==> !\result
 //@ ensures answerFor <= 0 ==> !\result
-//@ ensures askedAt <= 0 ==> !\result
-//@ ensures frame >= askedAt ==> !\result
-export function isLateAnswerBeforeFrameAsked(
+//@ ensures frame >= guestFrame && askedAt <= 0 ==> !\result
+//@ ensures frame >= guestFrame && frame >= askedAt ==> !\result
+export function isLateAnswerBehind(
   answerFor: number,
   frame: number,
   newest: number,
   askedAt: number,
+  guestFrame: number,
 ): boolean {
   if (answerFor <= 0 || answerFor === newest) return false;
-  return askedAt > 0 && frame < askedAt;
+  return frame < guestFrame || (askedAt > 0 && frame < askedAt);
 }
 
 /**
