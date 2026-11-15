@@ -201,8 +201,8 @@
  *     page's DataChannel send wrapper (initScript below) holds the first
  *     `sync-answer-id:` it sends on the `sync-state` channel, and with it the
  *     `sync-start:` header and binary chunks queued behind it, then releases
- *     them in order. No engine hook. Once the guest logs
- *     RESYNC-REQUEST-TIMEOUT it is made to ask again the same way; the late
+ *     them in order. No engine hook. At its RESYNC-REQUEST-TIMEOUT the guest
+ *     asks again on its own (RESYNC-REASK, specs/resync_reask.qnt); the late
  *     answer then arrives after that second request. The run fails unless the
  *     guest timed out, the host received both requests, the held answer
  *     reached the guest after the second request, the rules handled it
@@ -216,6 +216,18 @@
  *     enough on a quiet machine; the slower the machine, the larger n should
  *     be, since the second request must reach the host before the held
  *     answer is let go.
+ *   DOUBLE_RESYNC_ASK=1   A third of the way into the battle the guest's
+ *     network-change handler runs twice at once (two window `online`
+ *     events): two immediate, numbered `sync-request-full` on the channel.
+ *     The host answers the first and drops the second inside its 5 s rate
+ *     limit; the first's answer reaches a guest that has moved on, so it is
+ *     an older request's answer and behind, and is dropped
+ *     (SYNC-LATE-ANSWER-DROPPED). Nothing else is coming for the resync the
+ *     guest asked for. No engine hook. The run fails unless the host
+ *     rate-limited a request, the late answer was dropped, and a host state
+ *     was applied after the asks (at the request's deadline the guest asks
+ *     again: RESYNC-REASK). Reported as `doubleResyncAsk` in summary.json.
+ *     The other fault knobs are refused with it.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -345,6 +357,7 @@ const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
+const DOUBLE_RESYNC_ASK = process.env.DOUBLE_RESYNC_ASK === '1';
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -466,6 +479,23 @@ if (
   console.log('LINK_KBPS combines only with DELAY_SYNC_ANSWER_MS among the fault knobs');
   process.exit(1);
 }
+if (
+  DOUBLE_RESYNC_ASK &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    DESYNC_GUEST)
+) {
+  console.log('DOUBLE_RESYNC_ASK is mutually exclusive with the other fault knobs');
+  process.exit(1);
+}
+// The request's deadline, the ask again and its answer.
+const DOUBLE_RESYNC_ASK_RECOVER_MS = 30000;
 // LINK_KBPS without DELAY_SYNC_ANSWER_MS: one plain resync a third of the way in.
 const LINK_RESYNC = LINK_KBPS > 0 && !(DELAY_SYNC_ANSWER_MS > 0);
 const LINK_RESYNC_RECOVER_MS = 30000;
@@ -492,11 +522,15 @@ const DELAY_SYNC_ANSWER_RECOVER_MS = 20000;
 const faultNeedsSeconds = Math.ceil(
   (((DROP_PEER_MS > 0 ? DROP_PEER_MS + DROP_PEER_RECOVER_MS : 0) +
     (DELAY_SYNC_ANSWER_MS > 0 ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS : 0) +
-    (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0)) *
+    (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0) +
+    (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0)) *
     1.5) /
     1000,
 );
-if ((DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC) && !(BATTLE_SECONDS >= faultNeedsSeconds)) {
+if (
+  (DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC || DOUBLE_RESYNC_ASK) &&
+  !(BATTLE_SECONDS >= faultNeedsSeconds)
+) {
   console.log(`this fault needs BATTLE_SECONDS >= ${faultNeedsSeconds}`);
   process.exit(1);
 }
@@ -1107,6 +1141,8 @@ const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null };
 const delaySyncAnswer = { hostAt: null, guestAt: null, timedOut: false, askedAgainAfterMs: null };
 // LINK_KBPS on its own: where the logs stood when the guest asked for its plain resync.
 const linkResync = { hostAt: null, guestAt: null, applied: false };
+// DOUBLE_RESYNC_ASK: where the logs stood when the guest asked twice.
+const doubleResyncAsk = { hostAt: null, guestAt: null, applied: false };
 const syncLogOf = (page) => page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
 const seqOf = (line) => Number(line.split('\t')[0]);
 const lastLogLine = async (page) => {
@@ -1299,13 +1335,36 @@ if (inBattle) {
       DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS,
     );
     if (delaySyncAnswer.timedOut) {
-      await guest.evaluate(() => window.dispatchEvent(new Event('online')));
-      delaySyncAnswer.askedAgainAfterMs = Date.now() - started;
-      console.log(`DELAY_SYNC_ANSWER_MS: guest timed out and asked again ${delaySyncAnswer.askedAgainAfterMs} ms in`);
+      // The guest asks again on its own at the deadline (RESYNC-REASK).
+      if (await waitForLine(guest, delaySyncAnswer.guestAt.seq, /RESYNC-REASK .*: sent/, 5000)) {
+        delaySyncAnswer.askedAgainAfterMs = Date.now() - started;
+        console.log(`DELAY_SYNC_ANSWER_MS: guest timed out and asked again ${delaySyncAnswer.askedAgainAfterMs} ms in`);
+      } else {
+        console.log('DELAY_SYNC_ANSWER_MS: the guest timed out and did not ask again');
+      }
     } else {
       console.log('DELAY_SYNC_ANSWER_MS: the guest never logged RESYNC-REQUEST-TIMEOUT');
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (DOUBLE_RESYNC_ASK) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [doubleResyncAsk.hostAt, doubleResyncAsk.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    // The network-change handler twice at once: two immediate, numbered requests.
+    await guest.evaluate(() => {
+      window.dispatchEvent(new Event('online'));
+      window.dispatchEvent(new Event('online'));
+    });
+    console.log('DOUBLE_RESYNC_ASK: guest asked for a resync twice');
+    doubleResyncAsk.applied = await waitForLine(
+      guest,
+      doubleResyncAsk.guestAt.seq,
+      /sync #\d+ applied/,
+      DOUBLE_RESYNC_ASK_RECOVER_MS,
+    );
+    console.log(`DOUBLE_RESYNC_ASK: resync applied: ${doubleResyncAsk.applied} (${Date.now() - started} ms)`);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (LINK_RESYNC) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -1599,9 +1658,9 @@ const delaySyncAnswerReport = (() => {
   const guestLines = linesAfter(G.sync, delaySyncAnswer.guestAt.seq);
   const hostLines = linesAfter(H.sync, delaySyncAnswer.hostAt.seq);
   const countIn = (lines, re) => lines.filter((line) => re.test(line)).length;
-  // The guest's second request (its second network change) must come before
-  // the held answer's header reaches it, or the answer was not late.
-  const asks = guestLines.flatMap((line, i) => (/network change detected/.test(line) ? [i] : []));
+  // The guest's second request (its ask again at the deadline) must come
+  // before the held answer's header reaches it, or the answer was not late.
+  const asks = guestLines.flatMap((line, i) => (/network change detected|RESYNC-REASK .*: sent/.test(line) ? [i] : []));
   const firstAnswer = guestLines.findIndex((line) => /sync-start received/.test(line));
   // The request is settled only when an answer to the newest one was applied:
   // after the second ask, a `resync ready` whose answerFor is the newest
@@ -1642,6 +1701,25 @@ const delaySyncAnswerReport = (() => {
     resyncsApplied: countIn(guestLines, /sync #\d+ applied/),
     newestAnswer: newestReady < 0 ? null : guestLines[newestReady],
     newestApplied,
+    applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
+  };
+})();
+// DOUBLE_RESYNC_ASK: the rate-limited second request, the dropped late
+// answer, the deadline and the ask again, and the state applied after.
+const doubleResyncAskReport = (() => {
+  if (!DOUBLE_RESYNC_ASK || !doubleResyncAsk.guestAt) return null;
+  const guestLines = linesAfter(G.sync, doubleResyncAsk.guestAt.seq);
+  const hostLines = linesAfter(H.sync, doubleResyncAsk.hostAt.seq);
+  const countIn = (lines, re) => lines.filter((line) => re.test(line)).length;
+  return {
+    guestAsks: countIn(guestLines, /network change detected/),
+    requestsReceivedByHost: countIn(hostLines, /received sync-request-full from/),
+    rateLimited: countIn(hostLines, /rate-limited sync-request/),
+    lateAnswerDropped: countIn(guestLines, /SYNC-LATE-ANSWER-DROPPED/),
+    timeouts: guestLines.filter((line) => /RESYNC-REQUEST-TIMEOUT/.test(line)),
+    asksAgain: guestLines.filter((line) => /RESYNC-REASK /.test(line)),
+    gaveUp: countIn(guestLines, /RESYNC-REASK-GIVEUP/),
+    answers: guestLines.filter((line) => /resync ready \(|SYNC-LATE-ANSWER|not the answer awaited/.test(line)),
     applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
   };
 })();
@@ -2156,6 +2234,7 @@ const summary = {
 if (dropPeerReport) summary.dropPeer = dropPeerReport;
 if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
 if (linkReport) summary.link = linkReport;
+if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
@@ -2357,6 +2436,23 @@ if (delaySyncAnswerReport) {
     JSON.stringify(delaySyncAnswerReport),
   );
 }
+// DOUBLE_RESYNC_ASK: the host dropped the newest request, the guest dropped
+// the older one's answer, and a host state was applied all the same.
+const doubleResyncAskFailed =
+  DOUBLE_RESYNC_ASK &&
+  (!doubleResyncAskReport ||
+    doubleResyncAskReport.guestAsks < 2 ||
+    doubleResyncAskReport.rateLimited < 1 ||
+    doubleResyncAskReport.lateAnswerDropped < 1 ||
+    doubleResyncAskReport.applied.length < 1);
+if (doubleResyncAskReport) {
+  console.log(
+    doubleResyncAskFailed
+      ? 'DOUBLE_RESYNC_ASK: no request dropped, no late answer dropped, or no state applied after:'
+      : 'DOUBLE_RESYNC_ASK: the owed resync was applied:',
+    JSON.stringify(doubleResyncAskReport),
+  );
+}
 // LINK_KBPS: every channel was on its connection's shared link, the fault
 // happened (a plain resync was applied, or DELAY_SYNC_ANSWER_MS's own checks
 // above), and no rollback was skipped after it outside a proven recovery.
@@ -2391,6 +2487,7 @@ const failed =
   linkFailed ||
   dropPeerFailed ||
   delaySyncAnswerFailed ||
+  doubleResyncAskFailed ||
   observersFailed ||
   signalingDropFailed ||
   gpMis > 0 ||

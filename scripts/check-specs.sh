@@ -291,3 +291,20 @@ done
 # while a new match kept the last one's, resync_mesh_kept).
 $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── A "now" resync request asked again at its deadline ─────────────────────
+REASK=specs/resync_reask.qnt
+$QUINT typecheck "$REASK"
+for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_fixed; do
+  $QUINT test "$REASK" --main="$variant" --backend=typescript
+done
+# With the fix: an owed resync is asked for again or given up visibly, the
+# deadline does not cut an answer being decoded, and the asks again are
+# bounded. Today the deadline let the request go and asked nothing
+# (resync_reask_current; lateAnswerBehindTest, lostRequestTest); asking again
+# without holding the deadline while an answer decodes cuts it
+# (resync_reask_unguarded; askAgainCutsTheDecodeTest), and the lifecycle
+# guard's timeout letting the request go forgets it again
+# (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest).
+$QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript

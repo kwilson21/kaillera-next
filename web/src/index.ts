@@ -82,6 +82,7 @@ import {
   isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  resyncDeadlineStep,
 } from './resync-request.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
@@ -311,6 +312,7 @@ export const KNCore = {
     isLateAnswerBehind,
     keepsAwaitedAnswer,
     lateJoinLostHostStep,
+    resyncDeadlineStep,
   },
   rosterKey,
   screenshotCrop,

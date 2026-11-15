@@ -6503,16 +6503,116 @@
   // rate limit plus its capture deadline, so an answer on its way is not cut.
   let _resyncRequestSentAt = 0;
   const RESYNC_REQUEST_TIMEOUT_MS = 8000;
+  // A "now" request (no target frame: a reconnect, a network change, a tab
+  // shown again, a missing delta base, the socket fallback) is sent because
+  // this guest's state is known to be wrong. It can go unanswered: the host
+  // drops a request inside its rate limit, a channel can lose it, and the
+  // guest drops an older request's answer that would take it back. Its
+  // deadline let it go and asked nothing, so the guest ran on with the state
+  // it had asked to replace (specs/resync_reask.qnt,
+  // anOwedResyncIsNotForgotten). The resync stays owed until a host state is
+  // applied (applySyncState); the deadline asks again, at most
+  // RESYNC_MAX_ASKS_AGAIN times, then gives up visibly (RESYNC-REASK-GIVEUP).
+  // The late joiner's lost-host resync has its own bound and goes first.
+  let _owedResync = false;
+  let _owedResyncAsksAgain = 0;
+  const RESYNC_MAX_ASKS_AGAIN = 2;
+  // An answer whose chunks are all in is decoded off the main thread (the
+  // worker decompresses it and, for a delta, XORs it) before it is held: the
+  // deadline does not count meanwhile, or it lets the request go while its
+  // answer is on its way, and asking again would make that answer an older
+  // request's (theDecodedAnswerIsNotCut). I1: for at most
+  // SYNC_DECODE_GRACE_MS from the newest decode's start, so a worker reply
+  // that never comes does not hold the deadline off for good.
+  let _syncDecodes = 0;
+  let _syncDecodeStartedAt = 0;
+  const SYNC_DECODE_GRACE_MS = 10000;
+  const _decodingSyncAnswer = async (decode) => {
+    _syncDecodes++;
+    _syncDecodeStartedAt = performance.now();
+    try {
+      return await decode();
+    } finally {
+      _syncDecodes--;
+    }
+  };
+  // The deadline's step is resyncDeadlineStep (web/src/resync-request.ts),
+  // written out here and compared with it when the deadline acts (observing).
   const _checkResyncRequestDeadline = () => {
     if (!_resyncRequestInFlight) return;
-    // An answer is arriving or held: those waits have their own deadlines.
-    if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;
-    const waitedMs = performance.now() - _resyncRequestSentAt;
+    const now = performance.now();
+    const waitedMs = now - _resyncRequestSentAt;
+    // An answer arriving or held, or a coordinated target, has its own deadline.
+    const answerComing = _syncExpected > 0 || !!_pendingResyncState || _syncTargetFrame > 0;
+    const decoding = _syncDecodes > 0;
+    const decodingForMs = decoding ? now - _syncDecodeStartedAt : 0;
+    if (answerComing || (decoding && decodingForMs < SYNC_DECODE_GRACE_MS)) return;
     if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;
+    let step;
+    if (_lateJoinLostHost) step = 'lostHost';
+    else if (!_owedResync) step = 'letGo';
+    else if (_owedResyncAsksAgain >= RESYNC_MAX_ASKS_AGAIN) step = 'stopAsking';
+    else step = 'askAgain';
+    _resyncObserve('deadline-step', step, (rules) =>
+      rules.resyncDeadlineStep(
+        _resyncRequestInFlight,
+        answerComing,
+        decoding,
+        decodingForMs,
+        SYNC_DECODE_GRACE_MS,
+        waitedMs,
+        RESYNC_REQUEST_TIMEOUT_MS,
+        _lateJoinLostHost,
+        _owedResync,
+        _owedResyncAsksAgain,
+        RESYNC_MAX_ASKS_AGAIN,
+      ),
+    );
     _resyncRequestInFlight = false;
-    _syncLog(`RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} — no state came, may ask again`);
+    _syncLog(
+      `RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} ` +
+        `decoding=${decoding ? Math.round(decodingForMs) : 'no'} step=${step} — no state came`,
+    );
     // A late joiner still behind the host asks again (bounded there).
-    _resyncAfterLostHost('resync request timed out');
+    if (step === 'lostHost') _resyncAfterLostHost('resync request timed out');
+    else if (step === 'askAgain') _askAgainForOwedResync();
+    else if (step === 'stopAsking') _stopAskingForOwedResync('its asks again went unanswered');
+  };
+  const _stopAskingForOwedResync = (why) => {
+    const asks = _owedResyncAsksAgain;
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
+    _syncLog(`RESYNC-REASK-GIVEUP f=${_frameNum}: ${why} (asked again ${asks}/${RESYNC_MAX_ASKS_AGAIN})`);
+    KNEvent('resync-reask-giveup', 'No resync from the host after asking again', { asks, why });
+  };
+  // The owed resync, asked for again: a full state, now, on the channel to
+  // the host, or over the socket when that channel is not open.
+  const _askAgainForOwedResync = () => {
+    if (!_owedResync || _playerSlot === 0 || _phase !== PHASE_RUNNING) return;
+    _owedResyncAsksAgain++;
+    const ask = `${_owedResyncAsksAgain}/${RESYNC_MAX_ASKS_AGAIN}`;
+    _setLastSyncState(null, 'resync-reask');
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+    if (hostDc?.readyState === 'open') {
+      const requestId = _beginResyncRequest(-1, true);
+      try {
+        _sendResyncRequest(hostDc, requestId, 'sync-request-full');
+        _syncLog(`RESYNC-REASK f=${_frameNum} ask=${ask}: sent sync-request-full to the host`);
+        return;
+      } catch (e) {
+        _resyncRequestInFlight = false;
+        _syncLog(`RESYNC-REASK f=${_frameNum} ask=${ask}: channel send failed: ${e}`);
+      }
+    }
+    if (_requestSocketFullResync('resync-reask', true)) {
+      _syncLog(`RESYNC-REASK f=${_frameNum} ask=${ask}: sent over the socket`);
+      return;
+    }
+    // Nothing could carry it, and with no request out no deadline comes
+    // back here: stop now, visibly. A reconnect asks afresh.
+    _stopAskingForOwedResync('no channel to the host could carry the ask');
   };
   // Each request has a number and the state that answers it carries that
   // number (specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST). A request can be
@@ -6532,11 +6632,17 @@
   // (specs/resync_flow.qnt, lateAndBehind).
   let _resyncRequestAt = -1;
   const _requestIdFrom = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
-  const _beginResyncRequest = (at = -1) => {
+  // `again`: the deadline asking again for an owed "now" resync; any other
+  // "now" request starts the owed resync's count afresh.
+  const _beginResyncRequest = (at = -1, again = false) => {
     _resyncRequestInFlight = true;
     _resyncRequestSentAt = performance.now();
     _resyncRequestId++;
     _resyncRequestAt = at;
+    if (at < 0 && !again) {
+      _owedResync = true;
+      _owedResyncAsksAgain = 0;
+    }
     return _resyncRequestId;
   };
   // The number travels in a message of its own, just ahead of the request on
@@ -7077,7 +7183,7 @@
     _syncLog(`${reason}: lifecycle resync guard cleared`);
   }
 
-  function _requestSocketFullResync(reason) {
+  function _requestSocketFullResync(reason, again = false) {
     if (_playerSlot === 0 || _phase !== PHASE_RUNNING || !socket) return false;
     const hostEntry = _peerEntryForSlot(0);
     const hostSid = hostEntry?.[0];
@@ -7087,7 +7193,7 @@
     }
     try {
       _beginLifecycleResyncGuard(reason);
-      const requestId = _beginResyncRequest();
+      const requestId = _beginResyncRequest(-1, again);
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
       _signalSocket.emit('data-message', {
@@ -7163,16 +7269,18 @@
       );
       const answerFor = _requestIdFrom(msg.requestId);
       if (answerFor > 0) _hostNumbersAnswers = true;
-      const decompressed = await decodeAndDecompress(msg.data);
-      await _handleDecodedSyncPayload({
-        decompressed,
-        frame,
-        isFull: !!msg.full,
-        isProactive: !!msg.proactive,
-        isRegions: false,
-        wireSize: msg.compressedSize || 0,
-        source: 'socket',
-        answerFor,
+      await _decodingSyncAnswer(async () => {
+        const decompressed = await decodeAndDecompress(msg.data);
+        await _handleDecodedSyncPayload({
+          decompressed,
+          frame,
+          isFull: !!msg.full,
+          isProactive: !!msg.proactive,
+          isRegions: false,
+          wireSize: msg.compressedSize || 0,
+          source: 'socket',
+          answerFor,
+        });
       });
     } catch (err) {
       _syncLog(`socket sync-state failed: ${err?.message || err}`);
@@ -11167,6 +11275,9 @@
       observe('giveUp');
       _lateJoinLostHost = false;
       _lateJoinLostHostAsks = 0;
+      // Its asks marked a "now" resync owed: this give-up ends that too.
+      _owedResync = false;
+      _owedResyncAsksAgain = 0;
       _syncLog(
         `LATE-JOIN-LOST-HOST-GIVEUP f=${_frameNum} (${source}): ${LATE_JOIN_LOST_HOST_MAX_ASKS} resync requests went unanswered`,
       );
@@ -13756,6 +13867,8 @@
     _resyncRequestInFlight = false;
     _resyncRequestId = 0;
     _resyncRequestAt = -1;
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
     _hostNumbersAnswers = false;
     _syncAnswerFor = 0;
     // A late join's owed resync belongs to this match: it does not carry
@@ -14763,10 +14876,12 @@
     const nowInput = performance.now();
     const lifecycleGuardTimedOut =
       _lifecycleResyncPending && nowInput - _lifecycleResyncStartedAt >= LIFECYCLE_RESYNC_PENDING_TIMEOUT_MS;
-    if (lifecycleGuardTimedOut) {
-      _clearLifecycleResyncGuard('lifecycle resync guard timeout');
-      _resyncRequestInFlight = false;
-    }
+    // The guard holds the player's input; the timeout gives the input back.
+    // It does not let the request go: that is the request's own deadline
+    // (_checkResyncRequestDeadline, I1), which asks again for an owed resync.
+    // Letting it go here cut short the deadline's ask again, sent with this
+    // guard still armed (specs/resync_reask.qnt, GUARD_LETS_GO).
+    if (lifecycleGuardTimedOut) _clearLifecycleResyncGuard('lifecycle resync guard timeout');
     const suppressResumeGuardInput = nowInput < _resumeInputGuardUntil || _lifecycleResyncPending;
     if ((suppressEjsPausedInput || suppressResumeGuardInput) && _frameNum % 60 === 0) {
       _syncLog(
@@ -18045,16 +18160,18 @@
     _syncAnswerFor = 0;
 
     try {
-      const decompressed = await decompressState(assembled);
-      await _handleDecodedSyncPayload({
-        decompressed,
-        frame,
-        isFull,
-        isProactive,
-        isRegions,
-        wireSize: assembled.length,
-        source: 'dc',
-        answerFor,
+      await _decodingSyncAnswer(async () => {
+        const decompressed = await decompressState(assembled);
+        await _handleDecodedSyncPayload({
+          decompressed,
+          frame,
+          isFull,
+          isProactive,
+          isRegions,
+          wireSize: assembled.length,
+          source: 'dc',
+          answerFor,
+        });
       });
     } catch (err) {
       _syncLog(`sync decompress failed: ${err}`);
@@ -18226,6 +18343,9 @@
       _lateJoinLostHostAsks = 0;
       _syncLog(`late-join: a host state is applied at frame ${frame}; the lost-host resync is done`);
     }
+    // Any host state applied is the resync a "now" request owed.
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
     _lastResyncTime = performance.now(); // restart cooldown from application time, not request time
     // Reset frame pacing after resync — the guest may be behind the host and needs
     // to catch up without PACING-THROTTLE fighting the recovery. Clear the EMA smoothing
@@ -18447,6 +18567,8 @@
     _lateJoinGuestPausedAt = 0;
     _lateJoinLostHost = false;
     _lateJoinLostHostAsks = 0;
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();

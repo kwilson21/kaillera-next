@@ -7,6 +7,8 @@ import {
   isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  resyncDeadlineStep,
+  type DeadlineStep,
   type LostHostStep,
 } from '../../web/src/resync-request.ts';
 
@@ -111,6 +113,29 @@ test('the lost-host step asks up to the bound, then gives up', () => {
   assert.deepEqual(steps, ['ask', 'ask', 'ask', 'giveUp', 'giveUp']);
 });
 
+test('the deadline waits while an answer is coming, decoding, or not yet due', () => {
+  // requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHost, owed, asksAgain, max
+  assert.equal(resyncDeadlineStep(false, false, false, 0, 10000, 99999, 8000, false, true, 0, 2), 'noRequest');
+  assert.equal(resyncDeadlineStep(true, true, false, 0, 10000, 99999, 8000, false, true, 0, 2), 'wait');
+  assert.equal(resyncDeadlineStep(true, false, true, 9999, 10000, 99999, 8000, false, true, 0, 2), 'wait');
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 7999, 8000, false, true, 0, 2), 'wait');
+  // A decode past its grace no longer holds the deadline off (I1).
+  assert.equal(resyncDeadlineStep(true, false, true, 10000, 10000, 99999, 8000, false, true, 0, 2), 'askAgain');
+});
+
+test('at the deadline an owed resync is asked for again up to the bound, then given up', () => {
+  const steps: DeadlineStep[] = [];
+  for (let asks = 0; asks <= 3; asks++) {
+    steps.push(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, false, true, asks, 2));
+  }
+  assert.deepEqual(steps, ['askAgain', 'askAgain', 'stopAsking', 'stopAsking']);
+  // Nothing owed (a coordinated request): let go; the desync check asks again.
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, false, false, 0, 2), 'letGo');
+  // The late joiner's lost-host resync goes first, owed or not.
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, true, true, 0, 2), 'lostHost');
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, true, false, 5, 2), 'lostHost');
+});
+
 // The engine's rules (web/static/netplay-rollback.js), copied as they are
 // written there, over the engine's own variables.
 const engine = {
@@ -142,6 +167,28 @@ const engine = {
     if (inFlight) return 'inFlight';
     if (asks >= max) return 'giveUp';
     return 'ask';
+  },
+  // _checkResyncRequestDeadline: the returns and the step it computes.
+  deadline: (
+    inFlight: boolean,
+    answerComing: boolean,
+    decoding: boolean,
+    decodingForMs: number,
+    graceMs: number,
+    waitedMs: number,
+    timeoutMs: number,
+    lateJoinLostHost: boolean,
+    owedResync: boolean,
+    asksAgain: number,
+    max: number,
+  ): DeadlineStep => {
+    if (!inFlight) return 'noRequest';
+    if (answerComing || (decoding && decodingForMs < graceMs)) return 'wait';
+    if (waitedMs < timeoutMs) return 'wait';
+    if (lateJoinLostHost) return 'lostHost';
+    if (!owedResync) return 'letGo';
+    if (asksAgain >= max) return 'stopAsking';
+    return 'askAgain';
   },
 };
 
@@ -201,6 +248,37 @@ test("the proved rules agree with the engine's over a grid of inputs", () => {
       }
     }
   }
+  for (const out of BOOLS) {
+    for (const coming of BOOLS) {
+      for (const decoding of BOOLS) {
+        for (const decodingForMs of [0, 9999, 10000, 20000]) {
+          for (const waitedMs of [0, 7999, 8000, 30000]) {
+            for (const lostHost of BOOLS) {
+              for (const owed of BOOLS) {
+                for (const asks of [0, 1, 2, 3]) {
+                  const args = [
+                    out,
+                    coming,
+                    decoding,
+                    decodingForMs,
+                    10000,
+                    waitedMs,
+                    8000,
+                    lostHost,
+                    owed,
+                    asks,
+                    2,
+                  ] as const;
+                  assert.equal(resyncDeadlineStep(...args), engine.deadline(...args));
+                  cases++;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   assert.ok(cases > 1000);
 });
 
@@ -212,6 +290,7 @@ test('the engine runs each proved rule beside its own and reports a difference',
     'late-answer-behind': 'isLateAnswerBehind',
     'keeps-awaited-answer': 'keepsAwaitedAnswer',
     'late-join-lost-host': 'lateJoinLostHostStep',
+    'deadline-step': 'resyncDeadlineStep',
   };
   for (const [what, name] of Object.entries(observed)) {
     assert.ok(source.includes(`'${what}',`) || source.includes(`'${what}', `), `${what} is not compared`);
