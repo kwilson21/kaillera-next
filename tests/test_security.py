@@ -30,18 +30,14 @@ def test_reconnect_token_issued_and_forged_rejected(context, server_url):
         host.goto(f"{server_url}/play.html?room=SEC01{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        # Verify token was issued
-        host_pid = host.evaluate("""
-            new Promise(resolve => {
-                const check = () => {
-                    const pid = sessionStorage.getItem('persistentId');
-                    const tok = sessionStorage.getItem('reconnectToken');
-                    if (pid && tok) resolve({ pid, tok });
-                    else setTimeout(check, 100);
-                };
-                check();
-            })
-        """)
+        # Verify token was issued (play.js keeps both in sessionStorage)
+        host.wait_for_function(
+            "sessionStorage.getItem('kn-player-id') && sessionStorage.getItem('kn-reconnect-token')",
+            timeout=10000,
+        )
+        host_pid = host.evaluate(
+            "({ pid: sessionStorage.getItem('kn-player-id'), tok: sessionStorage.getItem('kn-reconnect-token') })"
+        )
         assert len(host_pid["tok"]) > 16
 
         # Impersonator tries to hijack session with forged token
@@ -108,22 +104,35 @@ def test_ice_servers_no_turn_without_token(server_url):
         assert "credential" not in s, "TURN credentials should not be exposed without auth"
 
 
-def test_og_tags_ignore_spoofed_host(server_url):
-    """OG meta tags don't reflect a spoofed Host header."""
-    r = requests.get(
-        f"{server_url}/",
-        headers={"Host": "evil.example.com", "Accept": "text/html"},
-        timeout=5,
-    )
+def test_og_tags_ignore_spoofed_host(monkeypatch):
+    """OG meta tags don't reflect a spoofed Host header.
+
+    The server holds the Host header to ALLOWED_ORIGIN, which production sets;
+    with it unset (a dev server, like the one these tests start) every host is
+    let through. So the app is built here as production configures it.
+    """
+    from fastapi.testclient import TestClient
+
+    from src.api import app as appmod
+
+    monkeypatch.setenv("ALLOWED_ORIGIN", "https://play.example")
+    client = TestClient(appmod.create_app())
+    r = client.get("/", headers={"Host": "evil.example.com", "Accept": "text/html"})
+    assert r.status_code == 200
     assert "evil.example.com" not in r.text
+    # The configured host stands in for the spoofed one.
+    assert 'content="https://play.example/static/og/home.png"' in r.text
 
 
 def test_sanitize_strips_angle_brackets(page, server_url):
     """Player names with <script> tags are sanitized."""
     page.goto(f"{server_url}/play.html?room=SEC03{_R}&host=1&name=%3Cscript%3Ealert(1)%3C/script%3E")
     expect(page.locator("#overlay")).to_be_visible(timeout=10000)
-    content = page.locator("#players-list").inner_html()
-    assert "<script>" not in content
+    # The server strips angle brackets from the name before anyone sees it.
+    name = page.locator('.player-slot[data-slot="0"] .name')
+    expect(name).to_contain_text("script", timeout=10000)
+    assert "<" not in name.inner_text() and ">" not in name.inner_text()
+    assert "<script>" not in page.locator("#player-list").inner_html()
 
 
 def test_oversized_snapshot_dropped(context, server_url):
