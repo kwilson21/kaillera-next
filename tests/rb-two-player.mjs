@@ -224,9 +224,10 @@
  *     so no push is acknowledged: fails unless the host pushes again to the
  *     limit, gives up (`INPUT-ASK-PUSH-GAVEUP`) and drops the player
  *     (`peer hard-disconnected`) rather than playing on split, the guest's
- *     page is told and ends its match (`DROPPED-BY-HOST`), and the drop is
- *     final: no mesh heal adds the player back and no late input follows on
- *     the host (specs/drop_is_final.qnt).
+ *     page is told (`DROPPED-BY-HOST`) and joins again late onto the host's
+ *     state (`late-join loaded`), no mesh heal adds it back, no late input
+ *     follows on the host, and the frames from the late join's state match
+ *     (specs/drop_is_final.qnt).
  *   ASK_UNANSWERED_PHANTOM=1   With HEAL_BOTH_SIDES=1: once the heal's checks
  *     are done (its 15 s after the reconnect's resync), the guest drops its
  *     input for one frame just ahead of it, for good: #272's shape. #272's
@@ -761,7 +762,9 @@ const FREEZE_LIKE =
   // The stall shape recovers by the host's state: a hole that straddles the
   // first push is predicted until the next one, then both are on the host's
   // state. Compared from the last state the guest applied.
-  (ASK_UNANSWERED_STALL_MS > 0 && !ASK_UNANSWERED_ACKS);
+  // ACKS: the guest is dropped and joins again late; compared from the
+  // late join's state.
+  ASK_UNANSWERED_STALL_MS > 0;
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -3328,7 +3331,11 @@ fs.writeFileSync(
 // before the guest's applied BOOT-SYNC are excluded the same way — never
 // widen this to a same-engine run, where a boot-window mismatch is real.
 const crossEngine = hostBrowser !== guestBrowser;
-const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
+// Each state the guest took: a resync, or a late join's state (a page the
+// host dropped joins again late, specs/drop_is_final.qnt).
+const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)|late-join loaded at frame (\d+)/g)].map(
+  (m) => +(m[1] ?? m[2]),
+);
 const bootSyncFrame = crossEngine && resyncs.length ? resyncs[0] : 0;
 // RESYNC_ONE_BACK / RESYNC_SAME_FRAME: the guest's frame reset after it
 // paused (none for the same frame) and the resync it applied. The compare
@@ -4554,6 +4561,7 @@ const askUnansweredReport = (() => {
     // ACKS: the drop is final (specs/drop_is_final.qnt): the guest's page
     // was told and ended its match, and nothing on the host followed it.
     droppedByHost: linesAfter(G.sync, askUnanswered.guestAt.seq).filter((l) => /DROPPED-BY-HOST reason=desync/.test(l)),
+    lateJoined: G.sync.split('\n').filter((l) => /late-join loaded at frame/.test(l)),
     pastWindowAfterDrop: gaveUp.length
       ? linesAfter(H.sync, seqOf(gaveUp[0])).filter((l) => /INPUT-PAST-WINDOW-MISMATCH/.test(l)).length
       : null,
@@ -4574,6 +4582,9 @@ const askUnansweredFailed =
         askUnansweredReport.gaveUp.length > 0 &&
         askUnansweredReport.hardDisconnected.length > 0 &&
         askUnansweredReport.droppedByHost.length > 0 &&
+        // It joined again late, onto the host's state; frames are compared
+        // from there (FREEZE_LIKE).
+        askUnansweredReport.lateJoined.length > 0 &&
         askUnansweredReport.heals === 0 &&
         askUnansweredReport.pastWindowAfterDrop === 0
       : askUnansweredReport.settled.length > 0 &&

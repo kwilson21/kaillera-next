@@ -217,7 +217,7 @@ def test_a_player_dropped_in_the_match_comes_back_only_as_a_late_joiner():
     handler = src[src.index("if (e.data.startsWith('dropped:')) {") :][:400]
     assert "if (peer.slot !== 0) {" in handler
     assert "_endMatchDropped(" in handler
+    # The page joins again late, through the start group's transition.
     end = src[src.index("const _endMatchDropped = (reason) => {") :]
     end = end[: end.index("\n  };\n")]
-    assert "_phase = PHASE_STOPPED;" in end
-    assert "_config?.onFatal?.('dropped');" in end
+    assert "queueMicrotask(() => _config?.onLeftOutOfStart?.());" in end

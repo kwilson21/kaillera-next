@@ -20,9 +20,11 @@
 //   in this match. It comes back only as a late joiner, whose activation
 //   puts its slot back in the roster.
 // TELL: the desync give-up tells the player first (`dropped:desync`, taken
-//   only from the host), and its page ends its match, as a core fault does;
-//   the player reloads and joins late. A drop after a dead channel cannot
-//   tell it.
+//   only from the host), and its page stops its match and joins again late
+//   by itself, onto the host's state (the session's leftOutOfStart:
+//   running -> lateJoinStarting). A drop after a dead channel cannot tell
+//   it: that page plays on alone until its player reloads (pre-existing; the
+//   guest's side is the follow-up).
 //
 // What is modelled: the host's entry for one player, the roster slot, the
 // player's page playing or ended, the two ways in, the health check, and a
@@ -69,7 +71,8 @@ module drop_is_final {
     inRoster' = inRoster, playing' = playing, dropped' = dropped, told' = told,
   }
 
-  // The player reloads and joins late: a new page, its slot back in the roster.
+  // The player joins late (by itself when told, else by reloading): its slot
+  // back in the roster.
   action lateJoin = all {
     dropped, not(playing), not(entry),
     entry' = true, inRoster' = true, playing' = true, dropped' = false, told' = false,

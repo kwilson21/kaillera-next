@@ -1755,6 +1755,8 @@
   // id: the mesh health check does not add them back; they come back only
   // as late joiners (specs/drop_is_final.qnt).
   let _droppedThisMatch = new Set();
+  // This page was dropped by the host and is joining again late.
+  let _droppedByHost = false;
   // INPUT-OOR is logged at most once a second per slot, with how many were
   // dropped since the last line: a peer far behind sends every frame, and a
   // line each filled the sync log's ring and evicted everything before it.
@@ -13386,25 +13388,20 @@
   };
 
   let _stepNoRunLastLogAt = 0;
-  // The host dropped this page from the match (`dropped:<reason>`): it ends
-  // its match as a core fault does, and the player joins again late
-  // (specs/drop_is_final.qnt).
+  // The host dropped this page from the match (`dropped:<reason>`): it joins
+  // again late, onto the host's state, through the transition a page left out
+  // of the start takes (session leftOutOfStart: running -> lateJoinStarting;
+  // the engine is stopped and started again as a late joiner).
+  // specs/drop_is_final.qnt.
   const _endMatchDropped = (reason) => {
-    if (_phase === PHASE_STOPPED) return;
-    _syncLog(`DROPPED-BY-HOST reason=${reason} f=${_frameNum} — ending the match on this page`);
+    if (_droppedByHost) return;
+    _droppedByHost = true;
+    _syncLog(`DROPPED-BY-HOST reason=${reason} f=${_frameNum} — joining again late`);
     KNEvent('desync', `dropped by the host (${reason})`, { kind: 'dropped-by-host', reason, frame: _frameNum });
-    _phase = PHASE_STOPPED;
-    _checkStateTransition();
-    if (_tickInterval) {
-      clearInterval(_tickInterval);
-      _tickInterval = null;
-    }
-    _workerCoprocAbort(`dropped by the host (${reason})`);
-    try {
-      _config?.onFatal?.('dropped');
-    } catch (cbErr) {
-      console.error('[lockstep] onFatal callback threw:', cbErr);
-    }
+    _config?.onToast?.('The host could not keep this game in sync: joining again');
+    // Out of this channel's message handler first: the late join stops this
+    // engine.
+    queueMicrotask(() => _config?.onLeftOutOfStart?.());
   };
   const _notifyCoreFatal = () => {
     try {
@@ -19539,6 +19536,7 @@
 
   const stop = () => {
     _droppedThisMatch = new Set();
+    _droppedByHost = false;
     // Before the final log flush, so its log line reaches the server.
     _clearHostInitialStateWait();
     _restoreLocalSaveFile();
