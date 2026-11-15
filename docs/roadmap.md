@@ -293,7 +293,8 @@ button's rule is observed, `play.js` still decides it). Joining a room:
 the `open-room` and `join-room` requests are built in `connect.ts` and typed
 against the generated schemas, with what each refusal means; whether a page
 comes in as a spectator and how it gets into a match already under way are
-`join-plan.ts` (proved), observed, with `onConnect` still deciding. Left in
+`join-plan.ts` (proved), which `onConnect` calls, as it does `connect.ts`'s
+reading of each answer. Left in
 `play.js`: the reconnect banner's timers, the game lifecycle handlers and
 engine start-up, which are effects on the page, the socket and the emulator.
 

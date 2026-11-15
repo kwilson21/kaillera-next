@@ -998,14 +998,12 @@
 
     if (isHost) {
       socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || 'ssb64', null), (err) => {
-        const roomHandedOn = err === 'Room already exists' && _droppedAsHost;
-        _playObserver.compare(
-          'open-room-answer',
-          err === 'Not the owner' || roomHandedOn ? 'join-as-guest' : err ? 'failed' : 'opened',
-          _connect.openRoomAnswer(err, _droppedAsHost).kind,
-        );
+        // What the answer means is connect.ts: opened, the room is someone
+        // else's now (it was handed on after this page was dropped as host),
+        // or failed.
+        const answer = _connect.openRoomAnswer(err, _droppedAsHost);
         _droppedAsHost = false;
-        if (err === 'Not the owner' || roomHandedOn) {
+        if (answer.kind === 'join-as-guest') {
           // This page's URL says host, but the room belongs to someone
           // else now: this player was dropped mid-match and the room was
           // handed on (and it may since have been taken back as a player).
@@ -1016,8 +1014,8 @@
           onConnect(false);
           return;
         }
-        if (err) {
-          showError(`Failed to create room: ${err}`);
+        if (answer.kind === 'failed') {
+          showError(answer.message);
           return;
         }
         mySlot = 0;
@@ -1060,12 +1058,7 @@
         // full room (socket reconnect, or catching up with a replaced match)
         // must not turn it into a spectator while the server keeps its slot.
         const holdsPlayerSlot = mySlot !== null && mySlot !== undefined;
-        _playObserver.compare(
-          'becomes-spectator',
-          !isSpectator && !holdsPlayerSlot && roomData.player_count >= roomData.max_players,
-          _joinPlan.becomesSpectator(isSpectator, holdsPlayerSlot, roomData.player_count, roomData.max_players),
-        );
-        if (!isSpectator && !holdsPlayerSlot && roomData.player_count >= roomData.max_players) {
+        if (_joinPlan.becomesSpectator(isSpectator, holdsPlayerSlot, roomData.player_count, roomData.max_players)) {
           console.log(
             `[play] auto-spectate: player_count=${roomData.player_count} >= max_players=${roomData.max_players}`,
           );
@@ -1089,13 +1082,11 @@
 
         socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), isSpectator, null), (err, joinData) => {
           if (err) {
-            _playObserver.compare(
-              'join-refusal',
-              err === 'Room is full' ? 'watch-instead' : 'failed',
-              _connect.joinRefusal(err, '').kind,
-            );
+            // What each refusal says is connect.ts (the spectator-cap copy
+            // is §7.2 M3 #3, whichever cap tripped).
+            const refusal = _connect.joinRefusal(err, roomClosedMessage(roomData?.host_name));
             // Room filled between REST check and join — auto-spectate
-            if (err === 'Room is full') {
+            if (refusal.kind === 'watch-instead') {
               isSpectator = true;
               _autoSpectated = true;
               socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), true, null), (err2, joinData2) => {
@@ -1113,9 +1104,7 @@
               });
               return;
             }
-            // What each refusal says is connect.ts (the spectator-cap copy
-            // is §7.2 M3 #3, whichever cap tripped).
-            showError(_connect.joinRefusal(err, roomClosedMessage(roomData?.host_name)).message);
+            showError(refusal.message);
             return;
           }
 
@@ -1215,19 +1204,19 @@
             // Store host ROM metadata for verification
             applyHostRomFromData(joinData || roomData);
 
+            // How this page gets into the match is join-plan.ts (proved).
+            const hasRom = localRomLoaded();
             const lateJoinPlan = _joinPlan.lateJoinPlan(
               !!isSpectator || mode === 'streaming',
-              localRomLoaded(),
+              hasRom,
               !!roomData.rom_sharing,
               hostRomMismatch(),
               _romSharingDecision === 'accepted',
             );
-            const lateJoinDecided = (decided) => _playObserver.compare('late-join-plan', decided, lateJoinPlan);
 
             // Spectators and streaming guests don't need a ROM — they
             // receive a video stream. Skip ROM checks and go to engine init.
-            if (isSpectator || mode === 'streaming') {
-              lateJoinDecided('watch');
+            if (lateJoinPlan === 'watch') {
               hideOverlay();
               showToolbar();
               showGameLoading();
@@ -1235,43 +1224,29 @@
               return;
             }
 
-            // If no ROM cached, check if host is sharing
-            if (!localRomLoaded()) {
-              if (roomData.rom_sharing) {
-                lateJoinDecided('askForSharedRom');
-                // Show accept/decline prompt instead of ROM drop
-                crumb('late-join-sharing-prompt', { sharing: true });
-                _romSharingEnabled = true;
-                _setPendingLateJoin(true);
-                showLateJoinRomPrompt();
-                updateRomSharingUI();
-                return;
-              }
-              lateJoinDecided('askForRom');
+            // No ROM, or one that isn't the host's, and the host is sharing
+            // theirs: show the accept/decline prompt instead of a ROM drop.
+            if (lateJoinPlan === 'askForSharedRom') {
+              if (!hasRom) crumb('late-join-sharing-prompt', { sharing: true });
+              _romSharingEnabled = true;
+              _setPendingLateJoin(true);
+              showLateJoinRomPrompt();
+              updateRomSharingUI();
+              return;
+            }
+            if (lateJoinPlan === 'askForRom') {
               crumb('late-join-rom-prompt', { sharing: false });
               _setPendingLateJoin(true);
               showLateJoinRomPrompt();
               return;
             }
-
-            // Verify ROM hash if available (skip when ROM came from host via sharing)
-            if (hostRomMismatch() && _romSharingDecision !== 'accepted') {
-              if (roomData.rom_sharing) {
-                // Cached ROM doesn't match but sharing is available —
-                // show sharing prompt instead of erroring out
-                lateJoinDecided('askForSharedRom');
-                _romSharingEnabled = true;
-                _setPendingLateJoin(true);
-                showLateJoinRomPrompt();
-                updateRomSharingUI();
-                return;
-              }
-              lateJoinDecided('wrongRom');
+            // The ROM's hash isn't the host's (one that came from the host by
+            // sharing is believed), and the host isn't sharing.
+            if (lateJoinPlan === 'wrongRom') {
               showError("Your ROM doesn't match the host's game. Drop the correct ROM.");
               return;
             }
 
-            lateJoinDecided('play');
             // A page that was in the lobby (it has just caught up with a
             // match that replaced the one it was in) still has the lobby
             // overlay up; a fresh page does not.
