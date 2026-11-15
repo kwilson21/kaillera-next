@@ -92,6 +92,11 @@ peer_connection() {
   local PAIR=specs/peer_connection.qnt
   verify "$PAIR" peer_connection_fixed allHold
   verify "$PAIR" peer_connection_current holdToday
+  # The machine deciding `heal` alone keeps what holds today and two more
+  # (no pair worse than today during a deploy). The answerer's wait still
+  # has no deadline there, as today: the next rule to wire.
+  verify "$PAIR" peer_connection_heal_one_side holdWithHealOneSide
+  expect_violation "$PAIR" peer_connection_heal_one_side everyWaitHasADeadline
   # Today's engine: each of these has a counterexample within 5 steps.
   # (neverLeftWithNothingPending is violated too, but its shortest
   # counterexample is longer than this bound; crossedHealOffersTest replays it.)
@@ -302,6 +307,22 @@ start_group() {
   expect_violation "$START_GROUP" start_group_lost_dropped neverStuck
 }
 
+mesh_heal() {
+  local MESH=specs/mesh_heal.qnt
+  verify "$MESH" mesh_heal_fixed allHold init 10
+  verify "$MESH" mesh_heal_fixed_guest_lower allHold init 10
+  # The link dies, both channels read closed, both sides go stale to
+  # phantoms, and nothing will act: 5 steps (phantomForeverTest). The same
+  # with the check on C ticks but skipping phantoms: 5 steps. (Without the
+  # reset at open, the second request takes 7 steps: secondRequestTest.)
+  expect_violation "$MESH" mesh_heal_current aDeadChannelIsNeverForgotten
+  expect_violation "$MESH" mesh_heal_c_tick_only aDeadChannelIsNeverForgotten
+  # A lower slot that is not the host goes phantom, heals with a fresh
+  # entry, and the reconnect opens without its asking the host: 5 steps
+  # (nonHostLowerTest).
+  expect_violation "$MESH" mesh_heal_fresh_entry aNonHostLowerResyncsAfterAHeal
+}
+
 ring_after_resync() {
   local RING=specs/ring_after_resync.qnt
   verify "$RING" ring_after_resync_current allHold
@@ -320,7 +341,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync start_group
+  rom_at_start ring_after_resync start_group mesh_heal
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -330,7 +351,7 @@ SPEC_GROUPS=(
 SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
-  "streaming_connection resync_flow tick_deadlines resync_mesh"   # ~6.5 min
+  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
   "peer_identity rom_transfer peer_connection rom_at_start"       # ~6.5 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group" # ~7 min
 )

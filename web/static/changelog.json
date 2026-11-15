@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.4",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "heal a silently dead channel on C-rollback ticks, and let the per-peer machine decide who offers (#272)"
+      }
+    ]
+  },
+  {
     "version": "0.69.3",
     "date": "2026-11-15",
     "changes": [

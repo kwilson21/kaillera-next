@@ -163,7 +163,7 @@ PAIR=specs/peer_connection.qnt
 $QUINT typecheck "$PAIR"
 # The scenarios say what each variant does with the same ordering.
 for variant in peer_connection_before_119 peer_connection_before_startup_flag peer_connection_current \
-  peer_connection_counter_only peer_connection_fixed; do
+  peer_connection_heal_one_side peer_connection_counter_only peer_connection_fixed; do
   $QUINT test "$PAIR" --main="$variant" --backend=typescript
 done
 pair() { # module invariant init
@@ -184,6 +184,13 @@ pair peer_connection_current holdToday initLobby
 # (startupRetryToAStartedPageTest).
 pair peer_connection_fixed allHold init
 pair peer_connection_fixed allHold initLobby
+# The per-peer machine deciding `heal` alone (the lower slot's health check
+# offers, the higher slot's notices a drop): what holds today, and the pair
+# no longer offers to each other at once or is left with nothing pending. A
+# new higher slot meeting an old lower slot during a deploy is this module;
+# an old higher slot with either is peer_connection_current.
+pair peer_connection_heal_one_side holdWithHealOneSide init
+pair peer_connection_heal_one_side holdWithHealOneSide initLobby
 # With attempts told apart by the offering page's counter alone (the per-peer
 # machine as first written), staleSignalsAreNotApplied is VIOLATED: a page
 # that replaces another numbers its offers from 1 again, and what was sent for
@@ -414,6 +421,28 @@ done
 # (sync_follow_up_from_send; mispredictWhileCompressingTest).
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── A channel that dies in a match with no event ───────────────────────────
+MESH=specs/mesh_heal.qnt
+$QUINT typecheck "$MESH"
+for variant in mesh_heal_current mesh_heal_c_tick_only mesh_heal_no_reset_on_open mesh_heal_fresh_entry \
+  mesh_heal_fixed mesh_heal_fixed_guest_lower; do
+  $QUINT test "$MESH" --main="$variant" --backend=typescript
+done
+# Today a C-rollback tick never reaches the mesh health check, so a channel
+# that dies with no event leaves a phantom for the rest of the match
+# (mesh_heal_current; phantomForeverTest). Run on C ticks but still skipping
+# phantoms it rarely acts, since frames are frozen until the player is one
+# (mesh_heal_c_tick_only). Without the guest's reset when the reconnected
+# channel opens, PEER-RECOVERED asks for a second resync
+# (mesh_heal_no_reset_on_open; secondRequestTest). A lower slot that is not
+# the host made a fresh entry when it healed, so it played on from its
+# predictions instead of asking the host for state (mesh_heal_fresh_entry;
+# nonHostLowerTest).
+for variant in mesh_heal_fixed mesh_heal_fixed_guest_lower; do
+  $QUINT run "$MESH" --main="$variant" --invariant=allHold \
+    --max-samples=20000 --max-steps=20 --backend=typescript
+done
 
 # ── The rollback ring across a resync that loads the host's state ─────────
 RING=specs/ring_after_resync.qnt
