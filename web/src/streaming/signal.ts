@@ -1,13 +1,12 @@
 /**
  * What a message does to the streaming engine's connections: a relayed
  * WebRTC signal, a late joiner saying it is ready, a data channel opening,
- * a connection failing. Each is the rule web/static/netplay-streaming.js
- * applies (onWebRTCSignal, onDataMessage, setupDataChannel's onOpen,
- * onconnectionstatechange). The engine still decides, and observe.ts
- * compares, with two exceptions the engine asks for: which offers a page
- * that receives the stream takes (`signalGate`), and which connection a
- * signal belongs to (attempt.ts: `offerForConnection`, `answerApplies`,
- * `signalForConnection`).
+ * a connection failing. web/static/netplay-streaming.js asks them in
+ * onWebRTCSignal, onDataMessage, setupDataChannel's onOpen and
+ * onconnectionstatechange, and carries out the answer. Among them: which
+ * offers a page that receives the stream takes (`signalGate`), and which
+ * connection a signal belongs to (attempt.ts: `offerForConnection`,
+ * `answerApplies`, `signalForConnection`).
  */
 import { signalDisposition } from '../peer-signaling.ts';
 import { checkRelayed, type Relayed } from '../relay.ts';

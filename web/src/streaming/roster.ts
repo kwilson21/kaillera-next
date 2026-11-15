@@ -1,9 +1,8 @@
 /**
  * The streaming engine's roster rules: who connects to whom when the room's
  * roster changes, and which controller ports the host's core sees plugged in.
- * Each is the rule web/static/netplay-streaming.js applies today
- * (onUsersUpdated, _controllerPresentMask), written as a function of its
- * inputs. The engine still decides; observe.ts compares.
+ * web/static/netplay-streaming.js asks them in onUsersUpdated and
+ * _controllerPresentMask.
  *
  * Streaming is a star, and its rule for who offers is not the rollback
  * mesh's (`shouldInitiate` in peer-signaling.ts: the lower slot offers, a

@@ -158,12 +158,12 @@ without the old code running beside it first.
   scenario, in the PR; any other difference blocks the change.
 - Still observing, each to be switched to deciding that way (the old code
   decides and the new reports a difference): the engine's checks of the
-  DataChannel strings peers send (`protocol-mismatch`), the mesh rules
-  (`mesh-disagree`), the streaming rules (`streaming-disagree`). The play
-  page's moved decisions all decide (the ROM receiver was the last; play.js
-  sends no `play-disagree`), the resync request rules decide and the
-  per-peer machine is driven (below), so `tests/observer-reports.mjs`
-  counts no report type now. Once all of them decide, the observer plumbing
+  DataChannel strings peers send (`protocol-mismatch`) and the mesh rules
+  (`mesh-disagree`). The play page's moved decisions all decide (the ROM
+  receiver was the last; play.js sends no `play-disagree`), the streaming
+  engine calls its rules (no `streaming-disagree`), the resync request
+  rules decide and the per-peer machine is driven (below), so
+  `tests/observer-reports.mjs` counts no report type now. Once all of them decide, the observer plumbing
   (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
@@ -648,16 +648,16 @@ Done so far:
   emulator, starting the engine, and connecting the fake peer and the
   autopilot to it.
 - `netplay-streaming.js` (item 4): its decisions are typed functions in
-  `web/src/streaming` that run beside the engine and report
-  `streaming-disagree`. These cover the roster, the signals and the input
-  path (#183), and the video choices (#185). Two of them decide rather than
-  observe: which offers a page receiving the stream takes (`offer-gate.ts`,
-  #220), and which connection a signal belongs to, together with the host's
-  deadline to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
+  `web/src/streaming`, and the engine calls them; its own copies are gone.
+  These cover the roster, the signals and the input path (#183), and the
+  video choices (#185), which ran beside the engine and reported
+  `streaming-disagree` until the engine switched to them, with a real-ROM
+  streaming run (connect, input, a dropped guest, a reconnect); which
+  offers a page receiving the stream takes (`offer-gate.ts`, #220); and
+  which connection a signal belongs to, together with the host's deadline
+  to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
   `specs/streaming_connection.qnt`).
-- Next: the engine calls the observed functions and its own copies are
-  deleted, one rule at a time, each with a real-ROM streaming run that
-  reaches it (connect, input, a dropped guest, a reconnect). Then move the demo page's wiring.
+- Next: move the demo page's wiring.
 
 Not every page has `window.KNCore`, and some of these scripts run before it:
 
