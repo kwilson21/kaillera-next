@@ -86,20 +86,20 @@ expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
 # check-specs.sh samples today's holdToday from `initLobby`.
 
 STREAM=specs/streaming_connection.qnt
-verify "$STREAM" streaming_connection_fixed allHold
+verify "$STREAM" streaming_connection_current allHold
 # Pages joining late, whose readies only this initial state has: a ready
 # lost, early, or arriving while the connection is still connecting. One
 # step fewer than the rest keeps it near the cost of the proof above (about
 # 130 s at 5 steps here, against about 160 s from `init` at 6); the longest of
 # those orderings, the resent offer of readyWhileConnectingTest, reaches the
 # guest at step 5.
-verify "$STREAM" streaming_connection_fixed allHold initLate $((STEPS - 1))
-verify "$STREAM" streaming_connection_current holdToday
-# Today's engine: a lost offer leaves the guest with nothing to come, in 2
-# steps. Its case of staleSignalsAreNotApplied, the host's new offer applied
-# to the guest's old connection (newConnectionTakenAsRenegotiationTest), is
-# 7 steps long, beyond this bound; that scenario holds it.
-expect_violation "$STREAM" streaming_connection_current neverLeftWithNothingPending
+verify "$STREAM" streaming_connection_current allHold initLate $((STEPS - 1))
+# The engine before the host's deadline: a lost offer left the guest with
+# nothing to come, in 2 steps. Its case of staleSignalsAreNotApplied, the
+# host's new offer applied to the guest's old connection
+# (newConnectionTakenAsRenegotiationTest), is 7 steps long, beyond this
+# bound; that scenario holds it.
+expect_violation "$STREAM" streaming_connection_before_reoffer neverLeftWithNothingPending
 # The engine before #220 answered any member's offer: a stray offer is
 # answered in 2 steps, and a stray sender's second offer is applied to its
 # first connection in 4.

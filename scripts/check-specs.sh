@@ -143,27 +143,24 @@ pair peer_connection_counter_only holdWithACounterAlone initLobby
 STREAM=specs/streaming_connection.qnt
 $QUINT typecheck "$STREAM"
 # The scenarios say what each variant does with the same ordering.
-for variant in streaming_connection_before_220 streaming_connection_current streaming_connection_fixed; do
+for variant in streaming_connection_before_220 streaming_connection_before_reoffer streaming_connection_current; do
   $QUINT test "$STREAM" --main="$variant" --backend=typescript
 done
 stream() { # module invariant init
   $QUINT run "$STREAM" --main="$1" --invariant="$2" --init="$3" \
     --max-samples=10000 --max-steps=25 --backend=typescript
 }
-# Today: nothing replaces a connection both pages have open, and a guest's or
-# spectator's page connects only to the host. The other two properties are
-# VIOLATED today (the scenarios above show how): neverLeftWithNothingPending
-# (a dropped connection is forgotten on both pages and nothing offers again,
-# droppedGuestIsNeverReconnectedTest) and staleSignalsAreNotApplied (an offer
-# for a new connection is applied to the old one,
-# newConnectionTakenAsRenegotiationTest). receiversConnectOnlyToTheHost was
-# VIOLATED before #220, when a page answered any member's offer
+# Today every property holds. Before the host had a deadline to offer again
+# and signals named their connection (streaming_connection_before_reoffer),
+# two were VIOLATED (the scenarios above show how):
+# neverLeftWithNothingPending (a dropped connection was forgotten on both
+# pages and nothing offered again, droppedGuestTest) and
+# staleSignalsAreNotApplied (an offer for a new connection was applied to the
+# old one, newConnectionTakenAsRenegotiationTest). receiversConnectOnlyToTheHost
+# was VIOLATED before #220, when a page answered any member's offer
 # (streaming_connection_before_220, strayOfferTest).
-stream streaming_connection_current holdToday init
-# With the host's deadline and signals that name their connection as well,
-# every property holds.
-stream streaming_connection_fixed allHold init
-stream streaming_connection_fixed allHold initLate
+stream streaming_connection_current allHold init
+stream streaming_connection_current allHold initLate
 
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt

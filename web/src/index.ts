@@ -86,8 +86,10 @@ import { classifyRunnerStep } from './runner-step.ts';
 import { installSite, KNSite } from './site/index.ts';
 import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
+import * as streamingAttempt from './streaming/attempt.ts';
 import * as streamingInput from './streaming/input.ts';
 import { createStreamingObserver } from './streaming/observe.ts';
+import * as streamingReoffer from './streaming/reoffer.ts';
 import * as streamingRoster from './streaming/roster.ts';
 import * as streamingSignal from './streaming/signal.ts';
 import * as streamingVideo from './streaming/video.ts';
@@ -358,12 +360,16 @@ export const KNCore = {
   },
   /**
    * The streaming engine's decisions (web/static/netplay-streaming.js still
-   * makes them; `createObserver` compares), except `signalGate`, which the
-   * engine asks: which offers a page that receives the stream takes.
+   * makes them; `createObserver` compares), except the ones the engine asks:
+   * which offers a page that receives the stream takes (`signalGate`), which
+   * connection a signal belongs to (attempt.ts), and the host's deadline to
+   * offer again (`startReofferDeadlines`, reoffer.ts).
    */
   streaming: {
     ...streamingRoster,
     ...streamingSignal,
+    ...streamingAttempt,
+    ...streamingReoffer,
     ...streamingInput,
     ...streamingVideo,
     createObserver: createStreamingObserver,
