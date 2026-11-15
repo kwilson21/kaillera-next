@@ -180,7 +180,8 @@ class SetModePayload(_ModeCompatMixin, BaseModel):
 
 
 class SetGameIdPayload(BaseModel):
-    game_id: str = Field(default="ssb64", max_length=32)
+    # Empty: the host's ROM is not a game the site knows, or it has none.
+    game_id: str = Field(default="", max_length=32)
 
 
 # ── rom-sharing-toggle ───────────────────────────────────────────────────────
