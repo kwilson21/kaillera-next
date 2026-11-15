@@ -1,7 +1,6 @@
 (function () {
   'use strict';
 
-  const DEMO_SOCKET_ID = 'demo-local';
   const _nativeRAF = window.APISandbox?.nativeRAF || window.requestAnimationFrame.bind(window);
 
   // The demo's own logic (web/src/demo) and the rollback engine are in the
@@ -36,7 +35,6 @@
   // which reads menu state from RDRAM. Other ROMs (e.g. Smash Remix, whose
   // memory layout differs) keep the recorded frame script below.
   let _romIsSsb64Us = false;
-  let _menuPilot = null;
   // The page's run state (engine, emulator loader, match, Pause, auto-compare,
   // mode, whether the controls were touched) is a state machine,
   // web/src/demo/run-state.ts: `_run`, made once the handlers below exist.
@@ -64,7 +62,6 @@
   let _recordingActive = false;
   let _recordingDone = false;
   let _autopilotActive = false;
-  let _wrappedReadLocalInput = false;
   let _heldRandomP1Input = null;
   let _heldRandomP1UntilFrame = -1;
   const _randomP1InputForFrame = (frame) => {
@@ -78,8 +75,29 @@
   };
   // The recorded menu scripts (player 1's from ?record=1, player 2's from
   // ?record=p2) and their lookup are web/src/demo/autopilot.ts.
-  const _p2InputAtFrame = (frame) => _demo.autopilot.p2ScriptedInput(frame);
-  const _p1InputAtFrame = (frame) => _demo.autopilot.p1ScriptedInput(frame);
+
+  // Booting the emulator, starting the engine against a synthetic player 2,
+  // and connecting the menu autopilot and the fake peer to it, with the input
+  // hook that plays the autopilot's or a recording's player 1. This page keeps
+  // what it shows and the recording's and autopilot's progress, which the
+  // wiring asks it for. web/src/demo/wiring.ts.
+  const _wiring = _demo.wiring(window, {
+    run: () => _run,
+    setStatus: (message) => _setStatus(message),
+    installEjsGlobals: _installEjsGlobals,
+    rom: () => ({ url: _romBlobUrl, hash: _romHash, ssb64Us: _romIsSsb64Us }),
+    recordMode: () => _recordMode,
+    recording: () => _recordingActive && !_recordingDone,
+    record: (entry) => _recordedInputs.push(entry),
+    autopilotActive: () => _autopilotActive,
+    randomP1InMatch: _randomP1InMatch,
+    randomP1InputForFrame: (frame) => _randomP1InputForFrame(frame),
+    inputHooked: (started) => {
+      if (started === 'recording') _recordingActive = true;
+      else _autopilotActive = true;
+    },
+    network: () => _networkFromControls(),
+  });
 
   // Compute SHA-256 of ROM bytes in the format the engine's _SMASH_REMIX_HASHES
   // set uses ('S' + 64 hex chars). This lets _isSmashRemix() detect Smash
@@ -134,15 +152,6 @@
   // `matchLeft` (web/src/demo/run-state.ts).
 
   const $ = (id) => document.getElementById(id);
-  const _noop = () => {};
-  const _socket = {
-    id: DEMO_SOCKET_ID,
-    connected: true,
-    on: _noop,
-    off: _noop,
-    emit: _noop,
-  };
-
   const _setStatus = (message) => {
     const status = $('demo-status');
     if (status) status.textContent = message;
@@ -272,89 +281,6 @@
     _updateRollbackToggle();
   };
 
-  const _zeroLocalInput = () => _demo.autopilot.zeroInput();
-
-  // No input-lag simulation here: the engine applies every player's input,
-  // yours included, `delay` frames after it's read, so each mode's delay is
-  // real — rollback's small delay (the trip minus the rollback budget),
-  // lockstep's whole trip.
-
-  // Wrap KNShared.readLocalInput once. In record mode, capture inputs to a
-  // buffer indexed by current engine frame. Otherwise, replay scripted inputs
-  // from the recorded script via _p1InputAtFrame (or pass real
-  // input through if the autopilot has no entry for this frame yet).
-  const _installInputHook = () => {
-    if (_wrappedReadLocalInput || !window.KNShared?.readLocalInput) return;
-    const original = window.KNShared.readLocalInput.bind(window.KNShared);
-    window.KNShared.readLocalInput = (playerSlot, keyMap, heldKeys) => {
-      const realInput = original(playerSlot, keyMap, heldKeys);
-      if (_recordMode === 'p1') {
-        if (_recordingActive && !_recordingDone) {
-          const frame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1;
-          _recordedInputs.push(_demo.autopilot.recordedFrame(frame, realInput));
-        }
-        return realInput;
-      }
-      if (_recordMode === 'p2') {
-        // P2 record: P1 follows the baked autopilot, user's keyboard becomes
-        // P2's input. Capture for the recording AND publish on a global slot
-        // for fake-peer to read this frame.
-        const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1;
-        if (_recordingActive && !_recordingDone) {
-          _recordedInputs.push(_demo.autopilot.recordedFrame(currentFrame, realInput));
-        }
-        // Publish live input so fake-peer's _scheduleFrame consumes it as
-        // P2's input this frame instead of zero / random.
-        window.__knDemoP2LiveInput = _demo.autopilot.wholeInput(realInput);
-        // Return autopilot's scripted P1 input for slot 0.
-        const scripted = _p1InputAtFrame(currentFrame);
-        if (scripted) return scripted;
-        return _zeroLocalInput();
-      }
-      // Replay path: while autopilot is active, ignore real input and feed
-      // the scripted sequence. Lookup is keyed on the engine's currentFrame
-      // so the scripted input applies at the same frame it was captured —
-      // sequential indexing breaks if the engine stalls or rolls back.
-      if (_autopilotActive) {
-        const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0;
-        if (_menuPilot) return _menuPilot.p1(currentFrame);
-        const scripted = _p1InputAtFrame(currentFrame);
-        if (scripted) return scripted;
-        return _zeroLocalInput();
-      }
-      if (_randomP1InMatch && window.NetplayRollback?.isInMatch?.()) {
-        const currentFrame = window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0;
-        return _randomP1InputForFrame(currentFrame);
-      }
-      return realInput;
-    };
-    _wrappedReadLocalInput = true;
-    if (_recordMode) {
-      _recordingActive = true;
-      const label = _recordMode === 'p2' ? 'P2' : 'P1';
-      _setStatus(`REC mode (${label}) — play through to a match. Recording stops automatically.`);
-    } else if (_demo.autopilot.P1_TRANSITIONS.length > 0) {
-      _autopilotActive = true;
-      // Freeze DELAY_FRAMES while the autopilot is running. Scripted button
-      // presses use ~5-frame windows; if delay shifts mid-press the engine
-      // reads the input ring at a different applied frame and lands past
-      // the release — press dropped. _finishAutopilot re-enables.
-      window.NetplayRollback?.setDelayRetuneEnabled?.(false);
-      // NOTE: we deliberately do NOT pause predictions here. The JS-side
-      // lockstep stall at netplay-rollback.js:12018 doesn't guard for
-      // negative applyFrame, so at frame 0 with delay=2 it tries to read
-      // _remoteInputs[slot][-2] (undefined) and stalls forever — engine
-      // never advances. With predictions LIVE the engine runs free; the
-      // autopilot's deterministic outcome is now provided by the matching
-      // delay (no pre-seed → handshake picks delay=2 = recording delay).
-      _setStatus('Setting up your match…');
-      // Indicator deferred to the gesture click — the user hasn't even seen
-      // the emulator yet, so showing "your inputs disabled" before they tap
-      // is confusing. _showInputIndicator('disabled') fires from the
-      // gesture-button handler in _bindDom.
-    }
-  };
-
   const _finishRecording = () => {
     if (!_recordMode || _recordingDone) return;
     _recordingDone = true;
@@ -432,8 +358,9 @@
       console.info(`[demo] autopilot scene ${_autopilotLastScene} -> ${s.scene} at frame ${frame}`);
       _autopilotLastScene = s.scene;
     }
-    const pilotFailure = _menuPilot?.failure?.() ?? null;
-    const check = { frame, scene: s.scene, closedLoop: !!_menuPilot, pilotFailure };
+    const menuPilot = _wiring.menuPilot();
+    const pilotFailure = menuPilot?.failure?.() ?? null;
+    const check = { frame, scene: s.scene, closedLoop: !!menuPilot, pilotFailure };
     if (!_demo.autopilot.autopilotStalled(check)) return;
     _autopilotStalled = true;
     console.warn(_demo.autopilot.stallLogLine(check, s.status, counters?.delay));
@@ -474,51 +401,8 @@
     if (btn) btn.textContent = 'Play now →';
   };
 
-  const ensureEmulatorBooted = ({ forceStartOnLoad = true } = {}) => {
-    if (window.__test_skipBoot) return;
-    if (window.EJS_emulator || _run.flags().bootInFlight || !_romBlobUrl) return;
-
-    _installEjsGlobals();
-    window.EJS_startOnLoaded = !!forceStartOnLoad;
-    window.EJS_gameUrl = _romBlobUrl;
-    window.EJS_gameID = 'kaillera-next-demo';
-    window.KNEmulatorResumeContext = null;
-    window.KNShared?.resetBootState?.();
-
-    const injectLoader = () => {
-      if (_run.flags().loaderInjected) return;
-      _run.send({ type: 'loaderInjected' });
-      let bootDoneTimer = null;
-      const markBootDone = () => {
-        _run.send({ type: 'loaderSettled' });
-        if (bootDoneTimer) {
-          clearTimeout(bootDoneTimer);
-          bootDoneTimer = null;
-        }
-        window.removeEventListener('kn-ejs-loader-complete', markBootDone);
-      };
-      window.addEventListener('kn-ejs-loader-complete', markBootDone);
-      bootDoneTimer = setTimeout(markBootDone, 30000);
-
-      const script = document.createElement('script');
-      script.src = '/static/ejs-loader.js';
-      script.onload = () => {
-        _setStatus('Emulator loader ready');
-      };
-      script.onerror = () => {
-        markBootDone();
-        _setStatus('Failed to load emulator');
-      };
-      document.body.appendChild(script);
-    };
-
-    if (window._knCoreReady) {
-      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Core load timeout')), 15000));
-      Promise.race([window._knCoreReady, timeout]).then(injectLoader, injectLoader);
-    } else {
-      injectLoader();
-    }
-  };
+  // Load the emulator with the dropped ROM (web/src/demo/wiring.ts).
+  const ensureEmulatorBooted = (options) => _wiring.boot(options);
 
   window.KNStartEmulatorBoot = ensureEmulatorBooted;
 
@@ -659,103 +543,8 @@
 
   const _startEngine = () => {
     if (_run.flags().engineStarted) return;
-    if (!window.NetplayRollback) {
-      _setStatus('Rollback engine missing');
-      return;
-    }
-
-    if (window.KNState) {
-      window.KNState.room = 'DEMO';
-      window.KNState.matchId = null;
-      window.KNState.uploadToken = null;
-      window.KNState.slot = 0;
-      window.KNState.romHash = null;
-    }
-
-    window.NetplayRollback.init({
-      socket: _socket,
-      playerSlot: 0,
-      isSpectator: false,
-      syntheticSlots: [1],
-      resyncEnabled: false,
-      skipInitialStateSync: true,
-      // Pass real ROM hash so _isSmashRemix() can identify Smash Remix ROMs
-      // and use the right RDRAM addresses for game_status. Without this, the
-      // engine treats every ROM as SSB64 and reads game_status through the
-      // SSB64 battle-state pointer, which Remix isn't verified to share.
-      romHash: _romHash,
-      disableStandardCheats: true,
-      skipSmashTitleWait: true,
-      lateJoin: false,
-      isMobile: false,
-      initialPlayers: {
-        players: {
-          [DEMO_SOCKET_ID]: {
-            socketId: DEMO_SOCKET_ID,
-            slot: 0,
-            playerName: 'You',
-          },
-        },
-        spectators: {},
-      },
-      onStatus: (message) => {
-        _setStatus(message);
-      },
-      onToast: _setStatus,
-      onSyncStatus: _setStatus,
-      onReconnecting: _noop,
-      onPlayersChanged: _noop,
-    });
-    _run.send({ type: 'engineStarted' });
-
-    // Demo mode disables the engine's pacing-throttle. Without this, the
-    // engine throttles itself to match the (artificially slow) synthetic peer
-    // and the result is identical to lockstep — same pace, no visible
-    // predictions or rollbacks. With demo mode on, the engine runs full speed,
-    // predicts when slot 1's input is missing, and rolls back when the actual
-    // input differs from the prediction. This is the core of the demo.
-    window.NetplayRollback?.setDemoMode?.(true);
-
-    if (_romIsSsb64Us && !_recordMode && window.KNMenuAutopilot && window.NetplayRollback.readRdram32) {
-      _menuPilot = window.KNMenuAutopilot.create({
-        read32: (addr) => window.NetplayRollback.readRdram32(addr),
-        log: (msg) => console.warn(`[demo] ${msg}`),
-        // The fake peer asks P2's actor for frames ahead of the engine.
-        currentFrame: () => window.NetplayRollback?.getHudCounters?.().currentFrame ?? 0,
-      });
-    }
-    _installInputHook();
-
-    // Start fake peer immediately. The engine needs slot 1 inputs continuously
-    // from frame 0: during the lockstep menu phase, and after C rollback
-    // engages. Waiting for isCRollback() deadlocks games that defer rollback
-    // until gameplay because the menu cannot advance without slot 1 input.
-    window.KNFakePeer?.start?.({
-      slot: 1,
-      getCurrentFrame: () => window.NetplayRollback?.getHudCounters?.().currentFrame ?? 0,
-      // P2 menu autopilot: feed P2's recorded CSS-selection inputs during
-      // pre-match. Suppress in ?record=p2 mode — there the user IS P2, so
-      // fake-peer should consume the live keyboard input via
-      // window.__knDemoP2LiveInput instead, not the recording.
-      getMirroredInput:
-        _recordMode === 'p2' ? null : _menuPilot ? (frame) => _menuPilot.p2(frame) : (frame) => _p2InputAtFrame(frame),
-    });
-    window.KNFakePeer?.setNetwork?.(_networkFromControls());
-    // The handshake's delay negotiation runs once at PHASE_LOCKSTEP_READY
-    // and the C engine's kn_rollback_init bakes that delay value in. The
-    // baked menu autopilot was recorded with DEFAULT_DELAY_FRAMES=2; if
-    // the handshake settles on anything else (e.g. delay=3 at higher RTT
-    // pre-seed), the P2 mirrored inputs end up applied 1 frame later in
-    // game state than they were recorded — stage-select cursor lands on
-    // the wrong stage, character-select misses by a frame, etc.
-    //
-    // We now rely on live delay re-tune (setDelayRetuneEnabled(true) in
-    // _finishAutopilot) plus the post-match _animateLagTo slider sweep
-    // to drive DELAY_FRAMES up to the user's RTT preference once the
-    // autopilot is done. So we don't pre-seed match-target RTT here —
-    // handshake fires at zero/menu RTT, picks delay=2 (matching the
-    // recording), autopilot runs deterministically, then the slider
-    // animation re-tunes delay for actual play.
+    // The engine, the autopilot and the fake peer (web/src/demo/wiring.ts).
+    if (!_wiring.startEngine()) return;
     _setRollbackEnabled(_rollbackOn());
 
     // Engine + peer are running, so Pause/Stop are now meaningful.
@@ -798,18 +587,14 @@
     el.classList.add('is-detected');
   };
 
-  const _pollRollbackReady = () => {
-    if (!_run.flags().engineStarted) return;
-    if (window.NetplayRollback?.isCRollback?.()) {
+  const _pollRollbackReady = () =>
+    _wiring.pollRollbackReady(() => {
       _setStatus('Rollback engine engaged');
       // Re-apply network now that the C engine is active. mispredictProb is
       // gated on isCRollback (see _networkFromControls), so until this point
       // the synthetic peer was sending pure ZERO_INPUT regardless of lag.
       _applyNetwork();
-      return;
-    }
-    setTimeout(_pollRollbackReady, 250);
-  };
+    });
 
   const _loadRomFile = async (file) => {
     if (!file) return;
@@ -1066,7 +851,7 @@
   const _run = _demo.runState({
     autoCompareDisabled: _options.autoCompareDisabled,
     handlers: {
-      fakePeerActive: (active) => window.KNFakePeer?.setMatchActive?.(active),
+      fakePeerActive: (active) => _wiring.fakePeerMatchActive(active),
       matchEntered: _matchEntered,
       matchLeft: _matchLeft,
       startAutoCompare: _startAutoCompare,
@@ -1139,7 +924,7 @@
       window.KNStartEmulatorBoot?.({ forceStartOnLoad: true });
       // Now that the user has tapped to start, the autopilot is about to
       // actually drive the game. Show the "inputs disabled" badge here
-      // (deferred from _installInputHook) so the warning matches reality.
+      // (deferred from the input hook, web/src/demo/wiring.ts) so the warning matches reality.
       if (_autopilotActive) _showInputIndicator('disabled');
     });
 

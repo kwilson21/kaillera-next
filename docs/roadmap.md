@@ -156,13 +156,13 @@ without the old code running beside it first.
   logic is meant to make (a fix the model shows, like those listed for the
   per-peer machine below) is asserted by the test and named, with its model
   scenario, in the PR; any other difference blocks the change.
-- Still observing, each to be switched to deciding that way (the old code
-  decides and the new reports a difference): the engine's checks of the
-  DataChannel strings peers send (`protocol-mismatch`) and the mesh rules
+- Still observing, to be switched to deciding that way (the old code
+  decides and the new reports a difference): the mesh rules
   (`mesh-disagree`). The play page's moved decisions all decide (the ROM
   receiver was the last; play.js sends no `play-disagree`), the streaming
-  engine calls its rules (no `streaming-disagree`), the resync request
-  rules decide and the per-peer machine is driven (below), so
+  engine calls its rules (no `streaming-disagree`), the engine drops a
+  DataChannel string off its schema (no `protocol-mismatch`), the resync
+  request rules decide and the per-peer machine is driven (below), so
   `tests/observer-reports.mjs` counts no report type now. Once all of them decide, the observer plumbing
   (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
@@ -278,10 +278,17 @@ the decoded value, and a message off its schema is dropped and logged
 (`[protocol] dropped ...`), with no handler run on it. Messages peers author
 (DataChannel control strings and JSON, and the `data-message` /
 `webrtc-signal` / `rom-signal` relays) are described in
-`web/src/peer-protocol.ts`. The rollback engine still reads its DataChannel
-strings and the `session-log` ack raw and only reports a mismatch
-(`protocol-mismatch`, sampled: the first 16 of each kind, because they arrive
-on the tick path); that moves with Stage 5. The per-frame input packet is
+`web/src/peer-protocol.ts`. The rollback engine decodes its `lockstep` and
+`sync-state` channel strings and the `session-log` ack through a boundary of
+its own: every string is checked (a control string is one anchored pattern,
+cheaper than the handler's own parse), and one off its schema is dropped and
+logged in the sync log and on the console. It reported a mismatch
+(`protocol-mismatch`, sampled) until it decided. What a page drops when a
+newer one shares its match is in peer-protocol.ts: a JSON message may gain
+fields, a control string may not (a new field travels as a message of its
+own), and an unknown kind is dropped. `tests/rb-two-player.mjs` fails any
+run in which an engine dropped a real message, and `MALFORMED_PEER=1` sends
+malformed strings mid-battle. The per-frame input packet is
 `input-wire.ts`.
 
 `play.js` is moving to `web/src/play/*.ts` in slices, each read back through
@@ -664,9 +671,13 @@ Done so far:
   `ssb64-menu-autopilot.js` (#201) and `rollback-timeline.js` (#200). Of
   `demo.js` itself, these are in `web/src/demo` (#186): the options its
   address takes, the network dial, the HUD's text, the ROM it accepts and
-  the recorded menu script. What remains is the page's wiring: booting the
+  the recorded menu script; and its wiring (`wiring.ts`): booting the
   emulator, starting the engine, and connecting the fake peer and the
-  autopilot to it.
+  autopilot to it, with the input hook that plays player 1's script or a
+  recording. `demo.js` keeps what the page shows (the status line, the
+  buttons, the result card) and the progress of a recording and of the
+  autopilot. Each moved as it was, held by `tests/ts/demo-page.test.ts` to
+  everything the old script showed and handed the engine.
 - `netplay-streaming.js` (item 4): its decisions are typed functions in
   `web/src/streaming`, and the engine calls them; its own copies are gone.
   These cover the roster, the signals and the input path (#183), and the
@@ -677,7 +688,8 @@ Done so far:
   which connection a signal belongs to, together with the host's deadline
   to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
   `specs/streaming_connection.qnt`).
-- Next: move the demo page's wiring.
+- Next: Stage 6 is done once the demo page's wiring is on main. What
+  `demo.js` keeps is the page itself, and stays a page script.
 
 Not every page has `window.KNCore`, and some of these scripts run before it:
 

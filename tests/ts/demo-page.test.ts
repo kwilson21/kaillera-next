@@ -44,7 +44,9 @@ const settle = async (pending: readonly (() => number)[]): Promise<void> => {
 };
 
 // web/static/demo.js calls web/src/demo for its options, network settings,
-// HUD text, menu script and ROM checks. Here the page script as it is now,
+// HUD text, menu script and ROM checks, and for its wiring: the emulator's
+// boot, the engine's start, and the autopilot and fake peer connected to it
+// (wiring.ts, given the page's own timers). Here the page script as it is now,
 // with the real TypeScript behind `window.KNCore.demo`, is run beside the
 // script it replaced (fixtures/demo.old.js: web/static/demo.js before the move,
 // verbatim) on two identical fake pages with a fake engine and fake peer.
