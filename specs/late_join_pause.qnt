@@ -70,6 +70,12 @@
 //   a joiner already running did (the regular reconnect path), and one that
 //   lost the channel before loading was made a player on a state the host
 //   had run past.
+// KEEP_MARKER_UNTIL_APPLIED: that joiner keeps its "lost the host" marker
+//   until a state from the host is applied, asks again when a request goes
+//   unanswered (refused by the host's rate limit, a failed capture, a lost
+//   answer: the request's deadline), and after MAX_ASKS asks gives up
+//   visibly. false = as first written: the marker was cleared when the
+//   request was sent, and an unanswered one left the joiner behind for good.
 module late_join_pause {
   const PAUSE_PER_JOINER: bool
   const ARM_AT_PAUSE: bool
@@ -77,8 +83,10 @@ module late_join_pause {
   const GUEST_RESUMES_ON_HOST_ONLY: bool
   const GUEST_PAUSE_HAS_DEADLINE: bool
   const RESYNC_AFTER_LOST_HOST: bool
+  const KEEP_MARKER_UNTIL_APPLIED: bool
 
   pure val JOINERS = Set("a", "b")
+  pure val MAX_ASKS = 3
 
   type Joiner = Away | Asking | Ready | Playing | Gone
   type ToGuest = Pause | Resume
@@ -105,6 +113,8 @@ module late_join_pause {
   var lostHost: Set[str]     // joiner: its channel to the host closed since it asked
   var resyncOwed: Set[str]   // joiner: a full resync from the host is on its way
   var behind: Set[str]       // history: the host ran on past the state this joiner loads
+  var asks: str -> int       // joiner: resync requests sent for its lost-host marker
+  var gaveUp: Set[str]       // joiner: gave up asking, visibly (LATE-JOIN-LOST-HOST-GIVEUP)
 
   // ── actions ────────────────────────────────────────────────────────────
 
@@ -118,6 +128,7 @@ module late_join_pause {
     channel' = Set(), toJoiner' = JOINERS.mapBy(_ => []),
     joinerPaused' = Set(), joinerDeadline' = Set(),
     pendingReady' = Set(), lostHost' = Set(), resyncOwed' = Set(), behind' = Set(),
+    asks' = JOINERS.mapBy(_ => 0), gaveUp' = Set(),
   }
 
   action hostUnchanged = all {
@@ -131,7 +142,7 @@ module late_join_pause {
   action joinersUnchanged = all {
     channel' = channel, toJoiner' = toJoiner, joinerPaused' = joinerPaused,
     joinerDeadline' = joinerDeadline, pendingReady' = pendingReady, lostHost' = lostHost,
-    resyncOwed' = resyncOwed, behind' = behind,
+    resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp, behind' = behind,
   }
   action unchangedAll = all {
     joiner' = joiner, hostUnchanged, guestUnchanged, joinersUnchanged,
@@ -156,6 +167,11 @@ module late_join_pause {
   def losesHost(j: str): Set[str] =
     if (joiner.get(j) == Ready or RESYNC_AFTER_LOST_HOST) lostHost.union(Set(j)) else lostHost
 
+  // Asking for the resync. As first written the marker went with the ask;
+  // with KEEP_MARKER_UNTIL_APPLIED it stays until a state is applied.
+  def markerAfterAsk(j: str): Set[str] =
+    if (KEEP_MARKER_UNTIL_APPLIED) lostHost else lostHost.exclude(Set(j))
+
   // The joiner's page is in the room and its emulator is up: its channel to
   // the host is open and it asks.
   action ask(j: str): bool = all {
@@ -164,7 +180,7 @@ module late_join_pause {
     channel' = channel.union(Set(j)),
     hostUnchanged, guestUnchanged, toGuest' = toGuest, relay' = relay,
     toJoiner' = toJoiner, joinerPaused' = joinerPaused, joinerDeadline' = joinerDeadline,
-    pendingReady' = pendingReady, lostHost' = lostHost, resyncOwed' = resyncOwed, behind' = behind,
+    pendingReady' = pendingReady, lostHost' = lostHost, resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp, behind' = behind,
   }
 
   // The host takes the request: holds the joiner, pauses, tells the guest
@@ -187,7 +203,7 @@ module late_join_pause {
     hostUp' = hostUp, kickedAPlayer' = kickedAPlayer, pushedBack' = pushedBack,
     joiner' = joiner, guestUnchanged, relay' = relay,
     channel' = channel, joinerPaused' = joinerPaused, joinerDeadline' = joinerDeadline,
-    pendingReady' = pendingReady, lostHost' = lostHost, resyncOwed' = resyncOwed,
+    pendingReady' = pendingReady, lostHost' = lostHost, resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp,
   }
 
   // The joiner repeats its request (every 5 s until it has a state) and the
@@ -207,7 +223,7 @@ module late_join_pause {
     kickedAPlayer' = kickedAPlayer,
     joiner' = joiner, guestUnchanged, relay' = relay,
     channel' = channel, joinerPaused' = joinerPaused, joinerDeadline' = joinerDeadline,
-    pendingReady' = pendingReady, lostHost' = lostHost, resyncOwed' = resyncOwed,
+    pendingReady' = pendingReady, lostHost' = lostHost, resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp,
   }
 
   // The worker hands the compressed state back and it is sent. A worker
@@ -229,7 +245,7 @@ module late_join_pause {
   // for a resync now if the channel is open, or when it opens.
   action loadState(j: str): bool = {
     val loads = joiner.get(j) == Asking
-    val asksNow = loads and lostHost.contains(j) and channel.contains(j)
+    val asksNow = loads and lostHost.contains(j) and channel.contains(j) and not(resyncOwed.contains(j))
     all {
       relay.contains(State(j)),
       relay' = if (loads)
@@ -239,7 +255,8 @@ module late_join_pause {
       joinerPaused' = if (loads) joinerPaused.exclude(Set(j)) else joinerPaused,
       joinerDeadline' = if (loads) joinerDeadline.exclude(Set(j)) else joinerDeadline,
       resyncOwed' = if (asksNow) resyncOwed.union(Set(j)) else resyncOwed,
-      lostHost' = if (asksNow) lostHost.exclude(Set(j)) else lostHost,
+      asks' = if (asksNow) asks.set(j, asks.get(j) + 1) else asks, gaveUp' = gaveUp,
+      lostHost' = if (asksNow) markerAfterAsk(j) else lostHost,
       hostUnchanged, guestUnchanged, toGuest' = toGuest,
       channel' = channel, toJoiner' = toJoiner, pendingReady' = pendingReady, behind' = behind,
     }
@@ -271,7 +288,7 @@ module late_join_pause {
       hostUp' = hostUp, compressing' = compressing, timers' = timers,
       kickedAPlayer' = kickedAPlayer, pushedBack' = pushedBack, guestUnchanged,
       channel' = channel, joinerPaused' = joinerPaused, joinerDeadline' = joinerDeadline,
-      lostHost' = lostHost, resyncOwed' = resyncOwed,
+      lostHost' = lostHost, resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp,
     }
   }
 
@@ -301,7 +318,7 @@ module late_join_pause {
       behind' = if (resumes) behind.union(runsPast("")) else behind,
       hostUp' = hostUp, pushedBack' = pushedBack, guestUnchanged, relay' = relay,
       joiner' = joiner, joinerPaused' = joinerPaused, joinerDeadline' = joinerDeadline,
-      pendingReady' = pendingReady, resyncOwed' = resyncOwed,
+      pendingReady' = pendingReady, resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp,
     }
   }
 
@@ -333,7 +350,7 @@ module late_join_pause {
       hostUp' = hostUp, kickedAPlayer' = kickedAPlayer, pushedBack' = pushedBack,
       joiner' = joiner, guestUnchanged, relay' = relay,
       joinerPaused' = joinerPaused, joinerDeadline' = joinerDeadline,
-      pendingReady' = pendingReady, resyncOwed' = resyncOwed,
+      pendingReady' = pendingReady, resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp,
     }
   }
 
@@ -343,7 +360,7 @@ module late_join_pause {
   // joiner that has loaded and lost the host asks for its resync.
   action channelReopens(j: str): bool = {
     val activates = pendingReady.contains(j) and joiner.get(j) == Ready
-    val asks = lostHost.contains(j) and joiner.get(j) == Ready
+    val asksNow = lostHost.contains(j) and joiner.get(j) == Ready and not(resyncOwed.contains(j))
     all {
       hostUp,
       not(channel.contains(j)),
@@ -352,24 +369,69 @@ module late_join_pause {
       joiner' = if (activates) joiner.set(j, Playing) else joiner,
       pendingReady' = pendingReady.exclude(Set(j)),
       toJoiner' = if (activates and hostPaused) toJoiner.set(j, [Pause]) else toJoiner.set(j, []),
-      resyncOwed' = if (asks) resyncOwed.union(Set(j)) else resyncOwed,
-      lostHost' = if (asks) lostHost.exclude(Set(j)) else lostHost,
+      resyncOwed' = if (asksNow) resyncOwed.union(Set(j)) else resyncOwed,
+      asks' = if (asksNow) asks.set(j, asks.get(j) + 1) else asks, gaveUp' = gaveUp,
+      lostHost' = if (asksNow) markerAfterAsk(j) else lostHost,
       hostUnchanged, guestUnchanged, toGuest' = toGuest, relay' = relay,
       joinerPaused' = joinerPaused, joinerDeadline' = joinerDeadline, behind' = behind,
     }
   }
 
   // The host answers the joiner's full resync request with the state it is
-  // at now, and the joiner loads it.
+  // at now, and the joiner applies it: the marker goes with it.
   action resyncs(j: str): bool = all {
     hostUp,
     resyncOwed.contains(j),
     channel.contains(j),
     resyncOwed' = resyncOwed.exclude(Set(j)),
     behind' = behind.exclude(Set(j)),
+    lostHost' = lostHost.exclude(Set(j)),
+    asks' = asks.set(j, 0), gaveUp' = gaveUp,
+    hostUnchanged, guestUnchanged, joiner' = joiner, toGuest' = toGuest, relay' = relay,
+    channel' = channel, toJoiner' = toJoiner, joinerPaused' = joinerPaused,
+    joinerDeadline' = joinerDeadline, pendingReady' = pendingReady,
+  }
+
+  // The request goes unanswered: the host's rate limit refuses it, its
+  // capture fails, or the answer is lost. The request's deadline
+  // (RESYNC-REQUEST-TIMEOUT) ends it.
+  action resyncUnanswered(j: str): bool = all {
+    resyncOwed.contains(j),
+    resyncOwed' = resyncOwed.exclude(Set(j)),
     hostUnchanged, guestUnchanged, joiner' = joiner, toGuest' = toGuest, relay' = relay,
     channel' = channel, toJoiner' = toJoiner, joinerPaused' = joinerPaused,
     joinerDeadline' = joinerDeadline, pendingReady' = pendingReady, lostHost' = lostHost,
+    behind' = behind, asks' = asks, gaveUp' = gaveUp,
+  }
+
+  // At that deadline a joiner still marked asks again, up to MAX_ASKS.
+  action askAgain(j: str): bool = all {
+    lostHost.contains(j),
+    joiner.get(j) == Ready or joiner.get(j) == Playing,
+    channel.contains(j),
+    not(resyncOwed.contains(j)),
+    asks.get(j) > 0, asks.get(j) < MAX_ASKS,
+    resyncOwed' = resyncOwed.union(Set(j)),
+    asks' = asks.set(j, asks.get(j) + 1),
+    lostHost' = markerAfterAsk(j),
+    hostUnchanged, guestUnchanged, joiner' = joiner, toGuest' = toGuest, relay' = relay,
+    channel' = channel, toJoiner' = toJoiner, joinerPaused' = joinerPaused,
+    joinerDeadline' = joinerDeadline, pendingReady' = pendingReady, behind' = behind,
+    gaveUp' = gaveUp,
+  }
+
+  // After MAX_ASKS unanswered asks the joiner gives up, visibly.
+  action giveUp(j: str): bool = all {
+    lostHost.contains(j),
+    not(resyncOwed.contains(j)),
+    asks.get(j) >= MAX_ASKS,
+    lostHost' = lostHost.exclude(Set(j)),
+    gaveUp' = gaveUp.union(Set(j)),
+    asks' = asks.set(j, 0),
+    hostUnchanged, guestUnchanged, joiner' = joiner, toGuest' = toGuest, relay' = relay,
+    channel' = channel, toJoiner' = toJoiner, joinerPaused' = joinerPaused,
+    joinerDeadline' = joinerDeadline, pendingReady' = pendingReady, behind' = behind,
+    resyncOwed' = resyncOwed,
   }
 
   // The guest reads the next message on the host's channel.
@@ -405,7 +467,7 @@ module late_join_pause {
     },
     hostUnchanged, guestUnchanged, joiner' = joiner, toGuest' = toGuest, relay' = relay,
     channel' = channel, pendingReady' = pendingReady, lostHost' = lostHost,
-    resyncOwed' = resyncOwed, behind' = behind,
+    resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp, behind' = behind,
   }
 
   // The joiner's (20 s) deadline is longer than the host's (15 s per serve),
@@ -419,7 +481,7 @@ module late_join_pause {
     joinerDeadline' = joinerDeadline.exclude(Set(j)),
     hostUnchanged, guestUnchanged, joiner' = joiner, toGuest' = toGuest, relay' = relay,
     channel' = channel, toJoiner' = toJoiner, pendingReady' = pendingReady, lostHost' = lostHost,
-    resyncOwed' = resyncOwed, behind' = behind,
+    resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp, behind' = behind,
   }
 
   // The joiner's "ready" reaches the guest. Before, the guest resumed on it,
@@ -455,7 +517,7 @@ module late_join_pause {
     joiner' = joiner, guestUnchanged, relay' = relay,
     channel' = Set(), toJoiner' = JOINERS.mapBy(_ => []), pendingReady' = Set(),
     joinerPaused' = joinerPaused, joinerDeadline' = joinerDeadline, lostHost' = lostHost,
-    resyncOwed' = resyncOwed, behind' = behind,
+    resyncOwed' = resyncOwed, asks' = asks, gaveUp' = gaveUp, behind' = behind,
   }
 
   action step = any {
@@ -467,6 +529,7 @@ module late_join_pause {
       ask(j), beginServe(j), serveAgain(j), sendState(j), loadState(j), hostHearsReady(j),
       timerFires(j), guestHearsReady(j), joinerLeaves(j),
       channelDrops(j), channelReopens(j), resyncs(j), joinerHears(j), joinerDeadlineFires(j),
+      resyncUnanswered(j), askAgain(j), giveUp(j),
     },
   }
 
@@ -544,13 +607,17 @@ module late_join_pause {
   )
 
   // A joiner is not made a player on a state the host has run past, unless a
-  // full resync is on its way to put it where the host is.
+  // full resync is on its way to put it where the host is, it is still
+  // marked to ask for one, or it has given up visibly.
   // Violated before RESYNC_AFTER_LOST_HOST: the joiner's channel closed
   // after the state was sent (a lost connection, or the 15 s deadline); the
   // host ended the serve and ran on; the joiner loaded the old state, its
   // channel opened again, and its "ready" made it a player frames behind.
+  // Violated before KEEP_MARKER_UNTIL_APPLIED: the marker went with the
+  // request, and one that went unanswered was never asked again.
   val aJoinerIsNotMadeAPlayerBehindTheHost = JOINERS.forall(j =>
-    (joiner.get(j) == Playing and behind.contains(j)) implies resyncOwed.contains(j)
+    (joiner.get(j) == Playing and behind.contains(j)) implies
+      (resyncOwed.contains(j) or lostHost.contains(j) or gaveUp.contains(j))
   )
 
   val holdToday = and { gameStaysPausedWhileAJoinerLoads, neverKicksAPlayerWhoJoined, hostPauseHasADeadline }
@@ -709,6 +776,37 @@ module late_join_pause {
       .expect(joiner.get("a") == Playing and behind == Set() and not(hostPaused))
       .expect(allHold)
 
+  // The joiner made a player behind the host asks for its resync, and the
+  // request goes unanswered (the host's rate limit refused it, its capture
+  // failed, the answer was lost). As first written the marker had gone with
+  // the request, and the joiner stayed behind the host for good.
+  run resyncRequestUnansweredTest =
+    init
+      .then(ask("a")).then(beginServe("a")).then(sendState("a"))
+      .then(channelDrops("a")).then(loadState("a")).then(channelReopens("a")).then(hostHearsReady("a"))
+      .expect(joiner.get("a") == Playing and behind == Set("a"))
+      .then(if (RESYNC_AFTER_LOST_HOST) resyncUnanswered("a") else unchangedAll)
+      .expect(aJoinerIsNotMadeAPlayerBehindTheHost == (RESYNC_AFTER_LOST_HOST and KEEP_MARKER_UNTIL_APPLIED))
+      .then(if (KEEP_MARKER_UNTIL_APPLIED) askAgain("a") else unchangedAll)
+      .then(if (KEEP_MARKER_UNTIL_APPLIED) resyncs("a") else unchangedAll)
+      .expect(KEEP_MARKER_UNTIL_APPLIED implies (behind == Set() and lostHost == Set() and allHold))
+
+  // Every request goes unanswered: after MAX_ASKS the joiner gives up,
+  // visibly, and asks no more.
+  run resyncGivesUpAfterMaxAsksTest =
+    init
+      .then(ask("a")).then(beginServe("a")).then(sendState("a"))
+      .then(channelDrops("a")).then(loadState("a")).then(channelReopens("a")).then(hostHearsReady("a"))
+      .then(if (RESYNC_AFTER_LOST_HOST) resyncUnanswered("a") else unchangedAll)
+      .then(if (KEEP_MARKER_UNTIL_APPLIED) askAgain("a") else unchangedAll)
+      .then(if (KEEP_MARKER_UNTIL_APPLIED) resyncUnanswered("a") else unchangedAll)
+      .then(if (KEEP_MARKER_UNTIL_APPLIED) askAgain("a") else unchangedAll)
+      .then(if (KEEP_MARKER_UNTIL_APPLIED) resyncUnanswered("a") else unchangedAll)
+      .expect(KEEP_MARKER_UNTIL_APPLIED implies (asks.get("a") == MAX_ASKS and lostHost == Set("a")))
+      .then(if (KEEP_MARKER_UNTIL_APPLIED) giveUp("a") else unchangedAll)
+      .expect(KEEP_MARKER_UNTIL_APPLIED implies (gaveUp == Set("a") and lostHost == Set() and allHold))
+      .expect(not(KEEP_MARKER_UNTIL_APPLIED) implies (gaveUp == Set() and not(aJoinerIsNotMadeAPlayerBehindTheHost)))
+
   // Two joiners: `b`'s channel closes while it waits; `a` is still held, so
   // the pause is kept.
   run oneJoinerLostTheOtherStillHeldTest =
@@ -725,7 +823,7 @@ module late_join_pause_before {
   import late_join_pause(
     PAUSE_PER_JOINER = false, ARM_AT_PAUSE = false, KEEP_FIRST_DEADLINE = true,
     GUEST_RESUMES_ON_HOST_ONLY = false, GUEST_PAUSE_HAS_DEADLINE = false,
-    RESYNC_AFTER_LOST_HOST = false
+    RESYNC_AFTER_LOST_HOST = false, KEEP_MARKER_UNTIL_APPLIED = false
   ).*
 }
 
@@ -735,7 +833,7 @@ module late_join_pause_host_side {
   import late_join_pause(
     PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true, KEEP_FIRST_DEADLINE = false,
     GUEST_RESUMES_ON_HOST_ONLY = false, GUEST_PAUSE_HAS_DEADLINE = false,
-    RESYNC_AFTER_LOST_HOST = false
+    RESYNC_AFTER_LOST_HOST = false, KEEP_MARKER_UNTIL_APPLIED = false
   ).*
 }
 
@@ -745,7 +843,7 @@ module late_join_pause_before_resync {
   import late_join_pause(
     PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true, KEEP_FIRST_DEADLINE = true,
     GUEST_RESUMES_ON_HOST_ONLY = true, GUEST_PAUSE_HAS_DEADLINE = true,
-    RESYNC_AFTER_LOST_HOST = false
+    RESYNC_AFTER_LOST_HOST = false, KEEP_MARKER_UNTIL_APPLIED = false
   ).*
 }
 
@@ -755,6 +853,16 @@ module late_join_pause_current {
   import late_join_pause(
     PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true, KEEP_FIRST_DEADLINE = true,
     GUEST_RESUMES_ON_HOST_ONLY = true, GUEST_PAUSE_HAS_DEADLINE = true,
-    RESYNC_AFTER_LOST_HOST = true
+    RESYNC_AFTER_LOST_HOST = true, KEEP_MARKER_UNTIL_APPLIED = false
+  ).*
+}
+
+// Today with the marker kept until a state is applied, a request that goes
+// unanswered asked again, and a give-up after MAX_ASKS.
+module late_join_pause_fixed {
+  import late_join_pause(
+    PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true, KEEP_FIRST_DEADLINE = true,
+    GUEST_RESUMES_ON_HOST_ONLY = true, GUEST_PAUSE_HAS_DEADLINE = true,
+    RESYNC_AFTER_LOST_HOST = true, KEEP_MARKER_UNTIL_APPLIED = true
   ).*
 }

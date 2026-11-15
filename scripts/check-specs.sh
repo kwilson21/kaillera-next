@@ -143,7 +143,7 @@ pair peer_connection_counter_only holdWithACounterAlone initLobby
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
 for variant in late_join_pause_before late_join_pause_host_side late_join_pause_before_resync \
-  late_join_pause_current; do
+  late_join_pause_current late_join_pause_fixed; do
   $QUINT test "$PAUSE" --main="$variant" --backend=typescript
 done
 # Today: the game stays paused while a joiner has yet to load, a joiner who
@@ -157,8 +157,13 @@ done
 # to the host during its serve is not made a player on a state the host has
 # run past without a resync on its way: violated before the joiner resynced
 # (late_join_pause_before_resync; joinerLosesTheHostAfterTheStateIsSentTest,
-# timerFiresWhileTheStateIsOnItsWayTest).
-$QUINT run "$PAUSE" --main=late_join_pause_current --invariant=allHold \
+# timerFiresWhileTheStateIsOnItsWayTest). Today the joiner's marker goes
+# with its first request, and one that goes unanswered leaves it behind for
+# good (resyncRequestUnansweredTest); late_join_pause_fixed keeps the marker
+# until a state is applied, asks again, and gives up visibly after three.
+$QUINT run "$PAUSE" --main=late_join_pause_current --invariant=holdBeforeTheResyncFix \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeTheResyncFix \
   --max-samples=20000 --max-steps=25 --backend=typescript
