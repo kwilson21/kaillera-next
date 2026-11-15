@@ -167,6 +167,9 @@ _VALID_EVENT_TYPES = {
     # A decision of the peer mesh disagreed with the proved function meant to
     # replace it (web/src/peer-signaling.ts, compared in netplay-rollback.js).
     "mesh-disagree",
+    # A resync request rule disagreed with the proved function meant to
+    # replace it (web/src/resync-request.ts, compared in netplay-rollback.js).
+    "resync-disagree",
 }
 _ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 
