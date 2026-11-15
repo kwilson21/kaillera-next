@@ -104,7 +104,7 @@ kaillera-next/
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
-│       ├── demo.js              # demo page orchestrator (emulator boot, engine start, fake peer + menu autopilot wiring); its options, network settings, HUD text and menu script are web/src/demo
+│       ├── demo.js              # demo page orchestrator: what the page shows, and a recording's and the autopilot's progress; its options, network settings, HUD text, menu script and wiring (emulator boot, engine start, fake peer + menu autopilot) are web/src/demo
 │       ├── fake-peer.js         # starts the demo page's synthetic P2 (window.KNFakePeer) from web/src/page/fake-peer.ts
 │       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo and the two-player test (window.KNMenuAutopilot) from web/src/page/menu-autopilot.ts
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD (window.KNRollbackTimeline) from web/src/page/rollback-timeline.ts

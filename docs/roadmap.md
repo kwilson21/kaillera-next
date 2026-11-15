@@ -644,9 +644,13 @@ Done so far:
   `ssb64-menu-autopilot.js` (#201) and `rollback-timeline.js` (#200). Of
   `demo.js` itself, these are in `web/src/demo` (#186): the options its
   address takes, the network dial, the HUD's text, the ROM it accepts and
-  the recorded menu script. What remains is the page's wiring: booting the
+  the recorded menu script; and its wiring (`wiring.ts`): booting the
   emulator, starting the engine, and connecting the fake peer and the
-  autopilot to it.
+  autopilot to it, with the input hook that plays player 1's script or a
+  recording. `demo.js` keeps what the page shows (the status line, the
+  buttons, the result card) and the progress of a recording and of the
+  autopilot. Each moved as it was, held by `tests/ts/demo-page.test.ts` to
+  everything the old script showed and handed the engine.
 - `netplay-streaming.js` (item 4): its decisions are typed functions in
   `web/src/streaming`, and the engine calls them; its own copies are gone.
   These cover the roster, the signals and the input path (#183), and the
@@ -657,7 +661,8 @@ Done so far:
   which connection a signal belongs to, together with the host's deadline
   to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
   `specs/streaming_connection.qnt`).
-- Next: move the demo page's wiring.
+- Next: Stage 6 is done once the demo page's wiring is on main. What
+  `demo.js` keeps is the page itself, and stays a page script.
 
 Not every page has `window.KNCore`, and some of these scripts run before it:
 
