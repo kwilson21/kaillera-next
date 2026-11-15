@@ -7,6 +7,7 @@ import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { addressMapFor } from './address-maps.ts';
 import { bootTimedOut } from './boot.ts';
+import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
@@ -293,6 +294,8 @@ export const KNCore = {
   startLateJoinWait,
   startRejoin,
   shouldResumeRomTransfer,
+  /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */
+  demo,
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
     startAudio,
