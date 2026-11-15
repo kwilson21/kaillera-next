@@ -15,7 +15,7 @@
  *     in docs/netplay-invariants.md) in either peer's engine or sync log
  *   - no rollback input-stall timeouts below frame 300 on either peer
  *   - TICK-STUCK stalls, negotiated delay and rollback counts, for context
- *   - no `peer-disagree` from the observer beside the engine
+ *   - no report from an observer beside the engine (none reports now)
  *     (tests/observer-reports.mjs), in either page's sync log or
  *     client events, nor, with KN_DB set to the server's DB_PATH, in the
  *     server's client_events table for this room (without KN_DB the query to

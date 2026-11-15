@@ -64,7 +64,8 @@ import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, sendPaced, transferStillFor } from './sync-send.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
-import { createPeerObserver, newPageId, readAttemptId } from './peer-observe.ts';
+import { newPageId, readAttemptId } from './attempt-id.ts';
+import { createPeerDriver } from './peer-driver.ts';
 import {
   disconnectDisposition,
   hasAttemptLeft,
@@ -281,7 +282,7 @@ export const KNCore = {
   framesToSendAgain,
   checkRelayed,
   createConnectTracker,
-  /** The per-peer connection machine (peer-connection.ts). The engine runs it observing, through `peerObserve`. */
+  /** The per-peer connection machine (peer-connection.ts). The engine drives it, through `peerDriver`. */
   createPeerConnection,
   createSession,
   createStickDeadband,
@@ -305,8 +306,10 @@ export const KNCore = {
   normalizeAxis,
   peerFacts,
   peerTiming: PEER_TIMING,
-  /** The per-peer machine run beside the rollback engine, observing (peer-observe.ts). */
-  peerObserve: { createPeerObserver, newPageId, readAttemptId },
+  /** Which connection attempt a WebRTC signal belongs to (attempt-id.ts); both engines use it. */
+  attemptId: { newPageId, readAttemptId },
+  /** The per-peer machine, driven from the rollback engine's events (peer-driver.ts). */
+  peerDriver: { createPeerDriver },
   /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */
   resyncRequest: {
     answersAnOlderRequest,

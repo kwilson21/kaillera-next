@@ -14,7 +14,7 @@
  * 60 times a second for each guest, so its decisions are sampled.
  */
 import type { WireInput } from '../input-wire.ts';
-import { readAttemptId } from '../peer-observe.ts';
+import { readAttemptId } from '../attempt-id.ts';
 import { createComparer } from '../play/observe.ts';
 import { checkRelayed, type Relayed } from '../relay.ts';
 import type { WirePayload } from '../wire.ts';
