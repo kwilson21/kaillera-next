@@ -272,8 +272,11 @@
  *     io.Socket.prototype.onevent), the request's deadline asks again on
  *     the channel, and the moment the last chunk of that answer has been
  *     handled the guest page delivers the held socket answer. Both are
- *     decoded by the same worker, the newest first: the late one is decoded
- *     while the newest one is held. Fails unless SYNC-LATE-ANSWER-IGNORED is
+ *     decoded by the same worker, the newest first, and the guest page holds
+ *     the worker's two results and delivers them back to back in one task
+ *     (a held answer is applied at the next tick, a few ms after its decode,
+ *     sooner than the late one's base64 decode ends): the late one is
+ *     decoded while the newest one is held. Fails unless SYNC-LATE-ANSWER-IGNORED is
  *     logged and the newest answer is then applied, and the guest goes on
  *     making frames.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
@@ -856,7 +859,45 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   window.__knSocketAnswersHeld = [];
   const heldSocketPackets = [];
   let realOnevent = null;
+  // And the page's next two decode results (the sync worker's replies) once
+  // the held answer is let go are held and delivered back to back in one
+  // task: the newest answer's first, then the late one's. A held "now"
+  // answer is applied at the next tick, a few ms after its decode; the late
+  // answer's base64 decode takes longer than that, so without this it lands
+  // after the apply and is only discarded as stale.
+  let workerHold = 0;
+  const workerHeld = [];
+  window.__knWorkerResultsHeld = [];
+  const realWorkerOnmessage = Object.getOwnPropertyDescriptor(Worker.prototype, 'onmessage');
+  if (realWorkerOnmessage?.set) {
+    Object.defineProperty(Worker.prototype, 'onmessage', {
+      configurable: true,
+      get() {
+        return realWorkerOnmessage.get.call(this);
+      },
+      set(fn) {
+        if (typeof fn !== 'function') {
+          realWorkerOnmessage.set.call(this, fn);
+          return;
+        }
+        realWorkerOnmessage.set.call(this, function (e) {
+          const d = e?.data;
+          if (workerHold > 0 && d && typeof d.id === 'number' && d.data instanceof Uint8Array) {
+            workerHeld.push({ self: this, e });
+            window.__knWorkerResultsHeld.push({ id: d.id, at: performance.now() });
+            if (workerHeld.length >= workerHold) {
+              workerHold = 0;
+              for (const held of workerHeld.splice(0)) fn.call(held.self, held.e);
+            }
+            return undefined;
+          }
+          return fn.call(this, e);
+        });
+      },
+    });
+  }
   const releaseHeldSocketAnswers = () => {
+    if (heldSocketPackets.length) workerHold = 2;
     while (heldSocketPackets.length) {
       const { socket, packet, record } = heldSocketPackets.shift();
       record.releasedAt = performance.now();
@@ -1898,6 +1939,7 @@ const collect = (p, VISUAL_CHECK) =>
       syncAnswersDropped: window.__knSyncAnswersDropped ?? [],
       socketAnswersDropped: window.__knSocketAnswersDropped ?? [],
       socketAnswersHeld: window.__knSocketAnswersHeld ?? [],
+      workerResultsHeld: window.__knWorkerResultsHeld ?? [],
       link: window.__knLink ?? null,
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
@@ -2191,6 +2233,7 @@ const unansweredSocketResyncReport = (() => {
     ignored: line(ignoredAt),
     appliedAfterIgnored: line(appliedAfterIgnored),
     socketAnswersHeld: G.socketAnswersHeld,
+    workerResultsHeld: G.workerResultsHeld,
     giveUp: line(giveUp),
     letGo: line(letGo),
     recoveryAsk: line(recoveryAsk),
