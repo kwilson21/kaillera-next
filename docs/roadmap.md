@@ -422,7 +422,11 @@ Slice 1, the peer mesh and signaling:
   out the machine's commands (`decideHeal`): the lower slot resets its
   entry and offers, the higher slot takes the dead channel for a drop it
   has just noticed (the 45 s give-up armed) and waits for that offer
-  (specs/peer_connection.qnt, `peer_connection_heal_one_side`). During a
+  (specs/peer_connection.qnt, `peer_connection_heal_one_side`). The
+  health check now runs on C-rollback ticks too: before, a C tick returned
+  before reaching it, so a channel that died with no event left the player
+  a phantom for the rest of the match. It heals a phantom whose channel
+  does not read open (specs/mesh_heal.qnt, `aDeadChannelIsNeverForgotten`). During a
   deploy an old higher slot still offers too, which is exactly today; the
   model shows no pair of versions is worse than today.
 - Next: the machine is wired in to decide the rest, one rule at a time (the

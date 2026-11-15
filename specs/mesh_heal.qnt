@@ -107,11 +107,12 @@ module mesh_heal {
   }
 
   // Staleness: no input for 3 s freezes the sim; 5 s makes the player a
-  // phantom and frames advance again. A reconnecting entry is not an input
-  // peer, and a reset one is not until its first input: neither goes stale.
+  // phantom and frames advance again. A reconnecting entry still goes stale
+  // (in roster mode, which a match uses, getInputPeers keeps it). A reset one
+  // does not until its first input: resetPeerState drops its clock.
   def staleAfter(s: str): str = if (stale.get(s) == "fresh") "stalled" else "phantom"
   action staler(s: str): bool = all {
-    not(linkUp), not(dropped), pending.get(s) != "waiting",
+    not(linkUp), not(dropped),
     or { stale.get(s) == "fresh", stale.get(s) == "stalled" },
     stale' = stale.set(s, staleAfter(s)),
     wasPhantom' = (wasPhantom or (s == "hi" and staleAfter(s) == "phantom")),

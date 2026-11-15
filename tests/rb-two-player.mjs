@@ -168,18 +168,22 @@
  *     connection rather than evict it as a stale peer. The run fails if the
  *     host has not seen that roster within n ms. BATTLE_SECONDS must cover
  *     this too.
- *   HEAL_BOTH_SIDES=1   The mesh health check on both pages at once
- *     (specs/peer_connection.qnt, peer_connection_heal_one_side). A third of
- *     the way in, once both pages are within 12 frames of a health check
- *     (every 300 frames), each page's channel to the other dies silently: it
- *     reads closed and its close and state handlers are detached, so only
- *     the health check finds it. Fails unless the host (the lower slot) heals
- *     and offers, every heal on the guest logs MESH-HEAL-WAIT (it takes the
- *     dead channel for a drop and waits for the host's offer), the guest
- *     resyncs after the reconnect, and it goes on making frames. Before the
- *     per-peer machine decided `heal`, the guest offered too and the two
- *     offers crossed (crossedHealOffersTest). Frames are compared as with
- *     FREEZE_HOST_MS. Needs BATTLE_SECONDS >= 90.
+ *   HEAL_BOTH_SIDES=1   A channel that dies with no event, on both pages at
+ *     once (specs/mesh_heal.qnt, specs/peer_connection.qnt
+ *     peer_connection_heal_one_side). A third of the way in, once both pages
+ *     are just past a health check (every 300 frames), each page's channel to
+ *     the other reads closed, its close and state handlers are detached, and
+ *     nothing arriving on it or on the unreliable input channel is taken in.
+ *     Inputs stop: each page stalls, then marks the other a phantom, and only
+ *     the next health check, on a C-rollback tick, can find it. Fails unless
+ *     the host (the lower slot) healed after it marked the guest a phantom and
+ *     offered, every heal on the guest logs MESH-HEAL-WAIT (it waits for the
+ *     host's offer), the guest applied exactly one state in the 15 s after the
+ *     reconnect's resync, and it goes on making frames. While the check ran
+ *     only on the JS lockstep path the guest stayed a phantom
+ *     (phantomForeverTest); before the per-peer machine decided `heal` the
+ *     guest offered too and the two offers crossed (crossedHealOffersTest).
+ *     Frames are compared as with FREEZE_HOST_MS. Needs BATTLE_SECONDS >= 165.
  *   DROP_PEER_MS=<n>   A third of the way into the battle, the guest's page
  *     closes its RTCPeerConnection to the host (pc.close() on the engine's
  *     peer entry for slot 0, KNState.peers), and the WebRTC signaling between
@@ -544,10 +548,14 @@ const UNANSWERED_LETGO_FREEZE_MS = 7000;
 // HEAL_BOTH_SIDES: both pages' channel to the other dies silently at once.
 const HEAL_BOTH_SIDES = process.env.HEAL_BOTH_SIDES === '1';
 // The mesh health check runs every 300 frames; the fault starts within this
-// many frames of one on both pages, before either can mark the other a phantom.
-const HEAL_BOUNDARY_WITHIN = 12;
-// Up to two health checks (300 frames each, ~30 s headless), the reconnect and its resync.
-const HEAL_RECOVER_MS = 60000;
+// many frames after one on both pages, so the next comes after the 3 s stall
+// and the 5 s phantom (specs/mesh_heal.qnt: the check must heal a phantom).
+const HEAL_AFTER_BOUNDARY_WITHIN = 40;
+// The phantom (5 s), up to two health checks (300 frames each, ~30 s
+// headless), the reconnect and its resync.
+const HEAL_RECOVER_MS = 90000;
+// After the first state the guest applies, how long a second one is looked for.
+const HEAL_SECOND_STATE_MS = 15000;
 const FREEZE_LIKE = FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || HEAL_BOTH_SIDES;
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
@@ -832,7 +840,7 @@ const faultNeedsSeconds = Math.ceil(
     (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0) +
     (RESYNC_FAULT ? RESYNC_ONE_BACK_RECOVER_MS : 0) +
     (UNANSWERED_SOCKET_RESYNC ? UNANSWERED_SOCKET_RESYNC_RECOVER_MS : 0) +
-    (HEAL_BOTH_SIDES ? HEAL_RECOVER_MS : 0) +
+    (HEAL_BOTH_SIDES ? HEAL_RECOVER_MS + HEAL_SECOND_STATE_MS : 0) +
     (CATCH_UP_MS > 0 ? CATCH_UP_MS + CATCH_UP_RECOVER_MS : 0)) *
     1.5) /
     1000,
@@ -1843,7 +1851,7 @@ let throttleFlipped = null; // null until the 15s mark; then whether the flip Pr
 // the fault began ({seq, frame} of its last line), and what the test saw.
 const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null };
 // HEAL_BOTH_SIDES: where the logs stood, what was silenced, and the frames after.
-const healBoth = { hostAt: null, guestAt: null, silenced: null, recovered: false, framesAfter: 0 };
+const healBoth = { hostAt: null, guestAt: null, guestEnd: null, silenced: null, recovered: false, framesAfter: 0 };
 const delaySyncAnswer = { hostAt: null, guestAt: null, timedOut: false, askedAgainAfterMs: null };
 // LOSE_INPUTS_BEFORE_FALLBACK: where each page's sync log stood when the drops began.
 const loseBeforeFallback = { hostAt: null, guestAt: null, fellBack: false, rounds: 0 };
@@ -2018,19 +2026,22 @@ if (inBattle) {
     await host.waitForTimeout(before);
     const started = Date.now();
     const frameOf = (page) => page.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
-    const toBoundary = (f) => 300 - (f % 300);
-    // Both pages close to a health check, so each finds the dead channel
-    // there before the other's inputs have been missing long enough to make
-    // it a phantom (which the check skips).
+    const sinceBoundary = (f) => f % 300;
+    // Both pages just past a health check: the next one comes after the
+    // sim's stall and the phantom, so it has to heal a phantom.
     const until = Date.now() + 90000;
     while (Date.now() < until) {
       const [hf, gf] = await Promise.all([frameOf(host), frameOf(guest)]);
-      if (toBoundary(hf) <= HEAL_BOUNDARY_WITHIN && toBoundary(gf) <= HEAL_BOUNDARY_WITHIN) break;
+      const h = sinceBoundary(hf);
+      const g = sinceBoundary(gf);
+      if (h >= 1 && h <= HEAL_AFTER_BOUNDARY_WITHIN && g >= 1 && g <= HEAL_AFTER_BOUNDARY_WITHIN) break;
       await host.waitForTimeout(50);
     }
     [healBoth.hostAt, healBoth.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
-    // A silent death: the channel reads closed and nothing fires, on either
-    // page (the case the mesh health check exists for).
+    // A silent death: the channel reads closed, nothing fires, and nothing
+    // arrives on it or on the unreliable input channel beside it, on either
+    // page (the case the mesh health check exists for). Inputs stop, so each
+    // page stalls and then marks the other a phantom.
     const silence = (slot) => {
       const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === slot);
       if (!entry?.dc || !entry.pc) return { ok: false, why: `no channel to slot ${slot}` };
@@ -2039,11 +2050,17 @@ if (inBattle) {
       entry.dc.onerror = null;
       entry.pc.onconnectionstatechange = null;
       entry.pc.oniceconnectionstatechange = null;
+      const drop = () => {};
+      entry.dc.onmessage = drop;
+      if (entry.rbDc) entry.rbDc.onmessage = drop;
       return { ok: true, frame: window.NetplayRollback.getHudCounters().currentFrame };
     };
     healBoth.silenced = { host: await host.evaluate(silence, 1), guest: await guest.evaluate(silence, 0) };
     console.log('HEAL_BOTH_SIDES: both channels died silently', JSON.stringify(healBoth.silenced));
     healBoth.recovered = await waitForLine(guest, healBoth.guestAt.seq, /sync #\d+ applied/, HEAL_RECOVER_MS);
+    // A second state racing the first would be applied within this window.
+    if (healBoth.recovered) await guest.waitForTimeout(HEAL_SECOND_STATE_MS);
+    healBoth.guestEnd = await lastLogLine(guest);
     const frameAt = await frameOf(guest);
     await guest.waitForTimeout(5000);
     healBoth.framesAfter = (await frameOf(guest)) - frameAt;
@@ -3611,12 +3628,22 @@ const healBothReport = (() => {
   const hostWaits = waits(hostLines);
   const guestHeals = heals(guestLines);
   const guestWaits = waits(guestLines);
+  // The host marked the guest a phantom before its check healed it: the
+  // check heals a phantom (mesh_heal_c_tick_only skips one).
+  const firstAt = (lines, re) => lines.findIndex((l) => re.test(l));
+  const hostPhantomAt = firstAt(hostLines, /PEER-PHANTOM slot=1/);
+  const hostHealAt = firstAt(hostLines, /MESH-HEAL f=/);
+  const healedAPhantom = hostPhantomAt >= 0 && hostHealAt > hostPhantomAt;
+  // One state after the reconnect, not two racing (atMostOneResyncPerReconnect).
+  const applied = guestLines.filter((l) => /sync #\d+ applied/.test(l) && seqOf(l) <= healBoth.guestEnd.seq);
   return {
     silenced: healBoth.silenced,
     hostHeals,
     hostWaits,
     guestHeals,
     guestWaits,
+    healedAPhantom,
+    applied,
     recovered: healBoth.recovered,
     framesAfter: healBoth.framesAfter,
     passed:
@@ -3624,6 +3651,8 @@ const healBothReport = (() => {
       hostWaits.length === 0 &&
       guestHeals.length >= 1 &&
       guestWaits.length === guestHeals.length &&
+      healedAPhantom &&
+      applied.length === 1 &&
       healBoth.recovered &&
       healBoth.framesAfter >= 10,
   };
