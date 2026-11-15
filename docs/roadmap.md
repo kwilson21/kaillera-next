@@ -419,6 +419,13 @@ Slice 1, the peer mesh and signaling:
   of three, its channel with another player opened first) took a startup
   retry for a gameplay reconnect and resynced during boot
   (`startupRetryToAStartedPageTest`).
+- Driven by tests too: `tests/rb-two-player.mjs` with `DROP_PEER_MS`
+  closes the guest's connection to the host mid-battle and drops their
+  WebRTC signaling for that long, so the host's reconnect attempt times out
+  and is retried; every run of it and of the lifecycle scenarios now fails on
+  a `peer-disagree` or `resync-disagree` (`tests/observer-reports.mjs`). The
+  first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
+  attempt with no disagreement and no mismatch.
 - Next: read the production reports; then decide, one rule at a time, by
   the machine, starting with who offers from the health check.
 
@@ -487,6 +494,17 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   reports a difference as a `resync-disagree` client event (and
   `RESYNC-DISAGREE` in the sync log). None came up in the two-player runs,
   plain or with the host or the guest frozen for 8 s.
+- Driven by tests too: `tests/rb-two-player.mjs` with
+  `DELAY_SYNC_ANSWER_MS` holds the host's answer past the guest's request
+  deadline, so the answer arrives after a second request
+  (`sync state is not the answer awaited`); `tests/lifecycle-e2e.mjs`
+  scenario `late-join-lost-host` closes the joiner's connection to the host
+  as the state arrives (marker, `LATE-JOIN-LOST-HOST-RESYNC`, then `the
+  lost-host resync is done`). No disagreement in either. In the first, the
+  late answer to an immediate request was applied and took the guest back
+  130 frames before the awaited answer took it forward again: the rules
+  allow it (only a request that names a frame drops an earlier answer), and
+  the hashes still matched.
 - Next: read the production reports; once they show none, the engine calls
   the proved functions instead of its own copies.
 

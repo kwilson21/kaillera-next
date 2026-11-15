@@ -21,6 +21,19 @@
  *   late-join-shared  the guest has no ROM and accepts the host's: its engine
  *                     first connects only to receive the ROM, then late-joins
  *   late-join-two-player  a third player joins a two-player match in play
+ *   late-join-lost-host  the late-join scenario with a fault: once the host has
+ *                     sent the state (over Socket.IO), the joiner's
+ *                     RTCPeerConnection to the host is closed just before the
+ *                     state reaches the page (the test holds that one message
+ *                     in its socket proxy while it closes the connection), so
+ *                     the joiner loses its channel to the host during the
+ *                     serve, before it is activated. Its logs must show the
+ *                     lost-host marker (`late-join: lost the channel to the
+ *                     host`), then `LATE-JOIN-LOST-HOST-RESYNC`, then the
+ *                     marker cleared by an applied host state (`the lost-host
+ *                     resync is done`) or a visible
+ *                     `LATE-JOIN-LOST-HOST-GIVEUP`; both pages must go on
+ *                     advancing
  *   missed-game-end   a guest's signaling is down while the host ends the
  *                     game; on reconnect it must return to the lobby
  *   missed-game-end-at-rom-prompt  the same for a guest that joined mid-game
@@ -53,12 +66,26 @@
  * overlay up or down), so a run cannot pass with machine and page agreeing on
  * the wrong answer. An uncaught exception on any page fails the scenario.
  *
+ * Every scenario also fails on a report from the two observers beside the
+ * rollback engine (`peer-disagree`, `resync-disagree`; tests/observer-reports.mjs):
+ * in the client events at a checkpoint, and in each page's sync log
+ * (`PEER-DISAGREE`, `RESYNC-DISAGREE`) at the end. With KN_DB set to the
+ * server's DB_PATH, the server's client_events rows for the scenario's room
+ * are counted too; without it the query to run by hand is printed.
+ *
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [KN_URL=http://localhost:27888] [SCENARIO=late-join] \
- *     [CHROMIUM_PATH=...] [OUT=/tmp/lifecycle-e2e] node tests/lifecycle-e2e.mjs
+ *     [CHROMIUM_PATH=...] [OUT=/tmp/lifecycle-e2e] [KN_DB=server DB_PATH] node tests/lifecycle-e2e.mjs
  */
 import fs from 'node:fs';
 import { chromium } from 'playwright';
+import {
+  OBSERVER_EVENTS,
+  observerDbNote,
+  observerEventsInDb,
+  observerLinesIn,
+  observerTotal,
+} from './observer-reports.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -68,6 +95,7 @@ const SCENARIOS = [
   'late-join-cached',
   'late-join-shared',
   'late-join-two-player',
+  'late-join-lost-host',
   'missed-game-end',
   'missed-game-end-at-rom-prompt',
   'missed-new-match',
@@ -93,7 +121,8 @@ fs.mkdirSync(OUT, { recursive: true });
 
 const BLIP_MS = 3000;
 // Reports that mean a TypeScript module and the page (or the server) differ.
-const DISAGREEMENTS = ['session-disagree', 'play-disagree', 'protocol-mismatch'];
+// The rollback engine's two observers report theirs the same way.
+const DISAGREEMENTS = ['session-disagree', 'play-disagree', 'protocol-mismatch', ...OBSERVER_EVENTS];
 const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
@@ -136,8 +165,12 @@ const recordEvents = () => {
 
 // Uncaught exceptions on any page, for the scenario in progress.
 const pageErrors = [];
-/** A page in its own browser context, with a signaling socket the test can cut. */
-const openPlayer = async (label, query, initScript = null) => {
+/**
+ * A page in its own browser context, with a signaling socket the test can cut.
+ * `fromServer(message, page)`, if given, sees each message from the server
+ * before the page does; the page gets them in order once it has returned.
+ */
+const openPlayer = async (label, query, initScript = null, fromServer = null) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(recordEvents);
   if (initScript) await ctx.addInitScript(initScript);
@@ -170,6 +203,16 @@ const openPlayer = async (label, query, initScript = null) => {
     const server = ws.connectToServer();
     signaling.sockets.push({ page: ws, server });
     ws.onMessage((message) => server.send(message));
+    if (fromServer) {
+      let delivered = Promise.resolve();
+      server.onMessage((message) => {
+        delivered = delivered
+          .then(() => fromServer(message, page))
+          .catch((e) => console.log(`[${label}] fromServer failed: ${e.message}`))
+          .then(() => ws.send(message))
+          .catch(() => {});
+      });
+    }
   });
   await page.goto(`${URL}/play.html?${query}&knperf=light`);
   return { label, page, ctx, signaling };
@@ -492,6 +535,74 @@ const scenarios = {
       log,
     );
     return [host, first, late];
+  },
+
+  'late-join-lost-host': async (room, failures, log) => {
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+
+    // The state reaches the joiner over Socket.IO. Just before the page gets
+    // it, the joiner's connection to the host is closed: the host has sent
+    // the state and the joiner is not yet activated.
+    let cut = null;
+    const cutBeforeState = async (message, page) => {
+      if (cut || !String(message).includes('"late-join-state"')) return;
+      cut = await page.evaluate(() => {
+        const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
+        if (!entry?.pc) return { closed: false, why: 'no peer entry for slot 0' };
+        const was = { pc: entry.pc.connectionState, dc: entry.dc?.readyState ?? null };
+        entry.pc.close();
+        return { closed: true, was };
+      });
+      console.log(`  closed the joiner's connection to the host as the state arrived: ${JSON.stringify(cut)}`);
+    };
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`, null, cutBeforeState);
+    await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+    await loadRom(guest);
+    const synced = await waitUntil(async () => {
+      await clickGesturePrompt(guest);
+      return (await frameOf(guest)) > 0;
+    }, 180000);
+    if (!synced) failures.push('the late joiner never received state');
+    if (!cut?.closed) failures.push(`the joiner's connection to the host was not closed (${JSON.stringify(cut)})`);
+
+    // The lost-host path, in the joiner's own log: the marker, a resync
+    // request, and then the marker cleared by an applied host state, or a
+    // visible give-up. The asks are bounded (3, 8 s apart at most).
+    const syncLog = () => guest.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+    const ended = /the lost-host resync is done|LATE-JOIN-LOST-HOST-GIVEUP/;
+    await waitUntil(async () => ended.test(await syncLog()), 90000);
+    const joinerLog = await syncLog();
+    const lineOf = (re) => joinerLog.split('\n').find((line) => re.test(line)) ?? null;
+    const path = {
+      marker: lineOf(/late-join: lost the channel to the host/),
+      resync: lineOf(/LATE-JOIN-LOST-HOST-RESYNC/),
+      done: lineOf(/the lost-host resync is done/),
+      giveUp: lineOf(/LATE-JOIN-LOST-HOST-GIVEUP/),
+      asks: (joinerLog.match(/LATE-JOIN-LOST-HOST-RESYNC/g) || []).length,
+    };
+    log.push({ cut, lostHostPath: path });
+    console.log(`  lost-host path: ${JSON.stringify(path)}`);
+    if (!path.marker) failures.push('the joiner never logged that it lost the channel to the host');
+    if (!path.resync) failures.push('the joiner never asked for the lost-host resync');
+    if (!path.done && !path.giveUp) failures.push('the lost-host resync neither completed nor gave up');
+    const seqOf = (line) => Number(line?.split('\t')[0]);
+    if (path.marker && path.resync && seqOf(path.resync) < seqOf(path.marker))
+      failures.push('the joiner asked for the lost-host resync before it lost the channel');
+    if (path.done && path.resync && seqOf(path.done) < seqOf(path.resync))
+      failures.push('the lost-host marker was cleared before the resync was asked for');
+
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
+    await checkpoint(
+      'after late join with a lost host channel',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
   },
 
   'streaming-join': async (room, failures, log) => {
@@ -890,13 +1001,24 @@ for (const name of wanted) {
   } catch (error) {
     failures.push(`scenario threw: ${error.message.split('\n')[0]}`);
   }
+  const observers = {};
   for (const player of players) {
     const sync = await player.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '').catch(() => '');
     fs.writeFileSync(`${OUT}/${name}-${player.label}-sync.txt`, sync);
+    observers[player.label] = observerLinesIn(sync);
   }
+  // Give the pages' last client events time to reach the server.
+  await new Promise((resolve) => setTimeout(resolve, 2000));
   for (const ctx of browser.contexts()) await ctx.close();
+  observers.db = await observerEventsInDb(process.env.KN_DB, [room]).catch((e) => ({ error: e.message }));
+  const dbNote = observerDbNote(process.env.KN_DB, [room]);
+  if (dbNote) console.log(`  ${dbNote}`);
+  console.log(`  observers: ${JSON.stringify(observers)}`);
+  if (observers.db?.error) failures.push(`KN_DB could not be read: ${observers.db.error}`);
+  else if (observerTotal(...Object.values(observers)) > 0)
+    failures.push(`an observer beside the rollback engine disagreed: ${JSON.stringify(observers)}`);
   for (const error of pageErrors.splice(0)) failures.push(`uncaught page error (${error.label}: ${error.message})`);
-  results.push({ scenario: name, room, checkpoints: log, failures });
+  results.push({ scenario: name, room, checkpoints: log, observers, failures });
 }
 
 await browser.close();
