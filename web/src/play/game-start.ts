@@ -8,12 +8,10 @@
  * take from the host, the old branches booted the game with nothing to run,
  * and this asks for a ROM (`askForRom`, specs/rom_at_start.qnt).
  *
- * One reading differs from the late join's (`lateJoinPlan` in join-plan.ts)
- * and is kept as it was: a player whose ROM is not the host's and who has
- * declined the host's offer gets `wrongRom` here, where a late joiner is
- * shown the offer again. No page can decline today (the decline button is
- * gone; nothing calls `declineRomSharing`), so the difference is not
- * reachable until one can.
+ * A player turns the host's offer down by loading a ROM of its own; nothing
+ * else declines it. So a player whose ROM is not the host's is shown the
+ * offer while the host shares, here as at a late join (`lateJoinPlan` in
+ * join-plan.ts).
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */
@@ -37,14 +35,14 @@ export type GameStartPlan = 'watch' | 'askForSharedRom' | 'awaitSharedRom' | 'as
  * `hasRom`: a ROM is loaded on the page. `romDiffers`: that ROM is known not
  * to be the host's. `hostShares`: the host offers its ROM. `tookHostsRom`:
  * the player accepted it (so a mismatch reading is not believed).
- * `undecided`: the player has neither accepted nor declined it.
  */
 //@ ensures needsNoRom ==> \result === "watch"
 //@ ensures !needsNoRom && hasRom && (!romDiffers || tookHostsRom) ==> \result === "play"
 //@ ensures \result === "play" ==> !needsNoRom && hasRom && (!romDiffers || tookHostsRom)
 //@ ensures !needsNoRom && !hasRom && !hostShares && (!romDiffers || tookHostsRom) ==> \result === "askForRom"
 //@ ensures \result === "askForRom" ==> !needsNoRom && !hasRom && !hostShares
-//@ ensures \result === "wrongRom" ==> !needsNoRom && romDiffers && !tookHostsRom && !(hostShares && undecided)
+//@ ensures \result === "wrongRom" ==> !needsNoRom && romDiffers && !tookHostsRom && !hostShares
+//@ ensures !needsNoRom && romDiffers && !tookHostsRom && hostShares ==> \result === "askForSharedRom"
 //@ ensures \result === "awaitSharedRom" ==> !needsNoRom && hostShares && tookHostsRom && !hasRom
 //@ ensures \result === "askForSharedRom" ==> !needsNoRom && hostShares && !tookHostsRom
 export function gameStartPlan(
@@ -53,11 +51,10 @@ export function gameStartPlan(
   romDiffers: boolean,
   hostShares: boolean,
   tookHostsRom: boolean,
-  undecided: boolean,
 ): GameStartPlan {
   if (needsNoRom) return 'watch';
   if (romDiffers && !tookHostsRom) {
-    if (hostShares && undecided) return 'askForSharedRom';
+    if (hostShares) return 'askForSharedRom';
     return 'wrongRom';
   }
   if (hostShares && !hasRom) {

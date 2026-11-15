@@ -35,7 +35,7 @@ export type RomTransferState = 'idle' | 'receiving' | 'paused' | 'resuming' | 'c
 
 export interface RomResumeInput {
   readonly isHost: boolean;
-  readonly sharingDecision: 'accepted' | 'declined' | null;
+  readonly sharingDecision: 'accepted' | null;
   readonly hasRom: boolean;
   readonly transferState: RomTransferState;
   /**

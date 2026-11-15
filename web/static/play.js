@@ -284,7 +284,7 @@
   };
 
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
-  let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
+  let _romSharingDecision = null; // 'accepted' once the player takes the host's ROM, else null
   let _romTransferState = 'idle'; // 'idle' | 'receiving' | 'paused' | 'resuming' | 'complete'
   let _romTransferStallTimer = null; // setTimeout ID — resets on each chunk
   let _romTransferResumeTimer = null; // setTimeout ID — 15s resume timeout
@@ -1439,7 +1439,6 @@
       hostRomMismatch(),
       !!_romSharingEnabled,
       _romSharingDecision === 'accepted',
-      _romSharingDecision === null,
     );
 
     // Spectators and streaming-mode guests don't run an emulator — they
@@ -1881,12 +1880,6 @@
         }
       }
     }, 15000);
-  };
-
-  const declineRomSharing = () => {
-    crumb('rom-sharing-decline');
-    _romSharingDecision = 'declined';
-    updateRomSharingUI();
   };
 
   const cancelRomTransfer = () => {
