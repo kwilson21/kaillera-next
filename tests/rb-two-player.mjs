@@ -195,17 +195,21 @@
  *   CATCH_UP_HOLE_MS=<n>   With DROP_PEER_MS: the host drops its input
  *     packets on the reconnected channel from that channel's first one until
  *     n ms after it sends the state, so the guest's catch-up after the
- *     reconnect waits on a hole (specs/catch_up_wait.qnt). Fails if the
+ *     reconnect waits on a hole (specs/catch_up_wait.qnt). The host's ticks
+ *     pause for the first 8 s of the drop, so the guest is ahead of that
+ *     state and does catch up from it. Fails if the
  *     catch-up stopped on the hole or the pages end more than 300 frames
  *     apart (the runaway). On main it fails: the waiting catch-up spun and
  *     sent a reliable input packet per slice, burying its asks.
  *   ASK_UNANSWERED_MS=<n>   A third of the way into the battle the guest
- *     drops its input packets for n ms, so the host's asks for them go
- *     unanswered (specs/ask_escalation.qnt). Fails unless the host's ask goes
+ *     drops its input packets for eight frames just ahead of it, for good
+ *     (resends included), while later frames go through: the host learns
+ *     they were made, asks for them, and is never answered
+ *     (specs/ask_escalation.qnt). Fails unless the host's ask goes
  *     overdue (`INPUT-ASK-OVERDUE … → push`), it pushes its state, and the
  *     guest's inputs-settled answers it (`INPUT-ASK-PUSH-SETTLED`), with no
  *     give-up. Frames are compared as usual. With ASK_UNANSWERED_ACKS=1
- *     (ASK_UNANSWERED_MS >= 20000) the guest drops its `inputs-settled:` too,
+ *     (ASK_UNANSWERED_MS >= 20000) the guest drops its `inputs-settled:` for n ms too,
  *     so no push is acknowledged: fails unless the host pushes again to the
  *     limit, gives up (`INPUT-ASK-PUSH-GAVEUP`) and drops the player
  *     (`peer hard-disconnected`) rather than playing on split.
@@ -600,7 +604,7 @@ if (ASK_UNANSWERED_ACKS && !(ASK_UNANSWERED_MS >= 20000)) {
   console.log('ASK_UNANSWERED_ACKS needs ASK_UNANSWERED_MS >= 20000');
   process.exit(1);
 }
-const askUnanswered = { hostAt: null, guestAt: null, dropped: 0 };
+const askUnanswered = { hostAt: null, guestAt: null, dropped: 0, range: null };
 if (CATCH_UP_HOLE_MS > 0 && !(DROP_PEER_MS > 0)) {
   console.log('CATCH_UP_HOLE_MS needs DROP_PEER_MS');
   process.exit(1);
@@ -1190,9 +1194,15 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // `rollback-input`) is dropped: the host's asks for them go unanswered.
   window.__knDropInputsUntil = 0;
   window.__knInputsDroppedUntil = 0;
-  // ASK_UNANSWERED_ACKS: in the same window, the guest's `inputs-settled:`
-  // (its acknowledgement of a pushed state) is dropped too.
-  window.__knDropSettledToo = false;
+  // ASK_UNANSWERED_MS: every input packet whose frame (its first word) is in
+  // [__knDropInputFrom, __knDropInputTo) is dropped, for good, resends
+  // included, while later frames go through: the peer learns they were made
+  // and asks for them, and the asks are never answered.
+  window.__knDropInputFrom = -1;
+  window.__knDropInputTo = -1;
+  // ASK_UNANSWERED_ACKS: until __knDropSettledUntil, the page's
+  // `inputs-settled:` (its acknowledgement of a pushed state) is dropped too.
+  window.__knDropSettledUntil = 0;
   window.__knSettledDropped = 0;
   window.__knDropArmedAt = 0;
   window.__knInputsDroppedAfterOpen = [];
@@ -1381,8 +1391,19 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
       return;
     }
     if (
-      window.__knDropSettledToo &&
-      performance.now() < window.__knDropInputsUntil &&
+      window.__knDropInputTo > window.__knDropInputFrom &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer &&
+      data.byteLength >= 4
+    ) {
+      const frame = new Int32Array(data, 0, 1)[0];
+      if (frame >= window.__knDropInputFrom && frame < window.__knDropInputTo) {
+        window.__knInputsDroppedUntil++;
+        return;
+      }
+    }
+    if (
+      performance.now() < window.__knDropSettledUntil &&
       typeof data === 'string' &&
       data.startsWith('inputs-settled:')
     ) {
@@ -2399,6 +2420,11 @@ if (inBattle) {
       await host.evaluate((ms) => {
         window.__knDropInputsAfterOpenMs = ms;
         window.__knDropArmedAt = performance.now();
+        // The host's ticks pause while the connection is down, so the guest
+        // (which marks it a phantom and runs on) is ahead of the state it is
+        // sent at the reconnect, and catches up from it.
+        window.NetplayRollback.pauseTick();
+        setTimeout(() => window.NetplayRollback.resumeTick(), 8000);
       }, CATCH_UP_HOLE_MS);
     }
     peerSignalBlock.until = Date.now() + DROP_PEER_MS;
@@ -2552,14 +2578,21 @@ if (inBattle) {
     await host.waitForTimeout(before);
     const started = Date.now();
     [askUnanswered.hostAt, askUnanswered.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
-    await guest.evaluate(
+    askUnanswered.range = await guest.evaluate(
       ([ms, acksToo]) => {
-        window.__knDropSettledToo = acksToo;
-        window.__knDropInputsUntil = performance.now() + ms;
+        // A range just ahead of the guest's frame: dropped for good.
+        const frame = window.NetplayRollback.getHudCounters().currentFrame;
+        window.__knDropInputFrom = frame + 20;
+        window.__knDropInputTo = frame + 28;
+        if (acksToo) window.__knDropSettledUntil = performance.now() + ms;
+        return [window.__knDropInputFrom, window.__knDropInputTo];
       },
       [ASK_UNANSWERED_MS, ASK_UNANSWERED_ACKS],
     );
-    console.log(`ASK_UNANSWERED_MS: the guest drops its inputs for ${ASK_UNANSWERED_MS} ms`);
+    console.log(
+      `ASK_UNANSWERED_MS: the guest drops its inputs for frames ${askUnanswered.range[0]}..${askUnanswered.range[1] - 1} for good` +
+        (ASK_UNANSWERED_ACKS ? `, and its acknowledgements for ${ASK_UNANSWERED_MS} ms` : ''),
+    );
     const settled = await waitForLine(
       host,
       askUnanswered.hostAt.seq,
@@ -4206,7 +4239,19 @@ const askUnansweredReport = (() => {
   const gaveUp = hostLines.filter((l) => /INPUT-ASK-PUSH-GAVEUP/.test(l));
   const hardDisconnected = hostLines.filter((l) => /peer hard-disconnected: .* slot: 1/.test(l));
   const pushes = hostLines.filter((l) => /INPUT-ASK-PUSH-AGAIN/.test(l));
-  return { dropped: askUnanswered.dropped, overdue, settled, pushes, gaveUp, hardDisconnected };
+  // After a drop, the health check may offer to the player again: each
+  // drop and heal is counted, so a cycle that does not end shows.
+  const heals = hostLines.filter((l) => /MESH-HEAL f=.* slot=1/.test(l));
+  return {
+    range: askUnanswered.range,
+    dropped: askUnanswered.dropped,
+    overdue,
+    settled,
+    pushes,
+    gaveUp,
+    hardDisconnected,
+    heals: heals.length,
+  };
 })();
 const askUnansweredFailed =
   ASK_UNANSWERED_MS > 0 &&

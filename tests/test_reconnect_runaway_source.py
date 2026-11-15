@@ -12,7 +12,7 @@ def _src() -> str:
     return LOCKSTEP_JS.read_text()
 
 
-def test_a_frames_input_goes_out_once_on_the_reliable_channel():
+def test_the_same_frames_input_goes_out_again_at_most_every_100_ms():
     src = _src()
     send = src[src.index("const shouldSendRedundancy = _useCRollback") :]
     send = send[: send.index("_rbTransportPacketsSent++;")]
@@ -21,11 +21,13 @@ def test_a_frames_input_goes_out_once_on_the_reliable_channel():
     assert "lastSend.dc === inputDc &&" in send
     assert "lastSend.frame === _frameNum &&" in send
     assert (
-        "(inputDc === peer.dc || nowSend - lastSend.at < INPUT_RESEND_EVERY_MS)" in send
+        "nowSend - lastSend.at < (inputDc === peer.dc ? INPUT_RESEND_RELIABLE_MS : INPUT_RESEND_EVERY_MS)"
+        in send
     )
     assert send.index("continue;") < send.index("KNShared.encodeInput(")
     assert "peer._knInputSend = { dc: inputDc, frame: _frameNum, at: nowSend };" in src
     assert "const INPUT_RESEND_EVERY_MS = 16;" in src
+    assert "const INPUT_RESEND_RELIABLE_MS = 100;" in src
     # Each change of a peer's input channel is logged.
     assert "`INPUT-CHANNEL f=${_frameNum} slot=${peer.slot} label=" in send
 
@@ -64,8 +66,11 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     count = src[src.index("const _countOverdueAsk = (peer, oldest, now) => {") :]
     count = count[: count.index("\n  };\n")]
     assert "window.KNCore.resyncRequest.overdueAskStep(" in count
-    assert "pushSyncState(sid, false);" in count
-    assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in count
+    assert "_escalateLostInput(peer, step, now);" in count
+    escalate = src[src.index("const _escalateLostInput = (peer, step, now) => {") :]
+    escalate = escalate[: escalate.index("\n  };\n")]
+    assert "pushSyncState(sid, false);" in escalate
+    assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in escalate
     assert "const INPUT_ASK_OVERDUE_ASKS = 3;" in src
     assert "const INPUT_ASK_OVERDUE_MS = 1500;" in src
     pushes = src[src.index("const _checkOverduePushes = () => {") :]
@@ -89,3 +94,19 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     reset = reset[: reset.index("\n  };\n")]
     assert "delete _inputAskOverdue[slot];" in reset
     assert "delete _overduePushes[slot];" in reset
+
+
+def test_an_input_past_the_window_that_differs_escalates_like_an_overdue_ask():
+    # specs/ask_escalation.qnt, lateMismatch: C counts a failed rollback for a
+    # misprediction too deep to roll back (DEEP-MISPREDICT-SKIP); every feed
+    # is wrapped, and a count that moved escalates at once.
+    src = _src()
+    feed = src[src.index("const _feedWatched = (mod, slot, frame, feed) => {") :]
+    feed = feed[: feed.index("\n  };\n")]
+    assert "mod?._kn_get_failed_rollbacks?.()" in feed
+    assert "_onPastWindowMismatch(slot, frame);" in feed
+    late = src[src.index("const _onPastWindowMismatch = (slot, frame) => {") :]
+    late = late[: late.index("\n  };\n")]
+    assert "window.KNCore.resyncRequest.overdueAskStep(" in late
+    assert "INPUT-PAST-WINDOW-MISMATCH" in late
+    assert "_escalateLostInput(peer, step, now);" in late

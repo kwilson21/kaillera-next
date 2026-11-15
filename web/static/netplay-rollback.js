@@ -1801,9 +1801,10 @@
   const DC_BUFFER_THRESHOLD = 2048; // bytes — ~100 input packets
   const DC_BUFFER_STALE_FRAMES = 10; // consecutive frames before fallback
   const DC_ACK_STALE_MS = 500; // ms without ack advance before fallback
-  // The same frame's input goes out again on the unreliable channel at most
-  // this often (one 60 Hz slot); never on the reliable one.
+  // The same frame's input goes out again at most this often: once a 60 Hz
+  // slot on the unreliable channel, every 100 ms on the reliable one.
   const INPUT_RESEND_EVERY_MS = 16;
+  const INPUT_RESEND_RELIABLE_MS = 100;
   // JS-side input queue: WebRTC callbacks push here instead of calling
   // kn_feed_input directly. The queue is drained at the start of each
   // tick (before kn_pre_tick) so the C engine sees a consistent input
@@ -5082,6 +5083,17 @@
     return mod.HEAP32[at] + mod.HEAP32[at + 1] + mod.HEAP32[at + 2];
   };
   const _feedWatched = (mod, slot, frame, feed) => {
+    // A real input past the rollback window that differs from what was
+    // predicted cannot be applied (C: DEEP-MISPREDICT-SKIP counts a failed
+    // rollback): the pages have split for certain. Escalated as an overdue
+    // ask is (specs/ask_escalation.qnt, lateMismatch).
+    const failedBefore = mod?._kn_get_failed_rollbacks?.() ?? -1;
+    const result = _feedWatchedFrame(mod, slot, frame, feed);
+    const failedAfter = mod?._kn_get_failed_rollbacks?.() ?? -1;
+    if (failedBefore >= 0 && failedAfter > failedBefore) _onPastWindowMismatch(slot, frame);
+    return result;
+  };
+  const _feedWatchedFrame = (mod, slot, frame, feed) => {
     let watched = false;
     for (const w of _followUpWatches.values()) if (!w.changed && frame <= w.frame) watched = true;
     if (!watched) return feed();
@@ -5288,6 +5300,31 @@
         `ms=${Math.round(now - track.firstAt)} → ${step}`,
     );
     delete _inputAskOverdue[slot];
+    _escalateLostInput(peer, step, now);
+  };
+
+  // A real input from `slot` that came past the rollback window and differs
+  // from its prediction: overdue at once (overdueAskStep with both thresholds
+  // met), logged.
+  const _onPastWindowMismatch = (slot, frame) => {
+    const peer = Object.values(_peers).find((p) => p.slot === slot);
+    if (!peer) return;
+    const now = performance.now();
+    const isHost = _playerSlot === 0;
+    const step = window.KNCore.resyncRequest.overdueAskStep(
+      isHost,
+      INPUT_ASK_OVERDUE_ASKS,
+      INPUT_ASK_OVERDUE_MS,
+      INPUT_ASK_OVERDUE_ASKS,
+      INPUT_ASK_OVERDUE_MS,
+      isHost ? !!_overduePushes[slot] : _resyncRequestInFlight,
+    );
+    _syncLog(`INPUT-PAST-WINDOW-MISMATCH f=${_frameNum} slot=${slot} frame=${frame} → ${step}`);
+    if (step !== 'wait') _escalateLostInput(peer, step, now);
+  };
+
+  const _escalateLostInput = (peer, step, now) => {
+    const slot = peer.slot;
     if (step === 'push') {
       const sid = Object.keys(_peers).find((key) => _peers[key] === peer);
       if (!sid) return;
@@ -15420,19 +15457,23 @@
           _rbTransport === 'unreliable' && peer.rbDc?.readyState === 'open' && peer.rbDcUnreliable
             ? peer.rbDc
             : peer.dc;
-        // A frame's input goes out once on the reliable channel, which
-        // delivers it; on the unreliable one it goes out again at most once
-        // a slot. A tick that runs again on the same frame (a stall, a
-        // catch-up waiting on a hole) sent it every time, and on the
-        // reliable channel the asks for a hole queued behind them
-        // (specs/catch_up_wait.qnt, everyReliableSendIsNew).
+        // The same frame's input goes out again at most once every
+        // INPUT_RESEND_RELIABLE_MS on the reliable channel and once a slot
+        // on the unreliable one. A tick that ran again on the same frame (a
+        // stall, a catch-up waiting on a hole) sent it every time, and on
+        // the reliable channel the asks for a hole queued behind them
+        // (specs/catch_up_wait.qnt, reliableResendsAreSpaced). Not never:
+        // a page far behind drops inputs as too far ahead (INPUT-OOR), even
+        // on the reliable channel, and this resend is what brings them back
+        // once it has caught up. That masks a receiver bug (the receiver
+        // should ask for what it dropped once it reaches it): a follow-up.
         const lastSend = peer._knInputSend;
         const nowSend = performance.now();
         if (
           lastSend &&
           lastSend.dc === inputDc &&
           lastSend.frame === _frameNum &&
-          (inputDc === peer.dc || nowSend - lastSend.at < INPUT_RESEND_EVERY_MS)
+          nowSend - lastSend.at < (inputDc === peer.dc ? INPUT_RESEND_RELIABLE_MS : INPUT_RESEND_EVERY_MS)
         ) {
           continue;
         }
