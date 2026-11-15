@@ -35,3 +35,11 @@ In a live session with the dev server running:
   session at game frame 3127 (originally `/tmp/rdram-guest-desync-gf3127.bin`
   from desync investigation, 2026-04-24). Used by all hash-golden tests in
   v1. Contains valid bytes at all addresses in `kn_gameplay_addrs.h`.
+- `in-sudden-death.rdram.gz` — raw RDRAM during a sudden death in SSB64
+  US, captured on the demo page (one emulator, the synthetic second
+  player) on 2026-11-15. The battle was made a timed match with about a
+  second left and both players on equal scores (game_rules, time_limit and
+  time_remain written into the live battle header), so time ran out on a
+  tie. Here the game's battle-state pointer (0x800A50E8) names the second
+  copy, 0x800A4EF8: its game_status reads 1 and its rules stock; the live
+  copy, 0x800A4D08, reads game_status 7 with the timed match's values.

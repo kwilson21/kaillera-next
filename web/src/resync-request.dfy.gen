@@ -2,6 +2,8 @@
 
 datatype LostHostStep = idle | waitForChannel | inFlight | giveUp | ask
 
+datatype DeadlineStep = noRequest | wait | lostHost | askAgain | stopAsking | letGo
+
 function endsRequest(answerFor: int, newest: int, hostNumbers: bool): bool
 {
   if (answerFor > 0) then
@@ -29,21 +31,22 @@ lemma answersAnOlderRequest_ensures(answerFor: int, newest: int)
 {
 }
 
-function isLateAnswerBeforeFrameAsked(answerFor: int, frame: int, newest: int, askedAt: int): bool
+function isLateAnswerBehind(answerFor: int, frame: int, newest: int, askedAt: int, guestFrame: int): bool
 {
   if ((answerFor <= 0) || (answerFor == newest)) then
     false
   else
-    ((askedAt > 0) && (frame < askedAt))
+    ((frame < guestFrame) || ((askedAt > 0) && (frame < askedAt)))
 }
 
-lemma isLateAnswerBeforeFrameAsked_ensures(answerFor: int, frame: int, newest: int, askedAt: int)
-  ensures (isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt) == ((((answerFor > 0) && (answerFor != newest)) && (askedAt > 0)) && (frame < askedAt)))
-  ensures (isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt) ==> (frame < askedAt))
-  ensures ((answerFor == newest) ==> !(isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt)))
-  ensures ((answerFor <= 0) ==> !(isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt)))
-  ensures ((askedAt <= 0) ==> !(isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt)))
-  ensures ((frame >= askedAt) ==> !(isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt)))
+lemma isLateAnswerBehind_ensures(answerFor: int, frame: int, newest: int, askedAt: int, guestFrame: int)
+  ensures (isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame) == (((answerFor > 0) && (answerFor != newest)) && ((frame < guestFrame) || ((askedAt > 0) && (frame < askedAt)))))
+  ensures (isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame) ==> ((frame < guestFrame) || (frame < askedAt)))
+  ensures ((answerFor > 0) ==> (answerFor != newest) ==> (frame < guestFrame) ==> isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame))
+  ensures ((answerFor == newest) ==> !(isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame)))
+  ensures ((answerFor <= 0) ==> !(isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame)))
+  ensures ((frame >= guestFrame) ==> (askedAt <= 0) ==> !(isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame)))
+  ensures ((frame >= guestFrame) ==> (frame >= askedAt) ==> !(isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame)))
 {
 }
 
@@ -94,5 +97,48 @@ lemma lateJoinLostHostStep_ensures(marked: bool, isHost: bool, running: bool, ch
   ensures (marked ==> !(isHost) ==> running ==> channelOpen ==> !(requestOut) ==> (asks < maxAsks) ==> lateJoinLostHostStep(marked, isHost, running, channelOpen, requestOut, asks, maxAsks).ask?)
   ensures (lateJoinLostHostStep(marked, isHost, running, channelOpen, requestOut, asks, maxAsks).ask? ==> ((channelOpen && !(requestOut)) && (asks < maxAsks)))
   ensures (lateJoinLostHostStep(marked, isHost, running, channelOpen, requestOut, asks, maxAsks).giveUp? ==> (asks >= maxAsks))
+{
+}
+
+function resyncDeadlineStep(requestOut: bool, answerComing: bool, decoding: bool, decodingForMs: int, graceMs: int, waitedMs: int, timeoutMs: int, lostHostOwed: bool, owed: bool, asksAgain: int, maxAsksAgain: int): DeadlineStep
+  requires (asksAgain >= 0)
+  requires (maxAsksAgain >= 1)
+{
+  if !(requestOut) then
+    DeadlineStep.noRequest
+  else
+    if answerComing then
+      DeadlineStep.wait
+    else
+      if (decoding && (decodingForMs < graceMs)) then
+        DeadlineStep.wait
+      else
+        if (waitedMs < timeoutMs) then
+          DeadlineStep.wait
+        else
+          if lostHostOwed then
+            DeadlineStep.lostHost
+          else
+            if !(owed) then
+              DeadlineStep.letGo
+            else
+              if (asksAgain >= maxAsksAgain) then
+                DeadlineStep.stopAsking
+              else
+                DeadlineStep.askAgain
+}
+
+lemma resyncDeadlineStep_ensures(requestOut: bool, answerComing: bool, decoding: bool, decodingForMs: int, graceMs: int, waitedMs: int, timeoutMs: int, lostHostOwed: bool, owed: bool, asksAgain: int, maxAsksAgain: int)
+  requires (asksAgain >= 0)
+  requires (maxAsksAgain >= 1)
+  ensures (!(requestOut) ==> resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).noRequest?)
+  ensures (requestOut ==> answerComing ==> resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).wait?)
+  ensures (requestOut ==> decoding ==> (decodingForMs < graceMs) ==> resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).wait?)
+  ensures (requestOut ==> (waitedMs < timeoutMs) ==> resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).wait?)
+  ensures (resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).lostHost? ==> lostHostOwed)
+  ensures (resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).askAgain? ==> ((owed && !(lostHostOwed)) && (asksAgain < maxAsksAgain)))
+  ensures (resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).stopAsking? ==> ((owed && !(lostHostOwed)) && (asksAgain >= maxAsksAgain)))
+  ensures (resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).letGo? ==> (!(owed) && !(lostHostOwed)))
+  ensures (requestOut ==> !(answerComing) ==> !((decoding && (decodingForMs < graceMs))) ==> (waitedMs >= timeoutMs) ==> ((!resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).wait?) && (!resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).noRequest?)))
 {
 }

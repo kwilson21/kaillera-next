@@ -213,11 +213,28 @@
     return /^[a-z0-9-]{1,32}$/.test(hint || '') ? hint : null;
   };
 
+  // The game a ROM is, from the known-ROMs table or the invite link's hint.
+  // A ROM in neither has no game id: it is not taken for SSB64.
   const _gameIdFromHash = (hash) => {
     if (hash && _knownRoms[hash]?.game_id) return _knownRoms[hash].game_id;
-    const hint = _gameIdHintFromUrl();
-    if (hint) return hint;
-    return 'ssb64'; // default fallback
+    return _gameIdHintFromUrl();
+  };
+
+  // The host tells the room which game its ROM is, or that it has none.
+  const _announceGameId = () => {
+    if (isHost && socket?.connected) socket.emit('set-game-id', { game_id: _gameId || '' });
+  };
+
+  // The room's game id is the host's ROM. A guest takes whatever the room
+  // says, empty included: the host's ROM is one the site does not list, and
+  // keeping an earlier id (say Smash Remix's) would turn on that game's
+  // workarounds for another. The host's own ROM decides its id; it takes the
+  // room's only when the room names a game, as before.
+  const _takeRoomGameId = (gameId) => {
+    if (typeof gameId !== 'string') return;
+    if (isHost && !gameId) return;
+    _gameId = gameId || null;
+    KNState.gameId = _gameId;
   };
 
   // ROM drop-zone status line. Every "Loaded: …" update goes through
@@ -552,10 +569,7 @@
     _hostRomIdentityResolved = true;
     // Flush any deferred autoload now that we know what the host has.
     if (_flushPendingRomAutoload) _flushPendingRomAutoload('host-rom-resolved');
-    if (next.gameId) {
-      _gameId = next.gameId;
-      KNState.gameId = _gameId;
-    }
+    _takeRoomGameId(next.gameId);
     const cachedHash = _safeGet('localStorage', 'kaillera-rom-hash');
     if (!localRomLoaded() && _hostRomHash && cachedHash && romHashMismatch(_hostRomHash, cachedHash)) {
       console.warn(
@@ -908,7 +922,7 @@
       // refuses; it never lets it in as a new player or opens a new room.
       const resume = { slot: _connect.resumeSlot(isSpectator, mySlot), matchId: KNState.matchId || '' };
       const payload = isHost
-        ? _connect.openRoomRequest(joinerNow(), _gameId || 'ssb64', resume)
+        ? _connect.openRoomRequest(joinerNow(), _gameId || '', resume)
         : _connect.joinRoomRequest(joinerNow(), isSpectator, resume);
       // The session owns the rejoin: it cancels it if the socket drops again
       // or the game ends, and then this handler is never called.
@@ -938,6 +952,9 @@
         }
         console.log('[play] mid-game rejoin succeeded');
         sendDeviceType();
+        // The server keeps a returning host's room as it was: a ROM changed
+        // while the socket was down is told now.
+        _announceGameId();
         // A player taken back after its grace window ran out is on a new
         // socket the server has no ROM report for: without this the next
         // start would wait for a ROM everybody already has.
@@ -956,15 +973,13 @@
     }
 
     if (isHost) {
-      socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || 'ssb64', null), (err) => {
-        const roomHandedOn = err === 'Room already exists' && _droppedAsHost;
-        _playObserver.compare(
-          'open-room-answer',
-          err === 'Not the owner' || roomHandedOn ? 'join-as-guest' : err ? 'failed' : 'opened',
-          _connect.openRoomAnswer(err, _droppedAsHost).kind,
-        );
+      socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || '', null), (err) => {
+        // What the answer means is connect.ts: opened, the room is someone
+        // else's now (it was handed on after this page was dropped as host),
+        // or failed.
+        const answer = _connect.openRoomAnswer(err, _droppedAsHost);
         _droppedAsHost = false;
-        if (err === 'Not the owner' || roomHandedOn) {
+        if (answer.kind === 'join-as-guest') {
           // This page's URL says host, but the room belongs to someone
           // else now: this player was dropped mid-match and the room was
           // handed on (and it may since have been taken back as a player).
@@ -975,8 +990,8 @@
           onConnect(false);
           return;
         }
-        if (err) {
-          showError(`Failed to create room: ${err}`);
+        if (answer.kind === 'failed') {
+          showError(answer.message);
           return;
         }
         mySlot = 0;
@@ -995,6 +1010,9 @@
         }
         // If ROM was already loaded from cache, notify server immediately
         if (_romBlob || _romBlobUrl) notifyRomReady();
+        // A host taken back into its own room keeps the room's old game id
+        // (the server ignores open-room's then): say the current one.
+        if (isReconnect) _announceGameId();
         showOverlay();
       });
     } else {
@@ -1007,11 +1025,7 @@
         }
         const roomData = await response.json();
         if (!roomData) return;
-        const roomGameId = roomData.gameId || roomData.game_id;
-        if (roomGameId) {
-          _gameId = roomGameId;
-          KNState.gameId = _gameId;
-        }
+        _takeRoomGameId(roomData.gameId ?? roomData.game_id);
         applyHostRomFromData(roomData);
 
         // Room full: auto-join as spectator with banner. A page that already
@@ -1019,12 +1033,7 @@
         // full room (socket reconnect, or catching up with a replaced match)
         // must not turn it into a spectator while the server keeps its slot.
         const holdsPlayerSlot = mySlot !== null && mySlot !== undefined;
-        _playObserver.compare(
-          'becomes-spectator',
-          !isSpectator && !holdsPlayerSlot && roomData.player_count >= roomData.max_players,
-          _joinPlan.becomesSpectator(isSpectator, holdsPlayerSlot, roomData.player_count, roomData.max_players),
-        );
-        if (!isSpectator && !holdsPlayerSlot && roomData.player_count >= roomData.max_players) {
+        if (_joinPlan.becomesSpectator(isSpectator, holdsPlayerSlot, roomData.player_count, roomData.max_players)) {
           console.log(
             `[play] auto-spectate: player_count=${roomData.player_count} >= max_players=${roomData.max_players}`,
           );
@@ -1048,13 +1057,11 @@
 
         socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), isSpectator, null), (err, joinData) => {
           if (err) {
-            _playObserver.compare(
-              'join-refusal',
-              err === 'Room is full' ? 'watch-instead' : 'failed',
-              _connect.joinRefusal(err, '').kind,
-            );
+            // What each refusal says is connect.ts (the spectator-cap copy
+            // is §7.2 M3 #3, whichever cap tripped).
+            const refusal = _connect.joinRefusal(err, roomClosedMessage(roomData?.host_name));
             // Room filled between REST check and join — auto-spectate
-            if (err === 'Room is full') {
+            if (refusal.kind === 'watch-instead') {
               isSpectator = true;
               _autoSpectated = true;
               socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), true, null), (err2, joinData2) => {
@@ -1072,18 +1079,12 @@
               });
               return;
             }
-            // What each refusal says is connect.ts (the spectator-cap copy
-            // is §7.2 M3 #3, whichever cap tripped).
-            showError(_connect.joinRefusal(err, roomClosedMessage(roomData?.host_name)).message);
+            showError(refusal.message);
             return;
           }
 
           _protocol?.checkAck('join-room', joinData);
-          const joinGameId = joinData?.gameId || joinData?.game_id;
-          if (joinGameId) {
-            _gameId = joinGameId;
-            KNState.gameId = _gameId;
-          }
+          _takeRoomGameId(joinData?.gameId ?? joinData?.game_id);
           applyHostRomFromData(joinData || roomData);
 
           if (!isSpectator && joinData?.players) {
@@ -1174,19 +1175,19 @@
             // Store host ROM metadata for verification
             applyHostRomFromData(joinData || roomData);
 
+            // How this page gets into the match is join-plan.ts (proved).
+            const hasRom = localRomLoaded();
             const lateJoinPlan = _joinPlan.lateJoinPlan(
               !!isSpectator || mode === 'streaming',
-              localRomLoaded(),
+              hasRom,
               !!roomData.rom_sharing,
               hostRomMismatch(),
               _romSharingDecision === 'accepted',
             );
-            const lateJoinDecided = (decided) => _playObserver.compare('late-join-plan', decided, lateJoinPlan);
 
             // Spectators and streaming guests don't need a ROM — they
             // receive a video stream. Skip ROM checks and go to engine init.
-            if (isSpectator || mode === 'streaming') {
-              lateJoinDecided('watch');
+            if (lateJoinPlan === 'watch') {
               hideOverlay();
               showToolbar();
               showGameLoading();
@@ -1194,43 +1195,29 @@
               return;
             }
 
-            // If no ROM cached, check if host is sharing
-            if (!localRomLoaded()) {
-              if (roomData.rom_sharing) {
-                lateJoinDecided('askForSharedRom');
-                // Show accept/decline prompt instead of ROM drop
-                crumb('late-join-sharing-prompt', { sharing: true });
-                _romSharingEnabled = true;
-                _setPendingLateJoin(true);
-                showLateJoinRomPrompt();
-                updateRomSharingUI();
-                return;
-              }
-              lateJoinDecided('askForRom');
+            // No ROM, or one that isn't the host's, and the host is sharing
+            // theirs: show the accept/decline prompt instead of a ROM drop.
+            if (lateJoinPlan === 'askForSharedRom') {
+              if (!hasRom) crumb('late-join-sharing-prompt', { sharing: true });
+              _romSharingEnabled = true;
+              _setPendingLateJoin(true);
+              showLateJoinRomPrompt();
+              updateRomSharingUI();
+              return;
+            }
+            if (lateJoinPlan === 'askForRom') {
               crumb('late-join-rom-prompt', { sharing: false });
               _setPendingLateJoin(true);
               showLateJoinRomPrompt();
               return;
             }
-
-            // Verify ROM hash if available (skip when ROM came from host via sharing)
-            if (hostRomMismatch() && _romSharingDecision !== 'accepted') {
-              if (roomData.rom_sharing) {
-                // Cached ROM doesn't match but sharing is available —
-                // show sharing prompt instead of erroring out
-                lateJoinDecided('askForSharedRom');
-                _romSharingEnabled = true;
-                _setPendingLateJoin(true);
-                showLateJoinRomPrompt();
-                updateRomSharingUI();
-                return;
-              }
-              lateJoinDecided('wrongRom');
+            // The ROM's hash isn't the host's (one that came from the host by
+            // sharing is believed), and the host isn't sharing.
+            if (lateJoinPlan === 'wrongRom') {
               showError("Your ROM doesn't match the host's game. Drop the correct ROM.");
               return;
             }
 
-            lateJoinDecided('play');
             // A page that was in the lobby (it has just caught up with a
             // match that replaced the one it was in) still has the lobby
             // overlay up; a fresh page does not.
@@ -1426,10 +1413,7 @@
     );
     mode = data.mode || mode;
     _gameResyncEnabled = data.resyncEnabled !== false;
-    if (data.gameId) {
-      _gameId = data.gameId;
-      KNState.gameId = _gameId;
-    }
+    _takeRoomGameId(data.gameId);
     applyHostRomFromData(data);
     KNState.matchId = data.matchId || null;
     _gfxRecoveryAttempt = 0;
@@ -3030,6 +3014,11 @@
     // host". Defer the autoload until applyHostRomFromData runs, then evaluate
     // the cached hash against the host's hash.
     const lastHash = _safeGet('localStorage', 'kaillera-rom-hash');
+    // Expose to applyHostRomFromData so it can flush the deferred autoload
+    // once host identity arrives. Set before the deferral below returns.
+    _flushPendingRomAutoload = (trigger) => {
+      if (_pendingRomAutoload) runRomAutoload(trigger);
+    };
     if (lastHash) {
       if (!isHost && !_hostRomIdentityResolved) {
         _pendingRomAutoload = { lastHash, savedRom, drop, statusEl };
@@ -3094,10 +3083,6 @@
         if (!isSpectator) renderRomLibrary();
       });
     }
-
-    // Expose to applyHostRomFromData so it can flush the deferred autoload
-    // once host identity arrives.
-    _flushPendingRomAutoload = (trigger) => runRomAutoload(trigger);
   };
 
   // Set by setupRomDrop; called from applyHostRomFromData when the host's ROM
@@ -3194,9 +3179,7 @@
         window.EJS_gameID = hash;
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
         console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026 game_id: ${_gameId}`);
-        if (isHost && _gameId && _gameId !== 'ssb64') {
-          socket.emit('set-game-id', { game_id: _gameId });
-        }
+        _announceGameId();
         _renderRomStatus();
       } catch (err) {
         console.log('[play] hash failed:', err);
@@ -3220,6 +3203,8 @@
       }
       hideRomMismatch();
       notifyRomReady();
+      // A guest who loads their own ROM has declined the host's: the offer goes.
+      updateRomSharingUI();
       // Always proceed with late-join, even if hash computation failed
       if (_isPendingLateJoin()) {
         dismissLateJoinPrompt();
@@ -3246,12 +3231,15 @@
     _gameId = null;
     KNState.romHash = null;
     KNState.gameId = null;
+    _announceGameId();
     window.EJS_gameUrl = undefined;
     window.EJS_gameID = 'kaillera-next';
     const romDrop = document.getElementById('rom-drop');
     const statusEl = document.getElementById('rom-status');
     if (romDrop) romDrop.classList.remove('loaded');
     if (statusEl) _setRomStatus('Drop or click to load ROM');
+    // A guest with no ROM again may take the host's, so the offer comes back.
+    updateRomSharingUI();
   };
 
   // ── ROM library (IndexedDB) ────────────────────────────────────────────
@@ -3296,9 +3284,7 @@
         window.EJS_gameID = hash;
         _safeSet('localStorage', 'kaillera-rom-name', val.name);
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
-        if (isHost && _gameId && _gameId !== 'ssb64') {
-          socket.emit('set-game-id', { game_id: _gameId });
-        }
+        _announceGameId();
         _romLibrary.touch(hash, Date.now()).catch(() => {});
         // Enable ROM sharing checkbox if host
         const romShareCb = document.getElementById('opt-rom-sharing');
@@ -3309,6 +3295,8 @@
         } else {
           hideRomMismatch();
           notifyRomReady();
+          // As for a dropped file: a guest with their own ROM no longer sees the host's offer.
+          updateRomSharingUI();
         }
         cb(true, val.name);
       })
@@ -3908,38 +3896,18 @@
     if (!btn || !isHost) return;
     const sel = document.getElementById('mode-select');
     const selectedMode = sel ? sel.value : mode;
-    const playerCount = Object.keys(players).length;
     const entries = Object.values(players);
-
-    if (playerCount < 1) {
-      btn.disabled = true;
-      btn.textContent = 'Start Game';
-    } else if (selectedMode === 'streaming' && playerCount < 2) {
-      btn.disabled = true;
-      btn.textContent = 'Start Game (need 2+)';
-    } else if (selectedMode === 'streaming') {
-      // Streaming: host runs the only emulator; guests don't need a ROM.
-      btn.disabled = false;
-      btn.textContent = 'Start Game';
-    } else {
-      // Rollback: check ROMs loaded
-      const allReady = entries.every((p) => p.romReady);
-      if (!allReady && !_romSharingEnabled) {
-        btn.disabled = true;
-        const readyCount = entries.filter((p) => p.romReady).length;
-        btn.textContent = `Waiting for ROMs (${readyCount}/${playerCount})`;
-      } else {
-        btn.disabled = false;
-        btn.textContent = 'Start Game';
-      }
-    }
-    // Whether the host may start is still decided above; room-view.ts
-    // computes it beside this and a difference is reported as play-disagree.
-    _playObserver.compare(
-      'start-button',
-      { disabled: btn.disabled, label: btn.textContent },
-      _roomView.startButton(playerCount, entries.filter((p) => p.romReady).length, selectedMode, _romSharingEnabled),
+    // Whether the host may start, and what the button says, is room-view.ts:
+    // streaming needs two players and no ROMs (the host runs the only
+    // emulator); rollback needs every player's ROM, unless the host shares.
+    const look = _roomView.startButton(
+      entries.length,
+      entries.filter((p) => p.romReady).length,
+      selectedMode,
+      _romSharingEnabled,
     );
+    btn.disabled = look.disabled;
+    btn.textContent = look.label;
   };
 
   // ── UI: Toolbar ────────────────────────────────────────────────────────
@@ -4667,28 +4635,11 @@
 
   // ── Delay Preference ────────────────────────────────────────────────
 
-  // The wording beside the picker is web/src/play/delay.ts. The delay itself
-  // (what this player asks the engine for) is still decided here: delay.ts
-  // computes it beside this code and a difference is reported as
-  // play-disagree. It takes over once production shows none; then
-  // sanitizeFrameDelay, currentAutoDelayValue and getDelayPreference below
-  // become calls into it.
+  // The delay itself (what this player asks the engine for), what Auto means
+  // and the wording beside the picker are web/src/play/delay.ts.
   const _delay = window.KNCore.play.delay;
 
-  const SOLO_FRAME_DELAY = 0;
-  const DEFAULT_FRAME_DELAY = 2;
-  const MIN_FRAME_DELAY = 1;
-  const MAX_FRAME_DELAY = 9;
-
-  const sanitizeFrameDelay = (value, fallback = DEFAULT_FRAME_DELAY, { allowZero = false } = {}) => {
-    const parsed = parseInt(value, 10);
-    if (!Number.isFinite(parsed)) return fallback;
-    if (allowZero && parsed === SOLO_FRAME_DELAY) return SOLO_FRAME_DELAY;
-    if (parsed <= 0) return fallback;
-    return Math.min(MAX_FRAME_DELAY, Math.max(MIN_FRAME_DELAY, parsed));
-  };
-
-  KNState.delayAutoValue = DEFAULT_FRAME_DELAY;
+  KNState.delayAutoValue = _delay.DEFAULT_FRAME_DELAY;
 
   const isSoloDelayContext = () => {
     if (isSpectator || !lastUsersData?.players) return false;
@@ -4704,31 +4655,16 @@
   });
 
   const currentAutoDelayValue = () =>
-    isSoloDelayContext() ? SOLO_FRAME_DELAY : sanitizeFrameDelay(KNState.delayAutoValue);
+    _delay.currentAutoDelay({ solo: isSoloDelayContext(), autoValue: KNState.delayAutoValue });
 
-  const getDelayPreference = () => {
-    const decided = decideDelayPreference();
-    _playObserver.compare('delay-preference', decided, _delay.delayPreference(delayPickerNow()));
-    return decided;
-  };
-
-  const decideDelayPreference = () => {
-    if (isSoloDelayContext()) return SOLO_FRAME_DELAY;
-    const autoEl = document.getElementById('delay-auto');
-    const selectEl = document.getElementById('delay-select');
-    if (autoEl?.checked) {
-      return currentAutoDelayValue();
-    }
-    if (selectEl) {
-      return sanitizeFrameDelay(selectEl.value);
-    }
-    return DEFAULT_FRAME_DELAY;
-  };
+  // The delay this player asks the match for is delay.ts: none when solo,
+  // Auto's measurement when Auto is on, else the select's value.
+  const getDelayPreference = () => _delay.delayPreference(delayPickerNow());
 
   window.getDelayPreference = getDelayPreference;
 
   const setAutoDelay = (value) => {
-    KNState.delayAutoValue = sanitizeFrameDelay(value);
+    KNState.delayAutoValue = _delay.sanitizeFrameDelay(value);
     const selectEl = document.getElementById('delay-select');
     const autoEl = document.getElementById('delay-auto');
     if (selectEl && autoEl?.checked) {
@@ -5121,6 +5057,9 @@
         if (_romHash) {
           _gameId = _gameIdFromHash(_romHash);
           KNState.gameId = _gameId;
+          // A ROM loaded from the cache before the table arrived was
+          // announced with no game id.
+          _announceGameId();
           if (_romStatusText) _renderRomStatus();
         }
         updateHostRomInfo();

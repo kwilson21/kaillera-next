@@ -21,18 +21,30 @@
 // frame with its deadline, the hold, the stall at the target, and the stale
 // state check.
 //
-// Not checked: an unasked state applied below the frame the guest asked at
-// (see beforeTheFrameAsked). Not modelled: what the state contains, deltas,
-// chunks and their timeout,
-// proactive pushes, more than one guest, the inputs around the apply
-// (specs/resync_inputs.qnt), a replay delaying the apply, and the 15 s guard
+// Not checked: an unasked state applied below the guest's frame or the frame
+// the guest asked at (see lateAnswerHeld). Not modelled: what the state
+// contains, deltas, chunks and their timeout, proactive pushes, more than
+// one guest, the inputs around the apply (specs/resync_inputs.qnt), a
+// replay delaying the apply, and the 15 s guard
 // the request sent when a hidden tab is shown again already has (the
 // requests after a desync, a dropped peer's return, a reconnect and a
 // network change have none). Nor a host on a version that does not number
 // its answers: until the host has numbered one, the guest treats its states
-// as with ANSWERS_CARRY_REQUEST false. Nor the two requests the guest sends
-// without marking a request as out (boot sync, input stall): they have no
-// number, and their answers are UNASKED to the guest.
+// as with ANSWERS_CARRY_REQUEST false.
+//
+// EVERY_REQUEST_NUMBERED: the two requests the guest sends on its own
+//   account, with no desync detected (the boot sync after the boot grace,
+//   and the input stall's after it made up a peer's input), are "now"
+//   requests like the others: numbered, marked as out, and owed until a host
+//   state is applied. They are sent only when no request is out. false = before: they went out bare, so the guest did
+//   not mark a request as out and the host's answer carried no number. To
+//   the guest that answer was a state the host sent for its own reasons, and
+//   was applied wherever it found the guest. A two-player run with the guest
+//   frozen in the menus found it: the boot sync's answer, the host's state at
+//   frame 124, arrived after the guest had asked again at 246 (a dropped
+//   peer back), and took it back from 241 to 124
+//   (bootAnswerAfterANewerRequestTest). Numbered, it answers an older
+//   request, and LATE_RULE drops it.
 //
 // ANSWERS_CARRY_REQUEST: a request has a number and the state that answers
 //   it carries that number (`sync-request-id:` / `sync-answer-id:` ahead of
@@ -46,9 +58,9 @@
 //   wait at; or it replaced the newer request's answer while that waited to
 //   be applied. true = today: only its own answer ends a request
 //   (_endsResyncRequest); the guest drops an answer to an older request
-//   that is from before the frame the newest request named, wherever it is
-//   (SYNC-LATE-ANSWER-DROPPED, _resyncRequestAt); and an older request's
-//   answer does not replace the newest one's (SYNC-LATE-ANSWER-IGNORED).
+//   that would take it back (LATE_RULE, SYNC-LATE-ANSWER-DROPPED); and an
+//   older request's answer does not replace the newest one's
+//   (SYNC-LATE-ANSWER-IGNORED).
 //   Not modelled, fixed with it: the stale-state check keeps a lifecycle
 //   guard an older request's answer does not end, and a chunk timeout on an
 //   older request's transfer leaves the newer request alone.
@@ -56,9 +68,37 @@
 // REQUEST_HAS_DEADLINE: a request that is out has a deadline of its own,
 //   after which the guest may ask again (RESYNC-REQUEST-TIMEOUT). false =
 //   before: only an arriving state ended it.
+//
+// LATE_RULE: which answers to an older request the guest drops (with
+//   ANSWERS_CARRY_REQUEST; without it the guest cannot tell them apart).
+//   "frameNamed" = before: one from before the frame the newest request
+//   named; when the newest request named none (asked "now": a reconnect, a
+//   network change, a lifecycle return, a missing delta base, the late-join
+//   lost-host resync) every late answer was applied, whatever its frame. A
+//   test run found it: an immediate request went unanswered past its
+//   deadline, the guest asked again, and the first answer (the host's state
+//   at frame 864) arrived with the guest at 994 and took it back 130 frames
+//   (immediateLateAnswerTest).
+//   "behind" = today: one from before the guest's own frame, or before the
+//   frame the newest request named. It is dropped on the tick that would
+//   apply it, so a late answer is applied only where it does not take the
+//   guest back: at or ahead of it (a hold), and not below the frame asked.
+//   Two other rules were checked and not taken:
+//   "older" (rule a): every answer to an older request. It holds the
+//   properties too, but it also drops a late answer that is ahead of the
+//   guest when it is the only state coming: the newest request asked "now"
+//   over a request at a frame, and the host's rate limit dropped it
+//   (onlyStateComingTest). The guest is left with its deadline, and only
+//   the late-join lost-host resync asks again at that deadline.
+//   "askedFrom" (rule b): one from before the frame the guest was on when it
+//   asked the newest request (or the frame that request named). The guest
+//   moves on after asking, so a late answer from between the two still takes
+//   it back (lateAnswerFromAfterTheAskTest).
 module resync_flow {
   const REQUEST_HAS_DEADLINE: bool
   const ANSWERS_CARRY_REQUEST: bool
+  const LATE_RULE: str
+  const EVERY_REQUEST_NUMBERED: bool
 
   pure val DELTA = 2        // how far ahead the guest sets its target
   pure val HOLD = 1         // a state this far ahead is held, not applied early
@@ -71,11 +111,15 @@ module resync_flow {
   pure val UNASKED = 0      // a state the host sent for its own reasons
 
   // `req`: the request the state answers (UNASKED for one the host sent
-  // for its own reasons).
-  type Pending = { frame: int, held: bool, req: int }
-  type Scheduled = { target: int, followUp: int, req: int }
-  type Request = { at: int, id: int }
-  type State = { frame: int, req: int }
+  // for its own reasons, or for a request that went out with no number).
+  // `ask`, not seen by the guest or the host: which of the guest's requests,
+  // counted in the order sent, numbered or not, the state answers (UNASKED
+  // for one the host sent for its own reasons). With every request
+  // numbered it is `req`.
+  type Pending = { frame: int, held: bool, req: int, ask: int }
+  type Scheduled = { target: int, followUp: int, req: int, ask: int }
+  type Request = { at: int, id: int, ask: int }
+  type State = { frame: int, req: int, ask: int }
 
   var guestFrame: int
   var hostFrame: int
@@ -85,13 +129,15 @@ module resync_flow {
   var asked: bool            // a request is out
   var askedId: int           // the number of the newest request
   var askedAt: int           // the frame the newest request named; NONE = it named none
+  var askedFrom: int         // the guest's frame when it sent the newest request (rule b only)
   var askDeadline: bool
   var stalled: bool          // stopped at the target, waiting for the state
   var pending: Pending       // a state received and not yet applied; frame NONE = none
   var lastApplied: int
   var appliedOlder: bool     // history: applied a state no newer than the last
   var lateEnded: bool        // history: an answer to an older request ended the one that was out
-  var takenBack: bool        // history: a late answer was applied, from before the frame the newest request named
+  var takenBack: bool        // history: a late answer was applied below the guest's frame or the frame the newest request named
+  var asks: int              // history: the requests the guest has sent, numbered or not
   var lostOwn: bool          // history: a late answer replaced the awaited one before it was applied
   // host
   var scheduled: Scheduled   // a capture owed to the guest; target NONE = none
@@ -100,14 +146,14 @@ module resync_flow {
   var requests: List[Request]
   var states: List[State]
 
-  pure val noPending: Pending = { frame: NONE, held: false, req: UNASKED }
-  pure val noSchedule: Scheduled = { target: NONE, followUp: 0, req: UNASKED }
+  pure val noPending: Pending = { frame: NONE, held: false, req: UNASKED, ask: UNASKED }
+  pure val noSchedule: Scheduled = { target: NONE, followUp: 0, req: UNASKED, ask: UNASKED }
 
   action init = all {
     guestFrame' = 0, hostFrame' = 0,
-    target' = NONE, targetDeadline' = false, asked' = false, askedId' = 0, askedAt' = NONE, askDeadline' = false,
+    target' = NONE, targetDeadline' = false, asked' = false, askedId' = 0, askedAt' = NONE, askedFrom' = NONE, askDeadline' = false,
     stalled' = false, pending' = noPending, lastApplied' = NONE, appliedOlder' = false,
-    lateEnded' = false, takenBack' = false, lostOwn' = false,
+    lateEnded' = false, takenBack' = false, lostOwn' = false, asks' = 0,
     scheduled' = noSchedule, cooling' = false,
     requests' = [], states' = [],
   }
@@ -115,36 +161,70 @@ module resync_flow {
   action framesUnchanged = all { guestFrame' = guestFrame, hostFrame' = hostFrame }
   action hostUnchanged = all { scheduled' = scheduled, cooling' = cooling }
   action historyUnchanged = all {
-    appliedOlder' = appliedOlder, lateEnded' = lateEnded, takenBack' = takenBack, lostOwn' = lostOwn,
+    appliedOlder' = appliedOlder, lateEnded' = lateEnded, takenBack' = takenBack, lostOwn' = lostOwn, asks' = asks,
   }
   action guestUnchanged = all {
     target' = target, targetDeadline' = targetDeadline, asked' = asked, askedId' = askedId, askedAt' = askedAt,
-    askDeadline' = askDeadline, stalled' = stalled, pending' = pending, lastApplied' = lastApplied,
+    askedFrom' = askedFrom, askDeadline' = askDeadline, stalled' = stalled, pending' = pending, lastApplied' = lastApplied,
     historyUnchanged,
   }
 
   // ── the guest asks ─────────────────────────────────────────────────────
 
   // A desync was detected: ask for the state at a frame a little ahead.
+  // The bound counts every request, numbered or not.
+  action history(newAsks) = all {
+    appliedOlder' = appliedOlder, lateEnded' = lateEnded, takenBack' = takenBack, lostOwn' = lostOwn, asks' = newAsks,
+  }
+
   action guestAsksAt = all {
     not(asked),
-    askedId < MAX_REQUESTS,
+    asks < MAX_REQUESTS,
     guestFrame + DELTA <= LAST_FRAME,
-    asked' = true, askedId' = askedId + 1, askedAt' = guestFrame + DELTA, askDeadline' = REQUEST_HAS_DEADLINE,
+    asked' = true, askedId' = askedId + 1, askedAt' = guestFrame + DELTA, askedFrom' = guestFrame,
+    askDeadline' = REQUEST_HAS_DEADLINE,
     target' = guestFrame + DELTA, targetDeadline' = true,
-    requests' = requests.append({ at: guestFrame + DELTA, id: askedId + 1 }),
-    stalled' = stalled, pending' = pending, lastApplied' = lastApplied, historyUnchanged,
+    requests' = requests.append({ at: guestFrame + DELTA, id: askedId + 1, ask: asks + 1 }),
+    stalled' = stalled, pending' = pending, lastApplied' = lastApplied, history(asks + 1),
     framesUnchanged, hostUnchanged, states' = states,
   }
 
   // Reconnect or network change: ask for it now. This one
   // goes out even when a request is already out.
   action guestAsksNow = all {
-    askedId < MAX_REQUESTS,
-    asked' = true, askedId' = askedId + 1, askedAt' = NONE, askDeadline' = REQUEST_HAS_DEADLINE,
+    asks < MAX_REQUESTS,
+    asked' = true, askedId' = askedId + 1, askedAt' = NONE, askedFrom' = guestFrame,
+    askDeadline' = REQUEST_HAS_DEADLINE,
     target' = NONE, targetDeadline' = false, stalled' = false,
-    requests' = requests.append({ at: NOW, id: askedId + 1 }),
-    pending' = pending, lastApplied' = lastApplied, historyUnchanged,
+    requests' = requests.append({ at: NOW, id: askedId + 1, ask: asks + 1 }),
+    pending' = pending, lastApplied' = lastApplied, history(asks + 1),
+    framesUnchanged, hostUnchanged, states' = states,
+  }
+
+  // The boot sync, or the input stall's after a peer's input was made up:
+  // ask for it now, on the guest's own account. Today it is a "now" request,
+  // numbered and out, but only when no request is out: the one that is out
+  // brings a host state already. Asked over it, it would make that answer an
+  // older request's, dropped once the guest is past it, while the host's
+  // rate limit may drop the new one. Nor does it give up a target, unlike a
+  // reconnect: a state held a few frames ahead would be applied early.
+  // Before, it went out with no number whatever was out, nothing marked it
+  // as out, and its answer came back as UNASKED.
+  action guestAsksOnItsOwn = if (EVERY_REQUEST_NUMBERED) all {
+    not(asked),
+    asks < MAX_REQUESTS,
+    asked' = true, askedId' = askedId + 1, askedAt' = NONE, askedFrom' = guestFrame,
+    askDeadline' = REQUEST_HAS_DEADLINE,
+    requests' = requests.append({ at: NOW, id: askedId + 1, ask: asks + 1 }),
+    target' = target, targetDeadline' = targetDeadline, stalled' = stalled,
+    pending' = pending, lastApplied' = lastApplied, history(asks + 1),
+    framesUnchanged, hostUnchanged, states' = states,
+  } else all {
+    asks < MAX_REQUESTS,
+    requests' = requests.append({ at: NOW, id: UNASKED, ask: asks + 1 }),
+    target' = target, targetDeadline' = targetDeadline, asked' = asked, askedId' = askedId, askedAt' = askedAt,
+    askedFrom' = askedFrom, askDeadline' = askDeadline, stalled' = stalled, pending' = pending, lastApplied' = lastApplied,
+    history(asks + 1),
     framesUnchanged, hostUnchanged, states' = states,
   }
 
@@ -160,9 +240,9 @@ module resync_flow {
         // Rate limited: dropped, and the guest is not told.
         scheduled' = scheduled, cooling' = cooling, states' = states,
       } else if (t > hostFrame) all {
-        scheduled' = { target: t, followUp: 0, req: r.id }, cooling' = true, states' = states,
+        scheduled' = { target: t, followUp: 0, req: r.id, ask: r.ask }, cooling' = true, states' = states,
       } else all {
-        scheduled' = scheduled, cooling' = true, states' = states.append({ frame: hostFrame, req: r.id }),
+        scheduled' = scheduled, cooling' = true, states' = states.append({ frame: hostFrame, req: r.id, ask: r.ask }),
       },
       framesUnchanged, guestUnchanged,
     }
@@ -175,7 +255,7 @@ module resync_flow {
 
   // The host's own reason to send: a guest it had dropped is back.
   action hostOwesASync = all {
-    scheduled' = { target: hostFrame, followUp: 0, req: UNASKED },
+    scheduled' = { target: hostFrame, followUp: 0, req: UNASKED, ask: UNASKED },
     cooling' = cooling, framesUnchanged, guestUnchanged, requests' = requests, states' = states,
   }
 
@@ -183,7 +263,7 @@ module resync_flow {
   action hostSendsConfirmed = all {
     scheduled.target != NONE,
     scheduled.target <= hostFrame,
-    states' = states.append({ frame: hostFrame, req: scheduled.req }),
+    states' = states.append({ frame: hostFrame, req: scheduled.req, ask: scheduled.ask }),
     scheduled' = noSchedule,
     cooling' = cooling, framesUnchanged, guestUnchanged, requests' = requests,
   }
@@ -192,9 +272,9 @@ module resync_flow {
   // a follow-up is left (what went out may still change here).
   action hostDeadline = all {
     scheduled.target != NONE,
-    states' = states.append({ frame: hostFrame, req: scheduled.req }),
+    states' = states.append({ frame: hostFrame, req: scheduled.req, ask: scheduled.ask }),
     scheduled' = if (scheduled.followUp < FOLLOW_UPS)
-      { target: hostFrame, followUp: scheduled.followUp + 1, req: scheduled.req }
+      { target: hostFrame, followUp: scheduled.followUp + 1, req: scheduled.req, ask: scheduled.ask }
     else noSchedule,
     cooling' = cooling, framesUnchanged, guestUnchanged, requests' = requests,
   }
@@ -211,50 +291,76 @@ module resync_flow {
     guestFrame' = pending.frame,
     lastApplied' = pending.frame,
     appliedOlder' = (appliedOlder or pending.frame <= lastApplied),
-    takenBack' = (takenBack or beforeTheFrameAsked),
-    lateEnded' = lateEnded, lostOwn' = lostOwn,
+    takenBack' = (takenBack or staleAndBehind),
+    lateEnded' = lateEnded, lostOwn' = lostOwn, asks' = asks,
     pending' = noPending, target' = NONE, targetDeadline' = false, stalled' = false,
-    asked' = asked, askedId' = askedId, askedAt' = askedAt, askDeadline' = askDeadline,
+    asked' = asked, askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom, askDeadline' = askDeadline,
   }
 
   action advance = all {
     guestFrame < LAST_FRAME,
     guestFrame' = guestFrame + 1,
     target' = target, targetDeadline' = targetDeadline, stalled' = stalled, pending' = pending,
-    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askedAt' = askedAt, askDeadline' = askDeadline,
+    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom, askDeadline' = askDeadline,
   }
 
   action hold = all {
     target' = pending.frame, targetDeadline' = true, stalled' = false,
     pending' = { ...pending, held: true },
     guestFrame' = guestFrame, lastApplied' = lastApplied, historyUnchanged,
-    asked' = asked, askedId' = askedId, askedAt' = askedAt, askDeadline' = askDeadline,
+    asked' = asked, askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom, askDeadline' = askDeadline,
   }
 
   action stall = all {
     not(stalled),
     stalled' = true,
     guestFrame' = guestFrame, target' = target, targetDeadline' = targetDeadline, pending' = pending,
-    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askedAt' = askedAt, askDeadline' = askDeadline,
+    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom, askDeadline' = askDeadline,
   }
 
   def ahead: int = pending.frame - guestFrame
 
-  // The state held is the answer to a request older than the newest one, and
-  // is from before the frame the newest request named. The frame is the
-  // request's, not the live target: the target's deadline gives the target
-  // up, and the state is as old after it as before.
+  // The state held is the answer to a request older than the newest one.
   // A state the host sent for its own reasons (UNASKED) is left out on
   // purpose, and is still applied as today, though it too can be from
-  // before that frame. The host sends one when it has decided this guest
-  // needs its state (a dropped peer is back); the guest's own request for
-  // the same event may be the one the host's rate limit drops, and then the
-  // unasked state is the only one coming. Nor can a guest tell it from an
-  // answer when the host is on a build that does not number its answers.
-  def beforeTheFrameAsked: bool = and {
-    pending.frame != NONE, askedAt != NONE,
-    pending.req != UNASKED, pending.req != askedId,
-    pending.frame < askedAt,
+  // before the guest's frame. The host sends one when it has decided this
+  // guest needs its state (a dropped peer is back); the guest's own request
+  // for the same event may be the one the host's rate limit drops, and then
+  // the unasked state is the only one coming. Nor can a guest tell it from
+  // an answer when the host is on a build that does not number its answers.
+  def lateAnswerHeld: bool = and {
+    pending.frame != NONE, pending.req != UNASKED, pending.req != askedId,
+  }
+
+  // Such a state, applied now, would take the guest back: below the frame
+  // it is on, or below the frame the newest request named. The frame named
+  // is the request's, not the live target: the target's deadline gives the
+  // target up, and the state is as old after it as before.
+  def lateAndBehind: bool = and {
+    lateAnswerHeld,
+    or { pending.frame < guestFrame, and { askedAt != NONE, pending.frame < askedAt } },
+  }
+
+  // What the property checks, seen from outside: the state held answers a
+  // request older than the guest's newest, numbered or not, and would take
+  // the guest back. With every request numbered it is lateAndBehind; before,
+  // the answer to a request that went out with no number was UNASKED to the
+  // guest and not checked.
+  def staleAndBehind: bool = and {
+    pending.frame != NONE, pending.ask != UNASKED, pending.ask != asks,
+    or { pending.frame < guestFrame, and { askedAt != NONE, pending.frame < askedAt } },
+  }
+
+  // The late answers the guest drops, by LATE_RULE.
+  def lateToDrop: bool = and {
+    ANSWERS_CARRY_REQUEST,
+    lateAnswerHeld,
+    if (LATE_RULE == "older") true
+    else if (LATE_RULE == "askedFrom") or {
+      pending.frame < askedFrom, and { askedAt != NONE, pending.frame < askedAt },
+    }
+    else if (LATE_RULE == "behind") lateAndBehind
+    else and { askedAt != NONE, pending.frame < askedAt },
   }
 
   // Such a state is not what the guest is waiting for. It is dropped
@@ -262,11 +368,11 @@ module resync_flow {
   action dropLate = all {
     pending' = noPending, stalled' = stalled,
     guestFrame' = guestFrame, target' = target, targetDeadline' = targetDeadline,
-    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askedAt' = askedAt, askDeadline' = askDeadline,
+    lastApplied' = lastApplied, historyUnchanged, asked' = asked, askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom, askDeadline' = askDeadline,
   }
 
   action guestTick = all {
-    if (ANSWERS_CARRY_REQUEST and beforeTheFrameAsked) dropLate
+    if (lateToDrop) dropLate
     else if (target != NONE and guestFrame >= target) {
       // At the target.
       if (pending.frame != NONE and ahead > 0 and ahead <= HOLD) hold
@@ -294,7 +400,7 @@ module resync_flow {
       states' = states.tail(),
       asked' = if (ends) false else asked,
       askDeadline' = if (ends) false else askDeadline,
-      askedId' = askedId, askedAt' = askedAt,
+      askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom,
       lateEnded' = (lateEnded or (late and ends)),
       // A state no newer than the last one applied is dropped.
       // Nor does a late answer take the place of the awaited one.
@@ -302,11 +408,11 @@ module resync_flow {
       val overAwaited = older and pending.frame != NONE and pending.req == askedId
       val kept = f <= lastApplied or (ANSWERS_CARRY_REQUEST and overAwaited)
       all {
-        pending' = if (kept) pending else { frame: f, held: false, req: st.req },
+        pending' = if (kept) pending else { frame: f, held: false, req: st.req, ask: st.ask },
         lostOwn' = (lostOwn or (overAwaited and not(kept))),
       },
       target' = target, targetDeadline' = targetDeadline, stalled' = stalled,
-      lastApplied' = lastApplied, appliedOlder' = appliedOlder, takenBack' = takenBack,
+      lastApplied' = lastApplied, appliedOlder' = appliedOlder, takenBack' = takenBack, asks' = asks,
       framesUnchanged, hostUnchanged, requests' = requests,
     }
   }
@@ -316,21 +422,21 @@ module resync_flow {
   action targetDeadlineFires = all {
     target != NONE, targetDeadline,
     target' = NONE, targetDeadline' = false, stalled' = false,
-    asked' = asked, askedId' = askedId, askedAt' = askedAt, askDeadline' = askDeadline, pending' = pending,
+    asked' = asked, askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom, askDeadline' = askDeadline, pending' = pending,
     lastApplied' = lastApplied, historyUnchanged,
     framesUnchanged, hostUnchanged, requests' = requests, states' = states,
   }
 
   action askDeadlineFires = all {
     asked, askDeadline,
-    asked' = false, askedId' = askedId, askedAt' = askedAt, askDeadline' = false,
+    asked' = false, askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom, askDeadline' = false,
     target' = target, targetDeadline' = targetDeadline, stalled' = stalled, pending' = pending,
     lastApplied' = lastApplied, historyUnchanged,
     framesUnchanged, hostUnchanged, requests' = requests, states' = states,
   }
 
   action step = any {
-    guestAsksAt, guestAsksNow, hostHearsRequest, cooldownEnds, hostOwesASync,
+    guestAsksAt, guestAsksNow, guestAsksOnItsOwn, hostHearsRequest, cooldownEnds, hostOwesASync,
     hostSendsConfirmed, hostDeadline, hostTick, guestTick, guestHearsState,
     targetDeadlineFires, askDeadlineFires,
   }
@@ -362,13 +468,20 @@ module resync_flow {
   // ask a third time while the second was still to be answered.
   val onlyItsAnswerEndsARequest = not(lateEnded)
 
-  // A late answer does not take the guest back below the frame its newest
-  // request named, whether the guest is still waiting at that frame or its
-  // target's deadline has passed.
+  // A late answer (to a request older than the newest) does not take the
+  // guest back: it is not applied below the frame the guest is on, nor
+  // below the frame its newest request named, whether the guest is still
+  // waiting at that frame or its target's deadline has passed. This holds
+  // whether or not the newest request named a frame.
   // Violated before requests were numbered (resync_flow_any_answer): it was
   // held until the newer request's target and applied there, or applied at
   // once after that target's deadline, although it is the host's state from
-  // before that frame.
+  // before that frame. Violated too while only the frame named was checked
+  // (resync_flow_frame_named): after a request asked "now", a late answer
+  // was applied whatever its frame (immediateLateAnswerTest). And by rule b
+  // (resync_flow_asked_from; lateAnswerFromAfterTheAskTest). And while the
+  // boot sync and the input stall's request went out with no number
+  // (resync_flow_unnumbered; bootAnswerAfterANewerRequestTest).
   val aLateAnswerDoesNotTakeTheGuestBack = not(takenBack)
 
   // A late answer does not take the place of the awaited one while that one
@@ -489,21 +602,176 @@ module resync_flow {
       .then(guestHearsState)
       .expect(theAwaitedAnswerIsNotLost == ANSWERS_CARRY_REQUEST)
       .expect(ANSWERS_CARRY_REQUEST implies pending.req == 2)
+
+  // The ordering a test run found: an immediate request; its deadline
+  // passes; a second immediate request; then the first one's answer, the
+  // host's state from well before the guest's frame, arrives late. Applied,
+  // it takes the guest back; today it is dropped, and the second request's
+  // own answer is applied when it comes.
+  run immediateLateAnswerTest =
+    init
+      .then(guestAsksNow)
+      .then(hostTick)
+      .then(hostHearsRequest)
+      .expect(states.length() == 1 and states[0].req == 1 and states[0].frame == 1)
+      .then(if (REQUEST_HAS_DEADLINE) askDeadlineFires else guestTick)
+      .then(3.reps(_ => guestTick))
+      .then(guestAsksNow)
+      .expect(askedId == 2 and askedAt == NONE)
+      .then(guestHearsState)
+      .then(guestTick)
+      .expect(aLateAnswerDoesNotTakeTheGuestBack == (ANSWERS_CARRY_REQUEST and LATE_RULE != "frameNamed"))
+      .expect((ANSWERS_CARRY_REQUEST and LATE_RULE != "frameNamed") implies (pending == noPending and lastApplied == NONE and asked))
+      // The second request's own answer.
+      .then(cooldownEnds)
+      .then(hostTick)
+      .then(hostHearsRequest)
+      .then(guestHearsState)
+      .then(guestTick)
+      .expect((ANSWERS_CARRY_REQUEST and LATE_RULE != "frameNamed") implies (lastApplied == 2 and not(asked)))
+
+  // Rule b: the guest moves on after asking, and a late answer from between
+  // the frame it asked at and the frame it is on still takes it back.
+  run lateAnswerFromAfterTheAskTest =
+    init
+      .then(guestAsksNow)
+      .then(guestAsksNow)
+      .then(hostTick)
+      .then(hostHearsRequest)
+      .then(2.reps(_ => guestTick))
+      .expect(guestFrame == 2 and askedFrom == 0 and states[0].frame == 1 and states[0].req == 1)
+      .then(guestHearsState)
+      .then(guestTick)
+      .expect(ANSWERS_CARRY_REQUEST implies (aLateAnswerDoesNotTakeTheGuestBack == (LATE_RULE == "older" or LATE_RULE == "behind")))
+
+  // Rule a: the guest asks at a frame, then asks "now" over it (a network
+  // change); the host's rate limit drops the second request. The first one's
+  // answer is the only state coming, and it is for a frame the guest has not
+  // reached. Every rule but a applies it there; rule a drops it, and
+  // nothing is left on its way: only the second request's deadline.
+  run onlyStateComingTest =
+    init
+      .then(guestAsksAt)
+      .then(hostHearsRequest)
+      .then(guestAsksNow)
+      .then(hostHearsRequest)
+      .expect(requests.length() == 0 and scheduled.req == 1 and cooling)
+      .then(2.reps(_ => hostTick))
+      .then(hostSendsConfirmed)
+      .then(guestHearsState)
+      .expect(pending.frame == 2 and guestFrame == 0)
+      .then(guestTick)
+      .expect(aLateAnswerDoesNotTakeTheGuestBack)
+      .expect((ANSWERS_CARRY_REQUEST and LATE_RULE == "older") implies and {
+        lastApplied == NONE, pending == noPending, asked,
+        requests.length() == 0, scheduled == noSchedule, states.length() == 0,
+      })
+      .expect(not(ANSWERS_CARRY_REQUEST and LATE_RULE == "older") implies (lastApplied == 2 and guestFrame == 2))
+
+  // The ordering a two-player run found, the guest frozen in the menus: the
+  // boot sync asks for the host's state now, and the host answers with its
+  // state at frame 0. The guest plays on and the answer is slow to come (in
+  // the run the guest froze for 14 s); the guest asks again at a frame (a
+  // dropped peer is back), and only then does the boot sync's answer arrive.
+  // Unnumbered, it is a state the host sent for its own reasons to the
+  // guest, so it waits for the target and is applied there, taking the guest
+  // back. Numbered, it answers an older request, is dropped, and the newer
+  // request's own answer is applied at its frame.
+  run bootAnswerAfterANewerRequestTest =
+    init
+      .then(guestAsksOnItsOwn)
+      .then(hostHearsRequest)
+      .expect(states.length() == 1 and states[0].frame == 0 and states[0].ask == 1)
+      .expect(asked == EVERY_REQUEST_NUMBERED)
+      .then(3.reps(_ => guestTick))
+      // The boot sync's deadline passes while its answer is on its way;
+      // before it was numbered, nothing was out.
+      .then(if (EVERY_REQUEST_NUMBERED and REQUEST_HAS_DEADLINE) askDeadlineFires else hostTick)
+      .then(cooldownEnds)
+      // Before a request had a deadline, only a reconnect asked over one.
+      .then(if (EVERY_REQUEST_NUMBERED and not(REQUEST_HAS_DEADLINE)) guestAsksNow else guestAsksAt)
+      .expect(guestFrame == 3 and asks == 2)
+      .then(guestHearsState)
+      .expect(pending.frame == 0 and pending.ask == 1)
+      .expect(pending.req == (if (EVERY_REQUEST_NUMBERED) 1 else UNASKED))
+      .then(3.reps(_ => guestTick))
+      .expect(aLateAnswerDoesNotTakeTheGuestBack == (EVERY_REQUEST_NUMBERED and ANSWERS_CARRY_REQUEST))
+      .expect(not(EVERY_REQUEST_NUMBERED) implies (guestFrame == 0 and lastApplied == 0))
+      .expect((EVERY_REQUEST_NUMBERED and ANSWERS_CARRY_REQUEST) implies and {
+        guestFrame == 5, lastApplied == NONE, pending == noPending, asked,
+      })
+      // The newer request's own answer, at its frame.
+      .then(hostHearsRequest)
+      .then(5.reps(_ => hostTick))
+      .then(if (scheduled.target != NONE) hostSendsConfirmed else hostTick)
+      .then(guestHearsState)
+      .then(guestTick)
+      .expect((EVERY_REQUEST_NUMBERED and ANSWERS_CARRY_REQUEST) implies and {
+        lastApplied == 5, guestFrame == 5, not(asked),
+      })
 }
+
+// The variants below up to resync_flow_unnumbered check the rule each was
+// about with every request numbered, which leaves out the two the guest sent
+// bare until resync_flow_unnumbered's fix; their results stand as recorded.
 
 // Before: a request that was out had no deadline.
 module resync_flow_before {
-  import resync_flow(REQUEST_HAS_DEADLINE = false, ANSWERS_CARRY_REQUEST = false).*
+  import resync_flow(
+    REQUEST_HAS_DEADLINE = false, ANSWERS_CARRY_REQUEST = false, LATE_RULE = "frameNamed", EVERY_REQUEST_NUMBERED = true,
+  ).*
 }
 
 // Before requests were numbered: any state that arrived ended the request
 // that was out.
 module resync_flow_any_answer {
-  import resync_flow(REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = false).*
+  import resync_flow(
+    REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = false, LATE_RULE = "frameNamed", EVERY_REQUEST_NUMBERED = true,
+  ).*
 }
 
-// Today: a request has a deadline and a number, and its answer carries the
-// number.
+// Before late answers were dropped after a request that named no frame: a
+// request has a deadline and a number, and the guest drops a late answer
+// only when it is from before the frame the newest request named. Violates
+// aLateAnswerDoesNotTakeTheGuestBack (immediateLateAnswerTest).
+module resync_flow_frame_named {
+  import resync_flow(
+    REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "frameNamed", EVERY_REQUEST_NUMBERED = true,
+  ).*
+}
+
+// Rule a, not taken: every answer to an older request is dropped. Holds
+// allHold, and drops the only state coming in onlyStateComingTest.
+module resync_flow_drop_older {
+  import resync_flow(
+    REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "older", EVERY_REQUEST_NUMBERED = true,
+  ).*
+}
+
+// Rule b, not taken: a late answer is dropped when it is from before the
+// frame the guest was on when it sent the newest request. Violates
+// aLateAnswerDoesNotTakeTheGuestBack (lateAnswerFromAfterTheAskTest).
+module resync_flow_asked_from {
+  import resync_flow(
+    REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "askedFrom", EVERY_REQUEST_NUMBERED = true,
+  ).*
+}
+
+// Before the boot sync and the input stall's request were numbered: their
+// answers came back unnumbered and were applied wherever they found the
+// guest. Violates aLateAnswerDoesNotTakeTheGuestBack
+// (bootAnswerAfterANewerRequestTest).
+module resync_flow_unnumbered {
+  import resync_flow(
+    REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "behind", EVERY_REQUEST_NUMBERED = false,
+  ).*
+}
+
+// Today: every request has a deadline and a number, its answer carries the
+// number, and a late answer is dropped wherever it would take the guest
+// back.
 module resync_flow_current {
-  import resync_flow(REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true).*
+  import resync_flow(
+    REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "behind", EVERY_REQUEST_NUMBERED = true,
+  ).*
 }

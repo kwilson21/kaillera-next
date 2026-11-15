@@ -10,6 +10,7 @@ however it's configured.
 
 import asyncio
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 
 from src import ratelimit  # noqa: E402
 from src.api import signaling  # noqa: E402
+
+
+def _run(coro):
+    """Run a coroutine to the end on a thread of its own. Under the full suite
+    tests/conftest.py starts a browser for every test, whose sync API keeps an
+    event loop running on this thread, and asyncio.run refuses to start inside
+    it (the same helper as tests/test_abandoned_match.py)."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(coro)).result()
+
 
 HANDSHAKE = "/socket.io/?EIO=4&transport=polling"
 
@@ -49,7 +60,7 @@ def handshake(origin: str | None) -> httpx.Response:
             headers = {"Origin": origin} if origin else {}
             return await c.get(HANDSHAKE, headers=headers)
 
-    return asyncio.run(go())
+    return _run(go())
 
 
 @pytest.mark.parametrize("origin", ["https://play.example", "https://x.onrender.com"])
@@ -341,7 +352,7 @@ def test_engineio_joins_duplicate_headers_but_extract_ip_falls_back(monkeypatch)
 
         return await translate_request(scope, receive, send)
 
-    environ = asyncio.run(go())
+    environ = _run(go())
     assert environ["HTTP_X_KN_CLIENT_IP"] == "5.6.7.8,9.9.9.9"
 
     monkeypatch.setattr(ratelimit, "_PROXY_SECRET", "s3cret")

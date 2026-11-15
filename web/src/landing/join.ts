@@ -132,8 +132,10 @@ const GAMES: ReadonlyMap<string, Game> = new Map([
   ['smash-remix', { name: 'Smash Remix', rom: 'Smash Remix' }],
 ]);
 
+// A room whose game the site does not list is named by its ROM, and the
+// invitee is asked for the host's ROM: it is not taken for SSB64.
 const gameOf = (room: RoomAnswer): Game =>
-  GAMES.get(room.game_id ?? '') ?? { name: room.romName || 'Super Smash Bros. 64', rom: 'SSB64' };
+  GAMES.get(room.game_id ?? '') ?? { name: room.romName || 'A retro game', rom: "copy of the host's" };
 
 /** The line after the slot markers: how many are in, and what the room is doing. */
 export const factsText = (room: RoomAnswer): string => {

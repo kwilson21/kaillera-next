@@ -15,13 +15,19 @@
  *     in docs/netplay-invariants.md) in either peer's engine or sync log
  *   - no rollback input-stall timeouts below frame 300 on either peer
  *   - TICK-STUCK stalls, negotiated delay and rollback counts, for context
+ *   - no `peer-disagree` or `resync-disagree` from the two observers beside
+ *     the engine (tests/observer-reports.mjs), in either page's sync log or
+ *     client events, nor, with KN_DB set to the server's DB_PATH, in the
+ *     server's client_events table for this room (without KN_DB the query to
+ *     run by hand is printed). Reading KN_DB needs Node >= 22.13 (node:sqlite);
+ *     on an older Node, or a database that cannot be read, the run fails.
  * Exits 1 for gameplay divergence; rollback failure; integrity events; a match
  * that never reaches a battle; fewer than 80% of finalized battle frames
- * compared; or a boot input stall timeout.
+ * compared; a boot input stall timeout; or an observer disagreement.
  *
  *   just serve        # the real server on :27888, in another terminal
- *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
- *     [HEADED=1] [OUT=/tmp/two-player] node tests/rb-two-player.mjs
+ *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [LINK_KBPS=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
+ *     [HEADED=1] [OUT=/tmp/two-player] [KN_DB=server DB_PATH, Node >= 22.13] node tests/rb-two-player.mjs
  *
  * Extra knobs, all off by default:
  *   HOST_BROWSER=webkit / GUEST_BROWSER=webkit   Run that page in Playwright
@@ -112,7 +118,10 @@
  *     scoring 31-40. So frames > 40 are "corrupted" (this is what fails the
  *     run); frames > 15 but <= 40 are reported informationally as
  *     `heldOrTimingDiffs` and do not fail anything.
- *     Reported as `visualCheck: {framesCompared, corrupted,
+ *     Frames inside a proven window the hash compare leaves out (a
+ *     frozen-page recovery, a DROP_PEER_MS reconnect) are left out here too
+ *     and counted as `framesExcluded`.
+ *     Reported as `visualCheck: {framesCompared, framesExcluded, corrupted,
  *     corruptedNearReplayEnd, firstCorrupted, heldOrTimingDiffs, maxDiff}`
  *     in summary.json. `corruptedNearReplayEnd` counts corrupted frames at
  *     or one past a `C-REPLAY done: caught up at f=N` line in the host's
@@ -159,6 +168,133 @@
  *     connection rather than evict it as a stale peer. The run fails if the
  *     host has not seen that roster within n ms. BATTLE_SECONDS must cover
  *     this too.
+ *   DROP_PEER_MS=<n>   A third of the way into the battle, the guest's page
+ *     closes its RTCPeerConnection to the host (pc.close() on the engine's
+ *     peer entry for slot 0, KNState.peers), and the WebRTC signaling between
+ *     the guest and the server (`webrtc-signal` frames, both ways) is dropped
+ *     for n ms, so the engine's own disconnect and reconnect path runs: the
+ *     host (lower slot) sends reconnect offers, one every 13 s at most, until
+ *     one gets through. 1 reconnects at once; 12000 takes the host through a
+ *     timed-out attempt and a retry. Both pages give up after 45 s, so keep
+ *     n under about 25000. On top of the normal checks the run fails unless
+ *     signaling frames were really dropped (`signalsDropped` above 0); with n
+ *     longer than an attempt's deadline (the engine's
+ *     _RECONNECT_ATTEMPT_TIMEOUT, 10 s, read from netplay-rollback.js), the
+ *     host's log shows the retry (`reconnect attempt 1 timeout`, or an
+ *     attempt 2 or later); and the logs show the reconnect offer (guest:
+ *     `received reconnect offer`), the answer (host: `onWebRTCSignal: answer
+ *     from` the guest), the channel open (guest: `DC open with ... slot: 0`),
+ *     the reconnect resync (guest: `reconnect resync: sent`) and a resync
+ *     applied after it. The frames from
+ *     12 before the drop to the frame that resync lands on differ by design
+ *     (each page ran on predicted input for the other) and are left out of
+ *     the hash compare, the way a proven frozen-page recovery is
+ *     (tests/frozen-recovery.mjs), and so are integrity reports up to 30
+ *     frames after it; both are counted in `frozenRecovery`. Reported as
+ *     `dropPeer` in summary.json. BATTLE_SECONDS must cover n plus 30 s in its
+ *     last two thirds.
+ *   DELAY_SYNC_ANSWER_MS=<n>   A third of the way into the battle the guest
+ *     asks the host for a full resync through its network-change handler (a
+ *     window `online` event: the immediate, numbered `sync-request-full` on
+ *     the channel), and the host's answer is held for n ms, which must be
+ *     longer than the guest's RESYNC_REQUEST_TIMEOUT_MS (8000): the host
+ *     page's DataChannel send wrapper (initScript below) holds the first
+ *     `sync-answer-id:` it sends on the `sync-state` channel, and with it the
+ *     `sync-start:` header and binary chunks queued behind it, then releases
+ *     them in order. No engine hook. At its RESYNC-REQUEST-TIMEOUT the guest
+ *     asks again on its own (RESYNC-REASK, specs/resync_reask.qnt); the late
+ *     answer then arrives after that second request. The run fails unless the
+ *     guest timed out, the host received both requests, the held answer
+ *     reached the guest after the second request, the rules handled it
+ *     (`SYNC-LATE-ANSWER-DROPPED`, `SYNC-LATE-ANSWER-IGNORED`, `sync state is
+ *     not the answer awaited`, or a chunk timeout `for older request`; each is
+ *     counted), and an answer to the newest request was applied (a `resync
+ *     ready (... answerFor=N newest=N endsRequest=true)` after the second
+ *     request, then `sync #k applied` before any other answer), so no
+ *     request is left pending. Frames are compared as usual: no
+ *     exclusion. Reported as `delaySyncAnswer` in summary.json. 10000 is
+ *     enough on a quiet machine; the slower the machine, the larger n should
+ *     be, since the second request must reach the host before the held
+ *     answer is let go.
+ *     DELAY_SYNC_ANSWER_AT=boot holds the boot sync's answer instead: the
+ *     hold is armed on the host before the game starts, nothing is asked a
+ *     third of the way in, and the logs are read from the match's start. The
+ *     guest's boot sync (`BOOT-SYNC`, a numbered "now" request after the
+ *     boot grace) goes unanswered past its deadline, the guest asks again,
+ *     and the boot answer, the host's state from the boot grace, arrives
+ *     after that second request, far behind the guest: the ordering of a
+ *     run where a 14 s freeze held it up and it took the guest back 117
+ *     frames (specs/resync_flow.qnt, bootAnswerAfterANewerRequestTest). The
+ *     same checks apply.
+ *   DOUBLE_RESYNC_ASK=1   A third of the way into the battle the guest's
+ *     network-change handler runs twice at once (two window `online`
+ *     events): two immediate, numbered `sync-request-full` on the channel.
+ *     The host answers the first and drops the second inside its 5 s rate
+ *     limit; the first's answer reaches a guest that has moved on, so it is
+ *     an older request's answer and behind, and is dropped
+ *     (SYNC-LATE-ANSWER-DROPPED). Nothing else is coming for the resync the
+ *     guest asked for. No engine hook. The run fails unless the host
+ *     rate-limited a request, the late answer was dropped, and a host state
+ *     was applied after the asks (at the request's deadline the guest asks
+ *     again: RESYNC-REASK). Reported as `doubleResyncAsk` in summary.json.
+ *     The other fault knobs are refused with it.
+ *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
+ *     kbit/s, in both directions, shared by all of that connection's data
+ *     channels (tests/link-schedule.mjs): a message handed to send() on any
+ *     channel waits until the link has carried every byte handed to it
+ *     earlier on any channel of the connection, then for LAT and JITTER as
+ *     usual, then goes to the real send(). A held message (DELAY_SYNC_ANSWER_MS)
+ *     goes onto the link only when released, and holds back its own channel
+ *     only. So the host's inputs on `lockstep` and `rollback-input` queue
+ *     behind the state chunks on `sync-state`, as on a real connection.
+ *     bufferedAmount: on `sync-state`, everything still in the simulated
+ *     network for it; on the other channels, their own bytes the link has
+ *     not carried yet. 2000 carries a resync answer (about 1.45 MB) in about
+ *     6 s and two back to back in about 12 s, past the guest's 5 s peer-stale
+ *     deadline for inputs queued behind them, while 320 KB (the engine's
+ *     paced send: four chunks waiting and one more) takes 1.3 s. Combine with
+ *     DELAY_SYNC_ANSWER_MS=10000 for the two answers back to back that
+ *     starved the host's inputs (#236); alone, the guest asks for one plain
+ *     resync a third of the way in, which must be applied. The other fault
+ *     knobs are refused with it. The run fails on any DEEP-MISPREDICT-SKIP
+ *     (a rollback deeper than the window, skipped) after the fault outside a
+ *     proven frozen-page recovery, and a phantom of a page whose input
+ *     messages waited 2 s or more on the link is never proven frozen
+ *     (withoutLinkStarved in tests/frozen-recovery.mjs), so the link's
+ *     outage cannot be left out as the container's. Reported as `link` in
+ *     summary.json: per page bytes queued, the largest backlog, per channel
+ *     the largest wait for the link and the starved messages, and after the
+ *     fault the phantoms, skipped rollbacks, SYNC-SEND-STALLED and
+ *     DC-FALLBACK lines.
+ *   LOSE_INPUTS_BEFORE_FALLBACK=1   The match runs on the unreliable input
+ *     channel (the host sets window._knTransportOverride = 'unreliable',
+ *     what knDiag.setTransport('unreliable') sets, before it starts the game,
+ *     and broadcasts `rb-transport:unreliable`). A third of the way into the
+ *     battle the host's `rollback-input` channel stops delivering: its page's
+ *     DataChannel send wrapper (initScript below) drops every binary input it
+ *     sends on that channel from then on, the way a stuck unordered SCTP
+ *     stream does (the fault the engine's DC health monitor exists for). In
+ *     this container the monitor has usually switched the host to the
+ *     reliable channel long before (a slow page goes 500 ms without a new
+ *     frame from its peer), so the host takes the unreliable transport up
+ *     again mid-match (knDiag.setTransport('unreliable'), which broadcasts
+ *     `rb-transport:unreliable` as at the start; a guest's own message is
+ *     ignored, since only the host sets the transport). The
+ *     guest stops hearing the host's new inputs, runs out of prediction room
+ *     and stalls; the host stops hearing the guest's new frames and its
+ *     health monitor switches it to the reliable channel by itself
+ *     (DC-FALLBACK reason=ack-stale). The fault needs no engine hook. If
+ *     fewer than two inputs were dropped before that switch, the host sets
+ *     the unreliable transport again (five rounds at most). The inputs dropped before a switch must
+ *     still reach the guest without the guest asking for them
+ *     (specs/input_transport.qnt). The run fails unless the match started on
+ *     the unreliable transport, the host took it up again, at least two of
+ *     its inputs were dropped, and it logged DC-FALLBACK after that; and
+ *     fails if, after the fault began, the guest asked the host for an input
+ *     (`RB-INPUT-ASK ... slot=0`: one was lost and nothing sent it again), or
+ *     either page logged PEER-PHANTOM, RB-INPUT-STALL-TIMEOUT or
+ *     INPUT-STALL-RESYNC. Frames are compared as usual: no exclusion.
+ *     Reported as `loseBeforeFallback` in summary.json.
  *
  *   DESYNC_GUEST=1   The one knob that makes the match unhealthy on purpose:
  *     halfway through the battle the guest's copy of P1's stock count
@@ -187,7 +323,8 @@
  *     character select and then the battle; both players' character ids at
  *     the character select are fighter kinds (and, without
  *     MENU_AUTOPILOT=any-fighter, the two the autopilot picks); the battle
- *     header's status says the match gets under way and stays so; stock counts
+ *     header's status says the match gets under way and stays so; the
+ *     game's battle-state pointer names the mapped battle state; stock counts
  *     in battle are plausible; the battle header is not empty; the RNG seed
  *     moves; and the fighter-buffer pointer, once set, points into RAM. Reported as
  *     `addressMapCheck` in summary.json. This shows a map is plausible, not
@@ -220,7 +357,16 @@ import {
   frozenRecoveryNote,
   inFrozenRecovery,
   inFrozenRecoveryAftermath,
+  withoutLinkStarved,
 } from './frozen-recovery.mjs';
+import { createLinkSchedule, spansInFrames } from './link-schedule.mjs';
+import {
+  observerDbNote,
+  observerEventsIn,
+  observerEventsInDb,
+  observerLinesIn,
+  observerTotal,
+} from './observer-reports.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -247,6 +393,20 @@ const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS)
 const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
 const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
+const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
+const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
+const DELAY_SYNC_ANSWER_AT = process.env.DELAY_SYNC_ANSWER_AT || 'battle';
+if (!['battle', 'boot'].includes(DELAY_SYNC_ANSWER_AT)) {
+  console.log(`DELAY_SYNC_ANSWER_AT=${DELAY_SYNC_ANSWER_AT} invalid — must be battle or boot`);
+  process.exit(1);
+}
+const LOSE_INPUTS_BEFORE_FALLBACK = process.env.LOSE_INPUTS_BEFORE_FALLBACK === '1';
+const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
+const DOUBLE_RESYNC_ASK = process.env.DOUBLE_RESYNC_ASK === '1';
+// The guest's own deadline on a resync request (netplay-rollback.js).
+const RESYNC_REQUEST_TIMEOUT_MS = 8000;
+// The server's database (its DB_PATH), to count the observers' client events in.
+const KN_DB = process.env.KN_DB || '';
 const ADDRESS_MAP_CHECK = process.env.ADDRESS_MAP_CHECK === '1';
 const ADDRESS_MAP_OF = process.env.ADDRESS_MAP_OF || '';
 const SSB64_US_HASH = 'S15592e79d3c5295cef4371d4992f0bd25bec2102fc29644c93e682f7ea99ef3d';
@@ -321,6 +481,125 @@ if (
   console.log('DESYNC_GUEST is mutually exclusive with the other knobs');
   process.exit(1);
 }
+for (const [name, value] of [
+  ['DROP_PEER_MS', DROP_PEER_MS],
+  ['DELAY_SYNC_ANSWER_MS', DELAY_SYNC_ANSWER_MS],
+]) {
+  if (!(Number.isFinite(value) && value >= 0)) {
+    console.log(`${name}=${process.env[name]} invalid — must be a finite number >= 0`);
+    process.exit(1);
+  }
+  if (
+    value > 0 &&
+    (FREEZE_MS > 0 ||
+      THROTTLE_GUEST ||
+      HIDE_GUEST_MS > 0 ||
+      CLICK_DURING_BATTLE ||
+      DROP_SIGNALING_MS > 0 ||
+      DESYNC_GUEST ||
+      (DROP_PEER_MS > 0 && DELAY_SYNC_ANSWER_MS > 0))
+  ) {
+    console.log(`${name} is mutually exclusive with the FREEZE, THROTTLE, HIDE, CLICK, DROP and DESYNC knobs`);
+    process.exit(1);
+  }
+}
+if (
+  LOSE_INPUTS_BEFORE_FALLBACK &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    DESYNC_GUEST)
+) {
+  console.log(
+    'LOSE_INPUTS_BEFORE_FALLBACK is mutually exclusive with the FREEZE, THROTTLE, HIDE, CLICK, DROP, DELAY, LINK and DESYNC knobs',
+  );
+  process.exit(1);
+}
+if (DELAY_SYNC_ANSWER_MS > 0 && !(DELAY_SYNC_ANSWER_MS > RESYNC_REQUEST_TIMEOUT_MS)) {
+  console.log(`DELAY_SYNC_ANSWER_MS must be longer than the guest's request deadline (${RESYNC_REQUEST_TIMEOUT_MS})`);
+  process.exit(1);
+}
+if (!(Number.isFinite(LINK_KBPS) && LINK_KBPS >= 0)) {
+  console.log(`LINK_KBPS=${process.env.LINK_KBPS} invalid — must be a finite number >= 0`);
+  process.exit(1);
+}
+if (
+  LINK_KBPS > 0 &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DESYNC_GUEST)
+) {
+  console.log('LINK_KBPS combines only with DELAY_SYNC_ANSWER_MS among the fault knobs');
+  process.exit(1);
+}
+if (
+  DOUBLE_RESYNC_ASK &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    LOSE_INPUTS_BEFORE_FALLBACK ||
+    DESYNC_GUEST)
+) {
+  console.log('DOUBLE_RESYNC_ASK is mutually exclusive with the other fault knobs');
+  process.exit(1);
+}
+// The request's deadline, the ask again and its answer.
+const DOUBLE_RESYNC_ASK_RECOVER_MS = 30000;
+// LINK_KBPS without DELAY_SYNC_ANSWER_MS: one plain resync a third of the way in.
+const LINK_RESYNC = LINK_KBPS > 0 && !(DELAY_SYNC_ANSWER_MS > 0);
+const LINK_RESYNC_RECOVER_MS = 30000;
+// Both start a third of the way in; what follows must fit in the remaining two thirds.
+const DROP_PEER_RECOVER_MS = 30000;
+// How long the host's reconnect attempt waits before it retries: the
+// engine's own _RECONNECT_ATTEMPT_TIMEOUT, read from netplay-rollback.js so
+// the two cannot drift. A DROP_PEER_MS longer than this drops the first
+// attempt's offer and outlasts its deadline, so the run must show a retry.
+const RECONNECT_ATTEMPT_TIMEOUT_MS = (() => {
+  const source = fs.readFileSync(
+    // URL is the server's address in this file.
+    new globalThis.URL('../web/static/netplay-rollback.js', import.meta.url),
+    'utf8',
+  );
+  const m = source.match(/const _RECONNECT_ATTEMPT_TIMEOUT = (\d+);/);
+  if (!m) {
+    console.log('netplay-rollback.js no longer defines _RECONNECT_ATTEMPT_TIMEOUT: update DROP_PEER_MS in this test');
+    process.exit(1);
+  }
+  return Number(m[1]);
+})();
+const DELAY_SYNC_ANSWER_RECOVER_MS = 20000;
+const faultNeedsSeconds = Math.ceil(
+  (((DROP_PEER_MS > 0 ? DROP_PEER_MS + DROP_PEER_RECOVER_MS : 0) +
+    // At boot the held answer is over long before the battle.
+    (DELAY_SYNC_ANSWER_MS > 0 && DELAY_SYNC_ANSWER_AT === 'battle'
+      ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS
+      : 0) +
+    (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0) +
+    (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0)) *
+    1.5) /
+    1000,
+);
+if (
+  (DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC || DOUBLE_RESYNC_ASK) &&
+  !(BATTLE_SECONDS >= faultNeedsSeconds)
+) {
+  console.log(`this fault needs BATTLE_SECONDS >= ${faultNeedsSeconds}`);
+  process.exit(1);
+}
 // The outage starts a third of the way in, so it and the reconnect that
 // follows must fit in the remaining two thirds.
 const DROP_SIGNALING_RECONNECT_MS = 20000;
@@ -372,30 +651,126 @@ const webkitBrowser = async () => (_webkitBrowser ??= await webkit.launch({ head
 const hostBrowser = HOST_BROWSER === 'webkit' ? await webkitBrowser() : await chromiumBrowser();
 const guestBrowser = GUEST_BROWSER === 'webkit' ? await webkitBrowser() : await chromiumBrowser();
 
-const initScript = ({ lat, jitter }) => {
-  // Simulated network: delay every outgoing DataChannel message.
+const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
+  // Simulated network (tests/link-schedule.mjs): every outgoing DataChannel
+  // message is held (DELAY_SYNC_ANSWER_MS), carried by its connection's link
+  // at LINK_KBPS (no limit when 0), then delayed LAT ms + up to JITTER ms.
   // Jitter never reorders a channel: real SCTP data channels deliver in
-  // order, and chunked transfers (compressed save states) rely on it. Each
-  // channel drains one FIFO queue; a timer per message could reorder a burst,
-  // because setTimeout truncates fractional delays.
+  // order, and chunked transfers (compressed save states) rely on it.
   const orig = RTCDataChannel.prototype.send;
-  const queues = new WeakMap();
-  const pump = (ch, q) => {
-    q.timer = null;
-    while (q.items.length && q.items[0].at <= performance.now()) {
-      const { data } = q.items.shift();
-      try {
-        if (ch.readyState === 'open') orig.call(ch, data);
-      } catch (_) {}
-    }
-    if (q.items.length) q.timer = setTimeout(() => pump(ch, q), Math.max(0, q.items[0].at - performance.now()));
+  const net = createLinkSchedule({ kbps, lat, jitter });
+  window.__knLink = { stats: net.stats, unmappedChannels: 0 };
+  // Which connection a channel belongs to: the ones this page creates, and
+  // the ones the other page creates (the `datachannel` event). The listener
+  // is added as the connection is made, so it runs before the page's own
+  // ondatachannel handler, which sends on the channel.
+  const pcOf = new WeakMap();
+  const RealPC = window.RTCPeerConnection;
+  window.RTCPeerConnection = new Proxy(RealPC, {
+    construct(target, args, newTarget) {
+      const pc = Reflect.construct(target, args, newTarget);
+      pc.addEventListener('datachannel', (e) => pcOf.set(e.channel, pc));
+      return pc;
+    },
+  });
+  const realCreate = RealPC.prototype.createDataChannel;
+  RealPC.prototype.createDataChannel = function (...args) {
+    const ch = realCreate.apply(this, args);
+    pcOf.set(ch, this);
+    return ch;
   };
+  const links = new WeakMap(); // connection (or a channel with none known) -> {link, timer}
+  const channels = new WeakMap(); // RTCDataChannel -> its channel on the link
+  const scheduleOf = (dc) => {
+    let ch = channels.get(dc);
+    if (ch) return ch;
+    let owner = pcOf.get(dc);
+    if (!owner) {
+      // Not seen being made: it gets a link of its own, and the summary says so.
+      owner = dc;
+      window.__knLink.unmappedChannels++;
+    }
+    let l = links.get(owner);
+    if (!l) links.set(owner, (l = { link: net.link(), timer: null, dcs: [] }));
+    ch = net.channel(l.link, dc.label);
+    ch.pumped = l;
+    l.dcs.push([dc, ch]);
+    channels.set(dc, ch);
+    return ch;
+  };
+  const pump = (l) => {
+    l.timer = null;
+    const now = performance.now();
+    for (const [dc, ch] of l.dcs) {
+      for (const data of net.take(ch, now)) {
+        try {
+          if (dc.readyState === 'open') orig.call(dc, data);
+        } catch (_) {}
+      }
+    }
+    arm(l);
+  };
+  const arm = (l) => {
+    const at = net.wakeAt(l.link, performance.now());
+    if (at === Infinity) return;
+    clearTimeout(l.timer);
+    l.timer = setTimeout(() => pump(l), Math.max(0, at - performance.now()));
+  };
+  // What a channel has been handed by send() and not yet sent is its
+  // bufferedAmount. On `sync-state`, everything still in the simulated
+  // network for it, held or on the link or in flight: the engine hands its
+  // resync state over a chunk at a time, waiting for bufferedAmount to fall
+  // below a low-water mark (KNCore.syncSend), and without this the queue hid
+  // a held answer from it, and on release the whole of it, 2.9 MB with the
+  // next answer behind it, went into the connection at once. On the other
+  // channels, only the bytes the capped link has not carried yet (none
+  // without LINK_KBPS): those are the channel's own unsent bytes, as on a
+  // congested real connection, while bytes in flight are not, so the input
+  // channels' own buffer checks (DC-FALLBACK) see what they would see there.
+  const realBuffered = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'bufferedAmount');
+  const bytesOf = (data) => (typeof data === 'string' ? data.length : (data?.byteLength ?? data?.size ?? 0));
+  Object.defineProperty(RTCDataChannel.prototype, 'bufferedAmount', {
+    configurable: true,
+    get() {
+      const real = realBuffered.get.call(this);
+      const ch = channels.get(this);
+      if (!ch) return real;
+      return real + (this.label === 'sync-state' ? net.queued(ch) : net.unsent(ch, performance.now()));
+    },
+  });
+  // DELAY_SYNC_ANSWER_MS: once the test sets window.__knHoldSyncAnswerMs, the
+  // next numbered answer to a resync request on the `sync-state` channel is
+  // held that long. The channel's order keeps the header and the binary
+  // chunks that follow it behind it, so they are released in order after it;
+  // the other channels' messages do not wait for it, until it is on the link.
+  // That channel carries state transfers only, never input.
+  window.__knHoldSyncAnswerMs = 0;
+  window.__knSyncAnswersHeld = [];
+  // LOSE_INPUTS_BEFORE_FALLBACK: once the test sets window.__knLoseRbInputs,
+  // every binary input sent on `rollback-input` (the unordered input channel)
+  // is dropped before it reaches the simulated link (it is neither queued
+  // nor counted there), and its frame (the packet's first word) kept.
+  window.__knLoseRbInputs = false;
+  window.__knRbInputsLost = [];
   RTCDataChannel.prototype.send = function (data) {
-    let q = queues.get(this);
-    if (!q) queues.set(this, (q = { items: [], timer: null }));
-    const last = q.items.length ? q.items[q.items.length - 1].at : 0;
-    q.items.push({ data, at: Math.max(performance.now() + lat + (jitter ? Math.random() * jitter : 0), last) });
-    if (!q.timer) q.timer = setTimeout(() => pump(this, q), Math.max(0, q.items[0].at - performance.now()));
+    if (window.__knLoseRbInputs && this.label === 'rollback-input' && data instanceof ArrayBuffer) {
+      if (data.byteLength >= 4) window.__knRbInputsLost.push(new Int32Array(data, 0, 1)[0]);
+      return;
+    }
+    const ch = scheduleOf(this);
+    let hold = 0;
+    if (
+      window.__knHoldSyncAnswerMs > 0 &&
+      this.label === 'sync-state' &&
+      typeof data === 'string' &&
+      data.startsWith('sync-answer-id:')
+    ) {
+      hold = window.__knHoldSyncAnswerMs;
+      window.__knHoldSyncAnswerMs = 0;
+      window.__knSyncAnswersHeld.push({ answer: data, heldAt: performance.now(), ms: hold });
+    }
+    net.send(ch, data, bytesOf(data), hold, performance.now());
+    arm(ch.pumped);
   };
 };
 
@@ -520,13 +895,28 @@ const recordEventsInitScript = () => {
 
 const mkPage = async (browser, name, { throttleHz = 0, hidden = false, suspendAudio = false } = {}) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
-  await ctx.addInitScript(initScript, { lat: LAT, jitter: JITTER });
+  // As source text: the link schedule is a function, which an init script's argument cannot carry.
+  await ctx.addInitScript({
+    content: `(${initScript})(${JSON.stringify({ lat: LAT, jitter: JITTER, kbps: LINK_KBPS })}, ${createLinkSchedule});`,
+  });
   if (throttleHz) await ctx.addInitScript(throttleInitScript, throttleHz);
   if (hidden) await ctx.addInitScript(hiddenInitScript);
   if (suspendAudio) await ctx.addInitScript(suspendAudioInitScript);
-  if (DROP_SIGNALING_MS) await ctx.addInitScript(recordEventsInitScript);
+  // Every run: the observers' client events are counted from these.
+  await ctx.addInitScript(recordEventsInitScript);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
+  if (DROP_PEER_MS && name === 'guest') {
+    // Proxy the guest's signaling so the WebRTC signaling between it and the
+    // host can be dropped, both ways, while its connection is down.
+    await page.routeWebSocket(/socket\.io/, (ws) => {
+      const server = ws.connectToServer();
+      const blocked = (message) =>
+        Date.now() < peerSignalBlock.until && String(message).includes('"webrtc-signal"') && ++peerSignalBlock.dropped;
+      ws.onMessage((message) => blocked(message) || server.send(message));
+      server.onMessage((message) => blocked(message) || ws.send(message));
+    });
+  }
   if (DROP_SIGNALING_MS) {
     // Proxy the signaling WebSocket so it can be cut, and kept down, on demand.
     signaling.set(page, { down: false, sockets: [] });
@@ -549,6 +939,8 @@ let hostSawRoomWithoutGuest = false;
 let hostSawGuestReturn = false;
 // Per-page signaling proxy state for DROP_SIGNALING_MS.
 const signaling = new Map();
+// DROP_PEER_MS: the guest's WebRTC signaling is dropped until `until`.
+const peerSignalBlock = { until: 0, dropped: 0 };
 const setSignalingDown = async (page, down) => {
   const state = signaling.get(page);
   state.down = down;
@@ -568,7 +960,10 @@ const guest = await mkPage(guestBrowser, 'guest', {
   hidden: HIDE_GUEST_MS > 0,
   suspendAudio: SUSPEND_GUEST_AUDIO,
 });
-await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
+// LOSE_INPUTS_BEFORE_FALLBACK re-arms the host's transport through knDiag,
+// which exists only with ?knDiag (it turns on nothing else).
+const HOST_QUERY = QUERY + (LOSE_INPUTS_BEFORE_FALLBACK ? '&knDiag' : '');
+await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${HOST_QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
 await guest.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
@@ -580,6 +975,17 @@ if (!MENU_AUTOPILOT) {
   if (MENU_AUTOPILOT === 'any-fighter') console.log('ROM is not SSB64 US: MENU_AUTOPILOT=any-fighter');
 }
 console.log('room', room, 'both ROM-ready; starting');
+// DELAY_SYNC_ANSWER_AT=boot: the first numbered answer the host sends, the
+// boot sync's, is held. Both logs are read from the match's first line.
+const delayBootSyncAnswer = DELAY_SYNC_ANSWER_MS > 0 && DELAY_SYNC_ANSWER_AT === 'boot';
+if (delayBootSyncAnswer) {
+  await host.evaluate((ms) => {
+    window.__knHoldSyncAnswerMs = ms;
+  }, DELAY_SYNC_ANSWER_MS);
+  console.log(`DELAY_SYNC_ANSWER_MS: the host's answer to the boot sync will be held ${DELAY_SYNC_ANSWER_MS} ms`);
+}
+// LOSE_INPUTS_BEFORE_FALLBACK: the host broadcasts the transport when the game starts.
+if (LOSE_INPUTS_BEFORE_FALLBACK) await host.evaluate(() => (window._knTransportOverride = 'unreliable'));
 await host.click('#start-btn');
 
 // Dismiss the tap-to-start prompt on whichever page shows it. Tracks how
@@ -661,6 +1067,9 @@ const install = async (p, role) => {
       W.mapRom = rom ? rom.name : null;
       W.mapScenes = rom ? rom.scenes : null;
       W.mapOngoing = rom ? rom.battleStatus.ongoing : null;
+      // The value the game's battle-state pointer holds when it names the
+      // mapped battle state (an N64 address: 0x80000000 | offset).
+      W.mapLiveHeaderPointer = rom ? (0x80000000 | rom.values[3]) >>> 0 : null;
       W.mapSamples = [];
       const byteAt = (off) => {
         const word = rb.readRdram32(off & ~3);
@@ -676,6 +1085,7 @@ const install = async (p, role) => {
         W.mapSamples.push({
           f,
           status: byteAt(vsHeader + rom.battleStatus.offset),
+          pointer: rb.readRdram32(rom.battleStatus.pointer),
           scene: byteAt(sceneCurr),
           stocks: [0, 1].map((p) => byteAt(stocksBase + p * playerStride)),
           charIds: [0, 1].map((p) => rb.readRdram32(cssBase + p * cssStride + cssCharId)),
@@ -815,6 +1225,32 @@ let inBattle = false;
 let desyncGuestStocksBase = -1; // DESYNC_GUEST: the map's address of P1's stock count
 let desyncGuestAt = -1; // DESYNC_GUEST: the guest's frame when its stock count was changed
 let throttleFlipped = null; // null until the 15s mark; then whether the flip Promise.all resolved or rejected
+// DROP_PEER_MS / DELAY_SYNC_ANSWER_MS: where each page's sync log stood when
+// the fault began ({seq, frame} of its last line), and what the test saw.
+const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null };
+const delaySyncAnswer = { hostAt: null, guestAt: null, timedOut: false, askedAgainAfterMs: null };
+// LOSE_INPUTS_BEFORE_FALLBACK: where each page's sync log stood when the drops began.
+const loseBeforeFallback = { hostAt: null, guestAt: null, fellBack: false, rounds: 0 };
+// LINK_KBPS on its own: where the logs stood when the guest asked for its plain resync.
+const linkResync = { hostAt: null, guestAt: null, applied: false };
+// DOUBLE_RESYNC_ASK: where the logs stood when the guest asked twice.
+const doubleResyncAsk = { hostAt: null, guestAt: null, applied: false };
+const syncLogOf = (page) => page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+const seqOf = (line) => Number(line.split('\t')[0]);
+const lastLogLine = async (page) => {
+  const last = (await syncLogOf(page)).trimEnd().split('\n').at(-1)?.split('\t') ?? [];
+  return { seq: Number(last[0]) || 0, frame: Number((last[2] || '').replace('f=', '')) || 0 };
+};
+// The lines of a sync log after the one numbered `seq`.
+const linesAfter = (log, seq) => log.split('\n').filter((line) => seqOf(line) > seq);
+const waitForLine = async (page, afterSeq, re, timeoutMs) => {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    if (linesAfter(await syncLogOf(page), afterSeq).some((line) => re.test(line))) return true;
+    await page.waitForTimeout(250);
+  }
+  return false;
+};
 for (;;) {
   const s = await Promise.all(
     [host, guest].map((p) =>
@@ -946,6 +1382,139 @@ if (inBattle) {
     }));
     console.log('guest desynced on purpose: P1 stock count changed at frame', desyncGuestAt);
     await host.waitForTimeout((BATTLE_SECONDS * 1000) / 2);
+  } else if (DROP_PEER_MS > 0) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [dropPeer.hostAt, dropPeer.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    const frameNow = () => window.NetplayRollback.getHudCounters().currentFrame;
+    dropPeer.hostFrame = await host.evaluate(frameNow);
+    peerSignalBlock.until = Date.now() + DROP_PEER_MS;
+    dropPeer.closed = await guest.evaluate(() => {
+      const frame = window.NetplayRollback.getHudCounters().currentFrame;
+      const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
+      if (!entry?.pc) return { closed: false, frame, why: 'no peer entry for slot 0' };
+      const was = { pc: entry.pc.connectionState, dc: entry.dc?.readyState ?? null };
+      entry.pc.close();
+      return { closed: true, frame, was };
+    });
+    console.log(`DROP_PEER_MS: guest closed its connection to the host`, JSON.stringify(dropPeer.closed));
+    console.log(`DROP_PEER_MS: WebRTC signaling to and from the guest dropped for ${DROP_PEER_MS} ms`);
+    // Until the guest has applied the reconnect's resync, or the window runs out.
+    const reconnected = await waitForLine(
+      guest,
+      dropPeer.guestAt.seq,
+      /sync #\d+ applied/,
+      DROP_PEER_MS + DROP_PEER_RECOVER_MS + 30000,
+    );
+    console.log(`DROP_PEER_MS: guest resynced after the reconnect: ${reconnected} (${Date.now() - started} ms)`);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (delayBootSyncAnswer) {
+    // The boot sync's answer was held from the start; by the battle the
+    // guest has normally timed out, asked again and been answered.
+    const started = Date.now();
+    delaySyncAnswer.hostAt = delaySyncAnswer.guestAt = { seq: -1, frame: 0 };
+    delaySyncAnswer.timedOut = await waitForLine(
+      guest,
+      -1,
+      /RESYNC-REQUEST-TIMEOUT/,
+      DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS,
+    );
+    console.log(
+      delaySyncAnswer.timedOut
+        ? 'DELAY_SYNC_ANSWER_MS: the boot sync timed out'
+        : 'DELAY_SYNC_ANSWER_MS: the guest never logged RESYNC-REQUEST-TIMEOUT',
+    );
+    await waitForLine(guest, -1, /SYNC-LATE-ANSWER-DROPPED/, DELAY_SYNC_ANSWER_RECOVER_MS);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - (Date.now() - started)));
+  } else if (DELAY_SYNC_ANSWER_MS > 0) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [delaySyncAnswer.hostAt, delaySyncAnswer.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    await host.evaluate((ms) => {
+      window.__knHoldSyncAnswerMs = ms;
+    }, DELAY_SYNC_ANSWER_MS);
+    // The guest's network-change handler: an immediate, numbered sync-request-full.
+    await guest.evaluate(() => window.dispatchEvent(new Event('online')));
+    console.log(`DELAY_SYNC_ANSWER_MS: guest asked for a resync; the host's answer is held ${DELAY_SYNC_ANSWER_MS} ms`);
+    delaySyncAnswer.timedOut = await waitForLine(
+      guest,
+      delaySyncAnswer.guestAt.seq,
+      /RESYNC-REQUEST-TIMEOUT/,
+      DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS,
+    );
+    if (delaySyncAnswer.timedOut) {
+      // The guest asks again on its own at the deadline (RESYNC-REASK).
+      if (await waitForLine(guest, delaySyncAnswer.guestAt.seq, /RESYNC-REASK .*: sent/, 5000)) {
+        delaySyncAnswer.askedAgainAfterMs = Date.now() - started;
+        console.log(`DELAY_SYNC_ANSWER_MS: guest timed out and asked again ${delaySyncAnswer.askedAgainAfterMs} ms in`);
+      } else {
+        console.log('DELAY_SYNC_ANSWER_MS: the guest timed out and did not ask again');
+      }
+    } else {
+      console.log('DELAY_SYNC_ANSWER_MS: the guest never logged RESYNC-REQUEST-TIMEOUT');
+    }
+    await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (DOUBLE_RESYNC_ASK) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [doubleResyncAsk.hostAt, doubleResyncAsk.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    // The network-change handler twice at once: two immediate, numbered requests.
+    await guest.evaluate(() => {
+      window.dispatchEvent(new Event('online'));
+      window.dispatchEvent(new Event('online'));
+    });
+    console.log('DOUBLE_RESYNC_ASK: guest asked for a resync twice');
+    doubleResyncAsk.applied = await waitForLine(
+      guest,
+      doubleResyncAsk.guestAt.seq,
+      /sync #\d+ applied/,
+      DOUBLE_RESYNC_ASK_RECOVER_MS,
+    );
+    console.log(`DOUBLE_RESYNC_ASK: resync applied: ${doubleResyncAsk.applied} (${Date.now() - started} ms)`);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (LINK_RESYNC) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [linkResync.hostAt, linkResync.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    // The guest's network-change handler: an immediate, numbered sync-request-full.
+    await guest.evaluate(() => window.dispatchEvent(new Event('online')));
+    console.log(`LINK_KBPS: guest asked for a resync over a ${LINK_KBPS} kbit/s link`);
+    linkResync.applied = await waitForLine(guest, linkResync.guestAt.seq, /sync #\d+ applied/, LINK_RESYNC_RECOVER_MS);
+    console.log(`LINK_KBPS: resync applied: ${linkResync.applied} (${Date.now() - started} ms)`);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (LOSE_INPUTS_BEFORE_FALLBACK) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [loseBeforeFallback.hostAt, loseBeforeFallback.guestAt] = await Promise.all([
+      lastLogLine(host),
+      lastLogLine(guest),
+    ]);
+    await host.evaluate(() => {
+      window.__knLoseRbInputs = true;
+    });
+    console.log("LOSE_INPUTS_BEFORE_FALLBACK: the host's inputs on rollback-input are dropped from here on");
+    const framesLost = () => host.evaluate(() => new Set(window.__knRbInputsLost).size);
+    while (loseBeforeFallback.rounds < 5) {
+      loseBeforeFallback.rounds++;
+      const at = await lastLogLine(host);
+      // The host takes the unreliable transport up again and tells the guest,
+      // as at the match start (knDiag.setTransport, host-authoritative).
+      const asked = await host.evaluate(() => window.knDiag?.setTransport?.('unreliable') === 'unreliable');
+      loseBeforeFallback.fellBack = asked && (await waitForLine(host, at.seq, /DC-FALLBACK reason=/, 30000));
+      const lost = await framesLost();
+      console.log(
+        `LOSE_INPUTS_BEFORE_FALLBACK: round ${loseBeforeFallback.rounds}: the host switched to the reliable ` +
+          `channel: ${loseBeforeFallback.fellBack}; ${lost} frames dropped (${Date.now() - started} ms)`,
+      );
+      if (!loseBeforeFallback.fellBack || lost >= 2) break;
+    }
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (DROP_SIGNALING_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
@@ -1065,6 +1634,9 @@ const collect = (p, VISUAL_CHECK) =>
       fpsWindowEnd,
       clog: m.UTF8ToString(m._kn_get_debug_log()),
       sync: window.NetplayRollback.exportSyncLog?.() || '',
+      syncAnswersHeld: window.__knSyncAnswersHeld ?? [],
+      rbInputsLost: window.__knRbInputsLost ?? [],
+      link: window.__knLink ?? null,
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
       // 64 KB RDRAM blocks kn_game_state_hash leaves out (of 128).
@@ -1072,13 +1644,28 @@ const collect = (p, VISUAL_CHECK) =>
       mapRom: window.__tp.mapRom,
       mapScenes: window.__tp.mapScenes,
       mapOngoing: window.__tp.mapOngoing,
+      mapLiveHeaderPointer: window.__tp.mapLiveHeaderPointer,
       mapSamples: window.__tp.mapSamples,
       visual,
     };
   }, VISUAL_CHECK);
 const [H, G] = await Promise.all([collect(host, VISUAL_CHECK), collect(guest, VISUAL_CHECK)]);
-const knEventsOf = (page) => (DROP_SIGNALING_MS ? page.evaluate(() => window.__knEvents) : []);
+const knEventsOf = (page) => page.evaluate(() => window.__knEvents ?? []);
 const [hostEvents, guestEvents] = await Promise.all([knEventsOf(host), knEventsOf(guest)]);
+// The observers' reports: sync-log lines, the client events the pages sent,
+// and (KN_DB) the rows the server stored, once the last posts have landed.
+await host.waitForTimeout(2000);
+const observers = {
+  host: { syncLog: observerLinesIn(H.sync), events: observerEventsIn(hostEvents) },
+  guest: { syncLog: observerLinesIn(G.sync), events: observerEventsIn(guestEvents) },
+  db: await observerEventsInDb(KN_DB, [room]).catch((e) => ({ error: e.message })),
+};
+const observerDisagreements =
+  observerTotal(observers.host.syncLog, observers.host.events, observers.guest.syncLog, observers.guest.events) +
+  (observers.db?.error ? 0 : observerTotal(observers.db));
+const observerNote = observerDbNote(KN_DB, [room]);
+if (observerNote) console.log(observerNote);
+if (observers.db?.error) console.log(`KN_DB could not be read: ${observers.db.error}`);
 await host.screenshot({ path: `${OUT}/host.png` });
 await guest.screenshot({ path: `${OUT}/guest.png` });
 fs.writeFileSync(`${OUT}/host-clog.txt`, H.clog);
@@ -1125,9 +1712,200 @@ let both = 0,
 // differ by design and are left out, like the frames before the resync in
 // freeze mode (tests/frozen-recovery.mjs says what counts as proof). Freeze
 // mode makes its own phantom on purpose and has its own exclusion.
-const recoveries = FREEZE_MS > 0 ? [] : frozenRecoveries({ host: H.sync, guest: G.sync });
+// LINK_KBPS: when each page's input messages (every channel but
+// `sync-state`) were starved on its link, in that page's frames. A phantom
+// of a page whose inputs were stuck there is the link's doing, not a frozen
+// page, and is not left out (withoutLinkStarved).
+const starvedFramesOf = (peer) =>
+  spansInFrames(
+    peer.sync,
+    Object.entries(peer.link?.stats.byLabel ?? {})
+      .filter(([label]) => label !== 'sync-state')
+      .flatMap(([, s]) => s.starvedSpans),
+  );
+const linkStarvedFrames = LINK_KBPS > 0 ? { host: starvedFramesOf(H), guest: starvedFramesOf(G) } : null;
+const recoveries =
+  FREEZE_MS > 0
+    ? []
+    : linkStarvedFrames
+      ? withoutLinkStarved(frozenRecoveries({ host: H.sync, guest: G.sync }), linkStarvedFrames)
+      : frozenRecoveries({ host: H.sync, guest: G.sync });
 let framesExcluded = 0,
   mismatchesExcluded = 0;
+// DROP_PEER_MS: the reconnect as the logs show it, after the drop. From 12
+// frames before the drop (the hashes trail the head by 12) to the frame the
+// guest's reconnect resync lands on, each page ran on predicted input for
+// the other, so the two timelines split by design; those frames are left
+// out, as a proven frozen-page recovery's are. Only when every step of the
+// reconnect is in the logs: otherwise every frame is compared.
+const dropPeerReport = (() => {
+  if (!DROP_PEER_MS || !dropPeer.guestAt) return null;
+  const guestLines = linesAfter(G.sync, dropPeer.guestAt.seq);
+  const hostLines = linesAfter(H.sync, dropPeer.hostAt.seq);
+  const lineOf = (lines, re) => lines.find((line) => re.test(line)) ?? null;
+  const resyncSent = guestLines.findIndex((line) => /reconnect resync: sent/.test(line));
+  const applied = (resyncSent < 0 ? [] : guestLines.slice(resyncSent))
+    .map((line) => line.match(/sync #\d+ applied \(frame \d+ -> (\d+)/))
+    .filter(Boolean)
+    .map((m) => Number(m[1]));
+  let to = applied.length ? applied[0] : null;
+  // A second resync right after the first ends the split, as in frozen-recovery.mjs.
+  for (const at of applied) if (to !== null && at > to && at <= to + 12) to = at;
+  const paths = {
+    reconnectOffer: lineOf(guestLines, /received reconnect offer from/),
+    answer: lineOf(hostLines, /onWebRTCSignal: answer from/),
+    channelOpen: lineOf(guestLines, /DC open with \S+ slot: 0/),
+    reconnectResync: lineOf(guestLines, /reconnect resync: sent/),
+    resyncApplied: resyncSent < 0 ? null : lineOf(guestLines.slice(resyncSent), /sync #\d+ applied/),
+  };
+  const proven = !!dropPeer.closed?.closed && Object.values(paths).every(Boolean) && to !== null;
+  // The fault itself: signaling was really dropped, and a drop that outlasts
+  // an attempt's deadline took the host through a timed-out attempt and a retry.
+  const retryExpected = DROP_PEER_MS > RECONNECT_ATTEMPT_TIMEOUT_MS;
+  const retry =
+    lineOf(hostLines, /reconnect attempt 1 timeout/) ??
+    lineOf(hostLines, /initiating reconnect to \S+ \(attempt [2-9]/);
+  const exercised = peerSignalBlock.dropped > 0 && (!retryExpected || !!retry);
+  return {
+    ms: DROP_PEER_MS,
+    closed: dropPeer.closed,
+    signalsDropped: peerSignalBlock.dropped,
+    attemptTimeoutMs: RECONNECT_ATTEMPT_TIMEOUT_MS,
+    retryExpected,
+    retry,
+    exercised,
+    frameAtDrop: { host: dropPeer.hostFrame, guest: dropPeer.closed?.frame ?? null },
+    reconnectAttempts: hostLines.filter((line) => /initiating reconnect to/.test(line)).length,
+    paths,
+    window: {
+      declaredBy: 'DROP_PEER_MS',
+      from: Math.min(dropPeer.hostFrame, dropPeer.closed?.frame ?? dropPeer.hostFrame) - 12,
+      to,
+      stoppedPage: null,
+      stoppedMs: null,
+      proven,
+    },
+    framesExcluded: 0,
+    mismatchesExcluded: 0,
+  };
+})();
+const dropWindows = dropPeerReport ? [dropPeerReport.window] : [];
+// DELAY_SYNC_ANSWER_MS: the held answer, the guest's deadline and second
+// request, and which of the rules for a late answer took it.
+const delaySyncAnswerReport = (() => {
+  if (!DELAY_SYNC_ANSWER_MS || !delaySyncAnswer.guestAt) return null;
+  const guestLines = linesAfter(G.sync, delaySyncAnswer.guestAt.seq);
+  const hostLines = linesAfter(H.sync, delaySyncAnswer.hostAt.seq);
+  const countIn = (lines, re) => lines.filter((line) => re.test(line)).length;
+  // The guest's second request (its ask again at the deadline) must come
+  // before the held answer's header reaches it, or the answer was not late.
+  const asks = guestLines.flatMap((line, i) =>
+    /network change detected|BOOT-SYNC: guest requesting|RESYNC-REASK .*: sent/.test(line) ? [i] : [],
+  );
+  const firstAnswer = guestLines.findIndex((line) => /sync-start received/.test(line));
+  // The request is settled only when an answer to the newest one was applied:
+  // after the second ask, a `resync ready` whose answerFor is the newest
+  // request and ends it, then a `sync #k applied` before any other answer.
+  const newestReady =
+    asks.length < 2
+      ? -1
+      : guestLines.findIndex(
+          (line, i) => i > asks[1] && /resync ready \(.*answerFor=(\d+) newest=\1 endsRequest=true\)/.test(line),
+        );
+  const afterReady = newestReady < 0 ? [] : guestLines.slice(newestReady + 1);
+  const nextAnswer = afterReady.findIndex((line) => /resync ready \(/.test(line));
+  const newestApplied =
+    newestReady < 0
+      ? null
+      : ((nextAnswer < 0 ? afterReady : afterReady.slice(0, nextAnswer)).find((line) =>
+          /sync #\d+ applied/.test(line),
+        ) ?? null);
+  return {
+    ms: DELAY_SYNC_ANSWER_MS,
+    at: DELAY_SYNC_ANSWER_AT,
+    held: H.syncAnswersHeld,
+    timedOut: delaySyncAnswer.timedOut,
+    timeouts: guestLines.filter((line) => /RESYNC-REQUEST-TIMEOUT/.test(line)),
+    askedAgainAfterMs: delaySyncAnswer.askedAgainAfterMs,
+    guestAsks: asks.length,
+    requestsReceivedByHost: countIn(hostLines, /received sync-request-full from/),
+    rateLimited: countIn(hostLines, /rate-limited sync-request/),
+    lateAnswerAfterSecondAsk: asks.length >= 2 && firstAnswer > asks[1],
+    lateAnswerHandled: {
+      'SYNC-LATE-ANSWER-DROPPED': countIn(guestLines, /SYNC-LATE-ANSWER-DROPPED/),
+      'SYNC-LATE-ANSWER-IGNORED': countIn(guestLines, /SYNC-LATE-ANSWER-IGNORED/),
+      'not the answer awaited': countIn(guestLines, /sync state is not the answer awaited/),
+      'chunk timeout for older request': countIn(guestLines, /sync chunks timeout: .* for older request/),
+    },
+    answers: guestLines.filter((line) =>
+      /resync ready \(|sync-start received|not the answer awaited|SYNC-LATE-ANSWER/.test(line),
+    ),
+    resyncsApplied: countIn(guestLines, /sync #\d+ applied/),
+    newestAnswer: newestReady < 0 ? null : guestLines[newestReady],
+    newestApplied,
+    applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
+  };
+})();
+// LOSE_INPUTS_BEFORE_FALLBACK: the transport, the drops and the switch, and
+// whether the dropped inputs had to be asked for.
+const loseBeforeFallbackReport = (() => {
+  if (!LOSE_INPUTS_BEFORE_FALLBACK || !loseBeforeFallback.guestAt) return null;
+  const guestLines = linesAfter(G.sync, loseBeforeFallback.guestAt.seq);
+  const hostLines = linesAfter(H.sync, loseBeforeFallback.hostAt.seq);
+  const linesIn = (lines, re) => lines.filter((line) => re.test(line));
+  const lost = [...new Set(H.rbInputsLost)].sort((a, b) => a - b);
+  const rearmed = linesIn(hostLines, /rb-transport: host broadcast=unreliable \(knDiag, mid-match\)/);
+  const unreliable = {
+    host:
+      /rb-transport: host broadcast=unreliable/.test(H.sync) &&
+      /rb-input DC open .*ordered=false maxRetransmits=0/.test(H.sync),
+    guest: /rb-transport: host=unreliable adopted=unreliable/.test(G.sync),
+  };
+  const firstRearm = hostLines.findIndex((line) =>
+    /rb-transport: host broadcast=unreliable \(knDiag, mid-match\)/.test(line),
+  );
+  const fallback =
+    firstRearm < 0 ? null : (hostLines.slice(firstRearm).find((line) => /DC-FALLBACK reason=/.test(line)) ?? null);
+  const exercised = unreliable.host && unreliable.guest && rearmed.length > 0 && lost.length >= 2 && !!fallback;
+  const after = {
+    guestAsksForHostInputs: linesIn(guestLines, /RB-INPUT-ASK .*slot=0\b/),
+    peerPhantoms: [...linesIn(hostLines, /PEER-PHANTOM/), ...linesIn(guestLines, /PEER-PHANTOM/)],
+    stallTimeouts: [...linesIn(hostLines, /RB-INPUT-STALL-TIMEOUT/), ...linesIn(guestLines, /RB-INPUT-STALL-TIMEOUT/)],
+    stallResyncs: [...linesIn(hostLines, /INPUT-STALL-RESYNC/), ...linesIn(guestLines, /INPUT-STALL-RESYNC/)],
+  };
+  return {
+    unreliable,
+    rounds: loseBeforeFallback.rounds,
+    rearmed: rearmed.length,
+    dropped: H.rbInputsLost.length,
+    framesLost: lost.length ? { first: lost[0], last: lost.at(-1), count: lost.length } : null,
+    fallback,
+    hostFallbackLines: linesIn(hostLines, /DC-FALLBACK/),
+    guestFallbackLines: linesIn(guestLines, /DC-FALLBACK/),
+    exercised,
+    ...after,
+    passed: exercised && Object.values(after).every((lines) => lines.length === 0),
+  };
+})();
+// DOUBLE_RESYNC_ASK: the rate-limited second request, the dropped late
+// answer, the deadline and the ask again, and the state applied after.
+const doubleResyncAskReport = (() => {
+  if (!DOUBLE_RESYNC_ASK || !doubleResyncAsk.guestAt) return null;
+  const guestLines = linesAfter(G.sync, doubleResyncAsk.guestAt.seq);
+  const hostLines = linesAfter(H.sync, doubleResyncAsk.hostAt.seq);
+  const countIn = (lines, re) => lines.filter((line) => re.test(line)).length;
+  return {
+    guestAsks: countIn(guestLines, /network change detected/),
+    requestsReceivedByHost: countIn(hostLines, /received sync-request-full from/),
+    rateLimited: countIn(hostLines, /rate-limited sync-request/),
+    lateAnswerDropped: countIn(guestLines, /SYNC-LATE-ANSWER-DROPPED/),
+    timeouts: guestLines.filter((line) => /RESYNC-REQUEST-TIMEOUT/.test(line)),
+    asksAgain: guestLines.filter((line) => /RESYNC-REASK /.test(line)),
+    gaveUp: countIn(guestLines, /RESYNC-REASK-GIVEUP/),
+    answers: guestLines.filter((line) => /resync ready \(|SYNC-LATE-ANSWER|not the answer awaited/.test(line)),
+    applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
+  };
+})();
 // DESYNC_GUEST holds its change for 3 s. A rollback in that time re-runs
 // frames from before the change with the change already in memory, so the
 // hashes and digests of up to a rollback window of earlier frames (22, the
@@ -1138,6 +1916,11 @@ for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f],
     b = G.hashes[f];
   if (!b || !a[0] || !b[0] || +f < recoveredAt) continue;
+  if (inFrozenRecovery(dropWindows, +f)) {
+    dropPeerReport.framesExcluded++;
+    if (a[0] !== b[0] || a[2] !== b[2]) dropPeerReport.mismatchesExcluded++;
+    continue;
+  }
   if (inFrozenRecovery(recoveries, +f)) {
     framesExcluded++;
     if (a[0] !== b[0] || a[2] !== b[2]) mismatchesExcluded++;
@@ -1291,9 +2074,16 @@ if (VISUAL_CHECK) {
     firstCorrupted = null,
     heldOrTimingDiffs = 0,
     maxDiff = 0;
+  let windowFramesExcluded = 0;
   for (const [f, hb] of hMap) {
     const gb = gMap.get(f);
     if (!gb || f < recoveredAt) continue;
+    // The proven windows the hash compare leaves out (a frozen-page recovery,
+    // a DROP_PEER_MS reconnect): the peers' pictures differ there by design too.
+    if (inFrozenRecovery([...recoveries, ...dropWindows], f)) {
+      windowFramesExcluded++;
+      continue;
+    }
     framesCompared++;
     let sum = 0;
     for (let i = 0; i < hb.length; i++) sum += Math.abs(hb[i] - gb[i]);
@@ -1309,6 +2099,7 @@ if (VISUAL_CHECK) {
   }
   visualCheck = {
     framesCompared,
+    framesExcluded: windowFramesExcluded,
     corrupted,
     corruptedNearReplayEnd,
     firstCorrupted,
@@ -1357,6 +2148,14 @@ const addressMapChecksOf = (side) => {
         underWayFrom < 0
           ? `status never read ${side.mapOngoing}; values seen ${[...new Set(inBattle.map((x) => x.status))].join(',')}`
           : `status ${side.mapOngoing} from battle sample ${underWayFrom + 1} of ${inBattle.length} on`,
+    },
+    {
+      // The game's own pointer to the battle state it runs from names the
+      // mapped one. In SSB64 it is moved to the other copy only for a
+      // sudden death, which this run never reaches.
+      name: "the game's battle-state pointer names the mapped battle state",
+      ok: underWayFrom >= 0 && inBattle.slice(underWayFrom).every((x) => x.pointer === side.mapLiveHeaderPointer),
+      detail: `values seen: ${[...new Set(inBattle.slice(Math.max(0, underWayFrom)).map((x) => (x.pointer ?? 0).toString(16)))].slice(0, 4).join(' ')}`,
     },
     {
       name: 'stock counts in battle are plausible',
@@ -1448,27 +2247,94 @@ const signalingDropOf = (page, events, log) => {
 // one with no frame is never excused.
 const frameOfSyncLine = (line) => Number((line.split('\t')[2] || '').replace('f=', ''));
 const frameOfCLine = (line) => Number((line.match(/myF=(\d+)/) || line.match(/\bf=(\d+)/) || [])[1]);
-const excusedIn = (log, frameOf, weigh) =>
+const excusedIn = (windows, log, frameOf, weigh) =>
   log
     .split('\n')
-    .filter((line) => inFrozenRecoveryAftermath(recoveries, frameOf(line)))
+    .filter((line) => inFrozenRecoveryAftermath(windows, frameOf(line)))
     .reduce((sum, line) => sum + weigh(line), 0);
-const recoveryIntegrity = {
+// The same for the split a DROP_PEER_MS reconnect makes (its windows).
+const integrityExcusedIn = (windows) => ({
   integrityEventsExcluded:
-    excusedIn(H.sync, frameOfSyncLine, bad) +
-    excusedIn(G.sync, frameOfSyncLine, bad) +
-    excusedIn(H.clog, frameOfCLine, bad) +
-    excusedIn(G.clog, frameOfCLine, bad),
+    excusedIn(windows, H.sync, frameOfSyncLine, bad) +
+    excusedIn(windows, G.sync, frameOfSyncLine, bad) +
+    excusedIn(windows, H.clog, frameOfCLine, bad) +
+    excusedIn(windows, G.clog, frameOfCLine, bad),
   // The engine's own counter has no frames; the sync log says when it rose.
   failedRollbacksExcluded: [H.sync, G.sync].reduce(
     (sum, log) =>
       sum +
-      excusedIn(log, frameOfSyncLine, (line) =>
+      excusedIn(windows, log, frameOfSyncLine, (line) =>
         Number((line.match(/FAILED-ROLLBACK detected: \+(\d+)/) || [])[1] || 0),
       ),
     0,
   ),
-};
+});
+const recoveryIntegrity = integrityExcusedIn(recoveries);
+const dropIntegrity = integrityExcusedIn(dropWindows);
+if (dropPeerReport) Object.assign(dropPeerReport, dropIntegrity);
+// What the pass/fail rule subtracts: the reports inside any proven window,
+// each counted once. The two counts above are for reporting only; a report
+// inside both a recovery and the drop window is in each of them, and
+// subtracting both would cancel a real report outside either window.
+const excusedIntegrity = integrityExcusedIn([...recoveries, ...dropWindows]);
+
+// LINK_KBPS: what the capped link did, and what followed the fault (the
+// DELAY_SYNC_ANSWER_MS request, or the plain resync): a skipped rollback
+// after it, outside a proven frozen-page recovery, is the desync this mode
+// exists to catch. The integrity rule above already fails on it anywhere in
+// the run; this names it.
+const linkReport = (() => {
+  if (!(LINK_KBPS > 0)) return null;
+  const at = DELAY_SYNC_ANSWER_MS > 0 ? delaySyncAnswer : linkResync;
+  const linkOf = (peer, starved) => {
+    const st = peer.link?.stats;
+    if (!st) return null;
+    return {
+      messages: st.messages,
+      bytesQueued: st.bytes,
+      maxBacklogBytes: st.maxBacklogBytes,
+      byLabel: Object.fromEntries(
+        Object.entries(st.byLabel).map(([label, l]) => [
+          label,
+          { messages: l.messages, bytes: l.bytes, maxQueueMs: Math.round(l.maxQueueMs), starved: l.starved },
+        ]),
+      ),
+      inputsStarvedFrames: starved,
+      unmappedChannels: peer.link.unmappedChannels,
+    };
+  };
+  const afterFault = (peer, pageAt) => {
+    if (!pageAt) return null;
+    const lines = linesAfter(peer.sync, pageAt.seq);
+    const unexcused = (line) => !inFrozenRecoveryAftermath(recoveries, frameOfSyncLine(line));
+    const deepSync = lines.filter((line) => /DEEP-MISPREDICT-SKIP/.test(line));
+    const deepC = peer.clog
+      .split('\n')
+      .filter((line) => /DEEP-MISPREDICT-SKIP/.test(line) && !(frameOfCLine(line) < pageAt.frame));
+    return {
+      fromFrame: pageAt.frame,
+      peerPhantoms: lines.filter((line) => /PEER-PHANTOM/.test(line)).length,
+      deepMispredictSkips: {
+        syncLog: deepSync.length,
+        syncLogUnexcused: deepSync.filter(unexcused).length,
+        cLog: deepC.length,
+        cLogUnexcused: deepC.filter((line) => !inFrozenRecoveryAftermath(recoveries, frameOfCLine(line))).length,
+      },
+      syncSendStalled: lines.filter((line) => /SYNC-SEND-STALLED/.test(line)).length,
+      dcFallbacks: lines.filter((line) => /DC-FALLBACK/.test(line)).length,
+      phantomLines: lines.filter((line) => /PEER-PHANTOM/.test(line)).slice(0, 4),
+      firstDeepMispredictSkip: deepSync[0] ?? deepC[0] ?? null,
+    };
+  };
+  return {
+    kbps: LINK_KBPS,
+    plainResync: LINK_RESYNC ? { applied: linkResync.applied } : null,
+    host: linkOf(H, linkStarvedFrames.host),
+    guest: linkOf(G, linkStarvedFrames.guest),
+    afterFault: { host: afterFault(H, at.hostAt), guest: afterFault(G, at.guestAt) },
+    recoveriesLinkStarved: recoveries.filter((recovery) => recovery.linkStarved).length,
+  };
+})();
 
 const summary = {
   room,
@@ -1485,6 +2351,7 @@ const summary = {
         },
       }
     : {}),
+  observers,
   ...(DROP_SIGNALING_MS
     ? {
         signalingDrop: {
@@ -1547,6 +2414,11 @@ const summary = {
   frozenRecovery: { recoveries, framesExcluded, mismatchesExcluded, ...recoveryIntegrity },
   ...(VISUAL_CHECK ? { visualCheck } : {}),
 };
+if (dropPeerReport) summary.dropPeer = dropPeerReport;
+if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
+if (LOSE_INPUTS_BEFORE_FALLBACK) summary.loseBeforeFallback = loseBeforeFallbackReport;
+if (linkReport) summary.link = linkReport;
+if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
@@ -1557,6 +2429,17 @@ const recoveryNote = frozenRecoveryNote(
   recoveryIntegrity.integrityEventsExcluded + recoveryIntegrity.failedRollbacksExcluded,
 );
 if (recoveryNote) console.log(recoveryNote);
+if (
+  dropPeerReport?.framesExcluded ||
+  dropPeerReport?.integrityEventsExcluded ||
+  dropPeerReport?.failedRollbacksExcluded
+)
+  console.log(
+    `Left out for DROP_PEER_MS (frames ${dropPeerReport.window.from} to ${dropPeerReport.window.to - 1}, ` +
+      `from 12 before the drop to the guest's reconnect resync): ${dropPeerReport.framesExcluded} frames, ` +
+      `${dropPeerReport.mismatchesExcluded} of them differing; ${dropPeerReport.integrityEventsExcluded} integrity ` +
+      `reports and ${dropPeerReport.failedRollbacksExcluded} failed rollbacks.`,
+  );
 // Close each distinct browser instance once (host and guest may share one,
 // e.g. the Chromium/Chromium default, or both resolve to the one WebKit
 // instance with HOST_BROWSER=webkit GUEST_BROWSER=webkit).
@@ -1612,8 +2495,8 @@ if (FREEZE_MS > 0)
 const integrityFailed =
   FREEZE_MS > 0
     ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
-    : (H.failed || 0) + (G.failed || 0) - recoveryIntegrity.failedRollbacksExcluded > 0 ||
-      summary.integrityEvents.host + summary.integrityEvents.guest - recoveryIntegrity.integrityEventsExcluded > 0;
+    : (H.failed || 0) + (G.failed || 0) - excusedIntegrity.failedRollbacksExcluded > 0 ||
+      summary.integrityEvents.host + summary.integrityEvents.guest - excusedIntegrity.integrityEventsExcluded > 0;
 const minGameFpsFailed = MIN_GAME_FPS !== null && (!(gameFps.host >= MIN_GAME_FPS) || !(gameFps.guest >= MIN_GAME_FPS));
 if (minGameFpsFailed) {
   console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));
@@ -1693,7 +2576,12 @@ if (DESYNC_GUEST) {
     desyncGuestFailed ? 'DESYNC_GUEST: the detector did not flag the desync as expected:' : 'DESYNC_GUEST: flagged:',
     JSON.stringify(summary.desyncGuest),
   );
-  process.exit(desyncGuestFailed || H.inBattleAt < 0 || G.inBattleAt < 0 ? 1 : 0);
+  // An unreadable KN_DB fails this mode as it does the others: the rows it holds were not counted.
+  process.exit(
+    desyncGuestFailed || observerDisagreements > 0 || observers.db?.error || H.inBattleAt < 0 || G.inBattleAt < 0
+      ? 1
+      : 0,
+  );
 }
 const addressMapFailed =
   ADDRESS_MAP_CHECK && [...summary.addressMapCheck.host, ...summary.addressMapCheck.guest].some((check) => !check.ok);
@@ -1702,8 +2590,100 @@ if (ADDRESS_MAP_CHECK) {
     for (const check of summary.addressMapCheck[side])
       console.log(`ADDRESS_MAP_CHECK ${side} ${check.ok ? 'ok  ' : 'FAIL'} ${check.name}: ${check.detail}`);
 }
+// DROP_PEER_MS: the signaling was dropped, every step of the reconnect is in
+// the logs, and a retry is too when the drop outlasted an attempt.
+const dropPeerFailed = DROP_PEER_MS > 0 && !(dropPeerReport?.window.proven && dropPeerReport.exercised);
+if (dropPeerReport) {
+  console.log(
+    dropPeerFailed
+      ? 'DROP_PEER_MS: no signaling dropped, no retry, or the reconnect is not all in the logs:'
+      : 'DROP_PEER_MS: reconnected:',
+    JSON.stringify(dropPeerReport),
+  );
+}
+// DELAY_SYNC_ANSWER_MS: the late answer must have been late, and handled.
+const delaySyncAnswerFailed =
+  DELAY_SYNC_ANSWER_MS > 0 &&
+  (!delaySyncAnswerReport ||
+    delaySyncAnswerReport.held.length < 1 ||
+    !delaySyncAnswerReport.timedOut ||
+    delaySyncAnswerReport.requestsReceivedByHost < 2 ||
+    !delaySyncAnswerReport.lateAnswerAfterSecondAsk ||
+    Object.values(delaySyncAnswerReport.lateAnswerHandled).every((n) => n === 0) ||
+    delaySyncAnswerReport.resyncsApplied < 1 ||
+    !delaySyncAnswerReport.newestApplied);
+if (delaySyncAnswerReport) {
+  console.log(
+    delaySyncAnswerFailed
+      ? 'DELAY_SYNC_ANSWER_MS: the late answer did not take the path under test:'
+      : 'DELAY_SYNC_ANSWER_MS: late answer handled:',
+    JSON.stringify(delaySyncAnswerReport),
+  );
+}
+// DOUBLE_RESYNC_ASK: the host dropped the newest request, the guest dropped
+// the older one's answer, and a host state was applied all the same.
+const doubleResyncAskFailed =
+  DOUBLE_RESYNC_ASK &&
+  (!doubleResyncAskReport ||
+    doubleResyncAskReport.guestAsks < 2 ||
+    doubleResyncAskReport.rateLimited < 1 ||
+    doubleResyncAskReport.lateAnswerDropped < 1 ||
+    doubleResyncAskReport.applied.length < 1);
+if (doubleResyncAskReport) {
+  console.log(
+    doubleResyncAskFailed
+      ? 'DOUBLE_RESYNC_ASK: no request dropped, no late answer dropped, or no state applied after:'
+      : 'DOUBLE_RESYNC_ASK: the owed resync was applied:',
+    JSON.stringify(doubleResyncAskReport),
+  );
+}
+// LINK_KBPS: every channel was on its connection's shared link, the fault
+// happened (a plain resync was applied, or DELAY_SYNC_ANSWER_MS's own checks
+// above), and no rollback was skipped after it outside a proven recovery.
+const linkFailed =
+  LINK_KBPS > 0 &&
+  (!linkReport.host ||
+    !linkReport.guest ||
+    linkReport.host.unmappedChannels > 0 ||
+    linkReport.guest.unmappedChannels > 0 ||
+    (LINK_RESYNC && !linkResync.applied) ||
+    !linkReport.afterFault.host ||
+    !linkReport.afterFault.guest ||
+    [linkReport.afterFault.host, linkReport.afterFault.guest].some(
+      (side) => side.deepMispredictSkips.syncLogUnexcused > 0 || side.deepMispredictSkips.cLogUnexcused > 0,
+    ));
+if (linkReport) {
+  console.log(
+    linkFailed
+      ? 'LINK_KBPS: a channel off the shared link, no fault, or a skipped rollback after it:'
+      : 'LINK_KBPS: link capped, no skipped rollback after the fault:',
+    JSON.stringify(linkReport),
+  );
+}
+// LOSE_INPUTS_BEFORE_FALLBACK: the fault ran, and nothing it dropped had to be asked for.
+const loseBeforeFallbackFailed = LOSE_INPUTS_BEFORE_FALLBACK && !loseBeforeFallbackReport?.passed;
+if (LOSE_INPUTS_BEFORE_FALLBACK) {
+  console.log(
+    loseBeforeFallbackFailed
+      ? 'LOSE_INPUTS_BEFORE_FALLBACK: not exercised, or inputs dropped before the switch were lost:'
+      : 'LOSE_INPUTS_BEFORE_FALLBACK: every dropped input reached the guest unasked:',
+    JSON.stringify(loseBeforeFallbackReport),
+  );
+}
+// A disagreement is what the fault modes exist to find: it fails the run like a mismatch.
+const observersFailed = observerDisagreements > 0 || !!observers.db?.error;
+console.log(
+  observersFailed ? 'OBSERVERS: disagreement reported (or KN_DB unreadable):' : 'OBSERVERS: no disagreement:',
+  JSON.stringify(observers),
+);
 const failed =
   addressMapFailed ||
+  linkFailed ||
+  dropPeerFailed ||
+  delaySyncAnswerFailed ||
+  loseBeforeFallbackFailed ||
+  doubleResyncAskFailed ||
+  observersFailed ||
   signalingDropFailed ||
   gpMis > 0 ||
   gsMis > 0 ||

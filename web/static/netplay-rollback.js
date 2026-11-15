@@ -1722,6 +1722,19 @@
   // page waits for one of those afterwards. See _settleInputsAtResync and
   // specs/resync_inputs.qnt.
   let _inputSettledBefore = {};
+  // Per peer slot, for asking a peer to send an input again while waiting
+  // for it (_askForMissingInputs; specs/resync_inputs.qnt ASK_FOR_MISSING):
+  // the newest frame of its inputs this page dropped as too far ahead of
+  // its own (INPUT-OOR), so it knows the peer has made it; and when it last
+  // asked for each frame. Cleared with the peer's other input state
+  // (resetPeerState, I2) and with every input timeline.
+  let _inputDroppedAheadUpTo = {};
+  let _inputAskedAt = {};
+  // Per peer slot, the frames of the switch to the reliable input channel's
+  // resend not sent yet: {from, upTo, ack} (_switchInputsToReliable). Cleared
+  // with the peer's other input state (resetPeerState, I2) and with every
+  // input timeline.
+  let _resendAtSwitch = {};
   // The oldest input from `slot` that can still be missing: nothing before
   // the rollback init or the last resync is waited for.
   const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
@@ -1756,8 +1769,8 @@
   // back to the reliable primary DC. iOS Safari's usrsctp silently
   // stops delivering on unordered streams — and the bug is at the
   // association level, so DC rotation doesn't help. Immediate fallback
-  // to the reliable DC keeps inputs flowing; GGPO redundancy covers
-  // the brief gap.
+  // to the reliable DC keeps inputs flowing; the inputs the peer had not
+  // acked go out again on it at the switch (_switchInputsToReliable).
   const _dcBufferStaleStreak = {}; // sid -> consecutive frames above threshold
   const DC_BUFFER_THRESHOLD = 2048; // bytes — ~100 input packets
   const DC_BUFFER_STALE_FRAMES = 10; // consecutive frames before fallback
@@ -4440,7 +4453,9 @@
           // Force the next match's rollback transport to a specific mode.
           // Useful for A/B testing reliable vs unreliable on the same
           // network without rebuilding. Takes effect at the next game
-          // start (host broadcasts at lockstep-ready time).
+          // start (host broadcasts at lockstep-ready time). On the host
+          // during a match it also takes effect now and is broadcast, as at
+          // the start: only the host's word sets the transport.
           //
           //   knDiag.setTransport('unreliable')  // unordered + redundancy
           //   knDiag.setTransport('reliable')    // ordered TCP-like
@@ -4456,6 +4471,18 @@
               return null;
             }
             window._knTransportOverride = mode;
+            if (_playerSlot === 0 && _phase === PHASE_RUNNING) {
+              if (mode === 'reliable' && _rbTransport === 'unreliable') _switchInputsToReliable('knDiag');
+              _rbTransport = mode;
+              for (const p of Object.values(_peers)) {
+                if (p.dc?.readyState !== 'open') continue;
+                try {
+                  p.dc.send(`rb-transport:${mode}`);
+                } catch (_) {}
+              }
+              _syncLog(`rb-transport: host broadcast=${mode} (knDiag, mid-match)`);
+              return mode;
+            }
             console.log(`transport override set to: ${mode} (takes effect at next match start)`);
             return mode;
           },
@@ -5052,10 +5079,15 @@
         // sent the state: tell each one where they start again.
         if (own.length) peer.dc.send(`inputs-settled:${from}`);
         for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
+        const askedAt = (_inputAskedAt[peer.slot] ??= {});
+        const askedNow = performance.now();
         for (let f = from; f < frame; f++) {
           const have = _remoteInputs[peer.slot]?.[f];
           if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
           peer.dc.send(`resend:${f}`);
+          // The stall's asking (_askForMissingInputs) waits its interval
+          // before asking for these again.
+          askedAt[f] = askedNow;
           asked.push(`${peer.slot}@${f}`);
         }
       } catch (err) {
@@ -5066,6 +5098,124 @@
       _syncLog(
         `RESYNC-INPUTS f=${frame} settledBefore=${from} sent=[${own.join(',')}] made=[${made.join(',')}] asked=[${asked.join(',')}]`,
       );
+    }
+  };
+
+  // While the rollback input stall waits on a peer's inputs, ask the peer
+  // to send again the ones this page waits for and knows it has made: up to
+  // the newest it received or dropped as too far ahead. A page far behind
+  // drops a peer's inputs as out of range, and the peer sends each one once:
+  // after a freeze the returning page caught up to that hole and waited,
+  // while the peer waited on the inputs the page could not make yet, and the
+  // resync that ends the split waited on both until its deadline
+  // (specs/resync_inputs.qnt, ASK_FOR_MISSING). Which frames is
+  // KNCore.framesToAskFor (web/src/input-ask.ts, proved). The peer answers
+  // `resend:` from the inputs it keeps (600 frames); one it no longer has is
+  // ignored there, and the stall's own deadline still applies.
+  const RB_INPUT_ASK_EVERY_MS = 500;
+  const RB_INPUT_ASK_MAX = 32;
+  const _askForMissingInputs = (peer, applyFrame, windowEdge) => {
+    const slot = peer.slot;
+    if (peer.dc?.readyState !== 'open') return;
+    const from = Math.max(0, windowEdge, _inputFloor(slot));
+    if (applyFrame < from) return;
+    const peerHas = Math.max(_lastRemoteFramePerSlot[slot] ?? -1, _inputDroppedAheadUpTo[slot] ?? -1);
+    const have = [];
+    for (let f = from; f <= applyFrame; f++) have.push(!!_remoteInputs[slot]?.[f]);
+    const frames = window.KNCore.framesToAskFor(have, from, applyFrame, peerHas, RB_INPUT_ASK_MAX);
+    const askedAt = (_inputAskedAt[slot] ??= {});
+    for (const f of Object.keys(askedAt)) if (Number(f) < from) delete askedAt[f];
+    if (frames.length === 0) return;
+    const now = performance.now();
+    const sent = [];
+    for (const f of frames) {
+      if (now - (askedAt[f] ?? -Infinity) < RB_INPUT_ASK_EVERY_MS) continue;
+      try {
+        peer.dc.send(`resend:${f}`);
+      } catch (_) {
+        break;
+      }
+      askedAt[f] = now;
+      sent.push(f);
+    }
+    if (sent.length) {
+      _syncLog(
+        `RB-INPUT-ASK f=${_frameNum} slot=${slot} frames=${sent[0]}..${sent.at(-1)} count=${sent.length} peerHas=${peerHas}`,
+      );
+    }
+  };
+
+  // The switch from the unreliable input channel to the reliable one, on
+  // either trigger: the DC health monitor (DC-FALLBACK reason=buffer,
+  // reason=ack-stale) or the unreliable channel closing (reason=rb-dc-close).
+  // From the next tick on, packets carry their own frame's input alone and
+  // the redundancy history is trimmed to nothing, so an input lost on the
+  // unreliable channel just before the switch, and not acked, would be sent
+  // by nothing: the peer stalled on the hole until it asked for it
+  // (RB-INPUT-ASK), or before that until its 5 s deadline
+  // (specs/input_transport.qnt, unackedInputsAreSentAgainAtTheSwitch). So
+  // every input after each peer's ack goes out again now, on the reliable
+  // channel, ahead of the next tick's packet. They come from the inputs this
+  // page keeps, not from the history, which holds only the newest
+  // RB_REDUNDANCY_MAX: a stuck channel can leave more than that unacked.
+  // Which frames is KNCore.framesToSendAgain (web/src/input-resend.ts,
+  // proved), up to the newest input this page has made: a switch between
+  // ticks (rb-dc-close, `rb-transport:`) comes after _frameNum has moved on
+  // and before that frame's input is made, and capping from it would cut
+  // the oldest frame in range for one that does not exist. A frame the peer
+  // already holds is dropped there as a duplicate. One send per frame, no wait.
+  const RB_RESEND_AT_SWITCH_MAX = 120;
+  const _switchInputsToReliable = (reason) => {
+    _rbTransport = 'reliable';
+    _syncLog(`DC-FALLBACK: switched to reliable DC (${reason}) — inputs now via primary channel`);
+    const newest = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum) ? _frameNum : _frameNum - 1;
+    for (const [sid, peer] of Object.entries(_peers)) {
+      if (peer.synthetic === true || peer.slot === null || peer.slot === undefined) continue;
+      if (_isPeerPendingLateJoin(sid, peer) || peer.dc?.readyState !== 'open') continue;
+      const ack = peer.lastAckFromPeer ?? -1;
+      const frames = window.KNCore.framesToSendAgain(ack, newest, RB_RESEND_AT_SWITCH_MAX);
+      if (frames.length === 0) {
+        delete _resendAtSwitch[peer.slot];
+        continue;
+      }
+      _resendAtSwitch[peer.slot] = { from: frames[0], upTo: frames.at(-1), ack };
+      _sendResendAtSwitch(peer);
+    }
+  };
+  // Sends the frames of the switch's resend not sent yet, oldest first. A
+  // send can throw partway (the channel's buffer is full): the frames from
+  // there on stay kept, and each tick sends them again before its own
+  // packet until all are sent or the peer is reset (resetPeerState, I2).
+  // Every kept frame, not only those after the peer's ack: on the reliable
+  // channel a packet carries its own frame alone, so the ack can pass a
+  // frame the peer is missing (specs/input_transport.qnt, RETRY_UNSENT,
+  // resendFailsPartwayTest).
+  const _sendResendAtSwitch = (peer) => {
+    const kept = _resendAtSwitch[peer.slot];
+    if (!kept || peer.dc?.readyState !== 'open') return;
+    const start = kept.from;
+    let count = 0;
+    try {
+      while (kept.from <= kept.upTo) {
+        const input = _localInputs[kept.from];
+        if (input !== undefined) {
+          peer.dc.send(KNShared.encodeInput(kept.from, input, peer.lastFrameFromPeer ?? -1).buffer);
+          count++;
+        }
+        kept.from++;
+      }
+      delete _resendAtSwitch[peer.slot];
+    } catch (err) {
+      // Once per frame it stopped at: a full buffer can throw tick after tick.
+      if (kept.stoppedAt !== kept.from) {
+        kept.stoppedAt = kept.from;
+        _syncLog(
+          `DC-FALLBACK resend stopped slot=${peer.slot} at frame=${kept.from} upTo=${kept.upTo}: ${err} — the rest goes next tick`,
+        );
+      }
+    }
+    if (count > 0) {
+      _syncLog(`DC-FALLBACK resent slot=${peer.slot} ack=${kept.ack} frames=${start}..${kept.from - 1} count=${count}`);
     }
   };
 
@@ -5417,6 +5567,9 @@
     delete _lateJoinActivatedAtFrame[slot];
     delete _remoteInputs[slot];
     delete _inputSettledBefore[slot];
+    delete _inputDroppedAheadUpTo[slot];
+    delete _inputAskedAt[slot];
+    delete _resendAtSwitch[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _menuStartReadyPeers[slot];
@@ -6412,9 +6565,28 @@
   let _syncFrame = 0; // frame number of incoming sync
   let _syncIsFull = true; // true=full state, false=XOR delta
   let _syncChunkTimeoutTimer = null;
+  // Restarts the chunk deadline of the transfer being received; null when none is.
+  let _rearmSyncChunkDeadline = null;
   let _syncChunkSessionId = 0;
   let _syncLastChunkProgressLogAt = 0;
+  // Guest: a transfer is given up when no chunk of it has arrived for this
+  // long (I1), counted from its header and again from each chunk. A deadline
+  // on the whole state gave up transfers that were still arriving: paced,
+  // 1.4 MB needs more than 3 s on a link below about 3.9 Mbit/s, and the host
+  // then went on pacing the transfer the guest had dropped, its inputs
+  // queued behind it (specs/tick_deadlines.qnt,
+  // aTransferMakingProgressIsNotAbandoned, noChunkForATransferTheGuestDropped).
   const SYNC_CHUNK_TIMEOUT_MS = 3000;
+  // Host: a state chunk waits for the channel to hold less than
+  // SYNC_SEND_LOW_WATER bytes (polled), at most SYNC_SEND_STALL_MS each (I1;
+  // sendSyncChunks). Four 64 KB chunks: the host's inputs never queue behind
+  // more than that (0.4 s at 5 Mbit/s), and a page whose main thread is busy
+  // still moves each chunk well inside the guest's 3 s chunk timeout. With one
+  // chunk, each took two or three turns of the main thread: about 250 ms in
+  // the test container, 6 s for a state.
+  const SYNC_SEND_LOW_WATER = 4 * 64000;
+  const SYNC_SEND_POLL_MS = 5;
+  const SYNC_SEND_STALL_MS = 15000;
   const SOCKET_SYNC_B64_SOFT_LIMIT = 3900000;
   let _lastResyncTime = 0; // timestamp of last resync request (10s cooldown)
   let _resyncRequestInFlight = false; // true while an explicit sync-request is in transit — prevents stacking
@@ -6425,16 +6597,117 @@
   // rate limit plus its capture deadline, so an answer on its way is not cut.
   let _resyncRequestSentAt = 0;
   const RESYNC_REQUEST_TIMEOUT_MS = 8000;
+  // A "now" request (no target frame: a reconnect, a network change, a tab
+  // shown again, a missing delta base, the socket fallback, the boot sync,
+  // the input stall's) is sent because this guest's state is known to be
+  // wrong. It can go unanswered: the host
+  // drops a request inside its rate limit, a channel can lose it, and the
+  // guest drops an older request's answer that would take it back. Its
+  // deadline let it go and asked nothing, so the guest ran on with the state
+  // it had asked to replace (specs/resync_reask.qnt,
+  // anOwedResyncIsNotForgotten). The resync stays owed until a host state is
+  // applied (applySyncState); the deadline asks again, at most
+  // RESYNC_MAX_ASKS_AGAIN times, then gives up visibly (RESYNC-REASK-GIVEUP).
+  // The late joiner's lost-host resync has its own bound and goes first.
+  let _owedResync = false;
+  let _owedResyncAsksAgain = 0;
+  const RESYNC_MAX_ASKS_AGAIN = 2;
+  // An answer whose chunks are all in is decoded off the main thread (the
+  // worker decompresses it and, for a delta, XORs it) before it is held: the
+  // deadline does not count meanwhile, or it lets the request go while its
+  // answer is on its way, and asking again would make that answer an older
+  // request's (theDecodedAnswerIsNotCut). I1: for at most
+  // SYNC_DECODE_GRACE_MS from the newest decode's start, so a worker reply
+  // that never comes does not hold the deadline off for good.
+  let _syncDecodes = 0;
+  let _syncDecodeStartedAt = 0;
+  const SYNC_DECODE_GRACE_MS = 10000;
+  const _decodingSyncAnswer = async (decode) => {
+    _syncDecodes++;
+    _syncDecodeStartedAt = performance.now();
+    try {
+      return await decode();
+    } finally {
+      _syncDecodes--;
+    }
+  };
+  // The deadline's step is resyncDeadlineStep (web/src/resync-request.ts),
+  // written out here and compared with it when the deadline acts (observing).
   const _checkResyncRequestDeadline = () => {
     if (!_resyncRequestInFlight) return;
-    // An answer is arriving or held: those waits have their own deadlines.
-    if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;
-    const waitedMs = performance.now() - _resyncRequestSentAt;
+    const now = performance.now();
+    const waitedMs = now - _resyncRequestSentAt;
+    // An answer arriving or held, or a coordinated target, has its own deadline.
+    const answerComing = _syncExpected > 0 || !!_pendingResyncState || _syncTargetFrame > 0;
+    const decoding = _syncDecodes > 0;
+    const decodingForMs = decoding ? now - _syncDecodeStartedAt : 0;
+    if (answerComing || (decoding && decodingForMs < SYNC_DECODE_GRACE_MS)) return;
     if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;
+    let step;
+    if (_lateJoinLostHost) step = 'lostHost';
+    else if (!_owedResync) step = 'letGo';
+    else if (_owedResyncAsksAgain >= RESYNC_MAX_ASKS_AGAIN) step = 'stopAsking';
+    else step = 'askAgain';
+    _resyncObserve('deadline-step', step, (rules) =>
+      rules.resyncDeadlineStep(
+        _resyncRequestInFlight,
+        answerComing,
+        decoding,
+        decodingForMs,
+        SYNC_DECODE_GRACE_MS,
+        waitedMs,
+        RESYNC_REQUEST_TIMEOUT_MS,
+        _lateJoinLostHost,
+        _owedResync,
+        _owedResyncAsksAgain,
+        RESYNC_MAX_ASKS_AGAIN,
+      ),
+    );
     _resyncRequestInFlight = false;
-    _syncLog(`RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} — no state came, may ask again`);
+    _syncLog(
+      `RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} ` +
+        `decoding=${decoding ? Math.round(decodingForMs) : 'no'} step=${step} — no state came`,
+    );
     // A late joiner still behind the host asks again (bounded there).
-    _resyncAfterLostHost('resync request timed out');
+    if (step === 'lostHost') _resyncAfterLostHost('resync request timed out');
+    else if (step === 'askAgain') _askAgainForOwedResync();
+    else if (step === 'stopAsking') _stopAskingForOwedResync('its asks again went unanswered');
+  };
+  const _stopAskingForOwedResync = (why) => {
+    const asks = _owedResyncAsksAgain;
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
+    _syncLog(`RESYNC-REASK-GIVEUP f=${_frameNum}: ${why} (asked again ${asks}/${RESYNC_MAX_ASKS_AGAIN})`);
+    KNEvent('resync-reask-giveup', 'No resync from the host after asking again', { asks, why });
+  };
+  // The owed resync, asked for again: a full state, now, on the channel to
+  // the host, or over the socket when that channel is not open.
+  const _askAgainForOwedResync = () => {
+    if (!_owedResync || _playerSlot === 0 || _phase !== PHASE_RUNNING) return;
+    _owedResyncAsksAgain++;
+    const ask = `${_owedResyncAsksAgain}/${RESYNC_MAX_ASKS_AGAIN}`;
+    _setLastSyncState(null, 'resync-reask');
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+    if (hostDc?.readyState === 'open') {
+      const requestId = _beginResyncRequest(-1, true);
+      try {
+        _sendResyncRequest(hostDc, requestId, 'sync-request-full');
+        _syncLog(`RESYNC-REASK f=${_frameNum} ask=${ask}: sent sync-request-full to the host`);
+        return;
+      } catch (e) {
+        _resyncRequestInFlight = false;
+        _syncLog(`RESYNC-REASK f=${_frameNum} ask=${ask}: channel send failed: ${e}`);
+      }
+    }
+    if (_requestSocketFullResync('resync-reask', true)) {
+      _syncLog(`RESYNC-REASK f=${_frameNum} ask=${ask}: sent over the socket`);
+      return;
+    }
+    // Nothing could carry it, and with no request out no deadline comes
+    // back here: stop now, visibly. A reconnect asks afresh.
+    _stopAskingForOwedResync('no channel to the host could carry the ask');
   };
   // Each request has a number and the state that answers it carries that
   // number (specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST). A request can be
@@ -6451,14 +6724,20 @@
   // The frame the newest request named (-1 = it named none). A late answer
   // from before it is dropped whether or not the target is still live: the
   // target's deadline gives the target up, not the frame the guest asked at
-  // (specs/resync_flow.qnt, beforeTheFrameAsked).
+  // (specs/resync_flow.qnt, lateAndBehind).
   let _resyncRequestAt = -1;
   const _requestIdFrom = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
-  const _beginResyncRequest = (at = -1) => {
+  // `again`: the deadline asking again for an owed "now" resync; any other
+  // "now" request starts the owed resync's count afresh.
+  const _beginResyncRequest = (at = -1, again = false) => {
     _resyncRequestInFlight = true;
     _resyncRequestSentAt = performance.now();
     _resyncRequestId++;
     _resyncRequestAt = at;
+    if (at < 0 && !again) {
+      _owedResync = true;
+      _owedResyncAsksAgain = 0;
+    }
     return _resyncRequestId;
   };
   // The number travels in a message of its own, just ahead of the request on
@@ -6502,15 +6781,20 @@
     _resyncObserve('answers-an-older-request', answerFor > 0 && answerFor !== _resyncRequestId, (rules) =>
       rules.answersAnOlderRequest(answerFor, _resyncRequestId),
     );
-  // A state answering an older request, from before the frame the newest one
-  // named: applied, it would take this guest back below that frame.
-  const _isLateAnswerBeforeFrameAsked = (state) =>
+  // A state answering an older request, from before the frame this guest is
+  // on or the frame the newest request named: applied, it would take this
+  // guest back. Whether or not the newest request named a frame: after one
+  // asked "now" (reconnect, network change, lifecycle, a missing delta base,
+  // the late-join lost-host resync) a late answer was applied whatever its
+  // frame (specs/resync_flow.qnt, immediateLateAnswerTest).
+  const _isLateAnswerBehind = (state) =>
     !!state &&
     _resyncObserve(
-      'late-answer-before-frame-asked',
-      _answersAnOlderRequest(state.answerFor || 0) && _resyncRequestAt > 0 && state.frame < _resyncRequestAt,
+      'late-answer-behind',
+      _answersAnOlderRequest(state.answerFor || 0) &&
+        (state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt)),
       (rules) =>
-        rules.isLateAnswerBeforeFrameAsked(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt),
+        rules.isLateAnswerBehind(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt, _frameNum),
     );
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
@@ -6837,6 +7121,9 @@
   // per sid (resetPeerState) or for the whole match (stop).
   const _syncQueueGen = {};
   let _syncQueueEpoch = 0;
+  // host: per guest sid, the state transfers handed to its channel, one at a
+  // time (sendSyncChunks). Per-peer state: resetPeerState drops it.
+  let _syncSendChains = {};
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
@@ -6991,7 +7278,7 @@
     _syncLog(`${reason}: lifecycle resync guard cleared`);
   }
 
-  function _requestSocketFullResync(reason) {
+  function _requestSocketFullResync(reason, again = false) {
     if (_playerSlot === 0 || _phase !== PHASE_RUNNING || !socket) return false;
     const hostEntry = _peerEntryForSlot(0);
     const hostSid = hostEntry?.[0];
@@ -7001,7 +7288,7 @@
     }
     try {
       _beginLifecycleResyncGuard(reason);
-      const requestId = _beginResyncRequest();
+      const requestId = _beginResyncRequest(-1, again);
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
       _signalSocket.emit('data-message', {
@@ -7077,16 +7364,18 @@
       );
       const answerFor = _requestIdFrom(msg.requestId);
       if (answerFor > 0) _hostNumbersAnswers = true;
-      const decompressed = await decodeAndDecompress(msg.data);
-      await _handleDecodedSyncPayload({
-        decompressed,
-        frame,
-        isFull: !!msg.full,
-        isProactive: !!msg.proactive,
-        isRegions: false,
-        wireSize: msg.compressedSize || 0,
-        source: 'socket',
-        answerFor,
+      await _decodingSyncAnswer(async () => {
+        const decompressed = await decodeAndDecompress(msg.data);
+        await _handleDecodedSyncPayload({
+          decompressed,
+          frame,
+          isFull: !!msg.full,
+          isProactive: !!msg.proactive,
+          isRegions: false,
+          wireSize: msg.compressedSize || 0,
+          source: 'socket',
+          answerFor,
+        });
       });
     } catch (err) {
       _syncLog(`socket sync-state failed: ${err?.message || err}`);
@@ -8140,6 +8429,12 @@
       recvFrame > _frameNum + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES
     ) {
       _syncLog(`INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES}`);
+      // Too far ahead: the peer has made it and will not send it again on
+      // its own. When this page catches up to it, it asks
+      // (_askForMissingInputs).
+      if (Number.isFinite(recvFrame) && recvFrame > _frameNum) {
+        _inputDroppedAheadUpTo[peer.slot] = Math.max(_inputDroppedAheadUpTo[peer.slot] ?? -1, recvFrame);
+      }
       return false;
     }
     const recvInput = { buttons: decoded.buttons, lx: decoded.lx, ly: decoded.ly, cx: decoded.cx, cy: decoded.cy };
@@ -8319,8 +8614,8 @@
       if (peer && peer.rbDc === ch) {
         resetPeerRollbackTransport(peer, remoteSid, 'rb-dc-close');
         if (_rbTransport === 'unreliable') {
-          _rbTransport = 'reliable';
           _syncLog(`DC-FALLBACK reason=rb-dc-close sid=${remoteSid} — inputs now via primary channel`);
+          _switchInputsToReliable('rb-dc-close');
         }
       }
       _syncLog(`rb-input DC closed sid=${remoteSid}`);
@@ -8765,6 +9060,16 @@
         // other than 'unreliable' is treated as reliable (the safe default).
         if (e.data.startsWith('rb-transport:')) {
           const mode = e.data.slice('rb-transport:'.length);
+          // Only the host's word sets the transport. A guest's would let any
+          // player flip it, and each flip to reliable makes this page send
+          // every peer up to RB_RESEND_AT_SWITCH_MAX inputs again.
+          if (_peers[remoteSid]?.slot !== 0) {
+            _syncLog(`rb-transport: ${mode} from slot=${_peers[remoteSid]?.slot ?? 'unknown'} ignored — not the host`);
+            return;
+          }
+          // Told to leave the unreliable channel: the same switch as a
+          // fallback, so the inputs not acked go out again.
+          if (mode !== 'unreliable' && _rbTransport === 'unreliable') _switchInputsToReliable('rb-transport');
           _rbTransport = mode === 'unreliable' ? 'unreliable' : 'reliable';
           _syncLog(`rb-transport: host=${mode} adopted=${_rbTransport}`);
           return;
@@ -9007,7 +9312,9 @@
           if (_syncChunkTimeoutTimer) clearTimeout(_syncChunkTimeoutTimer);
           const sessionId = _syncChunkSessionId;
           const transferAnswers = _syncAnswerFor;
-          _syncChunkTimeoutTimer = setTimeout(() => {
+          const onChunkDeadline = () => {
+            _syncChunkTimeoutTimer = null;
+            _rearmSyncChunkDeadline = null;
             if (sessionId !== _syncChunkSessionId || _syncExpected <= 0) return;
             const received = _syncChunks.length;
             if (_answersAnOlderRequest(transferAnswers)) {
@@ -9022,13 +9329,19 @@
               return;
             }
             _syncLog(
-              `sync chunks timeout: ${received}/${_syncExpected} chunks after ${SYNC_CHUNK_TIMEOUT_MS}ms — requesting socket full sync`,
+              `sync chunks timeout: ${received}/${_syncExpected} chunks, none for ${SYNC_CHUNK_TIMEOUT_MS}ms — requesting socket full sync`,
             );
             _syncChunks = [];
             _syncExpected = 0;
             _resyncRequestInFlight = false;
             _requestSocketFullResync('sync-chunk-timeout');
-          }, SYNC_CHUNK_TIMEOUT_MS);
+          };
+          _rearmSyncChunkDeadline = () => {
+            if (sessionId !== _syncChunkSessionId) return;
+            if (_syncChunkTimeoutTimer) clearTimeout(_syncChunkTimeoutTimer);
+            _syncChunkTimeoutTimer = setTimeout(onChunkDeadline, SYNC_CHUNK_TIMEOUT_MS);
+          };
+          _rearmSyncChunkDeadline();
           _syncLog(
             `sync-start received: frame=${_syncFrame} expected=${_syncExpected} full=${_syncIsFull} proactive=${_syncIsProactive}`,
           );
@@ -9047,6 +9360,7 @@
           _syncChunks = [];
           _syncLastChunkProgressLogAt = 0;
           _syncChunkSessionId++;
+          _rearmSyncChunkDeadline = null;
           _syncLog(`sync-regions-start received: frame=${_syncFrame} expected=${_syncExpected}`);
           return;
         }
@@ -9064,11 +9378,15 @@
             _syncLastChunkProgressLogAt = now;
             _syncLog(`sync chunks progress: ${_syncChunks.length}/${_syncExpected}`);
           }
-          if (_syncChunks.length >= _syncExpected) {
+          if (_syncChunks.length < _syncExpected) {
+            // Progress: the deadline starts again.
+            _rearmSyncChunkDeadline?.();
+          } else {
             if (_syncChunkTimeoutTimer) {
               clearTimeout(_syncChunkTimeoutTimer);
               _syncChunkTimeoutTimer = null;
             }
+            _rearmSyncChunkDeadline = null;
             _syncLog(`sync chunks complete: ${_syncChunks.length}/${_syncExpected} chunks received`);
             handleSyncChunksComplete();
           }
@@ -9130,7 +9448,9 @@
    * Shared queues filtered to remove entries for this slot:
    *   - _pendingCInputs (by slot)
    *   - _scheduledSyncRequests (by targetSid if sid provided; bumps
-   *     _syncQueueGen so an in-flight push can't requeue for it)
+   *     _syncQueueGen so an in-flight push can't requeue for it, and a
+   *     state transfer queued or running for it is dropped)
+   *   - _syncSendChains (by sid): that peer's chain of state transfers
    *
    * @param {number} slot - player slot to clear (0-3)
    * @param {string} reason - short human-readable reason for the reset;
@@ -9155,6 +9475,9 @@
     // Slot-indexed globals
     delete _remoteInputs[slot];
     delete _inputSettledBefore[slot];
+    delete _inputDroppedAheadUpTo[slot];
+    delete _inputAskedAt[slot];
+    delete _resendAtSwitch[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _peerLastAdvanceTime[slot];
@@ -9182,9 +9505,14 @@
     }
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
+      _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
-      // the new peer session.
+      // the new peer session, and a transfer on its chain, running or still
+      // queued, must not reach the new connection: each checks this
+      // generation and stops (_syncTargetCurrent). The chain itself goes,
+      // so the new connection's first transfer does not wait for them.
       _syncQueueGen[opts.sid] = (_syncQueueGen[opts.sid] || 0) + 1;
+      delete _syncSendChains[opts.sid];
     }
 
     // Stall tracking — if we were stalled waiting on this slot's apply
@@ -11053,6 +11381,9 @@
       observe('giveUp');
       _lateJoinLostHost = false;
       _lateJoinLostHostAsks = 0;
+      // Its asks marked a "now" resync owed: this give-up ends that too.
+      _owedResync = false;
+      _owedResyncAsksAgain = 0;
       _syncLog(
         `LATE-JOIN-LOST-HOST-GIVEUP f=${_frameNum} (${source}): ${LATE_JOIN_LOST_HOST_MAX_ASKS} resync requests went unanswered`,
       );
@@ -12602,6 +12933,9 @@
     _localInputs = {};
     _remoteInputs = preservedRemoteInputs;
     _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
+    _inputDroppedAheadUpTo = {};
+    _inputAskedAt = {};
+    _resendAtSwitch = {};
     _peerInputStarted = preservedPeerStarted;
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
   };
@@ -13394,6 +13728,9 @@
         _localInputs = {};
         _remoteInputs = {};
         _inputSettledBefore = {};
+        _inputDroppedAheadUpTo = {};
+        _inputAskedAt = {};
+        _resendAtSwitch = {};
         for (let d = 0; d < DELAY_FRAMES; d++) {
           _localInputs[_frameNum + d] = KNShared.ZERO_INPUT;
         }
@@ -13638,6 +13975,8 @@
     _resyncRequestInFlight = false;
     _resyncRequestId = 0;
     _resyncRequestAt = -1;
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
     _hostNumbersAnswers = false;
     _syncAnswerFor = 0;
     // A late join's owed resync belongs to this match: it does not carry
@@ -14296,13 +14635,14 @@
     // kn_set_frame then, so JS would rewind its frame counter while C kept
     // its own and finished the old replay over the new state (the peers
     // split from that frame). Hold the state until the replay finishes.
-    // The answer to a request given up on, from before the frame the newest
-    // request named: applied, it would take this guest back below that frame
-    // (specs/resync_flow.qnt, aLateAnswerDoesNotTakeTheGuestBack). Dropped
-    // here, before either branch below, so it is dropped after the target's
-    // deadline too (lateAnswerAfterTheTargetDeadlineTest). A wait at the
+    // The answer to a request given up on, from before this guest's frame or
+    // the frame the newest request named: applied, it would take this guest
+    // back (specs/resync_flow.qnt, aLateAnswerDoesNotTakeTheGuestBack).
+    // Dropped here, before either branch below, so it is dropped after the
+    // target's deadline too (lateAnswerAfterTheTargetDeadlineTest), and on
+    // the tick the guest moves past a late answer it held. A wait at the
     // target goes on, to that deadline (I1).
-    if (_isLateAnswerBeforeFrameAsked(_pendingResyncState)) {
+    if (_isLateAnswerBehind(_pendingResyncState)) {
       _syncLog(
         `SYNC-LATE-ANSWER-DROPPED f=${_frameNum} answerFor=${_pendingResyncState.answerFor} ` +
           `newest=${_resyncRequestId} frame=${_pendingResyncState.frame} asked=${_resyncRequestAt} ` +
@@ -14644,10 +14984,12 @@
     const nowInput = performance.now();
     const lifecycleGuardTimedOut =
       _lifecycleResyncPending && nowInput - _lifecycleResyncStartedAt >= LIFECYCLE_RESYNC_PENDING_TIMEOUT_MS;
-    if (lifecycleGuardTimedOut) {
-      _clearLifecycleResyncGuard('lifecycle resync guard timeout');
-      _resyncRequestInFlight = false;
-    }
+    // The guard holds the player's input; the timeout gives the input back.
+    // It does not let the request go: that is the request's own deadline
+    // (_checkResyncRequestDeadline, I1), which asks again for an owed resync.
+    // Letting it go here cut short the deadline's ask again, sent with this
+    // guard still armed (specs/resync_reask.qnt, GUARD_LETS_GO).
+    if (lifecycleGuardTimedOut) _clearLifecycleResyncGuard('lifecycle resync guard timeout');
     const suppressResumeGuardInput = nowInput < _resumeInputGuardUntil || _lifecycleResyncPending;
     if ((suppressEjsPausedInput || suppressResumeGuardInput) && _frameNum % 60 === 0) {
       _syncLog(
@@ -14707,6 +15049,8 @@
     for (let i = 0; i < activePeers.length; i++) {
       const peer = activePeers[i];
       if (peer.synthetic === true) continue;
+      // A resend at the switch to the reliable channel that a send cut short.
+      if (_resendAtSwitch[peer.slot]) _sendResendAtSwitch(peer);
       try {
         const ackFrame = peer.lastFrameFromPeer ?? -1;
         const needsRedundancy = shouldSendRedundancy && (peer.lastAckFromPeer ?? -1) < _frameNum - 1;
@@ -14740,9 +15084,10 @@
     // ── DC health monitor: detect stuck unreliable DC, fall back immediately ──
     // iOS Safari's SCTP bug affects ALL unordered streams on the association,
     // so DC rotation doesn't help — new streams die too. Instead, detect the
-    // failure and switch to the reliable primary DC immediately. The GGPO
-    // redundancy layer covers the brief gap (first reliable packet carries
-    // all unACKed frames).
+    // failure and switch to the reliable primary DC immediately. The
+    // switch sends every input the peer has not acked again on the reliable
+    // DC, ahead of the next tick's packet, which carries its own frame alone
+    // (_switchInputsToReliable).
     if (_useCRollback && _rbTransport === 'unreliable') {
       const nowDc = performance.now();
       for (const [sid, peer] of Object.entries(_peers)) {
@@ -14774,10 +15119,9 @@
         }
 
         if (shouldFallback) {
-          _rbTransport = 'reliable';
-          _syncLog('DC-FALLBACK: switched to reliable DC — inputs now via primary channel');
           // Reset ack tracking so peer isn't immediately marked phantom
           peer.lastAckAdvanceTime = nowDc;
+          if (_rbTransport === 'unreliable') _switchInputsToReliable('health');
         }
       }
     }
@@ -14858,11 +15202,30 @@
           window._knBootSyncDone = true;
           if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
             const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-            if (hostPeer?.dc?.readyState === 'open') {
+            if (_resyncRequestInFlight) {
+              // The request that is out brings a host state. Asked over, its
+              // answer would be an older request's, dropped once this guest
+              // is past it, while the host's rate limit may drop this one
+              // (specs/resync_flow.qnt, guestAsksOnItsOwn).
+              _syncLog(`BOOT-SYNC skipped at f=${_frameNum}: request ${_resyncRequestId} is out`);
+            } else if (hostPeer?.dc?.readyState === 'open') {
+              // A "now" request like the others: numbered, out and owed. Sent
+              // bare, its answer came back with no number, which to this
+              // guest is a state the host sent for its own reasons, applied
+              // wherever it finds the guest: arriving after a newer request
+              // it took the guest back 117 frames (specs/resync_flow.qnt,
+              // EVERY_REQUEST_NUMBERED, bootAnswerAfterANewerRequestTest).
+              // A target is left alone: a state held a few frames ahead
+              // would otherwise be applied early.
+              const bootRequestId = _beginResyncRequest();
               try {
-                hostPeer.dc.send('sync-request-full');
-                _syncLog(`BOOT-SYNC: guest requesting host state at f=${_frameNum} (JIT boot divergence correction)`);
+                _sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');
+                _syncLog(
+                  `BOOT-SYNC: guest requesting host state at f=${_frameNum} request=${bootRequestId} ` +
+                    '(JIT boot divergence correction)',
+                );
               } catch (e) {
+                _resyncRequestInFlight = false;
                 _syncLog(`BOOT-SYNC send failed: ${e}`);
               }
             }
@@ -14969,7 +15332,9 @@
                   _rbInputStallStartTime = 0;
                   continue;
                 }
-                // Too far ahead — stall to let peer catch up
+                // Too far ahead — stall to let peer catch up, and ask for
+                // what it has already sent that this page does not hold.
+                _askForMissingInputs(p, rbApplyFrame, windowEdge);
                 if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
                   _syncLog(
                     `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
@@ -16924,10 +17289,18 @@
               if (_playerSlot !== 0) {
                 const _hostForResync = Object.values(_peers).find((p) => p.slot === 0);
                 const _hostDcForResync = _hostForResync?.dc;
-                if (_hostDcForResync?.readyState === 'open') {
+                if (_resyncRequestInFlight) {
+                  // As the boot sync: the request that is out brings a host state.
+                  _syncLog(`INPUT-STALL-RESYNC f=${_frameNum}: request ${_resyncRequestId} is out, not asked again`);
+                } else if (_hostDcForResync?.readyState === 'open') {
+                  // Numbered like the boot sync's, and for the same reason: an
+                  // unnumbered answer is applied wherever it finds the guest
+                  // (specs/resync_flow.qnt, EVERY_REQUEST_NUMBERED).
+                  const stallRequestId = _beginResyncRequest();
                   try {
-                    _hostDcForResync.send('sync-request-full');
+                    _sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');
                   } catch (_e) {
+                    _resyncRequestInFlight = false;
                     _syncLog(`INPUT-STALL-RESYNC send failed: ${_e}`);
                   }
                 }
@@ -17452,6 +17825,18 @@
   // -- Async state sync (compress/decompress via Web Worker) -----------------
 
   let _pushingSyncState = false; // debounce concurrent sync-request handling
+  // Requests that came in while a state was being sent, by target sid ('' for
+  // every guest): sent next, newest options kept. A paced transfer lasts as
+  // long as the link takes, so dropping them, as before, would lose a guest's
+  // request for as long (its request deadline would ask again 8 s later).
+  const _queuedSyncPushes = new Map();
+  const _runQueuedSyncPush = () => {
+    const next = _queuedSyncPushes.entries().next();
+    if (next.done) return;
+    const [sid, options] = next.value;
+    _queuedSyncPushes.delete(sid);
+    pushSyncState(sid || null, false, options);
+  };
   let _proactivePushInFlight = false; // separate flag so proactive pushes never block explicit sync-requests
 
   let _lastSyncState = null; // host/guest: previous state for delta computation
@@ -17469,7 +17854,13 @@
     if (_playerSlot !== 0 || !_syncEnabled) return;
     // Proactive and explicit syncs use separate in-flight guards so that a
     // proactive push in progress never drops a sync-request from a reconnecting guest.
-    if (isProactive ? _proactivePushInFlight : _pushingSyncState) return;
+    if (isProactive ? _proactivePushInFlight : _pushingSyncState) {
+      if (!isProactive) {
+        _queuedSyncPushes.set(targetSid || '', options);
+        _syncLog(`sync push for ${targetSid || 'all'} queued behind the one in flight`);
+      }
+      return;
+    }
 
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return null;
@@ -17480,6 +17871,12 @@
     }
     let currentState;
     const frame = _frameNum;
+    // Who this state is for, on the connections they are on now: a reconnect
+    // while it is compressed or queued drops it for that guest.
+    const targets = _syncTargetsFor(targetSid);
+    const socketTarget = targetSid
+      ? { sid: targetSid, peer: _peers[targetSid], epoch: _syncQueueEpoch, gen: _syncQueueGen[targetSid] || 0 }
+      : null;
 
     if (_hasKnSync) {
       // C-level: read state directly from g_dev — no getState(), no memory growth
@@ -17491,7 +17888,10 @@
       if (bytesWritten === 0) {
         _syncLog('kn_sync_read returned 0');
         if (isProactive) _proactivePushInFlight = false;
-        else _pushingSyncState = false;
+        else {
+          _pushingSyncState = false;
+          _runQueuedSyncPush();
+        }
         return null;
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
@@ -17590,6 +17990,10 @@
           return;
         }
         const encoded = await compressAndEncode(toCompress);
+        if (!_syncTargetCurrent(socketTarget)) {
+          _syncLog(`socket sync dropped: ${targetSid} reconnected or match ended since the state was taken`);
+          return [];
+        }
         const b64KB = Math.round(encoded.data.length / 1024);
         const wireKB = Math.round(encoded.compressedSize / 1024);
         if (encoded.data.length <= SOCKET_SYNC_B64_SOFT_LIMIT) {
@@ -17616,13 +18020,13 @@
           _syncLog(
             `socket sync too large (${b64KB}KB b64 > ${Math.round(SOCKET_SYNC_B64_SOFT_LIMIT / 1024)}KB), falling back to DC chunks`,
           );
-          return await sendSyncChunks(base64ToUint8(encoded.data), frame, isFull, targetSid, isProactive, requestIds);
+          return await sendSyncChunks(base64ToUint8(encoded.data), frame, isFull, targets, isProactive, requestIds);
         }
       } else {
         const compressed = await compressState(toCompress);
         const sizeKB = Math.round(compressed.length / 1024);
         _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
-        return await sendSyncChunks(compressed, frame, isFull, targetSid, isProactive, requestIds);
+        return await sendSyncChunks(compressed, frame, isFull, targets, isProactive, requestIds);
       }
       return [];
     } catch (err) {
@@ -17630,79 +18034,140 @@
       return null;
     } finally {
       if (isProactive) _proactivePushInFlight = false;
-      else _pushingSyncState = false;
+      else {
+        _pushingSyncState = false;
+        _runQueuedSyncPush();
+      }
     }
   };
 
-  // Returns the sids of targets that were skipped because their channel
-  // wasn't open.
-  const sendSyncChunks = async (compressed, frame, isFull, targetSid, isProactive = false, requestIds = {}) => {
-    const skipped = [];
-    // Host: send compressed state/delta via DC in 64KB chunks.
-    // Chunks are sent with yields between them so input messages can
-    // interleave — prevents DataChannel saturation that causes mutual
-    // input deadlock (see project_stall_timeout_desync).
+  // Host: the guests a state is for, each with the connection it is on as the
+  // state is taken: the match epoch, and the guest's _syncQueueGen, which
+  // resetPeerState bumps on a reconnect. A transfer that comes up after
+  // either changed is dropped (KNCore.syncSend.transferStillFor;
+  // specs/tick_deadlines.qnt, aTransferQueuedBeforeAResetNeverReachesTheNewConnection):
+  // its state and request id belong to a connection that is gone.
+  const _syncTargetsFor = (targetSid) => {
+    const entries = targetSid
+      ? [[targetSid, _peers[targetSid]]]
+      : Object.entries(_peers).filter(([, p]) => getActivePeers().includes(p));
+    return entries
+      .filter(([sid, peer]) => peer && !_isPeerPendingLateJoin(sid, peer))
+      .map(([sid, peer]) => ({ sid, peer, epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0 }));
+  };
+  // Is the connection a transfer was taken for still the one there?
+  const _syncTargetCurrent = (t) =>
+    _peers[t.sid] === t.peer &&
+    window.KNCore.syncSend.transferStillFor(t.epoch, t.gen, _syncQueueEpoch, _syncQueueGen[t.sid] || 0);
+
+  // One state transfer at a time per guest: a paced transfer awaits between
+  // chunks, and a second one on the same channel would interleave its
+  // chunks. Each guest has a chain of its own, so a guest whose link is
+  // congested never holds up another's transfer (a broadcast to several).
+  // Resolves to the sids of targets that were skipped because their channel
+  // wasn't open. The chains are _syncSendChains, by sid.
+  const sendSyncChunks = async (compressed, frame, isFull, targets, isProactive = false, requestIds = {}) => {
+    const outcomes = await Promise.all(
+      targets.map((t) => {
+        const run = (_syncSendChains[t.sid] ?? Promise.resolve()).then(() =>
+          _sendSyncChunksTo(t, compressed, frame, isFull, isProactive, requestIds),
+        );
+        _syncSendChains[t.sid] = run.catch(() => {});
+        return run;
+      }),
+    );
+    _syncLog(
+      `pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${Math.ceil(compressed.length / 64000)} chunks)`,
+    );
+    return targets.filter((t, i) => outcomes[i] === 'skipped').map((t) => t.sid);
+  };
+  // Host: send compressed state/delta via DC in 64KB chunks, handed to the
+  // channel one at a time (KNCore.syncSend, specs/tick_deadlines.qnt
+  // `input_link`): the next goes only once less than SYNC_SEND_LOW_WATER
+  // bytes are still waiting in the channel. The host's inputs share the
+  // connection and queue behind whatever it has been given; handed a whole
+  // state at once (two answers, 2.9 MB, in a two-player run) it left them
+  // unsent for seconds, the guest gave up on the host at the peer-stale
+  // deadline, ran past its prediction window, and the inputs then arrived
+  // up to 83 frames deep (DEEP-MISPREDICT-SKIP).
+  // How it ended, for one guest: 'sent', 'skipped' (no open channel, or it
+  // closed with the guest still on it), 'dropped' (reconnected or the match
+  // ended since the state was taken), 'busy' (a proactive push onto a
+  // backed-up channel), 'stalled' or 'failed'.
+  const _sendSyncChunksTo = async (t, compressed, frame, isFull, isProactive, requestIds) => {
     const CHUNK_SIZE = 64000;
     const numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
-    let targets;
-    if (targetSid) {
-      const targetPeer = _peers[targetSid];
-      targets = targetPeer && !_isPeerPendingLateJoin(targetSid, targetPeer) ? [targetPeer] : [];
-    } else {
-      targets = getActivePeers();
+    const target = t.peer;
+    if (!_syncTargetCurrent(t)) {
+      _syncLog(`sync send dropped: slot=${target.slot} reconnected or match ended since the state was taken`);
+      return 'dropped';
     }
-
     const header = `sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}:${isProactive ? '1' : '0'}`;
-    for (const target of targets) {
-      // Prefer the dedicated low-priority sync-state DC; fall back to lockstep DC
-      // if syncDc isn't open yet (e.g. during initial handshake race).
-      const dc = target.syncDc && target.syncDc.readyState === 'open' ? target.syncDc : target.dc;
-      if (!dc || dc.readyState !== 'open') {
-        _syncLog(`sync send skipped: target slot=${target.slot} dc=${dc ? dc.readyState : 'null'}`);
-        const sid = Object.keys(_peers).find((k) => _peers[k] === target);
-        if (sid) skipped.push(sid);
-        continue;
-      }
-      // Proactive flood prevention: if the DataChannel is already backed up
-      // (e.g. host is many frames ahead after a guest reconnect), skip this
-      // proactive push. A backed-up DC means the event loop is already saturated
-      // with chunk-send microtasks — sending more would starve setInterval ticks
-      // and prevent the stall hard-timeout from firing.
-      if (isProactive && dc.bufferedAmount > 1024 * 1024) {
-        _syncLog(
-          `proactive push skipped: slot=${target.slot} bufferedAmount=${Math.round(dc.bufferedAmount / 1024)}KB — DC backed up`,
-        );
-        continue;
-      }
-      try {
-        // The request this answers, just ahead of the header on the same
-        // ordered channel: a guest on an older version parses the header
-        // strictly, and ignores a string it does not know.
-        const sid = targetSid || Object.keys(_peers).find((k) => _peers[k] === target);
-        const answerFor = (sid && requestIds[sid]) || 0;
-        if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
-        dc.send(header);
-        for (let i = 0; i < numChunks; i++) {
-          const start = i * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, compressed.length);
-          dc.send(compressed.slice(start, end));
-          // With AI DMA determinism, sync transfers only happen on reconnect
-          // (not during gameplay). No need to yield — get the state to the
-          // guest as fast as possible to minimize the coord stall duration.
-        }
+    // Prefer the dedicated low-priority sync-state DC; fall back to lockstep DC
+    // if syncDc isn't open yet (e.g. during initial handshake race).
+    const dc = target.syncDc && target.syncDc.readyState === 'open' ? target.syncDc : target.dc;
+    if (!dc || dc.readyState !== 'open') {
+      _syncLog(`sync send skipped: target slot=${target.slot} dc=${dc ? dc.readyState : 'null'}`);
+      return 'skipped';
+    }
+    // Proactive flood prevention: if the DataChannel is already backed up
+    // (e.g. host is many frames ahead after a guest reconnect), skip this
+    // proactive push. A backed-up DC means the event loop is already saturated
+    // with chunk-send microtasks — sending more would starve setInterval ticks
+    // and prevent the stall hard-timeout from firing.
+    if (isProactive && dc.bufferedAmount > 1024 * 1024) {
+      _syncLog(
+        `proactive push skipped: slot=${target.slot} bufferedAmount=${Math.round(dc.bufferedAmount / 1024)}KB — DC backed up`,
+      );
+      return 'busy';
+    }
+    try {
+      // The request this answers, just ahead of the header on the same
+      // ordered channel: a guest on an older version parses the header
+      // strictly, and ignores a string it does not know.
+      const answerFor = requestIds[t.sid] || 0;
+      if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
+      dc.send(header);
+      // I1: each chunk waits at most SYNC_SEND_STALL_MS for room; then the
+      // transfer is given up (the guest's chunk and request deadlines ask
+      // again). A reconnect or the match ending stops it at once.
+      const outcome = await window.KNCore.syncSend.sendPaced({
+        count: numChunks,
+        send: (i) => dc.send(compressed.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, compressed.length))),
+        buffered: () => dc.bufferedAmount,
+        open: () => dc.readyState === 'open' && _syncTargetCurrent(t),
+        lowWaterBytes: SYNC_SEND_LOW_WATER,
+        pollMs: SYNC_SEND_POLL_MS,
+        stallMs: SYNC_SEND_STALL_MS,
+      });
+      if (outcome === 'sent' && _syncTargetCurrent(t)) {
         // The guest will be on `frame` once it loads this: its inputs from
         // before frame - delay are in the state, and it may never have made
-        // them (specs/resync_inputs.qnt).
+        // them (specs/resync_inputs.qnt). Only once every chunk is handed
+        // over: a transfer given up leaves the guest without the state, and
+        // its late inputs from before that frame must still be fed
+        // (specs/tick_deadlines.qnt, inputsAreSettledOnlyForADeliveredState).
         _settleInputsBefore(target.slot, frame);
         _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
-      } catch (err) {
-        _syncLog(`sync send failed to slot=${target.slot}: ${err}`);
+        return 'sent';
       }
+      if (outcome === 'stalled') {
+        _syncLog(
+          `SYNC-SEND-STALLED slot=${target.slot} frame=${frame} — no room for a chunk in ` +
+            `${SYNC_SEND_STALL_MS}ms (buffered=${dc.bufferedAmount}), transfer given up`,
+        );
+        return 'stalled';
+      }
+      if (!_syncTargetCurrent(t)) {
+        _syncLog(`sync send stopped: slot=${target.slot} reconnected or match ended`);
+        return 'dropped';
+      }
+      _syncLog(`sync send stopped: slot=${target.slot} channel closed`);
+      return 'skipped';
+    } catch (err) {
+      _syncLog(`sync send failed to slot=${target.slot}: ${err}`);
+      return 'failed';
     }
-    _syncLog(
-      `pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${numChunks} chunks)`,
-    );
-    return skipped;
   };
 
   // The answer to the newest request is buffered: an older request's answer
@@ -17832,16 +18297,18 @@
     _syncAnswerFor = 0;
 
     try {
-      const decompressed = await decompressState(assembled);
-      await _handleDecodedSyncPayload({
-        decompressed,
-        frame,
-        isFull,
-        isProactive,
-        isRegions,
-        wireSize: assembled.length,
-        source: 'dc',
-        answerFor,
+      await _decodingSyncAnswer(async () => {
+        const decompressed = await decompressState(assembled);
+        await _handleDecodedSyncPayload({
+          decompressed,
+          frame,
+          isFull,
+          isProactive,
+          isRegions,
+          wireSize: assembled.length,
+          source: 'dc',
+          answerFor,
+        });
       });
     } catch (err) {
       _syncLog(`sync decompress failed: ${err}`);
@@ -18013,6 +18480,9 @@
       _lateJoinLostHostAsks = 0;
       _syncLog(`late-join: a host state is applied at frame ${frame}; the lost-host resync is done`);
     }
+    // Any host state applied is the resync a "now" request owed.
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
     _lastResyncTime = performance.now(); // restart cooldown from application time, not request time
     // Reset frame pacing after resync — the guest may be behind the host and needs
     // to catch up without PACING-THROTTLE fighting the recovery. Clear the EMA smoothing
@@ -18204,6 +18674,9 @@
     // Reset lockstep state
     _remoteInputs = {};
     _inputSettledBefore = {};
+    _inputDroppedAheadUpTo = {};
+    _inputAskedAt = {};
+    _resendAtSwitch = {};
     _peerInputStarted = {};
     _activeRoster = null;
     _lastControllerPresentMask = -1;
@@ -18232,6 +18705,8 @@
     _lateJoinGuestPausedAt = 0;
     _lateJoinLostHost = false;
     _lateJoinLostHostAsks = 0;
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
@@ -18275,9 +18750,11 @@
       clearTimeout(_syncChunkTimeoutTimer);
       _syncChunkTimeoutTimer = null;
     }
+    _rearmSyncChunkDeadline = null;
     _syncChunkSessionId++;
     _syncLastChunkProgressLogAt = 0;
     _pushingSyncState = false;
+    _queuedSyncPushes.clear();
     _proactivePushInFlight = false;
     _pendingResyncState = null;
     _lifecycleResyncPending = false;
@@ -18289,6 +18766,8 @@
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
     _syncQueueEpoch++;
+    // Each transfer still on a chain sees the new epoch and stops.
+    _syncSendChains = {};
     _lastResyncTime = 0;
     _heldKeys.clear();
     _p1KeyMap = null;

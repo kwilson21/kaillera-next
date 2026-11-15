@@ -250,6 +250,15 @@ def verify_reconnect_token(persistent_id: str, token: str) -> bool:
     return payload.get("pid") == persistent_id
 
 
+def _clean_game_id(game_id: str) -> str:
+    """A room's game id as stored. Empty means the host has no ROM yet, or one
+    the site does not know: the room is not labelled with a game it is not.
+    Anything that is not a short alphanumeric id is "unknown"."""
+    if game_id and (not _ALNUM_HYPHEN_RE.match(game_id) or len(game_id) > 32):
+        return "unknown"
+    return game_id
+
+
 def _sanitize_str(value: str, max_len: int) -> str:
     """Sanitize a player- or room-supplied display string.
 
@@ -831,8 +840,7 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
 
     player_name = _sanitize_str(player_name, 32)
     room_name = _sanitize_str(room_name, 64)
-    if not _ALNUM_HYPHEN_RE.match(game_id) or len(game_id) > 32:
-        game_id = "unknown"
+    game_id = _clean_game_id(game_id)
 
     room = Room(
         owner=sid,
@@ -1382,9 +1390,7 @@ async def set_game_id(sid: str, payload: SetGameIdPayload) -> str | None:
         session_id, room = result
         if room.owner != sid:
             return "Only the host can set the game"
-        game_id = payload.game_id
-        if not _ALNUM_HYPHEN_RE.match(game_id) or len(game_id) > 32:
-            game_id = "unknown"
+        game_id = _clean_game_id(payload.game_id)
         room.game_id = game_id
         await _emit("users-updated", _players_payload(room), room=session_id)
         await state.save_room(session_id, room)

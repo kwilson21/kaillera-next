@@ -202,14 +202,53 @@ def test_resync_settles_the_inputs_before_its_frame():
     apply_idx = src.index("const applySyncState = (bytes, frame, fromProactive = false) => {")
     assert "if (timelineAligned) _settleInputsAtResync(gm.Module, frame);" in src[apply_idx:]
 
-    # Host: settles the guest's inputs when the state goes out, on both routes.
-    send_idx = src.index("const sendSyncChunks = async (")
+    # Host: settles the guest's inputs when the state goes out, on both routes:
+    # over a DataChannel once every chunk is handed over (the per-guest
+    # transfer body, _sendSyncChunksTo), over Socket.IO once it is emitted.
+    send_idx = src.index("const _sendSyncChunksTo = async (")
     assert "_settleInputsBefore(target.slot, frame);" in src[send_idx:]
     assert "_settleInputsBefore(_peers[targetSid].slot, frame);" in src
 
     # I2: the floor is per-peer state.
     reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
     assert "delete _inputSettledBefore[slot];" in src[reset_idx : src.index("\n  };\n", reset_idx)]
+
+
+def test_a_stalled_page_asks_for_the_inputs_it_dropped():
+    # specs/resync_inputs.qnt, ASK_FOR_MISSING: a page that dropped a peer's
+    # inputs as too far ahead remembers that the peer made them, and while
+    # the rollback input stall waits on them it asks for them again; the
+    # frames are KNCore.framesToAskFor (web/src/input-ask.ts, proved).
+    src = LOCKSTEP_JS.read_text()
+
+    oor_idx = src.index("_syncLog(`INPUT-OOR slot=")
+    oor_src = src[oor_idx : src.index("return false;", oor_idx)]
+    assert "_inputDroppedAheadUpTo[peer.slot] = Math.max(" in oor_src
+
+    ask_idx = src.index("const _askForMissingInputs = (peer, applyFrame, windowEdge) => {")
+    ask_src = src[ask_idx : src.index("\n  };\n", ask_idx)]
+    for snippet in (
+        "const from = Math.max(0, windowEdge, _inputFloor(slot));",
+        "_inputDroppedAheadUpTo[slot] ?? -1",
+        "window.KNCore.framesToAskFor(have, from, applyFrame, peerHas, RB_INPUT_ASK_MAX)",
+        "now - (askedAt[f] ?? -Infinity) < RB_INPUT_ASK_EVERY_MS",
+        "peer.dc.send(`resend:${f}`);",
+    ):
+        assert snippet in ask_src
+
+    # It asks from inside the stall, before the stall returns.
+    stall_idx = src.index("// Too far ahead — stall to let peer catch up")
+    stall_src = src[stall_idx : src.index("_markTickReturn('skip:rb-input-stall');", stall_idx)]
+    assert "_askForMissingInputs(p, rbApplyFrame, windowEdge);" in stall_src
+
+    # I2: both tables are per-peer state, and go with every input timeline.
+    reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
+    reset_src = src[reset_idx : src.index("\n  };\n", reset_idx)]
+    assert "delete _inputDroppedAheadUpTo[slot];" in reset_src
+    assert "delete _inputAskedAt[slot];" in reset_src
+    clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
+    clear_src = src[clear_idx : src.index("\n  };\n", clear_idx)]
+    assert "_inputDroppedAheadUpTo = {};" in clear_src and "_inputAskedAt = {};" in clear_src
 
 
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():
@@ -548,15 +587,22 @@ def test_a_resync_request_that_is_out_has_a_deadline():
     for snippet in (
         "if (!_resyncRequestInFlight) return;",
         # An answer arriving, held, or waited for at a target has its own deadline.
-        "if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;",
+        "const answerComing = _syncExpected > 0 || !!_pendingResyncState || _syncTargetFrame > 0;",
+        # An answer being decoded holds it off, for a bounded time
+        # (specs/resync_reask.qnt, theDecodedAnswerIsNotCut).
+        "if (answerComing || (decoding && decodingForMs < SYNC_DECODE_GRACE_MS)) return;",
         "if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;",
         "_resyncRequestInFlight = false;",
         "RESYNC-REQUEST-TIMEOUT f=${_frameNum}",
     ):
         assert snippet in check_src
+    # The waits come before the request is let go.
+    assert check_src.index("if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;") < check_src.index(
+        "_resyncRequestInFlight = false;"
+    )
     # Every site that sends a request stamps it: they all go through the one
     # function that sets the flag.
-    begin = src[src.index("const _beginResyncRequest = (at = -1) => {") :]
+    begin = src[src.index("const _beginResyncRequest = (at = -1, again = false) => {") :]
     begin = begin[: begin.index("\n  };\n")]
     assert "_resyncRequestInFlight = true;\n    _resyncRequestSentAt = performance.now();" in begin
     assert src.count("_resyncRequestInFlight = true;") == 1
@@ -576,7 +622,7 @@ def test_a_resync_request_that_is_out_has_a_deadline():
 def test_every_resync_request_that_is_out_is_numbered():
     # specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST: a request has a number.
     src = LOCKSTEP_JS.read_text()
-    begin = src[src.index("const _beginResyncRequest = (at = -1) => {") :]
+    begin = src[src.index("const _beginResyncRequest = (at = -1, again = false) => {") :]
     begin = begin[: begin.index("\n  };\n")]
     for snippet in (
         "_resyncRequestInFlight = true;",
@@ -589,21 +635,24 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Eight sites ask: one over Socket.IO, seven on a DataChannel (the
+    # Eleven sites ask: one over Socket.IO, ten on a DataChannel (the
     # seventh is a late joiner that lost its channel to the host,
-    # specs/late_join_pause.qnt). The two that name a target frame give it to
-    # the request, which keeps it after the target's deadline
-    # (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 8
-    assert src.count("_beginResyncRequest()") == 6
+    # specs/late_join_pause.qnt; the eighth the deadline asking again for an
+    # owed "now" resync, specs/resync_reask.qnt; the last two the boot sync
+    # and the input stall's, specs/resync_flow.qnt EVERY_REQUEST_NUMBERED).
+    # The two that name a target frame give it to the request, which keeps
+    # it after the target's deadline (specs/resync_flow.qnt, askedAt).
+    assert src.count("_beginResyncRequest(") == 11
+    assert src.count("_beginResyncRequest()") == 7
+    assert src.count("_beginResyncRequest(-1, true)") == 1
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
     assert "let _resyncRequestAt = -1;" in src
     stop = src[src.index("const stopSync = () => {") :]
     assert "_resyncRequestAt = -1;" in stop[: stop.index("\n  };\n")]
-    socket_req = src[src.index("function _requestSocketFullResync(reason) {") :]
+    socket_req = src[src.index("function _requestSocketFullResync(reason, again = false) {") :]
     socket_req = socket_req[: socket_req.index("\n  }\n")]
-    assert "const requestId = _beginResyncRequest();" in socket_req
+    assert "const requestId = _beginResyncRequest(-1, again);" in socket_req
     assert "frame: _frameNum,\n        requestId,\n      });" in socket_req
 
     # On a DataChannel the number goes ahead of the request, which keeps the
@@ -611,13 +660,29 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 7
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 5
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 10
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 8
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
-    # Sent bare only where no request is marked as out (BOOT-SYNC,
-    # INPUT-STALL-RESYNC): those are not numbered.
-    assert src.count(".send('sync-request-full');") == 2
-    assert ".send(`sync-request-full-at:" not in src
+    # Never sent bare. The boot sync and the input stall's request were, and
+    # their unnumbered answers were applied wherever they found the guest,
+    # even after a newer request (specs/resync_flow.qnt,
+    # bootAnswerAfterANewerRequestTest).
+    assert not re.search(r"""\.send\(['"`]sync-request(?!-id:)""", src)
+    boot = src[src.index("if (_bootDoneForSync && !window._knBootSyncDone) {") :]
+    boot = boot[: boot.index("BOOT-SYNC skipped: initial state")]
+    assert "const bootRequestId = _beginResyncRequest();" in boot
+    assert "_sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');" in boot
+    stall = src[src.index("`INPUT-STALL-RESYNC f=${_frameNum}") :]
+    stall = stall[: stall.index("INPUT-STALL-RESYNC send failed")]
+    assert "const stallRequestId = _beginResyncRequest();" in stall
+    assert "_sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');" in stall
+    # Neither asks over a request that is out (its answer brings a host
+    # state; asked over, that answer would be dropped as an older request's),
+    # nor gives up a target, which would apply a held state early
+    # (specs/resync_flow.qnt, guestAsksOnItsOwn).
+    for site in (boot, stall):
+        assert site.index("if (_resyncRequestInFlight) {") < site.index("_beginResyncRequest()")
+        assert "_syncTargetFrame" not in site
 
     # A new match starts counting again.
     stop = src[src.index("const stopSync = () => {") :]
@@ -678,7 +743,12 @@ def test_only_its_own_answer_ends_a_resync_request():
     push = push[: push.index("const sendSyncChunks = async (")]
     assert "const requestIds = (!isProactive && options.requestIds) || {};" in push
     assert "...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {})," in push
-    chunks = src[src.index("const sendSyncChunks = async (") :]
+    # sendSyncChunks queues each guest's transfer behind that guest's one
+    # before; the body is _sendSyncChunksTo, which reads the request id by sid.
+    wrapper = src[src.index("const sendSyncChunks = async (") :]
+    wrapper = wrapper[: wrapper.index("\n  };\n")]
+    assert "_sendSyncChunksTo(t, compressed, frame, isFull, isProactive, requestIds)" in wrapper
+    chunks = src[src.index("const _sendSyncChunksTo = async (") :]
     chunks = chunks[: chunks.index("\n  };\n")]
     assert chunks.index("if (answerFor) dc.send(`sync-answer-id:${answerFor}`);") < chunks.index("dc.send(header);")
     # The header an older guest parses is unchanged.
@@ -699,26 +769,31 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert "if (slot === 0) _hostNumbersAnswers = false;" in reset
 
 
-def test_a_late_answer_from_before_the_frame_asked_is_dropped():
-    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate),
-    # with lateAnswerAfterTheTargetDeadlineTest: the frame is the request's,
-    # not the live target, so the drop holds after the target's deadline too.
+def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
+    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate,
+    # lateAndBehind), with lateAnswerAfterTheTargetDeadlineTest: the frame
+    # named is the request's, not the live target, so the drop holds after
+    # the target's deadline too; and immediateLateAnswerTest: a late answer
+    # from before the guest's own frame is dropped when the newest request
+    # named no frame.
     src = LOCKSTEP_JS.read_text()
     older = src[src.index("const _answersAnOlderRequest = (answerFor) =>") :]
     older = older[: older.index(";\n")]
     assert "_resyncObserve('answers-an-older-request', answerFor > 0 && answerFor !== _resyncRequestId," in older
     assert "rules.answersAnOlderRequest(answerFor, _resyncRequestId)" in older
-    late = src[src.index("const _isLateAnswerBeforeFrameAsked = (state) =>") :]
+    late = src[src.index("const _isLateAnswerBehind = (state) =>") :]
     late = late[: late.index(";\n")]
-    assert "_answersAnOlderRequest(state.answerFor || 0)" in late
-    assert "_resyncRequestAt > 0 && state.frame < _resyncRequestAt" in late
-    assert "!!state &&\n    _resyncObserve(\n      'late-answer-before-frame-asked'," in late
     assert (
-        "rules.isLateAnswerBeforeFrameAsked(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt)"
+        "_answersAnOlderRequest(state.answerFor || 0) &&\n"
+        "        (state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))"
+    ) in late
+    assert "!!state &&\n    _resyncObserve(\n      'late-answer-behind'," in late
+    assert (
+        "rules.isLateAnswerBehind(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt, _frameNum)"
     ) in late
     assert "_syncTargetFrame" not in late
     tick = src[src.index("const tick = () => {") :]
-    drop_at = tick.index("if (_isLateAnswerBeforeFrameAsked(_pendingResyncState)) {")
+    drop_at = tick.index("if (_isLateAnswerBehind(_pendingResyncState)) {")
     dropped = tick[drop_at : tick.index("\n    }\n", drop_at)]
     assert "SYNC-LATE-ANSWER-DROPPED f=${_frameNum}" in dropped
     assert "_pendingResyncState = null;" in dropped
@@ -786,9 +861,10 @@ def test_the_resync_rules_are_observed():
     for what, name in (
         ("ends-request", "endsRequest"),
         ("answers-an-older-request", "answersAnOlderRequest"),
-        ("late-answer-before-frame-asked", "isLateAnswerBeforeFrameAsked"),
+        ("late-answer-behind", "isLateAnswerBehind"),
         ("keeps-awaited-answer", "keepsAwaitedAnswer"),
         ("late-join-lost-host", "lateJoinLostHostStep"),
+        ("deadline-step", "resyncDeadlineStep"),
     ):
         assert f"_resyncObserve('{what}'," in src or f"_resyncObserve(\n      '{what}'," in src, what
         assert f"rules.{name}(" in src, name

@@ -4,9 +4,11 @@ import { test } from 'node:test';
 import {
   answersAnOlderRequest,
   endsRequest,
-  isLateAnswerBeforeFrameAsked,
+  isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  resyncDeadlineStep,
+  type DeadlineStep,
   type LostHostStep,
 } from '../../web/src/resync-request.ts';
 
@@ -43,20 +45,34 @@ test('an older request is a numbered one other than the newest', () => {
 });
 
 test('a late answer from before the frame the newest request named is dropped', () => {
-  assert.equal(isLateAnswerBeforeFrameAsked(1, 99, 2, 100), true);
-  // At or after the frame asked it does not take the guest back.
-  assert.equal(isLateAnswerBeforeFrameAsked(1, 100, 2, 100), false);
-  assert.equal(isLateAnswerBeforeFrameAsked(1, 101, 2, 100), false);
+  // The guest is at 98, short of the frame asked: the target's deadline gave it up.
+  assert.equal(isLateAnswerBehind(1, 99, 2, 100, 98), true);
+  // At or after the frame asked, and at or ahead of the guest, it does not take the guest back.
+  assert.equal(isLateAnswerBehind(1, 100, 2, 100, 100), false);
+  assert.equal(isLateAnswerBehind(1, 101, 2, 100, 100), false);
+});
+
+test('a late answer from before the frame the guest is on is dropped, whether or not a frame was named', () => {
+  // The run that found it: an immediate request, then the first answer (frame 864) with the guest at 994.
+  assert.equal(isLateAnswerBehind(1, 864, 2, -1, 994), true);
+  assert.equal(isLateAnswerBehind(1, 864, 2, 0, 994), true);
+  // Past the frame named, but behind the guest.
+  assert.equal(isLateAnswerBehind(1, 101, 2, 100, 102), true);
+  // One frame behind is behind.
+  assert.equal(isLateAnswerBehind(1, 993, 2, -1, 994), true);
 });
 
 test("the newest request's own answer, and a state with no number, are never dropped", () => {
-  assert.equal(isLateAnswerBeforeFrameAsked(2, 10, 2, 100), false);
-  assert.equal(isLateAnswerBeforeFrameAsked(0, 10, 2, 100), false);
+  assert.equal(isLateAnswerBehind(2, 10, 2, 100, 50), false);
+  assert.equal(isLateAnswerBehind(0, 10, 2, 100, 50), false);
+  assert.equal(isLateAnswerBehind(2, 864, 2, -1, 994), false);
+  assert.equal(isLateAnswerBehind(0, 864, 2, -1, 994), false);
 });
 
-test('a request that named no frame drops nothing', () => {
-  assert.equal(isLateAnswerBeforeFrameAsked(1, 10, 2, -1), false);
-  assert.equal(isLateAnswerBeforeFrameAsked(1, -5, 2, 0), false);
+test('a late answer at or ahead of the guest is kept when no frame was named', () => {
+  assert.equal(isLateAnswerBehind(1, 994, 2, -1, 994), false);
+  assert.equal(isLateAnswerBehind(1, 1000, 2, -1, 994), false);
+  assert.equal(isLateAnswerBehind(1, -5, 2, 0, -5), false);
 });
 
 test('an older answer does not replace the held answer to the newest request', () => {
@@ -97,17 +113,44 @@ test('the lost-host step asks up to the bound, then gives up', () => {
   assert.deepEqual(steps, ['ask', 'ask', 'ask', 'giveUp', 'giveUp']);
 });
 
+test('the deadline waits while an answer is coming, decoding, or not yet due', () => {
+  // requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHost, owed, asksAgain, max
+  assert.equal(resyncDeadlineStep(false, false, false, 0, 10000, 99999, 8000, false, true, 0, 2), 'noRequest');
+  assert.equal(resyncDeadlineStep(true, true, false, 0, 10000, 99999, 8000, false, true, 0, 2), 'wait');
+  assert.equal(resyncDeadlineStep(true, false, true, 9999, 10000, 99999, 8000, false, true, 0, 2), 'wait');
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 7999, 8000, false, true, 0, 2), 'wait');
+  // A decode past its grace no longer holds the deadline off (I1).
+  assert.equal(resyncDeadlineStep(true, false, true, 10000, 10000, 99999, 8000, false, true, 0, 2), 'askAgain');
+});
+
+test('at the deadline an owed resync is asked for again up to the bound, then given up', () => {
+  const steps: DeadlineStep[] = [];
+  for (let asks = 0; asks <= 3; asks++) {
+    steps.push(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, false, true, asks, 2));
+  }
+  assert.deepEqual(steps, ['askAgain', 'askAgain', 'stopAsking', 'stopAsking']);
+  // Nothing owed (a coordinated request): let go; the desync check asks again.
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, false, false, 0, 2), 'letGo');
+  // The late joiner's lost-host resync goes first, owed or not.
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, true, true, 0, 2), 'lostHost');
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, true, false, 5, 2), 'lostHost');
+});
+
 // The engine's rules (web/static/netplay-rollback.js), copied as they are
 // written there, over the engine's own variables.
 const engine = {
   ends: (answerFor: number, resyncRequestId: number, hostNumbersAnswers: boolean) =>
     answerFor > 0 ? answerFor === resyncRequestId : !hostNumbersAnswers,
   older: (answerFor: number, resyncRequestId: number) => answerFor > 0 && answerFor !== resyncRequestId,
-  late: (state: { answerFor?: number; frame: number } | null, resyncRequestId: number, resyncRequestAt: number) =>
+  late: (
+    state: { answerFor?: number; frame: number } | null,
+    resyncRequestId: number,
+    resyncRequestAt: number,
+    frameNum: number,
+  ) =>
     !!state &&
     engine.older(state.answerFor || 0, resyncRequestId) &&
-    resyncRequestAt > 0 &&
-    state.frame < resyncRequestAt,
+    (state.frame < frameNum || (resyncRequestAt > 0 && state.frame < resyncRequestAt)),
   keeps: (answerFor: number, resyncRequestId: number, pending: { answerFor?: number } | null) =>
     !(!engine.older(answerFor, resyncRequestId) || pending?.answerFor !== resyncRequestId),
   lostHost: (
@@ -125,6 +168,28 @@ const engine = {
     if (asks >= max) return 'giveUp';
     return 'ask';
   },
+  // _checkResyncRequestDeadline: the returns and the step it computes.
+  deadline: (
+    inFlight: boolean,
+    answerComing: boolean,
+    decoding: boolean,
+    decodingForMs: number,
+    graceMs: number,
+    waitedMs: number,
+    timeoutMs: number,
+    lateJoinLostHost: boolean,
+    owedResync: boolean,
+    asksAgain: number,
+    max: number,
+  ): DeadlineStep => {
+    if (!inFlight) return 'noRequest';
+    if (answerComing || (decoding && decodingForMs < graceMs)) return 'wait';
+    if (waitedMs < timeoutMs) return 'wait';
+    if (lateJoinLostHost) return 'lostHost';
+    if (!owedResync) return 'letGo';
+    if (asksAgain >= max) return 'stopAsking';
+    return 'askAgain';
+  },
 };
 
 test("the proved rules agree with the engine's over a grid of inputs", () => {
@@ -138,17 +203,24 @@ test("the proved rules agree with the engine's over a grid of inputs", () => {
       assert.equal(answersAnOlderRequest(answerFor, newest), engine.older(answerFor, newest));
       for (const frame of FRAMES) {
         for (const askedAt of FRAMES) {
-          assert.equal(
-            isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt),
-            engine.late({ answerFor, frame }, newest, askedAt),
-            `answerFor=${answerFor} frame=${frame} newest=${newest} askedAt=${askedAt}`,
-          );
-          cases++;
+          for (const guestFrame of FRAMES) {
+            assert.equal(
+              isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame),
+              engine.late({ answerFor, frame }, newest, askedAt, guestFrame),
+              `answerFor=${answerFor} frame=${frame} newest=${newest} askedAt=${askedAt} guestFrame=${guestFrame}`,
+            );
+            cases++;
+          }
         }
       }
       // A held state with no answerFor at all reads as 0, as the engine does.
       for (const frame of FRAMES) {
-        assert.equal(isLateAnswerBeforeFrameAsked(0, frame, newest, 100), engine.late({ frame }, newest, 100));
+        for (const guestFrame of FRAMES) {
+          assert.equal(
+            isLateAnswerBehind(0, frame, newest, 100, guestFrame),
+            engine.late({ frame }, newest, 100, guestFrame),
+          );
+        }
       }
       for (const held of HELD) {
         const pending = held < 0 ? null : { answerFor: held };
@@ -176,6 +248,37 @@ test("the proved rules agree with the engine's over a grid of inputs", () => {
       }
     }
   }
+  for (const out of BOOLS) {
+    for (const coming of BOOLS) {
+      for (const decoding of BOOLS) {
+        for (const decodingForMs of [0, 9999, 10000, 20000]) {
+          for (const waitedMs of [0, 7999, 8000, 30000]) {
+            for (const lostHost of BOOLS) {
+              for (const owed of BOOLS) {
+                for (const asks of [0, 1, 2, 3]) {
+                  const args = [
+                    out,
+                    coming,
+                    decoding,
+                    decodingForMs,
+                    10000,
+                    waitedMs,
+                    8000,
+                    lostHost,
+                    owed,
+                    asks,
+                    2,
+                  ] as const;
+                  assert.equal(resyncDeadlineStep(...args), engine.deadline(...args));
+                  cases++;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   assert.ok(cases > 1000);
 });
 
@@ -184,9 +287,10 @@ test('the engine runs each proved rule beside its own and reports a difference',
   const observed = {
     'ends-request': 'endsRequest',
     'answers-an-older-request': 'answersAnOlderRequest',
-    'late-answer-before-frame-asked': 'isLateAnswerBeforeFrameAsked',
+    'late-answer-behind': 'isLateAnswerBehind',
     'keeps-awaited-answer': 'keepsAwaitedAnswer',
     'late-join-lost-host': 'lateJoinLostHostStep',
+    'deadline-step': 'resyncDeadlineStep',
   };
   for (const [what, name] of Object.entries(observed)) {
     assert.ok(source.includes(`'${what}',`) || source.includes(`'${what}', `), `${what} is not compared`);
@@ -196,7 +300,7 @@ test('the engine runs each proved rule beside its own and reports a difference',
   // Observing only: the engine's own rules are still the ones returned.
   assert.ok(source.includes('answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers'));
   assert.ok(source.includes('answerFor > 0 && answerFor !== _resyncRequestId'));
-  assert.ok(source.includes('_resyncRequestAt > 0 && state.frame < _resyncRequestAt'));
+  assert.ok(source.includes('(state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))'));
   assert.ok(
     source.includes('_answersAnOlderRequest(answerFor) && _pendingResyncState?.answerFor === _resyncRequestId'),
   );

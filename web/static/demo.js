@@ -19,158 +19,16 @@
   }
   const _demo = window.KNCore.demo;
 
-  const _installEjsGlobals = () => {
-    const settings = _demo.options.ejsSettings(window.location.search || '');
-    window.EJS_player = '#game';
-    window.EJS_core = 'n64';
-    window.EJS_gameID = 'kaillera-next-demo';
-    window.EJS_startOnLoaded = true;
-    window.EJS_pathtodata = '/static/ejs/';
-    window.EJS_defaultOptions = settings.defaultOptions;
-
-    window.__knInstallUnpackAlignmentShim = () => {
-      [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach((ctor) => {
-        const proto = ctor && ctor.prototype;
-        if (!proto || proto.__knUnpackAlignmentPatched) return;
-        proto.__knUnpackAlignmentPatched = true;
-        ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D'].forEach((name) => {
-          const original = proto[name];
-          if (typeof original !== 'function') return;
-          proto[name] = function (...args) {
-            try {
-              this.pixelStorei(this.UNPACK_ALIGNMENT, 1);
-            } catch (_) {}
-            return original.apply(this, args);
-          };
-        });
-      });
-    };
-
-    if (settings.forceLegacyCores) window.EJS_forceLegacyCores = true;
-    if (settings.unpackAlignmentShim) window.__knInstallUnpackAlignmentShim();
-
-    window.EJS_defaultControls = {
-      0: {
-        0: { value: 'c', value2: 'BUTTON_2' },
-        1: { value: 'x', value2: 'BUTTON_4' },
-        3: { value: 'v', value2: 'START' },
-        4: { value: 'up arrow', value2: 'DPAD_UP' },
-        5: { value: 'down arrow', value2: 'DPAD_DOWN' },
-        6: { value: 'left arrow', value2: 'DPAD_LEFT' },
-        7: { value: 'right arrow', value2: 'DPAD_RIGHT' },
-        10: { value: 't', value2: 'LEFT_TOP_SHOULDER' },
-        11: { value: 'y', value2: 'RIGHT_TOP_SHOULDER' },
-        12: { value: 'z', value2: 'LEFT_BOTTOM_SHOULDER' },
-        16: { value: 'd', value2: 'LEFT_STICK_X:+1' },
-        17: { value: 'a', value2: 'LEFT_STICK_X:-1' },
-        18: { value: 's', value2: 'LEFT_STICK_Y:+1' },
-        19: { value: 'w', value2: 'LEFT_STICK_Y:-1' },
-        20: { value: 'j', value2: 'RIGHT_STICK_X:+1' },
-        21: { value: 'l', value2: 'RIGHT_STICK_X:-1' },
-        22: { value: 'k', value2: 'RIGHT_STICK_Y:+1' },
-        23: { value: 'i', value2: 'RIGHT_STICK_Y:-1' },
-        24: { value: '', value2: '' },
-        25: { value: '', value2: '' },
-        26: { value: '', value2: '' },
-      },
-      1: {},
-      2: {},
-      3: {},
-    };
-  };
+  // EmulatorJS's settings, controls and the ?kngfx=unpack1 shim, on window
+  // before the emulator loads, and again at each boot.
+  // web/src/demo/ejs-globals.ts.
+  const _installEjsGlobals = () => _demo.installEjsGlobals(window, window.location.search || '');
 
   _installEjsGlobals();
 
-  // ROM cache — IDB so Reset can re-init the engine without making the
-  // user re-drop the ROM. Stop clears it so the next visit hits the
-  // drop-ROM screen normally. Bytes-only persistence; no metadata
-  // beyond filename so we can rebuild the File object on auto-restore.
-  const _ROM_DB_NAME = 'kn-demo-rom';
-  const _ROM_DB_STORE = 'rom';
-  const _ROM_DB_KEY = 'current';
-  const _idbRomSave = (bytes, name) =>
-    new Promise((resolve) => {
-      try {
-        const req = indexedDB.open(_ROM_DB_NAME, 1);
-        req.onupgradeneeded = () => req.result.createObjectStore(_ROM_DB_STORE);
-        req.onsuccess = () => {
-          const db = req.result;
-          try {
-            const tx = db.transaction(_ROM_DB_STORE, 'readwrite');
-            tx.objectStore(_ROM_DB_STORE).put({ bytes, name }, _ROM_DB_KEY);
-            tx.oncomplete = () => {
-              db.close();
-              resolve();
-            };
-            tx.onerror = () => {
-              db.close();
-              resolve();
-            };
-          } catch (_) {
-            db.close();
-            resolve();
-          }
-        };
-        req.onerror = () => resolve();
-      } catch (_) {
-        resolve();
-      }
-    });
-  const _idbRomLoad = () =>
-    new Promise((resolve) => {
-      try {
-        const req = indexedDB.open(_ROM_DB_NAME, 1);
-        req.onupgradeneeded = () => req.result.createObjectStore(_ROM_DB_STORE);
-        req.onsuccess = () => {
-          const db = req.result;
-          try {
-            const tx = db.transaction(_ROM_DB_STORE, 'readonly');
-            const get = tx.objectStore(_ROM_DB_STORE).get(_ROM_DB_KEY);
-            get.onsuccess = () => {
-              db.close();
-              resolve(get.result || null);
-            };
-            get.onerror = () => {
-              db.close();
-              resolve(null);
-            };
-          } catch (_) {
-            db.close();
-            resolve(null);
-          }
-        };
-        req.onerror = () => resolve(null);
-      } catch (_) {
-        resolve(null);
-      }
-    });
-  const _idbRomClear = () =>
-    new Promise((resolve) => {
-      try {
-        const req = indexedDB.open(_ROM_DB_NAME, 1);
-        req.onsuccess = () => {
-          const db = req.result;
-          try {
-            const tx = db.transaction(_ROM_DB_STORE, 'readwrite');
-            tx.objectStore(_ROM_DB_STORE).delete(_ROM_DB_KEY);
-            tx.oncomplete = () => {
-              db.close();
-              resolve();
-            };
-            tx.onerror = () => {
-              db.close();
-              resolve();
-            };
-          } catch (_) {
-            db.close();
-            resolve();
-          }
-        };
-        req.onerror = () => resolve();
-      } catch (_) {
-        resolve();
-      }
-    });
+  // ROM cache: the last ROM dropped, kept so Reset (a reload) comes back
+  // into a running engine. Stop clears it. web/src/demo/rom-store.ts.
+  const _romStore = _demo.romStore(() => window.indexedDB);
 
   let _romBlobUrl = null;
   let _romHash = null;
@@ -179,10 +37,11 @@
   // memory layout differs) keep the recorded frame script below.
   let _romIsSsb64Us = false;
   let _menuPilot = null;
-  let _engineStarted = false;
-  let _emulatorBootInFlight = false;
-  let _loaderInjected = false;
-  let _rollbackEnabled = true;
+  // The page's run state (engine, emulator loader, match, Pause, auto-compare,
+  // mode, whether the controls were touched) is a state machine,
+  // web/src/demo/run-state.ts: `_run`, made once the handlers below exist.
+  // These read it.
+  const _rollbackOn = () => _run.flags().rollbackEnabled;
 
   // Menu autopilot — record user inputs once, replay them on every demo load
   // to skip menu navigation and drop the user straight into a match.
@@ -229,12 +88,13 @@
   // game_status offsets), and isInMatch returns wrong values.
   const _hashRom = (bytes) => _demo.rom.demoRomHash(bytes);
 
+  // Auto-compare's interval, while it runs. Whether it is on is the run state's.
   let _autoCompareTimer = 0;
   let _autoCompareStart = 0;
   let _autoCompareCycle = 0;
-  // Wall-clock timestamp when auto-compare was paused (0 = not paused). Used
-  // to offset _autoCompareStart on resume so the cycle picks up where it left
-  // off rather than restarting at phase 0.
+  // Wall-clock timestamp when auto-compare was paused. Used to offset
+  // _autoCompareStart on resume so the cycle picks up where it left off
+  // rather than restarting at phase 0.
   let _autoComparePausedAt = 0;
 
   let _lastTotalPreds = 0;
@@ -246,8 +106,6 @@
   // Throttle HUD text rewrites to ~5Hz so values stay legible.
   let _lastHudRenderAt = 0;
   const HUD_RENDER_INTERVAL_MS = 200;
-  // Emulator pause state (reflected on the Pause button label).
-  let _emuPaused = false;
 
   // Funnel state — counts every rollback ON/OFF transition (manual + auto).
   // Once the user has seen the contrast a few times, the play CTA promotes
@@ -266,21 +124,14 @@
   //   touched the controls in the current match (respect their choice).
   // - true → false (leaving the match / back to menu): stop auto-compare and
   //   reset rollback to ON so the next match starts clean.
-  // _wasInMatch tracks the inclusive predicate (in-match including in-game
-  // pause/unpause): true throughout a battle session even when P1 has the
-  // pause menu open. The strict isInMatch (status=1 only) is reserved for
-  // fake-peer's random-input gate — see _lastFakePeerMatchActive below.
-  let _wasInMatch = false;
-  // Strict-mode edge tracker for fake-peer: status=1 only. During in-game
-  // pause (status=2) the SSB64 pause menu accepts any controller's buttons,
-  // so P2 random presses navigate the menu and immediately unpause. We flip
-  // fake-peer's match-active to false the moment P1 pauses so its next
-  // injected input is a clean zero, and back to true on unpause.
-  let _lastFakePeerMatchActive = false;
-  let _userInteractedThisMatch = false;
-  const _markUserInteracted = () => {
-    _userInteractedThisMatch = true;
-  };
+  // The run state's match follows the inclusive predicate (in-match including
+  // in-game pause/unpause): in a match throughout a battle session even when
+  // P1 has the pause menu open. The strict isInMatch (status=1 only) is the
+  // fake peer's random-input gate: during in-game pause (status=2) the SSB64
+  // pause menu accepts any controller's buttons, so P2 random presses would
+  // navigate the menu and immediately unpause. Its edges come as the
+  // `fakePeerActive` command, the inclusive ones as `matchEntered` and
+  // `matchLeft` (web/src/demo/run-state.ts).
 
   const $ = (id) => document.getElementById(id);
   const _noop = () => {};
@@ -305,56 +156,10 @@
 
   const _formatNumber = (value, digits = 0) => (Number.isFinite(value) ? value.toFixed(digits) : '--');
 
-  // Rollback timeline (docs/landing-design.md §5.7f #3, §7.2 M3) — the
-  // Result card's live instrument. Driven entirely by real engine signals
-  // from getHudCounters() via web/static/rollback-timeline.js's pure state
-  // machine; see that file for what triggers a rewind vs. a lockstep wait.
-  const _reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false;
-  let _rbState = window.KNRollbackTimeline?.createState?.() ?? null;
-  let _rbRefs = null;
-  let _rbStillRendered = false;
-  const _getRbRefs = () => {
-    if (_rbRefs) return _rbRefs;
-    const svg = $('rb-timeline');
-    if (!svg) return null;
-    const ticks = Array.from(svg.querySelectorAll('.t')).sort(
-      (a, b) => Number(a.dataset.i ?? 0) - Number(b.dataset.i ?? 0),
-    );
-    _rbRefs = {
-      ticks,
-      head: $('rb-head'),
-      labelBad: $('rb-lbl-bad'),
-      labelReplay: $('rb-lbl-re'),
-      caption: $('rb-caption'),
-    };
-    return _rbRefs;
-  };
-  const _updateRollbackTimeline = (counters, inMatch) => {
-    const api = window.KNRollbackTimeline;
-    if (!api || !_rbState) return;
-    const refs = _getRbRefs();
-    if (!refs) return;
-    if (_reducedMotion) {
-      // Static illustrative frame — no motion, no per-frame reduce() calls.
-      if (!_rbStillRendered) {
-        api.render(_rbState, refs, { still: true });
-        _rbStillRendered = true;
-      }
-      return;
-    }
-    _rbState = api.reduce(
-      _rbState,
-      {
-        mode: _rollbackEnabled ? 'rollback' : 'lockstep',
-        matchActive: !!inMatch,
-        rollbackEventsTotal: counters?.rollbackEventsTotal ?? 0,
-        avgRollbackDepth: counters?.avgRollbackDepth ?? 0,
-        delay: counters?.delay ?? 0,
-      },
-      performance.now(),
-    );
-    api.render(_rbState, refs);
-  };
+  // The result card's rollback timeline, fed the engine's counters from the
+  // HUD loop. web/src/demo/timeline-view.ts.
+  const _timeline = _demo.timelineView(window);
+  const _updateRollbackTimeline = (counters, inMatch) => _timeline.update(counters, inMatch, _rollbackOn());
 
   const _readFile = (file) =>
     new Promise((resolve, reject) => {
@@ -434,22 +239,25 @@
   const _updateRollbackToggle = () => {
     const toggle = $('rollback-toggle');
     if (!toggle) return;
-    const look = _demo.hud.rollbackToggleLook(_rollbackEnabled);
+    const look = _demo.hud.rollbackToggleLook(_rollbackOn());
     toggle.textContent = look.text;
     toggle.setAttribute('aria-pressed', look.pressed);
     toggle.classList.toggle('is-off', look.off);
   };
 
-  const _setRollbackEnabled = (enabled) => {
-    const next = !!enabled;
-    if (_rollbackEnabled !== next) {
+  // Set the mode. The run state takes it and has the page apply it
+  // (`_applyMode`), counting it as a change only if it is one.
+  const _setRollbackEnabled = (enabled) => _run.send({ type: 'modeSwitched', rollback: !!enabled });
+
+  // The `applyMode` command: hand the run state's mode to the engine and the button.
+  const _applyMode = (changed) => {
+    if (changed) {
       _rollbackChangeCount += 1;
       if (_rollbackChangeCount >= CONVINCE_THRESHOLD && !_convinceShown) {
         _convinceShown = true;
         _showConvincePrompt();
       }
     }
-    _rollbackEnabled = next;
     // While the autopilot is replaying baked menu inputs, FORCE lockstep
     // (predictions paused) regardless of the toggle's visible state.
     // Reason: at non-zero delay the engine's prediction model can roll
@@ -459,7 +267,7 @@
     // peers' inputs apply deterministically at delay-frame applied
     // frames — same outcome every run. The user's choice is restored
     // by _finishAutopilot the moment isInMatch flips true.
-    const enginePredictionsOn = _autopilotActive ? false : _rollbackEnabled;
+    const enginePredictionsOn = _autopilotActive ? false : _rollbackOn();
     window.NetplayRollback?.setPredictionsPaused?.(!enginePredictionsOn);
     _updateRollbackToggle();
   };
@@ -593,9 +401,9 @@
     window.NetplayRollback?.setDelayRetuneEnabled?.(true);
     // Now that we're past the autopilot's menu navigation, restore the
     // engine's prediction state to the user's actual rollback choice.
-    // _setRollbackEnabled gates predictions on `_autopilotActive` ?
-    // false : _rollbackEnabled, so this re-applies cleanly.
-    window.NetplayRollback?.setPredictionsPaused?.(!_rollbackEnabled);
+    // _applyMode gates predictions on `_autopilotActive` ? false : the
+    // mode, so this re-applies cleanly.
+    window.NetplayRollback?.setPredictionsPaused?.(!_rollbackOn());
     _showInputIndicator('enabled');
   };
 
@@ -668,7 +476,7 @@
 
   const ensureEmulatorBooted = ({ forceStartOnLoad = true } = {}) => {
     if (window.__test_skipBoot) return;
-    if (window.EJS_emulator || _emulatorBootInFlight || !_romBlobUrl) return;
+    if (window.EJS_emulator || _run.flags().bootInFlight || !_romBlobUrl) return;
 
     _installEjsGlobals();
     window.EJS_startOnLoaded = !!forceStartOnLoad;
@@ -678,12 +486,11 @@
     window.KNShared?.resetBootState?.();
 
     const injectLoader = () => {
-      if (_loaderInjected) return;
-      _loaderInjected = true;
-      _emulatorBootInFlight = true;
+      if (_run.flags().loaderInjected) return;
+      _run.send({ type: 'loaderInjected' });
       let bootDoneTimer = null;
       const markBootDone = () => {
-        _emulatorBootInFlight = false;
+        _run.send({ type: 'loaderSettled' });
         if (bootDoneTimer) {
           clearTimeout(bootDoneTimer);
           bootDoneTimer = null;
@@ -721,10 +528,10 @@
   // gated additionally on inMatch — pressing Pause during the
   // autopilot's menu navigation lands the game in a half-set-up state
   // that doesn't recover cleanly. _refreshEmuButtonsAvailability is
-  // called from the rAF in _updateHud as inMatch flips, plus once at
+  // called on the match's edges (`matchEntered`, `matchLeft`), plus once at
   // engine boot to set the initial state.
-  let _engineRunning = false;
   const _refreshEmuButtonsAvailability = () => {
+    const engineRunning = _run.flags().engineStarted;
     const pause = $('emu-pause');
     const stop = $('emu-stop');
     const reset = $('emu-reset');
@@ -734,14 +541,10 @@
     // mid-pause, leaving the user with no way to stop the demo without
     // first unpausing the game.
     const inMatch = !!window.NetplayRollback?.isInMatchOrPaused?.();
-    const interactiveOk = _engineRunning && inMatch;
+    const interactiveOk = engineRunning && inMatch;
     if (pause) pause.disabled = !interactiveOk;
     if (stop) stop.disabled = !interactiveOk;
-    if (reset) reset.disabled = !_engineRunning;
-  };
-  const _setEmuButtonsEnabled = (enabled) => {
-    _engineRunning = !!enabled;
-    _refreshEmuButtonsAvailability();
+    if (reset) reset.disabled = !engineRunning;
   };
 
   // Hard reset: reloads the page so the demo restarts from the autopilot
@@ -758,36 +561,36 @@
     } catch (_) {}
     _setStatus('Resetting demo…');
     location.reload();
+    _run.send({ type: 'reset' });
   };
 
-  const _toggleEmuPause = () => {
-    // Pause the rollback engine's tick scheduler — that's what actually
-    // advances the emulator. The engine drives Emscripten's main loop manually
-    // via an intercepted rAF, so Module.pauseMainLoop() is a no-op here.
-    if (!window.NetplayRollback?.pauseTick) return;
-    if (_emuPaused) {
-      window.NetplayRollback.resumeTick();
-      _resumeAutoCompare();
-      _emuPaused = false;
-      const btn = $('emu-pause');
-      if (btn) {
-        btn.textContent = '⏸ Pause';
-        btn.classList.remove('is-paused');
-      }
-      _setStatus('Resumed');
-    } else {
-      window.NetplayRollback.pauseTick();
-      // Freeze auto-compare so the rollback toggle doesn't flip while the
-      // emulator is frozen — the user wouldn't see the contrast anyway.
-      _pauseAutoCompare();
-      _emuPaused = true;
-      const btn = $('emu-pause');
-      if (btn) {
-        btn.textContent = '▶ Resume';
-        btn.classList.add('is-paused');
-      }
-      _setStatus('Paused');
+  // The Pause button pauses the rollback engine's tick scheduler — that's
+  // what actually advances the emulator. The engine drives Emscripten's main
+  // loop manually via an intercepted rAF, so Module.pauseMainLoop() is a
+  // no-op here. The run state toggles only when the engine has pauseTick.
+  // The `pauseTick` command:
+  const _pauseTick = (pauseAutoCompare) => {
+    window.NetplayRollback.pauseTick();
+    // Freeze auto-compare so the rollback toggle doesn't flip while the
+    // emulator is frozen — the user wouldn't see the contrast anyway.
+    if (pauseAutoCompare) _pauseAutoCompare();
+    const btn = $('emu-pause');
+    if (btn) {
+      btn.textContent = '▶ Resume';
+      btn.classList.add('is-paused');
     }
+    _setStatus('Paused');
+  };
+  // The `resumeTick` command:
+  const _resumeTick = (resumeAutoCompare) => {
+    window.NetplayRollback.resumeTick();
+    if (resumeAutoCompare) _resumeAutoCompare();
+    const btn = $('emu-pause');
+    if (btn) {
+      btn.textContent = '⏸ Pause';
+      btn.classList.remove('is-paused');
+    }
+    _setStatus('Resumed');
   };
 
   // Stop = full page reload. EmulatorJS, the rollback engine, the WASM core,
@@ -795,9 +598,9 @@
   // intercepted rAF, and the synthetic-peer scheduler each leave behind state
   // that's brittle to unwind cleanly between sessions. A reload is the only
   // truly reliable reset. We persist the lag slider value first so the user
-  // doesn't lose their setting across the reload.
+  // doesn't lose their setting across the reload. The `stop` command: the run
+  // state issues it once the emulator's loader (or EmulatorJS) is on the page.
   const _stopEmu = () => {
-    if (!window.EJS_emulator && !_loaderInjected) return;
     try {
       // Persist only the user's manually-chosen preference, not the
       // currently-animated slider position (which may be mid-animation).
@@ -820,7 +623,7 @@
     // Stop is the user's "fully quit and forget the ROM" path — clear
     // the IDB cache so the next visit hits the drop-ROM screen rather
     // than auto-restoring. Reset preserves the cache (its whole point).
-    _idbRomClear().finally(() => location.reload());
+    _romStore.clear().finally(() => location.reload());
   };
 
   // User's preferred RTT value (round-trip ms), if they manually moved
@@ -855,7 +658,7 @@
   };
 
   const _startEngine = () => {
-    if (_engineStarted) return;
+    if (_run.flags().engineStarted) return;
     if (!window.NetplayRollback) {
       _setStatus('Rollback engine missing');
       return;
@@ -903,7 +706,7 @@
       onReconnecting: _noop,
       onPlayersChanged: _noop,
     });
-    _engineStarted = true;
+    _run.send({ type: 'engineStarted' });
 
     // Demo mode disables the engine's pacing-throttle. Without this, the
     // engine throttles itself to match the (artificially slow) synthetic peer
@@ -953,10 +756,10 @@
     // handshake fires at zero/menu RTT, picks delay=2 (matching the
     // recording), autopilot runs deterministically, then the slider
     // animation re-tunes delay for actual play.
-    _setRollbackEnabled(_rollbackEnabled);
+    _setRollbackEnabled(_rollbackOn());
 
     // Engine + peer are running, so Pause/Stop are now meaningful.
-    _setEmuButtonsEnabled(true);
+    _refreshEmuButtonsAvailability();
 
     // Start GamepadManager so a connected controller flows through the
     // same readLocalInput pipeline the lobby uses (web/src/page/shared.ts
@@ -996,7 +799,7 @@
   };
 
   const _pollRollbackReady = () => {
-    if (!_engineStarted) return;
+    if (!_run.flags().engineStarted) return;
     if (window.NetplayRollback?.isCRollback?.()) {
       _setStatus('Rollback engine engaged');
       // Re-apply network now that the C engine is active. mispredictProb is
@@ -1032,7 +835,7 @@
       // Cache the bytes so Reset (and any future page reload) can
       // restore the ROM without prompting the user to drop it again.
       // Best-effort; failure to cache doesn't block the load.
-      _idbRomSave(new Uint8Array(bytes), file.name).catch(() => {});
+      _romStore.save(new Uint8Array(bytes), file.name).catch(() => {});
       _startEngine();
     } catch (err) {
       _showLoading(false);
@@ -1046,13 +849,68 @@
   const _renderHudText = (counters) => {
     _demo.hud.renderHud(document, {
       counters,
-      rollbackEnabled: _rollbackEnabled,
+      rollbackEnabled: _rollbackOn(),
       rtt: _readRtt(),
       // Pause-inclusive: keep the result panel showing the current mode's
       // feel while the player has the SSB64 pause menu open, instead of
       // flipping to WAITING the moment status=2.
       isInMatch: !!window.NetplayRollback?.isInMatchOrPaused?.(),
     });
+  };
+
+  // The `matchEntered` command: the game crossed into a match.
+  const _matchEntered = () => {
+    // Pause/Stop track inMatch; recompute now that it changed.
+    _refreshEmuButtonsAvailability();
+    // Stop recording (in record mode) or end autopilot (in replay mode)
+    // exactly when the player crosses into the match. Real input takes
+    // over from here.
+    _finishRecording();
+    _finishAutopilot();
+    _clearAutopilotRetry();
+    // Clear any post-match indicator the previous round left behind —
+    // _finishAutopilot's "enabled" toast only fires on first-time
+    // autopilot finish, so subsequent rounds rely on this explicit
+    // clear.
+    _showInputIndicator(null);
+    // Animate the RTT slider from 0 (its menu-time value) up to the
+    // user's saved preference (or DEFAULT_MATCH_RTT_MS). The animation
+    // calls _applyNetwork() each frame, so the synthetic peer's
+    // RTT tracks the visible slider position smoothly.
+    const target = _savedRttPreference != null ? _savedRttPreference : DEFAULT_MATCH_RTT_MS;
+    _animateLagTo(target, 800);
+    // Entering a vs match re-arms interaction tracking (the run state forgets
+    // the touch) and auto-starts auto-compare for this match. Each new match
+    // gets its own chance to demo hands-free even if the user took control in
+    // a previous one. ?autoCompare=0 disables auto-compare (for testing
+    // pure-rollback freeze profile without the periodic lockstep flips).
+    _setStatus(
+      _options.autoCompareDisabled
+        ? 'Match started — pure rollback (auto-compare disabled)'
+        : 'Match started — auto-comparing rollback ON ↔ OFF',
+    );
+    setTimeout(() => _run.send({ type: 'autoStartDue' }), 600);
+  };
+
+  // The `matchLeft` command: the game left the match. Stop the demo and put
+  // rollback back ON so the next match (or the menus the user is now
+  // navigating) start clean.
+  const _matchLeft = (stopAutoCompare, rollbackChanged) => {
+    _refreshEmuButtonsAvailability();
+    if (stopAutoCompare) _stopAutoCompare();
+    if (rollbackChanged) _applyMode(true);
+    // Animate the slider back down to 0 so menu navigation is responsive
+    // and the visible position matches the actual lag.
+    _animateLagTo(0, 500);
+    _setStatus('Match ended. Hit Reset to restart the demo, or play through the menus.');
+    // Show the same disabled-input alert that fires at boot, with a
+    // post-match-specific message. The autopilot is one-shot (only
+    // navigates from boot to first match), so post-match menus are
+    // on the user — but the results screen / fade-back transitions
+    // ignore input until they auto-advance, which feels like P1
+    // input is broken. Tell the user explicitly what's happening
+    // and point at Reset.
+    _showInputIndicator('post-match');
   };
 
   const _updateHud = () => {
@@ -1103,71 +961,11 @@
     const inMatchStrict = !!window.NetplayRollback?.isInMatch?.();
     const inMatch = !!window.NetplayRollback?.isInMatchOrPaused?.();
     _checkAutopilot(counters);
-    // Edge-detect strict transitions for fake-peer independent of the UI
-    // edge below — the strict edge fires on every pause/unpause so fake-peer
-    // silences immediately, while the UI edge only fires on real match
-    // boundaries (battle entry / battle exit).
-    if (inMatchStrict !== _lastFakePeerMatchActive) {
-      _lastFakePeerMatchActive = inMatchStrict;
-      window.KNFakePeer?.setMatchActive?.(inMatchStrict);
-    }
-    if (inMatch !== _wasInMatch) {
-      _wasInMatch = inMatch;
-      // Pause/Stop track inMatch; recompute now that it changed.
-      _refreshEmuButtonsAvailability();
-      if (inMatch) {
-        // Stop recording (in record mode) or end autopilot (in replay mode)
-        // exactly when the player crosses into the match. Real input takes
-        // over from here.
-        _finishRecording();
-        _finishAutopilot();
-        _clearAutopilotRetry();
-        // Clear any post-match indicator the previous round left behind —
-        // _finishAutopilot's "enabled" toast only fires on first-time
-        // autopilot finish, so subsequent rounds rely on this explicit
-        // clear.
-        _showInputIndicator(null);
-        // Animate the RTT slider from 0 (its menu-time value) up to the
-        // user's saved preference (or DEFAULT_MATCH_RTT_MS). The animation
-        // calls _applyNetwork() each frame, so the synthetic peer's
-        // RTT tracks the visible slider position smoothly.
-        const target = _savedRttPreference != null ? _savedRttPreference : DEFAULT_MATCH_RTT_MS;
-        _animateLagTo(target, 800);
-        // Entering a vs match — re-arm interaction tracking and auto-start
-        // auto-compare for this match. Each new match gets its own chance to
-        // demo hands-free even if the user took control in a previous one.
-        _userInteractedThisMatch = false;
-        // ?autoCompare=0 disables auto-compare (for testing pure-rollback freeze
-        // profile without the periodic lockstep flips).
-        const _autoCompareDisabled = _options.autoCompareDisabled;
-        _setStatus(
-          _autoCompareDisabled
-            ? 'Match started — pure rollback (auto-compare disabled)'
-            : 'Match started — auto-comparing rollback ON ↔ OFF',
-        );
-        setTimeout(() => {
-          if (_wasInMatch && !_userInteractedThisMatch && !_isAutoCompareRunning() && !_autoCompareDisabled)
-            _startAutoCompare();
-        }, 600);
-      } else {
-        // Left the match — stop the demo and put rollback back ON so the
-        // next match (or the menus the user is now navigating) start clean.
-        _stopAutoCompare();
-        if (!_rollbackEnabled) _setRollbackEnabled(true);
-        // Animate the slider back down to 0 so menu navigation is responsive
-        // and the visible position matches the actual lag.
-        _animateLagTo(0, 500);
-        _setStatus('Match ended. Hit Reset to restart the demo, or play through the menus.');
-        // Show the same disabled-input alert that fires at boot, with a
-        // post-match-specific message. The autopilot is one-shot (only
-        // navigates from boot to first match), so post-match menus are
-        // on the user — but the results screen / fade-back transitions
-        // ignore input until they auto-advance, which feels like P1
-        // input is broken. Tell the user explicitly what's happening
-        // and point at Reset.
-        _showInputIndicator('post-match');
-      }
-    }
+    // The run state finds the edges: the strict one (`fakePeerActive`) fires
+    // on every pause/unpause so fake-peer silences immediately, while the UI
+    // edge (`matchEntered`, `matchLeft`) only fires on real match boundaries
+    // (battle entry / battle exit).
+    _run.send({ type: 'frame', strict: inMatchStrict, inclusive: inMatch });
 
     _nativeRAF(_updateHud);
   };
@@ -1183,7 +981,7 @@
     const next = !!enabled;
     const rb = window.NetplayRollback;
     const inMatch = !!rb?.isInMatchOrPaused?.();
-    if (!inMatch || _emuPaused) {
+    if (!inMatch || _run.flags().tickPaused) {
       _setRollbackEnabled(next);
       return;
     }
@@ -1209,10 +1007,12 @@
     }, MODE_SWITCH_LABEL_MS);
   };
 
-  const _isAutoCompareRunning = () => _autoCompareTimer !== 0;
-
+  // Auto-compare's work. When it starts, stops, pauses and resumes is the run
+  // state's (its `startAutoCompare` and `stopAutoCompare` commands, and the
+  // `pauseAutoCompare` and `resumeAutoCompare` parts of `pauseTick` and
+  // `resumeTick`): paused by the Pause button it is still on, and its button,
+  // the rollback button and leaving the match stop it as they stop it running.
   const _stopAutoCompare = () => {
-    if (!_isAutoCompareRunning()) return;
     clearInterval(_autoCompareTimer);
     _autoCompareTimer = 0;
     _autoComparePausedAt = 0;
@@ -1229,14 +1029,12 @@
   // top). _autoComparePausedAt = wall-clock at pause; resume offsets
   // _autoCompareStart by the gap so elapsed is unchanged.
   const _pauseAutoCompare = () => {
-    if (!_isAutoCompareRunning() || _autoComparePausedAt) return;
     _autoComparePausedAt = performance.now();
     clearInterval(_autoCompareTimer);
     _autoCompareTimer = 0;
   };
 
   const _resumeAutoCompare = () => {
-    if (!_autoComparePausedAt || _autoCompareTimer) return;
     _autoCompareStart += performance.now() - _autoComparePausedAt;
     _autoComparePausedAt = 0;
     _autoCompareTimer = setInterval(_tickAutoCompare, 100);
@@ -1252,11 +1050,11 @@
     }
   };
 
-  const _startAutoCompare = () => {
-    if (_isAutoCompareRunning()) return;
+  // Auto-compare starts in rollback; `rollbackChanged` is whether that is a change.
+  const _startAutoCompare = (rollbackChanged) => {
     _autoCompareStart = performance.now();
     _autoCompareCycle = 0;
-    _setRollbackEnabled(true);
+    _applyMode(rollbackChanged);
     _autoCompareTimer = setInterval(_tickAutoCompare, 100);
     const wrapper = $('auto-compare');
     if (wrapper) wrapper.classList.add('is-running');
@@ -1264,10 +1062,22 @@
     if (btn) btn.textContent = '■ Stop auto-compare';
   };
 
-  const _toggleAutoCompare = () => {
-    if (_isAutoCompareRunning()) _stopAutoCompare();
-    else _startAutoCompare();
-  };
+  // The run state, which decides when the page does each of the above.
+  const _run = _demo.runState({
+    autoCompareDisabled: _options.autoCompareDisabled,
+    handlers: {
+      fakePeerActive: (active) => window.KNFakePeer?.setMatchActive?.(active),
+      matchEntered: _matchEntered,
+      matchLeft: _matchLeft,
+      startAutoCompare: _startAutoCompare,
+      stopAutoCompare: _stopAutoCompare,
+      switchMode: (rollback) => _switchMode(rollback),
+      applyMode: _applyMode,
+      pauseTick: _pauseTick,
+      resumeTick: _resumeTick,
+      stop: _stopEmu,
+    },
+  });
 
   const _bindDom = () => {
     const drop = $('rom-drop');
@@ -1289,7 +1099,7 @@
     });
 
     $('lag')?.addEventListener('input', () => {
-      _markUserInteracted();
+      _run.send({ type: 'interacted' });
       // Cancel any in-flight slider animation — user is taking control.
       if (_lagAnimRaf) {
         cancelAnimationFrame(_lagAnimRaf);
@@ -1299,22 +1109,18 @@
       _savedRttPreference = _readRtt();
       _applyNetwork();
     });
-    $('rollback-toggle')?.addEventListener('click', () => {
-      _markUserInteracted();
-      // Manual toggle stops auto-compare so the user is back in control.
-      _stopAutoCompare();
-      _switchMode(!_rollbackEnabled);
-    });
+    // Manual toggle stops auto-compare so the user is back in control, then
+    // switches to the other mode (the run state's `stopAutoCompare` and
+    // `switchMode` commands).
+    $('rollback-toggle')?.addEventListener('click', () => _run.send({ type: 'rollbackToggleClicked' }));
     $('emu-pause')?.addEventListener('click', () => {
-      _markUserInteracted();
-      _toggleEmuPause();
+      _run.send({ type: 'pauseClicked', tickControl: !!window.NetplayRollback?.pauseTick });
     });
     $('emu-stop')?.addEventListener('click', () => {
-      _markUserInteracted();
-      _stopEmu();
+      _run.send({ type: 'stopClicked', emulator: !!window.EJS_emulator });
     });
     $('emu-controls')?.addEventListener('click', () => {
-      _markUserInteracted();
+      _run.send({ type: 'interacted' });
       // Open the same controller-settings panel the lobby uses (loaded
       // via the demo.html script tag). Lazy-init GamepadManager on first
       // open so detection works whether or not we hit this from the
@@ -1322,14 +1128,8 @@
       _ensureGamepadManager();
       window.ControllerSettings?.toggle?.();
     });
-    $('emu-reset')?.addEventListener('click', () => {
-      _markUserInteracted();
-      _resetDemo();
-    });
-    $('auto-compare-btn')?.addEventListener('click', () => {
-      _markUserInteracted();
-      _toggleAutoCompare();
-    });
+    $('emu-reset')?.addEventListener('click', () => _resetDemo());
+    $('auto-compare-btn')?.addEventListener('click', () => _run.send({ type: 'autoCompareClicked' }));
 
     // Gesture button: the engine listens for clicks on the page once it's in
     // the boot-gesture phase, but giving the button its own click handler that
@@ -1355,7 +1155,8 @@
     // come back into a running engine instead of dumping the user back at
     // the drop-ROM screen. Stop explicitly clears the cache so it still
     // works as a hard quit.
-    _idbRomLoad()
+    _romStore
+      .load()
       .then((cached) => {
         if (!cached?.bytes || !cached?.name) return;
         const blob = new Blob([cached.bytes], { type: 'application/octet-stream' });
@@ -1370,66 +1171,10 @@
   // ignored (autopilot is driving the menus) or whether they're in control.
   // state: 'disabled' shows persistent amber badge; 'enabled' flashes a
   // green "YOU'RE IN CONTROL" badge for 3s; null/undefined removes both.
-  let _inputIndicatorTimer = null;
-  const _ensureIndicatorAnim = () => {
-    if (document.getElementById('kn-demo-indicator-anim')) return;
-    const style = document.createElement('style');
-    style.id = 'kn-demo-indicator-anim';
-    style.textContent = _demo.hud.INPUT_INDICATOR_KEYFRAMES;
-    document.head.appendChild(style);
-  };
-  // Always remove the existing indicator before creating a new one. Mutating
-  // the same element to swap state caused two animations (pulse + fade) to
-  // briefly fight each other, which the browser composited as a visible flash.
-  const _showInputIndicator = (state) => {
-    if (_inputIndicatorTimer) {
-      clearTimeout(_inputIndicatorTimer);
-      _inputIndicatorTimer = null;
-    }
-    const existing = document.getElementById('input-indicator');
-    if (existing) existing.remove();
-    if (!state) return;
-    _ensureIndicatorAnim();
-    const el = document.createElement('div');
-    el.id = 'input-indicator';
-    el.style.cssText = _demo.hud.INPUT_INDICATOR_CSS;
-    const look = _demo.hud.inputIndicator(state);
-    if (look) {
-      el.textContent = look.text;
-      el.style.background = look.background;
-      el.style.animation = look.animation;
-      if (look.removeAfterMs != null) {
-        _inputIndicatorTimer = setTimeout(() => {
-          const cur = document.getElementById('input-indicator');
-          if (cur) cur.remove();
-          _inputIndicatorTimer = null;
-        }, look.removeAfterMs);
-      }
-    }
-    document.body.appendChild(el);
-  };
-
-  const _showRecIndicator = (on) => {
-    let el = document.getElementById('rec-indicator');
-    if (on && !el) {
-      el = document.createElement('div');
-      el.id = 'rec-indicator';
-      el.textContent = '● REC';
-      el.style.cssText =
-        'position:fixed;top:12px;right:12px;z-index:9999;' +
-        'padding:6px 12px;border-radius:6px;background:#a02020;color:#fff;' +
-        'font-family:sans-serif;font-weight:800;font-size:13px;letter-spacing:0.08em;' +
-        'box-shadow:0 0 0 0 rgba(255,80,80,0.6);animation:recPulse 1.4s ease-in-out infinite;' +
-        'pointer-events:none;';
-      const style = document.createElement('style');
-      style.textContent =
-        '@keyframes recPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,80,80,0.6)}50%{box-shadow:0 0 0 12px rgba(255,80,80,0)}}';
-      document.head.appendChild(style);
-      document.body.appendChild(el);
-    } else if (!on && el) {
-      el.remove();
-    }
-  };
+  // The input indicator and the REC badge. web/src/demo/indicators.ts.
+  const _indicators = _demo.indicators(window);
+  const _showInputIndicator = (state) => _indicators.showInput(state);
+  const _showRecIndicator = (on) => _indicators.showRec(on);
 
   // Manual recording controls. Use these from devtools console if you didn't
   // visit with ?record=1 from the start:
@@ -1468,6 +1213,8 @@
     ensureEmulatorBooted,
     loadRomFile: _loadRomFile,
     setRollbackEnabled: _setRollbackEnabled,
+    // The run state as one line, for the console and the tests.
+    runState: { state: _run.state },
     startRecording: _startRecordingManual,
     stopRecording: _stopRecordingManual,
     getRecording: _getRecording,

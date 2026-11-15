@@ -361,6 +361,15 @@
     // Guests/spectators: wait for host to initiate (don't create connections)
 
     _applyControllerPresentMask('users-updated');
+
+    // The host's deadlines: one for every member it lists with no open
+    // channel, none for a member it no longer lists.
+    const deadlines = _playerSlot === 0 ? _deadlines() : null;
+    if (deadlines) {
+      for (const sid of deadlines.armed()) if (!_isListed(sid)) deadlines.forget(sid);
+      const listed = [...Object.keys(_knownPlayers), ..._knownSpectators].filter(_isListed);
+      for (const sid of listed) if (_peers[sid]?.dc?.readyState !== 'open') deadlines.arm(sid);
+    }
     // After this handler, so the roster's own effect is observed first.
     if (_heldOffers.size) queueMicrotask(_decideHeldOffers);
 
@@ -370,12 +379,96 @@
     }
   };
 
+  // ── Connection attempts and the host's deadline ────────────────────────
+  // Every connection the host offers is named by an attempt {page, attempt}:
+  // this page's id and its count of the connections it offered to that
+  // member. Every signal carries the name of its connection as `attemptId`
+  // (an offer its own; an answer or a candidate the one of the connection it
+  // comes from), and a page applies it only to that connection
+  // (KNCore.streaming: offerForConnection, answerApplies,
+  // signalForConnection). A signal that names none comes from a page from
+  // before, and is applied to whatever connection is held, as then.
+  //
+  // The host keeps a deadline for every member its roster lists whose
+  // channel to it is not open (KNCore.streaming.startReofferDeadlines): when
+  // it expires, the connection is replaced and offered again, at growing
+  // waits, until the channel opens or the roster drops the member. Before
+  // it, a lost connection was forgotten on both pages and nothing offered
+  // again (specs/streaming_connection.qnt, droppedGuestTest).
+  let _attemptPage = null;
+  const _offerCounts = new Map(); // member sid → connections offered to it
+  const _attemptPageId = () => {
+    if (_attemptPage === null) {
+      _attemptPage =
+        window.KNCore?.peerObserve?.newPageId?.() ??
+        `p${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+    }
+    return _attemptPage;
+  };
+  const _nextAttempt = (sid) => {
+    const attempt = (_offerCounts.get(sid) ?? 0) + 1;
+    _offerCounts.set(sid, attempt);
+    return { page: _attemptPageId(), attempt };
+  };
+  const _readAttempt = (value) => window.KNCore?.peerObserve?.readAttemptId?.(value) ?? null;
+  const _withAttempt = (data, attempt) => (attempt ? { ...data, attemptId: attempt } : data);
+  const _attemptText = (attempt) => (attempt ? `${attempt.page}#${attempt.attempt}` : 'none');
+  const NAMES_NONE = { page: '', attempt: 0 };
+
+  // A member the host's latest roster lists: a player other than this page, or a spectator.
+  const _isListed = (sid) => (sid !== socket?.id && Object.hasOwn(_knownPlayers, sid)) || _knownSpectators.has(sid);
+
+  const _reofferDue = (sid) =>
+    window.KNCore?.streaming?.reofferDue?.(_playerSlot === 0, _isListed(sid), _peers[sid]?.dc?.readyState === 'open') ??
+    false;
+
+  // The deadlines, made on first use; null without the bundle's rules (a
+  // page that met an older bundle offers once, as before).
+  let _reofferDeadlines;
+  const _deadlines = () => {
+    if (_reofferDeadlines === undefined) {
+      _reofferDeadlines =
+        window.KNCore?.streaming?.startReofferDeadlines?.({ due: _reofferDue, reoffer: _reofferNow }) ?? null;
+    }
+    return _reofferDeadlines;
+  };
+
+  // Close a connection and forget it, if it is still the one held.
+  const _closePeer = (sid, peer) => {
+    if (peer.dc)
+      try {
+        peer.dc.close();
+      } catch (_) {}
+    if (peer.pc)
+      try {
+        peer.pc.close();
+      } catch (_) {}
+    if (_peers[sid] === peer) delete _peers[sid];
+    KNState.peers = _peers;
+  };
+
+  // The host's deadline for `sid` expired with no open channel: replace the
+  // connection and offer on the new one.
+  const _reofferNow = (sid, tries) => {
+    const old = _peers[sid];
+    const state = old ? `${old.dc?.readyState ?? 'no-channel'}/${old.pc?.connectionState ?? '?'}` : 'none';
+    _syncLog(`STREAM-REOFFER ${sid} try=${tries} held=${_attemptText(old?.attempt)} (${state})`);
+    if (old) _closePeer(sid, old);
+    createPeer(sid, Object.hasOwn(_knownPlayers, sid) ? _knownPlayers[sid].slot : null, true);
+    sendOffer(sid);
+  };
+
   // ── WebRTC ─────────────────────────────────────────────────────────────
 
   const createPeer = (remoteSid, remoteSlot, isInitiator) => {
     const peerGuard = (p) => _peers[remoteSid] === p;
-    const peer = KNShared.createBasePeer(_getIceServers(), remoteSid, socket, peerGuard);
+    // The candidates this connection gathers carry its attempt.
+    let made = null;
+    const signalSocket = { emit: (event, data) => socket.emit(event, _withAttempt(data, made?.attempt ?? null)) };
+    const peer = KNShared.createBasePeer(_getIceServers(), remoteSid, signalSocket, peerGuard);
+    made = peer;
     peer.slot = remoteSlot;
+    peer.attempt = null;
 
     peer.pc.onconnectionstatechange = () => {
       const s = peer.pc.connectionState;
@@ -573,13 +666,16 @@
     const peer = _peers[remoteSid];
     if (!peer) return;
     _observer.offered(remoteSid);
+    // The first offer on a connection names it; its candidates follow it.
+    if (!peer.attempt) peer.attempt = _nextAttempt(remoteSid);
+    _deadlines()?.arm(remoteSid);
     try {
       const offer = await peer.pc.createOffer();
       const browserSdp = offer.sdp;
       offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
       _observer.offerSdp(browserSdp, offer.sdp);
       await peer.pc.setLocalDescription(offer);
-      socket.emit('webrtc-signal', { target: remoteSid, offer });
+      socket.emit('webrtc-signal', _withAttempt({ target: remoteSid, offer }, peer.attempt));
     } catch (err) {
       _syncLog(`sendOffer failed for ${remoteSid}: ${err.message || err}`);
     }
@@ -658,12 +754,62 @@
       return;
     }
 
-    if (data.offer && !_peers[senderSid]) {
-      const known = _knownPlayers[senderSid];
-      createPeer(senderSid, known ? known.slot : null, false);
+    // Which connection the signal is for (KNCore.streaming, attempt.ts).
+    // Without the bundle's rules every signal goes to the connection held.
+    const streaming = window.KNCore?.streaming;
+    const named = _readAttempt(data.attemptId);
+    const name = named ?? NAMES_NONE;
+    let peer = _peers[senderSid];
+    const mine = peer?.attempt ?? NAMES_NONE;
+    if (data.offer) {
+      // Only a page that receives the stream tells connections apart by
+      // their offers; an offer to the host is applied as before.
+      const step =
+        _playerSlot !== 0 && streaming?.offerForConnection
+          ? streaming.offerForConnection(!!peer, mine.page, mine.attempt, name.page, name.attempt)
+          : peer
+            ? 'renegotiate'
+            : 'create';
+      if (step === 'drop') {
+        seen.act = 'stale';
+        _syncLog(
+          `dropped offer from ${senderSid} for an older connection (${_attemptText(named)}, holding ${_attemptText(peer?.attempt)})`,
+        );
+        return;
+      }
+      if (step === 'replace') {
+        _syncLog(
+          `offer from ${senderSid} for a new connection (${_attemptText(named)}): replacing ${_attemptText(peer?.attempt)}`,
+        );
+        _closePeer(senderSid, peer);
+        peer = undefined;
+      }
+      if (!peer) {
+        const known = _knownPlayers[senderSid];
+        peer = createPeer(senderSid, known ? known.slot : null, false);
+        peer.attempt = named;
+      }
+    } else if (peer && data.answer) {
+      const waiting = peer.pc.signalingState === 'have-local-offer';
+      const applies = streaming?.answerApplies
+        ? streaming.answerApplies(waiting, mine.page, mine.attempt, name.page, name.attempt)
+        : true;
+      if (!applies) {
+        seen.act = 'stale';
+        _syncLog(
+          `dropped answer from ${senderSid} (${_attemptText(named)}; holding ${_attemptText(peer.attempt)}, waiting=${waiting})`,
+        );
+        return;
+      }
+    } else if (peer && data.candidate) {
+      const applies = streaming?.signalForConnection
+        ? streaming.signalForConnection(mine.page, mine.attempt, name.page, name.attempt)
+        : true;
+      if (!applies) {
+        seen.act = 'stale';
+        return;
+      }
     }
-
-    const peer = _peers[senderSid];
     if (!peer) return;
 
     try {
@@ -671,10 +817,12 @@
         seen.act = 'offer';
         peer._offerCount = (peer._offerCount || 0) + 1;
         const hasVideo = data.offer.sdp?.includes('m=video') ?? false;
-        _syncLog(`received offer #${peer._offerCount} from ${senderSid} (hasVideo=${hasVideo})`);
+        _syncLog(
+          `received offer #${peer._offerCount} from ${senderSid} (hasVideo=${hasVideo}, attempt=${_attemptText(named)})`,
+        );
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await KNShared.drainCandidates(peer);
-        await KNShared.createAndSendAnswer(peer.pc, socket, senderSid);
+        await KNShared.createAndSendAnswer(peer.pc, socket, senderSid, peer.attempt);
       } else if (data.answer) {
         seen.act = 'answer';
         _syncLog(`received answer from ${senderSid}`);
@@ -718,7 +866,7 @@
     if (offer?.type === 'offer') {
       seen.act = 'resend';
       _syncLog(`late join ready: resending pending offer for ${remoteSid} slot=${remoteSlot}`);
-      socket.emit('webrtc-signal', { target: remoteSid, offer });
+      socket.emit('webrtc-signal', _withAttempt({ target: remoteSid, offer }, peer.attempt));
       return;
     }
 
@@ -735,6 +883,7 @@
     const onOpen = () => {
       const seen = _observer.channelOpen(remoteSid);
       const peer = _peers[remoteSid];
+      if (_playerSlot === 0 && peer?.dc === ch) _deadlines()?.opened(remoteSid);
       _syncLog(
         `DC open with ${remoteSid} slot=${peer ? peer.slot : '?'} mySlot=${_playerSlot} gameRunning=${_gameRunning} isSpectator=${_isSpectator}`,
       );
@@ -826,17 +975,15 @@
     }
     // Close the RTCPeerConnection to release OS sockets and media resources.
     // Without this, each disconnect leaks an open PC (DTLS, ICE agent, encoders).
-    if (peer.dc)
-      try {
-        peer.dc.close();
-      } catch (_) {}
-    if (peer.pc)
-      try {
-        peer.pc.close();
-      } catch (_) {}
-    delete _peers[remoteSid];
-    KNState.peers = _peers;
-    _syncLog(`peer disconnected: ${remoteSid}`);
+    _closePeer(remoteSid, peer);
+    _syncLog(`peer disconnected: ${remoteSid} (${_attemptText(peer.attempt)})`);
+    if (_playerSlot === 0) {
+      // The host offers again at its deadline while the roster lists them.
+      if (_isListed(remoteSid)) _deadlines()?.arm(remoteSid);
+    } else if (peer.slot === 0) {
+      // The host offers again at its deadline; until then the video holds its last frame.
+      setStatus('🟡 Connection to the host lost — reconnecting…');
+    }
   };
 
   // ── Host: emulator + stream ────────────────────────────────────────────
@@ -1093,7 +1240,7 @@
       offer.sdp = preferCodecs(setSDPBitrate(offer.sdp, 3000));
       _observer.offerSdp(browserSdp, offer.sdp);
       await peer.pc.setLocalDescription(offer);
-      socket.emit('webrtc-signal', { target: remoteSid, offer });
+      socket.emit('webrtc-signal', _withAttempt({ target: remoteSid, offer }, peer.attempt));
     } catch (err) {
       _syncLog(`renegotiate failed: ${err}`);
     }
@@ -1634,6 +1781,8 @@
       _unmuteAbort = null;
     }
 
+    _reofferDeadlines?.stop();
+    _reofferDeadlines = undefined;
     _heldKeys.clear();
     _knownPlayers = {};
     _knownSpectators = new Set();

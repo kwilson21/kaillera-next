@@ -143,27 +143,24 @@ pair peer_connection_counter_only holdWithACounterAlone initLobby
 STREAM=specs/streaming_connection.qnt
 $QUINT typecheck "$STREAM"
 # The scenarios say what each variant does with the same ordering.
-for variant in streaming_connection_before_220 streaming_connection_current streaming_connection_fixed; do
+for variant in streaming_connection_before_220 streaming_connection_before_reoffer streaming_connection_current; do
   $QUINT test "$STREAM" --main="$variant" --backend=typescript
 done
 stream() { # module invariant init
   $QUINT run "$STREAM" --main="$1" --invariant="$2" --init="$3" \
     --max-samples=10000 --max-steps=25 --backend=typescript
 }
-# Today: nothing replaces a connection both pages have open, and a guest's or
-# spectator's page connects only to the host. The other two properties are
-# VIOLATED today (the scenarios above show how): neverLeftWithNothingPending
-# (a dropped connection is forgotten on both pages and nothing offers again,
-# droppedGuestIsNeverReconnectedTest) and staleSignalsAreNotApplied (an offer
-# for a new connection is applied to the old one,
-# newConnectionTakenAsRenegotiationTest). receiversConnectOnlyToTheHost was
-# VIOLATED before #220, when a page answered any member's offer
+# Today every property holds. Before the host had a deadline to offer again
+# and signals named their connection (streaming_connection_before_reoffer),
+# two were VIOLATED (the scenarios above show how):
+# neverLeftWithNothingPending (a dropped connection was forgotten on both
+# pages and nothing offered again, droppedGuestTest) and
+# staleSignalsAreNotApplied (an offer for a new connection was applied to the
+# old one, newConnectionTakenAsRenegotiationTest). receiversConnectOnlyToTheHost
+# was VIOLATED before #220, when a page answered any member's offer
 # (streaming_connection_before_220, strayOfferTest).
-stream streaming_connection_current holdToday init
-# With the host's deadline and signals that name their connection as well,
-# every property holds.
-stream streaming_connection_fixed allHold init
-stream streaming_connection_fixed allHold initLate
+stream streaming_connection_current allHold init
+stream streaming_connection_current allHold initLate
 
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt
@@ -198,7 +195,8 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
-for variant in resync_flow_before resync_flow_any_answer resync_flow_current; do
+for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
+  resync_flow_asked_from resync_flow_unnumbered resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
 # A guest stopped at its target has a deadline, a state no newer than the
@@ -209,13 +207,22 @@ done
 $QUINT run "$FLOW" --main=resync_flow_any_answer --invariant=holdWithoutNumbers \
   --max-samples=20000 --max-steps=25 --backend=typescript
 # And only its own answer ends a request, a late answer does not take the
-# guest back below the frame its newest request named (at the target or
-# after the target's deadline), and a late answer does not take the place of
-# the awaited one. All three were violated before a request had a number its
-# answer carries (resync_flow_any_answer; lateAnswerTest,
-# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
-# hold the orderings).
+# guest back (below its frame, or below the frame its newest request named,
+# at the target or after the target's deadline), and a late answer does not
+# take the place of the awaited one. All three were violated before a
+# request had a number its answer carries (resync_flow_any_answer;
+# lateAnswerTest, lateAnswerAfterTheTargetDeadlineTest and
+# lateAnswerOverTheAwaitedOneTest hold the orderings). The second was
+# violated too while only the frame a request named was checked
+# (resync_flow_frame_named; immediateLateAnswerTest), is by rule b
+# (resync_flow_asked_from; lateAnswerFromAfterTheAskTest), and was while the
+# boot sync and the input stall's request went out with no number
+# (resync_flow_unnumbered; bootAnswerAfterANewerRequestTest).
 $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+# Rule a, not taken, holds them too; it drops the only state coming in
+# onlyStateComingTest.
+$QUINT run "$FLOW" --main=resync_flow_drop_older --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── The tick loop's deadlines and a page that freezes ───────────────────────
@@ -228,13 +235,32 @@ done
 # the pacing-throttle deadline was credited (tick_deadlines_before).
 $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldAgainstAPeer \
   --max-samples=20000 --max-steps=25 --backend=typescript
+# A state transfer and the host's inputs behind it on one connection.
+for variant in input_link_burst input_link_paced_unguarded input_link_paced_whole_deadline input_link_paced; do
+  $QUINT test "$TICK" --main="$variant" --backend=typescript
+done
+# With the chunks handed over one at a time, a host that is sending is never
+# given up on and none of its inputs arrives deeper than the cap. Both were
+# VIOLATED while a state went into the connection all at once
+# (input_link_burst; twoAnswersBackToBackTest holds the ordering of the
+# two-player run that found it).
+# Also: a transfer queued before a reconnect never reaches the new
+# connection, and the guest's inputs are settled only for a state that was
+# sent. Both VIOLATED by #236 as first written (input_link_paced_unguarded;
+# transferQueuedBeforeAResetTest and abandonedTransferTest hold the orderings).
+# And: a transfer still arriving is not given up by the guest, and the host
+# hands over no chunk of a transfer the guest told it it dropped. Both
+# VIOLATED while the guest's chunk deadline ran over the whole state
+# (input_link_paced_whole_deadline; progressingTransferAbandonedTest).
+$QUINT run "$TICK" --main=input_link_paced --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
 
 
 # ── Inputs around a resync: what a page may wait for afterwards ─────────────
 RESYNC=specs/resync_inputs.qnt
 $QUINT typecheck "$RESYNC"
 for variant in resync_inputs_before resync_inputs_solo_holes resync_inputs_only_new \
-  resync_inputs_no_refeed resync_inputs_current; do
+  resync_inputs_no_refeed resync_inputs_no_ask resync_inputs_current; do
   $QUINT test "$RESYNC" --main="$variant" --backend=typescript
 done
 # Today: after a resync nobody waits for an input that cannot arrive, and the
@@ -249,6 +275,9 @@ done
 # And the guest applies them itself: violated while a resync did not hand its
 # engine the ones it already had, which the engine's ring may have written
 # over (resync_inputs_no_refeed).
+# A due resync is never left to its deadline: violated while a page waiting
+# on inputs it had dropped as out of range did not ask for them
+# (resync_inputs_no_ask; guestWaitsOnInputsItDroppedTest holds the ordering).
 $QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
@@ -263,4 +292,43 @@ done
 # the settled point never runs ahead of the inputs still to be made (violated
 # while a new match kept the last one's, resync_mesh_kept).
 $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── Inputs on the unreliable channel, and the switch to the reliable one ────
+INPUTS=specs/input_transport.qnt
+$QUINT typecheck "$INPUTS"
+for variant in input_transport_before_ask input_transport_current input_transport_until_acked \
+  input_transport_resend_once input_transport_fixed; do
+  $QUINT test "$INPUTS" --main="$variant" --backend=typescript
+done
+# Today with the fix: every input the peer had not acked when the page
+# switched to the reliable channel reaches it without the peer asking, and
+# no input is lost for good. The first was violated while the switch let the
+# history go (input_transport_current; lostThenFallbackTest and
+# lostThenChannelClosesTest hold the orderings), and is with redundancy kept
+# until the ack instead (input_transport_until_acked;
+# stuckChannelBeyondTheCapTest). The second was violated before #235, when
+# the peer did not ask for a hole (input_transport_before_ask). The first is
+# violated too when a send that throws partway through the resend drops the
+# frames after it (input_transport_resend_once; resendFailsPartwayTest).
+$QUINT run "$INPUTS" --main=input_transport_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostForGood \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── A "now" resync request asked again at its deadline ─────────────────────
+REASK=specs/resync_reask.qnt
+$QUINT typecheck "$REASK"
+for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_fixed; do
+  $QUINT test "$REASK" --main="$variant" --backend=typescript
+done
+# With the fix: an owed resync is asked for again or given up visibly, the
+# deadline does not cut an answer being decoded, and the asks again are
+# bounded. Today the deadline let the request go and asked nothing
+# (resync_reask_current; lateAnswerBehindTest, lostRequestTest); asking again
+# without holding the deadline while an answer decodes cuts it
+# (resync_reask_unguarded; askAgainCutsTheDecodeTest), and the lifecycle
+# guard's timeout letting the request go forgets it again
+# (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest).
+$QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript

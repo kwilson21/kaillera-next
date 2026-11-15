@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 AUDIO_BACKEND = (
@@ -9,6 +10,12 @@ AUDIO_BACKEND = (
 AUDIO_PATCH = ROOT / "build/patches/audio-backend-skip-output.patch"
 
 
+# build/src/ holds the core's source as build/build.sh clones and patches it;
+# it is git-ignored, so a checkout that has not built the core has none.
+@pytest.mark.skipif(
+    not AUDIO_BACKEND.exists(),
+    reason="needs the patched core source: run build/build.sh, which clones and patches it into build/src/",
+)
 def test_deterministic_audio_captures_before_openal_output():
     """Netplay audio must not depend on RetroArch/OpenAL being writable.
 

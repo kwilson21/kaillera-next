@@ -40,6 +40,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      # Node 24 in every job that runs Node, as in the Docker image's web
+      # stage: the TypeScript tests strip types without a flag (22.18+), the
+      # observer-report helpers read node:sqlite (22.13+), and the image job
+      # compares the bundles built here with the image's.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: Install pinned tools
         run: npm ci --ignore-scripts
       - name: Format check (oxfmt)
@@ -51,7 +58,7 @@ jobs:
       - name: TypeScript tests
         run: npm run test:ts
       - name: Two-player test's own helpers
-        run: node --test tests/frozen-recovery.test.mjs
+        run: node --test tests/frozen-recovery.test.mjs tests/observer-reports.test.mjs tests/link-schedule.test.mjs
       # The menu driver the two-player test and the demo page share, against
       # a simulated SSB64 menu at every input delay the engine can set.
       - name: Menu autopilot against a simulated menu
@@ -71,6 +78,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: Install pinned tools
         run: npm ci --ignore-scripts
       - name: Model-check specs (Quint)
@@ -78,18 +88,29 @@ jobs:
 
   # Exhaustive model checking (Apalache): every run of the specs up to a
   # bounded number of steps, where the spec job's `npm run spec` samples deeper
-  # random runs. Separate job because it needs Java; it took 16 to 27 minutes
-  # on main before the streaming connection spec added about 3.5 more.
+  # random runs. Separate job because it needs Java. In one job it took 32
+  # minutes and grew with every spec, so it runs as parallel shards, each a
+  # few groups of checks (scripts/verify-specs.sh, SHARDS), of 4 to 8 minutes.
   spec-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       # Apalache needs Java 17+, which the runner image already has.
       - name: Install pinned tools
         run: npm ci --ignore-scripts
+      # A shard the script has and this matrix does not would never run.
+      - name: Every shard has a job
+        run: test "$(bash scripts/verify-specs.sh --shards)" = "${{ strategy.job-total }}"
       - name: Verify specs for every run up to 6 steps
-        run: npm run spec:verify
+        run: bash scripts/verify-specs.sh --shard ${{ matrix.shard }}
 
   # Proofs for the files in LemmaScript-files.txt. `lsc check` regenerates the
   # Dafny from the annotated TypeScript and verifies it; the diff step fails
@@ -99,6 +120,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: Install pinned tools
         run: npm ci --ignore-scripts
       - uses: actions/setup-dotnet@v5
@@ -139,6 +163,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: Install locked Python dependencies
         run: |
           python -m pip install uv
@@ -156,6 +183,8 @@ jobs:
             ../tests/test_abandoned_match.py \
             ../tests/test_relay_sender.py \
             ../tests/test_webrtc_signal_relay.py \
+            ../tests/test_socket_cors.py \
+            ../tests/test_turn_credentials.py \
             ../tests/test_schema.py \
             ../tests/test_query_builder.py \
             ../tests/test_room_logic.py \
@@ -173,7 +202,8 @@ jobs:
             ../tests/test_screenshots.py \
             ../tests/test_state.py \
             ../tests/test_emulator_boot_sequence.py \
-            ../tests/test_core_desync_exports.py
+            ../tests/test_core_desync_exports.py \
+            ../tests/test_sync_send_source.py
       # The desync registry compiled natively and read against a RAM dump of
       # a match: its addresses, the byte order of one-byte fields, the replay
       # rewrite and the address map. Its own conftest builds the library.
@@ -192,6 +222,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
       - name: Build the image
         run: docker build -t kaillera-next:ci .
       - name: Bundles in the image
