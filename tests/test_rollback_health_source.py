@@ -212,6 +212,43 @@ def test_resync_settles_the_inputs_before_its_frame():
     assert "delete _inputSettledBefore[slot];" in src[reset_idx : src.index("\n  };\n", reset_idx)]
 
 
+def test_a_stalled_page_asks_for_the_inputs_it_dropped():
+    # specs/resync_inputs.qnt, ASK_FOR_MISSING: a page that dropped a peer's
+    # inputs as too far ahead remembers that the peer made them, and while
+    # the rollback input stall waits on them it asks for them again; the
+    # frames are KNCore.framesToAskFor (web/src/input-ask.ts, proved).
+    src = LOCKSTEP_JS.read_text()
+
+    oor_idx = src.index("_syncLog(`INPUT-OOR slot=")
+    oor_src = src[oor_idx : src.index("return false;", oor_idx)]
+    assert "_inputDroppedAheadUpTo[peer.slot] = Math.max(" in oor_src
+
+    ask_idx = src.index("const _askForMissingInputs = (peer, applyFrame, windowEdge) => {")
+    ask_src = src[ask_idx : src.index("\n  };\n", ask_idx)]
+    for snippet in (
+        "const from = Math.max(0, windowEdge, _inputFloor(slot));",
+        "_inputDroppedAheadUpTo[slot] ?? -1",
+        "window.KNCore.framesToAskFor(have, from, applyFrame, peerHas, RB_INPUT_ASK_MAX)",
+        "now - (askedAt[f] ?? -Infinity) < RB_INPUT_ASK_EVERY_MS",
+        "peer.dc.send(`resend:${f}`);",
+    ):
+        assert snippet in ask_src
+
+    # It asks from inside the stall, before the stall returns.
+    stall_idx = src.index("// Too far ahead — stall to let peer catch up")
+    stall_src = src[stall_idx : src.index("_markTickReturn('skip:rb-input-stall');", stall_idx)]
+    assert "_askForMissingInputs(p, rbApplyFrame, windowEdge);" in stall_src
+
+    # I2: both tables are per-peer state, and go with every input timeline.
+    reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
+    reset_src = src[reset_idx : src.index("\n  };\n", reset_idx)]
+    assert "delete _inputDroppedAheadUpTo[slot];" in reset_src
+    assert "delete _inputAskedAt[slot];" in reset_src
+    clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
+    clear_src = src[clear_idx : src.index("\n  };\n", clear_idx)]
+    assert "_inputDroppedAheadUpTo = {};" in clear_src and "_inputAskedAt = {};" in clear_src
+
+
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():
     src = LOCKSTEP_JS.read_text()
 

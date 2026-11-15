@@ -189,6 +189,9 @@ resync_inputs() {
   # The counterexample on resync_inputs_before is 10 steps long (the host has to
   # run far enough ahead for the guest to drop its inputs), beyond this bound;
   # check-specs.sh's scenarios and samples reach it.
+  # The no-ask counterexample (the guest freezes, the host runs on alone and is
+  # heard from again, the guest catches up to the inputs it dropped) is over 20
+  # steps long, beyond this bound; guestWaitsOnInputsItDroppedTest holds it.
 }
 
 resync_mesh() {

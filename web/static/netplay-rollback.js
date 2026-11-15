@@ -1722,6 +1722,14 @@
   // page waits for one of those afterwards. See _settleInputsAtResync and
   // specs/resync_inputs.qnt.
   let _inputSettledBefore = {};
+  // Per peer slot, for asking a peer to send an input again while waiting
+  // for it (_askForMissingInputs; specs/resync_inputs.qnt ASK_FOR_MISSING):
+  // the newest frame of its inputs this page dropped as too far ahead of
+  // its own (INPUT-OOR), so it knows the peer has made it; and when it last
+  // asked for each frame. Cleared with the peer's other input state
+  // (resetPeerState, I2) and with every input timeline.
+  let _inputDroppedAheadUpTo = {};
+  let _inputAskedAt = {};
   // The oldest input from `slot` that can still be missing: nothing before
   // the rollback init or the last resync is waited for.
   const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
@@ -5052,10 +5060,15 @@
         // sent the state: tell each one where they start again.
         if (own.length) peer.dc.send(`inputs-settled:${from}`);
         for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
+        const askedAt = (_inputAskedAt[peer.slot] ??= {});
+        const askedNow = performance.now();
         for (let f = from; f < frame; f++) {
           const have = _remoteInputs[peer.slot]?.[f];
           if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
           peer.dc.send(`resend:${f}`);
+          // The stall's asking (_askForMissingInputs) waits its interval
+          // before asking for these again.
+          askedAt[f] = askedNow;
           asked.push(`${peer.slot}@${f}`);
         }
       } catch (err) {
@@ -5065,6 +5078,50 @@
     if (own.length || asked.length) {
       _syncLog(
         `RESYNC-INPUTS f=${frame} settledBefore=${from} sent=[${own.join(',')}] made=[${made.join(',')}] asked=[${asked.join(',')}]`,
+      );
+    }
+  };
+
+  // While the rollback input stall waits on a peer's inputs, ask the peer
+  // to send again the ones this page waits for and knows it has made: up to
+  // the newest it received or dropped as too far ahead. A page far behind
+  // drops a peer's inputs as out of range, and the peer sends each one once:
+  // after a freeze the returning page caught up to that hole and waited,
+  // while the peer waited on the inputs the page could not make yet, and the
+  // resync that ends the split waited on both until its deadline
+  // (specs/resync_inputs.qnt, ASK_FOR_MISSING). Which frames is
+  // KNCore.framesToAskFor (web/src/input-ask.ts, proved). The peer answers
+  // `resend:` from the inputs it keeps (600 frames); one it no longer has is
+  // ignored there, and the stall's own deadline still applies.
+  const RB_INPUT_ASK_EVERY_MS = 500;
+  const RB_INPUT_ASK_MAX = 32;
+  const _askForMissingInputs = (peer, applyFrame, windowEdge) => {
+    const slot = peer.slot;
+    if (peer.dc?.readyState !== 'open') return;
+    const from = Math.max(0, windowEdge, _inputFloor(slot));
+    if (applyFrame < from) return;
+    const peerHas = Math.max(_lastRemoteFramePerSlot[slot] ?? -1, _inputDroppedAheadUpTo[slot] ?? -1);
+    const have = [];
+    for (let f = from; f <= applyFrame; f++) have.push(!!_remoteInputs[slot]?.[f]);
+    const frames = window.KNCore.framesToAskFor(have, from, applyFrame, peerHas, RB_INPUT_ASK_MAX);
+    const askedAt = (_inputAskedAt[slot] ??= {});
+    for (const f of Object.keys(askedAt)) if (Number(f) < from) delete askedAt[f];
+    if (frames.length === 0) return;
+    const now = performance.now();
+    const sent = [];
+    for (const f of frames) {
+      if (now - (askedAt[f] ?? -Infinity) < RB_INPUT_ASK_EVERY_MS) continue;
+      try {
+        peer.dc.send(`resend:${f}`);
+      } catch (_) {
+        break;
+      }
+      askedAt[f] = now;
+      sent.push(f);
+    }
+    if (sent.length) {
+      _syncLog(
+        `RB-INPUT-ASK f=${_frameNum} slot=${slot} frames=${sent[0]}..${sent.at(-1)} count=${sent.length} peerHas=${peerHas}`,
       );
     }
   };
@@ -5417,6 +5474,8 @@
     delete _lateJoinActivatedAtFrame[slot];
     delete _remoteInputs[slot];
     delete _inputSettledBefore[slot];
+    delete _inputDroppedAheadUpTo[slot];
+    delete _inputAskedAt[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _menuStartReadyPeers[slot];
@@ -8145,6 +8204,12 @@
       recvFrame > _frameNum + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES
     ) {
       _syncLog(`INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES}`);
+      // Too far ahead: the peer has made it and will not send it again on
+      // its own. When this page catches up to it, it asks
+      // (_askForMissingInputs).
+      if (Number.isFinite(recvFrame) && recvFrame > _frameNum) {
+        _inputDroppedAheadUpTo[peer.slot] = Math.max(_inputDroppedAheadUpTo[peer.slot] ?? -1, recvFrame);
+      }
       return false;
     }
     const recvInput = { buttons: decoded.buttons, lx: decoded.lx, ly: decoded.ly, cx: decoded.cx, cy: decoded.cy };
@@ -9160,6 +9225,8 @@
     // Slot-indexed globals
     delete _remoteInputs[slot];
     delete _inputSettledBefore[slot];
+    delete _inputDroppedAheadUpTo[slot];
+    delete _inputAskedAt[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _peerLastAdvanceTime[slot];
@@ -12607,6 +12674,8 @@
     _localInputs = {};
     _remoteInputs = preservedRemoteInputs;
     _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
+    _inputDroppedAheadUpTo = {};
+    _inputAskedAt = {};
     _peerInputStarted = preservedPeerStarted;
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
   };
@@ -13399,6 +13468,8 @@
         _localInputs = {};
         _remoteInputs = {};
         _inputSettledBefore = {};
+        _inputDroppedAheadUpTo = {};
+        _inputAskedAt = {};
         for (let d = 0; d < DELAY_FRAMES; d++) {
           _localInputs[_frameNum + d] = KNShared.ZERO_INPUT;
         }
@@ -14975,7 +15046,9 @@
                   _rbInputStallStartTime = 0;
                   continue;
                 }
-                // Too far ahead — stall to let peer catch up
+                // Too far ahead — stall to let peer catch up, and ask for
+                // what it has already sent that this page does not hold.
+                _askForMissingInputs(p, rbApplyFrame, windowEdge);
                 if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
                   _syncLog(
                     `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
@@ -18210,6 +18283,8 @@
     // Reset lockstep state
     _remoteInputs = {};
     _inputSettledBefore = {};
+    _inputDroppedAheadUpTo = {};
+    _inputAskedAt = {};
     _peerInputStarted = {};
     _activeRoster = null;
     _lastControllerPresentMask = -1;
