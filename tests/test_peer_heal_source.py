@@ -12,35 +12,42 @@ def _src() -> str:
     return LOCKSTEP_JS.read_text()
 
 
-def _health_check() -> str:
-    src = _src()
-    start = src.index("const _meshHealthCheck = () => {")
+def _function(src: str, head: str) -> str:
+    start = src.index(head)
     return src[start : src.index("\n  };\n", start)]
+
+
+def _health_check() -> str:
+    return _function(_src(), "const _meshHealthCheck = () => {")
 
 
 def test_the_check_runs_on_c_rollback_ticks_and_on_the_lockstep_path():
     src = _src()
-    calls = [i for i in range(len(src)) if src.startswith("_meshHealthCheck();", i)]
+    calls = [i for i in range(len(src)) if src.startswith("_meshHealthTick();", i)]
     assert len(calls) == 2, calls
-    # The C branch: beside its TICK-PERF block, which a lockstep tick never reaches.
-    c_call = src.index(
-        "if (_frameNum > 0 && _frameNum % 300 === 0) _meshHealthCheck();"
-    )
+    # The C branch: beside its TICK-PERF block, which a lockstep tick never
+    # reaches; the C branch returns before the lockstep one.
+    c_call = calls[0]
     assert src.rindex("TICK-PERF f=", 0, c_call) > src.rindex(
         "if (_useCRollback) {", 0, c_call
     )
-    # The C branch returns before the lockstep one.
-    lockstep_call = src.index("if (_frameNum % 300 === 0) _meshHealthCheck();")
-    assert c_call < lockstep_call
+    # Only the tick entry point runs the check.
+    assert src.count("_meshHealthCheck();") == 1
 
 
-def test_the_check_runs_once_per_frame():
-    # A frozen sim ticks on the same frame: one check, not one per tick.
-    check = _health_check()
-    assert check.startswith(
-        "const _meshHealthCheck = () => {\n"
-        "    if (_lastMeshHealthFrame === _frameNum) return;\n"
-        "    _lastMeshHealthFrame = _frameNum;"
+def test_the_check_runs_once_per_traversal_of_a_check_frame():
+    # A frozen sim ticks on the same frame: one check, not one per tick. Any
+    # other frame forgets it, so a new match or a resync going back past a
+    # checked frame checks it again.
+    tick = _function(_src(), "const _meshHealthTick = () => {")
+    assert (
+        "if (_frameNum <= 0 || _frameNum % 300 !== 0) {\n"
+        "      _lastMeshHealthFrame = -1;\n"
+        "      return;"
+    ) in tick
+    assert "if (_lastMeshHealthFrame === _frameNum) return;" in tick
+    assert tick.index("_lastMeshHealthFrame = _frameNum;") < tick.index(
+        "_meshHealthCheck();"
     )
 
 
@@ -59,32 +66,44 @@ def test_the_check_carries_out_the_machines_decision():
     assert "_peerDriver()?.decideHeal(healFrame, {" in check
     # It offers only when the machine says so, or does not drive the player.
     assert (
-        "if (decided === null || decided.some((command) => command.type === 'offer')) {"
+        "const offers = decided === null || decided.some((command) => command.type === 'offer');"
         in check
-    )
-    assert check.index("decided === null") < check.index(
-        "sendOffer(sid, { reconnect: true });"
     )
     # Otherwise it waits, logged, through the engine's own drop handling (the
     # 45 s give-up), not handlePeerDisconnect's second driver frame.
-    assert "MESH-HEAL-WAIT f=" in check
-    assert "if (!p.reconnecting) _handlePeerDisconnect(sid, p);" in check
+    waits = check[check.index("MESH-HEAL-WAIT f=") :]
+    assert "if (!p.reconnecting) _handlePeerDisconnect(sid, p);" in waits
+    assert "sendOffer(" not in waits
     assert "handlePeerDisconnect(sid)" not in check
     # The old close() of the heal frame is gone: decideHeal closes it.
     assert "type: 'heal'" not in check
 
 
-def test_the_offering_path_still_resets_the_entry_first():
-    # I2: per-peer cleanup goes through resetPeerState before the new offer.
+def test_the_lower_slot_heals_through_the_drop_path():
+    # The lower slot with an entry: reset (I2), then the engine's drop
+    # handling, which marks it reconnecting, arms the 45 s give-up and offers
+    # (attemptReconnect). On open, a lower slot that is not the host resyncs
+    # from the host like any guest whose drop reconnected.
     check = _health_check()
-    offering = check[
-        check.index("if (decided === null") : check.index(
-            "} else {", check.index("if (decided === null")
-        )
-    ]
-    assert offering.index(
-        "resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });"
-    ) < offering.index("createPeer(sid, info.slot, true);")
+    lower = check[check.index("if (offers && p && _playerSlot < info.slot) {") :]
+    lower = lower[: lower.index("} else if (offers || !p) {")]
+    assert lower.index("resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });") < (
+        lower.index("_handlePeerDisconnect(sid, p);")
+    )
+    assert "createPeer(" not in lower
+
+
+def test_the_old_path_still_resets_the_entry_first():
+    # I2: an unwatched higher slot, or a page with no entry, offers as before,
+    # through resetPeerState before the new offer.
+    check = _health_check()
+    old = check[check.index("} else if (offers || !p) {") :]
+    old = old[: old.index("} else {")]
+    assert old.index("resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });") < (
+        old.index("createPeer(sid, info.slot, true);")
+    )
+    # A page that would wait but has no entry has nothing to wait on.
+    assert "no entry to wait on, offering" in old
 
 
 def test_a_reconnect_resets_the_guest_before_its_first_input():
@@ -101,7 +120,6 @@ def test_a_reconnect_resets_the_guest_before_its_first_input():
     assert (
         "resetPeerState(peer.slot, 'reconnect', { peer, sid: remoteSid });" in handler
     )
-    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
-    reset = reset[: reset.index("\n  };\n")]
+    reset = _function(src, "const resetPeerState = (slot, reason, opts = {}) => {")
     assert "delete _peerLastAdvanceTime[slot];" in reset
     assert "delete _peerPhantom[slot];" in reset

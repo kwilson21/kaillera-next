@@ -7831,9 +7831,19 @@
   // (specs/mesh_heal.qnt, aDeadChannelIsNeverForgotten). Once per frame: a
   // frozen sim ticks on the same frame.
   let _lastMeshHealthFrame = -1;
-  const _meshHealthCheck = () => {
+  // Called on every tick of either branch. Any frame that is not a check's
+  // forgets the last one, so a new match or a resync that goes back past a
+  // checked frame checks it again.
+  const _meshHealthTick = () => {
+    if (_frameNum <= 0 || _frameNum % 300 !== 0) {
+      _lastMeshHealthFrame = -1;
+      return;
+    }
     if (_lastMeshHealthFrame === _frameNum) return;
     _lastMeshHealthFrame = _frameNum;
+    _meshHealthCheck();
+  };
+  const _meshHealthCheck = () => {
     for (const [sid, info] of Object.entries(_knownPlayers)) {
       if (_isPeerPendingLateJoin(sid)) continue;
       // A phantom is healed too when its channel does not read open: on a
@@ -7868,7 +7878,28 @@
           page: healFound?.page ?? '',
           attempt: healFound?.attempt ?? 0,
         }) ?? null;
-      if (decided === null || decided.some((command) => command.type === 'offer')) {
+      const offers = decided === null || decided.some((command) => command.type === 'offer');
+      if (offers && p && _playerSlot < info.slot) {
+        // The lower slot heals as for any drop it noticed: the entry is
+        // reset (I2: resetPeerState, which on the host also clears the
+        // guest's phantom flag and staleness clock), then marked
+        // reconnecting with the 45 s give-up armed, and attemptReconnect
+        // offers with its attempt deadline and retries. When the channel
+        // opens, a lower slot that is not the host resyncs from the host
+        // like any guest whose drop reconnected: it may have run on
+        // predicted inputs of a phantom it now reaches again.
+        try {
+          p.pc.close();
+        } catch (_) {}
+        resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });
+        _handlePeerDisconnect(sid, p);
+      } else if (offers || !p) {
+        // A higher slot the machine does not drive heals as before, both
+        // slots offering; so does a page with no entry for the player (the
+        // give-up already dropped it), which has nothing to wait on.
+        if (!offers) {
+          _syncLog(`MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid}: no entry to wait on, offering`);
+        }
         if (p) {
           try {
             p.pc.close();
@@ -7882,17 +7913,15 @@
         sendOffer(sid, { reconnect: true });
       } else {
         _syncLog(`MESH-HEAL-WAIT f=${_frameNum} slot=${info.slot} sid=${sid}: the lower slot offers`);
-        if (p) {
-          // An offer of this page's own goes with its connection.
-          if (p.isInitiator && decided.some((command) => command.type === 'close')) {
-            try {
-              p.pc.close();
-            } catch (_) {}
-          }
-          // The machine has been told (decideHeal): the engine's own drop
-          // handling only, not handlePeerDisconnect's driver frame.
-          if (!p.reconnecting) _handlePeerDisconnect(sid, p);
+        // An offer of this page's own goes with its connection.
+        if (p.isInitiator && decided.some((command) => command.type === 'close')) {
+          try {
+            p.pc.close();
+          } catch (_) {}
         }
+        // The machine has been told (decideHeal): the engine's own drop
+        // handling only, not handlePeerDisconnect's driver frame.
+        if (!p.reconnecting) _handlePeerDisconnect(sid, p);
       }
     }
   };
@@ -15446,7 +15475,7 @@
         }
         // The mesh health check, which the JS lockstep path below runs too:
         // a C tick returns before reaching it (specs/mesh_heal.qnt).
-        if (_frameNum > 0 && _frameNum % 300 === 0) _meshHealthCheck();
+        _meshHealthTick();
         if (rbApplyFrame >= 0) {
           // Stall only when too far ahead for rollback to help
           const rbInputPeers = getInputPeers();
@@ -17642,7 +17671,7 @@
         _logPacingSummary();
       }
       // Mesh health check: _meshHealthCheck.
-      if (_frameNum % 300 === 0) _meshHealthCheck();
+      _meshHealthTick();
       _remoteApplied++;
 
       // Cleanup old local inputs — keep a history window for resend requests.
