@@ -302,7 +302,7 @@
  *     the input neutral, so every held input matches its prediction: fails
  *     unless the follow-up is skipped (SYNC-FOLLOW-UP-SKIPPED), no other
  *     state goes out for it, and the first answer is applied. `changed`
- *     alternates a button while the inputs are held, so they differ from it:
+ *     holds a button down while the inputs are held, so they differ from it:
  *     fails unless SYNC-FOLLOW-UP-NEEDED is logged, the follow-up goes out
  *     after it, and the guest applies it. Either way the guest must go on
  *     making frames. Frames are compared as with FREEZE_HOST_MS.
@@ -1800,12 +1800,15 @@ if (inBattle) {
     }, SYNC_FOLLOW_UP_FREEZE_MS);
     // The guest's inputs are held from here until the host has answered its
     // recovery request, so the host's state is taken on predicted inputs.
-    // With `changed` the inputs made meanwhile alternate, so the held ones
-    // differ from the prediction (the last input the host had: neutral).
+    // With `changed` a button is held down meanwhile, so every held input
+    // differs from the prediction (the last input the host had: neutral),
+    // the one for the frame sent included. Inputs before that frame that
+    // arrive once the state is sent are settled and never fed
+    // (_settleInputsBefore): they cannot change the host's state.
     await guest.evaluate(
       ({ ms, changed, n }) => {
         window.__knHoldInputsMs = ms;
-        if (changed) window.__knInputOverride = (f) => ({ ...n, buttons: f % 2 ? 1 : 0 });
+        if (changed) window.__knInputOverride = () => ({ ...n, buttons: 1 });
       },
       { ms: SYNC_FOLLOW_UP_HOLD_MS, changed: SYNC_FOLLOW_UP === 'changed', n: NEUTRAL },
     );
