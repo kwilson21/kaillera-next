@@ -178,15 +178,20 @@ export const sequenceDiagram = (trace: ItfTrace, labels: readonly string[], opti
   );
   // Who acted: a player the label names, unless the action is one of the
   // hub's own. When the label names several players (a trace from `--mbt`
-  // lists every value the step picked), the one the step changed.
+  // lists every value the step picked), the one the step changed. When it
+  // names players and changes none of them but one other (the host acting
+  // on what it holds for a player), that one.
   const hubActions = new Set(options.hubActions ?? []);
   const actorOf = (label: string, index: number): string => {
     if (hubActions.has(/^\w+/.exec(label)?.[0] ?? '')) return HUB;
     const named = [...label.matchAll(/"([^"]*)"/g)].map((match) => match[1] ?? '').filter((name) => everyone.has(name));
     const before = states[index] ?? {};
     const after = states[index + 1] ?? {};
-    const changed = named.find((who) => perActorState(before, who) !== perActorState(after, who));
-    return changed ?? named[0] ?? HUB;
+    const changes = (who: string): boolean => perActorState(before, who) !== perActorState(after, who);
+    const changed = named.find(changes);
+    if (changed !== undefined) return changed;
+    const others = named.length > 0 ? [...everyone].filter(changes) : [];
+    return (others.length === 1 ? others[0] : undefined) ?? named[0] ?? HUB;
   };
   const order = [HUB];
   for (const actor of [...labels.map(actorOf), ...touched]) if (!order.includes(actor)) order.push(actor);
