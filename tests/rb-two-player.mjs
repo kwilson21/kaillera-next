@@ -248,9 +248,12 @@
  *     header, resumes, and makes its copy of P1's stock count wrong just
  *     before its tick for T, so the ring's copy of T is the guest's own and
  *     differs from the host's. It holds its sync worker's reply with the
- *     decompressed state until that tick has run (pausing again at T + 1 if
- *     the reply is late), so the state is applied with the counter at T + 1
- *     and moved back exactly one frame (`sync frame reset: T+1 → T`). Frames
+ *     decompressed state until that tick has run, and from T + 1 its
+ *     kn_pre_tick is not run and the page is told 3, the engine's pacing
+ *     hold, until the state is loaded (kn_sync_write): a pump that runs two
+ *     ticks at once (its catch-up) cannot go past T + 1 before the released
+ *     state reaches the page. So the state is applied with the counter at
+ *     T + 1 and moved back exactly one frame (`sync frame reset: T+1 → T`). Frames
  *     are compared from T, T included: the ring's copy of T must be the
  *     host's state. Before kn_set_frame forgot the last save it kept the
  *     guest's own copy, and the compare failed at T. The run fails unless the
@@ -262,10 +265,10 @@
  *     frame has not run (specs/ring_after_resync.qnt,
  *     savedFrameDidNotRunTest). At its tick for T the guest page lets the
  *     real kn_pre_tick run (it saves T, with the wrong stock count) and tells
- *     the page 3, the engine's pacing hold, so T does not run. The held state
- *     is released then (pausing until it arrives if it is late) and applied
- *     with the counter still at T (`sync #n applied (frame T -> T`, no frame
- *     reset). While the page called kn_set_frame only when the frame
+ *     the page 3, the engine's pacing hold, so T does not run, and holds T
+ *     that way until the state is loaded. The held state is released then
+ *     and applied with the counter still at T (`sync #n applied (frame
+ *     T -> T`, no frame reset). While the page called kn_set_frame only when the frame
  *     changed, the ring kept the guest's own copy of T and the compare failed
  *     at T. Reported as `resyncSameFrame`.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
@@ -960,41 +963,38 @@ const resyncOneBackInitScript = () => {
     lastR: null, // the frame the guest runs next (its last forward post-tick)
     held: null, // delivers the held worker reply
     released: false,
+    loaded: false, // the released state went into the core (kn_sync_write)
     missed: null,
     flips: 0,
+    holds: 0, // ticks told 3 while the state was on its way
     headerAt: null,
     replyAt: null,
     releasedAt: null,
-    pausedForReply: false,
     timer: null,
     sameFrame: false,
     savedNotRunAt: null, // RESYNC_SAME_FRAME: the frame kn_pre_tick saved and that did not run
   };
   window.__knResyncOneBack = OB;
   const engine = () => window.NetplayRollback;
-  const resumeAfter = (why) => {
-    clearTimeout(OB.timer);
-    OB.timer = null;
-    engine().resumeTick();
-    return why;
+  const mod = () => window.EJS_emulator.gameManager.Module;
+  const giveUp = (why) => {
+    OB.missed = OB.missed || why;
+    if (OB.held) release();
   };
-  const pauseFor = (ms, why) => {
-    engine().pauseTick();
+  const deadline = (ms, why) => {
     clearTimeout(OB.timer);
     OB.timer = setTimeout(() => {
-      OB.missed = OB.missed || why;
-      OB.pausedForReply = false;
-      resumeAfter(why);
-      if (OB.held) release();
+      engine().resumeTick();
+      giveUp(why);
     }, ms);
   };
   // P1's stock count made wrong in the live state (as DESYNC_GUEST does).
   const writeWrong = () => {
-    const mod = window.EJS_emulator.gameManager.Module;
-    const stocksBase = mod._kn_field_map_value?.(0) ?? 0xa4d33;
-    const at = mod._kn_get_rdram_ptr() + (stocksBase ^ 3);
-    if (OB.wrong === undefined) OB.wrong = mod.HEAPU8[at] ^ 1;
-    mod.HEAPU8[at] = OB.wrong;
+    const m = mod();
+    const stocksBase = m._kn_field_map_value?.(0) ?? 0xa4d33;
+    const at = m._kn_get_rdram_ptr() + (stocksBase ^ 3);
+    if (OB.wrong === undefined) OB.wrong = m.HEAPU8[at] ^ 1;
+    m.HEAPU8[at] = OB.wrong;
     OB.flips++;
   };
   const release = () => {
@@ -1002,35 +1002,49 @@ const resyncOneBackInitScript = () => {
     OB.held = null;
     OB.released = true;
     OB.releasedAt = OB.lastR;
-    if (OB.pausedForReply) {
-      OB.pausedForReply = false;
-      resumeAfter('reply');
-    }
     deliver?.();
   };
-  // RESYNC_SAME_FRAME: at T the real kn_pre_tick runs (and saves T), and the
-  // page is told 3, the engine's pacing hold, so T does not run.
-  const holdTheTargetFrame = () => {
-    const mod = window.EJS_emulator.gameManager.Module;
-    const preTick = mod._kn_pre_tick;
-    mod._kn_pre_tick = function (...args) {
-      const result = preTick.apply(this, args);
-      if (OB.target === null || OB.savedNotRunAt !== null || OB.released || OB.missed) return result;
-      if (result !== 0 || mod._kn_get_frame() !== OB.target) return result;
-      OB.savedNotRunAt = OB.target;
-      if (OB.held) queueMicrotask(release);
-      else if (!OB.pausedForReply) {
-        OB.pausedForReply = true;
-        pauseFor(15000, 'no state within 15 s of the header');
+  // The frame the state is to land on, once the guest has reached it: T + 1
+  // for one frame back, T for the same frame once kn_pre_tick has saved it.
+  const landingFrame = () => (OB.sameFrame ? OB.savedNotRunAt : OB.target + 1);
+  // kn_pre_tick, wrapped. At the landing frame it is not run and the page is
+  // told 3, the engine's pacing hold, until the state is loaded: a pump that
+  // runs two ticks at once (its catch-up) cannot go past the frame before the
+  // state, released between them, reaches the page. For the same frame, the
+  // real kn_pre_tick runs once at T (it saves T) and T is held from there.
+  const wrapCore = () => {
+    const m = mod();
+    const preTick = m._kn_pre_tick;
+    m._kn_pre_tick = function (...args) {
+      const holding = OB.target !== null && !OB.loaded && !OB.missed;
+      if (holding && landingFrame() !== null && m._kn_get_frame() === landingFrame()) {
+        OB.holds++;
+        return 3;
       }
-      return 3;
+      const result = preTick.apply(this, args);
+      if (holding && OB.sameFrame && OB.savedNotRunAt === null && result === 0 && m._kn_get_frame() === OB.target) {
+        OB.savedNotRunAt = OB.target;
+        if (OB.held) queueMicrotask(release);
+        return 3;
+      }
+      return result;
+    };
+    const syncWrite = m._kn_sync_write;
+    m._kn_sync_write = function (...args) {
+      const result = syncWrite.apply(this, args);
+      if (OB.released && !OB.loaded) {
+        OB.loaded = true;
+        clearTimeout(OB.timer);
+      }
+      return result;
     };
   };
   OB.start = (sameFrame) => {
     OB.armed = true;
     OB.sameFrame = sameFrame;
-    if (sameFrame) holdTheTargetFrame();
-    pauseFor(15000, 'no answer header within 15 s');
+    wrapCore();
+    engine().pauseTick();
+    deadline(15000, 'no answer header within 15 s');
   };
   OB.ask = () => window.dispatchEvent(new Event('online'));
   OB.onHeader = (frame) => {
@@ -1039,7 +1053,8 @@ const resyncOneBackInitScript = () => {
     OB.headerAt = OB.lastR;
     if (OB.lastR > frame) OB.missed = `the answer is for frame ${frame}, the guest is at ${OB.lastR}`;
     else if (OB.lastR === frame) writeWrong();
-    resumeAfter('header');
+    engine().resumeTick();
+    deadline(15000, 'the state was not loaded within 15 s of the header');
   };
   // A reply from the sync worker: true when it is held (or already delivered).
   OB.onWorkerReply = (type, deliver) => {
@@ -1047,13 +1062,14 @@ const resyncOneBackInitScript = () => {
     if (type !== 'decompress' && type !== 'decode-and-decompress') return false;
     OB.replyAt = OB.lastR;
     OB.held = deliver;
-    if (OB.sameFrame) {
-      if (OB.lastR > OB.target) OB.missed = `the state arrived at ${OB.lastR}, past ${OB.target}`;
-      if (OB.savedNotRunAt !== null || OB.missed) release();
+    const at = landingFrame();
+    if (at === null) {
+      // Same frame, before kn_pre_tick has saved T.
+      if (OB.lastR > OB.target) giveUp(`the state arrived at ${OB.lastR}, past ${OB.target}`);
       return true;
     }
-    if (OB.lastR > OB.target + 1) OB.missed = `the state arrived at ${OB.lastR}, past ${OB.target + 1}`;
-    if (OB.lastR >= OB.target + 1) release();
+    if (OB.lastR > at) giveUp(`the state arrived at ${OB.lastR}, past ${at}`);
+    else if (OB.lastR === at) release();
     return true;
   };
   // Called after each kn_post_tick with the frame the guest runs next.
@@ -1064,20 +1080,12 @@ const resyncOneBackInitScript = () => {
     if (r === OB.target) writeWrong();
     if (!idle) return;
     if (OB.sameFrame) {
-      // T ran before kn_pre_tick could be held at it.
-      if (r > OB.target) {
-        OB.missed = `frame ${OB.target} ran before it was held`;
-        if (OB.held) queueMicrotask(release);
-      }
+      if (r > OB.target) giveUp(`frame ${OB.target} ran before it was held`);
       return;
     }
-    if (r !== OB.target + 1) return;
-    // The tick for T has run: the state applies on the next tick, one frame back.
-    if (OB.held) queueMicrotask(release);
-    else if (!OB.pausedForReply) {
-      OB.pausedForReply = true;
-      pauseFor(15000, 'no state within 15 s of the header');
-    }
+    // The tick for T has run: the state applies at T + 1, one frame back.
+    if (r === OB.target + 1 && OB.held) queueMicrotask(release);
+    else if (r > OB.target + 1) giveUp(`frame ${OB.target + 1} ran before the state`);
   };
   // The answer's header on the sync-state channel.
   const onmessage = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'onmessage');
@@ -1725,9 +1733,9 @@ if (inBattle) {
       RESYNC_ONE_BACK_RECOVER_MS,
     );
     resyncOneBack.page = await guest.evaluate(() => {
-      const { target, headerAt, replyAt, releasedAt, released, missed, flips, savedNotRunAt } =
+      const { target, headerAt, replyAt, releasedAt, released, loaded, missed, flips, holds, savedNotRunAt } =
         window.__knResyncOneBack;
-      return { target, headerAt, replyAt, releasedAt, released, missed, flips, savedNotRunAt };
+      return { target, headerAt, replyAt, releasedAt, released, loaded, missed, flips, holds, savedNotRunAt };
     });
     console.log(
       `${RESYNC_FAULT_KNOB}: resync applied: ${resyncOneBack.applied} (${Date.now() - started} ms)`,
