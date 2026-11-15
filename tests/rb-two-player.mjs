@@ -233,7 +233,7 @@
  *     but for less than the guest's request deadline (8000): the answer
  *     arrives as the request's own, the host's state from n ms before, with
  *     the guest that far on. It is caught up from: applied, and the frames up
- *     to the guest's run again at once (SYNC-CATCH-UP; specs/resync_flow.qnt,
+ *     to the guest's run again, unseen (SYNC-CATCH-UP; specs/resync_flow.qnt,
  *     ownAnswerBehindTest). Before, the guest's frame went back to the
  *     state's. The run fails unless the answer was held, the guest caught up
  *     all the way to the frame it was on, and a state was applied; frames

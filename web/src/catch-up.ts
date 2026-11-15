@@ -12,10 +12,10 @@
  * held 12 s: 396 -> 124).
  *
  * Instead the state is applied where it is from and the frames up to the
- * guest's are run again at once, unseen, with the inputs both pages already
- * have, so the guest goes on from the frame it was on
- * (netplay-rollback.js, _catchUpAfterResync). That takes time on the main
- * thread for each frame, so at most `max` are run again; a state further
+ * guest's are run again, unseen, as fast as the emulator goes, with the
+ * inputs both pages already have, so the guest goes on from the frame it was
+ * on (netplay-rollback.js, _startCatchUp). Each frame costs emulator time
+ * with the canvas held, so at most `max` are run again; a state further
  * back is not applied. specs/resync_flow.qnt models it: CATCH_UP,
  * MAX_CATCH_UP, `theGuestIsNeverRewound` (violated by resync_flow_rewinds,
  * ownAnswerBehindTest; tooOldToCatchUpTest).

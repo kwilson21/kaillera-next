@@ -96,9 +96,10 @@
 //   it back (lateAnswerFromAfterTheAskTest).
 //
 // CATCH_UP: a state from before the guest's frame is applied where it is
-//   from and the frames between it and the guest's frame are run again at
-//   once, unseen, with the inputs both pages already have; the guest goes on
-//   from the frame it was on. Only MAX_CATCH_UP frames are run again: a state
+//   from and the frames between it and the guest's frame are run again,
+//   unseen, with the inputs both pages already have (one step here; slices
+//   over a few ticks in the engine); the guest goes on from the frame it was
+//   on. Only MAX_CATCH_UP frames are run again: a state
 //   further back is not applied (SYNC-TOO-OLD-DROPPED) and the guest asks
 //   again if it is owed one. false = before: the guest's frame went back to
 //   the state's and the frames between were played again in sight, at the
