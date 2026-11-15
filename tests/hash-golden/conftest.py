@@ -13,6 +13,7 @@ import pytest
 
 _HERE = pathlib.Path(__file__).parent
 _FIXTURE_GZ = _HERE / "fixtures" / "in-game-mid-match.rdram.gz"
+_SUDDEN_DEATH_GZ = _HERE / "fixtures" / "in-sudden-death.rdram.gz"
 _LIB_PATH = _HERE / "build" / "libkn_hash_registry_test.so"
 
 
@@ -32,4 +33,13 @@ def rdram_fixture() -> bytes:
     assert len(raw) == 8 * 1024 * 1024, (
         f"fixture decompressed to {len(raw)} bytes, expected 8MB"
     )
+    return raw
+
+
+@pytest.fixture(scope="session")
+def sudden_death_fixture() -> bytes:
+    """RDRAM during a sudden death (fixtures/README.md)."""
+    with gzip.open(_SUDDEN_DEATH_GZ, "rb") as f:
+        raw = f.read()
+    assert len(raw) == 8 * 1024 * 1024
     return raw
