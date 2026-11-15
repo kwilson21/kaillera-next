@@ -275,11 +275,11 @@ room text (`room-text.ts`: HTML escaping, closed-room message, invite links,
 join/leave toasts), and the ROM library (`rom-library.ts`: IndexedDB storage
 with its version-1 upgrade, and the list markup; `play.js` keeps what loading
 a ROM does to the page), and input delay (`delay.ts`: the words beside the picker, and a
-player's delay preference, which `play.js` asks it for), and, observing, the control
+player's delay preference, which `play.js` asks it for), and the control
 remap wizard (`remap-wizard.ts`: the steps, what a captured button, stick or
-key does to the mapping, Back and Skip; `play.js`'s wizard is still in charge
-and each input is compared; whether an input is taken, ignored or rejected is
-`remap-step.ts`, proven with LemmaScript). Moved as they were, being page
+key does to the mapping, Back and Skip; `play.js` polls the pads and keys,
+hands each input to it and carries out the outcome; whether an input is
+taken, ignored or rejected is `remap-step.ts`, proven with LemmaScript). Moved as they were, being page
 effects with nothing to compare: the page's passing messages and small menus
 (`notices.ts`: toasts, the error card, the room-full banner; `menus.ts`: the
 invite menu, share or copy, the More menu). Observing: a guest receiving the
