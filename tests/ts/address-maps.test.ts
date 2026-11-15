@@ -52,7 +52,7 @@ test('a ROM with no map gets none', () => {
 test('Smash Remix 2.0.1 has a map of its own name', () => {
   const remix = addressMapFor('S7efec9e0983656bb0219a23c511cd1505a5f84d524e50ad4284dc1c7eb4d1403');
   assert.equal(remix?.name, 'smash-remix-2.0.1');
-  assert.deepEqual(remix?.battleStatus, { offset: 0x11, ongoing: 1 });
+  assert.deepEqual(remix?.battleStatus, { offset: 0x11, ongoing: 1, pointer: 0xa50e8 });
 });
 
 test("a map's battle state is the one whose status byte the ROM is known by", () => {
@@ -83,11 +83,29 @@ test('a map the registry would refuse is named', () => {
 test('a map whose reads would run off the end of RDRAM is named', () => {
   const base = ROM_ADDRESSES[SSB64_US].map;
   // Each entry is in range on its own; the read it leads to is not.
-  assert.match(addressMapProblem({ ...base, vsBattleHeader: 0x7ffff0 }) ?? '', /battle header/);
+  assert.match(addressMapProblem({ ...base, vsBattleHeader: 0x7ffff0, suddenDeathHeader: 0 }) ?? '', /battle header/);
+  assert.match(addressMapProblem({ ...base, suddenDeathHeader: 0x7ffff0 }) ?? '', /sudden-death battle header/);
+  assert.match(
+    addressMapProblem({ ...base, suddenDeathHeader: 0x7fff00 }) ?? '',
+    /sudden-death copy's last stock count/,
+  );
   assert.match(addressMapProblem({ ...base, cssBase: 0x7ffe00 }) ?? '', /cssCharId/);
   assert.match(addressMapProblem({ ...base, stocksBase: 0x7fff00 }) ?? '', /stock count/);
   assert.match(addressMapProblem({ ...base, rngSeed: 0x7ffffe }) ?? '', /rngSeed/);
   assert.equal(addressMapProblem({ ...base, rngSeed: 0x7ffffc }), null);
+});
+
+test("a second copy's stock counts are found from the header, so they must come after it", () => {
+  const base = ROM_ADDRESSES[SSB64_US].map;
+  const early = { ...base, stocksBase: base.vsBattleHeader - 1 };
+  assert.match(addressMapProblem(early) ?? '', /stocksBase is before vsBattleHeader/);
+  assert.equal(addressMapProblem({ ...early, suddenDeathHeader: 0 }), null);
+});
+
+test('SSB64 US names the copy of the battle state a sudden death runs from', () => {
+  // scvsbattle.c: in a sudden death gSCManagerBattleState (0x800A50E8) is
+  // pointed at gSCManagerVSBattleState, 0x800A4EF8.
+  assert.equal(ROM_ADDRESSES[SSB64_US].map.suddenDeathHeader, 0xa4ef8);
 });
 
 test('the plain-script pages reach it through KNCore', () => {
