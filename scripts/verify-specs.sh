@@ -249,11 +249,25 @@ resync_reask() {
   expect_violation "$REASK" resync_reask_coordinated_let_go aResyncAskedForIsNotForgotten
 }
 
+ring_after_resync() {
+  local RING=specs/ring_after_resync.qnt
+  verify "$RING" ring_after_resync_current allHold
+  # Two frames run, the resync for the second, that frame run again: 4 steps
+  # (oneFrameBackTest).
+  expect_violation "$RING" ring_after_resync_before everyRerunFrameIsTheHosts
+  # A frame saved and not run, the resync for it, the frame run: 4 steps
+  # (savedFrameDidNotRunTest). The same one frame back, saved again against
+  # the page's own copy as the sparse baseline: 4 steps (oneFrameBackTest).
+  expect_violation "$RING" ring_after_resync_save_only everyRerunFrameIsTheHosts
+  expect_violation "$RING" ring_after_resync_save_only everyCopyIsWhole
+}
+
 # Every group, in the order a local run takes them.
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask
+  ring_after_resync
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -265,7 +279,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh"   # ~6.5 min
   "peer_identity rom_transfer peer_connection"                    # ~6.5 min
-  "late_join_pause resync_inputs input_transport resync_reask"    # ~5.5 min
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync" # ~5.5 min
 )
 
 # Each group is in exactly one shard, and each shard names only groups.
