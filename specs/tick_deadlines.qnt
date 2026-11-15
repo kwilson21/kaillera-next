@@ -215,10 +215,24 @@ module tick_deadlines_current {
 //   its last chunk is handed over (sendPaced `sent`). false = #236 as first
 //   written: settled before the first chunk, and left settled when the
 //   transfer was given up.
+// PROGRESS_DEADLINE: the guest's chunk deadline (SYNC_CHUNK_TIMEOUT_MS, 3 s;
+//   CHUNK_LIMIT seconds here) restarts with each chunk that reaches it, so
+//   it gives a transfer up only when the transfer stops moving. false = a
+//   deadline on the whole state, from its header: the engine's before this.
+//   Paced, a 1.4 MB state needs more than 3 s on any link slower than about
+//   3.9 Mbit/s, so the guest gave up on transfers that were still arriving,
+//   asked for the state over Socket.IO, and the host went on pacing the
+//   transfer the guest had dropped, its inputs queued behind it (the
+//   LINK_KBPS=2000 two-player run, 2026-11: `sync chunks timeout: 5/15
+//   chunks after 3000ms`, then the host's inputs up to 1 s late and
+//   DEEP-MISPREDICT-SKIP after the forward jump the socket state made).
+//   The guest's give-up and its socket request are modelled; the socket
+//   transfer itself is not (it does not use this connection).
 module input_link {
   const PACED: bool
   const GUARD_QUEUED: bool
   const SETTLE_WHEN_SENT: bool
+  const PROGRESS_DEADLINE: bool
 
   pure val LIMIT = 2
   // Chunks one transfer is cut into (any number up to this).
@@ -227,6 +241,8 @@ module input_link {
   pure val MAX_QUEUE = 8
   // Bound on reconnects, for the checker.
   pure val MAX_RESETS = 2
+  // The guest's chunk deadline, in seconds of link time.
+  pure val CHUNK_LIMIT = 2
 
   var queue: List[str]     // "chunk" or "input", oldest first
   var toSend: int          // chunks of the current transfer not handed over yet
@@ -245,12 +261,24 @@ module input_link {
   var reachedNewConn: bool
   // history: a transfer was given up while the guest's inputs were settled for it
   var settledUndelivered: bool
+  var receiving: bool      // the guest is receiving the transfer in hand
+  var expecting: int       // chunks of it the guest has yet to get
+  var sinceStart: int      // seconds since that transfer started (capped)
+  var sinceChunk: int      // seconds since a chunk of it last reached the guest (capped)
+  var discarded: bool      // the guest gave the transfer in hand up and asked over Socket.IO
+  var heard: bool          // the host has that request
+  // history: the guest gave up on a transfer whose chunks were still arriving
+  var abandonedProgressing: bool
+  // history: the host handed over a chunk of a transfer it knew the guest had dropped
+  var deadChunk: bool
 
   action init = all {
     queue' = List(), toSend' = 0, stale' = 0,
     dropped' = false, hostStopped' = false, deep' = false,
     conn' = 0, sendingFor' = 0, queued' = 0, queuedFor' = 0, settled' = false,
     reachedNewConn' = false, settledUndelivered' = false,
+    receiving' = false, expecting' = 0, sinceStart' = 0, sinceChunk' = 0,
+    discarded' = false, heard' = false, abandonedProgressing' = false, deadChunk' = false,
   }
 
   pure def chunksIn(q: List[str]): int = q.foldl(0, (n, x) => if (x == "chunk") n + 1 else n)
@@ -273,6 +301,9 @@ module input_link {
     stale' = stale, dropped' = dropped, hostStopped' = hostStopped, deep' = deep,
     conn' = conn, queued' = queued, queuedFor' = queuedFor,
     reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+    // The guest starts receiving it (its header).
+    receiving' = true, expecting' = n, sinceStart' = 0, sinceChunk' = 0,
+    discarded' = false, heard' = false, abandonedProgressing' = abandonedProgressing, deadChunk' = deadChunk,
   }
 
   // Another transfer (a proactive push) waits behind the one in hand.
@@ -286,6 +317,8 @@ module input_link {
     queue' = queue, toSend' = toSend, stale' = stale, dropped' = dropped, hostStopped' = hostStopped,
     deep' = deep, conn' = conn, sendingFor' = sendingFor, settled' = settled,
     reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+    receiving' = receiving, expecting' = expecting, sinceStart' = sinceStart, sinceChunk' = sinceChunk,
+    discarded' = discarded, heard' = heard, abandonedProgressing' = abandonedProgressing, deadChunk' = deadChunk,
   }
 
   // The queued transfer comes up once the one before it is done. Guarded, it
@@ -303,6 +336,13 @@ module input_link {
       queue' = queue, stale' = stale, dropped' = dropped, hostStopped' = hostStopped,
       deep' = deep, conn' = conn, queuedFor' = queuedFor,
       reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+      receiving' = if (stillOurs) true else receiving,
+      expecting' = if (stillOurs) queued else expecting,
+      sinceStart' = if (stillOurs) 0 else sinceStart,
+      sinceChunk' = if (stillOurs) 0 else sinceChunk,
+      discarded' = if (stillOurs) false else discarded,
+      heard' = if (stillOurs) false else heard,
+      abandonedProgressing' = abandonedProgressing, deadChunk' = deadChunk,
     }
   }
 
@@ -320,6 +360,7 @@ module input_link {
     // Everything before the first chunk, and that chunk.
     val carried = if (upTo < q2.length()) upTo + 1 else upTo
     val gotInput = q2.slice(0, carried).foldl(false, (b, x) => b or x == "input")
+    val gotChunk = q2.slice(0, carried).foldl(false, (b, x) => b or x == "chunk")
     all {
       q2.length() <= MAX_QUEUE + 1,
       queue' = q2.slice(carried, q2.length()),
@@ -332,6 +373,13 @@ module input_link {
       settled' = (settled or (handed and toSend == 1)),
       reachedNewConn' = (reachedNewConn or (handed and sendingFor != conn)),
       settledUndelivered' = settledUndelivered,
+      // The last chunk has reached the guest: it has the state.
+      receiving' = (receiving and not(gotChunk and expecting <= 1)),
+      expecting' = if (gotChunk and expecting > 0) expecting - 1 else expecting,
+      sinceStart' = if (sinceStart > CHUNK_LIMIT) sinceStart else sinceStart + 1,
+      sinceChunk' = if (gotChunk) 0 else if (sinceChunk > CHUNK_LIMIT) sinceChunk else sinceChunk + 1,
+      discarded' = discarded, heard' = heard, abandonedProgressing' = abandonedProgressing,
+      deadChunk' = (deadChunk or (handed and heard)),
     }
   }
 
@@ -343,6 +391,8 @@ module input_link {
     queue' = queue, toSend' = toSend, stale' = stale, hostStopped' = hostStopped, deep' = deep,
     conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor, settled' = settled,
     reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+    receiving' = receiving, expecting' = expecting, sinceStart' = sinceStart, sinceChunk' = sinceChunk,
+    discarded' = discarded, heard' = heard, abandonedProgressing' = abandonedProgressing, deadChunk' = deadChunk,
   }
 
   action stop = all {
@@ -351,6 +401,8 @@ module input_link {
     queue' = queue, toSend' = toSend, stale' = stale, dropped' = dropped, deep' = deep,
     conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor, settled' = settled,
     reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+    receiving' = receiving, expecting' = expecting, sinceStart' = sinceStart, sinceChunk' = sinceChunk,
+    discarded' = discarded, heard' = heard, abandonedProgressing' = abandonedProgressing, deadChunk' = deadChunk,
   }
 
   // The guest's connection is replaced (resetPeerState): the transfer in
@@ -369,6 +421,9 @@ module input_link {
     hostStopped' = hostStopped, deep' = deep, sendingFor' = sendingFor,
     queued' = queued, queuedFor' = queuedFor,
     reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+    // The new connection's guest is receiving nothing yet.
+    receiving' = false, expecting' = 0, sinceStart' = sinceStart, sinceChunk' = sinceChunk,
+    discarded' = false, heard' = false, abandonedProgressing' = abandonedProgressing, deadChunk' = deadChunk,
   }
 
   // The paced sender finds no room for a chunk within its deadline and gives
@@ -381,6 +436,35 @@ module input_link {
     queue' = queue, stale' = stale, dropped' = dropped, hostStopped' = hostStopped, deep' = deep,
     conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor, settled' = settled,
     reachedNewConn' = reachedNewConn,
+    receiving' = receiving, expecting' = expecting, sinceStart' = sinceStart, sinceChunk' = sinceChunk,
+    discarded' = discarded, heard' = heard, abandonedProgressing' = abandonedProgressing, deadChunk' = deadChunk,
+  }
+
+  // The guest's chunk deadline: it drops the transfer and asks for the state
+  // over Socket.IO (`sync chunks timeout ... requesting socket full sync`).
+  action chunkTimeout = all {
+    receiving,
+    if (PROGRESS_DEADLINE) sinceChunk >= CHUNK_LIMIT else sinceStart >= CHUNK_LIMIT,
+    receiving' = false,
+    expecting' = 0,
+    discarded' = true,
+    abandonedProgressing' = (abandonedProgressing or sinceChunk < CHUNK_LIMIT),
+    queue' = queue, toSend' = toSend, stale' = stale, dropped' = dropped, hostStopped' = hostStopped,
+    deep' = deep, conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor,
+    settled' = settled, reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+    sinceStart' = sinceStart, sinceChunk' = sinceChunk, heard' = heard, deadChunk' = deadChunk,
+  }
+
+  // That request reaches the host.
+  action hearDiscard = all {
+    discarded,
+    not(heard),
+    heard' = true,
+    queue' = queue, toSend' = toSend, stale' = stale, dropped' = dropped, hostStopped' = hostStopped,
+    deep' = deep, conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor,
+    settled' = settled, reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+    receiving' = receiving, expecting' = expecting, sinceStart' = sinceStart, sinceChunk' = sinceChunk, discarded' = discarded,
+    abandonedProgressing' = abandonedProgressing, deadChunk' = deadChunk,
   }
 
   action step = any {
@@ -390,6 +474,8 @@ module input_link {
     reset,
     abandon,
     startQueued,
+    chunkTimeout,
+    hearDiscard,
     nondet n = 1.to(MAX_CHUNKS).oneOf()
     any { transfer(n), enqueue(n) },
   }
@@ -413,11 +499,24 @@ module input_link {
   // first chunk (input_link_paced_unguarded).
   val inputsAreSettledOnlyForADeliveredState = not(settledUndelivered)
 
+  // A transfer still making progress is not abandoned: the guest gives a
+  // transfer up only when no chunk of it has arrived for the deadline.
+  // Violated while the deadline ran over the whole state
+  // (input_link_paced_whole_deadline).
+  val aTransferMakingProgressIsNotAbandoned = not(abandonedProgressing)
+
+  // The host never goes on handing over a transfer the guest has told it it
+  // dropped, its inputs queuing behind the dead chunks. Violated with the
+  // deadline over the whole state (input_link_paced_whole_deadline).
+  val noChunkForATransferTheGuestDropped = not(deadChunk)
+
   val allHold = and {
     noInputArrivesDeeperThanTheCap,
     aSendingHostIsNotDropped,
     aTransferQueuedBeforeAResetNeverReachesTheNewConnection,
     inputsAreSettledOnlyForADeliveredState,
+    aTransferMakingProgressIsNotAbandoned,
+    noChunkForATransferTheGuestDropped,
   }
 
   // The run that found it: two answers back to back, and the inputs behind
@@ -493,6 +592,36 @@ module input_link {
         inputsAreSettledOnlyForADeliveredState == (not(PACED) or SETTLE_WHEN_SENT)
       )
 
+  // The LINK_KBPS=2000 run: a state longer than the deadline, its chunks
+  // arriving one a second. With a deadline over the whole state the guest
+  // drops it mid-way and asks over Socket.IO, and the paced host hands over
+  // the next chunk of the transfer it has just heard was dropped. With a
+  // progress deadline the guest keeps receiving it to the end.
+  run progressingTransferAbandonedTest =
+    init
+      .then(transfer(3))
+      .then(2.reps(_ => second))
+      .then(if (PROGRESS_DEADLINE) second else chunkTimeout)
+      .then(if (PROGRESS_DEADLINE) second else hearDiscard)
+      .then(second)
+      .expect(and {
+        abandonedProgressing == not(PROGRESS_DEADLINE),
+        deadChunk == (PACED and not(PROGRESS_DEADLINE)),
+        receiving == false,
+        discarded == not(PROGRESS_DEADLINE),
+      })
+
+  // A transfer that stops moving is still given up, deadline on progress or
+  // not: the paced sender gave it up (SYNC-SEND-STALLED) after one chunk.
+  run stalledTransferIsGivenUpTest =
+    init
+      .then(transfer(3))
+      .then(second)
+      .then(if (PACED) abandon else second)
+      .then(2.reps(_ => second))
+      .then(if (PACED) chunkTimeout else second)
+      .expect((discarded == PACED) and aTransferMakingProgressIsNotAbandoned and noChunkForATransferTheGuestDropped)
+
   // A transfer that is sent settles the guest's inputs, whenever it does so.
   run sentTransferSettlesTest =
     init
@@ -503,18 +632,25 @@ module input_link {
 
 // Before: a state went into the connection all at once.
 module input_link_burst {
-  import input_link(PACED = false, GUARD_QUEUED = false, SETTLE_WHEN_SENT = false).*
+  import input_link(PACED = false, GUARD_QUEUED = false, SETTLE_WHEN_SENT = false, PROGRESS_DEADLINE = false).*
 }
 
 // #236 as first written: a chunk at a time, but a queued transfer looked its
 // target up when it came up, and the guest's inputs were settled before the
 // first chunk.
 module input_link_paced_unguarded {
-  import input_link(PACED = true, GUARD_QUEUED = false, SETTLE_WHEN_SENT = false).*
+  import input_link(PACED = true, GUARD_QUEUED = false, SETTLE_WHEN_SENT = false, PROGRESS_DEADLINE = false).*
+}
+
+// #236 with those two fixed, the guest's chunk deadline still over the whole
+// state.
+module input_link_paced_whole_deadline {
+  import input_link(PACED = true, GUARD_QUEUED = true, SETTLE_WHEN_SENT = true, PROGRESS_DEADLINE = false).*
 }
 
 // Today: a chunk at a time, a queued transfer dropped if its connection was
-// replaced, and the guest's inputs settled once the state is sent.
+// replaced, the guest's inputs settled once the state is sent, and the
+// guest's chunk deadline on progress.
 module input_link_paced {
-  import input_link(PACED = true, GUARD_QUEUED = true, SETTLE_WHEN_SENT = true).*
+  import input_link(PACED = true, GUARD_QUEUED = true, SETTLE_WHEN_SENT = true, PROGRESS_DEADLINE = true).*
 }

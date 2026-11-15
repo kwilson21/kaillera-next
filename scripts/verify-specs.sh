@@ -182,6 +182,12 @@ tick_deadlines() {
   # given up: 2 steps (abandonedTransferTest).
   expect_violation "$TICK" input_link_paced_unguarded aTransferQueuedBeforeAResetNeverReachesTheNewConnection
   expect_violation "$TICK" input_link_paced_unguarded inputsAreSettledOnlyForADeliveredState
+  # The guest's chunk deadline over the whole state: a state longer than the
+  # deadline, two seconds, the guest drops it while it arrives (4 steps); its
+  # request reaches the host, which hands over the next chunk (6 steps).
+  # progressingTransferAbandonedTest holds the ordering.
+  expect_violation "$TICK" input_link_paced_whole_deadline aTransferMakingProgressIsNotAbandoned
+  expect_violation "$TICK" input_link_paced_whole_deadline noChunkForATransferTheGuestDropped
 }
 
 resync_inputs() {

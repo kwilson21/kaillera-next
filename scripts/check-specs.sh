@@ -234,7 +234,7 @@ done
 $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldAgainstAPeer \
   --max-samples=20000 --max-steps=25 --backend=typescript
 # A state transfer and the host's inputs behind it on one connection.
-for variant in input_link_burst input_link_paced_unguarded input_link_paced; do
+for variant in input_link_burst input_link_paced_unguarded input_link_paced_whole_deadline input_link_paced; do
   $QUINT test "$TICK" --main="$variant" --backend=typescript
 done
 # With the chunks handed over one at a time, a host that is sending is never
@@ -246,6 +246,10 @@ done
 # connection, and the guest's inputs are settled only for a state that was
 # sent. Both VIOLATED by #236 as first written (input_link_paced_unguarded;
 # transferQueuedBeforeAResetTest and abandonedTransferTest hold the orderings).
+# And: a transfer still arriving is not given up by the guest, and the host
+# hands over no chunk of a transfer the guest told it it dropped. Both
+# VIOLATED while the guest's chunk deadline ran over the whole state
+# (input_link_paced_whole_deadline; progressingTransferAbandonedTest).
 $QUINT run "$TICK" --main=input_link_paced --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
