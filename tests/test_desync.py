@@ -6,7 +6,7 @@ import time
 import re
 
 
-def test_lockstep_no_desync(browser, server_url):
+def test_lockstep_no_desync(browser, server_url, rom_path):
     """Two players in lockstep should have identical game state at the same frame."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -17,6 +17,9 @@ def test_lockstep_no_desync(browser, server_url):
 
         guest.goto(f"{server_url}/play.html?room=DSYNC1&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
+
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
 
         host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
         host.click("#start-btn")
@@ -31,7 +34,7 @@ def test_lockstep_no_desync(browser, server_url):
             window._captureAtFrame = {target_frame};
             window._capturedState = null;
             var check = setInterval(() => {{
-                if (window._frameNum === window._captureAtFrame && !window._capturedState) {{
+                if (window.KNState.frameNum === window._captureAtFrame && !window._capturedState) {{
                     var gm = window.EJS_emulator.gameManager;
                     var state = gm.getState();
                     var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
@@ -43,7 +46,7 @@ def test_lockstep_no_desync(browser, server_url):
                     }}
                     window._capturedState = {{
                         hash: hash | 0,
-                        frameNum: window._frameNum,
+                        frameNum: window.KNState.frameNum,
                         stateSize: bytes.length,
                         first2k: Array.from(bytes.slice(0, 2048))
                     }};
@@ -84,7 +87,7 @@ def test_lockstep_no_desync(browser, server_url):
         guest.close()
 
 
-def test_lockstep_frame_pacing(browser, server_url):
+def test_lockstep_frame_pacing(browser, server_url, rom_path):
     """Verify both emulators advance at the same rate (network-paced)."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -96,6 +99,9 @@ def test_lockstep_frame_pacing(browser, server_url):
         guest.goto(f"{server_url}/play.html?room=PACE1&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
+
         host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
         host.click("#start-btn")
 
@@ -106,8 +112,8 @@ def test_lockstep_frame_pacing(browser, server_url):
         samples = []
         for _ in range(5):
             time.sleep(1)
-            h_frame = host.evaluate("window._frameNum")
-            g_frame = guest.evaluate("window._frameNum")
+            h_frame = host.evaluate("window.KNState.frameNum")
+            g_frame = guest.evaluate("window.KNState.frameNum")
             diff = abs(h_frame - g_frame)
             samples.append((h_frame, g_frame, diff))
             print(f"  Host: {h_frame}, Guest: {g_frame}, Diff: {diff}")
@@ -127,15 +133,12 @@ def test_lockstep_frame_pacing(browser, server_url):
         guest.close()
 
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
-
-
-def _load_rom(page):
+def _load_rom(page, rom_path):
     """Load ROM into the play page via the hidden file input."""
-    page.set_input_files("#rom-drop input[type=file]", ROM_PATH)
+    page.set_input_files("#rom-drop input[type=file]", rom_path)
 
 
-def test_resync_after_forced_desync(browser, server_url):
+def test_resync_after_forced_desync(browser, server_url, rom_path):
     """Force a desync on the guest, verify rollback/resync recovers."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -160,12 +163,12 @@ def test_resync_after_forced_desync(browser, server_url):
         guest.wait_for_selector("#overlay", timeout=10000)
 
         # Load ROM on both pages
-        _load_rom(host)
-        _load_rom(guest)
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
         time.sleep(1)  # let ROM load complete
 
-        # Enable rollback checkbox on host before starting
-        host.check("#opt-rollback")
+        # Resync on (the host option, on by default)
+        host.check("#opt-resync")
 
         host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
         host.click("#start-btn")
@@ -204,8 +207,8 @@ def test_resync_after_forced_desync(browser, server_url):
             gm.loadState = function(data) {
                 origLoadState(data);
                 window._resyncDetected = true;
-                window._resyncFrame = window._frameNum;
-                console.log('[test] resync state loaded at frame ' + window._frameNum);
+                window._resyncFrame = window.KNState.frameNum;
+                console.log('[test] resync state loaded at frame ' + window.KNState.frameNum);
                 // Restore original after first resync
                 gm.loadState = origLoadState;
             };
@@ -221,13 +224,13 @@ def test_resync_after_forced_desync(browser, server_url):
             print(f"\n  Resync detected at frame {resync_frame}")
         except Exception as e:
             h_sync = host.evaluate("window.NetplayRollback.isSyncEnabled()")
-            g_frame = guest.evaluate("window._frameNum")
+            g_frame = guest.evaluate("window.KNState.frameNum")
             print(f"\n  Host sync={h_sync}, Guest frame={g_frame}")
             raise AssertionError(f"Resync did not happen within 30s: {e}")
 
         # Verify game is still running after resync
         time.sleep(1)
-        frame_after = guest.evaluate("window._frameNum")
+        frame_after = guest.evaluate("window.KNState.frameNum")
         assert frame_after > resync_frame, "Game stopped advancing after resync"
         print(f"  Game still running after resync (frame {frame_after})")
 
@@ -238,7 +241,7 @@ def test_resync_after_forced_desync(browser, server_url):
         guest.close()
 
 
-def test_resync_sustains_over_time(browser, server_url):
+def test_resync_sustains_over_time(browser, server_url, rom_path):
     """With rollback on, resyncs should keep correcting drift over 10+ seconds."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -249,11 +252,11 @@ def test_resync_sustains_over_time(browser, server_url):
         guest.goto(f"{server_url}/play.html?room=SUST01&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        _load_rom(host)
-        _load_rom(guest)
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
         time.sleep(1)
 
-        host.check("#opt-rollback")
+        host.check("#opt-resync")
         host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
         host.click("#start-btn")
 
@@ -264,8 +267,8 @@ def test_resync_sustains_over_time(browser, server_url):
         samples = []
         for i in range(5):
             time.sleep(2)
-            h_frame = host.evaluate("window._frameNum")
-            g_frame = guest.evaluate("window._frameNum")
+            h_frame = host.evaluate("window.KNState.frameNum")
+            g_frame = guest.evaluate("window.KNState.frameNum")
             diff = abs(h_frame - g_frame)
             samples.append((h_frame, g_frame, diff))
             print(f"  Sample {i+1}: host={h_frame} guest={g_frame} diff={diff}")
@@ -290,7 +293,7 @@ def test_resync_sustains_over_time(browser, server_url):
         guest.close()
 
 
-def test_end_game_with_rollback(browser, server_url):
+def test_end_game_with_rollback(browser, server_url, rom_path):
     """End game should work cleanly when rollback/sync is enabled."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -306,11 +309,11 @@ def test_end_game_with_rollback(browser, server_url):
         guest.goto(f"{server_url}/play.html?room=END01&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        _load_rom(host)
-        _load_rom(guest)
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
         time.sleep(1)
 
-        host.check("#opt-rollback")
+        host.check("#opt-resync")
         host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
         host.click("#start-btn")
 

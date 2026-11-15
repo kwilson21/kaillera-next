@@ -9,7 +9,7 @@ import os
 from playwright.sync_api import expect
 
 
-def test_rom_drop_and_boot(browser, server_url):
+def test_rom_drop_and_boot(browser, server_url, rom_path):
     """Drop a ROM file, start game, verify EmulatorJS loader is injected."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -19,7 +19,6 @@ def test_rom_drop_and_boot(browser, server_url):
     host.on("console", lambda msg: host_logs.append(msg.text))
 
     try:
-        rom_path = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
 
         # Host creates room
         host.goto(f"{server_url}/play.html?room=ROMTEST&host=1&name=Host")

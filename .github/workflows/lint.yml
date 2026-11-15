@@ -156,6 +156,8 @@ jobs:
             ../tests/test_abandoned_match.py \
             ../tests/test_relay_sender.py \
             ../tests/test_webrtc_signal_relay.py \
+            ../tests/test_socket_cors.py \
+            ../tests/test_turn_credentials.py \
             ../tests/test_schema.py \
             ../tests/test_query_builder.py \
             ../tests/test_room_logic.py \

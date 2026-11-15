@@ -2,7 +2,7 @@
 
 Run: pytest tests/test_pause_reconnect.py -v
 
-Requires: dev server running at localhost:27888, ROM file at ROM_PATH.
+Requires: dev server running at localhost:27888, and KN_ROM set to the ROM's path.
 """
 
 import os
@@ -14,7 +14,7 @@ import time
 import pytest
 from playwright.sync_api import expect
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
+ROM_PATH = os.environ.get("KN_ROM", "")
 
 
 def _room_id(prefix):
@@ -42,8 +42,10 @@ def server_url():
 @pytest.fixture(autouse=True)
 def _require_rom():
     """Skip all tests if ROM file is not available."""
-    if not os.path.exists(ROM_PATH):
-        pytest.skip(f"ROM file not found: {ROM_PATH}")
+    if not ROM_PATH:
+        pytest.skip("needs a ROM: set KN_ROM to the path of the SSB64 (USA) .z64")
+    if not os.path.isfile(ROM_PATH):
+        pytest.skip(f"KN_ROM is not a file: {ROM_PATH}")
 
 
 def _load_rom(page):

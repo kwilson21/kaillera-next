@@ -10,10 +10,9 @@ Run: pytest tests/test_rom_preload.py -v -s
 from playwright.sync_api import expect
 
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
 
 
-def test_rom_preload_before_game_start(browser, server_url):
+def test_rom_preload_before_game_start(browser, server_url, rom_path):
     """ROM transfers immediately when guest accepts sharing, before game starts."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -27,7 +26,7 @@ def test_rom_preload_before_game_start(browser, server_url):
         # Host creates room, loads ROM, enables sharing
         host.goto(f"{server_url}/play.html?room=PRELOAD1&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
-        host.locator("#rom-drop input[type='file']").set_input_files(ROM_PATH)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
         assert host.evaluate("document.getElementById('rom-drop').classList.contains('loaded')")
         rom_share_cb = host.locator("#opt-rom-sharing")

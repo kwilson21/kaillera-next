@@ -53,6 +53,19 @@ def _patch_requests_ssl():
     requests.Session.request = _patched
 
 
+# A real game needs a real ROM, which the repository does not ship. Tests that
+# boot one take it from KN_ROM, the variable tests/rb-two-player.mjs reads, and
+# are skipped without it.
+@pytest.fixture(scope="session")
+def rom_path():
+    path = os.environ.get("KN_ROM", "")
+    if not path:
+        pytest.skip("needs a ROM: set KN_ROM to the path of the SSB64 (USA) .z64")
+    if not os.path.isfile(path):
+        pytest.skip(f"KN_ROM is not a file: {path}")
+    return path
+
+
 _room_n = 0
 
 

@@ -12,10 +12,9 @@ Run: pytest tests/test_mobile_audio.py -v -s
 from playwright.sync_api import expect
 
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
 
 
-def test_guest_boots_and_audio_initializes(browser, server_url):
+def test_guest_boots_and_audio_initializes(browser, server_url, rom_path):
     """Guest emulator boots into lockstep and audio pipeline initializes."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -27,7 +26,7 @@ def test_guest_boots_and_audio_initializes(browser, server_url):
         # Host creates room, loads ROM, enables sharing
         host.goto(f"{server_url}/play.html?room=AUDIO1&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
-        host.locator("#rom-drop input[type='file']").set_input_files(ROM_PATH)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
         host.locator("#opt-rom-sharing").check()
         host.wait_for_timeout(300)

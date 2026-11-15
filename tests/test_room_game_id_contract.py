@@ -15,7 +15,9 @@ def test_rest_room_payload_includes_game_id_aliases():
     source = (REPO_ROOT / "server/src/api/app.py").read_text()
     handler_idx = source.find('@app.get("/room/{room_id}")')
     assert handler_idx != -1
-    window = source[handler_idx : handler_idx + 900]
+    # The handler: from its decorator to the next route's.
+    next_route = source.find("@app.", handler_idx + 1)
+    window = source[handler_idx : next_route if next_route != -1 else len(source)]
 
     assert '"game_id": room.game_id' in window
     assert '"gameId": room.game_id' in window

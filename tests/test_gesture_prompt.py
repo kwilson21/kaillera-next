@@ -9,10 +9,9 @@ Run: pytest tests/test_gesture_prompt.py -v -s
 from playwright.sync_api import expect
 
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
 
 
-def test_gesture_prompt_visible_for_guest(browser, server_url):
+def test_gesture_prompt_visible_for_guest(browser, server_url, rom_path):
     """Guest sees gesture prompt overlay after game starts."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -24,7 +23,7 @@ def test_gesture_prompt_visible_for_guest(browser, server_url):
         # Host creates room, loads ROM, enables sharing
         host.goto(f"{server_url}/play.html?room=GESTURE1&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
-        host.locator("#rom-drop input[type='file']").set_input_files(ROM_PATH)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
         host.locator("#opt-rom-sharing").check()
         host.wait_for_timeout(300)
@@ -76,7 +75,7 @@ def test_gesture_prompt_visible_for_guest(browser, server_url):
         guest.close()
 
 
-def test_host_does_not_see_gesture_prompt(browser, server_url):
+def test_host_does_not_see_gesture_prompt(browser, server_url, rom_path):
     """Host should auto-boot without gesture prompt."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -87,7 +86,7 @@ def test_host_does_not_see_gesture_prompt(browser, server_url):
     try:
         host.goto(f"{server_url}/play.html?room=GESTURE2&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
-        host.locator("#rom-drop input[type='file']").set_input_files(ROM_PATH)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
 
         guest.goto(f"{server_url}/play.html?room=GESTURE2&name=Guest")
