@@ -3,6 +3,7 @@
 Run: pytest tests/test_desync.py -v -s
 """
 import time
+from itertools import pairwise
 
 from netplay_steps import frame, silence_inputs, sync_log_lines, syncs_applied, wait_past_frame
 from playwright.sync_api import expect
@@ -127,12 +128,21 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
                 f"host at {h} while the guest went {g1}..{g2}: more than {most} frames apart"
             )
 
-        h_advance = samples[-1][0] - samples[0][0]
-        g_advance = samples[-1][1] - samples[0][1]
-        assert h_advance > 100, f"Host stalled: only advanced {h_advance} frames in 5s"
-        assert g_advance > 100, f"Guest stalled: only advanced {g_advance} frames in 5s"
-
-        print(f"\nFrame pacing OK: host rate = {h_advance/5:.0f}fps, guest rate = {g_advance/5:.0f}fps")
+        # How fast a page runs is the machine's: a headless emulator in the
+        # cloud container runs at 7-11 fps, a laptop's at 60, so a fixed count
+        # of frames (it was 100 in 4 s) tested the machine. What the netplay
+        # owes is that the pages go together (the lead check above) and that
+        # neither stalls: no second in which a page advanced far less than in
+        # a typical second of the same run. The page's own fps counter is no
+        # yardstick: it is this same advance, over a one-second window.
+        rates = []
+        for name, idx in (("Host", 0), ("Guest", 1)):
+            per_second = [b[idx] - a[idx] for a, b in pairwise(samples)]
+            typical = sorted(per_second)[len(per_second) // 2]
+            assert typical > 0, f"{name} did not advance: {per_second} frames per second"
+            assert min(per_second) >= typical / 4, f"{name} stalled for a second: {per_second} frames per second"
+            rates.append(per_second)
+        print(f"\nFrame pacing OK: host {rates[0]}, guest {rates[1]} frames per second")
 
     finally:
         host.close()
