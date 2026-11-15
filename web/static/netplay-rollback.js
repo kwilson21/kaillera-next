@@ -8283,6 +8283,11 @@
       ),
     );
 
+  // When this page's engine started (the game start): a guest's word that it
+  // cannot reach another counts only once its own deadline could have given
+  // up (leavesOutUnreachable).
+  let _startedAt = 0;
+
   // The slots that reached the start's ready barrier (said `lockstep-ready`)
   // in this start, this page's own included. Kept past a sync timeout: the
   // host's load deadline reads it to find a player that loaded but waits for
@@ -9282,19 +9287,23 @@
         // host decides; the first word of a pair counts.
         if (e.data.startsWith('unreachable:')) {
           const slot = Number(e.data.slice('unreachable:'.length));
-          const named = Object.entries(_peers).find(([, p]) => p.slot === slot && !p.synthetic);
+          const inStart = new Set(_startGroupPeers().map(([, p]) => p.slot));
+          const named = _startGroupPeers().find(([, p]) => p.slot === slot && !p.synthetic);
+          const sinceStartMs = Math.max(0, Math.floor(performance.now() - _startedAt));
           const leaves = window.KNCore.startGroup.leavesOutUnreachable(
             _playerSlot === 0 && !_isSpectator,
             _phase >= PHASE_RUNNING,
             peer.slot ?? -1,
             slot,
-            _leftOutOfStart.has(peer.slot),
-            _leftOutOfStart.has(slot),
+            inStart.has(peer.slot),
+            inStart.has(slot),
+            sinceStartMs,
+            STARTUP_CONNECT_TIMEOUT_MS * STARTUP_CONNECT_MAX_ATTEMPTS,
           );
           if (leaves && named) {
             _leaveOutOfStart(named[0], `slot ${peer.slot} cannot reach it`, { cannotPlay: true });
           } else {
-            _syncLog(`unreachable:${slot} from slot ${peer.slot} not taken`);
+            _syncLog(`unreachable:${slot} from slot ${peer.slot} not taken (${sinceStartMs}ms into the start)`);
           }
           return;
         }
@@ -19309,6 +19318,7 @@
 
   const init = (config) => {
     _sessionId++; // invalidate stale timers from previous session
+    _startedAt = performance.now();
     _startWaitRttLogged = false;
     _clearStartWaitRttTimer();
     _resetInputAudit();

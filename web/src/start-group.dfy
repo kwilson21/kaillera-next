@@ -68,20 +68,27 @@ lemma takesLeftOut_ensures(fromSlot: int, mySlot: int, running: bool, slot: int,
 {
 }
 
-function leavesOutUnreachable(isHost: bool, running: bool, fromSlot: int, slot: int, reporterOut: bool, namedOut: bool): bool
+function leavesOutUnreachable(isHost: bool, running: bool, fromSlot: int, slot: int, reporterInStart: bool, namedInStart: bool, sinceStartMs: int, giveUpMs: int): bool
+  requires (sinceStartMs >= 0)
+  requires (giveUpMs >= 0)
 {
-  if (((!(isHost) || running) || reporterOut) || namedOut) then
+  if (((!(isHost) || running) || !(reporterInStart)) || !(namedInStart)) then
     false
   else
-    if ((fromSlot <= HOST_SLOT) || (fromSlot >= 4)) then
+    if (sinceStartMs < giveUpMs) then
       false
     else
-      (((slot > HOST_SLOT) && (slot < 4)) && (slot != fromSlot))
+      if ((fromSlot <= HOST_SLOT) || (fromSlot >= 4)) then
+        false
+      else
+        (((slot > HOST_SLOT) && (slot < 4)) && (slot != fromSlot))
 }
 
-lemma leavesOutUnreachable_ensures(isHost: bool, running: bool, fromSlot: int, slot: int, reporterOut: bool, namedOut: bool)
-  ensures (leavesOutUnreachable(isHost, running, fromSlot, slot, reporterOut, namedOut) ==> (((isHost && !(running)) && !(reporterOut)) && !(namedOut)))
-  ensures (leavesOutUnreachable(isHost, running, fromSlot, slot, reporterOut, namedOut) ==> (((((fromSlot > 0) && (fromSlot < 4)) && (slot > 0)) && (slot < 4)) && (fromSlot != slot)))
+lemma leavesOutUnreachable_ensures(isHost: bool, running: bool, fromSlot: int, slot: int, reporterInStart: bool, namedInStart: bool, sinceStartMs: int, giveUpMs: int)
+  requires (sinceStartMs >= 0)
+  requires (giveUpMs >= 0)
+  ensures (leavesOutUnreachable(isHost, running, fromSlot, slot, reporterInStart, namedInStart, sinceStartMs, giveUpMs) ==> ((((isHost && !(running)) && reporterInStart) && namedInStart) && (sinceStartMs >= giveUpMs)))
+  ensures (leavesOutUnreachable(isHost, running, fromSlot, slot, reporterInStart, namedInStart, sinceStartMs, giveUpMs) ==> (((((fromSlot > 0) && (fromSlot < 4)) && (slot > 0)) && (slot < 4)) && (fromSlot != slot)))
 {
 }
 

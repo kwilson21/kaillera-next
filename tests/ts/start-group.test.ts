@@ -64,33 +64,39 @@ test('at the load deadline a player missed it if it has not loaded, or the host 
   assert.equal(missedLoadDeadline(true, false, false), false);
 });
 
-test('the host leaves out the guest another guest cannot reach; the first word of a pair counts', () => {
+test('the host leaves out the guest another guest cannot reach, both in the start, once a give-up could have come', () => {
+  const GIVE_UP = 24000;
   for (const isHost of BOOLS)
     for (const running of BOOLS)
       for (const from of SLOTS)
         for (const slot of SLOTS)
-          for (const reporterOut of BOOLS)
-            for (const namedOut of BOOLS) {
-              const leaves = leavesOutUnreachable(isHost, running, from, slot, reporterOut, namedOut);
-              const expected =
-                isHost &&
-                !running &&
-                !reporterOut &&
-                !namedOut &&
-                from > 0 &&
-                from < 4 &&
-                slot > 0 &&
-                slot < 4 &&
-                from !== slot;
-              assert.equal(leaves, expected, `${isHost} ${running} ${from} ${slot} ${reporterOut} ${namedOut}`);
-            }
+          for (const reporterIn of BOOLS)
+            for (const namedIn of BOOLS)
+              for (const since of [0, GIVE_UP - 1, GIVE_UP, 60000]) {
+                const leaves = leavesOutUnreachable(isHost, running, from, slot, reporterIn, namedIn, since, GIVE_UP);
+                const expected =
+                  isHost &&
+                  !running &&
+                  reporterIn &&
+                  namedIn &&
+                  since >= GIVE_UP &&
+                  from > 0 &&
+                  from < 4 &&
+                  slot > 0 &&
+                  slot < 4 &&
+                  from !== slot;
+                assert.equal(leaves, expected, `${isHost} ${running} ${from} ${slot} ${reporterIn} ${namedIn} ${since}`);
+              }
   // Slot 1 says it cannot reach slot 2: slot 2 is out. Slot 2 then says the
-  // same of slot 1: it is out itself, so its word does not count.
-  assert.equal(leavesOutUnreachable(true, false, 1, 2, false, false), true);
-  assert.equal(leavesOutUnreachable(true, false, 2, 1, true, false), false);
-  // Never the host, never from the host.
-  assert.equal(leavesOutUnreachable(true, false, 1, 0, false, false), false);
-  assert.equal(leavesOutUnreachable(true, false, 0, 1, false, false), false);
+  // same of slot 1: it is out of the start itself, so its word does not count.
+  assert.equal(leavesOutUnreachable(true, false, 1, 2, true, true, GIVE_UP, GIVE_UP), true);
+  assert.equal(leavesOutUnreachable(true, false, 2, 1, false, true, GIVE_UP, GIVE_UP), false);
+  // A claim made at once is not taken: no deadline could have given up yet.
+  assert.equal(leavesOutUnreachable(true, false, 1, 2, true, true, 1000, GIVE_UP), false);
+  // Never the host, never from the host, never the sender itself.
+  assert.equal(leavesOutUnreachable(true, false, 1, 0, true, true, GIVE_UP, GIVE_UP), false);
+  assert.equal(leavesOutUnreachable(true, false, 0, 1, true, true, GIVE_UP, GIVE_UP), false);
+  assert.equal(leavesOutUnreachable(true, false, 1, 1, true, true, GIVE_UP, GIVE_UP), false);
 });
 
 test('a guest told by the host that it is out joins late; nobody else can tell it so', () => {

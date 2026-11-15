@@ -121,21 +121,30 @@ export function takesLeftOut(
  *
  * Two guests that each reach the host but not each other wait for each
  * other's emu-ready for ever, and neither may leave the other out. The host
- * leaves out the one named, before its match runs, unless the guest that
- * says so is out itself (both may say it of each other: the first word
- * counts) or the one named is out already. The one that reported plays.
+ * leaves out the one named, before its match runs, when both are in the
+ * start (`reporterInStart`, `namedInStart`: counted by the start's waits,
+ * neither left out nor held as a late joiner; both may say it of each
+ * other: the first word counts), and only once the reporter's own deadline
+ * on the other could have given up (`sinceStartMs`, since this host's start,
+ * at least `giveUpMs`, the deadline's three attempts). A guest could claim
+ * any player unreachable to get it left out; that player joins late, and the
+ * wait stops a claim made at once. The one that reported plays.
  */
-//@ ensures \result ==> isHost && !running && !reporterOut && !namedOut
+//@ requires sinceStartMs >= 0 && giveUpMs >= 0
+//@ ensures \result ==> isHost && !running && reporterInStart && namedInStart && sinceStartMs >= giveUpMs
 //@ ensures \result ==> fromSlot > 0 && fromSlot < 4 && slot > 0 && slot < 4 && fromSlot !== slot
 export function leavesOutUnreachable(
   isHost: boolean,
   running: boolean,
   fromSlot: number,
   slot: number,
-  reporterOut: boolean,
-  namedOut: boolean,
+  reporterInStart: boolean,
+  namedInStart: boolean,
+  sinceStartMs: number,
+  giveUpMs: number,
 ): boolean {
-  if (!isHost || running || reporterOut || namedOut) return false;
+  if (!isHost || running || !reporterInStart || !namedInStart) return false;
+  if (sinceStartMs < giveUpMs) return false;
   if (fromSlot <= HOST_SLOT || fromSlot >= 4) return false;
   return slot > HOST_SLOT && slot < 4 && slot !== fromSlot;
 }

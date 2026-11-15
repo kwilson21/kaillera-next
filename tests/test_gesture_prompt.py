@@ -243,9 +243,11 @@ def test_a_guest_that_never_loads_does_not_hold_the_hosts_start_and_joins_late(b
         expect(guest_prompt).to_be_visible(timeout=30000)
         guest_prompt.click()
         joined_at = _frame(host)
+        # A late joiner boots cold and then waits for its state: in the cloud
+        # container that took 158-176 s in lifecycle-e2e's late-join runs.
         guest.wait_for_function(
             f"(window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0) > {joined_at}",
-            timeout=120000,
+            timeout=240000,
         )
         # Both keep playing.
         host_then, guest_then = _frame(host), _frame(guest)
