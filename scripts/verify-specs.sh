@@ -289,12 +289,17 @@ rom_at_start() {
 mesh_heal() {
   local MESH=specs/mesh_heal.qnt
   verify "$MESH" mesh_heal_fixed allHold init 10
+  verify "$MESH" mesh_heal_fixed_guest_lower allHold init 10
   # The link dies, both channels read closed, both sides go stale to
   # phantoms, and nothing will act: 5 steps (phantomForeverTest). The same
   # with the check on C ticks but skipping phantoms: 5 steps. (Without the
   # reset at open, the second request takes 7 steps: secondRequestTest.)
   expect_violation "$MESH" mesh_heal_current aDeadChannelIsNeverForgotten
   expect_violation "$MESH" mesh_heal_c_tick_only aDeadChannelIsNeverForgotten
+  # A lower slot that is not the host goes phantom, heals with a fresh
+  # entry, and the reconnect opens without its asking the host: 5 steps
+  # (nonHostLowerTest).
+  expect_violation "$MESH" mesh_heal_fresh_entry aNonHostLowerResyncsAfterAHeal
 }
 
 ring_after_resync() {

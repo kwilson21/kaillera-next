@@ -38,8 +38,16 @@
 // (RESET_ON_OPEN false: atMostOneResyncPerReconnect VIOLATED,
 // secondRequestTest).
 //
-// What is modelled: two players, the lower ("lo", the host) and the higher
-// ("hi", a guest); the link dying once, each side's channel then reading
+// A lower slot that is not the host (slot 1 healing its channel to slot 2)
+// is a guest of the host as well, and may have run on as if the other were
+// gone. It heals through the engine's drop path, so its entry is
+// reconnecting and the channel's open handler asks the host for state;
+// 35634ed made a fresh entry, and it played on from its predictions
+// (LO_THROUGH_DROP false: aNonHostLowerResyncsAfterAHeal VIOLATED,
+// mesh_heal_fresh_entry, nonHostLowerTest).
+//
+// What is modelled: two players, the lower ("lo", the host, or with
+// LO_IS_HOST false a guest) and the higher ("hi", a guest); the link dying once, each side's channel then reading
 // closed or still open; each side's staleness, fresh -> stalled (frames
 // frozen) -> phantom (frames advance without them); the health check where
 // frames advance; the offer connecting or failing; the higher side's
@@ -61,6 +69,15 @@ module mesh_heal {
   const C_TICK_CHECK: bool
   const HEAL_PHANTOMS: bool
   const RESET_ON_OPEN: bool
+  // The lower slot is the host (slot 0). A lower slot that is not (slot 1
+  // healing its channel to slot 2) is a guest of the host too, and may have
+  // run on as if the other were gone.
+  const LO_IS_HOST: bool
+  // The lower slot heals through the engine's drop path (_handlePeerDisconnect:
+  // reconnecting), so the channel's open handler asks the host for state when
+  // it is not the host. 35634ed made a fresh entry instead, not reconnecting,
+  // whose open handler skips that.
+  const LO_THROUGH_DROP: bool
 
   pure val SIDES = Set("lo", "hi")
 
@@ -74,6 +91,8 @@ module mesh_heal {
   var reconnects: int
   var requests: int              // the guest's resync requests since the last reconnect
   var inputSeen: bool            // the guest has had an input since the reconnect
+  var loWasPhantom: bool         // the lower side ran on as if the higher were gone
+  var loAsked: bool              // the lower side asked the host for state on the reconnect
 
   action init = all {
     linkUp' = true,
@@ -82,11 +101,15 @@ module mesh_heal {
     pending' = SIDES.mapBy(_ => "none"),
     dropped' = false, died' = false, wasPhantom' = false,
     reconnects' = 0, requests' = 0, inputSeen' = true,
+    loWasPhantom' = false, loAsked' = false,
   }
+
+  action keepLo = all { loWasPhantom' = loWasPhantom, loAsked' = loAsked }
 
   action keepRest = all {
     dropped' = dropped, died' = died, wasPhantom' = wasPhantom,
     reconnects' = reconnects, requests' = requests, inputSeen' = inputSeen,
+    keepLo,
   }
 
   // The link dies with no event; each side's channel reads closed or still open.
@@ -97,6 +120,7 @@ module mesh_heal {
     stale' = stale, pending' = pending,
     dropped' = dropped, died' = true, wasPhantom' = wasPhantom,
     reconnects' = reconnects, requests' = requests, inputSeen' = inputSeen,
+    keepLo,
   }
 
   // A side's channel comes to read closed later (the transport's own timeout).
@@ -116,6 +140,8 @@ module mesh_heal {
     or { stale.get(s) == "fresh", stale.get(s) == "stalled" },
     stale' = stale.set(s, staleAfter(s)),
     wasPhantom' = (wasPhantom or (s == "hi" and staleAfter(s) == "phantom")),
+    loWasPhantom' = (loWasPhantom or (s == "lo" and staleAfter(s) == "phantom")),
+    loAsked' = loAsked,
     linkUp' = linkUp, reads' = reads, pending' = pending,
     dropped' = dropped, died' = died, reconnects' = reconnects, requests' = requests, inputSeen' = inputSeen,
   }
@@ -146,7 +172,9 @@ module mesh_heal {
   }
 
   // The lower side's offer connects. The guest's open handler: a
-  // reconnecting entry resets and asks for an immediate resync.
+  // reconnecting entry resets and asks for an immediate resync. So does the
+  // lower side's, when it healed through the drop path (its entry is
+  // reconnecting) and is not the host.
   def hiReconnecting: bool = pending.get("hi") == "waiting"
   action connect = all {
     pending.get("lo") == "offering", not(dropped),
@@ -159,6 +187,8 @@ module mesh_heal {
     inputSeen' = false,
     reconnects' = reconnects + 1,
     dropped' = dropped, died' = died, wasPhantom' = wasPhantom,
+    loWasPhantom' = loWasPhantom,
+    loAsked' = (loAsked or (LO_THROUGH_DROP and not(LO_IS_HOST))),
   }
 
   // The offer gets no answer (the attempt's deadline): the lower side has no
@@ -179,6 +209,7 @@ module mesh_heal {
     stale' = SIDES.mapBy(_ => "fresh"),
     linkUp' = linkUp, reads' = reads, pending' = pending,
     dropped' = dropped, died' = died, wasPhantom' = wasPhantom, reconnects' = reconnects,
+    keepLo,
   }
 
   // The higher side's 45 s give-up: hardDisconnectPeer.
@@ -188,6 +219,7 @@ module mesh_heal {
     pending' = pending.set("hi", "none"),
     linkUp' = linkUp, reads' = reads, stale' = stale,
     died' = died, wasPhantom' = wasPhantom, reconnects' = reconnects, requests' = requests, inputSeen' = inputSeen,
+    keepLo,
   }
 
   action step = any {
@@ -225,8 +257,15 @@ module mesh_heal {
   // And in one: a second request races two states.
   val atMostOneResyncPerReconnect = requests <= 1
 
+  // A lower side that is not the host and ran on as if the higher were gone
+  // asks the host for state when the reconnect opens, before it plays on:
+  // the higher side's resync fixes the higher side only.
+  val aNonHostLowerResyncsAfterAHeal =
+    (linkUp and reconnects > 0 and not(LO_IS_HOST) and loWasPhantom) implies loAsked
+
   val allHold = and {
     aDeadChannelIsNeverForgotten, aPhantomReconnectEndsInAResync, atMostOneResyncPerReconnect,
+    aNonHostLowerResyncsAfterAHeal,
   }
 
   // ── Scenarios ────────────────────────────────────────────────────────────
@@ -280,6 +319,17 @@ module mesh_heal {
         .then(die("closed", "open"))
         .expect(not(checkActs("lo")))
 
+  // The lower side is not the host (slot 1 healing slot 2) and went phantom
+  // before its check healed: on the reconnect it asks the host for state,
+  // or, with 35634ed's fresh entry, plays on from its predictions.
+  run nonHostLowerTest =
+    if (C_TICK_CHECK and HEAL_PHANTOMS)
+      bothPhantomsTest
+        .then(check("lo")).then(connect)
+        .expect(aNonHostLowerResyncsAfterAHeal == (LO_IS_HOST or LO_THROUGH_DROP))
+    else
+      bothPhantomsTest
+
   // Only the higher side reads it closed: it waits and gives the player up.
   run higherAloneSeesItTest =
     if (C_TICK_CHECK and HEAL_PHANTOMS)
@@ -297,20 +347,37 @@ module mesh_heal {
 
 // Today: the check never runs on a C tick.
 module mesh_heal_current {
-  import mesh_heal(C_TICK_CHECK = false, HEAL_PHANTOMS = false, RESET_ON_OPEN = true).*
+  import mesh_heal(C_TICK_CHECK = false, HEAL_PHANTOMS = false, RESET_ON_OPEN = true,
+                   LO_IS_HOST = true, LO_THROUGH_DROP = false).*
 }
 
 // The check moved onto C ticks but still skipping phantoms.
 module mesh_heal_c_tick_only {
-  import mesh_heal(C_TICK_CHECK = true, HEAL_PHANTOMS = false, RESET_ON_OPEN = true).*
+  import mesh_heal(C_TICK_CHECK = true, HEAL_PHANTOMS = false, RESET_ON_OPEN = true,
+                   LO_IS_HOST = true, LO_THROUGH_DROP = true).*
 }
 
 // Without the guest's reset when the reconnected channel opens.
 module mesh_heal_no_reset_on_open {
-  import mesh_heal(C_TICK_CHECK = true, HEAL_PHANTOMS = true, RESET_ON_OPEN = false).*
+  import mesh_heal(C_TICK_CHECK = true, HEAL_PHANTOMS = true, RESET_ON_OPEN = false,
+                   LO_IS_HOST = true, LO_THROUGH_DROP = true).*
 }
 
-// The fix.
+// 35634ed with a lower slot that is not the host: its heal made a fresh
+// entry, so the reconnect's open handler did not ask the host for state.
+module mesh_heal_fresh_entry {
+  import mesh_heal(C_TICK_CHECK = true, HEAL_PHANTOMS = true, RESET_ON_OPEN = true,
+                   LO_IS_HOST = false, LO_THROUGH_DROP = false).*
+}
+
+// The fix, with the host as the lower slot.
 module mesh_heal_fixed {
-  import mesh_heal(C_TICK_CHECK = true, HEAL_PHANTOMS = true, RESET_ON_OPEN = true).*
+  import mesh_heal(C_TICK_CHECK = true, HEAL_PHANTOMS = true, RESET_ON_OPEN = true,
+                   LO_IS_HOST = true, LO_THROUGH_DROP = true).*
+}
+
+// The fix, with a guest as the lower slot.
+module mesh_heal_fixed_guest_lower {
+  import mesh_heal(C_TICK_CHECK = true, HEAL_PHANTOMS = true, RESET_ON_OPEN = true,
+                   LO_IS_HOST = false, LO_THROUGH_DROP = true).*
 }

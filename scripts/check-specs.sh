@@ -394,7 +394,8 @@ $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
 # ── A channel that dies in a match with no event ───────────────────────────
 MESH=specs/mesh_heal.qnt
 $QUINT typecheck "$MESH"
-for variant in mesh_heal_current mesh_heal_c_tick_only mesh_heal_no_reset_on_open mesh_heal_fixed; do
+for variant in mesh_heal_current mesh_heal_c_tick_only mesh_heal_no_reset_on_open mesh_heal_fresh_entry \
+  mesh_heal_fixed mesh_heal_fixed_guest_lower; do
   $QUINT test "$MESH" --main="$variant" --backend=typescript
 done
 # Today a C-rollback tick never reaches the mesh health check, so a channel
@@ -403,9 +404,14 @@ done
 # phantoms it rarely acts, since frames are frozen until the player is one
 # (mesh_heal_c_tick_only). Without the guest's reset when the reconnected
 # channel opens, PEER-RECOVERED asks for a second resync
-# (mesh_heal_no_reset_on_open; secondRequestTest).
-$QUINT run "$MESH" --main=mesh_heal_fixed --invariant=allHold \
-  --max-samples=20000 --max-steps=20 --backend=typescript
+# (mesh_heal_no_reset_on_open; secondRequestTest). A lower slot that is not
+# the host made a fresh entry when it healed, so it played on from its
+# predictions instead of asking the host for state (mesh_heal_fresh_entry;
+# nonHostLowerTest).
+for variant in mesh_heal_fixed mesh_heal_fixed_guest_lower; do
+  $QUINT run "$MESH" --main="$variant" --invariant=allHold \
+    --max-samples=20000 --max-steps=20 --backend=typescript
+done
 
 # ── The rollback ring across a resync that loads the host's state ─────────
 RING=specs/ring_after_resync.qnt
