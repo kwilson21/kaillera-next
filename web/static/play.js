@@ -540,7 +540,6 @@
       );
       clearLoadedRom();
       resetTransferForHostRomChange();
-      if (socket?.connected) socket.emit('rom-ready', { ready: false });
       if (_hostRomHash) autoMatchRom(_hostRomHash);
       updateRomSharingUI();
       return;
@@ -1483,6 +1482,17 @@
       showToolbar();
       showGameLoading();
       initEngine();
+      return;
+    }
+
+    // No ROM, and none to take from the host: ask for one, and join the game
+    // late once it is dropped, as a late joiner does. The server took the
+    // start while this page's word that it cleared its ROM was on its way
+    // (specs/rom_at_start.qnt); booting would run the emulator with nothing.
+    if (startPlan === 'askForRom') {
+      crumb('start-rom-prompt', { sharing: false });
+      _setPendingLateJoin(true);
+      showLateJoinRomPrompt();
       return;
     }
 
@@ -3254,7 +3264,6 @@
         );
         const droppedName = (_romHash && _knownRoms[_romHash]?.game) || displayName;
         clearLoadedRom();
-        if (socket?.connected) socket.emit('rom-ready', { ready: false });
         showRomMismatch(droppedName);
         return;
       }
@@ -3289,6 +3298,9 @@
     KNState.romHash = null;
     KNState.gameId = null;
     _announceGameId();
+    // The server counts this page as ready until told: a start would be taken
+    // with no ROM here (specs/rom_at_start.qnt, deletedRomTest).
+    if (socket?.connected) socket.emit('rom-ready', { ready: false });
     window.EJS_gameUrl = undefined;
     window.EJS_gameID = 'kaillera-next';
     const romDrop = document.getElementById('rom-drop');
