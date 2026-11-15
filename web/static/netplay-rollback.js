@@ -9020,6 +9020,14 @@
     const headerDuplicate = existingHeaderInput !== undefined && _inputEq(existingHeaderInput, recvInput);
     const headerWasSeeded = _consumeLateJoinSeededInput(peer.slot, recvFrame);
     _remoteInputs[peer.slot][recvFrame] = recvInput;
+    // An input this page did not hold restarts the peer-stale clock, below
+    // the peer's highest frame too: a peer catching up re-sends the frames
+    // it runs again, and is live. A resend of a frame already held does not:
+    // a peer stuck on one frame still goes stale (specs/tick_deadlines.qnt,
+    // peer_staleness).
+    if (existingHeaderInput === undefined && _peerLastAdvanceTime[peer.slot] !== undefined) {
+      _peerLastAdvanceTime[peer.slot] = performance.now();
+    }
     if (!_lastKnownInput[peer.slot] || recvFrame >= (_lastKnownInput[peer.slot].frame ?? -1)) {
       _lastKnownInput[peer.slot] = { ...recvInput, frame: recvFrame };
     }

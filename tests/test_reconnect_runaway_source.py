@@ -175,3 +175,21 @@ def test_the_guest_always_acknowledges_a_state_and_the_host_records_it_apart():
     reset = reset[: reset.index("\n  };\n")]
     assert "delete _inputSettledAckBefore[slot];" in reset
     assert src.count("_inputSettledAckBefore = {};") == 4
+
+
+def test_an_input_the_page_lacked_keeps_the_peer_live_a_repeat_does_not():
+    # specs/tick_deadlines.qnt peer_staleness: a peer catching up is not
+    # stale; one that only repeats itself still goes stale.
+    src = _src()
+    store = src.index("    _remoteInputs[peer.slot][recvFrame] = recvInput;\n")
+    before = src[
+        src.rindex(
+            "const existingHeaderInput = _remoteInputs[peer.slot][recvFrame];", 0, store
+        ) : store
+    ]
+    assert "existingHeaderInput" in before
+    after = src[store : store + 800]
+    assert (
+        "if (existingHeaderInput === undefined && _peerLastAdvanceTime[peer.slot] !== undefined) {"
+        in after
+    )
