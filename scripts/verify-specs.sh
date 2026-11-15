@@ -14,9 +14,10 @@ cd "$(dirname "$0")/.."
 STEPS="${STEPS:-6}"
 QUINT="npx quint"
 
-verify() { # spec module invariant
-  echo "== $2 / $3 (every run up to $STEPS steps)"
-  $QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$STEPS"
+verify() { # spec module invariant [init [steps]]
+  local init="${4:-init}" steps="${5:-$STEPS}"
+  echo "== $2 / $3${4:+ from $4} (every run up to $steps steps)"
+  $QUINT verify "$1" --main="$2" --invariant="$3" --init="$init" --max-steps="$steps"
 }
 
 # The checker must be able to find the bugs these properties exist for, or a
@@ -81,6 +82,13 @@ expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
 
 STREAM=specs/streaming_connection.qnt
 verify "$STREAM" streaming_connection_fixed allHold
+# Pages joining late, whose readies only this initial state has: a ready
+# lost, early, or arriving while the connection is still connecting. One
+# step fewer than the rest keeps it near the cost of the proof above (about
+# 130 s at 5 steps here, against about 160 s from `init` at 6); the longest of
+# those orderings, the resent offer of readyWhileConnectingTest, reaches the
+# guest at step 5.
+verify "$STREAM" streaming_connection_fixed allHold initLate $((STEPS - 1))
 verify "$STREAM" streaming_connection_current holdToday
 # Today's engine: a lost offer leaves the guest with nothing to come and a
 # stray offer is answered, each in 2 steps; a stray sender's second offer is

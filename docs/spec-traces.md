@@ -375,7 +375,7 @@ sequenceDiagram
   Note over Network: wire = {}
   Network-->>host: conns: {guest: {offer: 1, state: negotiated}, spect: {offer: 0, state: none}}
   host->>Network: channelOpens("host", "guest")
-  Note over host: conns: {guest: {offer: 1, state: open}, spect: {offer: 0, state: none}}
+  Note over host: conns: {guest: {offer: 1, state: open}, spect: {offer: 0, state: none}}, running: true
   guest->>Network: channelOpens("guest", "host")
   Note over guest: conns: {host: {offer: 1, state: open}, spect: {offer: 0, state: none}}
   Network->>Network: goLive

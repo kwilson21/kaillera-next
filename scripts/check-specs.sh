@@ -153,11 +153,12 @@ stream() { # module invariant init
 # strayOfferTest).
 stream streaming_connection_current holdToday init
 # With the host's deadline and signals that name their connection, all but
-# receiversConnectOnlyToTheHost hold; checking the sender is the owner's call.
+# receiversConnectOnlyToTheHost hold.
 stream streaming_connection_reconnects holdWithoutSenderCheck init
-# With the sender checked as well, every property holds.
+# With the sender checked as well, every property holds. That check is the
+# owner's decision; the engine change follows in its own PR.
 stream streaming_connection_fixed allHold init
-stream streaming_connection_fixed allHold initLive
+stream streaming_connection_fixed allHold initLate
 
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt

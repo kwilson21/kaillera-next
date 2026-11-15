@@ -21,20 +21,23 @@
 // show how):
 //   neverLeftWithNothingPending    a connection that drops is forgotten on
 //                                  both pages and nothing offers again
-//                                  (droppedGuestIsNeverReconnectedTest); nor
-//                                  after a lost offer or ready
+//                                  (droppedGuestIsNeverReconnectedTest), also
+//                                  when it drops while the host boots
+//                                  (dropWhileBootingTest); nor after a lost
+//                                  offer or ready
 //   staleSignalsAreNotApplied      an offer for a new connection is applied
 //                                  to the old one as a renegotiation
 //                                  (newConnectionTakenAsRenegotiationTest)
 //   receiversConnectOnlyToTheHost  a page answers an offer from any member
 //                                  of the room (strayOfferTest)
 //
-// The last is a security question for the project owner, and this model does
-// not decide it. Today any member of the room, a spectator included, can
-// open a connection to a player's page: the page shows that member's stream
-// in place of the game, and its ICE candidates (its addresses) go to that
-// member, which the star otherwise never lets a spectator see. The model
-// states the property precisely and shows today's engine violates it.
+// The last was a security question, and the project owner has decided it:
+// a guest or spectator accepts an offer only from the room's host, the
+// `fixed` behaviour (CHECKS_SENDER). The engine change follows in its own
+// PR; until then any member of the room, a spectator included, can open a
+// connection to a player's page: the page shows that member's stream in
+// place of the game, and its ICE candidates (its addresses) go to that
+// member, which the star otherwise never lets a spectator see.
 // streaming_connection_reconnects is the reconnect fix without the check;
 // streaming_connection_fixed adds it.
 //
@@ -56,10 +59,13 @@
 //                 socket was down, before the page meant to hear it was
 //                 listening, or dropped by the server's rate limit
 //   channelOpens  the `inputs` DataChannel's onopen (signal.ts,
-//                 channelOpenAction): the guest starts sending input
-//   goLive        the host's first open channel starts its emulator
-//                 (startHost), and capture starts once it has booted: from
-//                 then on _gameRunning and _hostStream are both set
+//                 channelOpenAction). The connection reaching `connected`
+//                 and its channel opening are one step on each page here.
+//                 The guest starts sending input; the host's first open
+//                 channel starts its emulator (startHost: _gameRunning)
+//   goLive        capture starts once the host's emulator has booted
+//                 (_hostStream). Nothing stops the boot: it goes on whether
+//                 or not the connection that started it is still there
 //   blip          the network stops carrying a connection, open or still
 //                 connecting. Both pages' connections go `disconnected`,
 //                 which WebRTC means as transient
@@ -106,16 +112,18 @@
 //     slot 0, which the page has before it listens for signals (init runs
 //     onUsersUpdated(config.initialPlayers) as it registers its listeners),
 //     or a stamp from the server on the signal, like the `knFrom` a relayed
-//     `data-message` carries. Which to use is the project owner's call; the
-//     model takes it as known.
+//     `data-message` carries. Which to use is for the engine change to
+//     settle; the model takes it as known.
 //   - Which of a receiver's connections made for the same offer the host
 //     took. A connection one page closed is gone for good on both, even when
 //     the other page makes a new one for the same offer later (an offer the
 //     host resends, taken again after the first was closed). The engine
 //     might connect there; the model never claims it does.
 //   - How long anything takes. A deadline may expire at any time, too early
-//     included; `pc.connectionState === 'connected'` is taken to be a
-//     negotiated connection the network carries (`alive`).
+//     included. A negotiated connection the network carries (`alive`) is
+//     still `connecting` until its channel opens.
+//   - A renderer that fails to start: startHost then stops with
+//     _gameRunning set and no stream, for good.
 //
 // HOST_REOFFERS: who offers again.
 //   false  today: the host offers once per connection: from the roster
@@ -143,7 +151,8 @@
 //          one, so the guest has to tell the two apart
 // CHECKS_SENDER: whose offer a guest or spectator answers.
 //   false  today: any member's
-//   true   the host's only
+//   true   the host's only: the owner's decision, to be made in the engine
+//          in its own PR
 module streaming_connection {
   const HOST_REOFFERS: bool
   const SIGNALS_NAME_CONNECTION: bool
@@ -176,7 +185,8 @@ module streaming_connection {
   type Page = {
     conns: str -> Conn,  // by every other member
     listed: Set[str],    // the host: the members its roster lists
-    live: bool,          // the host: the stream is up (_gameRunning and _hostStream)
+    running: bool,       // the host: its emulator was started (_gameRunning)
+    live: bool,          // the host: capture has started (_hostStream), so the stream is up
     shows: str,          // a guest or spectator: whose stream its <video> shows, "" none
   }
   // `kind` is "offer", "answer" or "ready". `id` is the offer an offer or an
@@ -186,7 +196,7 @@ module streaming_connection {
 
   pure val NONE: Conn = { offer: 0, state: "none" }
   pure def emptyPage(p: str): Page =
-    { conns: PAGES.exclude(Set(p)).mapBy(x => NONE), listed: Set(), live: false, shows: "" }
+    { conns: PAGES.exclude(Set(p)).mapBy(x => NONE), listed: Set(), running: false, live: false, shows: "" }
 
   var page: str -> Page
   var wire: Set[Msg]       // signals and readies the server has yet to deliver
@@ -328,13 +338,15 @@ module streaming_connection {
   }
 
   // A page joining the stream in play says it is listening. The host ignores
-  // a player its roster does not list yet, and a page it is already
-  // connected to. If its connection has made an offer it sends that offer
-  // again; otherwise it makes the connection if it holds none, and offers.
+  // a player its roster does not list yet, and a page its connection is open
+  // to (dc open or pc `connected`). If its connection has made an offer it
+  // sends that offer again, also when that offer was answered and the
+  // connection is still `connecting`; otherwise it makes the connection if it
+  // holds none, and offers.
   action receiveReady(m: Msg): bool = {
     val r = m.src
     val e = connOf(HOST, r)
-    val ignored = (isPlayer(r) and not(page.get(HOST).listed.contains(r))) or isOpen(e) or alive(r)
+    val ignored = (isPlayer(r) and not(page.get(HOST).listed.contains(r))) or isOpen(e)
     val resends = not(ignored) and holds(HOST, r) and e.offer != 0
     val offers = not(ignored) and not(resends)
     all {
@@ -370,15 +382,20 @@ module streaming_connection {
 
   // ── channels and the stream ────────────────────────────────────────────
 
-  action channelOpens(p: str, x: str): bool = all {
-    isPair(p, x), alive(receiverOf(p, x)), not(isOpen(connOf(p, x))),
-    page' = withConn(p, x, { ...connOf(p, x), state: "open" }),
-    wire' = wire, noOffer, unchangedNet, unchangedHistory,
+  // On the host, the first channel to open starts the emulator.
+  action channelOpens(p: str, x: str): bool = {
+    val opened = { ...page.get(p), conns: page.get(p).conns.set(x, { ...connOf(p, x), state: "open" }) }
+    all {
+      isPair(p, x), alive(receiverOf(p, x)), not(isOpen(connOf(p, x))),
+      page' = page.set(p, if (p == HOST) { ...opened, running: true } else opened),
+      wire' = wire, noOffer, unchangedNet, unchangedHistory,
+    }
   }
 
+  // Capture starts once the emulator has booted, whatever has become of the
+  // connection whose channel started it.
   action goLive = all {
-    not(page.get(HOST).live),
-    RECEIVERS.exists(r => isOpen(connOf(HOST, r))),
+    page.get(HOST).running, not(page.get(HOST).live),
     page' = page.set(HOST, { ...page.get(HOST), live: true }),
     wire' = wire, noOffer, unchangedNet, unchangedHistory,
   }
@@ -444,12 +461,13 @@ module streaming_connection {
     misapplied' = false, replacedLive' = false,
   }
 
-  // The stream is up (whoever the host started it with is left out), and the
-  // guest and the spectator join it late: each page has started its engine
-  // and sent its ready, and the roster that lists them is on its way to the
-  // host.
-  action initLive = all {
-    page' = PAGES.mapBy(p => if (p == HOST) { ...emptyPage(p), live: true } else emptyPage(p)),
+  // The match is under way (whoever the host started it with is left out):
+  // the host's emulator is running and capture starts at its own pace
+  // (goLive), so the stream may or may not be up yet. The guest and the
+  // spectator join late: each page has started its engine and sent its
+  // ready, and the roster that lists them is on its way to the host.
+  action initLate = all {
+    page' = PAGES.mapBy(p => if (p == HOST) { ...emptyPage(p), running: true } else emptyPage(p)),
     wire' = RECEIVERS.map(r => readyFrom(r)), nextId' = 1, broken' = Set(), closed' = Set(),
     misapplied' = false, replacedLive' = false,
   }
@@ -491,7 +509,8 @@ module streaming_connection {
   // and its input goes nowhere, with both pages still in the room.
   // Violated today: a connection that drops is forgotten on both pages
   // (droppedGuestIsNeverReconnectedTest), and a later roster only makes a
-  // connection that waits for a ready (rosterAfterADropWaitsForAReadyTest);
+  // connection that waits for a ready (rosterAfterADropWaitsForAReadyTest),
+  // also when the drop came before the stream was up (dropWhileBootingTest);
   // the same after a lost offer (lostOfferTest) or a lost or early ready
   // (lostReadyTest, readyBeforeRosterTest).
   val neverLeftWithNothingPending = canOffer implies RECEIVERS.forall(r => connected(r) or pendingFor(r))
@@ -507,7 +526,8 @@ module streaming_connection {
   // A guest's or spectator's page holds a connection only to the host and
   // shows only the host's stream.
   // Violated today, and with the reconnect fix alone: a member who is not
-  // the host offers, and the page answers it (strayOfferTest).
+  // the host offers, and the page answers it (strayOfferTest). The owner has
+  // chosen that it hold: the `fixed` variant is the behaviour to build.
   val receiversConnectOnlyToTheHost = RECEIVERS.forall(r => and {
     PAGES.exclude(Set(r, HOST)).forall(x => not(holds(r, x))),
     page.get(r).shows == "" or page.get(r).shows == HOST,
@@ -618,6 +638,40 @@ module streaming_connection {
       )
       .expect(connected("guest") == HOST_REOFFERS)
 
+  // The drop comes while the host's emulator is still booting: the channel
+  // that started it closes before capture starts. The boot goes on and the
+  // stream comes up with nobody connected, so the roster that comes next
+  // (the only thing that would offer again today) finds the stream up and
+  // only makes a connection that waits for a ready. Had the roster come
+  // before capture started, it would have offered at once.
+  run dropWhileBootingTest =
+    init
+      .then(roster("guest"))
+      .then(deliver(offerTo("guest", 1)))
+      .then(deliver(answerFrom("guest", 1)))
+      .then(channelOpens("host", "guest"))
+      .then(channelOpens("guest", "host"))
+      .expect(page.get(HOST).running and not(page.get(HOST).live))
+      .then(blip("guest"))
+      .then(notice("guest", "host"))
+      .then(notice("host", "guest"))
+      .then(goLive)
+      .expect(page.get(HOST).live and RECEIVERS.forall(r => not(holds(HOST, r))))
+      .then(roster("guest"))
+      .expect(holds("host", "guest") and connOf("host", "guest").offer == 0 and wire == Set())
+      .expect(neverLeftWithNothingPending == HOST_REOFFERS)
+      .then(
+        if (HOST_REOFFERS)
+          reoffer("guest")
+            .then(deliver(offerTo("guest", 2)))
+            .then(deliver(answerFrom("guest", 2)))
+            .then(channelOpens("guest", "host"))
+            .then(channelOpens("host", "guest"))
+        else
+          stutter
+      )
+      .expect(connected("guest") == HOST_REOFFERS)
+
   // The roster's offer is lost. The host's connection waits for an answer,
   // which no event ends, and its emulator never starts. Today nothing else
   // happens; with the deadline the host offers again.
@@ -641,7 +695,8 @@ module streaming_connection {
   // A player joins the stream in play. The roster makes a connection that
   // waits; the guest's ready makes the host offer on it.
   run lateJoinTest =
-    initLive
+    initLate
+      .then(goLive)
       .then(roster("guest"))
       .expect(holds("host", "guest") and connOf("host", "guest").offer == 0)
       .then(deliver(readyFrom("guest")))
@@ -654,7 +709,8 @@ module streaming_connection {
   // The joining player's ready is lost (its page sends it once, when its
   // engine starts). The host's connection waits for it for ever today.
   run lostReadyTest =
-    initLive
+    initLate
+      .then(goLive)
       .then(roster("guest"))
       .then(lose(readyFrom("guest")))
       .expect(holds("host", "guest") and connOf("host", "guest").offer == 0)
@@ -666,7 +722,8 @@ module streaming_connection {
   // not know; the roster then makes a connection that waits for the ready
   // already spent. A spectator's ready is let through in the same order.
   run readyBeforeRosterTest =
-    initLive
+    initLate
+      .then(goLive)
       .then(deliver(readyFrom("guest")))
       .expect(not(holds("host", "guest")) and nextId == 1)
       .then(roster("guest"))
@@ -675,7 +732,29 @@ module streaming_connection {
       .then(deliver(readyFrom("spect")))
       .expect(connOf("host", "spect").offer == 1 and wire.contains(offerTo("spect", 1)))
 
-  // Before the stream is up a roster is the one thing that offers again
+  // A player joins while the host's emulator is still booting, so the roster
+  // offers at once. Offer and answer are both applied, and the connection is
+  // still `connecting` when the player's ready arrives: the host's
+  // connection is neither open nor `connected`, so it sends its offer again.
+  // The guest takes it as a renegotiation of its connection and answers; the
+  // host, no longer waiting for an answer, drops that one. The pair then
+  // connects as before.
+  run readyWhileConnectingTest =
+    initLate
+      .then(roster("guest"))
+      .then(deliver(offerTo("guest", 1)))
+      .then(deliver(answerFrom("guest", 1)))
+      .expect(alive("guest") and not(isOpen(connOf("host", "guest"))))
+      .then(deliver(readyFrom("guest")))
+      .expect(wire.contains(offerTo("guest", 1)) and nextId == 2)
+      .then(deliver(offerTo("guest", 1)))
+      .then(deliver(answerFrom("guest", 1)))
+      .expect(connOf("host", "guest") == { offer: 1, state: "negotiated" })
+      .then(channelOpens("host", "guest"))
+      .then(channelOpens("guest", "host"))
+      .expect(connected("guest") and not(misapplied) and wire.contains(readyFrom("spect")))
+
+  // Before capture starts a roster is the one thing that offers again
   // today. The connection drops; the host notices first and forgets the
   // guest, which has not noticed yet. A roster comes and the host offers on
   // a new connection. The guest applies that offer to the connection it
@@ -747,10 +826,16 @@ module streaming_connection {
       .expect(connected("guest") and neverReplacesALiveConnection and wire == Set())
 
   // The guest is connected to the host. The spectator's page sends the guest
-  // an offer of its own. Today the guest answers it as it would the host's:
-  // it holds a connection to the spectator and its video shows the
-  // spectator's stream in place of the game. Checking the sender, it drops
-  // the offer.
+  // an offer of its own.
+  //   current, reconnects  the guest accepts it as it would the host's: it
+  //                        makes a connection for the spectator and answers
+  //                        from it (`negotiated`; the answer goes to the
+  //                        spectator's page, which the model does not
+  //                        follow), and its video shows the spectator's
+  //                        stream in place of the game
+  //   fixed                the guest refuses it: no connection, no answer,
+  //                        and its video still shows the host's stream
+  // Either way its connection to the host stays up.
   run strayOfferTest =
     init
       .then(roster("guest"))
@@ -759,11 +844,16 @@ module streaming_connection {
       .then(channelOpens("host", "guest"))
       .then(channelOpens("guest", "host"))
       .then(strayOffer("spect", "guest"))
+      .expect(wire == Set(offerFrom("spect", "guest", 2)))
       .then(deliver(offerFrom("spect", "guest", 2)))
-      .expect(holds("guest", "spect") == not(CHECKS_SENDER))
-      .expect(page.get("guest").shows == (if (CHECKS_SENDER) HOST else "spect"))
-      .expect(receiversConnectOnlyToTheHost == CHECKS_SENDER)
-      .expect(connected("guest"))
+      .expect(
+        if (CHECKS_SENDER)
+          not(holds("guest", "spect")) and page.get("guest").shows == HOST and receiversConnectOnlyToTheHost
+        else
+          connOf("guest", "spect") == { offer: 2, state: "negotiated" } and page.get("guest").shows == "spect"
+            and not(receiversConnectOnlyToTheHost)
+      )
+      .expect(wire == Set() and connected("guest"))
 }
 
 // The engine as it is today. neverLeftWithNothingPending,
@@ -776,14 +866,14 @@ module streaming_connection_current {
 
 // The reconnect fix alone: the host's deadline, and signals that name their
 // connection. Offers are still answered from any member, so
-// receiversConnectOnlyToTheHost is violated here; whether to check the
-// sender is the project owner's call.
+// receiversConnectOnlyToTheHost is violated here.
 module streaming_connection_reconnects {
   import streaming_connection(HOST_REOFFERS = true, SIGNALS_NAME_CONNECTION = true,
          CHECKS_SENDER = false).*
 }
 
-// The reconnect fix, and a guest or spectator answers only the host.
+// The reconnect fix, and a guest or spectator answers only the host: the
+// behaviour the project owner chose for the sender.
 module streaming_connection_fixed {
   import streaming_connection(HOST_REOFFERS = true, SIGNALS_NAME_CONNECTION = true,
          CHECKS_SENDER = true).*
