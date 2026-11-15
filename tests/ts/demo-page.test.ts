@@ -201,7 +201,9 @@ type Step =
   | { kind: 'mirror'; frame: number }
   | { kind: 'record'; call: 'startRecording' | 'stopRecording' | 'getRecording' }
   | { kind: 'load'; name: string }
-  | { kind: 'shim' };
+  | { kind: 'shim' }
+  /** The emulator's loader finishes (its event), its script loads, or its script fails. */
+  | { kind: 'loader'; how: 'complete' | 'load' | 'error' };
 
 /** `window.KNDemo`, as demo.js leaves it. */
 type DemoApi = {
@@ -210,6 +212,8 @@ type DemoApi = {
   startRecording: () => void;
   stopRecording: () => void;
   getRecording: () => string;
+  /** The run-state machine beside the flags; the old script has none. */
+  runState?: { state: () => string; disagreements: () => readonly { message: string; old: string; next: string }[] };
 };
 
 /** `window.KNCore` as a page script finds it. */
@@ -389,6 +393,7 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
   let blobs = 0;
   let api: DemoApi | undefined;
   let onWindow = '';
+  let windowListeners: { type: string; listener: () => void }[] = [];
 
   const local = fakeStorage(visit.local);
   const session = fakeStorage(visit.session);
@@ -413,8 +418,14 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
         elements.get(id) ?? attached().find((element) => element.id === id) ?? null,
       createElement: (): FakeElement => new FakeElement(),
     },
-    addEventListener: (type: string): void => note('window.addEventListener', type),
-    removeEventListener: (type: string): void => note('window.removeEventListener', type),
+    addEventListener: (type: string, listener: () => void): void => {
+      note('window.addEventListener', type);
+      windowListeners.push({ type, listener });
+    },
+    removeEventListener: (type: string, listener: () => void): void => {
+      note('window.removeEventListener', type);
+      windowListeners = windowListeners.filter((entry) => entry.type !== type || entry.listener !== listener);
+    },
     location: { search: visit.search, reload: (): void => note('reload') },
     localStorage: local,
     sessionStorage: session,
@@ -580,6 +591,14 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
       note(step.call, typeof said === 'string' ? said : undefined);
     } else if (step.kind === 'shim') {
       vm.runInContext('window.__knInstallUnpackAlignmentShim?.()', context);
+    } else if (step.kind === 'loader') {
+      if (step.how === 'complete') {
+        for (const entry of windowListeners.filter(({ type }) => type === 'kn-ejs-loader-complete')) entry.listener();
+      } else {
+        const script = body.children.find((child) => child.src === '/static/ejs-loader.js');
+        if (step.how === 'load') script?.onload?.();
+        else script?.onerror?.();
+      }
     } else await api?.loadRomFile({ name: step.name, bytes: new Uint8Array([1, 2, 3, 4]).buffer });
     await nextTurn();
   };
@@ -599,14 +618,32 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     ].join('\n');
   };
 
-  return { apply, snapshot, hasApi: (): boolean => api !== undefined, stored: idb.describe };
+  return {
+    apply,
+    snapshot,
+    hasApi: (): boolean => api !== undefined,
+    stored: idb.describe,
+    runState: (): DemoApi['runState'] => api?.runState,
+  };
 };
 
 /** The same visit on the old script and on the new one, compared after every step. */
+/** The run-state machine's states the visits have reached, by region (`engine:running`, ...). */
+const REACHED = new Set<string>();
+
+/** The new page's run-state machine agrees with its flags: no disagreement, ever. */
+const assertRunStateAgrees = (page: ReturnType<typeof openDemo>, where: string): void => {
+  const runState = page.runState();
+  if (!runState) return;
+  for (const part of runState.state().split(' ')) REACHED.add(part);
+  assert.deepEqual(runState.disagreements(), [], `run state disagrees with the flags ${where}`);
+};
+
 const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void> => {
   // The old script only checks that a core is there; it calls none of it.
   const before = openDemo(OLD_SCRIPT, {}, visit);
   const after = openDemo(NEW_SCRIPT, { demo }, visit);
+  assertRunStateAgrees(after, `on load: ${show(visit)}`);
   assert.equal(after.snapshot(), before.snapshot(), `on load: ${show(visit)}`);
   // A cached ROM is restored on load: let both pages finish reading and hashing it.
   if (visit.cached !== undefined) {
@@ -614,6 +651,7 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
       await nextTurn();
       await new Promise((resolve) => setTimeout(resolve, 2));
     }
+    assertRunStateAgrees(after, `after restoring the cached ROM: ${show(visit)}`);
     assert.equal(after.snapshot(), before.snapshot(), `after restoring the cached ROM: ${show(visit)}`);
   }
   let done = 0;
@@ -621,6 +659,7 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
     await before.apply(step);
     await after.apply(step);
     done++;
+    assertRunStateAgrees(after, `at step ${done} ${show(step)} of ${show(visit)}`);
     assert.equal(after.snapshot(), before.snapshot(), `step ${done} ${show(step)} of ${show(visit)}`);
   }
 };
@@ -708,7 +747,8 @@ const randomStep = (random: () => number): Step => {
   if (roll < 0.74) return { kind: 'frame', ms: pick(random, [1, 16, 17, 100, 250, 640, 3000, 6100]) ?? 16 };
   if (roll < 0.8) return { kind: 'click', id: pick(random, CLICKS) ?? 'rollback-toggle' };
   if (roll < 0.83) return { kind: 'rollback', on: random() < 0.5 };
-  if (roll < 0.93) return { kind: 'input', real: randomPad(random) };
+  if (roll < 0.91) return { kind: 'input', real: randomPad(random) };
+  if (roll < 0.93) return { kind: 'loader', how: pick(random, ['complete', 'load', 'error'] as const) ?? 'complete' };
   if (roll < 0.97) return { kind: 'mirror', frame: Math.floor(random() * 1100) - 50 };
   if (roll < 0.99) {
     return {
@@ -750,6 +790,26 @@ test('seeded visits: the page shows and sends what the old script did, step for 
     for (let i = 0; i < 90; i++) steps.push(randomStep(random));
     await compareVisit(visit, steps);
   }
+});
+
+// The demo has little traffic and no way to report to the server, so these
+// visits are the evidence that the run-state machine agrees with demo.js's
+// flags. They count only if they take it everywhere.
+test('the seeded visits reach every state of every region of the run-state machine', () => {
+  const states = [
+    ['engine', ['idle', 'running']],
+    ['loader', ['none', 'loading', 'done']],
+    ['match', ['menus', 'playing', 'gamePaused']],
+    ['tick', ['running', 'paused']],
+    ['autoCompare', ['off', 'running', 'paused', 'runningUnpausable']],
+    ['mode', ['rollback', 'lockstep']],
+    ['interaction', ['untouched', 'touched']],
+  ] as const;
+  const expected = [...states.flatMap(([name, all]) => all.map((state) => `${name}:${state}`)), 'leaving'];
+  assert.deepEqual(
+    expected.filter((state) => !REACHED.has(state)),
+    [],
+  );
 });
 
 // Entering a match animates the slider to the restored preference.

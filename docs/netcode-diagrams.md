@@ -10,6 +10,7 @@ run the generator named beside it.
 |---|---|---|---|
 | [Page lifecycle](session-machine.md) | What one page is doing: in the lobby, joining a match in play, or running one | `web/src/session.ts` | `npm run diagram` |
 | [Peer connection](peer-connection-machine.md) | The WebRTC connection to one other player as one page sees it: offering, answering, open, reconnecting, and the deadline on each wait. Built to the model's `fixed` variant; runs beside the rollback engine, observing | `web/src/peer-connection.ts` | `npm run diagram` |
+| [Demo run state](demo-run-machine.md) | What the demo page is doing: engine, emulator loader, match, the Pause button, auto-compare, mode, and whether the player has touched the controls. Runs beside `demo.js`'s flags, observing | `web/src/demo/run-state.ts` | `npm run diagram` |
 
 ## Orderings from the Quint models
 

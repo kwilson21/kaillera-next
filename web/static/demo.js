@@ -501,6 +501,7 @@
           bootDoneTimer = null;
         }
         window.removeEventListener('kn-ejs-loader-complete', markBootDone);
+        _runState.send({ type: 'loaderSettled' });
       };
       window.addEventListener('kn-ejs-loader-complete', markBootDone);
       bootDoneTimer = setTimeout(markBootDone, 30000);
@@ -515,6 +516,7 @@
         _setStatus('Failed to load emulator');
       };
       document.body.appendChild(script);
+      _runState.send({ type: 'loaderInjected' });
     };
 
     if (window._knCoreReady) {
@@ -556,6 +558,28 @@
     _refreshEmuButtonsAvailability();
   };
 
+  // The page's run state as a state machine (web/src/demo/run-state.ts),
+  // observing: each handler below that changes one of these flags tells it
+  // what happened, and the flags are compared with what the machine says
+  // they should be. A disagreement is logged and kept on KNDemo.runState.
+  const _runState = _demo.runState({
+    autoCompareDisabled: _options.autoCompareDisabled,
+    read: () => ({
+      engineStarted: _engineStarted,
+      engineRunning: _engineRunning,
+      loaderInjected: _loaderInjected,
+      bootInFlight: _emulatorBootInFlight,
+      inMatch: _wasInMatch,
+      fakePeerActive: _lastFakePeerMatchActive,
+      tickPaused: _emuPaused,
+      autoCompareRunning: _autoCompareTimer !== 0,
+      autoComparePaused: _autoComparePausedAt !== 0,
+      rollbackEnabled: _rollbackEnabled,
+      userInteracted: _userInteractedThisMatch,
+    }),
+    warn: (line) => console.warn(line),
+  });
+
   // Hard reset: reloads the page so the demo restarts from the autopilot
   // boot path. Cleaner than rewinding engine state mid-session (state
   // ring, Emscripten thread, audio worklet all need fresh init anyway).
@@ -570,6 +594,7 @@
     } catch (_) {}
     _setStatus('Resetting demo…');
     location.reload();
+    _runState.send({ type: 'reset' });
   };
 
   const _toggleEmuPause = () => {
@@ -846,6 +871,7 @@
       // Best-effort; failure to cache doesn't block the load.
       _romStore.save(new Uint8Array(bytes), file.name).catch(() => {});
       _startEngine();
+      _runState.send({ type: 'romLoaded', engineAvailable: !!window.NetplayRollback });
     } catch (err) {
       _showLoading(false);
       _setStatus(err?.message || 'ROM load failed');
@@ -960,6 +986,7 @@
         setTimeout(() => {
           if (_wasInMatch && !_userInteractedThisMatch && !_isAutoCompareRunning() && !_autoCompareDisabled)
             _startAutoCompare();
+          _runState.send({ type: 'autoStartDue' });
         }, 600);
       } else {
         // Left the match — stop the demo and put rollback back ON so the
@@ -980,6 +1007,7 @@
         _showInputIndicator('post-match');
       }
     }
+    _runState.send({ type: 'frame', strict: inMatchStrict, inclusive: inMatch });
 
     _nativeRAF(_updateHud);
   };
@@ -997,6 +1025,7 @@
     const inMatch = !!rb?.isInMatchOrPaused?.();
     if (!inMatch || _emuPaused) {
       _setRollbackEnabled(next);
+      _runState.send({ type: 'modeSwitched', rollback: next });
       return;
     }
     // The engine can't change the delay mid-replay (a replay lasts a few
@@ -1007,6 +1036,7 @@
       return;
     }
     _setRollbackEnabled(next);
+    _runState.send({ type: 'modeSwitched', rollback: next });
     const delay = rb.getHudCounters?.()?.delay ?? 0;
     const label = _demo.hud.modeSwitchLabel(next, delay);
     const title = $('mode-switch-title');
@@ -1110,20 +1140,24 @@
       // Remember this as the user's preference for future match starts.
       _savedRttPreference = _readRtt();
       _applyNetwork();
+      _runState.send({ type: 'interacted' });
     });
     $('rollback-toggle')?.addEventListener('click', () => {
       _markUserInteracted();
       // Manual toggle stops auto-compare so the user is back in control.
       _stopAutoCompare();
+      _runState.send({ type: 'rollbackToggleClicked' });
       _switchMode(!_rollbackEnabled);
     });
     $('emu-pause')?.addEventListener('click', () => {
       _markUserInteracted();
       _toggleEmuPause();
+      _runState.send({ type: 'pauseClicked', tickControl: !!window.NetplayRollback?.pauseTick });
     });
     $('emu-stop')?.addEventListener('click', () => {
       _markUserInteracted();
       _stopEmu();
+      _runState.send({ type: 'stopClicked', emulator: !!window.EJS_emulator });
     });
     $('emu-controls')?.addEventListener('click', () => {
       _markUserInteracted();
@@ -1133,6 +1167,7 @@
       // engine-start path.
       _ensureGamepadManager();
       window.ControllerSettings?.toggle?.();
+      _runState.send({ type: 'interacted' });
     });
     $('emu-reset')?.addEventListener('click', () => {
       _markUserInteracted();
@@ -1141,6 +1176,7 @@
     $('auto-compare-btn')?.addEventListener('click', () => {
       _markUserInteracted();
       _toggleAutoCompare();
+      _runState.send({ type: 'autoCompareClicked' });
     });
 
     // Gesture button: the engine listens for clicks on the page once it's in
@@ -1224,7 +1260,12 @@
   window.KNDemo = {
     ensureEmulatorBooted,
     loadRomFile: _loadRomFile,
-    setRollbackEnabled: _setRollbackEnabled,
+    setRollbackEnabled: (enabled) => {
+      _setRollbackEnabled(enabled);
+      _runState.send({ type: 'modeSwitched', rollback: !!enabled });
+    },
+    // The run-state machine's state and its disagreements with the flags.
+    runState: { state: _runState.state, disagreements: _runState.disagreements },
     startRecording: _startRecordingManual,
     stopRecording: _stopRecordingManual,
     getRecording: _getRecording,

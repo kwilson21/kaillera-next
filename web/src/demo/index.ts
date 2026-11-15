@@ -10,6 +10,7 @@ import * as network from './network.ts';
 import * as options from './options.ts';
 import * as rom from './rom.ts';
 import { demoRomStore } from './rom-store.ts';
+import { createRunState } from './run-state.ts';
 import { createTimelineView } from './timeline-view.ts';
 
 export const demo = {
@@ -22,4 +23,5 @@ export const demo = {
   installEjsGlobals,
   indicators: createIndicators,
   timelineView: createTimelineView,
+  runState: createRunState,
 };
