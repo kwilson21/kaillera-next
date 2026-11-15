@@ -254,15 +254,16 @@
  *     stream does (the fault the engine's DC health monitor exists for). In
  *     this container the monitor has usually switched the host to the
  *     reliable channel long before (a slow page goes 500 ms without a new
- *     frame from its peer), so the guest page then sends the host
- *     `rb-transport:unreliable` on its `lockstep` channel, the engine's own
- *     message, and the host takes the unreliable transport up again. The
+ *     frame from its peer), so the host takes the unreliable transport up
+ *     again mid-match (knDiag.setTransport('unreliable'), which broadcasts
+ *     `rb-transport:unreliable` as at the start; a guest's own message is
+ *     ignored, since only the host sets the transport). The
  *     guest stops hearing the host's new inputs, runs out of prediction room
  *     and stalls; the host stops hearing the guest's new frames and its
  *     health monitor switches it to the reliable channel by itself
- *     (DC-FALLBACK reason=ack-stale). No engine hook. If fewer than two
- *     inputs were dropped before that switch, the guest sends the message
- *     again (five rounds at most). The inputs dropped before a switch must
+ *     (DC-FALLBACK reason=ack-stale). The fault needs no engine hook. If
+ *     fewer than two inputs were dropped before that switch, the host sets
+ *     the unreliable transport again (five rounds at most). The inputs dropped before a switch must
  *     still reach the guest without the guest asking for them
  *     (specs/input_transport.qnt). The run fails unless the match started on
  *     the unreliable transport, the host took it up again, at least two of
@@ -1394,13 +1395,9 @@ if (inBattle) {
     while (loseBeforeFallback.rounds < 5) {
       loseBeforeFallback.rounds++;
       const at = await lastLogLine(host);
-      // The host takes the unreliable transport up again, by the engine's own message.
-      const asked = await guest.evaluate(() => {
-        const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
-        if (entry?.dc?.readyState !== 'open') return false;
-        entry.dc.send('rb-transport:unreliable');
-        return true;
-      });
+      // The host takes the unreliable transport up again and tells the guest,
+      // as at the match start (knDiag.setTransport, host-authoritative).
+      const asked = await host.evaluate(() => window.knDiag?.setTransport?.('unreliable') === 'unreliable');
       loseBeforeFallback.fellBack = asked && (await waitForLine(host, at.seq, /DC-FALLBACK reason=/, 30000));
       const lost = await framesLost();
       console.log(
@@ -1746,14 +1743,16 @@ const loseBeforeFallbackReport = (() => {
   const hostLines = linesAfter(H.sync, loseBeforeFallback.hostAt.seq);
   const linesIn = (lines, re) => lines.filter((line) => re.test(line));
   const lost = [...new Set(H.rbInputsLost)].sort((a, b) => a - b);
-  const rearmed = linesIn(hostLines, /rb-transport: host=unreliable adopted=unreliable/);
+  const rearmed = linesIn(hostLines, /rb-transport: host broadcast=unreliable \(knDiag, mid-match\)/);
   const unreliable = {
     host:
       /rb-transport: host broadcast=unreliable/.test(H.sync) &&
       /rb-input DC open .*ordered=false maxRetransmits=0/.test(H.sync),
     guest: /rb-transport: host=unreliable adopted=unreliable/.test(G.sync),
   };
-  const firstRearm = hostLines.findIndex((line) => /rb-transport: host=unreliable adopted=unreliable/.test(line));
+  const firstRearm = hostLines.findIndex((line) =>
+    /rb-transport: host broadcast=unreliable \(knDiag, mid-match\)/.test(line),
+  );
   const fallback =
     firstRearm < 0 ? null : (hostLines.slice(firstRearm).find((line) => /DC-FALLBACK reason=/.test(line)) ?? null);
   const exercised = unreliable.host && unreliable.guest && rearmed.length > 0 && lost.length >= 2 && !!fallback;

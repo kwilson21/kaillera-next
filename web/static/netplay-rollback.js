@@ -4453,7 +4453,9 @@
           // Force the next match's rollback transport to a specific mode.
           // Useful for A/B testing reliable vs unreliable on the same
           // network without rebuilding. Takes effect at the next game
-          // start (host broadcasts at lockstep-ready time).
+          // start (host broadcasts at lockstep-ready time). On the host
+          // during a match it also takes effect now and is broadcast, as at
+          // the start: only the host's word sets the transport.
           //
           //   knDiag.setTransport('unreliable')  // unordered + redundancy
           //   knDiag.setTransport('reliable')    // ordered TCP-like
@@ -4469,6 +4471,18 @@
               return null;
             }
             window._knTransportOverride = mode;
+            if (_playerSlot === 0 && _phase === PHASE_RUNNING) {
+              if (mode === 'reliable' && _rbTransport === 'unreliable') _switchInputsToReliable('knDiag');
+              _rbTransport = mode;
+              for (const p of Object.values(_peers)) {
+                if (p.dc?.readyState !== 'open') continue;
+                try {
+                  p.dc.send(`rb-transport:${mode}`);
+                } catch (_) {}
+              }
+              _syncLog(`rb-transport: host broadcast=${mode} (knDiag, mid-match)`);
+              return mode;
+            }
             console.log(`transport override set to: ${mode} (takes effect at next match start)`);
             return mode;
           },
