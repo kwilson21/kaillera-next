@@ -77,11 +77,12 @@ jobs:
         run: npm run spec
 
   # Exhaustive model checking (Apalache): every run of the specs up to a
-  # bounded number of steps, where the js job's `npm run spec` samples deeper
-  # random runs. Separate job because it needs Java and takes several minutes.
+  # bounded number of steps, where the spec job's `npm run spec` samples deeper
+  # random runs. Separate job because it needs Java; it took 16 to 27 minutes
+  # on main before the streaming connection spec added about 3.5 more.
   spec-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       # Apalache needs Java 17+, which the runner image already has.
