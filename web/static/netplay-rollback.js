@@ -18433,7 +18433,15 @@
       // one frame off; a state ahead of the guest is now held in tick() until
       // the guest reaches it, so a forward gap only lands here after that
       // hold timed out. Backward gaps replay frames whose inputs were sent.
-      if (frame != null && mod._kn_set_frame && _frameNum !== frame) {
+      // kn_set_frame is called on every load, the frame changed or not: it
+      // also tells the C engine that the live state is not the one it saved
+      // last, so the frame is saved again before it runs. Called only on a
+      // change, a state for a frame kn_pre_tick had saved and not run (a
+      // pacing hold, a step that emulated nothing) left the page's own copy
+      // in the ring (specs/ring_after_resync.qnt, savedFrameDidNotRunTest).
+      // A load waits out a pending rollback (_replayBlocksSyncApply), so the
+      // engine does not refuse it here.
+      if (frame != null && mod._kn_set_frame) {
         const oldFrame = _frameNum;
         _frameNum = frame;
         KNState.frameNum = frame;
@@ -18442,11 +18450,13 @@
         if (cFrame !== undefined && cFrame !== frame) {
           _syncLog(`SYNC-FRAME-MISMATCH js=${frame} c=${cFrame} — kn_set_frame refused`);
         }
-        _resetStrictMenuResends();
-        _clearStrictMenuWait();
-        _syncLog(`sync frame reset: ${oldFrame} → ${frame}`);
-        // Arm post-sync diagnostic burst: log full state hash for 10 frames
-        window._knPostSyncDiagFrames = 10;
+        if (oldFrame !== frame) {
+          _resetStrictMenuResends();
+          _clearStrictMenuWait();
+          _syncLog(`sync frame reset: ${oldFrame} → ${frame}`);
+          // Arm post-sync diagnostic burst: log full state hash for 10 frames
+          window._knPostSyncDiagFrames = 10;
+        }
       }
     } else {
       // Fallback: existing loadState path
