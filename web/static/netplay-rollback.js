@@ -15140,6 +15140,14 @@
               _lockstepWaitFrame = -1;
               _lockstepWaitStart = 0;
             } else if (step !== 'run') {
+              // A hole (the peer has made this frame's input: it sent or this
+              // page dropped a later one) is asked for at once, as the rollback
+              // input stall does (_askForMissingInputs; specs/resync_inputs.qnt
+              // ASK_FOR_MISSING). Any input still missing is asked for again at
+              // the first deadline.
+              for (const p of lockstepPeers) {
+                if (missingSlots.includes(p.slot)) _askForMissingInputs(p, applyFrame, applyFrame);
+              }
               if (step === 'askAgain') {
                 _requestStrictMenuResends(lockstepPeers, missingSlots, applyFrame, nowLockstep, 'lockstep');
               }
