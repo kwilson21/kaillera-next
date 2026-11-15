@@ -135,3 +135,84 @@ test('a driver that throws stops and says so once; the engine is not reached', (
   assert.equal(driver.open(1, 'g'), null);
   assert.deepEqual(log, ['PEER-DRIVER stopped: threw boom']);
 });
+
+// ── The mesh health check: the machine decides (specs/peer_connection.qnt,
+//    peer_connection_heal_one_side) ─────────────────────────────────────
+
+/** A pair connected and in a match, as the engine at `mySlot` sees it. */
+const connectedInMatch = (mySlot: number, theirSlot: number) => {
+  const page = engine(mySlot);
+  const lower = mySlot < theirSlot;
+  page.handle(theirSlot, 'k', { type: 'roster' }, { offer: lower });
+  if (lower) {
+    page.handle(theirSlot, 'k', { type: 'answer', page: PAGE, attempt: 1 });
+    page.handle(theirSlot, 'k', { type: 'opened', page: PAGE, attempt: 1 });
+  } else {
+    page.handle(theirSlot, 'k', { type: 'offer', page: THEIRS, attempt: 1, mode: 'first', underEarlierId: false });
+    page.handle(theirSlot, 'k', { type: 'opened', page: THEIRS, attempt: 1 });
+  }
+  page.driver.matchStarted();
+  return page;
+};
+const heal = (page: ReturnType<typeof engine>, theirSlot: number, found = { page: PAGE, attempt: 1 }) =>
+  page.driver.decideHeal(page.driver.open(theirSlot, 'k'), found);
+
+test('heal: the lower slot offers a reconnect', () => {
+  const host = connectedInMatch(0, 1);
+  const commands = heal(host, 1);
+  assert.ok(commands);
+  assert.deepEqual(
+    commands.filter((c) => c.type === 'offer').map((c) => (c.type === 'offer' ? c.mode : '')),
+    ['reconnect'],
+  );
+  assert.deepEqual(host.state(), [{ slot: 1, state: 'reconnecting.offering' }]);
+  host.driver.stop();
+});
+
+test('heal: the higher slot does not offer; it waits for the lower slot', () => {
+  const guest = connectedInMatch(1, 0);
+  const commands = heal(guest, 0, { page: THEIRS, attempt: 1 });
+  assert.ok(commands);
+  assert.equal(
+    commands.some((c) => c.type === 'offer'),
+    false,
+  );
+  assert.deepEqual(guest.state(), [{ slot: 0, state: 'reconnecting.awaitingOffer' }]);
+  guest.driver.stop();
+});
+
+test('heal: a player the machine does not drive is left to the engine (null)', () => {
+  const late = engine(2);
+  late.driver.joinedLate();
+  assert.equal(heal(late, 0), null);
+  const old = connectedInMatch(1, 0);
+  old.driver.stopWatching(0, 'k', 'their page sends no attempt id (offer)');
+  assert.equal(heal(old, 0, { page: THEIRS, attempt: 1 }), null);
+  old.driver.stop();
+});
+
+test('heal, old against new: only the higher slot changes, from offering to waiting', () => {
+  // The engine's rule before: every slot whose channel is dead resets and offers.
+  const oldRuleOffers = (_mySlot: number, _theirSlot: number) => true;
+  const pairs: readonly (readonly [number, number])[] = [
+    [0, 1],
+    [0, 2],
+    [1, 2],
+    [1, 0],
+    [2, 0],
+    [3, 1],
+  ];
+  for (const [mySlot, theirSlot] of pairs) {
+    const page = connectedInMatch(mySlot, theirSlot);
+    const commands = heal(
+      page,
+      theirSlot,
+      mySlot < theirSlot ? { page: PAGE, attempt: 1 } : { page: THEIRS, attempt: 1 },
+    );
+    assert.ok(commands, `${mySlot}->${theirSlot}`);
+    const offers = commands.some((c) => c.type === 'offer');
+    assert.equal(offers, mySlot < theirSlot, `${mySlot}->${theirSlot}`);
+    assert.equal(offers === oldRuleOffers(mySlot, theirSlot), mySlot < theirSlot, `${mySlot}->${theirSlot}`);
+    page.driver.stop();
+  }
+});

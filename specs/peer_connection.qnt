@@ -74,7 +74,17 @@
 //          at once, and the higher slot can heal while the lower reconnects
 //   true   proposed: only the page that initiates reconnects (the lower
 //          slot) offers from it; on the other page the check treats a dead
-//          channel as a drop it has just noticed
+//          channel as a drop it has just noticed. The per-peer machine
+//          decides this alone first (peer_connection_heal_one_side).
+//
+// Mixed versions during a deploy: a page from before the machine decided
+// `heal` meets one from after. The lower slot's health check is the same in
+// both (it resets its entry and offers); only the higher slot's changes. So
+// of the four pairs, the two with a new higher slot are
+// peer_connection_heal_one_side and the two with an old one are
+// peer_connection_current, exactly today. heal_one_side keeps every property
+// current keeps (holdToday) and also oneInitiatorPerPair and
+// neverLeftWithNothingPending: no pair is worse than today.
 // ANSWERER_HAS_DEADLINE: a page that answers a reconnect offer.
 //   false  today: marks the entry reconnecting; the 45 s give-up is armed
 //          only if that page also noticed the drop itself
@@ -664,6 +674,14 @@ module peer_connection {
   // The three that hold on today's engine.
   val holdToday = and { reconnectStartsClean, neverEvictsLiveConnection, startupRetryIsNotAReconnect }
 
+  // With the health check run by the lower slot only and nothing else
+  // changed (peer_connection_heal_one_side): what holds today, and the pair
+  // no longer offers to each other at once or is left with nothing pending.
+  // everyWaitHasADeadline is still violated there, as today: a page that
+  // answers a reconnect offer it did not notice the need for waits with only
+  // its answer timer (ANSWERER_HAS_DEADLINE, the next rule to wire).
+  val holdWithHealOneSide = and { holdToday, oneInitiatorPerPair, neverLeftWithNothingPending }
+
   // What still holds when attempts go by a counter alone: all but
   // staleSignalsAreNotApplied.
   val holdWithACounterAlone = and {
@@ -774,6 +792,25 @@ module peer_connection {
       .expect(side.get("hi").recon == HEAL_ONE_SIDE and (side.get("hi").made != 0) == not(HEAL_ONE_SIDE))
       .then(heal("lo"))
       .expect(oneInitiatorPerPair == HEAL_ONE_SIDE)
+
+  // The higher slot's health check finds the channel dead and the lower slot
+  // never offers (it crashed, or its page is gone). With the check run by the
+  // lower slot only, the higher slot treats the dead channel as a drop it has
+  // just noticed: reconnecting, with the 45 s give-up armed (I1). The give-up
+  // fires and the entry is dropped (hardDisconnectPeer), the existing route.
+  // Today the higher slot offers instead.
+  run higherHealsThenGivesUpTest =
+    init
+      .then(netDrop)
+      .then(silentClose("hi"))
+      .then(heal("hi"))
+      .expect(
+        if (HEAL_ONE_SIDE) side.get("hi").recon and side.get("hi").giveUp and side.get("hi").made == 0
+        else side.get("hi").made != 0
+      )
+      .expect(everyWaitHasADeadline)
+      .then(if (HEAL_ONE_SIDE) giveUpTimeout("hi") else stutter)
+      .expect(if (HEAL_ONE_SIDE) not(side.get("hi").has) else true)
 
   // A drop both pages notice: the lower slot offers, the guest answers and
   // comes back with its input state cleared.
@@ -1003,5 +1040,15 @@ module peer_connection_counter_only {
 module peer_connection_fixed {
   import peer_connection(HEAL_ONE_SIDE = true, ANSWERER_HAS_DEADLINE = true,
          SIGNALS_CARRY_ATTEMPT = true, ATTEMPT_NAMES_PAGE = true, ROSTER_KEEPS_LIVE = true,
+         STARTUP_FLAG_RELAYED = true).*
+}
+// Today's engine with the mesh health check run by the lower slot only: the
+// per-peer machine deciding `heal` and nothing else yet. During a deploy a
+// page of the old version meets one of the new: the lower slot heals the same
+// way in both, so a new higher slot with either is this module, and an old
+// higher slot with either is peer_connection_current.
+module peer_connection_heal_one_side {
+  import peer_connection(HEAL_ONE_SIDE = true, ANSWERER_HAS_DEADLINE = false,
+         SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true,
          STARTUP_FLAG_RELAYED = true).*
 }

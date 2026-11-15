@@ -7818,6 +7818,114 @@
     return !_isOwnSid(sid) && !healthy && !reconnecting;
   };
 
+  // Mesh health check (~5s): reconcile _knownPlayers (server truth) against
+  // actual DC state. Re-initiate connections to players the server says are
+  // in the room but we have no working DC to. This catches zombie peers,
+  // failed initial connections, and silent DC deaths that no event fires for.
+  // Run every 300 frames from both parts of tick(): the C-rollback branch
+  // (every match on the patched core, #232's lockstep mode included) and the
+  // JS lockstep path. Before it ran on C ticks, a channel that died with no
+  // event left the player a phantom for the rest of the match
+  // (specs/mesh_heal.qnt, aDeadChannelIsNeverForgotten). Once per frame: a
+  // frozen sim ticks on the same frame.
+  let _lastMeshHealthFrame = -1;
+  // Called on every tick of either branch. Any frame that is not a check's
+  // forgets the last one, so a new match or a resync that goes back past a
+  // checked frame checks it again.
+  const _meshHealthTick = () => {
+    if (_frameNum <= 0 || _frameNum % 300 !== 0) {
+      _lastMeshHealthFrame = -1;
+      return;
+    }
+    if (_lastMeshHealthFrame === _frameNum) return;
+    _lastMeshHealthFrame = _frameNum;
+    _meshHealthCheck();
+  };
+  const _meshHealthCheck = () => {
+    for (const [sid, info] of Object.entries(_knownPlayers)) {
+      if (_isPeerPendingLateJoin(sid)) continue;
+      // A phantom is healed too when its channel does not read open: on a
+      // C tick the sim is frozen from ROLLBACK_STALL_MS until the player is
+      // a phantom, so the first check after a silent death nearly always
+      // finds one (specs/mesh_heal.qnt, mesh_heal_c_tick_only). A phantom
+      // whose channel reads open is left to its inputs (_needsMeshHeal).
+      const p = _peers[sid];
+      // Skips our own entry (under any id we have had: while the
+      // signaling socket is down socket.id is undefined, and after it
+      // reconnects the roster still lists us under the old id until
+      // users-updated arrives), a peer with an open DC, and a reconnect
+      // already in progress.
+      if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) continue;
+      const healFrame = _peerDriver()?.open(info.slot, sid);
+      const healFound = p?.pc?._knAttempt;
+      const pcState = p?.pc?.connectionState;
+      _syncLog(
+        `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
+      );
+      // The per-peer machine decides (specs/peer_connection.qnt,
+      // peer_connection_heal_one_side): the lower slot resets its entry
+      // and offers; the higher slot takes the dead channel for a drop it
+      // has just noticed (reconnecting, the 45 s give-up armed: I1) and
+      // waits for that offer. Both offering at once crossed the two
+      // offers. Null: the machine does not drive this player (a page from
+      // before signals carried an attempt, a late joiner, one offered to
+      // before its machine existed) or holds another wait: both slots
+      // heal, as before.
+      const decided =
+        _peerDriver()?.decideHeal(healFrame, {
+          page: healFound?.page ?? '',
+          attempt: healFound?.attempt ?? 0,
+        }) ?? null;
+      const offers = decided === null || decided.some((command) => command.type === 'offer');
+      if (offers && p && _playerSlot !== 0 && _playerSlot < info.slot) {
+        // A lower slot that is not the host (slot 1 healing slot 2) heals as
+        // for any drop it noticed: the entry is reset (I2: resetPeerState),
+        // then marked reconnecting with the 45 s give-up armed, and
+        // attemptReconnect offers with its attempt deadline and retries.
+        // When the channel opens it resyncs from the host like any guest
+        // whose drop reconnected: it may have run on predicted inputs of a
+        // phantom it now reaches again (specs/mesh_heal.qnt,
+        // aNonHostLowerResyncsAfterAHeal). The host as the lower slot needs
+        // no resync and offers on a fresh entry, below.
+        try {
+          p.pc.close();
+        } catch (_) {}
+        resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });
+        _handlePeerDisconnect(sid, p);
+      } else if (offers || !p) {
+        // The host as the lower slot offers on a fresh entry. A higher slot
+        // the machine does not drive heals as before, both slots offering;
+        // so does a page with no entry for the player (the give-up already
+        // dropped it), which has nothing to wait on.
+        if (!offers) {
+          _syncLog(`MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid}: no entry to wait on, offering`);
+        }
+        if (p) {
+          try {
+            p.pc.close();
+          } catch (_) {}
+          // I2: route per-peer cleanup through resetPeerState before
+          // dropping the _peers entry.
+          resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });
+          delete _peers[sid];
+        }
+        createPeer(sid, info.slot, true);
+        sendOffer(sid, { reconnect: true });
+      } else {
+        _syncLog(`MESH-HEAL-WAIT f=${_frameNum} slot=${info.slot} sid=${sid}: the lower slot offers`);
+        // An offer of this page's own goes with its connection.
+        if (p.isInitiator && decided.some((command) => command.type === 'close')) {
+          try {
+            p.pc.close();
+          } catch (_) {}
+        }
+        // The machine has been told (decideHeal): the engine's own drop
+        // handling only, not handlePeerDisconnect's driver frame.
+        if (!p.reconnecting) _handlePeerDisconnect(sid, p);
+      }
+    }
+  };
+
   const _peerConnectionLive = (peer) =>
     peer?.pc?.connectionState === 'connected' && (peer.dc?.readyState === 'open' || peer.rbDc?.readyState === 'open');
 
@@ -15369,6 +15477,9 @@
           // Also called from the JS lockstep path's `_frameNum % 300` block, which C-rollback ticks never reach.
           _logPacingSummary();
         }
+        // The mesh health check, which the JS lockstep path below runs too:
+        // a C tick returns before reaching it (specs/mesh_heal.qnt).
+        _meshHealthTick();
         if (rbApplyFrame >= 0) {
           // Stall only when too far ahead for rollback to help
           const rbInputPeers = getInputPeers();
@@ -17467,45 +17578,8 @@
       if (_frameNum % 300 === 0) {
         _logPacingSummary();
       }
-      // Mesh health check (~5s): reconcile _knownPlayers (server truth) against
-      // actual DC state. Re-initiate connections to players the server says are
-      // in the room but we have no working DC to. This catches zombie peers,
-      // failed initial connections, and silent DC deaths that no event fires for.
-      if (_frameNum % 300 === 0) {
-        for (const [sid, info] of Object.entries(_knownPlayers)) {
-          if (_isPeerPendingLateJoin(sid)) continue;
-          if (_peerPhantom[info.slot]) continue; // confirmed dead during gameplay
-          const p = _peers[sid];
-          // Skips our own entry (under any id we have had: while the
-          // signaling socket is down socket.id is undefined, and after it
-          // reconnects the roster still lists us under the old id until
-          // users-updated arrives), a peer with an open DC, and a reconnect
-          // already in progress.
-          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) continue;
-          const healFrame = _peerDriver()?.open(info.slot, sid);
-          const healFound = p?.pc?._knAttempt;
-          const pcState = p?.pc?.connectionState;
-          _syncLog(
-            `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
-          );
-          if (p) {
-            try {
-              p.pc.close();
-            } catch (_) {}
-            // I2: route per-peer cleanup through resetPeerState before
-            // dropping the _peers entry.
-            resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });
-            delete _peers[sid];
-          }
-          createPeer(sid, info.slot, true);
-          sendOffer(sid, { reconnect: true });
-          _peerDriver()?.close(healFrame, {
-            type: 'heal',
-            page: healFound?.page ?? '',
-            attempt: healFound?.attempt ?? 0,
-          });
-        }
-      }
+      // Mesh health check: _meshHealthCheck.
+      _meshHealthTick();
       _remoteApplied++;
 
       // Cleanup old local inputs — keep a history window for resend requests.
