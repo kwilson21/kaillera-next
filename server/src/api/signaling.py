@@ -1583,7 +1583,7 @@ async def _relay_signal(sid: str, data: dict, event: str, keys: tuple[str, ...])
 
 
 # `attemptId` ({page, attempt}) says which connection attempt a signal belongs
-# to (web/src/peer-observe.ts); pages from before it send none. Like the rest,
+# to (web/src/attempt-id.ts); pages from before it send none. Like the rest,
 # it is relayed as the sender wrote it. `startupReconnect` marks a reconnect
 # offer as a startup retry from a page that has not started its game: without
 # it, a page that has (in a room of three, its channel with another player

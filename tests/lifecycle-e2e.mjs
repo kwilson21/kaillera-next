@@ -66,10 +66,11 @@
  * overlay up or down), so a run cannot pass with machine and page agreeing on
  * the wrong answer. An uncaught exception on any page fails the scenario.
  *
- * Every scenario also fails on a report from the two observers beside the
- * rollback engine (`peer-disagree`, `resync-disagree`; tests/observer-reports.mjs):
- * in the client events at a checkpoint, and in each page's sync log
- * (`PEER-DISAGREE`, `RESYNC-DISAGREE`) at the end. With KN_DB set to the
+ * Every scenario also fails on a report from the observer beside the
+ * rollback engine (tests/observer-reports.mjs; none reports now: the resync
+ * request rules decide and the per-peer machine is driven): in the
+ * client events at a checkpoint, and in each page's sync log at the end.
+ * With KN_DB set to the
  * server's DB_PATH, the server's client_events rows for the scenario's room
  * are counted too; without it the query to run by hand is printed. Reading
  * KN_DB needs Node >= 22.13 (node:sqlite); on an older Node, or a database
@@ -123,7 +124,7 @@ fs.mkdirSync(OUT, { recursive: true });
 
 const BLIP_MS = 3000;
 // Reports that mean a TypeScript module and the page (or the server) differ.
-// The rollback engine's two observers report theirs the same way.
+// The rollback engine's observer reports its own the same way.
 const DISAGREEMENTS = ['session-disagree', 'play-disagree', 'protocol-mismatch', ...OBSERVER_EVENTS];
 const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts

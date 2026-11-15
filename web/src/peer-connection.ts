@@ -7,11 +7,10 @@
  * roster update never replaces. The scenario tests in
  * tests/ts/peer-connection.test.ts replay that model's runs against it.
  *
- * It decides nothing yet. The engine (web/static/netplay-rollback.js) keeps
- * its own flags and timers and runs one of these beside it for each other
- * player, observing (peer-observe.ts). It makes no WebRTC call: what it
- * wants done it issues as a `PeerCommand`, which the observer sets beside
- * what the engine does.
+ * The engine (web/static/netplay-rollback.js) drives one of these for each
+ * other player (peer-driver.ts) and keeps its own flags and timers; the
+ * machine is being wired in to decide one rule at a time. It makes no
+ * WebRTC call: what it wants done it issues as a `PeerCommand`.
  *
  * The states, and the model's `Side` each one stands for:
  *

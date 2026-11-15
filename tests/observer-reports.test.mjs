@@ -35,12 +35,13 @@ const makeDb = async (file) => {
 
 test('sync-log lines and client events are counted by type', () => {
   const log = 'x\tPEER-DISAGREE a\ny\tRESYNC-DISAGREE b\nz\tPEER-DISAGREE c\n';
-  assert.deepEqual(observerLinesIn(log), { 'peer-disagree': 2, 'resync-disagree': 1 });
+  // Neither is counted: the resync request rules decide and the per-peer machine is driven.
+  assert.deepEqual(observerLinesIn(log), {});
   assert.deepEqual(
-    observerEventsIn([{ type: 'resync-disagree' }, { type: 'reconnect' }, { type: 'resync-disagree' }]),
-    { 'peer-disagree': 0, 'resync-disagree': 2 },
+    observerEventsIn([{ type: 'peer-disagree' }, { type: 'reconnect' }, { type: 'resync-disagree' }]),
+    {},
   );
-  assert.equal(observerTotal({ 'peer-disagree': 1, 'resync-disagree': 2 }, null, { 'peer-disagree': 3 }), 6);
+  assert.equal(observerTotal({ 'peer-disagree': 1 }, null, { 'resync-disagree': 3 }), 0);
 });
 
 test('no database named: nothing read', async () => {
@@ -50,12 +51,10 @@ test('no database named: nothing read', async () => {
 test("the database's rows are counted for the run's rooms only", async () => {
   const file = path.join(tmp(), 'kn.db');
   await makeDb(file);
-  assert.deepEqual(await observerEventsInDb(file, ['TPAAA']), { 'peer-disagree': 2, 'resync-disagree': 1 });
-  assert.deepEqual(await observerEventsInDb(file, ['TPAAA', 'TPBBB']), {
-    'peer-disagree': 3,
-    'resync-disagree': 1,
-  });
-  assert.deepEqual(await observerEventsInDb(file, ['TPCCC']), { 'peer-disagree': 0, 'resync-disagree': 0 });
+  // Rows from pages loaded before the observers went are not counted, and no query is built from an empty list.
+  assert.deepEqual(await observerEventsInDb(file, ['TPAAA']), {});
+  assert.deepEqual(await observerEventsInDb(file, ['TPAAA', 'TPBBB']), {});
+  assert.deepEqual(await observerEventsInDb(file, ['TPCCC']), {});
 });
 
 test('a database that cannot be read throws, for the caller to count as a failure', async () => {

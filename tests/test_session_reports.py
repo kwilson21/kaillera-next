@@ -48,9 +48,12 @@ def test_the_union_is_found():
 
 
 # The engine reports with createComparer too, under its own types (the peer
-# mesh's decisions against web/src/peer-signaling.ts, the resync request
-# rules against web/src/resync-request.ts, in netplay-rollback.js).
-ENGINE_REPORT_TYPES = ["mesh-disagree", "resync-disagree"]
+# mesh's decisions against web/src/peer-signaling.ts, in netplay-rollback.js).
+ENGINE_REPORT_TYPES = ["mesh-disagree"]
+# Types no page sends any more that the server still stores, for a page
+# loaded before the change: resync-disagree (the resync request rules
+# decide since web/src/resync-request.ts took over).
+RETIRED_REPORT_TYPES = ["resync-disagree"]
 
 
 def test_the_engine_sends_the_type_it_is_allowed():
@@ -59,7 +62,13 @@ def test_the_engine_sends_the_type_it_is_allowed():
         assert f"window.KNEvent?.('{report_type}'," in engine
 
 
-@pytest.mark.parametrize("report_type", _report_types() + ENGINE_REPORT_TYPES)
+def test_the_engine_no_longer_sends_a_retired_type():
+    engine = (SESSION_TS.parents[1] / "static" / "netplay-rollback.js").read_text()
+    for report_type in RETIRED_REPORT_TYPES:
+        assert f"'{report_type}'" not in engine
+
+
+@pytest.mark.parametrize("report_type", _report_types() + ENGINE_REPORT_TYPES + RETIRED_REPORT_TYPES)
 def test_server_stores_every_report_type(report_type, monkeypatch):
     import src.db as db
     from src.api import app as appmod

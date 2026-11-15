@@ -2,7 +2,7 @@
 
 The server relays a signal to its target in the same room, keeping only the
 keys it knows and adding `sender`. `attemptId` ({page, attempt}) names the
-connection attempt a signal belongs to (web/src/peer-observe.ts): it must
+connection attempt a signal belongs to (web/src/attempt-id.ts): it must
 reach the other page as it was sent, and a signal without one (from a page
 made before it) must still be relayed. `startupReconnect` must arrive too:
 it is how a page tells a startup retry from a gameplay reconnect.
