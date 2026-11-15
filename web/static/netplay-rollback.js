@@ -8196,10 +8196,11 @@
 
   // This page is a connection's initiator still in its startup connect: before
   // the game sequence, and, for a page in the start (not joining late), until
-  // its match runs, as the watchdog. A connection lost then is retried like
-  // one that never opened, and given up on by the watchdog's rule
-  // (specs/start_group.qnt, LOST_IS_RETRIED): dropped without a word once the
-  // game sequence had started, the other guests kept waiting for that player.
+  // its match runs. The watchdog runs while it is, and a connection lost then
+  // is retried like one that never opened and given up on by the watchdog's
+  // rule (specs/start_group.qnt, DEADLINE_UNTIL_RUNNING, LOST_IS_RETRIED):
+  // dropped without a word once the game sequence had started, the other
+  // guests kept waiting for that player.
   const _inStartupConnect = () => _phase < PHASE_GAME_STARTED || (!_lateJoin && _phase < PHASE_RUNNING);
 
   // A guest's own deadline on its channel to the host (specs/start_group.qnt,
@@ -8373,9 +8374,12 @@
 
   const armStartupConnectWatchdog = (remoteSid) => {
     const peer = _peers[remoteSid];
-    // Armed until the match runs: a player that has not answered by then is
-    // still waited for, game sequence or not (specs/start_group.qnt).
-    if (!peer || !peer.isInitiator || _phase >= PHASE_RUNNING) return;
+    // Armed until the match runs on a page in the start: a player that has
+    // not answered by then is still waited for, game sequence or not
+    // (specs/start_group.qnt). A late joiner keeps the old bound, its game
+    // sequence: its connections are not a start group, and retrying one that
+    // is merely slow to open, then giving it up, left it without its state.
+    if (!peer || !peer.isInitiator || !_inStartupConnect()) return;
     if (peer.dc?.readyState === 'open') return;
     clearStartupConnectWatchdog(peer);
     peer._startupConnectTimer = setTimeout(() => {
@@ -8388,7 +8392,7 @@
   const retryStartupConnection = async (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer || _peers[remoteSid] !== peer) return;
-    if (!peer.isInitiator || _phase >= PHASE_RUNNING) return;
+    if (!peer.isInitiator || !_inStartupConnect()) return;
     if (peer.dc?.readyState === 'open') return;
 
     const nextAttempt = (peer._startupConnectAttempt || 1) + 1;
