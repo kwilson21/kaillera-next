@@ -183,7 +183,7 @@ def test_resync_settles_the_inputs_before_its_frame():
         "_localInputs[f] = KNShared.ZERO_INPUT;",
         "_feedCInput(mod, _playerSlot, f, _localInputs[f]);",
         "_settleInputsBefore(peer.slot, frame);",
-        "if (own.length) peer.dc.send(`inputs-settled:${from}`);",
+        "peer.dc.send(`inputs-settled:${from}`);",
         "for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);",
         "peer.dc.send(`resend:${f}`);",
     ):

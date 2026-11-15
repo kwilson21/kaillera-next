@@ -76,7 +76,10 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     pushes = src[src.index("const _checkOverduePushes = () => {") :]
     pushes = pushes[: pushes.index("\n  };\n")]
     assert "window.KNCore.resyncRequest.pushDeadlineStep(" in pushes
-    assert "(_inputSettledBefore[slot] ?? 0) >= push.frame - DELAY_FRAMES" in pushes
+    # Answered by the guest's inputs-settled alone, not the host's own
+    # hand-over of the state (which raises _inputSettledBefore).
+    assert "(_inputSettledAckBefore[slot] ?? -1) >= push.frame - DELAY_FRAMES" in pushes
+    assert "_inputSettledBefore[slot]" not in pushes
     assert "_checkResyncRequestDeadline();\n    _checkOverduePushes();" in src
     # The last push unanswered: the player is dropped (I1's recovery), not
     # left playing on split; the event alone is not one.
@@ -159,3 +162,16 @@ def test_the_forced_past_window_switch_is_test_only_and_narrow():
     assert src.count("_testRunPastEdgeFrame()") == 2
     assert "windowEdge !== _testRunPastEdgeFrame() &&" in src
     assert "if (windowEdge === _testRunPastEdgeFrame()) return;" in src
+
+
+def test_the_guest_always_acknowledges_a_state_and_the_host_records_it_apart():
+    src = _src()
+    assert "peer.dc.send(`inputs-settled:${from}`);" in src
+    assert "if (own.length) peer.dc.send(`inputs-settled:" not in src
+    handler = src[src.index("if (e.data.startsWith('inputs-settled:')) {") :]
+    handler = handler[: handler.index("return;")]
+    assert "_inputSettledAckBefore[peer.slot] = Math.max(" in handler
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "delete _inputSettledAckBefore[slot];" in reset
+    assert src.count("_inputSettledAckBefore = {};") == 4

@@ -1746,6 +1746,11 @@
   // (specs/reconnect_inputs.qnt, WAIT_FIRST_INPUT).
   let _awaitFirstInputAfterReset = {};
   let _predictedKnownCount = 0;
+  // The frame before which each guest said it has applied a state the host
+  // sent (its `inputs-settled:`): the answer to an escalation push
+  // (specs/ask_escalation.qnt). Not _inputSettledBefore, which the host
+  // raises itself once it has handed a state over.
+  let _inputSettledAckBefore = {};
   // INPUT-OOR is logged at most once a second per slot, with how many were
   // dropped since the last line: a peer far behind sends every frame, and a
   // line each filled the sync log's ring and evicted everything before it.
@@ -5251,7 +5256,9 @@
       try {
         // Every peer waits on this page's inputs, not only the host that
         // sent the state: tell each one where they start again.
-        if (own.length) peer.dc.send(`inputs-settled:${from}`);
+        // Always, even with none of its own to resend: the host's
+        // escalation push is answered by it (specs/ask_escalation.qnt).
+        peer.dc.send(`inputs-settled:${from}`);
         for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
         const askedAt = (_inputAskedAt[peer.slot] ??= {});
         const askedNow = performance.now();
@@ -5401,7 +5408,9 @@
     for (const key of Object.keys(_overduePushes)) {
       const push = _overduePushes[key];
       const slot = Number(key);
-      const settled = (_inputSettledBefore[slot] ?? 0) >= push.frame - DELAY_FRAMES;
+      // Answered only by the guest: it has applied a state from at least
+      // this push's frame (the host's own hand-over does not count).
+      const settled = (_inputSettledAckBefore[slot] ?? -1) >= push.frame - DELAY_FRAMES;
       const step = window.KNCore.resyncRequest.pushDeadlineStep(
         true,
         settled,
@@ -5872,6 +5881,7 @@
     delete _inputSettledBefore[slot];
     delete _inputDroppedAheadUpTo[slot];
     delete _awaitFirstInputAfterReset[slot];
+    delete _inputSettledAckBefore[slot];
     delete _inputAskedAt[slot];
     delete _inputAskOverdue[slot];
     delete _overduePushes[slot];
@@ -9507,6 +9517,7 @@
             settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES
           ) {
             _inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);
+            _inputSettledAckBefore[peer.slot] = Math.max(_inputSettledAckBefore[peer.slot] ?? -1, settled);
             _syncLog(`INPUTS-SETTLED slot=${peer.slot} before=${settled} f=${_frameNum}`);
           }
           return;
@@ -10085,6 +10096,7 @@
     delete _inputSettledBefore[slot];
     delete _inputDroppedAheadUpTo[slot];
     delete _awaitFirstInputAfterReset[slot];
+    delete _inputSettledAckBefore[slot];
     delete _inputAskedAt[slot];
     delete _inputAskOverdue[slot];
     delete _overduePushes[slot];
@@ -13556,6 +13568,7 @@
     _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
     _inputDroppedAheadUpTo = {};
     _awaitFirstInputAfterReset = {};
+    _inputSettledAckBefore = {};
     _inputOorLog = {};
     _inputAskedAt = {};
     _inputAskOverdue = {};
@@ -14363,6 +14376,7 @@
         _inputSettledBefore = {};
         _inputDroppedAheadUpTo = {};
         _awaitFirstInputAfterReset = {};
+        _inputSettledAckBefore = {};
         _inputOorLog = {};
         _inputAskedAt = {};
         _inputAskOverdue = {};
@@ -19562,6 +19576,7 @@
     _inputSettledBefore = {};
     _inputDroppedAheadUpTo = {};
     _awaitFirstInputAfterReset = {};
+    _inputSettledAckBefore = {};
     _inputOorLog = {};
     _inputAskedAt = {};
     _inputAskOverdue = {};

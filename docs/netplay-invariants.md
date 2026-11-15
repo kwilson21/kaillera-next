@@ -90,6 +90,8 @@ separate path that discards all peer state at once instead.
 - `_inputAskedAt[slot]` — when each missing input was last asked for
 - `_inputAskOverdue[slot]` — asks counted toward escalation (specs/ask_escalation.qnt)
 - `_overduePushes[slot]` — the host's escalation push and its deadline
+- `_inputSettledAckBefore[slot]` — the frame before which the guest said
+  (`inputs-settled:`) it applied a state: the answer to that push
 - `_awaitFirstInputAfterReset[slot]` — cleared, then set again by a
   `reconnect` reset: frames wait for that peer's first input
   (specs/reconnect_inputs.qnt)
