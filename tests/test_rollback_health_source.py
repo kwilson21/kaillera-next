@@ -202,8 +202,10 @@ def test_resync_settles_the_inputs_before_its_frame():
     apply_idx = src.index("const applySyncState = (bytes, frame, fromProactive = false) => {")
     assert "if (timelineAligned) _settleInputsAtResync(gm.Module, frame);" in src[apply_idx:]
 
-    # Host: settles the guest's inputs when the state goes out, on both routes.
-    send_idx = src.index("const sendSyncChunks = async (")
+    # Host: settles the guest's inputs when the state goes out, on both routes:
+    # over a DataChannel once every chunk is handed over (the per-guest
+    # transfer body, _sendSyncChunksTo), over Socket.IO once it is emitted.
+    send_idx = src.index("const _sendSyncChunksTo = async (")
     assert "_settleInputsBefore(target.slot, frame);" in src[send_idx:]
     assert "_settleInputsBefore(_peers[targetSid].slot, frame);" in src
 
@@ -715,7 +717,12 @@ def test_only_its_own_answer_ends_a_resync_request():
     push = push[: push.index("const sendSyncChunks = async (")]
     assert "const requestIds = (!isProactive && options.requestIds) || {};" in push
     assert "...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {})," in push
-    chunks = src[src.index("const sendSyncChunks = async (") :]
+    # sendSyncChunks queues each guest's transfer behind that guest's one
+    # before; the body is _sendSyncChunksTo, which reads the request id by sid.
+    wrapper = src[src.index("const sendSyncChunks = async (") :]
+    wrapper = wrapper[: wrapper.index("\n  };\n")]
+    assert "_sendSyncChunksTo(t, compressed, frame, isFull, isProactive, requestIds)" in wrapper
+    chunks = src[src.index("const _sendSyncChunksTo = async (") :]
     chunks = chunks[: chunks.index("\n  };\n")]
     assert chunks.index("if (answerFor) dc.send(`sync-answer-id:${answerFor}`);") < chunks.index("dc.send(header);")
     # The header an older guest parses is unchanged.
