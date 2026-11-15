@@ -664,6 +664,8 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     stored: idb.describe,
     runState: (): DemoApi['runState'] => api?.runState,
     element: (id: string): FakeElement | undefined => elements.get(id),
+    /** What the page left in sessionStorage, which a reload keeps. */
+    session: (): [string, string][] => [...session.items],
   };
 };
 
@@ -953,6 +955,54 @@ test('a paused auto-compare: leaving the match or clicking its button stops it, 
     // And the new page agrees with the old one changed, step for step.
     await compareVisit(visit, [...autoComparePaused, ...steps, { kind: 'frame', ms: 6100 }]);
   }
+});
+
+// The ordering the run state's `leaving` is for. The closed-loop autopilot
+// reports a failure on the frame the battle begins: the page marks its one
+// retry and restarts the demo. The old script went on with that frame and
+// took the match's edge, which clears the retry mark, so after the reload the
+// next failure restarted the demo again, and again. Now the page takes
+// nothing more once it has asked to reload: the mark survives, and the next
+// failure hands the player control.
+test('a restart in the frame a match begins: the retry mark survives the reload, where it used to be cleared', async () => {
+  const visit: Visit = { search: '', local: [], session: [], closedLoop: true, seed: 1 };
+  const failsAsTheBattleBegins: Step[] = [
+    { kind: 'load', name: 'game.z64' },
+    { kind: 'pilotFailure', failure: 'cursor lost' },
+    { kind: 'match', strict: true, inclusive: true },
+    { kind: 'frame', ms: 16 },
+  ];
+  /** The page after the failing frame, and what the next visit (the reload) does with what it left. */
+  const visitAndReload = async (script: vm.Script) => {
+    const core = script === NEW_SCRIPT ? { demo } : {};
+    const first = openDemo(script, core, visit);
+    for (const step of failsAsTheBattleBegins) await first.apply(step);
+    const left = first.session();
+    const firstSaid = first.snapshot();
+    const second = openDemo(script, core, { ...visit, session: left });
+    await second.apply({ kind: 'load', name: 'game.z64' });
+    await second.apply({ kind: 'pilotFailure', failure: 'cursor lost' });
+    await second.apply({ kind: 'frame', ms: 16 });
+    const secondSaid = second.snapshot();
+    return {
+      retryMarkKept: left.some(([key, value]) => key === 'kn-demo-autopilot-retried' && value === '1'),
+      matchEdgeAfterReload: /reload\(\)[\s\S]*peer\.setMatchActive\(true\)/.test(firstSaid),
+      restartsAgain: secondSaid.includes('reload()'),
+      handsOver: secondSaid.includes("you're in control"),
+    };
+  };
+  assert.deepEqual(await visitAndReload(NEW_SCRIPT), {
+    retryMarkKept: true,
+    matchEdgeAfterReload: false,
+    restartsAgain: false,
+    handsOver: true,
+  });
+  assert.deepEqual(await visitAndReload(OLD_SCRIPT), await visitAndReload(NEW_SCRIPT), 'the old script, changed');
+  assert.deepEqual(
+    await visitAndReload(OLD_SCRIPT_AS_IT_WAS),
+    { retryMarkKept: false, matchEdgeAfterReload: true, restartsAgain: true, handsOver: false },
+    'the old script as it was',
+  );
 });
 
 test('the ROM cache: what a load keeps, the next visit restores, and Stop forgets', async () => {
