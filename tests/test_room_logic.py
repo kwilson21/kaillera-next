@@ -701,3 +701,36 @@ def test_start_game_gives_up_on_a_slow_registration():
     assert _time.monotonic() - started < 2
     assert room.status == "playing"
 
+
+# ── the room's game id ──────────────────────────────────────────────────────
+
+
+def test_a_room_without_a_known_game_has_no_game_id():
+    from src.api.signaling import _clean_game_id
+
+    # A host with no ROM yet, or one the site does not know, sends nothing:
+    # the room is not labelled with a game it is not (it used to say ssb64).
+    assert _clean_game_id("") == ""
+    assert _clean_game_id("ssb64") == "ssb64"
+    assert _clean_game_id("smash-remix") == "smash-remix"
+    assert _clean_game_id("<script>") == "unknown"
+    assert _clean_game_id("x" * 33) == "unknown"
+
+
+def test_the_host_can_clear_and_change_the_game_id():
+    from src.api.signaling import set_game_id
+
+    room = _host_room()
+    room.game_id = "ssb64"
+    patches = [
+        patch.object(signaling.sio, "emit", new=AsyncMock()),
+        patch.object(signaling.state, "save_room", new=AsyncMock()),
+        patch.object(signaling, "check", new=lambda sid, event: True),
+    ]
+    assert _run_with(patches, set_game_id("sid-host", {"game_id": ""})) is None
+    assert room.game_id == ""
+    assert _run_with(patches, set_game_id("sid-host", {"game_id": "smash-remix"})) is None
+    assert room.game_id == "smash-remix"
+    # A request without the field is not taken as SSB64 either.
+    assert _run_with(patches, set_game_id("sid-host", {})) is None
+    assert room.game_id == ""

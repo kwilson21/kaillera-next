@@ -2,20 +2,21 @@
  * The decisions a guest makes about its resync requests: which state ends
  * the request that is out, which state answers a request given up on, when
  * such a late answer is dropped or kept out of the way of the awaited one,
- * and what a late joiner that lost its channel to the host does next. Each
- * is the rule the engine applies today (web/static/netplay-rollback.js:
+ * what a late joiner that lost its channel to the host does next, and what
+ * a request's deadline does. The engine (web/static/netplay-rollback.js:
  * _endsResyncRequest, _answersAnOlderRequest, _isLateAnswerBehind,
- * _keepsAwaitedAnswer, _resyncAfterLostHost), written as a function with a
- * contract so the rule can be proved and then called from one place.
+ * _keepsAwaitedAnswer, _resyncAfterLostHost, _checkResyncRequestDeadline)
+ * calls these through window.KNCore.resyncRequest; they decide, and its own
+ * copies are gone (tests/ts/resync-request.test.ts keeps them, checked
+ * against these over a grid of inputs).
  *
  * Requests are numbered from 1, per match; the state that answers one
  * carries its number, and a state the host sent for its own reasons carries
  * 0. The orderings these rules are used in are model-checked in
  * specs/resync_flow.qnt (onlyItsAnswerEndsARequest,
  * aLateAnswerDoesNotTakeTheGuestBack, theAwaitedAnswerIsNotLost) and
- * specs/late_join_pause.qnt (aJoinerIsNotMadeAPlayerBehindTheHost).
- * Nothing here changes behaviour: the engine runs these beside its own rules
- * and reports a difference as a `resync-disagree` client event.
+ * specs/late_join_pause.qnt (aJoinerIsNotMadeAPlayerBehindTheHost) and
+ * specs/resync_reask.qnt (anOwedResyncIsNotForgotten).
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */

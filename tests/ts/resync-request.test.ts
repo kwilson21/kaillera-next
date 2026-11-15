@@ -136,7 +136,10 @@ test('at the deadline an owed resync is asked for again up to the bound, then gi
   assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, true, false, 5, 2), 'lostHost');
 });
 
-// The engine's rules (web/static/netplay-rollback.js), copied as they are
+// The old-against-new record (CLAUDE.md): the rules the engine
+// (web/static/netplay-rollback.js) applied before it called these, deleted
+// from it in the change that made the proved functions decide. They agree
+// on every input below; nothing was meant to differ. Copied as they were
 // written there, over the engine's own variables.
 const engine = {
   ends: (answerFor: number, resyncRequestId: number, hostNumbersAnswers: boolean) =>
@@ -282,29 +285,26 @@ test("the proved rules agree with the engine's over a grid of inputs", () => {
   assert.ok(cases > 1000);
 });
 
-test('the engine runs each proved rule beside its own and reports a difference', () => {
+test('the engine calls each proved rule and keeps no copy of its own', () => {
   const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
-  const observed = {
-    'ends-request': 'endsRequest',
-    'answers-an-older-request': 'answersAnOlderRequest',
-    'late-answer-behind': 'isLateAnswerBehind',
-    'keeps-awaited-answer': 'keepsAwaitedAnswer',
-    'late-join-lost-host': 'lateJoinLostHostStep',
-    'deadline-step': 'resyncDeadlineStep',
-  };
-  for (const [what, name] of Object.entries(observed)) {
-    assert.ok(source.includes(`'${what}',`) || source.includes(`'${what}', `), `${what} is not compared`);
-    assert.ok(source.includes(`rules.${name}(`), `${name} is not called by the engine`);
+  for (const name of [
+    'endsRequest',
+    'answersAnOlderRequest',
+    'isLateAnswerBehind',
+    'keepsAwaitedAnswer',
+    'lateJoinLostHostStep',
+    'resyncDeadlineStep',
+  ]) {
+    assert.equal(source.split(`window.KNCore.resyncRequest.${name}(`).length - 1, 1, `${name} is not called once`);
   }
-  assert.ok(source.includes("window.KNEvent?.('resync-disagree', message, { old, next });"));
-  // Observing only: the engine's own rules are still the ones returned.
-  assert.ok(source.includes('answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers'));
-  assert.ok(source.includes('answerFor > 0 && answerFor !== _resyncRequestId'));
-  assert.ok(source.includes('(state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))'));
-  assert.ok(
-    source.includes('_answersAnOlderRequest(answerFor) && _pendingResyncState?.answerFor === _resyncRequestId'),
-  );
-  assert.ok(source.includes('if (!rules) return engineValue;'));
+  // The copies kept above (`engine`) are gone from the engine, and so is
+  // the observer that compared them.
+  assert.ok(!source.includes('answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers'));
+  assert.ok(!source.includes('answerFor > 0 && answerFor !== _resyncRequestId'));
+  assert.ok(!source.includes('(state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))'));
+  assert.ok(!source.includes('_pendingResyncState?.answerFor === _resyncRequestId'));
+  assert.ok(!source.includes("else if (_owedResyncAsksAgain >= RESYNC_MAX_ASKS_AGAIN) step = 'stopAsking';"));
+  assert.ok(!source.includes('_resyncObserve') && !source.includes('resync-disagree'));
 });
 
 test('the module is listed for the proofs', () => {

@@ -203,6 +203,47 @@ def test_unsupported_rom_warns_but_allows_start(browser, server_url, room):
         host.close()
 
 
+def test_a_rom_the_site_does_not_know_is_not_labelled_ssb64(browser, server_url, room):
+    """The room's game id is what the host's ROM is, or nothing: an unknown ROM
+    used to be taken for SSB64, so invite cards and the board named the wrong game."""
+    host = browser.new_page()
+    try:
+        game_id = lambda: host.evaluate(f"fetch('/room/{room}').then((r) => r.json()).then((j) => j.game_id)")  # noqa: E731
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        host.wait_for_function("window.__test_socket && window.__test_socket.connected", timeout=10000)
+        expect(host.locator(".player-slot[data-slot='0'] .name")).to_contain_text("Host", timeout=10000)
+        assert game_id() == ""
+
+        host.locator("#rom-drop input[type='file']").set_input_files(_make_fake_rom(0x56))
+        expect(host.locator("#rom-status")).to_have_class(__import__("re").compile(r"rom-unsupported"), timeout=10000)
+        host.wait_for_timeout(500)
+        assert game_id() == ""
+    finally:
+        host.close()
+
+
+def test_a_guest_drops_the_game_id_when_the_hosts_rom_has_none(browser, server_url, room):
+    """A guest takes the room's game id as it is, empty included: keeping an
+    earlier id (Smash Remix's here) would turn that game's workarounds on for
+    another ROM."""
+    host = browser.new_page()
+    guest = browser.new_page()
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&game=smash-remix")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.wait_for_function("window.KNState.gameId === 'smash-remix'", timeout=10000)
+
+        # The host's ROM turns out to be one the site does not list.
+        host.evaluate("window.__test_socket.emit('set-game-id', { game_id: '' })")
+        guest.wait_for_function("window.KNState.gameId === null", timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
 # ── Watching instead: player releases their slot without leaving the room ─
 
 
