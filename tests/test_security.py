@@ -112,6 +112,7 @@ def test_og_tags_ignore_spoofed_host(monkeypatch):
     let through. So the app is built here as production configures it.
     """
     from fastapi.testclient import TestClient
+
     from src.api import app as appmod
 
     monkeypatch.setenv("ALLOWED_ORIGIN", "https://play.example")

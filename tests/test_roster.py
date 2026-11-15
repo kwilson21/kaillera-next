@@ -11,20 +11,8 @@ Run: KN_ROM=/path/ssb64-us.z64 pytest tests/test_roster.py -v
 """
 
 import contextlib
-import os
 import secrets
 import time
-
-import pytest
-
-
-@pytest.fixture
-def rom_path():
-    """The ROM every page boots, from KN_ROM; skip when none is given."""
-    path = os.environ.get("KN_ROM")
-    if not path or not os.path.isfile(path):
-        pytest.skip("needs a ROM: set KN_ROM (the roster only exists once the emulator runs)")
-    return path
 
 
 def _connect_player(browser, server_url, room, name, rom_path, is_host=False):

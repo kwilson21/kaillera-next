@@ -9,14 +9,17 @@ Run: pytest tests/test_input_resend.py -v -s --no-header
 """
 import time
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
+
+def _load_rom(page, rom_path):
+    page.set_input_files("#rom-drop input[type=file]", rom_path)
 
 
-def _load_rom(page):
-    page.set_input_files("#rom-drop input[type=file]", ROM_PATH)
+def _sync_log_lines(page, text):
+    """The engine's sync log lines that contain `text` (the console shows them only with ?debug)."""
+    return [line for line in page.evaluate("window.NetplayRollback.exportSyncLog()").splitlines() if text in line]
 
 
-def test_input_resend_on_stall(browser, server_url):
+def test_input_resend_on_stall(browser, server_url, rom_path):
     """Block guest input sending, verify host sends resend request and recovers."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -39,8 +42,8 @@ def test_input_resend_on_stall(browser, server_url):
         guest.goto(f"{server_url}/play.html?room=RESND1&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        _load_rom(host)
-        _load_rom(guest)
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
         time.sleep(1)
 
         host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
@@ -55,7 +58,7 @@ def test_input_resend_on_stall(browser, server_url):
 
         # Let the game run normally for 2 seconds to establish baseline
         time.sleep(2)
-        frame_before = host.evaluate("window._frameNum")
+        frame_before = host.evaluate("window.KNState.frameNum")
         assert frame_before > 60, f"Game not running: only at frame {frame_before}"
 
         # Block guest's binary DC sends (inputs) for 4 seconds.
@@ -65,14 +68,14 @@ def test_input_resend_on_stall(browser, server_url):
         guest.evaluate("""() => {
             window._inputsBlocked = 0;
             window._resendResponses = 0;
-            var peers = window.NetplayRollback._getPeers() || {};
+            var peers = window.KNState.peers || {};
             Object.values(peers).forEach(function(p) {
                 if (!p.dc) return;
                 var origSend = p.dc.send.bind(p.dc);
                 p.dc._origSend = origSend;
                 p.dc.send = function(data) {
-                    // Block binary sends (8-byte inputs) but allow strings
-                    if (data instanceof ArrayBuffer && data.byteLength === 8 && window._blockInputs) {
+                    // Block binary sends (input packets) but allow strings
+                    if ((data instanceof ArrayBuffer || ArrayBuffer.isView(data)) && window._blockInputs) {
                         window._inputsBlocked++;
                         return;
                     }
@@ -91,8 +94,8 @@ def test_input_resend_on_stall(browser, server_url):
         time.sleep(5.5)
 
         # Check host logs for resend-request
-        resend_requests = [l for l in host_logs if 'INPUT-STALL resend-request' in l]
-        hard_timeouts = [l for l in host_logs if 'INPUT-STALL hard-timeout' in l]
+        resend_requests = _sync_log_lines(host, "INPUT-STALL resend-request")
+        hard_timeouts = _sync_log_lines(host, "INPUT-STALL hard-timeout")
 
         print(f"\n  Resend requests sent by host: {len(resend_requests)}")
         print(f"  Hard timeouts on host: {len(hard_timeouts)}")
@@ -103,7 +106,7 @@ def test_input_resend_on_stall(browser, server_url):
         assert len(resend_requests) > 0, "Host never sent a resend request during stall"
 
         # Game should still be advancing (not permanently stuck)
-        frame_after = host.evaluate("window._frameNum")
+        frame_after = host.evaluate("window.KNState.frameNum")
         print(f"  Frames: before={frame_before} after={frame_after}")
         assert frame_after > frame_before, "Game stopped advancing after stall"
 
@@ -118,7 +121,7 @@ def test_input_resend_on_stall(browser, server_url):
         guest.close()
 
 
-def test_hard_timeout_fabricates_zero(browser, server_url):
+def test_hard_timeout_fabricates_zero(browser, server_url, rom_path):
     """When resend also fails, fabrication must use 0 (deterministic)."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -139,8 +142,8 @@ def test_hard_timeout_fabricates_zero(browser, server_url):
         guest.goto(f"{server_url}/play.html?room=HTIME1&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        _load_rom(host)
-        _load_rom(guest)
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
         time.sleep(1)
 
         host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
@@ -154,7 +157,7 @@ def test_hard_timeout_fabricates_zero(browser, server_url):
         # Block ALL guest DC sends (binary AND string) so resend response
         # never reaches the host — forces hard timeout
         guest.evaluate("""() => {
-            var peers = window.NetplayRollback._getPeers() || {};
+            var peers = window.KNState.peers || {};
             Object.values(peers).forEach(function(p) {
                 if (!p.dc) return;
                 var origSend = p.dc.send.bind(p.dc);
@@ -169,7 +172,7 @@ def test_hard_timeout_fabricates_zero(browser, server_url):
         # Wait for full timeout: MAX_STALL_MS (3s) + RESEND_TIMEOUT_MS (2s) + margin
         time.sleep(6.5)
 
-        hard_timeouts = [l for l in host_logs if 'INPUT-STALL hard-timeout' in l]
+        hard_timeouts = _sync_log_lines(host, "INPUT-STALL hard-timeout")
         print(f"\n  Hard timeouts: {len(hard_timeouts)}")
         for ht in hard_timeouts:
             print(f"    {ht}")
