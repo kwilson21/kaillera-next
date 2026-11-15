@@ -196,6 +196,7 @@ static uint32_t s_map[KN_MAP_COUNT] = {
     [KN_MAP_FT_MOTION_COUNT]       = KN_ADDR_FT_MOTION_COUNT,
     [KN_MAP_FT_BUFFER_PTR]         = 0x130D84,
     [KN_MAP_FT_BUFFER_SIZE]        = KN_FT_BUFFER_SIZE,
+    [KN_MAP_SUDDEN_DEATH_HEADER]   = KN_ADDR_SUDDEN_DEATH_BATTLE_HEADER,
 };
 #define MAP(name) (s_map[KN_MAP_##name])
 
@@ -240,6 +241,47 @@ static uint32_t hash_rdram_u8(uint32_t n64_offset) {
     return b ? kn_hash_fnv1a(b, 1) : 0;
 }
 
+/* FNV-1a carried on from an earlier hash, to hash two slices as one. */
+static uint32_t fnv1a_continue(uint32_t h, const uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint32_t)data[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+/* An address in the live battle state, moved to the same place in the
+ * sudden-death copy. Only called with addresses at or past the live
+ * header, which kn_field_map_set checks for the stock counts. */
+static uint32_t in_sudden_death_copy(uint32_t live_offset) {
+    return MAP(SUDDEN_DEATH_HEADER) + (live_offset - MAP(VS_BATTLE_HEADER));
+}
+
+/* Player p's stock count: the live copy's byte, then the sudden-death
+ * copy's when the map has one (kn_hash_registry.h, "Two copies"). */
+static uint32_t hash_stocks_now(uint8_t p) {
+    uint32_t off = MAP(STOCKS_BASE) + (uint32_t)p * MAP(PLAYER_STRIDE);
+    const uint8_t* live = rdram_u8(off);
+    if (!live) return 0;
+    if (!MAP(SUDDEN_DEATH_HEADER)) return kn_hash_fnv1a(live, 1);
+    const uint8_t* other = rdram_u8(in_sudden_death_copy(off));
+    if (!other) return 0;
+    const uint8_t both[2] = { *live, *other };
+    return kn_hash_fnv1a(both, 2);
+}
+
+/* The battle header: the live copy's bytes, then the sudden-death copy's. */
+static uint32_t hash_battle_header_now(void) {
+    uint8_t* base = (uint8_t*)kn_get_rdram_ptr();
+    uint32_t sz   = kn_get_rdram_size();
+    uint32_t len  = MAP(VS_BATTLE_HEADER_SIZE);
+    if (!base || MAP(VS_BATTLE_HEADER) + len > sz) return 0;
+    uint32_t h = kn_hash_fnv1a(base + MAP(VS_BATTLE_HEADER), len);
+    if (!MAP(SUDDEN_DEATH_HEADER)) return h;
+    if (MAP(SUDDEN_DEATH_HEADER) + len > sz) return 0;
+    return fnv1a_continue(h, base + MAP(SUDDEN_DEATH_HEADER), len);
+}
+
 /* ── History rings ───────────────────────────────────────────────────
  * Each field gets a 600-entry ring of (frame, hash) pairs. Newest entry
  * lives at ring_head[field]; ring is circular. Initial state: all zeros.
@@ -277,8 +319,7 @@ uint32_t kn_hash_stocks(uint8_t player_idx, int32_t frame) {
         return ring_find_frame(s_ring_stocks[player_idx], s_head_stocks[player_idx], frame);
     }
     /* Live read. */
-    uint32_t off = MAP(STOCKS_BASE) + (uint32_t)player_idx * MAP(PLAYER_STRIDE);
-    return hash_rdram_u8(off);
+    return hash_stocks_now(player_idx);
 }
 
 KN_KEEPALIVE
@@ -298,8 +339,7 @@ size_t kn_hash_history_stocks(uint8_t player_idx, uint32_t count, uint32_t* out_
 /* Append-to-ring helper: called from kn_hash_registry_post_tick. */
 static void ring_append_stocks(int32_t frame) {
     for (uint8_t p = 0; p < 4; p++) {
-        uint32_t off = MAP(STOCKS_BASE) + (uint32_t)p * MAP(PLAYER_STRIDE);
-        uint32_t h = hash_rdram_u8(off);
+        uint32_t h = hash_stocks_now(p);
         s_ring_stocks[p][s_head_stocks[p]] = (kn_ring_entry_t){ .frame = frame, .hash = h };
         s_head_stocks[p] = (s_head_stocks[p] + 1) % KN_RING_SIZE;
     }
@@ -490,7 +530,7 @@ uint32_t kn_hash_vs_battle_hdr(int32_t frame) {
     if (frame >= 0) {
         return ring_find_frame(s_ring_vs_battle_hdr, s_head_vs_battle_hdr, frame);
     }
-    return hash_rdram_slice(MAP(VS_BATTLE_HEADER), MAP(VS_BATTLE_HEADER_SIZE));
+    return hash_battle_header_now();
 }
 
 KN_KEEPALIVE
@@ -507,7 +547,7 @@ size_t kn_hash_history_vs_battle_hdr(uint32_t count, uint32_t* out_pairs) {
 }
 
 static void ring_append_vs_battle_hdr(int32_t frame) {
-    uint32_t h = hash_rdram_slice(MAP(VS_BATTLE_HEADER), MAP(VS_BATTLE_HEADER_SIZE));
+    uint32_t h = hash_battle_header_now();
     s_ring_vs_battle_hdr[s_head_vs_battle_hdr] = (kn_ring_entry_t){ .frame = frame, .hash = h };
     s_head_vs_battle_hdr = (s_head_vs_battle_hdr + 1) % KN_RING_SIZE;
 }
@@ -671,8 +711,7 @@ static int32_t  s_last_replay_final  = -1;
  * snapshot the same field set the per-frame post_tick uses. */
 static void snapshot_all_fields(uint32_t* out) {
     for (uint8_t p = 0; p < 4; p++) {
-        uint32_t off_stocks = MAP(STOCKS_BASE) + (uint32_t)p * MAP(PLAYER_STRIDE);
-        out[KN_FIELD_STOCKS_P0 + p]        = hash_rdram_u8(off_stocks);
+        out[KN_FIELD_STOCKS_P0 + p]        = hash_stocks_now(p);
         uint32_t css_base = MAP(CSS_BASE) + (uint32_t)p * MAP(CSS_STRIDE);
         out[KN_FIELD_CHARACTER_ID_P0 + p]  = hash_rdram_slice(css_base + MAP(CSS_OFF_CHAR_ID), 4);
         out[KN_FIELD_CSS_CURSOR_P0 + p]    = hash_rdram_slice(css_base + MAP(CSS_OFF_CURSOR_STATE), 4);
@@ -680,7 +719,7 @@ static void snapshot_all_fields(uint32_t* out) {
     }
     out[KN_FIELD_RNG]             = hash_rdram_slice(MAP(RNG_SEED), 4);
     out[KN_FIELD_MATCH_PHASE]     = hash_rdram_u8(MAP(SCENE_CURR));
-    out[KN_FIELD_VS_BATTLE_HDR]   = hash_rdram_slice(MAP(VS_BATTLE_HEADER), MAP(VS_BATTLE_HEADER_SIZE));
+    out[KN_FIELD_VS_BATTLE_HDR]   = hash_battle_header_now();
     out[KN_FIELD_PHYSICS_MOTION]  = hash_rdram_slice(MAP(FT_MOTION_COUNT), 4);
     out[KN_FIELD_FT_BUFFER]       = hash_ft_buffer_live();
 }
@@ -764,6 +803,10 @@ int kn_field_map_set(const uint32_t* values, uint32_t count) {
         if (values[i] >= limit) return 0;
     }
     if (values[KN_MAP_VS_BATTLE_HEADER_SIZE] == 0 || values[KN_MAP_FT_BUFFER_SIZE] == 0) return 0;
+    /* The sudden-death copy's stock counts are found at the live ones'
+     * distance from the header, so they must come after it. */
+    if (values[KN_MAP_SUDDEN_DEATH_HEADER] != 0 &&
+        values[KN_MAP_STOCKS_BASE] < values[KN_MAP_VS_BATTLE_HEADER]) return 0;
     memcpy(s_map, values, sizeof(s_map));
     /* Hashes recorded under the old map are of other memory. */
     rings_reset();
