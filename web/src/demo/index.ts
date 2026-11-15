@@ -10,6 +10,7 @@ import * as network from './network.ts';
 import * as options from './options.ts';
 import * as rom from './rom.ts';
 import { demoRomStore } from './rom-store.ts';
+import { createTimelineView } from './timeline-view.ts';
 
 export const demo = {
   autopilot,
@@ -20,4 +21,5 @@ export const demo = {
   romStore: demoRomStore,
   installEjsGlobals,
   indicators: createIndicators,
+  timelineView: createTimelineView,
 };

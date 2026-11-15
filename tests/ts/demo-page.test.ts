@@ -59,6 +59,7 @@ class FakeElement {
   onerror: (() => void) | null = null;
   readonly style = { cssText: '', background: '', animation: '', width: '' };
   readonly classes = new Set<string>();
+  readonly dataset: { [key: string]: string } = {};
   readonly attributes = new Map<string, string>();
   readonly listeners = new Map<string, Listener[]>();
   readonly children: FakeElement[] = [];
@@ -90,6 +91,11 @@ class FakeElement {
   }
   click(): void {
     this.fire('click');
+  }
+  /** Only `.name` selectors, over the element's children. */
+  querySelectorAll(selector: string): FakeElement[] {
+    const name = selector.replace(/^\./, '');
+    return this.children.filter((child) => child.classes.has(name));
   }
   fire(type: string): void {
     for (const listener of this.listeners.get(type) ?? []) listener({ preventDefault: () => undefined });
@@ -142,6 +148,11 @@ const PAGE_IDS = [
   'emu-pause',
   'emu-stop',
   'gamepad-status',
+  'rb-timeline',
+  'rb-head',
+  'rb-lbl-bad',
+  'rb-lbl-re',
+  'rb-caption',
 ];
 
 /** What the visit starts from. */
@@ -156,6 +167,8 @@ type Visit = {
   stickMax?: number;
   /** The file name of a ROM an earlier visit left in the demo's ROM cache. */
   cached?: string | undefined;
+  /** The browser asks for reduced motion. */
+  reducedMotion?: boolean | undefined;
 };
 
 /** The engine's counters as a step sets them; a missing or off-shape field is part of the test. */
@@ -259,6 +272,21 @@ const fakeGlContext = (refuseAlignment: boolean, withSubUpload: boolean) => {
   return FakeGl;
 };
 
+/** `matchMedia`'s answer, as the page reads it. */
+type MediaQueryAnswer = { matches: boolean };
+
+/** The timeline stub's state: how many frames it has been fed. */
+type TimelineStubState = { n: number };
+
+/** The elements the page hands the timeline's renderer, as the stub below reads them. */
+type TimelineRefsSeen = {
+  ticks?: FakeElement[];
+  head?: FakeElement | null;
+  labelBad?: FakeElement | null;
+  labelReplay?: FakeElement | null;
+  caption?: FakeElement | null;
+};
+
 /** The bytes of the ROM an earlier visit left in the cache. */
 const CACHED_BYTES = [9, 8, 7, 6];
 
@@ -328,6 +356,14 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
   );
   const lag = elements.get('lag');
   if (lag) lag.value = '0';
+  // The timeline's tick marks, out of their data-i order as a page could list them.
+  const track = elements.get('rb-timeline');
+  for (const i of [3, 0, 7, 1, 6, 2, 5, 4]) {
+    const tick = new FakeElement();
+    tick.classes.add('t');
+    tick.dataset['i'] = String(i);
+    track?.appendChild(tick);
+  }
   const head = new FakeElement();
   const body = new FakeElement();
   const attached = (): FakeElement[] => [...head.children, ...body.children];
@@ -383,6 +419,25 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     localStorage: local,
     sessionStorage: session,
     indexedDB: idb.factory,
+    matchMedia: (query: string): MediaQueryAnswer => {
+      note('matchMedia', query);
+      return { matches: visit.reducedMotion === true };
+    },
+    KNRollbackTimeline: {
+      createState: (): TimelineStubState => ({ n: 0 }),
+      reduce: (state: TimelineStubState, input: Shown, now: number): TimelineStubState => {
+        note('timeline.reduce', state.n, input, now);
+        return { n: state.n + 1 };
+      },
+      render: (state: TimelineStubState, refs: TimelineRefsSeen, options?: Shown): void =>
+        note(
+          'timeline.render',
+          state.n,
+          (refs.ticks ?? []).map((tick) => tick.dataset['i'] ?? ''),
+          [refs.head?.id, refs.labelBad?.id, refs.labelReplay?.id, refs.caption?.id],
+          options,
+        ),
+    },
     WebGLRenderingContext: fakeGlContext(false, true),
     WebGL2RenderingContext: fakeGlContext(true, false),
     performance: { now: (): number => clock },
@@ -675,6 +730,7 @@ const randomVisit = (random: () => number, seed: number): Visit => {
     closedLoop: random() < 0.25,
     seed,
     cached: random() < 0.25 ? pick(random, ['saved.z64', 'SAVED.N64', 'saved.zip', '']) : undefined,
+    reducedMotion: random() < 0.2,
   };
 };
 
@@ -778,6 +834,47 @@ test('every address: the EmulatorJS settings and controls, and the texture-uploa
   );
   assert.match(page.snapshot(), /true texImage2D:pixelStorei\(3317,1\)\|texImage2D\(1,2\)/);
   assert.match(page.snapshot(), /true texImage2D:texImage2D\(1,2\) [^"]*compressedTexSubImage2D:none/);
+});
+
+test('the rollback timeline: what the card feeds it each frame, in both modes and with reduced motion', async () => {
+  const steps: Step[] = [
+    { kind: 'load', name: 'game.z64' },
+    { kind: 'counters', counters: { delay: 3, rollbackEventsTotal: 2, currentFrame: 400, isCRollback: true } },
+    { kind: 'frame', ms: 250 },
+    { kind: 'rollback', on: false },
+    { kind: 'frame', ms: 250 },
+    { kind: 'match', strict: true, inclusive: true },
+    { kind: 'counters', counters: { delay: 5, rollbackEventsTotal: 9, currentFrame: 900 } },
+    { kind: 'frame', ms: 250 },
+    { kind: 'frame', ms: 250 },
+  ];
+  for (const reducedMotion of [false, true]) {
+    await compareVisit({ search: '', local: [], session: [], closedLoop: false, seed: 1, reducedMotion }, steps);
+  }
+  // The comparison holds whatever both do; this shows the timeline was fed and drawn.
+  const seen = async (reducedMotion: boolean): Promise<string> => {
+    const page = openDemo(
+      NEW_SCRIPT,
+      { demo },
+      { search: '', local: [], session: [], closedLoop: false, seed: 1, reducedMotion },
+    );
+    let log = '';
+    for (const step of steps) {
+      await page.apply(step);
+      log += page.snapshot();
+    }
+    return log;
+  };
+  const moving = await seen(false);
+  assert.match(moving, /timeline\.reduce\(/);
+  assert.match(
+    moving,
+    /timeline\.render\(\d+,\["0","1","2","3","4","5","6","7"\],\["rb-head","rb-lbl-bad","rb-lbl-re","rb-caption"\],undefined\)/,
+  );
+  const still = await seen(true);
+  assert.doesNotMatch(still, /timeline\.reduce\(/);
+  assert.equal(still.match(/timeline\.render\(/g)?.length, 1);
+  assert.match(still, /timeline\.render\(0,.*\{still:true\}\)/);
 });
 
 test('every slider value: the network handed to the fake peer and the label beside the slider', async () => {
