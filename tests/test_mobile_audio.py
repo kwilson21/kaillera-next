@@ -28,11 +28,14 @@ def test_guest_boots_and_audio_initializes(browser, server_url, rom_path):
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
+        # The sharing checkbox is in the host's Advanced options
+        host.click("#host-controls .advanced-options > summary")
         host.locator("#opt-rom-sharing").check()
         host.wait_for_timeout(300)
 
         # Guest joins, accepts ROM sharing
-        guest.goto(f"{server_url}/play.html?room=AUDIO1&name=Guest")
+        # ?debug: the guest's console logs, read below, are muted without it.
+        guest.goto(f"{server_url}/play.html?room=AUDIO1&name=Guest&debug")
         expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
         guest.click("#rom-accept-btn")
 
