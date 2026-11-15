@@ -334,17 +334,19 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   an error at startup when the core bundle is missing). Never commit them.
   The Docker image, CI and the landing and demo builds build them from
   `package-lock.json`, so the bytes are the same everywhere. Migration stages
-  are in `docs/roadmap.md`. A module moves from observing to deciding once
-  test runs that reach each rule it takes over show no disagreement with the
-  code it replaces. The site has too little traffic for production reports to
-  be the gate, so the evidence is end to end, as in stage 2 of the roadmap:
-  an old-against-new harness for page logic; for netplay logic,
+  are in `docs/roadmap.md`. **New logic decides; nothing observes.** A change
+  that moves a decision into `web/src` makes the page or engine call it and
+  deletes the copy it replaces, in the same PR. There is no phase where the
+  new code runs beside the old and reports disagreement: the site has too
+  little traffic for production reports to show anything. The evidence comes
+  before the merge instead: an old-against-new test that runs both on the
+  same inputs before the old one is deleted (like
+  `tests/ts/demo-page.test.ts`), the proofs and models, and for netplay logic
   `tests/rb-two-player.mjs` (`JITTER=20`) and the lifecycle tests, with a
-  fault mode for each rare path, failing on the module's own disagreement
-  report (`tests/observer-reports.mjs`, which checks `peer-disagree` and
-  `resync-disagree` today; add a module's report there before it moves). A
-  rule no run reaches gets a fault mode or a harness step first. A
-  disagreement production does report blocks the move until it is explained.
+  fault mode for each rare path. A rule no run reaches gets a fault mode or a
+  harness step before it decides. The modules that still observe (they send
+  `*-disagree` or `protocol-mismatch` reports) are being switched to deciding
+  the same way; don't add a new one.
 - **Model and prove before you patch state logic.** This applies to plans
   as much as to code: a plan for anything involving state, ordering or
   reconnects names the model, the invariant and the diagram it will change
