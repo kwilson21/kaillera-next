@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.14",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the server relays startupReconnect, so a started page does not take a startup retry for a reconnect (#218)"
+      }
+    ]
+  },
+  {
     "version": "0.68.13",
     "date": "2026-11-14",
     "changes": [
