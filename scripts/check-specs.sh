@@ -102,6 +102,27 @@ done
 $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+# ── A game start: who a page waits for before its match runs ─────────────────
+START_GROUP=specs/start_group.qnt
+$QUINT typecheck "$START_GROUP"
+for variant in start_group_before start_group_give_up_only start_group_untold start_group_deadline_only \
+  start_group_current; do
+  $QUINT test "$START_GROUP" --main="$variant" --backend=typescript
+done
+# Today: a host that has started a game always has a way on, a late joiner
+# is held as one, and a running match waited for no silent player. The first
+# was VIOLATED while the startup watchdog's give-up waited on
+# (start_group_before; aFrozenGuestTest: in a room of two the host never
+# started), and while the deadline stopped once the game sequence had started
+# (start_group_give_up_only; aThirdPlayerFrozenTest), and while the host
+# told the other players nobody it left out (start_group_untold; the same
+# test: the other guest still waited for the frozen one). It holds without the
+# ROM prompt's word too (start_group_deadline_only), only later.
+for variant in start_group_deadline_only start_group_current; do
+  $QUINT run "$START_GROUP" --main="$variant" --invariant=allHold \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+done
+
 # ── Desync digests: which frame a peer may report a hash for ────────────────
 DIGEST=specs/desync_digest.qnt
 $QUINT typecheck "$DIGEST"

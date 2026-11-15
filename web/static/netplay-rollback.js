@@ -7562,6 +7562,10 @@
       if (_phase !== PHASE_GAME_STARTED && _phase !== PHASE_EMU_READY) return;
       const joinerSid = _peerKey(msg.requesterSid);
       if (!joinerSid || !_peers[joinerSid]) return;
+      // A player left out of this start is not taken back into it: the
+      // waits no longer count it. Its request is answered with state once
+      // this host runs (specs/start_group.qnt, lateJoin).
+      if (_leftOutOfStart.has(_peers[joinerSid].slot)) return;
       // Answered on the joiner's own data channel, not through the server
       // relay: any room member can write to the relay, and a forged answer
       // would pull a player out of a real late join. The joiner accepts it
@@ -7949,7 +7953,10 @@
         !!_startCohortSlots?.has(p.slot),
         _slotAlreadyActive(p.slot),
       );
-      const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && held;
+      // Left out of this start (specs/start_group.qnt): held as a late joiner
+      // too, until the match runs and the late join takes it.
+      const leftOut = !running && _leftOutOfStart.has(p.slot);
+      const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && (held || leftOut);
 
       const key = _peerKey(p.socketId);
       // The machine for this slot is told the roster lists them.
@@ -8007,7 +8014,9 @@
         reason = 'running — wait for late-joiner offer';
       } else if (shouldHoldForLateJoin) {
         shouldInitiate = false;
-        reason = 'initial sync under way — wait for late-joiner offer';
+        reason = leftOut
+          ? 'left out of the start — wait for its late-join offer'
+          : 'initial sync under way — wait for late-joiner offer';
       } else if (_isSpectator) {
         shouldInitiate = false;
         reason = 'spectator never initiates';
@@ -8047,6 +8056,16 @@
       }
     }
 
+    // A player that says it has no ROM while the host's is not shared is at
+    // the ROM prompt (gameStartPlan's askForRom) and will not answer before
+    // it has one: the host leaves it out of the start at once rather than
+    // after the startup retries (specs/start_group.qnt, ROM_PROMPT_LEAVES_OUT).
+    if (_playerSlot === 0 && !_isSpectator && _phase < PHASE_RUNNING && data.romSharing === false) {
+      for (const p of otherPlayers) {
+        if (p.romReady === false) _leaveOutOfStart(_peerKey(p.socketId), 'it has no ROM');
+      }
+    }
+
     _applyControllerPresentMask('users-updated');
 
     // Notify controller
@@ -8063,6 +8082,65 @@
       clearTimeout(peer._startupConnectTimer);
       peer._startupConnectTimer = null;
     }
+  };
+
+  // The start group: who this page waits for before its match runs
+  // (specs/start_group.qnt). The host decides it. A player its startup
+  // deadline gives up on, or one that says it has no ROM while the host's is
+  // not shared, is left out: its connection is closed and it is held as a
+  // late joiner, so no wait counts it, and it comes back through the late
+  // join. The host tells the others (`left-out:<slot>`, now and on each
+  // channel that opens later), who stop waiting for it too. A guest never
+  // leaves anyone out itself: two guests that cannot reach each other would
+  // run with different players. The slots left out of this start:
+  const _leftOutOfStart = new Set();
+
+  // Stop waiting for the player in `slot`: its connection closes and it is
+  // held as a late joiner, under each key this page knows it by.
+  const _dropFromStart = (slot, reason) => {
+    for (const [sid, peer] of Object.entries(_peers)) {
+      if (peer.slot !== slot || peer.synthetic) continue;
+      hardDisconnectPeer(sid, { quiet: true });
+      _markPendingLateJoinPeer(sid, slot, reason);
+    }
+    for (const [sid, info] of Object.entries(_knownPlayers)) {
+      if (info?.slot === slot) _markPendingLateJoinPeer(sid, slot, reason);
+    }
+  };
+
+  // The host leaves a player out of the start. False when this page is not
+  // the host, the match already runs, or the player is in (its channel open)
+  // or already out.
+  const _leaveOutOfStart = (sid, reason) => {
+    if (_playerSlot !== 0 || _isSpectator || _phase >= PHASE_RUNNING) return false;
+    const peer = _peers[sid];
+    const slot = peer?.slot ?? _knownPlayers[sid]?.slot;
+    if (!_isValidPlayerSlot(slot) || slot === _playerSlot || peer?.synthetic) return false;
+    if (peer?.dc?.readyState === 'open' || _leftOutOfStart.has(slot)) return false;
+    _leftOutOfStart.add(slot);
+    _syncLog(`START-LEFT-OUT sid=${sid} slot=${slot} reason=${reason}`);
+    const name = _knownPlayers[sid]?.playerName || `P${slot + 1}`;
+    _config?.onToast?.(`Starting without ${name} — they can join once ready`);
+    _dropFromStart(slot, reason);
+    for (const other of Object.values(_peers)) {
+      if (other.dc?.readyState !== 'open') continue;
+      try {
+        other.dc.send(`left-out:${slot}`);
+      } catch (_) {}
+    }
+    const waitingFor = Object.entries(_peers).some(
+      ([key, p]) => _isValidPlayerSlot(p.slot) && !p.synthetic && !_isPeerPendingLateJoin(key, p),
+    );
+    if (_phase < PHASE_GAME_STARTED && !waitingFor) {
+      // Nobody left to wait for: start alone, as with no other player.
+      _syncLog('START-ALONE: every other player is left out of the start');
+      _rttComplete = true;
+      startGameSequence();
+    } else {
+      checkAllEmuReady();
+      checkAllLockstepReady();
+    }
+    return true;
   };
 
   const installPeerDataChannelHandlers = (remoteSid, peer) => {
@@ -8103,7 +8181,9 @@
 
   const armStartupConnectWatchdog = (remoteSid) => {
     const peer = _peers[remoteSid];
-    if (!peer || !peer.isInitiator || _phase >= PHASE_GAME_STARTED) return;
+    // Armed until the match runs: a player that has not answered by then is
+    // still waited for, game sequence or not (specs/start_group.qnt).
+    if (!peer || !peer.isInitiator || _phase >= PHASE_RUNNING) return;
     if (peer.dc?.readyState === 'open') return;
     clearStartupConnectWatchdog(peer);
     peer._startupConnectTimer = setTimeout(() => {
@@ -8116,7 +8196,7 @@
   const retryStartupConnection = async (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer || _peers[remoteSid] !== peer) return;
-    if (!peer.isInitiator || _phase >= PHASE_GAME_STARTED) return;
+    if (!peer.isInitiator || _phase >= PHASE_RUNNING) return;
     if (peer.dc?.readyState === 'open') return;
 
     const nextAttempt = (peer._startupConnectAttempt || 1) + 1;
@@ -8133,13 +8213,18 @@
           `attempts=${STARTUP_CONNECT_MAX_ATTEMPTS} pc=${peer.pc?.connectionState ?? 'none'} ` +
           `dc=${peer.dc?.readyState ?? 'none'}`,
       );
-      setStatus('Peer connection stalled — reload or rejoin to retry');
       KNEvent('webrtc-fail', 'Startup WebRTC connection stalled', {
         slot: peer.slot,
         remoteSid,
         state: peer.pc?.connectionState ?? 'none',
         dc: peer.dc?.readyState ?? 'none',
       });
+      // The host starts without that player, who can join late. A guest
+      // waits for the host's word (`left-out:`), which the host's own
+      // deadline on that player brings.
+      if (!_leaveOutOfStart(remoteSid, 'startup connect gave up')) {
+        setStatus('Peer connection stalled — waiting for the host');
+      }
       return;
     }
 
@@ -8819,6 +8904,15 @@
       if (_playerSlot === 0 && _pendingLateJoinReadySids.has(remoteSid)) {
         finishLateJoinReady('deferred DC open', remoteSid);
       }
+      // Host: a player whose channel opens before the match runs hears whom
+      // the host left out of the start, and stops waiting for them.
+      if (_playerSlot === 0 && _phase < PHASE_RUNNING) {
+        for (const slot of _leftOutOfStart) {
+          try {
+            ch.send(`left-out:${slot}`);
+          } catch (_) {}
+        }
+      }
       if (peer.slot === 0) _resyncAfterLostHost('host channel open');
 
       if (!openedAttempt) {
@@ -8884,6 +8978,26 @@
         }
         if (e.data === 'late-join-ready') {
           finishLateJoinReady('DC', remoteSid);
+        }
+        // The host left a player out of the start (specs/start_group.qnt):
+        // stop waiting for it; it joins late. Only the host's word counts.
+        if (e.data.startsWith('left-out:')) {
+          const slot = Number(e.data.slice('left-out:'.length));
+          if (
+            peer.slot === 0 &&
+            _playerSlot !== 0 &&
+            _phase < PHASE_RUNNING &&
+            _isValidPlayerSlot(slot) &&
+            slot !== _playerSlot &&
+            !_leftOutOfStart.has(slot)
+          ) {
+            _leftOutOfStart.add(slot);
+            _syncLog(`START-LEFT-OUT slot=${slot} reason=the host left it out`);
+            _dropFromStart(slot, 'the host left it out');
+            checkAllEmuReady();
+            checkAllLockstepReady();
+          }
+          return;
         }
         if (e.data.startsWith('roster:')) {
           const parts = e.data.split(':');
@@ -9679,7 +9793,9 @@
     hardDisconnectPeer(remoteSid);
   };
 
-  const hardDisconnectPeer = (remoteSid) => {
+  // `quiet`: the player is not gone, only out of this start
+  // (_leaveOutOfStart), so nobody is told it dropped.
+  const hardDisconnectPeer = (remoteSid, { quiet = false } = {}) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
     clearStartupConnectWatchdog(peer);
@@ -9716,6 +9832,7 @@
     // P0-1 funnel: emit peer_left only from the host so the per-session timeline
     // doesn't get N duplicate events (one per remaining observer). Includes the
     // left peer's slot in meta so the admin view can attribute it correctly.
+    if (quiet) return;
     if (_playerSlot === 0 && _leftSlot != null && _leftSlot !== undefined) {
       KNEvent('peer_left', '', { peer_slot: _leftSlot });
     }
@@ -10399,8 +10516,13 @@
     if (_phase === PHASE_RUNNING) return;
     if (_awaitingLateJoinState) return; // late-join path active — don't use normal sync
 
-    // Wait for ALL player peers to be emu-ready (not just 1)
-    const playerPeers = Object.values(_peers).filter((p) => p.slot !== null && p.slot !== undefined);
+    // Wait for every player peer in the start group to be emu-ready. Not the
+    // players held as late joiners, as checkAllLockstepReady: a player left
+    // out of the start never loads into it (specs/start_group.qnt), and
+    // waiting for it held the match unstarted.
+    const playerPeers = Object.entries(_peers)
+      .filter(([sid, p]) => p.slot !== null && p.slot !== undefined && !_isPeerPendingLateJoin(sid, p))
+      .map(([, p]) => p);
 
     const readyPeers = playerPeers.filter((p) => p.emuReady);
     const notReady = playerPeers.filter((p) => !p.emuReady);
@@ -13154,6 +13276,13 @@
       _activeRoster = null;
       _pendingLateJoinPeerSids.clear();
       _pendingLateJoinPeerSlots.clear();
+      // Players left out of this start stay held as late joiners: the late
+      // join takes them once the match runs (specs/start_group.qnt).
+      for (const slot of _leftOutOfStart) {
+        for (const [sid, info] of Object.entries(_knownPlayers)) {
+          if (info?.slot === slot) _markPendingLateJoinPeer(sid, slot, 'left out of the start');
+        }
+      }
       _lateJoinActivatedAtFrame = {};
       _lateJoinInputBootstrapUntilFrame = -1;
       _lateJoinSeededInputFrames = {};
@@ -19060,6 +19189,7 @@
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
+    _leftOutOfStart.clear();
     _startCohortSlots = null;
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;

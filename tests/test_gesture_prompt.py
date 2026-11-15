@@ -9,8 +9,6 @@ Run: pytest tests/test_gesture_prompt.py -v -s
 from playwright.sync_api import expect
 
 
-
-
 def test_gesture_prompt_visible_for_guest(browser, server_url, rom_path, room):
     """Guest sees gesture prompt overlay after game starts."""
     host = browser.new_page()
@@ -70,8 +68,7 @@ def test_gesture_prompt_visible_for_guest(browser, server_url, rom_path, room):
         expect(gesture).to_be_hidden(timeout=3000)
 
         # Confirm gesture was received in logs
-        assert any("gesture received" in l for l in guest_logs), \
-            "Guest should log 'gesture received'"
+        assert any("gesture received" in line for line in guest_logs), "Guest should log 'gesture received'"
 
     finally:
         host.close()
@@ -95,9 +92,12 @@ def test_host_taps_to_start_too(browser, server_url, rom_path, room):
         host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
 
+        # The guest loads the ROM too, so it plays: with no ROM it takes the ROM
+        # prompt at the start (gameStartPlan's askForRom) and the host starts
+        # without it, which is what the next test is for.
         guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
-        guest.evaluate("window.__test_socket.emit('rom-ready', { ready: true })")
+        guest.locator("#rom-drop input[type='file']").set_input_files(rom_path)
 
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
@@ -111,6 +111,65 @@ def test_host_taps_to_start_too(browser, server_url, rom_path, room):
             "window.NetplayRollback.exportSyncLog().includes('gesture received')",
             timeout=5000,
         )
+
+    finally:
+        host.close()
+        guest.close()
+
+
+def _frame(page):
+    return page.evaluate("window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0")
+
+
+def test_a_guest_at_the_rom_prompt_joins_late_once_it_drops_one(browser, server_url, rom_path, room):
+    """A guest with no ROM at the start does not hold the host's start, and joins late.
+
+    The server counts the guest ready though its page has no ROM (a harness
+    step: a start taken while its "no ROM" was on its way, as #260 found). The
+    guest takes the ROM prompt and says it has none; the host, whose ROM is not
+    shared, starts without it and plays (specs/start_group.qnt). The guest
+    drops the ROM and joins the running match late. Before, the host waited
+    for the guest's connection, gave up after three retries and never started.
+    """
+    host = browser.new_page()
+    guest = browser.new_page()
+
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
+        host.wait_for_timeout(500)
+
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.evaluate("window.__test_socket.emit('rom-ready', { ready: true })")
+
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+
+        # The guest asks for a ROM; the host starts alone, before its first
+        # startup retry (8 s), and plays.
+        expect(guest.locator("#late-join-msg")).to_be_visible(timeout=10000)
+        prompt = host.locator("#gesture-prompt")
+        expect(prompt).to_be_visible(timeout=6000)
+        prompt.click()
+        host.wait_for_function("(window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0) > 60", timeout=60000)
+        log = host.evaluate("window.NetplayRollback.exportSyncLog()")
+        assert "reason=it has no ROM" in log, log[-3000:]
+
+        # The guest drops the ROM and joins the running match.
+        guest.locator("#rom-drop input[type='file']").set_input_files(rom_path)
+        expect(guest.locator("#late-join-msg")).to_have_count(0, timeout=30000)
+        joined_at = _frame(host)
+        guest.wait_for_function(
+            f"(window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0) > {joined_at}",
+            timeout=90000,
+        )
+        # Both keep playing.
+        host_then, guest_then = _frame(host), _frame(guest)
+        host.wait_for_timeout(3000)
+        assert _frame(host) > host_then
+        assert _frame(guest) > guest_then
 
     finally:
         host.close()

@@ -2,7 +2,9 @@
 
 Run: pytest tests/test_desync.py -v -s
 """
+
 import time
+from itertools import pairwise
 
 from netplay_steps import frame, silence_inputs, sync_log_lines, syncs_applied, wait_past_frame
 from playwright.sync_api import expect
@@ -65,12 +67,12 @@ def test_lockstep_no_desync(browser, server_url, rom_path, start_game, room):
         print(f"\nHost:  frame={h['frameNum']} hash={h['hash']} size={h.get('stateSize')}")
         print(f"Guest: frame={g['frameNum']} hash={g['hash']} size={g.get('stateSize')}")
 
-        assert h['frameNum'] == target_frame, f"Host captured at wrong frame: {h['frameNum']}"
-        assert g['frameNum'] == target_frame, f"Guest captured at wrong frame: {g['frameNum']}"
+        assert h["frameNum"] == target_frame, f"Host captured at wrong frame: {h['frameNum']}"
+        assert g["frameNum"] == target_frame, f"Guest captured at wrong frame: {g['frameNum']}"
 
-        if h['hash'] != g['hash']:
-            hb = h['first2k']
-            gb = g['first2k']
+        if h["hash"] != g["hash"]:
+            hb = h["first2k"]
+            gb = g["first2k"]
             diffs = [(i, hb[i], gb[i]) for i in range(min(len(hb), len(gb))) if hb[i] != gb[i]]
             print(f"\nNote: {len(diffs)} bytes differ in first 2KB (save state metadata, not gameplay)")
             for offset, hv, gv in diffs[:10]:
@@ -110,9 +112,7 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
         # and must be within that lead of the guest's frame at some moment
         # between them: g1 - lead <= host <= g2 + lead.
         def lead():
-            return 8 + max(
-                page.evaluate("window.NetplayRollback.getHudCounters().delay") for page in (host, guest)
-            )
+            return 8 + max(page.evaluate("window.NetplayRollback.getHudCounters().delay") for page in (host, guest))
 
         samples = []
         for _ in range(5):
@@ -121,18 +121,25 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
             h = frame(host)
             g2 = frame(guest)
             most = lead()
-            samples.append((h, g2))
+            samples.append((time.monotonic(), h, g2))
             print(f"  Guest: {g1}..{g2}, Host: {h}, lead allowed: {most}")
             assert g1 - most <= h <= g2 + most, (
                 f"host at {h} while the guest went {g1}..{g2}: more than {most} frames apart"
             )
 
-        h_advance = samples[-1][0] - samples[0][0]
-        g_advance = samples[-1][1] - samples[0][1]
-        assert h_advance > 100, f"Host stalled: only advanced {h_advance} frames in 5s"
-        assert g_advance > 100, f"Guest stalled: only advanced {g_advance} frames in 5s"
-
-        print(f"\nFrame pacing OK: host rate = {h_advance/5:.0f}fps, guest rate = {g_advance/5:.0f}fps")
+        # How fast a page runs is the machine's: a headless emulator in the
+        # cloud container runs at 7-11 fps, a laptop's at 60, so a fixed
+        # number of frames tested the machine. What the netplay owes is that
+        # neither page stalls (each one moved on in every second sampled) and
+        # that they go together (the lead check above).
+        for (t0, h0, g0), (t1, h1, g1) in pairwise(samples):
+            assert h1 > h0, f"Host stalled at frame {h0} for {t1 - t0:.1f}s"
+            assert g1 > g0, f"Guest stalled at frame {g0} for {t1 - t0:.1f}s"
+        elapsed = samples[-1][0] - samples[0][0]
+        h_rate = (samples[-1][1] - samples[0][1]) / elapsed
+        g_rate = (samples[-1][2] - samples[0][2]) / elapsed
+        own = [page.evaluate("window.NetplayRollback.getHudCounters().fps") for page in (host, guest)]
+        print(f"\nFrame pacing OK: host {h_rate:.0f} fps, guest {g_rate:.0f} fps (own counters {own[0]}, {own[1]})")
 
     finally:
         host.close()
@@ -242,7 +249,7 @@ def test_resync_sustains_over_time(browser, server_url, rom_path, start_game, ro
             g_frame = guest.evaluate("window.KNState.frameNum")
             diff = abs(h_frame - g_frame)
             samples.append((h_frame, g_frame, diff))
-            print(f"  Sample {i+1}: host={h_frame} guest={g_frame} diff={diff}")
+            print(f"  Sample {i + 1}: host={h_frame} guest={g_frame} diff={diff}")
 
         # Frame counters should stay within a reasonable range of each other.
         # Without working resync, the guest would be stuck or wildly divergent.
