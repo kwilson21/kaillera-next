@@ -73,8 +73,7 @@ const steps = both.flatMap((one) => one.steps);
 const at = (snapshot: Snapshot, name: (typeof RUN_REGIONS)[number]): string => region(snapshot.value, name);
 const leaving = (snapshot: Snapshot): boolean => runStateName(snapshot.value) === 'leaving';
 const inMatch = (snapshot: Snapshot): boolean => at(snapshot, 'match') !== 'menus';
-const autoCompareRuns = (snapshot: Snapshot): boolean =>
-  at(snapshot, 'autoCompare') === 'running' || at(snapshot, 'autoCompare') === 'runningUnpausable';
+const autoCompareRuns = (snapshot: Snapshot): boolean => at(snapshot, 'autoCompare') === 'running';
 const describe = (step: Step): string =>
   `${runStateName(step.from.value)} --${JSON.stringify(step.event)}--> ${runStateName(step.to.value)}`;
 
@@ -84,7 +83,7 @@ test('the walk reaches every state of every region, and leaving', () => {
     loader: ['none', 'loading', 'done'],
     match: ['menus', 'playing', 'gamePaused'],
     tick: ['running', 'paused'],
-    autoCompare: ['off', 'running', 'paused', 'runningUnpausable'],
+    autoCompare: ['off', 'running', 'paused'],
     mode: ['rollback', 'lockstep'],
     interaction: ['untouched', 'touched'],
   };
@@ -119,14 +118,13 @@ test('the loader goes on the page at most once, and is loading only between goin
   }
 });
 
-test('leaving a match turns rollback on, and auto-compare off unless the Pause button has it paused', () => {
+test('leaving a match turns rollback on and auto-compare off, paused or not', () => {
   let seen = 0;
   for (const step of steps) {
     if (leaving(step.from) || step.event.type !== 'frame' || step.event.inclusive || !inMatch(step.from)) continue;
     seen++;
     assert.equal(at(step.to, 'mode'), 'rollback', describe(step));
-    const expected = at(step.from, 'autoCompare') === 'paused' ? 'paused' : 'off';
-    assert.equal(at(step.to, 'autoCompare'), expected, describe(step));
+    assert.equal(at(step.to, 'autoCompare'), 'off', describe(step));
   }
   assert.ok(seen > 0);
 });
@@ -189,9 +187,10 @@ test('the flags tell every state apart, so a comparison can see any difference',
   }
 });
 
-// Today's code does these, and the fix will make them unreachable: the
-// assertions are here so the fix has to change them.
-test('known: a paused auto-compare outlives the match, and a restart from paused cannot be paused again', () => {
+// The two orderings that used to strand a paused auto-compare: it outlived
+// the match and ran in the menus once the tick resumed, and a click on its
+// button ("Stop auto-compare") restarted it with the pause mark left set.
+test('a paused auto-compare stops on leaving the match, the rollback button and its own button', () => {
   const run = (events: readonly RunEvent[]): Snapshot =>
     events.reduce(
       (snapshot, event) => transition(demoRunMachine, snapshot, event)[0],
@@ -203,21 +202,21 @@ test('known: a paused auto-compare outlives the match, and a restart from paused
     { type: 'autoStartDue' },
     { type: 'pauseClicked', tickControl: true },
   ];
-  const outlives = run([
-    ...pausedInMatch,
+  assert.equal(at(run(pausedInMatch), 'autoCompare'), 'paused');
+  const resume: RunEvent = { type: 'pauseClicked', tickControl: true };
+  for (const stop of [
     { type: 'frame', strict: false, inclusive: false },
-    { type: 'pauseClicked', tickControl: true },
-  ]);
-  assert.equal(at(outlives, 'match'), 'menus');
-  assert.equal(at(outlives, 'autoCompare'), 'running');
-  const unpausable = run([
-    ...pausedInMatch,
+    { type: 'rollbackToggleClicked' },
     { type: 'autoCompareClicked' },
-    { type: 'pauseClicked', tickControl: true },
-    { type: 'pauseClicked', tickControl: true },
-  ]);
-  assert.equal(at(unpausable, 'tick'), 'paused');
-  assert.equal(at(unpausable, 'autoCompare'), 'runningUnpausable');
+  ] satisfies RunEvent[]) {
+    const stopped = run([...pausedInMatch, stop]);
+    assert.equal(at(stopped, 'autoCompare'), 'off', stop.type);
+    const resumed = run([...pausedInMatch, stop, resume]);
+    assert.equal(at(resumed, 'tick'), 'running', stop.type);
+    assert.equal(at(resumed, 'autoCompare'), 'off', `${stop.type}, then the tick resumes`);
+  }
+  // Nor does the timer set on entering a match start it over its pause mark.
+  assert.equal(at(run([...pausedInMatch, { type: 'autoStartDue' }]), 'autoCompare'), 'paused');
 });
 
 test('the observer compares after each event, reports a difference once, and stops at leaving', () => {

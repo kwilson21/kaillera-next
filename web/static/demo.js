@@ -1051,7 +1051,11 @@
     }, MODE_SWITCH_LABEL_MS);
   };
 
-  const _isAutoCompareRunning = () => _autoCompareTimer !== 0;
+  // On: its timer runs, or the Pause button has it paused (timer cleared, the
+  // time it was paused kept). A paused auto-compare is stopped like a running
+  // one, by its button, the rollback button or leaving the match, and is not
+  // started again over its pause mark.
+  const _isAutoCompareRunning = () => _autoCompareTimer !== 0 || _autoComparePausedAt !== 0;
 
   const _stopAutoCompare = () => {
     if (!_isAutoCompareRunning()) return;

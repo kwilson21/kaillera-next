@@ -21,8 +21,7 @@
  *   match         menus | playing |         _wasInMatch (not menus),
  *                 gamePaused                _lastFakePeerMatchActive (playing)
  *   tick          running | paused          _emuPaused
- *   autoCompare   off | running | paused |  _autoCompareTimer, _autoComparePausedAt
- *                 runningUnpausable
+ *   autoCompare   off | running | paused    _autoCompareTimer, _autoComparePausedAt
  *   mode          rollback | lockstep       _rollbackEnabled
  *   interaction   untouched | touched       _userInteractedThisMatch
  *
@@ -31,21 +30,19 @@
  * game's own pause menu (`isInMatchOrPaused` but not `isInMatch`), not the
  * page's Pause button, which is `tick`.
  *
- * Two things today's code does that it should not, both from auto-compare's
- * stop looking only at its timer, which the Pause button clears:
- *  - `paused` cannot be stopped. Leaving the match or clicking the rollback
- *    button leaves it paused, and resuming the tick then runs it in the menus.
- *  - `runningUnpausable`: with auto-compare paused, its button still reads
- *    "Stop auto-compare", and a click starts it again without clearing the
- *    pause mark. From then on Pause no longer pauses it, until it is stopped.
+ * Auto-compare paused by the Pause button is still on: its button reads
+ * "Stop auto-compare", and a click stops it, as leaving the match and the
+ * rollback button do. (They used to look only at its timer, which the Pause
+ * button clears: a paused auto-compare outlived the match, and a click
+ * restarted it with the pause mark left set, after which Pause no longer
+ * paused it.)
  *
  * The invariants it keeps (tests/ts/demo-run-state.test.ts walks every
  * reachable state):
  *  - the engine starts at most once and never stops;
  *  - the loader goes on the page at most once, and is loading only between
  *    going on and settling;
- *  - leaving a match turns rollback on, and auto-compare off unless the
- *    Pause button has it paused;
+ *  - leaving a match turns rollback on and auto-compare off;
  *  - entering a match forgets that the controls were touched;
  *  - auto-compare is paused only while the tick is;
  *  - after Stop or Reset nothing changes.
@@ -157,24 +154,14 @@ export const demoRunMachine = setupEffect({
                   event.tickControl && region(value, 'tick') === 'running' ? { target: 'paused' } : undefined,
               },
             },
-            // Its timer is cleared and the time it was paused kept. Stopping it looks
-            // only at the timer, so nothing stops it here: not the rollback button,
-            // not leaving the match. A start from here keeps the mark.
+            // Its timer is cleared and the time it was paused kept; it is still on.
             paused: {
-              on: {
-                autoCompareClicked: { target: 'runningUnpausable' },
-                autoStartDue: ({ context, value }) =>
-                  autoStarts(context, value) ? { target: 'runningUnpausable' } : undefined,
-                pauseClicked: ({ event, value }) =>
-                  event.tickControl && region(value, 'tick') === 'paused' ? { target: 'running' } : undefined,
-              },
-            },
-            // Running with the pause mark left set: pausing and resuming both see it and do nothing.
-            runningUnpausable: {
               on: {
                 autoCompareClicked: { target: 'off' },
                 rollbackToggleClicked: { target: 'off' },
                 frame: ({ event, value }) => (leavesMatch(value, event.inclusive) ? { target: 'off' } : undefined),
+                pauseClicked: ({ event, value }) =>
+                  event.tickControl && region(value, 'tick') === 'paused' ? { target: 'running' } : undefined,
               },
             },
           },
@@ -232,11 +219,8 @@ const inMatch = (value: StateValue): boolean => region(value, 'match') !== 'menu
 const leavesMatch = (value: StateValue, inclusive: boolean): boolean => inMatch(value) && !inclusive;
 const entersMatch = (value: StateValue, inclusive: boolean): boolean => !inMatch(value) && inclusive;
 
-/** Whether a click on the auto-compare button starts it (its timer is not running) rather than stops it. */
-const startsOnClick = (value: StateValue): boolean => {
-  const state = region(value, 'autoCompare');
-  return state === 'off' || state === 'paused';
-};
+/** Whether a click on the auto-compare button starts it (it is off, not running or paused) rather than stops it. */
+const startsOnClick = (value: StateValue): boolean => region(value, 'autoCompare') === 'off';
 
 /** Whether auto-compare starts on its own, 600 ms into a match. */
 const autoStarts = (context: { readonly autoCompareDisabled: boolean }, value: StateValue): boolean =>
@@ -300,8 +284,8 @@ export const runFlags = (value: StateValue): RunFlags => {
     inMatch: match !== 'menus',
     fakePeerActive: match === 'playing',
     tickPaused: region(value, 'tick') === 'paused',
-    autoCompareRunning: autoCompare === 'running' || autoCompare === 'runningUnpausable',
-    autoComparePaused: autoCompare === 'paused' || autoCompare === 'runningUnpausable',
+    autoCompareRunning: autoCompare === 'running',
+    autoComparePaused: autoCompare === 'paused',
     rollbackEnabled: region(value, 'mode') === 'rollback',
     userInteracted: region(value, 'interaction') === 'touched',
   };
