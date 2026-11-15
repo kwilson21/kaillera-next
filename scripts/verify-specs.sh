@@ -271,6 +271,17 @@ rom_at_start() {
   expect_violation "$ROM_START" rom_at_start_no_rejoin serverKnowsTheRom
 }
 
+mesh_heal() {
+  local MESH=specs/mesh_heal.qnt
+  verify "$MESH" mesh_heal_fixed allHold init 10
+  # The link dies, both channels read closed, both sides go stale to
+  # phantoms, and nothing will act: 5 steps (phantomForeverTest). The same
+  # with the check on C ticks but skipping phantoms: 5 steps. (Without the
+  # reset at open, the second request takes 7 steps: secondRequestTest.)
+  expect_violation "$MESH" mesh_heal_current aDeadChannelIsNeverForgotten
+  expect_violation "$MESH" mesh_heal_c_tick_only aDeadChannelIsNeverForgotten
+}
+
 ring_after_resync() {
   local RING=specs/ring_after_resync.qnt
   verify "$RING" ring_after_resync_current allHold
@@ -289,7 +300,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask
-  rom_at_start ring_after_resync
+  rom_at_start ring_after_resync mesh_heal
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -299,7 +310,7 @@ SPEC_GROUPS=(
 SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
-  "streaming_connection resync_flow tick_deadlines resync_mesh"   # ~6.5 min
+  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
   "peer_identity rom_transfer peer_connection rom_at_start"       # ~6.5 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync" # ~5.5 min
 )

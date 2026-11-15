@@ -366,6 +366,22 @@ done
 $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+# ── A channel that dies in a match with no event ───────────────────────────
+MESH=specs/mesh_heal.qnt
+$QUINT typecheck "$MESH"
+for variant in mesh_heal_current mesh_heal_c_tick_only mesh_heal_no_reset_on_open mesh_heal_fixed; do
+  $QUINT test "$MESH" --main="$variant" --backend=typescript
+done
+# Today a C-rollback tick never reaches the mesh health check, so a channel
+# that dies with no event leaves a phantom for the rest of the match
+# (mesh_heal_current; phantomForeverTest). Run on C ticks but still skipping
+# phantoms it rarely acts, since frames are frozen until the player is one
+# (mesh_heal_c_tick_only). Without the guest's reset when the reconnected
+# channel opens, PEER-RECOVERED asks for a second resync
+# (mesh_heal_no_reset_on_open; secondRequestTest).
+$QUINT run "$MESH" --main=mesh_heal_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend=typescript
+
 # ── The rollback ring across a resync that loads the host's state ─────────
 RING=specs/ring_after_resync.qnt
 $QUINT typecheck "$RING"
