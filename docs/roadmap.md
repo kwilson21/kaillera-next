@@ -535,6 +535,12 @@ Slice 1, the peer mesh and signaling:
   resend brings them back. Modelled first: after a resync's frame jump, the
   frames dropped as ahead at or above the new floor are asked for; then a
   reliable-channel send can go out once.
+- Next, one push per hole: the host escalates when the oldest missing input
+  goes overdue and pushes at its own frame, so a hole that reaches past
+  that push's floor is predicted until a second push (`ASK_UNANSWERED_STALL_MS`:
+  about 7 frames of differing play between two pushes, then one snap to
+  the host). Push once, at the edge of the newest missing input asked for,
+  modelled first in `specs/ask_escalation.qnt`.
 
 Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed
 as not modelled are now modelled.

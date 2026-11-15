@@ -216,8 +216,10 @@
  *     host's ask goes overdue (`INPUT-ASK-OVERDUE … → push`), it pushes its
  *     state, the guest's inputs-settled answers it (`INPUT-ASK-PUSH-SETTLED`),
  *     no stall reaches its 5 s deadline (`RB-INPUT-STALL-TIMEOUT`) and the
- *     host's frame never stands still for 5 s, with no give-up. Frames are
- *     compared as usual. With ASK_UNANSWERED_ACKS=1
+ *     host's frame never stands still for 5 s, with no give-up. A hole that
+ *     straddles the first push is predicted until the next push, then both
+ *     pages are on the host's state: frames are compared from the last state
+ *     the guest applied, which must be at or after the last push. With ASK_UNANSWERED_ACKS=1
  *     (ASK_UNANSWERED_STALL_MS >= 20000) the guest drops its `inputs-settled:` for n ms too,
  *     so no push is acknowledged: fails unless the host pushes again to the
  *     limit, gives up (`INPUT-ASK-PUSH-GAVEUP`) and drops the player
@@ -730,7 +732,15 @@ const PAST_WINDOW_RECOVER_MS = 30000;
 // Main's rollback input-stall deadline (MAX_STALL_MS + RESEND_TIMEOUT_MS).
 const STALL_DEADLINE_MS = 5000;
 const FREEZE_LIKE =
-  FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || SYNC_FOLLOW_UP !== '' || HEAL_BOTH_SIDES || PAST_WINDOW_FORCED;
+  FREEZE_MS > 0 ||
+  UNANSWERED_VARIANT === 'letgo' ||
+  SYNC_FOLLOW_UP !== '' ||
+  HEAL_BOTH_SIDES ||
+  PAST_WINDOW_FORCED ||
+  // The stall shape recovers by the host's state: a hole that straddles the
+  // first push is predicted until the next one, then both are on the host's
+  // state. Compared from the last state the guest applied.
+  (ASK_UNANSWERED_STALL_MS > 0 && !ASK_UNANSWERED_ACKS);
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -4439,6 +4449,8 @@ const askUnansweredReport = (() => {
     heals: heals.length,
     stallTimeouts,
     freezeMs: askUnanswered.freezeMs,
+    lastPushFrame: Math.max(-1, ...settled.map((l) => +(l.match(/ frame=(\d+)/) || [])[1] || -1)),
+    comparedFrom: recoveredAt,
   };
 })();
 const askUnansweredFailed =
@@ -4456,7 +4468,9 @@ const askUnansweredFailed =
         askUnansweredReport.gaveUp.length === 0 &&
         // The difference from main: no stall waits out its deadline.
         askUnansweredReport.stallTimeouts.length === 0 &&
-        askUnansweredReport.freezeMs < STALL_DEADLINE_MS)
+        askUnansweredReport.freezeMs < STALL_DEADLINE_MS &&
+        // The frames compared start at or after the last push's frame.
+        recoveredAt >= askUnansweredReport.lastPushFrame)
   );
 if (ASK_UNANSWERED_STALL_MS > 0) {
   console.log(
