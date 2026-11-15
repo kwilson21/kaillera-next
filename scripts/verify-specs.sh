@@ -85,7 +85,8 @@ expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
 # check-specs.sh samples today's holdToday from `initLobby`.
 
 PAUSE=specs/late_join_pause.qnt
-verify "$PAUSE" late_join_pause_current allHold
+verify "$PAUSE" late_join_pause_current holdBeforeTheResyncFix
+verify "$PAUSE" late_join_pause_fixed allHold
 expect_violation "$PAUSE" late_join_pause_before hostPauseHasADeadline
 expect_violation "$PAUSE" late_join_pause_host_side guestPauseHasADeadline
 expect_violation "$PAUSE" late_join_pause_host_side guestResumesOnTheHostsWord
@@ -93,6 +94,11 @@ expect_violation "$PAUSE" late_join_pause_host_side aRepeatedRequestKeepsTheDead
 # The other two violations on late_join_pause_before need two joiners and
 # are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
 # them.
+# aJoinerIsNotMadeAPlayerBehindTheHost on late_join_pause_current has a
+# counterexample 7 steps long (ask, serve, send, lose the channel, load,
+# reopen, ready), beyond this bound;
+# joinerLosesTheHostAfterTheStateIsSentTest and
+# timerFiresWhileTheStateIsOnItsWayTest hold it.
 
 FLOW=specs/resync_flow.qnt
 verify "$FLOW" resync_flow_current allHold
