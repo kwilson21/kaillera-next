@@ -6591,6 +6591,11 @@
   // applied (applySyncState); the deadline asks again, at most
   // RESYNC_MAX_ASKS_AGAIN times, then gives up visibly (RESYNC-REASK-GIVEUP).
   // The late joiner's lost-host resync has its own bound and goes first.
+  // A request at a frame (peer recovery) owes the resync just the same: when
+  // its answer was lost it was let go on the strength of a desync check that
+  // no longer sends anything (no page sends `sync-hash:`), and the guest
+  // stayed desynced for the rest of the match (aResyncAskedForIsNotForgotten,
+  // coordinatedAnswerLostTest).
   let _owedResync = false;
   let _owedResyncAsksAgain = 0;
   const RESYNC_MAX_ASKS_AGAIN = 2;
@@ -6702,14 +6707,14 @@
   // (specs/resync_flow.qnt, lateAndBehind).
   let _resyncRequestAt = -1;
   const _requestIdFrom = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
-  // `again`: the deadline asking again for an owed "now" resync; any other
-  // "now" request starts the owed resync's count afresh.
+  // `again`: the deadline asking again for an owed resync; any other request,
+  // "now" or at a frame, marks the resync owed and starts its count afresh.
   const _beginResyncRequest = (at = -1, again = false) => {
     _resyncRequestInFlight = true;
     _resyncRequestSentAt = performance.now();
     _resyncRequestId++;
     _resyncRequestAt = at;
-    if (at < 0 && !again) {
+    if (!again) {
       _owedResync = true;
       _owedResyncAsksAgain = 0;
     }
@@ -18323,7 +18328,15 @@
       // one frame off; a state ahead of the guest is now held in tick() until
       // the guest reaches it, so a forward gap only lands here after that
       // hold timed out. Backward gaps replay frames whose inputs were sent.
-      if (frame != null && mod._kn_set_frame && _frameNum !== frame) {
+      // kn_set_frame is called on every load, the frame changed or not: it
+      // also tells the C engine that the live state is not the one it saved
+      // last, so the frame is saved again before it runs. Called only on a
+      // change, a state for a frame kn_pre_tick had saved and not run (a
+      // pacing hold, a step that emulated nothing) left the page's own copy
+      // in the ring (specs/ring_after_resync.qnt, savedFrameDidNotRunTest).
+      // A load waits out a pending rollback (_replayBlocksSyncApply), so the
+      // engine does not refuse it here.
+      if (frame != null && mod._kn_set_frame) {
         const oldFrame = _frameNum;
         _frameNum = frame;
         KNState.frameNum = frame;
@@ -18332,11 +18345,13 @@
         if (cFrame !== undefined && cFrame !== frame) {
           _syncLog(`SYNC-FRAME-MISMATCH js=${frame} c=${cFrame} — kn_set_frame refused`);
         }
-        _resetStrictMenuResends();
-        _clearStrictMenuWait();
-        _syncLog(`sync frame reset: ${oldFrame} → ${frame}`);
-        // Arm post-sync diagnostic burst: log full state hash for 10 frames
-        window._knPostSyncDiagFrames = 10;
+        if (oldFrame !== frame) {
+          _resetStrictMenuResends();
+          _clearStrictMenuWait();
+          _syncLog(`sync frame reset: ${oldFrame} → ${frame}`);
+          // Arm post-sync diagnostic burst: log full state hash for 10 frames
+          window._knPostSyncDiagFrames = 10;
+        }
       }
     } else {
       // Fallback: existing loadState path

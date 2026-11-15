@@ -23,9 +23,9 @@ def _body(src: str, start: str, end: str = "\n  };\n") -> str:
 def test_a_now_request_marks_the_resync_owed_and_an_ask_again_does_not_reset_the_count():
     src = LOCKSTEP_JS.read_text()
     begin = _body(src, "const _beginResyncRequest = (at = -1, again = false) => {")
-    assert "if (at < 0 && !again) {\n      _owedResync = true;\n      _owedResyncAsksAgain = 0;\n    }" in begin
-    # A coordinated request ("at frame T") marks nothing: the desync check asks again.
-    assert "_owedResync = true;" not in begin.replace("if (at < 0 && !again) {\n      _owedResync = true;", "")
+    # Every request but an ask again marks the resync owed, one at a frame
+    # (peer recovery) too (specs/resync_reask.qnt, COORDINATED_OWES).
+    assert "if (!again) {\n      _owedResync = true;\n      _owedResyncAsksAgain = 0;\n    }" in begin
     assert src.count("_owedResync = true;") == 1
     assert "let _owedResync = false;" in src
     assert "const RESYNC_MAX_ASKS_AGAIN = 2;" in src

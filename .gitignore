@@ -62,6 +62,7 @@ build/softfloat/libsoftfloat.a
 
 # Hash-golden native test build output
 tests/hash-golden/build/
+tests/rollback-native/build/
 # Root-level ./static symlink that points at web/static — scoped with
 # a leading slash so it doesn't also block new files under web/static/.
 /static
