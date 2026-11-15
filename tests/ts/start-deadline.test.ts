@@ -1,13 +1,14 @@
 /**
  * A wait at the start with a deadline (web/src/start-deadline.ts): it ends
  * when what it waits for comes, calls back once at the deadline otherwise,
- * and never calls back once cancelled.
+ * and never calls back once cancelled. A word said until it is heard: now,
+ * again at intervals, at most a given number of times.
  *
  * Run: node --test tests/ts/
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { startDeadline } from '../../web/src/start-deadline.ts';
+import { sayUntilHeard, startDeadline } from '../../web/src/start-deadline.ts';
 
 test('a wait that is done never calls back', async () => {
   let deadlines = 0;
@@ -43,4 +44,37 @@ test('a wait started again replaces the one before: only the new one can call ba
   const second = startDeadline({ deadlineMs: 30, onDeadline: () => calls.push('second') });
   assert.equal(await second.outcome, 'deadline');
   assert.deepEqual(calls, ['second']);
+});
+
+test('a word is said at once, again at each interval, and stops once heard', async () => {
+  const said: number[] = [];
+  let heard = false;
+  const report = sayUntilHeard({ everyMs: 15, times: 6, heard: () => heard, say: (n) => said.push(n) });
+  assert.deepEqual(said, [0]);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  heard = true;
+  assert.equal(await report.result, true);
+  assert.deepEqual(said, [0, 1]);
+});
+
+test('a word never heard is said the number of times given, then given up', async () => {
+  const said: number[] = [];
+  const report = sayUntilHeard({ everyMs: 5, times: 3, heard: () => false, say: (n) => said.push(n) });
+  assert.equal(await report.result, undefined);
+  assert.deepEqual(said, [0, 1, 2]);
+});
+
+test('a word already heard is not said', async () => {
+  const said: number[] = [];
+  const report = sayUntilHeard({ everyMs: 5, times: 3, heard: () => true, say: (n) => said.push(n) });
+  assert.equal(await report.result, true);
+  assert.deepEqual(said, []);
+});
+
+test('a word cancelled is not said again', async () => {
+  const said: number[] = [];
+  const report = sayUntilHeard({ everyMs: 10, times: 6, heard: () => false, say: (n) => said.push(n) });
+  report.cancel();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(said, [0]);
 });

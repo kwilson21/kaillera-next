@@ -8223,7 +8223,9 @@
   const STARTUP_HOST_ANSWER_DEADLINE_MS = STARTUP_CONNECT_TIMEOUT_MS * (STARTUP_CONNECT_MAX_ATTEMPTS + 1);
   const STARTUP_HOST_AFTER_OFFER_MS = STARTUP_CONNECT_TIMEOUT_MS * 2;
   let _hostAnswerWait = null;
-  const _hostChannelOpen = () => Object.values(_peers).some((p) => p.slot === 0 && p.dc?.readyState === 'open');
+  // The host's peer whose channel is open, if any.
+  const _hostOpenPeer = () => Object.values(_peers).find((p) => p.slot === 0 && p.dc?.readyState === 'open');
+  const _hostChannelOpen = () => !!_hostOpenPeer();
   const _armHostAnswerDeadline = (deadlineMs, after) => {
     if (_playerSlot === 0 || _isSpectator || _lateJoin || _phase >= PHASE_RUNNING) return;
     if (_hostChannelOpen()) return;
@@ -8310,7 +8312,7 @@
           peer.pc?.close();
         } catch (_) {}
       } else {
-        peer._leftOutOfStart = true;
+        _keepOpenForTheWord(sid, slot);
       }
       _markPendingLateJoinPeer(sid, slot, reason);
     }
@@ -8318,6 +8320,86 @@
       if (info?.slot === slot) _markPendingLateJoinPeer(sid, slot, reason);
     }
     if (_startCohortSlots?.delete(slot)) _syncLog(`start cohort: slot ${slot} removed, it is left out`);
+  };
+
+  // A player the host left out keeps its channel open for the word
+  // (`left-out:`), and its page's restart closes it. A page that never
+  // restarts (a frozen tab, a page from before `left-out:`) would keep it open
+  // for the whole session, counted by pings, rosters and broadcasts: past
+  // LEFT_OUT_RESTART_MS the host closes it itself (I1), and the player stays
+  // held as a late joiner. The connections kept open, by socket id: each
+  // ends with its peer (resetPeerState, I2) and at stop.
+  const LEFT_OUT_RESTART_MS = 30000;
+  const _leftOutKeptOpen = new Map(); // sid -> startDeadline handle
+  const _endKeptOpen = (sid) => {
+    const wait = _leftOutKeptOpen.get(sid);
+    if (!wait) return;
+    _leftOutKeptOpen.delete(sid);
+    wait.cancel();
+  };
+  const _keepOpenForTheWord = (sid, slot) => {
+    if (_leftOutKeptOpen.has(sid)) return;
+    const wait = window.KNCore.startGroup.startDeadline({
+      deadlineMs: LEFT_OUT_RESTART_MS,
+      onDeadline: () => {
+        if (_leftOutKeptOpen.get(sid) !== wait) return;
+        _leftOutKeptOpen.delete(sid);
+        const peer = _peers[sid];
+        if (!peer) return;
+        _syncLog(`START-LEFT-OUT-CLOSED sid=${sid} slot=${slot}: its page did not restart in ${LEFT_OUT_RESTART_MS}ms`);
+        hardDisconnectPeer(sid, { quiet: true });
+        try {
+          peer.pc?.close();
+        } catch (_) {}
+        // Still held as a late joiner: the late join takes it if it comes back.
+        _markPendingLateJoinPeer(sid, slot, 'left out of the start');
+        for (const [knownSid, info] of Object.entries(_knownPlayers)) {
+          if (info?.slot === slot) _markPendingLateJoinPeer(knownSid, slot, 'left out of the start');
+        }
+      },
+    });
+    _leftOutKeptOpen.set(sid, wait);
+  };
+
+  // A guest that cannot reach another guest tells the host
+  // (`unreachable:<slot>`), and says it again every
+  // STARTUP_CONNECT_TIMEOUT_MS until the host has left that player out, the
+  // two can reach each other after all, or the match runs, at most
+  // UNREACHABLE_REPORTS times. The host takes the word only once its own
+  // give-up could have come (leavesOutUnreachable): a word said once, too
+  // soon (a failed connection retried at once, a host that started later),
+  // was lost, and both players were left out at the load deadline. Stopping
+  // the engine stops it, this page's own leave-out included (its restart).
+  const UNREACHABLE_REPORTS = 6;
+  const _unreachableReports = new Map(); // slot -> Polling
+  const _stopUnreachableReports = () => {
+    for (const report of _unreachableReports.values()) report.cancel();
+    _unreachableReports.clear();
+  };
+  const _reportUnreachable = (slot) => {
+    if (_unreachableReports.has(slot)) return;
+    const report = window.KNCore.startGroup.sayUntilHeard({
+      everyMs: STARTUP_CONNECT_TIMEOUT_MS,
+      times: UNREACHABLE_REPORTS,
+      heard: () =>
+        _phase >= PHASE_RUNNING ||
+        _leftOutOfStart.has(slot) ||
+        Object.values(_peers).some((p) => p.slot === slot && p.dc?.readyState === 'open'),
+      say: (n) => {
+        const host = _hostOpenPeer();
+        if (!host) return;
+        try {
+          host.dc.send(`unreachable:${slot}`);
+          _syncLog(`START-UNREACHABLE: told the host slot ${slot} cannot be reached (${n + 1}/${UNREACHABLE_REPORTS})`);
+        } catch (e) {
+          _syncLog(`START-UNREACHABLE: telling the host slot ${slot} cannot be reached failed: ${e}`);
+        }
+      },
+    });
+    _unreachableReports.set(slot, report);
+    void report.result.then(() => {
+      if (_unreachableReports.get(slot) === report) _unreachableReports.delete(slot);
+    });
   };
 
   // The host leaves a player out of the start. False when this page is not
@@ -8512,13 +8594,7 @@
       // both, decides who plays (specs/start_group.qnt, reportApart). The
       // guest waits for the host's word (`left-out:`).
       if (!_leaveOutOfStart(remoteSid, 'startup connect gave up')) {
-        const host = Object.values(_peers).find((p) => p.slot === 0 && p.dc?.readyState === 'open');
-        if (host && _playerSlot !== 0) {
-          try {
-            host.dc.send(`unreachable:${peer.slot}`);
-          } catch (_) {}
-          _syncLog(`START-UNREACHABLE: told the host slot ${peer.slot} cannot be reached`);
-        }
+        if (_playerSlot !== 0) _reportUnreachable(peer.slot);
         setStatus('Peer connection stalled — waiting for the host');
       }
       return;
@@ -9280,15 +9356,14 @@
         if (e.data === 'late-join-ready') {
           finishLateJoinReady('DC', remoteSid);
         }
-        // The host left a player out of the start (specs/start_group.qnt):
-        // stop waiting for it; it joins late. Only the host's word counts.
         // A guest cannot reach another guest: the host leaves the one named
         // out of the start (specs/start_group.qnt, reportApart). Only the
         // host decides; the first word of a pair counts.
         if (e.data.startsWith('unreachable:')) {
           const slot = Number(e.data.slice('unreachable:'.length));
-          const inStart = new Set(_startGroupPeers().map(([, p]) => p.slot));
-          const named = _startGroupPeers().find(([, p]) => p.slot === slot && !p.synthetic);
+          const startGroup = _startGroupPeers();
+          const inStart = new Set(startGroup.map(([, p]) => p.slot));
+          const named = startGroup.find(([, p]) => p.slot === slot && !p.synthetic);
           const sinceStartMs = Math.max(0, Math.floor(performance.now() - _startedAt));
           const leaves = window.KNCore.startGroup.leavesOutUnreachable(
             _playerSlot === 0 && !_isSpectator,
@@ -9307,6 +9382,8 @@
           }
           return;
         }
+        // The host left a player out of the start (specs/start_group.qnt):
+        // stop waiting for it; it joins late. Only the host's word counts.
         if (e.data.startsWith('left-out:')) {
           const slot = Number(e.data.slice('left-out:'.length));
           const mySlot = _isSpectator ? -1 : (_playerSlot ?? -1);
@@ -9968,6 +10045,8 @@
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A player that comes back reaches the ready barrier again.
     _saidStartReady.delete(slot);
+    // A channel kept open for a left-out player's word is gone.
+    if (opts.sid) _endKeptOpen(opts.sid);
     // A joiner that was being served is gone: the pause is not kept for it.
     // The resume broadcasts the roster, and the caller has yet to drop this
     // peer from `_peers`: done now, the roster would list the joiner as a
@@ -10097,7 +10176,7 @@
       _syncLog(`pending late-join peer ${remoteSid} disconnected before activation`);
       // A player the host left out of the start whose page restarts to join
       // late has not gone: nobody is told it dropped.
-      hardDisconnectPeer(remoteSid, { quiet: !!peer._leftOutOfStart });
+      hardDisconnectPeer(remoteSid, { quiet: _leftOutKeptOpen.has(remoteSid) });
       return;
     }
 
@@ -19427,6 +19506,8 @@
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
     _leftOutOfStart.clear();
+    for (const sid of [..._leftOutKeptOpen.keys()]) _endKeptOpen(sid);
+    _stopUnreachableReports();
     _endHostAnswerDeadline(false);
     _endStartLoadWait(false);
     _saidStartReady.clear();

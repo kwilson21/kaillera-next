@@ -117,7 +117,7 @@ import {
   startsAlone,
   takesLeftOut,
 } from './start-group.ts';
-import { startDeadline } from './start-deadline.ts';
+import { sayUntilHeard, startDeadline } from './start-deadline.ts';
 import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
@@ -336,6 +336,7 @@ export const KNCore = {
     startHasItsHost,
     /** A start wait with a deadline, an Effect program (web/src/start-deadline.ts). */
     startDeadline,
+    sayUntilHeard,
   },
   meshHealTargets,
   normalizeAxis,

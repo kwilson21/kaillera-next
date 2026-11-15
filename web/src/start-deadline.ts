@@ -10,6 +10,7 @@
  * page, that cannot wait without a deadline.
  */
 import { Deferred, Duration, Effect, Fiber } from 'effect';
+import { type Polling, startPolling } from './poll.ts';
 
 /** How the wait ended. */
 export type StartDeadlineOutcome = 'done' | 'deadline';
@@ -69,3 +70,31 @@ export const startDeadline = ({ deadlineMs, onDeadline }: StartDeadlineOptions):
     outcome,
   };
 };
+
+export interface SayUntilHeardOptions {
+  readonly everyMs: number;
+  /** How many times in all, the first included. */
+  readonly times: number;
+  /** The word has been acted on (or no longer matters): stop saying it. */
+  readonly heard: () => boolean;
+  /** Say it; `n` counts from 0. */
+  readonly say: (n: number) => void;
+}
+
+/**
+ * A word said again until it is heard: now, then every `everyMs`, at most
+ * `times` in all, until `heard()`. Its `result` is `true` once heard, or
+ * `undefined` once the times ran out; `cancel` stops it (the engine stopped).
+ * A guest's `unreachable:<slot>` to the host: the host does not take the word
+ * before its own give-up could have come, so one said once, too soon, was
+ * lost (specs/start_group.qnt, reportApart).
+ */
+export const sayUntilHeard = ({ everyMs, times, heard, say }: SayUntilHeardOptions): Polling<true> =>
+  startPolling<true>(
+    (n) => {
+      if (heard()) return true;
+      say(n);
+      return undefined;
+    },
+    { everyMs, attempts: times },
+  );
