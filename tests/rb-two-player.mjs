@@ -584,7 +584,10 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = (() => {
 const DELAY_SYNC_ANSWER_RECOVER_MS = 20000;
 const faultNeedsSeconds = Math.ceil(
   (((DROP_PEER_MS > 0 ? DROP_PEER_MS + DROP_PEER_RECOVER_MS : 0) +
-    (DELAY_SYNC_ANSWER_MS > 0 ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS : 0) +
+    // At boot the held answer is over long before the battle.
+    (DELAY_SYNC_ANSWER_MS > 0 && DELAY_SYNC_ANSWER_AT === 'battle'
+      ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS
+      : 0) +
     (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0) +
     (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0)) *
     1.5) /
