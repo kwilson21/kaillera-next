@@ -518,14 +518,22 @@ Slice 1, the peer mesh and signaling:
   100 ms. An ask that is never answered, or a late input past the rollback
   window that differs, escalates to a resync with a deadline and, last, a
   drop (`specs/ask_escalation.qnt`). The host's open handler resets the peer
-  (I2), and only the host's channel may send a state header. Driven by
-  `CATCH_UP_HOLE_MS` and `ASK_UNANSWERED_MS` (`ASK_UNANSWERED_ACKS`).
-- Next, the receiver side the 100 ms resend masks: a page far behind (a
-  guest catching up) drops a peer's inputs as too far ahead (`INPUT-OOR`)
-  even when they come on the reliable channel, and nothing asks for them
-  again once the page reaches them; only the sender's resend brings them
-  back. The page should remember the frames it dropped as ahead and ask for
-  them (`resend:`) once it reaches them, modelled first, and then a
+  (I2), and only the host's channel may send a state header. That reset
+  left the C slot inactive while the page ran on the peer's missing inputs,
+  recording no prediction (a split at 1344 in a CATCH_UP_HOLE run): after a
+  reconnect reset a frame now waits for the peer's first input
+  (`specs/reconnect_inputs.qnt`), and every two-player run fails on a frame
+  run on a prediction nothing corrects (`PREDICTED-KNOWN`). Driven by
+  `CATCH_UP_HOLE_MS`, `ASK_UNANSWERED_STALL_MS` (`ASK_UNANSWERED_ACKS`), `ASK_UNANSWERED_PHANTOM` and `PAST_WINDOW_INPUT`.
+- Next, the receiver side the 100 ms resend masks: a page far behind drops
+  a peer's inputs as too far ahead (`INPUT-OOR`) even on the reliable
+  channel. #235 remembers them (`_inputDroppedAheadUpTo`) and asks for them
+  when the page stalls on them, but not when a resync moves the page's
+  frame past them: in a send-once build the guest dropped the host's
+  1901+ at 1810, a resync took it from 1827 to 1910, it never asked, and
+  the pages split at about 1914 (`HEAL_BOTH_SIDES`). Only the sender's
+  resend brings them back. Modelled first: after a resync's frame jump, the
+  frames dropped as ahead at or above the new floor are asked for; then a
   reliable-channel send can go out once.
 
 Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed

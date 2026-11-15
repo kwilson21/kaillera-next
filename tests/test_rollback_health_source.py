@@ -459,6 +459,7 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         const _localInputs = {{}};
         const _remoteInputs = {{ 1: {{}} }};
         const _syncLog = () => {{}};
+        const _awaitFirstInputAfterReset = {{}};
         const KNShared = {{ ZERO_INPUT: Object.freeze({{buttons:0,lx:0,ly:0,cx:0,cy:0}}) }};
         const mod = {{ _kn_feed_input: (...args) => calls.push(args) }};
         for (let frame = 890; frame <= 910; frame++) {{

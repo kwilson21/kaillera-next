@@ -24,6 +24,7 @@ def _feed(watches, inputs):
         const {{ changesWatchedFrame, followUpIsUnneeded }} = await import('./web/src/sync-follow-up.ts');
         globalThis.window = {{ KNCore: {{ syncFollowUp: {{ changesWatchedFrame, followUpIsUnneeded }} }} }};
         const _syncLog = () => {{}};
+        const _awaitFirstInputAfterReset = {{}};
         const KNShared = {{ ZERO_INPUT: {{ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 }} }};
         const heap = new Int32Array(64);
         let mispredictions = 0;

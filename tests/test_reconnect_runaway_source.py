@@ -110,3 +110,38 @@ def test_an_input_past_the_window_that_differs_escalates_like_an_overdue_ask():
     assert "window.KNCore.resyncRequest.overdueAskStep(" in late
     assert "INPUT-PAST-WINDOW-MISMATCH" in late
     assert "_escalateLostInput(peer, step, now);" in late
+
+
+def test_after_a_reconnect_reset_a_frame_waits_for_the_peers_first_input():
+    # specs/reconnect_inputs.qnt WAIT_FIRST_INPUT: the reset leaves the C slot
+    # inactive, so a frame run on the peer's missing input would record no
+    # prediction. It waits until one input at or above the floor is in.
+    src = _src()
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "delete _awaitFirstInputAfterReset[slot];" in reset
+    assert reset.index("mod._kn_rollback_slot_reset(slot)") < reset.index(
+        "if (reason === 'reconnect') _awaitFirstInputAfterReset[slot] = true;"
+    )
+    feed = src[src.index("const _feedWatched = (mod, slot, frame, feed) => {") :]
+    feed = feed[: feed.index("\n  };\n")]
+    assert "delete _awaitFirstInputAfterReset[slot];" in feed
+    stall = src[src.index("const stallThreshold = _rbInputStallThreshold();") :]
+    stall = stall[: stall.index("_checkPredictedKnown(rbInputPeers, rbApplyFrame);")]
+    assert "_awaitingFirstInput(p.slot);" in stall
+    assert "if (gapAtEdge || firstWait || adv >= stallThreshold) {" in stall
+    # Every reset of all peers' state clears it too (I2): three, besides
+    # the declaration.
+    assert src.count("let _awaitFirstInputAfterReset = {};") == 1
+    assert src.count("_awaitFirstInputAfterReset = {};") == 4
+
+
+def test_every_frame_that_runs_is_checked_for_a_prediction_nothing_corrects():
+    src = _src()
+    check = src[src.index("const _checkPredictedKnown = (peers, applyFrame) => {") :]
+    check = check[: check.index("\n  };\n")]
+    assert "why = 'first-input';" in check
+    assert "why = 'edge';" in check
+    assert "PREDICTED-KNOWN f=" in check
+    assert src.count("_checkPredictedKnown(rbInputPeers, rbApplyFrame);") == 1
+    assert "predictedKnown: _predictedKnownCount," in src

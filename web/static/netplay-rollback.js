@@ -1739,6 +1739,13 @@
   // asked for each frame. Cleared with the peer's other input state
   // (resetPeerState, I2) and with every input timeline.
   let _inputDroppedAheadUpTo = {};
+  // After a reconnect reset (resetPeerState 'reconnect') the C slot is
+  // inactive: a frame run on that peer's missing input records no
+  // prediction, and nothing corrects it when the input comes. Until one real
+  // input at or above the floor is taken in, such a frame waits
+  // (specs/reconnect_inputs.qnt, WAIT_FIRST_INPUT).
+  let _awaitFirstInputAfterReset = {};
+  let _predictedKnownCount = 0;
   // INPUT-OOR is logged at most once a second per slot, with how many were
   // dropped since the last line: a peer far behind sends every frame, and a
   // line each filled the sync log's ring and evicted everything before it.
@@ -1764,6 +1771,39 @@
   // The oldest input from `slot` that can still be missing: nothing before
   // the rollback init or the last resync is waited for.
   const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
+  // After a reconnect reset: no input of that peer at or above the floor
+  // has been taken in yet (one that has will be fed before the frame runs).
+  const _awaitingFirstInput = (slot) => {
+    if (!_awaitFirstInputAfterReset[slot]) return false;
+    const floor = _inputFloor(slot);
+    for (const key of Object.keys(_remoteInputs[slot] || {})) if (+key >= floor) return false;
+    return true;
+  };
+  // The frame about to run, checked apart from the stall's decision: it must
+  // not finalize a frame on a prediction of an input the peer is known to
+  // have made (at the window's edge), nor predict one C will not record
+  // (after a reconnect reset). Each is a split nothing corrects; every
+  // two-player run fails on one (PREDICTED-KNOWN). A phantom is predicted by
+  // design until it is heard from (PEER-RECOVERED, then a resync).
+  const _checkPredictedKnown = (peers, applyFrame) => {
+    const windowEdge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+    for (const p of peers) {
+      if (_peerPhantom[p.slot]) continue;
+      const floor = _inputFloor(p.slot);
+      const peerHas = Math.max(_lastRemoteFramePerSlot[p.slot] ?? -1, _inputDroppedAheadUpTo[p.slot] ?? -1);
+      let why = '';
+      if (applyFrame >= floor && !_remoteInputs[p.slot]?.[applyFrame] && _awaitingFirstInput(p.slot))
+        why = 'first-input';
+      else if (RB_TRUE_ROLLBACK && windowEdge >= floor && windowEdge <= peerHas && !_remoteInputs[p.slot]?.[windowEdge])
+        why = 'edge';
+      if (!why) continue;
+      _predictedKnownCount++;
+      _syncLog(
+        `PREDICTED-KNOWN f=${_frameNum} slot=${p.slot} apply=${applyFrame} edge=${windowEdge} ` +
+          `peerHas=${peerHas} floor=${floor} why=${why}`,
+      );
+    }
+  };
   const _settleInputsBefore = (slot, frame) => {
     _inputSettledBefore[slot] = Math.max(_inputSettledBefore[slot] ?? 0, frame - DELAY_FRAMES);
   };
@@ -5089,6 +5129,8 @@
     // ask is (specs/ask_escalation.qnt, lateMismatch).
     const failedBefore = mod?._kn_get_failed_rollbacks?.() ?? -1;
     const result = _feedWatchedFrame(mod, slot, frame, feed);
+    // C has this slot's input: it records predictions for it again.
+    delete _awaitFirstInputAfterReset[slot];
     const failedAfter = mod?._kn_get_failed_rollbacks?.() ?? -1;
     if (failedBefore >= 0 && failedAfter > failedBefore) _onPastWindowMismatch(slot, frame);
     return result;
@@ -5823,6 +5865,7 @@
     delete _remoteInputs[slot];
     delete _inputSettledBefore[slot];
     delete _inputDroppedAheadUpTo[slot];
+    delete _awaitFirstInputAfterReset[slot];
     delete _inputAskedAt[slot];
     delete _inputAskOverdue[slot];
     delete _overduePushes[slot];
@@ -9818,6 +9861,7 @@
     delete _remoteInputs[slot];
     delete _inputSettledBefore[slot];
     delete _inputDroppedAheadUpTo[slot];
+    delete _awaitFirstInputAfterReset[slot];
     delete _inputAskedAt[slot];
     delete _inputAskOverdue[slot];
     delete _overduePushes[slot];
@@ -9873,6 +9917,9 @@
       if (mod?._kn_rollback_slot_reset) mod._kn_rollback_slot_reset(slot);
     }
 
+    // The same peer goes on after a reconnect: its inputs are waited for
+    // until one is taken in (the C slot active again).
+    if (reason === 'reconnect') _awaitFirstInputAfterReset[slot] = true;
     _syncLog(`PEER-RESET slot=${slot} reason=${reason}`);
   };
 
@@ -13263,6 +13310,7 @@
     _remoteInputs = preservedRemoteInputs;
     _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
     _inputDroppedAheadUpTo = {};
+    _awaitFirstInputAfterReset = {};
     _inputOorLog = {};
     _inputAskedAt = {};
     _inputAskOverdue = {};
@@ -14061,6 +14109,7 @@
         _remoteInputs = {};
         _inputSettledBefore = {};
         _inputDroppedAheadUpTo = {};
+        _awaitFirstInputAfterReset = {};
         _inputOorLog = {};
         _inputAskedAt = {};
         _inputAskOverdue = {};
@@ -15745,10 +15794,17 @@
               windowEdge >= _inputFloor(p.slot) &&
               windowEdge < peerFrame &&
               !_remoteInputs[p.slot]?.[windowEdge];
+            // After a reconnect reset nothing is known of how far ahead
+            // the peer is, and C would record no prediction: wait for its
+            // first input (specs/reconnect_inputs.qnt).
+            const firstWait =
+              !_remoteInputs[p.slot]?.[rbApplyFrame] &&
+              rbApplyFrame >= _inputFloor(p.slot) &&
+              _awaitingFirstInput(p.slot);
             if (gapAtEdge || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
               // Input missing — check how far ahead we are
               const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
-              if (gapAtEdge || adv >= stallThreshold) {
+              if (gapAtEdge || firstWait || adv >= stallThreshold) {
                 const nowRbInputStall = performance.now();
                 const rbStallKey = `${p.slot}:${rbApplyFrame}`;
                 if (_rbInputStallKey !== rbStallKey) {
@@ -15776,7 +15832,8 @@
                 if (!_rbStallLogged || _frameNum - _rbStallLogged >= 60) {
                   _syncLog(
                     `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
-                      `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling (rollback budget exhausted)`,
+                      `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling ` +
+                      (firstWait ? '(first input since the reconnect)' : '(rollback budget exhausted)'),
                   );
                   _rbStallLogged = _frameNum;
                 }
@@ -15789,6 +15846,7 @@
           }
           _rbInputStallKey = '';
           _rbInputStallStartTime = 0;
+          _checkPredictedKnown(rbInputPeers, rbApplyFrame);
         }
 
         if (_delayRetunePending && !(tickMod._kn_get_replay_depth?.() > 0)) _recomputeDelay();
@@ -19342,6 +19400,7 @@
     _remoteInputs = {};
     _inputSettledBefore = {};
     _inputDroppedAheadUpTo = {};
+    _awaitFirstInputAfterReset = {};
     _inputOorLog = {};
     _inputAskedAt = {};
     _inputAskOverdue = {};
@@ -19750,6 +19809,8 @@
           : _hudRollbackDepthSamples.reduce((a, b) => a + b, 0) / _hudRollbackDepthSamples.length;
       const tickMod = window.EJS_emulator?.gameManager?.Module;
       return {
+        // Frames run on a prediction nothing will correct (PREDICTED-KNOWN).
+        predictedKnown: _predictedKnownCount,
         pingMs: _hudPingMs(),
         predictionsPaused: _predictionsPaused,
         predictionState: _predictionsPaused ? 'LOCKSTEP' : 'PREDICT',
