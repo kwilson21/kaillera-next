@@ -104,7 +104,7 @@ kaillera-next/
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
 │       ├── demo.js              # demo page orchestrator (emulator boot, engine start, fake peer + menu autopilot wiring); its options, network settings, HUD text and menu script are web/src/demo
 │       ├── fake-peer.js         # synthetic P2 for the demo page (simulated input/jitter)
-│       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo (reads RDRAM menu state)
+│       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo and the two-player test (window.KNMenuAutopilot) from web/src/page/menu-autopilot.ts
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD (window.KNRollbackTimeline) from web/src/page/rollback-timeline.ts
 │       ├── feedback.js          # in-app feedback collection (window.KNFeedback); starts web/src/site/feedback.ts
 │       ├── version.js           # version display + changelog modal; starts web/src/site/version.ts
