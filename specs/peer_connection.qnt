@@ -540,7 +540,11 @@ module peer_connection {
     pages' = pages.set(s, { id: nextPage, offers: 0, old: old }),
     nextPage' = nextPage + 1,
     nextId' = nextId, labels' = labels,
-    wire' = wire, unchangedPhase, unchangedHistory,
+    // The new page has not run startGameSequence. In a match the phase is
+    // left to the match's own actions, as before.
+    started' = if (running) started else started.exclude(Set(s)),
+    running' = running, stalled' = stalled, dead' = dead,
+    wire' = wire, unchangedHistory,
   }
   action reload(s: str): bool = replacePage(s, false)
   action reloadOld(s: str): bool = replacePage(s, true)
