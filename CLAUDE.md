@@ -104,7 +104,7 @@ kaillera-next/
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
-│       ├── demo.js              # demo page orchestrator (emulator boot, engine start, fake peer + menu autopilot wiring); its options, network settings, HUD text and menu script are web/src/demo
+│       ├── demo.js              # demo page orchestrator: what the page shows, and a recording's and the autopilot's progress; its options, network settings, HUD text, menu script and wiring (emulator boot, engine start, fake peer + menu autopilot) are web/src/demo
 │       ├── fake-peer.js         # starts the demo page's synthetic P2 (window.KNFakePeer) from web/src/page/fake-peer.ts
 │       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo and the two-player test (window.KNMenuAutopilot) from web/src/page/menu-autopilot.ts
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD (window.KNRollbackTimeline) from web/src/page/rollback-timeline.ts
@@ -123,7 +123,7 @@ kaillera-next/
 │   │   ├── poll.ts              # looking again at intervals as Effect code: a bounded poll and a repeating one (emulator boot, gamepad hot-plug)
 │   │   ├── kn-state.ts          # cross-module shared state: the type and starting values of window.KNState, set by the bundle
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
-│   │   ├── socket-boundary.ts   # decodes what the server and peers send the play page (protocol.gen.ts, peer-protocol.ts); drops what is off its schema
+│   │   ├── socket-boundary.ts   # decodes what the server and peers send the play page and the rollback engine (protocol.gen.ts, peer-protocol.ts); drops what is off its schema
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
 │   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); driven from the engine (peer-driver.ts), being wired in to decide one rule at a time
 │   │   ├── peer-driver.ts       # hands the rollback engine's events to one peer-connection.ts machine per other player
@@ -356,8 +356,8 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   like the per-peer machine offering only from the lower slot), the
   old-against-new test asserts that difference and the PR names its model
   scenario; any other difference blocks the change. The modules that still observe (they send
-  `*-disagree` or `protocol-mismatch` reports) are being switched to deciding
-  the same way; don't add a new one.
+  `*-disagree` reports) are being switched to deciding the same way; don't
+  add a new one.
 - **Model and prove before you patch state logic.** This applies to plans
   as much as to code: a plan for anything involving state, ordering or
   reconnects names the model, the invariant and the diagram it will change

@@ -12,6 +12,7 @@ import * as rom from './rom.ts';
 import { demoRomStore } from './rom-store.ts';
 import { createRunState } from './run-state.ts';
 import { createTimelineView } from './timeline-view.ts';
+import { createDemoWiring } from './wiring.ts';
 
 export const demo = {
   autopilot,
@@ -24,4 +25,5 @@ export const demo = {
   indicators: createIndicators,
   timelineView: createTimelineView,
   runState: createRunState,
+  wiring: createDemoWiring,
 };
