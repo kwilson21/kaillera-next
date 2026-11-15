@@ -7,10 +7,13 @@
  * a channel that opened, a connection found lost, one of the engine's own
  * timers. The engine calls `open` before it handles such an event and
  * `close` once it has decided (before its first `await`), with the event in
- * the machine's words; `close` hands it to the machine. The machine decides
- * nothing yet: what it would do is not acted on. It is being wired in to
- * decide one rule at a time (docs/roadmap.md), and its decisions replace the
- * engine's as they are.
+ * the machine's words; `close` hands it to the machine. It is being wired in
+ * to decide one rule at a time (docs/roadmap.md), and its decisions replace
+ * the engine's as they are. It decides the mesh health check (`decideHeal`;
+ * specs/peer_connection.qnt, peer_connection_heal_one_side): the lower slot
+ * resets and offers, the higher slot treats the dead channel as a drop it
+ * has just noticed and waits for that offer. Elsewhere what it would do is
+ * not acted on yet.
  *
  * The engine's timers and the machine's deadlines stand for the same waits
  * but run on different clocks (the health check runs every 300 frames, the
@@ -34,6 +37,7 @@
 import {
   createPeerConnection,
   PEER_TIMING,
+  type PeerCommand,
   type PeerConnection,
   type PeerDeadline,
   type PeerEvent,
@@ -221,6 +225,38 @@ export const createPeerDriver = (options: PeerDriverOptions) => {
         }
         held.set(frame.key, [...list, event]);
       }),
+
+    /**
+     * The mesh health check found no open channel to the player under
+     * `frame`: the machine decides what is done (onLost if it still held the
+     * channel open, else onHealDeadline). Its
+     * commands, for the engine to carry out; null when the machine does not
+     * drive that player (the engine heals as before), or has no heal
+     * deadline armed (it holds another wait: the engine heals as before, and
+     * this is logged). Closes the frame.
+     */
+    decideHeal: (
+      frame: Frame | null | undefined,
+      found: { readonly page: string; readonly attempt: number },
+    ): readonly PeerCommand[] | null =>
+      guard(() => {
+        if (!frame || !frame.open) return null;
+        closeFrame(frame);
+        if (frame.slot === null) return null;
+        const watch = watchFor(frame.slot);
+        if (!watch) return null;
+        // A machine that still holds the channel open takes it for lost: that
+        // is its decision (the lower slot offers, the higher slot waits).
+        // Otherwise its heal deadline decides.
+        const commands =
+          watch.peer.state() === 'open'
+            ? watch.peer.send({ type: 'lost', page: found.page, attempt: found.attempt })
+            : watch.peer.fire('healAfter');
+        if (commands === null) {
+          options.log(`PEER-DRIVER slot=${frame.slot} heal not decided: the machine is ${watch.peer.state()}`);
+        }
+        return commands;
+      }, null) ?? null,
 
     /** The roster names the slot of the player under `key`: what was held for them reaches their machine. */
     identify: (key: string, slot: number | null | undefined): void =>

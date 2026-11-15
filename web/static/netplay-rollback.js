@@ -17357,22 +17357,46 @@
           _syncLog(
             `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
           );
-          if (p) {
-            try {
-              p.pc.close();
-            } catch (_) {}
-            // I2: route per-peer cleanup through resetPeerState before
-            // dropping the _peers entry.
-            resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });
-            delete _peers[sid];
+          // The per-peer machine decides (specs/peer_connection.qnt,
+          // peer_connection_heal_one_side): the lower slot resets its entry
+          // and offers; the higher slot takes the dead channel for a drop it
+          // has just noticed (reconnecting, the 45 s give-up armed: I1) and
+          // waits for that offer. Both offering at once crossed the two
+          // offers. Null: the machine does not drive this player (a page from
+          // before signals carried an attempt, a late joiner, one offered to
+          // before its machine existed) or holds another wait: both slots
+          // heal, as before.
+          const decided =
+            _peerDriver()?.decideHeal(healFrame, {
+              page: healFound?.page ?? '',
+              attempt: healFound?.attempt ?? 0,
+            }) ?? null;
+          if (decided === null || decided.some((command) => command.type === 'offer')) {
+            if (p) {
+              try {
+                p.pc.close();
+              } catch (_) {}
+              // I2: route per-peer cleanup through resetPeerState before
+              // dropping the _peers entry.
+              resetPeerState(p.slot, 'mesh-heal', { peer: p, sid });
+              delete _peers[sid];
+            }
+            createPeer(sid, info.slot, true);
+            sendOffer(sid, { reconnect: true });
+          } else {
+            _syncLog(`MESH-HEAL-WAIT f=${_frameNum} slot=${info.slot} sid=${sid}: the lower slot offers`);
+            if (p) {
+              // An offer of this page's own goes with its connection.
+              if (p.isInitiator && decided.some((command) => command.type === 'close')) {
+                try {
+                  p.pc.close();
+                } catch (_) {}
+              }
+              // The machine has been told (decideHeal): the engine's own drop
+              // handling only, not handlePeerDisconnect's driver frame.
+              if (!p.reconnecting) _handlePeerDisconnect(sid, p);
+            }
           }
-          createPeer(sid, info.slot, true);
-          sendOffer(sid, { reconnect: true });
-          _peerDriver()?.close(healFrame, {
-            type: 'heal',
-            page: healFound?.page ?? '',
-            attempt: healFound?.attempt ?? 0,
-          });
         }
       }
       _remoteApplied++;

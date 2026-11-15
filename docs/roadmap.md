@@ -413,23 +413,40 @@ Slice 1, the peer mesh and signaling:
   left alone, not reported. The model shows why it has to be
   (`oldPageAnswersWithNoLabelTest`): a page that goes by the id drops an
   old page's answer, its own included, and the two never connect.
-- Next: the machine is wired in to decide, one rule at a time (the owner's
-  rule: what makes the netcode more robust is wired in), starting with who
-  offers from the health check (`heal`), then the differences below. In
-  each, the engine's decision reads the machine and its copy is deleted;
-  the old-against-new test asserts the intended difference, the PR names
-  its model scenario, and a two-player fault mode reaches the rule.
-- Not wired: spectators, a page that joined a match in play, a player held
-  as a late joiner, more than one machine per player on a page (a player
-  this page offered to before it had a machine is left to the engine), and
-  the machine's view of the health check's timing (it runs on the
-  engine's). Each is wired, or kept on the engine's path with a reason,
-  before the engine's last copy goes. The four properties are still
-  violated by the engine.
+- Deciding: who offers from the health check (`heal`). The engine carries
+  out the machine's commands (`decideHeal`): the lower slot resets its
+  entry and offers, the higher slot takes the dead channel for a drop it
+  has just noticed (the 45 s give-up armed) and waits for that offer
+  (specs/peer_connection.qnt, `peer_connection_heal_one_side`). During a
+  deploy an old higher slot still offers too, which is exactly today; the
+  model shows no pair of versions is worse than today.
+- Next: the machine is wired in to decide the rest, one rule at a time (the
+  owner's rule: what makes the netcode more robust is wired in), next
+  answering a reconnect offer arms the give-up (`deadline:giveUpAfter`,
+  ANSWERER_HAS_DEADLINE: with it `everyWaitHasADeadline` holds), then the
+  differences below. In each, the engine's decision reads the machine and
+  its copy is deleted; the old-against-new test asserts the intended
+  difference, the PR names its model scenario, and a two-player fault mode
+  reaches the rule.
+- Not wired, so the engine keeps its old two-sided health check for them:
+  - a page that joined a match in play, and a player held as a late joiner:
+    the late-join states join the machine in their own PR (the late-join
+    slice of the per-peer machine);
+  - a player whose page sends no attempt id (from before signals carried
+    one): kept on the engine's path for good, since the machine cannot tell
+    that page's attempts apart (`oldPageAnswersWithNoLabelTest`); it goes
+    when no such page can still be open;
+  - a player this page offered to before it had a machine: the machine is
+    made when the page loads, before its first offer, in its own PR;
+  - spectators: they have no rollback connection.
+  The machine's view of the health check's timing also stays the engine's
+  (every 300 frames). Each is wired, or kept on the engine's path with a
+  reason, before the engine's last copy goes.
 - Differences between the engine and the model's `fixed` rules, each a fix
   the wiring makes (none came up in the two-player and lifecycle runs,
   which reconnect at most once):
-  - the health check offers from the higher slot too (`heal`);
+  - the health check offers from the higher slot too (`heal`): done, the
+    machine decides it;
   - a page that answers a reconnect offer without having noticed the drop
     has no give-up (`deadline:giveUpAfter`, from the machine);
   - an answer or a candidate for an earlier attempt is handed to the
@@ -463,8 +480,7 @@ Slice 1, the peer mesh and signaling:
   `tests/observer-reports.mjs`). The
   first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
   attempt with no disagreement and no mismatch.
-- Next: decide, one rule at a time, by the machine, starting with who
-  offers from the health check.
+- Next: decide the next rule by the machine: answering arms the give-up.
 
 Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed
 as not modelled are now modelled.
