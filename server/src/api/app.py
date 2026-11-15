@@ -158,8 +158,10 @@ _VALID_EVENT_TYPES = {
     # Kept so a page loaded before that still has its report stored.
     "session-disagree",
     "late-join-stranded",
-    # A message the server sent did not match the client's schema for it
-    # (web/src/socket-boundary.ts): tests/test_session_reports.py.
+    # A DataChannel string or session-log ack the rollback engine received did
+    # not match its schema (createProtocolObserver in web/src/socket-boundary.ts).
+    # The play page sent it for server messages too before it dropped them
+    # instead; kept for both: tests/test_session_reports.py.
     "protocol-mismatch",
     # A decision moved out of play.js disagreed with the play.js code still in
     # charge of it (web/src/play/observe.ts): tests/test_session_reports.py.
