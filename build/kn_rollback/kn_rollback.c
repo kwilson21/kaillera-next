@@ -3203,13 +3203,18 @@ void kn_set_frame(int frame) {
     }
     rb.frame = frame;
     /* The live state is no longer the one last saved: a resync has just
-     * loaded the host's state for `frame`, and the page may already have run
-     * and saved `frame` itself. kn_pre_tick saves a frame only when
+     * loaded the host's state for `frame` (the page calls this on every
+     * state it loads, the frame changed or not), and the page may already
+     * have saved `frame` itself. kn_pre_tick saves a frame only when
      * last_save_frame differs from it, so keeping the old value here left
      * the page's own copy of `frame` in the ring when the resync landed
      * exactly one frame behind it, and a rollback to `frame` restored that
-     * copy (specs/ring_after_resync.qnt, everyRerunFrameIsTheHosts). */
+     * copy (specs/ring_after_resync.qnt, everyRerunFrameIsTheHosts). For
+     * the same reason the sparse save mode's baseline is not the copy filed
+     * before `frame`: the next save is whole, as after the worker's state
+     * apply (kn_apply_split_state_partial_with_aux; everyCopyIsWhole). */
     rb.last_save_frame = -1;
+    rb.baseline_initialized = 0;
     rb_log("kn_set_frame: %d", frame);
 }
 

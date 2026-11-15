@@ -247,6 +247,17 @@
  *     guest logged that one-frame reset onto the answer's frame. Reported as
  *     `resyncOneBack` in summary.json. The other fault knobs are refused with
  *     it.
+ *   RESYNC_SAME_FRAME=1   As RESYNC_ONE_BACK, but the state lands on the
+ *     frame the guest is on, after kn_pre_tick has saved that frame and the
+ *     frame has not run (specs/ring_after_resync.qnt,
+ *     savedFrameDidNotRunTest). At its tick for T the guest page lets the
+ *     real kn_pre_tick run (it saves T, with the wrong stock count) and tells
+ *     the page 3, the engine's pacing hold, so T does not run. The held state
+ *     is released then (pausing until it arrives if it is late) and applied
+ *     with the counter still at T (`sync #n applied (frame T -> T`, no frame
+ *     reset). While the page called kn_set_frame only when the frame
+ *     changed, the ring kept the guest's own copy of T and the compare failed
+ *     at T. Reported as `resyncSameFrame`.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -408,6 +419,10 @@ const LOSE_INPUTS_BEFORE_FALLBACK = process.env.LOSE_INPUTS_BEFORE_FALLBACK === 
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 const DOUBLE_RESYNC_ASK = process.env.DOUBLE_RESYNC_ASK === '1';
 const RESYNC_ONE_BACK = process.env.RESYNC_ONE_BACK === '1';
+const RESYNC_SAME_FRAME = process.env.RESYNC_SAME_FRAME === '1';
+// Which of the two resync orderings the run lands, if either.
+const RESYNC_FAULT = RESYNC_ONE_BACK ? 'one-back' : RESYNC_SAME_FRAME ? 'same-frame' : null;
+const RESYNC_FAULT_KNOB = RESYNC_ONE_BACK ? 'RESYNC_ONE_BACK' : 'RESYNC_SAME_FRAME';
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -563,8 +578,9 @@ if (
   process.exit(1);
 }
 if (
-  RESYNC_ONE_BACK &&
-  (FREEZE_MS > 0 ||
+  RESYNC_FAULT &&
+  ((RESYNC_ONE_BACK && RESYNC_SAME_FRAME) ||
+    FREEZE_MS > 0 ||
     THROTTLE_GUEST ||
     HIDE_GUEST_MS > 0 ||
     CLICK_DURING_BATTLE ||
@@ -576,7 +592,7 @@ if (
     DESYNC_GUEST ||
     DOUBLE_RESYNC_ASK)
 ) {
-  console.log('RESYNC_ONE_BACK is mutually exclusive with the other fault knobs');
+  console.log('RESYNC_ONE_BACK and RESYNC_SAME_FRAME are mutually exclusive with each other and the other fault knobs');
   process.exit(1);
 }
 // The request, its answer held for one frame, and enough frames after it to compare.
@@ -611,12 +627,12 @@ const faultNeedsSeconds = Math.ceil(
     (DELAY_SYNC_ANSWER_MS > 0 ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS : 0) +
     (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0) +
     (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0) +
-    (RESYNC_ONE_BACK ? RESYNC_ONE_BACK_RECOVER_MS : 0)) *
+    (RESYNC_FAULT ? RESYNC_ONE_BACK_RECOVER_MS : 0)) *
     1.5) /
     1000,
 );
 if (
-  (DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC || DOUBLE_RESYNC_ASK || RESYNC_ONE_BACK) &&
+  (DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC || DOUBLE_RESYNC_ASK || RESYNC_FAULT) &&
   !(BATTLE_SECONDS >= faultNeedsSeconds)
 ) {
   console.log(`this fault needs BATTLE_SECONDS >= ${faultNeedsSeconds}`);
@@ -915,9 +931,10 @@ const recordEventsInitScript = () => {
   });
 };
 
-// RESYNC_ONE_BACK (guest page only): lands the resync answer one frame
-// behind the guest's counter. Inert until the run calls start(). Each pause
-// has a deadline; a miss is recorded, not retried, and fails the run.
+// RESYNC_ONE_BACK / RESYNC_SAME_FRAME (guest page only): lands the resync
+// answer one frame behind the guest's counter, or on the frame it is on after
+// kn_pre_tick saved it. Inert until the run calls start(). Each pause has a
+// deadline; a miss is recorded, not retried, and fails the run.
 const resyncOneBackInitScript = () => {
   const OB = {
     armed: false,
@@ -932,6 +949,8 @@ const resyncOneBackInitScript = () => {
     releasedAt: null,
     pausedForReply: false,
     timer: null,
+    sameFrame: false,
+    savedNotRunAt: null, // RESYNC_SAME_FRAME: the frame kn_pre_tick saved and that did not run
   };
   window.__knResyncOneBack = OB;
   const engine = () => window.NetplayRollback;
@@ -971,8 +990,28 @@ const resyncOneBackInitScript = () => {
     }
     deliver?.();
   };
-  OB.start = () => {
+  // RESYNC_SAME_FRAME: at T the real kn_pre_tick runs (and saves T), and the
+  // page is told 3, the engine's pacing hold, so T does not run.
+  const holdTheTargetFrame = () => {
+    const mod = window.EJS_emulator.gameManager.Module;
+    const preTick = mod._kn_pre_tick;
+    mod._kn_pre_tick = function (...args) {
+      const result = preTick.apply(this, args);
+      if (OB.target === null || OB.savedNotRunAt !== null || OB.released || OB.missed) return result;
+      if (result !== 0 || mod._kn_get_frame() !== OB.target) return result;
+      OB.savedNotRunAt = OB.target;
+      if (OB.held) queueMicrotask(release);
+      else if (!OB.pausedForReply) {
+        OB.pausedForReply = true;
+        pauseFor(15000, 'no state within 15 s of the header');
+      }
+      return 3;
+    };
+  };
+  OB.start = (sameFrame) => {
     OB.armed = true;
+    OB.sameFrame = sameFrame;
+    if (sameFrame) holdTheTargetFrame();
     pauseFor(15000, 'no answer header within 15 s');
   };
   OB.ask = () => window.dispatchEvent(new Event('online'));
@@ -990,6 +1029,11 @@ const resyncOneBackInitScript = () => {
     if (type !== 'decompress' && type !== 'decode-and-decompress') return false;
     OB.replyAt = OB.lastR;
     OB.held = deliver;
+    if (OB.sameFrame) {
+      if (OB.lastR > OB.target) OB.missed = `the state arrived at ${OB.lastR}, past ${OB.target}`;
+      if (OB.savedNotRunAt !== null || OB.missed) release();
+      return true;
+    }
     if (OB.lastR > OB.target + 1) OB.missed = `the state arrived at ${OB.lastR}, past ${OB.target + 1}`;
     if (OB.lastR >= OB.target + 1) release();
     return true;
@@ -1000,7 +1044,16 @@ const resyncOneBackInitScript = () => {
     if (!OB.armed || OB.target === null || OB.released || OB.missed) return;
     // Before the tick for T (a replay through T included), so its saved copy carries it.
     if (r === OB.target) writeWrong();
-    if (!idle || r !== OB.target + 1) return;
+    if (!idle) return;
+    if (OB.sameFrame) {
+      // T ran before kn_pre_tick could be held at it.
+      if (r > OB.target) {
+        OB.missed = `frame ${OB.target} ran before it was held`;
+        if (OB.held) queueMicrotask(release);
+      }
+      return;
+    }
+    if (r !== OB.target + 1) return;
     // The tick for T has run: the state applies on the next tick, one frame back.
     if (OB.held) queueMicrotask(release);
     else if (!OB.pausedForReply) {
@@ -1133,7 +1186,7 @@ const guest = await mkPage(guestBrowser, 'guest', {
   throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : HIDE_GUEST_MS && !HIDE_GUEST_FROZEN ? 1 : 0,
   hidden: HIDE_GUEST_MS > 0,
   suspendAudio: SUSPEND_GUEST_AUDIO,
-  resyncOneBack: RESYNC_ONE_BACK,
+  resyncOneBack: RESYNC_FAULT !== null,
 });
 // LOSE_INPUTS_BEFORE_FALLBACK re-arms the host's transport through knDiag,
 // which exists only with ?knDiag (it turns on nothing else).
@@ -1402,7 +1455,7 @@ const loseBeforeFallback = { hostAt: null, guestAt: null, fellBack: false, round
 const linkResync = { hostAt: null, guestAt: null, applied: false };
 // DOUBLE_RESYNC_ASK: where the logs stood when the guest asked twice.
 const doubleResyncAsk = { hostAt: null, guestAt: null, applied: false };
-// RESYNC_ONE_BACK: where the guest's log stood when it paused, and what its page saw.
+// RESYNC_ONE_BACK / RESYNC_SAME_FRAME: where the guest's log stood when it paused, and what its page saw.
 const resyncOneBack = { guestAt: null, applied: false, page: null };
 const syncLogOf = (page) => page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
 const seqOf = (line) => Number(line.split('\t')[0]);
@@ -1608,18 +1661,18 @@ if (inBattle) {
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
-  } else if (RESYNC_ONE_BACK) {
+  } else if (RESYNC_FAULT) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
     const started = Date.now();
     resyncOneBack.guestAt = await lastLogLine(guest);
     // Paused a second first, so the host's answer is for a frame the guest has not run.
-    await guest.evaluate(async () => {
-      window.__knResyncOneBack.start();
+    await guest.evaluate(async (sameFrame) => {
+      window.__knResyncOneBack.start(sameFrame);
       await new Promise((resolve) => setTimeout(resolve, 1000));
       window.__knResyncOneBack.ask();
-    });
-    console.log('RESYNC_ONE_BACK: guest paused a second and asked for a full resync');
+    }, RESYNC_FAULT === 'same-frame');
+    console.log(`${RESYNC_FAULT_KNOB}: guest paused a second and asked for a full resync`);
     resyncOneBack.applied = await waitForLine(
       guest,
       resyncOneBack.guestAt.seq,
@@ -1627,11 +1680,12 @@ if (inBattle) {
       RESYNC_ONE_BACK_RECOVER_MS,
     );
     resyncOneBack.page = await guest.evaluate(() => {
-      const { target, headerAt, replyAt, releasedAt, released, missed, flips } = window.__knResyncOneBack;
-      return { target, headerAt, replyAt, releasedAt, released, missed, flips };
+      const { target, headerAt, replyAt, releasedAt, released, missed, flips, savedNotRunAt } =
+        window.__knResyncOneBack;
+      return { target, headerAt, replyAt, releasedAt, released, missed, flips, savedNotRunAt };
     });
     console.log(
-      `RESYNC_ONE_BACK: resync applied: ${resyncOneBack.applied} (${Date.now() - started} ms)`,
+      `${RESYNC_FAULT_KNOB}: resync applied: ${resyncOneBack.applied} (${Date.now() - started} ms)`,
       JSON.stringify(resyncOneBack.page),
     );
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
@@ -1875,16 +1929,37 @@ fs.writeFileSync(
 const crossEngine = hostBrowser !== guestBrowser;
 const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
 const bootSyncFrame = crossEngine && resyncs.length ? resyncs[0] : 0;
-// RESYNC_ONE_BACK: the guest's frame reset after it paused, and the compare
-// starts at the frame it reset to, that frame included.
+// RESYNC_ONE_BACK / RESYNC_SAME_FRAME: the guest's frame reset after it
+// paused (none for the same frame) and the resync it applied. The compare
+// starts at the answer's frame, that frame included.
 const oneBackReset = (() => {
-  if (!RESYNC_ONE_BACK || !resyncOneBack.guestAt) return null;
+  if (!RESYNC_FAULT || !resyncOneBack.guestAt) return null;
   const line = linesAfter(G.sync, resyncOneBack.guestAt.seq).find((l) => /sync frame reset: \d+ → \d+/.test(l));
   const m = line?.match(/sync frame reset: (\d+) → (\d+)/);
   return m ? { from: +m[1], to: +m[2] } : null;
 })();
-const recoveredAt = RESYNC_ONE_BACK
-  ? (oneBackReset?.to ?? Infinity)
+const faultResyncApplied = (() => {
+  if (!RESYNC_FAULT || !resyncOneBack.guestAt) return null;
+  const line = linesAfter(G.sync, resyncOneBack.guestAt.seq).find((l) =>
+    /sync #\d+ applied \(frame \d+ -> \d+/.test(l),
+  );
+  const m = line?.match(/sync #\d+ applied \(frame (\d+) -> (\d+)/);
+  return m ? { frame: +m[1], counter: +m[2] } : null;
+})();
+const faultTarget = resyncOneBack.page?.target ?? null;
+const resyncFaultLanded =
+  RESYNC_FAULT === 'one-back'
+    ? !!oneBackReset && oneBackReset.from === oneBackReset.to + 1 && oneBackReset.to === faultTarget
+    : RESYNC_FAULT === 'same-frame'
+      ? !oneBackReset &&
+        resyncOneBack.page?.savedNotRunAt === faultTarget &&
+        faultResyncApplied?.frame === faultTarget &&
+        faultResyncApplied?.counter === faultTarget
+      : false;
+const recoveredAt = RESYNC_FAULT
+  ? resyncFaultLanded
+    ? faultTarget
+    : Infinity
   : FREEZE_MS > 0
     ? resyncs.length
       ? resyncs[resyncs.length - 1]
@@ -2096,14 +2171,16 @@ const doubleResyncAskReport = (() => {
   };
 })();
 // RESYNC_ONE_BACK: the reset must be one frame back onto the answer's frame.
+// RESYNC_SAME_FRAME: no reset, the state applied at the answer's frame after
+// kn_pre_tick saved it.
 const resyncOneBackReport = (() => {
-  if (!RESYNC_ONE_BACK || !resyncOneBack.guestAt) return null;
+  if (!RESYNC_FAULT || !resyncOneBack.guestAt) return null;
   const guestLines = linesAfter(G.sync, resyncOneBack.guestAt.seq);
-  const target = resyncOneBack.page?.target ?? null;
   return {
+    ordering: RESYNC_FAULT,
     ...resyncOneBack.page,
     reset: oneBackReset,
-    oneFrameBack: !!oneBackReset && oneBackReset.from === oneBackReset.to + 1 && oneBackReset.to === target,
+    landed: resyncFaultLanded,
     applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
     comparedFrom: recoveredAt,
   };
@@ -2621,7 +2698,7 @@ if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
 if (LOSE_INPUTS_BEFORE_FALLBACK) summary.loseBeforeFallback = loseBeforeFallbackReport;
 if (linkReport) summary.link = linkReport;
 if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
-if (RESYNC_ONE_BACK) summary.resyncOneBack = resyncOneBackReport;
+if (RESYNC_FAULT) summary[RESYNC_ONE_BACK ? 'resyncOneBack' : 'resyncSameFrame'] = resyncOneBackReport;
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
@@ -2688,16 +2765,16 @@ const cIntegrityAfterRecovery = (clog, marker) => {
   }).length;
 };
 const postRecoveryIntegrity =
-  FREEZE_MS > 0 || RESYNC_ONE_BACK
-    ? integrityAfterRecovery(H.sync, RESYNC_ONE_BACK ? null : /coord sync dispatch/) +
+  FREEZE_MS > 0 || RESYNC_FAULT
+    ? integrityAfterRecovery(H.sync, RESYNC_FAULT ? null : /coord sync dispatch/) +
       integrityAfterRecovery(G.sync, /sync #\d+ applied/) +
       cIntegrityAfterRecovery(H.clog, null) +
       cIntegrityAfterRecovery(G.clog, /kn_set_frame: \d+/)
     : 0;
-if (FREEZE_MS > 0 || RESYNC_ONE_BACK)
+if (FREEZE_MS > 0 || RESYNC_FAULT)
   console.log('post-recovery integrity events:', postRecoveryIntegrity, 'battle frames compared:', battleCompared);
 const integrityFailed =
-  FREEZE_MS > 0 || RESYNC_ONE_BACK
+  FREEZE_MS > 0 || RESYNC_FAULT
     ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
     : (H.failed || 0) + (G.failed || 0) - excusedIntegrity.failedRollbacksExcluded > 0 ||
       summary.integrityEvents.host + summary.integrityEvents.guest - excusedIntegrity.integrityEventsExcluded > 0;
@@ -2880,13 +2957,16 @@ console.log(
   observersFailed ? 'OBSERVERS: disagreement reported (or KN_DB unreadable):' : 'OBSERVERS: no disagreement:',
   JSON.stringify(observers),
 );
-// RESYNC_ONE_BACK: the ordering it is for was reached, or the run says why not.
-const resyncOneBackFailed = RESYNC_ONE_BACK && (!resyncOneBackReport?.oneFrameBack || !!resyncOneBackReport?.missed);
-if (RESYNC_ONE_BACK)
+// RESYNC_ONE_BACK / RESYNC_SAME_FRAME: the ordering it is for was reached,
+// or the run says why not.
+const resyncOneBackFailed = !!RESYNC_FAULT && (!resyncOneBackReport?.landed || !!resyncOneBackReport?.missed);
+if (RESYNC_FAULT)
   console.log(
     resyncOneBackFailed
-      ? 'RESYNC_ONE_BACK: the resync did not land one frame back onto the answer:'
-      : 'RESYNC_ONE_BACK: the resync landed one frame back:',
+      ? `${RESYNC_FAULT_KNOB}: the resync did not land as the mode is for:`
+      : RESYNC_ONE_BACK
+        ? 'RESYNC_ONE_BACK: the resync landed one frame back:'
+        : 'RESYNC_SAME_FRAME: the resync landed on a frame kn_pre_tick had saved and not run:',
     JSON.stringify(resyncOneBackReport),
   );
 const failed =

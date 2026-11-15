@@ -248,6 +248,11 @@ ring_after_resync() {
   # Two frames run, the resync for the second, that frame run again: 4 steps
   # (oneFrameBackTest).
   expect_violation "$RING" ring_after_resync_before everyRerunFrameIsTheHosts
+  # A frame saved and not run, the resync for it, the frame run: 4 steps
+  # (savedFrameDidNotRunTest). The same one frame back, saved again against
+  # the page's own copy as the sparse baseline: 4 steps (oneFrameBackTest).
+  expect_violation "$RING" ring_after_resync_save_only everyRerunFrameIsTheHosts
+  expect_violation "$RING" ring_after_resync_save_only everyCopyIsWhole
 }
 
 # Every group, in the order a local run takes them.
