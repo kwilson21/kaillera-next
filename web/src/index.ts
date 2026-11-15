@@ -74,6 +74,13 @@ import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { startRejoin, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
 import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from './rejoin-machine.ts';
 import { checkRelayed } from './relay.ts';
+import {
+  answersAnOlderRequest,
+  endsRequest,
+  isLateAnswerBeforeFrameAsked,
+  keepsAwaitedAnswer,
+  lateJoinLostHostStep,
+} from './resync-request.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
 import { installSite, KNSite } from './site/index.ts';
@@ -294,6 +301,14 @@ export const KNCore = {
   peerTiming: PEER_TIMING,
   /** The per-peer machine run beside the rollback engine, observing (peer-observe.ts). */
   peerObserve: { createPeerObserver, newPageId, readAttemptId },
+  /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */
+  resyncRequest: {
+    answersAnOlderRequest,
+    endsRequest,
+    isLateAnswerBeforeFrameAsked,
+    keepsAwaitedAnswer,
+    lateJoinLostHostStep,
+  },
   rosterKey,
   screenshotCrop,
   shouldInitiate,
