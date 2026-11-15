@@ -5944,8 +5944,8 @@
       gameStatus,
       sceneCurr,
       gameplay: sceneCurr === 22 && gameStatus === 1,
-      // Without the C engine (no kn_pre_tick, or disabled after repeated
-      // throws) nothing can roll a menu frame back, so a missing remote
+      // Without the C engine (a core with no kn_pre_tick) nothing can roll
+      // a menu frame back, so a missing remote
       // input is waited for there and never made up. Battle loading
       // (scene 22, status 0) is not controllable and runs freely.
       strictInputLockstep:
@@ -17124,26 +17124,16 @@
         return;
       } catch (eCR) {
         _markTickReturn('unmarked:c-rollback-throw');
+        // A throw out of the C engine's tick is a WASM trap: the engine and
+        // the core are left mid-frame, replay state half set. Going on would
+        // mean dropping the rollback it could not apply (this page's state
+        // splits from the others') or running this page without rollback
+        // while the others keep it, which diverges as well. So it is fatal,
+        // as a trap in the core's frame step is (FATAL-CORE-ABORT): the page
+        // stops and says the emulator crashed, and the other players drop it
+        // at the input deadline (docs/netplay-invariants.md).
         const cp = _tickLastCheckpoint;
-        // Track consecutive throws at the same frame. If recovery (clear
-        // replay state + memory growth refresh + rdram_base refresh) fails
-        // to unblock the engine, the trap is happening on a forward-save
-        // path too and recovery can't save it. Fall back to legacy lockstep
-        // for the rest of the match — already-fired rollbacks (the demo's
-        // success criterion) are preserved; the demo just stops trying to
-        // run new C rollbacks. This is a SAFETY VALVE for unrecoverable
-        // WASM traps, NOT a routine path: legitimate rollback bugs are
-        // caught by RB-CHECK / RB-INVARIANT-FIXUP mechanisms upstream
-        // before throwing.
-        if (!window.__knCRollbackThrowFrame || window.__knCRollbackThrowFrame !== _frameNum) {
-          window.__knCRollbackThrowFrame = _frameNum;
-          window.__knCRollbackThrowFrameCount = 1;
-        } else {
-          window.__knCRollbackThrowFrameCount = (window.__knCRollbackThrowFrameCount || 0) + 1;
-        }
-        const consecutiveThrows = window.__knCRollbackThrowFrameCount;
-        // Stash for offline inspection — playwright filter truncates
-        // stacks to 240 chars.
+        // Kept for offline inspection (tests/rb-demo-freeze-detector.mjs).
         try {
           if (!window.__knCRollbackThrowSamples) window.__knCRollbackThrowSamples = [];
           if (window.__knCRollbackThrowSamples.length < 5) {
@@ -17176,97 +17166,11 @@
             });
           }
         } catch (_) {}
-        // Recovery: a WASM trap inside kn_pre_tick leaves the C engine with
-        // replay state half-set. Without recovery, every subsequent tick
-        // re-enters the same throwing path → permanent freeze.
-        //
-        // Empirically observed (Mode 2 demo, frame ~1409 second rollback after
-        // worker coproc apply): rb_save_slot/rb_restore_slot_state OOBs the
-        // 8 MB memcpy or the kn_sync_write_cpu's TLB memset. The cause looks
-        // like a stale rb.rdram_base — Emscripten heap moved (memory growth
-        // detached the old buffer) but the C-side pointer wasn't refreshed.
-        // _refreshRunnerAfterRollbackRestore fires on did_restore=1 and
-        // already calls _emscripten_notify_memory_growth, but did_restore is
-        // CONSUMED by the call so the flag is gone by the time the second
-        // rollback fires.
-        //
-        // Recovery sequence:
-        //   1. Clear replay state (drops the rollback we couldn't apply)
-        //   2. Notify memory growth to refresh JS-side HEAPU8 views
-        //   3. Refresh C-side rb.rdram_base via _kn_set_rdram_preserve with
-        //      a fresh _kn_get_rdram_ptr. This is idempotent and replaces
-        //      the saved_rdram buffer too.
-        //   4. Resync JS _frameNum with rb.frame
-        // The dropped rollback shows up in P2 hash checks — same outcome
-        // shape as FAILED-ROLLBACK.
-        const tickModRecovery = window.EJS_emulator?.gameManager?.Module;
         try {
-          if (tickModRecovery?._kn_clear_replay_state) {
-            tickModRecovery._kn_clear_replay_state();
-          }
-          if (tickModRecovery?._emscripten_notify_memory_growth) {
-            tickModRecovery._emscripten_notify_memory_growth(0);
-          }
-          if (tickModRecovery?.updateMemoryViews) {
-            tickModRecovery.updateMemoryViews();
-          }
-          if (tickModRecovery?._kn_set_rdram_preserve && tickModRecovery?._kn_get_rdram_ptr) {
-            const freshPtr = tickModRecovery._kn_get_rdram_ptr();
-            if (freshPtr) tickModRecovery._kn_set_rdram_preserve(freshPtr);
-          }
-          if (tickModRecovery?._kn_get_frame) {
-            _frameNum = tickModRecovery._kn_get_frame();
-            KNState.frameNum = _frameNum;
-          }
-        } catch (_) {}
-        try {
-          // The visual freeze overlay was probably never shown for this
-          // throw (we crashed before reaching catchingUp===2 dispatch), but
-          // hide it just in case to avoid a dangling overlay if a previous
-          // rollback's freeze was still up.
-          _hideRollbackVisualFreeze?.();
-        } catch (_) {}
-        // Layered safety valve, escalating with consecutive throws:
-        //  1st throw: disable worker coproc (force local-replay path next).
-        //   Empirically the trap fires when the SECOND rollback after a
-        //   worker coproc apply tries to restore-and-resave. Local replay
-        //   (replay-burst path) doesn't show the same crash, so dropping
-        //   to mode-1 dispatch saves rollback functionality without risking
-        //   the freeze.
-        //  3rd+ throw: disable C rollback entirely. Same-frame trap means
-        //   local replay also OOBs — fall back to legacy lockstep.
-        if (consecutiveThrows === 1 && !_workerCoprocAborted) {
-          // Route through _workerCoprocAbort() — direct `_workerCoprocAborted
-          // = true` would skip the cleanup that cancels any in-flight
-          // dispatch's pending timeoutId, nulls _workerCoprocPending, and
-          // stops the watchdog interval. Without that, a worker reply
-          // arriving after the C throw would still match the pending seq
-          // and call _kn_apply_split_state_partial on the just-faulted
-          // engine, potentially corrupting state or triggering a second
-          // throw. The 200 ms timeout would then early-return (flag
-          // already true) and never null _workerCoprocPending.
-          _workerCoprocAbort(
-            `C-rollback throw on first consecutive at f=${_frameNum} — disabling worker coproc (local replay still active)`,
-          );
-        }
-        if (consecutiveThrows >= 3 && _useCRollback) {
-          _useCRollback = false;
-          try {
-            _syncLog(
-              `C-ROLLBACK-FALLBACK consecutive throws=${consecutiveThrows} at f=${_frameNum} ` +
-                `— disabling C rollback for the rest of the match (legacy lockstep takes over)`,
-            );
-          } catch (_) {}
-        }
-        try {
-          _syncLog(
-            `C-ROLLBACK-THROW lastCp=${cp} f=${_frameNum} consec=${consecutiveThrows} err=${(eCR?.message || String(eCR)).slice(0, 200)} ` +
-              `— cleared replay state, continuing`,
-          );
-        } catch (_) {}
-        try {
+          _syncLog(`C-ROLLBACK-THROW lastCp=${cp} f=${_frameNum} err=${(eCR?.message || String(eCR)).slice(0, 200)}`);
           console.error('[lockstep] C-rollback tick threw at cp=', cp, eCR);
         } catch (_) {}
+        _handleCoreFatal('c-rollback', eCR);
         return;
       }
     }

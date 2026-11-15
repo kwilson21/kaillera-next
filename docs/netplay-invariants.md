@@ -346,3 +346,13 @@ invariants held.
 `FATAL-CORE-ABORT` means the WASM core trapped. It stops this peer's tick
 loop and shows the crash error. Other peers stall, then phantom this peer at
 the I1 input-stall deadline. `STEP-THREW` is logged for every thrown step.
+A throw out of the C engine's tick (`kn_pre_tick` and the replay it drives)
+is the same: `C-ROLLBACK-THROW`, then `FATAL-CORE-ABORT branch=c-rollback`.
+
+Rejected: recovering from that throw. The engine used to clear the replay it
+could not apply and play on, and after three throws at one frame turned the
+C engine off for the rest of the match (`C-ROLLBACK-FALLBACK`, "legacy
+lockstep takes over"). The cleared replay was a rollback dropped on this
+page only, so its state split from the others'; and turning rollback off on
+one page, with the others still predicting, is the mixed protocol the
+engine's init warns diverges. Nothing reported either to the players.
