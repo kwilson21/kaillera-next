@@ -3261,6 +3261,8 @@
       }
       hideRomMismatch();
       notifyRomReady();
+      // A guest who loads their own ROM has declined the host's: the offer goes.
+      updateRomSharingUI();
       // Always proceed with late-join, even if hash computation failed
       if (_isPendingLateJoin()) {
         dismissLateJoinPrompt();
@@ -3350,6 +3352,8 @@
         } else {
           hideRomMismatch();
           notifyRomReady();
+          // As for a dropped file: a guest with their own ROM no longer sees the host's offer.
+          updateRomSharingUI();
         }
         cb(true, val.name);
       })
