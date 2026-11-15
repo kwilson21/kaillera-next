@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.27",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "number the boot sync and input-stall resync requests so their late answers cannot rewind the guest (#252)"
+      }
+    ]
+  },
+  {
     "version": "0.68.26",
     "date": "2026-11-15",
     "changes": [
