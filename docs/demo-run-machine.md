@@ -3,9 +3,9 @@
 Generated from `web/src/demo/run-state.ts` by `node scripts/demo-run-diagram.mjs`. Do not edit by
 hand; `npm run check` fails when it is out of date.
 
-What the demo page (`demo.html`) is doing, one region per part of it. Nothing uses it yet:
-`web/static/demo.js` keeps its own flags and sends the machine what happened at the end of each
-handler, and the flags are compared with the machine after every event (observing).
+What the demo page (`demo.html`) is doing, one region per part of it. `web/static/demo.js` keeps no
+flags for these: it sends the machine what happened and reads its state from it, and does what
+the machine issues (the commands below) when it issues it.
 
 ```mermaid
 flowchart LR
@@ -49,7 +49,7 @@ flowchart LR
       interaction_touched["touched"]
     end
   end
-  engine_idle -->|"romLoaded"| engine_running
+  engine_idle -->|"engineStarted"| engine_running
   loader_none -->|"loaderInjected"| loader_loading
   match_menus -->|"frame: playing"| match_playing
   match_menus -->|"frame: game's pause menu"| match_gamePaused
@@ -77,17 +77,57 @@ meet, the states of the other regions it is taken in. `leaving` is final: the pa
 reload, and no event changes anything after it. Stop leaves only once the loader is on the page
 (or EmulatorJS is); before that it counts as a touch.
 
+The commands each event issues, in the order the page runs them (a part named in brackets is
+true; the others are false):
+
+| Event | Commands |
+|---|---|
+| frame: menus (match playing, autoCompare off, mode rollback) | `fakePeerActive(), matchLeft()` |
+| frame: menus (match playing, autoCompare off, mode lockstep) | `fakePeerActive(), matchLeft(rollbackChanged)` |
+| frame: menus (match playing, autoCompare running or paused, mode lockstep) | `fakePeerActive(), matchLeft(stopAutoCompare, rollbackChanged)` |
+| frame: menus (match playing, autoCompare running or paused, mode rollback) | `fakePeerActive(), matchLeft(stopAutoCompare)` |
+| frame: menus (match gamePaused, autoCompare off, mode rollback) | `matchLeft()` |
+| frame: menus (match gamePaused, autoCompare off, mode lockstep) | `matchLeft(rollbackChanged)` |
+| frame: menus (match gamePaused, autoCompare running or paused, mode lockstep) | `matchLeft(stopAutoCompare, rollbackChanged)` |
+| frame: menus (match gamePaused, autoCompare running or paused, mode rollback) | `matchLeft(stopAutoCompare)` |
+| frame: playing (match gamePaused) | `fakePeerActive(active)` |
+| frame: playing (match menus) | `fakePeerActive(active), matchEntered` |
+| frame: game's pause menu (match playing) | `fakePeerActive()` |
+| frame: game's pause menu (match menus) | `matchEntered` |
+| rollback button (autoCompare running or paused, mode rollback) | `stopAutoCompare, switchMode()` |
+| rollback button (autoCompare running or paused, mode lockstep) | `stopAutoCompare, switchMode(rollback)` |
+| rollback button (autoCompare off, mode rollback) | `switchMode()` |
+| rollback button (autoCompare off, mode lockstep) | `switchMode(rollback)` |
+| modeSwitched: rollback (mode rollback) | `applyMode()` |
+| modeSwitched: rollback (mode lockstep) | `applyMode(changed)` |
+| modeSwitched: lockstep (mode lockstep) | `applyMode()` |
+| modeSwitched: lockstep (mode rollback) | `applyMode(changed)` |
+| Pause (tick running, autoCompare off) | `pauseTick()` |
+| Pause (tick running, autoCompare running) | `pauseTick(pauseAutoCompare)` |
+| Pause (tick paused, autoCompare off or running) | `resumeTick()` |
+| Pause (tick paused, autoCompare paused) | `resumeTick(resumeAutoCompare)` |
+| auto-compare button (autoCompare off, mode rollback) | `startAutoCompare()` |
+| auto-compare button (autoCompare off, mode lockstep) | `startAutoCompare(rollbackChanged)` |
+| auto-compare button (autoCompare running or paused) | `stopAutoCompare` |
+| autoStartDue (match playing or gamePaused, autoCompare off, mode rollback, interaction untouched, not ?autoCompare=0) | `startAutoCompare()` |
+| autoStartDue (match playing or gamePaused, autoCompare off, mode lockstep, interaction untouched, not ?autoCompare=0) | `startAutoCompare(rollbackChanged)` |
+| Stop (loader loading or done) | `stop` |
+| Stop, EmulatorJS on the page | `stop` |
+
+`switchMode` comes back as `modeSwitched` once the page has switched (at once, or once a replay
+ends); its `applyMode` hands the mode to the engine and the button.
+
 Events and where `demo.js` sends them:
 
 | Event | Sent from |
 |---|---|
-| `romLoaded` | `_loadRomFile`, after `_startEngine()`; whether `window.NetplayRollback` is there |
-| `loaderInjected` | `ensureEmulatorBooted`'s `injectLoader`, after the loader script is on the page |
+| `engineStarted` | `_startEngine`, once `NetplayRollback.init` has returned |
+| `loaderInjected` | `ensureEmulatorBooted`'s `injectLoader`, as it puts the loader script on the page |
 | `loaderSettled` | `markBootDone`: the loader finished, failed, or 30 s passed |
-| `frame` | the end of every HUD frame; the engine's `isInMatch()` and `isInMatchOrPaused()` |
+| `frame` | every HUD frame, after the autopilot's check; the engine's `isInMatch()` and `isInMatchOrPaused()` |
 | `interacted` | the latency slider, the controls button |
-| `rollbackToggleClicked` | the rollback button, after it stops auto-compare and before it switches |
-| `modeSwitched` | `_switchMode`, when it sets the mode (at once, or once a replay ends); `KNDemo.setRollbackEnabled` |
+| `rollbackToggleClicked` | the rollback button |
+| `modeSwitched` | `_setRollbackEnabled`: `_switchMode` (at once, or once a replay ends), the engine start, `KNDemo.setRollbackEnabled` |
 | `pauseClicked` | the Pause button; whether the engine has `pauseTick` |
 | `autoCompareClicked` | the auto-compare button |
 | `autoStartDue` | the timer set on entering a match, 600 ms later |
