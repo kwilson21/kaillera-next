@@ -234,7 +234,7 @@ done
 $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldAgainstAPeer \
   --max-samples=20000 --max-steps=25 --backend=typescript
 # A state transfer and the host's inputs behind it on one connection.
-for variant in input_link_burst input_link_paced; do
+for variant in input_link_burst input_link_paced_unguarded input_link_paced; do
   $QUINT test "$TICK" --main="$variant" --backend=typescript
 done
 # With the chunks handed over one at a time, a host that is sending is never
@@ -242,6 +242,10 @@ done
 # VIOLATED while a state went into the connection all at once
 # (input_link_burst; twoAnswersBackToBackTest holds the ordering of the
 # two-player run that found it).
+# Also: a transfer queued before a reconnect never reaches the new
+# connection, and the guest's inputs are settled only for a state that was
+# sent. Both VIOLATED by #236 as first written (input_link_paced_unguarded;
+# transferQueuedBeforeAResetTest and abandonedTransferTest hold the orderings).
 $QUINT run "$TICK" --main=input_link_paced --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 

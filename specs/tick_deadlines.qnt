@@ -181,7 +181,21 @@ module tick_deadlines_current {
 //
 // Not modelled: chunk sizes and link speed (a chunk is a second of link
 // time), the guest's own freezes (credited, above), the stall before the
-// deadline, the guest's inputs, more than one guest.
+// deadline, the guest's inputs, more than one guest (each guest's transfer
+// goes on a chain of its own, so one guest's congested link cannot hold
+// another's: a source test, tests/test_sync_send_source.py).
+//
+// Also modelled, for what a transfer may do once it is under way: the
+// guest's connection being replaced (a reconnect: resetPeerState, which
+// ends the transfer on the old channel and deletes the guest's input floor),
+// a transfer queued behind the one in hand (a proactive push on the same
+// chain), the paced sender giving a transfer up (SYNC-SEND-STALLED, no room
+// for a chunk within SYNC_SEND_STALL_MS), and the host settling the guest's
+// inputs for a state (_settleInputsBefore: it stops waiting for the guest's
+// inputs from before the state's frame, which the state already holds;
+// specs/resync_inputs.qnt). Settled for a state the guest never gets, the
+// guest's late inputs from before that frame are dropped at the host, which
+// predicted them: input loss after a congestion episode.
 //
 // PACED: the host hands its channel a chunk only while no chunk of its is
 //   waiting there (sendSyncChunks waits for the channel's bufferedAmount to
@@ -189,15 +203,30 @@ module tick_deadlines_current {
 //   the engine's), and starts a transfer only once the last one has gone
 //   (_pushingSyncState queues a request until then).
 //   false = before: every chunk is handed over at once, and a second answer
-//   behind the first.
+//   behind the first. Nothing waits, so nothing is queued, outlives a
+//   reconnect or is given up.
+// GUARD_QUEUED: a queued transfer remembers the connection it was queued for
+//   (the match epoch and the guest's _syncQueueGen, which resetPeerState
+//   bumps) and is dropped when it comes up if that connection was replaced.
+//   false = #236 as first written: the target was looked up when the
+//   transfer came up, and the old state and request id went over the new
+//   connection.
+// SETTLE_WHEN_SENT: the host settles the guest's inputs for a state only once
+//   its last chunk is handed over (sendPaced `sent`). false = #236 as first
+//   written: settled before the first chunk, and left settled when the
+//   transfer was given up.
 module input_link {
   const PACED: bool
+  const GUARD_QUEUED: bool
+  const SETTLE_WHEN_SENT: bool
 
   pure val LIMIT = 2
   // Chunks one transfer is cut into (any number up to this).
   pure val MAX_CHUNKS = 3
   // Bound on the queue, for the checker.
   pure val MAX_QUEUE = 8
+  // Bound on reconnects, for the checker.
+  pure val MAX_RESETS = 2
 
   var queue: List[str]     // "chunk" or "input", oldest first
   var toSend: int          // chunks of the current transfer not handed over yet
@@ -207,10 +236,21 @@ module input_link {
   // history: an input from a host that never stopped reached a guest that
   // had given up on it, i.e. deeper than the cap
   var deep: bool
+  var conn: int            // the guest's connection; a reconnect replaces it
+  var sendingFor: int      // the connection the transfer in hand was made for
+  var queued: int          // chunks of a transfer queued behind it (0: none)
+  var queuedFor: int       // the connection that one was made for
+  var settled: bool        // the guest's inputs are settled for the transfer in hand
+  // history: a chunk of a transfer made for one connection was handed to another
+  var reachedNewConn: bool
+  // history: a transfer was given up while the guest's inputs were settled for it
+  var settledUndelivered: bool
 
   action init = all {
     queue' = List(), toSend' = 0, stale' = 0,
     dropped' = false, hostStopped' = false, deep' = false,
+    conn' = 0, sendingFor' = 0, queued' = 0, queuedFor' = 0, settled' = false,
+    reachedNewConn' = false, settledUndelivered' = false,
   }
 
   pure def chunksIn(q: List[str]): int = q.foldl(0, (n, x) => if (x == "chunk") n + 1 else n)
@@ -218,13 +258,52 @@ module input_link {
   pure def withChunks(q: List[str], n: int): List[str] =
     range(1, MAX_CHUNKS + 1).foldl(q, (acc, i) => if (i <= n) acc.append("chunk") else acc)
 
+  // Settled when the transfer starts, unless only once it is sent; a burst
+  // is sent as it starts.
+  pure val SETTLE_AT_START = not(PACED) or not(SETTLE_WHEN_SENT)
+
   // The host answers a resync request with a state of n chunks.
   action transfer(n: int): bool = all {
     not(hostStopped),
-    if (PACED) toSend == 0 else queue.length() + n <= MAX_QUEUE,
+    if (PACED) toSend == 0 and queued == 0 else queue.length() + n <= MAX_QUEUE,
     queue' = if (PACED) queue else withChunks(queue, n),
     toSend' = if (PACED) n else toSend,
+    sendingFor' = conn,
+    settled' = SETTLE_AT_START,
     stale' = stale, dropped' = dropped, hostStopped' = hostStopped, deep' = deep,
+    conn' = conn, queued' = queued, queuedFor' = queuedFor,
+    reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+  }
+
+  // Another transfer (a proactive push) waits behind the one in hand.
+  action enqueue(n: int): bool = all {
+    PACED,
+    not(hostStopped),
+    toSend > 0,
+    queued == 0,
+    queued' = n,
+    queuedFor' = conn,
+    queue' = queue, toSend' = toSend, stale' = stale, dropped' = dropped, hostStopped' = hostStopped,
+    deep' = deep, conn' = conn, sendingFor' = sendingFor, settled' = settled,
+    reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+  }
+
+  // The queued transfer comes up once the one before it is done. Guarded, it
+  // is dropped if its connection was replaced meanwhile.
+  action startQueued = {
+    val stillOurs = not(GUARD_QUEUED) or queuedFor == conn
+    all {
+      PACED,
+      toSend == 0,
+      queued > 0,
+      queued' = 0,
+      toSend' = if (stillOurs) queued else 0,
+      sendingFor' = if (stillOurs) queuedFor else sendingFor,
+      settled' = if (stillOurs) SETTLE_AT_START else settled,
+      queue' = queue, stale' = stale, dropped' = dropped, hostStopped' = hostStopped,
+      deep' = deep, conn' = conn, queuedFor' = queuedFor,
+      reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+    }
   }
 
   // The link takes the inputs at the head of the queue and the chunk after them.
@@ -248,6 +327,11 @@ module input_link {
       stale' = if (gotInput) 0 else stale + 1,
       deep' = (deep or (gotInput and dropped and not(hostStopped))),
       dropped' = dropped, hostStopped' = hostStopped,
+      conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor,
+      // The last chunk handed over: the transfer is sent.
+      settled' = (settled or (handed and toSend == 1)),
+      reachedNewConn' = (reachedNewConn or (handed and sendingFor != conn)),
+      settledUndelivered' = settledUndelivered,
     }
   }
 
@@ -257,20 +341,57 @@ module input_link {
     stale >= LIMIT,
     dropped' = true,
     queue' = queue, toSend' = toSend, stale' = stale, hostStopped' = hostStopped, deep' = deep,
+    conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor, settled' = settled,
+    reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
   }
 
   action stop = all {
     not(hostStopped),
     hostStopped' = true,
     queue' = queue, toSend' = toSend, stale' = stale, dropped' = dropped, deep' = deep,
+    conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor, settled' = settled,
+    reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+  }
+
+  // The guest's connection is replaced (resetPeerState): the transfer in
+  // hand ends with the old channel (sendPaced `closed`), what the old
+  // connection held is gone, the guest's input floor is deleted, and the
+  // guest hears the host again on the new one. A queued transfer stays on
+  // the chain.
+  action reset = all {
+    conn < MAX_RESETS,
+    conn' = conn + 1,
+    toSend' = 0,
+    queue' = List(),
+    settled' = false,
+    stale' = 0,
+    dropped' = false,
+    hostStopped' = hostStopped, deep' = deep, sendingFor' = sendingFor,
+    queued' = queued, queuedFor' = queuedFor,
+    reachedNewConn' = reachedNewConn, settledUndelivered' = settledUndelivered,
+  }
+
+  // The paced sender finds no room for a chunk within its deadline and gives
+  // the transfer up (SYNC-SEND-STALLED). Whatever is settled for it stays so.
+  action abandon = all {
+    PACED,
+    toSend > 0,
+    toSend' = 0,
+    settledUndelivered' = (settledUndelivered or settled),
+    queue' = queue, stale' = stale, dropped' = dropped, hostStopped' = hostStopped, deep' = deep,
+    conn' = conn, sendingFor' = sendingFor, queued' = queued, queuedFor' = queuedFor, settled' = settled,
+    reachedNewConn' = reachedNewConn,
   }
 
   action step = any {
     second,
     fire,
     stop,
+    reset,
+    abandon,
+    startQueued,
     nondet n = 1.to(MAX_CHUNKS).oneOf()
-    transfer(n),
+    any { transfer(n), enqueue(n) },
   }
 
   // No input from a host that is sending arrives deeper than the cap: the
@@ -282,7 +403,22 @@ module input_link {
   // A host that is sending is never given up on.
   val aSendingHostIsNotDropped = dropped implies hostStopped
 
-  val allHold = noInputArrivesDeeperThanTheCap and aSendingHostIsNotDropped
+  // A transfer queued before a reset never reaches the new connection: its
+  // state and request id are the old connection's. Violated while a queued
+  // transfer looked its target up only when it came up (input_link_paced_unguarded).
+  val aTransferQueuedBeforeAResetNeverReachesTheNewConnection = not(reachedNewConn)
+
+  // Inputs are settled only for a state that was delivered: a transfer given
+  // up leaves nothing settled. Violated while the floor moved before the
+  // first chunk (input_link_paced_unguarded).
+  val inputsAreSettledOnlyForADeliveredState = not(settledUndelivered)
+
+  val allHold = and {
+    noInputArrivesDeeperThanTheCap,
+    aSendingHostIsNotDropped,
+    aTransferQueuedBeforeAResetNeverReachesTheNewConnection,
+    inputsAreSettledOnlyForADeliveredState,
+  }
 
   // The run that found it: two answers back to back, and the inputs behind
   // them. Before: the deadline fires while the host is sending, and its
@@ -317,14 +453,68 @@ module input_link {
       .then(fire)
       .then(3.reps(_ => second))
       .expect(dropped and not(deep) and allHold)
+
+  // Finding 2 on #236: a push queued behind a transfer, the guest reconnects,
+  // the push comes up. Unguarded, its chunk goes over the new connection.
+  // A burst queues nothing: its chunks went with the old connection.
+  run transferQueuedBeforeAResetTest =
+    init
+      .then(transfer(2))
+      .then(if (PACED) enqueue(1) else second)
+      .then(reset)
+      .then(if (PACED) startQueued else second)
+      .then(second)
+      .expect(
+        reachedNewConn == (PACED and not(GUARD_QUEUED)) and
+        aTransferQueuedBeforeAResetNeverReachesTheNewConnection == (not(PACED) or GUARD_QUEUED)
+      )
+
+  // The same push after a transfer that ended on its own: it still goes.
+  run transferQueuedWithoutAResetGoesTest =
+    init
+      .then(transfer(1))
+      .then(if (PACED) enqueue(1) else second)
+      .then(second)
+      .then(if (PACED) startQueued else second)
+      .then(second)
+      .expect(not(reachedNewConn) and toSend == 0 and queued == 0)
+
+  // Finding 3 on #236: a chunk goes, then the channel has no room for the
+  // next within the deadline and the transfer is given up. Settled at the
+  // start, the guest's inputs from before the state's frame stay settled
+  // for a state it never gets.
+  run abandonedTransferTest =
+    init
+      .then(transfer(2))
+      .then(second)
+      .then(if (PACED) abandon else second)
+      .expect(
+        settledUndelivered == (PACED and not(SETTLE_WHEN_SENT)) and
+        inputsAreSettledOnlyForADeliveredState == (not(PACED) or SETTLE_WHEN_SENT)
+      )
+
+  // A transfer that is sent settles the guest's inputs, whenever it does so.
+  run sentTransferSettlesTest =
+    init
+      .then(transfer(2))
+      .then(2.reps(_ => second))
+      .expect(toSend == 0 and settled and allHold)
 }
 
 // Before: a state went into the connection all at once.
 module input_link_burst {
-  import input_link(PACED = false).*
+  import input_link(PACED = false, GUARD_QUEUED = false, SETTLE_WHEN_SENT = false).*
 }
 
-// Today: the host hands over a chunk at a time.
+// #236 as first written: a chunk at a time, but a queued transfer looked its
+// target up when it came up, and the guest's inputs were settled before the
+// first chunk.
+module input_link_paced_unguarded {
+  import input_link(PACED = true, GUARD_QUEUED = false, SETTLE_WHEN_SENT = false).*
+}
+
+// Today: a chunk at a time, a queued transfer dropped if its connection was
+// replaced, and the guest's inputs settled once the state is sent.
 module input_link_paced {
-  import input_link(PACED = true).*
+  import input_link(PACED = true, GUARD_QUEUED = true, SETTLE_WHEN_SENT = true).*
 }

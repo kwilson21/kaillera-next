@@ -176,6 +176,12 @@ tick_deadlines() {
   verify "$TICK" input_link_paced allHold
   # Two chunks ahead of the inputs, two seconds, the deadline, a second: 5 steps.
   expect_violation "$TICK" input_link_burst allHold
+  # #236 as first written. A transfer, a push queued behind it, a reconnect,
+  # the push comes up, its chunk goes over the new connection: 5 steps
+  # (transferQueuedBeforeAResetTest). A transfer settled at its start and
+  # given up: 2 steps (abandonedTransferTest).
+  expect_violation "$TICK" input_link_paced_unguarded aTransferQueuedBeforeAResetNeverReachesTheNewConnection
+  expect_violation "$TICK" input_link_paced_unguarded inputsAreSettledOnlyForADeliveredState
 }
 
 resync_inputs() {
