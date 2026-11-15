@@ -23,7 +23,7 @@ import {
   drainCandidates,
   resetPeerConnection,
 } from './peer-connection.ts';
-import { page, type GameManager, type RunningGameManager } from './shared-globals.ts';
+import { page, type EmulatorModule, type GameManager, type RunningGameManager } from './shared-globals.ts';
 
 /** One GameShark cheat. */
 export interface Cheat {
@@ -80,6 +80,19 @@ type PreviousInputs = Record<string, WireInput | undefined>;
 
 const isRunning = (gm: GameManager): gm is RunningGameManager => !!gm.Module;
 
+/**
+ * Whether the core has opened the ROM, so a cheat may be set or cleared. The
+ * game manager, and its Module, exist before EmulatorJS has downloaded the
+ * ROM and called main, and the core sets up its cheat list only when it opens
+ * the ROM (M64CMD_ROM_OPEN, cheat_init). Before that the list's head is
+ * zeroed: set_cheat (retro_cheat_set) and reset_cheat (cheat_delete_all) walk
+ * it from a null pointer and trap with "memory access out of bounds". A frame
+ * run means the ROM is open. A core without the frame count is taken as ready,
+ * as before.
+ */
+export const coreHasOpenedRom = (mod: EmulatorModule): boolean =>
+  typeof mod._get_current_frame_count !== 'function' || mod._get_current_frame_count() >= 1;
+
 const clampN64Axis = (value: number | undefined): number =>
   Math.max(-N64_MAX, Math.min(N64_MAX, Math.trunc(Number(value) || 0)));
 
@@ -135,9 +148,25 @@ export const isMainLoopRunner = (cb: FrameRequestCallback | null | undefined): b
  * state; a page makes one (installShared).
  */
 export const createShared = () => {
+  /**
+   * The game manager once the core has opened the ROM (coreHasOpenedRom):
+   * looked for every 100 ms after the emulator is up, for at most
+   * `timeoutMs`. Fails if the ROM is never opened in that time.
+   */
+  async function waitForRomOpen(timeoutMs = 60000): Promise<RunningGameManager> {
+    const gm = await waitForEmulator();
+    if (coreHasOpenedRom(gm.Module)) return gm;
+    const opened = await startPolling(() => (coreHasOpenedRom(gm.Module) ? gm : undefined), {
+      everyMs: 100,
+      attempts: Math.ceil(timeoutMs / 100),
+    }).result;
+    if (!opened) throw new Error(`the core had not opened the ROM after ${timeoutMs}ms`);
+    return opened;
+  }
+
   async function applyStandardCheats(cheats: Cheat[]): Promise<void> {
     try {
-      const gm = await waitForEmulator();
+      const gm = await waitForRomOpen();
       cheats.forEach((c, i) => {
         gm.setCheat(i, 1, c.code);
       });
@@ -149,7 +178,7 @@ export const createShared = () => {
 
   async function clearCheats(disableKnownCheats = true): Promise<void> {
     try {
-      const gm = await waitForEmulator();
+      const gm = await waitForRomOpen();
       if (typeof gm.resetCheat === 'function') {
         gm.resetCheat();
       } else if (typeof gm.Module?._reset_cheat === 'function') {

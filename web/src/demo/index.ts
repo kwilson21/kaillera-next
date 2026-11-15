@@ -7,5 +7,6 @@ import * as hud from './hud.ts';
 import * as network from './network.ts';
 import * as options from './options.ts';
 import * as rom from './rom.ts';
+import { demoRomStore } from './rom-store.ts';
 
-export const demo = { autopilot, hud, network, options, rom };
+export const demo = { autopilot, hud, network, options, rom, romStore: demoRomStore };

@@ -26,7 +26,7 @@
  * compared; a boot input stall timeout; or an observer disagreement.
  *
  *   just serve        # the real server on :27888, in another terminal
- *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
+ *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [LINK_KBPS=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
  *     [HEADED=1] [OUT=/tmp/two-player] [KN_DB=server DB_PATH, Node >= 22.13] node tests/rb-two-player.mjs
  *
  * Extra knobs, all off by default:
@@ -216,6 +216,34 @@
  *     enough on a quiet machine; the slower the machine, the larger n should
  *     be, since the second request must reach the host before the held
  *     answer is let go.
+ *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
+ *     kbit/s, in both directions, shared by all of that connection's data
+ *     channels (tests/link-schedule.mjs): a message handed to send() on any
+ *     channel waits until the link has carried every byte handed to it
+ *     earlier on any channel of the connection, then for LAT and JITTER as
+ *     usual, then goes to the real send(). A held message (DELAY_SYNC_ANSWER_MS)
+ *     goes onto the link only when released, and holds back its own channel
+ *     only. So the host's inputs on `lockstep` and `rollback-input` queue
+ *     behind the state chunks on `sync-state`, as on a real connection.
+ *     bufferedAmount: on `sync-state`, everything still in the simulated
+ *     network for it; on the other channels, their own bytes the link has
+ *     not carried yet. 2000 carries a resync answer (about 1.45 MB) in about
+ *     6 s and two back to back in about 12 s, past the guest's 5 s peer-stale
+ *     deadline for inputs queued behind them, while 320 KB (the engine's
+ *     paced send: four chunks waiting and one more) takes 1.3 s. Combine with
+ *     DELAY_SYNC_ANSWER_MS=10000 for the two answers back to back that
+ *     starved the host's inputs (#236); alone, the guest asks for one plain
+ *     resync a third of the way in, which must be applied. The other fault
+ *     knobs are refused with it. The run fails on any DEEP-MISPREDICT-SKIP
+ *     (a rollback deeper than the window, skipped) after the fault outside a
+ *     proven frozen-page recovery, and a phantom of a page whose input
+ *     messages waited 2 s or more on the link is never proven frozen
+ *     (withoutLinkStarved in tests/frozen-recovery.mjs), so the link's
+ *     outage cannot be left out as the container's. Reported as `link` in
+ *     summary.json: per page bytes queued, the largest backlog, per channel
+ *     the largest wait for the link and the starved messages, and after the
+ *     fault the phantoms, skipped rollbacks, SYNC-SEND-STALLED and
+ *     DC-FALLBACK lines.
  *
  *   DESYNC_GUEST=1   The one knob that makes the match unhealthy on purpose:
  *     halfway through the battle the guest's copy of P1's stock count
@@ -278,7 +306,9 @@ import {
   frozenRecoveryNote,
   inFrozenRecovery,
   inFrozenRecoveryAftermath,
+  withoutLinkStarved,
 } from './frozen-recovery.mjs';
+import { createLinkSchedule, spansInFrames } from './link-schedule.mjs';
 import {
   observerDbNote,
   observerEventsIn,
@@ -314,6 +344,7 @@ const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
+const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -418,6 +449,26 @@ if (DELAY_SYNC_ANSWER_MS > 0 && !(DELAY_SYNC_ANSWER_MS > RESYNC_REQUEST_TIMEOUT_
   console.log(`DELAY_SYNC_ANSWER_MS must be longer than the guest's request deadline (${RESYNC_REQUEST_TIMEOUT_MS})`);
   process.exit(1);
 }
+if (!(Number.isFinite(LINK_KBPS) && LINK_KBPS >= 0)) {
+  console.log(`LINK_KBPS=${process.env.LINK_KBPS} invalid — must be a finite number >= 0`);
+  process.exit(1);
+}
+if (
+  LINK_KBPS > 0 &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DESYNC_GUEST)
+) {
+  console.log('LINK_KBPS combines only with DELAY_SYNC_ANSWER_MS among the fault knobs');
+  process.exit(1);
+}
+// LINK_KBPS without DELAY_SYNC_ANSWER_MS: one plain resync a third of the way in.
+const LINK_RESYNC = LINK_KBPS > 0 && !(DELAY_SYNC_ANSWER_MS > 0);
+const LINK_RESYNC_RECOVER_MS = 30000;
 // Both start a third of the way in; what follows must fit in the remaining two thirds.
 const DROP_PEER_RECOVER_MS = 30000;
 // How long the host's reconnect attempt waits before it retries: the
@@ -440,11 +491,12 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = (() => {
 const DELAY_SYNC_ANSWER_RECOVER_MS = 20000;
 const faultNeedsSeconds = Math.ceil(
   (((DROP_PEER_MS > 0 ? DROP_PEER_MS + DROP_PEER_RECOVER_MS : 0) +
-    (DELAY_SYNC_ANSWER_MS > 0 ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS : 0)) *
+    (DELAY_SYNC_ANSWER_MS > 0 ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS : 0) +
+    (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0)) *
     1.5) /
     1000,
 );
-if ((DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0) && !(BATTLE_SECONDS >= faultNeedsSeconds)) {
+if ((DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC) && !(BATTLE_SECONDS >= faultNeedsSeconds)) {
   console.log(`this fault needs BATTLE_SECONDS >= ${faultNeedsSeconds}`);
   process.exit(1);
 }
@@ -499,35 +551,103 @@ const webkitBrowser = async () => (_webkitBrowser ??= await webkit.launch({ head
 const hostBrowser = HOST_BROWSER === 'webkit' ? await webkitBrowser() : await chromiumBrowser();
 const guestBrowser = GUEST_BROWSER === 'webkit' ? await webkitBrowser() : await chromiumBrowser();
 
-const initScript = ({ lat, jitter }) => {
-  // Simulated network: delay every outgoing DataChannel message.
+const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
+  // Simulated network (tests/link-schedule.mjs): every outgoing DataChannel
+  // message is held (DELAY_SYNC_ANSWER_MS), carried by its connection's link
+  // at LINK_KBPS (no limit when 0), then delayed LAT ms + up to JITTER ms.
   // Jitter never reorders a channel: real SCTP data channels deliver in
-  // order, and chunked transfers (compressed save states) rely on it. Each
-  // channel drains one FIFO queue; a timer per message could reorder a burst,
-  // because setTimeout truncates fractional delays.
+  // order, and chunked transfers (compressed save states) rely on it.
   const orig = RTCDataChannel.prototype.send;
-  const queues = new WeakMap();
-  const pump = (ch, q) => {
-    q.timer = null;
-    while (q.items.length && q.items[0].at <= performance.now()) {
-      const { data } = q.items.shift();
-      try {
-        if (ch.readyState === 'open') orig.call(ch, data);
-      } catch (_) {}
-    }
-    if (q.items.length) q.timer = setTimeout(() => pump(ch, q), Math.max(0, q.items[0].at - performance.now()));
+  const net = createLinkSchedule({ kbps, lat, jitter });
+  window.__knLink = { stats: net.stats, unmappedChannels: 0 };
+  // Which connection a channel belongs to: the ones this page creates, and
+  // the ones the other page creates (the `datachannel` event). The listener
+  // is added as the connection is made, so it runs before the page's own
+  // ondatachannel handler, which sends on the channel.
+  const pcOf = new WeakMap();
+  const RealPC = window.RTCPeerConnection;
+  window.RTCPeerConnection = new Proxy(RealPC, {
+    construct(target, args, newTarget) {
+      const pc = Reflect.construct(target, args, newTarget);
+      pc.addEventListener('datachannel', (e) => pcOf.set(e.channel, pc));
+      return pc;
+    },
+  });
+  const realCreate = RealPC.prototype.createDataChannel;
+  RealPC.prototype.createDataChannel = function (...args) {
+    const ch = realCreate.apply(this, args);
+    pcOf.set(ch, this);
+    return ch;
   };
+  const links = new WeakMap(); // connection (or a channel with none known) -> {link, timer}
+  const channels = new WeakMap(); // RTCDataChannel -> its channel on the link
+  const scheduleOf = (dc) => {
+    let ch = channels.get(dc);
+    if (ch) return ch;
+    let owner = pcOf.get(dc);
+    if (!owner) {
+      // Not seen being made: it gets a link of its own, and the summary says so.
+      owner = dc;
+      window.__knLink.unmappedChannels++;
+    }
+    let l = links.get(owner);
+    if (!l) links.set(owner, (l = { link: net.link(), timer: null, dcs: [] }));
+    ch = net.channel(l.link, dc.label);
+    ch.pumped = l;
+    l.dcs.push([dc, ch]);
+    channels.set(dc, ch);
+    return ch;
+  };
+  const pump = (l) => {
+    l.timer = null;
+    const now = performance.now();
+    for (const [dc, ch] of l.dcs) {
+      for (const data of net.take(ch, now)) {
+        try {
+          if (dc.readyState === 'open') orig.call(dc, data);
+        } catch (_) {}
+      }
+    }
+    arm(l);
+  };
+  const arm = (l) => {
+    const at = net.wakeAt(l.link, performance.now());
+    if (at === Infinity) return;
+    clearTimeout(l.timer);
+    l.timer = setTimeout(() => pump(l), Math.max(0, at - performance.now()));
+  };
+  // What a channel has been handed by send() and not yet sent is its
+  // bufferedAmount. On `sync-state`, everything still in the simulated
+  // network for it, held or on the link or in flight: the engine hands its
+  // resync state over a chunk at a time, waiting for bufferedAmount to fall
+  // below a low-water mark (KNCore.syncSend), and without this the queue hid
+  // a held answer from it, and on release the whole of it, 2.9 MB with the
+  // next answer behind it, went into the connection at once. On the other
+  // channels, only the bytes the capped link has not carried yet (none
+  // without LINK_KBPS): those are the channel's own unsent bytes, as on a
+  // congested real connection, while bytes in flight are not, so the input
+  // channels' own buffer checks (DC-FALLBACK) see what they would see there.
+  const realBuffered = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'bufferedAmount');
+  const bytesOf = (data) => (typeof data === 'string' ? data.length : (data?.byteLength ?? data?.size ?? 0));
+  Object.defineProperty(RTCDataChannel.prototype, 'bufferedAmount', {
+    configurable: true,
+    get() {
+      const real = realBuffered.get.call(this);
+      const ch = channels.get(this);
+      if (!ch) return real;
+      return real + (this.label === 'sync-state' ? net.queued(ch) : net.unsent(ch, performance.now()));
+    },
+  });
   // DELAY_SYNC_ANSWER_MS: once the test sets window.__knHoldSyncAnswerMs, the
   // next numbered answer to a resync request on the `sync-state` channel is
-  // held that long. The FIFO above keeps the header and the binary chunks
-  // that follow it behind it, so they are released in order after it. That
-  // channel carries state transfers only, never input.
+  // held that long. The channel's order keeps the header and the binary
+  // chunks that follow it behind it, so they are released in order after it;
+  // the other channels' messages do not wait for it, until it is on the link.
+  // That channel carries state transfers only, never input.
   window.__knHoldSyncAnswerMs = 0;
   window.__knSyncAnswersHeld = [];
   RTCDataChannel.prototype.send = function (data) {
-    let q = queues.get(this);
-    if (!q) queues.set(this, (q = { items: [], timer: null }));
-    const last = q.items.length ? q.items[q.items.length - 1].at : 0;
+    const ch = scheduleOf(this);
     let hold = 0;
     if (
       window.__knHoldSyncAnswerMs > 0 &&
@@ -539,11 +659,8 @@ const initScript = ({ lat, jitter }) => {
       window.__knHoldSyncAnswerMs = 0;
       window.__knSyncAnswersHeld.push({ answer: data, heldAt: performance.now(), ms: hold });
     }
-    q.items.push({
-      data,
-      at: Math.max(performance.now() + hold + lat + (jitter ? Math.random() * jitter : 0), last),
-    });
-    if (!q.timer) q.timer = setTimeout(() => pump(this, q), Math.max(0, q.items[0].at - performance.now()));
+    net.send(ch, data, bytesOf(data), hold, performance.now());
+    arm(ch.pumped);
   };
 };
 
@@ -668,7 +785,10 @@ const recordEventsInitScript = () => {
 
 const mkPage = async (browser, name, { throttleHz = 0, hidden = false, suspendAudio = false } = {}) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
-  await ctx.addInitScript(initScript, { lat: LAT, jitter: JITTER });
+  // As source text: the link schedule is a function, which an init script's argument cannot carry.
+  await ctx.addInitScript({
+    content: `(${initScript})(${JSON.stringify({ lat: LAT, jitter: JITTER, kbps: LINK_KBPS })}, ${createLinkSchedule});`,
+  });
   if (throttleHz) await ctx.addInitScript(throttleInitScript, throttleHz);
   if (hidden) await ctx.addInitScript(hiddenInitScript);
   if (suspendAudio) await ctx.addInitScript(suspendAudioInitScript);
@@ -985,6 +1105,8 @@ let throttleFlipped = null; // null until the 15s mark; then whether the flip Pr
 // the fault began ({seq, frame} of its last line), and what the test saw.
 const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null };
 const delaySyncAnswer = { hostAt: null, guestAt: null, timedOut: false, askedAgainAfterMs: null };
+// LINK_KBPS on its own: where the logs stood when the guest asked for its plain resync.
+const linkResync = { hostAt: null, guestAt: null, applied: false };
 const syncLogOf = (page) => page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
 const seqOf = (line) => Number(line.split('\t')[0]);
 const lastLogLine = async (page) => {
@@ -1185,6 +1307,17 @@ if (inBattle) {
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (LINK_RESYNC) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [linkResync.hostAt, linkResync.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    // The guest's network-change handler: an immediate, numbered sync-request-full.
+    await guest.evaluate(() => window.dispatchEvent(new Event('online')));
+    console.log(`LINK_KBPS: guest asked for a resync over a ${LINK_KBPS} kbit/s link`);
+    linkResync.applied = await waitForLine(guest, linkResync.guestAt.seq, /sync #\d+ applied/, LINK_RESYNC_RECOVER_MS);
+    console.log(`LINK_KBPS: resync applied: ${linkResync.applied} (${Date.now() - started} ms)`);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (DROP_SIGNALING_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
@@ -1305,6 +1438,7 @@ const collect = (p, VISUAL_CHECK) =>
       clog: m.UTF8ToString(m._kn_get_debug_log()),
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       syncAnswersHeld: window.__knSyncAnswersHeld ?? [],
+      link: window.__knLink ?? null,
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
       // 64 KB RDRAM blocks kn_game_state_hash leaves out (of 128).
@@ -1380,7 +1514,24 @@ let both = 0,
 // differ by design and are left out, like the frames before the resync in
 // freeze mode (tests/frozen-recovery.mjs says what counts as proof). Freeze
 // mode makes its own phantom on purpose and has its own exclusion.
-const recoveries = FREEZE_MS > 0 ? [] : frozenRecoveries({ host: H.sync, guest: G.sync });
+// LINK_KBPS: when each page's input messages (every channel but
+// `sync-state`) were starved on its link, in that page's frames. A phantom
+// of a page whose inputs were stuck there is the link's doing, not a frozen
+// page, and is not left out (withoutLinkStarved).
+const starvedFramesOf = (peer) =>
+  spansInFrames(
+    peer.sync,
+    Object.entries(peer.link?.stats.byLabel ?? {})
+      .filter(([label]) => label !== 'sync-state')
+      .flatMap(([, s]) => s.starvedSpans),
+  );
+const linkStarvedFrames = LINK_KBPS > 0 ? { host: starvedFramesOf(H), guest: starvedFramesOf(G) } : null;
+const recoveries =
+  FREEZE_MS > 0
+    ? []
+    : linkStarvedFrames
+      ? withoutLinkStarved(frozenRecoveries({ host: H.sync, guest: G.sync }), linkStarvedFrames)
+      : frozenRecoveries({ host: H.sync, guest: G.sync });
 let framesExcluded = 0,
   mismatchesExcluded = 0;
 // DROP_PEER_MS: the reconnect as the logs show it, after the drop. From 12
@@ -1866,6 +2017,64 @@ if (dropPeerReport) Object.assign(dropPeerReport, dropIntegrity);
 // subtracting both would cancel a real report outside either window.
 const excusedIntegrity = integrityExcusedIn([...recoveries, ...dropWindows]);
 
+// LINK_KBPS: what the capped link did, and what followed the fault (the
+// DELAY_SYNC_ANSWER_MS request, or the plain resync): a skipped rollback
+// after it, outside a proven frozen-page recovery, is the desync this mode
+// exists to catch. The integrity rule above already fails on it anywhere in
+// the run; this names it.
+const linkReport = (() => {
+  if (!(LINK_KBPS > 0)) return null;
+  const at = DELAY_SYNC_ANSWER_MS > 0 ? delaySyncAnswer : linkResync;
+  const linkOf = (peer, starved) => {
+    const st = peer.link?.stats;
+    if (!st) return null;
+    return {
+      messages: st.messages,
+      bytesQueued: st.bytes,
+      maxBacklogBytes: st.maxBacklogBytes,
+      byLabel: Object.fromEntries(
+        Object.entries(st.byLabel).map(([label, l]) => [
+          label,
+          { messages: l.messages, bytes: l.bytes, maxQueueMs: Math.round(l.maxQueueMs), starved: l.starved },
+        ]),
+      ),
+      inputsStarvedFrames: starved,
+      unmappedChannels: peer.link.unmappedChannels,
+    };
+  };
+  const afterFault = (peer, pageAt) => {
+    if (!pageAt) return null;
+    const lines = linesAfter(peer.sync, pageAt.seq);
+    const unexcused = (line) => !inFrozenRecoveryAftermath(recoveries, frameOfSyncLine(line));
+    const deepSync = lines.filter((line) => /DEEP-MISPREDICT-SKIP/.test(line));
+    const deepC = peer.clog
+      .split('\n')
+      .filter((line) => /DEEP-MISPREDICT-SKIP/.test(line) && !(frameOfCLine(line) < pageAt.frame));
+    return {
+      fromFrame: pageAt.frame,
+      peerPhantoms: lines.filter((line) => /PEER-PHANTOM/.test(line)).length,
+      deepMispredictSkips: {
+        syncLog: deepSync.length,
+        syncLogUnexcused: deepSync.filter(unexcused).length,
+        cLog: deepC.length,
+        cLogUnexcused: deepC.filter((line) => !inFrozenRecoveryAftermath(recoveries, frameOfCLine(line))).length,
+      },
+      syncSendStalled: lines.filter((line) => /SYNC-SEND-STALLED/.test(line)).length,
+      dcFallbacks: lines.filter((line) => /DC-FALLBACK/.test(line)).length,
+      phantomLines: lines.filter((line) => /PEER-PHANTOM/.test(line)).slice(0, 4),
+      firstDeepMispredictSkip: deepSync[0] ?? deepC[0] ?? null,
+    };
+  };
+  return {
+    kbps: LINK_KBPS,
+    plainResync: LINK_RESYNC ? { applied: linkResync.applied } : null,
+    host: linkOf(H, linkStarvedFrames.host),
+    guest: linkOf(G, linkStarvedFrames.guest),
+    afterFault: { host: afterFault(H, at.hostAt), guest: afterFault(G, at.guestAt) },
+    recoveriesLinkStarved: recoveries.filter((recovery) => recovery.linkStarved).length,
+  };
+})();
+
 const summary = {
   room,
   ...(ADDRESS_MAP_CHECK
@@ -1946,6 +2155,7 @@ const summary = {
 };
 if (dropPeerReport) summary.dropPeer = dropPeerReport;
 if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
+if (linkReport) summary.link = linkReport;
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
@@ -2147,6 +2357,29 @@ if (delaySyncAnswerReport) {
     JSON.stringify(delaySyncAnswerReport),
   );
 }
+// LINK_KBPS: every channel was on its connection's shared link, the fault
+// happened (a plain resync was applied, or DELAY_SYNC_ANSWER_MS's own checks
+// above), and no rollback was skipped after it outside a proven recovery.
+const linkFailed =
+  LINK_KBPS > 0 &&
+  (!linkReport.host ||
+    !linkReport.guest ||
+    linkReport.host.unmappedChannels > 0 ||
+    linkReport.guest.unmappedChannels > 0 ||
+    (LINK_RESYNC && !linkResync.applied) ||
+    !linkReport.afterFault.host ||
+    !linkReport.afterFault.guest ||
+    [linkReport.afterFault.host, linkReport.afterFault.guest].some(
+      (side) => side.deepMispredictSkips.syncLogUnexcused > 0 || side.deepMispredictSkips.cLogUnexcused > 0,
+    ));
+if (linkReport) {
+  console.log(
+    linkFailed
+      ? 'LINK_KBPS: a channel off the shared link, no fault, or a skipped rollback after it:'
+      : 'LINK_KBPS: link capped, no skipped rollback after the fault:',
+    JSON.stringify(linkReport),
+  );
+}
 // A disagreement is what the fault modes exist to find: it fails the run like a mismatch.
 const observersFailed = observerDisagreements > 0 || !!observers.db?.error;
 console.log(
@@ -2155,6 +2388,7 @@ console.log(
 );
 const failed =
   addressMapFailed ||
+  linkFailed ||
   dropPeerFailed ||
   delaySyncAnswerFailed ||
   observersFailed ||
