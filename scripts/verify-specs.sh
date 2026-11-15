@@ -173,6 +173,21 @@ tick_deadlines() {
   local TICK=specs/tick_deadlines.qnt
   verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
   expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
+  verify "$TICK" input_link_paced allHold
+  # Two chunks ahead of the inputs, two seconds, the deadline, a second: 5 steps.
+  expect_violation "$TICK" input_link_burst allHold
+  # #236 as first written. A transfer, a push queued behind it, a reconnect,
+  # the push comes up, its chunk goes over the new connection: 5 steps
+  # (transferQueuedBeforeAResetTest). A transfer settled at its start and
+  # given up: 2 steps (abandonedTransferTest).
+  expect_violation "$TICK" input_link_paced_unguarded aTransferQueuedBeforeAResetNeverReachesTheNewConnection
+  expect_violation "$TICK" input_link_paced_unguarded inputsAreSettledOnlyForADeliveredState
+  # The guest's chunk deadline over the whole state: a state longer than the
+  # deadline, two seconds, the guest drops it while it arrives (4 steps); its
+  # request reaches the host, which hands over the next chunk (6 steps).
+  # progressingTransferAbandonedTest holds the ordering.
+  expect_violation "$TICK" input_link_paced_whole_deadline aTransferMakingProgressIsNotAbandoned
+  expect_violation "$TICK" input_link_paced_whole_deadline noChunkForATransferTheGuestDropped
 }
 
 resync_inputs() {

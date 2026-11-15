@@ -516,6 +516,22 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   guest asked from (rule b, `resync_flow_asked_from`) still takes it back.
 - Next: read the production reports; once they show none, the engine calls
   the proved functions instead of its own copies.
+- A state transfer starving the inputs behind it (`specs/tick_deadlines.qnt`,
+  `input_link`). Two `DELAY_SYNC_ANSWER_MS` runs failed with 83 and 40
+  gameplay mismatches and 76 and 20 `DEEP-MISPREDICT-SKIP`. The prediction
+  window's guard held; it leaves out a phantom peer by design, and the guest
+  made the host a phantom at the peer-stale deadline (5 s) while the host's
+  inputs sat unsent behind two answers' worth of state (2.9 MB) on the
+  shared connection (the host's input channel stood at 5.7 KB buffered). The
+  guest then ran 38 to 84 frames past the window. Fixed: the host hands its
+  state over a chunk at a time, waiting for the channel to hold less than
+  256 KB (`KNCore.syncSend`, `mayHandChunk` proved, the wait an Effect
+  program with a 15 s deadline per chunk, `SYNC-SEND-STALLED`); a request
+  that comes in meanwhile is queued, not dropped. The two-player harness
+  counts what its simulated link holds in the `sync-state` channel's
+  `bufferedAmount`. After the fix the delayed run at 90 s had no mismatch
+  and no deep rollback, and so did the plain, frozen-host, frozen-guest and
+  dropped-peer runs.
 
 **Stage 6: the remaining page scripts**
 The other hand-written scripts of the play, demo and landing pages move to
