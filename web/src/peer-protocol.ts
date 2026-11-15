@@ -266,7 +266,7 @@ const SignalRelay = Schema.Struct({
   // A reconnect offer that is a startup retry, from a page whose game has not started.
   startupReconnect: Schema.optional(Schema.Boolean),
   // Which attempt the signal belongs to: the page that made the offer and that
-  // page's count of its offers (peer-observe.ts). Pages from before it send none.
+  // page's count of its offers (attempt-id.ts). Pages from before it send none.
   attemptId: Schema.optional(Schema.Struct({ page: Schema.String, attempt: Schema.Number })),
 });
 

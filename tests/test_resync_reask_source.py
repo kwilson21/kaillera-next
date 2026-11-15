@@ -34,14 +34,16 @@ def test_a_now_request_marks_the_resync_owed_and_an_ask_again_does_not_reset_the
 def test_the_deadline_asks_again_bounded_and_the_lost_host_resync_goes_first():
     src = LOCKSTEP_JS.read_text()
     deadline = _body(src, "const _checkResyncRequestDeadline = () => {")
-    lost = deadline.index("if (_lateJoinLostHost) step = 'lostHost';")
-    owed = deadline.index("else if (!_owedResync) step = 'letGo';")
-    bound = deadline.index("else if (_owedResyncAsksAgain >= RESYNC_MAX_ASKS_AGAIN) step = 'stopAsking';")
-    again = deadline.index("else step = 'askAgain';")
-    assert lost < owed < bound < again
+    # The step is the proved resyncDeadlineStep (web/src/resync-request.ts):
+    # the lost-host resync first, then nothing owed, the bound, the ask again
+    # (tests/ts/resync-request.test.ts).
+    step = deadline.index("const step = window.KNCore.resyncRequest.resyncDeadlineStep(")
+    for arg in ("_lateJoinLostHost,", "_owedResync,", "_owedResyncAsksAgain,", "RESYNC_MAX_ASKS_AGAIN,"):
+        assert arg in deadline[step:]
+    waits = deadline.index("if (step === 'noRequest' || step === 'wait') return;")
     # The request is let go before any step acts.
     let_go = deadline.index("_resyncRequestInFlight = false;")
-    assert deadline.index("_resyncObserve('deadline-step', step,") < let_go
+    assert step < waits < let_go
     for call in (
         "if (step === 'lostHost') _resyncAfterLostHost('resync request timed out');",
         "else if (step === 'askAgain') _askAgainForOwedResync();",

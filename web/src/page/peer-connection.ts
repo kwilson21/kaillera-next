@@ -16,7 +16,7 @@ interface SignalPayload {
   candidate?: RTCIceCandidate;
   offer?: RTCSessionDescriptionInit;
   answer?: RTCSessionDescriptionInit;
-  /** The attempt the signal belongs to (web/src/peer-observe.ts). The rollback engine sets it. */
+  /** The attempt the signal belongs to (web/src/attempt-id.ts). The rollback engine sets it. */
   attemptId?: { page: string; attempt: number } | null;
 }
 

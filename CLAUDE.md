@@ -123,7 +123,9 @@ kaillera-next/
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
 │   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
-│   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); not wired into the engine yet
+│   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); driven from the engine (peer-driver.ts), being wired in to decide one rule at a time
+│   │   ├── peer-driver.ts       # hands the rollback engine's events to one peer-connection.ts machine per other player
+│   │   ├── attempt-id.ts        # the `attemptId` {page, attempt} every webrtc-signal carries: which connection attempt it belongs to
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing); offer-gate.ts decides, for the engine, that a guest or spectator takes an offer only from slot 0; attempt.ts decides which connection a signal belongs to and reoffer.ts is the host's deadline to offer again (specs/streaming_connection.qnt)
@@ -386,6 +388,7 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   used to accept stick values in the same zone without a rollback; #14 made
   matching exact. Don't reintroduce a tolerance: filter jitter at the input
   source instead (`KNShared.createStickDeadband`).
+- **Wire in what makes the netcode more robust.** A modelled fix (a machine or rule built to a spec's `*_fixed` variant) is wired in to decide, not left beside the engine or deleted.
 
 ## Dev environment
 
