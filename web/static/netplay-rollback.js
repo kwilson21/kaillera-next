@@ -5243,6 +5243,26 @@
   // normally ends the pause; this one is for a host that never says resume.
   let _lateJoinGuestPausedAt = 0;
   const LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000;
+  // Joiner: its channel to the host closed while it waited for the state or
+  // loaded it. The host ends the serve when that channel goes (resetPeerState)
+  // and runs on, but a state already sent still arrives and is loaded: the
+  // joiner would be made a player frames behind the host. Once it has loaded
+  // and its channel to the host is open it asks for a full resync instead
+  // (specs/late_join_pause.qnt, aJoinerIsNotMadeAPlayerBehindTheHost).
+  // The marker stays until a state from the host is applied
+  // (applySyncState): a request can go unanswered (the host's rate limit, a
+  // failed capture, a lost answer), and its deadline then asks again.
+  // resetPeerState for the host does not clear it: the late-join load and the
+  // reconnect path both reset the host's peer state just as the resync is
+  // needed most.
+  let _lateJoinLostHost = false;
+  // Asks for that resync since the marker was set. Bound: at most
+  // LATE_JOIN_LOST_HOST_MAX_ASKS requests, each ended by its answer or by
+  // RESYNC_REQUEST_TIMEOUT_MS (8 s, longer than the host's 5 s rate limit);
+  // after the last one goes unanswered the joiner gives up, visibly
+  // (LATE-JOIN-LOST-HOST-GIVEUP), and asks no more.
+  let _lateJoinLostHostAsks = 0;
+  const LATE_JOIN_LOST_HOST_MAX_ASKS = 3;
   const _lateJoinReadyHandled = new Set(); // senderSid values already resumed
   // Host: the joiners being served, sid -> the id of that serve. The pause
   // belongs to them: it ends when none is left, and a serve's timer acts only
@@ -6413,6 +6433,8 @@
     if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;
     _resyncRequestInFlight = false;
     _syncLog(`RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} — no state came, may ask again`);
+    // A late joiner still behind the host asks again (bounded there).
+    _resyncAfterLostHost('resync request timed out');
   };
   // Each request has a number and the state that answers it carries that
   // number (specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST). A request can be
@@ -7088,6 +7110,8 @@
     if (!_awaitingLateJoinState || _isApplyingLateJoinState) return;
     _syncLog(`late-join wait: joining the start instead (${reason})`);
     _awaitingLateJoinState = false;
+    _lateJoinLostHost = false;
+    _lateJoinLostHostAsks = 0;
     _lateJoin = false;
     _config?.onLateJoinAdmitted?.();
     for (const p of Object.values(_peers)) {
@@ -7102,6 +7126,8 @@
 
   const _beginLateJoinWait = () => {
     _awaitingLateJoinState = true;
+    _lateJoinLostHost = false;
+    _lateJoinLostHostAsks = 0;
     _declareLateJoiner();
     setStatus('Requesting game state...');
     const wait = window.KNCore.startLateJoinWait({
@@ -8416,6 +8442,7 @@
       if (_playerSlot === 0 && _pendingLateJoinReadySids.has(remoteSid)) {
         finishLateJoinReady('deferred DC open', remoteSid);
       }
+      if (peer.slot === 0) _resyncAfterLostHost('host channel open');
 
       if (!openedAttempt) {
         _peerObs()?.stopWatching(peer.slot, remoteSid, 'a channel opened on a connection with no attempt id');
@@ -9145,6 +9172,10 @@
   const handlePeerDisconnect = (remoteSid, lostAttempt = _peers[remoteSid]?.pc?._knAttempt) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
+    if (peer.slot === 0 && _playerSlot !== 0 && (_awaitingLateJoinState || _isApplyingLateJoinState)) {
+      _lateJoinLostHost = true;
+      _syncLog('late-join: lost the channel to the host before loading; a resync follows the load');
+    }
     // The machine does not cover a late joiner: that player is left alone.
     if (_isPeerPendingLateJoin(remoteSid, peer)) _peerObs()?.stopWatching(peer.slot, remoteSid, 'a late joiner');
     const frame = _peerObs()?.open(peer.slot, remoteSid);
@@ -10943,6 +10974,55 @@
     }
   }
 
+  // Joiner: a full resync from the host after a late join during which the
+  // channel to the host was lost. Asked once the state is loaded and the
+  // channel is open; until then the marker waits for the channel's open. The
+  // marker is cleared only when a state is applied (applySyncState). Each
+  // request has the resync request's own deadline (I1), which calls this
+  // again; after LATE_JOIN_LOST_HOST_MAX_ASKS unanswered asks it gives up.
+  const _resyncAfterLostHost = (source) => {
+    if (!_lateJoinLostHost || _playerSlot === 0 || _phase !== PHASE_RUNNING) return;
+    const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+    if (hostDc?.readyState !== 'open') {
+      _syncLog(`late-join resync after a lost host channel waits for it to open (${source})`);
+      return;
+    }
+    // A request already out: its answer, applied, clears the marker; its
+    // deadline brings this back if none comes.
+    if (_resyncRequestInFlight) {
+      _syncLog(`late-join resync after a lost host channel: a resync is already on its way (${source})`);
+      return;
+    }
+    if (_lateJoinLostHostAsks >= LATE_JOIN_LOST_HOST_MAX_ASKS) {
+      _lateJoinLostHost = false;
+      _lateJoinLostHostAsks = 0;
+      _syncLog(
+        `LATE-JOIN-LOST-HOST-GIVEUP f=${_frameNum} (${source}): ${LATE_JOIN_LOST_HOST_MAX_ASKS} resync requests went unanswered`,
+      );
+      KNEvent('late-join-lost-host-giveup', 'No resync from the host after a late join', {
+        asks: LATE_JOIN_LOST_HOST_MAX_ASKS,
+      });
+      return;
+    }
+    _lateJoinLostHostAsks++;
+    _setLastSyncState(null, 'late-join-lost-host');
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    const requestId = _beginResyncRequest();
+    try {
+      _sendResyncRequest(hostDc, requestId, 'sync-request-full');
+      _syncLog(
+        `LATE-JOIN-LOST-HOST-RESYNC f=${_frameNum} ask=${_lateJoinLostHostAsks}/${LATE_JOIN_LOST_HOST_MAX_ASKS} ` +
+          `(${source}): sent sync-request-full to the host`,
+      );
+    } catch (e) {
+      _syncLog(`late-join resync request failed: ${e}`);
+      _resyncRequestInFlight = false;
+      // Bounded by the count above.
+      _resyncAfterLostHost(`${source}, send failed`);
+    }
+  };
+
   const handleLateJoinState = async (msg) => {
     if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
     if (_isSpectator) return;
@@ -11148,6 +11228,9 @@
         const pcState = existing?.pc?.connectionState;
         const working = !!existing && pcState === 'connected' && existing.dc?.readyState === 'open';
         if (!_needsMeshHeal(sid, working, false)) continue;
+        // No working channel to the host now: the host may have ended this
+        // serve and run on.
+        if (info.slot === 0) _lateJoinLostHost = true;
         // Peer is missing, dead, or has no working DC — clean up and recreate
         if (existing) {
           _syncLog(
@@ -11192,6 +11275,7 @@
         _syncLog(`late-join-ready retry ${readyAttempts}`);
         sendLateJoinReady();
       }, 500);
+      _resyncAfterLostHost('late-join state loaded');
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
     } finally {
@@ -13498,6 +13582,10 @@
     _resyncRequestAt = -1;
     _hostNumbersAnswers = false;
     _syncAnswerFor = 0;
+    // A late join's owed resync belongs to this match: it does not carry
+    // into the next one on this page.
+    _lateJoinLostHost = false;
+    _lateJoinLostHostAsks = 0;
     _lastAppliedSyncHostFrame = -1;
     _resetStrictMenuResends();
     _clearStrictMenuWait();
@@ -17856,6 +17944,12 @@
 
     _syncMismatchStreak = 0;
     _lastAppliedSyncHostFrame = frame; // discard any explicit state older than this
+    if (_lateJoinLostHost) {
+      // The host's state is applied: the late joiner is where the host is.
+      _lateJoinLostHost = false;
+      _lateJoinLostHostAsks = 0;
+      _syncLog(`late-join: a host state is applied at frame ${frame}; the lost-host resync is done`);
+    }
     _lastResyncTime = performance.now(); // restart cooldown from application time, not request time
     // Reset frame pacing after resync — the guest may be behind the host and needs
     // to catch up without PACING-THROTTLE fighting the recovery. Clear the EMA smoothing
@@ -18073,6 +18167,8 @@
     _lateJoinReadyHandled.clear();
     _lateJoinServing.clear();
     _lateJoinGuestPausedAt = 0;
+    _lateJoinLostHost = false;
+    _lateJoinLostHostAsks = 0;
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();

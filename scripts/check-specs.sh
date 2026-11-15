@@ -142,16 +142,31 @@ pair peer_connection_counter_only holdWithACounterAlone initLobby
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
-for variant in late_join_pause_before late_join_pause_host_side late_join_pause_current; do
+for variant in late_join_pause_before late_join_pause_host_side late_join_pause_before_resync \
+  late_join_pause_marker_at_send late_join_pause_current; do
   $QUINT test "$PAUSE" --main="$variant" --backend=typescript
 done
 # Today: the game stays paused while a joiner has yet to load, a joiner who
 # is playing is never disconnected, the host's pause has a deadline that a
-# repeated request does not push back, and a paused guest resumes on the
-# host's word or at its own deadline. The first three were violated before
-# the pause belonged to the joiners being served (late_join_pause_before);
-# the rest with only the host's side changed (late_join_pause_host_side).
+# repeated request does not push back, a paused guest resumes on the host's
+# word or at its own deadline, and so does a joiner, including one made a
+# player while the host is paused for another (it waits with the rest). The
+# first three were violated before the pause belonged to the joiners being
+# served (late_join_pause_before); the guest's with only the host's side
+# changed (late_join_pause_host_side). And a joiner that lost its channel
+# to the host during its serve is not made a player on a state the host has
+# run past without a resync on its way: violated before the joiner resynced
+# (late_join_pause_before_resync; joinerLosesTheHostAfterTheStateIsSentTest,
+# timerFiresWhileTheStateIsOnItsWayTest), and again while the joiner's
+# marker went with its first request: one that went unanswered left it
+# behind for good (late_join_pause_marker_at_send;
+# resyncRequestUnansweredTest). Today the marker stays until a state is
+# applied, the joiner asks again, and gives up visibly after three.
 $QUINT run "$PAUSE" --main=late_join_pause_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$PAUSE" --main=late_join_pause_marker_at_send --invariant=holdBeforeTheResyncFix \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeTheResyncFix \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── A resync from request to apply ──────────────────────────────────────────

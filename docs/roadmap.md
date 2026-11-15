@@ -422,6 +422,49 @@ Slice 1, the peer mesh and signaling:
 - Next: read the production reports; then decide, one rule at a time, by
   the machine, starting with who offers from the health check.
 
+Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed
+as not modelled are now modelled.
+
+- A joiner made a player while the host is still paused for another one.
+  The model has the host's channel to each joiner and the joiner's own
+  pause. Two properties: the new player waits for the host (it is paused,
+  or a pause is on its way: `aNewPlayerWaitsForTheHost`), and a joiner's
+  pause has a deadline (`joinerPauseHasADeadline`, I1). The engine already
+  holds both: `finishLateJoinReady` sends the new player `late-join-pause`
+  when the pause is kept, `sendLateJoinState` pauses every other peer with
+  an open channel, a joiner included, `resumeLateJoinPause` resumes every
+  peer, and the joiner's page runs the guest's 20 s deadline. Nothing
+  changed in the engine for this one
+  (`aNewPlayerPausesWithTheHostTest`, `aPlayerPausesForTheNextJoinerTest`).
+- A joiner's channel to the host closing during its serve (a lost
+  connection, or the host's own disconnect at the 15 s deadline), and
+  opening again. The host ends the serve (`resetPeerState`), so its timer
+  and a compression still running do nothing, and resumes if no one else
+  is held. But a state already sent through the server is still loaded,
+  and the joiner's "ready", held until its channel opens
+  (`_pendingLateJoinReadySids`), made it a player on a state the host had
+  run past. Violated before (`aJoinerIsNotMadeAPlayerBehindTheHost` on
+  `late_join_pause_before_resync`, 7 steps). Fixed: a joiner whose channel
+  to the host closed while it waited or loaded (`_lateJoinLostHost`) asks
+  for a full resync once it has loaded and the channel is open
+  (`_resyncAfterLostHost`), as a running player does after a reconnect.
+  The resync is the regular one, with its own deadline; none of this ran
+  in the two-player and lifecycle runs, which lose no channel mid-serve.
+- That marker was first cleared when the request was sent, so a request
+  that went unanswered (the host's rate limit, a failed capture, a lost
+  answer) left the joiner behind the host for good
+  (`late_join_pause_marker_at_send`, `resyncRequestUnansweredTest`, 8
+  steps). It now stays until a host state is applied (`applySyncState`);
+  the request's deadline (`RESYNC_REQUEST_TIMEOUT_MS`, 8 s, longer than the
+  host's 5 s rate limit) asks again, and after
+  `LATE_JOIN_LOST_HOST_MAX_ASKS` (3) unanswered asks the joiner gives up
+  visibly (`LATE-JOIN-LOST-HOST-GIVEUP`, client event
+  `late-join-lost-host-giveup`).
+- Still not modelled: a "ready" that arrives before the joiner's channel
+  has ever opened (the host resumes without the joiner and makes it a
+  player when the channel opens), and a channel lost by a joiner who is
+  already playing (the regular reconnect path).
+
 **Stage 6: the remaining page scripts**
 The other hand-written scripts of the play, demo and landing pages move to
 `web/src` the way `play.js` does: the logic becomes strict TypeScript and the
