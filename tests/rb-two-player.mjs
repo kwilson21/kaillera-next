@@ -19,14 +19,15 @@
  *     the engine (tests/observer-reports.mjs), in either page's sync log or
  *     client events, nor, with KN_DB set to the server's DB_PATH, in the
  *     server's client_events table for this room (without KN_DB the query to
- *     run by hand is printed)
+ *     run by hand is printed). Reading KN_DB needs Node >= 22.13 (node:sqlite);
+ *     on an older Node, or a database that cannot be read, the run fails.
  * Exits 1 for gameplay divergence; rollback failure; integrity events; a match
  * that never reaches a battle; fewer than 80% of finalized battle frames
  * compared; a boot input stall timeout; or an observer disagreement.
  *
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
- *     [HEADED=1] [OUT=/tmp/two-player] node tests/rb-two-player.mjs
+ *     [HEADED=1] [OUT=/tmp/two-player] [KN_DB=server DB_PATH, Node >= 22.13] node tests/rb-two-player.mjs
  *
  * Extra knobs, all off by default:
  *   HOST_BROWSER=webkit / GUEST_BROWSER=webkit   Run that page in Playwright
@@ -117,7 +118,10 @@
  *     scoring 31-40. So frames > 40 are "corrupted" (this is what fails the
  *     run); frames > 15 but <= 40 are reported informationally as
  *     `heldOrTimingDiffs` and do not fail anything.
- *     Reported as `visualCheck: {framesCompared, corrupted,
+ *     Frames inside a proven window the hash compare leaves out (a
+ *     frozen-page recovery, a DROP_PEER_MS reconnect) are left out here too
+ *     and counted as `framesExcluded`.
+ *     Reported as `visualCheck: {framesCompared, framesExcluded, corrupted,
  *     corruptedNearReplayEnd, firstCorrupted, heldOrTimingDiffs, maxDiff}`
  *     in summary.json. `corruptedNearReplayEnd` counts corrupted frames at
  *     or one past a `C-REPLAY done: caught up at f=N` line in the host's
@@ -173,10 +177,15 @@
  *     one gets through. 1 reconnects at once; 12000 takes the host through a
  *     timed-out attempt and a retry. Both pages give up after 45 s, so keep
  *     n under about 25000. On top of the normal checks the run fails unless
- *     the logs show the reconnect offer (guest: `received reconnect offer`),
- *     the answer (host: `onWebRTCSignal: answer from` the guest), the channel
- *     open (guest: `DC open with ... slot: 0`), the reconnect resync (guest:
- *     `reconnect resync: sent`) and a resync applied after it. The frames from
+ *     signaling frames were really dropped (`signalsDropped` above 0); with n
+ *     longer than an attempt's deadline (the engine's
+ *     _RECONNECT_ATTEMPT_TIMEOUT, 10 s, read from netplay-rollback.js), the
+ *     host's log shows the retry (`reconnect attempt 1 timeout`, or an
+ *     attempt 2 or later); and the logs show the reconnect offer (guest:
+ *     `received reconnect offer`), the answer (host: `onWebRTCSignal: answer
+ *     from` the guest), the channel open (guest: `DC open with ... slot: 0`),
+ *     the reconnect resync (guest: `reconnect resync: sent`) and a resync
+ *     applied after it. The frames from
  *     12 before the drop to the frame that resync lands on differ by design
  *     (each page ran on predicted input for the other) and are left out of
  *     the hash compare, the way a proven frozen-page recovery is
@@ -199,7 +208,10 @@
  *     reached the guest after the second request, the rules handled it
  *     (`SYNC-LATE-ANSWER-DROPPED`, `SYNC-LATE-ANSWER-IGNORED`, `sync state is
  *     not the answer awaited`, or a chunk timeout `for older request`; each is
- *     counted), and a resync was applied. Frames are compared as usual: no
+ *     counted), and an answer to the newest request was applied (a `resync
+ *     ready (... answerFor=N newest=N endsRequest=true)` after the second
+ *     request, then `sync #k applied` before any other answer), so no
+ *     request is left pending. Frames are compared as usual: no
  *     exclusion. Reported as `delaySyncAnswer` in summary.json. 10000 is
  *     enough on a quiet machine; the slower the machine, the larger n should
  *     be, since the second request must reach the host before the held
@@ -407,6 +419,23 @@ if (DELAY_SYNC_ANSWER_MS > 0 && !(DELAY_SYNC_ANSWER_MS > RESYNC_REQUEST_TIMEOUT_
 }
 // Both start a third of the way in; what follows must fit in the remaining two thirds.
 const DROP_PEER_RECOVER_MS = 30000;
+// How long the host's reconnect attempt waits before it retries: the
+// engine's own _RECONNECT_ATTEMPT_TIMEOUT, read from netplay-rollback.js so
+// the two cannot drift. A DROP_PEER_MS longer than this drops the first
+// attempt's offer and outlasts its deadline, so the run must show a retry.
+const RECONNECT_ATTEMPT_TIMEOUT_MS = (() => {
+  const source = fs.readFileSync(
+    // URL is the server's address in this file.
+    new globalThis.URL('../web/static/netplay-rollback.js', import.meta.url),
+    'utf8',
+  );
+  const m = source.match(/const _RECONNECT_ATTEMPT_TIMEOUT = (\d+);/);
+  if (!m) {
+    console.log('netplay-rollback.js no longer defines _RECONNECT_ATTEMPT_TIMEOUT: update DROP_PEER_MS in this test');
+    process.exit(1);
+  }
+  return Number(m[1]);
+})();
 const DELAY_SYNC_ANSWER_RECOVER_MS = 20000;
 const faultNeedsSeconds = Math.ceil(
   (((DROP_PEER_MS > 0 ? DROP_PEER_MS + DROP_PEER_RECOVER_MS : 0) +
@@ -1375,10 +1404,21 @@ const dropPeerReport = (() => {
     resyncApplied: resyncSent < 0 ? null : lineOf(guestLines.slice(resyncSent), /sync #\d+ applied/),
   };
   const proven = !!dropPeer.closed?.closed && Object.values(paths).every(Boolean) && to !== null;
+  // The fault itself: signaling was really dropped, and a drop that outlasts
+  // an attempt's deadline took the host through a timed-out attempt and a retry.
+  const retryExpected = DROP_PEER_MS > RECONNECT_ATTEMPT_TIMEOUT_MS;
+  const retry =
+    lineOf(hostLines, /reconnect attempt 1 timeout/) ??
+    lineOf(hostLines, /initiating reconnect to \S+ \(attempt [2-9]/);
+  const exercised = peerSignalBlock.dropped > 0 && (!retryExpected || !!retry);
   return {
     ms: DROP_PEER_MS,
     closed: dropPeer.closed,
     signalsDropped: peerSignalBlock.dropped,
+    attemptTimeoutMs: RECONNECT_ATTEMPT_TIMEOUT_MS,
+    retryExpected,
+    retry,
+    exercised,
     frameAtDrop: { host: dropPeer.hostFrame, guest: dropPeer.closed?.frame ?? null },
     reconnectAttempts: hostLines.filter((line) => /initiating reconnect to/.test(line)).length,
     paths,
@@ -1406,6 +1446,23 @@ const delaySyncAnswerReport = (() => {
   // the held answer's header reaches it, or the answer was not late.
   const asks = guestLines.flatMap((line, i) => (/network change detected/.test(line) ? [i] : []));
   const firstAnswer = guestLines.findIndex((line) => /sync-start received/.test(line));
+  // The request is settled only when an answer to the newest one was applied:
+  // after the second ask, a `resync ready` whose answerFor is the newest
+  // request and ends it, then a `sync #k applied` before any other answer.
+  const newestReady =
+    asks.length < 2
+      ? -1
+      : guestLines.findIndex(
+          (line, i) => i > asks[1] && /resync ready \(.*answerFor=(\d+) newest=\1 endsRequest=true\)/.test(line),
+        );
+  const afterReady = newestReady < 0 ? [] : guestLines.slice(newestReady + 1);
+  const nextAnswer = afterReady.findIndex((line) => /resync ready \(/.test(line));
+  const newestApplied =
+    newestReady < 0
+      ? null
+      : ((nextAnswer < 0 ? afterReady : afterReady.slice(0, nextAnswer)).find((line) =>
+          /sync #\d+ applied/.test(line),
+        ) ?? null);
   return {
     ms: DELAY_SYNC_ANSWER_MS,
     held: H.syncAnswersHeld,
@@ -1426,6 +1483,8 @@ const delaySyncAnswerReport = (() => {
       /resync ready \(|sync-start received|not the answer awaited|SYNC-LATE-ANSWER/.test(line),
     ),
     resyncsApplied: countIn(guestLines, /sync #\d+ applied/),
+    newestAnswer: newestReady < 0 ? null : guestLines[newestReady],
+    newestApplied,
     applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
   };
 })();
@@ -1597,9 +1656,16 @@ if (VISUAL_CHECK) {
     firstCorrupted = null,
     heldOrTimingDiffs = 0,
     maxDiff = 0;
+  let windowFramesExcluded = 0;
   for (const [f, hb] of hMap) {
     const gb = gMap.get(f);
     if (!gb || f < recoveredAt) continue;
+    // The proven windows the hash compare leaves out (a frozen-page recovery,
+    // a DROP_PEER_MS reconnect): the peers' pictures differ there by design too.
+    if (inFrozenRecovery([...recoveries, ...dropWindows], f)) {
+      windowFramesExcluded++;
+      continue;
+    }
     framesCompared++;
     let sum = 0;
     for (let i = 0; i < hb.length; i++) sum += Math.abs(hb[i] - gb[i]);
@@ -1615,6 +1681,7 @@ if (VISUAL_CHECK) {
   }
   visualCheck = {
     framesCompared,
+    framesExcluded: windowFramesExcluded,
     corrupted,
     corruptedNearReplayEnd,
     firstCorrupted,
@@ -1779,6 +1846,11 @@ const integrityExcusedIn = (windows) => ({
 const recoveryIntegrity = integrityExcusedIn(recoveries);
 const dropIntegrity = integrityExcusedIn(dropWindows);
 if (dropPeerReport) Object.assign(dropPeerReport, dropIntegrity);
+// What the pass/fail rule subtracts: the reports inside any proven window,
+// each counted once. The two counts above are for reporting only; a report
+// inside both a recovery and the drop window is in each of them, and
+// subtracting both would cancel a real report outside either window.
+const excusedIntegrity = integrityExcusedIn([...recoveries, ...dropWindows]);
 
 const summary = {
   room,
@@ -1936,16 +2008,8 @@ if (FREEZE_MS > 0)
 const integrityFailed =
   FREEZE_MS > 0
     ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
-    : (H.failed || 0) +
-        (G.failed || 0) -
-        recoveryIntegrity.failedRollbacksExcluded -
-        dropIntegrity.failedRollbacksExcluded >
-        0 ||
-      summary.integrityEvents.host +
-        summary.integrityEvents.guest -
-        recoveryIntegrity.integrityEventsExcluded -
-        dropIntegrity.integrityEventsExcluded >
-        0;
+    : (H.failed || 0) + (G.failed || 0) - excusedIntegrity.failedRollbacksExcluded > 0 ||
+      summary.integrityEvents.host + summary.integrityEvents.guest - excusedIntegrity.integrityEventsExcluded > 0;
 const minGameFpsFailed = MIN_GAME_FPS !== null && (!(gameFps.host >= MIN_GAME_FPS) || !(gameFps.guest >= MIN_GAME_FPS));
 if (minGameFpsFailed) {
   console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));
@@ -2025,7 +2089,12 @@ if (DESYNC_GUEST) {
     desyncGuestFailed ? 'DESYNC_GUEST: the detector did not flag the desync as expected:' : 'DESYNC_GUEST: flagged:',
     JSON.stringify(summary.desyncGuest),
   );
-  process.exit(desyncGuestFailed || observerDisagreements > 0 || H.inBattleAt < 0 || G.inBattleAt < 0 ? 1 : 0);
+  // An unreadable KN_DB fails this mode as it does the others: the rows it holds were not counted.
+  process.exit(
+    desyncGuestFailed || observerDisagreements > 0 || observers.db?.error || H.inBattleAt < 0 || G.inBattleAt < 0
+      ? 1
+      : 0,
+  );
 }
 const addressMapFailed =
   ADDRESS_MAP_CHECK && [...summary.addressMapCheck.host, ...summary.addressMapCheck.guest].some((check) => !check.ok);
@@ -2034,23 +2103,28 @@ if (ADDRESS_MAP_CHECK) {
     for (const check of summary.addressMapCheck[side])
       console.log(`ADDRESS_MAP_CHECK ${side} ${check.ok ? 'ok  ' : 'FAIL'} ${check.name}: ${check.detail}`);
 }
-// DROP_PEER_MS: every step of the reconnect must be in the logs.
-const dropPeerFailed = !!dropPeerReport && !dropPeerReport.window.proven;
+// DROP_PEER_MS: the signaling was dropped, every step of the reconnect is in
+// the logs, and a retry is too when the drop outlasted an attempt.
+const dropPeerFailed = DROP_PEER_MS > 0 && !(dropPeerReport?.window.proven && dropPeerReport.exercised);
 if (dropPeerReport) {
   console.log(
-    dropPeerFailed ? 'DROP_PEER_MS: the reconnect is not all in the logs:' : 'DROP_PEER_MS: reconnected:',
+    dropPeerFailed
+      ? 'DROP_PEER_MS: no signaling dropped, no retry, or the reconnect is not all in the logs:'
+      : 'DROP_PEER_MS: reconnected:',
     JSON.stringify(dropPeerReport),
   );
 }
 // DELAY_SYNC_ANSWER_MS: the late answer must have been late, and handled.
 const delaySyncAnswerFailed =
-  !!delaySyncAnswerReport &&
-  (delaySyncAnswerReport.held.length < 1 ||
+  DELAY_SYNC_ANSWER_MS > 0 &&
+  (!delaySyncAnswerReport ||
+    delaySyncAnswerReport.held.length < 1 ||
     !delaySyncAnswerReport.timedOut ||
     delaySyncAnswerReport.requestsReceivedByHost < 2 ||
     !delaySyncAnswerReport.lateAnswerAfterSecondAsk ||
     Object.values(delaySyncAnswerReport.lateAnswerHandled).every((n) => n === 0) ||
-    delaySyncAnswerReport.resyncsApplied < 1);
+    delaySyncAnswerReport.resyncsApplied < 1 ||
+    !delaySyncAnswerReport.newestApplied);
 if (delaySyncAnswerReport) {
   console.log(
     delaySyncAnswerFailed
