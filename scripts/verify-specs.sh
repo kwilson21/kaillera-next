@@ -254,6 +254,8 @@ rom_at_start() {
   # The same, Start before the clear arrives, the page boots: 5 steps
   # (startBeforeTheClearArrivesTest).
   expect_violation "$ROM_START" rom_at_start_clear_only neverBootsWithoutRom
+  # Load, heard, the socket drops, clear, rejoin: 5 steps (clearedWhileDownTest).
+  expect_violation "$ROM_START" rom_at_start_no_rejoin serverKnowsTheRom
 }
 
 # Every group, in the order a local run takes them.

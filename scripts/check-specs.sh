@@ -78,15 +78,17 @@ done
 # ── A game start: a page never boots without a ROM ───────────────────────────
 ROM_START=specs/rom_at_start.qnt
 $QUINT typecheck "$ROM_START"
-for variant in rom_at_start_before rom_at_start_clear_only rom_at_start_current; do
+for variant in rom_at_start_before rom_at_start_clear_only rom_at_start_no_rejoin rom_at_start_current; do
   $QUINT test "$ROM_START" --main="$variant" --backend=typescript
 done
 # Today: the server knows whether a page has a ROM once its messages are in,
 # a page never boots without one, and a page a started game left out is
 # asked for one. The first was VIOLATED while clearing a ROM told the server
-# nothing (rom_at_start_before; deletedRomTest); the second while the start
-# plan answered `play` without a ROM, even once clearing told the server
-# (rom_at_start_clear_only; startBeforeTheClearArrivesTest).
+# nothing (rom_at_start_before; deletedRomTest), and while a page that
+# rejoined without a ROM said nothing (rom_at_start_no_rejoin;
+# clearedWhileDownTest); the second while the start plan answered `play`
+# without a ROM, even once clearing told the server (rom_at_start_clear_only;
+# startBeforeTheClearArrivesTest).
 $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
