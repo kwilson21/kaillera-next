@@ -11,6 +11,7 @@ flowchart LR
   lateJoinStarting -->|"lateJoinRomNeeded"| lateJoinAwaitingRom
   lateJoinStarting -->|"engineStarted: needs state"| lateJoinSyncing
   lateJoinStarting -->|"engineStarted: no state needed<br/>lateJoinSynced"| running
+  running -->|"lateJoinRomNeeded"| lateJoinAwaitingRom
   lateJoinAwaitingRom -->|"lateJoinRomReady"| lateJoinStarting
   lateJoinSyncing -->|"lateJoinSynced<br/>admittedToStart"| running
 ```

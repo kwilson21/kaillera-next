@@ -77,6 +77,27 @@ test('joining a match in play without a ROM waits for one before the late join',
   await session.stop();
 });
 
+test('a start the page could not boot without a ROM waits for one and joins late (specs/rom_at_start.qnt)', async () => {
+  const { session, reported } = open();
+  session.send({ type: 'joined', status: 'lobby', matchId: null, spectator: false, streaming: false });
+  session.send({ type: 'gameStarted', matchId: 'm1' });
+  assert.equal(session.state(), 'running');
+  // play.js: gameStartPlan answered askForRom.
+  session.send({ type: 'lateJoinRomNeeded' });
+  assert.equal(session.state(), 'lateJoinAwaitingRom');
+  assert.equal(session.flag('pendingLateJoin'), true);
+  assert.equal(session.gameOn(), true);
+  // A ROM is dropped: the next engine start is the late join.
+  session.send({ type: 'lateJoinRomReady' });
+  assert.equal(session.state(), 'lateJoinStarting');
+  assert.equal(session.flag('lateJoin'), true);
+  session.send(engineUp);
+  session.send({ type: 'lateJoinSynced' });
+  assert.equal(session.state(), 'running');
+  assert.deepEqual(reported, []);
+  await session.stop();
+});
+
 test('an engine started only to fetch the ROM is not the late join', async () => {
   // ROM sharing: the joiner accepts the host's ROM, the engine connects to
   // receive it, and the real late join starts when the transfer is done.

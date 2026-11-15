@@ -298,8 +298,9 @@ against the generated schemas, with what each refusal means; whether a page
 comes in as a spectator and how it gets into a match already under way are
 `join-plan.ts` (proved), which `onConnect` calls, as it does `connect.ts`'s
 reading of each answer. What a page does when the host starts a game (watch,
-keep the host's ROM offer up, wait for the transfer, stop on a ROM that is not
-the host's, or boot) and whether it has a game's end to handle are
+keep the host's ROM offer up, wait for the transfer, ask for a ROM and join
+late when it has none and none to take, stop on a ROM that is not the host's,
+or boot) and whether it has a game's end to handle are
 `game-start.ts` (proved), which `onGameStarted` and `onGameEnded` ask and
 carry out. What the player is told while the socket is down (the reconnecting
 banner, the in-game "server unreachable" note, the lobby error, the
