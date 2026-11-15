@@ -7,8 +7,9 @@
  * (lobby up or down, frames advancing) at each step. Each checkpoint also
  * blips the page's signaling socket, to take it through a rejoin, and fails
  * on any disagreement an observing TypeScript module reported
- * (`play-disagree`, `protocol-mismatch`; `session-disagree` from a page
- * built before the old page flags were deleted). The machine reports
+ * (`play-disagree`, the engine's `protocol-mismatch`; `session-disagree` from
+ * a page built before the old page flags were deleted), and on any message
+ * the page's socket boundary dropped as off its schema. The machine reports
  * `late-join-stranded` when a late joiner has waited more than 20 s for
  * state. For the late joiner that is a notice: the scenario times the wait
  * itself and fails only if the notice and the measured wait contradict each
@@ -177,6 +178,12 @@ const openPlayer = async (label, query, initScript = null, fromServer = null) =>
   await ctx.addInitScript(recordEvents);
   if (initScript) await ctx.addInitScript(initScript);
   const page = await ctx.newPage();
+  // A message the socket boundary (web/src/socket-boundary.ts) dropped: off
+  // its schema, so no handler ran on it.
+  const dropped = [];
+  page.on('console', (m) => {
+    if (m.text().startsWith('[protocol] dropped')) dropped.push(m.text());
+  });
   page.on('pageerror', (e) => {
     console.log(`[${label}] pageerror ${e.stack || e.message}`);
     pageErrors.push({ label, message: e.message });
@@ -217,7 +224,7 @@ const openPlayer = async (label, query, initScript = null, fromServer = null) =>
     }
   });
   await page.goto(`${URL}/play.html?${query}&knperf=light`);
-  return { label, page, ctx, signaling };
+  return { label, page, ctx, signaling, dropped };
 };
 
 // Keep every 'lockstep' data channel a page opens or is given, so a scenario
@@ -324,6 +331,7 @@ const checkpoint = async (name, expectations, failures, log) => {
     if (lobbyShown !== lobby) failures.push(`${name}: ${player.label} ${lobby ? 'is not' : 'is'} showing the lobby`);
     if (disagreements.length)
       failures.push(`${name}: ${player.label} reported a disagreement ${JSON.stringify(disagreements)}`);
+    if (player.dropped.length) failures.push(`${name}: ${player.label} dropped ${JSON.stringify(player.dropped)}`);
     if (stranded && !lateJoiner) failures.push(`${name}: ${player.label} was reported as a stranded late joiner`);
   }
 };

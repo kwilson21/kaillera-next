@@ -4,10 +4,11 @@
  * `webrtc-signal`, `rom-signal`).
  *
  * The server never builds these, so they have no Pydantic model: this file is
- * their one description. The engine and play.js still build and read them by
- * hand; `checkPeerText` and `checkRelay` say whether a message they received
- * matches, so production can show the descriptions are right before any
- * handler reads a decoded value (socket-boundary.ts reports the misses).
+ * their one description. `checkPeerText` and `checkRelay` say whether a
+ * message matches: play.js's handlers get only the relays and ROM transfer
+ * strings that do (socket-boundary.ts `createBoundary` drops the rest). The
+ * engine still reads its own by hand and reports the misses
+ * (`createProtocolObserver`) until Stage 5 moves it.
  *
  * The per-frame input packet is binary and has its own codec, input-wire.ts.
  */

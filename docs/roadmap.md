@@ -158,8 +158,8 @@ without the old code running beside it first.
   scenario, in the PR; any other difference blocks the change.
 - Still observing, each to be switched to deciding that way (the old code
   decides and the new reports a difference): the play page's moved decisions
-  (`play-disagree`), the decoding of server messages and of messages peers
-  author (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
+  (`play-disagree`), the engine's checks of the DataChannel strings peers
+  send (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
   per-peer machine (`peer-disagree`), the resync request rules
   (`resync-disagree`) and the streaming rules (`streaming-disagree`). Once
   all of them decide, the observer plumbing
@@ -259,14 +259,18 @@ Done so far: `scripts/gen_protocol.py` writes `web/src/protocol.gen.ts` from
 The payloads the server sends have models there too, and `signaling.py` holds
 every one to its model as it goes out (`_emit`, `checked`): a mismatch raises
 under tests and logs `PAYLOAD-CONTRACT` in production. The page decodes every
-server-authored event and the `join-room` ack (`web/src/socket-boundary.ts`),
-observing: a message off its schema is reported as `protocol-mismatch` and the
-handlers still run on the raw payload. Next: handlers move onto decoded values,
-and a message off its schema is dropped. Messages peers author (DataChannel control
-strings and JSON, and the `data-message` / `webrtc-signal` / `rom-signal`
-relays) are described in `web/src/peer-protocol.ts` and checked the same way;
-DataChannel strings are sampled (the first 16 of each kind) because they
-arrive on the tick path. The per-frame input packet is `input-wire.ts`.
+server-authored event, the `join-room` ack, the `data-message` and
+`rom-signal` relays and the ROM transfer channel's strings
+(`web/src/socket-boundary.ts`, `createBoundary`): `play.js`'s handlers run on
+the decoded value, and a message off its schema is dropped and logged
+(`[protocol] dropped ...`), with no handler run on it. Messages peers author
+(DataChannel control strings and JSON, and the `data-message` /
+`webrtc-signal` / `rom-signal` relays) are described in
+`web/src/peer-protocol.ts`. The rollback engine still reads its DataChannel
+strings and the `session-log` ack raw and only reports a mismatch
+(`protocol-mismatch`, sampled: the first 16 of each kind, because they arrive
+on the tick path); that moves with Stage 5. The per-frame input packet is
+`input-wire.ts`.
 
 `play.js` is moving to `web/src/play/*.ts` in slices, each read back through
 `window.KNCore.play`. Moved: ROM identity (`rom.ts`: host ROM from a payload,
