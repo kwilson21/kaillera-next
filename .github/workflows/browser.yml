@@ -1,0 +1,77 @@
+name: Browser suites
+on:
+  # Main itself is checked after every merge: two pull requests that were
+  # each green on the main they last merged in can still break it together.
+  push:
+    branches: [main]
+  # Lets a merge queue run these checks, if one is ever switched on.
+  merge_group:
+  pull_request:
+    paths:
+      - '.github/workflows/browser.yml'
+      - 'scripts/browser_shard.py'
+      - 'scripts/build-web.mjs'
+      - 'web/**'
+      - 'server/**'
+      - 'tests/**'
+      - 'deploy/static/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+# The play page's Playwright suites (tests/test_*.py that take a browser,
+# context or page) against a server this job starts, so two pull requests
+# that each pass cannot break a page between them unseen (#256 and #260
+# did). A test that boots a game needs a ROM, which the repository does not
+# ship: it takes it from KN_ROM and is skipped without it.
+jobs:
+  browser:
+    name: browser (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      KN_TEST_PORT: '27888'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # The pages need the bundles, which are build output and not in git.
+      - name: Install locked dependencies and build the bundles
+        run: |
+          python -m pip install uv
+          uv sync --directory server --frozen --extra dev
+          npm ci --ignore-scripts
+          npm run build
+      - name: Install Chromium
+        run: uv run --directory server --frozen --extra dev python -m playwright install --with-deps chromium
+      # Started here rather than by the tests' fixture, so its log is kept and
+      # rate limiting is off in its own environment (ratelimit.py reads it at import).
+      - name: Start the server
+        run: |
+          cd server
+          DISABLE_RATE_LIMIT=1 DISABLE_HTTPS=1 PORT="$KN_TEST_PORT" DB_PATH="$RUNNER_TEMP/kn.db" \
+            nohup uv run --frozen kaillera-server > "$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf "http://localhost:$KN_TEST_PORT/health" > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "The server did not answer /health within 60 s"
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
+      - name: This shard's browser suites
+        run: |
+          files=$(python scripts/browser_shard.py ${{ matrix.shard }} 4)
+          echo "$files"
+          # pytest runs from server/ (its project), so the paths go up one.
+          uv run --directory server --frozen --extra dev pytest $(printf '../%s ' $files) \
+            --browser chromium -q -rs --durations=15
+      - name: Server log
+        if: failure()
+        run: tail -n 400 "$RUNNER_TEMP/server.log"
