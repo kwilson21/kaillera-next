@@ -6468,13 +6468,50 @@
     dc.send(`sync-request-id:${requestId}`);
     dc.send(request);
   };
+  // Stage 5, observing: the resync request rules below decide as before; the
+  // proved functions of web/src/resync-request.ts run on the same inputs and
+  // a difference is reported as a resync-disagree client event (and
+  // RESYNC-DISAGREE in the sync log). They take over once production shows
+  // none. Returns the engine's value, whatever the proved one is; without
+  // KNCore nothing is compared. Looked up on first use: kn-core.js loads
+  // after this file.
+  let _resyncObserver;
+  const _resyncObserve = (what, engineValue, proved) => {
+    const rules = window.KNCore?.resyncRequest;
+    if (!rules) return engineValue;
+    if (_resyncObserver === undefined) {
+      _resyncObserver =
+        window.KNCore?.play?.observe?.createComparer?.(({ message, old, next }) => {
+          if (!window.KNState?.uploadToken) return false;
+          _syncLog(`RESYNC-DISAGREE ${message} engine=${old} proved=${next}`);
+          window.KNEvent?.('resync-disagree', message, { old, next });
+          return true;
+        }) ?? null;
+    }
+    try {
+      _resyncObserver?.compare(what, engineValue, proved(rules));
+    } catch (_) {}
+    return engineValue;
+  };
   // Only its own answer ends a request (onlyItsAnswerEndsARequest).
-  const _endsResyncRequest = (answerFor) => (answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers);
-  const _answersAnOlderRequest = (answerFor) => answerFor > 0 && answerFor !== _resyncRequestId;
+  const _endsResyncRequest = (answerFor) =>
+    _resyncObserve('ends-request', answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers, (rules) =>
+      rules.endsRequest(answerFor, _resyncRequestId, _hostNumbersAnswers),
+    );
+  const _answersAnOlderRequest = (answerFor) =>
+    _resyncObserve('answers-an-older-request', answerFor > 0 && answerFor !== _resyncRequestId, (rules) =>
+      rules.answersAnOlderRequest(answerFor, _resyncRequestId),
+    );
   // A state answering an older request, from before the frame the newest one
   // named: applied, it would take this guest back below that frame.
   const _isLateAnswerBeforeFrameAsked = (state) =>
-    !!state && _answersAnOlderRequest(state.answerFor || 0) && _resyncRequestAt > 0 && state.frame < _resyncRequestAt;
+    !!state &&
+    _resyncObserve(
+      'late-answer-before-frame-asked',
+      _answersAnOlderRequest(state.answerFor || 0) && _resyncRequestAt > 0 && state.frame < _resyncRequestAt,
+      (rules) =>
+        rules.isLateAnswerBeforeFrameAsked(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt),
+    );
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
@@ -10981,19 +11018,39 @@
   // request has the resync request's own deadline (I1), which calls this
   // again; after LATE_JOIN_LOST_HOST_MAX_ASKS unanswered asks it gives up.
   const _resyncAfterLostHost = (source) => {
-    if (!_lateJoinLostHost || _playerSlot === 0 || _phase !== PHASE_RUNNING) return;
+    // Observing: the proved step (web/src/resync-request.ts) on the same
+    // inputs, compared with each branch below before that branch changes any.
+    const observe = (taken) =>
+      _resyncObserve('late-join-lost-host', taken, (rules) =>
+        rules.lateJoinLostHostStep(
+          _lateJoinLostHost,
+          _playerSlot === 0,
+          _phase === PHASE_RUNNING,
+          Object.values(_peers).find((p) => p.slot === 0)?.dc?.readyState === 'open',
+          _resyncRequestInFlight,
+          _lateJoinLostHostAsks,
+          LATE_JOIN_LOST_HOST_MAX_ASKS,
+        ),
+      );
+    if (!_lateJoinLostHost || _playerSlot === 0 || _phase !== PHASE_RUNNING) {
+      observe('idle');
+      return;
+    }
     const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
     if (hostDc?.readyState !== 'open') {
+      observe('waitForChannel');
       _syncLog(`late-join resync after a lost host channel waits for it to open (${source})`);
       return;
     }
     // A request already out: its answer, applied, clears the marker; its
     // deadline brings this back if none comes.
     if (_resyncRequestInFlight) {
+      observe('inFlight');
       _syncLog(`late-join resync after a lost host channel: a resync is already on its way (${source})`);
       return;
     }
     if (_lateJoinLostHostAsks >= LATE_JOIN_LOST_HOST_MAX_ASKS) {
+      observe('giveUp');
       _lateJoinLostHost = false;
       _lateJoinLostHostAsks = 0;
       _syncLog(
@@ -11004,6 +11061,7 @@
       });
       return;
     }
+    observe('ask');
     _lateJoinLostHostAsks++;
     _setLastSyncState(null, 'late-join-lost-host');
     _syncTargetFrame = -1;
@@ -17651,7 +17709,12 @@
   // finishing its decode later (one over the socket, one over the channel)
   // does not take its place (specs/resync_flow.qnt, theAwaitedAnswerIsNotLost).
   const _keepsAwaitedAnswer = (answerFor, frame) => {
-    if (!_answersAnOlderRequest(answerFor) || _pendingResyncState?.answerFor !== _resyncRequestId) return false;
+    const keeps = _resyncObserve(
+      'keeps-awaited-answer',
+      _answersAnOlderRequest(answerFor) && _pendingResyncState?.answerFor === _resyncRequestId,
+      (rules) => rules.keepsAwaitedAnswer(answerFor, _resyncRequestId, _pendingResyncState?.answerFor ?? -1),
+    );
+    if (!keeps) return false;
     _syncLog(
       `SYNC-LATE-ANSWER-IGNORED answerFor=${answerFor} frame=${frame} ` +
         `kept=${_pendingResyncState.frame} newest=${_resyncRequestId}`,

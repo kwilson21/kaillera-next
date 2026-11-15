@@ -465,6 +465,31 @@ as not modelled are now modelled.
   player when the channel opens), and a channel lost by a joiner who is
   already playing (the regular reconnect path).
 
+Resync, ahead of its slice: the guest's resync request rules (#213, #221),
+modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
+
+- Done (proved, observing): the rules are pure functions with contracts in
+  `web/src/resync-request.ts`, checked by the `proofs` CI job: which state
+  ends the request that is out (`endsRequest`, the model's
+  `onlyItsAnswerEndsARequest`), which state answers an older request
+  (`answersAnOlderRequest`), which late answer is dropped because it is from
+  before the frame the newest request named (`isLateAnswerBeforeFrameAsked`,
+  `aLateAnswerDoesNotTakeTheGuestBack` / `beforeTheFrameAsked`), which is set
+  aside because the newest request's answer is already held
+  (`keepsAwaitedAnswer`, `theAwaitedAnswerIsNotLost`), and what a late
+  joiner that lost its channel to the host does next: nothing, wait for the
+  channel, wait for the request already out, give up after
+  `LATE_JOIN_LOST_HOST_MAX_ASKS`, or ask (`lateJoinLostHostStep`). The
+  engine keeps its own rules in charge (`_endsResyncRequest`,
+  `_answersAnOlderRequest`, `_isLateAnswerBeforeFrameAsked`,
+  `_keepsAwaitedAnswer`, `_resyncAfterLostHost`), runs the proved function
+  beside each on the same inputs through `window.KNCore.resyncRequest`, and
+  reports a difference as a `resync-disagree` client event (and
+  `RESYNC-DISAGREE` in the sync log). None came up in the two-player runs,
+  plain or with the host or the guest frozen for 8 s.
+- Next: read the production reports; once they show none, the engine calls
+  the proved functions instead of its own copies.
+
 **Stage 6: the remaining page scripts**
 The other hand-written scripts of the play, demo and landing pages move to
 `web/src` the way `play.js` does: the logic becomes strict TypeScript and the
