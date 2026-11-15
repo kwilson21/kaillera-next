@@ -169,7 +169,7 @@ def test_a_gamepad_is_captured_and_a_refused_stick_can_be_moved(browser, server_
         _stick(page, 1, -1)  # UP on axis 1
         expect(prompt).to_have_text("Push stick DOWN (gamepad or key)")
         _stick(page, 4, 1)  # DOWN on axis 4: not the stick UP is on
-        expect(prompt).to_have_text("Must use same stick as UP \u2014 try again")
+        expect(prompt).to_have_text("Must use same stick as UP — try again")
 
         # Back to UP, to put the stick on axis 4 instead.
         page.locator("#ingame-remap-back").click()
@@ -194,5 +194,62 @@ def test_a_gamepad_is_captured_and_a_refused_stick_can_be_moved(browser, server_
         assert saved["axes"]["stickY"] == {"index": 4, "bits": [18, 19]}  # DOWN on +, UP on -
         assert saved["axes"]["stickX"] == {"index": 0, "bits": [16, 17]}  # skipped: as it was
         assert saved["axisButtons"]["2"]["pos"] == (1 << 21) | (1 << 23)  # C-Right as it was, and C-Up
+    finally:
+        page.close()
+
+
+def test_a_gamepad_takes_every_step_and_the_profile_is_saved_whole(browser, server_url, room):
+    """All 18 steps captured from the pad, none skipped, with Back across the X stick's pair."""
+    page = _open(browser, server_url, room, _FAKE_PAD)
+    try:
+        page.wait_for_function("window.GamepadManager.getDetected().length === 1", timeout=5000)
+        page.evaluate("window._startIngameRemap()")
+        prompt = page.locator("#ingame-remap-prompt")
+        expect(prompt).to_have_text("Press: A (gamepad or key)")
+
+        # The ten button steps, A to D-Right, on pad buttons 0 to 9.
+        for button in range(10):
+            _button(page, button)
+        expect(prompt).to_have_text("Push stick UP (gamepad or key)")
+
+        # The stick: up and down on axis 1, left on axis 0.
+        _stick(page, 1, -1)
+        _stick(page, 1, 1)
+        _stick(page, 0, -1)
+        expect(prompt).to_have_text("Push stick RIGHT (gamepad or key)")
+
+        # Right on another axis than left: refused, and the step stays.
+        _stick(page, 2, 1)
+        expect(prompt).to_have_text("Must use same stick as LEFT — try again")
+        expect(prompt).to_have_text("Push stick RIGHT (gamepad or key)", timeout=3000)
+
+        # Back returns to LEFT with LEFT not taken, so LEFT can move to axis 2.
+        page.locator("#ingame-remap-back").click()
+        page.wait_for_timeout(DEBOUNCE_MS)
+        expect(prompt).to_have_text("Push stick LEFT (gamepad or key)")
+        _stick(page, 2, -1)
+        expect(prompt).to_have_text("Push stick RIGHT (gamepad or key)")
+        _stick(page, 2, 1)
+
+        # The C buttons on the second stick, axes 3 and 4.
+        expect(prompt).to_have_text("Press: C-Up (gamepad or key)")
+        _stick(page, 4, -1)
+        _stick(page, 4, 1)
+        _stick(page, 3, -1)
+        _stick(page, 3, 1)
+
+        expect(page.locator("#ingame-remap")).to_be_hidden()
+        saved = json.loads(page.evaluate(f"localStorage.getItem('gamepad-profile:{PAD_ID}')"))
+        assert saved["name"] == "Custom"
+        assert saved["buttons"]["0"] == 1 << 0  # A
+        assert saved["buttons"]["3"] == 1 << 12  # Z
+        assert saved["buttons"]["9"] == 1 << 7  # D-Right
+        assert saved["axes"]["stickY"] == {"index": 1, "bits": [18, 19]}  # down, up
+        assert saved["axes"]["stickX"] == {"index": 2, "bits": [16, 17]}  # right, left
+        # A C button is added to what the pad's default profile already gives that axis.
+        assert saved["axisButtons"]["4"]["pos"] & (1 << 22)  # C-Down
+        assert saved["axisButtons"]["4"]["neg"] & (1 << 23)  # C-Up
+        assert saved["axisButtons"]["3"]["pos"] & (1 << 21)  # C-Right
+        assert saved["axisButtons"]["3"]["neg"] & (1 << 20)  # C-Left
     finally:
         page.close()
