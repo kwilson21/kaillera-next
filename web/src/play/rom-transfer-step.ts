@@ -11,25 +11,23 @@ export const MAX_RETRIES = 3;
 
 /**
  * After a wait ended badly. `retry`: ask again by itself after a pause.
- * `stalled`: retries are used up; the guest decides. `wait`: nothing is
- * scheduled; the page offers Retry.
+ * `stalled`: retries are used up; the guest decides.
  */
-export type RetryVerdict = 'retry' | 'stalled' | 'wait';
+export type RetryVerdict = 'retry' | 'stalled';
 
 /**
  * The channel closed mid-transfer. `retries` already counts this failure.
- * Retried automatically only when part of the file has arrived: a channel
- * that dies before any byte is not worth asking for again unprompted.
+ * Retried automatically whether or not any of the file arrived: a channel
+ * also closes with nothing received when the host never heard the guest's
+ * first message, and it used to leave the guest on "ROM transfer failed"
+ * (specs/rom_transfer.qnt, `retriesBeforeAsking`).
  */
-//@ requires retries >= 1 && received >= 0
-//@ ensures \result === "retry" ==> retries <= 3 && received > 0
+//@ requires retries >= 1
+//@ ensures retries <= 3 ==> \result === "retry"
 //@ ensures retries > 3 ==> \result === "stalled"
-//@ ensures retries <= 3 && received > 0 ==> \result === "retry"
-//@ ensures retries <= 3 && received === 0 ==> \result === "wait"
-export function afterChannelClosed(retries: number, received: number): RetryVerdict {
-  if (retries > 3) return 'stalled';
-  if (received > 0) return 'retry';
-  return 'wait';
+export function afterChannelClosed(retries: number): RetryVerdict {
+  if (retries <= 3) return 'retry';
+  return 'stalled';
 }
 
 /** No channel came after asking. `retries` already counts this failure. */
