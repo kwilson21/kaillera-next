@@ -57,6 +57,41 @@ test('a phantom that is never resynced, or resynced much later, is not left out'
   }
 });
 
+test('a page that stays stopped long past the phantom is still a proven recovery', () => {
+  // The shape of a real run on a slow container: the guest stops at frame
+  // 150 and again right after, the host drops it at 166 and plays on to 250
+  // before the guest is seen again and resynced at 251.
+  const host =
+    line(166, 'PEER-PHANTOM slot=1 lastAdvance=19431 staleSec=5.0 — excluded from pacing') +
+    line(250, 'PEER-RECOVERED slot=1 f=155 — resuming normal pacing') +
+    line(250, 'peer-recovery resync: host scheduled full sync for slot=1 at f=250');
+  const recoveries = frozenRecoveries({ host, guest: resync(1, 126) + freeze(150, 4905) + resync(2, 251) });
+  assert.deepEqual(recoveries, [
+    { declaredBy: 'host', from: 154, to: 251, stoppedPage: 'guest', stoppedMs: 4905, proven: true },
+  ]);
+  assert.equal(inFrozenRecovery(recoveries, 240), true);
+});
+
+test('a resync that lands as the phantom is declared belongs to the recovery before it', () => {
+  // Two stops in a row: the resync at 285 ends the first recovery, the
+  // second is declared at that same frame and ends at 325.
+  const host =
+    line(285, 'PEER-PHANTOM slot=1 lastAdvance=33498 staleSec=5.0 — excluded from pacing') +
+    line(296, 'PEER-RECOVERED slot=1 f=274 — resuming normal pacing');
+  const recoveries = frozenRecoveries({ host, guest: resync(3, 285) + freeze(274, 5212) + resync(4, 325) });
+  assert.equal(recoveries[0].to, 325);
+  assert.equal(recoveries[0].proven, true);
+});
+
+test('a page seen again but resynced much later is not left out', () => {
+  const host =
+    line(166, 'PEER-PHANTOM slot=1 lastAdvance=19431 staleSec=5.0 — excluded from pacing') +
+    line(250, 'PEER-RECOVERED slot=1 f=155 — resuming normal pacing');
+  const recoveries = frozenRecoveries({ host, guest: freeze(150, 4905) + resync(2, 400) });
+  assert.equal(recoveries[0].to, null);
+  assert.equal(recoveries[0].proven, false);
+});
+
 test('a recovery that takes two resyncs ends at the second', () => {
   const recoveries = frozenRecoveries({
     host: line(229, 'PEER-PHANTOM slot=1 lastAdvance=1 staleSec=5.0 — excluded from pacing'),

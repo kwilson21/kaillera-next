@@ -9,6 +9,7 @@
  * Consumed by: netplay-rollback.js, netplay-streaming.js, play.js
  * Exposes: window.KNShared, window.KNEvent (installShared)
  */
+import { startPolling, type Polling } from '../poll.ts';
 import { decodeInput, encodeInput, inputEqual, type WireInput } from '../input-wire.ts';
 import { classifyRunnerStep } from '../runner-step.ts';
 import { createStickDeadband } from '../stick-deadband.ts';
@@ -313,91 +314,92 @@ export const createShared = () => {
     const waitMs = timeoutMs || 30000;
     bt('waitForEmulator-start', { timeoutMs: waitMs });
 
-    _bootPromise = new Promise<RunningGameManager>((resolve, reject) => {
-      let attempts = 0;
-      const maxAttempts = Math.ceil(waitMs / 200);
-      let _lastState = ''; // track state transitions to log only changes
+    const maxAttempts = Math.ceil(waitMs / 200);
+    let _lastState = ''; // track state transitions to log only changes
 
-      const attempt = (): void => {
-        const ejs = page().EJS_emulator;
-        // Always try clicking the EJS start button first — with startOnLoaded=false
-        // (guests), Module may exist before the game loop starts. If we resolve
-        // on Module alone, the start button never gets clicked and frames stay at 0.
-        const btn = document.querySelector<HTMLElement>('.ejs_start_button');
-        if (btn) {
-          const btnVisible = btn.offsetParent !== null;
-          if (attempts === 0 || attempts % 10 === 0) {
-            console.log(
-              `[netplay] triggerEmulatorStart: clicking start button (visible=${btnVisible} display=${getComputedStyle(btn).display})`,
-            );
-          }
-          if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
-          btn.click();
-        }
-
-        const gm = ejs?.gameManager;
-        if (gm && isRunning(gm)) {
-          const mod = gm.Module;
-          const frames = mod._get_current_frame_count ? mod._get_current_frame_count() : 'n/a';
-          const audioState = mod.SDL2?.audioContext?.state ?? 'n/a';
-          bt('waitForEmulator-resolved', { attempts, frames, audioState });
-          console.log(`[netplay] emulator running (frames=${frames} audio=${audioState})`);
-          _bootPromise = null;
-          enableMobileTouch();
-          // P0-1 funnel: emit emulator_booted once per match, and only when
-          // the core has actually run a frame (Module can exist before the
-          // game loop starts — frames=0 resolves don't represent a real boot).
-          // The match_id guard also protects against waitForEmulator being
-          // called multiple times in the same session, while still allowing
-          // a new match in the same tab to fire the event again.
-          const matchId = pageState().matchId;
-          if (typeof frames === 'number' && frames >= 1 && matchId && _funnelLastBootedMatchId !== matchId) {
-            _funnelLastBootedMatchId = matchId;
-            clientEvent('emulator_booted', '', { frames });
-          }
-          resolve(gm);
-          return;
-        }
-
-        // Log state transitions (not just every 10th poll) so we can see
-        // exactly when each boot stage is reached vs when it stalls.
-        const curState = `ejs=${!!ejs}|gm=${!!gm}|btn=${!!btn}`;
-        if (curState !== _lastState) {
-          bt('waitForEmulator-state', { poll: attempts, ejs: !!ejs, gm: !!gm, btn: !!btn });
-          _lastState = curState;
-        }
-
-        if (attempts % 10 === 0) {
-          const ejsKeys = ejs
-            ? Object.entries(ejs)
-                .filter(([, value]) => typeof value !== 'function')
-                .map(([k]) => k)
-                .slice(0, 15)
-                .join(',')
-            : 'null';
+    // One look at the page: the running game manager, or undefined to look
+    // again. `attempts` is the number of looks made before this one.
+    const look = (attempts: number): RunningGameManager | undefined => {
+      const ejs = page().EJS_emulator;
+      // Always try clicking the EJS start button first — with startOnLoaded=false
+      // (guests), Module may exist before the game loop starts. If we resolve
+      // on Module alone, the start button never gets clicked and frames stay at 0.
+      const btn = document.querySelector<HTMLElement>('.ejs_start_button');
+      if (btn) {
+        const btnVisible = btn.offsetParent !== null;
+        if (attempts === 0 || attempts % 10 === 0) {
           console.log(
-            `[netplay] waitForEmulator poll #${attempts}: EJS=${!!ejs} gameManager=${!!gm} btn=${!!btn} ejsState=[${ejsKeys}]`,
+            `[netplay] triggerEmulatorStart: clicking start button (visible=${btnVisible} display=${getComputedStyle(btn).display})`,
           );
         }
-        if (++attempts >= maxAttempts) {
-          _bootPromise = null;
-          const now = page().EJS_emulator;
-          const snapshot = {
-            ejs: !!now,
-            gameManager: !!now?.gameManager,
-            module: !!now?.gameManager?.Module,
-            btn: !!document.querySelector('.ejs_start_button'),
-            audioCtxState: page()._kn_preloadedAudioCtx?.state ?? 'none',
-          };
-          bt('waitForEmulator-timeout', snapshot);
-          clientEvent('wasm-fail', `Emulator boot timed out after ${waitMs}ms`, snapshot);
-          reject(new Error(`Emulator boot timed out after ${waitMs}ms`));
-          return;
+        if ('ontouchstart' in window) btn.dispatchEvent(new Event('touchstart'));
+        btn.click();
+      }
+
+      const gm = ejs?.gameManager;
+      if (gm && isRunning(gm)) {
+        const mod = gm.Module;
+        const frames = mod._get_current_frame_count ? mod._get_current_frame_count() : 'n/a';
+        const audioState = mod.SDL2?.audioContext?.state ?? 'n/a';
+        bt('waitForEmulator-resolved', { attempts, frames, audioState });
+        console.log(`[netplay] emulator running (frames=${frames} audio=${audioState})`);
+        _bootPromise = null;
+        enableMobileTouch();
+        // P0-1 funnel: emit emulator_booted once per match, and only when
+        // the core has actually run a frame (Module can exist before the
+        // game loop starts — frames=0 resolves don't represent a real boot).
+        // The match_id guard also protects against waitForEmulator being
+        // called multiple times in the same session, while still allowing
+        // a new match in the same tab to fire the event again.
+        const matchId = pageState().matchId;
+        if (typeof frames === 'number' && frames >= 1 && matchId && _funnelLastBootedMatchId !== matchId) {
+          _funnelLastBootedMatchId = matchId;
+          clientEvent('emulator_booted', '', { frames });
         }
-        setTimeout(attempt, 200);
+        return gm;
+      }
+
+      // Log state transitions (not just every 10th poll) so we can see
+      // exactly when each boot stage is reached vs when it stalls.
+      const curState = `ejs=${!!ejs}|gm=${!!gm}|btn=${!!btn}`;
+      if (curState !== _lastState) {
+        bt('waitForEmulator-state', { poll: attempts, ejs: !!ejs, gm: !!gm, btn: !!btn });
+        _lastState = curState;
+      }
+
+      if (attempts % 10 === 0) {
+        const ejsKeys = ejs
+          ? Object.entries(ejs)
+              .filter(([, value]) => typeof value !== 'function')
+              .map(([k]) => k)
+              .slice(0, 15)
+              .join(',')
+          : 'null';
+        console.log(
+          `[netplay] waitForEmulator poll #${attempts}: EJS=${!!ejs} gameManager=${!!gm} btn=${!!btn} ejsState=[${ejsKeys}]`,
+        );
+      }
+      return undefined;
+    };
+
+    // The first look is made here, by this call; the rest every 200 ms
+    // (web/src/poll.ts). The looks running out is the boot timing out.
+    const boot = startPolling(look, { everyMs: 200, attempts: maxAttempts }).result.then((gm) => {
+      if (gm) return gm;
+      _bootPromise = null;
+      const now = page().EJS_emulator;
+      const snapshot = {
+        ejs: !!now,
+        gameManager: !!now?.gameManager,
+        module: !!now?.gameManager?.Module,
+        btn: !!document.querySelector('.ejs_start_button'),
+        audioCtxState: page()._kn_preloadedAudioCtx?.state ?? 'none',
       };
-      attempt();
+      bt('waitForEmulator-timeout', snapshot);
+      clientEvent('wasm-fail', `Emulator boot timed out after ${waitMs}ms`, snapshot);
+      throw new Error(`Emulator boot timed out after ${waitMs}ms`);
     });
+    _bootPromise = boot;
 
     return _bootPromise;
   }
@@ -422,12 +424,12 @@ export const createShared = () => {
 
   let _ejsBlockHandler: ((e: Event) => void) | null = null;
   let _ejsBlockedParent: HTMLElement | null = null;
-  let _ejsBlockTimer: ReturnType<typeof setTimeout> | null = null;
+  let _ejsBlockPoll: Polling<true> | null = null;
 
   const _clearPriorBlockers = (): void => {
-    if (_ejsBlockTimer) {
-      clearTimeout(_ejsBlockTimer);
-      _ejsBlockTimer = null;
+    if (_ejsBlockPoll) {
+      _ejsBlockPoll.cancel();
+      _ejsBlockPoll = null;
     }
     if (_ejsBlockedParent && _ejsBlockHandler) {
       _ejsBlockedParent.removeEventListener('keydown', _ejsBlockHandler, true);
@@ -442,20 +444,13 @@ export const createShared = () => {
     // rematch (which reuses the hibernated EJS parent) does not stack blockers.
     _clearPriorBlockers();
 
-    let attempts = 0;
     const tag = label || 'netplay';
-    const attempt = (): void => {
-      _ejsBlockTimer = null;
+    // One look: once the emulator is there its input is disabled, in the
+    // same step. Until then, undefined to look again.
+    const look = (): true | undefined => {
       const ejs = page().EJS_emulator;
       const gm = ejs?.gameManager;
-      if (!ejs || !gm) {
-        if (++attempts < 150) {
-          _ejsBlockTimer = setTimeout(attempt, 200);
-        } else {
-          console.warn(`[${tag}] disableEJSInput timed out`);
-        }
-        return;
-      }
+      if (!ejs || !gm) return undefined;
 
       // Disable EJS keyboard handling
       gm.setKeyboardEnabled(false);
@@ -488,8 +483,16 @@ export const createShared = () => {
       if (sandbox?.overrideGetGamepads) {
         sandbox.overrideGetGamepads(() => []);
       }
+      return true;
     };
-    attempt();
+    // The first look is made here; then every 200 ms, 150 looks in all
+    // (web/src/poll.ts). A later call cancels this one (_clearPriorBlockers).
+    const poll = startPolling(look, { everyMs: 200, attempts: 150 });
+    _ejsBlockPoll = poll;
+    void poll.result.then((disabled) => {
+      if (_ejsBlockPoll === poll) _ejsBlockPoll = null;
+      if (!disabled) console.warn(`[${tag}] disableEJSInput timed out`);
+    });
   };
 
   // Common boot sequence: wait for emulator, apply cheats, disable EJS input.

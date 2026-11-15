@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.68.14",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the server relays startupReconnect, so a started page does not take a startup retry for a reconnect (#218)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.13",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync answer names the request it answers (#213)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.12",
+    "date": "2026-11-14",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the gameplay hash reads the battle state the match runs from (#207)"
+      }
+    ]
+  },
+  {
     "version": "0.68.11",
     "date": "2026-11-14",
     "changes": [

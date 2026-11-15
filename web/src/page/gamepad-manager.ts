@@ -21,6 +21,7 @@
  * profile in ../gamepad-profile.ts. This module reads the pads, the profiles
  * and the player's settings.
  */
+import { startEvery } from '../poll.ts';
 import {
   analogScale,
   axisSign,
@@ -624,10 +625,7 @@ const browserEnv = (): GamepadEnv => ({
     window.removeEventListener('gamepadconnected', poll);
     window.removeEventListener('gamepaddisconnected', poll);
   },
-  every: (poll, ms) => {
-    const id = window.setInterval(poll, ms);
-    return () => window.clearInterval(id);
-  },
+  every: startEvery,
   warn: (message) => console.warn(message),
 });
 
