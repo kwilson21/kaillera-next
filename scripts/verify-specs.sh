@@ -244,6 +244,9 @@ resync_reask() {
   expect_violation "$REASK" resync_reask_unguarded theDecodedAnswerIsNotCut
   # The lifecycle guard's timeout letting the ask again go: 5 steps.
   expect_violation "$REASK" resync_reask_guard_lets_go anOwedResyncIsNotForgotten
+  # A coordinated request ("at" a frame) whose answer is lost, then its
+  # deadline lets it go: 3 steps.
+  expect_violation "$REASK" resync_reask_coordinated_let_go aResyncAskedForIsNotForgotten
 }
 
 # Every group, in the order a local run takes them.

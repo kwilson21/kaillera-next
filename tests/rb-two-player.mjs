@@ -266,14 +266,17 @@
  *     goes on making frames after it (I1: no stall).
  *   UNANSWERED_SOCKET_RESYNC=letgo   The host page is frozen for 7 s, so the
  *     guest makes it a phantom (5 s) and, when it is back, asks for a resync
- *     at a frame (`peer-recovery resync`: a coordinated request, which owes
- *     nothing); the host page drops the whole of that answer. The target's
- *     deadline gives the target up and the request's deadline lets it go
- *     (step=letGo) without asking again. Fails unless the request was sent,
- *     its answer dropped, the let-go logged with no ask again after it, and
- *     the guest goes on making frames. As with FREEZE_HOST_MS, frames are
- *     compared only from the guest's last applied resync, and one must come
- *     after the freeze: the desync check (the host's hashes) asks again.
+ *     at a frame (`peer-recovery resync`: a coordinated request); the host
+ *     page drops the whole of that answer, every time it sends it (the host
+ *     can send it twice: once when its own wait for the target frame times
+ *     out, and again at the target). Before the fix the request owed nothing,
+ *     so its deadline let it go (step=letGo) and the guest stayed diverged
+ *     (specs/resync_reask.qnt, coordinatedAnswerLostTest). Now it is owed:
+ *     fails unless the request was sent, its answer dropped, its deadline
+ *     asks again (step=askAgain, RESYNC-REASK), a state is applied after
+ *     that, nothing is let go, and the guest goes on making frames. As with
+ *     FREEZE_HOST_MS, frames are compared only from the guest's last applied
+ *     resync.
  *   UNANSWERED_SOCKET_RESYNC=ignored   A late answer set aside because the
  *     newest request's answer is held (SYNC-LATE-ANSWER-IGNORED,
  *     keepsAwaitedAnswer). The guest asks; the host page drops the chunks of
@@ -839,16 +842,22 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // taken by the next numbered answer on `sync-state` (its `sync-answer-id:`
   // message): 'chunks' passes the answer's id and header and drops its
   // binary chunks; 'whole' drops the id, the header and the chunks. Either
-  // lasts until the next message that starts a transfer. What was dropped is
-  // kept in __knSyncAnswersDropped.
+  // lasts until the next message that starts a transfer. With
+  // __knSyncAnswerDropRepeats set, an answer sent again under an id already
+  // dropped whole is dropped whole too, without taking an entry. What was
+  // dropped is kept in __knSyncAnswersDropped.
   window.__knSyncAnswerDrops = [];
+  window.__knSyncAnswerDropRepeats = false;
   window.__knSyncAnswersDropped = [];
+  const syncIdsDroppedWhole = new Set();
   let syncDropping = null;
   let syncIdJustSent = false;
   const syncStateDrops = (data) => {
     if (typeof data === 'string') {
       if (data.startsWith('sync-answer-id:')) {
-        syncDropping = window.__knSyncAnswerDrops.shift() ?? null;
+        const repeat = window.__knSyncAnswerDropRepeats && syncIdsDroppedWhole.has(data);
+        syncDropping = repeat ? 'whole' : (window.__knSyncAnswerDrops.shift() ?? null);
+        if (syncDropping === 'whole') syncIdsDroppedWhole.add(data);
         syncIdJustSent = true;
         if (syncDropping) window.__knSyncAnswersDropped.push({ answer: data, drop: syncDropping });
         return syncDropping === 'whole';
@@ -1478,6 +1487,7 @@ const unansweredSocketResync = {
   applied: false,
   gaveUp: false,
   letGo: false,
+  askedAgain: false,
   ignored: false,
   framesAfter: 0,
 };
@@ -1779,18 +1789,29 @@ if (inBattle) {
     } else {
       await host.evaluate(() => {
         window.__knSyncAnswerDrops = ['whole'];
+        window.__knSyncAnswerDropRepeats = true;
       });
       console.log(`UNANSWERED_SOCKET_RESYNC=letgo: freezing the host for ${UNANSWERED_LETGO_FREEZE_MS} ms`);
       await host.evaluate((ms) => {
         const t = performance.now();
         while (performance.now() - t < ms);
       }, UNANSWERED_LETGO_FREEZE_MS);
-      unansweredSocketResync.letGo = await waitForLine(
+      unansweredSocketResync.askedAgain = await waitForLine(
         guest,
         unansweredSocketResync.guestAt.seq,
-        /RESYNC-REQUEST-TIMEOUT .*step=letGo/,
+        /RESYNC-REASK /,
         UNANSWERED_SOCKET_RESYNC_RECOVER_MS,
       );
+      // The state applied after the ask again (the report checks the order).
+      if (unansweredSocketResync.askedAgain) {
+        const until = Date.now() + 15000;
+        while (Date.now() < until && !unansweredSocketResync.applied) {
+          const lines = linesAfter(await syncLogOf(guest), unansweredSocketResync.guestAt.seq);
+          const ask = lines.findIndex((l) => /RESYNC-REASK /.test(l));
+          unansweredSocketResync.applied = ask >= 0 && lines.slice(ask).some((l) => /sync #\d+ applied/.test(l));
+          if (!unansweredSocketResync.applied) await guest.waitForTimeout(250);
+        }
+      }
       await stopDropping();
     }
     // I1: the guest goes on making frames after the fault.
@@ -2255,6 +2276,9 @@ const unansweredSocketResyncReport = (() => {
   const ignoredAt = at(/SYNC-LATE-ANSWER-IGNORED/);
   const appliedAfterIgnored = ignoredAt < 0 ? -1 : at(/sync #\d+ applied/, ignoredAt);
   const letGo = at(/RESYNC-REQUEST-TIMEOUT .*step=letGo/);
+  const recoveryDeadline = at(/RESYNC-REQUEST-TIMEOUT .*step=askAgain/);
+  const recoveryAskAgain = recoveryDeadline < 0 ? -1 : at(/RESYNC-REASK /, recoveryDeadline);
+  const appliedAfterAskAgain = recoveryAskAgain < 0 ? -1 : at(/sync #\d+ applied/, recoveryAskAgain);
   const recoveryAsk = at(/peer-recovery resync: sent sync-request-full-at:/);
   const appliedBefore = (end) => guestLines.slice(0, end).filter((l) => /sync #\d+ applied/.test(l)).length;
   const asksAfter = (from) => guestLines.slice(from + 1).filter((l) => /RESYNC-REASK /.test(l)).length;
@@ -2266,8 +2290,11 @@ const unansweredSocketResyncReport = (() => {
       : UNANSWERED_VARIANT === 'letgo'
         ? recoveryAsk >= 0 &&
           H.syncAnswersDropped.some((d) => d.drop === 'whole') &&
-          letGo > recoveryAsk &&
-          asksAfter(letGo) === 0 &&
+          recoveryDeadline > recoveryAsk &&
+          appliedBefore(recoveryDeadline) === appliedBefore(recoveryAsk) &&
+          recoveryAskAgain > recoveryDeadline &&
+          appliedAfterAskAgain > recoveryAskAgain &&
+          letGo < 0 &&
           ticking
         : UNANSWERED_VARIANT === 'ignored'
           ? H.syncAnswersDropped.some((d) => d.drop === 'chunks') &&
@@ -2284,6 +2311,9 @@ const unansweredSocketResyncReport = (() => {
     workerResultsHeld: G.workerResultsHeld,
     giveUp: line(giveUp),
     letGo: line(letGo),
+    recoveryDeadline: line(recoveryDeadline),
+    recoveryAskAgain: line(recoveryAskAgain),
+    appliedAfterAskAgain: line(appliedAfterAskAgain),
     recoveryAsk: line(recoveryAsk),
     framesAfter: unansweredSocketResync.framesAfter,
     syncAnswersDropped: H.syncAnswersDropped,
