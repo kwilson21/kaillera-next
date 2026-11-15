@@ -244,6 +244,34 @@
  *     the largest wait for the link and the starved messages, and after the
  *     fault the phantoms, skipped rollbacks, SYNC-SEND-STALLED and
  *     DC-FALLBACK lines.
+ *   LOSE_INPUTS_BEFORE_FALLBACK=1   The match runs on the unreliable input
+ *     channel (the host sets window._knTransportOverride = 'unreliable',
+ *     what knDiag.setTransport('unreliable') sets, before it starts the game,
+ *     and broadcasts `rb-transport:unreliable`). A third of the way into the
+ *     battle the host's `rollback-input` channel stops delivering: its page's
+ *     DataChannel send wrapper (initScript below) drops every binary input it
+ *     sends on that channel from then on, the way a stuck unordered SCTP
+ *     stream does (the fault the engine's DC health monitor exists for). In
+ *     this container the monitor has usually switched the host to the
+ *     reliable channel long before (a slow page goes 500 ms without a new
+ *     frame from its peer), so the guest page then sends the host
+ *     `rb-transport:unreliable` on its `lockstep` channel, the engine's own
+ *     message, and the host takes the unreliable transport up again. The
+ *     guest stops hearing the host's new inputs, runs out of prediction room
+ *     and stalls; the host stops hearing the guest's new frames and its
+ *     health monitor switches it to the reliable channel by itself
+ *     (DC-FALLBACK reason=ack-stale). No engine hook. If fewer than two
+ *     inputs were dropped before that switch, the guest sends the message
+ *     again (five rounds at most). The inputs dropped before a switch must
+ *     still reach the guest without the guest asking for them
+ *     (specs/input_transport.qnt). The run fails unless the match started on
+ *     the unreliable transport, the host took it up again, at least two of
+ *     its inputs were dropped, and it logged DC-FALLBACK after that; and
+ *     fails if, after the fault began, the guest asked the host for an input
+ *     (`RB-INPUT-ASK ... slot=0`: one was lost and nothing sent it again), or
+ *     either page logged PEER-PHANTOM, RB-INPUT-STALL-TIMEOUT or
+ *     INPUT-STALL-RESYNC. Frames are compared as usual: no exclusion.
+ *     Reported as `loseBeforeFallback` in summary.json.
  *
  *   DESYNC_GUEST=1   The one knob that makes the match unhealthy on purpose:
  *     halfway through the battle the guest's copy of P1's stock count
@@ -344,6 +372,7 @@ const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
+const LOSE_INPUTS_BEFORE_FALLBACK = process.env.LOSE_INPUTS_BEFORE_FALLBACK === '1';
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
@@ -444,6 +473,23 @@ for (const [name, value] of [
     console.log(`${name} is mutually exclusive with the FREEZE, THROTTLE, HIDE, CLICK, DROP and DESYNC knobs`);
     process.exit(1);
   }
+}
+if (
+  LOSE_INPUTS_BEFORE_FALLBACK &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    DESYNC_GUEST)
+) {
+  console.log(
+    'LOSE_INPUTS_BEFORE_FALLBACK is mutually exclusive with the FREEZE, THROTTLE, HIDE, CLICK, DROP, DELAY, LINK and DESYNC knobs',
+  );
+  process.exit(1);
 }
 if (DELAY_SYNC_ANSWER_MS > 0 && !(DELAY_SYNC_ANSWER_MS > RESYNC_REQUEST_TIMEOUT_MS)) {
   console.log(`DELAY_SYNC_ANSWER_MS must be longer than the guest's request deadline (${RESYNC_REQUEST_TIMEOUT_MS})`);
@@ -646,7 +692,17 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // That channel carries state transfers only, never input.
   window.__knHoldSyncAnswerMs = 0;
   window.__knSyncAnswersHeld = [];
+  // LOSE_INPUTS_BEFORE_FALLBACK: once the test sets window.__knLoseRbInputs,
+  // every binary input sent on `rollback-input` (the unordered input channel)
+  // is dropped before it reaches the simulated link (it is neither queued
+  // nor counted there), and its frame (the packet's first word) kept.
+  window.__knLoseRbInputs = false;
+  window.__knRbInputsLost = [];
   RTCDataChannel.prototype.send = function (data) {
+    if (window.__knLoseRbInputs && this.label === 'rollback-input' && data instanceof ArrayBuffer) {
+      if (data.byteLength >= 4) window.__knRbInputsLost.push(new Int32Array(data, 0, 1)[0]);
+      return;
+    }
     const ch = scheduleOf(this);
     let hold = 0;
     if (
@@ -862,6 +918,8 @@ if (!MENU_AUTOPILOT) {
   if (MENU_AUTOPILOT === 'any-fighter') console.log('ROM is not SSB64 US: MENU_AUTOPILOT=any-fighter');
 }
 console.log('room', room, 'both ROM-ready; starting');
+// LOSE_INPUTS_BEFORE_FALLBACK: the host broadcasts the transport when the game starts.
+if (LOSE_INPUTS_BEFORE_FALLBACK) await host.evaluate(() => (window._knTransportOverride = 'unreliable'));
 await host.click('#start-btn');
 
 // Dismiss the tap-to-start prompt on whichever page shows it. Tracks how
@@ -1105,6 +1163,8 @@ let throttleFlipped = null; // null until the 15s mark; then whether the flip Pr
 // the fault began ({seq, frame} of its last line), and what the test saw.
 const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null };
 const delaySyncAnswer = { hostAt: null, guestAt: null, timedOut: false, askedAgainAfterMs: null };
+// LOSE_INPUTS_BEFORE_FALLBACK: where each page's sync log stood when the drops began.
+const loseBeforeFallback = { hostAt: null, guestAt: null, fellBack: false, rounds: 0 };
 // LINK_KBPS on its own: where the logs stood when the guest asked for its plain resync.
 const linkResync = { hostAt: null, guestAt: null, applied: false };
 const syncLogOf = (page) => page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
@@ -1318,6 +1378,38 @@ if (inBattle) {
     linkResync.applied = await waitForLine(guest, linkResync.guestAt.seq, /sync #\d+ applied/, LINK_RESYNC_RECOVER_MS);
     console.log(`LINK_KBPS: resync applied: ${linkResync.applied} (${Date.now() - started} ms)`);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (LOSE_INPUTS_BEFORE_FALLBACK) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [loseBeforeFallback.hostAt, loseBeforeFallback.guestAt] = await Promise.all([
+      lastLogLine(host),
+      lastLogLine(guest),
+    ]);
+    await host.evaluate(() => {
+      window.__knLoseRbInputs = true;
+    });
+    console.log("LOSE_INPUTS_BEFORE_FALLBACK: the host's inputs on rollback-input are dropped from here on");
+    const framesLost = () => host.evaluate(() => new Set(window.__knRbInputsLost).size);
+    while (loseBeforeFallback.rounds < 5) {
+      loseBeforeFallback.rounds++;
+      const at = await lastLogLine(host);
+      // The host takes the unreliable transport up again, by the engine's own message.
+      const asked = await guest.evaluate(() => {
+        const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
+        if (entry?.dc?.readyState !== 'open') return false;
+        entry.dc.send('rb-transport:unreliable');
+        return true;
+      });
+      loseBeforeFallback.fellBack = asked && (await waitForLine(host, at.seq, /DC-FALLBACK reason=/, 30000));
+      const lost = await framesLost();
+      console.log(
+        `LOSE_INPUTS_BEFORE_FALLBACK: round ${loseBeforeFallback.rounds}: the host switched to the reliable ` +
+          `channel: ${loseBeforeFallback.fellBack}; ${lost} frames dropped (${Date.now() - started} ms)`,
+      );
+      if (!loseBeforeFallback.fellBack || lost >= 2) break;
+    }
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (DROP_SIGNALING_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
@@ -1438,6 +1530,7 @@ const collect = (p, VISUAL_CHECK) =>
       clog: m.UTF8ToString(m._kn_get_debug_log()),
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       syncAnswersHeld: window.__knSyncAnswersHeld ?? [],
+      rbInputsLost: window.__knRbInputsLost ?? [],
       link: window.__knLink ?? null,
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
@@ -1643,6 +1736,45 @@ const delaySyncAnswerReport = (() => {
     newestAnswer: newestReady < 0 ? null : guestLines[newestReady],
     newestApplied,
     applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
+  };
+})();
+// LOSE_INPUTS_BEFORE_FALLBACK: the transport, the drops and the switch, and
+// whether the dropped inputs had to be asked for.
+const loseBeforeFallbackReport = (() => {
+  if (!LOSE_INPUTS_BEFORE_FALLBACK || !loseBeforeFallback.guestAt) return null;
+  const guestLines = linesAfter(G.sync, loseBeforeFallback.guestAt.seq);
+  const hostLines = linesAfter(H.sync, loseBeforeFallback.hostAt.seq);
+  const linesIn = (lines, re) => lines.filter((line) => re.test(line));
+  const lost = [...new Set(H.rbInputsLost)].sort((a, b) => a - b);
+  const rearmed = linesIn(hostLines, /rb-transport: host=unreliable adopted=unreliable/);
+  const unreliable = {
+    host:
+      /rb-transport: host broadcast=unreliable/.test(H.sync) &&
+      /rb-input DC open .*ordered=false maxRetransmits=0/.test(H.sync),
+    guest: /rb-transport: host=unreliable adopted=unreliable/.test(G.sync),
+  };
+  const firstRearm = hostLines.findIndex((line) => /rb-transport: host=unreliable adopted=unreliable/.test(line));
+  const fallback =
+    firstRearm < 0 ? null : (hostLines.slice(firstRearm).find((line) => /DC-FALLBACK reason=/.test(line)) ?? null);
+  const exercised = unreliable.host && unreliable.guest && rearmed.length > 0 && lost.length >= 2 && !!fallback;
+  const after = {
+    guestAsksForHostInputs: linesIn(guestLines, /RB-INPUT-ASK .*slot=0\b/),
+    peerPhantoms: [...linesIn(hostLines, /PEER-PHANTOM/), ...linesIn(guestLines, /PEER-PHANTOM/)],
+    stallTimeouts: [...linesIn(hostLines, /RB-INPUT-STALL-TIMEOUT/), ...linesIn(guestLines, /RB-INPUT-STALL-TIMEOUT/)],
+    stallResyncs: [...linesIn(hostLines, /INPUT-STALL-RESYNC/), ...linesIn(guestLines, /INPUT-STALL-RESYNC/)],
+  };
+  return {
+    unreliable,
+    rounds: loseBeforeFallback.rounds,
+    rearmed: rearmed.length,
+    dropped: H.rbInputsLost.length,
+    framesLost: lost.length ? { first: lost[0], last: lost.at(-1), count: lost.length } : null,
+    fallback,
+    hostFallbackLines: linesIn(hostLines, /DC-FALLBACK/),
+    guestFallbackLines: linesIn(guestLines, /DC-FALLBACK/),
+    exercised,
+    ...after,
+    passed: exercised && Object.values(after).every((lines) => lines.length === 0),
   };
 })();
 // DESYNC_GUEST holds its change for 3 s. A rollback in that time re-runs
@@ -2155,6 +2287,7 @@ const summary = {
 };
 if (dropPeerReport) summary.dropPeer = dropPeerReport;
 if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
+if (LOSE_INPUTS_BEFORE_FALLBACK) summary.loseBeforeFallback = loseBeforeFallbackReport;
 if (linkReport) summary.link = linkReport;
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
@@ -2380,6 +2513,16 @@ if (linkReport) {
     JSON.stringify(linkReport),
   );
 }
+// LOSE_INPUTS_BEFORE_FALLBACK: the fault ran, and nothing it dropped had to be asked for.
+const loseBeforeFallbackFailed = LOSE_INPUTS_BEFORE_FALLBACK && !loseBeforeFallbackReport?.passed;
+if (LOSE_INPUTS_BEFORE_FALLBACK) {
+  console.log(
+    loseBeforeFallbackFailed
+      ? 'LOSE_INPUTS_BEFORE_FALLBACK: not exercised, or inputs dropped before the switch were lost:'
+      : 'LOSE_INPUTS_BEFORE_FALLBACK: every dropped input reached the guest unasked:',
+    JSON.stringify(loseBeforeFallbackReport),
+  );
+}
 // A disagreement is what the fault modes exist to find: it fails the run like a mismatch.
 const observersFailed = observerDisagreements > 0 || !!observers.db?.error;
 console.log(
@@ -2391,6 +2534,7 @@ const failed =
   linkFailed ||
   dropPeerFailed ||
   delaySyncAnswerFailed ||
+  loseBeforeFallbackFailed ||
   observersFailed ||
   signalingDropFailed ||
   gpMis > 0 ||
