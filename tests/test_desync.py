@@ -102,25 +102,37 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
 
         start_game(host, guest)
 
-        # Sample frame numbers every second for 5 seconds
+        # A page stalls once it is delay + KN_MAX_VISIBLE_ROLLBACK_DEPTH (7)
+        # + 1 frames past its peer's last input (_rbInputStallThreshold in
+        # netplay-rollback.js), so neither can lead the other by more. The
+        # pages are read one after the other, each read taking up to a few
+        # hundred ms here, so the host is read between two reads of the guest
+        # and must be within that lead of the guest's frame at some moment
+        # between them: g1 - lead <= host <= g2 + lead.
+        def lead():
+            return 8 + max(
+                page.evaluate("window.NetplayRollback.getHudCounters().delay") for page in (host, guest)
+            )
+
         samples = []
         for _ in range(5):
             time.sleep(1)
-            h_frame = host.evaluate("window.KNState.frameNum")
-            g_frame = guest.evaluate("window.KNState.frameNum")
-            diff = abs(h_frame - g_frame)
-            samples.append((h_frame, g_frame, diff))
-            print(f"  Host: {h_frame}, Guest: {g_frame}, Diff: {diff}")
-
-        max_diff = max(s[2] for s in samples)
-        assert max_diff <= 10, f"Frame pacing too divergent: max diff = {max_diff}"
+            g1 = frame(guest)
+            h = frame(host)
+            g2 = frame(guest)
+            most = lead()
+            samples.append((h, g2))
+            print(f"  Guest: {g1}..{g2}, Host: {h}, lead allowed: {most}")
+            assert g1 - most <= h <= g2 + most, (
+                f"host at {h} while the guest went {g1}..{g2}: more than {most} frames apart"
+            )
 
         h_advance = samples[-1][0] - samples[0][0]
         g_advance = samples[-1][1] - samples[0][1]
         assert h_advance > 100, f"Host stalled: only advanced {h_advance} frames in 5s"
         assert g_advance > 100, f"Guest stalled: only advanced {g_advance} frames in 5s"
 
-        print(f"\nFrame pacing OK: max diff = {max_diff}, host rate = {h_advance/5:.0f}fps, guest rate = {g_advance/5:.0f}fps")
+        print(f"\nFrame pacing OK: host rate = {h_advance/5:.0f}fps, guest rate = {g_advance/5:.0f}fps")
 
     finally:
         host.close()

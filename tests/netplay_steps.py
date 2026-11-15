@@ -39,21 +39,25 @@ def wait_past_frame(page, past, timeout_s=60):
     raise AssertionError(f"game stuck at frame {frame(page)}, not past {past} after {timeout_s}s:\n{tail}")
 
 
-def silence_inputs(page, ms):
+def silence_inputs(page, ms, channels=("dc", "rbDc")):
     """For `ms` milliseconds, drop every input packet the page sends.
 
-    Inputs are binary messages on a peer's `dc` (the reliable channel) or, in
-    rollback mode, its `rbDc` (the unreliable one); everything else the page
-    sends is a string and still goes through. Returns at once: the silence
-    ends by itself. `window._knTestDropped` counts the packets dropped.
+    Inputs are binary messages on a peer's `dc` (the reliable channel, which
+    the host picks by default) or its `rbDc` (the unreliable one, picked with
+    knDiag.setTransport('unreliable')); everything else the page sends is a
+    string and still goes through. Both are silenced unless `channels` names
+    one: dropping packets on `dc` is a page gone quiet, since that channel
+    loses nothing on its own; on `rbDc` it is packet loss. Returns at once:
+    the silence ends by itself. `window._knTestDropped` counts the packets
+    dropped.
     """
     page.evaluate(
-        """(ms) => {
+        """([ms, channels]) => {
             window._knTestDropped = window._knTestDropped || 0;
             window._knTestSilentUntil = performance.now() + ms;
             const binary = (d) => d instanceof ArrayBuffer || ArrayBuffer.isView(d) || d instanceof Blob;
             for (const p of Object.values(window.KNState.peers || {})) {
-                for (const ch of [p.dc, p.rbDc]) {
+                for (const ch of channels.map((name) => p[name])) {
                     if (!ch || ch._knTestWrapped) continue;
                     const send = ch.send.bind(ch);
                     ch.send = (data) => {
@@ -67,5 +71,5 @@ def silence_inputs(page, ms):
                 }
             }
         }""",
-        ms,
+        [ms, list(channels)],
     )

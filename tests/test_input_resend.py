@@ -7,9 +7,11 @@ resend-request` and `INPUT-STALL hard-timeout`). A game now runs on the C
 rollback engine, which the lockstep path stands in for only when the core
 lacks kn_pre_tick, and the rollback path does neither:
 
-- every input packet carries all the inputs the peer has not acknowledged,
-  up to RB_REDUNDANCY_MAX (30) frames, so a short gap is filled by the next
-  packet that gets through, with no request;
+- inputs go over the reliable channel by default, which loses nothing. With
+  the unreliable one (knDiag.setTransport('unreliable') on the host), every
+  input packet carries all the inputs the peer has not acknowledged, up to
+  RB_REDUNDANCY_MAX (30) frames, so a short gap is filled by the next packet
+  that gets through, with no request;
 - a peer whose inputs stay away is dropped as a phantom after 5 s
   (`PEER-PHANTOM`, from RB-INPUT-STALL-TIMEOUT or PEER_DEAD_MS), and the
   others run on without it. When it comes back, the host resyncs it
@@ -23,9 +25,12 @@ import time
 from netplay_steps import frame, silence_inputs, sync_log_lines, wait_past_frame
 
 
-def _start(browser, server_url, rom_path, start_game, room):
+def _start(browser, server_url, rom_path, start_game, room, transport=None):
     host = browser.new_page()
     guest = browser.new_page()
+    if transport:
+        # What knDiag.setTransport does: the host announces it at the start.
+        host.add_init_script(f"window._knTransportOverride = '{transport}';")
     host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
     host.wait_for_selector("#overlay", timeout=10000)
     guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
@@ -45,16 +50,37 @@ def _phantoms(page, slot):
 
 
 def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_url, rom_path, start_game, room):
-    """A few lost input packets are made good by the next one: no phantom."""
-    host, guest = _start(browser, server_url, rom_path, start_game, room)
-    try:
-        phantoms_before = len(_phantoms(host, 1))
+    """On the unreliable channel, a few lost input packets are made good by the
+    next one: no phantom.
 
-        # About 3 frames at this container's 7-11 fps, well inside the
-        # 30-frame redundancy window.
-        silence_inputs(guest, 300)
-        time.sleep(0.5)
-        dropped = guest.evaluate("window._knTestDropped")
+    This is the steady state: both pages run the C engine, which is what sends
+    the redundant inputs (shouldSendRedundancy needs _useCRollback), and the
+    guest has taken up the unreliable channel. The loss is kept under
+    DC_ACK_STALE_MS (500 ms without an acknowledgement), past which the guest
+    falls back to the reliable channel; that fallback, and packets lost before
+    the C engine starts, are not what this tests.
+    """
+    host, guest = _start(browser, server_url, rom_path, start_game, room, transport="unreliable")
+    try:
+        for page in (host, guest):
+            page.wait_for_function("window.NetplayRollback.isCRollback() === true", timeout=60000)
+        guest.wait_for_function(
+            "window.NetplayRollback.exportSyncLog().includes('adopted=unreliable')",
+            timeout=30000,
+        )
+        wait_past_frame(guest, frame(guest) + 10)
+        phantoms_before = len(_phantoms(host, 1))
+        fallbacks_before = len(sync_log_lines(guest, "DC-FALLBACK"))
+
+        # One or two frames at a time at this container's 7-11 fps, well
+        # inside the 30-frame redundancy window, until a packet is lost.
+        dropped = 0
+        for _ in range(5):
+            silence_inputs(guest, 150, channels=("rbDc",))
+            time.sleep(0.4)
+            dropped = guest.evaluate("window._knTestDropped")
+            if dropped:
+                break
         assert dropped > 0, "no input packet was dropped: the silence did not take"
 
         frame_before = frame(host)
@@ -64,7 +90,10 @@ def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_ur
 
         assert frame(host) > frame_before, "host stopped advancing after the gap"
         new_phantoms = _phantoms(host, 1)[phantoms_before:]
-        assert not new_phantoms, f"host dropped the guest over a short gap: {new_phantoms}"
+        fallbacks = sync_log_lines(guest, "DC-FALLBACK")[fallbacks_before:]
+        assert not new_phantoms, (
+            f"host dropped the guest over a short gap: {new_phantoms}; guest fallbacks: {fallbacks}"
+        )
     finally:
         host.close()
         guest.close()
