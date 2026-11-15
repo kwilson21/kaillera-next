@@ -5,10 +5,24 @@
  *
  * The server never builds these, so they have no Pydantic model: this file is
  * their one description. `checkPeerText` and `checkRelay` say whether a
- * message matches: play.js's handlers get only the relays and ROM transfer
- * strings that do (socket-boundary.ts `createBoundary` drops the rest). The
- * engine still reads its own by hand and reports the misses
- * (`createProtocolObserver`) until Stage 5 moves it.
+ * message matches, and handlers get only the messages that do
+ * (socket-boundary.ts `createBoundary` drops the rest): play.js's relays and
+ * ROM transfer strings, and the rollback engine's `lockstep` and `sync-state`
+ * channel strings.
+ *
+ * A page loaded before a deploy can share a match with one loaded after it (a
+ * late joiner, a reload), so what a page drops is part of the protocol:
+ * - A JSON message may carry fields its schema does not name. They are not
+ *   checked, and the handler reads the message as it was sent, so a newer
+ *   page may add a field to a JSON message and an older page still reads it.
+ * - A control string must match its pattern whole. Several handlers read
+ *   everything after the prefix, and would misread a longer string, so a
+ *   newer page that needs a new field sends it as a message of its own
+ *   beside the old one, as `sync-request-id` and `sync-answer-id` do.
+ * - A kind this page does not know, a control string or a JSON `type`, is
+ *   dropped and logged once. The handlers had nothing to do with one either.
+ *   A kind a current page no longer sends stays here while an older page
+ *   might still send it ("Read but no longer sent").
  *
  * The per-frame input packet is binary and has its own codec, input-wire.ts.
  */

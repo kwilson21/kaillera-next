@@ -6172,21 +6172,19 @@
     return _peerDriverInstance;
   };
 
-  // Stage 3, observing: the strings peers send over the DataChannels (and the
-  // session-log ack) are checked against web/src/peer-protocol.ts and a
-  // mismatch is reported; the handlers below still read the raw message.
-  // Looked up on first use: kn-core.js loads after this file.
-  let _peerProtocolObserver;
-  const _peerProtocol = () => {
-    if (_peerProtocolObserver === undefined) {
-      _peerProtocolObserver =
-        window.KNCore?.protocol?.createObserver?.(({ type, message, issue }) => {
-          if (!window.KNState?.uploadToken) return false;
-          window.KNEvent?.(type, message, { issue });
-          return true;
-        }) ?? null;
-    }
-    return _peerProtocolObserver;
+  // The strings peers send over the DataChannels, and the server's
+  // session-log ack, are checked against web/src/peer-protocol.ts and
+  // protocol.gen.ts before a handler reads them (KNCore.protocol.createBoundary):
+  // one off its schema is dropped, and the first drop of each kind for each
+  // reason is logged, never its values: in the sync log, and on the console
+  // as play.js logs its own. Made on first use: kn-core.js loads after this file.
+  let _peerBoundaryInstance = null;
+  const _peerBoundary = () => {
+    _peerBoundaryInstance ??= window.KNCore.protocol.createBoundary((line) => {
+      _syncLog(line);
+      console.warn(line);
+    });
+    return _peerBoundaryInstance;
   };
 
   const _syncLog = (msg) => {
@@ -6537,9 +6535,9 @@
         socket.emit('session-log', payload, (ack) => {
           acked = true;
           _socketFlushFails = 0;
-          // The server acks a flush it turned away with no data at all.
-          if (ack) _peerProtocol()?.checkAck('session-log', ack);
-          _ackSyncLogFlush(ack, payload);
+          // The server acks a flush it turned away with no data at all; an
+          // ack off its schema is dropped, and acks nothing.
+          _ackSyncLogFlush(_peerBoundary().ack('session-log', ack), payload);
         });
         // If no ack within 5s, count as failure and try HTTP next time
         setTimeout(() => {
@@ -8851,9 +8849,9 @@
       const peer = _peers[remoteSid];
       if (!peer) return;
 
-      // String messages
+      // String messages: one off its schema goes no further.
       if (typeof e.data === 'string') {
-        _peerProtocol()?.peerText('lockstep', e.data);
+        if (!_peerBoundary().peerText('lockstep', e.data)) return;
         if (e.data === 'ready') {
           peer.ready = true;
         }
@@ -9336,7 +9334,7 @@
     let syncAnswerIdNext = 0;
     ch.onmessage = (e) => {
       if (typeof e.data === 'string') {
-        _peerProtocol()?.peerText('sync-state', e.data);
+        if (!_peerBoundary().peerText('sync-state', e.data)) return;
         if (e.data.startsWith('sync-answer-id:')) {
           syncAnswerIdNext = _requestIdFrom(Number(e.data.substring(15)));
           // Only the host's word says what the host does.
