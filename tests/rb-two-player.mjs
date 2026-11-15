@@ -233,8 +233,9 @@
  *     state match (the host's reset on open makes the hole stall and be
  *     asked for, and the ask escalates).
  *   ROLLBACK_AT_EDGE=1   A third of the way into the battle the host's
- *     input is held at nothing for a second, then set to a button for frame
- *     F onward, so the guest predicts F wrong. The guest page holds the
+ *     input is held at nothing for a second and set to a button for frame F
+ *     alone, so the guest predicts F wrong (C predicts from the newest input
+ *     it has). The guest page holds the
  *     host's input for F (as a packet and inside any later packet's
  *     redundancy) until the guest stalls at its rollback window's edge for
  *     F (depth 7, the deepest C rolls back), then takes it in. Fails unless C
@@ -2682,8 +2683,10 @@ if (inBattle) {
     // it has, nothing) is wrong.
     pastWindow.frame = await host.evaluate(() => {
       const F = window.NetplayRollback.getHudCounters().currentFrame + 30;
+      // The button on F alone: C predicts from the newest input it has, so
+      // F differs from both its neighbours and the guest predicts it wrong.
       window.__knInputOverride = (f) =>
-        f < F ? { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 } : { buttons: 1, lx: 0, ly: 0, cx: 0, cy: 0 };
+        f === F ? { buttons: 1, lx: 0, ly: 0, cx: 0, cy: 0 } : { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
       return F;
     });
     // The guest takes in nothing for F, as a packet or inside a later
