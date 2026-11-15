@@ -88,6 +88,11 @@ peer_connection() {
   local PAIR=specs/peer_connection.qnt
   verify "$PAIR" peer_connection_fixed allHold
   verify "$PAIR" peer_connection_current holdToday
+  # The machine deciding `heal` alone keeps what holds today and two more
+  # (no pair worse than today during a deploy). The answerer's wait still
+  # has no deadline there, as today: the next rule to wire.
+  verify "$PAIR" peer_connection_heal_one_side holdWithHealOneSide
+  expect_violation "$PAIR" peer_connection_heal_one_side everyWaitHasADeadline
   # Today's engine: each of these has a counterexample within 5 steps.
   # (neverLeftWithNothingPending is violated too, but its shortest
   # counterexample is longer than this bound; crossedHealOffersTest replays it.)

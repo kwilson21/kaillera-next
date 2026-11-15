@@ -105,7 +105,7 @@ PAIR=specs/peer_connection.qnt
 $QUINT typecheck "$PAIR"
 # The scenarios say what each variant does with the same ordering.
 for variant in peer_connection_before_119 peer_connection_before_startup_flag peer_connection_current \
-  peer_connection_counter_only peer_connection_fixed; do
+  peer_connection_heal_one_side peer_connection_counter_only peer_connection_fixed; do
   $QUINT test "$PAIR" --main="$variant" --backend=typescript
 done
 pair() { # module invariant init
@@ -126,6 +126,13 @@ pair peer_connection_current holdToday initLobby
 # (startupRetryToAStartedPageTest).
 pair peer_connection_fixed allHold init
 pair peer_connection_fixed allHold initLobby
+# The per-peer machine deciding `heal` alone (the lower slot's health check
+# offers, the higher slot's notices a drop): what holds today, and the pair
+# no longer offers to each other at once or is left with nothing pending. A
+# new higher slot meeting an old lower slot during a deploy is this module;
+# an old higher slot with either is peer_connection_current.
+pair peer_connection_heal_one_side holdWithHealOneSide init
+pair peer_connection_heal_one_side holdWithHealOneSide initLobby
 # With attempts told apart by the offering page's counter alone (the per-peer
 # machine as first written), staleSignalsAreNotApplied is VIOLATED: a page
 # that replaces another numbers its offers from 1 again, and what was sent for
