@@ -297,7 +297,10 @@ reading of each answer. What a page does when the host starts a game (watch,
 keep the host's ROM offer up, wait for the transfer, stop on a ROM that is not
 the host's, or boot) and whether it has a game's end to handle are
 `game-start.ts` (proved), which `onGameStarted` and `onGameEnded` ask and
-carry out. Left in `play.js`: the reconnect banner's timers, what the game
+carry out. What the player is told while the socket is down (the reconnecting
+banner, the in-game "server unreachable" note, the lobby error, the
+slow-first-connection toast) is `connection-notices.ts`: one Effect fiber per
+notice, interrupted when the socket returns. Left in `play.js`: what the game
 lifecycle handlers do to the page, and engine start-up, which are effects on
 the page, the socket and the emulator.
 
