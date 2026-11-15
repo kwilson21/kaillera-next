@@ -23,6 +23,9 @@
 //   channelArrives     the host opens a rom-transfer channel
 //   chunk              a chunk arrives
 //   completes          the host says the file is complete
+//   completesShort     the host says the file is complete, but the bytes held
+//                      are not as many as its header announced: the page drops
+//                      them and shows the drop zone again
 //   closes             the channel closes, or no chunk came for 10 s and the
 //                      guest closes it
 //   backoffFires       the 2 s pause before an automatic retry ends
@@ -31,9 +34,9 @@
 //   sharingOff / sharingOn   the host turns ROM sharing off or on
 //   cancel             the guest cancels, or the game ends
 //
-// Not modelled: what the bytes are (size and hash checks), the host's side,
-// a second channel replacing the first, a stale timer from an earlier
-// request firing late.
+// Not modelled: what the bytes are beyond whether the page holds any (size
+// and hash checks), the host's side, a second channel replacing the first, a
+// stale timer from an earlier request firing late.
 //
 // DEADLINE_ON_EVERY_ASK: every request for a channel starts the 15 s
 //   deadline, however it is sent. false = before this model was written:
@@ -41,12 +44,20 @@
 //   the engine channel or by the Socket.IO fallback, left nothing running,
 //   so a host that never answered left the guest on "reconnecting..." for
 //   good.
+// SHORT_COMPLETE_DROPS_COUNT: a short file drops the receiver's count of
+//   what arrived, as the page drops the bytes. false = before: the receiver
+//   kept its count and header (rom-transfer.ts `{ ...state, phase: 'idle' }`,
+//   and play.js's own variables). The next request asked the host to resume
+//   from that count with nothing held, so the file could end up missing its
+//   start, or never come whole.
 module rom_transfer {
   const DEADLINE_ON_EVERY_ASK: bool
+  const SHORT_COMPLETE_DROPS_COUNT: bool
 
   var phase: str          // idle | receiving | paused | resuming | complete
   var retries: int        // automatic retries since the guest last acted
-  var gotBytes: bool      // something of the file has arrived
+  var gotBytes: bool      // the receiver counts some of the file as arrived (`received` > 0)
+  var held: bool          // the page holds bytes of the file (its chunks)
   var timer: str          // none | stall | backoff | resume | poll
   var retryOffered: bool  // the page shows a Retry button
 
@@ -55,11 +66,11 @@ module rom_transfer {
   pure def midGameAskTimer(deadline: bool): str = if (deadline) "resume" else "none"
 
   action init = all {
-    phase' = "idle", retries' = 0, gotBytes' = false, timer' = "none", retryOffered' = false,
+    phase' = "idle", retries' = 0, gotBytes' = false, held' = false, timer' = "none", retryOffered' = false,
   }
 
   action startWaiting(t: str): bool = all {
-    phase' = "resuming", retries' = 0, gotBytes' = false, timer' = t, retryOffered' = false,
+    phase' = "resuming", retries' = 0, gotBytes' = false, held' = false, timer' = t, retryOffered' = false,
   }
 
   action acceptPreGame = all { phase == "idle", startWaiting("resume") }
@@ -70,13 +81,13 @@ module rom_transfer {
   action pollSends = all {
     phase == "resuming", timer == "poll",
     timer' = midGameAskTimer(DEADLINE_ON_EVERY_ASK),
-    phase' = phase, retries' = retries, gotBytes' = gotBytes, retryOffered' = retryOffered,
+    phase' = phase, retries' = retries, gotBytes' = gotBytes, held' = held, retryOffered' = retryOffered,
   }
 
   action pollGivesUp = all {
     phase == "resuming", timer == "poll",
     timer' = "resume",
-    phase' = phase, retries' = retries, gotBytes' = gotBytes, retryOffered' = retryOffered,
+    phase' = phase, retries' = retries, gotBytes' = gotBytes, held' = held, retryOffered' = retryOffered,
   }
 
   // A channel that arrives while the guest is waiting to resume keeps what
@@ -86,18 +97,35 @@ module rom_transfer {
     phase' = "receiving", timer' = "stall", retryOffered' = false,
     retries' = if (phase == "resuming" or phase == "paused") retries else 0,
     gotBytes' = if (phase == "resuming" or phase == "paused") gotBytes else false,
+    held' = if (phase == "resuming" or phase == "paused") held else false,
   }
 
   action chunk = all {
     phase == "receiving",
-    gotBytes' = true, timer' = "stall",
+    gotBytes' = true, held' = true, timer' = "stall",
     phase' = phase, retries' = retries, retryOffered' = retryOffered,
   }
 
   action completes = all {
     phase == "receiving",
     phase' = "complete", timer' = "none", retryOffered' = false,
-    retries' = retries, gotBytes' = gotBytes,
+    retries' = retries, gotBytes' = gotBytes, held' = held,
+  }
+
+  // The page drops the bytes and shows the drop zone (no Retry); the host,
+  // a game start or a reconnect can still start another request.
+  action completesShort = all {
+    phase == "receiving",
+    phase' = "idle", timer' = "none", retryOffered' = false, held' = false,
+    gotBytes' = if (SHORT_COMPLETE_DROPS_COUNT) false else gotBytes,
+    retries' = if (SHORT_COMPLETE_DROPS_COUNT) 0 else retries,
+  }
+
+  // A game starting while the guest, having accepted, still has no ROM.
+  action gameStarts = all {
+    phase == "idle",
+    phase' = "resuming", timer' = "poll", retryOffered' = false,
+    retries' = retries, gotBytes' = gotBytes, held' = held,
   }
 
   // Retried automatically only if part of the file arrived; either way the
@@ -106,45 +134,45 @@ module rom_transfer {
     phase == "receiving",
     phase' = "paused", retries' = retries + 1, retryOffered' = true,
     timer' = if (retries + 1 <= MAX_RETRIES and gotBytes) "backoff" else "none",
-    gotBytes' = gotBytes,
+    gotBytes' = gotBytes, held' = held,
   }
 
   action backoffFires = all {
     phase == "paused", timer == "backoff",
     phase' = "resuming", timer' = "resume", retryOffered' = false,
-    retries' = retries, gotBytes' = gotBytes,
+    retries' = retries, gotBytes' = gotBytes, held' = held,
   }
 
   action resumeTimesOut = all {
     phase == "resuming", timer == "resume",
     phase' = "paused", retries' = retries + 1, retryOffered' = true,
     timer' = if (retries + 1 <= MAX_RETRIES) "backoff" else "none",
-    gotBytes' = gotBytes,
+    gotBytes' = gotBytes, held' = held,
   }
 
   action userRetry = all {
     retryOffered, phase == "paused",
     phase' = "resuming", retries' = 0, timer' = "resume", retryOffered' = false,
-    gotBytes' = gotBytes,
+    gotBytes' = gotBytes, held' = held,
   }
 
   action sharingOff = all {
     phase == "receiving" or phase == "resuming",
     phase' = "paused", timer' = "none", retryOffered' = true,
-    retries' = retries, gotBytes' = gotBytes,
+    retries' = retries, gotBytes' = gotBytes, held' = held,
   }
 
   action sharingOn = all {
     (phase == "paused" and gotBytes) or phase == "idle",
     phase' = "resuming", timer' = "resume", retryOffered' = false,
-    retries' = retries, gotBytes' = gotBytes,
+    retries' = retries, gotBytes' = gotBytes, held' = held,
   }
 
   action cancel = init
 
   action step = any {
     acceptPreGame, acceptPolling, acceptOverEngine, acceptFallback, pollSends, pollGivesUp,
-    channelArrives, chunk, completes, closes, backoffFires, resumeTimesOut,
+    channelArrives, chunk, completes, completesShort, gameStarts, closes, backoffFires, resumeTimesOut,
     userRetry, sharingOff, sharingOn, cancel,
   }
 
@@ -162,6 +190,10 @@ module rom_transfer {
   // past the limit. (The host turning sharing back on resumes without
   // resetting the count, so the count itself is not bounded.)
   val timersAloneStop = (timer == "backoff") implies (retries <= MAX_RETRIES)
+
+  // What the receiver counts as arrived is what the page holds: a resumed
+  // channel asks the host to go on from the bytes the page has.
+  val countIsHeld = gotBytes == held
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -211,14 +243,42 @@ module rom_transfer {
       .then(backoffFires)
       .then(channelArrives)
       .expect(phase == "receiving" and gotBytes and retries == 1)
+
+  // A short file, then the host turns sharing off and on again: the new
+  // channel resumes from what the receiver counts. Before the fix that was
+  // the dropped file's count, with nothing held.
+  run shortFileThenSharingAgainTest =
+    init
+      .then(acceptPreGame)
+      .then(channelArrives).then(chunk)
+      .then(completesShort)
+      .expect(countIsHeld == SHORT_COMPLETE_DROPS_COUNT)
+      .then(sharingOn)
+      .then(channelArrives)
+      .expect(phase == "receiving" and countIsHeld == SHORT_COMPLETE_DROPS_COUNT)
+
+  // The same through a game starting while the guest still has no ROM.
+  run shortFileThenGameStartsTest =
+    init
+      .then(acceptPreGame)
+      .then(channelArrives).then(chunk)
+      .then(completesShort)
+      .then(gameStarts).then(pollGivesUp)
+      .then(channelArrives)
+      .expect(phase == "receiving" and countIsHeld == SHORT_COMPLETE_DROPS_COUNT)
 }
 
 // Before this model: a request sent mid-game had no deadline.
 module rom_transfer_before {
-  import rom_transfer(DEADLINE_ON_EVERY_ASK = false).*
+  import rom_transfer(DEADLINE_ON_EVERY_ASK = false, SHORT_COMPLETE_DROPS_COUNT = false).*
+}
+
+// Before the short-file fix: the receiver kept the dropped file's count.
+module rom_transfer_short_kept {
+  import rom_transfer(DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = false).*
 }
 
 // Today.
 module rom_transfer_current {
-  import rom_transfer(DEADLINE_ON_EVERY_ASK = true).*
+  import rom_transfer(DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = true).*
 }

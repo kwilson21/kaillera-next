@@ -2531,8 +2531,14 @@
 
     if (_romTransferHeader && _romTransferHeader.size !== totalSize) {
       setRomTransferState('failed', 'ROM transfer size mismatch — load manually');
+      // The bytes are dropped, so what was counted goes with them: a later
+      // request starts the file again rather than resuming from bytes this
+      // page no longer holds (specs/rom_transfer.qnt, `countIsHeld`).
       _romTransferState = 'idle';
       _romTransferChunks = [];
+      _romTransferHeader = null;
+      _romTransferBytesReceived = 0;
+      _romTransferRetries = 0;
       updateRomSharingUI();
       return;
     }
