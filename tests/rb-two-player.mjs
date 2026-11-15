@@ -576,12 +576,17 @@ const guest = await mkPage(guestBrowser, 'guest', {
   hidden: HIDE_GUEST_MS > 0,
   suspendAudio: SUSPEND_GUEST_AUDIO,
 });
-await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=${MODE}${QUERY}`);
+await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
 await guest.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 for (const p of [host, guest]) await p.locator("#rom-drop input[type='file']").setInputFiles(ROM);
 await host.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+// The host picks the mode in the lobby, as a player would. The URL's `mode`
+// only fills the picker until the room's first update, which carries the
+// room's own mode (rollback for a new room).
+await host.selectOption('#mode-select', MODE);
+await host.waitForSelector('#start-btn:not([disabled])', { timeout: 20000 });
 ROM_HASH = (await host.evaluate(() => window.KNState?.romHash)) || '';
 if (!MENU_AUTOPILOT) {
   MENU_AUTOPILOT = ROM_HASH && ROM_HASH !== SSB64_US_HASH ? 'any-fighter' : 'ssb64';
