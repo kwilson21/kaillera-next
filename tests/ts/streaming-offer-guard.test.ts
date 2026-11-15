@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
-import { createStreamingObserver } from '../../web/src/streaming/observe.ts';
 import * as streamingRoster from '../../web/src/streaming/roster.ts';
 import * as streamingSignal from '../../web/src/streaming/signal.ts';
+import * as streamingVideo from '../../web/src/streaming/video.ts';
+import * as streamingInput from '../../web/src/streaming/input.ts';
 
 // web/static/netplay-streaming.js itself, run on a fake page whose socket,
 // WebRTC and bundle helpers record what the engine does with them: which
@@ -93,13 +94,10 @@ interface EngineConfig {
   initialPlayers: RosterMessage | null;
 }
 
-type ObserverCounts = ReturnType<ReturnType<typeof createStreamingObserver>['counts']>;
-
 /** window.NetplayStreaming, as far as these tests use it. */
 interface EngineApi {
   init: (config: EngineConfig) => void;
   stop: () => void;
-  observed: () => ObserverCounts;
   getPeerConnection: (sid: string) => FakePc | null;
 }
 
@@ -114,7 +112,7 @@ interface Report {
   readonly message: string;
 }
 
-const STREAMING = { ...streamingRoster, ...streamingSignal, createObserver: createStreamingObserver };
+const STREAMING = { ...streamingRoster, ...streamingSignal, ...streamingInput, ...streamingVideo };
 
 /** The page's global object: what the engine reads from it, and what it leaves there. */
 interface FakeWindow {
@@ -128,7 +126,7 @@ interface FakeWindow {
   KNState: FakeKNState;
   KNEvent: (type: string, message: string) => void;
   KNShared: FakeShared;
-  KNCore: { streaming?: typeof STREAMING };
+  KNCore: { streaming: typeof STREAMING };
 }
 
 class FakeDescription {
@@ -150,9 +148,8 @@ interface FakeShared {
 
 /**
  * The engine on a page whose own socket is `sid`.
- * @param withGate  the bundle's streaming rules are there (a page without them refuses every offer)
  */
-const page = (sid: string, withGate = true) => {
+const page = (sid: string) => {
   const handlers = new Map<string, Handler>();
   const answered: string[] = [];
   const logs: string[] = [];
@@ -188,7 +185,7 @@ const page = (sid: string, withGate = true) => {
       teardownKeyTracking: () => undefined,
       bootWithCheats: () => undefined,
     },
-    KNCore: withGate ? { streaming: STREAMING } : {},
+    KNCore: { streaming: STREAMING },
   };
   window.window = window;
   vm.runInNewContext(ENGINE, window);
@@ -250,8 +247,6 @@ test("a guest answers the host's offer and refuses another player's or a spectat
   assert.equal(p2.engine.getPeerConnection('host')?.remote?.type, 'offer');
 
   assert.deepEqual(p2.reports, []);
-  assert.equal(p2.engine.observed().disagreed, 0);
-  assert.equal(p2.engine.observed().compared['signal:offer'], 4);
 });
 
 test('an offer before any roster is held with its candidates, and applied when the roster places it at slot 0', async () => {
@@ -273,7 +268,6 @@ test('an offer before any roster is held with its candidates, and applied when t
   // Its candidates follow it to the connection, in order.
   assert.deepEqual(p2.candidatesFor('host'), [{ candidate: 'c1' }, { candidate: 'c2' }]);
   assert.deepEqual(p2.reports, []);
-  assert.equal(p2.engine.observed().disagreed, 0);
 });
 
 test('a held offer is dropped when the roster places its sender anywhere but slot 0', async () => {
@@ -308,7 +302,6 @@ test("a reloaded host's offer from its new socket is held until the roster names
   p2.roster({ players: { a: { socketId: 'host2', slot: 0 }, b: { socketId: 'p2', slot: 1 } }, spectators: {} });
   await settle();
   assert.deepEqual(p2.answered, ['host2']);
-  assert.equal(p2.engine.observed().disagreed, 0);
 });
 
 test('stop() forgets held offers: a roster in the next match applies nothing from the last', async () => {
@@ -344,13 +337,4 @@ test("the host's page answers any offer, as before", async () => {
   await settle();
   assert.deepEqual(host.answered, ['p3']);
   assert.deepEqual(host.logged('refused offer'), []);
-});
-
-test('a guest whose bundle has no offer gate takes no offer', async () => {
-  const p2 = page('p2', false);
-  p2.engine.init({ socket: p2.socket, playerSlot: 1, isSpectator: false, initialPlayers: ROOM });
-  p2.signal(offerFrom('host'));
-  await settle();
-  assert.deepEqual(p2.answered, []);
-  assert.equal(p2.engine.getPeerConnection('host'), null);
 });

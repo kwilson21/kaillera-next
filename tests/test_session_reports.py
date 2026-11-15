@@ -37,14 +37,11 @@ def _report_types() -> list[str]:
     observe = (SESSION_TS.parent / "play" / "observe.ts").read_text()
     disagree = observe[observe.index("export type DisagreeReport") :]
     disagree = disagree[: disagree.index("};")]
-    streaming = (SESSION_TS.parent / "streaming" / "observe.ts").read_text()
-    streaming = streaming[streaming.index("export type StreamingDisagreeReport") :]
-    streaming = streaming[: streaming.index("};")]
-    return re.findall(r"readonly type: '([^']+)'", union + report + disagree + streaming)
+    return re.findall(r"readonly type: '([^']+)'", union + report + disagree)
 
 
 def test_the_union_is_found():
-    assert set(_report_types()) >= {"late-join-stranded", "protocol-mismatch", "play-disagree", "streaming-disagree"}
+    assert set(_report_types()) >= {"late-join-stranded", "protocol-mismatch", "play-disagree"}
 
 
 # The engine reports with createComparer too, under its own types (the peer
@@ -52,20 +49,23 @@ def test_the_union_is_found():
 ENGINE_REPORT_TYPES = ["mesh-disagree"]
 # Types no page sends any more that the server still stores, for a page
 # loaded before the change: resync-disagree (the resync request rules
-# decide since web/src/resync-request.ts took over).
-RETIRED_REPORT_TYPES = ["resync-disagree"]
+# decide since web/src/resync-request.ts took over) and streaming-disagree
+# (netplay-streaming.js calls the rules in web/src/streaming).
+RETIRED_REPORT_TYPES = ["resync-disagree", "streaming-disagree"]
+STATIC = SESSION_TS.parents[1] / "static"
 
 
 def test_the_engine_sends_the_type_it_is_allowed():
-    engine = (SESSION_TS.parents[1] / "static" / "netplay-rollback.js").read_text()
+    engine = (STATIC / "netplay-rollback.js").read_text()
     for report_type in ENGINE_REPORT_TYPES:
         assert f"window.KNEvent?.('{report_type}'," in engine
 
 
-def test_the_engine_no_longer_sends_a_retired_type():
-    engine = (SESSION_TS.parents[1] / "static" / "netplay-rollback.js").read_text()
+@pytest.mark.parametrize("engine", ["netplay-rollback.js", "netplay-streaming.js"])
+def test_the_engines_no_longer_send_a_retired_type(engine):
+    source = (STATIC / engine).read_text()
     for report_type in RETIRED_REPORT_TYPES:
-        assert f"'{report_type}'" not in engine
+        assert f"'{report_type}'" not in source
 
 
 @pytest.mark.parametrize("report_type", _report_types() + ENGINE_REPORT_TYPES + RETIRED_REPORT_TYPES)

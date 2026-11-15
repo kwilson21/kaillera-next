@@ -168,8 +168,10 @@ _VALID_EVENT_TYPES = {
     # decision now decides. Kept so a page loaded before that still has its
     # report stored: tests/test_session_reports.py.
     "play-disagree",
-    # A streaming rule in web/src/streaming disagreed with the engine still in
-    # charge of it (web/src/streaming/observe.ts): tests/test_session_reports.py.
+    # A streaming rule in web/src/streaming disagreed with the code in
+    # netplay-streaming.js then in charge of it. No longer sent: the engine
+    # calls those rules. Kept so a page loaded before that still has its
+    # report stored: tests/test_session_reports.py.
     "streaming-disagree",
     # A decision of the peer mesh disagreed with the proved function meant to
     # replace it (web/src/peer-signaling.ts, compared in netplay-rollback.js).
