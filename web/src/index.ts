@@ -28,6 +28,7 @@ import {
 } from './protocol.ts';
 import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
+import { startFakePeer } from './page/fake-peer.ts';
 import { menuAutopilot } from './page/menu-autopilot.ts';
 import { rollbackTimeline } from './page/rollback-timeline.ts';
 import { startSwitch2Usb } from './page/switch2-usb.ts';
@@ -311,6 +312,7 @@ export const KNCore = {
     startControllerSettings,
     startVisionClient,
     startVirtualGamepad,
+    startFakePeer,
   },
   /** What these pages share with the front page; the same object is `window.KNSite` on both. */
   site: KNSite,
