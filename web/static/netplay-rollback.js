@@ -8479,7 +8479,16 @@
   // is told so and joins late. Then the run goes on with the start whether or
   // not it left anyone out: a wait nothing else would look at again moves on
   // here.
-  const START_LOAD_DEADLINE_MS = 60000;
+  // Test-only: `&knStartLoadMs=` shortens the window so a browser test can
+  // see a run (as `knperf=light` and `screenshots=off` change what a page
+  // does for tests). It only shortens, and never below 5 s: a host can
+  // already leave players out, and this only brings that sooner.
+  const START_LOAD_DEADLINE_MS = (() => {
+    const DEFAULT_MS = 60000;
+    const asked = Number(_urlParams.get('knStartLoadMs'));
+    if (!_urlParams.has('knStartLoadMs') || !Number.isFinite(asked)) return DEFAULT_MS;
+    return Math.min(DEFAULT_MS, Math.max(5000, Math.floor(asked)));
+  })();
   // The next run comes no sooner than this after the last.
   const START_LOAD_RECHECK_MIN_MS = 1000;
   let _startLoadWait = null;
@@ -11033,21 +11042,32 @@
     }
     // Guests without ROM hash: wait for save state via handleSaveStateMsg
 
-    // Timeout: if sync hasn't completed, reset sync state so a
+    // Timeout: on a guest, if sync hasn't completed, reset sync state so a
     // reconnecting peer can re-trigger the sync flow instead of getting stuck.
+    // The host's word (`left-out:`, its lockstep-ready) moves it on from there.
     // Capture _sessionId so the timer is invalidated if stop()/init() runs.
     const sid = _sessionId;
     const syncTimeoutMs = _isSmashRemix() ? INITIAL_SMASH_TITLE_TIMEOUT_MS + 30000 : 30000;
     setTimeout(() => {
       if (_coreFatalError) return;
       if (sid !== _sessionId) return; // stale timer from previous session
-      if (_phase !== PHASE_RUNNING && _phase >= PHASE_EMU_READY) {
-        setStatus('Sync timed out — waiting for reconnect...');
-        _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
-        _phase = PHASE_EMU_READY; // allow sync retry
-        _lockstepReadyPeers = {};
-        _startCohortSlots = null;
+      if (_phase === PHASE_RUNNING || _phase < PHASE_EMU_READY) return;
+      // One sync per start on the host (specs/start_group.qnt, ONE_SYNC). A
+      // page says lockstep-ready once and takes the first state it is sent:
+      // back at the emu-ready wait, the host's barrier waited for ever for a
+      // player that had said it (or, had the word been kept, that player
+      // started from the first state and the host from the second). A player
+      // still behind is the load deadline's to leave out; it joins late, from
+      // the running state.
+      if (_playerSlot === 0) {
+        _syncLog(`SYNC-TIMEOUT phase=${_phase}: one sync per start; the load deadline decides who is behind`);
+        return;
       }
+      setStatus('Sync timed out — waiting for reconnect...');
+      _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
+      _phase = PHASE_EMU_READY; // allow sync retry
+      _lockstepReadyPeers = {};
+      _startCohortSlots = null;
     }, syncTimeoutMs);
   };
 
@@ -11753,8 +11773,47 @@
       }
     } catch (err) {
       _syncLog(`failed to send initial state: ${err}`);
+      if (_playerSlot === 0) _retryHostState();
     }
   }
+
+  // The host's own starting state failed (its capture threw): no player has
+  // a state from it yet, so it captures again HOST_STATE_RETRY_MS later, at
+  // most HOST_STATE_ATTEMPTS in all, and then says it cannot start. With one
+  // sync per start nothing else would try again, and nobody is behind a host
+  // that is not ready itself: it sat at "Syncing..." for ever (I1). A state
+  // the host has but cannot get to its players (the relay stalls) is the load
+  // deadline's: it leaves them out, the host runs alone, and they join late.
+  const HOST_STATE_ATTEMPTS = 3;
+  const HOST_STATE_RETRY_MS = 2000;
+  let _hostStateFailures = 0;
+  let _hostStateRetry = null;
+  const _endHostStateRetry = () => {
+    _hostStateRetry?.cancel();
+    _hostStateRetry = null;
+    _hostStateFailures = 0;
+  };
+  const _retryHostState = () => {
+    if (_phase !== PHASE_SYNCING || _isSpectator) return;
+    _hostStateFailures++;
+    if (_hostStateFailures >= HOST_STATE_ATTEMPTS) {
+      _syncLog(`SYNC-HOST-STATE-FAILED after ${_hostStateFailures} attempts`);
+      setStatus('Could not prepare the starting state — reload to try again');
+      KNEvent('stall', 'The host could not prepare the starting state', { attempts: _hostStateFailures });
+      return;
+    }
+    _syncLog(`SYNC-HOST-STATE-RETRY ${_hostStateFailures + 1}/${HOST_STATE_ATTEMPTS} in ${HOST_STATE_RETRY_MS}ms`);
+    _hostStateRetry?.cancel();
+    const wait = window.KNCore.startGroup.startDeadline({
+      deadlineMs: HOST_STATE_RETRY_MS,
+      onDeadline: () => {
+        if (_hostStateRetry !== wait) return;
+        _hostStateRetry = null;
+        if (_phase === PHASE_SYNCING) sendInitialState();
+      },
+    });
+    _hostStateRetry = wait;
+  };
 
   const handleSaveStateMsg = async (msg) => {
     if (_isSpectator) return;
@@ -13656,6 +13715,7 @@
     _phase = PHASE_RUNNING;
     _endHostAnswerDeadline(true);
     _endStartLoadWait(true);
+    _endHostStateRetry();
     _clearStartSteps();
     _peerDriver()?.matchStarted();
     window._knPreventRetroArchVisibilityPause = true;
@@ -19541,6 +19601,7 @@
     _stopUnreachableReports();
     _endHostAnswerDeadline(false);
     _endStartLoadWait(false);
+    _endHostStateRetry();
     _clearStartSteps();
     _startCohortSlots = null;
     _lateJoinActivatedAtFrame = {};

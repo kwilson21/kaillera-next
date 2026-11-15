@@ -65,7 +65,13 @@
 // waited for it for ever, or, had its word been kept, it would have started
 // from the first state and the host from the second. A player behind at the
 // barrier is the deadline's to leave out; it joins late, from the running
-// state.
+// state. That includes a host whose state never reaches its players (the
+// relay stalls): every player is left out, the host runs alone, and they
+// join late (aStateThatNeverArrivesTest). Not modelled: the host's own
+// capture of that state, a step of the host's sync here. One that fails is
+// tried again, a bounded number of times, and then the host says it cannot
+// start: no player has a state from it yet, so trying again is not a second
+// sync.
 //
 // The guest's deadline is the page's, not a connection's: armed when its
 // engine starts, again whenever it loses its channel to the host before its
@@ -1107,6 +1113,32 @@ module start_group {
       )
       .expect(neverStuck == (ONE_SYNC or (LOAD_DEADLINE and DEADLINE_LIVE and not(READY_KEPT))))
       .expect((ONE_SYNC and NO_PROGRESS) implies (host == "running" and startGroup == GUESTS))
+
+  // A room of three; both guests load and the host syncs, but its state
+  // never reaches them (the relay stalls). Neither ever says it is ready. The
+  // load deadline leaves both out after a whole window with no step, the
+  // host runs alone, and they join late: progress, not a hang.
+  run aStateThatNeverArrivesTest =
+    init
+      .then(startWith("starting", "starting"))
+      .then(answer("g1"))
+      .then(answer("g2"))
+      .then(loadAny("g1"))
+      .then(loadAny("g2"))
+      .then(syncAny)
+      .then(loadDeadlineAny)
+      .then(matchRunsStep)
+      .expect(host == (if (LOAD_DEADLINE) "running" else "sequence"))
+      .then(rejoinLateAny("g1"))
+      .then(rejoinLateAny("g2"))
+      .then(lateJoinAny("g1"))
+      .then(lateJoinAny("g2"))
+      .expect(
+        GUESTS.forall(g => page.get(g) == (if (LOAD_DEADLINE and HOST_TELLS_LEFT_OUT and GUEST_REJOINS_LATE) "joined" else "starting"))
+      )
+      // One time for every player (no NO_PROGRESS) cut them while they still
+      // waited on the host's state.
+      .expect(aPlayerMakingProgressStays == not(LOAD_DEADLINE and not(NO_PROGRESS)))
 
   // Two players who answer: nobody is left out and the match runs.
   run everyoneAnswersTest =
