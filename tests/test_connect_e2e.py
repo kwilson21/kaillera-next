@@ -1,11 +1,10 @@
 """Opening and joining a room on the real play page.
 
 The requests a page sends and what each answer means are
-web/src/play/connect.ts and web/src/play/join-plan.ts. onConnect in play.js
-still makes each decision itself, with the TypeScript rules computing it
-beside and a difference reported as a `play-disagree` client event. This
-fills a room, sends a fifth person in, and checks that everyone lands where
-they should and that the two agree throughout.
+web/src/play/connect.ts and web/src/play/join-plan.ts, which onConnect in
+play.js calls. This fills a room, sends a fifth person in, and checks that
+everyone lands where they should, and that the page's other moved decisions
+still observing report no `play-disagree`.
 
 Not covered here: the mid-game rejoin (tests/rb-two-player.mjs with
 DROP_SIGNALING_MS) and joining a match in progress (tests/lifecycle-e2e.mjs).
