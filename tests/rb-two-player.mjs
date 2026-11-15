@@ -333,6 +333,20 @@
  *     was applied after the asks (at the request's deadline the guest asks
  *     again: RESYNC-REASK). Reported as `doubleResyncAsk` in summary.json.
  *     The other fault knobs are refused with it.
+ *   C_ROLLBACK_TRAP=1   A third of the way into the battle every call of the
+ *     guest's kn_pre_tick throws what a WASM trap throws (a
+ *     WebAssembly.RuntimeError). A trap in the C engine's tick is fatal, as
+ *     any core trap is: the guest logs C-ROLLBACK-THROW and FATAL-CORE-ABORT
+ *     branch=c-rollback, shows the crash error and stops; the host drops it
+ *     at the input deadline (PEER-PHANTOM) and plays on. The engine used to
+ *     clear the replay and go on, and after three throws turn rollback off
+ *     on that page alone (C-ROLLBACK-FALLBACK). The run fails unless the
+ *     guest threw once, ended the match, showed the error, turned its worker
+ *     coprocessor off (WORKER-COPROC AUTO-DISABLED) and stopped advancing,
+ *     and the host dropped it and kept advancing. The guest is
+ *     gone after that, so the run ends there: no hash compare. Reported as
+ *     `cRollbackTrap` in summary.json. The other fault knobs are refused
+ *     with it.
  *   RESYNC_ONE_BACK=1   A resync that lands exactly one frame behind the
  *     guest's counter (specs/ring_after_resync.qnt). A third of the way into
  *     the battle the guest's tick is paused (the engine's own pauseTick, as
@@ -659,6 +673,7 @@ if (!['battle', 'boot'].includes(DELAY_SYNC_ANSWER_AT)) {
 const LOSE_INPUTS_BEFORE_FALLBACK = process.env.LOSE_INPUTS_BEFORE_FALLBACK === '1';
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 const DOUBLE_RESYNC_ASK = process.env.DOUBLE_RESYNC_ASK === '1';
+const C_ROLLBACK_TRAP = process.env.C_ROLLBACK_TRAP === '1';
 const CATCH_UP_MS = Number(process.env.CATCH_UP_MS || 0);
 const RESYNC_ONE_BACK = process.env.RESYNC_ONE_BACK === '1';
 const RESYNC_SAME_FRAME = process.env.RESYNC_SAME_FRAME === '1';
@@ -1023,6 +1038,29 @@ if (
     HEAL_BOTH_SIDES)
 ) {
   console.log('CATCH_UP_MS is mutually exclusive with the other fault knobs');
+  process.exit(1);
+}
+if (
+  C_ROLLBACK_TRAP &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    LOSE_INPUTS_BEFORE_FALLBACK ||
+    DOUBLE_RESYNC_ASK ||
+    UNANSWERED_SOCKET_RESYNC ||
+    RESYNC_FAULT ||
+    DESYNC_GUEST ||
+    SYNC_FOLLOW_UP ||
+    MALFORMED_PEER ||
+    HEAL_BOTH_SIDES ||
+    CATCH_UP_MS > 0)
+) {
+  console.log('C_ROLLBACK_TRAP is mutually exclusive with the other fault knobs');
   process.exit(1);
 }
 // The held answer, then its catch-up.
@@ -3093,6 +3131,59 @@ if (inBattle) {
       console.log(`host saw the guest back in the room: ${hostSawGuestReturn}`);
       await host.waitForTimeout(8000);
     }
+  } else if (C_ROLLBACK_TRAP) {
+    await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
+    const trap = { hostAt: null, guestAt: null };
+    [trap.hostAt, trap.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    const frameOf = (p) => p.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+    // From here every call of the guest's kn_pre_tick throws what a WASM trap
+    // throws, as a trap the engine cannot get past would.
+    trap.frame = await guest.evaluate(() => {
+      window.EJS_emulator.gameManager.Module._kn_pre_tick = () => {
+        throw new WebAssembly.RuntimeError('memory access out of bounds (C_ROLLBACK_TRAP)');
+      };
+      return window.NetplayRollback.getHudCounters().currentFrame;
+    });
+    console.log(`C_ROLLBACK_TRAP: the guest's kn_pre_tick traps from frame ${trap.frame}`);
+    trap.fatal = await waitForLine(guest, trap.guestAt.seq, /FATAL-CORE-ABORT branch=c-rollback/, 10000);
+    // The host waits on the stopped guest's inputs, then drops it at the deadline.
+    trap.hostDropped = await waitForLine(host, trap.hostAt.seq, /PEER-PHANTOM slot=1/, 20000);
+    const [guestBefore, hostBefore] = await Promise.all([frameOf(guest), frameOf(host)]);
+    await host.waitForTimeout(5000);
+    const [guestAfter, hostAfter] = await Promise.all([frameOf(guest), frameOf(host)]);
+    trap.guestFramesAfter = guestAfter - guestBefore;
+    trap.hostFramesAfter = hostAfter - hostBefore;
+    trap.error = await guest.evaluate(() => {
+      const el = document.getElementById('error-msg');
+      return el && !el.classList.contains('hidden') ? el.textContent.trim() : null;
+    });
+    const [hostSync, guestSync] = await Promise.all([syncLogOf(host), syncLogOf(guest)]);
+    fs.writeFileSync(`${OUT}/host-sync.txt`, hostSync);
+    fs.writeFileSync(`${OUT}/guest-sync.txt`, guestSync);
+    const guestLines = linesAfter(guestSync, trap.guestAt.seq);
+    trap.throws = guestLines.filter((line) => /C-ROLLBACK-THROW/.test(line)).length;
+    trap.fellBack = guestLines.some((line) => /C-ROLLBACK-FALLBACK/.test(line));
+    // No worker replay may land on the trapped core: its coprocessor is off.
+    trap.coprocOff = /WORKER-COPROC AUTO-DISABLED/.test(guestSync);
+    const trapFailed = !(
+      trap.fatal &&
+      trap.throws === 1 &&
+      !trap.fellBack &&
+      trap.coprocOff &&
+      trap.guestFramesAfter === 0 &&
+      /emulator crashed/i.test(trap.error || '') &&
+      trap.hostDropped &&
+      trap.hostFramesAfter > 0
+    );
+    fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify({ mode: MODE, cRollbackTrap: trap }, null, 1));
+    console.log(
+      trapFailed
+        ? 'C_ROLLBACK_TRAP: the trap did not end the match on the guest alone, or the host did not play on:'
+        : 'C_ROLLBACK_TRAP: the guest ended its match at the trap; the host dropped it and played on:',
+      JSON.stringify(trap),
+    );
+    for (const b of new Set([hostBrowser, guestBrowser])) await b.close();
+    process.exit(trapFailed ? 1 : 0);
   } else if (MALFORMED_PEER) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
