@@ -412,9 +412,13 @@ Slice 1, the peer mesh and signaling:
     from the engine, three from the machine;
   - a roster that lists a reloaded player under a new id makes the engine
     drop the entry it has; the machine keeps it until the new page offers.
-  The server relays only the keys it knows, so `startupReconnect` never
-  arrives: a page tells a late startup retry from a reconnect by its own
-  phase, and so does the observer.
+  The server relays `startupReconnect` (it used to drop it), so a page
+  tells a startup retry from a reconnect by the offer's flag, and so does
+  the observer. A reconnect offer without it falls back on the page's own
+  phase, as every one did before; then a page that had started (in a room
+  of three, its channel with another player opened first) took a startup
+  retry for a gameplay reconnect and resynced during boot
+  (`startupRetryToAStartedPageTest`).
 - Next: read the production reports; then decide, one rule at a time, by
   the machine, starting with who offers from the health check.
 

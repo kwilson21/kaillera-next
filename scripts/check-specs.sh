@@ -104,19 +104,26 @@ $QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPictures
 PAIR=specs/peer_connection.qnt
 $QUINT typecheck "$PAIR"
 # The scenarios say what each variant does with the same ordering.
-for variant in peer_connection_before_119 peer_connection_current peer_connection_counter_only \
-  peer_connection_fixed; do
+for variant in peer_connection_before_119 peer_connection_before_startup_flag peer_connection_current \
+  peer_connection_counter_only peer_connection_fixed; do
   $QUINT test "$PAIR" --main="$variant" --backend=typescript
 done
 pair() { # module invariant init
   $QUINT run "$PAIR" --main="$1" --invariant="$2" --init="$3" \
     --max-samples=10000 --max-steps=25 --backend=typescript
 }
-# Today: a reconnect leaves the guest's input state clean and a roster update
-# never replaces a connection that is up. The other four properties are
-# violated today (the scenarios above show how) and hold on
-# peer_connection_fixed, the rules the per-peer machine is built to.
+# Today: a reconnect leaves the guest's input state clean, a roster update
+# never replaces a connection that is up, and a startup retry is never
+# handled as a gameplay reconnect. The other four properties are violated
+# today (the scenarios above show how) and hold on peer_connection_fixed, the
+# rules the per-peer machine is built to.
 pair peer_connection_current holdToday init
+pair peer_connection_current holdToday initLobby
+# startupRetryIsNotAReconnect was VIOLATED, from the lobby, while the server
+# dropped the startupReconnect flag (peer_connection_before_startup_flag): a
+# startup retry that reaches a page whose game has started (its channel with
+# a third player opened) is taken for a reconnect
+# (startupRetryToAStartedPageTest).
 pair peer_connection_fixed allHold init
 pair peer_connection_fixed allHold initLobby
 # With attempts told apart by the offering page's counter alone (the per-peer

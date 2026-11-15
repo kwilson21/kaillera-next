@@ -78,6 +78,11 @@ expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
 # A counter alone for the attempt: a replaced page's candidate reaches its
 # replacement's connection in 5 steps (oldCandidateReachesReplacementConnectionTest).
 expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
+# startupRetryIsNotAReconnect is violated on
+# peer_connection_before_startup_flag only before the match, and this script
+# starts from `init`, a match under way; from the lobby there is a
+# counterexample 6 steps long. startupRetryToAStartedPageTest holds it, and
+# check-specs.sh samples today's holdToday from `initLobby`.
 
 PAUSE=specs/late_join_pause.qnt
 verify "$PAUSE" late_join_pause_current allHold

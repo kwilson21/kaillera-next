@@ -4,7 +4,8 @@ The server relays a signal to its target in the same room, keeping only the
 keys it knows and adding `sender`. `attemptId` ({page, attempt}) names the
 connection attempt a signal belongs to (web/src/peer-observe.ts): it must
 reach the other page as it was sent, and a signal without one (from a page
-made before it) must still be relayed.
+made before it) must still be relayed. `startupReconnect` must arrive too:
+it is how a page tells a startup retry from a gameplay reconnect.
 
 Run: cd server && uv run pytest --noconftest ../tests/test_webrtc_signal_relay.py -v
 """
@@ -81,9 +82,34 @@ def test_a_signal_without_one_is_relayed_as_before():
     ]
 
 
+def test_a_startup_retry_keeps_its_flag():
+    # A page that has started tells a startup retry from a gameplay reconnect
+    # only by this flag (specs/peer_connection.qnt, startupRetryIsNotAReconnect).
+    attempt = {"page": "a1b2c3", "attempt": 2}
+    offer = {"type": "offer", "sdp": "v=0"}
+    sent = _relayed(
+        "sid-host",
+        {"target": "sid-guest", "offer": offer, "reconnect": True, "startupReconnect": True, "attemptId": attempt},
+    )
+    assert sent == [
+        (
+            "webrtc-signal",
+            {
+                "sender": "sid-host",
+                "target": "sid-guest",
+                "offer": offer,
+                "reconnect": True,
+                "startupReconnect": True,
+                "attemptId": attempt,
+            },
+            {"to": "sid-guest"},
+        )
+    ]
+
+
 def test_keys_the_server_does_not_know_are_dropped():
-    sent = _relayed("sid-host", {"target": "sid-guest", "offer": {"type": "offer"}, "startupReconnect": True, "extra": 1})
-    assert "startupReconnect" not in sent[0][1]
+    sent = _relayed("sid-host", {"target": "sid-guest", "offer": {"type": "offer"}, "reconnect": True, "extra": 1})
+    assert sent[0][1]["reconnect"] is True
     assert "extra" not in sent[0][1]
 
 
