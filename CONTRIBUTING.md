@@ -194,7 +194,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `version.js`                                             | —       | Version display + changelog modal; a small caller of `web/src/site/version.ts`                                                                                                         | dist/kn-core.js or dist/kn-site.js                          |
 | `version-guard.js`                                       | —       | Cross-tab version mismatch guard — forces reload when a deploy lands; a small caller of `web/src/site/version-guard.ts`                                                                | dist/kn-core.js or dist/kn-site.js                          |
 | `ejs-loader.js`                                          | —       | EmulatorJS loader shim (booting + script setup hooks)                                                                                                                                  | play.js                                                     |
-| `landing.js`                                             | —       | Front-page board controller (room creation, open-rooms board) on index.html                                                                                                            | —                                                           |
+| `dist/kn-landing.js`                                     | —       | Front-page board controller (room creation, open-rooms board), built from `web/src/landing/front.ts`                                                                                   | index.html                                                  |
 | `dist/kn-join.js`                                        | —       | Invite-page controller (room lookup, join/watch states), built from `web/src/landing/join.ts`                                                                                          | join.html                                                   |
 | `dist/kn-wake-art.js`                                    | —       | Standalone TypeScript bundle for waking-state art while a room wakes                                                                                                                   | index.html, join.html                                       |
 | `dist/kn-site.js`                                        | —       | Small TypeScript bundle for pages without the core: `KNStorage`, and `KNSite` (`web/src/site/`), which the play page gets from the core                                                | index.html, admin.html                                      |
@@ -215,9 +215,9 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
   are build output and not in git: run `npm ci && npm run build` after a
   fresh checkout and after changing `web/src`. The Docker image builds them
   itself. The static landing pages are strict TypeScript too, without
-  Effect (`web/src/landing/`): the waking art and the invite page are built
-  as their own small bundles, `web/static/dist/kn-wake-art.js` and
-  `web/static/dist/kn-join.js`. The existing
+  Effect (`web/src/landing/`): the waking art, the invite page and the front page
+  are built as their own small bundles, `web/static/dist/kn-wake-art.js`,
+  `web/static/dist/kn-join.js` and `web/static/dist/kn-landing.js`. The existing
   `web/static/*.js` files stay plain scripts until their turn in the
   migration (`docs/roadmap.md`).
 - **JS/TS/HTML/CSS** — formatted by oxfmt (`just fmt`), same style Prettier

@@ -196,13 +196,13 @@ jobs:
       - name: Bundles in the image
         run: |
           docker run --rm --entrypoint sh kaillera-next:ci -c \
-            'cd /app/web/static/dist && sha256sum kn-core.js kn-join.js kn-site.js kn-wake-art.js' > image.sha
+            'cd /app/web/static/dist && sha256sum kn-core.js kn-join.js kn-landing.js kn-site.js kn-wake-art.js' > image.sha
           cat image.sha
       - name: Bundles built here
         run: |
           npm ci --ignore-scripts --omit=dev
           npm run build
-          (cd web/static/dist && sha256sum kn-core.js kn-join.js kn-site.js kn-wake-art.js) > local.sha
+          (cd web/static/dist && sha256sum kn-core.js kn-join.js kn-landing.js kn-site.js kn-wake-art.js) > local.sha
           diff image.sha local.sha
       - name: The image serves the play page with its bundle
         run: |

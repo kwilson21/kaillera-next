@@ -101,7 +101,7 @@ def test_release_metadata_is_not_part_of_landing_build_id(tmp_path):
 
 
 def test_screenshot_slots_have_accessible_lazy_image_contract():
-    script = (REPO / "web" / "static" / "landing.js").read_text()
+    script = (REPO / "web" / "src" / "landing" / "front.ts").read_text()
     # Every listed shot is a real WebP within the screenshot budget.
     srcs = re.findall(r"""src: ['"](/static/shots/[^'"]+)['"]""", script)
     assert srcs, "SHOTS lists no screenshots"
