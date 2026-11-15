@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.1",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a short ROM file starts again from nothing, and a guest re-shared a ROM hears the host's new offer (#255)"
+      }
+    ]
+  },
+  {
     "version": "0.69.0",
     "date": "2026-11-15",
     "changes": [
