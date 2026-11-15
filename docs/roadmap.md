@@ -147,10 +147,15 @@ without the old code running beside it first.
   it replaces. The site has too little traffic for production reports to
   show agreement, so the evidence comes before the merge, end to end as in
   stage 2: an old-against-new test that runs both on the same inputs before
-  the old one is deleted, the proofs and models, and for netplay logic
-  `tests/rb-two-player.mjs` with a fault mode for each rare path and the
-  lifecycle tests. A rule no run reaches gets a fault mode or a harness step
-  before it decides.
+  the old one is deleted, the proofs and models, and runs of the engine the
+  logic belongs to, with a fault mode for each rare path:
+  `tests/rb-two-player.mjs` and the lifecycle tests for rollback;
+  `tests/test_streaming_*.py` and a real-ROM streaming run for streaming
+  (`rb-two-player.mjs` opens `mode=rollback` only). A rule no run reaches gets
+  a fault mode or a harness step before it decides. A difference the new
+  logic is meant to make (a fix the model shows, like those listed for the
+  per-peer machine below) is asserted by the test and named, with its model
+  scenario, in the PR; any other difference blocks the change.
 - Still observing, each to be switched to deciding that way (the old code
   decides and the new reports a difference): the play page's moved decisions
   (`play-disagree`), the decoding of server messages and of messages peers
