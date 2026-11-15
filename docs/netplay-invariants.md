@@ -232,6 +232,26 @@ saves created ring coverage gaps). Violations during a
 misprediction-triggered restore log `FATAL-RING-STALE` and throw
 in dev (RF7).
 
+Valid means of the timeline the page is running. A resync loads the
+host's state and the page calls `kn_set_frame` on every state it loads,
+the frame changed or not, so `kn_set_frame` forgets the last save
+(`last_save_frame = -1`) and that frame is saved again before it runs.
+It used not to: a resync landing exactly one frame behind the page,
+whose last save was that frame, left the page's own copy in the ring,
+and a rollback to it restored the old timeline. A two-player run's hash
+compare (which reads the ring) saw that one frame differ (frame 1021 in
+#232). The page also skipped `kn_set_frame` for a state of the frame it
+was on, which left the same stale copy when `kn_pre_tick` had saved
+that frame and it had not run (a pacing hold, a step that emulated
+nothing). `kn_set_frame` forgets the sparse save mode's baseline too,
+so the next save is whole, as after the worker's state apply.
+[specs/ring_after_resync.qnt](../specs/ring_after_resync.qnt)
+(`everyRerunFrameIsTheHosts`, `everyCopyIsWhole`) holds the rules,
+`tests/rollback-native/` runs the engine itself through the model's
+orderings (natively, against a stand-in core, on both state backends),
+and `RESYNC_ONE_BACK=1` and `RESYNC_SAME_FRAME=1` in
+`tests/rb-two-player.mjs` land the two orderings in a real match.
+
 ### R4 — Post-replay live state equals ring state
 
 After a replay completes at frame N, the emulator's live state

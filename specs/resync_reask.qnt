@@ -65,6 +65,7 @@ module resync_reask {
   const ASK_AGAIN: bool
   const HOLD_WHILE_DECODING: bool
   const GUARD_LETS_GO: bool
+  const COORDINATED_OWES: bool
 
   pure val MAX_ASKS_AGAIN = 2
   // The "now" requests the guest sends on its own in one run.
@@ -73,6 +74,9 @@ module resync_reask {
   var newest: int            // _resyncRequestId: the newest request's number
   var inFlight: bool         // _resyncRequestInFlight
   var owed: bool             // a "now" resync was asked for and none applied since
+  // History: a resync was asked for, either way, and none applied since nor
+  // given up visibly.
+  var asked: bool
   var asksAgain: int         // asks sent again at the deadline for the owed resync
   var ownAsks: int           // requests sent on the guest's own (bound for the model)
   var hostWaits: bool        // the host's rate limit: it drops a request now
@@ -86,7 +90,7 @@ module resync_reask {
   var cutWhileDecoding: bool
 
   action init = all {
-    newest' = 0, inFlight' = false, owed' = false, asksAgain' = 0, ownAsks' = 0,
+    newest' = 0, inFlight' = false, owed' = false, asksAgain' = 0, ownAsks' = 0, asked' = false,
     hostWaits' = false, toHost' = List(), toGuest' = List(), decoding' = 0, held' = 0,
     gaveUp' = false, cutWhileDecoding' = false,
   }
@@ -95,7 +99,7 @@ module resync_reask {
   action requestLost = all {
     toHost.length() > 0,
     toHost' = toHost.tail(),
-    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
+    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks, asked' = asked,
     hostWaits' = hostWaits, toGuest' = toGuest, decoding' = decoding, held' = held,
     gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
   }
@@ -105,7 +109,23 @@ module resync_reask {
   action ownAsk = all {
     ownAsks < MAX_OWN_ASKS,
     ownAsks' = ownAsks + 1,
-    newest' = newest + 1, inFlight' = true, owed' = true, asksAgain' = 0,
+    newest' = newest + 1, inFlight' = true, owed' = true, asksAgain' = 0, asked' = true,
+    toHost' = toHost.append(newest + 1),
+    hostWaits' = hostWaits, toGuest' = toGuest, decoding' = decoding, held' = held,
+    gaveUp' = false, cutWhileDecoding' = cutWhileDecoding,
+  }
+
+  // A dropped peer is back (PEER-RECOVERED): the guest asks for a resync at
+  // a frame (`sync-request-full-at:`). Today it owes nothing: when its
+  // answer does not come the deadline lets it go (step=letGo), and the
+  // desync check meant to ask again sends nothing any more (no page sends
+  // `sync-hash:`). With COORDINATED_OWES it is owed like a "now" request.
+  action coordAsk = all {
+    ownAsks < MAX_OWN_ASKS,
+    ownAsks' = ownAsks + 1,
+    newest' = newest + 1, inFlight' = true, asked' = true,
+    owed' = if (COORDINATED_OWES) true else owed,
+    asksAgain' = if (COORDINATED_OWES) 0 else asksAgain,
     toHost' = toHost.append(newest + 1),
     hostWaits' = hostWaits, toGuest' = toGuest, decoding' = decoding, held' = held,
     gaveUp' = false, cutWhileDecoding' = cutWhileDecoding,
@@ -117,7 +137,7 @@ module resync_reask {
     toHost' = toHost.tail(),
     if (hostWaits) all { toGuest' = toGuest, hostWaits' = true }
     else all { toGuest' = toGuest.append(toHost.head()), hostWaits' = true },
-    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
+    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks, asked' = asked,
     decoding' = decoding, held' = held, gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
   }
 
@@ -125,7 +145,7 @@ module resync_reask {
   action hostRateLimitEnds = all {
     hostWaits,
     hostWaits' = false,
-    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
+    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks, asked' = asked,
     toHost' = toHost, toGuest' = toGuest, decoding' = decoding, held' = held,
     gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
   }
@@ -135,7 +155,7 @@ module resync_reask {
   action answerArrives = all {
     toGuest.length() > 0, decoding == 0,
     toGuest' = toGuest.tail(), decoding' = toGuest.head(), toHost' = toHost,
-    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
+    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks, asked' = asked,
     hostWaits' = hostWaits, held' = held, gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
   }
 
@@ -150,7 +170,7 @@ module resync_reask {
       inFlight' = inFlight,
       held' = if (behind or held == newest) held else decoding,
     },
-    newest' = newest, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
+    newest' = newest, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks, asked' = asked,
     hostWaits' = hostWaits, toHost' = toHost, toGuest' = toGuest,
     gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
   }
@@ -158,7 +178,7 @@ module resync_reask {
   // The held state is applied at the next frame boundary: the owed resync is done.
   action apply = all {
     held != 0,
-    held' = 0, owed' = false, asksAgain' = 0,
+    held' = 0, owed' = false, asksAgain' = 0, asked' = false,
     newest' = newest, inFlight' = inFlight, ownAsks' = ownAsks,
     hostWaits' = hostWaits, toHost' = toHost, toGuest' = toGuest, decoding' = decoding,
     gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
@@ -174,6 +194,7 @@ module resync_reask {
     val giveUp = ASK_AGAIN and owed and asksAgain >= MAX_ASKS_AGAIN
     all {
       cutWhileDecoding' = (cutWhileDecoding or decoding == newest),
+      asked' = if (giveUp) false else asked,
       if (again) all {
         newest' = newest + 1, inFlight' = true, asksAgain' = asksAgain + 1,
         toHost' = toHost.append(newest + 1), owed' = owed, gaveUp' = false,
@@ -189,20 +210,20 @@ module resync_reask {
   action guardTimesOut = all {
     GUARD_LETS_GO, inFlight,
     inFlight' = false,
-    newest' = newest, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
+    newest' = newest, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks, asked' = asked,
     hostWaits' = hostWaits, toHost' = toHost, toGuest' = toGuest, decoding' = decoding, held' = held,
     gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
   }
 
   // Time passes and nothing happens (for the scenarios).
   action nothingHappens = all {
-    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
+    newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks, asked' = asked,
     hostWaits' = hostWaits, toHost' = toHost, toGuest' = toGuest, decoding' = decoding, held' = held,
     gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
   }
 
   action step = any {
-    ownAsk, hostReceives, requestLost, hostRateLimitEnds, answerArrives, apply, deadline, guardTimesOut,
+    ownAsk, coordAsk, hostReceives, requestLost, hostRateLimitEnds, answerArrives, apply, deadline, guardTimesOut,
     nondet behind = oneOf(Set(true, false))
     decoded(behind),
   }
@@ -226,7 +247,15 @@ module resync_reask {
   // The asks again are bounded.
   val asksAgainAreBounded = asksAgain <= MAX_ASKS_AGAIN
 
-  val allHold = anOwedResyncIsNotForgotten and theDecodedAnswerIsNotCut and asksAgainAreBounded
+  // A resync asked for either way is applied, still on its way, or given
+  // up visibly: never left with nothing out. Violated with a coordinated
+  // request that owes nothing (coordinatedAnswerLostTest; found by the
+  // two-player run UNANSWERED_SOCKET_RESYNC=letgo).
+  val aResyncAskedForIsNotForgotten =
+    not(asked and not(inFlight) and held == 0 and decoding == 0 and toGuest == List() and toHost == List())
+
+  val allHold = anOwedResyncIsNotForgotten and theDecodedAnswerIsNotCut and asksAgainAreBounded and
+    aResyncAskedForIsNotForgotten
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -296,6 +325,15 @@ module resync_reask {
       .expect(anOwedResyncIsNotForgotten == (ASK_AGAIN and not(GUARD_LETS_GO)))
       .expect(if (ASK_AGAIN and not(GUARD_LETS_GO)) asksAgain == 2 and toHost == List(3) else true)
 
+  // A dropped peer is back and the guest asks at a frame; the request is
+  // lost. Today the deadline lets it go and nothing asks again; with the
+  // fix it is asked for again.
+  run coordinatedAnswerLostTest =
+    init
+      .then(coordAsk).then(requestLost).then(deadline)
+      .expect(aResyncAskedForIsNotForgotten == (COORDINATED_OWES and ASK_AGAIN))
+      .expect(if (COORDINATED_OWES and ASK_AGAIN) toHost == List(2) and asksAgain == 1 else not(inFlight))
+
   // The plain case: asked, answered, applied; the deadline never fires.
   run answeredTest =
     init
@@ -305,21 +343,37 @@ module resync_reask {
 
 // Today: the deadline lets the request go and asks nothing.
 module resync_reask_current {
-  import resync_reask(ASK_AGAIN = false, HOLD_WHILE_DECODING = false, GUARD_LETS_GO = true).*
+  import resync_reask(
+    ASK_AGAIN = false, HOLD_WHILE_DECODING = false, GUARD_LETS_GO = true, COORDINATED_OWES = false
+  ).*
 }
 
 // Asking again without holding the deadline while an answer decodes.
 module resync_reask_unguarded {
-  import resync_reask(ASK_AGAIN = true, HOLD_WHILE_DECODING = false, GUARD_LETS_GO = false).*
+  import resync_reask(
+    ASK_AGAIN = true, HOLD_WHILE_DECODING = false, GUARD_LETS_GO = false, COORDINATED_OWES = false
+  ).*
 }
 
 // Asking again, holding while an answer decodes, and the guard's timeout
 // still letting the request go (#243 as first pushed).
 module resync_reask_guard_lets_go {
-  import resync_reask(ASK_AGAIN = true, HOLD_WHILE_DECODING = true, GUARD_LETS_GO = true).*
+  import resync_reask(
+    ASK_AGAIN = true, HOLD_WHILE_DECODING = true, GUARD_LETS_GO = true, COORDINATED_OWES = false
+  ).*
+}
+
+// #248: the ask again with the decode hold and the guard's timeout fixed;
+// a coordinated request still owes nothing.
+module resync_reask_coordinated_let_go {
+  import resync_reask(
+    ASK_AGAIN = true, HOLD_WHILE_DECODING = true, GUARD_LETS_GO = false, COORDINATED_OWES = false
+  ).*
 }
 
 // The fix.
 module resync_reask_fixed {
-  import resync_reask(ASK_AGAIN = true, HOLD_WHILE_DECODING = true, GUARD_LETS_GO = false).*
+  import resync_reask(
+    ASK_AGAIN = true, HOLD_WHILE_DECODING = true, GUARD_LETS_GO = false, COORDINATED_OWES = true
+  ).*
 }
