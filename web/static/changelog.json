@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.29",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync asked for at a frame is owed, so a lost answer is asked for again (#257)"
+      }
+    ]
+  },
+  {
     "version": "0.68.28",
     "date": "2026-11-15",
     "changes": [
