@@ -187,7 +187,8 @@ type Step =
   | { kind: 'input'; real: Pad }
   | { kind: 'mirror'; frame: number }
   | { kind: 'record'; call: 'startRecording' | 'stopRecording' | 'getRecording' }
-  | { kind: 'load'; name: string };
+  | { kind: 'load'; name: string }
+  | { kind: 'shim' };
 
 /** `window.KNDemo`, as demo.js leaves it. */
 type DemoApi = {
@@ -224,6 +225,40 @@ class FakeFile {
   }
 }
 
+/**
+ * A WebGL context class with fresh prototypes for each page, its calls noted
+ * on the instance. The second kind refuses pixelStorei and has no
+ * compressedTexSubImage2D, the two cases the texture-upload shim must step
+ * around.
+ */
+const fakeGlContext = (refuseAlignment: boolean, withSubUpload: boolean) => {
+  class FakeGl {
+    readonly UNPACK_ALIGNMENT = 3317;
+    calls: string[] = [];
+    pixelStorei(pname: number, param: number): void {
+      if (refuseAlignment) throw new Error('refused');
+      this.calls.push(`pixelStorei(${pname},${param})`);
+    }
+    texImage2D(...args: number[]): void {
+      this.calls.push(`texImage2D(${args.join(',')})`);
+    }
+    texSubImage2D(...args: number[]): void {
+      this.calls.push(`texSubImage2D(${args.join(',')})`);
+    }
+    compressedTexImage2D(...args: number[]): void {
+      this.calls.push(`compressedTexImage2D(${args.join(',')})`);
+    }
+  }
+  if (withSubUpload) {
+    Object.assign(FakeGl.prototype, {
+      compressedTexSubImage2D(this: FakeGl, ...args: number[]): void {
+        this.calls.push(`compressedTexSubImage2D(${args.join(',')})`);
+      },
+    });
+  }
+  return FakeGl;
+};
+
 /** The bytes of the ROM an earlier visit left in the cache. */
 const CACHED_BYTES = [9, 8, 7, 6];
 
@@ -249,6 +284,25 @@ const fakeStorage = (initial: [string, string][]) => {
 
 // Run in the page: hands this test what demo.js has left on `window`.
 const READ_WINDOW = new vm.Script(`__read(window.KNDemo, {
+  player: window.EJS_player,
+  core: window.EJS_core,
+  gameId: window.EJS_gameID,
+  path: window.EJS_pathtodata,
+  controls: window.EJS_defaultControls,
+  gl: [window.WebGLRenderingContext, window.WebGL2RenderingContext].map((Context) => {
+    const gl = new Context();
+    const out = [String(Context.prototype.__knUnpackAlignmentPatched)];
+    for (const upload of ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D']) {
+      if (typeof gl[upload] !== 'function') {
+        out.push(upload + ':none');
+        continue;
+      }
+      gl.calls = [];
+      gl[upload](1, 2);
+      out.push(upload + ':' + gl.calls.join('|'));
+    }
+    return out.join(' ');
+  }),
   options: window.EJS_defaultOptions,
   legacy: window.EJS_forceLegacyCores,
   shim: window.__knInstallUnpackAlignmentShim,
@@ -329,6 +383,8 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     localStorage: local,
     sessionStorage: session,
     indexedDB: idb.factory,
+    WebGLRenderingContext: fakeGlContext(false, true),
+    WebGL2RenderingContext: fakeGlContext(true, false),
     performance: { now: (): number => clock },
     console: {
       log: (...args: Shown[]): void => note('console.log', ...args),
@@ -467,6 +523,8 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     else if (step.kind === 'record') {
       const said = api?.[step.call]();
       note(step.call, typeof said === 'string' ? said : undefined);
+    } else if (step.kind === 'shim') {
+      vm.runInContext('window.__knInstallUnpackAlignmentShim?.()', context);
     } else await api?.loadRomFile({ name: step.name, bytes: new Uint8Array([1, 2, 3, 4]).buffer });
     await nextTurn();
   };
@@ -703,6 +761,23 @@ test('the ROM cache: what a load keeps, the next visit restores, and Stop forget
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
   assert.match(restored.snapshot(), /Restoring saved\.z64|init\(/);
+});
+
+test('every address: the EmulatorJS settings and controls, and the texture-upload shim installed again later', async () => {
+  for (const search of SEARCHES) {
+    await compareVisit({ search, local: [], session: [], closedLoop: false, seed: 1 }, [
+      { kind: 'shim' },
+      { kind: 'shim' },
+    ]);
+  }
+  // The comparison holds whatever both do; this shows the shim does its work.
+  const page = openDemo(
+    NEW_SCRIPT,
+    { demo },
+    { search: '?kngfx=unpack1', local: [], session: [], closedLoop: false, seed: 1 },
+  );
+  assert.match(page.snapshot(), /true texImage2D:pixelStorei\(3317,1\)\|texImage2D\(1,2\)/);
+  assert.match(page.snapshot(), /true texImage2D:texImage2D\(1,2\) [^"]*compressedTexSubImage2D:none/);
 });
 
 test('every slider value: the network handed to the fake peer and the label beside the slider', async () => {
