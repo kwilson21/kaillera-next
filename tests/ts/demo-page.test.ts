@@ -15,7 +15,25 @@ import { lcg } from './load-shared.ts';
 // Both are driven through the same visits, and after every step everything a
 // page can show or hand to the engine must be the same on both.
 
-const OLD_SCRIPT = new vm.Script(readFileSync(new URL('./fixtures/demo.old.js', import.meta.url), 'utf8'));
+const OLD_SOURCE = readFileSync(new URL('./fixtures/demo.old.js', import.meta.url), 'utf8');
+// Changed since, on purpose: auto-compare paused by the Pause button counts as
+// on, so its button, the rollback button and leaving the match stop it, and
+// nothing starts it again over its pause mark. The old script runs with that
+// change and is held to everything else, character for character; the test
+// 'a paused auto-compare' shows the two orderings the change is for.
+const SINCE_THE_OLD_SCRIPT: readonly (readonly [string, string])[] = [
+  [
+    '  const _isAutoCompareRunning = () => _autoCompareTimer !== 0;',
+    '  const _isAutoCompareRunning = () => _autoCompareTimer !== 0 || _autoComparePausedAt !== 0;',
+  ],
+];
+const OLD_SCRIPT = new vm.Script(
+  SINCE_THE_OLD_SCRIPT.reduce((script, [before, after]) => {
+    assert.equal(script.split(before).length, 2, `the old script has this line once: ${before}`);
+    return script.replace(before, after);
+  }, OLD_SOURCE),
+);
+const OLD_SCRIPT_AS_IT_WAS = new vm.Script(OLD_SOURCE);
 const NEW_SCRIPT = new vm.Script(readFileSync(new URL('../../web/static/demo.js', import.meta.url), 'utf8'));
 
 /** Seeded random numbers from 0 up to 1, like `Math.random`. */
@@ -59,6 +77,7 @@ class FakeElement {
   onerror: (() => void) | null = null;
   readonly style = { cssText: '', background: '', animation: '', width: '' };
   readonly classes = new Set<string>();
+  readonly dataset: { [key: string]: string } = {};
   readonly attributes = new Map<string, string>();
   readonly listeners = new Map<string, Listener[]>();
   readonly children: FakeElement[] = [];
@@ -90,6 +109,11 @@ class FakeElement {
   }
   click(): void {
     this.fire('click');
+  }
+  /** Only `.name` selectors, over the element's children. */
+  querySelectorAll(selector: string): FakeElement[] {
+    const name = selector.replace(/^\./, '');
+    return this.children.filter((child) => child.classes.has(name));
   }
   fire(type: string): void {
     for (const listener of this.listeners.get(type) ?? []) listener({ preventDefault: () => undefined });
@@ -142,6 +166,11 @@ const PAGE_IDS = [
   'emu-pause',
   'emu-stop',
   'gamepad-status',
+  'rb-timeline',
+  'rb-head',
+  'rb-lbl-bad',
+  'rb-lbl-re',
+  'rb-caption',
 ];
 
 /** What the visit starts from. */
@@ -156,6 +185,8 @@ type Visit = {
   stickMax?: number;
   /** The file name of a ROM an earlier visit left in the demo's ROM cache. */
   cached?: string | undefined;
+  /** The browser asks for reduced motion. */
+  reducedMotion?: boolean | undefined;
 };
 
 /** The engine's counters as a step sets them; a missing or off-shape field is part of the test. */
@@ -187,7 +218,10 @@ type Step =
   | { kind: 'input'; real: Pad }
   | { kind: 'mirror'; frame: number }
   | { kind: 'record'; call: 'startRecording' | 'stopRecording' | 'getRecording' }
-  | { kind: 'load'; name: string };
+  | { kind: 'load'; name: string }
+  | { kind: 'shim' }
+  /** The emulator's loader finishes (its event), its script loads, or its script fails. */
+  | { kind: 'loader'; how: 'complete' | 'load' | 'error' };
 
 /** `window.KNDemo`, as demo.js leaves it. */
 type DemoApi = {
@@ -196,6 +230,8 @@ type DemoApi = {
   startRecording: () => void;
   stopRecording: () => void;
   getRecording: () => string;
+  /** The run-state machine beside the flags; the old script has none. */
+  runState?: { state: () => string; disagreements: () => readonly { message: string; old: string; next: string }[] };
 };
 
 /** `window.KNCore` as a page script finds it. */
@@ -224,6 +260,55 @@ class FakeFile {
   }
 }
 
+/**
+ * A WebGL context class with fresh prototypes for each page, its calls noted
+ * on the instance. The second kind refuses pixelStorei and has no
+ * compressedTexSubImage2D, the two cases the texture-upload shim must step
+ * around.
+ */
+const fakeGlContext = (refuseAlignment: boolean, withSubUpload: boolean) => {
+  class FakeGl {
+    readonly UNPACK_ALIGNMENT = 3317;
+    calls: string[] = [];
+    pixelStorei(pname: number, param: number): void {
+      if (refuseAlignment) throw new Error('refused');
+      this.calls.push(`pixelStorei(${pname},${param})`);
+    }
+    texImage2D(...args: number[]): void {
+      this.calls.push(`texImage2D(${args.join(',')})`);
+    }
+    texSubImage2D(...args: number[]): void {
+      this.calls.push(`texSubImage2D(${args.join(',')})`);
+    }
+    compressedTexImage2D(...args: number[]): void {
+      this.calls.push(`compressedTexImage2D(${args.join(',')})`);
+    }
+  }
+  if (withSubUpload) {
+    Object.assign(FakeGl.prototype, {
+      compressedTexSubImage2D(this: FakeGl, ...args: number[]): void {
+        this.calls.push(`compressedTexSubImage2D(${args.join(',')})`);
+      },
+    });
+  }
+  return FakeGl;
+};
+
+/** `matchMedia`'s answer, as the page reads it. */
+type MediaQueryAnswer = { matches: boolean };
+
+/** The timeline stub's state: how many frames it has been fed. */
+type TimelineStubState = { n: number };
+
+/** The elements the page hands the timeline's renderer, as the stub below reads them. */
+type TimelineRefsSeen = {
+  ticks?: FakeElement[];
+  head?: FakeElement | null;
+  labelBad?: FakeElement | null;
+  labelReplay?: FakeElement | null;
+  caption?: FakeElement | null;
+};
+
 /** The bytes of the ROM an earlier visit left in the cache. */
 const CACHED_BYTES = [9, 8, 7, 6];
 
@@ -249,6 +334,25 @@ const fakeStorage = (initial: [string, string][]) => {
 
 // Run in the page: hands this test what demo.js has left on `window`.
 const READ_WINDOW = new vm.Script(`__read(window.KNDemo, {
+  player: window.EJS_player,
+  core: window.EJS_core,
+  gameId: window.EJS_gameID,
+  path: window.EJS_pathtodata,
+  controls: window.EJS_defaultControls,
+  gl: [window.WebGLRenderingContext, window.WebGL2RenderingContext].map((Context) => {
+    const gl = new Context();
+    const out = [String(Context.prototype.__knUnpackAlignmentPatched)];
+    for (const upload of ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D']) {
+      if (typeof gl[upload] !== 'function') {
+        out.push(upload + ':none');
+        continue;
+      }
+      gl.calls = [];
+      gl[upload](1, 2);
+      out.push(upload + ':' + gl.calls.join('|'));
+    }
+    return out.join(' ');
+  }),
   options: window.EJS_defaultOptions,
   legacy: window.EJS_forceLegacyCores,
   shim: window.__knInstallUnpackAlignmentShim,
@@ -274,6 +378,14 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
   );
   const lag = elements.get('lag');
   if (lag) lag.value = '0';
+  // The timeline's tick marks, out of their data-i order as a page could list them.
+  const track = elements.get('rb-timeline');
+  for (const i of [3, 0, 7, 1, 6, 2, 5, 4]) {
+    const tick = new FakeElement();
+    tick.classes.add('t');
+    tick.dataset['i'] = String(i);
+    track?.appendChild(tick);
+  }
   const head = new FakeElement();
   const body = new FakeElement();
   const attached = (): FakeElement[] => [...head.children, ...body.children];
@@ -299,6 +411,7 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
   let blobs = 0;
   let api: DemoApi | undefined;
   let onWindow = '';
+  let windowListeners: { type: string; listener: () => void }[] = [];
 
   const local = fakeStorage(visit.local);
   const session = fakeStorage(visit.session);
@@ -323,12 +436,39 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
         elements.get(id) ?? attached().find((element) => element.id === id) ?? null,
       createElement: (): FakeElement => new FakeElement(),
     },
-    addEventListener: (type: string): void => note('window.addEventListener', type),
-    removeEventListener: (type: string): void => note('window.removeEventListener', type),
+    addEventListener: (type: string, listener: () => void): void => {
+      note('window.addEventListener', type);
+      windowListeners.push({ type, listener });
+    },
+    removeEventListener: (type: string, listener: () => void): void => {
+      note('window.removeEventListener', type);
+      windowListeners = windowListeners.filter((entry) => entry.type !== type || entry.listener !== listener);
+    },
     location: { search: visit.search, reload: (): void => note('reload') },
     localStorage: local,
     sessionStorage: session,
     indexedDB: idb.factory,
+    matchMedia: (query: string): MediaQueryAnswer => {
+      note('matchMedia', query);
+      return { matches: visit.reducedMotion === true };
+    },
+    KNRollbackTimeline: {
+      createState: (): TimelineStubState => ({ n: 0 }),
+      reduce: (state: TimelineStubState, input: Shown, now: number): TimelineStubState => {
+        note('timeline.reduce', state.n, input, now);
+        return { n: state.n + 1 };
+      },
+      render: (state: TimelineStubState, refs: TimelineRefsSeen, options?: Shown): void =>
+        note(
+          'timeline.render',
+          state.n,
+          (refs.ticks ?? []).map((tick) => tick.dataset['i'] ?? ''),
+          [refs.head?.id, refs.labelBad?.id, refs.labelReplay?.id, refs.caption?.id],
+          options,
+        ),
+    },
+    WebGLRenderingContext: fakeGlContext(false, true),
+    WebGL2RenderingContext: fakeGlContext(true, false),
     performance: { now: (): number => clock },
     console: {
       log: (...args: Shown[]): void => note('console.log', ...args),
@@ -467,6 +607,16 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     else if (step.kind === 'record') {
       const said = api?.[step.call]();
       note(step.call, typeof said === 'string' ? said : undefined);
+    } else if (step.kind === 'shim') {
+      vm.runInContext('window.__knInstallUnpackAlignmentShim?.()', context);
+    } else if (step.kind === 'loader') {
+      if (step.how === 'complete') {
+        for (const entry of windowListeners.filter(({ type }) => type === 'kn-ejs-loader-complete')) entry.listener();
+      } else {
+        const script = body.children.find((child) => child.src === '/static/ejs-loader.js');
+        if (step.how === 'load') script?.onload?.();
+        else script?.onerror?.();
+      }
     } else await api?.loadRomFile({ name: step.name, bytes: new Uint8Array([1, 2, 3, 4]).buffer });
     await nextTurn();
   };
@@ -486,14 +636,33 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     ].join('\n');
   };
 
-  return { apply, snapshot, hasApi: (): boolean => api !== undefined, stored: idb.describe };
+  return {
+    apply,
+    snapshot,
+    hasApi: (): boolean => api !== undefined,
+    stored: idb.describe,
+    runState: (): DemoApi['runState'] => api?.runState,
+    element: (id: string): FakeElement | undefined => elements.get(id),
+  };
 };
 
 /** The same visit on the old script and on the new one, compared after every step. */
+/** The run-state machine's states the visits have reached, by region (`engine:running`, ...). */
+const REACHED = new Set<string>();
+
+/** The new page's run-state machine agrees with its flags: no disagreement, ever. */
+const assertRunStateAgrees = (page: ReturnType<typeof openDemo>, where: string): void => {
+  const runState = page.runState();
+  if (!runState) return;
+  for (const part of runState.state().split(' ')) REACHED.add(part);
+  assert.deepEqual(runState.disagreements(), [], `run state disagrees with the flags ${where}`);
+};
+
 const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void> => {
   // The old script only checks that a core is there; it calls none of it.
   const before = openDemo(OLD_SCRIPT, {}, visit);
   const after = openDemo(NEW_SCRIPT, { demo }, visit);
+  assertRunStateAgrees(after, `on load: ${show(visit)}`);
   assert.equal(after.snapshot(), before.snapshot(), `on load: ${show(visit)}`);
   // A cached ROM is restored on load: let both pages finish reading and hashing it.
   if (visit.cached !== undefined) {
@@ -501,6 +670,7 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
       await nextTurn();
       await new Promise((resolve) => setTimeout(resolve, 2));
     }
+    assertRunStateAgrees(after, `after restoring the cached ROM: ${show(visit)}`);
     assert.equal(after.snapshot(), before.snapshot(), `after restoring the cached ROM: ${show(visit)}`);
   }
   let done = 0;
@@ -508,6 +678,7 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
     await before.apply(step);
     await after.apply(step);
     done++;
+    assertRunStateAgrees(after, `at step ${done} ${show(step)} of ${show(visit)}`);
     assert.equal(after.snapshot(), before.snapshot(), `step ${done} ${show(step)} of ${show(visit)}`);
   }
 };
@@ -595,7 +766,8 @@ const randomStep = (random: () => number): Step => {
   if (roll < 0.74) return { kind: 'frame', ms: pick(random, [1, 16, 17, 100, 250, 640, 3000, 6100]) ?? 16 };
   if (roll < 0.8) return { kind: 'click', id: pick(random, CLICKS) ?? 'rollback-toggle' };
   if (roll < 0.83) return { kind: 'rollback', on: random() < 0.5 };
-  if (roll < 0.93) return { kind: 'input', real: randomPad(random) };
+  if (roll < 0.91) return { kind: 'input', real: randomPad(random) };
+  if (roll < 0.93) return { kind: 'loader', how: pick(random, ['complete', 'load', 'error'] as const) ?? 'complete' };
   if (roll < 0.97) return { kind: 'mirror', frame: Math.floor(random() * 1100) - 50 };
   if (roll < 0.99) {
     return {
@@ -617,6 +789,7 @@ const randomVisit = (random: () => number, seed: number): Visit => {
     closedLoop: random() < 0.25,
     seed,
     cached: random() < 0.25 ? pick(random, ['saved.z64', 'SAVED.N64', 'saved.zip', '']) : undefined,
+    reducedMotion: random() < 0.2,
   };
 };
 
@@ -636,6 +809,26 @@ test('seeded visits: the page shows and sends what the old script did, step for 
     for (let i = 0; i < 90; i++) steps.push(randomStep(random));
     await compareVisit(visit, steps);
   }
+});
+
+// The demo has little traffic and no way to report to the server, so these
+// visits are the evidence that the run-state machine agrees with demo.js's
+// flags. They count only if they take it everywhere.
+test('the seeded visits reach every state of every region of the run-state machine', () => {
+  const states = [
+    ['engine', ['idle', 'running']],
+    ['loader', ['none', 'loading', 'done']],
+    ['match', ['menus', 'playing', 'gamePaused']],
+    ['tick', ['running', 'paused']],
+    ['autoCompare', ['off', 'running', 'paused']],
+    ['mode', ['rollback', 'lockstep']],
+    ['interaction', ['untouched', 'touched']],
+  ] as const;
+  const expected = [...states.flatMap(([name, all]) => all.map((state) => `${name}:${state}`)), 'leaving'];
+  assert.deepEqual(
+    expected.filter((state) => !REACHED.has(state)),
+    [],
+  );
 });
 
 // Entering a match animates the slider to the restored preference.
@@ -673,6 +866,63 @@ test('every address: what the page gives the emulator on load and shows on the w
   }
 });
 
+// The two orderings the change since the old script is for. As it was, a
+// paused auto-compare outlived the match and ran in the menus once the tick
+// resumed, and its button (which still read "Stop auto-compare") restarted it
+// with the pause mark left set, after which Pause no longer paused it.
+test('a paused auto-compare: leaving the match or clicking its button stops it, where it used to run on', async () => {
+  const visit: Visit = { search: '', local: [], session: [], closedLoop: false, seed: 1 };
+  const autoComparePaused: Step[] = [
+    { kind: 'load', name: 'game.z64' },
+    { kind: 'match', strict: true, inclusive: true },
+    { kind: 'frame', ms: 16 },
+    // Auto-compare starts 600 ms into the match.
+    { kind: 'frame', ms: 700 },
+    { kind: 'click', id: 'emu-pause' },
+  ];
+  const orderings: [string, Step[]][] = [
+    [
+      'leave the match while paused, then resume',
+      [
+        { kind: 'match', strict: false, inclusive: false },
+        { kind: 'frame', ms: 16 },
+        { kind: 'click', id: 'emu-pause' },
+      ],
+    ],
+    [
+      'click the auto-compare button while paused, then resume and pause again',
+      [
+        { kind: 'click', id: 'auto-compare-btn' },
+        { kind: 'click', id: 'emu-pause' },
+        { kind: 'click', id: 'emu-pause' },
+      ],
+    ],
+  ];
+  /** Whether auto-compare shows as on, and the mode, a cycle (6 s) after the ordering. */
+  const after = async (script: vm.Script, steps: readonly Step[]) => {
+    const page = openDemo(script, script === NEW_SCRIPT ? { demo } : {}, visit);
+    for (const step of [...autoComparePaused, ...steps]) await page.apply(step);
+    const on = page.element('auto-compare')?.classes.has('is-running') ?? false;
+    await page.apply({ kind: 'frame', ms: 6100 });
+    return { on, lockstepAfterACycle: page.element('rollback-toggle')?.classes.has('is-off') ?? false };
+  };
+  for (const [name, steps] of orderings) {
+    assert.deepEqual(await after(NEW_SCRIPT, steps), { on: false, lockstepAfterACycle: false }, `now: ${name}`);
+    assert.deepEqual(
+      await after(OLD_SCRIPT, steps),
+      { on: false, lockstepAfterACycle: false },
+      `old, changed: ${name}`,
+    );
+    assert.deepEqual(
+      await after(OLD_SCRIPT_AS_IT_WAS, steps),
+      { on: true, lockstepAfterACycle: true },
+      `as it was: ${name}`,
+    );
+    // And the new page agrees with the old one changed, step for step.
+    await compareVisit(visit, [...autoComparePaused, ...steps, { kind: 'frame', ms: 6100 }]);
+  }
+});
+
 test('the ROM cache: what a load keeps, the next visit restores, and Stop forgets', async () => {
   for (const cached of [undefined, 'saved.z64', 'SAVED.N64', 'saved.zip', '']) {
     await compareVisit({ search: '', local: [], session: [], closedLoop: false, seed: 1, cached }, [
@@ -703,6 +953,64 @@ test('the ROM cache: what a load keeps, the next visit restores, and Stop forget
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
   assert.match(restored.snapshot(), /Restoring saved\.z64|init\(/);
+});
+
+test('every address: the EmulatorJS settings and controls, and the texture-upload shim installed again later', async () => {
+  for (const search of SEARCHES) {
+    await compareVisit({ search, local: [], session: [], closedLoop: false, seed: 1 }, [
+      { kind: 'shim' },
+      { kind: 'shim' },
+    ]);
+  }
+  // The comparison holds whatever both do; this shows the shim does its work.
+  const page = openDemo(
+    NEW_SCRIPT,
+    { demo },
+    { search: '?kngfx=unpack1', local: [], session: [], closedLoop: false, seed: 1 },
+  );
+  assert.match(page.snapshot(), /true texImage2D:pixelStorei\(3317,1\)\|texImage2D\(1,2\)/);
+  assert.match(page.snapshot(), /true texImage2D:texImage2D\(1,2\) [^"]*compressedTexSubImage2D:none/);
+});
+
+test('the rollback timeline: what the card feeds it each frame, in both modes and with reduced motion', async () => {
+  const steps: Step[] = [
+    { kind: 'load', name: 'game.z64' },
+    { kind: 'counters', counters: { delay: 3, rollbackEventsTotal: 2, currentFrame: 400, isCRollback: true } },
+    { kind: 'frame', ms: 250 },
+    { kind: 'rollback', on: false },
+    { kind: 'frame', ms: 250 },
+    { kind: 'match', strict: true, inclusive: true },
+    { kind: 'counters', counters: { delay: 5, rollbackEventsTotal: 9, currentFrame: 900 } },
+    { kind: 'frame', ms: 250 },
+    { kind: 'frame', ms: 250 },
+  ];
+  for (const reducedMotion of [false, true]) {
+    await compareVisit({ search: '', local: [], session: [], closedLoop: false, seed: 1, reducedMotion }, steps);
+  }
+  // The comparison holds whatever both do; this shows the timeline was fed and drawn.
+  const seen = async (reducedMotion: boolean): Promise<string> => {
+    const page = openDemo(
+      NEW_SCRIPT,
+      { demo },
+      { search: '', local: [], session: [], closedLoop: false, seed: 1, reducedMotion },
+    );
+    let log = '';
+    for (const step of steps) {
+      await page.apply(step);
+      log += page.snapshot();
+    }
+    return log;
+  };
+  const moving = await seen(false);
+  assert.match(moving, /timeline\.reduce\(/);
+  assert.match(
+    moving,
+    /timeline\.render\(\d+,\["0","1","2","3","4","5","6","7"\],\["rb-head","rb-lbl-bad","rb-lbl-re","rb-caption"\],undefined\)/,
+  );
+  const still = await seen(true);
+  assert.doesNotMatch(still, /timeline\.reduce\(/);
+  assert.equal(still.match(/timeline\.render\(/g)?.length, 1);
+  assert.match(still, /timeline\.render\(0,.*\{still:true\}\)/);
 });
 
 test('every slider value: the network handed to the fake peer and the label beside the slider', async () => {

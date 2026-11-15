@@ -291,3 +291,42 @@ done
 # while a new match kept the last one's, resync_mesh_kept).
 $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── Inputs on the unreliable channel, and the switch to the reliable one ────
+INPUTS=specs/input_transport.qnt
+$QUINT typecheck "$INPUTS"
+for variant in input_transport_before_ask input_transport_current input_transport_until_acked \
+  input_transport_resend_once input_transport_fixed; do
+  $QUINT test "$INPUTS" --main="$variant" --backend=typescript
+done
+# Today with the fix: every input the peer had not acked when the page
+# switched to the reliable channel reaches it without the peer asking, and
+# no input is lost for good. The first was violated while the switch let the
+# history go (input_transport_current; lostThenFallbackTest and
+# lostThenChannelClosesTest hold the orderings), and is with redundancy kept
+# until the ack instead (input_transport_until_acked;
+# stuckChannelBeyondTheCapTest). The second was violated before #235, when
+# the peer did not ask for a hole (input_transport_before_ask). The first is
+# violated too when a send that throws partway through the resend drops the
+# frames after it (input_transport_resend_once; resendFailsPartwayTest).
+$QUINT run "$INPUTS" --main=input_transport_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostForGood \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── A "now" resync request asked again at its deadline ─────────────────────
+REASK=specs/resync_reask.qnt
+$QUINT typecheck "$REASK"
+for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_fixed; do
+  $QUINT test "$REASK" --main="$variant" --backend=typescript
+done
+# With the fix: an owed resync is asked for again or given up visibly, the
+# deadline does not cut an answer being decoded, and the asks again are
+# bounded. Today the deadline let the request go and asked nothing
+# (resync_reask_current; lateAnswerBehindTest, lostRequestTest); asking again
+# without holding the deadline while an answer decodes cuts it
+# (resync_reask_unguarded; askAgainCutsTheDecodeTest), and the lifecycle
+# guard's timeout letting the request go forgets it again
+# (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest).
+$QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript

@@ -334,8 +334,25 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   an error at startup when the core bundle is missing). Never commit them.
   The Docker image, CI and the landing and demo builds build them from
   `package-lock.json`, so the bytes are the same everywhere. Migration stages
-  are in `docs/roadmap.md`. A module moves from observing to deciding only after
-  production shows it agrees with the code it replaces.
+  are in `docs/roadmap.md`. **New logic decides; nothing observes.** A change
+  that moves a decision into `web/src` makes the page or engine call it and
+  deletes the copy it replaces, in the same PR. There is no phase where the
+  new code runs beside the old and reports disagreement: the site has too
+  little traffic for production reports to show anything. The evidence comes
+  before the merge instead: an old-against-new test that runs both on the
+  same inputs before the old one is deleted (like
+  `tests/ts/demo-page.test.ts`), the proofs and models, and runs of the engine
+  the logic belongs to, with a fault mode for each rare path: for the rollback
+  engine `tests/rb-two-player.mjs` (`JITTER=20`) and the lifecycle tests; for
+  the streaming engine `tests/test_streaming_*.py` (a painted canvas in place
+  of the emulator) and a real-ROM streaming run (`mode=streaming`, `KN_ROM`).
+  A rule no run reaches gets a fault mode or a harness step before it decides.
+  Where the new logic is meant to differ from the old (a fix the model shows,
+  like the per-peer machine offering only from the lower slot), the
+  old-against-new test asserts that difference and the PR names its model
+  scenario; any other difference blocks the change. The modules that still observe (they send
+  `*-disagree` or `protocol-mismatch` reports) are being switched to deciding
+  the same way; don't add a new one.
 - **Model and prove before you patch state logic.** This applies to plans
   as much as to code: a plan for anything involving state, ordering or
   reconnects names the model, the invariant and the diagram it will change

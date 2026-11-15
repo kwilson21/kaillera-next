@@ -17,6 +17,7 @@ import { installGamepadManager } from './page/gamepad-manager.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
+import { framesToSendAgain } from './input-resend.ts';
 import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import {
@@ -83,6 +84,7 @@ import {
   isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  resyncDeadlineStep,
 } from './resync-request.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
@@ -277,6 +279,7 @@ export const KNCore = {
   addressMapFor,
   captureFrame,
   framesToAskFor,
+  framesToSendAgain,
   checkRelayed,
   createConnectTracker,
   /** The per-peer connection machine (peer-connection.ts). The engine runs it observing, through `peerObserve`. */
@@ -312,6 +315,7 @@ export const KNCore = {
     isLateAnswerBehind,
     keepsAwaitedAnswer,
     lateJoinLostHostStep,
+    resyncDeadlineStep,
   },
   rosterKey,
   screenshotCrop,

@@ -19,65 +19,10 @@
   }
   const _demo = window.KNCore.demo;
 
-  const _installEjsGlobals = () => {
-    const settings = _demo.options.ejsSettings(window.location.search || '');
-    window.EJS_player = '#game';
-    window.EJS_core = 'n64';
-    window.EJS_gameID = 'kaillera-next-demo';
-    window.EJS_startOnLoaded = true;
-    window.EJS_pathtodata = '/static/ejs/';
-    window.EJS_defaultOptions = settings.defaultOptions;
-
-    window.__knInstallUnpackAlignmentShim = () => {
-      [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach((ctor) => {
-        const proto = ctor && ctor.prototype;
-        if (!proto || proto.__knUnpackAlignmentPatched) return;
-        proto.__knUnpackAlignmentPatched = true;
-        ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D'].forEach((name) => {
-          const original = proto[name];
-          if (typeof original !== 'function') return;
-          proto[name] = function (...args) {
-            try {
-              this.pixelStorei(this.UNPACK_ALIGNMENT, 1);
-            } catch (_) {}
-            return original.apply(this, args);
-          };
-        });
-      });
-    };
-
-    if (settings.forceLegacyCores) window.EJS_forceLegacyCores = true;
-    if (settings.unpackAlignmentShim) window.__knInstallUnpackAlignmentShim();
-
-    window.EJS_defaultControls = {
-      0: {
-        0: { value: 'c', value2: 'BUTTON_2' },
-        1: { value: 'x', value2: 'BUTTON_4' },
-        3: { value: 'v', value2: 'START' },
-        4: { value: 'up arrow', value2: 'DPAD_UP' },
-        5: { value: 'down arrow', value2: 'DPAD_DOWN' },
-        6: { value: 'left arrow', value2: 'DPAD_LEFT' },
-        7: { value: 'right arrow', value2: 'DPAD_RIGHT' },
-        10: { value: 't', value2: 'LEFT_TOP_SHOULDER' },
-        11: { value: 'y', value2: 'RIGHT_TOP_SHOULDER' },
-        12: { value: 'z', value2: 'LEFT_BOTTOM_SHOULDER' },
-        16: { value: 'd', value2: 'LEFT_STICK_X:+1' },
-        17: { value: 'a', value2: 'LEFT_STICK_X:-1' },
-        18: { value: 's', value2: 'LEFT_STICK_Y:+1' },
-        19: { value: 'w', value2: 'LEFT_STICK_Y:-1' },
-        20: { value: 'j', value2: 'RIGHT_STICK_X:+1' },
-        21: { value: 'l', value2: 'RIGHT_STICK_X:-1' },
-        22: { value: 'k', value2: 'RIGHT_STICK_Y:+1' },
-        23: { value: 'i', value2: 'RIGHT_STICK_Y:-1' },
-        24: { value: '', value2: '' },
-        25: { value: '', value2: '' },
-        26: { value: '', value2: '' },
-      },
-      1: {},
-      2: {},
-      3: {},
-    };
-  };
+  // EmulatorJS's settings, controls and the ?kngfx=unpack1 shim, on window
+  // before the emulator loads, and again at each boot.
+  // web/src/demo/ejs-globals.ts.
+  const _installEjsGlobals = () => _demo.installEjsGlobals(window, window.location.search || '');
 
   _installEjsGlobals();
 
@@ -218,56 +163,10 @@
 
   const _formatNumber = (value, digits = 0) => (Number.isFinite(value) ? value.toFixed(digits) : '--');
 
-  // Rollback timeline (docs/landing-design.md §5.7f #3, §7.2 M3) — the
-  // Result card's live instrument. Driven entirely by real engine signals
-  // from getHudCounters() via web/static/rollback-timeline.js's pure state
-  // machine; see that file for what triggers a rewind vs. a lockstep wait.
-  const _reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false;
-  let _rbState = window.KNRollbackTimeline?.createState?.() ?? null;
-  let _rbRefs = null;
-  let _rbStillRendered = false;
-  const _getRbRefs = () => {
-    if (_rbRefs) return _rbRefs;
-    const svg = $('rb-timeline');
-    if (!svg) return null;
-    const ticks = Array.from(svg.querySelectorAll('.t')).sort(
-      (a, b) => Number(a.dataset.i ?? 0) - Number(b.dataset.i ?? 0),
-    );
-    _rbRefs = {
-      ticks,
-      head: $('rb-head'),
-      labelBad: $('rb-lbl-bad'),
-      labelReplay: $('rb-lbl-re'),
-      caption: $('rb-caption'),
-    };
-    return _rbRefs;
-  };
-  const _updateRollbackTimeline = (counters, inMatch) => {
-    const api = window.KNRollbackTimeline;
-    if (!api || !_rbState) return;
-    const refs = _getRbRefs();
-    if (!refs) return;
-    if (_reducedMotion) {
-      // Static illustrative frame — no motion, no per-frame reduce() calls.
-      if (!_rbStillRendered) {
-        api.render(_rbState, refs, { still: true });
-        _rbStillRendered = true;
-      }
-      return;
-    }
-    _rbState = api.reduce(
-      _rbState,
-      {
-        mode: _rollbackEnabled ? 'rollback' : 'lockstep',
-        matchActive: !!inMatch,
-        rollbackEventsTotal: counters?.rollbackEventsTotal ?? 0,
-        avgRollbackDepth: counters?.avgRollbackDepth ?? 0,
-        delay: counters?.delay ?? 0,
-      },
-      performance.now(),
-    );
-    api.render(_rbState, refs);
-  };
+  // The result card's rollback timeline, fed the engine's counters from the
+  // HUD loop. web/src/demo/timeline-view.ts.
+  const _timeline = _demo.timelineView(window);
+  const _updateRollbackTimeline = (counters, inMatch) => _timeline.update(counters, inMatch, _rollbackEnabled);
 
   const _readFile = (file) =>
     new Promise((resolve, reject) => {
@@ -602,6 +501,7 @@
           bootDoneTimer = null;
         }
         window.removeEventListener('kn-ejs-loader-complete', markBootDone);
+        _runState.send({ type: 'loaderSettled' });
       };
       window.addEventListener('kn-ejs-loader-complete', markBootDone);
       bootDoneTimer = setTimeout(markBootDone, 30000);
@@ -616,6 +516,7 @@
         _setStatus('Failed to load emulator');
       };
       document.body.appendChild(script);
+      _runState.send({ type: 'loaderInjected' });
     };
 
     if (window._knCoreReady) {
@@ -657,6 +558,28 @@
     _refreshEmuButtonsAvailability();
   };
 
+  // The page's run state as a state machine (web/src/demo/run-state.ts),
+  // observing: each handler below that changes one of these flags tells it
+  // what happened, and the flags are compared with what the machine says
+  // they should be. A disagreement is logged and kept on KNDemo.runState.
+  const _runState = _demo.runState({
+    autoCompareDisabled: _options.autoCompareDisabled,
+    read: () => ({
+      engineStarted: _engineStarted,
+      engineRunning: _engineRunning,
+      loaderInjected: _loaderInjected,
+      bootInFlight: _emulatorBootInFlight,
+      inMatch: _wasInMatch,
+      fakePeerActive: _lastFakePeerMatchActive,
+      tickPaused: _emuPaused,
+      autoCompareRunning: _autoCompareTimer !== 0,
+      autoComparePaused: _autoComparePausedAt !== 0,
+      rollbackEnabled: _rollbackEnabled,
+      userInteracted: _userInteractedThisMatch,
+    }),
+    warn: (line) => console.warn(line),
+  });
+
   // Hard reset: reloads the page so the demo restarts from the autopilot
   // boot path. Cleaner than rewinding engine state mid-session (state
   // ring, Emscripten thread, audio worklet all need fresh init anyway).
@@ -671,6 +594,7 @@
     } catch (_) {}
     _setStatus('Resetting demo…');
     location.reload();
+    _runState.send({ type: 'reset' });
   };
 
   const _toggleEmuPause = () => {
@@ -947,6 +871,7 @@
       // Best-effort; failure to cache doesn't block the load.
       _romStore.save(new Uint8Array(bytes), file.name).catch(() => {});
       _startEngine();
+      _runState.send({ type: 'romLoaded', engineAvailable: !!window.NetplayRollback });
     } catch (err) {
       _showLoading(false);
       _setStatus(err?.message || 'ROM load failed');
@@ -1061,6 +986,7 @@
         setTimeout(() => {
           if (_wasInMatch && !_userInteractedThisMatch && !_isAutoCompareRunning() && !_autoCompareDisabled)
             _startAutoCompare();
+          _runState.send({ type: 'autoStartDue' });
         }, 600);
       } else {
         // Left the match — stop the demo and put rollback back ON so the
@@ -1081,6 +1007,7 @@
         _showInputIndicator('post-match');
       }
     }
+    _runState.send({ type: 'frame', strict: inMatchStrict, inclusive: inMatch });
 
     _nativeRAF(_updateHud);
   };
@@ -1098,6 +1025,7 @@
     const inMatch = !!rb?.isInMatchOrPaused?.();
     if (!inMatch || _emuPaused) {
       _setRollbackEnabled(next);
+      _runState.send({ type: 'modeSwitched', rollback: next });
       return;
     }
     // The engine can't change the delay mid-replay (a replay lasts a few
@@ -1108,6 +1036,7 @@
       return;
     }
     _setRollbackEnabled(next);
+    _runState.send({ type: 'modeSwitched', rollback: next });
     const delay = rb.getHudCounters?.()?.delay ?? 0;
     const label = _demo.hud.modeSwitchLabel(next, delay);
     const title = $('mode-switch-title');
@@ -1122,7 +1051,11 @@
     }, MODE_SWITCH_LABEL_MS);
   };
 
-  const _isAutoCompareRunning = () => _autoCompareTimer !== 0;
+  // On: its timer runs, or the Pause button has it paused (timer cleared, the
+  // time it was paused kept). A paused auto-compare is stopped like a running
+  // one, by its button, the rollback button or leaving the match, and is not
+  // started again over its pause mark.
+  const _isAutoCompareRunning = () => _autoCompareTimer !== 0 || _autoComparePausedAt !== 0;
 
   const _stopAutoCompare = () => {
     if (!_isAutoCompareRunning()) return;
@@ -1211,20 +1144,24 @@
       // Remember this as the user's preference for future match starts.
       _savedRttPreference = _readRtt();
       _applyNetwork();
+      _runState.send({ type: 'interacted' });
     });
     $('rollback-toggle')?.addEventListener('click', () => {
       _markUserInteracted();
       // Manual toggle stops auto-compare so the user is back in control.
       _stopAutoCompare();
+      _runState.send({ type: 'rollbackToggleClicked' });
       _switchMode(!_rollbackEnabled);
     });
     $('emu-pause')?.addEventListener('click', () => {
       _markUserInteracted();
       _toggleEmuPause();
+      _runState.send({ type: 'pauseClicked', tickControl: !!window.NetplayRollback?.pauseTick });
     });
     $('emu-stop')?.addEventListener('click', () => {
       _markUserInteracted();
       _stopEmu();
+      _runState.send({ type: 'stopClicked', emulator: !!window.EJS_emulator });
     });
     $('emu-controls')?.addEventListener('click', () => {
       _markUserInteracted();
@@ -1234,6 +1171,7 @@
       // engine-start path.
       _ensureGamepadManager();
       window.ControllerSettings?.toggle?.();
+      _runState.send({ type: 'interacted' });
     });
     $('emu-reset')?.addEventListener('click', () => {
       _markUserInteracted();
@@ -1242,6 +1180,7 @@
     $('auto-compare-btn')?.addEventListener('click', () => {
       _markUserInteracted();
       _toggleAutoCompare();
+      _runState.send({ type: 'autoCompareClicked' });
     });
 
     // Gesture button: the engine listens for clicks on the page once it's in
@@ -1284,66 +1223,10 @@
   // ignored (autopilot is driving the menus) or whether they're in control.
   // state: 'disabled' shows persistent amber badge; 'enabled' flashes a
   // green "YOU'RE IN CONTROL" badge for 3s; null/undefined removes both.
-  let _inputIndicatorTimer = null;
-  const _ensureIndicatorAnim = () => {
-    if (document.getElementById('kn-demo-indicator-anim')) return;
-    const style = document.createElement('style');
-    style.id = 'kn-demo-indicator-anim';
-    style.textContent = _demo.hud.INPUT_INDICATOR_KEYFRAMES;
-    document.head.appendChild(style);
-  };
-  // Always remove the existing indicator before creating a new one. Mutating
-  // the same element to swap state caused two animations (pulse + fade) to
-  // briefly fight each other, which the browser composited as a visible flash.
-  const _showInputIndicator = (state) => {
-    if (_inputIndicatorTimer) {
-      clearTimeout(_inputIndicatorTimer);
-      _inputIndicatorTimer = null;
-    }
-    const existing = document.getElementById('input-indicator');
-    if (existing) existing.remove();
-    if (!state) return;
-    _ensureIndicatorAnim();
-    const el = document.createElement('div');
-    el.id = 'input-indicator';
-    el.style.cssText = _demo.hud.INPUT_INDICATOR_CSS;
-    const look = _demo.hud.inputIndicator(state);
-    if (look) {
-      el.textContent = look.text;
-      el.style.background = look.background;
-      el.style.animation = look.animation;
-      if (look.removeAfterMs != null) {
-        _inputIndicatorTimer = setTimeout(() => {
-          const cur = document.getElementById('input-indicator');
-          if (cur) cur.remove();
-          _inputIndicatorTimer = null;
-        }, look.removeAfterMs);
-      }
-    }
-    document.body.appendChild(el);
-  };
-
-  const _showRecIndicator = (on) => {
-    let el = document.getElementById('rec-indicator');
-    if (on && !el) {
-      el = document.createElement('div');
-      el.id = 'rec-indicator';
-      el.textContent = '● REC';
-      el.style.cssText =
-        'position:fixed;top:12px;right:12px;z-index:9999;' +
-        'padding:6px 12px;border-radius:6px;background:#a02020;color:#fff;' +
-        'font-family:sans-serif;font-weight:800;font-size:13px;letter-spacing:0.08em;' +
-        'box-shadow:0 0 0 0 rgba(255,80,80,0.6);animation:recPulse 1.4s ease-in-out infinite;' +
-        'pointer-events:none;';
-      const style = document.createElement('style');
-      style.textContent =
-        '@keyframes recPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,80,80,0.6)}50%{box-shadow:0 0 0 12px rgba(255,80,80,0)}}';
-      document.head.appendChild(style);
-      document.body.appendChild(el);
-    } else if (!on && el) {
-      el.remove();
-    }
-  };
+  // The input indicator and the REC badge. web/src/demo/indicators.ts.
+  const _indicators = _demo.indicators(window);
+  const _showInputIndicator = (state) => _indicators.showInput(state);
+  const _showRecIndicator = (on) => _indicators.showRec(on);
 
   // Manual recording controls. Use these from devtools console if you didn't
   // visit with ?record=1 from the start:
@@ -1381,7 +1264,12 @@
   window.KNDemo = {
     ensureEmulatorBooted,
     loadRomFile: _loadRomFile,
-    setRollbackEnabled: _setRollbackEnabled,
+    setRollbackEnabled: (enabled) => {
+      _setRollbackEnabled(enabled);
+      _runState.send({ type: 'modeSwitched', rollback: !!enabled });
+    },
+    // The run-state machine's state and its disagreements with the flags.
+    runState: { state: _runState.state, disagreements: _runState.disagreements },
     startRecording: _startRecordingManual,
     stopRecording: _stopRecordingManual,
     getRecording: _getRecording,
