@@ -11,3 +11,13 @@ lemma mayHandChunk_ensures(buffered: int, lowWater: int)
   ensures (mayHandChunk(buffered, lowWater) == (buffered < lowWater))
 {
 }
+
+function transferStillFor(queuedEpoch: int, queuedGen: int, epoch: int, gen: int): bool
+{
+  ((queuedEpoch == epoch) && (queuedGen == gen))
+}
+
+lemma transferStillFor_ensures(queuedEpoch: int, queuedGen: int, epoch: int, gen: int)
+  ensures (transferStillFor(queuedEpoch, queuedGen, epoch, gen) == ((queuedEpoch == epoch) && (queuedGen == gen)))
+{
+}

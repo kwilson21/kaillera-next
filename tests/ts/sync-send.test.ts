@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mayHandChunk, sendPaced } from '../../web/src/sync-send.ts';
+import { mayHandChunk, sendPaced, transferStillFor } from '../../web/src/sync-send.ts';
 
 const CHUNK = 100;
 
@@ -109,4 +109,45 @@ test('a channel that closes ends the transfer', async () => {
   });
   ch.stop();
   assert.equal(outcome, 'closed');
+});
+
+test('a queued transfer goes only to the connection it was taken for', () => {
+  assert.equal(transferStillFor(3, 1, 3, 1), true);
+  // The guest reconnected (resetPeerState bumped its generation).
+  assert.equal(transferStillFor(3, 1, 3, 2), false);
+  // The match ended (stop bumped the epoch).
+  assert.equal(transferStillFor(3, 1, 4, 1), false);
+});
+
+test('two guests paced side by side: a congested one does not hold the other', async () => {
+  // The engine gives each guest a chain of its own (sendSyncChunks); here,
+  // two transfers run at once, one on a link that takes nothing.
+  const stuck = fakeChannel(0);
+  const healthy = fakeChannel(CHUNK);
+  const started = Date.now();
+  const [a, b] = await Promise.all([
+    sendPaced({
+      count: 3,
+      send: (i) => stuck.send(`chunk${i}`, CHUNK),
+      buffered: stuck.buffered,
+      open: stuck.open,
+      lowWaterBytes: CHUNK,
+      pollMs: 1,
+      stallMs: 300,
+    }),
+    sendPaced({
+      count: 5,
+      send: (i) => healthy.send(`chunk${i}`, CHUNK),
+      buffered: healthy.buffered,
+      open: healthy.open,
+      lowWaterBytes: CHUNK,
+      pollMs: 1,
+      stallMs: 300,
+    }).then((outcome) => ({ outcome, ms: Date.now() - started })),
+  ]);
+  stuck.stop();
+  healthy.stop();
+  assert.equal(a, 'stalled');
+  assert.equal(b.outcome, 'sent');
+  assert.ok(b.ms < 300, `the healthy transfer finished in ${b.ms} ms, before the other's deadline`);
 });

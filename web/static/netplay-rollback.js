@@ -6852,6 +6852,9 @@
   // per sid (resetPeerState) or for the whole match (stop).
   const _syncQueueGen = {};
   let _syncQueueEpoch = 0;
+  // host: per guest sid, the state transfers handed to its channel, one at a
+  // time (sendSyncChunks). Per-peer state: resetPeerState drops it.
+  let _syncSendChains = {};
 
   // Proactive state push: host sends delta state every N frames so guests have a
   // fresh snapshot ready for instant resyncs — no request-response RTT needed.
@@ -9145,7 +9148,9 @@
    * Shared queues filtered to remove entries for this slot:
    *   - _pendingCInputs (by slot)
    *   - _scheduledSyncRequests (by targetSid if sid provided; bumps
-   *     _syncQueueGen so an in-flight push can't requeue for it)
+   *     _syncQueueGen so an in-flight push can't requeue for it, and a
+   *     state transfer queued or running for it is dropped)
+   *   - _syncSendChains (by sid): that peer's chain of state transfers
    *
    * @param {number} slot - player slot to clear (0-3)
    * @param {string} reason - short human-readable reason for the reset;
@@ -9199,8 +9204,12 @@
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
       _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
-      // the new peer session.
+      // the new peer session, and a transfer on its chain, running or still
+      // queued, must not reach the new connection: each checks this
+      // generation and stops (_syncTargetCurrent). The chain itself goes,
+      // so the new connection's first transfer does not wait for them.
       _syncQueueGen[opts.sid] = (_syncQueueGen[opts.sid] || 0) + 1;
+      delete _syncSendChains[opts.sid];
     }
 
     // Stall tracking — if we were stalled waiting on this slot's apply
@@ -17515,6 +17524,12 @@
     }
     let currentState;
     const frame = _frameNum;
+    // Who this state is for, on the connections they are on now: a reconnect
+    // while it is compressed or queued drops it for that guest.
+    const targets = _syncTargetsFor(targetSid);
+    const socketTarget = targetSid
+      ? { sid: targetSid, peer: _peers[targetSid], epoch: _syncQueueEpoch, gen: _syncQueueGen[targetSid] || 0 }
+      : null;
 
     if (_hasKnSync) {
       // C-level: read state directly from g_dev — no getState(), no memory growth
@@ -17628,6 +17643,10 @@
           return;
         }
         const encoded = await compressAndEncode(toCompress);
+        if (!_syncTargetCurrent(socketTarget)) {
+          _syncLog(`socket sync dropped: ${targetSid} reconnected or match ended since the state was taken`);
+          return [];
+        }
         const b64KB = Math.round(encoded.data.length / 1024);
         const wireKB = Math.round(encoded.compressedSize / 1024);
         if (encoded.data.length <= SOCKET_SYNC_B64_SOFT_LIMIT) {
@@ -17654,13 +17673,13 @@
           _syncLog(
             `socket sync too large (${b64KB}KB b64 > ${Math.round(SOCKET_SYNC_B64_SOFT_LIMIT / 1024)}KB), falling back to DC chunks`,
           );
-          return await sendSyncChunks(base64ToUint8(encoded.data), frame, isFull, targetSid, isProactive, requestIds);
+          return await sendSyncChunks(base64ToUint8(encoded.data), frame, isFull, targets, isProactive, requestIds);
         }
       } else {
         const compressed = await compressState(toCompress);
         const sizeKB = Math.round(compressed.length / 1024);
         _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
-        return await sendSyncChunks(compressed, frame, isFull, targetSid, isProactive, requestIds);
+        return await sendSyncChunks(compressed, frame, isFull, targets, isProactive, requestIds);
       }
       return [];
     } catch (err) {
@@ -17675,104 +17694,133 @@
     }
   };
 
-  // Returns the sids of targets that were skipped because their channel
-  // wasn't open.
-  // One state transfer at a time: a paced transfer awaits between chunks,
-  // and a second one on the same channel would interleave its chunks.
-  let _syncSendChain = Promise.resolve();
-  const sendSyncChunks = (...args) => {
-    const run = _syncSendChain.then(() => _sendSyncChunksNow(...args));
-    _syncSendChain = run.catch(() => {});
-    return run;
+  // Host: the guests a state is for, each with the connection it is on as the
+  // state is taken: the match epoch, and the guest's _syncQueueGen, which
+  // resetPeerState bumps on a reconnect. A transfer that comes up after
+  // either changed is dropped (KNCore.syncSend.transferStillFor;
+  // specs/tick_deadlines.qnt, aTransferQueuedBeforeAResetNeverReachesTheNewConnection):
+  // its state and request id belong to a connection that is gone.
+  const _syncTargetsFor = (targetSid) => {
+    const entries = targetSid
+      ? [[targetSid, _peers[targetSid]]]
+      : Object.entries(_peers).filter(([, p]) => getActivePeers().includes(p));
+    return entries
+      .filter(([sid, peer]) => peer && !_isPeerPendingLateJoin(sid, peer))
+      .map(([sid, peer]) => ({ sid, peer, epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0 }));
   };
-  const _sendSyncChunksNow = async (compressed, frame, isFull, targetSid, isProactive = false, requestIds = {}) => {
-    const skipped = [];
-    // Host: send compressed state/delta via DC in 64KB chunks, handed to the
-    // channel one at a time (KNCore.syncSend, specs/tick_deadlines.qnt
-    // `input_link`): the next goes only once less than SYNC_SEND_LOW_WATER
-    // bytes are still waiting in the channel. The host's inputs share the
-    // connection and queue behind whatever it has been given; handed a whole
-    // state at once (two answers, 2.9 MB, in a two-player run) it left them
-    // unsent for seconds, the guest gave up on the host at the peer-stale
-    // deadline, ran past its prediction window, and the inputs then arrived
-    // up to 83 frames deep (DEEP-MISPREDICT-SKIP).
+  // Is the connection a transfer was taken for still the one there?
+  const _syncTargetCurrent = (t) =>
+    _peers[t.sid] === t.peer &&
+    window.KNCore.syncSend.transferStillFor(t.epoch, t.gen, _syncQueueEpoch, _syncQueueGen[t.sid] || 0);
+
+  // One state transfer at a time per guest: a paced transfer awaits between
+  // chunks, and a second one on the same channel would interleave its
+  // chunks. Each guest has a chain of its own, so a guest whose link is
+  // congested never holds up another's transfer (a broadcast to several).
+  // Resolves to the sids of targets that were skipped because their channel
+  // wasn't open. The chains are _syncSendChains, by sid.
+  const sendSyncChunks = async (compressed, frame, isFull, targets, isProactive = false, requestIds = {}) => {
+    const outcomes = await Promise.all(
+      targets.map((t) => {
+        const run = (_syncSendChains[t.sid] ?? Promise.resolve()).then(() =>
+          _sendSyncChunksTo(t, compressed, frame, isFull, isProactive, requestIds),
+        );
+        _syncSendChains[t.sid] = run.catch(() => {});
+        return run;
+      }),
+    );
+    _syncLog(
+      `pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${Math.ceil(compressed.length / 64000)} chunks)`,
+    );
+    return targets.filter((t, i) => outcomes[i] === 'skipped').map((t) => t.sid);
+  };
+  // Host: send compressed state/delta via DC in 64KB chunks, handed to the
+  // channel one at a time (KNCore.syncSend, specs/tick_deadlines.qnt
+  // `input_link`): the next goes only once less than SYNC_SEND_LOW_WATER
+  // bytes are still waiting in the channel. The host's inputs share the
+  // connection and queue behind whatever it has been given; handed a whole
+  // state at once (two answers, 2.9 MB, in a two-player run) it left them
+  // unsent for seconds, the guest gave up on the host at the peer-stale
+  // deadline, ran past its prediction window, and the inputs then arrived
+  // up to 83 frames deep (DEEP-MISPREDICT-SKIP).
+  // How it ended, for one guest: 'sent', 'skipped' (no open channel, or it
+  // closed with the guest still on it), 'dropped' (reconnected or the match
+  // ended since the state was taken), 'busy' (a proactive push onto a
+  // backed-up channel), 'stalled' or 'failed'.
+  const _sendSyncChunksTo = async (t, compressed, frame, isFull, isProactive, requestIds) => {
     const CHUNK_SIZE = 64000;
     const numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
-    let targets;
-    if (targetSid) {
-      const targetPeer = _peers[targetSid];
-      targets = targetPeer && !_isPeerPendingLateJoin(targetSid, targetPeer) ? [targetPeer] : [];
-    } else {
-      targets = getActivePeers();
+    const target = t.peer;
+    if (!_syncTargetCurrent(t)) {
+      _syncLog(`sync send dropped: slot=${target.slot} reconnected or match ended since the state was taken`);
+      return 'dropped';
     }
-
     const header = `sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}:${isProactive ? '1' : '0'}`;
-    for (const target of targets) {
-      // Prefer the dedicated low-priority sync-state DC; fall back to lockstep DC
-      // if syncDc isn't open yet (e.g. during initial handshake race).
-      const dc = target.syncDc && target.syncDc.readyState === 'open' ? target.syncDc : target.dc;
-      if (!dc || dc.readyState !== 'open') {
-        _syncLog(`sync send skipped: target slot=${target.slot} dc=${dc ? dc.readyState : 'null'}`);
-        const sid = Object.keys(_peers).find((k) => _peers[k] === target);
-        if (sid) skipped.push(sid);
-        continue;
-      }
-      // Proactive flood prevention: if the DataChannel is already backed up
-      // (e.g. host is many frames ahead after a guest reconnect), skip this
-      // proactive push. A backed-up DC means the event loop is already saturated
-      // with chunk-send microtasks — sending more would starve setInterval ticks
-      // and prevent the stall hard-timeout from firing.
-      if (isProactive && dc.bufferedAmount > 1024 * 1024) {
-        _syncLog(
-          `proactive push skipped: slot=${target.slot} bufferedAmount=${Math.round(dc.bufferedAmount / 1024)}KB — DC backed up`,
-        );
-        continue;
-      }
-      try {
-        // The request this answers, just ahead of the header on the same
-        // ordered channel: a guest on an older version parses the header
-        // strictly, and ignores a string it does not know.
-        const sid = targetSid || Object.keys(_peers).find((k) => _peers[k] === target);
-        const answerFor = (sid && requestIds[sid]) || 0;
-        if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
-        dc.send(header);
+    // Prefer the dedicated low-priority sync-state DC; fall back to lockstep DC
+    // if syncDc isn't open yet (e.g. during initial handshake race).
+    const dc = target.syncDc && target.syncDc.readyState === 'open' ? target.syncDc : target.dc;
+    if (!dc || dc.readyState !== 'open') {
+      _syncLog(`sync send skipped: target slot=${target.slot} dc=${dc ? dc.readyState : 'null'}`);
+      return 'skipped';
+    }
+    // Proactive flood prevention: if the DataChannel is already backed up
+    // (e.g. host is many frames ahead after a guest reconnect), skip this
+    // proactive push. A backed-up DC means the event loop is already saturated
+    // with chunk-send microtasks — sending more would starve setInterval ticks
+    // and prevent the stall hard-timeout from firing.
+    if (isProactive && dc.bufferedAmount > 1024 * 1024) {
+      _syncLog(
+        `proactive push skipped: slot=${target.slot} bufferedAmount=${Math.round(dc.bufferedAmount / 1024)}KB — DC backed up`,
+      );
+      return 'busy';
+    }
+    try {
+      // The request this answers, just ahead of the header on the same
+      // ordered channel: a guest on an older version parses the header
+      // strictly, and ignores a string it does not know.
+      const answerFor = requestIds[t.sid] || 0;
+      if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
+      dc.send(header);
+      // I1: each chunk waits at most SYNC_SEND_STALL_MS for room; then the
+      // transfer is given up (the guest's chunk and request deadlines ask
+      // again). A reconnect or the match ending stops it at once.
+      const outcome = await window.KNCore.syncSend.sendPaced({
+        count: numChunks,
+        send: (i) => dc.send(compressed.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, compressed.length))),
+        buffered: () => dc.bufferedAmount,
+        open: () => dc.readyState === 'open' && _syncTargetCurrent(t),
+        lowWaterBytes: SYNC_SEND_LOW_WATER,
+        pollMs: SYNC_SEND_POLL_MS,
+        stallMs: SYNC_SEND_STALL_MS,
+      });
+      if (outcome === 'sent' && _syncTargetCurrent(t)) {
         // The guest will be on `frame` once it loads this: its inputs from
         // before frame - delay are in the state, and it may never have made
-        // them (specs/resync_inputs.qnt).
+        // them (specs/resync_inputs.qnt). Only once every chunk is handed
+        // over: a transfer given up leaves the guest without the state, and
+        // its late inputs from before that frame must still be fed
+        // (specs/tick_deadlines.qnt, inputsAreSettledOnlyForADeliveredState).
         _settleInputsBefore(target.slot, frame);
-        const epoch = _syncQueueEpoch;
-        // I1: each chunk waits at most SYNC_SEND_STALL_MS for room; then the
-        // transfer is given up (the guest's chunk and request deadlines ask
-        // again).
-        const outcome = await window.KNCore.syncSend.sendPaced({
-          count: numChunks,
-          send: (i) => dc.send(compressed.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, compressed.length))),
-          buffered: () => dc.bufferedAmount,
-          open: () => dc.readyState === 'open' && epoch === _syncQueueEpoch,
-          lowWaterBytes: SYNC_SEND_LOW_WATER,
-          pollMs: SYNC_SEND_POLL_MS,
-          stallMs: SYNC_SEND_STALL_MS,
-        });
-        if (outcome === 'sent') {
-          _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
-        } else if (outcome === 'closed') {
-          _syncLog(`sync send stopped: slot=${target.slot} channel closed or match stopped`);
-          const sid = Object.keys(_peers).find((k) => _peers[k] === target);
-          if (sid && epoch === _syncQueueEpoch) skipped.push(sid);
-        } else {
-          _syncLog(
-            `SYNC-SEND-STALLED slot=${target.slot} frame=${frame} — no room for a chunk in ` +
-              `${SYNC_SEND_STALL_MS}ms (buffered=${dc.bufferedAmount}), transfer given up`,
-          );
-        }
-      } catch (err) {
-        _syncLog(`sync send failed to slot=${target.slot}: ${err}`);
+        _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
+        return 'sent';
       }
+      if (outcome === 'stalled') {
+        _syncLog(
+          `SYNC-SEND-STALLED slot=${target.slot} frame=${frame} — no room for a chunk in ` +
+            `${SYNC_SEND_STALL_MS}ms (buffered=${dc.bufferedAmount}), transfer given up`,
+        );
+        return 'stalled';
+      }
+      if (!_syncTargetCurrent(t)) {
+        _syncLog(`sync send stopped: slot=${target.slot} reconnected or match ended`);
+        return 'dropped';
+      }
+      _syncLog(`sync send stopped: slot=${target.slot} channel closed`);
+      return 'skipped';
+    } catch (err) {
+      _syncLog(`sync send failed to slot=${target.slot}: ${err}`);
+      return 'failed';
     }
-    _syncLog(
-      `pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${numChunks} chunks)`,
-    );
-    return skipped;
   };
 
   // The answer to the newest request is buffered: an older request's answer
@@ -18360,6 +18408,8 @@
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
     _syncQueueEpoch++;
+    // Each transfer still on a chain sees the new epoch and stops.
+    _syncSendChains = {};
     _lastResyncTime = 0;
     _heldKeys.clear();
     _p1KeyMap = null;

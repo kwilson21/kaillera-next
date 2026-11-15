@@ -17,9 +17,9 @@
  * is given up (the guest's own deadlines ask again).
  */
 import { Duration, Effect } from 'effect';
-import { mayHandChunk } from './sync-chunk-room.ts';
+import { mayHandChunk, transferStillFor } from './sync-chunk-room.ts';
 
-export { mayHandChunk };
+export { mayHandChunk, transferStillFor };
 
 /** How a paced transfer ended. */
 export type PacedSendOutcome =

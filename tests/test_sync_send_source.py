@@ -16,10 +16,15 @@ INVARIANTS_DOC = ROOT / "docs/netplay-invariants.md"
 
 
 def _send_body() -> str:
+    """One guest's transfer (_sendSyncChunksTo)."""
     src = ENGINE.read_text()
-    start = src.index("const _sendSyncChunksNow = async")
-    end = src.index("pushed ${isFull ? 'full' : 'delta'} state frame", start)
-    return src[start:end]
+    start = src.index("const _sendSyncChunksTo = async")
+    return src[start : src.index("\n  };\n", start)]
+
+
+def _block(src: str, start: str) -> str:
+    i = src.index(start)
+    return src[i : src.index("\n  };\n", i)]
 
 
 def test_chunks_go_through_the_paced_sender():
@@ -39,9 +44,72 @@ def test_the_wait_for_room_has_a_deadline():
     assert "SYNC_SEND_STALL_MS" in INVARIANTS_DOC.read_text()
 
 
-def test_one_transfer_at_a_time():
+def test_one_transfer_at_a_time_per_guest_and_guests_in_parallel():
+    """#236 review, finding 1: a broadcast paced its targets one after another,
+    so a guest on a congested link (up to SYNC_SEND_STALL_MS per chunk) held a
+    healthy guest's transfer past that guest's 8 s request deadline. Each
+    guest now has a chain of its own: one transfer at a time on its channels,
+    the guests side by side."""
     src = ENGINE.read_text()
-    assert "_syncSendChain.then(() => _sendSyncChunksNow(...args))" in src
+    wrapper = _block(src, "const sendSyncChunks = async (")
+    assert "targets.map((t) => {" in wrapper
+    assert "(_syncSendChains[t.sid] ?? Promise.resolve()).then(() =>" in wrapper
+    assert "_syncSendChains[t.sid] = run.catch(() => {});" in wrapper
+    # Every target's transfer is started before any is awaited.
+    assert "await Promise.all(" in wrapper
+    assert wrapper.count("await") == 1
+    # The paced wait is inside one guest's transfer, with no loop over guests
+    # around it.
+    body = _send_body()
+    assert "await window.KNCore.syncSend.sendPaced(" in body
+    assert "for (const target of targets)" not in body
+    assert "_syncSendChain " not in src and "_syncSendChain." not in src
+
+
+def test_a_queued_transfer_never_reaches_a_new_connection():
+    """#236 review, finding 2 (I2): a transfer queued before a reconnect looked
+    its target up when it came up, and sent the old state and request id over
+    the new connection (specs/tick_deadlines.qnt,
+    aTransferQueuedBeforeAResetNeverReachesTheNewConnection)."""
+    src = ENGINE.read_text()
+    push = src[src.index("const pushSyncState = async (") :]
+    # The targets and their connections are taken with the state, before any await.
+    capture = push.index("const targets = _syncTargetsFor(targetSid);")
+    assert push.index("const frame = _frameNum;") < capture < push.index("await ")
+    assert "_syncQueueGen[targetSid] || 0" in push[capture : push.index("await ")]
+    assert "sendSyncChunks(compressed, frame, isFull, targets, isProactive, requestIds)" in push
+    assert "if (!_syncTargetCurrent(socketTarget)) {" in push
+    targets_for = _block(src, "const _syncTargetsFor = (targetSid) => {")
+    assert "epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0" in targets_for
+    current = src[src.index("const _syncTargetCurrent = (t) =>") :]
+    current = current[: current.index(";\n")]
+    assert "_peers[t.sid] === t.peer" in current
+    assert "window.KNCore.syncSend.transferStillFor(t.epoch, t.gen, _syncQueueEpoch, _syncQueueGen[t.sid] || 0)" in current
+    body = _send_body()
+    # Checked when the transfer comes up, and between chunks.
+    assert body.index("if (!_syncTargetCurrent(t)) {") < body.index("dc.send(header);")
+    assert "open: () => dc.readyState === 'open' && _syncTargetCurrent(t)," in body
+    # resetPeerState bumps the generation and drops the chain; stop() bumps
+    # the epoch and drops every chain.
+    reset = _block(src, "const resetPeerState = (slot, reason, opts = {}) => {")
+    assert "_syncQueueGen[opts.sid] = (_syncQueueGen[opts.sid] || 0) + 1;" in reset
+    assert "delete _syncSendChains[opts.sid];" in reset
+    stop = src[src.index("_syncQueueEpoch++;") :]
+    assert stop.index("_syncSendChains = {};") < stop.index("\n  };\n")
+
+
+def test_inputs_are_settled_only_for_a_state_that_was_sent():
+    """#236 review, finding 3: the host settled the guest's inputs before the
+    first chunk, and left them settled when the transfer was given up: the
+    guest's late inputs from before that frame were then skipped at the host,
+    which had predicted them (specs/tick_deadlines.qnt,
+    inputsAreSettledOnlyForADeliveredState)."""
+    body = _send_body()
+    settle = body.index("_settleInputsBefore(target.slot, frame);")
+    assert body.count("_settleInputsBefore(") == 1
+    assert body.index("await window.KNCore.syncSend.sendPaced(") < settle
+    assert "if (outcome === 'sent' && _syncTargetCurrent(t)) {" in body[:settle]
+    assert "SYNC-SEND-STALLED" in body[settle:]
 
 
 def test_harness_counts_queued_state_in_buffered_amount():
