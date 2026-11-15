@@ -226,6 +226,19 @@
  *     run where a 14 s freeze held it up and it took the guest back 117
  *     frames (specs/resync_flow.qnt, bootAnswerAfterANewerRequestTest). The
  *     same checks apply.
+ *   CATCH_UP_MS=<n>   A third of the way into the battle the guest asks the
+ *     host for a full resync through its network-change handler (a window
+ *     `online` event: an immediate, numbered `sync-request-full`), and the
+ *     host's answer is held n ms on its way, as DELAY_SYNC_ANSWER_MS holds it,
+ *     but for less than the guest's request deadline (8000): the answer
+ *     arrives as the request's own, the host's state from n ms before, with
+ *     the guest that far on. It is caught up from: applied, and the frames up
+ *     to the guest's run again at once (SYNC-CATCH-UP; specs/resync_flow.qnt,
+ *     ownAnswerBehindTest). Before, the guest's frame went back to the
+ *     state's. The run fails unless the answer was held, the guest caught up
+ *     all the way to the frame it was on, and a state was applied; frames
+ *     are compared as usual, no exclusion. Reported as `catchUp` in
+ *     summary.json. The other fault knobs are refused with it.
  *   DOUBLE_RESYNC_ASK=1   A third of the way into the battle the guest's
  *     network-change handler runs twice at once (two window `online`
  *     events): two immediate, numbered `sync-request-full` on the channel.
@@ -403,6 +416,7 @@ if (!['battle', 'boot'].includes(DELAY_SYNC_ANSWER_AT)) {
 const LOSE_INPUTS_BEFORE_FALLBACK = process.env.LOSE_INPUTS_BEFORE_FALLBACK === '1';
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 const DOUBLE_RESYNC_ASK = process.env.DOUBLE_RESYNC_ASK === '1';
+const CATCH_UP_MS = Number(process.env.CATCH_UP_MS || 0);
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -557,6 +571,33 @@ if (
   console.log('DOUBLE_RESYNC_ASK is mutually exclusive with the other fault knobs');
   process.exit(1);
 }
+if (!(Number.isFinite(CATCH_UP_MS) && CATCH_UP_MS >= 0)) {
+  console.log(`CATCH_UP_MS=${process.env.CATCH_UP_MS} invalid — must be a finite number >= 0`);
+  process.exit(1);
+}
+if (CATCH_UP_MS > 0 && !(CATCH_UP_MS < RESYNC_REQUEST_TIMEOUT_MS)) {
+  console.log(`CATCH_UP_MS must be shorter than the guest's request deadline (${RESYNC_REQUEST_TIMEOUT_MS})`);
+  process.exit(1);
+}
+if (
+  CATCH_UP_MS > 0 &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    LOSE_INPUTS_BEFORE_FALLBACK ||
+    DOUBLE_RESYNC_ASK ||
+    DESYNC_GUEST)
+) {
+  console.log('CATCH_UP_MS is mutually exclusive with the other fault knobs');
+  process.exit(1);
+}
+// The held answer, then its catch-up.
+const CATCH_UP_RECOVER_MS = 20000;
 // The request's deadline, the ask again and its answer.
 const DOUBLE_RESYNC_ASK_RECOVER_MS = 30000;
 // LINK_KBPS without DELAY_SYNC_ANSWER_MS: one plain resync a third of the way in.
@@ -589,12 +630,13 @@ const faultNeedsSeconds = Math.ceil(
       ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS
       : 0) +
     (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0) +
-    (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0)) *
+    (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0) +
+    (CATCH_UP_MS > 0 ? CATCH_UP_MS + CATCH_UP_RECOVER_MS : 0)) *
     1.5) /
     1000,
 );
 if (
-  (DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC || DOUBLE_RESYNC_ASK) &&
+  (DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC || DOUBLE_RESYNC_ASK || CATCH_UP_MS > 0) &&
   !(BATTLE_SECONDS >= faultNeedsSeconds)
 ) {
   console.log(`this fault needs BATTLE_SECONDS >= ${faultNeedsSeconds}`);
@@ -1235,6 +1277,8 @@ const loseBeforeFallback = { hostAt: null, guestAt: null, fellBack: false, round
 const linkResync = { hostAt: null, guestAt: null, applied: false };
 // DOUBLE_RESYNC_ASK: where the logs stood when the guest asked twice.
 const doubleResyncAsk = { hostAt: null, guestAt: null, applied: false };
+// CATCH_UP_MS: where the logs stood when the guest asked, and whether it caught up.
+const catchUp = { hostAt: null, guestAt: null, seen: false };
 const syncLogOf = (page) => page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
 const seqOf = (line) => Number(line.split('\t')[0]);
 const lastLogLine = async (page) => {
@@ -1456,6 +1500,27 @@ if (inBattle) {
       console.log('DELAY_SYNC_ANSWER_MS: the guest never logged RESYNC-REQUEST-TIMEOUT');
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (CATCH_UP_MS > 0) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [catchUp.hostAt, catchUp.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    await host.evaluate((ms) => {
+      window.__knHoldSyncAnswerMs = ms;
+    }, CATCH_UP_MS);
+    // The guest's network-change handler: an immediate, numbered sync-request-full.
+    await guest.evaluate(() => window.dispatchEvent(new Event('online')));
+    console.log(`CATCH_UP_MS: guest asked for a resync; the host's answer is held ${CATCH_UP_MS} ms`);
+    catchUp.seen = await waitForLine(
+      guest,
+      catchUp.guestAt.seq,
+      /SYNC-CATCH-UP from=/,
+      CATCH_UP_MS + CATCH_UP_RECOVER_MS,
+    );
+    console.log(
+      catchUp.seen ? 'CATCH_UP_MS: the guest caught up' : 'CATCH_UP_MS: the guest never logged SYNC-CATCH-UP',
+    );
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (DOUBLE_RESYNC_ASK) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -1843,6 +1908,24 @@ const delaySyncAnswerReport = (() => {
     resyncsApplied: countIn(guestLines, /sync #\d+ applied/),
     newestAnswer: newestReady < 0 ? null : guestLines[newestReady],
     newestApplied,
+    applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
+  };
+})();
+// CATCH_UP_MS: the held answer was the request's own, behind the guest, and
+// the guest caught up from it to the frame it was on.
+const catchUpReport = (() => {
+  if (!CATCH_UP_MS || !catchUp.guestAt) return null;
+  const guestLines = linesAfter(G.sync, catchUp.guestAt.seq);
+  const catchUps = guestLines.flatMap((line) => {
+    const m = line.match(/SYNC-CATCH-UP from=(\d+) to=(\d+) of=(\d+) frames=(\d+) ms=([\d.]+)/);
+    return m ? [{ from: +m[1], to: +m[2], of: +m[3], frames: +m[4], ms: +m[5], stopped: /stopped:/.test(line) }] : [];
+  });
+  return {
+    ms: CATCH_UP_MS,
+    held: H.syncAnswersHeld,
+    catchUps,
+    tooOld: guestLines.filter((line) => /SYNC-TOO-OLD-DROPPED/.test(line)),
+    answers: guestLines.filter((line) => /resync ready \(|SYNC-LATE-ANSWER/.test(line)),
     applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
   };
 })();
@@ -2416,6 +2499,7 @@ const summary = {
 };
 if (dropPeerReport) summary.dropPeer = dropPeerReport;
 if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
+if (catchUpReport) summary.catchUp = catchUpReport;
 if (LOSE_INPUTS_BEFORE_FALLBACK) summary.loseBeforeFallback = loseBeforeFallbackReport;
 if (linkReport) summary.link = linkReport;
 if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
@@ -2620,6 +2704,19 @@ if (delaySyncAnswerReport) {
     JSON.stringify(delaySyncAnswerReport),
   );
 }
+// CATCH_UP_MS: the answer was held and caught up from, all the way.
+const catchUpFailed =
+  CATCH_UP_MS > 0 &&
+  (!catchUpReport ||
+    catchUpReport.held.length < 1 ||
+    !catchUpReport.catchUps.some((c) => c.frames > 0 && c.to === c.of) ||
+    catchUpReport.applied.length < 1);
+if (catchUpReport) {
+  console.log(
+    catchUpFailed ? 'CATCH_UP_MS: the answer was not caught up from:' : 'CATCH_UP_MS: caught up:',
+    JSON.stringify(catchUpReport),
+  );
+}
 // DOUBLE_RESYNC_ASK: the host dropped the newest request, the guest dropped
 // the older one's answer, and a host state was applied all the same.
 const doubleResyncAskFailed =
@@ -2681,6 +2778,7 @@ const failed =
   linkFailed ||
   dropPeerFailed ||
   delaySyncAnswerFailed ||
+  catchUpFailed ||
   loseBeforeFallbackFailed ||
   doubleResyncAskFailed ||
   observersFailed ||
