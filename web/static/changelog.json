@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.26",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a paused auto-compare stops on leaving the match, the rollback button and its own button (#247)"
+      }
+    ]
+  },
+  {
     "version": "0.68.25",
     "date": "2026-11-15",
     "changes": [

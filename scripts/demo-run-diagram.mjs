@@ -13,14 +13,13 @@
  */
 import fs from 'node:fs';
 import { initialTransition, transition } from 'xstate';
-import { RUN_REGIONS, demoRunMachine, region, runStateName } from '../web/src/demo/run-state.ts';
+import { RUN_REGIONS, demoRunMachine, issuedCommands, region, runStateName } from '../web/src/demo/run-state.ts';
 
 const OUT = new URL('../docs/demo-run-machine.md', import.meta.url);
 
 // One sample of each event demo.js sends, labelled the way a reader would say it.
 const EVENTS = [
-  ['romLoaded', { type: 'romLoaded', engineAvailable: true }],
-  ['romLoaded, no engine script', { type: 'romLoaded', engineAvailable: false }],
+  ['engineStarted', { type: 'engineStarted' }],
   ['loaderInjected', { type: 'loaderInjected' }],
   ['loaderSettled', { type: 'loaderSettled' }],
   ['frame: menus', { type: 'frame', strict: false, inclusive: false }],
@@ -41,18 +40,28 @@ const EVENTS = [
 
 // What each event is, where demo.js sends it, and what it reads.
 const SENT = {
-  romLoaded: '`_loadRomFile`, after `_startEngine()`; whether `window.NetplayRollback` is there',
-  loaderInjected: "`ensureEmulatorBooted`'s `injectLoader`, after the loader script is on the page",
+  engineStarted: '`_startEngine`, once `NetplayRollback.init` has returned',
+  loaderInjected: "`ensureEmulatorBooted`'s `injectLoader`, as it puts the loader script on the page",
   loaderSettled: '`markBootDone`: the loader finished, failed, or 30 s passed',
-  frame: "the end of every HUD frame; the engine's `isInMatch()` and `isInMatchOrPaused()`",
+  frame: "every HUD frame, after the autopilot's check; the engine's `isInMatch()` and `isInMatchOrPaused()`",
   interacted: 'the latency slider, the controls button',
-  rollbackToggleClicked: 'the rollback button, after it stops auto-compare and before it switches',
-  modeSwitched: '`_switchMode`, when it sets the mode (at once, or once a replay ends); `KNDemo.setRollbackEnabled`',
+  rollbackToggleClicked: 'the rollback button',
+  modeSwitched:
+    '`_setRollbackEnabled`: `_switchMode` (at once, or once a replay ends), the engine start, `KNDemo.setRollbackEnabled`',
   pauseClicked: 'the Pause button; whether the engine has `pauseTick`',
   autoCompareClicked: 'the auto-compare button',
   autoStartDue: 'the timer set on entering a match, 600 ms later',
   stopClicked: 'the Stop button; whether `window.EJS_emulator` is there',
   reset: '`_resetDemo`: the Reset button, or the autopilot restarting the demo once',
+};
+
+/** A command as the page's handler gets it: `matchLeft(stopAutoCompare, rollbackChanged)`. */
+const showCommand = (command) => {
+  const { type, ...parts } = command;
+  const named = Object.entries(parts)
+    .filter(([, value]) => value === true)
+    .map(([name]) => name);
+  return Object.keys(parts).length === 0 ? type : `${type}(${named.join(', ')})`;
 };
 
 const INPUTS = [
@@ -65,6 +74,7 @@ const edges = new Map(); // "region from to label" -> { region, from, to, label,
 const tried = new Map(); // "region from label" -> Set of full-state keys where it was tried
 const fullStates = new Map(); // key -> { value, input }
 const leavingBy = new Map(); // label -> { label, seen: Set of full-state keys }
+const issued = new Map(); // "label commands" -> { label, commands, seen: Set of full-state keys }
 const triedEverywhere = new Map(); // label -> Set of full-state keys
 for (const [inputName, input] of INPUTS) {
   const [first] = initialTransition(demoRunMachine, input);
@@ -81,8 +91,14 @@ for (const [inputName, input] of INPUTS) {
       met.set(name, set.add(region(from.value, name)));
     }
     for (const [label, event] of EVENTS) {
-      const [to] = transition(demoRunMachine, from, event);
+      const [to, effects] = transition(demoRunMachine, from, event);
       const toName = runStateName(to.value);
+      const commands = issuedCommands(effects).map(showCommand).join(', ');
+      if (commands) {
+        const entry = issued.get(`${label} ${commands}`) ?? { region: '', label, commands, seen: new Set() };
+        entry.seen.add(key);
+        issued.set(`${label} ${commands}`, entry);
+      }
       triedEverywhere.set(label, (triedEverywhere.get(label) ?? new Set()).add(key));
       for (const name of RUN_REGIONS) {
         const triedKey = `${name} ${region(from.value, name)} ${label}`;
@@ -132,6 +148,8 @@ const when = (edge) => {
   return notes.length ? `${edge.label} (${notes.join(', ')})` : edge.label;
 };
 
+const eventIndex = (label) => EVENTS.findIndex(([name]) => name === label);
+
 const node = (name, state) => `${name}_${state}`;
 const arrows = new Map(); // "from to" -> labels
 for (const edge of edges.values()) {
@@ -144,7 +162,7 @@ const ORDER = {
   loader: ['none', 'loading', 'done'],
   match: ['menus', 'playing', 'gamePaused'],
   tick: ['running', 'paused'],
-  autoCompare: ['off', 'running', 'paused', 'runningUnpausable'],
+  autoCompare: ['off', 'running', 'paused'],
   mode: ['rollback', 'lockstep'],
   interaction: ['untouched', 'touched'],
 };
@@ -155,9 +173,9 @@ const lines = [
   'Generated from `web/src/demo/run-state.ts` by `node scripts/demo-run-diagram.mjs`. Do not edit by',
   'hand; `npm run check` fails when it is out of date.',
   '',
-  'What the demo page (`demo.html`) is doing, one region per part of it. Nothing uses it yet:',
-  '`web/static/demo.js` keeps its own flags and sends the machine what happened at the end of each',
-  'handler, and the flags are compared with the machine after every event (observing).',
+  'What the demo page (`demo.html`) is doing, one region per part of it. `web/static/demo.js` keeps no',
+  'flags for these: it sends the machine what happened and reads its state from it, and does what',
+  'the machine issues (the commands below) when it issues it.',
   '',
   '```mermaid',
   'flowchart LR',
@@ -184,17 +202,26 @@ const lines = [
   'reload, and no event changes anything after it. Stop leaves only once the loader is on the page',
   '(or EmulatorJS is); before that it counts as a touch.',
   '',
+  'The commands each event issues, in the order the page runs them (a part named in brackets is',
+  'true; the others are false):',
+  '',
+  '| Event | Commands |',
+  '|---|---|',
+  ...[...issued.values()]
+    .sort((a, b) => eventIndex(a.label) - eventIndex(b.label) || a.commands.localeCompare(b.commands))
+    .map((entry) => `| ${when(entry)} | \`${entry.commands}\` |`),
+  '',
+  '`switchMode` comes back as `modeSwitched` once the page has switched (at once, or once a replay',
+  'ends); its `applyMode` hands the mode to the engine and the button.',
+  '',
   'Events and where `demo.js` sends them:',
   '',
   '| Event | Sent from |',
   '|---|---|',
   ...Object.entries(SENT).map(([event, from]) => `| \`${event}\` | ${from} |`),
   '',
-  'Two states are there because the code reaches them, not because it should:',
-  '`autoCompare.paused` is not left by leaving the match or by the rollback button (auto-compare',
-  'stops only when its timer runs, and the Pause button clears the timer), and',
-  '`autoCompare.runningUnpausable` is a restart from `paused` that keeps the pause mark, after which',
-  'Pause no longer pauses auto-compare.',
+  '`autoCompare.paused` is auto-compare with the Pause button down: still on, so its button, the',
+  'rollback button and leaving the match stop it as they stop it running.',
   '',
 ];
 const out = lines.join('\n');
