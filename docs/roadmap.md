@@ -450,6 +450,16 @@ as not modelled are now modelled.
   (`_resyncAfterLostHost`), as a running player does after a reconnect.
   The resync is the regular one, with its own deadline; none of this ran
   in the two-player and lifecycle runs, which lose no channel mid-serve.
+- That marker was first cleared when the request was sent, so a request
+  that went unanswered (the host's rate limit, a failed capture, a lost
+  answer) left the joiner behind the host for good
+  (`late_join_pause_marker_at_send`, `resyncRequestUnansweredTest`, 8
+  steps). It now stays until a host state is applied (`applySyncState`);
+  the request's deadline (`RESYNC_REQUEST_TIMEOUT_MS`, 8 s, longer than the
+  host's 5 s rate limit) asks again, and after
+  `LATE_JOIN_LOST_HOST_MAX_ASKS` (3) unanswered asks the joiner gives up
+  visibly (`LATE-JOIN-LOST-HOST-GIVEUP`, client event
+  `late-join-lost-host-giveup`).
 - Still not modelled: a "ready" that arrives before the joiner's channel
   has ever opened (the host resumes without the joiner and makes it a
   player when the channel opens), and a channel lost by a joiner who is

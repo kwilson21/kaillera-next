@@ -85,8 +85,8 @@ expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
 # check-specs.sh samples today's holdToday from `initLobby`.
 
 PAUSE=specs/late_join_pause.qnt
-verify "$PAUSE" late_join_pause_current holdBeforeTheResyncFix
-verify "$PAUSE" late_join_pause_fixed allHold
+verify "$PAUSE" late_join_pause_current allHold
+verify "$PAUSE" late_join_pause_marker_at_send holdBeforeTheResyncFix
 verify "$PAUSE" late_join_pause_before_resync holdBeforeTheResyncFix
 expect_violation "$PAUSE" late_join_pause_before hostPauseHasADeadline
 expect_violation "$PAUSE" late_join_pause_host_side guestPauseHasADeadline
@@ -99,9 +99,9 @@ expect_violation "$PAUSE" late_join_pause_host_side aRepeatedRequestKeepsTheDead
 # a counterexample 7 steps long (ask, serve, send, lose the channel, load,
 # reopen, ready), beyond this bound;
 # joinerLosesTheHostAfterTheStateIsSentTest and
-# timerFiresWhileTheStateIsOnItsWayTest hold it. On late_join_pause_current
-# its counterexample (the same and an unanswered request) is 8 steps long;
-# resyncRequestUnansweredTest holds it.
+# timerFiresWhileTheStateIsOnItsWayTest hold it. On
+# late_join_pause_marker_at_send its counterexample (the same and an
+# unanswered request) is 8 steps long; resyncRequestUnansweredTest holds it.
 
 FLOW=specs/resync_flow.qnt
 verify "$FLOW" resync_flow_current allHold
