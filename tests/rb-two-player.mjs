@@ -230,16 +230,23 @@
  *     the input was dropped and the frames after the guest's last applied
  *     state match (the host's reset on open makes the hole stall and be
  *     asked for, and the ask escalates).
- *   PAST_WINDOW_INPUT=1   A third of the way into the battle the host's
+ *   ROLLBACK_AT_EDGE=1   A third of the way into the battle the host's
  *     input is held at nothing for a second, then set to a button for frame
  *     F onward, so the guest predicts F wrong. The guest page holds the
  *     host's input for F (as a packet and inside any later packet's
- *     redundancy) until the guest is past its rollback window for F, then
- *     takes it in: a misprediction too deep to roll back (C's
- *     DEEP-MISPREDICT-SKIP). On main nothing corrects it. Fails unless the
- *     hold landed (the C log has the skip), the guest logged
- *     INPUT-PAST-WINDOW-MISMATCH, a state was applied after it, and the
- *     frames after that state match.
+ *     redundancy) until the guest stalls at its rollback window's edge for
+ *     F (depth 7, the deepest C rolls back), then takes it in. Fails unless C
+ *     rolled F back at depth 5 or more, with no DEEP-MISPREDICT-SKIP or
+ *     FAILED-ROLLBACK, and the frames match: the deepest correctable
+ *     misprediction, on main as on the fix.
+ *   PAST_WINDOW_FORCED=1   As ROLLBACK_AT_EDGE, but a test-only switch
+ *     (window.__test_runPastEdgeFor) lets the guest run past the edge stall
+ *     for F, and the input is taken in three frames past the window: a
+ *     misprediction too deep to roll back (C's DEEP-MISPREDICT-SKIP). The
+ *     edge stall guards this in normal play; only this forced step reaches
+ *     it. On main (with the switch alone) nothing corrects it. Fails unless
+ *     the C log has the skip, the guest logged INPUT-PAST-WINDOW-MISMATCH, a
+ *     state was applied after it, and the frames after that state match.
  *   DROP_PEER_MS=<n>   A third of the way into the battle, the guest's page
  *     closes its RTCPeerConnection to the host (pc.close() on the engine's
  *     peer entry for slot 0, KNState.peers), and the WebRTC signaling between
@@ -704,17 +711,26 @@ if (ASK_UNANSWERED_PHANTOM && !HEAL_BOTH_SIDES) {
 }
 // After the drop, how long the host's asks, a stall and a resync may take.
 const ASK_PHANTOM_RECOVER_MS = 30000;
-// PAST_WINDOW_INPUT: one real host input held until the guest is past its rollback window.
-const PAST_WINDOW_INPUT = process.env.PAST_WINDOW_INPUT === '1';
-// The engine's visible rollback cap (KN_MAX_VISIBLE_ROLLBACK_DEPTH): a frame
-// further back than this cannot be rolled back; the held input is let go
-// two frames past it.
-const PAST_WINDOW_RELEASE_AFTER = 7 + 2;
+// ROLLBACK_AT_EDGE / PAST_WINDOW_FORCED: one real host input held until the
+// guest is at (or, forced, past) its rollback window's edge.
+const ROLLBACK_AT_EDGE = process.env.ROLLBACK_AT_EDGE === '1';
+const PAST_WINDOW_FORCED = process.env.PAST_WINDOW_FORCED === '1';
+const PAST_WINDOW_INPUT = ROLLBACK_AT_EDGE || PAST_WINDOW_FORCED;
+const PAST_KNOB = ROLLBACK_AT_EDGE ? 'ROLLBACK_AT_EDGE' : 'PAST_WINDOW_FORCED';
+if (ROLLBACK_AT_EDGE && PAST_WINDOW_FORCED) {
+  console.log('ROLLBACK_AT_EDGE and PAST_WINDOW_FORCED are mutually exclusive');
+  process.exit(1);
+}
+// The engine's visible rollback cap (KN_MAX_VISIBLE_ROLLBACK_DEPTH). Input F
+// is applied at frame F + delay: the edge stall holds the guest at depth 7;
+// forced past it, the input is let go at depth 10.
+const ROLLBACK_CAP = 7;
+const PAST_WINDOW_FORCED_DEPTH = ROLLBACK_CAP + 3;
 const PAST_WINDOW_RECOVER_MS = 30000;
 // Main's rollback input-stall deadline (MAX_STALL_MS + RESEND_TIMEOUT_MS).
 const STALL_DEADLINE_MS = 5000;
 const FREEZE_LIKE =
-  FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || SYNC_FOLLOW_UP !== '' || HEAL_BOTH_SIDES || PAST_WINDOW_INPUT;
+  FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || SYNC_FOLLOW_UP !== '' || HEAL_BOTH_SIDES || PAST_WINDOW_FORCED;
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -945,7 +961,7 @@ if (
     ASK_UNANSWERED_STALL_MS > 0 ||
     CATCH_UP_MS > 0)
 ) {
-  console.log('PAST_WINDOW_INPUT is mutually exclusive with the other fault knobs');
+  console.log(`${PAST_KNOB} is mutually exclusive with the other fault knobs`);
   process.exit(1);
 }
 if (
@@ -2682,14 +2698,22 @@ if (inBattle) {
         return d;
       };
     }, pastWindow.frame);
-    console.log(`PAST_WINDOW_INPUT: the host presses a button from frame ${pastWindow.frame}; the guest holds it`);
-    // Release once the guest is past its rollback window for F.
+    console.log(`${PAST_KNOB}: the host presses a button from frame ${pastWindow.frame}; the guest holds it`);
+    // Forced: the edge stall lets F through (test-only switch).
+    if (PAST_WINDOW_FORCED)
+      await guest.evaluate((F) => {
+        window.__test_runPastEdgeFor = F;
+      }, pastWindow.frame);
+    // Release at the edge (the guest stalls there) or, forced, past it.
+    const depth = PAST_WINDOW_FORCED ? PAST_WINDOW_FORCED_DEPTH : ROLLBACK_CAP;
     const until = Date.now() + 60000;
     while (Date.now() < until) {
-      const gf = await guest.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
-      if (gf >= pastWindow.frame + PAST_WINDOW_RELEASE_AFTER) break;
+      const hud = await guest.evaluate(() => window.NetplayRollback.getHudCounters());
+      if (hud.currentFrame >= pastWindow.frame + (hud.delay ?? 0) + depth) break;
       await guest.waitForTimeout(20);
     }
+    // At the edge, let the stall take hold before the input comes.
+    if (ROLLBACK_AT_EDGE) await guest.waitForTimeout(500);
     await host.evaluate(() => {
       window.__knInputOverride = null;
     });
@@ -2698,6 +2722,7 @@ if (inBattle) {
       const frame = window.NetplayRollback.getHudCounters().currentFrame;
       hold.frame = -1;
       window.KNShared.decodeInput = hold.decode;
+      window.__test_runPastEdgeFor = undefined;
       // Hand the held packet to the channel it would have come in on.
       const host = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
       if (hold.packet && host?.dc?.onmessage) host.dc.onmessage({ data: hold.packet });
@@ -2706,8 +2731,9 @@ if (inBattle) {
     pastWindow.held = release.held;
     pastWindow.releasedAt = release.frame;
     pastWindow.released = release.delivered;
-    console.log(`PAST_WINDOW_INPUT: let go at guest frame ${release.frame}:`, JSON.stringify(release));
-    await waitForLine(guest, pastWindow.guestAt.seq, /sync #\d+ applied/, PAST_WINDOW_RECOVER_MS);
+    console.log(`${PAST_KNOB}: let go at guest frame ${release.frame}:`, JSON.stringify(release));
+    if (PAST_WINDOW_FORCED)
+      await waitForLine(guest, pastWindow.guestAt.seq, /sync #\d+ applied/, PAST_WINDOW_RECOVER_MS);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (ASK_UNANSWERED_STALL_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -4487,9 +4513,10 @@ if (ASK_UNANSWERED_PHANTOM)
       : 'ASK_UNANSWERED_PHANTOM: the hole ended in a state both pages agree on:',
     JSON.stringify(askPhantomReport),
   );
-// PAST_WINDOW_INPUT: the held input came past the window and different
-// (C's DEEP-MISPREDICT-SKIP), the guest escalated, and a state applied
-// after it left the pages agreeing.
+// ROLLBACK_AT_EDGE: C rolled the held input back at the window's edge.
+// PAST_WINDOW_FORCED: it came past the window and different (C's
+// DEEP-MISPREDICT-SKIP), the guest escalated, and a state applied after it
+// left the pages agreeing.
 const pastWindowReport = (() => {
   if (!PAST_WINDOW_INPUT || !pastWindow.guestAt) return null;
   const guestLines = linesAfter(G.sync, pastWindow.guestAt.seq);
@@ -4497,7 +4524,13 @@ const pastWindowReport = (() => {
   const skipped = G.clog
     .split('\n')
     .filter((l) => new RegExp(`(DEEP-MISPREDICT-SKIP|FAILED-ROLLBACK) slot=0 f=${F} `).test(l));
+  const rolledBack = G.clog
+    .split('\n')
+    .map((l) => l.match(new RegExp(`MISPREDICTION slot=0 f=${F} .*depth=(\\d+)`)))
+    .filter(Boolean)
+    .map((m) => +m[1]);
   return {
+    rolledBackDepth: rolledBack.length ? Math.max(...rolledBack) : null,
     frame: F,
     held: pastWindow.held,
     releasedAt: pastWindow.releasedAt,
@@ -4510,23 +4543,35 @@ const pastWindowReport = (() => {
     comparedFrom: recoveredAt,
   };
 })();
-const pastWindowFailed =
-  PAST_WINDOW_INPUT &&
-  !(
-    pastWindowReport &&
-    pastWindowReport.released &&
-    pastWindowReport.skipped.length > 0 &&
-    pastWindowReport.mismatch.length > 0 &&
-    pastWindowReport.applied > 0 &&
-    recoveredAt > pastWindowReport.frame &&
-    gpMis === 0 &&
-    gsMis === 0
-  );
+const pastWindowFailed = ROLLBACK_AT_EDGE
+  ? !(
+      pastWindowReport &&
+      pastWindowReport.released &&
+      pastWindowReport.rolledBackDepth >= 5 &&
+      pastWindowReport.skipped.length === 0 &&
+      gpMis === 0 &&
+      gsMis === 0
+    )
+  : PAST_WINDOW_FORCED &&
+    !(
+      pastWindowReport &&
+      pastWindowReport.released &&
+      pastWindowReport.skipped.length > 0 &&
+      pastWindowReport.mismatch.length > 0 &&
+      pastWindowReport.applied > 0 &&
+      recoveredAt > pastWindowReport.frame &&
+      gpMis === 0 &&
+      gsMis === 0
+    );
 if (PAST_WINDOW_INPUT)
   console.log(
     pastWindowFailed
-      ? 'PAST_WINDOW_INPUT: not held past the window, not escalated, or the frames after the state differ:'
-      : 'PAST_WINDOW_INPUT: the late input escalated to a state both pages agree on:',
+      ? ROLLBACK_AT_EDGE
+        ? 'ROLLBACK_AT_EDGE: not rolled back at the edge, skipped, or the frames differ:'
+        : 'PAST_WINDOW_FORCED: not held past the window, not escalated, or the frames after the state differ:'
+      : ROLLBACK_AT_EDGE
+        ? 'ROLLBACK_AT_EDGE: rolled back at the edge and the frames match:'
+        : 'PAST_WINDOW_FORCED: the late input escalated to a state both pages agree on:',
     JSON.stringify(pastWindowReport),
   );
 const catchUpHoleFailed =

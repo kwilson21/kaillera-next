@@ -1771,6 +1771,11 @@
   // The oldest input from `slot` that can still be missing: nothing before
   // the rollback init or the last resync is waited for.
   const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
+  // Test only (tests/rb-two-player.mjs PAST_WINDOW_FORCED): the edge stall
+  // lets this one frame through, so a held input arrives past the rollback
+  // window and INPUT-PAST-WINDOW-MISMATCH, which that stall guards in normal
+  // play, is reached. Never set outside the harness.
+  const _testRunPastEdgeFrame = () => window.__test_runPastEdgeFor ?? -1;
   // After a reconnect reset: no input of that peer at or above the floor
   // has been taken in yet (one that has will be fed before the frame runs).
   const _awaitingFirstInput = (slot) => {
@@ -1787,6 +1792,7 @@
   // design until it is heard from (PEER-RECOVERED, then a resync).
   const _checkPredictedKnown = (peers, applyFrame) => {
     const windowEdge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+    if (windowEdge === _testRunPastEdgeFrame()) return;
     for (const p of peers) {
       if (_peerPhantom[p.slot]) continue;
       const floor = _inputFloor(p.slot);
@@ -15791,6 +15797,7 @@
             // the guest forward the input may never have been made.
             const gapAtEdge =
               RB_TRUE_ROLLBACK &&
+              windowEdge !== _testRunPastEdgeFrame() &&
               windowEdge >= _inputFloor(p.slot) &&
               windowEdge < peerFrame &&
               !_remoteInputs[p.slot]?.[windowEdge];

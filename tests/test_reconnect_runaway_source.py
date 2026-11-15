@@ -145,3 +145,17 @@ def test_every_frame_that_runs_is_checked_for_a_prediction_nothing_corrects():
     assert "PREDICTED-KNOWN f=" in check
     assert src.count("_checkPredictedKnown(rbInputPeers, rbApplyFrame);") == 1
     assert "predictedKnown: _predictedKnownCount," in src
+
+
+def test_the_forced_past_window_switch_is_test_only_and_narrow():
+    # PAST_WINDOW_FORCED: the harness lets one frame past the edge stall so
+    # INPUT-PAST-WINDOW-MISMATCH is reached; the stall guards it otherwise.
+    src = _src()
+    assert src.count("window.__test_runPastEdgeFor") == 1
+    assert (
+        "const _testRunPastEdgeFrame = () => window.__test_runPastEdgeFor ?? -1;" in src
+    )
+    # Read in exactly two places: the edge stall and the PREDICTED-KNOWN check.
+    assert src.count("_testRunPastEdgeFrame()") == 2
+    assert "windowEdge !== _testRunPastEdgeFrame() &&" in src
+    assert "if (windowEdge === _testRunPastEdgeFrame()) return;" in src

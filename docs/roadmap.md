@@ -524,7 +524,7 @@ Slice 1, the peer mesh and signaling:
   reconnect reset a frame now waits for the peer's first input
   (`specs/reconnect_inputs.qnt`), and every two-player run fails on a frame
   run on a prediction nothing corrects (`PREDICTED-KNOWN`). Driven by
-  `CATCH_UP_HOLE_MS`, `ASK_UNANSWERED_STALL_MS` (`ASK_UNANSWERED_ACKS`), `ASK_UNANSWERED_PHANTOM` and `PAST_WINDOW_INPUT`.
+  `CATCH_UP_HOLE_MS`, `ASK_UNANSWERED_STALL_MS` (`ASK_UNANSWERED_ACKS`), `ASK_UNANSWERED_PHANTOM`, `ROLLBACK_AT_EDGE` and `PAST_WINDOW_FORCED`.
 - Next, the receiver side the 100 ms resend masks: a page far behind drops
   a peer's inputs as too far ahead (`INPUT-OOR`) even on the reliable
   channel. #235 remembers them (`_inputDroppedAheadUpTo`) and asks for them
