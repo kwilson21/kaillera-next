@@ -196,7 +196,7 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
 for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
-  resync_flow_asked_from resync_flow_current; do
+  resync_flow_asked_from resync_flow_unnumbered resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
 # A guest stopped at its target has a deadline, a state no newer than the
@@ -214,8 +214,10 @@ $QUINT run "$FLOW" --main=resync_flow_any_answer --invariant=holdWithoutNumbers 
 # lateAnswerTest, lateAnswerAfterTheTargetDeadlineTest and
 # lateAnswerOverTheAwaitedOneTest hold the orderings). The second was
 # violated too while only the frame a request named was checked
-# (resync_flow_frame_named; immediateLateAnswerTest), and is by rule b
-# (resync_flow_asked_from; lateAnswerFromAfterTheAskTest).
+# (resync_flow_frame_named; immediateLateAnswerTest), is by rule b
+# (resync_flow_asked_from; lateAnswerFromAfterTheAskTest), and was while the
+# boot sync and the input stall's request went out with no number
+# (resync_flow_unnumbered; bootAnswerAfterANewerRequestTest).
 $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 # Rule a, not taken, holds them too; it drops the only state coming in
@@ -294,4 +296,43 @@ done
 # the settled point never runs ahead of the inputs still to be made (violated
 # while a new match kept the last one's, resync_mesh_kept).
 $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── Inputs on the unreliable channel, and the switch to the reliable one ────
+INPUTS=specs/input_transport.qnt
+$QUINT typecheck "$INPUTS"
+for variant in input_transport_before_ask input_transport_current input_transport_until_acked \
+  input_transport_resend_once input_transport_fixed; do
+  $QUINT test "$INPUTS" --main="$variant" --backend=typescript
+done
+# Today with the fix: every input the peer had not acked when the page
+# switched to the reliable channel reaches it without the peer asking, and
+# no input is lost for good. The first was violated while the switch let the
+# history go (input_transport_current; lostThenFallbackTest and
+# lostThenChannelClosesTest hold the orderings), and is with redundancy kept
+# until the ack instead (input_transport_until_acked;
+# stuckChannelBeyondTheCapTest). The second was violated before #235, when
+# the peer did not ask for a hole (input_transport_before_ask). The first is
+# violated too when a send that throws partway through the resend drops the
+# frames after it (input_transport_resend_once; resendFailsPartwayTest).
+$QUINT run "$INPUTS" --main=input_transport_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostForGood \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── A "now" resync request asked again at its deadline ─────────────────────
+REASK=specs/resync_reask.qnt
+$QUINT typecheck "$REASK"
+for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_fixed; do
+  $QUINT test "$REASK" --main="$variant" --backend=typescript
+done
+# With the fix: an owed resync is asked for again or given up visibly, the
+# deadline does not cut an answer being decoded, and the asks again are
+# bounded. Today the deadline let the request go and asked nothing
+# (resync_reask_current; lateAnswerBehindTest, lostRequestTest); asking again
+# without holding the deadline while an answer decodes cuts it
+# (resync_reask_unguarded; askAgainCutsTheDecodeTest), and the lifecycle
+# guard's timeout letting the request go forgets it again
+# (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest).
+$QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript

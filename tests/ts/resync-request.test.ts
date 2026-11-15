@@ -7,6 +7,8 @@ import {
   isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  resyncDeadlineStep,
+  type DeadlineStep,
   type LostHostStep,
 } from '../../web/src/resync-request.ts';
 
@@ -111,7 +113,33 @@ test('the lost-host step asks up to the bound, then gives up', () => {
   assert.deepEqual(steps, ['ask', 'ask', 'ask', 'giveUp', 'giveUp']);
 });
 
-// The engine's rules (web/static/netplay-rollback.js), copied as they are
+test('the deadline waits while an answer is coming, decoding, or not yet due', () => {
+  // requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHost, owed, asksAgain, max
+  assert.equal(resyncDeadlineStep(false, false, false, 0, 10000, 99999, 8000, false, true, 0, 2), 'noRequest');
+  assert.equal(resyncDeadlineStep(true, true, false, 0, 10000, 99999, 8000, false, true, 0, 2), 'wait');
+  assert.equal(resyncDeadlineStep(true, false, true, 9999, 10000, 99999, 8000, false, true, 0, 2), 'wait');
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 7999, 8000, false, true, 0, 2), 'wait');
+  // A decode past its grace no longer holds the deadline off (I1).
+  assert.equal(resyncDeadlineStep(true, false, true, 10000, 10000, 99999, 8000, false, true, 0, 2), 'askAgain');
+});
+
+test('at the deadline an owed resync is asked for again up to the bound, then given up', () => {
+  const steps: DeadlineStep[] = [];
+  for (let asks = 0; asks <= 3; asks++) {
+    steps.push(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, false, true, asks, 2));
+  }
+  assert.deepEqual(steps, ['askAgain', 'askAgain', 'stopAsking', 'stopAsking']);
+  // Nothing owed (a coordinated request): let go; the desync check asks again.
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, false, false, 0, 2), 'letGo');
+  // The late joiner's lost-host resync goes first, owed or not.
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, true, true, 0, 2), 'lostHost');
+  assert.equal(resyncDeadlineStep(true, false, false, 0, 10000, 8000, 8000, true, false, 5, 2), 'lostHost');
+});
+
+// The old-against-new record (CLAUDE.md): the rules the engine
+// (web/static/netplay-rollback.js) applied before it called these, deleted
+// from it in the change that made the proved functions decide. They agree
+// on every input below; nothing was meant to differ. Copied as they were
 // written there, over the engine's own variables.
 const engine = {
   ends: (answerFor: number, resyncRequestId: number, hostNumbersAnswers: boolean) =>
@@ -142,6 +170,28 @@ const engine = {
     if (inFlight) return 'inFlight';
     if (asks >= max) return 'giveUp';
     return 'ask';
+  },
+  // _checkResyncRequestDeadline: the returns and the step it computes.
+  deadline: (
+    inFlight: boolean,
+    answerComing: boolean,
+    decoding: boolean,
+    decodingForMs: number,
+    graceMs: number,
+    waitedMs: number,
+    timeoutMs: number,
+    lateJoinLostHost: boolean,
+    owedResync: boolean,
+    asksAgain: number,
+    max: number,
+  ): DeadlineStep => {
+    if (!inFlight) return 'noRequest';
+    if (answerComing || (decoding && decodingForMs < graceMs)) return 'wait';
+    if (waitedMs < timeoutMs) return 'wait';
+    if (lateJoinLostHost) return 'lostHost';
+    if (!owedResync) return 'letGo';
+    if (asksAgain >= max) return 'stopAsking';
+    return 'askAgain';
   },
 };
 
@@ -201,31 +251,60 @@ test("the proved rules agree with the engine's over a grid of inputs", () => {
       }
     }
   }
+  for (const out of BOOLS) {
+    for (const coming of BOOLS) {
+      for (const decoding of BOOLS) {
+        for (const decodingForMs of [0, 9999, 10000, 20000]) {
+          for (const waitedMs of [0, 7999, 8000, 30000]) {
+            for (const lostHost of BOOLS) {
+              for (const owed of BOOLS) {
+                for (const asks of [0, 1, 2, 3]) {
+                  const args = [
+                    out,
+                    coming,
+                    decoding,
+                    decodingForMs,
+                    10000,
+                    waitedMs,
+                    8000,
+                    lostHost,
+                    owed,
+                    asks,
+                    2,
+                  ] as const;
+                  assert.equal(resyncDeadlineStep(...args), engine.deadline(...args));
+                  cases++;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   assert.ok(cases > 1000);
 });
 
-test('the engine runs each proved rule beside its own and reports a difference', () => {
+test('the engine calls each proved rule and keeps no copy of its own', () => {
   const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
-  const observed = {
-    'ends-request': 'endsRequest',
-    'answers-an-older-request': 'answersAnOlderRequest',
-    'late-answer-behind': 'isLateAnswerBehind',
-    'keeps-awaited-answer': 'keepsAwaitedAnswer',
-    'late-join-lost-host': 'lateJoinLostHostStep',
-  };
-  for (const [what, name] of Object.entries(observed)) {
-    assert.ok(source.includes(`'${what}',`) || source.includes(`'${what}', `), `${what} is not compared`);
-    assert.ok(source.includes(`rules.${name}(`), `${name} is not called by the engine`);
+  for (const name of [
+    'endsRequest',
+    'answersAnOlderRequest',
+    'isLateAnswerBehind',
+    'keepsAwaitedAnswer',
+    'lateJoinLostHostStep',
+    'resyncDeadlineStep',
+  ]) {
+    assert.equal(source.split(`window.KNCore.resyncRequest.${name}(`).length - 1, 1, `${name} is not called once`);
   }
-  assert.ok(source.includes("window.KNEvent?.('resync-disagree', message, { old, next });"));
-  // Observing only: the engine's own rules are still the ones returned.
-  assert.ok(source.includes('answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers'));
-  assert.ok(source.includes('answerFor > 0 && answerFor !== _resyncRequestId'));
-  assert.ok(source.includes('(state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))'));
-  assert.ok(
-    source.includes('_answersAnOlderRequest(answerFor) && _pendingResyncState?.answerFor === _resyncRequestId'),
-  );
-  assert.ok(source.includes('if (!rules) return engineValue;'));
+  // The copies kept above (`engine`) are gone from the engine, and so is
+  // the observer that compared them.
+  assert.ok(!source.includes('answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers'));
+  assert.ok(!source.includes('answerFor > 0 && answerFor !== _resyncRequestId'));
+  assert.ok(!source.includes('(state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))'));
+  assert.ok(!source.includes('_pendingResyncState?.answerFor === _resyncRequestId'));
+  assert.ok(!source.includes("else if (_owedResyncAsksAgain >= RESYNC_MAX_ASKS_AGAIN) step = 'stopAsking';"));
+  assert.ok(!source.includes('_resyncObserve') && !source.includes('resync-disagree'));
 });
 
 test('the module is listed for the proofs', () => {

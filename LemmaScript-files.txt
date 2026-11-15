@@ -19,5 +19,7 @@ web/src/streaming/offer-gate.ts
 web/src/streaming/attempt.ts
 web/src/resync-request.ts
 web/src/lockstep-wait.ts
+web/src/play/game-start.ts
 web/src/sync-chunk-room.ts
 web/src/input-ask.ts
+web/src/input-resend.ts

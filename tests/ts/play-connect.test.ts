@@ -118,6 +118,65 @@ test('a refused join: watch a room that filled up, or say why', () => {
 
 // ── decisions, against the branches they restate ─────────────────────────────
 
+// onConnect's open-room callback in web/static/play.js before it asked connect.ts.
+const oldOpenRoomAnswer = (err: string | null | undefined, droppedAsHost: boolean) => {
+  const roomHandedOn = err === 'Room already exists' && droppedAsHost;
+  if (err === 'Not the owner' || roomHandedOn) return { kind: 'join-as-guest' };
+  if (err) return { kind: 'failed', message: `Failed to create room: ${err}` };
+  return { kind: 'opened' };
+};
+
+// Every answer the server sends to open-room (server/src/api/signaling.py), and some it does not.
+const OPEN_ROOM_ERRORS = [
+  null,
+  undefined,
+  '',
+  'Not the owner',
+  'Room already exists',
+  'Server is full',
+  'Rate limited',
+  'Not in room',
+  'Missing sessionid',
+  'Invalid room code',
+  'Invalid reconnect token',
+  'not the owner',
+  ' Not the owner',
+];
+
+test('open-room: every answer leads where the old branches led it', () => {
+  for (const err of OPEN_ROOM_ERRORS) {
+    for (const droppedAsHost of [true, false]) {
+      assert.deepEqual(
+        openRoomAnswer(err, droppedAsHost),
+        oldOpenRoomAnswer(err, droppedAsHost),
+        `${err} ${droppedAsHost}`,
+      );
+    }
+  }
+});
+
+// onConnect's join-room callback before it asked connect.ts: only a full room was watched instead.
+const oldJoinRefusalKind = (err: string): string => (err === 'Room is full' ? 'watch-instead' : 'failed');
+
+test('a refused join: only a room that filled up is watched instead, as before', () => {
+  for (const err of [
+    'Room is full',
+    'Room closed',
+    'Room not found',
+    'Wrong password',
+    'Room spectator limit reached',
+    'Spectator limit reached for your network',
+    'Rate limited',
+    'Not in room',
+    'Invalid room code',
+    'Invalid reconnect token',
+    'room is full',
+    '',
+  ]) {
+    assert.equal(joinRefusal(err, 'Ana closed the room.').kind, oldJoinRefusalKind(err), err);
+  }
+});
+
 test('a page becomes a spectator exactly when the old condition said so', () => {
   for (const wantsToWatch of [true, false]) {
     for (const holdsSlot of [true, false]) {

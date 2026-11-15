@@ -125,7 +125,9 @@ kaillera-next/
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
 │   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
-│   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); not wired into the engine yet
+│   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); driven from the engine (peer-driver.ts), being wired in to decide one rule at a time
+│   │   ├── peer-driver.ts       # hands the rollback engine's events to one peer-connection.ts machine per other player
+│   │   ├── attempt-id.ts        # the `attemptId` {page, attempt} every webrtc-signal carries: which connection attempt it belongs to
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
 │   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing); offer-gate.ts decides, for the engine, that a guest or spectator takes an offer only from slot 0; attempt.ts decides which connection a signal belongs to and reoffer.ts is the host's deadline to offer again (specs/streaming_connection.qnt)
@@ -336,8 +338,25 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   an error at startup when the core bundle is missing). Never commit them.
   The Docker image, CI and the landing and demo builds build them from
   `package-lock.json`, so the bytes are the same everywhere. Migration stages
-  are in `docs/roadmap.md`. A module moves from observing to deciding only after
-  production shows it agrees with the code it replaces.
+  are in `docs/roadmap.md`. **New logic decides; nothing observes.** A change
+  that moves a decision into `web/src` makes the page or engine call it and
+  deletes the copy it replaces, in the same PR. There is no phase where the
+  new code runs beside the old and reports disagreement: the site has too
+  little traffic for production reports to show anything. The evidence comes
+  before the merge instead: an old-against-new test that runs both on the
+  same inputs before the old one is deleted (like
+  `tests/ts/demo-page.test.ts`), the proofs and models, and runs of the engine
+  the logic belongs to, with a fault mode for each rare path: for the rollback
+  engine `tests/rb-two-player.mjs` (`JITTER=20`) and the lifecycle tests; for
+  the streaming engine `tests/test_streaming_*.py` (a painted canvas in place
+  of the emulator) and a real-ROM streaming run (`mode=streaming`, `KN_ROM`).
+  A rule no run reaches gets a fault mode or a harness step before it decides.
+  Where the new logic is meant to differ from the old (a fix the model shows,
+  like the per-peer machine offering only from the lower slot), the
+  old-against-new test asserts that difference and the PR names its model
+  scenario; any other difference blocks the change. The modules that still observe (they send
+  `*-disagree` or `protocol-mismatch` reports) are being switched to deciding
+  the same way; don't add a new one.
 - **Model and prove before you patch state logic.** This applies to plans
   as much as to code: a plan for anything involving state, ordering or
   reconnects names the model, the invariant and the diagram it will change
@@ -371,6 +390,7 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   used to accept stick values in the same zone without a rollback; #14 made
   matching exact. Don't reintroduce a tolerance: filter jitter at the input
   source instead (`KNShared.createStickDeadband`).
+- **Wire in what makes the netcode more robust.** A modelled fix (a machine or rule built to a spec's `*_fixed` variant) is wired in to decide, not left beside the engine or deleted.
 
 ## Dev environment
 

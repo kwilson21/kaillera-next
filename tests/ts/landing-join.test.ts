@@ -111,12 +111,12 @@ test('every kind of open room reads the same as it did, for a player link and a 
           [0, 0],
         ] as const) {
           for (const host_name of ['Kaz', '', '  ', ' Agent 21 ', null]) {
+            // Games the site lists. An unlisted one is no longer taken for
+            // SSB64 (the test after this one).
             for (const game of [
               { game_id: 'ssb64', romName: null },
               { game_id: 'smash-remix', romName: 'Smash Remix 1.5.2' },
-              { game_id: 'mk64', romName: 'Mario Kart 64' },
-              { game_id: null, romName: null },
-              { game_id: null, romName: '' },
+              { game_id: 'ssb64', romName: 'Super Smash Bros. (USA).z64' },
             ]) {
               const pair = invite(search, { wasm });
               pair.serve(awake({ status: 200, json: room({ status, player_count, max_players, host_name, ...game }) }));
@@ -129,17 +129,12 @@ test('every kind of open room reads the same as it did, for a player link and a 
       }
     }
   }
-  assert.equal(compared, 2 * 2 * 2 * 8 * 5 * 5);
+  assert.equal(compared, 2 * 2 * 2 * 8 * 5 * 3);
 });
 
 test('the invite view says what the old page put on screen', async () => {
   for (const spectate of [false, true]) {
-    for (const fields of [
-      {},
-      { player_count: 4 },
-      { status: 'playing', host_name: '' },
-      { game_id: 'other', romName: 'GoldenEye 007' },
-    ]) {
+    for (const fields of [{}, { player_count: 4 }, { status: 'playing', host_name: '' }]) {
       const page = new FakePage({
         file: 'join.html',
         url: `${ORIGIN}/join?room=KAZ64${spectate ? '&spectate=1' : ''}`,
@@ -168,6 +163,30 @@ test('the invite view says what the old page put on screen', async () => {
       assert.ok(page.el('inv-facts').textContent.endsWith(factsText(answer)));
     }
   }
+});
+
+const answerOf = (fields: RoomFields) => {
+  const answer = room(fields);
+  assert.ok(isRoomAnswer(answer));
+  return answer;
+};
+
+test('a game the site does not list is named by its ROM and is not taken for SSB64', () => {
+  // The old page called every unlisted room "Super Smash Bros. 64" when it had
+  // no ROM name, and asked for an SSB64 ROM whatever the game was.
+  for (const spectate of [false, true]) {
+    const named = inviteView(answerOf({ game_id: 'other', romName: 'GoldenEye 007' }), spectate);
+    assert.equal(named.title, 'GoldenEye 007');
+    assert.ok(named.joinHint.startsWith("needs your own copy of the host's ROM"), named.joinHint);
+    for (const game_id of [null, '']) {
+      const unnamed = inviteView(answerOf({ game_id, romName: null }), spectate);
+      assert.equal(unnamed.title, 'A retro game');
+      assert.ok(!unnamed.joinHint.includes('SSB64'), unnamed.joinHint);
+    }
+  }
+  const listed = inviteView(answerOf({ game_id: 'smash-remix', romName: 'whatever.z64' }), false);
+  assert.equal(listed.title, 'Smash Remix');
+  assert.equal(listed.joinHint, 'needs your own Smash Remix ROM (.z64 / .n64 / .v64 / .zip)');
 });
 
 test('a room on screen is looked up again every 15 s, and follows what the lookups say', async () => {

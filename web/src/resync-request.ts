@@ -2,20 +2,21 @@
  * The decisions a guest makes about its resync requests: which state ends
  * the request that is out, which state answers a request given up on, when
  * such a late answer is dropped or kept out of the way of the awaited one,
- * and what a late joiner that lost its channel to the host does next. Each
- * is the rule the engine applies today (web/static/netplay-rollback.js:
+ * what a late joiner that lost its channel to the host does next, and what
+ * a request's deadline does. The engine (web/static/netplay-rollback.js:
  * _endsResyncRequest, _answersAnOlderRequest, _isLateAnswerBehind,
- * _keepsAwaitedAnswer, _resyncAfterLostHost), written as a function with a
- * contract so the rule can be proved and then called from one place.
+ * _keepsAwaitedAnswer, _resyncAfterLostHost, _checkResyncRequestDeadline)
+ * calls these through window.KNCore.resyncRequest; they decide, and its own
+ * copies are gone (tests/ts/resync-request.test.ts keeps them, checked
+ * against these over a grid of inputs).
  *
  * Requests are numbered from 1, per match; the state that answers one
  * carries its number, and a state the host sent for its own reasons carries
  * 0. The orderings these rules are used in are model-checked in
  * specs/resync_flow.qnt (onlyItsAnswerEndsARequest,
  * aLateAnswerDoesNotTakeTheGuestBack, theAwaitedAnswerIsNotLost) and
- * specs/late_join_pause.qnt (aJoinerIsNotMadeAPlayerBehindTheHost).
- * Nothing here changes behaviour: the engine runs these beside its own rules
- * and reports a difference as a `resync-disagree` client event.
+ * specs/late_join_pause.qnt (aJoinerIsNotMadeAPlayerBehindTheHost) and
+ * specs/resync_reask.qnt (anOwedResyncIsNotForgotten).
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */
@@ -162,4 +163,74 @@ export function lateJoinLostHostStep(
   if (requestOut) return 'inFlight';
   if (asks >= maxAsks) return 'giveUp';
   return 'ask';
+}
+
+/**
+ * What the resync request's deadline does on a tick. `noRequest`: no
+ * request is out. `wait`: the request is out and its answer is arriving, held, or being
+ * decoded, or its time has not run out. Once it has run out the request is
+ * let go, and then: `lostHost`, the late joiner's lost-host step decides
+ * (bounded there); `askAgain`, a "now" resync is owed and is asked for again;
+ * `stopAsking`, it was asked for again `maxAsksAgain` times: stop,
+ * visibly;
+ * `letGo`, nothing is owed (a coordinated request: the desync check asks
+ * again).
+ */
+export type DeadlineStep = 'noRequest' | 'wait' | 'lostHost' | 'askAgain' | 'stopAsking' | 'letGo';
+
+/**
+ * The resync request's deadline (specs/resync_reask.qnt; I1).
+ *
+ * A "now" request (a reconnect, a network change, a tab shown again, a
+ * missing delta base, the socket fallback) is sent because the guest's state
+ * is known to be wrong. The host drops a request inside its 5 s rate limit
+ * without a word, and drops nothing it has not received, and the guest drops
+ * an older request's answer that would take it back: the request can go
+ * unanswered. Its deadline asks again, at most `maxAsksAgain` times
+ * (anOwedResyncIsNotForgotten). It does not count while an answer is being
+ * decoded, for at most `graceMs` (theDecodedAnswerIsNotCut).
+ *
+ * @param requestOut     a resync request is out
+ * @param answerComing   its answer is arriving or held, or a coordinated target is set
+ * @param decoding       an answer is being decoded
+ * @param decodingForMs  how long the newest decode has run
+ * @param graceMs        the most the deadline waits for a decode
+ * @param waitedMs       how long since the request was sent
+ * @param timeoutMs      the request's deadline
+ * @param lostHostOwed   the late joiner's lost-host resync is owed
+ * @param owed           a "now" resync was asked for and none applied since
+ * @param asksAgain      asks sent again for it
+ * @param maxAsksAgain   the most asks sent again
+ */
+//@ requires asksAgain >= 0 && maxAsksAgain >= 1
+//@ ensures !requestOut ==> \result === "noRequest"
+//@ ensures requestOut && answerComing ==> \result === "wait"
+//@ ensures requestOut && decoding && decodingForMs < graceMs ==> \result === "wait"
+//@ ensures requestOut && waitedMs < timeoutMs ==> \result === "wait"
+//@ ensures \result === "lostHost" ==> lostHostOwed
+//@ ensures \result === "askAgain" ==> owed && !lostHostOwed && asksAgain < maxAsksAgain
+//@ ensures \result === "stopAsking" ==> owed && !lostHostOwed && asksAgain >= maxAsksAgain
+//@ ensures \result === "letGo" ==> !owed && !lostHostOwed
+//@ ensures requestOut && !answerComing && !(decoding && decodingForMs < graceMs) && waitedMs >= timeoutMs ==> \result !== "wait" && \result !== "noRequest"
+export function resyncDeadlineStep(
+  requestOut: boolean,
+  answerComing: boolean,
+  decoding: boolean,
+  decodingForMs: number,
+  graceMs: number,
+  waitedMs: number,
+  timeoutMs: number,
+  lostHostOwed: boolean,
+  owed: boolean,
+  asksAgain: number,
+  maxAsksAgain: number,
+): DeadlineStep {
+  if (!requestOut) return 'noRequest';
+  if (answerComing) return 'wait';
+  if (decoding && decodingForMs < graceMs) return 'wait';
+  if (waitedMs < timeoutMs) return 'wait';
+  if (lostHostOwed) return 'lostHost';
+  if (!owed) return 'letGo';
+  if (asksAgain >= maxAsksAgain) return 'stopAsking';
+  return 'askAgain';
 }

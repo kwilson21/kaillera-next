@@ -161,6 +161,10 @@ resync_flow() {
   expect_violation "$FLOW" resync_flow_any_answer aLateAnswerDoesNotTakeTheGuestBack
   expect_violation "$FLOW" resync_flow_frame_named aLateAnswerDoesNotTakeTheGuestBack
   expect_violation "$FLOW" resync_flow_asked_from aLateAnswerDoesNotTakeTheGuestBack
+  # Six steps too: the boot sync asks with no number, the host answers, the
+  # guest moves on and asks again, and the unnumbered answer is applied
+  # behind it (bootAnswerAfterANewerRequestTest).
+  expect_violation "$FLOW" resync_flow_unnumbered aLateAnswerDoesNotTakeTheGuestBack
   # Rule a, not taken, holds them too (onlyStateComingTest shows its cost).
   verify "$FLOW" resync_flow_drop_older allHold
   # The counterexample to theAwaitedAnswerIsNotLost on resync_flow_any_answer
@@ -218,11 +222,37 @@ resync_mesh() {
   expect_violation "$MESH" resync_mesh_kept settledPointIsNotAhead
 }
 
+input_transport() {
+  local INPUTS=specs/input_transport.qnt
+  verify "$INPUTS" input_transport_fixed allHold
+  verify "$INPUTS" input_transport_current noInputIsLostForGood
+  # Inputs lost on the unreliable channel, then the switch: 3 to 5 steps.
+  expect_violation "$INPUTS" input_transport_current unackedInputsAreSentAgainAtTheSwitch
+  expect_violation "$INPUTS" input_transport_until_acked unackedInputsAreSentAgainAtTheSwitch
+  # A resend cut short by a failed send, its rest dropped: 4 steps.
+  expect_violation "$INPUTS" input_transport_resend_once unackedInputsAreSentAgainAtTheSwitch
+  expect_violation "$INPUTS" input_transport_before_ask noInputIsLostForGood
+}
+
+resync_reask() {
+  local REASK=specs/resync_reask.qnt
+  # A lost request asked again at its deadline twice and then given up: 10 steps.
+  verify "$REASK" resync_reask_fixed allHold init 10
+  verify "$REASK" resync_reask_unguarded anOwedResyncIsNotForgotten
+  # A "now" request lost, then its deadline: 3 steps. The deadline during
+  # the decode of its answer: 5 steps.
+  expect_violation "$REASK" resync_reask_current anOwedResyncIsNotForgotten
+  expect_violation "$REASK" resync_reask_current theDecodedAnswerIsNotCut
+  expect_violation "$REASK" resync_reask_unguarded theDecodedAnswerIsNotCut
+  # The lifecycle guard's timeout letting the ask again go: 5 steps.
+  expect_violation "$REASK" resync_reask_guard_lets_go anOwedResyncIsNotForgotten
+}
+
 # Every group, in the order a local run takes them.
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
-  tick_deadlines resync_inputs resync_mesh
+  tick_deadlines resync_inputs resync_mesh input_transport resync_reask
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -234,7 +264,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh"   # ~6.5 min
   "peer_identity rom_transfer peer_connection"                    # ~6.5 min
-  "late_join_pause resync_inputs"                                 # ~4 min
+  "late_join_pause resync_inputs input_transport resync_reask"    # ~5.5 min
 )
 
 # Each group is in exactly one shard, and each shard names only groups.
