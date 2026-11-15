@@ -82,7 +82,6 @@ kaillera-next/
 │   ├── demo.html            # interactive rollback demo (user-supplied ROM required)
 │   ├── error.html           # error/fallback page
 │   └── static/
-│       ├── landing.js           # front page: board poll, waking state, header marks
 │       ├── landing.css          # front page styles (direction A tokens)
 │       ├── play.css             # play page styles (room overlay tokens, direction A)
 │       ├── admin.css            # admin dashboard styles
@@ -92,10 +91,10 @@ kaillera-next/
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
-│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming
-│       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
+│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming, except which offers a guest takes, which it asks web/src/streaming (`signalGate`)
+│       ├── switch2-usb.js       # starts the WebUSB handshake that wakes the Switch 2 Pro Controller (window.Switch2USB) from web/src/page/switch2-usb.ts
 │       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
-│       ├── virtual-gamepad.js   # on-screen touch controls for mobile
+│       ├── virtual-gamepad.js   # starts the on-screen touch controls (window.VirtualGamepad) from web/src/page/virtual-gamepad/
 │       ├── kn-audio.js          # starts the engine's audio pipeline (window.KNAudio) from web/src/page/audio.ts
 │       ├── kn-capture.js        # starts the diagnostic-image capture policy (window.KNCapture) from web/src/page/capture.ts
 │       ├── kn-vision-client.js  # starts the desync-vision client (window.KNVision) from web/src/page/vision-client.ts
@@ -103,16 +102,17 @@ kaillera-next/
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
-│       ├── demo.js              # demo page orchestrator (fake peer + menu autopilot)
-│       ├── fake-peer.js         # synthetic P2 for the demo page (simulated input/jitter)
-│       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo (reads RDRAM menu state)
-│       ├── rollback-timeline.js # demo page's live rollback-metrics HUD
-│       ├── feedback.js          # in-app feedback collection
-│       ├── version.js           # version display + changelog modal
+│       ├── demo.js              # demo page orchestrator (emulator boot, engine start, fake peer + menu autopilot wiring); its options, network settings, HUD text and menu script are web/src/demo
+│       ├── fake-peer.js         # starts the demo page's synthetic P2 (window.KNFakePeer) from web/src/page/fake-peer.ts
+│       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo and the two-player test (window.KNMenuAutopilot) from web/src/page/menu-autopilot.ts
+│       ├── rollback-timeline.js # demo page's live rollback-metrics HUD (window.KNRollbackTimeline) from web/src/page/rollback-timeline.ts
+│       ├── feedback.js          # in-app feedback collection (window.KNFeedback); starts web/src/site/feedback.ts
+│       ├── version.js           # version display + changelog modal; starts web/src/site/version.ts
 │       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
 │       ├── dist/kn-core.js       # built from web/src by `npm run build`; build output, not in git (the Docker image and CI build it)
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
+│       ├── dist/kn-landing.js    # the front page's own small bundle: board poll, waking state, header marks
 │       ├── dist/kn-join.js       # the invite page's own small bundle: room lookup, full/closed/in-app states
 │       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage, window.KNSite
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
@@ -126,21 +126,23 @@ kaillera-next/
 │   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); not wired into the engine yet
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
-│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing)
+│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing); offer-gate.ts decides, for the engine, that a guest or spectator takes an offer only from slot 0
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
-│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts)
+│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts, version.ts, feedback.ts)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
-│   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (join.ts: the invite page; wake.ts, wire.ts: shared)
+│   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (front.ts, board.ts: the front page and its decisions; join.ts: the invite page; wake.ts, wire.ts: shared)
+│   │   ├── landing-entry.ts     # kn-landing.js bundle entry
 │   │   ├── join-entry.ts        # kn-join.js bundle entry
 │   │   ├── page/shared.ts       # window.KNShared and window.KNEvent: cheats, key tracking, local input, input wire format, WebRTC peer helpers (was web/static/shared.js)
 │   │   ├── page/gamepad-manager.ts # window.GamepadManager: gamepad profiles, remapping, slot assignment
 │   │   ├── page/desync-detector.ts # window.KNDesync: field-granular cross-peer desync detection, installed by the bundle
+│   │   ├── demo/                # the demo page's logic, moving out of web/static/demo.js in slices (window.KNCore.demo)
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
 ├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route live on kaillera-next.thesuperhuman.us)
 ├── tests/           # pytest + Playwright E2E tests
-├── specs/           # Quint models (room lifecycle, peer identity, peer connection); `just spec` model-checks them
+├── specs/           # Quint models (room lifecycle, peer identity, peer connection, streaming connection); `just spec` model-checks them
 ├── tools/           # match analysis scripts; oxlint/anti-slop/ = vendored lint rules
 ├── docs/            # roadmap, netplay invariants, netcode-diagrams.md (index of the generated diagrams: session-machine.md, peer-connection-machine.md, spec-traces.md), design/research notes
 ├── Dockerfile       # production Docker image
@@ -183,7 +185,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `set-name`            | client→server      | `{name}`                                                                                                                                  | Update player display name                                                                                                                                                                                                       |
 | `set-mode`            | client→server      | `{mode}`                                                                                                                                  | Host sets game mode                                                                                                                                                                                                              |
 | `set-game-id`         | client→server      | `{game_id}`                                                                                                                               | Host updates game_id after ROM identification                                                                                                                                                                                    |
-| `webrtc-signal`       | bidirectional      | `{target, offer/answer/candidate/reconnect/requestRenegotiate}`                                                                           | WebRTC relay                                                                                                                                                                                                                     |
+| `webrtc-signal`       | bidirectional      | `{target, offer/answer/candidate/reconnect/startupReconnect/requestRenegotiate, attemptId}`                                               | WebRTC relay. `attemptId` `{page, attempt}`, optional (older pages send none): the offering page's id and its count of its offers; an answer or candidate carries its offer's. `startupReconnect`: the offer is a startup retry  |
 | `rom-signal`          | bidirectional      | `{target, ...}`                                                                                                                           | Pre-game ROM transfer signaling                                                                                                                                                                                                  |
 | `data-message`        | client→server→room | `{type, ...}`                                                                                                                             | Save state / late-join relay (4MB max). The server stamps every relayed `data-message`, `snapshot` and `input` with `knFrom: {sid, slot, owner}`, the true sender; pages check it (`KNCore.checkRelayed`)                        |
 | `snapshot`            | client→server→room | `{...}`                                                                                                                                   | Game snapshot relay (64KB max)                                                                                                                                                                                                   |

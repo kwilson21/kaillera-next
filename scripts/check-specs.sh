@@ -104,47 +104,117 @@ $QUINT run "$CAPTURE" --main=desync_capture_current --invariant=comparedPictures
 PAIR=specs/peer_connection.qnt
 $QUINT typecheck "$PAIR"
 # The scenarios say what each variant does with the same ordering.
-for variant in peer_connection_before_119 peer_connection_current peer_connection_fixed; do
+for variant in peer_connection_before_119 peer_connection_before_startup_flag peer_connection_current \
+  peer_connection_counter_only peer_connection_fixed; do
   $QUINT test "$PAIR" --main="$variant" --backend=typescript
 done
 pair() { # module invariant init
   $QUINT run "$PAIR" --main="$1" --invariant="$2" --init="$3" \
     --max-samples=10000 --max-steps=25 --backend=typescript
 }
-# Today: a reconnect leaves the guest's input state clean and a roster update
-# never replaces a connection that is up. The other four properties are
-# violated today (the scenarios above show how) and hold on
-# peer_connection_fixed, the rules the per-peer machine is built to.
+# Today: a reconnect leaves the guest's input state clean, a roster update
+# never replaces a connection that is up, and a startup retry is never
+# handled as a gameplay reconnect. The other four properties are violated
+# today (the scenarios above show how) and hold on peer_connection_fixed, the
+# rules the per-peer machine is built to.
 pair peer_connection_current holdToday init
+pair peer_connection_current holdToday initLobby
+# startupRetryIsNotAReconnect was VIOLATED, from the lobby, while the server
+# dropped the startupReconnect flag (peer_connection_before_startup_flag): a
+# startup retry that reaches a page whose game has started (its channel with
+# a third player opened) is taken for a reconnect
+# (startupRetryToAStartedPageTest).
 pair peer_connection_fixed allHold init
 pair peer_connection_fixed allHold initLobby
+# With attempts told apart by the offering page's counter alone (the per-peer
+# machine as first written), staleSignalsAreNotApplied is VIOLATED: a page
+# that replaces another numbers its offers from 1 again, and what was sent for
+# the old page's attempt passes for the new one's
+# (oldAnswerTakenByReplacementPageTest, oldCandidateReachesReplacementConnectionTest).
+# The other five still hold there. peer_connection_fixed names the page
+# beside the counter. A page from before signals carried an attempt
+# (`reloadOld`) sends none; only pages that check labels are held to
+# staleSignalsAreNotApplied, and oldPageAnswersWithNoLabelTest shows that a
+# page that checks them never connects to an old one.
+pair peer_connection_counter_only holdWithACounterAlone init
+pair peer_connection_counter_only holdWithACounterAlone initLobby
+
+# ── Streaming connection: the host and the pages it streams to ──────────────
+STREAM=specs/streaming_connection.qnt
+$QUINT typecheck "$STREAM"
+# The scenarios say what each variant does with the same ordering.
+for variant in streaming_connection_before_220 streaming_connection_current streaming_connection_fixed; do
+  $QUINT test "$STREAM" --main="$variant" --backend=typescript
+done
+stream() { # module invariant init
+  $QUINT run "$STREAM" --main="$1" --invariant="$2" --init="$3" \
+    --max-samples=10000 --max-steps=25 --backend=typescript
+}
+# Today: nothing replaces a connection both pages have open, and a guest's or
+# spectator's page connects only to the host. The other two properties are
+# VIOLATED today (the scenarios above show how): neverLeftWithNothingPending
+# (a dropped connection is forgotten on both pages and nothing offers again,
+# droppedGuestIsNeverReconnectedTest) and staleSignalsAreNotApplied (an offer
+# for a new connection is applied to the old one,
+# newConnectionTakenAsRenegotiationTest). receiversConnectOnlyToTheHost was
+# VIOLATED before #220, when a page answered any member's offer
+# (streaming_connection_before_220, strayOfferTest).
+stream streaming_connection_current holdToday init
+# With the host's deadline and signals that name their connection as well,
+# every property holds.
+stream streaming_connection_fixed allHold init
+stream streaming_connection_fixed allHold initLate
 
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
-for variant in late_join_pause_before late_join_pause_host_side late_join_pause_current; do
+for variant in late_join_pause_before late_join_pause_host_side late_join_pause_before_resync \
+  late_join_pause_marker_at_send late_join_pause_current; do
   $QUINT test "$PAUSE" --main="$variant" --backend=typescript
 done
 # Today: the game stays paused while a joiner has yet to load, a joiner who
 # is playing is never disconnected, the host's pause has a deadline that a
-# repeated request does not push back, and a paused guest resumes on the
-# host's word or at its own deadline. The first three were violated before
-# the pause belonged to the joiners being served (late_join_pause_before);
-# the rest with only the host's side changed (late_join_pause_host_side).
+# repeated request does not push back, a paused guest resumes on the host's
+# word or at its own deadline, and so does a joiner, including one made a
+# player while the host is paused for another (it waits with the rest). The
+# first three were violated before the pause belonged to the joiners being
+# served (late_join_pause_before); the guest's with only the host's side
+# changed (late_join_pause_host_side). And a joiner that lost its channel
+# to the host during its serve is not made a player on a state the host has
+# run past without a resync on its way: violated before the joiner resynced
+# (late_join_pause_before_resync; joinerLosesTheHostAfterTheStateIsSentTest,
+# timerFiresWhileTheStateIsOnItsWayTest), and again while the joiner's
+# marker went with its first request: one that went unanswered left it
+# behind for good (late_join_pause_marker_at_send;
+# resyncRequestUnansweredTest). Today the marker stays until a state is
+# applied, the joiner asks again, and gives up visibly after three.
 $QUINT run "$PAUSE" --main=late_join_pause_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$PAUSE" --main=late_join_pause_marker_at_send --invariant=holdBeforeTheResyncFix \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeTheResyncFix \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
-for variant in resync_flow_before resync_flow_current; do
+for variant in resync_flow_before resync_flow_any_answer resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
-# Today: a guest stopped at its target has a deadline, a state no newer than
-# the last one applied is never applied, and a request that is out can always
+# A guest stopped at its target has a deadline, a state no newer than the
+# last one applied is never applied, and a request that is out can always
 # end. The last was violated before the request had a deadline of its own
 # (resync_flow_before): the host drops a request inside its rate limit and
-# the guest never asked again.
+# the guest never asked again. These held before requests were numbered too.
+$QUINT run "$FLOW" --main=resync_flow_any_answer --invariant=holdWithoutNumbers \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+# And only its own answer ends a request, a late answer does not take the
+# guest back below the frame its newest request named (at the target or
+# after the target's deadline), and a late answer does not take the place of
+# the awaited one. All three were violated before a request had a number its
+# answer carries (resync_flow_any_answer; lateAnswerTest,
+# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
+# hold the orderings).
 $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 

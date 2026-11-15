@@ -197,8 +197,8 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
-    landing.js         Front-page board controller (room creation, open-rooms board)
     landing.css        Front-page styles (direction A tokens)
+    dist/kn-landing.js Front-page board controller (room creation, open-rooms board), built from web/src/landing/front.ts
     dist/kn-join.js    Invite-page controller (room lookup, join/watch states), built from web/src/landing/join.ts
     dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
     dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper, window.KNSite)
@@ -209,23 +209,23 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from web/src/streaming
-    switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
+    switch2-usb.js         Starts the WebUSB handshake for the Switch 2 Pro Controller (web/src/page/switch2-usb.ts)
     controller-settings.js Starts the in-game controller settings panel (logic in web/src/page/controller-settings/)
-    virtual-gamepad.js     On-screen touch controls for mobile
+    virtual-gamepad.js     Starts the on-screen touch controls (web/src/page/virtual-gamepad/)
     kn-audio.js            Starts the AudioWorklet pump + rollback audio capture (web/src/page/audio.ts)
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
     kn-vision-client.js    Starts the desync-vision client (web/src/page/vision-client.ts)
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
-    feedback.js            In-app feedback collection
-    version.js             Version display + changelog modal
+    feedback.js            In-app feedback collection; starts web/src/site/feedback.ts
+    version.js             Version display + changelog modal; starts web/src/site/version.ts
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
-    demo.js                Demo page orchestrator (fake peer + menu autopilot)
-    fake-peer.js           Synthetic P2 for the demo page (simulated input/jitter)
-    ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (reads RDRAM menu state)
-    rollback-timeline.js   Demo page's live rollback-metrics HUD
+    demo.js                Demo page orchestrator (fake peer + menu autopilot); its options, network settings and HUD text are web/src/demo
+    fake-peer.js           Synthetic P2 for the demo page (logic in web/src/page/fake-peer.ts)
+    ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (logic in web/src/page/menu-autopilot.ts)
+    rollback-timeline.js   Demo page's live rollback-metrics HUD (logic in web/src/page/rollback-timeline.ts)
     socket.io.min.js       Self-hosted Socket.IO client (v4.8.4)
     vendor/fflate.min.js   Self-hosted compression lib used to extract ROM ZIP archives
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization

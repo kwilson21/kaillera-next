@@ -2,9 +2,10 @@
  * Draws Quint traces as Mermaid sequence diagrams (script./quint-trace.mts).
  *
  * With no arguments it writes docs/spec-traces.md: every `run` scenario of
- * the specs listed in SPECS, replayed by `quint test` and drawn from the
- * trace that produced, so a diagram cannot show an ordering the model does
- * not have. `--check` fails when the committed file is out of date.
+ * the specs listed in SPECS (or the ones an entry names), replayed by
+ * `quint test` and drawn from the trace that produced, so a diagram cannot
+ * show an ordering the model does not have. `--check` fails when the
+ * committed file is out of date.
  *
  *   node scripts/trace-diagram.mjs [--check]
  *
@@ -32,7 +33,8 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const OUT = path.join(ROOT, 'docs/spec-traces.md');
 
 // The scenarios drawn in docs/spec-traces.md. `hub` names the lifeline for
-// everything the model does not keep per player.
+// everything the model does not keep per player. `runs`, when given, names
+// the only runs of the spec that are drawn; otherwise every run is.
 const SPECS = [
   {
     file: 'specs/room_lifecycle.qnt',
@@ -43,6 +45,20 @@ const SPECS = [
     about:
       "The server's view of a room against what each player's page is doing. " +
       'The note on a page is the state it moves to; a dashed arrow is what an action did to another page.',
+  },
+  {
+    file: 'specs/streaming_connection.qnt',
+    main: 'streaming_connection_current',
+    hub: 'Network',
+    // A roster reaching the host, a signal delivered or lost, the network
+    // failing a connection or carrying it again.
+    hubActions: ['roster', 'deliver', 'lose', 'blip', 'recovers'],
+    runs: ['droppedGuestIsNeverReconnectedTest'],
+    about:
+      "The streaming engine's connection between the host and a guest, as each page holds it. " +
+      'Network stands for the server relaying the roster and signals and for the connection between the pages; ' +
+      'its notes are its own state (`broken`, `closed`), and a dashed arrow is what a step did to a page. ' +
+      "The ordering today's engine never recovers from: the guest is left with no connection, with both pages still in the room.",
   },
 ];
 
@@ -69,7 +85,14 @@ const tracesOf = (spec) => {
   try {
     execFileSync(
       path.join(ROOT, 'node_modules/.bin/quint'),
-      ['test', spec.file, `--main=${spec.main}`, '--backend=typescript', `--out-itf=${dir}/{test}.itf.json`],
+      [
+        'test',
+        spec.file,
+        `--main=${spec.main}`,
+        '--backend=typescript',
+        `--out-itf=${dir}/{test}.itf.json`,
+        ...(spec.runs ? [`--match=^(${spec.runs.join('|')})$`] : []),
+      ],
       { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'] },
     );
     const traces = new Map();
@@ -101,7 +124,13 @@ for (const spec of SPECS) {
   const source = fs.readFileSync(path.join(ROOT, spec.file), 'utf8');
   const traces = tracesOf(spec);
   lines.push(`## \`${spec.file}\` (\`${spec.main}\`)`, '', spec.about, '');
-  const scenarios = runScenarios(source, spec.main);
+  const scenarios = runScenarios(source, spec.main).filter(
+    (scenario) => spec.runs === undefined || spec.runs.includes(scenario.name),
+  );
+  // A run named here that the spec does not have would otherwise be dropped
+  // without a word.
+  const missing = (spec.runs ?? []).filter((name) => !scenarios.some((scenario) => scenario.name === name));
+  if (missing.length > 0) throw new Error(`${spec.file}: no run called ${missing.join(', ')}`);
   // Every run Quint replayed must be drawn: a run this script failed to read
   // from the spec would otherwise go missing without a word.
   const unread = [...traces.keys()].filter((name) => !scenarios.some((scenario) => scenario.name === name));

@@ -47,9 +47,10 @@ def test_the_union_is_found():
     assert set(_report_types()) >= {"late-join-stranded", "protocol-mismatch", "play-disagree", "streaming-disagree"}
 
 
-# The engine reports with createComparer too, under its own type (the peer
-# mesh's decisions against web/src/peer-signaling.ts, in netplay-rollback.js).
-ENGINE_REPORT_TYPES = ["mesh-disagree"]
+# The engine reports with createComparer too, under its own types (the peer
+# mesh's decisions against web/src/peer-signaling.ts, the resync request
+# rules against web/src/resync-request.ts, in netplay-rollback.js).
+ENGINE_REPORT_TYPES = ["mesh-disagree", "resync-disagree"]
 
 
 def test_the_engine_sends_the_type_it_is_allowed():

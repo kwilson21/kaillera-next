@@ -351,3 +351,40 @@ sequenceDiagram
   Server->>Server: serveLateJoin("guest2")
   Server-->>guest2: Running(1)
 ```
+
+## `specs/streaming_connection.qnt` (`streaming_connection_current`)
+
+The streaming engine's connection between the host and a guest, as each page holds it. Network stands for the server relaying the roster and signals and for the connection between the pages; its notes are its own state (`broken`, `closed`), and a dashed arrow is what a step did to a page. The ordering today's engine never recovers from: the guest is left with no connection, with both pages still in the room.
+
+### droppedGuestIsNeverReconnectedTest
+
+The guest and the host are connected and the stream is up. The network drops the connection for a moment. The guest's connection reports `disconnected`, a state WebRTC means as transient; the guest closes it and forgets the host. That closes it for the host too, whose channel closes, and the host forgets the guest. Both pages are still in the room and the roster has not changed. Today nothing offers again: the guest is left on the last frame of the video for good.
+
+```mermaid
+sequenceDiagram
+  participant Network
+  participant host
+  participant guest
+  Network->>Network: roster("guest")
+  Note over Network: wire = {{dest: guest, id: 1, kind: offer, src: host}}<br/>nextId = 2
+  Network-->>host: conns: {guest: {offer: 1, state: offered}, spect: {offer: 0, state: none}}, listed: {guest}
+  Network->>Network: deliver(offerTo("guest", 1))
+  Note over Network: wire = {{dest: host, id: 1, kind: answer, src: guest}}
+  Network-->>guest: conns: {host: {offer: 1, state: negotiated}, spect: {offer: 0, state: none}}, shows: host
+  Network->>Network: deliver(answerFrom("guest", 1))
+  Note over Network: wire = {}
+  Network-->>host: conns: {guest: {offer: 1, state: negotiated}, spect: {offer: 0, state: none}}
+  host->>Network: channelOpens("host", "guest")
+  Note over host: conns: {guest: {offer: 1, state: open}, spect: {offer: 0, state: none}}, running: true
+  guest->>Network: channelOpens("guest", "host")
+  Note over guest: conns: {host: {offer: 1, state: open}, spect: {offer: 0, state: none}}
+  Network->>Network: goLive
+  Network-->>host: live: true
+  Network->>Network: blip("guest")
+  Note over Network: broken = {1}
+  guest->>Network: notice("guest", "host")
+  Note over Network: closed = {1}
+  Note over guest: conns: {host: {offer: 0, state: none}, spect: {offer: 0, state: none}}
+  host->>Network: notice("host", "guest")
+  Note over host: conns: {guest: {offer: 0, state: none}, spect: {offer: 0, state: none}}
+```

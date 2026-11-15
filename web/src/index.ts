@@ -7,6 +7,7 @@ import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { addressMapFor } from './address-maps.ts';
 import { bootTimedOut } from './boot.ts';
+import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
@@ -27,8 +28,13 @@ import {
 } from './protocol.ts';
 import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
+import { startFakePeer } from './page/fake-peer.ts';
+import { menuAutopilot } from './page/menu-autopilot.ts';
+import { rollbackTimeline } from './page/rollback-timeline.ts';
+import { startSwitch2Usb } from './page/switch2-usb.ts';
 import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
+import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
 import { installShared } from './page/shared.ts';
@@ -55,6 +61,7 @@ import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts
 import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
+import { createPeerObserver, newPageId, readAttemptId } from './peer-observe.ts';
 import {
   disconnectDisposition,
   hasAttemptLeft,
@@ -67,6 +74,13 @@ import { reconcileRejoin, type RejoinVerdict } from './rejoin.ts';
 import { startRejoin, type RejoinOptions, type RejoinOutcome } from './rejoin-attempt.ts';
 import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from './rejoin-machine.ts';
 import { checkRelayed } from './relay.ts';
+import {
+  answersAnOlderRequest,
+  endsRequest,
+  isLateAnswerBeforeFrameAsked,
+  keepsAwaitedAnswer,
+  lateJoinLostHostStep,
+} from './resync-request.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
 import { installSite, KNSite } from './site/index.ts';
@@ -259,7 +273,7 @@ export const KNCore = {
   captureFrame,
   checkRelayed,
   createConnectTracker,
-  /** The per-peer connection machine (peer-connection.ts). Built, not yet run beside the engine. */
+  /** The per-peer connection machine (peer-connection.ts). The engine runs it observing, through `peerObserve`. */
   createPeerConnection,
   createSession,
   createStickDeadband,
@@ -283,6 +297,16 @@ export const KNCore = {
   normalizeAxis,
   peerFacts,
   peerTiming: PEER_TIMING,
+  /** The per-peer machine run beside the rollback engine, observing (peer-observe.ts). */
+  peerObserve: { createPeerObserver, newPageId, readAttemptId },
+  /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */
+  resyncRequest: {
+    answersAnOlderRequest,
+    endsRequest,
+    isLateAnswerBeforeFrameAsked,
+    keepsAwaitedAnswer,
+    lateJoinLostHostStep,
+  },
   rosterKey,
   screenshotCrop,
   shouldInitiate,
@@ -291,12 +315,19 @@ export const KNCore = {
   startLateJoinWait,
   startRejoin,
   shouldResumeRomTransfer,
+  /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */
+  demo,
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
+    menuAutopilot,
+    rollbackTimeline,
     startAudio,
     startCapture,
+    startSwitch2Usb,
     startControllerSettings,
     startVisionClient,
+    startVirtualGamepad,
+    startFakePeer,
   },
   /** What these pages share with the front page; the same object is `window.KNSite` on both. */
   site: KNSite,
@@ -327,7 +358,8 @@ export const KNCore = {
   },
   /**
    * The streaming engine's decisions (web/static/netplay-streaming.js still
-   * makes them; `createObserver` compares).
+   * makes them; `createObserver` compares), except `signalGate`, which the
+   * engine asks: which offers a page that receives the stream takes.
    */
   streaming: {
     ...streamingRoster,

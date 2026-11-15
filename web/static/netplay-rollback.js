@@ -5243,6 +5243,26 @@
   // normally ends the pause; this one is for a host that never says resume.
   let _lateJoinGuestPausedAt = 0;
   const LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000;
+  // Joiner: its channel to the host closed while it waited for the state or
+  // loaded it. The host ends the serve when that channel goes (resetPeerState)
+  // and runs on, but a state already sent still arrives and is loaded: the
+  // joiner would be made a player frames behind the host. Once it has loaded
+  // and its channel to the host is open it asks for a full resync instead
+  // (specs/late_join_pause.qnt, aJoinerIsNotMadeAPlayerBehindTheHost).
+  // The marker stays until a state from the host is applied
+  // (applySyncState): a request can go unanswered (the host's rate limit, a
+  // failed capture, a lost answer), and its deadline then asks again.
+  // resetPeerState for the host does not clear it: the late-join load and the
+  // reconnect path both reset the host's peer state just as the resync is
+  // needed most.
+  let _lateJoinLostHost = false;
+  // Asks for that resync since the marker was set. Bound: at most
+  // LATE_JOIN_LOST_HOST_MAX_ASKS requests, each ended by its answer or by
+  // RESYNC_REQUEST_TIMEOUT_MS (8 s, longer than the host's 5 s rate limit);
+  // after the last one goes unanswered the joiner gives up, visibly
+  // (LATE-JOIN-LOST-HOST-GIVEUP), and asks no more.
+  let _lateJoinLostHostAsks = 0;
+  const LATE_JOIN_LOST_HOST_MAX_ASKS = 3;
   const _lateJoinReadyHandled = new Set(); // senderSid values already resumed
   // Host: the joiners being served, sid -> the id of that serve. The pause
   // belongs to them: it ends when none is left, and a serve's timer acts only
@@ -5852,6 +5872,69 @@
   };
   const _meshCore = () => window.KNCore ?? null;
 
+  // Stage 5, observing: the per-peer connection machine
+  // (web/src/peer-connection.ts) runs beside the mesh code below, one per
+  // other player, through web/src/peer-observe.ts. The code below brackets
+  // each event it acts on with _peerObs().open/close and reports what it did
+  // with .did; the machine is handed the same event and a difference is
+  // reported as a peer-disagree client event. Nothing here changes what the
+  // engine does.
+  //
+  // Every webrtc-signal carries attemptId {page, attempt}: this page's id,
+  // made once when it loads, and its count of the offers it has made to that
+  // player. An offer carries its own; an answer and a candidate the one of
+  // the offer their connection was made for (kept on the RTCPeerConnection
+  // as _knAttempt). Pages from before it send none and ignore it; nothing
+  // accepts or rejects a signal by it yet.
+  let _attemptPage = null;
+  const _offerCounts = new Map();
+  const _attemptPageId = () => {
+    if (_attemptPage === null) {
+      _attemptPage =
+        window.KNCore?.peerObserve?.newPageId?.() ??
+        `p${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+    }
+    return _attemptPage;
+  };
+  const _offerCountKey = (slot, key) => (slot === null || slot === undefined ? `sid:${key}` : slot);
+  const _nextAttemptId = (slot, key) => {
+    const countKey = _offerCountKey(slot, key);
+    const attempt = (_offerCounts.get(countKey) ?? 0) + 1;
+    _offerCounts.set(countKey, attempt);
+    return { page: _attemptPageId(), attempt };
+  };
+  const _readAttemptId = (value) => window.KNCore?.peerObserve?.readAttemptId?.(value) ?? null;
+  const _slotOfKey = (key) => _peers[key]?.slot ?? _knownPlayers[key]?.slot ?? null;
+  // What the engine holds for a player slot, as the machine's facts.
+  const _peerFactsOfSlot = (slot) => {
+    const held = Object.values(_peers).filter((p) => p.slot === slot);
+    const peer = held.find((p) => p.dc?.readyState === 'open') ?? held[0];
+    return {
+      entry: !!peer,
+      open: peer?.dc?.readyState === 'open',
+      reconnecting: !!peer?.reconnecting,
+    };
+  };
+  let _peerObserver;
+  const _peerObs = () => {
+    if (_peerObserver === undefined) {
+      _peerObserver =
+        window.KNCore?.peerObserve?.createPeerObserver?.({
+          page: _attemptPageId(),
+          mySlot: () => (_isSpectator ? null : _playerSlot),
+          offersMade: (slot) => _offerCounts.get(slot) ?? 0,
+          facts: _peerFactsOfSlot,
+          sink: ({ message, old, next }) => {
+            if (!window.KNState?.uploadToken) return false;
+            window.KNEvent?.('peer-disagree', message, { old, next });
+            return true;
+          },
+          log: (line) => _syncLog(line),
+        }) ?? null;
+    }
+    return _peerObserver;
+  };
+
   // Stage 3, observing: the strings peers send over the DataChannels (and the
   // session-log ack) are checked against web/src/peer-protocol.ts and a
   // mismatch is reported; the handlers below still read the raw message.
@@ -6350,7 +6433,85 @@
     if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;
     _resyncRequestInFlight = false;
     _syncLog(`RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} — no state came, may ask again`);
+    // A late joiner still behind the host asks again (bounded there).
+    _resyncAfterLostHost('resync request timed out');
   };
+  // Each request has a number and the state that answers it carries that
+  // number (specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST). A request can be
+  // given up on while its answer is on the way (the deadline above, or a
+  // reconnect asking again over it); without the number that late answer
+  // ended the newer request and was applied at the newer request's target.
+  // 0 = none: a state the host sent for its own reasons carries no number.
+  let _resyncRequestId = 0; // the newest request's number; per match
+  // The host numbers its answers: learned from the first numbered one. Until
+  // then (a host on a version that does not) an unnumbered state ends the
+  // request as it always did, or the flag would only clear at its deadline.
+  let _hostNumbersAnswers = false;
+  let _syncAnswerFor = 0; // the request the state being assembled answers
+  // The frame the newest request named (-1 = it named none). A late answer
+  // from before it is dropped whether or not the target is still live: the
+  // target's deadline gives the target up, not the frame the guest asked at
+  // (specs/resync_flow.qnt, beforeTheFrameAsked).
+  let _resyncRequestAt = -1;
+  const _requestIdFrom = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
+  const _beginResyncRequest = (at = -1) => {
+    _resyncRequestInFlight = true;
+    _resyncRequestSentAt = performance.now();
+    _resyncRequestId++;
+    _resyncRequestAt = at;
+    return _resyncRequestId;
+  };
+  // The number travels in a message of its own, just ahead of the request on
+  // the same ordered channel: a host on an older version matches the request
+  // strings exactly, and ignores a string it does not know.
+  const _sendResyncRequest = (dc, requestId, request) => {
+    dc.send(`sync-request-id:${requestId}`);
+    dc.send(request);
+  };
+  // Stage 5, observing: the resync request rules below decide as before; the
+  // proved functions of web/src/resync-request.ts run on the same inputs and
+  // a difference is reported as a resync-disagree client event (and
+  // RESYNC-DISAGREE in the sync log). They take over once production shows
+  // none. Returns the engine's value, whatever the proved one is; without
+  // KNCore nothing is compared. Looked up on first use: kn-core.js loads
+  // after this file.
+  let _resyncObserver;
+  const _resyncObserve = (what, engineValue, proved) => {
+    const rules = window.KNCore?.resyncRequest;
+    if (!rules) return engineValue;
+    if (_resyncObserver === undefined) {
+      _resyncObserver =
+        window.KNCore?.play?.observe?.createComparer?.(({ message, old, next }) => {
+          if (!window.KNState?.uploadToken) return false;
+          _syncLog(`RESYNC-DISAGREE ${message} engine=${old} proved=${next}`);
+          window.KNEvent?.('resync-disagree', message, { old, next });
+          return true;
+        }) ?? null;
+    }
+    try {
+      _resyncObserver?.compare(what, engineValue, proved(rules));
+    } catch (_) {}
+    return engineValue;
+  };
+  // Only its own answer ends a request (onlyItsAnswerEndsARequest).
+  const _endsResyncRequest = (answerFor) =>
+    _resyncObserve('ends-request', answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers, (rules) =>
+      rules.endsRequest(answerFor, _resyncRequestId, _hostNumbersAnswers),
+    );
+  const _answersAnOlderRequest = (answerFor) =>
+    _resyncObserve('answers-an-older-request', answerFor > 0 && answerFor !== _resyncRequestId, (rules) =>
+      rules.answersAnOlderRequest(answerFor, _resyncRequestId),
+    );
+  // A state answering an older request, from before the frame the newest one
+  // named: applied, it would take this guest back below that frame.
+  const _isLateAnswerBeforeFrameAsked = (state) =>
+    !!state &&
+    _resyncObserve(
+      'late-answer-before-frame-asked',
+      _answersAnOlderRequest(state.answerFor || 0) && _resyncRequestAt > 0 && state.frame < _resyncRequestAt,
+      (rules) =>
+        rules.isLateAnswerBeforeFrameAsked(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt),
+    );
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
@@ -6840,8 +7001,7 @@
     }
     try {
       _beginLifecycleResyncGuard(reason);
-      _resyncRequestInFlight = true;
-      _resyncRequestSentAt = performance.now();
+      const requestId = _beginResyncRequest();
       _syncTargetFrame = -1;
       _syncTargetDeadlineAt = 0;
       _signalSocket.emit('data-message', {
@@ -6850,6 +7010,7 @@
         requesterSid: socket.id,
         reason,
         frame: _frameNum,
+        requestId,
       });
       _syncLog(`${reason}: sent socket sync-request-full to host`);
       return true;
@@ -6894,7 +7055,11 @@
     }
     _syncLog(`received socket sync-request-full from ${requesterSid} reason=${msg.reason || 'unknown'}`);
     _setLastSyncState(null, 'socket-requested-full');
-    pushSyncState(requesterSid, false, { transport: 'socket', reason: msg.reason || 'socket-request' });
+    pushSyncState(requesterSid, false, {
+      transport: 'socket',
+      reason: msg.reason || 'socket-request',
+      requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) },
+    });
   };
 
   const handleSocketSyncState = async (msg) => {
@@ -6910,6 +7075,8 @@
         `socket sync-state received: frame=${frame} full=${msg.full ? 'true' : 'false'} ` +
           `wire=${Math.round((msg.compressedSize || msg.data?.length || 0) / 1024)}KB reason=${msg.reason || 'unknown'}`,
       );
+      const answerFor = _requestIdFrom(msg.requestId);
+      if (answerFor > 0) _hostNumbersAnswers = true;
       const decompressed = await decodeAndDecompress(msg.data);
       await _handleDecodedSyncPayload({
         decompressed,
@@ -6919,6 +7086,7 @@
         isRegions: false,
         wireSize: msg.compressedSize || 0,
         source: 'socket',
+        answerFor,
       });
     } catch (err) {
       _syncLog(`socket sync-state failed: ${err?.message || err}`);
@@ -6979,6 +7147,8 @@
     if (!_awaitingLateJoinState || _isApplyingLateJoinState) return;
     _syncLog(`late-join wait: joining the start instead (${reason})`);
     _awaitingLateJoinState = false;
+    _lateJoinLostHost = false;
+    _lateJoinLostHostAsks = 0;
     _lateJoin = false;
     _config?.onLateJoinAdmitted?.();
     for (const p of Object.values(_peers)) {
@@ -6993,6 +7163,8 @@
 
   const _beginLateJoinWait = () => {
     _awaitingLateJoinState = true;
+    _lateJoinLostHost = false;
+    _lateJoinLostHostAsks = 0;
     _declareLateJoiner();
     setStatus('Requesting game state...');
     const wait = window.KNCore.startLateJoinWait({
@@ -7342,8 +7514,13 @@
   const _currentSid = (key) => _knownPlayers[key]?.socketId || key;
   const _signalSocket = {
     emit: (event, data) => {
-      if (event === 'webrtc-signal') data = { ...data, target: _currentSid(data.target) };
-      else if (event === 'data-message' && data.targetSid) data = { ...data, targetSid: _currentSid(data.targetSid) };
+      if (event === 'webrtc-signal') {
+        // A signal that does not name its attempt is for the connection the entry has now.
+        const attemptId = data.attemptId ?? _peers[data.target]?.pc?._knAttempt ?? null;
+        data = attemptId
+          ? { ...data, attemptId, target: _currentSid(data.target) }
+          : { ...data, target: _currentSid(data.target) };
+      } else if (event === 'data-message' && data.targetSid) data = { ...data, targetSid: _currentSid(data.targetSid) };
       return socket.emit(event, data);
     },
   };
@@ -7351,6 +7528,7 @@
   const _evictPeer = (sid, reason) => {
     const peer = _peers[sid];
     if (!peer) return;
+    _peerObs()?.did(peer.slot, sid, { type: 'drop' });
     try {
       peer.pc?.close();
     } catch (_) {}
@@ -7422,6 +7600,11 @@
       const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && held;
 
       const key = _peerKey(p.socketId);
+      // Observing: the machine for this slot is told the roster lists them.
+      if (_lateJoin && !_isSpectator) _peerObs()?.joinedLate();
+      if (shouldHoldForLateJoin) _peerObs()?.stopWatching(p.slot, key, 'held as a late joiner');
+      if (_peers[key]) _peerObs()?.identify(key, p.slot);
+      const rosterFrame = _peerObs()?.open(p.slot, key);
       if (_peers[key]) {
         _syncLog(`onUsersUpdated: peer ${key} (slot ${p.slot}) already exists, skipping`);
         _peers[key].slot = p.slot;
@@ -7430,6 +7613,7 @@
         } else if (_activeRoster?.has(p.slot)) {
           _clearPendingLateJoinPeer(key, p.slot, 'users-updated active roster');
         }
+        _peerObs()?.close(rosterFrame, { type: 'roster' });
         continue;
       }
 
@@ -7496,6 +7680,7 @@
 
       createPeer(p.socketId, p.slot, shouldInitiate);
       if (shouldInitiate) sendOffer(p.socketId);
+      _peerObs()?.close(rosterFrame, { type: 'roster' });
     }
     _tagPeerIdentities();
 
@@ -7570,7 +7755,9 @@
     if (peer.dc?.readyState === 'open') return;
     clearStartupConnectWatchdog(peer);
     peer._startupConnectTimer = setTimeout(() => {
+      const frame = _peerObs()?.open(peer.slot, remoteSid);
       retryStartupConnection(remoteSid);
+      _peerObs()?.close(frame, { type: 'deadline', deadline: 'startupAfter' });
     }, STARTUP_CONNECT_TIMEOUT_MS);
   };
 
@@ -7595,6 +7782,7 @@
           `dc=${peer.dc?.readyState ?? 'none'}`,
       );
       setStatus('Peer connection stalled — reload or rejoin to retry');
+      _peerObs()?.did(peer.slot, remoteSid, { type: 'stalled' });
       KNEvent('webrtc-fail', 'Startup WebRTC connection stalled', {
         slot: peer.slot,
         remoteSid,
@@ -7622,7 +7810,12 @@
       const s = peer.pc.connectionState;
       _syncLog(`startup retry peer ${remoteSid} connection-state: ${s}`);
       if (s === 'connecting') setStatus('Connecting to players...');
-      if (s === 'failed') retryStartupConnection(remoteSid);
+      if (s === 'failed') {
+        const frame = _peerObs()?.open(peer.slot, remoteSid);
+        const lost = peer.pc._knAttempt;
+        retryStartupConnection(remoteSid);
+        _peerObs()?.close(frame, { type: 'lost', page: lost?.page ?? '', attempt: lost?.attempt ?? 0 });
+      }
     };
     createOutgoingPeerChannels(remoteSid, peer);
 
@@ -7668,7 +7861,10 @@
       if (s === 'failed') {
         if (_phase < PHASE_GAME_STARTED && peer.isInitiator) {
           _syncLog(`startup peer ${remoteSid} failed before game start — retrying`);
+          const frame = _peerObs()?.open(peer.slot, remoteSid);
+          const lost = peer.pc._knAttempt;
           retryStartupConnection(remoteSid);
+          _peerObs()?.close(frame, { type: 'lost', page: lost?.page ?? '', attempt: lost?.attempt ?? 0 });
           return;
         }
         // Failed is terminal — disconnect immediately
@@ -7732,13 +7928,26 @@
       _syncLog(`sendOffer: no peer for ${remoteSid}, skipping`);
       return;
     }
+    const attemptId = _nextAttemptId(peer.slot, remoteSid);
     _syncLog(
       `sendOffer: sending to ${remoteSid} (slot ${peer.slot})` +
-        `${reconnect ? ' [reconnect]' : ''}${startup ? ' [startup]' : ''}`,
+        `${reconnect ? ' [reconnect]' : ''}${startup ? ' [startup]' : ''} attempt=${attemptId.page}#${attemptId.attempt}`,
     );
+    peer.pc._knAttempt = attemptId;
+    _peerObs()?.did(peer.slot, remoteSid, {
+      type: 'offer',
+      attempt: attemptId.attempt,
+      mode: startup ? 'startup' : reconnect ? 'reconnect' : 'first',
+    });
     const offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
-    _signalSocket.emit('webrtc-signal', { target: remoteSid, offer, reconnect, startupReconnect: startup });
+    _signalSocket.emit('webrtc-signal', {
+      target: remoteSid,
+      offer,
+      reconnect,
+      startupReconnect: startup,
+      attemptId,
+    });
     armStartupConnectWatchdog(remoteSid);
   }
 
@@ -7748,10 +7957,42 @@
     if (!senderSid) return;
     let key = _peerKey(senderSid);
     const sigType = data.offer ? 'offer' : data.answer ? 'answer' : data.candidate ? 'candidate' : 'other';
+    const obsAttempt = _readAttemptId(data.attemptId);
     _syncLog(
       `onWebRTCSignal: ${sigType} from ${senderSid}${key !== senderSid ? ` (peer ${key})` : ''}, ` +
-        `hasPeer=${!!_peers[key]}, knownPlayer=${!!_knownPlayers[key]}`,
+        `hasPeer=${!!_peers[key]}, knownPlayer=${!!_knownPlayers[key]}, ` +
+        `attempt=${obsAttempt ? `${obsAttempt.page}#${obsAttempt.attempt}` : 'none'}`,
     );
+
+    // Observing: the machine for this player is told the same signal once
+    // the code below has decided what to do with it (before its first await).
+    // A signal that names no attempt comes from a page from before attemptId:
+    // that player is not watched from then on.
+    const obsHadEntry = !!_peers[key];
+    const obsUnderEarlierId = key !== senderSid;
+    let obsNew = false;
+    let obsFrame = sigType === 'other' ? null : _peerObs()?.open(_slotOfKey(key), key);
+    let obsEvent = null;
+    const obsDone = () => {
+      if (!obsFrame) return;
+      const frame = obsFrame;
+      obsFrame = null;
+      _peerObs()?.close(frame, obsEvent);
+    };
+    if (obsFrame && !obsAttempt) {
+      _peerObs()?.stopWatching(_slotOfKey(key), key, `their page sends no attempt id (${sigType})`);
+    } else if (obsFrame && _isPeerPendingLateJoin(key)) {
+      _peerObs()?.stopWatching(_slotOfKey(key), key, 'a late joiner');
+    } else if (obsAttempt && sigType === 'offer') {
+      const mode = !data.reconnect
+        ? 'first'
+        : data.startupReconnect || _phase < PHASE_GAME_STARTED
+          ? 'startup'
+          : 'reconnect';
+      obsEvent = { type: 'offer', ...obsAttempt, mode, underEarlierId: obsUnderEarlierId };
+    } else if (obsAttempt) {
+      obsEvent = { type: sigType, ...obsAttempt };
+    }
 
     // A fresh offer from a player whose connection was kept across their
     // Socket.IO reconnect means their page reloaded: that connection is a
@@ -7775,6 +8016,7 @@
     if (data.offer && !data.reconnect && key !== senderSid) {
       _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
       _evictPeer(key, 'replaced-by-new-page');
+      obsNew = true;
       if (_lastUsersUpdated) onUsersUpdated(_lastUsersUpdated);
       key = _peerKey(senderSid);
     }
@@ -7784,11 +8026,13 @@
       const known = _knownPlayers[key];
       _syncLog(`onWebRTCSignal: on-demand createPeer for ${key}, slot=${known?.slot ?? 'null'}`);
       createPeer(key, known ? known.slot : null, false);
+      obsNew = true;
     }
 
     let peer = _peers[key];
     if (!peer) {
       _syncLog(`onWebRTCSignal: no peer for ${key}, dropping ${sigType}`);
+      obsDone();
       return;
     }
 
@@ -7813,12 +8057,15 @@
           // Timeout: if reconnect doesn't reach 'connected' within 10s, close and retry
           let _reconnectTimer = setTimeout(() => {
             const state = existingPeer.pc.connectionState;
+            const frame = _peerObs()?.open(existingPeer.slot, key);
             if (state !== 'connected') {
               _syncLog(`reconnect timeout (state=${state}) — closing stale PC for ${senderSid}`);
+              if (_peers[key] === existingPeer) _peerObs()?.did(existingPeer.slot, key, { type: 'close' });
               try {
                 existingPeer.pc.close();
               } catch (_) {}
             }
+            _peerObs()?.close(frame, { type: 'deadline', deadline: 'answerAfter' });
           }, 10000);
           existingPeer.pc.onconnectionstatechange = () => {
             const s = existingPeer.pc.connectionState;
@@ -7830,18 +8077,35 @@
           installPeerDataChannelHandlers(key, existingPeer);
 
           peer = existingPeer;
+          obsNew = true;
         }
 
+        // The connection now belongs to this offer's attempt (none from an old page).
+        peer.pc._knAttempt = obsAttempt;
+        if (obsAttempt) {
+          _peerObs()?.did(peer.slot, key, {
+            type: 'answer',
+            ...obsAttempt,
+            connection: obsNew || !obsHadEntry ? 'new' : 'kept',
+          });
+        }
+        obsDone();
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await KNShared.drainCandidates(peer);
-        await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key);
+        await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key, peer.pc._knAttempt);
       } else if (data.answer) {
+        if (obsAttempt) _peerObs()?.did(peer.slot, key, { type: 'applyAnswer', ...obsAttempt });
+        obsDone();
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         await KNShared.drainCandidates(peer);
       } else if (data.candidate) {
+        if (obsAttempt) _peerObs()?.did(peer.slot, key, { type: 'applyCandidate', ...obsAttempt });
+        obsDone();
         await KNShared.addBufferedCandidate(peer, data.candidate);
       }
+      obsDone();
     } catch (err) {
+      obsDone();
       _syncLog(`WebRTC signal error: ${err.message || err}`);
       setStatus(`WebRTC error: ${err.message || err}`);
     }
@@ -7987,12 +8251,11 @@
           const _recoveryTarget = _frameNum + SYNC_COORD_DELTA;
           _syncTargetFrame = _recoveryTarget;
           _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
-          _resyncRequestInFlight = true;
-          _resyncRequestSentAt = performance.now();
+          const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);
           try {
             const peerDc = _peers[remoteSid]?.dc;
             if (peerDc?.readyState === 'open') {
-              peerDc.send(`sync-request-full-at:${_recoveryTarget}`);
+              _sendResyncRequest(peerDc, _recoveryRequestId, `sync-request-full-at:${_recoveryTarget}`);
               _syncLog(`peer-recovery resync: sent sync-request-full-at:${_recoveryTarget}`);
             }
           } catch (e) {
@@ -8079,10 +8342,17 @@
 
   const setupDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
+    // The connection this channel belongs to: its attempt names the channel's open and close.
+    ch._knPc = ch._knPc ?? _peers[remoteSid]?.pc ?? null;
+    // Host: the number a guest sent ahead of its next request on this
+    // channel. It lives and dies with the channel.
+    let syncRequestIdNext = 0;
 
     const onOpen = () => {
       const peer = _peers[remoteSid];
       if (!peer) return;
+      const openedAttempt = ch._knPc?._knAttempt;
+      const openedFrame = _peerObs()?.open(peer.slot, remoteSid);
       const known = _knownPlayers[remoteSid];
       const peerName = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
       _syncLog(`DC open with ${remoteSid} slot: ${peer.slot} ${peerName}`);
@@ -8172,10 +8442,9 @@
           if (hostDc?.readyState === 'open') {
             _syncTargetFrame = -1;
             _syncTargetDeadlineAt = 0;
-            _resyncRequestInFlight = true;
-            _resyncRequestSentAt = performance.now();
+            const _reconnectRequestId = _beginResyncRequest();
             try {
-              hostDc.send('sync-request-full');
+              _sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full');
               _syncLog('reconnect resync: sent immediate sync-request-full to host DC');
             } catch (e) {
               _syncLog(`reconnect resync send failed: ${e}`);
@@ -8210,7 +8479,12 @@
       if (_playerSlot === 0 && _pendingLateJoinReadySids.has(remoteSid)) {
         finishLateJoinReady('deferred DC open', remoteSid);
       }
+      if (peer.slot === 0) _resyncAfterLostHost('host channel open');
 
+      if (!openedAttempt) {
+        _peerObs()?.stopWatching(peer.slot, remoteSid, 'a channel opened on a connection with no attempt id');
+      }
+      _peerObs()?.close(openedFrame, openedAttempt ? { type: 'opened', ...openedAttempt } : null);
       if (_phase < PHASE_GAME_STARTED) startGameSequence();
     };
     ch.onopen = onOpen;
@@ -8224,7 +8498,7 @@
       const current = _peers[remoteSid];
       if (!current || current.dc !== ch) return;
       _syncLog(`DC closed with ${remoteSid}`);
-      handlePeerDisconnect(remoteSid);
+      handlePeerDisconnect(remoteSid, ch._knPc?._knAttempt);
     };
 
     ch.onerror = (e) => {
@@ -8575,16 +8849,15 @@
           const cooldownElapsed = now2 - _lastResyncTime;
           if (!_resyncRequestInFlight && cooldownElapsed > _resyncCooldownMs()) {
             _lastResyncTime = now2;
-            _resyncRequestInFlight = true;
-            _resyncRequestSentAt = performance.now();
             const _coordTarget = _frameNum + SYNC_COORD_DELTA;
+            const _desyncRequestId = _beginResyncRequest(_coordTarget);
             _syncTargetFrame = _coordTarget;
             _syncTargetDeadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS; // I1 (MF3)
             _syncLog(
               `sending sync-request-full-at:${_coordTarget} (RDRAM desync, cooldown=${Math.round(cooldownElapsed)}ms)`,
             );
             try {
-              peer.dc.send(`sync-request-full-at:${_coordTarget}`);
+              _sendResyncRequest(peer.dc, _desyncRequestId, `sync-request-full-at:${_coordTarget}`);
             } catch (e2) {
               _syncLog(`sync-request send failed: ${e2}`);
               _resyncRequestInFlight = false;
@@ -8597,6 +8870,11 @@
             );
           }
         }
+        // State sync: the number of the request that follows on this channel.
+        if (e.data.startsWith('sync-request-id:')) {
+          if (_playerSlot === 0) syncRequestIdNext = _requestIdFrom(Number(e.data.substring(16)));
+          return;
+        }
         // State sync: host received request from guest (sent on lockstep DC)
         if (
           _playerSlot === 0 &&
@@ -8606,6 +8884,9 @@
             e.data.startsWith('sync-request-at:') ||
             e.data.startsWith('sync-request-full-at:'))
         ) {
+          // The number is for this request only, answered or not.
+          const requestId = syncRequestIdNext;
+          syncRequestIdNext = 0;
           const now = Date.now();
           const lastRequest = _syncRequestCooldowns.get(remoteSid) || 0;
           if (now - lastRequest < _SYNC_REQUEST_COOLDOWN_MS) {
@@ -8632,11 +8913,12 @@
               targetFrame,
               targetSid: remoteSid,
               forceFull: isFull,
+              requestId,
               deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
             });
             _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
           } else {
-            pushSyncState(remoteSid);
+            pushSyncState(remoteSid, false, { requestIds: { [remoteSid]: requestId } });
           }
         }
         // JSON messages
@@ -8697,9 +8979,18 @@
     // state must not carry over or binary chunks will be dropped as unexpected.
     _syncExpected = 0;
     _syncChunks = [];
+    // Guest: the request the next state on this channel answers, sent just
+    // ahead of its header. It lives and dies with the channel.
+    let syncAnswerIdNext = 0;
     ch.onmessage = (e) => {
       if (typeof e.data === 'string') {
         _peerProtocol()?.peerText('sync-state', e.data);
+        if (e.data.startsWith('sync-answer-id:')) {
+          syncAnswerIdNext = _requestIdFrom(Number(e.data.substring(15)));
+          // Only the host's word says what the host does.
+          if (syncAnswerIdNext > 0 && _peers[_remoteSid]?.slot === 0) _hostNumbersAnswers = true;
+          return;
+        }
         // Guest: incoming state transfer header
         if (e.data.startsWith('sync-start:')) {
           const parts = e.data.split(':');
@@ -8708,14 +8999,28 @@
           _syncIsFull = parts[3] === '1';
           _syncIsProactive = parts[4] === '1';
           _syncIsRegions = false;
+          _syncAnswerFor = syncAnswerIdNext;
+          syncAnswerIdNext = 0;
           _syncChunks = [];
           _syncLastChunkProgressLogAt = 0;
           _syncChunkSessionId++;
           if (_syncChunkTimeoutTimer) clearTimeout(_syncChunkTimeoutTimer);
           const sessionId = _syncChunkSessionId;
+          const transferAnswers = _syncAnswerFor;
           _syncChunkTimeoutTimer = setTimeout(() => {
             if (sessionId !== _syncChunkSessionId || _syncExpected <= 0) return;
             const received = _syncChunks.length;
+            if (_answersAnOlderRequest(transferAnswers)) {
+              // The transfer answered a request given up on: the newer one
+              // that is out keeps its own deadline and is not asked again.
+              _syncLog(
+                `sync chunks timeout: ${received}/${_syncExpected} for older request ${transferAnswers} ` +
+                  `(newest=${_resyncRequestId}) — dropped`,
+              );
+              _syncChunks = [];
+              _syncExpected = 0;
+              return;
+            }
             _syncLog(
               `sync chunks timeout: ${received}/${_syncExpected} chunks after ${SYNC_CHUNK_TIMEOUT_MS}ms — requesting socket full sync`,
             );
@@ -8737,6 +9042,8 @@
           _syncIsFull = true;
           _syncIsProactive = false;
           _syncIsRegions = true;
+          _syncAnswerFor = syncAnswerIdNext;
+          syncAnswerIdNext = 0;
           _syncChunks = [];
           _syncLastChunkProgressLogAt = 0;
           _syncChunkSessionId++;
@@ -8813,6 +9120,7 @@
    *   - _auditLastRemote[slot]         (last audited remote input)
    *   - _lateJoinActivatedAtFrame[slot] (post-activation grace window)
    *   - _lateJoinSeededInputFrames[slot] (seeded late-join input frames)
+   *   - _hostNumbersAnswers            (slot 0 only: learned from the host)
    *
    * Fields reset for per-peer-object state (if peer provided):
    *   - peer.lastAckFromPeer
@@ -8832,6 +9140,7 @@
    * @param {string} [opts.sid] - socket.io sid to filter scheduled syncs
    */
   const resetPeerState = (slot, reason, opts = {}) => {
+    _peerObs()?.peerReset(slot, opts.sid ?? null, reason);
     if (slot === null || slot === undefined) return;
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A joiner that was being served is gone: the pause is not kept for it.
@@ -8863,6 +9172,10 @@
       opts.peer.lastAckAdvanceTime = 0;
     }
 
+    // What this guest learned about the host's answers: the host that comes
+    // back may be on another version.
+    if (slot === 0) _hostNumbersAnswers = false;
+
     // Shared queues — filter out entries for this slot/sid
     for (let i = _pendingCInputs.length - 1; i >= 0; i--) {
       if (_pendingCInputs[i].slot === slot) _pendingCInputs.splice(i, 1);
@@ -8892,9 +9205,30 @@
 
   // -- Peer disconnect (drop handling) ---------------------------------------
 
-  const handlePeerDisconnect = (remoteSid) => {
+  // `lostAttempt`: the attempt of the connection found lost (observing only).
+  const handlePeerDisconnect = (remoteSid, lostAttempt = _peers[remoteSid]?.pc?._knAttempt) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
+    if (peer.slot === 0 && _playerSlot !== 0 && (_awaitingLateJoinState || _isApplyingLateJoinState)) {
+      _lateJoinLostHost = true;
+      _syncLog('late-join: lost the channel to the host before loading; a resync follows the load');
+    }
+    // The machine does not cover a late joiner: that player is left alone.
+    if (_isPeerPendingLateJoin(remoteSid, peer)) _peerObs()?.stopWatching(peer.slot, remoteSid, 'a late joiner');
+    const frame = _peerObs()?.open(peer.slot, remoteSid);
+    try {
+      _handlePeerDisconnect(remoteSid, peer);
+    } finally {
+      _peerObs()?.close(
+        frame,
+        peer._intentionalLeave
+          ? { type: 'left' }
+          : { type: 'lost', page: lostAttempt?.page ?? '', attempt: lostAttempt?.attempt ?? 0 },
+      );
+    }
+  };
+
+  const _handlePeerDisconnect = (remoteSid, peer) => {
     if (peer._disconnectTimer) {
       clearTimeout(peer._disconnectTimer);
       peer._disconnectTimer = null;
@@ -8956,7 +9290,9 @@
       peer._reconnectTimeout = setTimeout(() => {
         if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
         _syncLog(`reconnect timeout for ${remoteSid} after ${peer._reconnectAttempts || 1} attempts`);
+        const frame = _peerObs()?.open(peer.slot, remoteSid);
         hardDisconnectPeer(remoteSid);
+        _peerObs()?.close(frame, { type: 'deadline', deadline: 'giveUpAfter' });
       }, 45000);
 
       return;
@@ -8969,6 +9305,7 @@
   const hardDisconnectPeer = (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
+    _peerObs()?.did(peer.slot, remoteSid, { type: 'drop' });
     clearStartupConnectWatchdog(peer);
     if (peer._reconnectTimeout) {
       clearTimeout(peer._reconnectTimeout);
@@ -9035,12 +9372,28 @@
     const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
     setStatus(`${name} disconnected — reconnecting (attempt ${attempt})...`);
 
+    // A retry's attempt was named when the retry was decided (retryOrGiveUp).
+    const reserved = attempt > 1 ? peer._knNextAttempt : null;
+    const attemptId = reserved ?? _nextAttemptId(peer.slot, remoteSid);
+    if (!reserved) {
+      _peerObs()?.did(peer.slot, remoteSid, { type: 'offer', attempt: attemptId.attempt, mode: 'reconnect' });
+    }
+    peer._knNextAttempt = null;
     const peerGuard = (p) => _peers[remoteSid] === p;
     KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, _signalSocket, peerGuard);
+    peer.pc._knAttempt = attemptId;
     peer.ready = false;
 
     const retryOrGiveUp = () => {
       if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
+      const frame = _peerObs()?.open(peer.slot, remoteSid);
+      try {
+        _retryOrGiveUp();
+      } finally {
+        _peerObs()?.close(frame, { type: 'deadline', deadline: 'attemptAfter' });
+      }
+    };
+    const _retryOrGiveUp = () => {
       _meshCompare(
         'reconnect-attempt-left',
         attempt < _MAX_RECONNECT_ATTEMPTS,
@@ -9049,6 +9402,9 @@
       if (attempt < _MAX_RECONNECT_ATTEMPTS) {
         _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
         setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
+        const next = _nextAttemptId(peer.slot, remoteSid);
+        peer._knNextAttempt = next;
+        _peerObs()?.did(peer.slot, remoteSid, { type: 'offer', attempt: next.attempt, mode: 'reconnect' });
         setTimeout(() => attemptReconnect(remoteSid, attempt + 1), _RECONNECT_RETRY_DELAY);
       } else {
         _syncLog(`reconnect failed after ${_MAX_RECONNECT_ATTEMPTS} attempts — hard disconnect ${remoteSid}`);
@@ -9114,6 +9470,7 @@
         target: remoteSid,
         offer: peer.pc.localDescription,
         reconnect: true,
+        attemptId,
       });
     } catch (err) {
       _syncLog(`reconnect offer failed (attempt ${attempt}): ${err}`);
@@ -10654,6 +11011,76 @@
     }
   }
 
+  // Joiner: a full resync from the host after a late join during which the
+  // channel to the host was lost. Asked once the state is loaded and the
+  // channel is open; until then the marker waits for the channel's open. The
+  // marker is cleared only when a state is applied (applySyncState). Each
+  // request has the resync request's own deadline (I1), which calls this
+  // again; after LATE_JOIN_LOST_HOST_MAX_ASKS unanswered asks it gives up.
+  const _resyncAfterLostHost = (source) => {
+    // Observing: the proved step (web/src/resync-request.ts) on the same
+    // inputs, compared with each branch below before that branch changes any.
+    const observe = (taken) =>
+      _resyncObserve('late-join-lost-host', taken, (rules) =>
+        rules.lateJoinLostHostStep(
+          _lateJoinLostHost,
+          _playerSlot === 0,
+          _phase === PHASE_RUNNING,
+          Object.values(_peers).find((p) => p.slot === 0)?.dc?.readyState === 'open',
+          _resyncRequestInFlight,
+          _lateJoinLostHostAsks,
+          LATE_JOIN_LOST_HOST_MAX_ASKS,
+        ),
+      );
+    if (!_lateJoinLostHost || _playerSlot === 0 || _phase !== PHASE_RUNNING) {
+      observe('idle');
+      return;
+    }
+    const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+    if (hostDc?.readyState !== 'open') {
+      observe('waitForChannel');
+      _syncLog(`late-join resync after a lost host channel waits for it to open (${source})`);
+      return;
+    }
+    // A request already out: its answer, applied, clears the marker; its
+    // deadline brings this back if none comes.
+    if (_resyncRequestInFlight) {
+      observe('inFlight');
+      _syncLog(`late-join resync after a lost host channel: a resync is already on its way (${source})`);
+      return;
+    }
+    if (_lateJoinLostHostAsks >= LATE_JOIN_LOST_HOST_MAX_ASKS) {
+      observe('giveUp');
+      _lateJoinLostHost = false;
+      _lateJoinLostHostAsks = 0;
+      _syncLog(
+        `LATE-JOIN-LOST-HOST-GIVEUP f=${_frameNum} (${source}): ${LATE_JOIN_LOST_HOST_MAX_ASKS} resync requests went unanswered`,
+      );
+      KNEvent('late-join-lost-host-giveup', 'No resync from the host after a late join', {
+        asks: LATE_JOIN_LOST_HOST_MAX_ASKS,
+      });
+      return;
+    }
+    observe('ask');
+    _lateJoinLostHostAsks++;
+    _setLastSyncState(null, 'late-join-lost-host');
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    const requestId = _beginResyncRequest();
+    try {
+      _sendResyncRequest(hostDc, requestId, 'sync-request-full');
+      _syncLog(
+        `LATE-JOIN-LOST-HOST-RESYNC f=${_frameNum} ask=${_lateJoinLostHostAsks}/${LATE_JOIN_LOST_HOST_MAX_ASKS} ` +
+          `(${source}): sent sync-request-full to the host`,
+      );
+    } catch (e) {
+      _syncLog(`late-join resync request failed: ${e}`);
+      _resyncRequestInFlight = false;
+      // Bounded by the count above.
+      _resyncAfterLostHost(`${source}, send failed`);
+    }
+  };
+
   const handleLateJoinState = async (msg) => {
     if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
     if (_isSpectator) return;
@@ -10859,6 +11286,9 @@
         const pcState = existing?.pc?.connectionState;
         const working = !!existing && pcState === 'connected' && existing.dc?.readyState === 'open';
         if (!_needsMeshHeal(sid, working, false)) continue;
+        // No working channel to the host now: the host may have ended this
+        // serve and run on.
+        if (info.slot === 0) _lateJoinLostHost = true;
         // Peer is missing, dead, or has no working DC — clean up and recreate
         if (existing) {
           _syncLog(
@@ -10903,6 +11333,7 @@
         _syncLog(`late-join-ready retry ${readyAttempts}`);
         sendLateJoinReady();
       }, 500);
+      _resyncAfterLostHost('late-join state loaded');
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
     } finally {
@@ -12264,6 +12695,7 @@
     }
     if (_phase === PHASE_RUNNING) return;
     _phase = PHASE_RUNNING;
+    _peerObs()?.matchStarted();
     window._knPreventRetroArchVisibilityPause = true;
     _checkStateTransition();
 
@@ -12980,9 +13412,7 @@
         const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
         if (!sentSocket && hostPeer?.dc?.readyState === 'open') {
           try {
-            _resyncRequestInFlight = true;
-            _resyncRequestSentAt = performance.now();
-            hostPeer.dc.send('sync-request-full');
+            _sendResyncRequest(hostPeer.dc, _beginResyncRequest(), 'sync-request-full');
             _syncLog(`${reason}: sent sync-request-full to host over DC fallback`);
           } catch (_) {
             _resyncRequestInFlight = false;
@@ -13113,9 +13543,7 @@
         const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
         if (hostPeer?.dc?.readyState === 'open') {
           try {
-            _resyncRequestInFlight = true;
-            _resyncRequestSentAt = performance.now();
-            hostPeer.dc.send('sync-request-full');
+            _sendResyncRequest(hostPeer.dc, _beginResyncRequest(), 'sync-request-full');
           } catch (_) {
             _resyncRequestInFlight = false;
           }
@@ -13202,10 +13630,20 @@
 
   const stopSync = () => {
     _phase = PHASE_STOPPED;
+    // Observing: every connection is about to close; each machine is told, and its per-match state goes.
+    _peerObs()?.sessionEnded();
     _runSubstate = RUN_NORMAL;
     _checkStateTransition();
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
+    _resyncRequestId = 0;
+    _resyncRequestAt = -1;
+    _hostNumbersAnswers = false;
+    _syncAnswerFor = 0;
+    // A late join's owed resync belongs to this match: it does not carry
+    // into the next one on this page.
+    _lateJoinLostHost = false;
+    _lateJoinLostHostAsks = 0;
     _lastAppliedSyncHostFrame = -1;
     _resetStrictMenuResends();
     _clearStrictMenuWait();
@@ -13575,6 +14013,8 @@
         targetSid: r.targetSid,
         forceFull: true,
         followUp,
+        // Still the answer to the request the first one was for.
+        requestId: r.requestId || 0,
         deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
       });
     // Confirmation skips phantom peers, so a state sent while a target is a
@@ -13584,7 +14024,11 @@
     );
     const epoch = _syncQueueEpoch;
     const gens = due.map((r) => _syncQueueGen[r.targetSid] || 0);
-    pushSyncState(targetSid).then((skipped) => {
+    // Each guest numbers its own requests: one number per target. A sync the
+    // host scheduled for its own reasons has none.
+    const requestIds = {};
+    for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;
+    pushSyncState(targetSid, false, { requestIds }).then((skipped) => {
       due.forEach((r, i) => {
         // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
         if (!_peers[r.targetSid] || epoch !== _syncQueueEpoch || gens[i] !== (_syncQueueGen[r.targetSid] || 0)) return;
@@ -13852,6 +14296,20 @@
     // kn_set_frame then, so JS would rewind its frame counter while C kept
     // its own and finished the old replay over the new state (the peers
     // split from that frame). Hold the state until the replay finishes.
+    // The answer to a request given up on, from before the frame the newest
+    // request named: applied, it would take this guest back below that frame
+    // (specs/resync_flow.qnt, aLateAnswerDoesNotTakeTheGuestBack). Dropped
+    // here, before either branch below, so it is dropped after the target's
+    // deadline too (lateAnswerAfterTheTargetDeadlineTest). A wait at the
+    // target goes on, to that deadline (I1).
+    if (_isLateAnswerBeforeFrameAsked(_pendingResyncState)) {
+      _syncLog(
+        `SYNC-LATE-ANSWER-DROPPED f=${_frameNum} answerFor=${_pendingResyncState.answerFor} ` +
+          `newest=${_resyncRequestId} frame=${_pendingResyncState.frame} asked=${_resyncRequestAt} ` +
+          `target=${_syncTargetFrame}`,
+      );
+      _pendingResyncState = null;
+    }
     const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;
     if (_syncTargetFrame > 0) {
       if (_frameNum >= _syncTargetFrame) {
@@ -16602,7 +17060,12 @@
           // reconnects the roster still lists us under the old id until
           // users-updated arrives), a peer with an open DC, and a reconnect
           // already in progress.
-          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) continue;
+          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) {
+            _peerObs()?.check(info.slot);
+            continue;
+          }
+          const healFrame = _peerObs()?.open(info.slot, sid);
+          const healFound = p?.pc?._knAttempt;
           const pcState = p?.pc?.connectionState;
           _syncLog(
             `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
@@ -16618,6 +17081,7 @@
           }
           createPeer(sid, info.slot, true);
           sendOffer(sid, { reconnect: true });
+          _peerObs()?.close(healFrame, { type: 'heal', page: healFound?.page ?? '', attempt: healFound?.attempt ?? 0 });
         }
       }
       _remoteApplied++;
@@ -17117,6 +17581,8 @@
       _setLastSyncState(currentState.slice(), 'pushSync');
     }
 
+    // By target sid: the number of the request this state answers, if any.
+    const requestIds = (!isProactive && options.requestIds) || {};
     try {
       if (options.transport === 'socket') {
         if (!targetSid || !_peers[targetSid]) {
@@ -17138,6 +17604,8 @@
             rawSize: encoded.rawSize,
             compressedSize: encoded.compressedSize,
             data: encoded.data,
+            // The request this answers; absent when it answers none.
+            ...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {}),
           });
           _settleInputsBefore(_peers[targetSid].slot, frame);
           _syncLog(
@@ -17148,13 +17616,13 @@
           _syncLog(
             `socket sync too large (${b64KB}KB b64 > ${Math.round(SOCKET_SYNC_B64_SOFT_LIMIT / 1024)}KB), falling back to DC chunks`,
           );
-          return await sendSyncChunks(base64ToUint8(encoded.data), frame, isFull, targetSid, isProactive);
+          return await sendSyncChunks(base64ToUint8(encoded.data), frame, isFull, targetSid, isProactive, requestIds);
         }
       } else {
         const compressed = await compressState(toCompress);
         const sizeKB = Math.round(compressed.length / 1024);
         _syncLog(`${isFull ? 'full' : 'delta'} state: ${sizeKB}KB compressed`);
-        return await sendSyncChunks(compressed, frame, isFull, targetSid, isProactive);
+        return await sendSyncChunks(compressed, frame, isFull, targetSid, isProactive, requestIds);
       }
       return [];
     } catch (err) {
@@ -17168,7 +17636,7 @@
 
   // Returns the sids of targets that were skipped because their channel
   // wasn't open.
-  const sendSyncChunks = async (compressed, frame, isFull, targetSid, isProactive = false) => {
+  const sendSyncChunks = async (compressed, frame, isFull, targetSid, isProactive = false, requestIds = {}) => {
     const skipped = [];
     // Host: send compressed state/delta via DC in 64KB chunks.
     // Chunks are sent with yields between them so input messages can
@@ -17207,6 +17675,12 @@
         continue;
       }
       try {
+        // The request this answers, just ahead of the header on the same
+        // ordered channel: a guest on an older version parses the header
+        // strictly, and ignores a string it does not know.
+        const sid = targetSid || Object.keys(_peers).find((k) => _peers[k] === target);
+        const answerFor = (sid && requestIds[sid]) || 0;
+        if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
         dc.send(header);
         for (let i = 0; i < numChunks; i++) {
           const start = i * CHUNK_SIZE;
@@ -17231,16 +17705,43 @@
     return skipped;
   };
 
-  async function _handleDecodedSyncPayload({ decompressed, frame, isFull, isProactive, isRegions, wireSize, source }) {
+  // The answer to the newest request is buffered: an older request's answer
+  // finishing its decode later (one over the socket, one over the channel)
+  // does not take its place (specs/resync_flow.qnt, theAwaitedAnswerIsNotLost).
+  const _keepsAwaitedAnswer = (answerFor, frame) => {
+    const keeps = _resyncObserve(
+      'keeps-awaited-answer',
+      _answersAnOlderRequest(answerFor) && _pendingResyncState?.answerFor === _resyncRequestId,
+      (rules) => rules.keepsAwaitedAnswer(answerFor, _resyncRequestId, _pendingResyncState?.answerFor ?? -1),
+    );
+    if (!keeps) return false;
+    _syncLog(
+      `SYNC-LATE-ANSWER-IGNORED answerFor=${answerFor} frame=${frame} ` +
+        `kept=${_pendingResyncState.frame} newest=${_resyncRequestId}`,
+    );
+    return true;
+  };
+
+  async function _handleDecodedSyncPayload({
+    decompressed,
+    frame,
+    isFull,
+    isProactive,
+    isRegions,
+    wireSize,
+    source,
+    answerFor = 0,
+  }) {
     // Regions patch: decompress directly, buffer for apply — no delta chain.
     if (isRegions) {
-      _resyncRequestInFlight = false;
+      if (_endsResyncRequest(answerFor)) _resyncRequestInFlight = false;
       if (frame <= _lastAppliedSyncHostFrame) {
         _syncLog(`regions sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
-        _clearLifecycleResyncGuard('regions sync stale');
+        if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('regions sync stale');
         return;
       }
-      _pendingResyncState = { bytes: decompressed, frame, isRegions: true };
+      if (_keepsAwaitedAnswer(answerFor, frame)) return;
+      _pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };
       _syncLog(`regions resync ready: ${Math.round(wireSize / 1024)}KB wire frame=${frame}`);
       return;
     }
@@ -17263,9 +17764,7 @@
           const hostSyncDc = hostPeer?.syncDc?.readyState === 'open' ? hostPeer.syncDc : hostPeer?.dc;
           if (hostSyncDc?.readyState === 'open') {
             try {
-              _resyncRequestInFlight = true;
-              _resyncRequestSentAt = performance.now();
-              hostSyncDc.send('sync-request-full');
+              _sendResyncRequest(hostSyncDc, _beginResyncRequest(), 'sync-request-full');
             } catch (_) {
               _resyncRequestInFlight = false;
             }
@@ -17287,17 +17786,29 @@
       // if any proactive packet is lost (e.g. during a network switch).
       _syncLog(`proactive state buffered: ${Math.round(wireSize / 1024)}KB wire, frame=${frame} source=${source}`);
     } else {
-      // Request satisfied — clear in-flight flag so next desync can send a new request.
-      _resyncRequestInFlight = false;
+      // Its own answer ends the request that is out, so the next desync can
+      // ask again. A state the host sent for its own reasons, or the answer
+      // to a request given up on, does not (specs/resync_flow.qnt).
+      const endsRequest = _endsResyncRequest(answerFor);
+      if (endsRequest) _resyncRequestInFlight = false;
+      else if (_resyncRequestInFlight) {
+        _syncLog(`sync state is not the answer awaited: answerFor=${answerFor} newest=${_resyncRequestId}`);
+      }
       // Discard if we already applied a state at or after this frame (e.g. proactive
       // fast-path already jumped us forward — applying an older explicit would roll back).
       if (frame <= _lastAppliedSyncHostFrame) {
         _syncLog(`explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
-        _clearLifecycleResyncGuard('explicit sync stale');
+        // The guard belongs to the request that is out; the answer to an
+        // older one does not end it.
+        if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('explicit sync stale');
         return;
       }
-      _pendingResyncState = { bytes: fullBytes, frame };
-      _syncLog(`resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source})`);
+      if (_keepsAwaitedAnswer(answerFor, frame)) return;
+      _pendingResyncState = { bytes: fullBytes, frame, answerFor };
+      _syncLog(
+        `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +
+          `answerFor=${answerFor} newest=${_resyncRequestId} endsRequest=${endsRequest})`,
+      );
     }
   }
 
@@ -17317,6 +17828,8 @@
     const isProactive = _syncIsProactive;
     const isRegions = _syncIsRegions;
     _syncIsRegions = false;
+    const answerFor = _syncAnswerFor;
+    _syncAnswerFor = 0;
 
     try {
       const decompressed = await decompressState(assembled);
@@ -17328,6 +17841,7 @@
         isRegions,
         wireSize: assembled.length,
         source: 'dc',
+        answerFor,
       });
     } catch (err) {
       _syncLog(`sync decompress failed: ${err}`);
@@ -17493,6 +18007,12 @@
 
     _syncMismatchStreak = 0;
     _lastAppliedSyncHostFrame = frame; // discard any explicit state older than this
+    if (_lateJoinLostHost) {
+      // The host's state is applied: the late joiner is where the host is.
+      _lateJoinLostHost = false;
+      _lateJoinLostHostAsks = 0;
+      _syncLog(`late-join: a host state is applied at frame ${frame}; the lost-host resync is done`);
+    }
     _lastResyncTime = performance.now(); // restart cooldown from application time, not request time
     // Reset frame pacing after resync — the guest may be behind the host and needs
     // to catch up without PACING-THROTTLE fighting the recovery. Clear the EMA smoothing
@@ -17710,6 +18230,8 @@
     _lateJoinReadyHandled.clear();
     _lateJoinServing.clear();
     _lateJoinGuestPausedAt = 0;
+    _lateJoinLostHost = false;
+    _lateJoinLostHostAsks = 0;
     _pendingLateJoinReadySids.clear();
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();

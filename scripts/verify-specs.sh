@@ -14,9 +14,10 @@ cd "$(dirname "$0")/.."
 STEPS="${STEPS:-6}"
 QUINT="npx quint"
 
-verify() { # spec module invariant
-  echo "== $2 / $3 (every run up to $STEPS steps)"
-  $QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$STEPS"
+verify() { # spec module invariant [init [steps]]
+  local init="${4:-init}" steps="${5:-$STEPS}"
+  echo "== $2 / $3${4:+ from $4} (every run up to $steps steps)"
+  $QUINT verify "$1" --main="$2" --invariant="$3" --init="$init" --max-steps="$steps"
 }
 
 # The checker must be able to find the bugs these properties exist for, or a
@@ -75,9 +76,40 @@ expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
 expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
 expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
 expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
+# A counter alone for the attempt: a replaced page's candidate reaches its
+# replacement's connection in 5 steps (oldCandidateReachesReplacementConnectionTest).
+expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
+# startupRetryIsNotAReconnect is violated on
+# peer_connection_before_startup_flag only before the match, and this script
+# starts from `init`, a match under way; from the lobby there is a
+# counterexample 6 steps long. startupRetryToAStartedPageTest holds it, and
+# check-specs.sh samples today's holdToday from `initLobby`.
+
+STREAM=specs/streaming_connection.qnt
+verify "$STREAM" streaming_connection_fixed allHold
+# Pages joining late, whose readies only this initial state has: a ready
+# lost, early, or arriving while the connection is still connecting. One
+# step fewer than the rest keeps it near the cost of the proof above (about
+# 130 s at 5 steps here, against about 160 s from `init` at 6); the longest of
+# those orderings, the resent offer of readyWhileConnectingTest, reaches the
+# guest at step 5.
+verify "$STREAM" streaming_connection_fixed allHold initLate $((STEPS - 1))
+verify "$STREAM" streaming_connection_current holdToday
+# Today's engine: a lost offer leaves the guest with nothing to come, in 2
+# steps. Its case of staleSignalsAreNotApplied, the host's new offer applied
+# to the guest's old connection (newConnectionTakenAsRenegotiationTest), is
+# 7 steps long, beyond this bound; that scenario holds it.
+expect_violation "$STREAM" streaming_connection_current neverLeftWithNothingPending
+# The engine before #220 answered any member's offer: a stray offer is
+# answered in 2 steps, and a stray sender's second offer is applied to its
+# first connection in 4.
+expect_violation "$STREAM" streaming_connection_before_220 receiversConnectOnlyToTheHost
+expect_violation "$STREAM" streaming_connection_before_220 staleSignalsAreNotApplied
 
 PAUSE=specs/late_join_pause.qnt
 verify "$PAUSE" late_join_pause_current allHold
+verify "$PAUSE" late_join_pause_marker_at_send holdBeforeTheResyncFix
+verify "$PAUSE" late_join_pause_before_resync holdBeforeTheResyncFix
 expect_violation "$PAUSE" late_join_pause_before hostPauseHasADeadline
 expect_violation "$PAUSE" late_join_pause_host_side guestPauseHasADeadline
 expect_violation "$PAUSE" late_join_pause_host_side guestResumesOnTheHostsWord
@@ -85,10 +117,24 @@ expect_violation "$PAUSE" late_join_pause_host_side aRepeatedRequestKeepsTheDead
 # The other two violations on late_join_pause_before need two joiners and
 # are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
 # them.
+# aJoinerIsNotMadeAPlayerBehindTheHost on late_join_pause_before_resync has
+# a counterexample 7 steps long (ask, serve, send, lose the channel, load,
+# reopen, ready), beyond this bound;
+# joinerLosesTheHostAfterTheStateIsSentTest and
+# timerFiresWhileTheStateIsOnItsWayTest hold it. On
+# late_join_pause_marker_at_send its counterexample (the same and an
+# unanswered request) is 8 steps long; resyncRequestUnansweredTest holds it.
 
 FLOW=specs/resync_flow.qnt
 verify "$FLOW" resync_flow_current allHold
+verify "$FLOW" resync_flow_any_answer holdWithoutNumbers
 expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
+expect_violation "$FLOW" resync_flow_any_answer onlyItsAnswerEndsARequest
+# The counterexamples to aLateAnswerDoesNotTakeTheGuestBack and
+# theAwaitedAnswerIsNotLost on resync_flow_any_answer are over ten steps
+# long, beyond this bound; lateAnswerTest,
+# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
+# hold them.
 
 TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer

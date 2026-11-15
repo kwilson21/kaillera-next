@@ -146,6 +146,9 @@ _VALID_EVENT_TYPES = {
     "rejoin-no-answer",
     # A late joiner got no game state from a running host before its deadline.
     "late-join-timeout",
+    # A late joiner that lost its channel to the host got no answer to any of
+    # its resync requests and stopped asking (netplay-rollback.js).
+    "late-join-lost-host-giveup",
     # Reports from the page lifecycle machine (web/src/session.ts). Every
     # SessionReport type must be listed: tests/test_session_reports.py.
     # No longer sent: the page flags it compared with the machine are gone.
@@ -164,6 +167,9 @@ _VALID_EVENT_TYPES = {
     # A decision of the peer mesh disagreed with the proved function meant to
     # replace it (web/src/peer-signaling.ts, compared in netplay-rollback.js).
     "mesh-disagree",
+    # A resync request rule disagreed with the proved function meant to
+    # replace it (web/src/resync-request.ts, compared in netplay-rollback.js).
+    "resync-disagree",
 }
 _ADMIN_EVENT_TYPES = _VALID_EVENT_TYPES | {"wake-time"}
 

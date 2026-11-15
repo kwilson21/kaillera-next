@@ -25,6 +25,7 @@ import {
   randomRoomCode,
   reportWakeDuration,
   sendDirectWake,
+  slotClass,
   type CodeHost,
   type WakeHost,
 } from './wake.ts';
@@ -133,10 +134,6 @@ const GAMES: ReadonlyMap<string, Game> = new Map([
 
 const gameOf = (room: RoomAnswer): Game =>
   GAMES.get(room.game_id ?? '') ?? { name: room.romName || 'Super Smash Bros. 64', rom: 'SSB64' };
-
-/** The class of the room's `index`th slot marker: taken slots carry their player colour. */
-export const slotClass = (index: number, playerCount: number): string =>
-  index < playerCount ? `slot p${(index % 4) + 1} on` : 'slot';
 
 /** The line after the slot markers: how many are in, and what the room is doing. */
 export const factsText = (room: RoomAnswer): string => {

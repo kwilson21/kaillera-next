@@ -199,3 +199,108 @@ def test_the_resume_for_a_joiner_that_left_waits_for_the_peer_to_be_dropped():
     reset = reset[: reset.index("\n  };\n")]
     assert "queueMicrotask(() => _endLateJoinPauseIfNoneServed(`${reason} for ${leftSid}`));" in reset
     assert "      _endLateJoinPauseIfNoneServed(`${reason} for ${opts.sid}`);" not in reset
+
+
+def test_a_joiner_that_lost_the_host_resyncs_after_loading():
+    # specs/late_join_pause.qnt (aJoinerIsNotMadeAPlayerBehindTheHost): the
+    # host ends a serve when the joiner's channel goes (its own 15 s deadline
+    # closes it too) and runs on, but a state already sent is still loaded.
+    # Its "ready" then made the joiner a player frames behind the host.
+    src = (Path(__file__).resolve().parent.parent / "web/static/netplay-rollback.js").read_text()
+
+    disconnect = src[src.index("const handlePeerDisconnect = (remoteSid, lostAttempt") :]
+    disconnect = disconnect[: disconnect.index("\n  };\n")]
+    assert (
+        "peer.slot === 0 && _playerSlot !== 0 && (_awaitingLateJoinState || _isApplyingLateJoinState)"
+        in disconnect
+    )
+    assert "_lateJoinLostHost = true;" in disconnect
+
+    helper = src[src.index("const _resyncAfterLostHost = (source) => {") :]
+    helper = helper[: helper.index("\n  };\n")]
+    assert (
+        "if (!_lateJoinLostHost || _playerSlot === 0 || _phase !== PHASE_RUNNING) {\n"
+        "      observe('idle');\n"
+        "      return;\n"
+        "    }"
+    ) in helper
+    assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in helper
+
+    state = src[src.index("const handleLateJoinState = async (msg) => {") :]
+    state = state[: state.index("// -- Guest audio muting")]
+    assert "if (info.slot === 0) _lateJoinLostHost = true;" in state
+    assert state.index("_lateJoinReadyRetryTimer = setInterval(") < state.index(
+        "_resyncAfterLostHost('late-join state loaded');"
+    )
+
+    # Asked when the host's channel opens, if it was closed at the load.
+    assert "if (peer.slot === 0) _resyncAfterLostHost('host channel open');" in src
+
+    # A fresh wait, joining the start, an applied host state, the give-up,
+    # the end of the match (stopSync) and the page's stop clear it: it cannot
+    # outlive a match. Each resets the ask count with it.
+    assert src.count("_lateJoinLostHost = false;") - src.count("let _lateJoinLostHost = false;") == 6
+    assert src.count("_lateJoinLostHostAsks = 0;") - src.count("let _lateJoinLostHostAsks = 0;") == 6
+    stop_sync = src[src.index("const stopSync = () => {") :]
+    stop_sync = stop_sync[: stop_sync.index("\n  };\n")]
+    assert "_lateJoinLostHost = false;" in stop_sync
+
+    # The resync it asks for is a numbered request (#213): a late answer to
+    # it is handled by the resync request rules.
+    assert "const requestId = _beginResyncRequest();" in helper
+    assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in helper
+
+
+def test_a_lost_host_resync_that_goes_unanswered_is_asked_again_up_to_a_bound():
+    # specs/late_join_pause.qnt (KEEP_MARKER_UNTIL_APPLIED,
+    # resyncRequestUnansweredTest): the marker used to be cleared when the
+    # request was sent. A request the host refused, or whose answer was lost,
+    # then left the joiner behind the host for good.
+    src = (Path(__file__).resolve().parent.parent / "web/static/netplay-rollback.js").read_text()
+
+    helper = src[src.index("const _resyncAfterLostHost = (source) => {") :]
+    helper = helper[: helper.index("\n  };\n")]
+    # Not cleared at send, nor while another request is out.
+    send = helper.index("_sendResyncRequest(hostDc, requestId, 'sync-request-full');")
+    in_flight = helper.index("if (_resyncRequestInFlight) {")
+    assert "_lateJoinLostHost = false;" not in helper[:in_flight]
+    assert "_lateJoinLostHost = false;" not in helper[in_flight:send][: helper[in_flight:send].index("\n    }\n")]
+    # The cap: checked before each ask, then a visible give-up.
+    assert "const LATE_JOIN_LOST_HOST_MAX_ASKS = 3;" in src
+    cap = helper.index("if (_lateJoinLostHostAsks >= LATE_JOIN_LOST_HOST_MAX_ASKS) {")
+    assert in_flight < cap < helper.index("_lateJoinLostHostAsks++;") < send
+    give_up = helper[cap : helper.index("_lateJoinLostHostAsks++;")]
+    assert "_lateJoinLostHost = false;" in give_up
+    assert "LATE-JOIN-LOST-HOST-GIVEUP" in give_up
+    assert "KNEvent('late-join-lost-host-giveup'" in give_up
+    # Each branch is compared with the proved step (web/src/resync-request.ts)
+    # before it changes anything.
+    assert give_up.index("observe('giveUp');") < give_up.index("_lateJoinLostHost = false;")
+    assert helper.index("observe('ask');\n    _lateJoinLostHostAsks++;") > cap
+    assert "observe('inFlight');" in helper[in_flight : in_flight + 80]
+    # A failed send asks again, still under the cap.
+    catch = helper[helper.index("} catch (e) {") :]
+    assert "_resyncRequestInFlight = false;" in catch
+    assert "_resyncAfterLostHost(`${source}, send failed`);" in catch
+
+    # The request's deadline asks again, with no timer of its own.
+    deadline = src[src.index("const _checkResyncRequestDeadline = () => {") :]
+    deadline = deadline[: deadline.index("\n  };\n")]
+    assert deadline.index("_resyncRequestInFlight = false;") < deadline.index(
+        "_resyncAfterLostHost('resync request timed out');"
+    )
+
+    # Cleared when a host state is applied.
+    apply = src[src.index("const applySyncState = (bytes, frame, fromProactive = false) => {") :]
+    apply = apply[: apply.index("\n  };\n")]
+    assert apply.index("_lastAppliedSyncHostFrame = frame;") < apply.index("_lateJoinLostHost = false;")
+
+    # Not by resetPeerState: the late-join load resets the host's peer state
+    # right after setting the marker.
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "_lateJoinLostHost" not in reset
+
+    # The give-up is a client event the server accepts.
+    app = (Path(__file__).resolve().parent.parent / "server/src/api/app.py").read_text()
+    assert '"late-join-lost-host-giveup",' in app

@@ -130,8 +130,8 @@ earlier ones to have set up their `window.*` exports:
 5. `dist/kn-core.js` — the TypeScript bundle built from `web/src`: `window.KNCore`, safe storage `window.KNStorage` (`web/src/site/storage.ts`), `window.KNSite` (what this page shares with the front page), the shared state `window.KNState`, and the page globals that used to be scripts of their own: `window.KNShared` and `window.KNEvent` (`page/shared.ts`), `window.GamepadManager` (`page/gamepad-manager.ts`), `window.KNDiag` (`page/diagnostics.ts`) and `window.KNDesync` (`page/desync-detector.ts`)
 6. `version-guard.js` — cross-tab version mismatch guard (forces reload after deploys); starts `web/src/site/version-guard.ts`
 7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
-8. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
-9. `virtual-gamepad.js` — touch controls for mobile
+8. `switch2-usb.js` — starts the WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad (`web/src/page/switch2-usb.ts`)
+9. `virtual-gamepad.js` — starts the touch controls for mobile (`web/src/page/virtual-gamepad/`)
 10. `kn-audio.js` — AudioWorklet pump + rollback audio capture (the logic is `web/src/page/audio.ts`)
 11. `kn-vision-client.js` — starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)
 12. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
@@ -139,8 +139,8 @@ earlier ones to have set up their `window.*` exports:
 14. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
 15. `controller-settings.js` — starts the in-game controller settings panel (logic in `web/src/page/controller-settings/`)
 16. `play.js` — page orchestrator (connects everything)
-17. `version.js` — version display + changelog modal
-18. `feedback.js` — in-app feedback collection
+17. `version.js` — version display + changelog modal; starts `web/src/site/version.ts`
+18. `feedback.js` — in-app feedback collection (`window.KNFeedback`); starts `web/src/site/feedback.ts`
 
 #### Server structure
 
@@ -180,29 +180,29 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 | `netplay-streaming.js`                                   | ~1,600  | Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from `web/src/streaming`                                                                     | play.js, KNState, KNShared                                  |
 | `web/src/page/shared.ts` (in `dist/kn-core.js`)          | ~650    | `window.KNShared`: input encoding/decoding, N64 button map, cheat codes, wire format                                                                                                   | rollback, streaming                                         |
 | `web/src/page/gamepad-manager.ts` (in `dist/kn-core.js`) | ~570    | Profile-based gamepad detection, deadzone, analog mapping (`window.GamepadManager`)                                                                                                    | play.js, KNState                                            |
-| `switch2-usb.js`                                         | ~250    | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line                                                                           | play.html                                                   |
+| `switch2-usb.js`                                         | —       | Starts the WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C), which owns the Connect button and its status line (`web/src/page/switch2-usb.ts`)                          | play.html                                                   |
 | `controller-settings.js`                                 | —       | Starts the in-game controller settings panel (deadzone, sensitivity, profiles); the logic is `web/src/page/controller-settings/`                                                       | play.js, gamepad-manager                                    |
-| `virtual-gamepad.js`                                     | ~1,194  | On-screen touch controls for mobile                                                                                                                                                    | KNState                                                     |
+| `virtual-gamepad.js`                                     | ~7      | Starts the on-screen touch controls for mobile; the logic is `web/src/page/virtual-gamepad/`                                                                                           | KNCore, KNState                                             |
 | `kn-audio.js`                                            | —       | AudioWorklet pump + rollback audio capture; starts `web/src/page/audio.ts` as `window.KNAudio`                                                                                         | rollback, play.js                                           |
 | `kn-vision-client.js`                                    | —       | Starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)                                                                                  | rollback                                                    |
 | `audio-worklet-processor.js`                             | ~85     | AudioWorklet ring buffer for rollback audio                                                                                                                                            | kn-audio.js                                                 |
-| `feedback.js`                                            | ~540    | In-app feedback collection UI                                                                                                                                                          | play.js                                                     |
+| `feedback.js`                                            | —       | In-app feedback collection UI (`window.KNFeedback`); a small caller of `web/src/site/feedback.ts`                                                                                      | dist/kn-core.js or dist/kn-site.js                          |
 | `api-sandbox.js`                                         | —       | Saves/restores native rAF, performance.now, getGamepads                                                                                                                                | rollback, core-redirector                                   |
 | `core-redirector.js`                                     | —       | Intercepts EJS core download → serves patched WASM from IDB                                                                                                                            | api-sandbox                                                 |
 | `web/src/site/storage.ts` (in `dist/kn-core.js`)         | —       | Safe localStorage/sessionStorage wrapper (`window.KNStorage`), set by the bundle                                                                                                       | all modules                                                 |
 | `kn-capture.js`                                          | —       | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)                                                                                                                  | rollback, streaming                                         |
-| `version.js`                                             | ~350    | Version display + changelog modal                                                                                                                                                      | play.js                                                     |
+| `version.js`                                             | —       | Version display + changelog modal; a small caller of `web/src/site/version.ts`                                                                                                         | dist/kn-core.js or dist/kn-site.js                          |
 | `version-guard.js`                                       | —       | Cross-tab version mismatch guard — forces reload when a deploy lands; a small caller of `web/src/site/version-guard.ts`                                                                | dist/kn-core.js or dist/kn-site.js                          |
 | `ejs-loader.js`                                          | —       | EmulatorJS loader shim (booting + script setup hooks)                                                                                                                                  | play.js                                                     |
-| `landing.js`                                             | —       | Front-page board controller (room creation, open-rooms board) on index.html                                                                                                            | —                                                           |
+| `dist/kn-landing.js`                                     | —       | Front-page board controller (room creation, open-rooms board), built from `web/src/landing/front.ts`                                                                                   | index.html                                                  |
 | `dist/kn-join.js`                                        | —       | Invite-page controller (room lookup, join/watch states), built from `web/src/landing/join.ts`                                                                                          | join.html                                                   |
 | `dist/kn-wake-art.js`                                    | —       | Standalone TypeScript bundle for waking-state art while a room wakes                                                                                                                   | index.html, join.html                                       |
 | `dist/kn-site.js`                                        | —       | Small TypeScript bundle for pages without the core: `KNStorage`, and `KNSite` (`web/src/site/`), which the play page gets from the core                                                | index.html, admin.html                                      |
 | `admin.js`                                               | —       | Admin dashboard logic (sessions, events, feedback, screenshots)                                                                                                                        | admin.html only                                             |
-| `demo.js`                                                | ~1,818  | Demo page orchestrator (fake peer + menu autopilot)                                                                                                                                    | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
-| `fake-peer.js`                                           | ~559    | Synthetic P2 for the demo page (simulated input/jitter)                                                                                                                                | demo.js                                                     |
-| `ssb64-menu-autopilot.js`                                | ~308    | Closed-loop menu driver for the demo (reads RDRAM menu state)                                                                                                                          | demo.js                                                     |
-| `rollback-timeline.js`                                   | ~229    | Demo page's live rollback-metrics HUD                                                                                                                                                  | demo.js                                                     |
+| `demo.js`                                                | ~1,475  | Demo page orchestrator (fake peer + menu autopilot); its options, network settings, HUD text and menu script are `web/src/demo` (`KNCore.demo`)                                        | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
+| `fake-peer.js`                                           | —       | Synthetic P2 for the demo page (simulated input/jitter); the logic is `web/src/page/fake-peer.ts`                                                                                      | demo.js                                                     |
+| `ssb64-menu-autopilot.js`                                | —       | Closed-loop menu driver for the demo (reads RDRAM menu state); the logic is `web/src/page/menu-autopilot.ts`                                                                           | demo.js, tests/rb-two-player.mjs                            |
+| `rollback-timeline.js`                                   | —       | Demo page's live rollback-metrics HUD; the logic is `web/src/page/rollback-timeline.ts`                                                                                                | demo.js                                                     |
 
 ### Conventions
 
@@ -215,9 +215,9 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
   are build output and not in git: run `npm ci && npm run build` after a
   fresh checkout and after changing `web/src`. The Docker image builds them
   itself. The static landing pages are strict TypeScript too, without
-  Effect (`web/src/landing/`): the waking art and the invite page are built
-  as their own small bundles, `web/static/dist/kn-wake-art.js` and
-  `web/static/dist/kn-join.js`. The existing
+  Effect (`web/src/landing/`): the waking art, the invite page and the front page
+  are built as their own small bundles, `web/static/dist/kn-wake-art.js`,
+  `web/static/dist/kn-join.js` and `web/static/dist/kn-landing.js`. The existing
   `web/static/*.js` files stay plain scripts until their turn in the
   migration (`docs/roadmap.md`).
 - **JS/TS/HTML/CSS** — formatted by oxfmt (`just fmt`), same style Prettier
