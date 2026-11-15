@@ -17,7 +17,7 @@
 // while both pages stay in the room, that a signal is applied only to the
 // connection it was made for, that nothing replaces a connection that is
 // up, and that a guest's or spectator's page connects to nobody but the
-// host. Today's engine holds only the third. Violated today (the scenarios
+// host. Today's engine holds the last two. Violated today (the scenarios
 // show how):
 //   neverLeftWithNothingPending    a connection that drops is forgotten on
 //                                  both pages and nothing offers again
@@ -28,18 +28,16 @@
 //   staleSignalsAreNotApplied      an offer for a new connection is applied
 //                                  to the old one as a renegotiation
 //                                  (newConnectionTakenAsRenegotiationTest)
-//   receiversConnectOnlyToTheHost  a page answers an offer from any member
-//                                  of the room (strayOfferTest)
 //
-// The last was a security question, and the project owner has decided it:
-// a guest or spectator accepts an offer only from the room's host, the
-// `fixed` behaviour (CHECKS_SENDER). The engine change follows in its own
-// PR; until then any member of the room, a spectator included, can open a
-// connection to a player's page: the page shows that member's stream in
-// place of the game, and its ICE candidates (its addresses) go to that
-// member, which the star otherwise never lets a spectator see.
-// streaming_connection_reconnects is the reconnect fix without the check;
-// streaming_connection_fixed adds it.
+// receiversConnectOnlyToTheHost was violated until #220: a page answered an
+// offer from any member of the room (strayOfferTest), so any member, a
+// spectator included, could open a connection to a player's page. The page
+// showed that member's stream in place of the game, and its ICE candidates
+// (its addresses) went to that member, which the star otherwise never lets
+// a spectator see. The project owner decided that a guest or spectator
+// accepts an offer only from the room's host (CHECKS_SENDER), and #220 made
+// the engine do so. streaming_connection_before_220 is the engine before
+// that; streaming_connection_fixed is today's with the reconnect fix.
 //
 // What is modelled, and where it comes from. web/src/streaming holds the
 // engine's own rules as functions that observe it; each is named beside the
@@ -78,8 +76,8 @@
 //                 for the other page too, which finds out the same way
 //   strayOffer    a member who is not the host sends another member an offer
 //                 of its own. The server relays a `webrtc-signal` between any
-//                 two members of a room and says who sent it; nothing on the
-//                 page checks who that is
+//                 two members of a room and says who sent it. Before #220
+//                 nothing on the page checked who that was
 //   reoffer       proposed (HOST_REOFFERS): the host's deadline. A member the
 //                 roster lists that has no open channel to the host when it
 //                 expires gets a new connection and a new offer
@@ -109,11 +107,12 @@
 //   - More than one guest and one spectator. The spectator stands for any
 //     member who is not the host; another player is the same.
 //   - How a page knows who the host is, for CHECKS_SENDER: the roster's
-//     slot 0, which the page has before it listens for signals (init runs
-//     onUsersUpdated(config.initialPlayers) as it registers its listeners),
-//     or a stamp from the server on the signal, like the `knFrom` a relayed
-//     `data-message` carries. Which to use is for the engine change to
-//     settle; the model takes it as known.
+//     slot 0 (offer-gate.ts, offerGate), which the page has before it
+//     listens for signals (init runs onUsersUpdated(config.initialPlayers)
+//     as it registers its listeners). An offer from a sender the page's
+//     roster does not list yet is held until a roster says who that is
+//     (_heldOffers), then applied if the sender is the host and refused
+//     otherwise. The model takes the roster as known, so nothing is held.
 //   - Which of a receiver's connections made for the same offer the host
 //     took. A connection one page closed is gone for good on both, even when
 //     the other page makes a new one for the same offer later (an offer the
@@ -150,9 +149,8 @@
 //          replaces its connection while the guest may still hold the old
 //          one, so the guest has to tell the two apart
 // CHECKS_SENDER: whose offer a guest or spectator answers.
-//   false  today: any member's
-//   true   the host's only: the owner's decision, to be made in the engine
-//          in its own PR
+//   false  before #220: any member's
+//   true   today: the host's only, the owner's decision (offer-gate.ts)
 module streaming_connection {
   const HOST_REOFFERS: bool
   const SIGNALS_NAME_CONNECTION: bool
@@ -524,10 +522,9 @@ module streaming_connection {
   val staleSignalsAreNotApplied = not(misapplied)
 
   // A guest's or spectator's page holds a connection only to the host and
-  // shows only the host's stream.
-  // Violated today, and with the reconnect fix alone: a member who is not
-  // the host offers, and the page answers it (strayOfferTest). The owner has
-  // chosen that it hold: the `fixed` variant is the behaviour to build.
+  // shows only the host's stream. Holds today. Violated before #220: a
+  // member who is not the host offered, and the page answered it
+  // (strayOfferTest).
   val receiversConnectOnlyToTheHost = RECEIVERS.forall(r => and {
     PAGES.exclude(Set(r, HOST)).forall(x => not(holds(r, x))),
     page.get(r).shows == "" or page.get(r).shows == HOST,
@@ -540,14 +537,8 @@ module streaming_connection {
   // connection a newer one made (olderOfferIsDroppedTest).
   val neverReplacesALiveConnection = not(replacedLive)
 
-  // The one that holds on today's engine.
-  val holdToday = neverReplacesALiveConnection
-
-  // What holds with the reconnect fix and no check of the sender: all but
-  // receiversConnectOnlyToTheHost.
-  val holdWithoutSenderCheck = and {
-    neverLeftWithNothingPending, staleSignalsAreNotApplied, neverReplacesALiveConnection,
-  }
+  // The ones that hold on today's engine.
+  val holdToday = and { neverReplacesALiveConnection, receiversConnectOnlyToTheHost }
 
   // Every property at once.
   val allHold = and {
@@ -827,14 +818,13 @@ module streaming_connection {
 
   // The guest is connected to the host. The spectator's page sends the guest
   // an offer of its own.
-  //   current, reconnects  the guest accepts it as it would the host's: it
-  //                        makes a connection for the spectator and answers
-  //                        from it (`negotiated`; the answer goes to the
-  //                        spectator's page, which the model does not
-  //                        follow), and its video shows the spectator's
-  //                        stream in place of the game
-  //   fixed                the guest refuses it: no connection, no answer,
-  //                        and its video still shows the host's stream
+  //   before_220      the guest accepts it as it would the host's: it
+  //                   makes a connection for the spectator and answers from
+  //                   it (`negotiated`; the answer goes to the spectator's
+  //                   page, which the model does not follow), and its video
+  //                   shows the spectator's stream in place of the game
+  //   current, fixed  the guest refuses it: no connection, no answer, and
+  //                   its video still shows the host's stream
   // Either way its connection to the host stays up.
   run strayOfferTest =
     init
@@ -856,24 +846,24 @@ module streaming_connection {
       .expect(wire == Set() and connected("guest"))
 }
 
-// The engine as it is today. neverLeftWithNothingPending,
-// staleSignalsAreNotApplied and receiversConnectOnlyToTheHost are violated
-// here.
-module streaming_connection_current {
+// The engine before #220: a guest or spectator answered an offer from any
+// member. neverLeftWithNothingPending, staleSignalsAreNotApplied and
+// receiversConnectOnlyToTheHost are violated here.
+module streaming_connection_before_220 {
   import streaming_connection(HOST_REOFFERS = false, SIGNALS_NAME_CONNECTION = false,
          CHECKS_SENDER = false).*
 }
 
-// The reconnect fix alone: the host's deadline, and signals that name their
-// connection. Offers are still answered from any member, so
-// receiversConnectOnlyToTheHost is violated here.
-module streaming_connection_reconnects {
-  import streaming_connection(HOST_REOFFERS = true, SIGNALS_NAME_CONNECTION = true,
-         CHECKS_SENDER = false).*
+// The engine as it is today: a guest or spectator answers only the host.
+// neverLeftWithNothingPending and staleSignalsAreNotApplied are violated
+// here.
+module streaming_connection_current {
+  import streaming_connection(HOST_REOFFERS = false, SIGNALS_NAME_CONNECTION = false,
+         CHECKS_SENDER = true).*
 }
 
-// The reconnect fix, and a guest or spectator answers only the host: the
-// behaviour the project owner chose for the sender.
+// Today's engine with the reconnect fix: the host's deadline, and signals
+// that name their connection. Every property holds.
 module streaming_connection_fixed {
   import streaming_connection(HOST_REOFFERS = true, SIGNALS_NAME_CONNECTION = true,
          CHECKS_SENDER = true).*

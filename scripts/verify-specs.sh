@@ -95,15 +95,16 @@ verify "$STREAM" streaming_connection_fixed allHold
 # guest at step 5.
 verify "$STREAM" streaming_connection_fixed allHold initLate $((STEPS - 1))
 verify "$STREAM" streaming_connection_current holdToday
-# Today's engine: a lost offer leaves the guest with nothing to come and a
-# stray offer is answered, each in 2 steps; a stray sender's second offer is
-# applied to its first connection in 4. (The host's own case of the last,
-# newConnectionTakenAsRenegotiationTest, is 7 steps long, beyond this bound.)
+# Today's engine: a lost offer leaves the guest with nothing to come, in 2
+# steps. Its case of staleSignalsAreNotApplied, the host's new offer applied
+# to the guest's old connection (newConnectionTakenAsRenegotiationTest), is
+# 7 steps long, beyond this bound; that scenario holds it.
 expect_violation "$STREAM" streaming_connection_current neverLeftWithNothingPending
-expect_violation "$STREAM" streaming_connection_current staleSignalsAreNotApplied
-expect_violation "$STREAM" streaming_connection_current receiversConnectOnlyToTheHost
-# The reconnect fix alone still answers any member's offer.
-expect_violation "$STREAM" streaming_connection_reconnects receiversConnectOnlyToTheHost
+# The engine before #220 answered any member's offer: a stray offer is
+# answered in 2 steps, and a stray sender's second offer is applied to its
+# first connection in 4.
+expect_violation "$STREAM" streaming_connection_before_220 receiversConnectOnlyToTheHost
+expect_violation "$STREAM" streaming_connection_before_220 staleSignalsAreNotApplied
 
 PAUSE=specs/late_join_pause.qnt
 verify "$PAUSE" late_join_pause_current allHold

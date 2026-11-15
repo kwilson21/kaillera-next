@@ -143,27 +143,25 @@ pair peer_connection_counter_only holdWithACounterAlone initLobby
 STREAM=specs/streaming_connection.qnt
 $QUINT typecheck "$STREAM"
 # The scenarios say what each variant does with the same ordering.
-for variant in streaming_connection_current streaming_connection_reconnects streaming_connection_fixed; do
+for variant in streaming_connection_before_220 streaming_connection_current streaming_connection_fixed; do
   $QUINT test "$STREAM" --main="$variant" --backend=typescript
 done
 stream() { # module invariant init
   $QUINT run "$STREAM" --main="$1" --invariant="$2" --init="$3" \
     --max-samples=10000 --max-steps=25 --backend=typescript
 }
-# Today: nothing replaces a connection both pages have open. The other three
-# properties are VIOLATED today (the scenarios above show how):
-# neverLeftWithNothingPending (a dropped connection is forgotten on both pages
-# and nothing offers again, droppedGuestIsNeverReconnectedTest),
-# staleSignalsAreNotApplied (an offer for a new connection is applied to the
-# old one, newConnectionTakenAsRenegotiationTest) and
-# receiversConnectOnlyToTheHost (a page answers any member's offer,
-# strayOfferTest).
+# Today: nothing replaces a connection both pages have open, and a guest's or
+# spectator's page connects only to the host. The other two properties are
+# VIOLATED today (the scenarios above show how): neverLeftWithNothingPending
+# (a dropped connection is forgotten on both pages and nothing offers again,
+# droppedGuestIsNeverReconnectedTest) and staleSignalsAreNotApplied (an offer
+# for a new connection is applied to the old one,
+# newConnectionTakenAsRenegotiationTest). receiversConnectOnlyToTheHost was
+# VIOLATED before #220, when a page answered any member's offer
+# (streaming_connection_before_220, strayOfferTest).
 stream streaming_connection_current holdToday init
-# With the host's deadline and signals that name their connection, all but
-# receiversConnectOnlyToTheHost hold.
-stream streaming_connection_reconnects holdWithoutSenderCheck init
-# With the sender checked as well, every property holds. That check is the
-# owner's decision; the engine change follows in its own PR.
+# With the host's deadline and signals that name their connection as well,
+# every property holds.
 stream streaming_connection_fixed allHold init
 stream streaming_connection_fixed allHold initLate
 
