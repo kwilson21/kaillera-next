@@ -51,7 +51,7 @@ jobs:
       - name: TypeScript tests
         run: npm run test:ts
       - name: Two-player test's own helpers
-        run: node --test tests/frozen-recovery.test.mjs
+        run: node --test tests/frozen-recovery.test.mjs tests/observer-reports.test.mjs
       # The menu driver the two-player test and the demo page share, against
       # a simulated SSB64 menu at every input delay the engine can set.
       - name: Menu autopilot against a simulated menu

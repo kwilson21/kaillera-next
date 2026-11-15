@@ -27,6 +27,11 @@ def fnv1a(data: bytes) -> int:
     return h
 
 
+# The sudden-death copy of the battle state (0xA4EF8) is this far past the
+# live one (0xA4D08); its fields are at the same offsets.
+SUDDEN_DEATH_DISTANCE = 0xA4EF8 - 0xA4D08
+
+
 def _load_lib():
     lib = ctypes.CDLL(str(LIB_PATH))
     lib.kn_test_set_rdram.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
@@ -50,7 +55,8 @@ def test_kn_hash_stocks_matches_fixture_bytes(rdram_fixture):
     for p in range(4):
         off = base + p * stride
         # RDRAM is host-order 32-bit words: N64 byte A is at offset A ^ 3.
-        observed = bytes([rdram_fixture[off ^ 3]])
+        # The live copy's byte, then the sudden-death copy's (0x1F0 on).
+        observed = bytes([rdram_fixture[off ^ 3], rdram_fixture[(off + SUDDEN_DEATH_DISTANCE) ^ 3]])
         expected = fnv1a(observed)
         actual = lib.kn_hash_stocks(p, -1)
         assert actual == expected, (
@@ -208,7 +214,9 @@ def test_kn_hash_vs_battle_hdr_matches_fixture_bytes(rdram_fixture):
 
     off = 0xA4D08  # KN_ADDR_LIVE_BATTLE_HEADER
     size = 32      # KN_SIZE_VS_BATTLE_HEADER
-    observed = bytes(rdram_fixture[off:off + size])
+    # Both copies' headers, live first (kn_hash_registry.h, "Two copies").
+    other = off + SUDDEN_DEATH_DISTANCE
+    observed = bytes(rdram_fixture[off:off + size]) + bytes(rdram_fixture[other:other + size])
     expected = fnv1a(observed)
     actual = lib.kn_hash_vs_battle_hdr(-1)
     assert actual == expected, (
@@ -308,8 +316,8 @@ def test_replay_rewrites_the_history_for_its_frames(rdram_fixture):
     assert corrected != mispredicted
 
 
-MAP_COUNT = 14
-SSB64_MAP = [0xA4D33, 0x74, 0xA4AD0, 0xA4D08, 32, 0x03B940, 0x13BA88, 0xBC, 0x48, 0x54, 0x58, 0x130D94, 0x130D84, 4096]
+MAP_COUNT = 15
+SSB64_MAP = [0xA4D33, 0x74, 0xA4AD0, 0xA4D08, 32, 0x03B940, 0x13BA88, 0xBC, 0x48, 0x54, 0x58, 0x130D94, 0x130D84, 4096, 0xA4EF8]
 
 
 def _map_lib():
@@ -390,3 +398,69 @@ def test_the_map_names_the_battle_state_the_match_runs_from(rdram_fixture):
     assert n64_byte(live + 0x11) == 1
     assert n64_byte(0xA4EF8 + 0x11) == 0
     assert [n64_byte(0xA4F23 + p * 0x74) for p in range(4)] == [0, 0, 0, 0]
+
+
+def test_a_map_without_a_sudden_death_copy_hashes_the_live_one_alone(rdram_fixture):
+    """With the sudden-death entry 0 (a ROM with one copy), the stocks and
+    header fields are the live copy's bytes alone."""
+    lib = _load_lib()
+    lib.kn_hash_vs_battle_hdr.argtypes = [ctypes.c_int32]
+    lib.kn_hash_vs_battle_hdr.restype = ctypes.c_uint32
+    lib.kn_test_set_rdram(rdram_fixture, len(rdram_fixture))
+    one_copy = list(SSB64_MAP)
+    one_copy[-1] = 0
+    try:
+        assert _set_map(lib, one_copy) == 1
+        assert lib.kn_hash_stocks(0, -1) == fnv1a(bytes([rdram_fixture[0xA4D33 ^ 3]]))
+        assert lib.kn_hash_vs_battle_hdr(-1) == fnv1a(rdram_fixture[0xA4D08:0xA4D08 + 32])
+    finally:
+        assert _set_map(lib, SSB64_MAP) == 1
+
+
+def test_a_map_whose_stock_counts_come_before_the_header_is_refused_with_a_second_copy():
+    lib = _load_lib()
+    early_stocks = list(SSB64_MAP)
+    early_stocks[0] = 0xA4D00
+    assert _set_map(lib, early_stocks) == 0
+    early_stocks[-1] = 0
+    assert _set_map(lib, early_stocks) == 1
+    assert _set_map(lib, SSB64_MAP) == 1
+
+
+def test_in_a_sudden_death_the_game_runs_from_the_second_copy(sudden_death_fixture):
+    """The dump of a real sudden death: the game's own pointer names the
+    second copy, and that copy is the one under way."""
+    import struct
+
+    def n64_byte(address):
+        return sudden_death_fixture[address ^ 3]
+
+    (pointer,) = struct.unpack("<I", sudden_death_fixture[0xA50E8:0xA50EC])
+    assert pointer == 0x80000000 | 0xA4EF8
+    assert n64_byte(0xA4AD0) == 22            # still the battle scene
+    assert n64_byte(0xA4EF8 + 0x11) == 1      # the second copy is under way
+    assert n64_byte(0xA4EF8 + 0x03) == 2      # with stock rules
+    assert n64_byte(0xA4D08 + 0x11) == 7      # the live copy has finished
+
+
+def test_a_stock_count_that_differs_only_in_the_sudden_death_copy_changes_the_field(sudden_death_fixture):
+    """In a sudden death the game runs from the second copy; a divergence
+    there must change the stocks and header hashes."""
+    lib = _load_lib()
+    lib.kn_hash_vs_battle_hdr.argtypes = [ctypes.c_int32]
+    lib.kn_hash_vs_battle_hdr.restype = ctypes.c_uint32
+    rdram_fixture = sudden_death_fixture
+    lib.kn_test_set_rdram(rdram_fixture, len(rdram_fixture))
+    before = [lib.kn_hash_stocks(p, -1) for p in range(4)]
+    header_before = lib.kn_hash_vs_battle_hdr(-1)
+    changed = bytearray(rdram_fixture)
+    changed[(0xA4F23 + 0x74) ^ 3] ^= 1   # P2's stock count, sudden-death copy
+    changed[(0xA4EF8 + 0x11) ^ 3] ^= 1   # its game_status
+    lib.kn_test_set_rdram(bytes(changed), len(changed))
+    try:
+        after = [lib.kn_hash_stocks(p, -1) for p in range(4)]
+        assert after[0] == before[0] and after[2:] == before[2:]
+        assert after[1] != before[1]
+        assert lib.kn_hash_vs_battle_hdr(-1) != header_before
+    finally:
+        lib.kn_test_set_rdram(rdram_fixture, len(rdram_fixture))
