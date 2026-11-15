@@ -907,7 +907,10 @@ const guest = await mkPage(guestBrowser, 'guest', {
   hidden: HIDE_GUEST_MS > 0,
   suspendAudio: SUSPEND_GUEST_AUDIO,
 });
-await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
+// LOSE_INPUTS_BEFORE_FALLBACK re-arms the host's transport through knDiag,
+// which exists only with ?knDiag (it turns on nothing else).
+const HOST_QUERY = QUERY + (LOSE_INPUTS_BEFORE_FALLBACK ? '&knDiag' : '');
+await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${HOST_QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
 await guest.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
