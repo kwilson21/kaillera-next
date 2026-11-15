@@ -5852,6 +5852,69 @@
   };
   const _meshCore = () => window.KNCore ?? null;
 
+  // Stage 5, observing: the per-peer connection machine
+  // (web/src/peer-connection.ts) runs beside the mesh code below, one per
+  // other player, through web/src/peer-observe.ts. The code below brackets
+  // each event it acts on with _peerObs().open/close and reports what it did
+  // with .did; the machine is handed the same event and a difference is
+  // reported as a peer-disagree client event. Nothing here changes what the
+  // engine does.
+  //
+  // Every webrtc-signal carries attemptId {page, attempt}: this page's id,
+  // made once when it loads, and its count of the offers it has made to that
+  // player. An offer carries its own; an answer and a candidate the one of
+  // the offer their connection was made for (kept on the RTCPeerConnection
+  // as _knAttempt). Pages from before it send none and ignore it; nothing
+  // accepts or rejects a signal by it yet.
+  let _attemptPage = null;
+  const _offerCounts = new Map();
+  const _attemptPageId = () => {
+    if (_attemptPage === null) {
+      _attemptPage =
+        window.KNCore?.peerObserve?.newPageId?.() ??
+        `p${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+    }
+    return _attemptPage;
+  };
+  const _offerCountKey = (slot, key) => (slot === null || slot === undefined ? `sid:${key}` : slot);
+  const _nextAttemptId = (slot, key) => {
+    const countKey = _offerCountKey(slot, key);
+    const attempt = (_offerCounts.get(countKey) ?? 0) + 1;
+    _offerCounts.set(countKey, attempt);
+    return { page: _attemptPageId(), attempt };
+  };
+  const _readAttemptId = (value) => window.KNCore?.peerObserve?.readAttemptId?.(value) ?? null;
+  const _slotOfKey = (key) => _peers[key]?.slot ?? _knownPlayers[key]?.slot ?? null;
+  // What the engine holds for a player slot, as the machine's facts.
+  const _peerFactsOfSlot = (slot) => {
+    const held = Object.values(_peers).filter((p) => p.slot === slot);
+    const peer = held.find((p) => p.dc?.readyState === 'open') ?? held[0];
+    return {
+      entry: !!peer,
+      open: peer?.dc?.readyState === 'open',
+      reconnecting: !!peer?.reconnecting,
+    };
+  };
+  let _peerObserver;
+  const _peerObs = () => {
+    if (_peerObserver === undefined) {
+      _peerObserver =
+        window.KNCore?.peerObserve?.createPeerObserver?.({
+          page: _attemptPageId(),
+          mySlot: () => (_isSpectator ? null : _playerSlot),
+          offersMade: (slot) => _offerCounts.get(slot) ?? 0,
+          facts: _peerFactsOfSlot,
+          sink: ({ message, old, next }) => {
+            if (!window.KNState?.uploadToken) return false;
+            window.KNEvent?.('peer-disagree', message, { old, next });
+            return true;
+          },
+          log: (line) => _syncLog(line),
+        }) ?? null;
+    }
+    return _peerObserver;
+  };
+
   // Stage 3, observing: the strings peers send over the DataChannels (and the
   // session-log ack) are checked against web/src/peer-protocol.ts and a
   // mismatch is reported; the handlers below still read the raw message.
@@ -7388,8 +7451,13 @@
   const _currentSid = (key) => _knownPlayers[key]?.socketId || key;
   const _signalSocket = {
     emit: (event, data) => {
-      if (event === 'webrtc-signal') data = { ...data, target: _currentSid(data.target) };
-      else if (event === 'data-message' && data.targetSid) data = { ...data, targetSid: _currentSid(data.targetSid) };
+      if (event === 'webrtc-signal') {
+        // A signal that does not name its attempt is for the connection the entry has now.
+        const attemptId = data.attemptId ?? _peers[data.target]?.pc?._knAttempt ?? null;
+        data = attemptId
+          ? { ...data, attemptId, target: _currentSid(data.target) }
+          : { ...data, target: _currentSid(data.target) };
+      } else if (event === 'data-message' && data.targetSid) data = { ...data, targetSid: _currentSid(data.targetSid) };
       return socket.emit(event, data);
     },
   };
@@ -7397,6 +7465,7 @@
   const _evictPeer = (sid, reason) => {
     const peer = _peers[sid];
     if (!peer) return;
+    _peerObs()?.did(peer.slot, sid, { type: 'drop' });
     try {
       peer.pc?.close();
     } catch (_) {}
@@ -7468,6 +7537,11 @@
       const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && held;
 
       const key = _peerKey(p.socketId);
+      // Observing: the machine for this slot is told the roster lists them.
+      if (_lateJoin && !_isSpectator) _peerObs()?.joinedLate();
+      if (shouldHoldForLateJoin) _peerObs()?.stopWatching(p.slot, key, 'held as a late joiner');
+      if (_peers[key]) _peerObs()?.identify(key, p.slot);
+      const rosterFrame = _peerObs()?.open(p.slot, key);
       if (_peers[key]) {
         _syncLog(`onUsersUpdated: peer ${key} (slot ${p.slot}) already exists, skipping`);
         _peers[key].slot = p.slot;
@@ -7476,6 +7550,7 @@
         } else if (_activeRoster?.has(p.slot)) {
           _clearPendingLateJoinPeer(key, p.slot, 'users-updated active roster');
         }
+        _peerObs()?.close(rosterFrame, { type: 'roster' });
         continue;
       }
 
@@ -7542,6 +7617,7 @@
 
       createPeer(p.socketId, p.slot, shouldInitiate);
       if (shouldInitiate) sendOffer(p.socketId);
+      _peerObs()?.close(rosterFrame, { type: 'roster' });
     }
     _tagPeerIdentities();
 
@@ -7616,7 +7692,9 @@
     if (peer.dc?.readyState === 'open') return;
     clearStartupConnectWatchdog(peer);
     peer._startupConnectTimer = setTimeout(() => {
+      const frame = _peerObs()?.open(peer.slot, remoteSid);
       retryStartupConnection(remoteSid);
+      _peerObs()?.close(frame, { type: 'deadline', deadline: 'startupAfter' });
     }, STARTUP_CONNECT_TIMEOUT_MS);
   };
 
@@ -7641,6 +7719,7 @@
           `dc=${peer.dc?.readyState ?? 'none'}`,
       );
       setStatus('Peer connection stalled — reload or rejoin to retry');
+      _peerObs()?.did(peer.slot, remoteSid, { type: 'stalled' });
       KNEvent('webrtc-fail', 'Startup WebRTC connection stalled', {
         slot: peer.slot,
         remoteSid,
@@ -7668,7 +7747,12 @@
       const s = peer.pc.connectionState;
       _syncLog(`startup retry peer ${remoteSid} connection-state: ${s}`);
       if (s === 'connecting') setStatus('Connecting to players...');
-      if (s === 'failed') retryStartupConnection(remoteSid);
+      if (s === 'failed') {
+        const frame = _peerObs()?.open(peer.slot, remoteSid);
+        const lost = peer.pc._knAttempt;
+        retryStartupConnection(remoteSid);
+        _peerObs()?.close(frame, { type: 'lost', page: lost?.page ?? '', attempt: lost?.attempt ?? 0 });
+      }
     };
     createOutgoingPeerChannels(remoteSid, peer);
 
@@ -7714,7 +7798,10 @@
       if (s === 'failed') {
         if (_phase < PHASE_GAME_STARTED && peer.isInitiator) {
           _syncLog(`startup peer ${remoteSid} failed before game start — retrying`);
+          const frame = _peerObs()?.open(peer.slot, remoteSid);
+          const lost = peer.pc._knAttempt;
           retryStartupConnection(remoteSid);
+          _peerObs()?.close(frame, { type: 'lost', page: lost?.page ?? '', attempt: lost?.attempt ?? 0 });
           return;
         }
         // Failed is terminal — disconnect immediately
@@ -7778,13 +7865,26 @@
       _syncLog(`sendOffer: no peer for ${remoteSid}, skipping`);
       return;
     }
+    const attemptId = _nextAttemptId(peer.slot, remoteSid);
     _syncLog(
       `sendOffer: sending to ${remoteSid} (slot ${peer.slot})` +
-        `${reconnect ? ' [reconnect]' : ''}${startup ? ' [startup]' : ''}`,
+        `${reconnect ? ' [reconnect]' : ''}${startup ? ' [startup]' : ''} attempt=${attemptId.page}#${attemptId.attempt}`,
     );
+    peer.pc._knAttempt = attemptId;
+    _peerObs()?.did(peer.slot, remoteSid, {
+      type: 'offer',
+      attempt: attemptId.attempt,
+      mode: startup ? 'startup' : reconnect ? 'reconnect' : 'first',
+    });
     const offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
-    _signalSocket.emit('webrtc-signal', { target: remoteSid, offer, reconnect, startupReconnect: startup });
+    _signalSocket.emit('webrtc-signal', {
+      target: remoteSid,
+      offer,
+      reconnect,
+      startupReconnect: startup,
+      attemptId,
+    });
     armStartupConnectWatchdog(remoteSid);
   }
 
@@ -7794,10 +7894,42 @@
     if (!senderSid) return;
     let key = _peerKey(senderSid);
     const sigType = data.offer ? 'offer' : data.answer ? 'answer' : data.candidate ? 'candidate' : 'other';
+    const obsAttempt = _readAttemptId(data.attemptId);
     _syncLog(
       `onWebRTCSignal: ${sigType} from ${senderSid}${key !== senderSid ? ` (peer ${key})` : ''}, ` +
-        `hasPeer=${!!_peers[key]}, knownPlayer=${!!_knownPlayers[key]}`,
+        `hasPeer=${!!_peers[key]}, knownPlayer=${!!_knownPlayers[key]}, ` +
+        `attempt=${obsAttempt ? `${obsAttempt.page}#${obsAttempt.attempt}` : 'none'}`,
     );
+
+    // Observing: the machine for this player is told the same signal once
+    // the code below has decided what to do with it (before its first await).
+    // A signal that names no attempt comes from a page from before attemptId:
+    // that player is not watched from then on.
+    const obsHadEntry = !!_peers[key];
+    const obsUnderEarlierId = key !== senderSid;
+    let obsNew = false;
+    let obsFrame = sigType === 'other' ? null : _peerObs()?.open(_slotOfKey(key), key);
+    let obsEvent = null;
+    const obsDone = () => {
+      if (!obsFrame) return;
+      const frame = obsFrame;
+      obsFrame = null;
+      _peerObs()?.close(frame, obsEvent);
+    };
+    if (obsFrame && !obsAttempt) {
+      _peerObs()?.stopWatching(_slotOfKey(key), key, `their page sends no attempt id (${sigType})`);
+    } else if (obsFrame && _isPeerPendingLateJoin(key)) {
+      _peerObs()?.stopWatching(_slotOfKey(key), key, 'a late joiner');
+    } else if (obsAttempt && sigType === 'offer') {
+      const mode = !data.reconnect
+        ? 'first'
+        : data.startupReconnect || _phase < PHASE_GAME_STARTED
+          ? 'startup'
+          : 'reconnect';
+      obsEvent = { type: 'offer', ...obsAttempt, mode, underEarlierId: obsUnderEarlierId };
+    } else if (obsAttempt) {
+      obsEvent = { type: sigType, ...obsAttempt };
+    }
 
     // A fresh offer from a player whose connection was kept across their
     // Socket.IO reconnect means their page reloaded: that connection is a
@@ -7821,6 +7953,7 @@
     if (data.offer && !data.reconnect && key !== senderSid) {
       _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
       _evictPeer(key, 'replaced-by-new-page');
+      obsNew = true;
       if (_lastUsersUpdated) onUsersUpdated(_lastUsersUpdated);
       key = _peerKey(senderSid);
     }
@@ -7830,11 +7963,13 @@
       const known = _knownPlayers[key];
       _syncLog(`onWebRTCSignal: on-demand createPeer for ${key}, slot=${known?.slot ?? 'null'}`);
       createPeer(key, known ? known.slot : null, false);
+      obsNew = true;
     }
 
     let peer = _peers[key];
     if (!peer) {
       _syncLog(`onWebRTCSignal: no peer for ${key}, dropping ${sigType}`);
+      obsDone();
       return;
     }
 
@@ -7859,12 +7994,15 @@
           // Timeout: if reconnect doesn't reach 'connected' within 10s, close and retry
           let _reconnectTimer = setTimeout(() => {
             const state = existingPeer.pc.connectionState;
+            const frame = _peerObs()?.open(existingPeer.slot, key);
             if (state !== 'connected') {
               _syncLog(`reconnect timeout (state=${state}) — closing stale PC for ${senderSid}`);
+              if (_peers[key] === existingPeer) _peerObs()?.did(existingPeer.slot, key, { type: 'close' });
               try {
                 existingPeer.pc.close();
               } catch (_) {}
             }
+            _peerObs()?.close(frame, { type: 'deadline', deadline: 'answerAfter' });
           }, 10000);
           existingPeer.pc.onconnectionstatechange = () => {
             const s = existingPeer.pc.connectionState;
@@ -7876,18 +8014,35 @@
           installPeerDataChannelHandlers(key, existingPeer);
 
           peer = existingPeer;
+          obsNew = true;
         }
 
+        // The connection now belongs to this offer's attempt (none from an old page).
+        peer.pc._knAttempt = obsAttempt;
+        if (obsAttempt) {
+          _peerObs()?.did(peer.slot, key, {
+            type: 'answer',
+            ...obsAttempt,
+            connection: obsNew || !obsHadEntry ? 'new' : 'kept',
+          });
+        }
+        obsDone();
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await KNShared.drainCandidates(peer);
-        await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key);
+        await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key, peer.pc._knAttempt);
       } else if (data.answer) {
+        if (obsAttempt) _peerObs()?.did(peer.slot, key, { type: 'applyAnswer', ...obsAttempt });
+        obsDone();
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         await KNShared.drainCandidates(peer);
       } else if (data.candidate) {
+        if (obsAttempt) _peerObs()?.did(peer.slot, key, { type: 'applyCandidate', ...obsAttempt });
+        obsDone();
         await KNShared.addBufferedCandidate(peer, data.candidate);
       }
+      obsDone();
     } catch (err) {
+      obsDone();
       _syncLog(`WebRTC signal error: ${err.message || err}`);
       setStatus(`WebRTC error: ${err.message || err}`);
     }
@@ -8124,6 +8279,8 @@
 
   const setupDataChannel = (remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
+    // The connection this channel belongs to: its attempt names the channel's open and close.
+    ch._knPc = ch._knPc ?? _peers[remoteSid]?.pc ?? null;
     // Host: the number a guest sent ahead of its next request on this
     // channel. It lives and dies with the channel.
     let syncRequestIdNext = 0;
@@ -8131,6 +8288,8 @@
     const onOpen = () => {
       const peer = _peers[remoteSid];
       if (!peer) return;
+      const openedAttempt = ch._knPc?._knAttempt;
+      const openedFrame = _peerObs()?.open(peer.slot, remoteSid);
       const known = _knownPlayers[remoteSid];
       const peerName = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
       _syncLog(`DC open with ${remoteSid} slot: ${peer.slot} ${peerName}`);
@@ -8258,6 +8417,10 @@
         finishLateJoinReady('deferred DC open', remoteSid);
       }
 
+      if (!openedAttempt) {
+        _peerObs()?.stopWatching(peer.slot, remoteSid, 'a channel opened on a connection with no attempt id');
+      }
+      _peerObs()?.close(openedFrame, openedAttempt ? { type: 'opened', ...openedAttempt } : null);
       if (_phase < PHASE_GAME_STARTED) startGameSequence();
     };
     ch.onopen = onOpen;
@@ -8271,7 +8434,7 @@
       const current = _peers[remoteSid];
       if (!current || current.dc !== ch) return;
       _syncLog(`DC closed with ${remoteSid}`);
-      handlePeerDisconnect(remoteSid);
+      handlePeerDisconnect(remoteSid, ch._knPc?._knAttempt);
     };
 
     ch.onerror = (e) => {
@@ -8913,6 +9076,7 @@
    * @param {string} [opts.sid] - socket.io sid to filter scheduled syncs
    */
   const resetPeerState = (slot, reason, opts = {}) => {
+    _peerObs()?.peerReset(slot, opts.sid ?? null, reason);
     if (slot === null || slot === undefined) return;
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A joiner that was being served is gone: the pause is not kept for it.
@@ -8977,9 +9141,26 @@
 
   // -- Peer disconnect (drop handling) ---------------------------------------
 
-  const handlePeerDisconnect = (remoteSid) => {
+  // `lostAttempt`: the attempt of the connection found lost (observing only).
+  const handlePeerDisconnect = (remoteSid, lostAttempt = _peers[remoteSid]?.pc?._knAttempt) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
+    // The machine does not cover a late joiner: that player is left alone.
+    if (_isPeerPendingLateJoin(remoteSid, peer)) _peerObs()?.stopWatching(peer.slot, remoteSid, 'a late joiner');
+    const frame = _peerObs()?.open(peer.slot, remoteSid);
+    try {
+      _handlePeerDisconnect(remoteSid, peer);
+    } finally {
+      _peerObs()?.close(
+        frame,
+        peer._intentionalLeave
+          ? { type: 'left' }
+          : { type: 'lost', page: lostAttempt?.page ?? '', attempt: lostAttempt?.attempt ?? 0 },
+      );
+    }
+  };
+
+  const _handlePeerDisconnect = (remoteSid, peer) => {
     if (peer._disconnectTimer) {
       clearTimeout(peer._disconnectTimer);
       peer._disconnectTimer = null;
@@ -9041,7 +9222,9 @@
       peer._reconnectTimeout = setTimeout(() => {
         if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
         _syncLog(`reconnect timeout for ${remoteSid} after ${peer._reconnectAttempts || 1} attempts`);
+        const frame = _peerObs()?.open(peer.slot, remoteSid);
         hardDisconnectPeer(remoteSid);
+        _peerObs()?.close(frame, { type: 'deadline', deadline: 'giveUpAfter' });
       }, 45000);
 
       return;
@@ -9054,6 +9237,7 @@
   const hardDisconnectPeer = (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
+    _peerObs()?.did(peer.slot, remoteSid, { type: 'drop' });
     clearStartupConnectWatchdog(peer);
     if (peer._reconnectTimeout) {
       clearTimeout(peer._reconnectTimeout);
@@ -9120,12 +9304,28 @@
     const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
     setStatus(`${name} disconnected — reconnecting (attempt ${attempt})...`);
 
+    // A retry's attempt was named when the retry was decided (retryOrGiveUp).
+    const reserved = attempt > 1 ? peer._knNextAttempt : null;
+    const attemptId = reserved ?? _nextAttemptId(peer.slot, remoteSid);
+    if (!reserved) {
+      _peerObs()?.did(peer.slot, remoteSid, { type: 'offer', attempt: attemptId.attempt, mode: 'reconnect' });
+    }
+    peer._knNextAttempt = null;
     const peerGuard = (p) => _peers[remoteSid] === p;
     KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, _signalSocket, peerGuard);
+    peer.pc._knAttempt = attemptId;
     peer.ready = false;
 
     const retryOrGiveUp = () => {
       if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
+      const frame = _peerObs()?.open(peer.slot, remoteSid);
+      try {
+        _retryOrGiveUp();
+      } finally {
+        _peerObs()?.close(frame, { type: 'deadline', deadline: 'attemptAfter' });
+      }
+    };
+    const _retryOrGiveUp = () => {
       _meshCompare(
         'reconnect-attempt-left',
         attempt < _MAX_RECONNECT_ATTEMPTS,
@@ -9134,6 +9334,9 @@
       if (attempt < _MAX_RECONNECT_ATTEMPTS) {
         _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
         setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
+        const next = _nextAttemptId(peer.slot, remoteSid);
+        peer._knNextAttempt = next;
+        _peerObs()?.did(peer.slot, remoteSid, { type: 'offer', attempt: next.attempt, mode: 'reconnect' });
         setTimeout(() => attemptReconnect(remoteSid, attempt + 1), _RECONNECT_RETRY_DELAY);
       } else {
         _syncLog(`reconnect failed after ${_MAX_RECONNECT_ATTEMPTS} attempts — hard disconnect ${remoteSid}`);
@@ -9199,6 +9402,7 @@
         target: remoteSid,
         offer: peer.pc.localDescription,
         reconnect: true,
+        attemptId,
       });
     } catch (err) {
       _syncLog(`reconnect offer failed (attempt ${attempt}): ${err}`);
@@ -12349,6 +12553,7 @@
     }
     if (_phase === PHASE_RUNNING) return;
     _phase = PHASE_RUNNING;
+    _peerObs()?.matchStarted();
     window._knPreventRetroArchVisibilityPause = true;
     _checkStateTransition();
 
@@ -13283,6 +13488,8 @@
 
   const stopSync = () => {
     _phase = PHASE_STOPPED;
+    // Observing: every connection is about to close; each machine is told, and its per-match state goes.
+    _peerObs()?.sessionEnded();
     _runSubstate = RUN_NORMAL;
     _checkStateTransition();
     window._lockstepActive = false;
@@ -16707,7 +16914,12 @@
           // reconnects the roster still lists us under the old id until
           // users-updated arrives), a peer with an open DC, and a reconnect
           // already in progress.
-          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) continue;
+          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) {
+            _peerObs()?.check(info.slot);
+            continue;
+          }
+          const healFrame = _peerObs()?.open(info.slot, sid);
+          const healFound = p?.pc?._knAttempt;
           const pcState = p?.pc?.connectionState;
           _syncLog(
             `MESH-HEAL f=${_frameNum} slot=${info.slot} sid=${sid} pc=${pcState ?? 'gone'} dc=${p?.dc?.readyState ?? 'none'}`,
@@ -16723,6 +16935,7 @@
           }
           createPeer(sid, info.slot, true);
           sendOffer(sid, { reconnect: true });
+          _peerObs()?.close(healFrame, { type: 'heal', page: healFound?.page ?? '', attempt: healFound?.attempt ?? 0 });
         }
       }
       _remoteApplied++;

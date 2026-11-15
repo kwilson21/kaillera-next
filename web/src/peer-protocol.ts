@@ -263,6 +263,9 @@ const SignalRelay = Schema.Struct({
   // An ICE candidate object, or null for end-of-candidates.
   candidate: Schema.optional(Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown))),
   reconnect: Schema.optional(Schema.Boolean),
+  // Which attempt the signal belongs to: the page that made the offer and that
+  // page's count of its offers (peer-observe.ts). Pages from before it send none.
+  attemptId: Schema.optional(Schema.Struct({ page: Schema.String, attempt: Schema.Number })),
 });
 
 const signalRelayIssue = issueFinder(SignalRelay);

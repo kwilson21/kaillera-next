@@ -828,19 +828,42 @@ test('what the engine keeps as flags can be read from each state', () => {
   assert.deepEqual(peerFacts('reconnecting.answering'), { entry: true, open: false, reconnecting: true });
 });
 
-test('run as an actor, the deadlines fire on the real clock and the commands reach the host', async () => {
-  const commands: PeerCommand[] = [];
+test('run on its own, an event is taken at once and the deadlines fire on the real clock', async () => {
+  const deadlines: [string, readonly PeerCommand[]][] = [];
   const timing = { ...PEER_TIMING, startupAfterMs: 15 };
-  const peer = createPeerConnection({ mySlot: 0, theirSlot: 1, timing, page: LO }, (command) => commands.push(command));
+  const peer = createPeerConnection({ mySlot: 0, theirSlot: 1, timing, page: LO }, (deadline, commands) =>
+    deadlines.push([deadline, commands]),
+  );
   assert.equal(peer.state(), 'absent');
-  peer.send({ type: 'roster' });
+  assert.deepEqual(peer.send({ type: 'roster' }), [{ type: 'offer', page: LO, attempt: 1, mode: 'first' }]);
+  assert.equal(peer.state(), 'offering');
+  // The health check's deadline is armed too; it acts only in a match.
+  assert.deepEqual(peer.armed().sort(), ['healAfter', 'startupAfter']);
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(peer.state(), 'stalled');
-  assert.deepEqual(commands, [
-    { type: 'offer', page: LO, attempt: 1, mode: 'first' },
-    { type: 'offer', page: LO, attempt: 2, mode: 'startup' },
-    { type: 'offer', page: LO, attempt: 3, mode: 'startup' },
-    { type: 'stalled' },
+  assert.deepEqual(deadlines, [
+    ['startupAfter', [{ type: 'offer', page: LO, attempt: 2, mode: 'startup' }]],
+    ['startupAfter', [{ type: 'offer', page: LO, attempt: 3, mode: 'startup' }]],
+    ['startupAfter', [{ type: 'stalled' }]],
   ]);
   await peer.stop();
+});
+
+test('an armed deadline can be taken early; one that is not armed is not', async () => {
+  const deadlines: string[] = [];
+  const peer = createPeerConnection({ mySlot: 0, theirSlot: 1, timing: PEER_TIMING, page: LO }, (deadline) =>
+    deadlines.push(deadline),
+  );
+  peer.send({ type: 'roster' });
+  assert.equal(peer.fire('attemptAfter'), null);
+  assert.deepEqual(peer.fire('startupAfter'), [{ type: 'offer', page: LO, attempt: 2, mode: 'startup' }]);
+  assert.deepEqual(peer.armed().sort(), ['healAfter', 'startupAfter']);
+  assert.deepEqual(peer.send({ type: 'answer', page: LO, attempt: 2 }), [
+    { type: 'applyAnswer', page: LO, attempt: 2 },
+  ]);
+  assert.deepEqual(peer.send({ type: 'opened', page: LO, attempt: 2 }), []);
+  assert.deepEqual(peer.armed(), []);
+  await peer.stop();
+  assert.deepEqual(peer.send({ type: 'lost', page: LO, attempt: 2 }), []);
+  assert.deepEqual(deadlines, []);
 });

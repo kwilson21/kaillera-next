@@ -59,6 +59,7 @@ import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts
 import { startLateJoinWait } from './late-join-wait.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
+import { createPeerObserver, newPageId, readAttemptId } from './peer-observe.ts';
 import {
   disconnectDisposition,
   hasAttemptLeft,
@@ -263,7 +264,7 @@ export const KNCore = {
   captureFrame,
   checkRelayed,
   createConnectTracker,
-  /** The per-peer connection machine (peer-connection.ts). Built, not yet run beside the engine. */
+  /** The per-peer connection machine (peer-connection.ts). The engine runs it observing, through `peerObserve`. */
   createPeerConnection,
   createSession,
   createStickDeadband,
@@ -287,6 +288,8 @@ export const KNCore = {
   normalizeAxis,
   peerFacts,
   peerTiming: PEER_TIMING,
+  /** The per-peer machine run beside the rollback engine, observing (peer-observe.ts). */
+  peerObserve: { createPeerObserver, newPageId, readAttemptId },
   rosterKey,
   screenshotCrop,
   shouldInitiate,
