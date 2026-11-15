@@ -669,19 +669,20 @@ def test_every_resync_request_that_is_out_is_numbered():
     # bootAnswerAfterANewerRequestTest).
     assert not re.search(r"""\.send\(['"`]sync-request(?!-id:)""", src)
     boot = src[src.index("if (_bootDoneForSync && !window._knBootSyncDone) {") :]
-    boot = boot[: boot.index("BOOT-SYNC skipped")]
+    boot = boot[: boot.index("BOOT-SYNC skipped: initial state")]
     assert "const bootRequestId = _beginResyncRequest();" in boot
     assert "_sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');" in boot
     stall = src[src.index("`INPUT-STALL-RESYNC f=${_frameNum}") :]
     stall = stall[: stall.index("INPUT-STALL-RESYNC send failed")]
     assert "const stallRequestId = _beginResyncRequest();" in stall
     assert "_sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');" in stall
-    # A "now" request drops a coordinated target, and the wait at it.
+    # Neither asks over a request that is out (its answer brings a host
+    # state; asked over, that answer would be dropped as an older request's),
+    # nor gives up a target, which would apply a held state early
+    # (specs/resync_flow.qnt, guestAsksOnItsOwn).
     for site in (boot, stall):
-        assert site.index("if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;") < site.index(
-            "_beginResyncRequest()"
-        )
-        assert "_syncTargetFrame = -1;" in site
+        assert site.index("if (_resyncRequestInFlight) {") < site.index("_beginResyncRequest()")
+        assert "_syncTargetFrame" not in site
 
     # A new match starts counting again.
     stop = src[src.index("const stopSync = () => {") :]

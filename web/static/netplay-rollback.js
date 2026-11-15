@@ -15202,16 +15202,21 @@
           window._knBootSyncDone = true;
           if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
             const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-            if (hostPeer?.dc?.readyState === 'open') {
+            if (_resyncRequestInFlight) {
+              // The request that is out brings a host state. Asked over, its
+              // answer would be an older request's, dropped once this guest
+              // is past it, while the host's rate limit may drop this one
+              // (specs/resync_flow.qnt, guestAsksOnItsOwn).
+              _syncLog(`BOOT-SYNC skipped at f=${_frameNum}: request ${_resyncRequestId} is out`);
+            } else if (hostPeer?.dc?.readyState === 'open') {
               // A "now" request like the others: numbered, out and owed. Sent
               // bare, its answer came back with no number, which to this
               // guest is a state the host sent for its own reasons, applied
               // wherever it finds the guest: arriving after a newer request
               // it took the guest back 117 frames (specs/resync_flow.qnt,
               // EVERY_REQUEST_NUMBERED, bootAnswerAfterANewerRequestTest).
-              if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-              _syncTargetFrame = -1;
-              _syncTargetDeadlineAt = 0;
+              // A target is left alone: a state held a few frames ahead
+              // would otherwise be applied early.
               const bootRequestId = _beginResyncRequest();
               try {
                 _sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');
@@ -17284,13 +17289,13 @@
               if (_playerSlot !== 0) {
                 const _hostForResync = Object.values(_peers).find((p) => p.slot === 0);
                 const _hostDcForResync = _hostForResync?.dc;
-                if (_hostDcForResync?.readyState === 'open') {
+                if (_resyncRequestInFlight) {
+                  // As the boot sync: the request that is out brings a host state.
+                  _syncLog(`INPUT-STALL-RESYNC f=${_frameNum}: request ${_resyncRequestId} is out, not asked again`);
+                } else if (_hostDcForResync?.readyState === 'open') {
                   // Numbered like the boot sync's, and for the same reason: an
                   // unnumbered answer is applied wherever it finds the guest
                   // (specs/resync_flow.qnt, EVERY_REQUEST_NUMBERED).
-                  if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-                  _syncTargetFrame = -1;
-                  _syncTargetDeadlineAt = 0;
                   const stallRequestId = _beginResyncRequest();
                   try {
                     _sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');

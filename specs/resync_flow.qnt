@@ -36,7 +36,7 @@
 //   account, with no desync detected (the boot sync after the boot grace,
 //   and the input stall's after it made up a peer's input), are "now"
 //   requests like the others: numbered, marked as out, and owed until a host
-//   state is applied. false = before: they went out bare, so the guest did
+//   state is applied. They are sent only when no request is out. false = before: they went out bare, so the guest did
 //   not mark a request as out and the host's answer carried no number. To
 //   the guest that answer was a state the host sent for its own reasons, and
 //   was applied wherever it found the guest. A two-player run with the guest
@@ -202,10 +202,24 @@ module resync_flow {
   }
 
   // The boot sync, or the input stall's after a peer's input was made up:
-  // ask for it now, on the guest's own account. Today it is a "now" request
-  // like guestAsksNow. Before, it went out with no number and nothing marked
-  // it as out, so its answer came back as UNASKED.
-  action guestAsksOnItsOwn = if (EVERY_REQUEST_NUMBERED) guestAsksNow else all {
+  // ask for it now, on the guest's own account. Today it is a "now" request,
+  // numbered and out, but only when no request is out: the one that is out
+  // brings a host state already. Asked over it, it would make that answer an
+  // older request's, dropped once the guest is past it, while the host's
+  // rate limit may drop the new one. Nor does it give up a target, unlike a
+  // reconnect: a state held a few frames ahead would be applied early.
+  // Before, it went out with no number whatever was out, nothing marked it
+  // as out, and its answer came back as UNASKED.
+  action guestAsksOnItsOwn = if (EVERY_REQUEST_NUMBERED) all {
+    not(asked),
+    asks < MAX_REQUESTS,
+    asked' = true, askedId' = askedId + 1, askedAt' = NONE, askedFrom' = guestFrame,
+    askDeadline' = REQUEST_HAS_DEADLINE,
+    requests' = requests.append({ at: NOW, id: askedId + 1, ask: asks + 1 }),
+    target' = target, targetDeadline' = targetDeadline, stalled' = stalled,
+    pending' = pending, lastApplied' = lastApplied, history(asks + 1),
+    framesUnchanged, hostUnchanged, states' = states,
+  } else all {
     asks < MAX_REQUESTS,
     requests' = requests.append({ at: NOW, id: UNASKED, ask: asks + 1 }),
     target' = target, targetDeadline' = targetDeadline, asked' = asked, askedId' = askedId, askedAt' = askedAt,
