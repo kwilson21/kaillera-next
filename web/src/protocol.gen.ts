@@ -108,6 +108,7 @@ export type SetListedPayload = typeof SetListedPayload.Type;
 
 export const RomReadyPayload = Schema.Struct({
   ready: Schema.optional(Schema.Boolean),
+  prompt: Schema.optional(Schema.Boolean),
   hash: Schema.optional(Schema.NullOr(Schema.String)),
   name: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(128)))),
   size: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 536870912 })))),
@@ -150,6 +151,7 @@ export const RoomPlayer = Schema.Struct({
   playerName: Schema.String,
   slot: Schema.NullOr(Schema.Int),
   romReady: Schema.Boolean,
+  romPrompt: Schema.optional(Schema.Boolean),
   inputType: Schema.String,
   deviceType: Schema.String,
 });

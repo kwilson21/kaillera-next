@@ -54,6 +54,8 @@ const TEXT_GRAMMAR = {
     'peer-resumed': '',
     // roster:<frame>:<slot>,<slot>,...   (no slots: the part after the colon is empty)
     roster: `:${INT}:(?:\\d+(?:,\\d+)*)?`,
+    // left-out:<slot>  the host left that player out of the start; it joins late (specs/start_group.qnt)
+    'left-out': ':\\d+',
     // menu-ready:<frame>:<scene>
     'menu-ready': `:${INT}:${INT}`,
     resend: `:${INT}`,

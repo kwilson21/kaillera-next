@@ -175,6 +175,12 @@ class TestSwapSid:
         assert "new-sid" in room.rom_ready
         assert "old-sid" not in room.rom_ready
 
+    def test_swaps_rom_prompt(self):
+        room = _make_room()
+        room.rom_prompt.add("old-sid")
+        _swap_sid(room, "pid-1", "old-sid", "new-sid")
+        assert room.rom_prompt == {"new-sid"}
+
     def test_swaps_input_and_device_types(self):
         room = _make_room()
         room.input_types["old-sid"] = "gamepad"
@@ -321,6 +327,31 @@ class TestRomReady:
 
         assert err == "ROM does not match host"
         assert "sid-2" not in room.rom_ready
+
+    def test_a_guest_at_the_rom_prompt_says_so_until_it_has_one(self):
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[0] = "pid-host"
+        room.slots[1] = "pid-2"
+        room.rom_ready.update({"sid-host", "sid-2"})
+        rooms["ROOM7"] = room
+        _sid_to_room["sid-2"] = ("ROOM7", "pid-2", False)
+
+        # A page that has not loaded one yet is not at the prompt.
+        assert self._run("sid-2", {"ready": False}) is None
+        assert "sid-2" not in room.rom_ready
+        assert _players_payload(room)["players"]["pid-2"]["romPrompt"] is False
+
+        # The page at the ROM prompt says so.
+        assert self._run("sid-2", {"ready": False, "prompt": True}) is None
+        assert room.rom_prompt == {"sid-2"}
+        assert _players_payload(room)["players"]["pid-2"]["romPrompt"] is True
+
+        # Its ROM dropped, it is ready and at the prompt no longer.
+        assert self._run("sid-2", {"ready": True}) is None
+        assert "sid-2" in room.rom_ready
+        assert room.rom_prompt == set()
 
 
 class TestReleaseSlot:

@@ -22,6 +22,17 @@ test('the bare control words match', () => {
   bad('lockstep', 'Ready');
 });
 
+test('left-out names the slot the host left out of the start (specs/start_group.qnt)', () => {
+  ok('lockstep', 'left-out:2');
+  ok('lockstep', 'left-out:3');
+  bad('lockstep', 'left-out:');
+  bad('lockstep', 'left-out:-1');
+  bad('lockstep', 'left-out:two');
+  bad('lockstep', 'left-out:1:2');
+  // A lockstep word only: the sync-state channel carries state.
+  bad('sync-state', 'left-out:2');
+});
+
 test('roster carries a frame and the slots in play', () => {
   ok('lockstep', 'roster:1840:0,1,3');
   ok('lockstep', 'roster:0:0');

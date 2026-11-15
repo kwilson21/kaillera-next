@@ -36,6 +36,7 @@ const EVENTS = [
   ['roomClosed', { type: 'roomClosed' }],
   ['rejoinRefused', { type: 'rejoinRefused' }],
   ['lateJoinRomNeeded', { type: 'lateJoinRomNeeded' }],
+  ['leftOutOfStart', { type: 'leftOutOfStart' }],
   ['lateJoinRomReady', { type: 'lateJoinRomReady' }],
   ['engineStarted: connect only', { type: 'engineStarted', connectOnly: true, waitsForState: true }],
   ['engineStarted: needs state', { type: 'engineStarted', connectOnly: false, waitsForState: true }],
