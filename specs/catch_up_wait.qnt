@@ -25,9 +25,13 @@
 //   slot, so the next tick waits for the next slot. The fix for the spin
 //   (I1: the wait keeps its deadline).
 //
-// ONCE_ON_RELIABLE: on the reliable channel a frame's input is sent once:
-//   the channel delivers it. (On the unreliable channel resends stay,
-//   limited by time; not modelled here.)
+// RESEND_LIMITED: the same frame's input goes out again at most once every
+//   R slots (100 ms: R = 6; the model uses 2), on either channel. Not never:
+//   a page far behind drops a peer's inputs as too far ahead (INPUT-OOR)
+//   even on the reliable channel, and the resend after it caught up is what
+//   brought the input back (#272's HEAL_BOTH_SIDES run on a send-once
+//   build split at 1911). That masks a receiver bug: the follow-up has the
+//   receiver ask for what it dropped once it reaches it.
 //
 // What is modelled: one guest, its frame, the hole the catch-up waits on,
 // ticks and 60 Hz slots, the input sends, the reliable channel as a queue
@@ -39,7 +43,7 @@
 
 module catch_up_wait {
   const YIELD_WHILE_WAITING: bool
-  const ONCE_ON_RELIABLE: bool
+  const RESEND_LIMITED: bool
 
   // Packets the reliable channel delivers per slot (bounded for the model).
   pure val DRAIN = 2
@@ -48,6 +52,8 @@ module catch_up_wait {
   pure val ASK_BOUND = 4
   // Bound on the queue for the model.
   pure val QUEUE_CAP = 12
+  // Slots between two sends of the same frame (6 in the engine).
+  pure val R = 2
 
   var waiting: bool        // the catch-up waits on a hole
   var holeFilled: bool
@@ -56,26 +62,29 @@ module catch_up_wait {
   var queue: int           // packets on the reliable channel not yet delivered
   var askAhead: int        // packets queued ahead of the ask; -1 = no ask in flight
   var ticksThisSlot: int
-  var duplicate: bool      // history: a frame's input went out twice on the reliable channel
+  var slotsSinceSend: int  // slots since the last send (capped at R)
+  var tooSoon: bool        // history: the same frame went out again within R slots
   var buried: bool         // history: the ask was queued behind more than ASK_BOUND
 
   action init = all {
     waiting' = true, holeFilled' = false,
     lastSent' = 10, frame' = 10,
     queue' = 0, askAhead' = -1, ticksThisSlot' = 0,
-    duplicate' = false, buried' = false,
+    slotsSinceSend' = R, tooSoon' = false, buried' = false,
   }
 
   // A tick. While waiting it runs a slice (no frame advances) after the
   // input send; it may run again in the same slot only if it does not
   // spend the slot.
   def mayTick: bool = ticksThisSlot == 0 or not(YIELD_WHILE_WAITING and waiting)
-  def sends: bool = not(ONCE_ON_RELIABLE) or lastSent < frame
+  def sameFrame: bool = lastSent >= frame
+  def sends: bool = not(RESEND_LIMITED) or not(sameFrame) or slotsSinceSend >= R
   action tick = all {
     mayTick, queue < QUEUE_CAP, ticksThisSlot < 6,
     ticksThisSlot' = ticksThisSlot + 1,
     queue' = if (sends) queue + 1 else queue,
-    duplicate' = (duplicate or (sends and lastSent >= frame)),
+    tooSoon' = (tooSoon or (sends and sameFrame and slotsSinceSend < R)),
+    slotsSinceSend' = if (sends) 0 else slotsSinceSend,
     lastSent' = if (sends) frame else lastSent,
     // Once the hole is filled the catch-up runs on: the frame advances.
     frame' = if (not(waiting)) frame + 1 else frame,
@@ -89,7 +98,7 @@ module catch_up_wait {
     queue' = queue + 1,
     buried' = (buried or queue > ASK_BOUND),
     waiting' = waiting, holeFilled' = holeFilled, lastSent' = lastSent, frame' = frame,
-    ticksThisSlot' = ticksThisSlot, duplicate' = duplicate,
+    ticksThisSlot' = ticksThisSlot, slotsSinceSend' = slotsSinceSend, tooSoon' = tooSoon,
   }
 
   // A 60 Hz slot: the channel delivers up to DRAIN packets. Once nothing is
@@ -101,21 +110,22 @@ module catch_up_wait {
     holeFilled' = (holeFilled or (askAhead >= 0 and askAhead < delivered)),
     waiting' = (waiting and not(askAhead >= 0 and askAhead < delivered)),
     ticksThisSlot' = 0,
-    lastSent' = lastSent, frame' = frame, duplicate' = duplicate, buried' = buried,
+    slotsSinceSend' = if (slotsSinceSend < R) slotsSinceSend + 1 else R,
+    lastSent' = lastSent, frame' = frame, tooSoon' = tooSoon, buried' = buried,
   }
 
   action step = any { tick, ask, slot }
 
   // ── Properties ───────────────────────────────────────────────────────────
 
-  // Every send on the reliable channel carries something new.
-  val everyReliableSendIsNew = not(duplicate)
+  // The same frame's input goes out again at most once every R slots.
+  val reliableResendsAreSpaced = not(tooSoon)
   // A catch-up waiting on a hole takes one tick per 60 Hz slot.
   val aWaitingCatchUpDoesNotSpin = waiting implies ticksThisSlot <= 1
   // The ask for the hole is never queued behind more than a few packets.
   val theAskIsNotBuried = not(buried)
 
-  val allHold = and { everyReliableSendIsNew, aWaitingCatchUpDoesNotSpin, theAskIsNotBuried }
+  val allHold = and { reliableResendsAreSpaced, aWaitingCatchUpDoesNotSpin, theAskIsNotBuried }
 
   // ── Scenarios ────────────────────────────────────────────────────────────
 
@@ -129,13 +139,13 @@ module catch_up_wait {
       init
         .then(tick).then(tick).then(tick).then(tick).then(tick).then(tick)
         .then(ask)
-        .expect(theAskIsNotBuried == ONCE_ON_RELIABLE)
+        .expect(theAskIsNotBuried == RESEND_LIMITED)
         .expect(not(aWaitingCatchUpDoesNotSpin))
 
   // With the fix the second tick in a slot waits for the next slot, and the
   // ask is answered in the slot after it is sent.
   run yieldThenAskTest =
-    if (YIELD_WHILE_WAITING and ONCE_ON_RELIABLE)
+    if (YIELD_WHILE_WAITING and RESEND_LIMITED)
       init.then(tick).then(ask).then(slot)
         .expect(holeFilled and not(waiting) and allHold)
         .then(tick).then(tick)
@@ -143,28 +153,28 @@ module catch_up_wait {
     else if (YIELD_WHILE_WAITING)
       // Yielding alone: one tick a slot, but each sends the same frame again.
       init.then(tick).then(slot).then(tick)
-        .expect(aWaitingCatchUpDoesNotSpin and not(everyReliableSendIsNew))
+        .expect(aWaitingCatchUpDoesNotSpin and not(reliableResendsAreSpaced))
     else
       init.then(tick).then(tick)
         .expect(not(aWaitingCatchUpDoesNotSpin))
 }
 
-// Today: the waiting catch-up spins and every tick resends the frame.
+// Today: the waiting catch-up spins and every tick sends the frame again.
 module catch_up_wait_current {
-  import catch_up_wait(YIELD_WHILE_WAITING = false, ONCE_ON_RELIABLE = false).*
+  import catch_up_wait(YIELD_WHILE_WAITING = false, RESEND_LIMITED = false).*
 }
 
-// Yielding alone: one resend a slot still goes out on the reliable channel.
+// Yielding alone: the same frame still goes out again every slot.
 module catch_up_wait_yield_only {
-  import catch_up_wait(YIELD_WHILE_WAITING = true, ONCE_ON_RELIABLE = false).*
+  import catch_up_wait(YIELD_WHILE_WAITING = true, RESEND_LIMITED = false).*
 }
 
-// Sending once alone: the slice still spins, but sends nothing new.
-module catch_up_wait_once_only {
-  import catch_up_wait(YIELD_WHILE_WAITING = false, ONCE_ON_RELIABLE = true).*
+// Limiting the resend alone: the slice still spins.
+module catch_up_wait_resend_limited_only {
+  import catch_up_wait(YIELD_WHILE_WAITING = false, RESEND_LIMITED = true).*
 }
 
 // The fix.
 module catch_up_wait_fixed {
-  import catch_up_wait(YIELD_WHILE_WAITING = true, ONCE_ON_RELIABLE = true).*
+  import catch_up_wait(YIELD_WHILE_WAITING = true, RESEND_LIMITED = true).*
 }

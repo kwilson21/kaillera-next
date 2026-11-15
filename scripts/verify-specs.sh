@@ -294,9 +294,9 @@ catch_up_wait() {
   # 2 steps; six spinning ticks then the ask, buried: 7 steps
   # (spinThenAskTest carries that one).
   expect_violation "$WAIT" catch_up_wait_current aWaitingCatchUpDoesNotSpin
-  expect_violation "$WAIT" catch_up_wait_current everyReliableSendIsNew
-  expect_violation "$WAIT" catch_up_wait_yield_only everyReliableSendIsNew
-  expect_violation "$WAIT" catch_up_wait_once_only aWaitingCatchUpDoesNotSpin
+  expect_violation "$WAIT" catch_up_wait_current reliableResendsAreSpaced
+  expect_violation "$WAIT" catch_up_wait_yield_only reliableResendsAreSpaced
+  expect_violation "$WAIT" catch_up_wait_resend_limited_only aWaitingCatchUpDoesNotSpin
 }
 
 ask_escalation() {

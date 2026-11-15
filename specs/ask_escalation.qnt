@@ -27,6 +27,13 @@
 //   the host's state (pushDeadlineStep). An event alone would leave the guest
 //   playing on split. Without the deadline a lost push was the end of it.
 //
+// A second way in: the input arrives, but past the rollback window and
+// different from what was predicted (C's DEEP-MISPREDICT-SKIP: too deep to
+// roll back). It cannot be applied, so the pages have split for certain.
+// That was silent until the hashes diverged; it is now logged
+// (INPUT-PAST-WINDOW-MISMATCH) and is overdue at once, escalating as an
+// unanswered ask does (lateMismatchTest).
+//
 // What is modelled: one ask for one input; its answer arriving or being
 // lost for good; the escalation; the push, its acknowledgement arriving or
 // being lost, its deadline and retry. Time is abstract: `aged` turns true
@@ -83,6 +90,17 @@ module ask_escalation {
     pushes' = pushes, ackLost' = ackLost, applied' = applied, dropped' = dropped,
   }
 
+  // It came, past the rollback window and different: as good as lost, and
+  // overdue at once.
+  action lateMismatch = all {
+    open, not(lost),
+    lost' = true,
+    asks' = if (asks < MIN_ASKS) MIN_ASKS else asks,
+    aged' = true,
+    answered' = answered, resyncOut' = resyncOut,
+    pushes' = pushes, ackLost' = ackLost, applied' = applied, dropped' = dropped,
+  }
+
   action loseAnswer = all {
     open, not(lost), not(answered),
     lost' = true,
@@ -135,7 +153,7 @@ module ask_escalation {
     pushes' = pushes, ackLost' = ackLost, applied' = applied, dropped' = dropped,
   }
 
-  action step = any { ask, age, answer, loseAnswer, escalate, applyResync, loseAck, pushDeadline, stutter }
+  action step = any { ask, age, answer, loseAnswer, lateMismatch, escalate, applyResync, loseAck, pushDeadline, stutter }
 
   // ── Properties ───────────────────────────────────────────────────────────
 
@@ -165,6 +183,15 @@ module ask_escalation {
     init.then(ask).then(loseAnswer).then(ask).then(ask).then(age)
       .then(ask).then(ask).then(ask)
       .expect(everyAskEnds == ESCALATE)
+
+  // A late input that differs past the window: escalated at once (today: the
+  // split nothing corrects).
+  run lateMismatchTest =
+    if (ESCALATE)
+      init.then(lateMismatch).then(escalate).then(applyResync)
+        .expect(applied and allHold)
+    else
+      init.then(lateMismatch).expect(not(everyAskEnds) or canMove)
 
   // A slow answer after one ask never escalates.
   run slowAnswerTest =

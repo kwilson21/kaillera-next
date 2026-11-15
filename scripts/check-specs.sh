@@ -394,14 +394,14 @@ $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
 # ── A catch-up waiting on a hole after a reconnect ────────────────────────
 WAIT=specs/catch_up_wait.qnt
 $QUINT typecheck "$WAIT"
-for variant in catch_up_wait_current catch_up_wait_yield_only catch_up_wait_once_only catch_up_wait_fixed; do
+for variant in catch_up_wait_current catch_up_wait_yield_only catch_up_wait_resend_limited_only catch_up_wait_fixed; do
   $QUINT test "$WAIT" --main="$variant" --backend=typescript
 done
 # Today a catch-up waiting on a missing input spins (each tick replay-only,
 # run again at once) and every tick sends the same frame's input on the
 # reliable channel, burying the ask for the hole (catch_up_wait_current;
-# spinThenAskTest). Yielding alone still sends duplicates; sending once alone
-# still spins.
+# spinThenAskTest). Yielding alone still sends the same frame every slot; limiting
+# the resend alone still spins.
 $QUINT run "$WAIT" --main=catch_up_wait_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=30 --backend=typescript
 
