@@ -25,3 +25,4 @@ web/src/sync-follow-up.ts
 web/src/input-ask.ts
 web/src/catch-up.ts
 web/src/input-resend.ts
+web/src/start-group.ts

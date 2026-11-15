@@ -193,6 +193,9 @@ class SetListedPayload(BaseModel):
 
 class RomReadyPayload(BaseModel):
     ready: bool = True
+    # With ready false: the page shows the ROM prompt (it has no ROM and asks
+    # for one), not merely that it has not loaded one yet.
+    prompt: bool = False
     hash: str | None = None
     name: str | None = Field(default=None, max_length=128)
     size: int | None = Field(default=None, ge=0, le=512 * 1024 * 1024)
@@ -268,6 +271,10 @@ class RoomPlayer(_ServerMessage):
     # None while the player holds no slot.
     slot: int | None
     romReady: bool
+    # The player's page shows the ROM prompt: it said it has no ROM and asks
+    # for one (rom-ready {ready: false, prompt: true}). A page that has not
+    # said rom-ready yet shows romReady false without it.
+    romPrompt: bool = False
     inputType: str
     deviceType: str
 

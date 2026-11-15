@@ -286,6 +286,27 @@ rom_at_start() {
   expect_violation "$ROM_START" rom_at_start_no_rejoin serverKnowsTheRom
 }
 
+start_group() {
+  local START_GROUP=specs/start_group.qnt
+  verify "$START_GROUP" start_group_current allHold
+  verify "$START_GROUP" start_group_deadline_only allHold
+  # A room of two, the guest frozen, three deadlines: 4 steps (aFrozenGuestTest).
+  expect_violation "$START_GROUP" start_group_before neverStuck
+  # A room of three, one guest answers, the other frozen: 2 steps
+  # (aThirdPlayerFrozenTest).
+  expect_violation "$START_GROUP" start_group_give_up_only neverStuck
+  # The same, the frozen guest left out but the other guest not told: 5 steps.
+  expect_violation "$START_GROUP" start_group_untold neverStuck
+  # A room of two, the guest slow, three deadlines: 4 steps (aSlowGuestTest).
+  expect_violation "$START_GROUP" start_group_no_rejoin nobodyIsInNeither
+  # The same, and the last attempt opens after the give-up: 5 steps (aLateOpenTest).
+  expect_violation "$START_GROUP" start_group_open_after_give_up nobodyIsInNeither
+  # The same, and the guest's side fails instead: 5 steps (aGuestLosesTheHostTest).
+  expect_violation "$START_GROUP" start_group_deadline_with_the_connection nobodyIsInNeither
+  # A room of three, both answer, one is lost: 4 steps (aLostAfterTheSequenceTest).
+  expect_violation "$START_GROUP" start_group_lost_dropped neverStuck
+}
+
 mesh_heal() {
   local MESH=specs/mesh_heal.qnt
   verify "$MESH" mesh_heal_fixed allHold init 10
@@ -320,7 +341,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync mesh_heal
+  rom_at_start ring_after_resync start_group mesh_heal
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -332,7 +353,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
   "peer_identity rom_transfer peer_connection rom_at_start"       # ~6.5 min
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up" # ~6.5 min
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group" # ~7 min
 )
 
 # Each group is in exactly one shard, and each shard names only groups.
