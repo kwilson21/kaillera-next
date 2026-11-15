@@ -50,6 +50,23 @@
 // still waiting for a player the host left out (it ignores the word) no
 // longer holds the start.
 //
+// Within the game sequence the host waits twice: for every player's
+// emu-ready, then, once it has synced and is ready itself, for every player's
+// lockstep-ready (the ready barrier). The load deadline covers both, for as
+// long as the start lasts: it is armed again each time it runs, and each run
+// goes on with the start (checkAllEmuReady, checkAllLockstepReady) whether or
+// not it left anyone out. It leaves out only a player that has made no start
+// step (channel open, emu-ready, lockstep-ready) since it last ran and is
+// not waiting on the host's own state: one that is still loading, or still
+// taking the host's state in, is never cut. There is one sync per start: the
+// host's sync timeout no longer sends it back to wait for emu-ready again. A
+// page says lockstep-ready once, and takes the first state it is sent, so a
+// second sync could not complete with a player that had said it: the barrier
+// waited for it for ever, or, had its word been kept, it would have started
+// from the first state and the host from the second. A player behind at the
+// barrier is the deadline's to leave out; it joins late, from the running
+// state.
+//
 // The guest's deadline is the page's, not a connection's: armed when its
 // engine starts, again whenever it loses its channel to the host before its
 // match runs, and restarted at each offer the host sends, so it runs out only
@@ -97,6 +114,17 @@
 // HOST_ARBITRATES: a guest whose deadline gives up on another guest tells the
 //   host (`unreachable:<slot>`), which leaves that one out at once and tells
 //   it; before, the guest said it was waiting for the host and waited.
+// DEADLINE_LIVE: the load deadline is armed again each time it runs, until
+//   the match runs, and each run goes on with the start; before (#277's first
+//   push) it ran once, and went on only when it had left someone out.
+// NO_PROGRESS: the load deadline leaves out only a player that has made no
+//   start step since it last ran and is not waiting on the host; before, it
+//   left out every player behind at its single time.
+// ONE_SYNC: the host's sync timeout does not send it back to the emu-ready
+//   wait; before, it did, forgetting the barrier's words of ready.
+// READY_KEPT: the load deadline reads every word of ready a player sent on
+//   its channel, kept past a sync timeout (#277's first push,
+//   `_saidStartReady`), rather than the barrier's own record.
 module start_group {
   const GIVE_UP_LEAVES_OUT: bool
   const DEADLINE_UNTIL_RUNNING: bool
@@ -108,6 +136,10 @@ module start_group {
   const LOST_IS_RETRIED: bool
   const LOAD_DEADLINE: bool
   const HOST_ARBITRATES: bool
+  const DEADLINE_LIVE: bool
+  const NO_PROGRESS: bool
+  const ONE_SYNC: bool
+  const READY_KEPT: bool
 
   // The startup watchdog's attempts (STARTUP_CONNECT_MAX_ATTEMPTS).
   pure val MAX_ATTEMPTS = 3
@@ -140,6 +172,32 @@ module start_group {
   var openToNobody: Set[str]
   // The two guests each reach the host but cannot reach each other.
   var apart: bool
+  // Where the host is within its game sequence: "loading" (it waits for
+  // every player's emu-ready) | "barrier" (it has synced and is ready itself;
+  // it waits for every player's lockstep-ready).
+  var stage: str
+  // The guests whose emulator has loaded. The page's own: a channel that
+  // opens later carries its emu-ready (netplay-rollback.js, the channel's
+  // onopen).
+  var loaded: Set[str]
+  // The host's ready barrier: the guests that said lockstep-ready to it in
+  // this sync (`_lockstepReadyPeers`).
+  var saidReady: Set[str]
+  // The guests that said lockstep-ready on their current channel. A page says
+  // it once: not again for a second sync.
+  var readyOnChannel: Set[str]
+  // The guests that made a start step since the load deadline last ran, or
+  // that wait on the host's own step (its sync).
+  var progressed: Set[str]
+  // The host's load deadline is armed.
+  var loadArmed: bool
+  // The host will look at its emu-ready wait again (checkAllEmuReady): an
+  // emu-ready came, the start group changed, or the deadline went on with the
+  // start. A sync timeout leaves nothing due.
+  var settleDue: bool
+  // The load deadline has left out a player that was making progress, or
+  // one that had said it was ready and was forgotten by a sync timeout.
+  var cutHealthy: bool
 
   action init = all {
     host' = "lobby",
@@ -150,10 +208,43 @@ module start_group {
     guestDeadline' = Set(),
     openToNobody' = Set(),
     apart' = false,
+    stage' = "loading",
+    loaded' = Set(),
+    saidReady' = Set(),
+    readyOnChannel' = Set(),
+    progressed' = Set(),
+    loadArmed' = false,
+    settleDue' = false,
+    cutHealthy' = false,
   }
 
   // The guest side's state, unchanged.
   action guestsKeep = all { guestDeadline' = guestDeadline, openToNobody' = openToNobody, apart' = apart }
+
+  // The game sequence's waits, unchanged.
+  action syncKeep = all {
+    stage' = stage,
+    loaded' = loaded,
+    saidReady' = saidReady,
+    readyOnChannel' = readyOnChannel,
+    progressed' = progressed,
+    loadArmed' = loadArmed,
+    settleDue' = settleDue,
+    cutHealthy' = cutHealthy,
+  }
+
+  // The host starts its game sequence: it loads its own emulator and arms its
+  // load deadline, which gives every player a fresh window.
+  action syncKeepOrArm(arms: bool): bool = all {
+    stage' = stage,
+    loaded' = loaded,
+    saidReady' = saidReady,
+    readyOnChannel' = readyOnChannel,
+    progressed' = if (arms) GUESTS else progressed,
+    loadArmed' = if (arms) LOAD_DEADLINE else loadArmed,
+    settleDue' = true,
+    cutHealthy' = cutHealthy,
+  }
 
   // The start group: the players the host waits for.
   val startGroup = GUESTS.filter(g => conn.get(g).in(Set("connecting", "open", "stalled")))
@@ -175,6 +266,7 @@ module start_group {
       apart' = apartNow,
       guestDeadline' = GUESTS.filter(g => pages.get(g) == "starting"),
       openToNobody' = openToNobody,
+      syncKeep,
     }
   }
 
@@ -189,8 +281,9 @@ module start_group {
 
   pure def other(g: str): str = if (g == "g1") "g2" else "g1"
 
-  // A player that is starting answers: the channel opens. The host's first
-  // open channel starts its game sequence.
+  // A player that is starting answers: the channel opens, a start step (and
+  // it carries the page's emu-ready, if it has loaded). The host's first open
+  // channel starts its game sequence.
   action answer(g: str): bool = all {
     conn.get(g) == "connecting",
     page.get(g).in(Set("starting", "stuck")),
@@ -203,6 +296,14 @@ module start_group {
     apart' = apart,
     guestDeadline' = guestDeadline.exclude(Set(g)),
     openToNobody' = openToNobody,
+    stage' = stage,
+    loaded' = loaded,
+    saidReady' = saidReady,
+    readyOnChannel' = readyOnChannel,
+    progressed' = if (host == "waiting") GUESTS else progressed.union(Set(g)),
+    loadArmed' = if (host == "waiting") LOAD_DEADLINE else loadArmed,
+    settleDue' = true,
+    cutHealthy' = cutHealthy,
   }
 
   // The deadline is armed while the host waits for the game sequence, and
@@ -211,16 +312,18 @@ module start_group {
 
   // The leave-out: the player's connection closes and it is held as a late
   // joiner. With nobody left to wait for, the host starts alone.
-  action leaveOut(g: str): bool = all {
-    conn' = conn.set(g, "leftOut"),
-    attempt' = attempt,
-    page' = page,
-    told' = if (HOST_TELLS_LEFT_OUT) told.union(Set(g)) else told,
-    host' = {
-      val rest = startGroup.exclude(Set(g))
-      if (host == "waiting" and rest.size() == 0) "sequence" else host
-    },
-    guestsKeep,
+  action leaveOut(g: str): bool = {
+    val startsAlone = host == "waiting" and startGroup.exclude(Set(g)).size() == 0
+    all {
+      conn' = conn.set(g, "leftOut"),
+      attempt' = attempt,
+      page' = page,
+      told' = if (HOST_TELLS_LEFT_OUT) told.union(Set(g)) else told,
+      host' = if (startsAlone) "sequence" else host,
+      guestsKeep,
+      // The start group changed: the host goes on with the start.
+      syncKeepOrArm(startsAlone),
+    }
   }
 
   // The startup deadline: no open channel in time. Another attempt while
@@ -239,6 +342,7 @@ module start_group {
         apart' = apart,
         guestDeadline' = if (page.get(g) == "starting") guestDeadline.union(Set(g)) else guestDeadline,
         openToNobody' = openToNobody,
+        syncKeep,
       }
     else if (GIVE_UP_LEAVES_OUT)
       leaveOut(g)
@@ -250,6 +354,7 @@ module start_group {
         host' = host,
         told' = told,
         guestsKeep,
+        syncKeep,
       },
   }
 
@@ -270,6 +375,7 @@ module start_group {
     attempt' = attempt,
     page' = page,
     told' = told,
+    syncKeep,
   }
 
   // The guest's side of a connection that has not opened fails (the host
@@ -289,6 +395,7 @@ module start_group {
     attempt' = attempt,
     page' = page,
     told' = told,
+    syncKeep,
   }
 
   // An open connection is lost before the match runs. It is retried like one
@@ -307,6 +414,16 @@ module start_group {
     host' = host,
     page' = page,
     told' = told,
+    // The host forgets its words on that channel. A page whose channel comes
+    // back sends its emu-ready again, not its lockstep-ready.
+    stage' = stage,
+    loaded' = loaded,
+    saidReady' = saidReady.exclude(Set(g)),
+    readyOnChannel' = readyOnChannel.exclude(Set(g)),
+    progressed' = progressed,
+    loadArmed' = loadArmed,
+    settleDue' = settleDue,
+    cutHealthy' = cutHealthy,
   }
 
   // A player at the ROM prompt says it has no ROM; the host, whose ROM is
@@ -328,29 +445,135 @@ module start_group {
   // is in the start: its emu-ready never comes.
   def waitsForTheOther(g: str): bool = apart and other(g).in(startGroup)
 
-  // A player in the start group has loaded: it answered, its emulator runs,
-  // and it waits for no player the host left out without telling it, nor
-  // for one it cannot reach.
-  def ready(g: str): bool = and {
+  // A guest's emulator loads once its channel is open: a page at the ROM
+  // prompt runs none, and a "stuck" one never gets there.
+  def canLoad(g: str): bool = and {
+    host.in(Set("waiting", "sequence")),
+    page.get(g) == "starting",
     conn.get(g) == "open",
-    page.get(g) != "stuck",
+    not(loaded.contains(g)),
+  }
+
+  // A guest says it is ready once it has the host's state: its channel is
+  // open, its emulator has loaded, it waits for no player the host left out
+  // without telling it nor for one it cannot reach, and it has not said so
+  // on this channel already.
+  def canSayReady(g: str): bool = and {
+    host == "sequence",
+    stage == "barrier",
+    conn.get(g) == "open",
+    loaded.contains(g),
+    not(readyOnChannel.contains(g)),
     waitedForBehindTheHost.exclude(Set(g)).size() == 0,
     not(waitsForTheOther(g)),
   }
 
-  // Every player in the start group has loaded: the match runs.
-  val everyoneIsIn = startGroup.forall(g => ready(g))
+  // Every player in the start group has loaded, as the host has heard.
+  val everyoneLoaded = startGroup.forall(g => conn.get(g) == "open" and loaded.contains(g))
+  // The host syncs when it next looks and every player has loaded.
+  val canSync = host == "sequence" and stage == "loading" and settleDue and everyoneLoaded
+  // Every player in the start group has said it is ready: the match runs.
+  val everyoneIsIn = startGroup.forall(g => conn.get(g) == "open" and saidReady.contains(g))
+  val canRun = host == "sequence" and stage == "barrier" and everyoneIsIn
+
+  action load(g: str): bool = all {
+    canLoad(g),
+    loaded' = loaded.union(Set(g)),
+    progressed' = progressed.union(Set(g)),
+    settleDue' = true,
+    stage' = stage,
+    saidReady' = saidReady,
+    readyOnChannel' = readyOnChannel,
+    loadArmed' = loadArmed,
+    cutHealthy' = cutHealthy,
+    host' = host,
+    conn' = conn,
+    attempt' = attempt,
+    page' = page,
+    told' = told,
+    guestsKeep,
+  }
+
+  // The host syncs: it has the starting state and is ready itself. Every
+  // player now waits on the host's state, which restarts its window.
+  action sync = all {
+    canSync,
+    stage' = "barrier",
+    saidReady' = Set(),
+    progressed' = progressed.union(startGroup),
+    settleDue' = false,
+    loaded' = loaded,
+    readyOnChannel' = readyOnChannel,
+    loadArmed' = loadArmed,
+    cutHealthy' = cutHealthy,
+    host' = host,
+    conn' = conn,
+    attempt' = attempt,
+    page' = page,
+    told' = told,
+    guestsKeep,
+  }
+
+  action sayReady(g: str): bool = all {
+    canSayReady(g),
+    saidReady' = saidReady.union(Set(g)),
+    readyOnChannel' = readyOnChannel.union(Set(g)),
+    progressed' = progressed.union(Set(g)),
+    stage' = stage,
+    loaded' = loaded,
+    loadArmed' = loadArmed,
+    settleDue' = settleDue,
+    cutHealthy' = cutHealthy,
+    host' = host,
+    conn' = conn,
+    attempt' = attempt,
+    page' = page,
+    told' = told,
+    guestsKeep,
+  }
+
+  // The host's sync times out with a player not ready. Before, it went back
+  // to the emu-ready wait and forgot the barrier's words, and nothing looked
+  // at that wait again until another emu-ready came. With one sync per start
+  // it does not happen: the load deadline decides.
+  action syncTimesOut = all {
+    not(ONE_SYNC),
+    host == "sequence",
+    stage == "barrier",
+    not(everyoneIsIn),
+    stage' = "loading",
+    saidReady' = Set(),
+    settleDue' = false,
+    loaded' = loaded,
+    readyOnChannel' = readyOnChannel,
+    progressed' = progressed,
+    loadArmed' = loadArmed,
+    cutHealthy' = cutHealthy,
+    host' = host,
+    conn' = conn,
+    attempt' = attempt,
+    page' = page,
+    told' = told,
+    guestsKeep,
+  }
 
   // The host's match runs once every player in its start group is in.
   action matchRuns = all {
-    host == "sequence",
-    everyoneIsIn,
+    canRun,
     host' = "running",
     conn' = conn,
     attempt' = attempt,
     page' = page,
     told' = told,
     guestsKeep,
+    stage' = stage,
+    loaded' = loaded,
+    saidReady' = saidReady,
+    readyOnChannel' = readyOnChannel,
+    progressed' = progressed,
+    loadArmed' = false,
+    settleDue' = settleDue,
+    cutHealthy' = cutHealthy,
   }
 
   // The player at the ROM prompt drops one: it joins late.
@@ -362,21 +585,49 @@ module start_group {
     attempt' = attempt,
     told' = told,
     guestsKeep,
+    syncKeep,
   }
 
-  // The host's load deadline: a player that answered has not loaded. It is
-  // left out and told so, itself included: a page that hears it joins late
-  // (its way into the late join is armed, as by its own deadline). A page
-  // from before `left-out:` does not hear it.
-  action loadDeadline(g: str): bool = all {
+  // Whether the load deadline takes a player for ready: the barrier's record,
+  // or, READY_KEPT, every word of ready it sent on its channel.
+  def deadlineSeesReady(g: str): bool = if (READY_KEPT) readyOnChannel.contains(g) else saidReady.contains(g)
+
+  // The players behind: in the start group with an open channel, and not
+  // loaded, or not ready at the host's barrier.
+  val behind =
+    startGroup.filter(g =>
+      conn.get(g) == "open" and (not(loaded.contains(g)) or (stage == "barrier" and not(deadlineSeesReady(g))))
+    )
+
+  // The players the load deadline leaves out when it runs: every player
+  // behind, or, NO_PROGRESS, those of them that made no start step since it
+  // last ran and do not wait on the host.
+  val dueNow = if (NO_PROGRESS) behind.exclude(progressed) else behind
+
+  // The host's load deadline runs. Each player it leaves out is told so,
+  // itself included: a page that hears it joins late (its way into the late
+  // join is armed, as by its own deadline). A page from before `left-out:`
+  // does not hear it. Then it goes on with the start, and is armed again,
+  // DEADLINE_LIVE; before, it went on only when it had left someone out, and
+  // was not armed again.
+  action loadFires = all {
     LOAD_DEADLINE,
+    loadArmed,
     host == "sequence",
-    conn.get(g) == "open",
-    not(ready(g)),
-    conn' = conn.set(g, "leftOut"),
-    told' = if (HOST_TELLS_LEFT_OUT) told.union(Set(g)) else told,
+    conn' = GUESTS.mapBy(g => if (dueNow.contains(g)) "leftOut" else conn.get(g)),
+    told' = if (HOST_TELLS_LEFT_OUT) told.union(dueNow) else told,
+    guestDeadline' = if (HOST_TELLS_LEFT_OUT) guestDeadline.union(dueNow) else guestDeadline,
+    cutHealthy' = (
+      cutHealthy or dueNow.exists(g => progressed.contains(g) or (readyOnChannel.contains(g) and not(saidReady.contains(g))))
+    ),
+    progressed' = Set(),
+    loadArmed' = DEADLINE_LIVE,
+    settleDue' = (settleDue or DEADLINE_LIVE or dueNow.size() > 0),
+    stage' = stage,
+    loaded' = loaded,
+    saidReady' = saidReady,
+    readyOnChannel' = readyOnChannel,
     apart' = apart,
-    guestDeadline' = if (HOST_TELLS_LEFT_OUT) guestDeadline.union(Set(g)) else guestDeadline,
     openToNobody' = openToNobody,
     host' = host,
     attempt' = attempt,
@@ -401,6 +652,7 @@ module start_group {
     host' = host,
     attempt' = attempt,
     page' = page,
+    syncKeepOrArm(false),
   }
 
   // A page that started normally but was left out (it answered too late, or
@@ -421,6 +673,7 @@ module start_group {
     conn' = conn,
     attempt' = attempt,
     told' = told,
+    syncKeep,
   }
 
   // A late joiner joins a running match: the host serves it a player it holds
@@ -435,9 +688,10 @@ module start_group {
     attempt' = attempt,
     told' = told,
     guestsKeep,
+    syncKeep,
   }
 
-  action nothing = all { host' = host, conn' = conn, attempt' = attempt, page' = page, told' = told, guestsKeep }
+  action nothing = all { host' = host, conn' = conn, attempt' = attempt, page' = page, told' = told, guestsKeep, syncKeep }
 
   action step = any {
     start,
@@ -445,7 +699,8 @@ module start_group {
     any {
       answer(g),
       deadline(g),
-      loadDeadline(g),
+      load(g),
+      sayReady(g),
       reportApart(g),
       lateOpen(g),
       guestLosesHost(g),
@@ -455,6 +710,9 @@ module start_group {
       rejoinLate(g),
       lateJoin(g),
     },
+    sync,
+    syncTimesOut,
+    loadFires,
     matchRuns,
   }
 
@@ -465,19 +723,36 @@ module start_group {
   val aDeadlineRuns = deadlineArmed and GUESTS.exists(g => conn.get(g) == "connecting")
   val aRomPromptIsHeard = ROM_PROMPT_LEAVES_OUT and startGroup.exists(g => page.get(g) == "awaitingRom")
   val aPairIsSplit = HOST_ARBITRATES and apart and GUESTS.forall(g => conn.get(g) == "open")
-  val aLoadDeadlineRuns =
-    LOAD_DEADLINE and host == "sequence" and startGroup.exists(g => conn.get(g) == "open" and not(ready(g)))
+  // A guest's own next step: it loads, or says it is ready.
+  val aGuestStepComes = startGroup.exists(g => canLoad(g) or canSayReady(g))
+  // The load deadline is armed and its run moves the start on: it leaves
+  // someone out now, or, armed again, later, or it goes on with a wait that
+  // nothing else will look at again.
+  val aLoadDeadlineRuns = and {
+    LOAD_DEADLINE,
+    loadArmed,
+    host == "sequence",
+    or {
+      dueNow.size() > 0,
+      DEADLINE_LIVE and behind.size() > 0,
+      DEADLINE_LIVE and stage == "loading" and everyoneLoaded,
+    },
+  }
   val theHostCanGoOn = or {
     host == "waiting" and GUESTS.exists(g => conn.get(g) == "open"),
-    host == "sequence" and everyoneIsIn,
+    canSync,
+    canRun,
   }
 
   // A host that has started a game but whose match does not run always has a
-  // way on: a player still answering, a deadline still armed, a ROM prompt it
-  // will hear, or its own next step. VIOLATED while the give-up waited on
+  // way on: a player still answering, loading or saying it is ready, a
+  // deadline still armed that leads somewhere, a ROM prompt it will hear, or
+  // its own next step. VIOLATED while the give-up waited on
   // (start_group_before, aFrozenGuestTest: in a room of two the host never
-  // starts) and while the deadline stopped at the game sequence
-  // (start_group_give_up_only, aThirdPlayerFrozenTest).
+  // starts), while the deadline stopped at the game sequence
+  // (start_group_give_up_only, aThirdPlayerFrozenTest), and while the load
+  // deadline ran once beside a sync timeout that sent the host back
+  // (start_group_deadline_once, aSyncTimesOutTest).
   val neverStuck =
     host.in(Set("waiting", "sequence")) implies or {
       theHostCanGoOn,
@@ -486,6 +761,7 @@ module start_group {
       aRomPromptIsHeard,
       aLoadDeadlineRuns,
       aPairIsSplit,
+      aGuestStepComes,
     }
 
   // A late joiner waiting on a running match is held as one: the host has
@@ -510,13 +786,38 @@ module start_group {
         implies (GUEST_REJOINS_LATE and guestDeadline.contains(g))
     )
 
-  val allHold = neverStuck and aLateJoinerIsHeldAsOne and aRunningMatchHasNoSilentPlayer and nobodyIsInNeither
+  // The load deadline leaves out no player that is making progress: one that
+  // took a start step since the deadline last ran, waits on the host's own
+  // state, or said it was ready and was forgotten by a sync timeout.
+  // VIOLATED while the deadline was one time from the host's emu-ready
+  // (start_group_absolute_deadline, aSlowStateTest: a player still taking the
+  // host's state in at that time was cut) and while the host synced again
+  // after a timeout (start_group_resync, aReadyThenATimeoutTest: a player that
+  // had said it was ready never said it again, and was cut).
+  val aPlayerMakingProgressStays = not(cutHealthy)
+
+  val allHold =
+    neverStuck and aLateJoinerIsHeldAsOne and aRunningMatchHasNoSilentPlayer and nobodyIsInNeither
+      and aPlayerMakingProgressStays
 
   // ── scenarios ───────────────────────────────────────────────────────────
 
   // Steps a scenario takes only where the variant allows them.
   action deadlineAny(g: str): bool = if (deadlineArmed and conn.get(g) == "connecting") deadline(g) else nothing
-  action matchRunsAny = if (host == "sequence" and everyoneIsIn) matchRuns else nothing
+  action loadAny(g: str): bool = if (canLoad(g)) load(g) else nothing
+  action syncAny = if (canSync) sync else nothing
+  action sayReadyAny(g: str): bool = if (canSayReady(g)) sayReady(g) else nothing
+  action matchRunsStep = if (canRun) matchRuns else nothing
+  action syncTimesOutAny =
+    if (not(ONE_SYNC) and host == "sequence" and stage == "barrier" and not(everyoneIsIn)) syncTimesOut else nothing
+  action loadFiresAny = if (LOAD_DEADLINE and loadArmed and host == "sequence") loadFires else nothing
+  // The host goes on as far as its players let it: each loads, it syncs,
+  // each says it is ready, and the match runs.
+  run matchRunsAny =
+    loadAny("g1").then(loadAny("g2")).then(syncAny).then(sayReadyAny("g1")).then(sayReadyAny("g2")).then(matchRunsStep)
+  // The load deadline over two windows: a player that made no step in the
+  // first is left out at the second.
+  run loadDeadlineAny = loadFiresAny.then(loadFiresAny)
   action romPromptAny(g: str): bool =
     if (ROM_PROMPT_LEAVES_OUT and page.get(g) == "awaitingRom" and g.in(startGroup) and host.in(Set("waiting", "sequence")))
       romPromptHeard(g)
@@ -554,6 +855,7 @@ module start_group {
       .then(startWith("starting", "frozen"))
       .then(answer("g1"))
       .expect(host == "sequence")
+      .then(loadAny("g1"))
       .expect(neverStuck == DEADLINE_UNTIL_RUNNING)
       .then(deadlineAny("g2"))
       .then(deadlineAny("g2"))
@@ -649,16 +951,20 @@ module start_group {
         page.get("g1") == (if (GIVE_UP_LEAVES_OUT and GUEST_DEADLINE_ON_LOSS and GUEST_REJOINS_LATE) "joined" else "starting")
       )
 
-  // A room of three; both guests answer, then one connection to the host is
-  // lost before the match runs. Before, the host dropped it without a word:
-  // the host stopped counting that player but the other guest still waited
-  // for it, and the host for the other guest.
+
+  // A room of three; both guests answer and load, then one connection to the
+  // host is lost before the match runs. Before, the host dropped it without a
+  // word: the host stopped counting that player but the other guest still
+  // waited for it, and the host for the other guest.
   run aLostAfterTheSequenceTest =
     init
       .then(startWith("starting", "starting"))
       .then(answer("g1"))
       .then(answer("g2"))
+      .then(loadAny("g1"))
+      .then(loadAny("g2"))
       .then(lose("g2"))
+      .then(syncAny)
       .expect(neverStuck == (LOST_IS_RETRIED or LOAD_DEADLINE))
       .then(deadlineAny("g2"))
       .then(deadlineAny("g2"))
@@ -666,7 +972,7 @@ module start_group {
       .then(matchRunsAny)
       // The other guest still waits for a player it was not told of: the load
       // deadline leaves it out too.
-      .then(loadDeadlineAny("g1"))
+      .then(loadDeadlineAny)
       .then(matchRunsAny)
       .expect(
         host == (
@@ -674,9 +980,6 @@ module start_group {
           else "sequence"
         )
       )
-
-  action loadDeadlineAny(g: str): bool =
-    if (LOAD_DEADLINE and host == "sequence" and conn.get(g) == "open" and not(ready(g))) loadDeadline(g) else nothing
 
   // A room of two; the guest answers but its emulator never loads. Before,
   // the host waited at emu-ready for ever. Now its load deadline leaves the
@@ -687,7 +990,7 @@ module start_group {
       .then(answer("g1"))
       .expect(host == "sequence")
       .expect(neverStuck == LOAD_DEADLINE)
-      .then(loadDeadlineAny("g1"))
+      .then(loadDeadlineAny)
       .then(matchRunsAny)
       .expect(host == (if (LOAD_DEADLINE) "running" else "sequence"))
 
@@ -704,7 +1007,7 @@ module start_group {
       .then(deadlineAny("g2"))
       .then(deadlineAny("g2"))
       .then(matchRunsAny)
-      .then(loadDeadlineAny("g1"))
+      .then(loadDeadlineAny)
       .then(matchRunsAny)
       .expect(
         host == (
@@ -719,23 +1022,91 @@ module start_group {
     else nothing
 
   // A room of three; both guests reach the host but not each other. Each
-  // waits for the other's emu-ready. Before, the start waited for ever; with
-  // only the load deadline, the host leaves both out after it; now the guest
-  // whose deadline gave up tells the host, which leaves the other out, and
-  // the match runs with the one that reported.
+  // waits for the other. Before, the start waited for ever; with only the
+  // load deadline, the host leaves both out after it; now the guest whose
+  // deadline gave up tells the host, which leaves the other out, and the
+  // match runs with the one that reported.
   run aPairApartTest =
     init
       .then(startApartOrNot("starting", "starting", true))
       .then(answer("g1"))
       .then(answer("g2"))
+      .then(loadAny("g1"))
+      .then(loadAny("g2"))
+      .then(syncAny)
       .expect(neverStuck == (HOST_ARBITRATES or LOAD_DEADLINE))
       .then(reportApartAny("g1"))
       .then(matchRunsAny)
-      .then(loadDeadlineAny("g1"))
-      .then(loadDeadlineAny("g2"))
+      .then(loadDeadlineAny)
       .then(matchRunsAny)
       .expect(host == (if (HOST_ARBITRATES or LOAD_DEADLINE) "running" else "sequence"))
       .expect(HOST_ARBITRATES implies startGroup == Set("g1"))
+
+  // A room of two; the guest loads, the host syncs, and its sync times out
+  // before the guest says it is ready (a slow state, a heavy tab). Before,
+  // the host went back to wait for emu-ready, which nothing looked at again,
+  // and the load deadline, run once, found nobody behind and did not go on
+  // with the start: the host waited for ever. Now the host keeps its one
+  // sync and the guest's word comes; a host that went back would still be
+  // moved on by its deadline, armed again.
+  run aSyncTimesOutTest =
+    init
+      .then(startWith("starting", "absent"))
+      .then(answer("g1"))
+      .then(loadAny("g1"))
+      .then(syncAny)
+      .then(syncTimesOutAny)
+      .then(loadFiresAny)
+      .expect(neverStuck == (ONE_SYNC or (LOAD_DEADLINE and DEADLINE_LIVE)))
+      .then(matchRunsAny)
+      .expect(host == (if (ONE_SYNC or (LOAD_DEADLINE and DEADLINE_LIVE)) "running" else "sequence"))
+
+  // A room of two; the guest is still taking the host's state in when the
+  // load deadline runs. Before, the deadline was one time from the host's
+  // emu-ready and left the guest out though it was making progress; now it
+  // leaves out only a player that made no start step in a whole window.
+  run aSlowStateTest =
+    init
+      .then(startWith("starting", "absent"))
+      .then(answer("g1"))
+      .then(loadAny("g1"))
+      .then(syncAny)
+      .then(loadFiresAny)
+      .expect(aPlayerMakingProgressStays == not(LOAD_DEADLINE and not(NO_PROGRESS)))
+      .then(matchRunsAny)
+      .expect(host == "running")
+      .expect(conn.get("g1") == (if (LOAD_DEADLINE and not(NO_PROGRESS)) "leftOut" else "open"))
+
+  // A room of three; both guests load, the host syncs, one guest says it is
+  // ready while the other is slow, and the host's sync times out. Before, the
+  // host went back and synced again: the guest that had said it was ready
+  // took no second state and never said so again. The barrier waited for it,
+  // with the deadline reading its old word (#277's first push), or, with the
+  // barrier's own record, the deadline left it out though it had done
+  // nothing wrong. Now there is one sync: the slow guest says it is ready and
+  // the match runs with both.
+  run aReadyThenATimeoutTest =
+    init
+      .then(startWith("starting", "starting"))
+      .then(answer("g1"))
+      .then(answer("g2"))
+      .then(loadAny("g1"))
+      .then(loadAny("g2"))
+      .then(syncAny)
+      .then(sayReadyAny("g1"))
+      .then(syncTimesOutAny)
+      .then(loadFiresAny)
+      .then(syncAny)
+      .then(sayReadyAny("g2"))
+      .then(loadDeadlineAny)
+      .then(matchRunsStep)
+      .expect(
+        aPlayerMakingProgressStays == not(
+          LOAD_DEADLINE and ((ONE_SYNC and not(NO_PROGRESS)) or (not(ONE_SYNC) and DEADLINE_LIVE and not(READY_KEPT)))
+        )
+      )
+      .expect(neverStuck == (ONE_SYNC or (LOAD_DEADLINE and DEADLINE_LIVE and not(READY_KEPT))))
+      .expect((ONE_SYNC and NO_PROGRESS) implies (host == "running" and startGroup == GUESTS))
 
   // Two players who answer: nobody is left out and the match runs.
   run everyoneAnswersTest =
@@ -743,7 +1114,7 @@ module start_group {
       .then(startWith("starting", "starting"))
       .then(answer("g2"))
       .then(answer("g1"))
-      .then(matchRuns)
+      .then(matchRunsAny)
       .expect(host == "running")
       .expect(startGroup == GUESTS)
       .expect(allHold)
@@ -762,6 +1133,10 @@ module start_group_before {
     LOST_IS_RETRIED = false,
     LOAD_DEADLINE = false,
     HOST_ARBITRATES = false,
+    DEADLINE_LIVE = false,
+    NO_PROGRESS = false,
+    ONE_SYNC = false,
+    READY_KEPT = false,
   ).*
 }
 
@@ -779,6 +1154,10 @@ module start_group_give_up_only {
     LOST_IS_RETRIED = false,
     LOAD_DEADLINE = false,
     HOST_ARBITRATES = false,
+    DEADLINE_LIVE = false,
+    NO_PROGRESS = false,
+    ONE_SYNC = false,
+    READY_KEPT = false,
   ).*
 }
 
@@ -800,6 +1179,10 @@ module start_group_untold {
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
     HOST_ARBITRATES = false,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = true,
+    ONE_SYNC = true,
+    READY_KEPT = false,
   ).*
 }
 
@@ -817,6 +1200,10 @@ module start_group_deadline_only {
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
     HOST_ARBITRATES = true,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = true,
+    ONE_SYNC = true,
+    READY_KEPT = false,
   ).*
 }
 
@@ -835,6 +1222,10 @@ module start_group_untold_no_load {
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = false,
     HOST_ARBITRATES = false,
+    DEADLINE_LIVE = false,
+    NO_PROGRESS = false,
+    ONE_SYNC = false,
+    READY_KEPT = false,
   ).*
 }
 
@@ -852,6 +1243,10 @@ module start_group_no_rejoin {
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
     HOST_ARBITRATES = true,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = true,
+    ONE_SYNC = true,
+    READY_KEPT = false,
   ).*
 }
 
@@ -870,6 +1265,10 @@ module start_group_open_after_give_up {
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
     HOST_ARBITRATES = true,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = true,
+    ONE_SYNC = true,
+    READY_KEPT = false,
   ).*
 }
 
@@ -885,6 +1284,10 @@ module start_group_deadline_with_the_connection {
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
     HOST_ARBITRATES = true,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = true,
+    ONE_SYNC = true,
+    READY_KEPT = false,
   ).*
 }
 
@@ -902,6 +1305,10 @@ module start_group_lost_dropped {
     LOST_IS_RETRIED = false,
     LOAD_DEADLINE = false,
     HOST_ARBITRATES = true,
+    DEADLINE_LIVE = false,
+    NO_PROGRESS = false,
+    ONE_SYNC = false,
+    READY_KEPT = false,
   ).*
 }
 
@@ -919,10 +1326,79 @@ module start_group_apart_unarbitrated {
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = false,
     HOST_ARBITRATES = false,
+    DEADLINE_LIVE = false,
+    NO_PROGRESS = false,
+    ONE_SYNC = false,
+    READY_KEPT = false,
   ).*
 }
 
-// Today: all ten.
+// #277's first push: the load deadline ran once, from the host's emu-ready,
+// went on with the start only when it left someone out, and read every word
+// of ready kept past a sync timeout; the sync timeout sent the host back to
+// wait for emu-ready.
+module start_group_deadline_once {
+  import start_group(
+    GIVE_UP_LEAVES_OUT = true,
+    DEADLINE_UNTIL_RUNNING = true,
+    ROM_PROMPT_LEAVES_OUT = true,
+    HOST_TELLS_LEFT_OUT = true,
+    GUEST_REJOINS_LATE = true,
+    GIVE_UP_CLOSES = true,
+    GUEST_DEADLINE_ON_LOSS = true,
+    LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
+    DEADLINE_LIVE = false,
+    NO_PROGRESS = false,
+    ONE_SYNC = false,
+    READY_KEPT = true,
+  ).*
+}
+
+// The load deadline armed again and going on with the start, but one time
+// for every player: a player still taking the host's state in is cut.
+module start_group_absolute_deadline {
+  import start_group(
+    GIVE_UP_LEAVES_OUT = true,
+    DEADLINE_UNTIL_RUNNING = true,
+    ROM_PROMPT_LEAVES_OUT = true,
+    HOST_TELLS_LEFT_OUT = true,
+    GUEST_REJOINS_LATE = true,
+    GIVE_UP_CLOSES = true,
+    GUEST_DEADLINE_ON_LOSS = true,
+    LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = false,
+    ONE_SYNC = true,
+    READY_KEPT = false,
+  ).*
+}
+
+// The load deadline as today, with the sync timeout sending the host back to
+// sync again: a player that said it was ready never says so again, and is cut.
+module start_group_resync {
+  import start_group(
+    GIVE_UP_LEAVES_OUT = true,
+    DEADLINE_UNTIL_RUNNING = true,
+    ROM_PROMPT_LEAVES_OUT = true,
+    HOST_TELLS_LEFT_OUT = true,
+    GUEST_REJOINS_LATE = true,
+    GIVE_UP_CLOSES = true,
+    GUEST_DEADLINE_ON_LOSS = true,
+    LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = true,
+    ONE_SYNC = false,
+    READY_KEPT = false,
+  ).*
+}
+
+// Today: all fourteen.
 module start_group_current {
   import start_group(
     GIVE_UP_LEAVES_OUT = true,
@@ -935,5 +1411,9 @@ module start_group_current {
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
     HOST_ARBITRATES = true,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = true,
+    ONE_SYNC = true,
+    READY_KEPT = false,
   ).*
 }

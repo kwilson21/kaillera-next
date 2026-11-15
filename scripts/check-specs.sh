@@ -108,7 +108,7 @@ $QUINT typecheck "$START_GROUP"
 for variant in start_group_before start_group_give_up_only start_group_untold_no_load start_group_untold \
   start_group_deadline_only start_group_no_rejoin start_group_open_after_give_up \
   start_group_deadline_with_the_connection start_group_lost_dropped start_group_apart_unarbitrated \
-  start_group_current; do
+  start_group_deadline_once start_group_absolute_deadline start_group_resync start_group_current; do
   $QUINT test "$START_GROUP" --main="$variant" --backend=typescript
 done
 # Today: a host that has started a game always has a way on, a late joiner
@@ -133,8 +133,15 @@ done
 # started was dropped without a word (start_group_lost_dropped;
 # aLostAfterTheSequenceTest), and while two guests that could not reach each
 # other waited for each other with nobody deciding (start_group_apart_unarbitrated;
-# aPairApartTest). It all holds without the ROM prompt's word too
-# (start_group_deadline_only), only later.
+# aPairApartTest), and while the load deadline ran once and a sync that timed
+# out sent the host back to an emu-ready wait nothing looked at again
+# (start_group_deadline_once; aSyncTimesOutTest). No player making progress
+# is left out: VIOLATED while the load deadline was one time for every player
+# (start_group_absolute_deadline; aSlowStateTest: a guest still taking the
+# host's state in was cut) and while the host synced again after a timeout
+# (start_group_resync; aReadyThenATimeoutTest: a guest that had said it was
+# ready never said so again, and was cut). It all holds without the ROM
+# prompt's word too (start_group_deadline_only), only later.
 for variant in start_group_deadline_only start_group_current; do
   $QUINT run "$START_GROUP" --main="$variant" --invariant=allHold \
     --max-samples=20000 --max-steps=25 --backend=typescript

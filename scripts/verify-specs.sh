@@ -292,11 +292,12 @@ start_group() {
   verify "$START_GROUP" start_group_deadline_only allHold
   # A room of two, the guest frozen, three deadlines: 4 steps (aFrozenGuestTest).
   expect_violation "$START_GROUP" start_group_before neverStuck
-  # A room of three, one guest answers, the other frozen: 2 steps
+  # A room of three, one guest answers and loads, the other frozen: 3 steps
   # (aThirdPlayerFrozenTest).
   expect_violation "$START_GROUP" start_group_give_up_only neverStuck
   # The same, the frozen guest left out but the other guest not told, and no
-  # load deadline: 5 steps (anOldGuestTest).
+  # load deadline (anOldGuestTest); or a sync that times out with no deadline
+  # to go on, 5 steps (aSyncTimesOutTest).
   expect_violation "$START_GROUP" start_group_untold_no_load neverStuck
   # With the load deadline the host's match runs beside a page that ignores
   # `left-out:`.
@@ -311,10 +312,22 @@ start_group() {
   expect_violation "$START_GROUP" start_group_open_after_give_up nobodyIsInNeither
   # The same, and the guest's side fails instead: 5 steps (aGuestLosesTheHostTest).
   expect_violation "$START_GROUP" start_group_deadline_with_the_connection nobodyIsInNeither
-  # A room of three, both answer, one is lost: 4 steps (aLostAfterTheSequenceTest).
+  # A room of three, both answer, one is lost (aLostAfterTheSequenceTest), or,
+  # with no load deadline, a sync that times out: 5 steps (aSyncTimesOutTest).
   expect_violation "$START_GROUP" start_group_lost_dropped neverStuck
-  # A room of three, the guests apart, both answer: 3 steps (aPairApartTest).
+  # A room of three, the guests apart, both load and the host syncs: 6 steps
+  # (aPairApartTest); or a sync that times out, 5.
   expect_violation "$START_GROUP" start_group_apart_unarbitrated neverStuck
+  # #277's first push: the guest loads, the host syncs, the sync times out,
+  # and the deadline, run once, finds nobody behind and does not go on with
+  # the start: 6 steps (aSyncTimesOutTest).
+  expect_violation "$START_GROUP" start_group_deadline_once neverStuck
+  # One deadline time for every player: the guest still taking the host's
+  # state in is cut, 5 steps (aSlowStateTest).
+  expect_violation "$START_GROUP" start_group_absolute_deadline aPlayerMakingProgressStays
+  # start_group_resync's counterexample (aReadyThenATimeoutTest: a guest says
+  # it is ready, the other is slow, the sync times out, the host syncs again)
+  # is 11 steps, past this bound: check-specs.sh runs that scenario.
 }
 
 mesh_heal() {
