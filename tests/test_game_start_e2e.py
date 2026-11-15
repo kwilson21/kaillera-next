@@ -108,6 +108,12 @@ def _in_match(page):
     page.wait_for_function("!!window.KNState.matchId", timeout=10000)
 
 
+def _slot(page):
+    """The page's player slot, once its engine has started (until then it reads -1)."""
+    page.wait_for_function("window._playerSlot >= 0", timeout=15000)
+    return page.evaluate("window._playerSlot")
+
+
 # Count "game ended" toasts added from now on (a toast removes itself after a
 # few seconds, so the ones on screen are not a count).
 _COUNT_ENDED_TOASTS = """(text) => {
@@ -485,7 +491,7 @@ def test_in_a_room_of_three_the_other_guest_hears_who_was_left_out(browser, serv
         host.click("#start-btn")
         # The host's game sequence starts on the guest's channel.
         expect(host.locator("#gesture-prompt")).to_be_visible(timeout=15000)
-        deaf_slot = deaf.evaluate("window._playerSlot")
+        deaf_slot = _slot(deaf)
         # The host's deadline on the silent player runs on past that, gives
         # up, and the host tells the guest, which stops waiting for it too.
         # The deadline used to stop once the sequence had started.
@@ -511,7 +517,7 @@ def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):
             _load_rom(page)
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
-        other_slot = other.evaluate("window._playerSlot")
+        other_slot = _slot(other)
         # The guest's channel to the other guest opens, then it claims the host left the other out.
         sent = guest.wait_for_function(
             f"""() => {{
