@@ -82,6 +82,7 @@
  */
 import fs from 'node:fs';
 import { chromium } from 'playwright';
+import { fileURLToPath } from 'node:url';
 import { requireCurrentBundle } from './bundle-check.mjs';
 import {
   OBSERVER_EVENTS,
@@ -131,7 +132,7 @@ const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/si
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
 // The play page's TypeScript must be this tree's, built and served (bundle-check.mjs).
-await requireCurrentBundle(new globalThis.URL('..', import.meta.url).pathname, URL);
+await requireCurrentBundle(fileURLToPath(new globalThis.URL('..', import.meta.url)), URL);
 
 const browser = await chromium.launch({
   ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),

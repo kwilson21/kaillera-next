@@ -7,7 +7,8 @@
  * committed). A run after a merge, a rebase or an edit under web/src without
  * a build tests the old rules while reporting the new tree's commit. So
  * before a run: the bundle must exist and be newer than every file under
- * web/src, and the server under test must serve these same bytes (it may be
+ * web/src and than the build script and the dependency manifests, and the
+ * server under test must serve these same bytes (it may be
  * serving another checkout). The server has no build id for the bundle, so
  * the bytes are compared.
  */
@@ -16,7 +17,11 @@ import path from 'node:path';
 
 const BUNDLE = path.join('web', 'static', 'dist', 'kn-core.js');
 const SOURCES = path.join('web', 'src');
+// What else makes the bundle's bytes: the build script and the dependencies.
+const BUILD_INPUTS = [path.join('scripts', 'build-web.mjs'), 'package.json', 'package-lock.json'];
 const SERVED_PATH = '/static/dist/kn-core.js';
+// A server that takes the connection and never answers fails the check, not the run.
+const FETCH_TIMEOUT_MS = 10000;
 
 /** The newest modification time (ms) of any file under `dir`, and that file. */
 export const newestUnder = (dir) => {
@@ -34,17 +39,25 @@ export const localBundleProblem = (root) => {
   const bundle = path.join(root, BUNDLE);
   if (!fs.existsSync(bundle)) return `${BUNDLE} is missing`;
   const built = fs.statSync(bundle).mtimeMs;
-  const newest = newestUnder(path.join(root, SOURCES));
-  if (newest.mtimeMs > built) return `${path.relative(root, newest.file)} is newer than ${BUNDLE}`;
+  const inputs = [
+    newestUnder(path.join(root, SOURCES)),
+    ...BUILD_INPUTS.map((p) => path.join(root, p))
+      .filter((file) => fs.existsSync(file))
+      .map((file) => ({ file, mtimeMs: fs.statSync(file).mtimeMs })),
+  ];
+  const newer = inputs.find((input) => input.mtimeMs > built);
+  if (newer) return `${path.relative(root, newer.file)} is newer than ${BUNDLE}`;
   return null;
 };
 
 /** Why the server at `baseUrl` is not serving this tree's bundle, or null. */
-export const servedBundleProblem = async (root, baseUrl, fetchImpl = fetch) => {
+export const servedBundleProblem = async (root, baseUrl, { fetchImpl = fetch, timeoutMs = FETCH_TIMEOUT_MS } = {}) => {
   const local = fs.readFileSync(path.join(root, BUNDLE));
   let served;
   try {
-    const res = await fetchImpl(new globalThis.URL(SERVED_PATH, baseUrl));
+    const res = await fetchImpl(new globalThis.URL(SERVED_PATH, baseUrl), {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     if (!res.ok) return `${baseUrl}${SERVED_PATH} answered ${res.status}`;
     served = Buffer.from(await res.arrayBuffer());
   } catch (error) {

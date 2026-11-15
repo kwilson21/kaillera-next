@@ -48,6 +48,18 @@ test('a bundle older than a file under web/src is refused, naming the file', () 
   assert.match(problem, /web\/src\/play\/a\.ts is newer than/);
 });
 
+test('a build script or dependency manifest newer than the bundle is refused', () => {
+  const root = tree({ sourceAt: 1000, bundle: 'x', bundleAt: 2000 });
+  for (const file of [path.join('scripts', 'build-web.mjs'), 'package-lock.json']) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.writeFileSync(path.join(root, file), '{}\n');
+    fs.utimesSync(path.join(root, file), 3000, 3000);
+    assert.match(localBundleProblem(root), new RegExp(`${file.replace('.', '\\.')} is newer than`));
+    fs.utimesSync(path.join(root, file), 1500, 1500);
+  }
+  assert.equal(localBundleProblem(root), null);
+});
+
 test('a bundle built after every source passes', () => {
   assert.equal(localBundleProblem(tree({ sourceAt: 1000, bundle: 'x', bundleAt: 2000 })), null);
 });
@@ -74,4 +86,21 @@ test('a server that answers with an error, or not at all, is refused', async () 
     missing.close();
   }
   assert.match(await servedBundleProblem(root, 'http://127.0.0.1:1'), /could not be fetched/);
+});
+
+test('a server that takes the connection and never answers is refused at the timeout', async () => {
+  const root = tree({ sourceAt: 1000, bundle: 'this tree', bundleAt: 2000 });
+  const sockets = new Set();
+  const silent = http.createServer(() => {});
+  silent.on('connection', (socket) => sockets.add(socket));
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
+  const started = Date.now();
+  try {
+    const problem = await servedBundleProblem(root, `http://127.0.0.1:${silent.address().port}`, { timeoutMs: 300 });
+    assert.match(problem, /could not be fetched/);
+    assert.ok(Date.now() - started < 5000);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    silent.close();
+  }
 });
