@@ -353,6 +353,21 @@ test('the host turning sharing off pauses, and on again resumes, with or without
   assert.equal(last(pausedEmpty, { kind: 'sharing-on' }), 'ask');
 });
 
+test('the host stopping sharing stops the transfer, also when its channel close came first', () => {
+  // The host closes its channel as it stops sharing; the guest can see the
+  // close, and schedule a retry, before the message that sharing is off.
+  const closedFirst = receiverStep(run({ kind: 'accept' }, { kind: 'channel' }), { kind: 'closed' });
+  assert.equal(closedFirst.next, 'ask-after-pause');
+  const off = receiverStep(closedFirst.state, { kind: 'sharing-off' });
+  // Before: 'none' with the phase unchanged, so the page kept the retry and
+  // asked a host that was not sharing.
+  assert.deepEqual([off.next, off.state.phase], ['stop', 'paused']);
+  const receiving = run({ kind: 'accept' }, { kind: 'channel' }, { kind: 'chunk', bytes: 1000 });
+  assert.equal(last(receiving, { kind: 'sharing-off' }), 'stop');
+  assert.equal(last(run({ kind: 'accept' }), { kind: 'sharing-off' }), 'stop');
+  assert.equal(last(IDLE, { kind: 'sharing-off' }), 'none');
+});
+
 test('while paused, the page says a retry is coming, or what is left to the guest', () => {
   const closed = (bytes: number, closes: number) => {
     let state = run({ kind: 'accept' }, { kind: 'channel' }, { kind: 'header', size: 1000, hash: 'Saa' });

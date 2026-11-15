@@ -34,7 +34,11 @@
 //   backoffFires       the 2 s pause before an automatic retry ends
 //   resumeTimesOut     no channel came within 15 s of asking
 //   userRetry          the guest presses Retry
-//   sharingOff / sharingOn   the host turns ROM sharing off or on
+//   sharingOff / sharingOn   the host turns ROM sharing off or on. The host
+//                      closes its channel as it turns sharing off, and the
+//                      guest can see that close before the message saying
+//                      sharing is off: sharingOff can then find the transfer
+//                      already paused, with a retry on its way
 //   cancel             the guest cancels, or the game ends
 //
 // Not modelled: what the bytes are beyond whether the page holds any (size
@@ -59,10 +63,16 @@
 //   sharing back on resumes it. false = before: either left it paused with
 //   only a Retry button, so a resume the host never heard ended on "ROM
 //   transfer failed" until the player pressed Retry.
+// SHARING_OFF_CANCELS_RETRY: the host turning sharing off cancels a retry
+//   already on its way, also when the guest saw the channel close first and
+//   is paused. false = before: only a transfer still receiving or waiting
+//   was stopped, so the guest went on asking a host that was not sharing
+//   until its retries ran out.
 module rom_transfer {
   const DEADLINE_ON_EVERY_ASK: bool
   const SHORT_COMPLETE_DROPS_COUNT: bool
   const NOTHING_RECEIVED_RESUMES: bool
+  const SHARING_OFF_CANCELS_RETRY: bool
 
   var phase: str          // idle | receiving | paused | resuming | complete
   var retries: int        // automatic retries since the guest last acted
@@ -173,8 +183,9 @@ module rom_transfer {
   }
 
   action sharingOff = all {
-    phase == "receiving" or phase == "resuming",
-    phase' = "paused", timer' = "none", retryOffered' = true,
+    phase == "receiving" or phase == "resuming" or phase == "paused",
+    phase' = "paused", retryOffered' = true,
+    timer' = if (phase != "paused" or SHARING_OFF_CANCELS_RETRY) "none" else timer,
     retries' = retries, gotBytes' = gotBytes, held' = held, byHost' = true,
   }
 
@@ -223,6 +234,9 @@ module rom_transfer {
   // retries, or the host stopped sharing. A channel that closed before any
   // byte (a resume the host never heard) used to stop there at once.
   val retriesBeforeAsking = (phase == "paused" and timer == "none") implies (retries > MAX_RETRIES or byHost)
+
+  // Nothing asks the host again by itself once it has stopped sharing.
+  val noRetryWhileHostStopped = byHost implies timer != "backoff"
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -276,6 +290,20 @@ module rom_transfer {
       .then(sharingOn)
       .expect(phase == (if (NOTHING_RECEIVED_RESUMES) "resuming" else "paused"))
       .expect(retriesBeforeAsking == NOTHING_RECEIVED_RESUMES)
+
+  // The host turns sharing off; the guest sees its channel close before the
+  // message saying so. The retry the close scheduled is cancelled (before:
+  // it went on, and asked a host that was not sharing).
+  run closeBeforeSharingOffTest =
+    init
+      .then(acceptPreGame)
+      .then(channelArrives).then(chunk)
+      .then(closes)
+      .expect(timer == "backoff")
+      .then(sharingOff)
+      .expect(phase == "paused" and byHost)
+      .expect((timer == "none") == SHARING_OFF_CANCELS_RETRY)
+      .expect(noRetryWhileHostStopped == SHARING_OFF_CANCELS_RETRY)
 
   // Channels that keep dying before any byte use the automatic retries, then
   // the guest is asked; before, every one of them asked.
@@ -337,22 +365,43 @@ module rom_transfer {
 
 // Before this model: a request sent mid-game had no deadline.
 module rom_transfer_before {
-  import rom_transfer(DEADLINE_ON_EVERY_ASK = false, SHORT_COMPLETE_DROPS_COUNT = false, NOTHING_RECEIVED_RESUMES = false).*
+  import rom_transfer(
+    DEADLINE_ON_EVERY_ASK = false, SHORT_COMPLETE_DROPS_COUNT = false, NOTHING_RECEIVED_RESUMES = false,
+    SHARING_OFF_CANCELS_RETRY = false,
+  ).*
 }
 
 // Before the short-file fix: the receiver kept the dropped file's count.
 module rom_transfer_short_kept {
-  import rom_transfer(DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = false, NOTHING_RECEIVED_RESUMES = false).*
+  import rom_transfer(
+    DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = false, NOTHING_RECEIVED_RESUMES = false,
+    SHARING_OFF_CANCELS_RETRY = false,
+  ).*
 }
 
 // Before a transfer with nothing received resumed on its own: a resume the
 // host never heard left the guest on "ROM transfer failed" until it pressed
 // Retry, even once the host was sharing again.
 module rom_transfer_nothing_received_waits {
-  import rom_transfer(DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = true, NOTHING_RECEIVED_RESUMES = false).*
+  import rom_transfer(
+    DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = true, NOTHING_RECEIVED_RESUMES = false,
+    SHARING_OFF_CANCELS_RETRY = false,
+  ).*
+}
+
+// With nothing-received retries, before the host turning sharing off cancelled
+// a retry the guest's close had already scheduled.
+module rom_transfer_retry_outlives_sharing {
+  import rom_transfer(
+    DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = true, NOTHING_RECEIVED_RESUMES = true,
+    SHARING_OFF_CANCELS_RETRY = false,
+  ).*
 }
 
 // Today.
 module rom_transfer_current {
-  import rom_transfer(DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = true, NOTHING_RECEIVED_RESUMES = true).*
+  import rom_transfer(
+    DEADLINE_ON_EVERY_ASK = true, SHORT_COMPLETE_DROPS_COUNT = true, NOTHING_RECEIVED_RESUMES = true,
+    SHARING_OFF_CANCELS_RETRY = true,
+  ).*
 }

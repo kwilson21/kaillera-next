@@ -1595,9 +1595,9 @@
 
     // Host disabled sharing — pause transfer but KEEP chunks
     if (wasEnabled && !_romSharingEnabled) {
-      const was = _romReceiver.phase;
-      romStep({ kind: 'sharing-off' });
-      if (_romReceiver.phase !== was) {
+      // Stop the transfer and cancel any retry on its way, also one a close of
+      // the host's channel, seen before this message, already scheduled.
+      if (romStep({ kind: 'sharing-off' }) === 'stop') {
         if (_romTransferDC) {
           try {
             _romTransferDC.close();

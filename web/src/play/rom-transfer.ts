@@ -80,6 +80,8 @@ export type ReceiverNext =
   | 'ask'
   /** Ask again after the pause. */
   | 'ask-after-pause'
+  /** The host stopped sharing: close the channel and cancel any ask on its way. */
+  | 'stop'
   /** Out of automatic retries: the guest decides. */
   | 'stalled'
   /** The transfer was refused or abandoned; everything received is dropped. */
@@ -120,7 +122,13 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
     case 'game-started':
       return stay(state.phase === 'idle' ? { ...state, phase: 'resuming' } : state);
     case 'sharing-off':
-      return stay(state.phase === 'receiving' || state.phase === 'resuming' ? { ...state, phase: 'paused' } : state);
+      // Also when already paused: the host closes its channel as it stops
+      // sharing, and the guest can see that close, and schedule a retry,
+      // before it hears that sharing is off (`noRetryWhileHostStopped` in
+      // specs/rom_transfer.qnt).
+      return state.phase === 'receiving' || state.phase === 'resuming' || state.phase === 'paused'
+        ? { state: { ...state, phase: 'paused' }, next: 'stop' }
+        : stay(state);
     case 'sharing-on':
       // Resume what was paused, with or without bytes, or start a transfer
       // that never began (`retriesBeforeAsking` in specs/rom_transfer.qnt).
