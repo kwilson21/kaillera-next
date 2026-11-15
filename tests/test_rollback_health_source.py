@@ -221,7 +221,7 @@ def test_a_stalled_page_asks_for_the_inputs_it_dropped():
     # frames are KNCore.framesToAskFor (web/src/input-ask.ts, proved).
     src = LOCKSTEP_JS.read_text()
 
-    oor_idx = src.index("_syncLog(`INPUT-OOR slot=")
+    oor_idx = src.index("`INPUT-OOR slot=")
     oor_src = src[oor_idx : src.index("return false;", oor_idx)]
     assert "_inputDroppedAheadUpTo[peer.slot] = Math.max(" in oor_src
 
@@ -711,11 +711,14 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
 
     # Each tick runs the next slice, after the queued inputs are fed and
     # before anything else steps the emulator.
-    tick_slice = src.index("if (_catchUpTo >= 0) {\n          _catchUpSlice(tickMod);")
+    tick_slice = src.index("if (_catchUpTo >= 0) {\n          const ranFrames = _catchUpSlice(tickMod);")
     assert src.rindex("_drainPendingCInputs(tickMod);", 0, tick_slice) > src.rindex("RB-INPUT-STALL f=", 0, tick_slice)
-    # The slice spends no 60 Hz slot, as a rollback replay does not.
+    # A slice that runs frames spends no 60 Hz slot, as a rollback replay
+    # does not; one that runs none (it waits on a hole) spends it, so the
+    # tick does not spin (specs/catch_up_wait.qnt, aWaitingCatchUpDoesNotSpin).
     after_slice = src[tick_slice : src.index("return;", tick_slice)]
-    assert "_tickReplayOnly = true;" in after_slice
+    assert "_tickReplayOnly = ranFrames > 0;" in after_slice
+    assert "return ran;" in sl
     # Inputs it runs on stay until it reaches its target, and the peers'
     # inputs for the frame it goes back to are taken in meanwhile.
     assert "const keepThrough = Math.max(_frameNum, _catchUpTo) + DELAY_FRAMES;" in apply

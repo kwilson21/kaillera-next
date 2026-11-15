@@ -1790,6 +1790,9 @@
   const DC_BUFFER_THRESHOLD = 2048; // bytes — ~100 input packets
   const DC_BUFFER_STALE_FRAMES = 10; // consecutive frames before fallback
   const DC_ACK_STALE_MS = 500; // ms without ack advance before fallback
+  // The same frame's input goes out again on the unreliable channel at most
+  // this often (one 60 Hz slot); never on the reliable one.
+  const INPUT_RESEND_EVERY_MS = 16;
   // JS-side input queue: WebRTC callbacks push here instead of calling
   // kn_feed_input directly. The queue is drained at the start of each
   // tick (before kn_pre_tick) so the C engine sees a consistent input
@@ -8878,21 +8881,25 @@
         // so states are guaranteed to have diverged. Send on the sync-state DC
         // if available (avoids the _syncExpected=0 race on the new DC), fall back
         // to the lockstep DC. Reset resync tracking so cooldowns don't block it.
+        // I2: Full per-peer reset on DC reconnect, on every page, the host
+        // too. Any inputs in flight when the DC died are gone; keeping them
+        // lets the rollback engine read stale values after state resync.
+        // The original commit 788add0 cleared only _remoteInputs here, on
+        // guests; this covers every per-peer field (phantom, ack state,
+        // audit log, fabrication counter, etc.) so the new DC starts from a
+        // guaranteed-clean slate. On the host it was skipped: the guest's
+        // phantom flag and staleness clock survived the reconnect, so the
+        // host kept running without pacing on the guest, and the guest's
+        // inputs, older than the host's past window by then, were dropped
+        // before they could clear it (the runaway).
+        if (peer.slot !== null && peer.slot !== undefined) {
+          resetPeerState(peer.slot, 'reconnect', { peer, sid: remoteSid });
+        }
         if (_playerSlot !== 0) {
           _lastResyncTime = 0;
           _consecutiveResyncs = 0;
           _resyncRequestInFlight = false;
           _syncMismatchStreak = 0;
-          // I2: Full per-peer reset on DC reconnect. Any inputs in
-          // flight when the DC died are gone; keeping them lets the
-          // rollback engine read stale values after state resync. The
-          // original commit 788add0 cleared only _remoteInputs here —
-          // this expands to every per-peer field (phantom, ack state,
-          // audit log, fabrication counter, etc.) so the new DC starts
-          // from a guaranteed-clean slate.
-          if (peer.slot !== null && peer.slot !== undefined) {
-            resetPeerState(peer.slot, 'reconnect', { peer, sid: remoteSid });
-          }
           // Send sync-request-full to the HOST's lockstep DC (only host handles
           // sync requests). `ch` is the DC to the reconnected peer — which may
           // not be the host (e.g. P1 reconnecting to P2).
@@ -15282,6 +15289,37 @@
       // A resend at the switch to the reliable channel that a send cut short.
       if (_resendAtSwitch[peer.slot]) _sendResendAtSwitch(peer);
       try {
+        // Use unreliable rb-input DC when available, fall back to primary DC
+        const inputDc =
+          _rbTransport === 'unreliable' && peer.rbDc?.readyState === 'open' && peer.rbDcUnreliable
+            ? peer.rbDc
+            : peer.dc;
+        // A frame's input goes out once on the reliable channel, which
+        // delivers it; on the unreliable one it goes out again at most once
+        // a slot. A tick that runs again on the same frame (a stall, a
+        // catch-up waiting on a hole) sent it every time, and on the
+        // reliable channel the asks for a hole queued behind them
+        // (specs/catch_up_wait.qnt, everyReliableSendIsNew).
+        const lastSend = peer._knInputSend;
+        const nowSend = performance.now();
+        if (
+          lastSend &&
+          lastSend.dc === inputDc &&
+          lastSend.frame === _frameNum &&
+          (inputDc === peer.dc || nowSend - lastSend.at < INPUT_RESEND_EVERY_MS)
+        ) {
+          continue;
+        }
+        if (inputDc && peer._knInputDc !== inputDc) {
+          // Which channel this peer's inputs go out on, each time it
+          // changes (a reconnect, a fallback): a channel the peer has
+          // dropped loses what is sent on it.
+          _syncLog(
+            `INPUT-CHANNEL f=${_frameNum} slot=${peer.slot} label=${inputDc.label} id=${inputDc.id ?? -1} ` +
+              `state=${inputDc.readyState} pc=${peer.pc?.connectionState ?? 'none'}`,
+          );
+          peer._knInputDc = inputDc;
+        }
         const ackFrame = peer.lastFrameFromPeer ?? -1;
         const needsRedundancy = shouldSendRedundancy && (peer.lastAckFromPeer ?? -1) < _frameNum - 1;
         if (needsRedundancy && redundantTail === null) {
@@ -15293,13 +15331,9 @@
           ackFrame,
           needsRedundancy ? redundantTail : null,
         ).buffer;
-        // Use unreliable rb-input DC when available, fall back to primary DC
-        const inputDc =
-          _rbTransport === 'unreliable' && peer.rbDc?.readyState === 'open' && peer.rbDcUnreliable
-            ? peer.rbDc
-            : peer.dc;
         if (inputDc?.readyState === 'open') {
           inputDc.send(peerBuf);
+          peer._knInputSend = { dc: inputDc, frame: _frameNum, at: nowSend };
           _rbTransportPacketsSent++;
           if (_catchUpTo >= 0) {
             if (inputDc === peer.dc) _catchUpSendsReliable++;
@@ -15598,11 +15632,16 @@
         // A catch-up from a state behind this guest goes on: its next slice
         // is this tick's work (_startCatchUp).
         if (_catchUpTo >= 0) {
-          _catchUpSlice(tickMod);
+          const ranFrames = _catchUpSlice(tickMod);
           _markTickReturn('catch-up');
           // Old frames run again: the 60 Hz slot is not spent on them, as on
-          // a rollback replay.
-          _tickReplayOnly = true;
+          // a rollback replay. A slice that ran none (it waits on a hole)
+          // spends it: the next tick waits for the next slot instead of
+          // running at once, hundreds of thousands of times while the input
+          // is asked for (specs/catch_up_wait.qnt,
+          // aWaitingCatchUpDoesNotSpin). The wait keeps its deadline
+          // (CATCH_UP_HOLE_WAIT_MS, I1).
+          _tickReplayOnly = ranFrames > 0;
           return;
         }
 
@@ -18664,9 +18703,11 @@
     _catchUpHoleSince = 0;
   };
 
+  // Returns how many frames it ran: none while it waits on a hole.
   const _catchUpSlice = (mod) => {
-    if (_catchUpTo < 0) return;
+    if (_catchUpTo < 0) return 0;
     const t0 = performance.now();
+    const fromFrame = _frameNum;
     const remotePeers = [];
     for (const [sid, peer] of Object.entries(_peers)) {
       if (!Number.isInteger(peer.slot) || peer.slot === _playerSlot || _isPeerPendingLateJoin(sid, peer)) continue;
@@ -18738,7 +18779,9 @@
     }
     _catchUpWorkMs += performance.now() - t0;
     _catchUpSlices++;
+    const ran = Math.max(0, _frameNum - fromFrame);
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
+    return ran;
   };
 
   const applySyncState = (bytes, frame, fromProactive = false) => {
