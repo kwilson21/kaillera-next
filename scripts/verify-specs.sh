@@ -201,11 +201,21 @@ resync_mesh() {
   expect_violation "$MESH" resync_mesh_kept settledPointIsNotAhead
 }
 
+input_transport() {
+  local INPUTS=specs/input_transport.qnt
+  verify "$INPUTS" input_transport_fixed allHold
+  verify "$INPUTS" input_transport_current noInputIsLostForGood
+  # Inputs lost on the unreliable channel, then the switch: 3 to 5 steps.
+  expect_violation "$INPUTS" input_transport_current unackedInputsAreSentAgainAtTheSwitch
+  expect_violation "$INPUTS" input_transport_until_acked unackedInputsAreSentAgainAtTheSwitch
+  expect_violation "$INPUTS" input_transport_before_ask noInputIsLostForGood
+}
+
 # Every group, in the order a local run takes them.
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
-  tick_deadlines resync_inputs resync_mesh
+  tick_deadlines resync_inputs resync_mesh input_transport
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -217,7 +227,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh"   # ~6.5 min
   "peer_identity rom_transfer peer_connection"                    # ~6.5 min
-  "late_join_pause resync_inputs"                                 # ~4 min
+  "late_join_pause resync_inputs input_transport"                 # ~5 min
 )
 
 # Each group is in exactly one shard, and each shard names only groups.
