@@ -451,7 +451,8 @@
  *     set the delay and the state transfer's frame to NaN. Each engine must
  *     drop them before any handler reads them
  *     (KNCore.protocol.createBoundary): the run fails unless each page's sync
- *     log has exactly the expected `[protocol] dropped` lines, all after the
+ *     log has exactly the expected `[protocol] dropped` lines (in any order:
+ *     the two channels are not ordered against each other), all after the
  *     strings were sent and none with what was sent in it, and each page
  *     played at least 30 frames in the ten seconds after. Frames are compared as
  *     usual: no exclusion. Reported as `malformedPeer` in summary.json.
@@ -1951,7 +1952,7 @@ const MALFORMED_STRINGS = {
   ],
   syncState: ['sync-start:zz-frame:1:1:0'],
 };
-// The `[protocol] dropped <kind>` each receiving page must log, once each.
+// The `[protocol] dropped <kind>` each receiving page must log, once each, in any order.
 const MALFORMED_DROPS = [
   'dc lockstep rb-check',
   'dc lockstep rb-delay',
@@ -2941,7 +2942,8 @@ const malformedPeerReport = (() => {
       passed:
         !!at &&
         lines.length === after.length &&
-        JSON.stringify(kinds) === JSON.stringify(MALFORMED_DROPS) &&
+        // In any order: the sync-state channel is not ordered against lockstep.
+        JSON.stringify([...kinds].sort()) === JSON.stringify([...MALFORMED_DROPS].sort()) &&
         valuesLogged === 0 &&
         framesAfter >= MALFORMED_FRAMES_AFTER,
     };
