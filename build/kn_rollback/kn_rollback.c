@@ -3202,6 +3202,14 @@ void kn_set_frame(int frame) {
         return;
     }
     rb.frame = frame;
+    /* The live state is no longer the one last saved: a resync has just
+     * loaded the host's state for `frame`, and the page may already have run
+     * and saved `frame` itself. kn_pre_tick saves a frame only when
+     * last_save_frame differs from it, so keeping the old value here left
+     * the page's own copy of `frame` in the ring when the resync landed
+     * exactly one frame behind it, and a rollback to `frame` restored that
+     * copy (specs/ring_after_resync.qnt, everyRerunFrameIsTheHosts). */
+    rb.last_save_frame = -1;
     rb_log("kn_set_frame: %d", frame);
 }
 

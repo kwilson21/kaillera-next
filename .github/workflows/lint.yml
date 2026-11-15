@@ -211,6 +211,13 @@ jobs:
         run: |
           uv run --directory server --frozen --extra dev pytest -p no:playwright -q \
             --confcutdir ../tests/hash-golden ../tests/hash-golden
+      # The rollback engine compiled natively against a stand-in core: what
+      # its ring holds after a resync moves the frame counter back. Its own
+      # conftest builds the library.
+      - name: Rollback engine, natively
+        run: |
+          uv run --directory server --frozen --extra dev pytest -p no:playwright -q \
+            --confcutdir ../tests/rollback-native ../tests/rollback-native
 
   # The production image builds the TypeScript bundles itself (Dockerfile,
   # stage `web`). This builds the image as Render and the VPS do, and checks

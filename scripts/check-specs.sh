@@ -330,3 +330,18 @@ done
 # (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest).
 $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── The rollback ring across a resync that moves the frame counter back ─────
+RING=specs/ring_after_resync.qnt
+$QUINT typecheck "$RING"
+for variant in ring_after_resync_before ring_after_resync_current; do
+  $QUINT test "$RING" --main="$variant" --backend=typescript
+done
+# Today: every frame a page runs again after a resync has the host's state in
+# its ring, and each ring copy is of the frame it is filed under. The first
+# was VIOLATED while kn_set_frame kept the last save: a resync landing one
+# frame behind the page left the page's own copy of that frame
+# (ring_after_resync_before; oneFrameBackTest holds the ordering, which a
+# two-player run found at frame 1021 in #232).
+$QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
