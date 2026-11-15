@@ -3,23 +3,13 @@
 Validates that when a peer's input is missing past MAX_STALL_MS (3s),
 a resend request is sent and the peer re-sends from _localInputs.
 
-Expects the dev server to be running on localhost:27888.
+Uses the `server_url` fixture from tests/conftest.py, which starts a test
+server when none is running.
 Run: pytest tests/test_input_resend.py -v -s --no-header
 """
-import os
 import time
 
-import pytest
-
-# KN_TEST_PORT lets parallel checkouts each run their own test server.
-SERVER_URL = f"http://localhost:{os.environ.get('KN_TEST_PORT', '27888')}"
 ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
-
-
-@pytest.fixture
-def server_url():
-    """Use the already-running dev server."""
-    return SERVER_URL
 
 
 def _load_rom(page):

@@ -3071,6 +3071,11 @@
     // host". Defer the autoload until applyHostRomFromData runs, then evaluate
     // the cached hash against the host's hash.
     const lastHash = _safeGet('localStorage', 'kaillera-rom-hash');
+    // Expose to applyHostRomFromData so it can flush the deferred autoload
+    // once host identity arrives. Set before the deferral below returns.
+    _flushPendingRomAutoload = (trigger) => {
+      if (_pendingRomAutoload) runRomAutoload(trigger);
+    };
     if (lastHash) {
       if (!isHost && !_hostRomIdentityResolved) {
         _pendingRomAutoload = { lastHash, savedRom, drop, statusEl };
@@ -3135,10 +3140,6 @@
         if (!isSpectator) renderRomLibrary();
       });
     }
-
-    // Expose to applyHostRomFromData so it can flush the deferred autoload
-    // once host identity arrives.
-    _flushPendingRomAutoload = (trigger) => runRomAutoload(trigger);
   };
 
   // Set by setupRomDrop; called from applyHostRomFromData when the host's ROM
