@@ -113,10 +113,16 @@ pair() { # module invariant init
     --max-samples=10000 --max-steps=25 --backend=typescript
 }
 # Today: a reconnect leaves the guest's input state clean and a roster update
-# never replaces a connection that is up. The other four properties are
+# never replaces a connection that is up. The other five properties are
 # violated today (the scenarios above show how) and hold on
 # peer_connection_fixed, the rules the per-peer machine is built to.
 pair peer_connection_current holdToday init
+pair peer_connection_current holdToday initLobby
+# startupRetryIsNotAReconnect is VIOLATED today, from the lobby: the server
+# drops the startupReconnect flag, so a startup retry that reaches a page
+# whose game has started (its channel with a third player opened) is taken
+# for a reconnect (startupRetryToAStartedPageTest). It holds where the flag
+# is relayed, in allHold below.
 pair peer_connection_fixed allHold init
 pair peer_connection_fixed allHold initLobby
 # With attempts told apart by the offering page's counter alone (the per-peer

@@ -51,10 +51,17 @@
 //                   it receives as today's engine does, whatever the label.
 //                   Only that is modelled of its age: it follows the same
 //                   rules as the other page otherwise
+//   thirdOpens      before the match, a page's channel with a third player
+//                   opens. A page has started (_phase PHASE_GAME_STARTED,
+//                   startGameSequence) once any of its lockstep channels has
+//                   opened, so in a room of three one page of the pair can
+//                   have started while the other is still connecting to it
+//                   and retrying. Of the third player only that is modelled
 //
-// Not modelled: more than two players, spectators, a drop before the match
-// starts, PEER-PHANTOM (which stops the health check for that slot), timers
-// that outlive the entry they were armed for, and the tick loop. Of a
+// Not modelled: a third player beyond thirdOpens, spectators, a drop before
+// the match starts, PEER-PHANTOM (which stops the health check for that
+// slot), timers that outlive the entry they were armed for, and the tick
+// loop. Of a
 // replaced page: the server refusing a signal addressed to a socket that is
 // gone (every signal in flight can still arrive, the worst case), the channel
 // events of its connection on the page that stays (`opened`, `lost`: the
@@ -85,12 +92,19 @@
 //          with every page: no two attempts are the same on the wire
 // ROSTER_KEEPS_LIVE: false = before #119, a roster under a new id replaced a
 //   connection that was up.
+// STARTUP_FLAG_RELAYED: what a startup retry says of itself on arrival. The
+//   retry goes out as a reconnect offer marked `startupReconnect`.
+//   false  the server's relay drops `startupReconnect`: the page that
+//          receives the retry tells a startup retry from a reconnect by its
+//          own phase, and a page that has started takes it for a reconnect
+//   true   the flag arrives, and a startup retry is one wherever it lands
 module peer_connection {
   const HEAL_ONE_SIDE: bool
   const ANSWERER_HAS_DEADLINE: bool
   const SIGNALS_CARRY_ATTEMPT: bool
   const ATTEMPT_NAMES_PAGE: bool
   const ROSTER_KEEPS_LIVE: bool
+  const STARTUP_FLAG_RELAYED: bool
 
   pure val SIDES = Set("lo", "hi")
   pure def other(s: str): str = if (s == "lo") "hi" else "lo"
@@ -119,6 +133,7 @@ module peer_connection {
     ansTimer: bool,      // the answerer's 10 s timer is armed
     closePending: bool,  // a replaced channel may still fire its close event
     dirty: bool,         // per-peer input state from before a drop
+    retry: bool,         // its connection was answered to a startup retry
   }
   // `id` says which connection a signal belongs to. It is the model's own
   // knowledge: no page can read it. What a page can read is the id's label.
@@ -138,7 +153,7 @@ module peer_connection {
 
   pure val ABSENT: Side = {
     has: false, made: 0, link: 0, open: false, chan: false, recon: false, giveUp: false,
-    attempt: 0, ansTimer: false, closePending: false, dirty: false,
+    attempt: 0, ansTimer: false, closePending: false, dirty: false, retry: false,
   }
 
   var side: str -> Side
@@ -149,9 +164,11 @@ module peer_connection {
   var nextPage: int
   var dead: Set[int]       // connections the network has killed
   var running: bool        // the match is under way
+  var started: Set[str]    // pages past startGameSequence: one of their channels opened
   var stalled: bool        // the startup watchdog gave up and told the player
   var staleApplied: bool   // history: an answer or a candidate was applied to a connection it was not for
   var evictedLive: bool    // history: a roster update replaced a connection that was up
+  var retryAsReconnect: bool // history: a startup retry was handled as a gameplay reconnect
 
   // ── helpers ────────────────────────────────────────────────────────────
 
@@ -202,8 +219,10 @@ module peer_connection {
 
   def healRunsFor(s: str): bool = not(HEAL_ONE_SIDE) or s == "lo"
 
-  action unchangedHistory = all { staleApplied' = staleApplied, evictedLive' = evictedLive }
-  action unchangedPhase = all { running' = running, stalled' = stalled, dead' = dead }
+  action unchangedHistory = all {
+    staleApplied' = staleApplied, evictedLive' = evictedLive, retryAsReconnect' = retryAsReconnect,
+  }
+  action unchangedPhase = all { running' = running, stalled' = stalled, dead' = dead, started' = started }
 
   // ── before the match ───────────────────────────────────────────────────
 
@@ -226,11 +245,12 @@ module peer_connection {
   }
 
   // The startup watchdog: no open channel 8 s after the offer. Replace the
-  // connection and offer again, three times, then tell the player.
+  // connection and offer again, three times, then tell the player. A page
+  // that has started (a channel with a third player opened) retries no more.
   action startupTimeout = {
     val s = side.get("lo")
     all {
-      not(running), s.has, not(s.open), s.attempt > 0,
+      not(running), not(started.contains("lo")), s.has, not(s.open), s.attempt > 0,
       if (s.attempt < MAX_ATTEMPTS) all {
         canOffer,
         side' = side.set("lo", { ...s, made: nextId, link: 0, chan: true, attempt: s.attempt + 1 }),
@@ -242,22 +262,30 @@ module peer_connection {
         wire' = wire, noOffer,
         stalled' = true,
       },
-      running' = running, dead' = dead, unchangedHistory,
+      running' = running, dead' = dead, started' = started, unchangedHistory,
     }
   }
 
   action start = all {
     not(running), side.get("lo").open, side.get("hi").open,
     running' = true,
-    side' = side, wire' = wire, noOffer, stalled' = stalled, dead' = dead,
+    side' = side, wire' = wire, noOffer, stalled' = stalled, dead' = dead, started' = started,
     unchangedHistory,
+  }
+
+  // A page's channel with a third player opens before the match.
+  action thirdOpens(s: str): bool = all {
+    not(running), not(started.contains(s)),
+    started' = started.union(Set(s)),
+    side' = side, wire' = wire, noOffer,
+    running' = running, stalled' = stalled, dead' = dead, unchangedHistory,
   }
 
   // ── signals ────────────────────────────────────────────────────────────
 
   // An offer arrives. With no entry, one is made on demand. Before the match
-  // the page just answers. In a match, what happens depends on what the
-  // offer says it is:
+  // the page just answers, unless it takes the offer for a reconnect (below).
+  // In a match, what happens depends on what the offer says it is:
   //   reconnect  the page replaces its connection (dropping an offer of its
   //              own), marks the entry reconnecting, arms a timer that only
   //              closes the connection, and answers
@@ -267,22 +295,27 @@ module peer_connection {
   //              the entry already has, which keeps its channels but is now
   //              described by an offer from a connection that is gone
   // Replacing the connection closes the channels the entry held.
+  // What the page takes the offer for (`seen`): a startup retry whose flag
+  // the server dropped is a reconnect offer to a page that has started. Such
+  // a page takes it for a reconnect even before the match.
   action receiveOffer(m: Msg): bool = {
     val s = side.get(m.dest)
-    val replaced = { ...s, has: true, made: 0, link: m.id, open: false, chan: false }
+    val seen = if (m.mode == "startup" and not(STARTUP_FLAG_RELAYED) and started.contains(m.dest)) "reconnect"
+      else m.mode
+    val replaced = { ...s, has: true, made: 0, link: m.id, open: false, chan: false, retry: m.mode == "startup" }
     all {
       side' = side.set(m.dest,
-        if (not(running)) replaced
-        else if (m.mode == "reconnect") {
+        if (not(running) and seen != "reconnect") replaced
+        else if (seen == "reconnect") {
           ...replaced,
           recon: true, ansTimer: true,
           giveUp: s.giveUp or ANSWERER_HAS_DEADLINE,
           closePending: s.closePending or s.chan,
-        } else if (m.mode == "startup") {
+        } else if (seen == "startup") {
           ...replaced,
           ansTimer: true,
           closePending: s.closePending or s.chan,
-        } else { ...s, has: true, made: 0, link: m.id }),
+        } else { ...s, has: true, made: 0, link: m.id, retry: false }),
       wire' = wire.exclude(Set(m)).union(Set({
         dest: other(m.dest), kind: "answer", id: m.id, mode: "", bare: m.bare or pages.get(m.dest).old,
       })),
@@ -315,7 +348,7 @@ module peer_connection {
       // not something the rules can prevent, so only a page that checks
       // labels is held to them.
       staleApplied' = (staleApplied or (takenAnyway and not(pages.get(m.dest).old))),
-      evictedLive' = evictedLive,
+      evictedLive' = evictedLive, retryAsReconnect' = retryAsReconnect,
       noOffer, unchangedPhase,
     }
   }
@@ -342,7 +375,7 @@ module peer_connection {
     all {
       wire' = wire.exclude(Set(m)),
       staleApplied' = (staleApplied or (applied and mine != m.id and not(pages.get(m.dest).old))),
-      evictedLive' = evictedLive,
+      evictedLive' = evictedLive, retryAsReconnect' = retryAsReconnect,
       side' = side, noOffer, unchangedPhase,
     }
   }
@@ -362,7 +395,11 @@ module peer_connection {
 
   // The channel opens on one page. After a drop the guest clears its
   // per-peer input state (resetPeerState, 'reconnect'); the host keeps its
-  // own and pushes the match state.
+  // own and pushes the match state. Everything an open does for a page
+  // marked reconnecting (the resync request, resetPeerState, the
+  // "reconnected" status and toast, peer_reconnected) is the one step
+  // `retryAsReconnect` records when the connection was a startup retry's.
+  // The first channel to open starts the page's game (startGameSequence).
   action channelOpens(s: str): bool = {
     val e = side.get(s)
     all {
@@ -372,7 +409,11 @@ module peer_connection {
         open: true, chan: true, recon: false, giveUp: false, attempt: 0, ansTimer: false,
         dirty: e.dirty and not(e.recon and s == "hi"),
       }),
-      wire' = wire, noOffer, unchangedPhase, unchangedHistory,
+      wire' = wire, noOffer,
+      running' = running, stalled' = stalled, dead' = dead,
+      started' = if (running) started else started.union(Set(s)),
+      staleApplied' = staleApplied, evictedLive' = evictedLive,
+      retryAsReconnect' = (retryAsReconnect or (e.recon and e.retry)),
     }
   }
 
@@ -382,7 +423,7 @@ module peer_connection {
     running, side.get("lo").open, alive("lo"), alive("hi"),
     dead' = dead.union(Set(side.get("lo").link)),
     side' = side, wire' = wire, noOffer,
-    running' = running, stalled' = stalled, unchangedHistory,
+    running' = running, stalled' = stalled, started' = started, unchangedHistory,
   }
 
   // handlePeerDisconnect, entered with the entry `e`.
@@ -484,7 +525,7 @@ module peer_connection {
     running, side.get(s).has, side.get(s).open,
     side' = if (ROSTER_KEEPS_LIVE) side else side.set(s, { ...ABSENT, has: true }),
     evictedLive' = (evictedLive or not(ROSTER_KEEPS_LIVE)),
-    staleApplied' = staleApplied,
+    staleApplied' = staleApplied, retryAsReconnect' = retryAsReconnect,
     wire' = wire, noOffer, unchangedPhase,
   }
 
@@ -516,8 +557,8 @@ module peer_connection {
     wire' = Set(), nextId' = 2, dead' = Set(),
     labels' = Map(1 -> { page: if (ATTEMPT_NAMES_PAGE) 1 else 0, n: 1 }),
     pages' = Map("lo" -> { id: 1, offers: 1, old: false }, "hi" -> { id: 2, offers: 0, old: false }), nextPage' = 3,
-    running' = true, stalled' = false,
-    staleApplied' = false, evictedLive' = false,
+    running' = true, stalled' = false, started' = SIDES,
+    staleApplied' = false, evictedLive' = false, retryAsReconnect' = false,
   }
 
   // Two players in the lobby, before either page has heard of the other.
@@ -526,8 +567,8 @@ module peer_connection {
     wire' = Set(), nextId' = 1, dead' = Set(),
     labels' = Map(),
     pages' = Map("lo" -> { id: 1, offers: 0, old: false }, "hi" -> { id: 2, offers: 0, old: false }), nextPage' = 3,
-    running' = false, stalled' = false,
-    staleApplied' = false, evictedLive' = false,
+    running' = false, stalled' = false, started' = Set(),
+    staleApplied' = false, evictedLive' = false, retryAsReconnect' = false,
   }
 
   action step = any {
@@ -541,7 +582,7 @@ module peer_connection {
       any {
         roster(s), channelOpens(s), notice(s), silentClose(s), oldChannelCloses(s), closeNeverComes(s),
         giveUpTimeout(s), answerTimeout(s), heal(s), rosterRenames(s),
-        candidateSent(s), reload(s), reloadOld(s),
+        candidateSent(s), reload(s), reloadOld(s), thirdOpens(s),
       }
     },
   }
@@ -608,6 +649,14 @@ module peer_connection {
   // A roster update never replaces a connection that is up (#119).
   val neverEvictsLiveConnection = not(evictedLive)
 
+  // A startup retry is never handled as a gameplay reconnect: when its
+  // channel opens, the page does not ask the host for a resync, run
+  // resetPeerState, show "reconnected" or report peer_reconnected.
+  // Violated today (peer_connection_current): the server drops the
+  // startupReconnect flag, and in a room of three the page the retry
+  // reaches may have started already (startupRetryToAStartedPageTest).
+  val startupRetryIsNotAReconnect = not(retryAsReconnect)
+
   // The two that hold on today's engine.
   val holdToday = reconnectStartsClean and neverEvictsLiveConnection
 
@@ -615,13 +664,14 @@ module peer_connection {
   // staleSignalsAreNotApplied.
   val holdWithACounterAlone = and {
     oneInitiatorPerPair, everyWaitHasADeadline, neverLeftWithNothingPending,
-    reconnectStartsClean, neverEvictsLiveConnection,
+    reconnectStartsClean, neverEvictsLiveConnection, startupRetryIsNotAReconnect,
   }
 
   // Every property at once.
   val allHold = and {
     oneInitiatorPerPair, everyWaitHasADeadline, neverLeftWithNothingPending,
     staleSignalsAreNotApplied, reconnectStartsClean, neverEvictsLiveConnection,
+    startupRetryIsNotAReconnect,
   }
 
   // ── scenarios ──────────────────────────────────────────────────────────
@@ -884,19 +934,47 @@ module peer_connection {
       .expect(not(staleApplied))
       .expect((side.get("lo").link == 1) == not(SIGNALS_CARRY_ATTEMPT))
       .expect(alive("lo") == not(SIGNALS_CARRY_ATTEMPT))
+
+  // A room of three. The higher slot's channel with the third player has
+  // opened, so its game has started; the lower slot's first offer to it was
+  // lost and the lower slot, still starting, retries. Without the
+  // startupReconnect flag the retry reaches a page that has started and is
+  // taken for a reconnect: when its channel opens the page asks the host for
+  // a resync and clears its per-peer state, during boot. With the flag it is
+  // a startup retry and the pair just connects.
+  run startupRetryToAStartedPageTest =
+    initLobby
+      .then(roster("lo"))
+      .then(roster("hi"))
+      .then(lose(firstOfferTo("hi", 1)))
+      .then(thirdOpens("hi"))
+      .then(startupTimeout)
+      .then(deliver(startupOfferTo("hi", 2)))
+      .expect(STARTUP_FLAG_RELAYED implies not(side.get("hi").recon))
+      .expect(not(STARTUP_FLAG_RELAYED) implies side.get("hi").recon)
+      .then(deliver(answerTo("lo", 2)))
+      .then(channelOpens("hi"))
+      .expect(STARTUP_FLAG_RELAYED implies startupRetryIsNotAReconnect)
+      .expect(not(STARTUP_FLAG_RELAYED) implies not(startupRetryIsNotAReconnect))
+      .then(channelOpens("lo"))
+      .then(start)
+      .expect(bothOpenOn(2))
 }
 
 // Before #119.
 module peer_connection_before_119 {
   import peer_connection(HEAL_ONE_SIDE = false, ANSWERER_HAS_DEADLINE = false,
-         SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = false).*
+         SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = false,
+         STARTUP_FLAG_RELAYED = false).*
 }
 
 // The engine as it is today. oneInitiatorPerPair, everyWaitHasADeadline,
-// neverLeftWithNothingPending and staleSignalsAreNotApplied are violated here.
+// neverLeftWithNothingPending, staleSignalsAreNotApplied and
+// startupRetryIsNotAReconnect are violated here.
 module peer_connection_current {
   import peer_connection(HEAL_ONE_SIDE = false, ANSWERER_HAS_DEADLINE = false,
-         SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true).*
+         SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true,
+         STARTUP_FLAG_RELAYED = false).*
 }
 
 // The three proposed changes with attempts told apart by the offering page's
@@ -905,12 +983,14 @@ module peer_connection_current {
 // reuses its numbers.
 module peer_connection_counter_only {
   import peer_connection(HEAL_ONE_SIDE = true, ANSWERER_HAS_DEADLINE = true,
-         SIGNALS_CARRY_ATTEMPT = true, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true).*
+         SIGNALS_CARRY_ATTEMPT = true, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true,
+         STARTUP_FLAG_RELAYED = true).*
 }
 
 // With the three proposed changes, and each attempt named by the page that
 // offered and that page's counter: the rules the per-peer machine is built to.
 module peer_connection_fixed {
   import peer_connection(HEAL_ONE_SIDE = true, ANSWERER_HAS_DEADLINE = true,
-         SIGNALS_CARRY_ATTEMPT = true, ATTEMPT_NAMES_PAGE = true, ROSTER_KEEPS_LIVE = true).*
+         SIGNALS_CARRY_ATTEMPT = true, ATTEMPT_NAMES_PAGE = true, ROSTER_KEEPS_LIVE = true,
+         STARTUP_FLAG_RELAYED = true).*
 }
