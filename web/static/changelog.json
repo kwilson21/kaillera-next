@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.68.19",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the desync detector covers a sudden death (#229)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.18",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the touch controls stop above the in-game toolbar in landscape (#224)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.17",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a streaming guest whose connection drops is offered a new one (#223)"
+      }
+    ]
+  },
+  {
     "version": "0.68.16",
     "date": "2026-11-15",
     "changes": [

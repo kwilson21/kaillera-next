@@ -409,6 +409,10 @@ export const OVERLAY_HTML = [
   '    --panel-r: calc(max(var(--ab-group-w), var(--c-group)) + 30px);',
   '    --offset-l: max(clamp(24px, 4vw, 48px), env(safe-area-inset-left, 0px));',
   '    --offset-r: max(clamp(24px, 4vw, 48px), env(safe-area-inset-right, 0px));',
+  // The in-game toolbar's height, which the panels stop above: play.css gives
+  // #toolbar 6px of padding above and below 44px touch targets. A smaller
+  // figure lets the lowest control in a column (the stick) run under it.
+  '    --toolbar-clear: calc(44px + 2 * 6px);',
   // ── Position tokens (design-mode editable) ──
   '    --shoulders-top: clamp(4px, 1svh, 10px);',
   '    --shoulders-display: flex;',
@@ -456,7 +460,7 @@ export const OVERLAY_HTML = [
 
   // Panels: flex columns, width from design tokens
   '  .vgp-left, .vgp-right {',
-  '    position: fixed; top: 0; bottom: 52px;',
+  '    position: fixed; top: 0; bottom: var(--toolbar-clear);',
   '    display: flex; flex-direction: column;',
   '    align-items: center; padding: 0 0 4px 0;',
   '  }',

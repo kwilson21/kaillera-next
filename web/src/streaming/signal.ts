@@ -4,11 +4,14 @@
  * a connection failing. Each is the rule web/static/netplay-streaming.js
  * applies (onWebRTCSignal, onDataMessage, setupDataChannel's onOpen,
  * onconnectionstatechange). The engine still decides, and observe.ts
- * compares, with one exception: which offers a page that receives the
- * stream takes (`signalGate`) is decided here, and the engine asks.
+ * compares, with two exceptions the engine asks for: which offers a page
+ * that receives the stream takes (`signalGate`), and which connection a
+ * signal belongs to (attempt.ts: `offerForConnection`, `answerApplies`,
+ * `signalForConnection`).
  */
 import { signalDisposition } from '../peer-signaling.ts';
 import { checkRelayed, type Relayed } from '../relay.ts';
+import { answerApplies, offerForConnection, signalForConnection } from './attempt.ts';
 import { offerGate, type OfferGate } from './offer-gate.ts';
 import { HOST_SLOT, offersConnections, type Connection, type Slot } from './roster.ts';
 
@@ -97,14 +100,29 @@ export const signalGate = (mySlot: Slot, kind: SignalKind, sender: string, roste
   return gate === 'hold' || gate === 'refuse' ? gate : 'apply';
 };
 
-/** What the engine does with a signal: hand it on as `signalAction` says, or hold it, or refuse it. */
-export type GuardedAct = SignalKind | 'held' | 'refused';
+/**
+ * What the engine does with a signal: hand it on as `signalAction` says, or
+ * hold it, or refuse it, or drop it as `stale` (it names a connection other
+ * than the one it would reach).
+ */
+export type GuardedAct = SignalKind | 'held' | 'refused' | 'stale';
 
 export interface GuardedSignalAction {
   readonly create: boolean;
+  /** Close the connection held for the sender and make a new one first (a newer offer from the host). */
+  readonly replace: boolean;
+  /** The slot a connection made or remade here gets: the roster's, null for a sender not on it. */
   readonly slot: number | null;
   readonly act: GuardedAct;
 }
+
+/** Which connection attempt a signal or a connection belongs to (attempt.ts). */
+export interface AttemptName {
+  readonly page: string;
+  readonly attempt: number;
+}
+
+const NAMES_NONE: AttemptName = { page: '', attempt: 0 };
 
 export interface GuardedSignalInput {
   /** The socket id the server stamped as the sender; undefined or empty when it said none. */
@@ -116,6 +134,12 @@ export interface GuardedSignalInput {
   readonly hasEntry: boolean;
   /** An offer from the sender is held, waiting for a roster that places it. */
   readonly offerHeld: boolean;
+  /** The attempt the sender's connection belongs to; null when the page holds none, or it names none. */
+  readonly held: AttemptName | null;
+  /** The attempt the signal names (its `attemptId`); null when it names none. */
+  readonly named: AttemptName | null;
+  /** The connection held for the sender waits for an answer: its offer is set, no answer yet. */
+  readonly awaitingAnswer: boolean;
 }
 
 /**
@@ -127,19 +151,43 @@ export interface GuardedSignalInput {
  * while its sender's offer is held, with no connection to give it to, is
  * kept with that offer: the offer was made before it, and an offer applied
  * without its candidates may never connect. `refused`: dropped, and no
- * connection is made. Everything else is `signalAction`.
+ * connection is made.
+ *
+ * Then which connection it belongs to (attempt.ts). On a page that receives
+ * the stream, an offer for a newer connection than the one held replaces it,
+ * and one for an older connection is dropped (`stale`); on the host, an
+ * answer is taken only by the connection that waits for it, and only when
+ * it answers that connection's offer. A candidate reaches only the
+ * connection it was gathered for. Everything else is `signalAction`.
  */
 export const guardedSignalAction = (input: GuardedSignalInput): GuardedSignalAction => {
+  const plain = (action: SignalAction): GuardedSignalAction => ({ ...action, replace: false });
   const { sender } = input;
-  if (!sender) return signalAction(false, input.kind, input.hasEntry, undefined);
+  if (!sender) return plain(signalAction(false, input.kind, input.hasEntry, undefined));
   const gate = signalGate(input.mySlot, input.kind, sender, input.roster);
-  if (gate !== 'apply') return { create: false, slot: null, act: gate === 'hold' ? 'held' : 'refused' };
+  if (gate !== 'apply') return { create: false, replace: false, slot: null, act: gate === 'hold' ? 'held' : 'refused' };
   const receiver = !offersConnections(input.mySlot);
   if (receiver && input.kind === 'candidate' && !input.hasEntry && input.offerHeld) {
-    return { create: false, slot: null, act: 'held' };
+    return { create: false, replace: false, slot: null, act: 'held' };
   }
   const knownSlot = Object.hasOwn(input.roster.players, sender) ? input.roster.players[sender]?.slot : undefined;
-  return signalAction(true, input.kind, input.hasEntry, knownSlot);
+  const action = plain(signalAction(true, input.kind, input.hasEntry, knownSlot));
+  if (action.act === 'none') return action;
+
+  const held = input.held ?? NAMES_NONE;
+  const named = input.named ?? NAMES_NONE;
+  const stale: GuardedSignalAction = { create: false, replace: false, slot: null, act: 'stale' };
+  if (input.kind === 'offer') {
+    if (!receiver) return action;
+    const step = offerForConnection(input.hasEntry, held.page, held.attempt, named.page, named.attempt);
+    if (step === 'drop') return stale;
+    if (step === 'replace') return { create: false, replace: true, slot: knownSlot ?? null, act: 'offer' };
+    return action;
+  }
+  if (input.kind === 'answer') {
+    return answerApplies(input.awaitingAnswer, held.page, held.attempt, named.page, named.attempt) ? action : stale;
+  }
+  return signalForConnection(held.page, held.attempt, named.page, named.attempt) ? action : stale;
 };
 
 /** A connection as the late-join rule sees it. */
@@ -234,11 +282,12 @@ export const channelOpenAction = (state: {
 /**
  * Does this connection state end the connection?
  *
- * Streaming has no reconnect of its own, unlike the rollback engine
- * (`disconnectDisposition` in peer-signaling.ts, which retries before a
- * match and reconnects during one): a connection that fails, or that only
- * reports `disconnected`, is closed and forgotten at once. A state change on
- * a connection the table no longer holds is ignored.
+ * A connection that fails, or that only reports `disconnected`, is closed
+ * and forgotten at once on either page; unlike the rollback engine
+ * (`disconnectDisposition` in peer-signaling.ts) neither page tries again
+ * on the spot. The host's deadline (reoffer.ts) then offers a new
+ * connection to a member its roster still lists. A state change on a
+ * connection the table no longer holds is ignored.
  */
 export const connectionLost = (state: string, current: boolean): boolean =>
   current && (state === 'failed' || state === 'disconnected');

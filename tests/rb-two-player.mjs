@@ -244,7 +244,8 @@
  *     character select and then the battle; both players' character ids at
  *     the character select are fighter kinds (and, without
  *     MENU_AUTOPILOT=any-fighter, the two the autopilot picks); the battle
- *     header's status says the match gets under way and stays so; stock counts
+ *     header's status says the match gets under way and stays so; the
+ *     game's battle-state pointer names the mapped battle state; stock counts
  *     in battle are plausible; the battle header is not empty; the RNG seed
  *     moves; and the fighter-buffer pointer, once set, points into RAM. Reported as
  *     `addressMapCheck` in summary.json. This shows a map is plausible, not
@@ -841,6 +842,9 @@ const install = async (p, role) => {
       W.mapRom = rom ? rom.name : null;
       W.mapScenes = rom ? rom.scenes : null;
       W.mapOngoing = rom ? rom.battleStatus.ongoing : null;
+      // The value the game's battle-state pointer holds when it names the
+      // mapped battle state (an N64 address: 0x80000000 | offset).
+      W.mapLiveHeaderPointer = rom ? (0x80000000 | rom.values[3]) >>> 0 : null;
       W.mapSamples = [];
       const byteAt = (off) => {
         const word = rb.readRdram32(off & ~3);
@@ -856,6 +860,7 @@ const install = async (p, role) => {
         W.mapSamples.push({
           f,
           status: byteAt(vsHeader + rom.battleStatus.offset),
+          pointer: rb.readRdram32(rom.battleStatus.pointer),
           scene: byteAt(sceneCurr),
           stocks: [0, 1].map((p) => byteAt(stocksBase + p * playerStride)),
           charIds: [0, 1].map((p) => rb.readRdram32(cssBase + p * cssStride + cssCharId)),
@@ -1326,6 +1331,7 @@ const collect = (p, VISUAL_CHECK) =>
       mapRom: window.__tp.mapRom,
       mapScenes: window.__tp.mapScenes,
       mapOngoing: window.__tp.mapOngoing,
+      mapLiveHeaderPointer: window.__tp.mapLiveHeaderPointer,
       mapSamples: window.__tp.mapSamples,
       visual,
     };
@@ -1749,6 +1755,14 @@ const addressMapChecksOf = (side) => {
         underWayFrom < 0
           ? `status never read ${side.mapOngoing}; values seen ${[...new Set(inBattle.map((x) => x.status))].join(',')}`
           : `status ${side.mapOngoing} from battle sample ${underWayFrom + 1} of ${inBattle.length} on`,
+    },
+    {
+      // The game's own pointer to the battle state it runs from names the
+      // mapped one. In SSB64 it is moved to the other copy only for a
+      // sudden death, which this run never reaches.
+      name: "the game's battle-state pointer names the mapped battle state",
+      ok: underWayFrom >= 0 && inBattle.slice(underWayFrom).every((x) => x.pointer === side.mapLiveHeaderPointer),
+      detail: `values seen: ${[...new Set(inBattle.slice(Math.max(0, underWayFrom)).map((x) => (x.pointer ?? 0).toString(16)))].slice(0, 4).join(' ')}`,
     },
     {
       name: 'stock counts in battle are plausible',

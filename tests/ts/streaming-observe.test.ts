@@ -85,7 +85,11 @@ test('an engine doing what the rules say reports nothing, and every decision is 
   // The roster lists a guest: the host connects and offers.
   observer.roster({ players: { a: { socketId: 'host', slot: 0 }, b: { socketId: 'p2', slot: 1 } }, spectators: {} });
   state.known.set('host', { slot: 0 }).set('p2', { slot: 1 });
-  const p2: PeerView = { slot: 1, pc: { connectionState: 'new', localDescription: null, getSenders: () => [] } };
+  // It offered, so its connection waits for the answer.
+  const p2: PeerView = {
+    slot: 1,
+    pc: { connectionState: 'new', signalingState: 'have-local-offer', localDescription: null, getSenders: () => [] },
+  };
   state.peers.set('p2', p2);
   observer.offered('p2');
   observer.offerSdp('v=0\r\nm=video 9 X 96\r\nc=IN\r\n', 'v=0\r\nm=video 9 X 96\r\nc=IN\r\nb=AS:3000\r\n');
@@ -212,7 +216,13 @@ test("a guest that answers another player's offer is reported", () => {
   settle();
   assert.deepEqual(
     sent.map((report) => [report.message, report.old, report.next]),
-    [['signal:offer', '{"act":"offer","create":true,"slot":2}', '{"act":"refused","create":false,"slot":null}']],
+    [
+      [
+        'signal:offer',
+        '{"act":"offer","create":true,"replace":false,"slot":2}',
+        '{"act":"refused","create":false,"replace":false,"slot":null}',
+      ],
+    ],
   );
 });
 

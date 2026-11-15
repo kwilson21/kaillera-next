@@ -57,12 +57,33 @@ interface OldHelpers {
   readonly updateStick: (clientX: number, clientY: number) => void;
   readonly setStick: (center: Point, knob: FakeElement) => void;
 }
+// Changed since, on purpose: the side panels stop above the in-game toolbar's
+// real height (44px touch targets with 6px of padding above and below) rather
+// than 52px, so the stick no longer runs under the toolbar in landscape. The
+// old script runs with that change and is held to everything else, character
+// for character.
+const SINCE_THE_OLD_SCRIPT: readonly (readonly [string, string])[] = [
+  [
+    "      '    position: fixed; top: 0; bottom: 52px;',",
+    "      '    position: fixed; top: 0; bottom: var(--toolbar-clear);',",
+  ],
+  [
+    "      '    --offset-r: max(clamp(24px, 4vw, 48px), env(safe-area-inset-right, 0px));',",
+    "      '    --offset-r: max(clamp(24px, 4vw, 48px), env(safe-area-inset-right, 0px));',\n" +
+      "      '    --toolbar-clear: calc(44px + 2 * 6px);',",
+  ],
+];
+const OLD_SCRIPT_TODAY = SINCE_THE_OLD_SCRIPT.reduce((script, [before, after]) => {
+  assert.equal(script.split(before).length, 2, `the old script has this line once: ${before}`);
+  return script.replace(before, after);
+}, OLD_SCRIPT);
+
 const PUBLIC_API_LINE = '  window.VirtualGamepad = {';
 const HELPERS_LINE =
   '  window.oldHelpers = { hitTestBtn, hitTestBtnSlop, updateStick, setStick: (center, knob) => { _stickCenter = center; _stickEl = knob; } };';
-assert.ok(OLD_SCRIPT.includes(PUBLIC_API_LINE));
+assert.ok(OLD_SCRIPT_TODAY.includes(PUBLIC_API_LINE));
 const OLD_SCRIPT_WITH_HELPERS = new vm.Script(
-  OLD_SCRIPT.replace(PUBLIC_API_LINE, `${HELPERS_LINE}\n${PUBLIC_API_LINE}`),
+  OLD_SCRIPT_TODAY.replace(PUBLIC_API_LINE, `${HELPERS_LINE}\n${PUBLIC_API_LINE}`),
 );
 
 // ── where a browser puts the controls ────────────────────────────────────────

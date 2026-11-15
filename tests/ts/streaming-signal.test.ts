@@ -174,12 +174,28 @@ test("a guest applies the host's offer and refuses one from any other player or 
   assert.equal(signalGate(null, 'offer', 'p2', ROOM), 'refuse');
   assert.equal(signalGate(null, 'offer', 'w1', ROOM), 'refuse');
   // A refused offer makes no connection and is answered by nobody.
-  const refused = { sender: 'p3', kind: 'offer', mySlot: 1, roster: ROOM, hasEntry: false, offerHeld: false } as const;
-  assert.deepEqual(guardedSignalAction(refused), { create: false, slot: null, act: 'refused' });
-  assert.deepEqual(guardedSignalAction({ ...refused, sender: 'host' }), { create: true, slot: 0, act: 'offer' });
+  const refused = {
+    sender: 'p3',
+    kind: 'offer',
+    mySlot: 1,
+    roster: ROOM,
+    hasEntry: false,
+    offerHeld: false,
+    held: null,
+    named: null,
+    awaitingAnswer: false,
+  } as const;
+  assert.deepEqual(guardedSignalAction(refused), { create: false, replace: false, slot: null, act: 'refused' });
+  assert.deepEqual(guardedSignalAction({ ...refused, sender: 'host' }), {
+    create: true,
+    replace: false,
+    slot: 0,
+    act: 'offer',
+  });
   // A renegotiation from the host on the connection it has is applied, as before.
   assert.deepEqual(guardedSignalAction({ ...refused, sender: 'host', hasEntry: true }), {
     create: false,
+    replace: false,
     slot: null,
     act: 'offer',
   });
@@ -194,12 +210,16 @@ test('an offer before any roster is held, then applied at slot 0 or dropped anyw
     roster: NO_ROSTER,
     hasEntry: false,
     offerHeld: false,
+    held: null,
+    named: null,
+    awaitingAnswer: false,
   } as const;
-  assert.deepEqual(guardedSignalAction(early), { create: false, slot: null, act: 'held' });
+  const nothing = { create: false, replace: false, slot: null };
+  assert.deepEqual(guardedSignalAction(early), { ...nothing, act: 'held' });
   // Its candidates wait with it; with no offer held they are dropped, as before.
   const candidate = { ...early, kind: 'candidate', offerHeld: true } as const;
-  assert.deepEqual(guardedSignalAction(candidate), { create: false, slot: null, act: 'held' });
-  assert.deepEqual(guardedSignalAction({ ...candidate, offerHeld: false }), { create: false, slot: null, act: 'none' });
+  assert.deepEqual(guardedSignalAction(candidate), { ...nothing, act: 'held' });
+  assert.deepEqual(guardedSignalAction({ ...candidate, offerHeld: false }), { ...nothing, act: 'none' });
   // The roster that places the sender decides.
   assert.equal(signalGate(1, 'offer', 'host', ROOM), 'apply');
   assert.equal(
@@ -231,7 +251,7 @@ test('answers, candidates and everything the host receives are handled as before
   }
 });
 
-test("the guarded signal is the old engine's, except an offer a receiver does not take from slot 0", () => {
+test('an unnamed signal is guarded as the old engine handled it, except an offer a receiver does not take from slot 0 and an answer nothing waits for', () => {
   const parts: readonly Signal[] = [{}, { offer: {} }, { answer: {} }, { candidate: {} }, { offer: {}, answer: {} }];
   const differences = new Set<string>();
   for (const part of parts) {
@@ -240,32 +260,47 @@ test("the guarded signal is the old engine's, except an offer a receiver does no
         for (const mySlot of [0, 1, null] as const) {
           for (const hasEntry of BOOLS) {
             for (const offerHeld of BOOLS) {
-              const data: Signal = sender === undefined ? part : { ...part, sender };
-              const kind = signalKind(data);
-              const known = new Map<string, Slot>(Object.entries(roster.players).map(([sid, p]) => [sid, p.slot]));
-              const peers = new Map<string, Slot>(hasEntry && sender ? [[sender, 1]] : []);
-              const old = oldSignal(data, peers, known);
-              const mine = guardedSignalAction({ sender, kind, mySlot, roster, hasEntry, offerHeld });
-              const why = JSON.stringify({ data, roster, mySlot, hasEntry, offerHeld });
-              // The documented difference, stated without the gate's code.
-              const host = Object.entries(roster.players).find(([, p]) => p.slot === 0)?.[0];
-              const listed = Boolean(sender) && (known.has(sender ?? '') || roster.spectators.includes(sender ?? ''));
-              const receiverOffer = mySlot !== 0 && Boolean(sender) && kind === 'offer' && sender !== host;
-              const heldCandidate = mySlot !== 0 && Boolean(sender) && kind === 'candidate' && !hasEntry && offerHeld;
-              if (!receiverOffer && !heldCandidate) {
-                assert.deepEqual(mine, old, why);
-                continue;
+              for (const awaitingAnswer of BOOLS) {
+                const data: Signal = sender === undefined ? part : { ...part, sender };
+                const kind = signalKind(data);
+                const known = new Map<string, Slot>(Object.entries(roster.players).map(([sid, p]) => [sid, p.slot]));
+                const peers = new Map<string, Slot>(hasEntry && sender ? [[sender, 1]] : []);
+                const old = { ...oldSignal(data, peers, known), replace: false };
+                const input = {
+                  sender,
+                  kind,
+                  mySlot,
+                  roster,
+                  hasEntry,
+                  offerHeld,
+                  held: null,
+                  named: null,
+                  awaitingAnswer,
+                };
+                const mine = guardedSignalAction(input);
+                const why = JSON.stringify({ data, roster, mySlot, hasEntry, offerHeld, awaitingAnswer });
+                // The documented differences, stated without the gate's code.
+                const host = Object.entries(roster.players).find(([, p]) => p.slot === 0)?.[0];
+                const listed = Boolean(sender) && (known.has(sender ?? '') || roster.spectators.includes(sender ?? ''));
+                const receiverOffer = mySlot !== 0 && Boolean(sender) && kind === 'offer' && sender !== host;
+                const heldCandidate = mySlot !== 0 && Boolean(sender) && kind === 'candidate' && !hasEntry && offerHeld;
+                // An answer the connection no longer waits for, which the browser refused before.
+                const unwantedAnswer = Boolean(sender) && kind === 'answer' && hasEntry && !awaitingAnswer;
+                if (!receiverOffer && !heldCandidate && !unwantedAnswer) {
+                  assert.deepEqual(mine, old, why);
+                  continue;
+                }
+                const act = unwantedAnswer ? 'stale' : heldCandidate || !listed ? 'held' : 'refused';
+                assert.deepEqual(mine, { create: false, replace: false, slot: null, act }, why);
+                differences.add(`${kind}:${act}`);
               }
-              const act = heldCandidate || !listed ? 'held' : 'refused';
-              assert.deepEqual(mine, { create: false, slot: null, act }, why);
-              differences.add(`${kind}:${act}`);
             }
           }
         }
       }
     }
   }
-  assert.deepEqual([...differences].sort(), ['candidate:held', 'offer:held', 'offer:refused']);
+  assert.deepEqual([...differences].sort(), ['answer:stale', 'candidate:held', 'offer:held', 'offer:refused']);
 });
 
 const stamped = (sid: string, slot: number | null) => ({

@@ -8,6 +8,12 @@
 # Needs Java 17+. The first run downloads Apalache (~190 MB) to ~/.quint.
 # Cost grows quickly with the bound: on a laptop-class machine the peer
 # identity check takes ~20 s at 5 steps, ~50 s at 6 and ~170 s at 7.
+#
+# Usage:
+#   verify-specs.sh               every group below, one after another
+#   verify-specs.sh --shard N     the groups of CI shard N (SHARDS below)
+#   verify-specs.sh --shards      how many shards there are
+#   verify-specs.sh GROUP...      the named groups
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -37,128 +43,200 @@ expect_violation() { # spec module invariant
   exit 1
 }
 
-PEERS=specs/peer_identity.qnt
-verify "$PEERS" peer_identity_current neverEvictsLiveConnection
-verify "$PEERS" peer_identity_current oneConnectionPerGuest
-expect_violation "$PEERS" peer_identity_before neverEvictsLiveConnection
-expect_violation "$PEERS" peer_identity_untagged neverEvictsLiveConnection
+peer_identity() {
+  local PEERS=specs/peer_identity.qnt
+  verify "$PEERS" peer_identity_current neverEvictsLiveConnection
+  verify "$PEERS" peer_identity_current oneConnectionPerGuest
+  expect_violation "$PEERS" peer_identity_before neverEvictsLiveConnection
+  expect_violation "$PEERS" peer_identity_untagged neverEvictsLiveConnection
+}
 
-ROMT=specs/rom_transfer.qnt
-verify "$ROMT" rom_transfer_current waitingHasAWayOut
-verify "$ROMT" rom_transfer_current timersAloneStop
-expect_violation "$ROMT" rom_transfer_before waitingHasAWayOut
+rom_transfer() {
+  local ROMT=specs/rom_transfer.qnt
+  verify "$ROMT" rom_transfer_current waitingHasAWayOut
+  verify "$ROMT" rom_transfer_current timersAloneStop
+  expect_violation "$ROMT" rom_transfer_before waitingHasAWayOut
+}
 
-ROOM=specs/room_lifecycle.qnt
-verify "$ROOM" room_current ownerSeesGame
-verify "$ROOM" room_current lateJoinersChaseTheCurrentMatch
-verify "$ROOM" room_current pagesAgreeWithServer
-verify "$ROOM" room_current joinersAreNotLeftWaitingAtTheStart
-verify "$ROOM" room_current startIsNotHeldUpByALateJoiner
-verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
-verify "$ROOM" room_current anAbandonedMatchIsEnded
-verify "$ROOM" room_current aMatchIsNotLostToTheGraceWindow
-expect_violation "$ROOM" room_before_start_fix joinersAreNotLeftWaitingAtTheStart
-expect_violation "$ROOM" room_before_start_fix startIsNotHeldUpByALateJoiner
-expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
-expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
-expect_violation "$ROOM" room_before_grace_wait aMatchIsNotLostToTheGraceWindow
-# Before the page reconciled on reconnect, the last two have counterexamples
-# 7 to 8 steps long (found at 8 in ~4 minutes), beyond this bound;
-# check-specs.sh samples deep enough to reach them.
+# room_lifecycle is the largest, so it is checked in two halves: the start of a
+# match and what the pages see of it, then players dropping and coming back.
+# Before the page reconciled on reconnect, lateJoinersChaseTheCurrentMatch and
+# pagesAgreeWithServer had counterexamples 7 to 8 steps long (found at 8 in ~4
+# minutes), beyond this bound; check-specs.sh samples deep enough to reach them.
+room_lifecycle_start() {
+  local ROOM=specs/room_lifecycle.qnt
+  verify "$ROOM" room_current ownerSeesGame
+  verify "$ROOM" room_current pagesAgreeWithServer
+  verify "$ROOM" room_current joinersAreNotLeftWaitingAtTheStart
+  verify "$ROOM" room_current startIsNotHeldUpByALateJoiner
+  expect_violation "$ROOM" room_before_start_fix joinersAreNotLeftWaitingAtTheStart
+  expect_violation "$ROOM" room_before_start_fix startIsNotHeldUpByALateJoiner
+}
 
-PAIR=specs/peer_connection.qnt
-verify "$PAIR" peer_connection_fixed allHold
-verify "$PAIR" peer_connection_current holdToday
-# Today's engine: each of these has a counterexample within 5 steps.
-# (neverLeftWithNothingPending is violated too, but its shortest
-# counterexample is longer than this bound; crossedHealOffersTest replays it.)
-expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
-expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
-expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
-expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
-# A counter alone for the attempt: a replaced page's candidate reaches its
-# replacement's connection in 5 steps (oldCandidateReachesReplacementConnectionTest).
-expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
-# startupRetryIsNotAReconnect is violated on
-# peer_connection_before_startup_flag only before the match, and this script
-# starts from `init`, a match under way; from the lobby there is a
-# counterexample 6 steps long. startupRetryToAStartedPageTest holds it, and
-# check-specs.sh samples today's holdToday from `initLobby`.
+room_lifecycle_drops() {
+  local ROOM=specs/room_lifecycle.qnt
+  verify "$ROOM" room_current lateJoinersChaseTheCurrentMatch
+  verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
+  verify "$ROOM" room_current anAbandonedMatchIsEnded
+  verify "$ROOM" room_current aMatchIsNotLostToTheGraceWindow
+  expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
+  expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
+  expect_violation "$ROOM" room_before_grace_wait aMatchIsNotLostToTheGraceWindow
+}
 
-STREAM=specs/streaming_connection.qnt
-verify "$STREAM" streaming_connection_fixed allHold
-# Pages joining late, whose readies only this initial state has: a ready
-# lost, early, or arriving while the connection is still connecting. One
-# step fewer than the rest keeps it near the cost of the proof above (about
-# 130 s at 5 steps here, against about 160 s from `init` at 6); the longest of
-# those orderings, the resent offer of readyWhileConnectingTest, reaches the
-# guest at step 5.
-verify "$STREAM" streaming_connection_fixed allHold initLate $((STEPS - 1))
-verify "$STREAM" streaming_connection_current holdToday
-# Today's engine: a lost offer leaves the guest with nothing to come, in 2
-# steps. Its case of staleSignalsAreNotApplied, the host's new offer applied
-# to the guest's old connection (newConnectionTakenAsRenegotiationTest), is
-# 7 steps long, beyond this bound; that scenario holds it.
-expect_violation "$STREAM" streaming_connection_current neverLeftWithNothingPending
-# The engine before #220 answered any member's offer: a stray offer is
-# answered in 2 steps, and a stray sender's second offer is applied to its
-# first connection in 4.
-expect_violation "$STREAM" streaming_connection_before_220 receiversConnectOnlyToTheHost
-expect_violation "$STREAM" streaming_connection_before_220 staleSignalsAreNotApplied
+peer_connection() {
+  local PAIR=specs/peer_connection.qnt
+  verify "$PAIR" peer_connection_fixed allHold
+  verify "$PAIR" peer_connection_current holdToday
+  # Today's engine: each of these has a counterexample within 5 steps.
+  # (neverLeftWithNothingPending is violated too, but its shortest
+  # counterexample is longer than this bound; crossedHealOffersTest replays it.)
+  expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
+  expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
+  expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
+  expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
+  # A counter alone for the attempt: a replaced page's candidate reaches its
+  # replacement's connection in 5 steps (oldCandidateReachesReplacementConnectionTest).
+  expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
+  # startupRetryIsNotAReconnect is violated on
+  # peer_connection_before_startup_flag only before the match, and this script
+  # starts from `init`, a match under way; from the lobby there is a
+  # counterexample 6 steps long. startupRetryToAStartedPageTest holds it, and
+  # check-specs.sh samples today's holdToday from `initLobby`.
+}
 
-PAUSE=specs/late_join_pause.qnt
-verify "$PAUSE" late_join_pause_current allHold
-verify "$PAUSE" late_join_pause_marker_at_send holdBeforeTheResyncFix
-verify "$PAUSE" late_join_pause_before_resync holdBeforeTheResyncFix
-expect_violation "$PAUSE" late_join_pause_before hostPauseHasADeadline
-expect_violation "$PAUSE" late_join_pause_host_side guestPauseHasADeadline
-expect_violation "$PAUSE" late_join_pause_host_side guestResumesOnTheHostsWord
-expect_violation "$PAUSE" late_join_pause_host_side aRepeatedRequestKeepsTheDeadline
-# The other two violations on late_join_pause_before need two joiners and
-# are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
-# them.
-# aJoinerIsNotMadeAPlayerBehindTheHost on late_join_pause_before_resync has
-# a counterexample 7 steps long (ask, serve, send, lose the channel, load,
-# reopen, ready), beyond this bound;
-# joinerLosesTheHostAfterTheStateIsSentTest and
-# timerFiresWhileTheStateIsOnItsWayTest hold it. On
-# late_join_pause_marker_at_send its counterexample (the same and an
-# unanswered request) is 8 steps long; resyncRequestUnansweredTest holds it.
+streaming_connection() {
+  local STREAM=specs/streaming_connection.qnt
+  verify "$STREAM" streaming_connection_current allHold
+  # Pages joining late, whose readies only this initial state has: a ready
+  # lost, early, or arriving while the connection is still connecting. One
+  # step fewer than the rest keeps it near the cost of the proof above (about
+  # 130 s at 5 steps here, against about 160 s from `init` at 6); the longest of
+  # those orderings, the resent offer of readyWhileConnectingTest, reaches the
+  # guest at step 5.
+  verify "$STREAM" streaming_connection_current allHold initLate $((STEPS - 1))
+  # The engine before the host's deadline: a lost offer left the guest with
+  # nothing to come, in 2 steps. Its case of staleSignalsAreNotApplied, the
+  # host's new offer applied to the guest's old connection
+  # (newConnectionTakenAsRenegotiationTest), is 7 steps long, beyond this
+  # bound; that scenario holds it.
+  expect_violation "$STREAM" streaming_connection_before_reoffer neverLeftWithNothingPending
+  # The engine before #220 answered any member's offer: a stray offer is
+  # answered in 2 steps, and a stray sender's second offer is applied to its
+  # first connection in 4.
+  expect_violation "$STREAM" streaming_connection_before_220 receiversConnectOnlyToTheHost
+  expect_violation "$STREAM" streaming_connection_before_220 staleSignalsAreNotApplied
+}
 
-FLOW=specs/resync_flow.qnt
-verify "$FLOW" resync_flow_current allHold
-verify "$FLOW" resync_flow_any_answer holdWithoutNumbers
-expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
-expect_violation "$FLOW" resync_flow_any_answer onlyItsAnswerEndsARequest
-# The counterexamples to aLateAnswerDoesNotTakeTheGuestBack and
-# theAwaitedAnswerIsNotLost on resync_flow_any_answer are over ten steps
-# long, beyond this bound; lateAnswerTest,
-# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
-# hold them.
+late_join_pause() {
+  local PAUSE=specs/late_join_pause.qnt
+  verify "$PAUSE" late_join_pause_current allHold
+  verify "$PAUSE" late_join_pause_marker_at_send holdBeforeTheResyncFix
+  verify "$PAUSE" late_join_pause_before_resync holdBeforeTheResyncFix
+  expect_violation "$PAUSE" late_join_pause_before hostPauseHasADeadline
+  expect_violation "$PAUSE" late_join_pause_host_side guestPauseHasADeadline
+  expect_violation "$PAUSE" late_join_pause_host_side guestResumesOnTheHostsWord
+  expect_violation "$PAUSE" late_join_pause_host_side aRepeatedRequestKeepsTheDeadline
+  # The other two violations on late_join_pause_before need two joiners and
+  # are 8 to 9 steps long, beyond this bound; check-specs.sh's scenarios hold
+  # them.
+  # aJoinerIsNotMadeAPlayerBehindTheHost on late_join_pause_before_resync has
+  # a counterexample 7 steps long (ask, serve, send, lose the channel, load,
+  # reopen, ready), beyond this bound;
+  # joinerLosesTheHostAfterTheStateIsSentTest and
+  # timerFiresWhileTheStateIsOnItsWayTest hold it. On
+  # late_join_pause_marker_at_send its counterexample (the same and an
+  # unanswered request) is 8 steps long; resyncRequestUnansweredTest holds it.
+}
 
-TICK=specs/tick_deadlines.qnt
-verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
-expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
-verify "$TICK" input_link_paced allHold
-# Two chunks ahead of the inputs, two seconds, the deadline, a second: 5 steps.
-expect_violation "$TICK" input_link_burst allHold
+resync_flow() {
+  local FLOW=specs/resync_flow.qnt
+  verify "$FLOW" resync_flow_current allHold
+  verify "$FLOW" resync_flow_any_answer holdWithoutNumbers
+  expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
+  expect_violation "$FLOW" resync_flow_any_answer onlyItsAnswerEndsARequest
+  # The counterexamples to aLateAnswerDoesNotTakeTheGuestBack and
+  # theAwaitedAnswerIsNotLost on resync_flow_any_answer are over ten steps
+  # long, beyond this bound; lateAnswerTest,
+  # lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
+  # hold them.
+}
 
+tick_deadlines() {
+  local TICK=specs/tick_deadlines.qnt
+  verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
+  expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
+  verify "$TICK" input_link_paced allHold
+  # Two chunks ahead of the inputs, two seconds, the deadline, a second: 5 steps.
+  expect_violation "$TICK" input_link_burst allHold
+}
 
-RESYNC=specs/resync_inputs.qnt
-verify "$RESYNC" resync_inputs_current allHold
-# The only-new counterexample (run ahead, be taken back, be moved forward
-# again) is over 15 steps long, beyond this bound;
-# guestMovedOverInputsItMadeBeforeTest holds it and check-specs.sh's samples
-# reach it.
-# The no-refeed counterexample is over 13 steps long, beyond this bound;
-# guestMovedOverAnInputItsEngineWroteOverTest holds it.
-# The solo-holes counterexample (run alone past the limit, then resync) is 9
-# steps long, beyond this bound; hostRanAloneThenResyncsTest holds it.
-# The counterexample on resync_inputs_before is 10 steps long (the host has to
-# run far enough ahead for the guest to drop its inputs), beyond this bound;
-# check-specs.sh's scenarios and samples reach it.
+resync_inputs() {
+  local RESYNC=specs/resync_inputs.qnt
+  verify "$RESYNC" resync_inputs_current allHold
+  # The only-new counterexample (run ahead, be taken back, be moved forward
+  # again) is over 15 steps long, beyond this bound;
+  # guestMovedOverInputsItMadeBeforeTest holds it and check-specs.sh's samples
+  # reach it.
+  # The no-refeed counterexample is over 13 steps long, beyond this bound;
+  # guestMovedOverAnInputItsEngineWroteOverTest holds it.
+  # The solo-holes counterexample (run alone past the limit, then resync) is 9
+  # steps long, beyond this bound; hostRanAloneThenResyncsTest holds it.
+  # The counterexample on resync_inputs_before is 10 steps long (the host has to
+  # run far enough ahead for the guest to drop its inputs), beyond this bound;
+  # check-specs.sh's scenarios and samples reach it.
+}
 
-MESH=specs/resync_mesh.qnt
-verify "$MESH" resync_mesh_current allHold
-expect_violation "$MESH" resync_mesh_untold noWaitForAnInputThatCannotArrive
-expect_violation "$MESH" resync_mesh_kept settledPointIsNotAhead
+resync_mesh() {
+  local MESH=specs/resync_mesh.qnt
+  verify "$MESH" resync_mesh_current allHold
+  expect_violation "$MESH" resync_mesh_untold noWaitForAnInputThatCannotArrive
+  expect_violation "$MESH" resync_mesh_kept settledPointIsNotAhead
+}
+
+# Every group, in the order a local run takes them.
+SPEC_GROUPS=(
+  peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
+  peer_connection streaming_connection late_join_pause resync_flow
+  tick_deadlines resync_inputs resync_mesh
+)
+
+# CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
+# balanced by the minutes each group took on CI at 6 steps (Nov 2026): the
+# whole set took 32 minutes in one job. A group added above goes in a shard
+# here; the check below fails until it does.
+SHARDS=(
+  "room_lifecycle_start"                                          # ~7 min
+  "room_lifecycle_drops"                                          # ~8 min
+  "streaming_connection resync_flow tick_deadlines resync_mesh"   # ~6.5 min
+  "peer_identity rom_transfer peer_connection"                    # ~6.5 min
+  "late_join_pause resync_inputs"                                 # ~4 min
+)
+
+# Each group is in exactly one shard, and each shard names only groups.
+sharded=$(printf '%s\n' ${SHARDS[@]} | sort)
+if [ "$sharded" != "$(printf '%s\n' "${SPEC_GROUPS[@]}" | sort)" ]; then
+  echo "SHARDS must list every group in SPEC_GROUPS exactly once" >&2
+  exit 1
+fi
+
+case "${1:-}" in
+  "") run=("${SPEC_GROUPS[@]}") ;;
+  --shards) echo "${#SHARDS[@]}"; exit 0 ;;
+  --shard)
+    n="${2:?--shard needs a number}"
+    if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt "${#SHARDS[@]}" ]; then
+      echo "no shard $n: there are ${#SHARDS[@]}" >&2
+      exit 1
+    fi
+    read -r -a run <<<"${SHARDS[$((n - 1))]}"
+    ;;
+  *) run=("$@") ;;
+esac
+for group in "${run[@]}"; do
+  if ! printf '%s\n' "${SPEC_GROUPS[@]}" | grep -qx "$group"; then
+    echo "no group $group (groups: ${SPEC_GROUPS[*]})" >&2
+    exit 1
+  fi
+  "$group"
+done
