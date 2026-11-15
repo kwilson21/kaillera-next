@@ -109,6 +109,12 @@ def _in_match(page):
     page.wait_for_function("!!window.KNState.matchId", timeout=10000)
 
 
+def _slot(page):
+    """The page's player slot, once its engine has started (until then it reads -1)."""
+    page.wait_for_function("window._playerSlot >= 0", timeout=15000)
+    return page.evaluate("window._playerSlot")
+
+
 # Count "game ended" toasts added from now on (a toast removes itself after a
 # few seconds, so the ones on screen are not a count).
 _COUNT_ENDED_TOASTS = """(text) => {
@@ -486,16 +492,20 @@ def test_in_a_room_of_three_the_other_guest_hears_who_was_left_out(browser, serv
         host.click("#start-btn")
         # The host's game sequence starts on the guest's channel.
         expect(host.locator("#gesture-prompt")).to_be_visible(timeout=15000)
-        deaf_slot = deaf.evaluate("window._playerSlot")
+        deaf_slot = _slot(deaf)
         # The host's deadline on the silent player runs on past that, gives
         # up, and the host tells the guest, which stops waiting for it too.
-        # The deadline used to stop once the sequence had started.
+        # The deadline used to stop once the sequence had started. The
+        # guest's own deadline on that player gives up at about the same
+        # time and tells the host it cannot reach it: whichever comes first
+        # leaves it out.
         guest.wait_for_function(
             f"{_SYNC_LOG}.includes('START-LEFT-OUT slot={deaf_slot} reason=the host left it out')",
             timeout=45000,
         )
-        assert "reason=startup connect gave up" in host.evaluate(_SYNC_LOG)
-        assert "START-ALONE" not in host.evaluate(_SYNC_LOG)
+        log = host.evaluate(_SYNC_LOG)
+        assert "reason=startup connect gave up" in log or "reason=slot 1 cannot reach it" in log, log[-3000:]
+        assert "START-ALONE" not in log
     finally:
         host.close()
         guest.close()
@@ -519,7 +529,7 @@ def test_a_guest_the_host_tells_it_is_out_joins_late(browser, server_url, room):
         guest.evaluate(_RECORD_ENGINE_STARTS)
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
-        guest_slot = guest.evaluate("window._playerSlot")
+        guest_slot = _slot(guest)
         sent = host.wait_for_function(
             f"""() => {{
                 const peer = Object.values(window.KNState.peers || {{}}).find((p) => p.slot === {guest_slot});
@@ -527,7 +537,7 @@ def test_a_guest_the_host_tells_it_is_out_joins_late(browser, server_url, room):
                 peer.dc.send('left-out:{guest_slot}');
                 return true;
             }}""",
-            timeout=20000,
+            timeout=45000,
         )
         assert sent
         # The guest starts again as a late joiner (web/src/start-group.ts,
@@ -540,6 +550,59 @@ def test_a_guest_the_host_tells_it_is_out_joins_late(browser, server_url, room):
         guest.close()
 
 
+# The page hears no WebRTC signal from one sender (a network between two
+# guests that never lets them through), and all the others.
+_DEAF_TO = """(sender) => {
+    const socket = window.__test_socket;
+    const deaf = (handler) => (data) => (data?.sender === sender ? undefined : handler(data));
+    const handlers = socket.listeners('webrtc-signal');
+    socket.off('webrtc-signal');
+    const on = socket.on.bind(socket);
+    for (const handler of handlers) on('webrtc-signal', deaf(handler));
+    socket.on = (event, handler) => on(event, event === 'webrtc-signal' ? deaf(handler) : handler);
+}"""
+
+
+def test_two_guests_that_cannot_reach_each_other_do_not_hold_the_start(browser, server_url, room):
+    """Two guests that each reach the host but not each other: the host decides who plays.
+
+    Each would wait for the other's emu-ready for ever, and neither may leave
+    the other out. The guest whose deadline gives up on the other tells the
+    host (`unreachable:<slot>`); the host leaves that one out and tells it, and
+    it joins late (specs/start_group.qnt, reportApart).
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    other = _open(browser, f"{server_url}/play.html?room={room}&name=Other")
+    try:
+        for page in (host, guest, other):
+            _load_rom(page)
+        other.evaluate(_DEAF_TO, guest.evaluate("window.__test_socket.id"))
+        other.evaluate(_RECORD_ENGINE_STARTS)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        guest_slot = _slot(guest)
+        other_slot = _slot(other)
+        assert 0 < guest_slot < other_slot  # the guest offers to the other guest
+        # The guest gives up on the other guest after its retries and tells the host.
+        host.wait_for_function(
+            f"{_SYNC_LOG}.includes('reason=slot {guest_slot} cannot reach it')",
+            timeout=60000,
+        )
+        assert f"START-UNREACHABLE: told the host slot {other_slot}" in guest.evaluate(_SYNC_LOG)
+        guest.wait_for_function(
+            f"{_SYNC_LOG}.includes('START-LEFT-OUT slot={other_slot} reason=the host left it out')",
+            timeout=10000,
+        )
+        # The other guest hears it is out and joins late.
+        other.wait_for_function("window.__engineStarts.length >= 2", timeout=15000)
+        assert other.evaluate("window.__engineStarts") == [False, True]
+    finally:
+        host.close()
+        guest.close()
+        other.close()
+
+
 def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):
     """Only the host decides the start group: `left-out:` from another guest changes nothing."""
     host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
@@ -550,7 +613,7 @@ def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):
             _load_rom(page)
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
-        other_slot = other.evaluate("window._playerSlot")
+        other_slot = _slot(other)
         # The guest's channel to the other guest opens, then it claims the host left the other out.
         sent = guest.wait_for_function(
             f"""() => {{

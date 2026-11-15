@@ -67,11 +67,14 @@
 // Modelled from the host's side, with two other players (a room of three);
 // a player that is not in the room is "absent". A player that answers
 // answers everyone, so a guest's channel to another guest opens when that
-// guest answers the host. Not modelled: the retries' timing (a deadline is a
-// step that may come at any time), a guest the host never reaches though it
-// is alive (it waits for an offer that does not come; separate work), a
-// player who leaves the room (the roster removes it), spectators (no
-// emulator), streaming (no mesh).
+// guest answers the host, unless the two guests cannot reach each other
+// (`apart`): then each waits for the other's emu-ready for ever, and neither
+// may leave the other out; the one whose deadline gives up tells the host,
+// which decides. Not modelled: the retries' timing (a deadline is a step that
+// may come at any time), whether a guest left out that way can then join
+// late (the two still cannot reach each other: a relay's job, which TURN
+// does where it is set up), a player who leaves the room (the roster
+// removes it), spectators (no emulator), streaming (no mesh).
 //
 // GIVE_UP_LEAVES_OUT: the deadline's give-up leaves the player out of the
 //   start group; before, it said the connection had stalled and waited on.
@@ -91,6 +94,9 @@
 //   and nobody was told.
 // LOAD_DEADLINE: the host leaves out a player that answered but has not
 //   loaded by its load deadline, and tells that player too.
+// HOST_ARBITRATES: a guest whose deadline gives up on another guest tells the
+//   host (`unreachable:<slot>`), which leaves that one out at once and tells
+//   it; before, the guest said it was waiting for the host and waited.
 module start_group {
   const GIVE_UP_LEAVES_OUT: bool
   const DEADLINE_UNTIL_RUNNING: bool
@@ -101,6 +107,7 @@ module start_group {
   const GUEST_DEADLINE_ON_LOSS: bool
   const LOST_IS_RETRIED: bool
   const LOAD_DEADLINE: bool
+  const HOST_ARBITRATES: bool
 
   // The startup watchdog's attempts (STARTUP_CONNECT_MAX_ATTEMPTS).
   pure val MAX_ATTEMPTS = 3
@@ -131,6 +138,8 @@ module start_group {
   var guestDeadline: Set[str]
   // The guests with a channel open to a host that has left them out.
   var openToNobody: Set[str]
+  // The two guests each reach the host but cannot reach each other.
+  var apart: bool
 
   action init = all {
     host' = "lobby",
@@ -140,16 +149,18 @@ module start_group {
     told' = Set(),
     guestDeadline' = Set(),
     openToNobody' = Set(),
+    apart' = false,
   }
 
   // The guest side's state, unchanged.
-  action guestsKeep = all { guestDeadline' = guestDeadline, openToNobody' = openToNobody }
+  action guestsKeep = all { guestDeadline' = guestDeadline, openToNobody' = openToNobody, apart' = apart }
 
   // The start group: the players the host waits for.
   val startGroup = GUESTS.filter(g => conn.get(g).in(Set("connecting", "open", "stalled")))
 
-  // The host presses Start with these two players in the room as they are.
-  action startWith(p1: str, p2: str): bool = {
+  // The host presses Start with these two players in the room as they are,
+  // and whether they can reach each other.
+  action startApartOrNot(p1: str, p2: str, apartNow: bool): bool = {
     val pages = Map("g1" -> p1, "g2" -> p2)
     all {
       host == "lobby",
@@ -161,16 +172,22 @@ module start_group {
       attempt' = GUESTS.mapBy(g => if (pages.get(g) == "absent") 0 else 1),
       told' = told,
       // A page that starts its engine arms its deadline on the host.
+      apart' = apartNow,
       guestDeadline' = GUESTS.filter(g => pages.get(g) == "starting"),
       openToNobody' = openToNobody,
     }
   }
 
+  action startWith(p1: str, p2: str): bool = startApartOrNot(p1, p2, false)
+
   action start = {
     nondet p1 = STARTS.oneOf()
     nondet p2 = STARTS.oneOf()
-    startWith(p1, p2)
+    nondet apartNow = Set(false, true).oneOf()
+    startApartOrNot(p1, p2, apartNow)
   }
+
+  pure def other(g: str): str = if (g == "g1") "g2" else "g1"
 
   // A player that is starting answers: the channel opens. The host's first
   // open channel starts its game sequence.
@@ -183,6 +200,7 @@ module start_group {
     page' = page,
     told' = told,
     // Its channel to the host is open: the guest's deadline ends.
+    apart' = apart,
     guestDeadline' = guestDeadline.exclude(Set(g)),
     openToNobody' = openToNobody,
   }
@@ -218,6 +236,7 @@ module start_group {
         host' = host,
         told' = told,
         // The host's next offer restarts the guest's deadline.
+        apart' = apart,
         guestDeadline' = if (page.get(g) == "starting") guestDeadline.union(Set(g)) else guestDeadline,
         openToNobody' = openToNobody,
       }
@@ -244,6 +263,7 @@ module start_group {
     conn.get(g) == "leftOut",
     not(openToNobody.contains(g)),
     openToNobody' = openToNobody.union(Set(g)),
+    apart' = apart,
     guestDeadline' = guestDeadline.exclude(Set(g)),
     host' = host,
     conn' = conn,
@@ -260,6 +280,7 @@ module start_group {
     page.get(g) == "starting",
     conn.get(g).in(Set("connecting", "stalled", "leftOut", "dropped")),
     not(openToNobody.contains(g)),
+    apart' = apart,
     guestDeadline' =
       if (GUEST_DEADLINE_ON_LOSS) guestDeadline.union(Set(g)) else guestDeadline.exclude(Set(g)),
     openToNobody' = openToNobody,
@@ -280,6 +301,7 @@ module start_group {
     conn' = conn.set(g, if (LOST_IS_RETRIED) "connecting" else "dropped"),
     attempt' = attempt.set(g, 1),
     // The guest lost its channel to the host too.
+    apart' = apart,
     guestDeadline' = if (GUEST_DEADLINE_ON_LOSS) guestDeadline.union(Set(g)) else guestDeadline,
     openToNobody' = openToNobody,
     host' = host,
@@ -302,12 +324,18 @@ module start_group {
   val waitedForBehindTheHost =
     GUESTS.filter(g => conn.get(g).in(Set("leftOut", "dropped")) and not(told.contains(g)))
 
+  // A guest that cannot reach the other guest waits for it while the other
+  // is in the start: its emu-ready never comes.
+  def waitsForTheOther(g: str): bool = apart and other(g).in(startGroup)
+
   // A player in the start group has loaded: it answered, its emulator runs,
-  // and it waits for no player the host left out without telling it.
+  // and it waits for no player the host left out without telling it, nor
+  // for one it cannot reach.
   def ready(g: str): bool = and {
     conn.get(g) == "open",
     page.get(g) != "stuck",
     waitedForBehindTheHost.exclude(Set(g)).size() == 0,
+    not(waitsForTheOther(g)),
   }
 
   // Every player in the start group has loaded: the match runs.
@@ -347,7 +375,28 @@ module start_group {
     not(ready(g)),
     conn' = conn.set(g, "leftOut"),
     told' = if (HOST_TELLS_LEFT_OUT) told.union(Set(g)) else told,
+    apart' = apart,
     guestDeadline' = if (HOST_TELLS_LEFT_OUT) guestDeadline.union(Set(g)) else guestDeadline,
+    openToNobody' = openToNobody,
+    host' = host,
+    attempt' = attempt,
+    page' = page,
+  }
+
+  // Two guests that each reach the host cannot reach each other: one's
+  // deadline on the other gives up, and it tells the host, which leaves the
+  // other out at once and tells it (itself included). The guest that
+  // reported plays.
+  action reportApart(g: str): bool = all {
+    HOST_ARBITRATES,
+    apart,
+    host.in(Set("waiting", "sequence")),
+    conn.get(g) == "open",
+    conn.get(other(g)) == "open",
+    conn' = conn.set(other(g), "leftOut"),
+    told' = if (HOST_TELLS_LEFT_OUT) told.union(Set(other(g))) else told,
+    apart' = apart,
+    guestDeadline' = if (HOST_TELLS_LEFT_OUT) guestDeadline.union(Set(other(g))) else guestDeadline,
     openToNobody' = openToNobody,
     host' = host,
     attempt' = attempt,
@@ -365,6 +414,7 @@ module start_group {
     conn.get(g).in(Set("leftOut", "dropped")),
     guestDeadline.contains(g),
     page' = page.set(g, "lateJoining"),
+    apart' = apart,
     guestDeadline' = guestDeadline.exclude(Set(g)),
     openToNobody' = openToNobody,
     host' = host,
@@ -396,6 +446,7 @@ module start_group {
       answer(g),
       deadline(g),
       loadDeadline(g),
+      reportApart(g),
       lateOpen(g),
       guestLosesHost(g),
       lose(g),
@@ -413,6 +464,7 @@ module start_group {
   val anAnswerComes = GUESTS.exists(g => conn.get(g) == "connecting" and page.get(g) == "starting")
   val aDeadlineRuns = deadlineArmed and GUESTS.exists(g => conn.get(g) == "connecting")
   val aRomPromptIsHeard = ROM_PROMPT_LEAVES_OUT and startGroup.exists(g => page.get(g) == "awaitingRom")
+  val aPairIsSplit = HOST_ARBITRATES and apart and GUESTS.forall(g => conn.get(g) == "open")
   val aLoadDeadlineRuns =
     LOAD_DEADLINE and host == "sequence" and startGroup.exists(g => conn.get(g) == "open" and not(ready(g)))
   val theHostCanGoOn = or {
@@ -433,6 +485,7 @@ module start_group {
       aDeadlineRuns,
       aRomPromptIsHeard,
       aLoadDeadlineRuns,
+      aPairIsSplit,
     }
 
   // A late joiner waiting on a running match is held as one: the host has
@@ -660,6 +713,30 @@ module start_group {
         )
       )
 
+  action reportApartAny(g: str): bool =
+    if (HOST_ARBITRATES and apart and host.in(Set("waiting", "sequence")) and GUESTS.forall(h => conn.get(h) == "open"))
+      reportApart(g)
+    else nothing
+
+  // A room of three; both guests reach the host but not each other. Each
+  // waits for the other's emu-ready. Before, the start waited for ever; with
+  // only the load deadline, the host leaves both out after it; now the guest
+  // whose deadline gave up tells the host, which leaves the other out, and
+  // the match runs with the one that reported.
+  run aPairApartTest =
+    init
+      .then(startApartOrNot("starting", "starting", true))
+      .then(answer("g1"))
+      .then(answer("g2"))
+      .expect(neverStuck == (HOST_ARBITRATES or LOAD_DEADLINE))
+      .then(reportApartAny("g1"))
+      .then(matchRunsAny)
+      .then(loadDeadlineAny("g1"))
+      .then(loadDeadlineAny("g2"))
+      .then(matchRunsAny)
+      .expect(host == (if (HOST_ARBITRATES or LOAD_DEADLINE) "running" else "sequence"))
+      .expect(HOST_ARBITRATES implies startGroup == Set("g1"))
+
   // Two players who answer: nobody is left out and the match runs.
   run everyoneAnswersTest =
     init
@@ -684,6 +761,7 @@ module start_group_before {
     GUEST_DEADLINE_ON_LOSS = false,
     LOST_IS_RETRIED = false,
     LOAD_DEADLINE = false,
+    HOST_ARBITRATES = false,
   ).*
 }
 
@@ -700,6 +778,7 @@ module start_group_give_up_only {
     GUEST_DEADLINE_ON_LOSS = false,
     LOST_IS_RETRIED = false,
     LOAD_DEADLINE = false,
+    HOST_ARBITRATES = false,
   ).*
 }
 
@@ -720,6 +799,7 @@ module start_group_untold {
     GUEST_DEADLINE_ON_LOSS = false,
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
+    HOST_ARBITRATES = false,
   ).*
 }
 
@@ -736,6 +816,7 @@ module start_group_deadline_only {
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
   ).*
 }
 
@@ -753,6 +834,7 @@ module start_group_untold_no_load {
     GUEST_DEADLINE_ON_LOSS = false,
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = false,
+    HOST_ARBITRATES = false,
   ).*
 }
 
@@ -769,6 +851,7 @@ module start_group_no_rejoin {
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
   ).*
 }
 
@@ -786,6 +869,7 @@ module start_group_open_after_give_up {
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
   ).*
 }
 
@@ -800,6 +884,7 @@ module start_group_deadline_with_the_connection {
     GUEST_DEADLINE_ON_LOSS = false,
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
   ).*
 }
 
@@ -816,10 +901,28 @@ module start_group_lost_dropped {
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = false,
     LOAD_DEADLINE = false,
+    HOST_ARBITRATES = true,
   ).*
 }
 
-// Today: all nine.
+// Two guests that cannot reach each other, with #274's host and guests: no
+// load deadline, and a guest whose deadline gives up on the other only waits.
+module start_group_apart_unarbitrated {
+  import start_group(
+    GIVE_UP_LEAVES_OUT = true,
+    DEADLINE_UNTIL_RUNNING = true,
+    ROM_PROMPT_LEAVES_OUT = true,
+    HOST_TELLS_LEFT_OUT = true,
+    GUEST_REJOINS_LATE = true,
+    GIVE_UP_CLOSES = true,
+    GUEST_DEADLINE_ON_LOSS = true,
+    LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = false,
+    HOST_ARBITRATES = false,
+  ).*
+}
+
+// Today: all ten.
 module start_group_current {
   import start_group(
     GIVE_UP_LEAVES_OUT = true,
@@ -831,5 +934,6 @@ module start_group_current {
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = true,
     LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
   ).*
 }

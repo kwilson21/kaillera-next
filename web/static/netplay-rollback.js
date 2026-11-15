@@ -8317,9 +8317,10 @@
 
   // The host leaves a player out of the start. False when this page is not
   // the host, the match already runs, the player is already out, or it
-  // answered (its channel open) and has not missed the load deadline.
+  // answered (its channel open) and can play: `cannotPlay`, it missed the
+  // load deadline or another guest cannot reach it.
   // `settle`: go on with the start now; false while leaving out several.
-  const _leaveOutOfStart = (sid, reason, { missedLoad = false, settle = true } = {}) => {
+  const _leaveOutOfStart = (sid, reason, { cannotPlay = false, settle = true } = {}) => {
     const rules = window.KNCore.startGroup;
     const peer = _peers[sid];
     const slot = peer?.slot ?? _knownPlayers[sid]?.slot;
@@ -8329,7 +8330,7 @@
       _phase >= PHASE_RUNNING,
       _isValidPlayerSlot(slot) && slot !== _playerSlot && !peer?.synthetic,
       channelOpen,
-      missedLoad,
+      cannotPlay,
       _leftOutOfStart.has(slot),
     );
     if (!leaves) return false;
@@ -8410,7 +8411,7 @@
     );
     let leftAnyOut = false;
     for (const sid of missed) {
-      if (_leaveOutOfStart(sid, 'it did not load in time', { missedLoad: true, settle: false })) leftAnyOut = true;
+      if (_leaveOutOfStart(sid, 'it did not load in time', { cannotPlay: true, settle: false })) leftAnyOut = true;
     }
     if (leftAnyOut) _settleStartGroup();
   };
@@ -8501,9 +8502,18 @@
         return;
       }
       // The host starts without that player, who can join late. A guest
-      // waits for the host's word (`left-out:`), which the host's own
-      // deadline on that player brings.
+      // never leaves anyone out itself: it tells the host it cannot reach
+      // that player (`unreachable:<slot>`), and the host, which may reach
+      // both, decides who plays (specs/start_group.qnt, reportApart). The
+      // guest waits for the host's word (`left-out:`).
       if (!_leaveOutOfStart(remoteSid, 'startup connect gave up')) {
+        const host = Object.values(_peers).find((p) => p.slot === 0 && p.dc?.readyState === 'open');
+        if (host && _playerSlot !== 0) {
+          try {
+            host.dc.send(`unreachable:${peer.slot}`);
+          } catch (_) {}
+          _syncLog(`START-UNREACHABLE: told the host slot ${peer.slot} cannot be reached`);
+        }
         setStatus('Peer connection stalled — waiting for the host');
       }
       return;
@@ -9267,6 +9277,27 @@
         }
         // The host left a player out of the start (specs/start_group.qnt):
         // stop waiting for it; it joins late. Only the host's word counts.
+        // A guest cannot reach another guest: the host leaves the one named
+        // out of the start (specs/start_group.qnt, reportApart). Only the
+        // host decides; the first word of a pair counts.
+        if (e.data.startsWith('unreachable:')) {
+          const slot = Number(e.data.slice('unreachable:'.length));
+          const named = Object.entries(_peers).find(([, p]) => p.slot === slot && !p.synthetic);
+          const leaves = window.KNCore.startGroup.leavesOutUnreachable(
+            _playerSlot === 0 && !_isSpectator,
+            _phase >= PHASE_RUNNING,
+            peer.slot ?? -1,
+            slot,
+            _leftOutOfStart.has(peer.slot),
+            _leftOutOfStart.has(slot),
+          );
+          if (leaves && named) {
+            _leaveOutOfStart(named[0], `slot ${peer.slot} cannot reach it`, { cannotPlay: true });
+          } else {
+            _syncLog(`unreachable:${slot} from slot ${peer.slot} not taken`);
+          }
+          return;
+        }
         if (e.data.startsWith('left-out:')) {
           const slot = Number(e.data.slice('left-out:'.length));
           const mySlot = _isSpectator ? -1 : (_playerSlot ?? -1);

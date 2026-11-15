@@ -107,7 +107,8 @@ START_GROUP=specs/start_group.qnt
 $QUINT typecheck "$START_GROUP"
 for variant in start_group_before start_group_give_up_only start_group_untold_no_load start_group_untold \
   start_group_deadline_only start_group_no_rejoin start_group_open_after_give_up \
-  start_group_deadline_with_the_connection start_group_lost_dropped start_group_current; do
+  start_group_deadline_with_the_connection start_group_lost_dropped start_group_apart_unarbitrated \
+  start_group_current; do
   $QUINT test "$START_GROUP" --main="$variant" --backend=typescript
 done
 # Today: a host that has started a game always has a way on, a late joiner
@@ -130,7 +131,9 @@ done
 # (start_group_deadline_with_the_connection; aGuestLosesTheHostTest). The host
 # never stuck: VIOLATED while a connection lost after the game sequence had
 # started was dropped without a word (start_group_lost_dropped;
-# aLostAfterTheSequenceTest). It all holds without the ROM prompt's word too
+# aLostAfterTheSequenceTest), and while two guests that could not reach each
+# other waited for each other with nobody deciding (start_group_apart_unarbitrated;
+# aPairApartTest). It all holds without the ROM prompt's word too
 # (start_group_deadline_only), only later.
 for variant in start_group_deadline_only start_group_current; do
   $QUINT run "$START_GROUP" --main="$variant" --invariant=allHold \

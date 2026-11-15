@@ -4,8 +4,9 @@
  * decision and carries out the answer.
  *
  * The host decides the start group. A player its startup deadline gives up
- * on, one at the ROM prompt while the host's is not shared, or one that has
- * not loaded its emulator by the host's load deadline is left out: held as a
+ * on, one at the ROM prompt while the host's is not shared, one that has not
+ * loaded its emulator by the host's load deadline, or one another guest
+ * says it cannot reach is left out: held as a
  * late joiner, it is counted by none of the start's waits, and a host with
  * nobody left to wait for starts alone. The host tells the players
  * (`left-out:<slot>`), the one left out included; a guest takes that word
@@ -40,23 +41,24 @@ export function countedByStartGates(isPlayer: boolean, heldAsLateJoiner: boolean
  * `isHost`: this page is the host (a guest never leaves anyone out).
  * `running`: this page's match runs (the start is over). `otherPlayer`: the
  * connection is to another player, not this page or a synthetic one.
- * `channelOpen`: that player's channel is open (it answered). `missedLoad`:
- * it has not loaded its emulator by the host's load deadline. `alreadyOut`:
- * it was left out already. A player that answered is left out only for
- * missing the load deadline.
+ * `channelOpen`: that player's channel is open (it answered). `cannotPlay`:
+ * it answered but cannot play in this start: it has not loaded its emulator
+ * by the host's load deadline, or another guest cannot reach it.
+ * `alreadyOut`: it was left out already. A player that answered is left out
+ * only when it cannot play.
  */
 //@ ensures \result ==> isHost && !running && otherPlayer && !alreadyOut
-//@ ensures \result && channelOpen ==> missedLoad
-//@ ensures isHost && !running && otherPlayer && !alreadyOut && (!channelOpen || missedLoad) ==> \result
+//@ ensures \result && channelOpen ==> cannotPlay
+//@ ensures isHost && !running && otherPlayer && !alreadyOut && (!channelOpen || cannotPlay) ==> \result
 export function leavesOut(
   isHost: boolean,
   running: boolean,
   otherPlayer: boolean,
   channelOpen: boolean,
-  missedLoad: boolean,
+  cannotPlay: boolean,
   alreadyOut: boolean,
 ): boolean {
-  return isHost && !running && otherPlayer && !alreadyOut && (!channelOpen || missedLoad);
+  return isHost && !running && otherPlayer && !alreadyOut && (!channelOpen || cannotPlay);
 }
 
 /**
@@ -111,6 +113,31 @@ export function takesLeftOut(
   if (mySlot <= HOST_SLOT || mySlot >= 4) return false;
   if (running || alreadyOut) return false;
   return slot > HOST_SLOT && slot < 4 && slot !== mySlot;
+}
+
+/**
+ * The host hears from a guest (`fromSlot`) that it cannot reach another
+ * guest (`slot`): `unreachable:<slot>`. Does the host leave that one out?
+ *
+ * Two guests that each reach the host but not each other wait for each
+ * other's emu-ready for ever, and neither may leave the other out. The host
+ * leaves out the one named, before its match runs, unless the guest that
+ * says so is out itself (both may say it of each other: the first word
+ * counts) or the one named is out already. The one that reported plays.
+ */
+//@ ensures \result ==> isHost && !running && !reporterOut && !namedOut
+//@ ensures \result ==> fromSlot > 0 && fromSlot < 4 && slot > 0 && slot < 4 && fromSlot !== slot
+export function leavesOutUnreachable(
+  isHost: boolean,
+  running: boolean,
+  fromSlot: number,
+  slot: number,
+  reporterOut: boolean,
+  namedOut: boolean,
+): boolean {
+  if (!isHost || running || reporterOut || namedOut) return false;
+  if (fromSlot <= HOST_SLOT || fromSlot >= 4) return false;
+  return slot > HOST_SLOT && slot < 4 && slot !== fromSlot;
 }
 
 /**

@@ -12,15 +12,15 @@ lemma countedByStartGates_ensures(isPlayer: bool, heldAsLateJoiner: bool, leftOu
 {
 }
 
-function leavesOut(isHost: bool, running: bool, otherPlayer: bool, channelOpen: bool, missedLoad: bool, alreadyOut: bool): bool
+function leavesOut(isHost: bool, running: bool, otherPlayer: bool, channelOpen: bool, cannotPlay: bool, alreadyOut: bool): bool
 {
-  ((((isHost && !(running)) && otherPlayer) && !(alreadyOut)) && (!(channelOpen) || missedLoad))
+  ((((isHost && !(running)) && otherPlayer) && !(alreadyOut)) && (!(channelOpen) || cannotPlay))
 }
 
-lemma leavesOut_ensures(isHost: bool, running: bool, otherPlayer: bool, channelOpen: bool, missedLoad: bool, alreadyOut: bool)
-  ensures (leavesOut(isHost, running, otherPlayer, channelOpen, missedLoad, alreadyOut) ==> (((isHost && !(running)) && otherPlayer) && !(alreadyOut)))
-  ensures (leavesOut(isHost, running, otherPlayer, channelOpen, missedLoad, alreadyOut) ==> channelOpen ==> missedLoad)
-  ensures (isHost ==> !(running) ==> otherPlayer ==> !(alreadyOut) ==> (!(channelOpen) || missedLoad) ==> leavesOut(isHost, running, otherPlayer, channelOpen, missedLoad, alreadyOut))
+lemma leavesOut_ensures(isHost: bool, running: bool, otherPlayer: bool, channelOpen: bool, cannotPlay: bool, alreadyOut: bool)
+  ensures (leavesOut(isHost, running, otherPlayer, channelOpen, cannotPlay, alreadyOut) ==> (((isHost && !(running)) && otherPlayer) && !(alreadyOut)))
+  ensures (leavesOut(isHost, running, otherPlayer, channelOpen, cannotPlay, alreadyOut) ==> channelOpen ==> cannotPlay)
+  ensures (isHost ==> !(running) ==> otherPlayer ==> !(alreadyOut) ==> (!(channelOpen) || cannotPlay) ==> leavesOut(isHost, running, otherPlayer, channelOpen, cannotPlay, alreadyOut))
 {
 }
 
@@ -65,6 +65,23 @@ lemma takesLeftOut_ensures(fromSlot: int, mySlot: int, running: bool, slot: int,
   ensures (takesLeftOut(fromSlot, mySlot, running, slot, alreadyOut) ==> (((fromSlot == 0) && (mySlot > 0)) && (mySlot < 4)))
   ensures (takesLeftOut(fromSlot, mySlot, running, slot, alreadyOut) ==> ((((!(running) && !(alreadyOut)) && (slot > 0)) && (slot < 4)) && (slot != mySlot)))
   ensures ((fromSlot != 0) ==> !(takesLeftOut(fromSlot, mySlot, running, slot, alreadyOut)))
+{
+}
+
+function leavesOutUnreachable(isHost: bool, running: bool, fromSlot: int, slot: int, reporterOut: bool, namedOut: bool): bool
+{
+  if (((!(isHost) || running) || reporterOut) || namedOut) then
+    false
+  else
+    if ((fromSlot <= HOST_SLOT) || (fromSlot >= 4)) then
+      false
+    else
+      (((slot > HOST_SLOT) && (slot < 4)) && (slot != fromSlot))
+}
+
+lemma leavesOutUnreachable_ensures(isHost: bool, running: bool, fromSlot: int, slot: int, reporterOut: bool, namedOut: bool)
+  ensures (leavesOutUnreachable(isHost, running, fromSlot, slot, reporterOut, namedOut) ==> (((isHost && !(running)) && !(reporterOut)) && !(namedOut)))
+  ensures (leavesOutUnreachable(isHost, running, fromSlot, slot, reporterOut, namedOut) ==> (((((fromSlot > 0) && (fromSlot < 4)) && (slot > 0)) && (slot < 4)) && (fromSlot != slot)))
 {
 }
 

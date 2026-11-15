@@ -313,6 +313,8 @@ start_group() {
   expect_violation "$START_GROUP" start_group_deadline_with_the_connection nobodyIsInNeither
   # A room of three, both answer, one is lost: 4 steps (aLostAfterTheSequenceTest).
   expect_violation "$START_GROUP" start_group_lost_dropped neverStuck
+  # A room of three, the guests apart, both answer: 3 steps (aPairApartTest).
+  expect_violation "$START_GROUP" start_group_apart_unarbitrated neverStuck
 }
 
 mesh_heal() {

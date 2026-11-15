@@ -11,6 +11,7 @@ import { startDeadline } from '../../web/src/start-deadline.ts';
 import {
   countedByStartGates,
   leavesOut,
+  leavesOutUnreachable,
   leftOutItself,
   missedLoadDeadline,
   rejoinsLate,
@@ -61,6 +62,35 @@ test('at the load deadline a player missed it if it has not loaded, or the host 
   assert.equal(missedLoadDeadline(true, true, false), true);
   // While the host is still syncing itself, a player that loaded is not cut.
   assert.equal(missedLoadDeadline(true, false, false), false);
+});
+
+test('the host leaves out the guest another guest cannot reach; the first word of a pair counts', () => {
+  for (const isHost of BOOLS)
+    for (const running of BOOLS)
+      for (const from of SLOTS)
+        for (const slot of SLOTS)
+          for (const reporterOut of BOOLS)
+            for (const namedOut of BOOLS) {
+              const leaves = leavesOutUnreachable(isHost, running, from, slot, reporterOut, namedOut);
+              const expected =
+                isHost &&
+                !running &&
+                !reporterOut &&
+                !namedOut &&
+                from > 0 &&
+                from < 4 &&
+                slot > 0 &&
+                slot < 4 &&
+                from !== slot;
+              assert.equal(leaves, expected, `${isHost} ${running} ${from} ${slot} ${reporterOut} ${namedOut}`);
+            }
+  // Slot 1 says it cannot reach slot 2: slot 2 is out. Slot 2 then says the
+  // same of slot 1: it is out itself, so its word does not count.
+  assert.equal(leavesOutUnreachable(true, false, 1, 2, false, false), true);
+  assert.equal(leavesOutUnreachable(true, false, 2, 1, true, false), false);
+  // Never the host, never from the host.
+  assert.equal(leavesOutUnreachable(true, false, 1, 0, false, false), false);
+  assert.equal(leavesOutUnreachable(true, false, 0, 1, false, false), false);
 });
 
 test('a guest told by the host that it is out joins late; nobody else can tell it so', () => {
@@ -129,6 +159,7 @@ test('KNCore gives the engine the start group decisions', () => {
   assert.equal(KNCore.startGroup.takesLeftOut, takesLeftOut);
   assert.equal(KNCore.startGroup.rejoinsLate, rejoinsLate);
   assert.equal(KNCore.startGroup.leftOutItself, leftOutItself);
+  assert.equal(KNCore.startGroup.leavesOutUnreachable, leavesOutUnreachable);
   assert.equal(KNCore.startGroup.missedLoadDeadline, missedLoadDeadline);
   assert.equal(KNCore.startGroup.startHasItsHost, startHasItsHost);
   assert.equal(KNCore.startGroup.startDeadline, startDeadline);
