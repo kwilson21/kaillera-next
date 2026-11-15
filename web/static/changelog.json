@@ -1,5 +1,19 @@
 [
   {
+    "version": "0.68.22",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the tests that failed on main pass or skip with a reason; three ROM-sharing bugs (#233)"
+      },
+      {
+        "type": "fix",
+        "message": "the cheats are set once the core has opened the ROM (#237)"
+      }
+    ]
+  },
+  {
     "version": "0.68.21",
     "date": "2026-11-15",
     "changes": [
