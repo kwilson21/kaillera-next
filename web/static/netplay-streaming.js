@@ -100,6 +100,7 @@
   let _isSpectator = false;
   let _peers = {}; // remoteSid → {pc, dc, slot}
   let _knownPlayers = {};
+  let _knownSpectators = new Set(); // spectators' socket ids on the last roster
   let _hostStream = null; // MediaStream from canvas (host only)
   let _guestVideo = null; // <video> element (guest only)
   let _p1KeyMap = null;
@@ -161,6 +162,8 @@
         spectator: () => _isSpectator,
         peers: () => _peers,
         known: () => _knownPlayers,
+        spectators: () => [..._knownSpectators],
+        heldOffers: () => [..._heldOffers.keys()],
         running: () => _gameRunning,
         live: () => !!_hostStream,
         capture: () => ({ mode: _captureMode, scale: _captureScaleDownBy }),
@@ -319,6 +322,7 @@
     for (const p of Object.values(players)) {
       _knownPlayers[p.socketId] = { slot: p.slot, playerName: p.playerName };
     }
+    _knownSpectators = new Set(Object.values(spectators).map((s) => s.socketId));
 
     const myPlayerEntry = Object.values(players).find((p) => p.socketId === socket.id);
     if (myPlayerEntry) {
@@ -357,6 +361,8 @@
     // Guests/spectators: wait for host to initiate (don't create connections)
 
     _applyControllerPresentMask('users-updated');
+    // After this handler, so the roster's own effect is observed first.
+    if (_heldOffers.size) queueMicrotask(_decideHeldOffers);
 
     // Notify controller
     if (_config?.onPlayersChanged) {
@@ -579,11 +585,78 @@
     }
   };
 
+  // ── Which offers a receiver takes ──────────────────────────────────────
+  // A page that is not the host answers an offer only from the socket its
+  // latest roster places at slot 0 (KNCore.streaming.signalGate): any other
+  // room member could otherwise wire a connection to it and have it show
+  // their video as the game. The sender is the server's: _relay_signal
+  // builds the relayed payload with `sender` set from the sending socket, so
+  // a page cannot name another. An offer from a sender no roster has placed
+  // yet is held (the latest per sender, with the candidates that follow it)
+  // and decided again by the next roster: the host does not send an offer
+  // again when one goes unanswered, so dropping the host's would leave this
+  // page without a stream. stop() clears what is held, so nothing is applied
+  // in a later match. Whoever holds slot 0 is trusted.
+  const HELD_CANDIDATES_MAX = 64;
+  const _heldOffers = new Map(); // sender sid → { offer, candidates }
+  const _offerGateLogged = new Set(); // "refuse:sid" / "hold:sid", logged once each
+
+  const _offerGateLog = (key, msg) => {
+    if (_offerGateLogged.has(key)) return;
+    _offerGateLogged.add(key);
+    _syncLog(msg);
+  };
+
+  const _signalGate = (senderSid, data) => {
+    const streaming = window.KNCore?.streaming;
+    // No rule to ask (the bundle did not load): a receiver takes no offer.
+    if (!streaming?.signalGate) return data.offer && _playerSlot !== 0 ? 'refuse' : 'apply';
+    const roster = { players: _knownPlayers, spectators: [..._knownSpectators] };
+    return streaming.signalGate(_playerSlot, streaming.signalKind(data), senderSid, roster);
+  };
+
+  // A roster arrived: decide each held offer again. From the sender now at
+  // slot 0 it is handled as if it had just come, then its candidates; from a
+  // sender the roster places anywhere else it is dropped; the rest wait on.
+  const _decideHeldOffers = () => {
+    for (const [sid, held] of _heldOffers) {
+      const gate = _signalGate(sid, held.offer);
+      if (gate === 'hold') continue;
+      _heldOffers.delete(sid);
+      if (gate === 'refuse') {
+        _offerGateLog(`refuse:${sid}`, `dropped held offer from ${sid}: the roster does not place it at slot 0`);
+        continue;
+      }
+      _syncLog(`applying held offer from ${sid}: the roster places it at slot 0`);
+      onWebRTCSignal(held.offer);
+      for (const candidate of held.candidates) onWebRTCSignal(candidate);
+    }
+  };
+
   const onWebRTCSignal = async (data) => {
     const seen = _observer.signal(data);
     if (!data) return;
     const senderSid = data.sender;
     if (!senderSid) return;
+
+    const gate = _signalGate(senderSid, data);
+    if (gate === 'refuse') {
+      seen.act = 'refused';
+      _offerGateLog(`refuse:${senderSid}`, `refused offer from ${senderSid}: not the host (slot 0) on the roster`);
+      return;
+    }
+    if (gate === 'hold') {
+      seen.act = 'held';
+      _heldOffers.set(senderSid, { offer: data, candidates: [] });
+      _offerGateLog(`hold:${senderSid}`, `holding offer from ${senderSid} until the roster places it`);
+      return;
+    }
+    const held = _heldOffers.get(senderSid);
+    if (_playerSlot !== 0 && held && data.candidate && !data.offer && !data.answer && !_peers[senderSid]) {
+      seen.act = 'held';
+      if (held.candidates.length < HELD_CANDIDATES_MAX) held.candidates.push(data);
+      return;
+    }
 
     if (data.offer && !_peers[senderSid]) {
       const known = _knownPlayers[senderSid];
@@ -1563,6 +1636,9 @@
 
     _heldKeys.clear();
     _knownPlayers = {};
+    _knownSpectators = new Set();
+    _heldOffers.clear();
+    _offerGateLogged.clear();
     _prevSlotInputs = {};
     _p1KeyMap = null;
     KNShared.teardownKeyTracking();
