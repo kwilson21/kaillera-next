@@ -6580,8 +6580,9 @@
   let _resyncRequestSentAt = 0;
   const RESYNC_REQUEST_TIMEOUT_MS = 8000;
   // A "now" request (no target frame: a reconnect, a network change, a tab
-  // shown again, a missing delta base, the socket fallback) is sent because
-  // this guest's state is known to be wrong. It can go unanswered: the host
+  // shown again, a missing delta base, the socket fallback, the boot sync,
+  // the input stall's) is sent because this guest's state is known to be
+  // wrong. It can go unanswered: the host
   // drops a request inside its rate limit, a channel can lose it, and the
   // guest drops an older request's answer that would take it back. Its
   // deadline let it go and asked nothing, so the guest ran on with the state
@@ -15113,11 +15114,30 @@
           window._knBootSyncDone = true;
           if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
             const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-            if (hostPeer?.dc?.readyState === 'open') {
+            if (_resyncRequestInFlight) {
+              // The request that is out brings a host state. Asked over, its
+              // answer would be an older request's, dropped once this guest
+              // is past it, while the host's rate limit may drop this one
+              // (specs/resync_flow.qnt, guestAsksOnItsOwn).
+              _syncLog(`BOOT-SYNC skipped at f=${_frameNum}: request ${_resyncRequestId} is out`);
+            } else if (hostPeer?.dc?.readyState === 'open') {
+              // A "now" request like the others: numbered, out and owed. Sent
+              // bare, its answer came back with no number, which to this
+              // guest is a state the host sent for its own reasons, applied
+              // wherever it finds the guest: arriving after a newer request
+              // it took the guest back 117 frames (specs/resync_flow.qnt,
+              // EVERY_REQUEST_NUMBERED, bootAnswerAfterANewerRequestTest).
+              // A target is left alone: a state held a few frames ahead
+              // would otherwise be applied early.
+              const bootRequestId = _beginResyncRequest();
               try {
-                hostPeer.dc.send('sync-request-full');
-                _syncLog(`BOOT-SYNC: guest requesting host state at f=${_frameNum} (JIT boot divergence correction)`);
+                _sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');
+                _syncLog(
+                  `BOOT-SYNC: guest requesting host state at f=${_frameNum} request=${bootRequestId} ` +
+                    '(JIT boot divergence correction)',
+                );
               } catch (e) {
+                _resyncRequestInFlight = false;
                 _syncLog(`BOOT-SYNC send failed: ${e}`);
               }
             }
@@ -17181,10 +17201,18 @@
               if (_playerSlot !== 0) {
                 const _hostForResync = Object.values(_peers).find((p) => p.slot === 0);
                 const _hostDcForResync = _hostForResync?.dc;
-                if (_hostDcForResync?.readyState === 'open') {
+                if (_resyncRequestInFlight) {
+                  // As the boot sync: the request that is out brings a host state.
+                  _syncLog(`INPUT-STALL-RESYNC f=${_frameNum}: request ${_resyncRequestId} is out, not asked again`);
+                } else if (_hostDcForResync?.readyState === 'open') {
+                  // Numbered like the boot sync's, and for the same reason: an
+                  // unnumbered answer is applied wherever it finds the guest
+                  // (specs/resync_flow.qnt, EVERY_REQUEST_NUMBERED).
+                  const stallRequestId = _beginResyncRequest();
                   try {
-                    _hostDcForResync.send('sync-request-full');
+                    _sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');
                   } catch (_e) {
+                    _resyncRequestInFlight = false;
                     _syncLog(`INPUT-STALL-RESYNC send failed: ${_e}`);
                   }
                 }

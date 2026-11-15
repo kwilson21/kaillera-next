@@ -274,9 +274,8 @@ identity key, size text, hash and hash comparison, ROM out of an archive) and
 room text (`room-text.ts`: HTML escaping, closed-room message, invite links,
 join/leave toasts), and the ROM library (`rom-library.ts`: IndexedDB storage
 with its version-1 upgrade, and the list markup; `play.js` keeps what loading
-a ROM does to the page), and input delay (`delay.ts`: the words beside the picker, and, observing,
-a player's delay preference: `play.js` still decides it and a difference is
-reported as `play-disagree` through `observe.ts`), and, observing, the control
+a ROM does to the page), and input delay (`delay.ts`: the words beside the picker, and a
+player's delay preference, which `play.js` asks it for), and, observing, the control
 remap wizard (`remap-wizard.ts`: the steps, what a captured button, stick or
 key does to the mapping, Back and Skip; `play.js`'s wizard is still in charge
 and each input is compared; whether an input is taken, ignored or rejected is
@@ -288,8 +287,8 @@ host's ROM (`rom-transfer.ts`, decisions proved in `rom-transfer-step.ts`,
 modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
 keeps the channel, the timers and the page. The host's sending side and the
 WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
-(each player slot, the spectator line, the in-game info panel; the Start
-button's rule is observed, `play.js` still decides it). Joining a room:
+(each player slot, the spectator line, the in-game info panel, and whether
+the host may start). Joining a room:
 the `open-room` and `join-room` requests are built in `connect.ts` and typed
 against the generated schemas, with what each refusal means; whether a page
 comes in as a spectator and how it gets into a match already under way are

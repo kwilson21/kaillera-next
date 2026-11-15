@@ -216,6 +216,16 @@
  *     enough on a quiet machine; the slower the machine, the larger n should
  *     be, since the second request must reach the host before the held
  *     answer is let go.
+ *     DELAY_SYNC_ANSWER_AT=boot holds the boot sync's answer instead: the
+ *     hold is armed on the host before the game starts, nothing is asked a
+ *     third of the way in, and the logs are read from the match's start. The
+ *     guest's boot sync (`BOOT-SYNC`, a numbered "now" request after the
+ *     boot grace) goes unanswered past its deadline, the guest asks again,
+ *     and the boot answer, the host's state from the boot grace, arrives
+ *     after that second request, far behind the guest: the ordering of a
+ *     run where a 14 s freeze held it up and it took the guest back 117
+ *     frames (specs/resync_flow.qnt, bootAnswerAfterANewerRequestTest). The
+ *     same checks apply.
  *   DOUBLE_RESYNC_ASK=1   A third of the way into the battle the guest's
  *     network-change handler runs twice at once (two window `online`
  *     events): two immediate, numbered `sync-request-full` on the channel.
@@ -436,6 +446,11 @@ const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
+const DELAY_SYNC_ANSWER_AT = process.env.DELAY_SYNC_ANSWER_AT || 'battle';
+if (!['battle', 'boot'].includes(DELAY_SYNC_ANSWER_AT)) {
+  console.log(`DELAY_SYNC_ANSWER_AT=${DELAY_SYNC_ANSWER_AT} invalid — must be battle or boot`);
+  process.exit(1);
+}
 const LOSE_INPUTS_BEFORE_FALLBACK = process.env.LOSE_INPUTS_BEFORE_FALLBACK === '1';
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 const DOUBLE_RESYNC_ASK = process.env.DOUBLE_RESYNC_ASK === '1';
@@ -651,7 +666,10 @@ const RECONNECT_ATTEMPT_TIMEOUT_MS = (() => {
 const DELAY_SYNC_ANSWER_RECOVER_MS = 20000;
 const faultNeedsSeconds = Math.ceil(
   (((DROP_PEER_MS > 0 ? DROP_PEER_MS + DROP_PEER_RECOVER_MS : 0) +
-    (DELAY_SYNC_ANSWER_MS > 0 ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS : 0) +
+    // At boot the held answer is over long before the battle.
+    (DELAY_SYNC_ANSWER_MS > 0 && DELAY_SYNC_ANSWER_AT === 'battle'
+      ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS
+      : 0) +
     (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0) +
     (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0) +
     (UNANSWERED_SOCKET_RESYNC ? UNANSWERED_SOCKET_RESYNC_RECOVER_MS : 0)) *
@@ -1193,6 +1211,15 @@ if (!MENU_AUTOPILOT) {
   if (MENU_AUTOPILOT === 'any-fighter') console.log('ROM is not SSB64 US: MENU_AUTOPILOT=any-fighter');
 }
 console.log('room', room, 'both ROM-ready; starting');
+// DELAY_SYNC_ANSWER_AT=boot: the first numbered answer the host sends, the
+// boot sync's, is held. Both logs are read from the match's first line.
+const delayBootSyncAnswer = DELAY_SYNC_ANSWER_MS > 0 && DELAY_SYNC_ANSWER_AT === 'boot';
+if (delayBootSyncAnswer) {
+  await host.evaluate((ms) => {
+    window.__knHoldSyncAnswerMs = ms;
+  }, DELAY_SYNC_ANSWER_MS);
+  console.log(`DELAY_SYNC_ANSWER_MS: the host's answer to the boot sync will be held ${DELAY_SYNC_ANSWER_MS} ms`);
+}
 // LOSE_INPUTS_BEFORE_FALLBACK: the host broadcasts the transport when the game starts.
 if (LOSE_INPUTS_BEFORE_FALLBACK) await host.evaluate(() => (window._knTransportOverride = 'unreliable'));
 await host.click('#start-btn');
@@ -1628,6 +1655,24 @@ if (inBattle) {
     );
     console.log(`DROP_PEER_MS: guest resynced after the reconnect: ${reconnected} (${Date.now() - started} ms)`);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (delayBootSyncAnswer) {
+    // The boot sync's answer was held from the start; by the battle the
+    // guest has normally timed out, asked again and been answered.
+    const started = Date.now();
+    delaySyncAnswer.hostAt = delaySyncAnswer.guestAt = { seq: -1, frame: 0 };
+    delaySyncAnswer.timedOut = await waitForLine(
+      guest,
+      -1,
+      /RESYNC-REQUEST-TIMEOUT/,
+      DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS,
+    );
+    console.log(
+      delaySyncAnswer.timedOut
+        ? 'DELAY_SYNC_ANSWER_MS: the boot sync timed out'
+        : 'DELAY_SYNC_ANSWER_MS: the guest never logged RESYNC-REQUEST-TIMEOUT',
+    );
+    await waitForLine(guest, -1, /SYNC-LATE-ANSWER-DROPPED/, DELAY_SYNC_ANSWER_RECOVER_MS);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - (Date.now() - started)));
   } else if (DELAY_SYNC_ANSWER_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
@@ -2102,7 +2147,9 @@ const delaySyncAnswerReport = (() => {
   const countIn = (lines, re) => lines.filter((line) => re.test(line)).length;
   // The guest's second request (its ask again at the deadline) must come
   // before the held answer's header reaches it, or the answer was not late.
-  const asks = guestLines.flatMap((line, i) => (/network change detected|RESYNC-REASK .*: sent/.test(line) ? [i] : []));
+  const asks = guestLines.flatMap((line, i) =>
+    /network change detected|BOOT-SYNC: guest requesting|RESYNC-REASK .*: sent/.test(line) ? [i] : [],
+  );
   const firstAnswer = guestLines.findIndex((line) => /sync-start received/.test(line));
   // The request is settled only when an answer to the newest one was applied:
   // after the second ask, a `resync ready` whose answerFor is the newest
@@ -2123,6 +2170,7 @@ const delaySyncAnswerReport = (() => {
         ) ?? null);
   return {
     ms: DELAY_SYNC_ANSWER_MS,
+    at: DELAY_SYNC_ANSWER_AT,
     held: H.syncAnswersHeld,
     timedOut: delaySyncAnswer.timedOut,
     timeouts: guestLines.filter((line) => /RESYNC-REQUEST-TIMEOUT/.test(line)),
