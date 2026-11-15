@@ -356,6 +356,26 @@
  *     decoded while the newest one is held. Fails unless SYNC-LATE-ANSWER-IGNORED is
  *     logged and the newest answer is then applied, and the guest goes on
  *     making frames.
+ *   SYNC_FOLLOW_UP=same|changed   The host's follow-up to an answer it sent
+ *     unconfirmed (specs/sync_follow_up.qnt). A third of the way in the
+ *     guest's input is held neutral and the host page is frozen for 7 s: the
+ *     guest's peer recovery asks for a resync at a frame, as with
+ *     UNANSWERED_SOCKET_RESYNC=letgo. Then each of the guest's input packets
+ *     is held 2 s until the host answers. If it answers unconfirmed it
+ *     watches the frame it sent (SYNC-FOLLOW-UP-WATCH); whether its deadline
+ *     finds the frame confirmed is a race with its own stall, so an attempt
+ *     answered confirmed is tried again, at most 3 times. `same` keeps the
+ *     input neutral, so every held input matches its prediction: fails
+ *     unless the follow-up is skipped (SYNC-FOLLOW-UP-SKIPPED), no other
+ *     state goes out for it, and the first answer is applied. `changed`
+ *     holds a button down while the inputs are held: fails unless
+ *     SYNC-FOLLOW-UP-NEEDED is logged, the follow-up goes out after it, and
+ *     the guest applies it. In two players `changed` is not reached: the
+ *     guest's late inputs before the frame sent are settled once it is
+ *     handed over and never fed, and pacing and the stale-input stall keep
+ *     the host from answering on predicted inputs that reach that frame
+ *     (docs/roadmap.md, Not verified). Either way the guest must go on
+ *     making frames. Frames are compared as with FREEZE_HOST_MS.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -547,6 +567,26 @@ const UNANSWERED_SOCKET_RESYNC = !['', '0'].includes(UNANSWERED_SOCKET_RESYNC_RA
 const UNANSWERED_VARIANT = UNANSWERED_SOCKET_RESYNC_RAW === '1' ? 'guard' : UNANSWERED_SOCKET_RESYNC_RAW;
 // The letgo variant freezes the host as FREEZE_HOST_MS does, and is compared as it is.
 const UNANSWERED_LETGO_FREEZE_MS = 7000;
+// FORCE_DELAY=<n>: both pages pick a frame delay of n (Auto off) before the
+// game starts. The engine may still re-tune it from the measured RTT
+// (`delay re-tuned` in the sync log says what it chose).
+const FORCE_DELAY = process.env.FORCE_DELAY ? Number(process.env.FORCE_DELAY) : null;
+const SYNC_FOLLOW_UP = process.env.SYNC_FOLLOW_UP || '';
+if (!['', 'same', 'changed'].includes(SYNC_FOLLOW_UP)) {
+  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same or changed`);
+  process.exit(1);
+}
+// SYNC_FOLLOW_UP freezes the host as letgo does, and how long the guest's
+// inputs are held after it, so the host's answer goes out unconfirmed.
+const SYNC_FOLLOW_UP_FREEZE_MS = 7000;
+// How long each of the guest's input packets is held after the freeze, so the
+// host answers on predicted inputs.
+const SYNC_FOLLOW_UP_HOLD_MS = 2000;
+// Whether the host's deadline finds its frame confirmed is a race with its own
+// stall; an attempt whose answer goes out confirmed is tried again.
+const SYNC_FOLLOW_UP_ATTEMPTS = 3;
+// The recovery request, its answer, the follow-up's decision once confirmed.
+const SYNC_FOLLOW_UP_RECOVER_MS = 30000 * SYNC_FOLLOW_UP_ATTEMPTS;
 // HEAL_BOTH_SIDES: both pages' channel to the other dies silently at once.
 const HEAL_BOTH_SIDES = process.env.HEAL_BOTH_SIDES === '1';
 // The mesh health check runs every 300 frames; the fault starts within this
@@ -558,7 +598,7 @@ const HEAL_AFTER_BOUNDARY_WITHIN = 40;
 const HEAL_RECOVER_MS = 90000;
 // After the first state the guest applies, how long a second one is looked for.
 const HEAL_SECOND_STATE_MS = 15000;
-const FREEZE_LIKE = FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || HEAL_BOTH_SIDES;
+const FREEZE_LIKE = FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || SYNC_FOLLOW_UP !== '' || HEAL_BOTH_SIDES;
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -714,6 +754,27 @@ if (
   process.exit(1);
 }
 if (
+  SYNC_FOLLOW_UP &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    LOSE_INPUTS_BEFORE_FALLBACK ||
+    DOUBLE_RESYNC_ASK ||
+    UNANSWERED_SOCKET_RESYNC ||
+    RESYNC_FAULT ||
+    DESYNC_GUEST ||
+    CATCH_UP_MS > 0 ||
+    HEAL_BOTH_SIDES)
+) {
+  console.log('SYNC_FOLLOW_UP is mutually exclusive with the other fault knobs');
+  process.exit(1);
+}
+if (
   RESYNC_FAULT &&
   ((RESYNC_ONE_BACK && RESYNC_SAME_FRAME) ||
     FREEZE_MS > 0 ||
@@ -728,6 +789,7 @@ if (
     DESYNC_GUEST ||
     DOUBLE_RESYNC_ASK ||
     UNANSWERED_SOCKET_RESYNC ||
+    SYNC_FOLLOW_UP ||
     HEAL_BOTH_SIDES ||
     CATCH_UP_MS > 0)
 ) {
@@ -751,7 +813,8 @@ if (
     UNANSWERED_SOCKET_RESYNC ||
     RESYNC_FAULT ||
     DESYNC_GUEST ||
-    CATCH_UP_MS > 0)
+    CATCH_UP_MS > 0 ||
+    SYNC_FOLLOW_UP)
 ) {
   console.log('HEAL_BOTH_SIDES is mutually exclusive with the other fault knobs');
   process.exit(1);
@@ -800,6 +863,7 @@ if (
     UNANSWERED_SOCKET_RESYNC ||
     RESYNC_FAULT ||
     DESYNC_GUEST ||
+    SYNC_FOLLOW_UP ||
     HEAL_BOTH_SIDES)
 ) {
   console.log('CATCH_UP_MS is mutually exclusive with the other fault knobs');
@@ -840,8 +904,9 @@ const faultNeedsSeconds = Math.ceil(
       : 0) +
     (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0) +
     (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0) +
-    (RESYNC_FAULT ? RESYNC_ONE_BACK_RECOVER_MS : 0) +
     (UNANSWERED_SOCKET_RESYNC ? UNANSWERED_SOCKET_RESYNC_RECOVER_MS : 0) +
+    (RESYNC_FAULT ? RESYNC_ONE_BACK_RECOVER_MS : 0) +
+    (SYNC_FOLLOW_UP ? SYNC_FOLLOW_UP_FREEZE_MS + SYNC_FOLLOW_UP_RECOVER_MS : 0) +
     (HEAL_BOTH_SIDES ? HEAL_RECOVER_MS + HEAL_SECOND_STATE_MS : 0) +
     (CATCH_UP_MS > 0 ? CATCH_UP_MS + CATCH_UP_RECOVER_MS : 0)) *
     1.5) /
@@ -854,6 +919,7 @@ if (
     DOUBLE_RESYNC_ASK ||
     UNANSWERED_SOCKET_RESYNC ||
     RESYNC_FAULT ||
+    SYNC_FOLLOW_UP ||
     HEAL_BOTH_SIDES ||
     CATCH_UP_MS > 0) &&
   !(BATTLE_SECONDS >= faultNeedsSeconds)
@@ -1016,6 +1082,10 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // nor counted there), and its frame (the packet's first word) kept.
   window.__knLoseRbInputs = false;
   window.__knRbInputsLost = [];
+  // SYNC_FOLLOW_UP (the guest page): while window.__knHoldInputsMs is above
+  // 0, every input packet (binary, on `lockstep` or `rollback-input`) is held
+  // that long. A channel never reorders, so what follows waits behind it.
+  window.__knHoldInputsMs = 0;
   // UNANSWERED_SOCKET_RESYNC: each entry of window.__knSyncAnswerDrops is
   // taken by the next numbered answer on `sync-state` (its `sync-answer-id:`
   // message): 'chunks' passes the answer's id and header and drops its
@@ -1192,6 +1262,12 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
       window.__knHoldSyncAnswerMs = 0;
       window.__knSyncAnswersHeld.push({ answer: data, heldAt: performance.now(), ms: hold });
     }
+    if (
+      window.__knHoldInputsMs > 0 &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer
+    )
+      hold = Math.max(hold, window.__knHoldInputsMs);
     net.send(ch, data, bytesOf(data), hold, performance.now());
     arm(ch.pumped);
   };
@@ -1632,6 +1708,20 @@ if (delayBootSyncAnswer) {
 }
 // LOSE_INPUTS_BEFORE_FALLBACK: the host broadcasts the transport when the game starts.
 if (LOSE_INPUTS_BEFORE_FALLBACK) await host.evaluate(() => (window._knTransportOverride = 'unreliable'));
+if (FORCE_DELAY !== null) {
+  for (const p of [host, guest]) {
+    await p.evaluate((n) => {
+      const auto = document.getElementById('delay-auto');
+      if (auto?.checked) auto.click();
+      const select = document.getElementById('delay-select');
+      if (select) {
+        select.value = String(n);
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }, FORCE_DELAY);
+  }
+  console.log(`FORCE_DELAY: both pages pick ${FORCE_DELAY}`);
+}
 await host.click('#start-btn');
 
 // Dismiss the tap-to-start prompt on whichever page shows it. Tracks how
@@ -1777,6 +1867,8 @@ const install = async (p, role) => {
           return inp;
         }
         if (W.inBattleAt < 0) W.inBattleAt = f;
+        // SYNC_FOLLOW_UP: the test sets this page's input itself for a while.
+        if (window.__knInputOverride) return window.__knInputOverride(f);
         if (f >= until) {
           const r = Math.random();
           held = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
@@ -1897,6 +1989,8 @@ const catchUp = { hostAt: null, guestAt: null, seen: false };
 // RESYNC_ONE_BACK / RESYNC_SAME_FRAME: where the guest's log stood when it paused, and what its page saw.
 const resyncOneBack = { guestAt: null, applied: false, page: null };
 // UNANSWERED_SOCKET_RESYNC: where the logs stood when the guest asked.
+// SYNC_FOLLOW_UP: where the logs stood before the freeze and after the fault.
+const syncFollowUp = { hostAt: null, guestAt: null, hostEnd: null, watched: false, attempts: 0, framesAfter: 0 };
 const unansweredSocketResync = {
   hostAt: null,
   guestAt: null,
@@ -2186,6 +2280,82 @@ if (inBattle) {
       console.log('DELAY_SYNC_ANSWER_MS: the guest never logged RESYNC-REQUEST-TIMEOUT');
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (SYNC_FOLLOW_UP) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    const NEUTRAL = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+    while (!syncFollowUp.watched && syncFollowUp.attempts < SYNC_FOLLOW_UP_ATTEMPTS) {
+      syncFollowUp.attempts++;
+      // The guest's input, fixed: the host predicts the guest's last input,
+      // so while it stays fixed every prediction holds.
+      await guest.evaluate((n) => {
+        window.__knInputOverride = () => n;
+      }, NEUTRAL);
+      await guest.waitForTimeout(3000);
+      [syncFollowUp.hostAt, syncFollowUp.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+      console.log(
+        `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: attempt ${syncFollowUp.attempts}, ` +
+          `freezing the host for ${SYNC_FOLLOW_UP_FREEZE_MS} ms`,
+      );
+      await host.evaluate((ms) => {
+        const t = performance.now();
+        while (performance.now() - t < ms);
+      }, SYNC_FOLLOW_UP_FREEZE_MS);
+      // The guest's input packets are held from here until the host has
+      // answered its recovery request, so the host answers on predicted
+      // inputs. With `changed` a button is held down meanwhile, so the held
+      // inputs differ from the prediction.
+      await guest.evaluate(
+        ({ ms, changed, n }) => {
+          window.__knHoldInputsMs = ms;
+          if (changed) window.__knInputOverride = () => ({ ...n, buttons: 1 });
+        },
+        { ms: SYNC_FOLLOW_UP_HOLD_MS, changed: SYNC_FOLLOW_UP === 'changed', n: NEUTRAL },
+      );
+      // Unconfirmed: the host watches the frame it sent. Confirmed: it just
+      // dispatches, and the attempt is tried again.
+      const answered = await waitForLine(
+        host,
+        syncFollowUp.hostAt.seq,
+        /SYNC-FOLLOW-UP-WATCH |coord sync dispatch: /,
+        20000,
+      );
+      if (answered) await host.waitForTimeout(500);
+      syncFollowUp.watched = linesAfter(await syncLogOf(host), syncFollowUp.hostAt.seq).some((l) =>
+        /SYNC-FOLLOW-UP-WATCH /.test(l),
+      );
+      await guest.evaluate((n) => {
+        window.__knHoldInputsMs = 0;
+        window.__knInputOverride = () => n;
+      }, NEUTRAL);
+      console.log(
+        `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: ` +
+          (syncFollowUp.watched
+            ? 'the host answered unconfirmed; inputs released'
+            : answered
+              ? 'the host answered confirmed; trying again'
+              : 'no answer seen'),
+      );
+      if (!syncFollowUp.watched) await guest.waitForTimeout(5000);
+    }
+    // The held inputs arrive, the frame is confirmed, and the follow-up is
+    // decided (and, if sent, applied).
+    await guest.waitForTimeout(12000);
+    await guest.evaluate(() => {
+      window.__knInputOverride = null;
+    });
+    syncFollowUp.hostEnd = await lastLogLine(host);
+    // I1: the guest goes on making frames after the fault.
+    const guestFrame = () => guest.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+    const frameAt = await guestFrame();
+    await guest.waitForTimeout(5000);
+    syncFollowUp.framesAfter = (await guestFrame()) - frameAt;
+    console.log(
+      `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: done (${Date.now() - started} ms, ${syncFollowUp.attempts} attempt(s)); ` +
+        `the guest made ${syncFollowUp.framesAfter} frames in the next 5 s`,
+    );
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (CATCH_UP_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -3770,6 +3940,61 @@ if (doubleResyncAskReport) {
     JSON.stringify(doubleResyncAskReport),
   );
 }
+// SYNC_FOLLOW_UP: the host answered the guest's recovery request unconfirmed
+// and watched the frame it sent. `same`: no input at or before it differed
+// from its prediction, so the follow-up was skipped and nothing else went out
+// for it. `changed`: one did, and the follow-up went out and was applied.
+// specs/sync_follow_up.qnt.
+const syncFollowUpReport = (() => {
+  if (!SYNC_FOLLOW_UP || !syncFollowUp.hostAt) return null;
+  const endSeq = syncFollowUp.hostEnd?.seq ?? Infinity;
+  const hostLines = linesAfter(H.sync, syncFollowUp.hostAt.seq).filter((l) => seqOf(l) <= endSeq);
+  const guestLines = linesAfter(G.sync, syncFollowUp.guestAt.seq);
+  const at = (lines, re, from = 0) => {
+    const i = lines.slice(from).findIndex((l) => re.test(l));
+    return i < 0 ? -1 : from + i;
+  };
+  const line = (lines, i) => (i < 0 ? null : lines[i]);
+  const recoveryAsk = at(guestLines, /peer-recovery resync: sent sync-request-full-at:/);
+  const watch = at(hostLines, /SYNC-FOLLOW-UP-WATCH /);
+  const after = (re) => (watch < 0 ? -1 : at(hostLines, re, watch));
+  const needed = after(/SYNC-FOLLOW-UP-NEEDED /);
+  const skipped = after(/SYNC-FOLLOW-UP-SKIPPED /);
+  // The watch is logged as its state is taken, just after its dispatch: a
+  // dispatch after it is the follow-up.
+  const followUpDispatch = after(/coord sync dispatch: /);
+  const applied = recoveryAsk < 0 ? [] : guestLines.slice(recoveryAsk).filter((l) => /sync #\d+ applied/.test(l));
+  const ticking = syncFollowUp.framesAfter >= 10;
+  const passed =
+    recoveryAsk >= 0 &&
+    watch >= 0 &&
+    ticking &&
+    (SYNC_FOLLOW_UP === 'same'
+      ? needed < 0 && skipped > watch && followUpDispatch < 0 && applied.length >= 1
+      : needed > watch && followUpDispatch > needed && skipped < 0 && applied.length >= 2);
+  return {
+    mode: SYNC_FOLLOW_UP,
+    attempts: syncFollowUp.attempts,
+    recoveryAsk: line(guestLines, recoveryAsk),
+    watch: line(hostLines, watch),
+    needed: line(hostLines, needed),
+    skipped: line(hostLines, skipped),
+    followUpDispatch: line(hostLines, followUpDispatch),
+    dispatches: hostLines.filter((l) => /coord sync dispatch: |COORD-SYNC-TIMEOUT/.test(l)),
+    applied,
+    framesAfter: syncFollowUp.framesAfter,
+    passed,
+  };
+})();
+const syncFollowUpFailed = SYNC_FOLLOW_UP !== '' && !syncFollowUpReport?.passed;
+if (SYNC_FOLLOW_UP) {
+  console.log(
+    syncFollowUpFailed
+      ? `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: not exercised, or the path under test did not hold:`
+      : `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: the path under test held:`,
+    JSON.stringify(syncFollowUpReport),
+  );
+}
 // UNANSWERED_SOCKET_RESYNC: the guard timed out under the owed resync, and
 // the request's own deadline still asked again and got it.
 const unansweredSocketResyncFailed = UNANSWERED_SOCKET_RESYNC && !unansweredSocketResyncReport?.passed;
@@ -3843,6 +4068,7 @@ const failed =
   loseBeforeFallbackFailed ||
   doubleResyncAskFailed ||
   unansweredSocketResyncFailed ||
+  syncFollowUpFailed ||
   observersFailed ||
   signalingDropFailed ||
   gpMis > 0 ||

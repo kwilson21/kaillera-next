@@ -98,8 +98,10 @@ const oldReceiver = () => {
         break;
       case 'complete':
         state = 'complete';
-        // finishRomTransfer: the chunks add up to `received`.
-        if (header && header.size !== received) state = 'idle';
+        // finishRomTransfer: the chunks add up to `received`. Changed since,
+        // on purpose: a short file drops the count and header with the bytes
+        // (it used to set only the phase to idle). See the short-file test.
+        if (header && header.size !== received) cancel();
         break;
       case 'closed':
         if (state === 'receiving') {
@@ -235,7 +237,26 @@ test('a file short of what the host announced is not kept', () => {
   );
   const step = receiverStep(short, { kind: 'complete' });
   assert.equal(step.next, 'abandoned');
-  assert.equal(step.state.phase, 'idle');
+  assert.deepEqual(step.state, IDLE);
+});
+
+// The ordering specs/rom_transfer.qnt found (`countIsHeld`): the page drops a
+// short file's bytes, so a later request must not resume from its count.
+test('after a short file, the next request starts the file again from nothing', () => {
+  const short = run(
+    { kind: 'accept' },
+    { kind: 'channel' },
+    { kind: 'header', size: 300_000, hash: 'Saa' },
+    { kind: 'chunk', bytes: 100_000 },
+    { kind: 'complete' },
+  );
+  for (const again of [{ kind: 'sharing-on' }, { kind: 'game-started' }, { kind: 'reconnected' }] as const) {
+    const asked = receiverStep(short, again).state;
+    assert.equal(asked.phase, 'resuming', again.kind);
+    const resumed = receiverStep(asked, { kind: 'channel' }).state;
+    assert.equal(resumed.received, 0, `${again.kind}: the host is asked for the file from its start`);
+    assert.equal(resumed.header, null, again.kind);
+  }
 });
 
 test('a closed channel is retried by itself only after part of the file arrived', () => {

@@ -66,12 +66,14 @@ done
 # ── ROM transfer: a guest waiting on the host always has a way out ──────────
 ROM=specs/rom_transfer.qnt
 $QUINT typecheck "$ROM"
-for variant in rom_transfer_before rom_transfer_current; do
+for variant in rom_transfer_before rom_transfer_short_kept rom_transfer_current; do
   $QUINT test "$ROM" --main="$variant" --backend=typescript
 done
 # Today: every waiting state has a running timer or a Retry button. Violated
-# before the request sent over the engine channel was given a deadline.
-for invariant in waitingHasAWayOut timersAloneStop; do
+# before the request sent over the engine channel was given a deadline. And
+# what the receiver counts is what the page holds; violated while a short
+# file kept its count (rom_transfer_short_kept).
+for invariant in waitingHasAWayOut timersAloneStop countIsHeld; do
   $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
@@ -364,6 +366,21 @@ done
 # coordinated at a frame was never owed, so its lost answer was let go
 # (resync_reask_coordinated_let_go; coordinatedAnswerLostTest).
 $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── The follow-up to an answer sent unconfirmed ────────────────────────────
+FOLLOW=specs/sync_follow_up.qnt
+$QUINT typecheck "$FOLLOW"
+for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend=typescript
+done
+# With the fix: a follow-up goes out only for a state an input changed after
+# it was taken, the guest ends on the host's state, and at most one answer is
+# on the channel. Today every unconfirmed answer is followed up
+# (sync_follow_up_current; unchangedFollowUpTest); recording the change from
+# the send only misses one made while the state is compressed
+# (sync_follow_up_from_send; mispredictWhileCompressingTest).
+$QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── A channel that dies in a match with no event ───────────────────────────

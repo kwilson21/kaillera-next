@@ -1823,7 +1823,9 @@
         settledSkipped++;
         continue;
       }
-      tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy);
+      _feedWatched(tickMod, qi.slot, qi.frame, () =>
+        tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy),
+      );
     }
     _pendingCInputs.length = 0;
     if (settledSkipped > 0) _syncLog(`C-INPUT-SETTLED-SKIP f=${_frameNum} count=${settledSkipped}`);
@@ -5033,16 +5035,62 @@
   const INPUT_PAST_WINDOW_FRAMES = 240; // ~4s at 60fps — generous for a stalled peer
   const INPUT_FUTURE_MARGIN_FRAMES = 60; // 1s past delay buffer
 
+  // Host: an input at or before a watched frame (_followUpWatches) that
+  // differs from the prediction it replaces means the state sent for that
+  // frame may no longer be this page's (specs/sync_follow_up.qnt). C counts
+  // every such difference in its breakdown before it decides whether it can
+  // roll back, so a skipped (DEEP-MISPREDICT-SKIP) or failed rollback counts
+  // too. A breakdown that cannot be read counts as a difference: that can
+  // only cost a follow-up, never keep a state that changed.
+  // Host: for a guest sent a state while it was unconfirmed, the frame of
+  // that state and whether an input at or before it has since differed from
+  // its prediction (specs/sync_follow_up.qnt). Set as the state is taken.
+  const _followUpWatches = new Map(); // sid -> {frame, changed}
+  // The buffer belongs to the module that allocated it: EmulatorJS can
+  // replace the module between matches, and stopSync drops it with the
+  // other scratch buffers.
+  let _mispredBufPtr = 0;
+  let _mispredBufMod = null;
+  const _mispredTotal = (mod) => {
+    if (!mod?._kn_get_mispred_breakdown || !mod._malloc) return -1;
+    if (_mispredBufMod !== mod) {
+      _mispredBufPtr = 0;
+      _mispredBufMod = mod;
+    }
+    if (!_mispredBufPtr) _mispredBufPtr = mod._malloc(12);
+    if (!_mispredBufPtr || mod._kn_get_mispred_breakdown(_mispredBufPtr, 3) !== 3) return -1;
+    const at = _mispredBufPtr >> 2;
+    return mod.HEAP32[at] + mod.HEAP32[at + 1] + mod.HEAP32[at + 2];
+  };
+  const _feedWatched = (mod, slot, frame, feed) => {
+    let watched = false;
+    for (const w of _followUpWatches.values()) if (!w.changed && frame <= w.frame) watched = true;
+    if (!watched) return feed();
+    const before = _mispredTotal(mod);
+    const result = feed();
+    const after = _mispredTotal(mod);
+    for (const [sid, w] of _followUpWatches) {
+      if (w.changed || !window.KNCore.syncFollowUp.changesWatchedFrame(frame, w.frame, before, after)) continue;
+      w.changed = true;
+      _syncLog(
+        `SYNC-FOLLOW-UP-NEEDED target=${sid} frame=${w.frame}: slot ${slot} f=${frame} differed from its prediction`,
+      );
+    }
+    return result;
+  };
+
   const _feedCInput = (mod, slot, frame, input) => {
     if (!mod?._kn_feed_input || !input || slot === null || slot === undefined || frame < 0) return false;
-    mod._kn_feed_input(
-      Number(slot),
-      Number(frame),
-      input.buttons | 0,
-      input.lx | 0,
-      input.ly | 0,
-      input.cx | 0,
-      input.cy | 0,
+    _feedWatched(mod, slot, frame, () =>
+      mod._kn_feed_input(
+        Number(slot),
+        Number(frame),
+        input.buttons | 0,
+        input.lx | 0,
+        input.ly | 0,
+        input.cx | 0,
+        input.cy | 0,
+      ),
     );
     return true;
   };
@@ -9584,6 +9632,7 @@
     }
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
+      _followUpWatches.delete(opts.sid);
       _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
       // the new peer session, and a transfer on its chain, running or still
@@ -14121,6 +14170,9 @@
         stopMod._free(window._rbMispredBuf);
         window._rbMispredBuf = 0;
       }
+      if (_mispredBufPtr && _mispredBufMod === stopMod) stopMod._free(_mispredBufPtr);
+      _mispredBufPtr = 0;
+      _mispredBufMod = null;
     } else {
       // No WASM module available (already destroyed) — drop the JS-side
       // offsets so we don't reuse them against a future fresh heap.
@@ -14129,6 +14181,8 @@
       _rbHashBufPtr = 0;
       _rbTaintBufPtr = 0;
       window._rbMispredBuf = 0;
+      _mispredBufPtr = 0;
+      _mispredBufMod = null;
     }
     // Clear host-broadcast init params so a back-to-back match doesn't fire
     // its tryInitRollback with stale values from the previous match's host
@@ -14392,9 +14446,36 @@
     // Confirmation skips phantom peers, so for a follow-up (below) it proves
     // nothing while the follow-up's own target is a phantom.
     const confirmedFor = (r) => confirmed && !(r.followUp && _peerPhantom[_peers[r.targetSid]?.slot]);
-    const due = _scheduledSyncRequests.filter(
+    const ready = _scheduledSyncRequests.filter(
       (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
     );
+    // A follow-up whose frame is now confirmed goes out only if an input at
+    // or before the frame of the state already sent differed from its
+    // prediction: otherwise the guest has the right state already
+    // (specs/sync_follow_up.qnt). One due at its deadline unconfirmed cannot
+    // know yet, and goes out.
+    // Watched only once its state was handed over whole (`delivered`): a
+    // transfer that stalled, failed or was dropped left the guest without
+    // it. Confirmed only while no player is a phantom: confirmation skips
+    // phantoms, whose predicted inputs can still change the frame.
+    const anyPhantom = Object.values(_peerPhantom).some(Boolean);
+    const unchanged = ready.filter((r) =>
+      window.KNCore.syncFollowUp.followUpIsUnneeded(
+        r.followUp || 0,
+        !!r.watch?.delivered,
+        !!r.watch?.changed,
+        confirmedFor(r) && !anyPhantom,
+      ),
+    );
+    for (const r of unchanged) {
+      _syncLog(
+        `SYNC-FOLLOW-UP-SKIPPED target=${r.targetSid} frame=${r.watch.frame} request=${r.requestId || 0} ` +
+          `follow-up=${r.followUp}: no input at or before it differed from its prediction`,
+      );
+      if (_followUpWatches.get(r.targetSid) === r.watch) _followUpWatches.delete(r.targetSid);
+    }
+    if (unchanged.length > 0) _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !unchanged.includes(r));
+    const due = ready.filter((r) => !unchanged.includes(r));
     if (due.length === 0) return;
     for (const r of due) {
       if (r.targetFrame > _frameNum || !confirmed) {
@@ -14413,7 +14494,7 @@
     _syncLog(
       `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
     );
-    const requeue = (r, followUp) =>
+    const requeue = (r, followUp, watch) =>
       _scheduledSyncRequests.push({
         targetFrame: _frameNum,
         targetSid: r.targetSid,
@@ -14422,6 +14503,8 @@
         // Still the answer to the request the first one was for.
         requestId: r.requestId || 0,
         deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+        // What became of the state it follows (null: send regardless).
+        watch: watch ?? null,
       });
     // Confirmation skips phantom peers, so a state sent while a target is a
     // phantom is not confirmed for that target.
@@ -14434,7 +14517,7 @@
     // host scheduled for its own reasons has none.
     const requestIds = {};
     for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;
-    pushSyncState(targetSid, false, { requestIds }).then((skipped) => {
+    pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] }).then((skipped) => {
       due.forEach((r, i) => {
         // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
         if (!_peers[r.targetSid] || epoch !== _syncQueueEpoch || gens[i] !== (_syncQueueGen[r.targetSid] || 0)) return;
@@ -14446,14 +14529,14 @@
           // send then skips that target. Put its request back unchanged so
           // it goes out when reachable.
           _syncLog(`coord sync re-queued: send to ${r.targetSid} did not go out`);
-          requeue(r, r.followUp || 0);
+          requeue(r, r.followUp || 0, null);
         } else if (unconfirmedFor.has(r.targetSid)) {
           // A state sent unconfirmed can still change here through a later
           // rollback, leaving the guest on a state the host no longer has.
           // Follow up with a fresh sync; each goes out once confirmed or at
           // its deadline, at most SYNC_FOLLOW_UP_MAX in a row (I1).
           const n = (r.followUp || 0) + 1;
-          if (n <= SYNC_FOLLOW_UP_MAX) requeue(r, n);
+          if (n <= SYNC_FOLLOW_UP_MAX) requeue(r, n, _followUpWatches.get(r.targetSid));
           else _syncLog(`coord sync follow-ups exhausted for ${r.targetSid}`);
         }
       });
@@ -17974,6 +18057,23 @@
     }
     let currentState;
     const frame = _frameNum;
+    // Taken now: a guest it goes to unconfirmed is watched from here, before
+    // compression, since an input that differs while it compresses changes
+    // this frame as much as one after the send (specs/sync_follow_up.qnt).
+    // Any other guest it goes to gets a state that supersedes its watch.
+    const watchFor = options.watchFor || [];
+    // A watch superseded here stops being updated, so it is marked changed:
+    // a follow-up still holding it goes out (the new state may never arrive).
+    for (const [sid, w] of [..._followUpWatches]) {
+      if ((!targetSid || targetSid === sid) && !watchFor.includes(sid)) {
+        w.changed = true;
+        _followUpWatches.delete(sid);
+      }
+    }
+    for (const sid of watchFor) {
+      _followUpWatches.set(sid, { frame, changed: false, delivered: false });
+      _syncLog(`SYNC-FOLLOW-UP-WATCH target=${sid} frame=${frame}: sent unconfirmed`);
+    }
     // Who this state is for, on the connections they are on now: a reconnect
     // while it is compressed or queued drops it for that guest.
     const targets = _syncTargetsFor(targetSid);
@@ -18182,6 +18282,11 @@
     _syncLog(
       `pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${Math.ceil(compressed.length / 64000)} chunks)`,
     );
+    // A watched state counts as the guest's only once every chunk went out.
+    targets.forEach((t, i) => {
+      const w = _followUpWatches.get(t.sid);
+      if (outcomes[i] === 'sent' && w && w.frame === frame) w.delivered = true;
+    });
     return targets.filter((t, i) => outcomes[i] === 'skipped').map((t) => t.sid);
   };
   // Host: send compressed state/delta via DC in 64KB chunks, handed to the
@@ -19055,6 +19160,7 @@
     _syncTargetFrame = -1;
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
+    _followUpWatches.clear();
     _syncQueueEpoch++;
     // Each transfer still on a chain sees the new epoch and stops.
     _syncSendChains = {};
