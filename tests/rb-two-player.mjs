@@ -248,6 +248,34 @@
  *     (`RESYNC-REASK ... ask=2/2`), and a host state was applied after it.
  *     Reported as `unansweredSocketResync` in summary.json. The other fault
  *     knobs are refused with it.
+ *   UNANSWERED_SOCKET_RESYNC=giveup   Every answer is dropped instead (on
+ *     `sync-state` and over the socket), so the owed resync's asks run out:
+ *     the request, two asks again, then RESYNC-REASK-GIVEUP (the deadline's
+ *     stopAsking). Fails unless the give-up is logged, nothing is applied
+ *     from the guest's ask to the give-up nor asked after it, and the guest
+ *     goes on making frames after it (I1: no stall).
+ *   UNANSWERED_SOCKET_RESYNC=letgo   The host page is frozen for 7 s, so the
+ *     guest makes it a phantom (5 s) and, when it is back, asks for a resync
+ *     at a frame (`peer-recovery resync`: a coordinated request, which owes
+ *     nothing); the host page drops the whole of that answer. The target's
+ *     deadline gives the target up and the request's deadline lets it go
+ *     (step=letGo) without asking again. Fails unless the request was sent,
+ *     its answer dropped, the let-go logged with no ask again after it, and
+ *     the guest goes on making frames. As with FREEZE_HOST_MS, frames are
+ *     compared only from the guest's last applied resync, and one must come
+ *     after the freeze: the desync check (the host's hashes) asks again.
+ *   UNANSWERED_SOCKET_RESYNC=ignored   A late answer set aside because the
+ *     newest request's answer is held (SYNC-LATE-ANSWER-IGNORED,
+ *     keepsAwaitedAnswer). The guest asks; the host page drops the chunks of
+ *     that answer, so the chunk timeout asks over the socket. The guest page
+ *     holds the socket answer that comes back (a wrapper on
+ *     io.Socket.prototype.onevent), the request's deadline asks again on
+ *     the channel, and the moment the last chunk of that answer has been
+ *     handled the guest page delivers the held socket answer. Both are
+ *     decoded by the same worker, the newest first: the late one is decoded
+ *     while the newest one is held. Fails unless SYNC-LATE-ANSWER-IGNORED is
+ *     logged and the newest answer is then applied, and the guest goes on
+ *     making frames.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -408,7 +436,17 @@ const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
 const LOSE_INPUTS_BEFORE_FALLBACK = process.env.LOSE_INPUTS_BEFORE_FALLBACK === '1';
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 const DOUBLE_RESYNC_ASK = process.env.DOUBLE_RESYNC_ASK === '1';
-const UNANSWERED_SOCKET_RESYNC = process.env.UNANSWERED_SOCKET_RESYNC === '1';
+const UNANSWERED_SOCKET_RESYNC_RAW = process.env.UNANSWERED_SOCKET_RESYNC || '';
+if (!['', '0', '1', 'giveup', 'letgo', 'ignored'].includes(UNANSWERED_SOCKET_RESYNC_RAW)) {
+  console.log(`UNANSWERED_SOCKET_RESYNC=${UNANSWERED_SOCKET_RESYNC_RAW} invalid: 1, giveup, letgo or ignored`);
+  process.exit(1);
+}
+const UNANSWERED_SOCKET_RESYNC = !['', '0'].includes(UNANSWERED_SOCKET_RESYNC_RAW);
+// 'guard' (=1), 'giveup', 'letgo' or 'ignored'.
+const UNANSWERED_VARIANT = UNANSWERED_SOCKET_RESYNC_RAW === '1' ? 'guard' : UNANSWERED_SOCKET_RESYNC_RAW;
+// The letgo variant freezes the host as FREEZE_HOST_MS does, and is compared as it is.
+const UNANSWERED_LETGO_FREEZE_MS = 7000;
+const FREEZE_LIKE = FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo';
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -809,9 +847,73 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // request number kept. socket.io.min.js assigns window.io as it loads.
   window.__knDropSocketAnswers = 0;
   window.__knSocketAnswersDropped = [];
+  // UNANSWERED_SOCKET_RESYNC=ignored (the guest page): while
+  // window.__knHoldSocketAnswers is above 0, the next state answer that
+  // arrives over the socket is held, and delivered as soon as the last chunk
+  // of the next answer on `sync-state` has been handled. Kept in
+  // __knSocketAnswersHeld.
+  window.__knHoldSocketAnswers = 0;
+  window.__knSocketAnswersHeld = [];
+  const heldSocketPackets = [];
+  let realOnevent = null;
+  const releaseHeldSocketAnswers = () => {
+    while (heldSocketPackets.length) {
+      const { socket, packet, record } = heldSocketPackets.shift();
+      record.releasedAt = performance.now();
+      realOnevent.call(socket, packet);
+    }
+  };
+  let syncChunksLeft = 0;
+  const afterSyncStateMessage = (data) => {
+    if (typeof data === 'string') {
+      if (data.startsWith('sync-start:')) syncChunksLeft = Number(data.split(':')[2]) || 0;
+      return;
+    }
+    if (syncChunksLeft <= 0) return;
+    syncChunksLeft--;
+    if (syncChunksLeft === 0 && heldSocketPackets.length) releaseHeldSocketAnswers();
+  };
+  const realOnmessage = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'onmessage');
+  Object.defineProperty(RTCDataChannel.prototype, 'onmessage', {
+    configurable: true,
+    get() {
+      return realOnmessage.get.call(this);
+    },
+    set(fn) {
+      if (typeof fn !== 'function') {
+        realOnmessage.set.call(this, fn);
+        return;
+      }
+      const ch = this;
+      realOnmessage.set.call(this, function (e) {
+        const result = fn.call(this, e);
+        if (ch.label === 'sync-state') afterSyncStateMessage(e.data);
+        return result;
+      });
+    },
+  });
   Object.defineProperty(window, 'io', {
     configurable: true,
     set(io) {
+      const onevent = io?.Socket?.prototype?.onevent;
+      if (onevent) {
+        realOnevent = onevent;
+        io.Socket.prototype.onevent = function (packet) {
+          const args = packet?.data;
+          if (
+            window.__knHoldSocketAnswers > 0 &&
+            args?.[0] === 'data-message' &&
+            args[1]?.type === 'sync-state-socket'
+          ) {
+            window.__knHoldSocketAnswers--;
+            const record = { requestId: args[1].requestId ?? null, heldAt: performance.now(), releasedAt: null };
+            window.__knSocketAnswersHeld.push(record);
+            heldSocketPackets.push({ socket: this, packet, record });
+            return;
+          }
+          return onevent.call(this, packet);
+        };
+      }
       const emit = io?.Socket?.prototype?.emit;
       if (emit) {
         io.Socket.prototype.emit = function (event, data, ...rest) {
@@ -1302,7 +1404,15 @@ const linkResync = { hostAt: null, guestAt: null, applied: false };
 // DOUBLE_RESYNC_ASK: where the logs stood when the guest asked twice.
 const doubleResyncAsk = { hostAt: null, guestAt: null, applied: false };
 // UNANSWERED_SOCKET_RESYNC: where the logs stood when the guest asked.
-const unansweredSocketResync = { hostAt: null, guestAt: null, applied: false };
+const unansweredSocketResync = {
+  hostAt: null,
+  guestAt: null,
+  applied: false,
+  gaveUp: false,
+  letGo: false,
+  ignored: false,
+  framesAfter: 0,
+};
 const syncLogOf = (page) => page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
 const seqOf = (line) => Number(line.split('\t')[0]);
 const lastLogLine = async (page) => {
@@ -1515,27 +1625,95 @@ if (inBattle) {
       lastLogLine(host),
       lastLogLine(guest),
     ]);
-    // The answer to the guest's ask loses its chunks; the socket answer that
-    // follows the chunk timeout is dropped, and the whole of the answer to
-    // the first ask again.
-    await host.evaluate(() => {
-      window.__knSyncAnswerDrops = ['chunks', 'whole'];
-      window.__knDropSocketAnswers = 1;
-    });
-    await guest.evaluate(() => window.dispatchEvent(new Event('online')));
-    console.log('UNANSWERED_SOCKET_RESYNC: guest asked for a resync; its answers are dropped');
-    // The guard times out at 15 s and the request's deadline asks a second
-    // time at 16 s; that answer goes through.
-    const asked = await waitForLine(
-      guest,
-      unansweredSocketResync.guestAt.seq,
-      /RESYNC-REASK .*ask=2\/2/,
-      UNANSWERED_SOCKET_RESYNC_RECOVER_MS,
-    );
-    unansweredSocketResync.applied =
-      asked && (await waitForLine(guest, unansweredSocketResync.guestAt.seq, /sync #\d+ applied/, 15000));
+    const guestFrame = () => guest.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+    const stopDropping = () =>
+      host.evaluate(() => {
+        window.__knSyncAnswerDrops = [];
+        window.__knDropSocketAnswers = 0;
+      });
+    if (UNANSWERED_VARIANT === 'guard') {
+      // The answer to the guest's ask loses its chunks; the socket answer
+      // that follows the chunk timeout is dropped, and the whole of the
+      // answer to the first ask again.
+      await host.evaluate(() => {
+        window.__knSyncAnswerDrops = ['chunks', 'whole'];
+        window.__knDropSocketAnswers = 1;
+      });
+      await guest.evaluate(() => window.dispatchEvent(new Event('online')));
+      console.log('UNANSWERED_SOCKET_RESYNC: guest asked for a resync; its answers are dropped');
+      // The guard times out at 15 s and the request's deadline asks a second
+      // time at 16 s; that answer goes through.
+      const asked = await waitForLine(
+        guest,
+        unansweredSocketResync.guestAt.seq,
+        /RESYNC-REASK .*ask=2\/2/,
+        UNANSWERED_SOCKET_RESYNC_RECOVER_MS,
+      );
+      unansweredSocketResync.applied =
+        asked && (await waitForLine(guest, unansweredSocketResync.guestAt.seq, /sync #\d+ applied/, 15000));
+    } else if (UNANSWERED_VARIANT === 'giveup') {
+      await host.evaluate(() => {
+        window.__knSyncAnswerDrops = Array(8).fill('whole');
+        window.__knDropSocketAnswers = 8;
+      });
+      await guest.evaluate(() => window.dispatchEvent(new Event('online')));
+      console.log('UNANSWERED_SOCKET_RESYNC=giveup: guest asked for a resync; every answer is dropped');
+      unansweredSocketResync.gaveUp = await waitForLine(
+        guest,
+        unansweredSocketResync.guestAt.seq,
+        /RESYNC-REASK-GIVEUP/,
+        UNANSWERED_SOCKET_RESYNC_RECOVER_MS,
+      );
+      await stopDropping();
+    } else if (UNANSWERED_VARIANT === 'ignored') {
+      // The answer to the guest's ask loses its chunks; the guest holds the
+      // socket answer the chunk timeout brings until the next answer on the
+      // channel (the ask again's) is in.
+      await host.evaluate(() => {
+        window.__knSyncAnswerDrops = ['chunks'];
+      });
+      await guest.evaluate(() => {
+        window.__knHoldSocketAnswers = 1;
+      });
+      await guest.evaluate(() => window.dispatchEvent(new Event('online')));
+      console.log('UNANSWERED_SOCKET_RESYNC=ignored: guest asked; the socket answer will come late');
+      unansweredSocketResync.ignored = await waitForLine(
+        guest,
+        unansweredSocketResync.guestAt.seq,
+        /SYNC-LATE-ANSWER-IGNORED/,
+        UNANSWERED_SOCKET_RESYNC_RECOVER_MS,
+      );
+      unansweredSocketResync.applied = await waitForLine(
+        guest,
+        unansweredSocketResync.guestAt.seq,
+        /sync #\d+ applied/,
+        15000,
+      );
+      await stopDropping();
+    } else {
+      await host.evaluate(() => {
+        window.__knSyncAnswerDrops = ['whole'];
+      });
+      console.log(`UNANSWERED_SOCKET_RESYNC=letgo: freezing the host for ${UNANSWERED_LETGO_FREEZE_MS} ms`);
+      await host.evaluate((ms) => {
+        const t = performance.now();
+        while (performance.now() - t < ms);
+      }, UNANSWERED_LETGO_FREEZE_MS);
+      unansweredSocketResync.letGo = await waitForLine(
+        guest,
+        unansweredSocketResync.guestAt.seq,
+        /RESYNC-REQUEST-TIMEOUT .*step=letGo/,
+        UNANSWERED_SOCKET_RESYNC_RECOVER_MS,
+      );
+      await stopDropping();
+    }
+    // I1: the guest goes on making frames after the fault.
+    const frameAt = await guestFrame();
+    await guest.waitForTimeout(5000);
+    unansweredSocketResync.framesAfter = (await guestFrame()) - frameAt;
     console.log(
-      `UNANSWERED_SOCKET_RESYNC: a state applied: ${unansweredSocketResync.applied} (${Date.now() - started} ms)`,
+      `UNANSWERED_SOCKET_RESYNC=${UNANSWERED_VARIANT}: done (${Date.now() - started} ms); ` +
+        `the guest made ${unansweredSocketResync.framesAfter} frames in the next 5 s`,
     );
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (DOUBLE_RESYNC_ASK) {
@@ -1719,6 +1897,7 @@ const collect = (p, VISUAL_CHECK) =>
       rbInputsLost: window.__knRbInputsLost ?? [],
       syncAnswersDropped: window.__knSyncAnswersDropped ?? [],
       socketAnswersDropped: window.__knSocketAnswersDropped ?? [],
+      socketAnswersHeld: window.__knSocketAnswersHeld ?? [],
       link: window.__knLink ?? null,
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
@@ -1780,7 +1959,7 @@ fs.writeFileSync(
 const crossEngine = hostBrowser !== guestBrowser;
 const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
 const bootSyncFrame = crossEngine && resyncs.length ? resyncs[0] : 0;
-const recoveredAt = FREEZE_MS > 0 ? (resyncs.length ? resyncs[resyncs.length - 1] : Infinity) : bootSyncFrame;
+const recoveredAt = FREEZE_LIKE ? (resyncs.length ? resyncs[resyncs.length - 1] : Infinity) : bootSyncFrame;
 let both = 0,
   gpMis = 0,
   fullMis = 0,
@@ -1807,12 +1986,11 @@ const starvedFramesOf = (peer) =>
       .flatMap(([, s]) => s.starvedSpans),
   );
 const linkStarvedFrames = LINK_KBPS > 0 ? { host: starvedFramesOf(H), guest: starvedFramesOf(G) } : null;
-const recoveries =
-  FREEZE_MS > 0
-    ? []
-    : linkStarvedFrames
-      ? withoutLinkStarved(frozenRecoveries({ host: H.sync, guest: G.sync }), linkStarvedFrames)
-      : frozenRecoveries({ host: H.sync, guest: G.sync });
+const recoveries = FREEZE_LIKE
+  ? []
+  : linkStarvedFrames
+    ? withoutLinkStarved(frozenRecoveries({ host: H.sync, guest: G.sync }), linkStarvedFrames)
+    : frozenRecoveries({ host: H.sync, guest: G.sync });
 let framesExcluded = 0,
   mismatchesExcluded = 0;
 // DROP_PEER_MS: the reconnect as the logs show it, after the drop. From 12
@@ -1983,7 +2161,40 @@ const unansweredSocketResyncReport = (() => {
   const secondAsk = at(/RESYNC-REASK .*ask=2\/2/, Math.max(0, guardTimedOut));
   const appliedAfter = secondAsk < 0 ? -1 : at(/sync #\d+ applied/, secondAsk);
   const line = (i) => (i < 0 ? null : guestLines[i]);
+  const giveUp = at(/RESYNC-REASK-GIVEUP/);
+  const ignoredAt = at(/SYNC-LATE-ANSWER-IGNORED/);
+  const appliedAfterIgnored = ignoredAt < 0 ? -1 : at(/sync #\d+ applied/, ignoredAt);
+  const letGo = at(/RESYNC-REQUEST-TIMEOUT .*step=letGo/);
+  const recoveryAsk = at(/peer-recovery resync: sent sync-request-full-at:/);
+  const appliedBefore = (end) => guestLines.slice(0, end).filter((l) => /sync #\d+ applied/.test(l)).length;
+  const asksAfter = (from) => guestLines.slice(from + 1).filter((l) => /RESYNC-REASK /.test(l)).length;
+  // I1: the guest made frames after the fault (frames in the 5 s that followed).
+  const ticking = unansweredSocketResync.framesAfter >= 10;
+  const variantPassed =
+    UNANSWERED_VARIANT === 'giveup'
+      ? giveUp >= 0 && appliedBefore(giveUp) === 0 && asksAfter(giveUp) === 0 && ticking
+      : UNANSWERED_VARIANT === 'letgo'
+        ? recoveryAsk >= 0 &&
+          H.syncAnswersDropped.some((d) => d.drop === 'whole') &&
+          letGo > recoveryAsk &&
+          asksAfter(letGo) === 0 &&
+          ticking
+        : UNANSWERED_VARIANT === 'ignored'
+          ? H.syncAnswersDropped.some((d) => d.drop === 'chunks') &&
+            G.socketAnswersHeld.some((h) => h.releasedAt !== null) &&
+            ignoredAt >= 0 &&
+            appliedAfterIgnored > ignoredAt &&
+            ticking
+          : null;
   return {
+    variant: UNANSWERED_VARIANT,
+    ignored: line(ignoredAt),
+    appliedAfterIgnored: line(appliedAfterIgnored),
+    socketAnswersHeld: G.socketAnswersHeld,
+    giveUp: line(giveUp),
+    letGo: line(letGo),
+    recoveryAsk: line(recoveryAsk),
+    framesAfter: unansweredSocketResync.framesAfter,
     syncAnswersDropped: H.syncAnswersDropped,
     socketAnswersDropped: H.socketAnswersDropped,
     chunkTimeout: line(chunkTimeout),
@@ -1995,13 +2206,15 @@ const unansweredSocketResyncReport = (() => {
     asksAgain: guestLines.filter((l) => /RESYNC-REASK/.test(l)),
     applied: guestLines.filter((l) => /sync #\d+ applied/.test(l)),
     passed:
-      chunkTimeout >= 0 &&
-      guardArmed >= 0 &&
-      H.socketAnswersDropped.length >= 1 &&
-      H.syncAnswersDropped.some((d) => d.drop === 'whole') &&
-      guardTimedOut > guardArmed &&
-      secondAsk > guardTimedOut &&
-      appliedAfter > secondAsk,
+      variantPassed ??
+      (chunkTimeout >= 0 &&
+        guardArmed >= 0 &&
+        H.socketAnswersDropped.length >= 1 &&
+        H.syncAnswersDropped.some((d) => d.drop === 'whole') &&
+        guardTimedOut > guardArmed &&
+        secondAsk > guardTimedOut &&
+        appliedAfter > secondAsk &&
+        ticking),
   };
 })();
 // DOUBLE_RESYNC_ASK: the rate-limited second request, the dropped late
@@ -2601,20 +2814,18 @@ const cIntegrityAfterRecovery = (clog, marker) => {
     return !m || +m[1] >= recoveredAt + 30;
   }).length;
 };
-const postRecoveryIntegrity =
-  FREEZE_MS > 0
-    ? integrityAfterRecovery(H.sync, /coord sync dispatch/) +
-      integrityAfterRecovery(G.sync, /sync #\d+ applied/) +
-      cIntegrityAfterRecovery(H.clog, null) +
-      cIntegrityAfterRecovery(G.clog, /kn_set_frame: \d+/)
-    : 0;
-if (FREEZE_MS > 0)
+const postRecoveryIntegrity = FREEZE_LIKE
+  ? integrityAfterRecovery(H.sync, /coord sync dispatch/) +
+    integrityAfterRecovery(G.sync, /sync #\d+ applied/) +
+    cIntegrityAfterRecovery(H.clog, null) +
+    cIntegrityAfterRecovery(G.clog, /kn_set_frame: \d+/)
+  : 0;
+if (FREEZE_LIKE)
   console.log('post-recovery integrity events:', postRecoveryIntegrity, 'battle frames compared:', battleCompared);
-const integrityFailed =
-  FREEZE_MS > 0
-    ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
-    : (H.failed || 0) + (G.failed || 0) - excusedIntegrity.failedRollbacksExcluded > 0 ||
-      summary.integrityEvents.host + summary.integrityEvents.guest - excusedIntegrity.integrityEventsExcluded > 0;
+const integrityFailed = FREEZE_LIKE
+  ? !Number.isFinite(recoveredAt) || postRecoveryIntegrity > 0 || battleCompared < POST_RECOVERY_MIN_FRAMES
+  : (H.failed || 0) + (G.failed || 0) - excusedIntegrity.failedRollbacksExcluded > 0 ||
+    summary.integrityEvents.host + summary.integrityEvents.guest - excusedIntegrity.integrityEventsExcluded > 0;
 const minGameFpsFailed = MIN_GAME_FPS !== null && (!(gameFps.host >= MIN_GAME_FPS) || !(gameFps.guest >= MIN_GAME_FPS));
 if (minGameFpsFailed) {
   console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));
@@ -2761,8 +2972,8 @@ const unansweredSocketResyncFailed = UNANSWERED_SOCKET_RESYNC && !unansweredSock
 if (UNANSWERED_SOCKET_RESYNC) {
   console.log(
     unansweredSocketResyncFailed
-      ? 'UNANSWERED_SOCKET_RESYNC: not exercised, or no ask again after the guard timed out:'
-      : 'UNANSWERED_SOCKET_RESYNC: asked again after the guard timed out, and applied:',
+      ? `UNANSWERED_SOCKET_RESYNC=${UNANSWERED_VARIANT}: not exercised, or the path under test did not hold:`
+      : `UNANSWERED_SOCKET_RESYNC=${UNANSWERED_VARIANT}: the path under test held:`,
     JSON.stringify(unansweredSocketResyncReport),
   );
 }
