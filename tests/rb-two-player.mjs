@@ -1058,6 +1058,10 @@ if (
     SYNC_FOLLOW_UP ||
     MALFORMED_PEER ||
     HEAL_BOTH_SIDES ||
+    CATCH_UP_HOLE_MS > 0 ||
+    ASK_UNANSWERED_STALL_MS > 0 ||
+    ROLLBACK_AT_EDGE ||
+    PAST_WINDOW_FORCED ||
     CATCH_UP_MS > 0)
 ) {
   console.log('C_ROLLBACK_TRAP is mutually exclusive with the other fault knobs');
