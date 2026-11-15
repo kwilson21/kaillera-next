@@ -157,13 +157,20 @@ def test_a_guest_at_the_rom_prompt_joins_late_once_it_drops_one(browser, server_
         log = host.evaluate("window.NetplayRollback.exportSyncLog()")
         assert "reason=it is at the ROM prompt" in log, log[-3000:]
 
-        # The guest drops the ROM and joins the running match.
+        # The guest drops the ROM; its engine starts as a late joiner, and its
+        # emulator boots on its tap, as every player's does.
         guest.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         expect(guest.locator("#late-join-msg")).to_have_count(0, timeout=30000)
+        guest_prompt = guest.locator("#gesture-prompt")
+        expect(guest_prompt).to_be_visible(timeout=60000)
+        guest_prompt.click()
+        # It joins the running match. A late joiner boots cold and then waits
+        # for its state: in the cloud container that took 158-176 s in
+        # lifecycle-e2e's late-join runs.
         joined_at = _frame(host)
         guest.wait_for_function(
             f"(window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0) > {joined_at}",
-            timeout=90000,
+            timeout=240000,
         )
         # Both keep playing.
         host_then, guest_then = _frame(host), _frame(guest)
