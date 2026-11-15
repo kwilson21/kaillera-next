@@ -151,6 +151,10 @@ const SSB64_US: RomAddresses = {
  * 0x800A4D08. The rest are SSB64's, taken on the evidence of
  * docs/address-maps.md steps 3 to 5 run on this ROM: the verifier's checks
  * pass, healthy matches raise no flag, and a changed stock count is flagged.
+ * The sudden-death copy has not been seen in a Remix sudden death; the
+ * verifier shows the game's battle-state pointer at SSB64's 0x800A50E8,
+ * naming 0x800A4D08, so the three globals keep SSB64's layout, the second
+ * copy between them.
  * Other Remix releases are other ROM hashes and have no map until those
  * steps are run on them.
  */
