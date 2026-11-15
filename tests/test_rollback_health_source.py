@@ -212,6 +212,43 @@ def test_resync_settles_the_inputs_before_its_frame():
     assert "delete _inputSettledBefore[slot];" in src[reset_idx : src.index("\n  };\n", reset_idx)]
 
 
+def test_a_stalled_page_asks_for_the_inputs_it_dropped():
+    # specs/resync_inputs.qnt, ASK_FOR_MISSING: a page that dropped a peer's
+    # inputs as too far ahead remembers that the peer made them, and while
+    # the rollback input stall waits on them it asks for them again; the
+    # frames are KNCore.framesToAskFor (web/src/input-ask.ts, proved).
+    src = LOCKSTEP_JS.read_text()
+
+    oor_idx = src.index("_syncLog(`INPUT-OOR slot=")
+    oor_src = src[oor_idx : src.index("return false;", oor_idx)]
+    assert "_inputDroppedAheadUpTo[peer.slot] = Math.max(" in oor_src
+
+    ask_idx = src.index("const _askForMissingInputs = (peer, applyFrame, windowEdge) => {")
+    ask_src = src[ask_idx : src.index("\n  };\n", ask_idx)]
+    for snippet in (
+        "const from = Math.max(0, windowEdge, _inputFloor(slot));",
+        "_inputDroppedAheadUpTo[slot] ?? -1",
+        "window.KNCore.framesToAskFor(have, from, applyFrame, peerHas, RB_INPUT_ASK_MAX)",
+        "now - (askedAt[f] ?? -Infinity) < RB_INPUT_ASK_EVERY_MS",
+        "peer.dc.send(`resend:${f}`);",
+    ):
+        assert snippet in ask_src
+
+    # It asks from inside the stall, before the stall returns.
+    stall_idx = src.index("// Too far ahead — stall to let peer catch up")
+    stall_src = src[stall_idx : src.index("_markTickReturn('skip:rb-input-stall');", stall_idx)]
+    assert "_askForMissingInputs(p, rbApplyFrame, windowEdge);" in stall_src
+
+    # I2: both tables are per-peer state, and go with every input timeline.
+    reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
+    reset_src = src[reset_idx : src.index("\n  };\n", reset_idx)]
+    assert "delete _inputDroppedAheadUpTo[slot];" in reset_src
+    assert "delete _inputAskedAt[slot];" in reset_src
+    clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
+    clear_src = src[clear_idx : src.index("\n  };\n", clear_idx)]
+    assert "_inputDroppedAheadUpTo = {};" in clear_src and "_inputAskedAt = {};" in clear_src
+
+
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():
     src = LOCKSTEP_JS.read_text()
 
@@ -699,26 +736,31 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert "if (slot === 0) _hostNumbersAnswers = false;" in reset
 
 
-def test_a_late_answer_from_before_the_frame_asked_is_dropped():
-    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate),
-    # with lateAnswerAfterTheTargetDeadlineTest: the frame is the request's,
-    # not the live target, so the drop holds after the target's deadline too.
+def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
+    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate,
+    # lateAndBehind), with lateAnswerAfterTheTargetDeadlineTest: the frame
+    # named is the request's, not the live target, so the drop holds after
+    # the target's deadline too; and immediateLateAnswerTest: a late answer
+    # from before the guest's own frame is dropped when the newest request
+    # named no frame.
     src = LOCKSTEP_JS.read_text()
     older = src[src.index("const _answersAnOlderRequest = (answerFor) =>") :]
     older = older[: older.index(";\n")]
     assert "_resyncObserve('answers-an-older-request', answerFor > 0 && answerFor !== _resyncRequestId," in older
     assert "rules.answersAnOlderRequest(answerFor, _resyncRequestId)" in older
-    late = src[src.index("const _isLateAnswerBeforeFrameAsked = (state) =>") :]
+    late = src[src.index("const _isLateAnswerBehind = (state) =>") :]
     late = late[: late.index(";\n")]
-    assert "_answersAnOlderRequest(state.answerFor || 0)" in late
-    assert "_resyncRequestAt > 0 && state.frame < _resyncRequestAt" in late
-    assert "!!state &&\n    _resyncObserve(\n      'late-answer-before-frame-asked'," in late
     assert (
-        "rules.isLateAnswerBeforeFrameAsked(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt)"
+        "_answersAnOlderRequest(state.answerFor || 0) &&\n"
+        "        (state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))"
+    ) in late
+    assert "!!state &&\n    _resyncObserve(\n      'late-answer-behind'," in late
+    assert (
+        "rules.isLateAnswerBehind(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt, _frameNum)"
     ) in late
     assert "_syncTargetFrame" not in late
     tick = src[src.index("const tick = () => {") :]
-    drop_at = tick.index("if (_isLateAnswerBeforeFrameAsked(_pendingResyncState)) {")
+    drop_at = tick.index("if (_isLateAnswerBehind(_pendingResyncState)) {")
     dropped = tick[drop_at : tick.index("\n    }\n", drop_at)]
     assert "SYNC-LATE-ANSWER-DROPPED f=${_frameNum}" in dropped
     assert "_pendingResyncState = null;" in dropped
@@ -786,7 +828,7 @@ def test_the_resync_rules_are_observed():
     for what, name in (
         ("ends-request", "endsRequest"),
         ("answers-an-older-request", "answersAnOlderRequest"),
-        ("late-answer-before-frame-asked", "isLateAnswerBeforeFrameAsked"),
+        ("late-answer-behind", "isLateAnswerBehind"),
         ("keeps-awaited-answer", "keepsAwaitedAnswer"),
         ("late-join-lost-host", "lateJoinLostHostStep"),
     ):

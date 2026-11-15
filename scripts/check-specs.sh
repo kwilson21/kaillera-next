@@ -195,7 +195,8 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 # ── A resync from request to apply ──────────────────────────────────────────
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
-for variant in resync_flow_before resync_flow_any_answer resync_flow_current; do
+for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
+  resync_flow_asked_from resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
 # A guest stopped at its target has a deadline, a state no newer than the
@@ -206,13 +207,20 @@ done
 $QUINT run "$FLOW" --main=resync_flow_any_answer --invariant=holdWithoutNumbers \
   --max-samples=20000 --max-steps=25 --backend=typescript
 # And only its own answer ends a request, a late answer does not take the
-# guest back below the frame its newest request named (at the target or
-# after the target's deadline), and a late answer does not take the place of
-# the awaited one. All three were violated before a request had a number its
-# answer carries (resync_flow_any_answer; lateAnswerTest,
-# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
-# hold the orderings).
+# guest back (below its frame, or below the frame its newest request named,
+# at the target or after the target's deadline), and a late answer does not
+# take the place of the awaited one. All three were violated before a
+# request had a number its answer carries (resync_flow_any_answer;
+# lateAnswerTest, lateAnswerAfterTheTargetDeadlineTest and
+# lateAnswerOverTheAwaitedOneTest hold the orderings). The second was
+# violated too while only the frame a request named was checked
+# (resync_flow_frame_named; immediateLateAnswerTest), and is by rule b
+# (resync_flow_asked_from; lateAnswerFromAfterTheAskTest).
 $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+# Rule a, not taken, holds them too; it drops the only state coming in
+# onlyStateComingTest.
+$QUINT run "$FLOW" --main=resync_flow_drop_older --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── The tick loop's deadlines and a page that freezes ───────────────────────
@@ -231,7 +239,7 @@ $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldA
 RESYNC=specs/resync_inputs.qnt
 $QUINT typecheck "$RESYNC"
 for variant in resync_inputs_before resync_inputs_solo_holes resync_inputs_only_new \
-  resync_inputs_no_refeed resync_inputs_current; do
+  resync_inputs_no_refeed resync_inputs_no_ask resync_inputs_current; do
   $QUINT test "$RESYNC" --main="$variant" --backend=typescript
 done
 # Today: after a resync nobody waits for an input that cannot arrive, and the
@@ -246,6 +254,9 @@ done
 # And the guest applies them itself: violated while a resync did not hand its
 # engine the ones it already had, which the engine's ring may have written
 # over (resync_inputs_no_refeed).
+# A due resync is never left to its deadline: violated while a page waiting
+# on inputs it had dropped as out of range did not ask for them
+# (resync_inputs_no_ask; guestWaitsOnInputsItDroppedTest holds the ordering).
 $QUINT run "$RESYNC" --main=resync_inputs_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 

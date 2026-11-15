@@ -1,5 +1,6 @@
 """Shared fixtures for all tests (REST and Playwright E2E)."""
 
+import contextlib
 import os
 import secrets
 import subprocess
@@ -51,6 +52,50 @@ def _patch_requests_ssl():
         return _orig(self, *args, **kwargs)
 
     requests.Session.request = _patched
+
+
+# A real game needs a real ROM, which the repository does not ship. Tests that
+# boot one take it from KN_ROM, the variable tests/rb-two-player.mjs reads, and
+# are skipped without it.
+@pytest.fixture(scope="session")
+def rom_path():
+    path = os.environ.get("KN_ROM", "")
+    if not path:
+        pytest.skip("needs a ROM: set KN_ROM to the path of the SSB64 (USA) .z64")
+    if not os.path.isfile(path):
+        pytest.skip(f"KN_ROM is not a file: {path}")
+    return path
+
+
+@pytest.fixture
+def start_game():
+    """Start a game from the host's page and wait until it runs on every page.
+
+    After Start, a page may show the "tap to start" prompt (#gesture-prompt)
+    and stay on frame 0 until it is clicked, whatever the browser's autoplay
+    policy, so each page's prompt is clicked whenever it is shown, as
+    tests/rb-two-player.mjs does. Returns once window._lockstepActive is true
+    on all of them; fails after timeout_s seconds.
+    """
+
+    def start(host, *others, timeout_s=120):
+        pages = [host, *others]
+        host.wait_for_selector("#start-btn:not([disabled])", timeout=30000)
+        host.click("#start-btn")
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            for page in pages:
+                if page.locator("#gesture-prompt:not(.hidden)").count():
+                    # It may be hidden again before the click lands.
+                    with contextlib.suppress(Exception):
+                        page.locator("#gesture-prompt").click(force=True, timeout=2000)
+            if all(page.evaluate("window._lockstepActive === true") for page in pages):
+                return
+            time.sleep(0.5)
+        running = [page.evaluate("window._lockstepActive === true") for page in pages]
+        pytest.fail(f"game not running on every page after {timeout_s}s (running: {running})")
+
+    return start
 
 
 _room_n = 0

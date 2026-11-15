@@ -194,7 +194,7 @@ const runDetector = (
     if (event instanceof CustomEvent) suspects.push(structuredClone(event.detail));
   });
   if (scenes) {
-    const rom = { name: 'other-rom', values: [1, 2, 3], scenes, battleStatus: { offset: 0, ongoing: 1 } };
+    const rom = { name: 'other-rom', values: [1, 2, 3], scenes, battleStatus: { offset: 0, ongoing: 1, pointer: 0 } };
     detector.init(module, mode, rom);
     assert.deepEqual(installed, [[1, 2, 3]], "the ROM's address map is handed to the core");
   } else {
