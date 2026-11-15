@@ -6,7 +6,8 @@ const BOOLS = [true, false] as const;
 const DECISIONS = ['accepted', 'declined', null] as const;
 
 // onGameStarted's branches in web/static/play.js as of v0.68.18, in their
-// order. `mismatch` is hostRomMismatch(), which is false without a ROM.
+// order, before it asked gameStartPlan: the old-against-new evidence for the
+// switch. `mismatch` is hostRomMismatch(), which is false without a ROM.
 const oldGameStart = (
   isSpectator: boolean,
   mode: string,
@@ -77,7 +78,7 @@ test('no ROM while the host shares: wait for the transfer once taken, else keep 
   assert.equal(gameStartPlan(false, false, false, true, false, false), 'askForSharedRom');
 });
 
-// onGameEnded's early returns as of v0.68.18.
+// onGameEnded's early returns as of v0.68.18, before it asked handlesGameEnd.
 const oldHandlesEnd = (ended: string | null, last: string | null, leftByMachine: boolean, gameOn: boolean) => {
   if (ended && last === ended) return false;
   if (!leftByMachine && !gameOn) return false;

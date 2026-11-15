@@ -1,8 +1,17 @@
 /**
  * What a page in the room does when the host starts a game, and whether it
- * has anything to do when the game ends. The decisions of `onGameStarted`
- * and `onGameEnded` in web/static/play.js, which are observed against these
- * (`game-start-plan`, `game-end-handled`) before these decide.
+ * has anything to do when the game ends. `onGameStarted` and `onGameEnded`
+ * in web/static/play.js ask these and carry out the answer. They are the
+ * branches those handlers had, in the same order:
+ * tests/ts/play-game-start.test.ts holds them to a transcription of the old
+ * branches over every input.
+ *
+ * One reading differs from the late join's (`lateJoinPlan` in join-plan.ts)
+ * and is kept as it was: a player whose ROM is not the host's and who has
+ * declined the host's offer gets `wrongRom` here, where a late joiner is
+ * shown the offer again. No page can decline today (the decline button is
+ * gone; nothing calls `declineRomSharing`), so the difference is not
+ * reachable until one can.
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */

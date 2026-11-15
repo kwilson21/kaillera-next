@@ -296,8 +296,8 @@ comes in as a spectator and how it gets into a match already under way are
 `join-plan.ts` (proved), observed, with `onConnect` still deciding. What a
 page does when the host starts a game (watch, keep the host's ROM offer up,
 wait for the transfer, stop on a ROM that is not the host's, or boot) and
-whether it has a game's end to handle are `game-start.ts` (proved),
-observed, with `onGameStarted` and `onGameEnded` still deciding. Left in
+whether it has a game's end to handle are `game-start.ts` (proved), which
+`onGameStarted` and `onGameEnded` ask and carry out. Left in
 `play.js`: the reconnect banner's timers, what the game lifecycle handlers do
 to the page, and engine start-up, which are effects on the page, the socket
 and the emulator.
