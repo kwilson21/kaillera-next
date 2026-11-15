@@ -5,9 +5,19 @@
 import * as autopilot from './autopilot.ts';
 import { installEjsGlobals } from './ejs-globals.ts';
 import * as hud from './hud.ts';
+import { createIndicators } from './indicators.ts';
 import * as network from './network.ts';
 import * as options from './options.ts';
 import * as rom from './rom.ts';
 import { demoRomStore } from './rom-store.ts';
 
-export const demo = { autopilot, hud, network, options, rom, romStore: demoRomStore, installEjsGlobals };
+export const demo = {
+  autopilot,
+  hud,
+  network,
+  options,
+  rom,
+  romStore: demoRomStore,
+  installEjsGlobals,
+  indicators: createIndicators,
+};

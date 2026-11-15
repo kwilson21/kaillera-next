@@ -1229,66 +1229,10 @@
   // ignored (autopilot is driving the menus) or whether they're in control.
   // state: 'disabled' shows persistent amber badge; 'enabled' flashes a
   // green "YOU'RE IN CONTROL" badge for 3s; null/undefined removes both.
-  let _inputIndicatorTimer = null;
-  const _ensureIndicatorAnim = () => {
-    if (document.getElementById('kn-demo-indicator-anim')) return;
-    const style = document.createElement('style');
-    style.id = 'kn-demo-indicator-anim';
-    style.textContent = _demo.hud.INPUT_INDICATOR_KEYFRAMES;
-    document.head.appendChild(style);
-  };
-  // Always remove the existing indicator before creating a new one. Mutating
-  // the same element to swap state caused two animations (pulse + fade) to
-  // briefly fight each other, which the browser composited as a visible flash.
-  const _showInputIndicator = (state) => {
-    if (_inputIndicatorTimer) {
-      clearTimeout(_inputIndicatorTimer);
-      _inputIndicatorTimer = null;
-    }
-    const existing = document.getElementById('input-indicator');
-    if (existing) existing.remove();
-    if (!state) return;
-    _ensureIndicatorAnim();
-    const el = document.createElement('div');
-    el.id = 'input-indicator';
-    el.style.cssText = _demo.hud.INPUT_INDICATOR_CSS;
-    const look = _demo.hud.inputIndicator(state);
-    if (look) {
-      el.textContent = look.text;
-      el.style.background = look.background;
-      el.style.animation = look.animation;
-      if (look.removeAfterMs != null) {
-        _inputIndicatorTimer = setTimeout(() => {
-          const cur = document.getElementById('input-indicator');
-          if (cur) cur.remove();
-          _inputIndicatorTimer = null;
-        }, look.removeAfterMs);
-      }
-    }
-    document.body.appendChild(el);
-  };
-
-  const _showRecIndicator = (on) => {
-    let el = document.getElementById('rec-indicator');
-    if (on && !el) {
-      el = document.createElement('div');
-      el.id = 'rec-indicator';
-      el.textContent = '● REC';
-      el.style.cssText =
-        'position:fixed;top:12px;right:12px;z-index:9999;' +
-        'padding:6px 12px;border-radius:6px;background:#a02020;color:#fff;' +
-        'font-family:sans-serif;font-weight:800;font-size:13px;letter-spacing:0.08em;' +
-        'box-shadow:0 0 0 0 rgba(255,80,80,0.6);animation:recPulse 1.4s ease-in-out infinite;' +
-        'pointer-events:none;';
-      const style = document.createElement('style');
-      style.textContent =
-        '@keyframes recPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,80,80,0.6)}50%{box-shadow:0 0 0 12px rgba(255,80,80,0)}}';
-      document.head.appendChild(style);
-      document.body.appendChild(el);
-    } else if (!on && el) {
-      el.remove();
-    }
-  };
+  // The input indicator and the REC badge. web/src/demo/indicators.ts.
+  const _indicators = _demo.indicators(window);
+  const _showInputIndicator = (state) => _indicators.showInput(state);
+  const _showRecIndicator = (on) => _indicators.showRec(on);
 
   // Manual recording controls. Use these from devtools console if you didn't
   // visit with ?record=1 from the start:
