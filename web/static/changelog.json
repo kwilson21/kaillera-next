@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.32",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a guest catches up from a host state behind it instead of rewinding to it (#261)"
+      }
+    ]
+  },
+  {
     "version": "0.68.31",
     "date": "2026-11-15",
     "changes": [
