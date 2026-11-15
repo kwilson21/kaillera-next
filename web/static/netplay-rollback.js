@@ -1739,6 +1739,11 @@
   // asked for each frame. Cleared with the peer's other input state
   // (resetPeerState, I2) and with every input timeline.
   let _inputDroppedAheadUpTo = {};
+  // INPUT-OOR is logged at most once a second per slot, with how many were
+  // dropped since the last line: a peer far behind sends every frame, and a
+  // line each filled the sync log's ring and evicted everything before it.
+  const INPUT_OOR_LOG_EVERY_MS = 1000;
+  let _inputOorLog = {}; // slot -> { at, dropped }
   let _inputAskedAt = {};
   // Per peer slot, the frames of the switch to the reliable input channel's
   // resend not sent yet: {from, upTo, ack} (_switchInputsToReliable). Cleared
@@ -5235,7 +5240,9 @@
     }
     if (sent.length) {
       _syncLog(
-        `RB-INPUT-ASK f=${_frameNum} slot=${slot} frames=${sent[0]}..${sent.at(-1)} count=${sent.length} peerHas=${peerHas}`,
+        `RB-INPUT-ASK f=${_frameNum} slot=${slot} frames=${sent[0]}..${sent.at(-1)} count=${sent.length} peerHas=${peerHas}` +
+          ` dcBuffered=${peer.dc?.bufferedAmount ?? -1} dcLabel=${peer.dc?.label ?? ''} dcId=${peer.dc?.id ?? -1}` +
+          ` pc=${peer.pc?.connectionState ?? 'none'} pcIsDcs=${peer.dc?._knPc === peer.pc} wall=${Date.now()}`,
       );
     }
   };
@@ -5349,6 +5356,8 @@
   let _catchUpStartedAt = 0;
   let _catchUpWorkMs = 0;
   let _catchUpSlices = 0;
+  let _catchUpSendsReliable = 0; // diagnostic: input packets sent per tick while catching up
+  let _catchUpSendsUnreliable = 0;
 
   // Legacy booleans — still the source of truth until fully migrated.
   // Each is set alongside _phase during the transition period.
@@ -8581,7 +8590,16 @@
       recvFrame < _frameNum - INPUT_PAST_WINDOW_FRAMES ||
       recvFrame > recvBound + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES
     ) {
-      _syncLog(`INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES}`);
+      const oor = (_inputOorLog[peer.slot] ??= { at: -Infinity, dropped: 0 });
+      oor.dropped++;
+      const oorNow = performance.now();
+      if (oorNow - oor.at >= INPUT_OOR_LOG_EVERY_MS) {
+        _syncLog(
+          `INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES} dropped=${oor.dropped}`,
+        );
+        oor.at = oorNow;
+        oor.dropped = 0;
+      }
       // Too far ahead: the peer has made it and will not send it again on
       // its own. When this page catches up to it, it asks
       // (_askForMissingInputs).
@@ -9048,6 +9066,11 @@
         if (e.data.startsWith('resend:')) {
           const resendFrame = parseInt(e.data.split(':')[1], 10);
           const localInput = _localInputs[resendFrame];
+          _syncLog(
+            `RESEND f=${_frameNum} slot=${peer.slot} frame=${resendFrame} have=${localInput !== undefined} ` +
+              `via=${peer.dc === ch ? 'same' : 'other'} dc=${peer.dc?.readyState ?? 'none'} chId=${ch.id ?? -1} ` +
+              `wall=${Date.now()}`,
+          );
           if (localInput !== undefined) {
             try {
               peer.dc.send(KNShared.encodeInput(resendFrame, localInput).buffer);
@@ -13075,6 +13098,7 @@
     _remoteInputs = preservedRemoteInputs;
     _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
     _inputDroppedAheadUpTo = {};
+    _inputOorLog = {};
     _inputAskedAt = {};
     _resendAtSwitch = {};
     _peerInputStarted = preservedPeerStarted;
@@ -13870,6 +13894,7 @@
         _remoteInputs = {};
         _inputSettledBefore = {};
         _inputDroppedAheadUpTo = {};
+        _inputOorLog = {};
         _inputAskedAt = {};
         _resendAtSwitch = {};
         for (let d = 0; d < DELAY_FRAMES; d++) {
@@ -15276,6 +15301,10 @@
         if (inputDc?.readyState === 'open') {
           inputDc.send(peerBuf);
           _rbTransportPacketsSent++;
+          if (_catchUpTo >= 0) {
+            if (inputDc === peer.dc) _catchUpSendsReliable++;
+            else _catchUpSendsUnreliable++;
+          }
           // Initialize ack tracking on first send to avoid false positive
           if (!peer.lastAckAdvanceTime) peer.lastAckAdvanceTime = performance.now();
         } else {
@@ -18610,6 +18639,8 @@
     window.KNDesync?.forgetFrom(fromFrame);
     _catchUpWorkMs = 0;
     _catchUpSlices = 0;
+    _catchUpSendsReliable = 0;
+    _catchUpSendsUnreliable = 0;
     _setReplayFullHeadless(mod, true, 'catch-up');
     _setReplayRdpSkip(mod, true, 'catch-up');
     _setReplayAudioOutputSkip(mod, true, 'catch-up');
@@ -18624,7 +18655,9 @@
     _syncLog(
       `SYNC-CATCH-UP from=${_catchUpFrom} to=${_frameNum} of=${_catchUpTo} frames=${_frameNum - _catchUpFrom} ` +
         `ms=${(performance.now() - _catchUpStartedAt).toFixed(1)} workMs=${_catchUpWorkMs.toFixed(1)} ` +
-        `slices=${_catchUpSlices}${stoppedAt ? ` stopped: ${stoppedAt}` : ''}`,
+        `slices=${_catchUpSlices} sentReliable=${_catchUpSendsReliable} sentUnreliable=${_catchUpSendsUnreliable} ` +
+        `dcBuffered=${Math.max(-1, ...Object.values(_peers).map((p) => p.dc?.bufferedAmount ?? -1))} ` +
+        `transport=${_rbTransport}${stoppedAt ? ` stopped: ${stoppedAt}` : ''}`,
     );
     _catchUpTo = -1;
     _catchUpFrom = -1;
@@ -19099,6 +19132,7 @@
     _remoteInputs = {};
     _inputSettledBefore = {};
     _inputDroppedAheadUpTo = {};
+    _inputOorLog = {};
     _inputAskedAt = {};
     _resendAtSwitch = {};
     _peerInputStarted = {};
