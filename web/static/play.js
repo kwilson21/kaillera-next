@@ -168,6 +168,11 @@
   let _romHash = null; // SHA-256 hex of loaded ROM
   let _romName = null; // display name for the loaded ROM
   let _romSize = null; // byte size for the loaded ROM
+  // The loaded ROM is one the player dropped themselves (its name), not a copy
+  // the page chose (the library, the cache, the host's transfer). Told why
+  // when the host's ROM turns out not to match it; a copy the page chose is
+  // swapped quietly.
+  let _romDroppedName = null;
   let _gameId = null; // derived from ROM hash via known_roms table
   let _hostRomHash = null; // host's ROM hash for late-join verification
   let _hostRomName = null; // host's current ROM display name
@@ -525,13 +530,18 @@
 
     if (hostRomMismatch()) {
       console.warn(
-        '[play] host ROM mismatch - clearing cached ROM',
+        '[play] host ROM mismatch - clearing our ROM',
         'host:',
         _hostRomHash?.substring(0, 16) || _hostRomSize,
         'ours:',
         _romHash?.substring(0, 16) || _romSize,
       );
+      // A ROM the player dropped before the host's was known: say why it goes
+      // (as at the drop, when the host's is known). A library match found
+      // next hides the banner again.
+      const dropped = _romDroppedName && ((_romHash && _knownRoms[_romHash]?.game) || _romDroppedName);
       clearLoadedRom();
+      if (dropped) showRomMismatch(dropped);
       resetTransferForHostRomChange();
       if (_hostRomHash) autoMatchRom(_hostRomHash);
       updateRomSharingUI();
@@ -2452,6 +2462,7 @@
 
     _romBlob = blob;
     _romName = displayName;
+    _romDroppedName = null;
     _romSize = blob.size;
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(blob);
@@ -3071,6 +3082,7 @@
     hideRomMismatch();
     _romBlob = file;
     _romName = displayName;
+    _romDroppedName = displayName;
     _romSize = file.size;
     if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
     _romBlobUrl = URL.createObjectURL(file);
@@ -3175,6 +3187,7 @@
     _romBlobUrl = null;
     _romHash = null;
     _romName = null;
+    _romDroppedName = null;
     _romSize = null;
     _gameId = null;
     KNState.romHash = null;
@@ -3223,6 +3236,7 @@
         const blob = new Blob([val.blob]);
         _romBlob = blob;
         _romName = val.name;
+        _romDroppedName = null;
         _romSize = val.size || blob.size;
         if (_romBlobUrl) URL.revokeObjectURL(_romBlobUrl);
         _romBlobUrl = URL.createObjectURL(blob);

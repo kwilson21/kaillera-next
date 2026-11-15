@@ -227,6 +227,25 @@ def test_a_rom_that_is_not_the_hosts_is_refused_and_the_start_keeps_the_offer_up
         guest.close()
 
 
+def test_a_rom_dropped_before_the_hosts_is_known_is_refused_with_a_word_once_it_is(browser, server_url, room):
+    # The refusal at the drop needs the host's ROM known. One dropped before
+    # it is taken; when the host's arrives and does not match, it is cleared,
+    # and the player is told why, as at the drop. It used to vanish without a
+    # word: the clearing was meant for a copy the page chose itself.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        guest.set_input_files("#rom-drop input[type=file]", OTHER_ROM)
+        expect(guest.locator("#rom-status")).to_contain_text("other.z64", timeout=15000)
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        _load_rom(host)
+        expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
+        expect(guest.locator("#rom-mismatch")).to_contain_text("other.z64")
+        expect(guest.locator("#rom-status")).not_to_contain_text("other.z64")
+    finally:
+        host.close()
+        guest.close()
+
+
 def test_a_player_who_took_the_hosts_rom_waits_for_it_in_the_lobby(browser, server_url, room):
     host, guest = _guest_in_a_room(browser, server_url, room)
     try:
