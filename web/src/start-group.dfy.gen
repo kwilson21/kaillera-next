@@ -46,13 +46,23 @@ function takesLeftOut(fromSlot: int, mySlot: int, running: bool, slot: int, alre
       if (running || alreadyOut) then
         false
       else
-        (((slot >= 0) && (slot < 4)) && (slot != mySlot))
+        (((slot > HOST_SLOT) && (slot < 4)) && (slot != mySlot))
 }
 
 lemma takesLeftOut_ensures(fromSlot: int, mySlot: int, running: bool, slot: int, alreadyOut: bool)
   ensures (takesLeftOut(fromSlot, mySlot, running, slot, alreadyOut) ==> (((fromSlot == 0) && (mySlot > 0)) && (mySlot < 4)))
-  ensures (takesLeftOut(fromSlot, mySlot, running, slot, alreadyOut) ==> ((((!(running) && !(alreadyOut)) && (slot >= 0)) && (slot < 4)) && (slot != mySlot)))
+  ensures (takesLeftOut(fromSlot, mySlot, running, slot, alreadyOut) ==> ((((!(running) && !(alreadyOut)) && (slot > 0)) && (slot < 4)) && (slot != mySlot)))
   ensures ((fromSlot != 0) ==> !(takesLeftOut(fromSlot, mySlot, running, slot, alreadyOut)))
+{
+}
+
+function startHasItsHost(isHost: bool, hostChannelOpen: bool): bool
+{
+  (isHost || hostChannelOpen)
+}
+
+lemma startHasItsHost_ensures(isHost: bool, hostChannelOpen: bool)
+  ensures (startHasItsHost(isHost, hostChannelOpen) <==> (isHost || hostChannelOpen))
 {
 }
 

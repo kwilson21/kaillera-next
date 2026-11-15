@@ -155,7 +155,7 @@ def test_a_guest_at_the_rom_prompt_joins_late_once_it_drops_one(browser, server_
         prompt.click()
         host.wait_for_function("(window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0) > 60", timeout=60000)
         log = host.evaluate("window.NetplayRollback.exportSyncLog()")
-        assert "reason=it has no ROM" in log, log[-3000:]
+        assert "reason=it is at the ROM prompt" in log, log[-3000:]
 
         # The guest drops the ROM and joins the running match.
         guest.locator("#rom-drop input[type='file']").set_input_files(rom_path)

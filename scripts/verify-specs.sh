@@ -294,6 +294,12 @@ start_group() {
   expect_violation "$START_GROUP" start_group_untold neverStuck
   # A room of two, the guest slow, three deadlines: 4 steps (aSlowGuestTest).
   expect_violation "$START_GROUP" start_group_no_rejoin nobodyIsInNeither
+  # The same, and the last attempt opens after the give-up: 5 steps (aLateOpenTest).
+  expect_violation "$START_GROUP" start_group_open_after_give_up nobodyIsInNeither
+  # The same, and the guest's side fails instead: 5 steps (aGuestLosesTheHostTest).
+  expect_violation "$START_GROUP" start_group_deadline_with_the_connection nobodyIsInNeither
+  # A room of three, both answer, one is lost: 4 steps (aLostAfterTheSequenceTest).
+  expect_violation "$START_GROUP" start_group_lost_dropped neverStuck
 }
 
 ring_after_resync() {

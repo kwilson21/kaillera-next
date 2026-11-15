@@ -330,6 +330,7 @@ class Room:
     rom_size: int | None = None  # Host-provided byte size for the currently loaded ROM
     rom_sharing: bool = False  # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
+    rom_prompt: set[str] = field(default_factory=set)  # sids at the ROM prompt: no ROM, asking for one
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
@@ -401,6 +402,7 @@ def _players_payload(room: Room) -> dict:
                 "playerName": info.get("playerName", "Player"),
                 "slot": pid_to_slot.get(pid),
                 "romReady": info["socketId"] in room.rom_ready,
+                "romPrompt": info["socketId"] in room.rom_prompt,
                 "inputType": room.input_types.get(info["socketId"], "keyboard"),
                 "deviceType": room.device_types.get(info["socketId"], "desktop"),
             }
@@ -552,6 +554,9 @@ def _swap_sid(room: Room, persistent_id: str, old_sid: str, new_sid: str) -> Non
     if old_sid in room.rom_ready:
         room.rom_ready.discard(old_sid)
         room.rom_ready.add(new_sid)
+    if old_sid in room.rom_prompt:
+        room.rom_prompt.discard(old_sid)
+        room.rom_prompt.add(new_sid)
     if old_sid in room.input_types:
         room.input_types[new_sid] = room.input_types.pop(old_sid)
     if old_sid in room.device_types:
@@ -633,6 +638,7 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
             del room.slots[rm_slot]
 
     room.rom_ready.discard(sid)
+    room.rom_prompt.discard(sid)
     room.input_types.pop(sid, None)
     room.device_types.pop(sid, None)
 
@@ -1117,6 +1123,7 @@ async def _release_slot_locked(sid: str) -> str | None:
             del room.slots[slot]
     room.spectators[player_id] = {"socketId": sid, "playerName": player_name}
     room.rom_ready.discard(sid)
+    room.rom_prompt.discard(sid)
     _sid_to_room[sid] = (session_id, player_id, True)
 
     await _emit("users-updated", _players_payload(room), room=session_id)
@@ -1475,6 +1482,11 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
             return "Not in a room"
         session_id, room = result
 
+        # Any word but "no ROM, at the prompt" ends the prompt.
+        if not payload.ready and payload.prompt and sid != room.owner:
+            room.rom_prompt.add(sid)
+        else:
+            room.rom_prompt.discard(sid)
         if sid == room.owner:
             if not payload.ready:
                 _clear_host_rom(room)

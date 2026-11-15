@@ -397,7 +397,7 @@ def test_a_guest_at_the_rom_prompt_does_not_hold_the_hosts_start(browser, server
         # The host starts without it, well before its first startup retry (8 s).
         expect(host.locator("#gesture-prompt")).to_be_visible(timeout=6000)
         log = host.evaluate(_SYNC_LOG)
-        assert "reason=it has no ROM" in log, log[-3000:]
+        assert "reason=it is at the ROM prompt" in log, log[-3000:]
         assert "START-ALONE" in log
         assert "startup connect retry" not in log
     finally:
@@ -430,6 +430,44 @@ def test_a_guest_that_never_answers_does_not_hold_the_hosts_start(browser, serve
         assert guest.evaluate("window.__engineStarts") == [False, True]
         # The late joiner's engine (a fresh sync log) offers to the host itself.
         guest.wait_for_function(f"{_SYNC_LOG}.includes('late-joiner always initiates')", timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_a_guest_that_loses_the_host_before_the_match_runs_joins_late(browser, server_url, room):
+    """A channel lost before the match runs is retried, then given up on; the guest's deadline outlives it.
+
+    The guest's channel to the host opens, then closes before the match runs
+    (nothing boots here, so it never runs), and the guest stops hearing the
+    host's offers. The host retries the connection as one that never opened,
+    and leaves the guest out at the give-up; it used to drop it without a word
+    once the game sequence had started. The guest's deadline on the host,
+    armed again on the loss, takes it into the late join; it used to go with
+    the connection, and the guest waited for ever (specs/start_group.qnt,
+    LOST_IS_RETRIED, GUEST_DEADLINE_ON_LOSS).
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    try:
+        _load_rom(host)
+        _load_rom(guest)
+        guest.evaluate(_RECORD_ENGINE_STARTS)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        guest.wait_for_function(
+            "Object.values(window.KNState.peers || {}).some((p) => p.slot === 0 && p.dc?.readyState === 'open')",
+            timeout=45000,
+        )
+        # The guest stops hearing the host, and its channel to the host closes.
+        guest.evaluate(_DEAF_TO_OFFERS)
+        guest.evaluate("Object.values(window.KNState.peers).find((p) => p.slot === 0).dc.close()")
+        # The host retries, then leaves the guest out.
+        host.wait_for_function(f"{_SYNC_LOG}.includes('reason=startup connect gave up')", timeout=45000)
+        assert "startup connect retry" in host.evaluate(_SYNC_LOG)
+        # The guest's deadline takes it into the late join.
+        guest.wait_for_function("window.__engineStarts.length >= 2", timeout=45000)
+        assert guest.evaluate("window.__engineStarts") == [False, True]
     finally:
         host.close()
         guest.close()
@@ -482,7 +520,7 @@ def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):
                 peer.dc.send('left-out:{other_slot}');
                 return true;
             }}""",
-            timeout=20000,
+            timeout=45000,
         )
         assert sent
         host_slot_word = f"left-out:{other_slot}"

@@ -7,7 +7,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { KNCore } from '../../web/src/index.ts';
-import { countedByStartGates, leavesOut, rejoinsLate, startsAlone, takesLeftOut } from '../../web/src/start-group.ts';
+import { startDeadline } from '../../web/src/start-deadline.ts';
+import {
+  countedByStartGates,
+  leavesOut,
+  rejoinsLate,
+  startHasItsHost,
+  startsAlone,
+  takesLeftOut,
+} from '../../web/src/start-group.ts';
 
 const BOOLS = [false, true] as const;
 const SLOTS = [-1, 0, 1, 2, 3, 4] as const;
@@ -42,7 +50,7 @@ test('the host starts alone only with nobody left in its start group', () => {
   assert.equal(startsAlone(false, false, 0), false);
 });
 
-test("a guest takes left-out only from the host's channel, for a slot other than its own", () => {
+test("a guest takes left-out only from the host's channel, for another guest's slot", () => {
   for (const from of SLOTS)
     for (const mine of SLOTS)
       for (const slot of SLOTS)
@@ -50,7 +58,7 @@ test("a guest takes left-out only from the host's channel, for a slot other than
           for (const out of BOOLS) {
             const takes = takesLeftOut(from, mine, running, slot, out);
             const expected =
-              from === 0 && mine > 0 && mine < 4 && !running && !out && slot >= 0 && slot < 4 && slot !== mine;
+              from === 0 && mine > 0 && mine < 4 && !running && !out && slot > 0 && slot < 4 && slot !== mine;
             assert.equal(takes, expected, `from=${from} mine=${mine} slot=${slot} running=${running} out=${out}`);
           }
   // Another guest's word, or one to the host, is not taken.
@@ -58,6 +66,14 @@ test("a guest takes left-out only from the host's channel, for a slot other than
   assert.equal(takesLeftOut(0, 0, false, 1, false), false);
   // A spectator (-1) waits for nobody.
   assert.equal(takesLeftOut(0, -1, false, 1, false), false);
+  // The host never leaves itself out.
+  assert.equal(takesLeftOut(0, 1, false, 0, false), false);
+});
+
+test('a guest goes on with its start only with its channel to the host open', () => {
+  for (const isHost of BOOLS)
+    for (const open of BOOLS) assert.equal(startHasItsHost(isHost, open), isHost || open, `${isHost} ${open}`);
+  assert.equal(startHasItsHost(false, false), false);
 });
 
 test('a guest with no channel to the host by its deadline joins late, unless it is joining late already', () => {
@@ -74,4 +90,6 @@ test('KNCore gives the engine the start group decisions', () => {
   assert.equal(KNCore.startGroup.startsAlone, startsAlone);
   assert.equal(KNCore.startGroup.takesLeftOut, takesLeftOut);
   assert.equal(KNCore.startGroup.rejoinsLate, rejoinsLate);
+  assert.equal(KNCore.startGroup.startHasItsHost, startHasItsHost);
+  assert.equal(KNCore.startGroup.startDeadline, startDeadline);
 });

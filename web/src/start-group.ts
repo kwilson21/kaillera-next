@@ -11,7 +11,7 @@
  * own channel and never leaves anyone out itself. A guest whose page started
  * normally but has no channel to the host by its own deadline joins late
  * instead, so no player whose page is alive ends up in neither the start nor
- * the late join.
+ * the late join; a guest without that channel never goes on with its start.
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */
@@ -70,11 +70,12 @@ export function startsAlone(isHost: boolean, sequenceStarted: boolean, waitingFo
  * Does a page take the word `left-out:<slot>`?
  *
  * Only from the host's own channel (`fromSlot`), only on a guest (`mySlot`,
- * -1 for a spectator) before its match runs, and only for a player slot
- * other than its own and not already left out.
+ * -1 for a spectator) before its match runs, and only for a guest's slot
+ * other than its own and not already left out: the host never leaves itself
+ * out.
  */
 //@ ensures \result ==> fromSlot === 0 && mySlot > 0 && mySlot < 4
-//@ ensures \result ==> !running && !alreadyOut && slot >= 0 && slot < 4 && slot !== mySlot
+//@ ensures \result ==> !running && !alreadyOut && slot > 0 && slot < 4 && slot !== mySlot
 //@ ensures fromSlot !== 0 ==> !\result
 export function takesLeftOut(
   fromSlot: number,
@@ -86,7 +87,21 @@ export function takesLeftOut(
   if (fromSlot !== HOST_SLOT) return false;
   if (mySlot <= HOST_SLOT || mySlot >= 4) return false;
   if (running || alreadyOut) return false;
-  return slot >= 0 && slot < 4 && slot !== mySlot;
+  return slot > HOST_SLOT && slot < 4 && slot !== mySlot;
+}
+
+/**
+ * May this page's start go past a wait (emu-ready, the ready barrier)?
+ *
+ * A guest's start group always holds the host: with no open channel to it, a
+ * guest that counted only the players left would sync and run a match of its
+ * own. It waits instead; its deadline on the host takes it into the late join
+ * if the channel does not come back. `isHost`: this page is the host.
+ * `hostChannelOpen`: its channel to the host is open.
+ */
+//@ ensures \result <==> isHost || hostChannelOpen
+export function startHasItsHost(isHost: boolean, hostChannelOpen: boolean): boolean {
+  return isHost || hostChannelOpen;
 }
 
 /**

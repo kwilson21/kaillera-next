@@ -1457,9 +1457,11 @@
       crumb('start-rom-prompt', { sharing: false });
       // Say so: this page runs no engine until a ROM is dropped and will not
       // answer the start's connections, and the host starts without it
-      // rather than after its retries (specs/start_group.qnt). The server may
-      // still count it ready (the start took the word while it was on its way).
-      if (socket?.connected) socket.emit('rom-ready', { ready: false });
+      // rather than after its retries (specs/start_group.qnt). `prompt`: at the
+      // ROM prompt, not merely without a ROM yet (a page that reloaded shows
+      // that until its rom-ready arrives). The server may still count it
+      // ready (the start took the word while it was on its way).
+      if (socket?.connected) socket.emit('rom-ready', { ready: false, prompt: true });
       // As a late joiner's: tells the machine once frames run, so the join is
       // not reported as stranded.
       if (!isSpectator && mode !== 'streaming') _sessionWatchLateJoin();
