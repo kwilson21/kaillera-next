@@ -79,6 +79,19 @@ expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
 # replacement's connection in 5 steps (oldCandidateReachesReplacementConnectionTest).
 expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
 
+STREAM=specs/streaming_connection.qnt
+verify "$STREAM" streaming_connection_fixed allHold
+verify "$STREAM" streaming_connection_current holdToday
+# Today's engine: a lost offer leaves the guest with nothing to come and a
+# stray offer is answered, each in 2 steps; a stray sender's second offer is
+# applied to its first connection in 4. (The host's own case of the last,
+# newConnectionTakenAsRenegotiationTest, is 7 steps long, beyond this bound.)
+expect_violation "$STREAM" streaming_connection_current neverLeftWithNothingPending
+expect_violation "$STREAM" streaming_connection_current staleSignalsAreNotApplied
+expect_violation "$STREAM" streaming_connection_current receiversConnectOnlyToTheHost
+# The reconnect fix alone still answers any member's offer.
+expect_violation "$STREAM" streaming_connection_reconnects receiversConnectOnlyToTheHost
+
 PAUSE=specs/late_join_pause.qnt
 verify "$PAUSE" late_join_pause_current allHold
 expect_violation "$PAUSE" late_join_pause_before hostPauseHasADeadline
