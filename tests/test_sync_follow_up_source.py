@@ -88,7 +88,12 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
     push = src[src.index("const pushSyncState = async (") :]
     push = push[: push.index("_kn_sync_read(")]
     # The watch is set before the state is read, not after it is sent.
-    assert "_followUpWatches.set(sid, { frame, changed: false });" in push
+    assert (
+        "_followUpWatches.set(sid, { frame, changed: false, delivered: false });"
+        in push
+    )
+    # A watch superseded by a newer state is marked changed: its follow-up goes out.
+    assert "w.changed = true;\n        _followUpWatches.delete(sid);" in push
     # I2: a reset or the match ending drops the watches.
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
@@ -106,3 +111,35 @@ def test_every_input_the_page_feeds_goes_through_the_watch():
     for i in calls:
         before = src[max(0, i - 200) : i]
         assert "_feedWatched(" in before, src[max(0, i - 200) : i + 40]
+
+
+def test_a_follow_up_is_skipped_only_for_a_delivered_state_with_no_phantom():
+    src = LOCKSTEP_JS.read_text()
+    dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
+    dispatch = dispatch[: dispatch.index("\n  };\n")]
+    assert "!!r.watch?.delivered," in dispatch
+    assert "confirmedFor(r) && !anyPhantom," in dispatch
+    # Delivered: only a transfer that ended `sent` marks the watch.
+    chunks = src[src.index("const sendSyncChunks = async (") :]
+    chunks = chunks[: chunks.index("\n  };\n")]
+    assert (
+        "if (outcomes[i] === 'sent' && w && w.frame === frame) w.delivered = true;"
+        in chunks
+    )
+
+
+def test_the_misprediction_buffer_does_not_outlive_its_module():
+    src = LOCKSTEP_JS.read_text()
+    total = src[src.index("const _mispredTotal = (mod) => {") :]
+    total = total[: total.index("\n  };\n")]
+    assert "if (_mispredBufMod !== mod) {" in total
+    stop = src[
+        src.index(
+            "// Free auxiliary WASM scratch buffers regardless of _useCRollback"
+        ) :
+    ]
+    stop = stop[: stop.index("window._rbMispredBuf = 0;\n      _mispredBufPtr = 0;")]
+    assert (
+        "if (_mispredBufPtr && _mispredBufMod === stopMod) stopMod._free(_mispredBufPtr);"
+        in stop
+    )

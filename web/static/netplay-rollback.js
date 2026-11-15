@@ -4999,9 +4999,17 @@
   // that state and whether an input at or before it has since differed from
   // its prediction (specs/sync_follow_up.qnt). Set as the state is taken.
   const _followUpWatches = new Map(); // sid -> {frame, changed}
+  // The buffer belongs to the module that allocated it: EmulatorJS can
+  // replace the module between matches, and stopSync drops it with the
+  // other scratch buffers.
   let _mispredBufPtr = 0;
+  let _mispredBufMod = null;
   const _mispredTotal = (mod) => {
     if (!mod?._kn_get_mispred_breakdown || !mod._malloc) return -1;
+    if (_mispredBufMod !== mod) {
+      _mispredBufPtr = 0;
+      _mispredBufMod = mod;
+    }
     if (!_mispredBufPtr) _mispredBufPtr = mod._malloc(12);
     if (!_mispredBufPtr || mod._kn_get_mispred_breakdown(_mispredBufPtr, 3) !== 3) return -1;
     const at = _mispredBufPtr >> 2;
@@ -14015,6 +14023,9 @@
         stopMod._free(window._rbMispredBuf);
         window._rbMispredBuf = 0;
       }
+      if (_mispredBufPtr && _mispredBufMod === stopMod) stopMod._free(_mispredBufPtr);
+      _mispredBufPtr = 0;
+      _mispredBufMod = null;
     } else {
       // No WASM module available (already destroyed) — drop the JS-side
       // offsets so we don't reuse them against a future fresh heap.
@@ -14023,6 +14034,8 @@
       _rbHashBufPtr = 0;
       _rbTaintBufPtr = 0;
       window._rbMispredBuf = 0;
+      _mispredBufPtr = 0;
+      _mispredBufMod = null;
     }
     // Clear host-broadcast init params so a back-to-back match doesn't fire
     // its tryInitRollback with stale values from the previous match's host
@@ -14291,8 +14304,18 @@
     // prediction: otherwise the guest has the right state already
     // (specs/sync_follow_up.qnt). One due at its deadline unconfirmed cannot
     // know yet, and goes out.
+    // Watched only once its state was handed over whole (`delivered`): a
+    // transfer that stalled, failed or was dropped left the guest without
+    // it. Confirmed only while no player is a phantom: confirmation skips
+    // phantoms, whose predicted inputs can still change the frame.
+    const anyPhantom = Object.values(_peerPhantom).some(Boolean);
     const unchanged = ready.filter((r) =>
-      window.KNCore.syncFollowUp.followUpIsUnneeded(r.followUp || 0, !!r.watch, !!r.watch?.changed, confirmedFor(r)),
+      window.KNCore.syncFollowUp.followUpIsUnneeded(
+        r.followUp || 0,
+        !!r.watch?.delivered,
+        !!r.watch?.changed,
+        confirmedFor(r) && !anyPhantom,
+      ),
     );
     for (const r of unchanged) {
       _syncLog(
@@ -17854,11 +17877,16 @@
     // this frame as much as one after the send (specs/sync_follow_up.qnt).
     // Any other guest it goes to gets a state that supersedes its watch.
     const watchFor = options.watchFor || [];
-    for (const sid of [..._followUpWatches.keys()]) {
-      if ((!targetSid || targetSid === sid) && !watchFor.includes(sid)) _followUpWatches.delete(sid);
+    // A watch superseded here stops being updated, so it is marked changed:
+    // a follow-up still holding it goes out (the new state may never arrive).
+    for (const [sid, w] of [..._followUpWatches]) {
+      if ((!targetSid || targetSid === sid) && !watchFor.includes(sid)) {
+        w.changed = true;
+        _followUpWatches.delete(sid);
+      }
     }
     for (const sid of watchFor) {
-      _followUpWatches.set(sid, { frame, changed: false });
+      _followUpWatches.set(sid, { frame, changed: false, delivered: false });
       _syncLog(`SYNC-FOLLOW-UP-WATCH target=${sid} frame=${frame}: sent unconfirmed`);
     }
     // Who this state is for, on the connections they are on now: a reconnect
@@ -18069,6 +18097,11 @@
     _syncLog(
       `pushed ${isFull ? 'full' : 'delta'} state frame ${frame} (${Math.round(compressed.length / 1024)}KB, ${Math.ceil(compressed.length / 64000)} chunks)`,
     );
+    // A watched state counts as the guest's only once every chunk went out.
+    targets.forEach((t, i) => {
+      const w = _followUpWatches.get(t.sid);
+      if (outcomes[i] === 'sent' && w && w.frame === frame) w.delivered = true;
+    });
     return targets.filter((t, i) => outcomes[i] === 'skipped').map((t) => t.sid);
   };
   // Host: send compressed state/delta via DC in 64KB chunks, handed to the

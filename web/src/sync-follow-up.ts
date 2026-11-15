@@ -25,10 +25,11 @@ export function changesWatchedFrame(inputFrame: number, watchFrame: number, befo
 
 /**
  * Whether a follow-up that has come due can be dropped: it follows a state
- * the host is watching (`watched`), no input at or before that state's frame
- * differed from its prediction (`changed` false), and the frame is now
- * confirmed. One due at its deadline with the frame unconfirmed cannot know
- * yet, and goes out; so does one with no watch.
+ * the host is watching and handed over whole (`watched`), no input at or
+ * before that state's frame differed from its prediction (`changed` false),
+ * and the frame is now confirmed with no player a phantom (`confirmed`). One
+ * due at its deadline with the frame unconfirmed cannot know yet, and goes
+ * out; so does one with no watch, or whose state did not all go out.
  */
 //@ ensures \result === (followUp > 0 && watched && !changed && confirmed)
 export function followUpIsUnneeded(followUp: number, watched: boolean, changed: boolean, confirmed: boolean): boolean {
