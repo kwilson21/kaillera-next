@@ -52,6 +52,15 @@ def test_the_union_is_found():
 # rules against web/src/resync-request.ts, in netplay-rollback.js).
 ENGINE_REPORT_TYPES = ["mesh-disagree", "resync-disagree"]
 
+# The play page sends how often each observed decision ran when it closes
+# (web/src/play/observe.ts counts, web/static/play.js sends).
+PAGE_SUMMARY_TYPES = ["play-observed"]
+
+
+def test_the_play_page_sends_its_observed_counts():
+    play = (SESSION_TS.parents[1] / "static" / "play.js").read_text()
+    assert "KNEvent('play-observed', '', { counts: observed });" in play
+
 
 def test_the_engine_sends_the_type_it_is_allowed():
     engine = (SESSION_TS.parents[1] / "static" / "netplay-rollback.js").read_text()
@@ -59,7 +68,7 @@ def test_the_engine_sends_the_type_it_is_allowed():
         assert f"window.KNEvent?.('{report_type}'," in engine
 
 
-@pytest.mark.parametrize("report_type", _report_types() + ENGINE_REPORT_TYPES)
+@pytest.mark.parametrize("report_type", _report_types() + ENGINE_REPORT_TYPES + PAGE_SUMMARY_TYPES)
 def test_server_stores_every_report_type(report_type, monkeypatch):
     import src.db as db
     from src.api import app as appmod

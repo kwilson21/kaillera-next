@@ -6,6 +6,11 @@
  * every stage"). The old code stays in charge; the new function runs on the
  * same inputs and a difference is reported as a `play-disagree` client event.
  * The new one takes over once production shows none.
+ *
+ * Silence alone does not show that: a rule that never ran sends nothing
+ * either. So the comparer also counts, per decision, how often it compared
+ * and how often the two differed, and the page sends that once
+ * (`play-observed`) when it closes.
  */
 import type { WirePayload } from '../wire.ts';
 
@@ -18,6 +23,15 @@ export type DisagreeReport = {
   readonly old: string;
   readonly next: string;
 };
+
+/** How often one decision was compared on this page, and how often the two differed. */
+export type ObservedCount = { readonly compared: number; readonly disagreed: number };
+
+/** The counts a page sends when it closes: decision name to its count. */
+export type ObservedCounts = Readonly<Record<string, ObservedCount>>;
+
+/** Decisions kept in the counts; the client event's meta has a size limit. */
+export const OBSERVED_LIMIT = 24;
 
 /** A page may report this many different disagreements; a wrong function is wrong often. */
 export const DISAGREE_LIMIT = 10;
@@ -46,6 +60,14 @@ const firstDifference = (a: string, b: string): number => {
 export const createComparer = (sink: (report: DisagreeReport) => boolean) => {
   const seen = new Set<string>();
   let waiting: readonly DisagreeReport[] = [];
+  const tally = new Map<string, ObservedCount>();
+
+  const count = (what: string, agree: boolean): void => {
+    const before = tally.get(what);
+    if (!before && tally.size >= OBSERVED_LIMIT) return;
+    const { compared, disagreed } = before ?? { compared: 0, disagreed: 0 };
+    tally.set(what, { compared: compared + 1, disagreed: disagreed + (agree ? 0 : 1) });
+  };
 
   const flush = (): void => {
     waiting = waiting.filter((report) => !sink(report));
@@ -56,6 +78,7 @@ export const createComparer = (sink: (report: DisagreeReport) => boolean) => {
     const oldJson = asJson(oldValue);
     const nextJson = asJson(newValue);
     const agree = oldJson === nextJson;
+    count(what, agree);
     if (!agree) {
       const at = firstDifference(oldJson, nextJson);
       const old = windowAt(oldJson, at);
@@ -70,5 +93,8 @@ export const createComparer = (sink: (report: DisagreeReport) => boolean) => {
     return agree;
   };
 
-  return { compare, flush };
+  /** Every decision compared so far, with its counts. */
+  const counts = (): ObservedCounts => Object.fromEntries(tally);
+
+  return { compare, flush, counts };
 };

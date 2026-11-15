@@ -631,6 +631,10 @@
   // ── Clean tab close ───────────────────────────────────────────────────
 
   window.addEventListener('pagehide', () => {
+    // How often each observed decision ran on this page, and how often it
+    // disagreed: what lets one take over (web/src/play/observe.ts).
+    const observed = _playObserver.counts();
+    if (Object.keys(observed).length > 0) KNEvent('play-observed', '', { counts: observed });
     // Flush session log via HTTP keepalive (survives page close)
     if (engine?.exportSyncLog) {
       try {

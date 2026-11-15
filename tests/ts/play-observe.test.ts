@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createComparer, DISAGREE_LIMIT, type DisagreeReport } from '../../web/src/play/observe.ts';
+import { createComparer, DISAGREE_LIMIT, OBSERVED_LIMIT, type DisagreeReport } from '../../web/src/play/observe.ts';
 
 const collecting = (ready = () => true) => {
   const sent: DisagreeReport[] = [];
@@ -68,4 +68,38 @@ test('long values are compared whole and reported around the first difference', 
   assert.equal(sent[0]?.old.length, 300);
   assert.ok(sent[0]?.old.endsWith('A"'));
   assert.ok(sent[0]?.next.endsWith('B"'));
+});
+
+test('every comparison is counted per decision, agreeing or not', () => {
+  const { comparer } = collecting();
+  assert.deepEqual(comparer.counts(), {});
+  comparer.compare('delay-preference', 2, 2);
+  comparer.compare('delay-preference', 2, 3);
+  comparer.compare('delay-preference', 4, 4);
+  comparer.compare('late-join-plan', 'play', 'play');
+  assert.deepEqual(comparer.counts(), {
+    'delay-preference': { compared: 3, disagreed: 1 },
+    'late-join-plan': { compared: 1, disagreed: 0 },
+  });
+});
+
+test('the counts keep a bounded number of decisions, and keep counting those', () => {
+  const { comparer } = collecting();
+  for (let i = 0; i < OBSERVED_LIMIT + 5; i++) comparer.compare(`rule-${i}`, 1, 1);
+  comparer.compare('rule-0', 1, 2);
+  const counts = comparer.counts();
+  assert.equal(Object.keys(counts).length, OBSERVED_LIMIT);
+  assert.deepEqual(counts['rule-0'], { compared: 2, disagreed: 1 });
+  assert.equal(counts[`rule-${OBSERVED_LIMIT}`], undefined);
+});
+
+test('the counts of every decision fit the client event meta limit', () => {
+  const { comparer } = collecting();
+  // Long names (rom-transfer:<kind>) and large counts, at the limit.
+  for (let i = 0; i < OBSERVED_LIMIT; i++) {
+    for (let n = 0; n < 3; n++) comparer.compare(`rom-transfer:resume-timed-out-${i}`, n, 0);
+  }
+  const meta = JSON.stringify({ counts: comparer.counts(), match_id: '6b067ae0-3e20-4685-b016-f1642afdec34' });
+  // server/src/api/app.py refuses meta over 2048 bytes.
+  assert.ok(meta.length <= 2048, `${meta.length}`);
 });

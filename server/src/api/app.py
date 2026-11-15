@@ -161,6 +161,10 @@ _VALID_EVENT_TYPES = {
     # A decision moved out of play.js disagreed with the play.js code still in
     # charge of it (web/src/play/observe.ts): tests/test_session_reports.py.
     "play-disagree",
+    # How often each of those decisions was compared on a page, and how often
+    # it disagreed, sent once when the page closes: no report is evidence of
+    # agreement only when the rule ran (web/src/play/observe.ts).
+    "play-observed",
     # A streaming rule in web/src/streaming disagreed with the engine still in
     # charge of it (web/src/streaming/observe.ts): tests/test_session_reports.py.
     "streaming-disagree",

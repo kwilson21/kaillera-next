@@ -144,7 +144,10 @@ without the old code running beside it first.
 
 - A new module starts by observing: it runs next to the code it will replace
   and reports disagreement (`session-disagree`). It takes over only after
-  production shows none.
+  production shows none, and shows it ran: a rule that never ran is silent
+  too. The play page's comparer counts each decision it compares and sends
+  the counts when the page closes (`play-observed`), so "no reports" can be
+  read as "agreed N times".
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
 - State logic is modelled in Quint first; pure functions with a contract are

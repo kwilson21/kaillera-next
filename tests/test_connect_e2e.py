@@ -65,6 +65,16 @@ def _disagreements(page):
     return [e for e in events if e.get("type") == "play-disagree"]
 
 
+def _observed(page):
+    # What the page sends as it closes: how often each decision was compared.
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+    page.wait_for_timeout(300)
+    events = [json.loads(text) for text in page.evaluate("window.__beacons")]
+    sent = [e for e in events if e.get("type") == "play-observed"]
+    assert len(sent) == 1, sent
+    return sent[0]["meta"]["counts"]
+
+
 def test_a_full_room_takes_a_fifth_person_as_a_spectator(browser, server_url, room):
     pages = []
     try:
@@ -102,6 +112,14 @@ def test_a_full_room_takes_a_fifth_person_as_a_spectator(browser, server_url, ro
 
         for page in pages:
             assert _disagreements(page) == []
+
+        # The rules ran, so their silence is agreement.
+        host_counts = _observed(host)
+        assert host_counts["open-room-answer"] == {"compared": 1, "disagreed": 0}
+        assert host_counts["delay-preference"]["disagreed"] == 0
+        for page in pages[1:]:
+            counts = _observed(page)
+            assert counts["becomes-spectator"] == {"compared": 1, "disagreed": 0}
     finally:
         for page in pages:
             page.close()
