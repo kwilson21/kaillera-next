@@ -538,7 +538,6 @@
       );
       clearLoadedRom();
       resetTransferForHostRomChange();
-      if (socket?.connected) socket.emit('rom-ready', { ready: false });
       if (_hostRomHash) autoMatchRom(_hostRomHash);
       updateRomSharingUI();
       return;
@@ -959,6 +958,7 @@
         // socket the server has no ROM report for: without this the next
         // start would wait for a ROM everybody already has.
         if (localRomLoaded()) notifyRomReady();
+        else tellNoRomAfterRejoin();
         // Said again in case the first telling was lost with the socket.
         const joinedMatch = _session?.joinedMatch();
         if (joinedMatch) _tellServerMatchJoined(joinedMatch);
@@ -1011,6 +1011,7 @@
         }
         // If ROM was already loaded from cache, notify server immediately
         if (_romBlob || _romBlobUrl) notifyRomReady();
+        else if (isReconnect) tellNoRomAfterRejoin();
         // A host taken back into its own room keeps the room's old game id
         // (the server ignores open-room's then): say the current one.
         if (isReconnect) _announceGameId();
@@ -1125,6 +1126,8 @@
             // Cached ROM doesn't match host's — clear it now (skip when ROM sharing handles it)
             console.log('[play] join: cached ROM mismatch — clearing');
             clearLoadedRom();
+          } else if (isReconnect) {
+            tellNoRomAfterRejoin();
           }
           if (isReconnect) resumeRomTransferAfterReconnect();
 
@@ -1445,6 +1448,20 @@
       showToolbar();
       showGameLoading();
       initEngine();
+      return;
+    }
+
+    // No ROM, and none to take from the host: ask for one, and join the game
+    // late once it is dropped, as a late joiner does. The server took the
+    // start while this page's word that it cleared its ROM was on its way
+    // (specs/rom_at_start.qnt); booting would run the emulator with nothing.
+    if (startPlan === 'askForRom') {
+      crumb('start-rom-prompt', { sharing: false });
+      // As a late joiner's: tells the machine once frames run, so the join is
+      // not reported as stranded.
+      if (!isSpectator && mode !== 'streaming') _sessionWatchLateJoin();
+      _setPendingLateJoin(true);
+      showLateJoinRomPrompt();
       return;
     }
 
@@ -2619,6 +2636,15 @@
     cleanupPreGameConnections();
   };
 
+  // The server keeps the lobby host for a few seconds after a disconnect,
+  // and any player mid-game, and carries their readiness over to the new
+  // socket; a ROM cleared while the socket was down was never told. A page
+  // that comes back without one says so (specs/rom_at_start.qnt,
+  // clearedWhileDownTest).
+  const tellNoRomAfterRejoin = () => {
+    if (!localRomLoaded() && socket?.connected) socket.emit('rom-ready', { ready: false });
+  };
+
   const notifyRomReady = () => {
     if (socket?.connected) {
       socket.emit('rom-ready', {
@@ -3231,7 +3257,6 @@
         );
         const droppedName = (_romHash && _knownRoms[_romHash]?.game) || displayName;
         clearLoadedRom();
-        if (socket?.connected) socket.emit('rom-ready', { ready: false });
         showRomMismatch(droppedName);
         return;
       }
@@ -3266,6 +3291,9 @@
     KNState.romHash = null;
     KNState.gameId = null;
     _announceGameId();
+    // The server counts this page as ready until told: a start would be taken
+    // with no ROM here (specs/rom_at_start.qnt, deletedRomTest).
+    if (socket?.connected) socket.emit('rom-ready', { ready: false });
     window.EJS_gameUrl = undefined;
     window.EJS_gameID = 'kaillera-next';
     const romDrop = document.getElementById('rom-drop');

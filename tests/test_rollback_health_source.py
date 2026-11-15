@@ -622,6 +622,118 @@ def test_a_resync_request_that_is_out_has_a_deadline():
     assert src.index("_creditLocalFreeze();", tick_idx) < src.index("_checkResyncRequestDeadline();", tick_idx)
 
 
+def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
+    # specs/resync_flow.qnt CATCH_UP, theGuestIsNeverRewound: a host state from
+    # before the guest's frame is applied and the frames up to the guest's run
+    # again at once; one further back than MAX_CATCH_UP_FRAMES is not applied.
+    src = LOCKSTEP_JS.read_text()
+    assert re.search(r"const MAX_CATCH_UP_FRAMES = \d+;", src)
+
+    # The decision is the proved one, in both places it is taken.
+    assert src.count("window.KNCore.catchUp.catchUpStep(") == 2
+    tick_refuse = src[src.index("SYNC-LATE-ANSWER-DROPPED f=${_frameNum}") :]
+    tick_refuse = tick_refuse[: tick_refuse.index("const syncApplyBlocked = ")]
+    assert (
+        "window.KNCore.catchUp.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'"
+        in tick_refuse
+    )
+    assert "SYNC-TOO-OLD-DROPPED" in tick_refuse
+    assert "_pendingResyncState = null;" in tick_refuse
+    # The request it answered has ended: an owed resync is asked for again, or
+    # given up, as the proved tooOldStep says.
+    assert "window.KNCore.catchUp.tooOldStep(" in tick_refuse
+    assert "if (then === 'askAgain') _askAgainForOwedResync();" in tick_refuse
+    assert "else if (then === 'stopAsking') _stopAskingForOwedResync(" in tick_refuse
+
+    apply = src[src.index("const applySyncState = (bytes, frame, fromProactive = false) => {") :]
+    apply = apply[: apply.index("\n  };\n")]
+    assert "const frameBeforeApply = _frameNum;" in apply
+    catch = apply.index("window.KNCore.catchUp.catchUpStep(frame, frameBeforeApply, MAX_CATCH_UP_FRAMES) === 'catchUp'")
+    # Inputs are settled at the state's frame first, and purged only after the
+    # catch-up's first slice has run on them.
+    assert apply.index("_settleInputsAtResync(gm.Module, frame);") < catch
+    assert catch < apply.index("_startCatchUp(gm.Module, frame, frameBeforeApply);")
+    assert apply.index("_startCatchUp(gm.Module, frame, frameBeforeApply);") < apply.index(
+        "for (const [slot, inputs] of Object.entries(_remoteInputs)) {"
+    )
+
+    start = src[src.index("const _startCatchUp = (mod, fromFrame, toFrame) => {") :]
+    start = start[: start.index("\n  };\n")]
+    # Not over a rollback in flight; unseen and unheard; the first slice at once.
+    assert "_kn_peek_pending_rollback" in start and "_kn_get_replay_depth" in start
+    for flag in ("_setReplayFullHeadless", "_setReplayRdpSkip", "_setReplayAudioOutputSkip"):
+        assert f"{flag}(mod, true, 'catch-up');" in start
+    assert start.rstrip().endswith("_catchUpSlice(mod);")
+    # The detector's own digests for the frames run again are dropped.
+    assert "window.KNDesync?.forgetFrom(fromFrame);" in start
+    end = src[src.index("const _endCatchUp = (mod, stoppedAt = '') => {") :]
+    end = end[: end.index("\n  };\n")]
+    for flag in ("_setReplayFullHeadless", "_setReplayRdpSkip", "_setReplayAudioOutputSkip"):
+        assert f"{flag}(mod, false, 'catch-up');" in end
+    assert "SYNC-CATCH-UP from=" in end and "_catchUpTo = -1;" in end
+
+    sl = src[src.index("const _catchUpSlice = (mod) => {") :]
+    sl = sl[: sl.index("\n  };\n")]
+    loop = sl[sl.index("while (_frameNum < _catchUpTo) {") :]
+    # Each frame: every peer's input fed again from this page's record, then a
+    # forward step as in tick(), pacing bypassed.
+    assert loop.index("_feedCInput(mod, p.slot, key, input)") < loop.index("mod._kn_pre_tick(")
+    assert "mod._kn_pre_tick(own.buttons, own.lx, own.ly, own.cx, own.cy, -1)" in loop
+    order = [
+        "mod._kn_pre_tick(",
+        "_writeRingInputs(mod, _frameNum - DELAY_FRAMES);",
+        "_syncRNGSeed(mod, _frameNum);",
+        "_runStepOneFrame('catch-up')",
+        "_frameNum = mod._kn_post_tick();",
+        "if (performance.now() - t0 >= CATCH_UP_SLICE_MS) break;",
+    ]
+    positions = [loop.index(x) for x in order]
+    assert positions == sorted(positions)
+    # An input not here is predicted where tick() would predict it: within the
+    # rollback window of the frame it goes back to, a phantom peer's, or one
+    # from before the settled point. A deeper hole is asked for and waited on,
+    # to a deadline (I1); the timer goes when it is filled or the catch-up ends.
+    assert "const nearTheEnd = f >= _catchUpTo - KN_MAX_VISIBLE_ROLLBACK_DEPTH;" in loop
+    hole = loop[loop.index("const hole = remotePeers.find(") :]
+    hole = hole[: hole.index(");")]
+    for cond in (
+        "_remoteInputs[p.slot]?.[key] === undefined",
+        "key >= _inputFloor(p.slot)",
+        "!_peerPhantom[p.slot]",
+        "!nearTheEnd",
+    ):
+        assert cond in hole
+    assert "now - _catchUpHoleSince >= CATCH_UP_HOLE_WAIT_MS" in loop
+    assert "_askForMissingInputs(hole," in loop
+    assert "_catchUpHoleSince = 0;" in loop and "_catchUpHoleSince = 0;" in end
+    assert re.search(r"const CATCH_UP_HOLE_WAIT_MS = \d+;", src)
+    assert "if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);" in sl
+
+    # Each tick runs the next slice, after the queued inputs are fed and
+    # before anything else steps the emulator.
+    tick_slice = src.index("if (_catchUpTo >= 0) {\n          _catchUpSlice(tickMod);")
+    assert src.rindex("_drainPendingCInputs(tickMod);", 0, tick_slice) > src.rindex("RB-INPUT-STALL f=", 0, tick_slice)
+    # The slice spends no 60 Hz slot, as a rollback replay does not.
+    after_slice = src[tick_slice : src.index("return;", tick_slice)]
+    assert "_tickReplayOnly = true;" in after_slice
+    # Inputs it runs on stay until it reaches its target, and the peers'
+    # inputs for the frame it goes back to are taken in meanwhile.
+    assert "const keepThrough = Math.max(_frameNum, _catchUpTo) + DELAY_FRAMES;" in apply
+    packet = src[src.index("const _processInputPacket = (remoteSid, peer, data) => {") :]
+    packet = packet[: packet.index("INPUT-OOR slot=")]
+    assert "const recvBound = Math.max(_frameNum, _catchUpTo);" in packet
+    assert "recvFrame > recvBound + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES" in packet
+    # A newer state waits for it; a stopped match ends it.
+    blocks = src[src.index("const _replayBlocksSyncApply = () => {") :]
+    assert blocks[: blocks.index("\n  };\n")].index("if (_catchUpTo >= 0) return true;") >= 0
+    stop = src[src.index("const stopSync = () => {") :]
+    assert "_endCatchUp(" in stop[: stop.index("\n  };\n")]
+
+    # tick() writes a forward frame's inputs through the same helper.
+    assert src.count("_writeRingInputs(") == 2  # tick() and the catch-up
+    assert "const localApplied = _writeRingInputs(tickMod, applyFrame);" in src
+
+
 def test_every_resync_request_that_is_out_is_numbered():
     # specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST: a request has a number.
     src = LOCKSTEP_JS.read_text()

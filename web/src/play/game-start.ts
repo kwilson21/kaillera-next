@@ -4,7 +4,9 @@
  * in web/static/play.js ask these and carry out the answer. They are the
  * branches those handlers had, in the same order:
  * tests/ts/play-game-start.test.ts holds them to a transcription of the old
- * branches over every input.
+ * branches over every input, but for one difference: with no ROM and none to
+ * take from the host, the old branches booted the game with nothing to run,
+ * and this asks for a ROM (`askForRom`, specs/rom_at_start.qnt).
  *
  * One reading differs from the late join's (`lateJoinPlan` in join-plan.ts)
  * and is kept as it was: a player whose ROM is not the host's and who has
@@ -21,10 +23,14 @@
  * game) and starts at once. `askForSharedRom`: its ROM is missing or not the
  * host's, the host is sharing theirs, and the player has not taken it yet;
  * the lobby stays up with the offer. `awaitSharedRom`: the player took the
- * host's ROM and it has not all arrived. `wrongRom`: its ROM is not the
+ * host's ROM and it has not all arrived. `askForRom`: it has no ROM and the
+ * host offers none; the page asks for one and joins the game late once it
+ * is dropped, as a late joiner does. The server takes no start while a
+ * player is without a ROM, so this is a start taken while the page's word
+ * that it cleared its ROM was on its way. `wrongRom`: its ROM is not the
  * host's and it cannot take the host's. `play`: it boots the game.
  */
-export type GameStartPlan = 'watch' | 'askForSharedRom' | 'awaitSharedRom' | 'wrongRom' | 'play';
+export type GameStartPlan = 'watch' | 'askForSharedRom' | 'awaitSharedRom' | 'askForRom' | 'wrongRom' | 'play';
 
 /**
  * `needsNoRom`: a spectator, or a guest when the game is streamed.
@@ -35,7 +41,9 @@ export type GameStartPlan = 'watch' | 'askForSharedRom' | 'awaitSharedRom' | 'wr
  */
 //@ ensures needsNoRom ==> \result === "watch"
 //@ ensures !needsNoRom && hasRom && (!romDiffers || tookHostsRom) ==> \result === "play"
-//@ ensures \result === "play" ==> !needsNoRom && (!romDiffers || tookHostsRom) && (hasRom || !hostShares)
+//@ ensures \result === "play" ==> !needsNoRom && hasRom && (!romDiffers || tookHostsRom)
+//@ ensures !needsNoRom && !hasRom && !hostShares && (!romDiffers || tookHostsRom) ==> \result === "askForRom"
+//@ ensures \result === "askForRom" ==> !needsNoRom && !hasRom && !hostShares
 //@ ensures \result === "wrongRom" ==> !needsNoRom && romDiffers && !tookHostsRom && !(hostShares && undecided)
 //@ ensures \result === "awaitSharedRom" ==> !needsNoRom && hostShares && tookHostsRom && !hasRom
 //@ ensures \result === "askForSharedRom" ==> !needsNoRom && hostShares && !tookHostsRom
@@ -56,6 +64,7 @@ export function gameStartPlan(
     if (tookHostsRom) return 'awaitSharedRom';
     return 'askForSharedRom';
   }
+  if (!hasRom) return 'askForRom';
   return 'play';
 }
 

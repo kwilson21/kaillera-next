@@ -8,6 +8,9 @@ const DECISIONS = ['accepted', 'declined', null] as const;
 // onGameStarted's branches in web/static/play.js as of v0.68.18, in their
 // order, before it asked gameStartPlan: the old-against-new evidence for the
 // switch. `mismatch` is hostRomMismatch(), which is false without a ROM.
+// One difference is the fix specs/rom_at_start.qnt shows
+// (startBeforeTheClearArrivesTest): with no ROM and none to take from the
+// host, the old branches booted the game; the plan asks for a ROM.
 const oldGameStart = (
   isSpectator: boolean,
   mode: string,
@@ -26,8 +29,9 @@ const oldGameStart = (
   return 'play';
 };
 
-test('a page takes the same path at a game start that the old branches took', () => {
+test('a page takes the same path at a game start that the old branches took, but one', () => {
   let compared = 0;
+  let askForRom = 0;
   for (const isSpectator of BOOLS) {
     for (const mode of ['rollback', 'lockstep', 'streaming']) {
       for (const isHost of BOOLS) {
@@ -36,17 +40,19 @@ test('a page takes the same path at a game start that the old branches took', ()
           for (const mismatch of hasRom ? BOOLS : [false]) {
             for (const sharing of BOOLS) {
               for (const decision of DECISIONS) {
-                assert.equal(
-                  gameStartPlan(
-                    isSpectator || (mode === 'streaming' && !isHost),
-                    hasRom,
-                    mismatch,
-                    sharing,
-                    decision === 'accepted',
-                    decision === null,
-                  ),
-                  oldGameStart(isSpectator, mode, isHost, hasRom, mismatch, sharing, decision),
+                const old = oldGameStart(isSpectator, mode, isHost, hasRom, mismatch, sharing, decision);
+                const plan = gameStartPlan(
+                  isSpectator || (mode === 'streaming' && !isHost),
+                  hasRom,
+                  mismatch,
+                  sharing,
+                  decision === 'accepted',
+                  decision === null,
                 );
+                // The named difference: no ROM, nothing shared, the old branches played.
+                const noRomToPlay = old === 'play' && !hasRom && !sharing;
+                assert.equal(plan, noRomToPlay ? 'askForRom' : old);
+                if (noRomToPlay) askForRom++;
                 compared++;
               }
             }
@@ -56,6 +62,24 @@ test('a page takes the same path at a game start that the old branches took', ()
     }
   }
   assert.equal(compared, 2 * 3 * 2 * 3 * 2 * 3);
+  // Every player page (not a spectator, not a streamed game's guest) with no
+  // ROM and no sharing, whatever it decided about an offer: 5 page kinds x 3.
+  assert.equal(askForRom, 15);
+});
+
+test('a page never boots a game without a ROM: with none to take, it asks for one', () => {
+  for (const decision of DECISIONS) {
+    assert.equal(gameStartPlan(false, false, false, false, decision === 'accepted', decision === null), 'askForRom');
+  }
+  for (const needsNoRom of BOOLS)
+    for (const hasRom of BOOLS)
+      for (const romDiffers of BOOLS)
+        for (const hostShares of BOOLS)
+          for (const took of BOOLS)
+            for (const undecided of BOOLS) {
+              if (gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, took, undecided) === 'play')
+                assert.equal(hasRom, true);
+            }
 });
 
 test('the host of a streamed game boots it; its guests and spectators watch', () => {
