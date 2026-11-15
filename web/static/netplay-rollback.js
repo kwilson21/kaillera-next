@@ -6415,6 +6415,10 @@
   let _syncChunkSessionId = 0;
   let _syncLastChunkProgressLogAt = 0;
   const SYNC_CHUNK_TIMEOUT_MS = 3000;
+  // Host: a state chunk waits for the channel to hold less than one chunk of
+  // it (polled), at most SYNC_SEND_STALL_MS each (I1; sendSyncChunks).
+  const SYNC_SEND_POLL_MS = 5;
+  const SYNC_SEND_STALL_MS = 15000;
   const SOCKET_SYNC_B64_SOFT_LIMIT = 3900000;
   let _lastResyncTime = 0; // timestamp of last resync request (10s cooldown)
   let _resyncRequestInFlight = false; // true while an explicit sync-request is in transit — prevents stacking
@@ -17636,12 +17640,25 @@
 
   // Returns the sids of targets that were skipped because their channel
   // wasn't open.
-  const sendSyncChunks = async (compressed, frame, isFull, targetSid, isProactive = false, requestIds = {}) => {
+  // One state transfer at a time: a paced transfer awaits between chunks,
+  // and a second one on the same channel would interleave its chunks.
+  let _syncSendChain = Promise.resolve();
+  const sendSyncChunks = (...args) => {
+    const run = _syncSendChain.then(() => _sendSyncChunksNow(...args));
+    _syncSendChain = run.catch(() => {});
+    return run;
+  };
+  const _sendSyncChunksNow = async (compressed, frame, isFull, targetSid, isProactive = false, requestIds = {}) => {
     const skipped = [];
-    // Host: send compressed state/delta via DC in 64KB chunks.
-    // Chunks are sent with yields between them so input messages can
-    // interleave — prevents DataChannel saturation that causes mutual
-    // input deadlock (see project_stall_timeout_desync).
+    // Host: send compressed state/delta via DC in 64KB chunks, handed to the
+    // channel one at a time (KNCore.syncSend, specs/tick_deadlines.qnt
+    // `input_link`): the next goes only once less than a chunk of this state
+    // is still waiting in the channel. The host's inputs share the
+    // connection and queue behind whatever it has been given; handed a whole
+    // state at once (two answers, 2.9 MB, in a two-player run) it left them
+    // unsent for seconds, the guest gave up on the host at the peer-stale
+    // deadline, ran past its prediction window, and the inputs then arrived
+    // up to 83 frames deep (DEEP-MISPREDICT-SKIP).
     const CHUNK_SIZE = 64000;
     const numChunks = Math.ceil(compressed.length / CHUNK_SIZE);
     let targets;
@@ -17682,19 +17699,35 @@
         const answerFor = (sid && requestIds[sid]) || 0;
         if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
         dc.send(header);
-        for (let i = 0; i < numChunks; i++) {
-          const start = i * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, compressed.length);
-          dc.send(compressed.slice(start, end));
-          // With AI DMA determinism, sync transfers only happen on reconnect
-          // (not during gameplay). No need to yield — get the state to the
-          // guest as fast as possible to minimize the coord stall duration.
-        }
         // The guest will be on `frame` once it loads this: its inputs from
         // before frame - delay are in the state, and it may never have made
         // them (specs/resync_inputs.qnt).
         _settleInputsBefore(target.slot, frame);
-        _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
+        const epoch = _syncQueueEpoch;
+        // I1: each chunk waits at most SYNC_SEND_STALL_MS for room; then the
+        // transfer is given up (the guest's chunk and request deadlines ask
+        // again).
+        const outcome = await window.KNCore.syncSend.sendPaced({
+          count: numChunks,
+          send: (i) => dc.send(compressed.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, compressed.length))),
+          buffered: () => dc.bufferedAmount,
+          open: () => dc.readyState === 'open' && epoch === _syncQueueEpoch,
+          lowWaterBytes: CHUNK_SIZE,
+          pollMs: SYNC_SEND_POLL_MS,
+          stallMs: SYNC_SEND_STALL_MS,
+        });
+        if (outcome === 'sent') {
+          _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
+        } else if (outcome === 'closed') {
+          _syncLog(`sync send stopped: slot=${target.slot} channel closed or match stopped`);
+          const sid = Object.keys(_peers).find((k) => _peers[k] === target);
+          if (sid && epoch === _syncQueueEpoch) skipped.push(sid);
+        } else {
+          _syncLog(
+            `SYNC-SEND-STALLED slot=${target.slot} frame=${frame} — no room for a chunk in ` +
+              `${SYNC_SEND_STALL_MS}ms (buffered=${dc.bufferedAmount}), transfer given up`,
+          );
+        }
       } catch (err) {
         _syncLog(`sync send failed to slot=${target.slot}: ${err}`);
       }

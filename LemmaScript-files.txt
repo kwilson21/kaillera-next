@@ -17,3 +17,4 @@ web/src/peer-signaling.ts
 web/src/play/join-plan.ts
 web/src/streaming/offer-gate.ts
 web/src/resync-request.ts
+web/src/sync-chunk-room.ts

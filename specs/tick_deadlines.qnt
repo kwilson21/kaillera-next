@@ -187,7 +187,7 @@ module tick_deadlines_current {
 //   waiting there (sendSyncChunks waits for the channel's bufferedAmount to
 //   fall below one chunk), and starts a transfer only once the last one has
 //   gone (_pushingSyncState holds a request until then).
-//   false = today: every chunk is handed over at once, and a second answer
+//   false = before: every chunk is handed over at once, and a second answer
 //   behind the first.
 module input_link {
   const PACED: bool
@@ -275,7 +275,7 @@ module input_link {
   // No input from a host that is sending arrives deeper than the cap: the
   // guest never gives up on a host whose inputs are queued behind the
   // host's own state, and so never runs past the window on it.
-  // Violated while a state goes into the connection all at once.
+  // Violated while a state went into the connection all at once.
   val noInputArrivesDeeperThanTheCap = not(deep)
 
   // A host that is sending is never given up on.
@@ -318,12 +318,12 @@ module input_link {
       .expect(dropped and not(deep) and allHold)
 }
 
-// Today: a state goes into the connection all at once.
+// Before: a state went into the connection all at once.
 module input_link_burst {
   import input_link(PACED = false).*
 }
 
-// Fixed: the host hands over a chunk at a time.
+// Today: the host hands over a chunk at a time.
 module input_link_paced {
   import input_link(PACED = true).*
 }

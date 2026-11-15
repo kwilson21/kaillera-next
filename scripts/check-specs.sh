@@ -233,8 +233,8 @@ for variant in input_link_burst input_link_paced; do
   $QUINT test "$TICK" --main="$variant" --backend=typescript
 done
 # With the chunks handed over one at a time, a host that is sending is never
-# given up on and none of its inputs arrives deeper than the cap. Both are
-# VIOLATED today, while a state goes into the connection all at once
+# given up on and none of its inputs arrives deeper than the cap. Both were
+# VIOLATED while a state went into the connection all at once
 # (input_link_burst; twoAnswersBackToBackTest holds the ordering of the
 # two-player run that found it).
 $QUINT run "$TICK" --main=input_link_paced --invariant=allHold \

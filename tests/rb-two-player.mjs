@@ -516,6 +516,25 @@ const initScript = ({ lat, jitter }) => {
     }
     if (q.items.length) q.timer = setTimeout(() => pump(ch, q), Math.max(0, q.items[0].at - performance.now()));
   };
+  // What this queue holds has been handed to send() and not yet taken by the
+  // simulated link, which is what a real channel's bufferedAmount counts.
+  // The engine hands its resync state over a chunk at a time, waiting for
+  // bufferedAmount to fall below a chunk (KNCore.syncSend); without this the
+  // queue hid a held answer from it, and on release the whole of it, 2.9 MB
+  // with the next answer behind it, went into the connection at once. Only
+  // the `sync-state` channel: the input channels' own buffer checks
+  // (DC-FALLBACK) are about the real transport.
+  const realBuffered = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'bufferedAmount');
+  const bytesOf = (data) => (typeof data === 'string' ? data.length : (data?.byteLength ?? data?.size ?? 0));
+  Object.defineProperty(RTCDataChannel.prototype, 'bufferedAmount', {
+    configurable: true,
+    get() {
+      const real = realBuffered.get.call(this);
+      if (this.label !== 'sync-state') return real;
+      const q = queues.get(this);
+      return q ? q.items.reduce((n, it) => n + bytesOf(it.data), real) : real;
+    },
+  });
   // DELAY_SYNC_ANSWER_MS: once the test sets window.__knHoldSyncAnswerMs, the
   // next numbered answer to a resync request on the `sync-state` channel is
   // held that long. The FIFO above keeps the header and the binary chunks
