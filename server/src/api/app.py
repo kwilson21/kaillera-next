@@ -1459,13 +1459,10 @@ def create_app(lifespan=None) -> FastAPI:
             matching = matching.where(SessionLog.room == room)
         if match_id:
             matching = matching.where(SessionLog.match_id == match_id)
-        if mode == "rollback":
-            # Include legacy "lockstep" rows as historical synonym — the engine
-            # was renamed without changing semantics, so analytics for "rollback"
-            # should include all sessions whether logged before or after the rename.
-            matching = matching.where(SessionLog.mode.in_(["rollback", "lockstep"]))
-        elif mode in ("streaming", "lockstep"):
-            # "lockstep" on its own is the direct legacy filter: pre-rename rows only.
+        if mode in ("rollback", "lockstep", "streaming"):
+            # Each mode is its own: "lockstep" is the mode a host picks (no
+            # prediction). Rows from before v0.64.0 (2026-09-30) used
+            # "lockstep" for rollback; they are older than the default window.
             matching = matching.where(SessionLog.mode == mode)
         if has_desyncs == "true":
             matching = matching.where(db.json_field(SessionLog.summary, "$.desyncs") > 0)

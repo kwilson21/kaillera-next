@@ -18,6 +18,7 @@ web/src/play/join-plan.ts
 web/src/streaming/offer-gate.ts
 web/src/streaming/attempt.ts
 web/src/resync-request.ts
+web/src/lockstep-wait.ts
 web/src/play/game-start.ts
 web/src/sync-chunk-room.ts
 web/src/sync-follow-up.ts

@@ -1,11 +1,16 @@
 /**
  * The control remap wizard's rules: which input it asks for next, what a
  * captured button, stick or key does to the mapping, and how Back and Skip
- * move through it. Moved from web/static/play.js.
+ * move through it. Moved from web/static/play.js, whose wizard hands every
+ * input here and carries out the outcome.
  *
  * Nothing here touches the page, the gamepad API or the clock: play.js polls
- * the pads, listens for keys, debounces, and shows the prompts. Every state
- * is a new value, so going back is just returning to an earlier one.
+ * the pads, listens for keys, debounces, shows the prompts and saves. Every
+ * state is a new value, so going back is just returning to an earlier one.
+ * tests/ts/play-remap-wizard.test.ts holds these rules to the wizard play.js
+ * had before, over random sessions; they differ on purpose in one place: a
+ * stick direction refused for being on the wrong axis leaves nothing for
+ * Back to return to (see `wizardInput`).
  */
 import { stepAfter, stepVerdict } from './remap-step.ts';
 
@@ -191,18 +196,6 @@ export const wizardInput = (state: WizardState, input: WizardInput): WizardOutco
   }
   return taken(state, verdict, changesFor(state, step, input));
 };
-
-/**
- * What play.js's own wizard holds, laid out the same way, so the two can be
- * compared after every input while play.js is still in charge.
- */
-export const comparable = (state: WizardState) => ({
-  step: state.step,
-  keyMap: state.keyMap,
-  buttons: state.profile?.buttons ?? null,
-  axisButtons: state.profile?.axisButtons ?? null,
-  axisCaptures: state.axisCaptures,
-});
 
 /**
  * The profile to save: the edited one, with each stick whose two directions

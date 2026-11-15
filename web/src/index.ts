@@ -10,6 +10,7 @@ import { bootTimedOut } from './boot.ts';
 import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
+import { lockstepStep } from './lockstep-wait.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
@@ -45,6 +46,7 @@ import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
 import * as gameStart from './play/game-start.ts';
 import * as joinPlan from './play/join-plan.ts';
+import * as mode from './play/mode.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
 import * as observe from './play/observe.ts';
@@ -308,6 +310,8 @@ export const KNCore = {
   gamepadDisplayName,
   hashPixels,
   inputEqual,
+  /** Lockstep mode: what a tick does while an input is missing (web/src/lockstep-wait.ts). */
+  lockstepStep,
   measureCanvasHealth,
   digestFrame,
   createRomResumeAnswerer,
@@ -378,6 +382,7 @@ export const KNCore = {
     connect,
     connectionNotices,
     joinPlan,
+    mode,
     gameStart,
     observe,
     remapWizard,

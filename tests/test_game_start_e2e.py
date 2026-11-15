@@ -41,12 +41,35 @@ ENDED = "The host has ended the game"
 
 # Deliver a message to the page's own handler for a server event, as if the
 # server had sent it (the harness step for answers a real room doesn't reach
-# on demand).
+# on demand). The page decodes what the server sends and drops a message off
+# its schema (web/src/socket-boundary.ts), so a made-up one must be whole.
 _DELIVER = """([event, data]) => {
     const handlers = window.__test_socket.listeners(event);
     if (!handlers.length) throw new Error('no handler for ' + event);
     for (const handler of handlers) handler(data);
 }"""
+
+
+def _game_started(match_id):
+    """A `game-started` as the server sends it (GameStarted in server/src/api/payloads.py), naming no ROM."""
+    return {
+        "mode": "rollback",
+        "resyncEnabled": True,
+        "romHash": None,
+        "romName": None,
+        "rom_name": None,
+        "romSize": None,
+        "rom_size": None,
+        "hostRom": {"hash": None, "name": None, "size": None, "gameId": "", "game_id": ""},
+        "gameId": "",
+        "matchId": match_id,
+    }
+
+
+def _start(page, match_id):
+    """Deliver a made-up `game-started`, and check the page took it rather than dropped it."""
+    page.evaluate(_DELIVER, ["game-started", _game_started(match_id)])
+    assert page.evaluate("window.KNState.matchId") == match_id
 
 
 def _open(browser, url, init_script=None):
@@ -198,10 +221,7 @@ def test_a_player_who_took_the_hosts_rom_waits_for_it_in_the_lobby(browser, serv
         guest.click("#rom-accept-btn")
         expect(guest.locator("#rom-transfer-progress")).to_be_visible(timeout=5000)
 
-        guest.evaluate(
-            _DELIVER,
-            ["game-started", {"mode": "rollback", "resyncEnabled": True, "gameId": "", "matchId": "m-await"}],
-        )
+        _start(guest, "m-await")
         # Not booted: the lobby stays up with the transfer, no offer, no error.
         expect(guest.locator("#overlay")).to_be_visible()
         expect(guest.locator("#rom-transfer-progress")).to_be_visible()
@@ -306,10 +326,7 @@ def test_a_start_reaching_a_page_with_no_rom_asks_for_one_and_joins_late(browser
     try:
         # Harness step: the start the server took while the page's "no ROM"
         # was on its way, with the host not sharing.
-        guest.evaluate(
-            _DELIVER,
-            ["game-started", {"mode": "rollback", "resyncEnabled": True, "gameId": "", "matchId": "m-no-rom"}],
-        )
+        _start(guest, "m-no-rom")
         # Not booted: the page asks for a ROM, as a late joiner's does.
         prompt = guest.locator("#late-join-msg")
         expect(prompt).to_contain_text("load a ROM to join", timeout=5000)

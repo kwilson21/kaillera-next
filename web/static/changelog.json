@@ -1,5 +1,25 @@
 [
   {
+    "version": "0.69.0",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "lockstep is a mode the host can pick (#232)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.33",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the remap wizard decides with remap-wizard.ts, so Back after a refused stick push lets it move (#263)"
+      }
+    ]
+  },
+  {
     "version": "0.68.32",
     "date": "2026-11-15",
     "changes": [
