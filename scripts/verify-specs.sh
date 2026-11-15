@@ -312,6 +312,14 @@ ask_escalation() {
   expect_violation "$ESC" ask_escalation_push_once everyAskEnds 8
 }
 
+reconnect_inputs() {
+  local REC=specs/reconnect_inputs.qnt
+  verify "$REC" reconnect_inputs_fixed allHold init 12
+  # Right after the reset, one frame run on the peer's missing input with
+  # the C slot inactive (runBeforeFirstInputTest): 1 step.
+  expect_violation "$REC" reconnect_inputs_current theHostNeverPredictsAFrameThePeerHasMade 2
+}
+
 mesh_heal() {
   local MESH=specs/mesh_heal.qnt
   verify "$MESH" mesh_heal_fixed allHold init 10
@@ -346,7 +354,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync mesh_heal catch_up_wait ask_escalation
+  rom_at_start ring_after_resync mesh_heal catch_up_wait ask_escalation reconnect_inputs
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -358,7 +366,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
   "peer_identity rom_transfer peer_connection rom_at_start catch_up_wait ask_escalation" # ~7.5 min
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up" # ~6.5 min
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up reconnect_inputs" # ~7 min
 )
 
 # Each group is in exactly one shard, and each shard names only groups.

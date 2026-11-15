@@ -419,6 +419,18 @@ for variant in ask_escalation_fixed_host ask_escalation_fixed_guest; do
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
 
+# ── After a reconnect, frames run before the peer's inputs ────────────────
+REC=specs/reconnect_inputs.qnt
+$QUINT typecheck "$REC"
+for variant in reconnect_inputs_current reconnect_inputs_fixed; do
+  $QUINT test "$REC" --main="$variant" --backend=typescript
+done
+# Today the reset leaves the C slot inactive and the page runs frames on the
+# peer's missing input, recording no prediction (reconnect_inputs_current;
+# runBeforeFirstInputTest).
+$QUINT run "$REC" --main=reconnect_inputs_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
 # ── A channel that dies in a match with no event ───────────────────────────
 MESH=specs/mesh_heal.qnt
 $QUINT typecheck "$MESH"
