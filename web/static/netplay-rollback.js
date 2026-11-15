@@ -9186,6 +9186,7 @@
     }
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
+      _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
       // the new peer session.
       _syncQueueGen[opts.sid] = (_syncQueueGen[opts.sid] || 0) + 1;
@@ -17456,6 +17457,18 @@
   // -- Async state sync (compress/decompress via Web Worker) -----------------
 
   let _pushingSyncState = false; // debounce concurrent sync-request handling
+  // Requests that came in while a state was being sent, by target sid ('' for
+  // every guest): sent next, newest options kept. A paced transfer lasts as
+  // long as the link takes, so dropping them, as before, would lose a guest's
+  // request for as long (its request deadline would ask again 8 s later).
+  const _queuedSyncPushes = new Map();
+  const _runQueuedSyncPush = () => {
+    const next = _queuedSyncPushes.entries().next();
+    if (next.done) return;
+    const [sid, options] = next.value;
+    _queuedSyncPushes.delete(sid);
+    pushSyncState(sid || null, false, options);
+  };
   let _proactivePushInFlight = false; // separate flag so proactive pushes never block explicit sync-requests
 
   let _lastSyncState = null; // host/guest: previous state for delta computation
@@ -17473,7 +17486,13 @@
     if (_playerSlot !== 0 || !_syncEnabled) return;
     // Proactive and explicit syncs use separate in-flight guards so that a
     // proactive push in progress never drops a sync-request from a reconnecting guest.
-    if (isProactive ? _proactivePushInFlight : _pushingSyncState) return;
+    if (isProactive ? _proactivePushInFlight : _pushingSyncState) {
+      if (!isProactive) {
+        _queuedSyncPushes.set(targetSid || '', options);
+        _syncLog(`sync push for ${targetSid || 'all'} queued behind the one in flight`);
+      }
+      return;
+    }
 
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return null;
@@ -17495,7 +17514,10 @@
       if (bytesWritten === 0) {
         _syncLog('kn_sync_read returned 0');
         if (isProactive) _proactivePushInFlight = false;
-        else _pushingSyncState = false;
+        else {
+          _pushingSyncState = false;
+          _runQueuedSyncPush();
+        }
         return null;
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
@@ -17634,7 +17656,10 @@
       return null;
     } finally {
       if (isProactive) _proactivePushInFlight = false;
-      else _pushingSyncState = false;
+      else {
+        _pushingSyncState = false;
+        _runQueuedSyncPush();
+      }
     }
   };
 
@@ -18311,6 +18336,7 @@
     _syncChunkSessionId++;
     _syncLastChunkProgressLogAt = 0;
     _pushingSyncState = false;
+    _queuedSyncPushes.clear();
     _proactivePushInFlight = false;
     _pendingResyncState = null;
     _lifecycleResyncPending = false;

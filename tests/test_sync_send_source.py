@@ -48,3 +48,16 @@ def test_harness_counts_queued_state_in_buffered_amount():
     src = HARNESS.read_text()
     assert "Object.defineProperty(RTCDataChannel.prototype, 'bufferedAmount'" in src
     assert "if (this.label !== 'sync-state') return real;" in src
+
+
+def test_a_request_during_a_transfer_is_queued_not_dropped():
+    src = ENGINE.read_text()
+    start = src.index("const pushSyncState = async")
+    head = src[start : src.index("const gm = window.EJS_emulator?.gameManager;", start)]
+    assert "_queuedSyncPushes.set(targetSid || '', options);" in head
+    assert "_runQueuedSyncPush();" in src[start:]
+    # Per-peer state: resetPeerState drops the peer's queued push (I2), and
+    # stop() all of them.
+    reset = src[src.index("const resetPeerState") :]
+    assert "_queuedSyncPushes.delete(opts.sid);" in reset[: reset.index("\n  };\n")]
+    assert "_queuedSyncPushes.clear();" in src
