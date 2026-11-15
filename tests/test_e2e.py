@@ -236,6 +236,10 @@ def test_rom_sharing_decline_shows_drop_zone(context, server_url):
         # ROM drop zone stays (showing their ROM), prompt hidden
         expect(guest.locator("#rom-drop")).to_be_visible(timeout=5000)
         expect(guest.locator("#rom-sharing-prompt")).to_be_hidden(timeout=5000)
+
+        # Removing that ROM leaves them with none, so the offer comes back
+        guest.locator("#rom-library .rom-library-item.active .rom-delete").click(timeout=10000)
+        expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=5000)
     finally:
         host.close()
         guest.close()

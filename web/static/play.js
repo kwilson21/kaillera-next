@@ -3296,6 +3296,8 @@
     const statusEl = document.getElementById('rom-status');
     if (romDrop) romDrop.classList.remove('loaded');
     if (statusEl) _setRomStatus('Drop or click to load ROM');
+    // A guest with no ROM again may take the host's, so the offer comes back.
+    updateRomSharingUI();
   };
 
   // ── ROM library (IndexedDB) ────────────────────────────────────────────
