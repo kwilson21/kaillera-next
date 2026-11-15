@@ -292,6 +292,28 @@ done
 $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+# ── Inputs on the unreliable channel, and the switch to the reliable one ────
+INPUTS=specs/input_transport.qnt
+$QUINT typecheck "$INPUTS"
+for variant in input_transport_before_ask input_transport_current input_transport_until_acked \
+  input_transport_resend_once input_transport_fixed; do
+  $QUINT test "$INPUTS" --main="$variant" --backend=typescript
+done
+# Today with the fix: every input the peer had not acked when the page
+# switched to the reliable channel reaches it without the peer asking, and
+# no input is lost for good. The first was violated while the switch let the
+# history go (input_transport_current; lostThenFallbackTest and
+# lostThenChannelClosesTest hold the orderings), and is with redundancy kept
+# until the ack instead (input_transport_until_acked;
+# stuckChannelBeyondTheCapTest). The second was violated before #235, when
+# the peer did not ask for a hole (input_transport_before_ask). The first is
+# violated too when a send that throws partway through the resend drops the
+# frames after it (input_transport_resend_once; resendFailsPartwayTest).
+$QUINT run "$INPUTS" --main=input_transport_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostForGood \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
 # ── A "now" resync request asked again at its deadline ─────────────────────
 REASK=specs/resync_reask.qnt
 $QUINT typecheck "$REASK"

@@ -548,6 +548,10 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   `bufferedAmount`. After the fix the delayed run at 90 s had no mismatch
   and no deep rollback, and so did the plain, frozen-host, frozen-guest and
   dropped-peer runs.
+  Known limit: on links under about 170 kbit/s one 64 KB state chunk takes
+  more than 3 s, so the guest's progress deadline still fires and the
+  transfer falls back to the socket; nothing is planned unless production
+  shows it.
 
 **Stage 6: the remaining page scripts**
 The other hand-written scripts of the play, demo and landing pages move to
