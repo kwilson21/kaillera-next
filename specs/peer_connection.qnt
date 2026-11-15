@@ -652,13 +652,13 @@ module peer_connection {
   // A startup retry is never handled as a gameplay reconnect: when its
   // channel opens, the page does not ask the host for a resync, run
   // resetPeerState, show "reconnected" or report peer_reconnected.
-  // Violated today (peer_connection_current): the server drops the
-  // startupReconnect flag, and in a room of three the page the retry
-  // reaches may have started already (startupRetryToAStartedPageTest).
+  // Violated while the server dropped the startupReconnect flag
+  // (peer_connection_before_startup_flag): in a room of three the page the
+  // retry reaches may have started already (startupRetryToAStartedPageTest).
   val startupRetryIsNotAReconnect = not(retryAsReconnect)
 
-  // The two that hold on today's engine.
-  val holdToday = reconnectStartsClean and neverEvictsLiveConnection
+  // The three that hold on today's engine.
+  val holdToday = and { reconnectStartsClean, neverEvictsLiveConnection, startupRetryIsNotAReconnect }
 
   // What still holds when attempts go by a counter alone: all but
   // staleSignalsAreNotApplied.
@@ -968,13 +968,20 @@ module peer_connection_before_119 {
          STARTUP_FLAG_RELAYED = false).*
 }
 
-// The engine as it is today. oneInitiatorPerPair, everyWaitHasADeadline,
-// neverLeftWithNothingPending, staleSignalsAreNotApplied and
-// startupRetryIsNotAReconnect are violated here.
-module peer_connection_current {
+// Before the server relayed startupReconnect. startupRetryIsNotAReconnect
+// is violated here, on top of what is violated today.
+module peer_connection_before_startup_flag {
   import peer_connection(HEAL_ONE_SIDE = false, ANSWERER_HAS_DEADLINE = false,
          SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true,
          STARTUP_FLAG_RELAYED = false).*
+}
+
+// The engine as it is today. oneInitiatorPerPair, everyWaitHasADeadline,
+// neverLeftWithNothingPending and staleSignalsAreNotApplied are violated here.
+module peer_connection_current {
+  import peer_connection(HEAL_ONE_SIDE = false, ANSWERER_HAS_DEADLINE = false,
+         SIGNALS_CARRY_ATTEMPT = false, ATTEMPT_NAMES_PAGE = false, ROSTER_KEEPS_LIVE = true,
+         STARTUP_FLAG_RELAYED = true).*
 }
 
 // The three proposed changes with attempts told apart by the offering page's
