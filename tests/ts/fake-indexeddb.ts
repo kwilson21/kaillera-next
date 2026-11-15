@@ -3,8 +3,9 @@
  * old web/static/demo.js), kept in memory: open with an upgrade, one object
  * store, put, get, delete, and transactions that complete. A test puts it on
  * a fake page as `indexedDB`. Events fire as microtasks, so a whole open,
- * write and complete has run by the next turn of the event loop. Values are
- * stored and read back through structuredClone, as IndexedDB does.
+ * write and complete has run by the next turn of the event loop; `pending`
+ * counts those not yet fired. Values are stored and read back through
+ * structuredClone, as IndexedDB does.
  *
  * Like the real one, a transaction on a store the database does not have
  * throws (NotFoundError), and opening a database that does not exist creates
@@ -57,6 +58,16 @@ export const fakeIndexedDb = () => {
   const databases = new Map<string, Database>();
   let opens = 0;
   let closes = 0;
+  let pending = 0;
+
+  /** Fires an event as a microtask, as IndexedDB answers a request later. */
+  const fire = (event: () => void): void => {
+    pending++;
+    queueMicrotask(() => {
+      pending--;
+      event();
+    });
+  };
 
   const connection = (database: Database): Connection => ({
     createObjectStore: (name) => void database.stores.set(name, new Map()),
@@ -72,7 +83,7 @@ export const fakeIndexedDb = () => {
           delete: (key) => void store.delete(key),
           get: (key) => {
             const request: GetRequest = { result: undefined, onsuccess: null, onerror: null };
-            queueMicrotask(() => {
+            fire(() => {
               request.result = structuredClone(store.get(key));
               request.onsuccess?.();
             });
@@ -80,7 +91,7 @@ export const fakeIndexedDb = () => {
           },
         }),
       };
-      queueMicrotask(() => tx.oncomplete?.());
+      fire(() => tx.oncomplete?.());
       return tx;
     },
   });
@@ -89,7 +100,7 @@ export const fakeIndexedDb = () => {
     open: (name: string, version: number): OpenRequest => {
       opens++;
       const request: OpenRequest = { result: null, onupgradeneeded: null, onsuccess: null, onerror: null };
-      queueMicrotask(() => {
+      fire(() => {
         let database = databases.get(name);
         const created = database === undefined;
         if (database === undefined) {
@@ -114,6 +125,8 @@ export const fakeIndexedDb = () => {
       database.stores.set(store, stored);
       stored.set(key, structuredClone(value));
     },
+    /** Events a page has started that have not fired yet: opens, gets and transactions. */
+    pending: (): number => pending,
     /** Every database, store and ROM, and how many connections were opened and closed. */
     describe: (): string =>
       JSON.stringify({
