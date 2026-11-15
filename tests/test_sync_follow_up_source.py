@@ -94,3 +94,15 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
     reset = reset[: reset.index("\n  };\n")]
     assert "_followUpWatches.delete(opts.sid);" in reset
     assert "_followUpWatches.clear();" in src
+
+
+def test_every_input_the_page_feeds_goes_through_the_watch():
+    # The harness above drives _feedCInput; the drain of queued inputs is the
+    # other live site. Both must go through the same wrapper, so no input
+    # reaches C unseen by the watch.
+    src = LOCKSTEP_JS.read_text()
+    calls = [i for i in range(len(src)) if src.startswith("._kn_feed_input(", i)]
+    assert len(calls) == 2, calls
+    for i in calls:
+        before = src[max(0, i - 200) : i]
+        assert "_feedWatched(" in before, src[max(0, i - 200) : i + 40]

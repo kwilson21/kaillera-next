@@ -489,6 +489,10 @@ const UNANSWERED_SOCKET_RESYNC = !['', '0'].includes(UNANSWERED_SOCKET_RESYNC_RA
 const UNANSWERED_VARIANT = UNANSWERED_SOCKET_RESYNC_RAW === '1' ? 'guard' : UNANSWERED_SOCKET_RESYNC_RAW;
 // The letgo variant freezes the host as FREEZE_HOST_MS does, and is compared as it is.
 const UNANSWERED_LETGO_FREEZE_MS = 7000;
+// FORCE_DELAY=<n>: both pages pick a frame delay of n (Auto off) before the
+// game starts. The engine may still re-tune it from the measured RTT
+// (`delay re-tuned` in the sync log says what it chose).
+const FORCE_DELAY = process.env.FORCE_DELAY ? Number(process.env.FORCE_DELAY) : null;
 const SYNC_FOLLOW_UP = process.env.SYNC_FOLLOW_UP || '';
 if (!['', 'same', 'changed'].includes(SYNC_FOLLOW_UP)) {
   console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same or changed`);
@@ -1338,6 +1342,20 @@ if (delayBootSyncAnswer) {
 }
 // LOSE_INPUTS_BEFORE_FALLBACK: the host broadcasts the transport when the game starts.
 if (LOSE_INPUTS_BEFORE_FALLBACK) await host.evaluate(() => (window._knTransportOverride = 'unreliable'));
+if (FORCE_DELAY !== null) {
+  for (const p of [host, guest]) {
+    await p.evaluate((n) => {
+      const auto = document.getElementById('delay-auto');
+      if (auto?.checked) auto.click();
+      const select = document.getElementById('delay-select');
+      if (select) {
+        select.value = String(n);
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }, FORCE_DELAY);
+  }
+  console.log(`FORCE_DELAY: both pages pick ${FORCE_DELAY}`);
+}
 await host.click('#start-btn');
 
 // Dismiss the tap-to-start prompt on whichever page shows it. Tracks how
