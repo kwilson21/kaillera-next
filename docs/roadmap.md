@@ -143,8 +143,15 @@ without the old code running beside it first.
 **Rules for every stage**
 
 - A new module starts by observing: it runs next to the code it will replace
-  and reports disagreement (`session-disagree`). It takes over only after
-  production shows none.
+  and reports disagreement (`session-disagree`). It takes over once test runs
+  that reach each of its rules show none. The site has too little traffic for
+  production to show it, so the evidence is end to end, as in stage 2: an
+  old-against-new harness for page logic; `tests/rb-two-player.mjs` with a
+  fault mode for each rare path, and the lifecycle tests, for netplay logic,
+  each run failing on the module's own report (`tests/observer-reports.mjs`
+  checks `peer-disagree` and `resync-disagree`; a module's report is added
+  there before it moves). A disagreement production does report blocks the
+  move until it is explained.
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
 - State logic is modelled in Quint first; pure functions with a contract are
@@ -243,7 +250,7 @@ under tests and logs `PAYLOAD-CONTRACT` in production. The page decodes every
 server-authored event and the `join-room` ack (`web/src/socket-boundary.ts`),
 observing: a message off its schema is reported as `protocol-mismatch` and the
 handlers still run on the raw payload. Handlers move onto decoded values once
-production shows no reports. Messages peers author (DataChannel control
+the end-to-end runs show no reports. Messages peers author (DataChannel control
 strings and JSON, and the `data-message` / `webrtc-signal` / `rom-signal`
 relays) are described in `web/src/peer-protocol.ts` and checked the same way;
 DataChannel strings are sampled (the first 16 of each kind) because they
@@ -345,7 +352,8 @@ Slice 1, the peer mesh and signaling:
   signal does to the connection table, what a lost connection leads to, when
   to stop retrying, which entries a new player replaces) and reports a
   difference as a `mesh-disagree` client event. The engine's rules stay in
-  charge until production shows none.
+  charge until runs that reach each rule show none (`mesh-disagree` is not
+  yet among the reports `tests/observer-reports.mjs` fails on).
 - Built: the per-peer machine, `web/src/peer-connection.ts` (diagram in
   `docs/peer-connection-machine.md`). One machine per other player, built
   to the model's `fixed` variant: the lower slot is the pair's one
@@ -390,7 +398,8 @@ Slice 1, the peer mesh and signaling:
   this page offered to before it watched them is left alone), and the
   machine's view of the health check's timing (it runs on the engine's).
   The four properties are still violated by the engine; the machine takes
-  over nothing until production shows no `peer-disagree` it should not.
+  over nothing until runs that reach its rules show no `peer-disagree` it
+  should not.
 - Differences the observer is expected to report, where the engine is not
   what the model's `fixed` rules say (none came up in the two-player and
   lifecycle runs, which reconnect at most once):
@@ -426,8 +435,9 @@ Slice 1, the peer mesh and signaling:
   a `peer-disagree` or `resync-disagree` (`tests/observer-reports.mjs`). The
   first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
   attempt with no disagreement and no mismatch.
-- Next: read the production reports; then decide, one rule at a time, by
-  the machine, starting with who offers from the health check.
+- Next: decide, one rule at a time, by the machine, starting with who
+  offers from the health check, each once the runs that reach it show no
+  disagreement.
 
 Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed
 as not modelled are now modelled.
@@ -530,8 +540,10 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   `resyncDeadlineStep`, proved and observing like the rules above.
   `tests/rb-two-player.mjs` with `DOUBLE_RESYNC_ASK=1` drives it: two
   requests at once, the second rate-limited, the first's answer dropped.
-- Next: read the production reports; once they show none, the engine calls
-  the proved functions instead of its own copies.
+- Next: the engine calls the proved functions instead of its own copies,
+  one at a time, each once the runs that reach it show no `resync-disagree`
+  (`DOUBLE_RESYNC_ASK`, and a lifecycle resync that actually happens, which
+  no fault mode drives yet).
 - A state transfer starving the inputs behind it (`specs/tick_deadlines.qnt`,
   `input_link`). Two `DELAY_SYNC_ANSWER_MS` runs failed with 83 and 40
   gameplay mismatches and 76 and 20 `DEEP-MISPREDICT-SKIP`. The prediction
@@ -594,9 +606,10 @@ Done so far:
   #220), and which connection a signal belongs to, together with the host's
   deadline to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
   `specs/streaming_connection.qnt`).
-- Next: read the `streaming-disagree` reports. Once they show none, the
-  engine calls the observed functions instead of its own copies, one rule at
-  a time. Then move the demo page's wiring.
+- Next: the engine calls the observed functions instead of its own copies,
+  one rule at a time, each once real-ROM streaming runs that reach it
+  (connect, input, a dropped guest, a reconnect) show no
+  `streaming-disagree`. Then move the demo page's wiring.
 
 Not every page has `window.KNCore`, and some of these scripts run before it:
 
