@@ -9,6 +9,8 @@ import {
   dedicationLine,
   escapeHtml,
   startVersion,
+  VERSION_ATTEMPTS,
+  VERSION_RETRY_MS,
   type SiteStyle,
   type StaticJson,
   type VersionHost,
@@ -520,6 +522,8 @@ const fakePage = (readyState: 'loading' | 'complete', controls: { about: number;
     ['/static/changelog.json', DOWN],
   ]);
   const fetched: string[] = [];
+  /** Timers the page set, held until a test runs them: the old script set none. */
+  const timers: { readonly handler: () => void; readonly ms: number }[] = [];
   const document = {
     readyState,
     body,
@@ -552,6 +556,14 @@ const fakePage = (readyState: 'loading' | 'complete', controls: { about: number;
   return {
     document,
     fetch,
+    setTimeout: (handler: () => void, ms: number): void => {
+      timers.push({ handler, ms });
+    },
+    timers,
+    /** Run the timers set so far, as their delays pass. */
+    runTimers: (): void => {
+      for (const timer of timers.splice(0)) timer.handler();
+    },
     body,
     about,
     version,
@@ -579,7 +591,7 @@ const startOld = (page: Page): void => {
 };
 
 const startNew = (page: Page): void => {
-  const host: VersionHost<FakeElement> = { document: page.document, fetch: page.fetch };
+  const host: VersionHost<FakeElement> = { document: page.document, fetch: page.fetch, setTimeout: page.setTimeout };
   startVersion(host);
 };
 
@@ -749,6 +761,65 @@ test('a version file off its shape leaves the footer as a failed request does', 
     assert.equal(page.about[0]?.clicks.length, 1, answer);
   }
   assert.equal(decodeVersionFile(parseJson('{"version":"0.3.0","commit":"abc"}')), '0.3.0');
+});
+
+// Where the new display is meant to differ from the old script: the old one
+// asked for the version once. Behind the landing Worker the request reaches a
+// game server that can be napping, so the new one asks again until it
+// answers. (The comparison above never runs the timers, so it covers the
+// first request.)
+test('a failed version request is asked for again while the server wakes', async () => {
+  const page = fakePage('complete', { about: 1, version: 1 });
+  startNew(page);
+  await settle();
+  assert.equal(page.version[0]?.textContent, '');
+  assert.deepEqual(
+    page.timers.map((timer) => timer.ms),
+    [VERSION_RETRY_MS],
+  );
+  // Still waking: another request, another retry.
+  page.runTimers();
+  await settle();
+  assert.equal(page.version[0]?.textContent, '');
+  assert.equal(page.timers.length, 1);
+  // Awake: the footer fills in, opens the changelog, and stops asking.
+  page.setAnswer('/static/version.json', '{"version":"0.69.3"}');
+  page.setAnswer('/static/changelog.json', CHANGELOG);
+  page.runTimers();
+  await settle();
+  assert.equal(page.version[0]?.textContent, 'v0.69.3');
+  assert.equal(page.timers.length, 0);
+  assert.deepEqual(page.fetched, ['/static/version.json', '/static/version.json', '/static/version.json']);
+  page.version[0]?.click();
+  await settle();
+  assert.equal(page.body.children.filter((child) => child.id === 'kn-changelog-modal').length, 1);
+  // About was wired once, before the first request.
+  assert.equal(page.about[0]?.clicks.length, 1);
+});
+
+test('the footer stops asking for the version after its last attempt', async () => {
+  const page = fakePage('complete', { about: 0, version: 1 });
+  startNew(page);
+  await settle();
+  for (let i = 0; i < VERSION_ATTEMPTS + 5; i++) {
+    page.runTimers();
+    await settle();
+  }
+  assert.equal(page.fetched.length, VERSION_ATTEMPTS);
+  assert.equal(page.timers.length, 0);
+  assert.equal(page.version[0]?.textContent, '');
+  assert.equal(page.version[0]?.clicks.length, 0);
+  // About two minutes of asking: as long as the front page waits before it calls a wake slow.
+  assert.equal((VERSION_ATTEMPTS * VERSION_RETRY_MS) / 1000, 120);
+});
+
+test('a version answered on the first request sets no timer', async () => {
+  const page = fakePage('complete', { about: 0, version: 1 });
+  page.setAnswer('/static/version.json', '{"version":"0.3.0"}');
+  startNew(page);
+  await settle();
+  assert.equal(page.version[0]?.textContent, 'v0.3.0');
+  assert.equal(page.timers.length, 0);
 });
 
 test('a changelog off its shape opens nothing and is asked for again on the next click', async () => {
