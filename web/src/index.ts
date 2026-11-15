@@ -73,6 +73,7 @@ import {
 } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, sendPaced, transferStillFor } from './sync-send.ts';
+import { changesWatchedFrame, followUpIsUnneeded } from './sync-follow-up.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
 import { newPageId, readAttemptId } from './attempt-id.ts';
@@ -342,6 +343,8 @@ export const KNCore = {
   startLateJoinWait,
   /** The host's resync state, a chunk at a time (sync-send.ts). */
   syncSend: { mayHandChunk, sendPaced, transferStillFor },
+  /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
+  syncFollowUp: { changesWatchedFrame, followUpIsUnneeded },
   startRejoin,
   shouldResumeRomTransfer,
   /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */
