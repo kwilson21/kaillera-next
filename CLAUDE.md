@@ -220,8 +220,9 @@ All events go through the default Socket.IO namespace (`/`).
   amortized restore on misprediction. Cross-platform determinism via SoftFloat FPU.
   Rollback runs on every screen, menus included; nothing in the engine's tick
   depends on the scene the game is showing. Strict lockstep is the path used
-  when the core does not export `kn_pre_tick` (or the C engine was disabled
-  after repeated throws).
+  when the core does not export `kn_pre_tick`. A throw out of the C engine's
+  tick is a WASM trap and ends the match on that page (`FATAL-CORE-ABORT`),
+  as any core trap does; nothing switches a page off rollback mid-match.
   Host-authoritative resync remains as fallback for reconnection and late join.
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
   video via WebRTC MediaStream. Guests send input back over DataChannel. The host

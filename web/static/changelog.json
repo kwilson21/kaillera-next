@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.5",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a trap in the C rollback tick ends the match on that page, as any core trap does (#273)"
+      }
+    ]
+  },
+  {
     "version": "0.69.4",
     "date": "2026-11-15",
     "changes": [
