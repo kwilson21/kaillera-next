@@ -336,12 +336,24 @@ ring_after_resync() {
   expect_violation "$RING" ring_after_resync_save_only everyCopyIsWhole
 }
 
+engine_start() {
+  local START=specs/engine_start.qnt
+  verify "$START" engine_start_current allHold
+  verify "$START" engine_start_before theHostsStartIsWhereTheGuestIs
+  # A solo match: start, arm, one frame (3 steps; soloTest).
+  expect_violation "$START" engine_start_before everyFrameRunsOnTheCEngine
+  # A guest that hears nothing: start, three ticks, the deadline (5 steps).
+  expect_violation "$START" engine_start_before armsWithTheHostsDelay
+  # engine_start_stop_only's counterexample needs a close, an open and the
+  # whole wait (9 steps): check-specs.sh's random runs find it.
+}
+
 # Every group, in the order a local run takes them.
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync start_group mesh_heal
+  rom_at_start ring_after_resync start_group mesh_heal engine_start
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -352,7 +364,7 @@ SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
-  "peer_identity rom_transfer peer_connection rom_at_start"       # ~6.5 min
+  "peer_identity rom_transfer peer_connection rom_at_start engine_start" # ~6.5 min + engine_start
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group" # ~7 min
 )
 

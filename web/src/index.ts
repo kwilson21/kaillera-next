@@ -11,6 +11,7 @@ import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { lockstepStep } from './lockstep-wait.ts';
+import { guestStartStep } from './engine-start.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
@@ -314,6 +315,8 @@ export const KNCore = {
   inputEqual,
   /** Lockstep mode: what a tick does while an input is missing (web/src/lockstep-wait.ts). */
   lockstepStep,
+  /** What a guest does while it waits for the host's delay and start frame (web/src/engine-start.ts, specs/engine_start.qnt). */
+  guestStartStep,
   measureCanvasHealth,
   digestFrame,
   createRomResumeAnswerer,

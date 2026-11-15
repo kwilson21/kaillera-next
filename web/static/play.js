@@ -3430,11 +3430,12 @@
         // Engine forwards users-updated — supplementary to our direct listener
       },
       onToast: showToast,
-      onFatal: () => {
+      // `message`: why the match cannot start on this page; none for a crash.
+      onFatal: (message) => {
         coreFatal = true;
         engine?.flushSyncLog?.();
         engine?.dumpLogs?.();
-        showError("The emulator crashed and can't continue. Reload the page to rejoin the match.");
+        showError(message || "The emulator crashed and can't continue. Reload the page to rejoin the match.");
       },
       onSyncStatus: showSyncStatus,
       onReconnecting: (sid, isReconnecting) => {

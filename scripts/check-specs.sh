@@ -463,3 +463,25 @@ done
 # (ring_after_resync_save_only; oneFrameBackTest, twoFramesBackTest).
 $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── How a page's C engine starts ───────────────────────────────────────────
+START=specs/engine_start.qnt
+$QUINT typecheck "$START"
+for variant in engine_start_before engine_start_stop_only engine_start_current; do
+  $QUINT test "$START" --main="$variant" --backend=typescript
+done
+# Today: every frame of a match runs on the C engine, a guest arms with the
+# host's delay on the frame the host gave it, and stops only when it cannot
+# reach the armed host. The first was VIOLATED while a delay of 0 ran on the
+# old JS lockstep path: every solo match, and a friend who joined it
+# (engine_start_before; soloTest, lateJoinIntoSoloTest). The second was
+# VIOLATED while a guest that heard nothing by the deadline armed with its
+# own delay (engine_start_before; lostDelayTest). Stopping at the deadline
+# without the host sending the delay and start frame again on every open
+# stops a guest the host could reach (engine_start_stop_only; lostDelayTest).
+# The host's start frame is the guest's own in every variant, which is why
+# RB-INIT-CATCHUP and the overshoot went (theHostsStartIsWhereTheGuestIs).
+$QUINT run "$START" --main=engine_start_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+$QUINT run "$START" --main=engine_start_before --invariant=theHostsStartIsWhereTheGuestIs \
+  --max-samples=20000 --max-steps=25 --backend=typescript

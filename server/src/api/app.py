@@ -146,6 +146,9 @@ _VALID_EVENT_TYPES = {
     "rejoin-no-answer",
     # A late joiner got no game state from a running host before its deadline.
     "late-join-timeout",
+    # The match could not start on a page: its core lacks the C engine, or it
+    # never heard the host's delay (netplay-rollback.js _stopAtStart).
+    "start-fail",
     # A late joiner that lost its channel to the host got no answer to any of
     # its resync requests and stopped asking (netplay-rollback.js).
     "late-join-lost-host-giveup",

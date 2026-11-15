@@ -33,7 +33,7 @@ recovered.
 
 | Stall | Constant | Action | Event | Spec |
 |-------|----------|----------|-------|------|
-| `_rbPendingInit` (guest defers rollback init on host's `rb-delay:` broadcast) | `RB_INIT_TIMEOUT_MS = 3000` | Fall back to local delay and init anyway | `RB-INIT-TIMEOUT` | §MF2 |
+| `_rbPendingInit` (guest holds until it has the host's `rb-delay:` and `rb-init-frame:`; the armed host sends both again on every channel that opens) | `RB_INIT_TIMEOUT_MS = 10000` | With the host's delay, arm with it at the page's own frame; with none, stop and say so. Never arm with the page's own delay (`KNCore.guestStartStep`, specs/engine_start.qnt) | `RB-INIT-NO-START-FRAME`, `START-FAIL reason=no-host` | §MF2 |
 | `_syncTargetFrame` (guest holds state for coordinated frame-boundary apply; also a non-coordinated state 1-2 frames ahead of the guest, `sync held`) | `SYNC_COORD_TIMEOUT_MS = 3000` | Drop target, apply pending state at current frame (non-coord branch) | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `_scheduledSyncRequests` entries (host captures state at scheduled target frame; in rollback mode also waits until its state is confirmed — no replay pending, every live peer's consumed input real) | `SYNC_COORD_TIMEOUT_MS = 3000` | Dispatch request at current frame | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `INPUT-STALL` hard-timeout (fabricate ZERO_INPUT after input missing) | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Fabricate AND request full resync so divergence converges | `INPUT-STALL-RESYNC` | §MF4 |

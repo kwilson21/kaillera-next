@@ -99,23 +99,28 @@ def test_rollback_delay_inputs_are_clamped_to_engine_window():
         "const _delayCeiling = () => (_predictionsPaused ? LOCKSTEP_MAX_DELAY_FRAMES : ROLLBACK_MAX_DELAY_FRAMES);"
         in src
     )
-    assert "const hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);" in src
+    # The host's delay as it comes: 0 stays 0 (a solo match and a friend who
+    # joins it), anything else is clamped as the host's own was.
+    assert "return n === 0 ? 0 : clampRollbackDelay(n);" in src
+    assert "const hostDelay = _hostDelayFrom(e.data.split(':')[1]);" in src
     assert "if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);" in src
-    assert "window._rbHostDelay = clampRollbackDelay(msg.effectiveDelay);" in src
-    assert (
-        "const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);"
-        in src
-    )
+    assert "const lateJoinDelay = _hostDelayFrom(msg.effectiveDelay);" in src
 
 
-def test_solo_delay_does_not_initialize_rollback():
+def test_every_page_arms_the_c_engine_solo_included():
+    """specs/engine_start.qnt everyFrameRunsOnTheCEngine: a delay of 0 arms too."""
     src = LOCKSTEP_JS.read_text()
 
     assert "const soloMode = playerPeerSids.length === 0;" in src
-    assert "ownDelay = 0;" in src
     assert "if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);" in src
-    assert "if (detMod?._kn_rollback_init && DELAY_FRAMES > 0)" in src
-    assert "C-ROLLBACK disabled for zero-delay solo play" in src
+    assert "DELAY_FRAMES > 0" not in src[src.index("const tryInitRollback = () => {") :][:4000]
+    assert "C-ROLLBACK disabled for zero-delay solo play" not in src
+    # A core without the C engine stops at the start instead of running unarmed.
+    assert "_stopAtStart('core', { missing: missingExports });" in src
+    # A page that has not armed holds; it never steps on another path.
+    hold_idx = src.index("_markTickReturn('skip:not-armed');")
+    c_branch_idx = src.index("// ── C-level rollback path")
+    assert hold_idx < c_branch_idx
 
 
 
@@ -271,37 +276,30 @@ def test_pending_rollback_init_keeps_reliable_input_stream_alive():
     pending_idx = src.index("if (window._rbPendingInit) {")
     pending_src = src[pending_idx : src.index("if (_syncTargetFrame > 0", pending_idx)]
     send_idx = pending_src.index("_sendPendingRollbackInitInput();")
-    deadline_idx = pending_src.index("if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS)")
-    assert send_idx < deadline_idx
+    decide_idx = pending_src.index("if (!_guestStart('tick')) {")
+    assert send_idx < decide_idx
 
 
-def test_host_authoritative_rb_init_catches_guest_state_up_before_init():
+def test_a_guest_arms_on_the_rule_and_never_with_its_own_delay():
+    """specs/engine_start.qnt: the guest arms with the host's delay at its own
+    frame, or stops and says so; there is no catch-up and no own-delay fallback."""
     src = LOCKSTEP_JS.read_text()
 
-    assert "let _rbPendingInitCatchup = null;" in src
-    assert "const _requestRollbackInit = (delay, initFrame, source) => {" in src
-    assert "targetFrame > _frameNum" in src
-    assert "_rbPendingInitCatchup = { delay: effectiveDelay, initFrame: targetFrame, source };" in src
-    assert "RB-INIT-CATCHUP armed source=${source}" in src
-    assert "RB-INIT-CATCHUP complete source=${source}" in src
+    guest_idx = src.index("const _guestStart = (source) => {")
+    guest_src = src[guest_idx : src.index("const startLockstep = () => {", guest_idx)]
+    assert "window.KNCore.guestStartStep(heardDelay, heardStart, _frameNum, waitedMs, RB_INIT_TIMEOUT_MS)" in guest_src
+    assert "window._rbDoInit(heardDelay, _frameNum);" in guest_src
+    assert "_stopAtStart('no-host'" in guest_src and "_stopAtStart('start-frame'" in guest_src
+    for gone in ("_rbPendingInitCatchup", "RB-INIT-CATCHUP", "RB-INIT-TIMEOUT", "_rbFallbackDelay"):
+        assert gone not in src
 
-    request_idx = src.index("const _requestRollbackInit = (delay, initFrame, source) => {")
-    request_src = src[request_idx : src.index("const startLockstep = () => {", request_idx)]
-    arm_idx = request_src.index("targetFrame > _frameNum")
-    direct_idx = request_src.index("window._rbDoInit(effectiveDelay, alignedFrame);")
-    assert arm_idx < direct_idx
-
-    pending_idx = src.index("if (window._rbPendingInit) {")
-    pending_src = src[pending_idx : src.index("if (_syncTargetFrame > 0", pending_idx)]
-    catchup_idx = pending_src.index("if (_rbPendingInitCatchup) {")
-    timeout_idx = pending_src.index("if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS)")
-    fallthrough_idx = pending_src.index("Fall through to the JS lockstep path")
-    assert catchup_idx < timeout_idx
-    assert catchup_idx < fallthrough_idx < timeout_idx
-
-    assert "_requestRollbackInit(hostDelay, window._rbHostInitFrame, 'rb-delay');" in src
-    assert "_requestRollbackInit(window._rbHostDelay, hostInitFrame, 'rb-init-frame');" in src
-    assert "_requestRollbackInit(window._rbHostDelay, window._rbHostInitFrame, 'try-init');" in src
+    # The host sends its delay and start frame together, when it arms and on
+    # every channel to a guest that opens.
+    send_idx = src.index("const _sendHostStart = (dc) => {")
+    send_src = src[send_idx : src.index("};", send_idx)]
+    assert send_src.index("rb-delay:") < send_src.index("rb-init-frame:")
+    assert "_sendHostStart(p.dc);" in src  # when it arms
+    assert "_sendHostStart(ch);" in src  # on every channel that opens
 
 
 def test_failed_frame_step_does_not_advance_bookkeeping():
