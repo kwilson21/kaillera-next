@@ -510,6 +510,23 @@ Slice 1, the peer mesh and signaling:
   first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
   attempt with no disagreement and no mismatch.
 - Next: decide the next rule by the machine: answering arms the give-up.
+- Done: the reconnect runaway (`DROP_PEER_MS=12000`, 1 run in 4 on main:
+  host 3112 frames, guest 1915). A catch-up waiting on a hole spun, and each
+  spin resent the frame's input on the reliable channel, ahead of the ask
+  for the hole. Modelled in `specs/catch_up_wait.qnt`: a waiting slice spends
+  its 60 Hz slot, and the reliable channel resends a frame at most every
+  100 ms. An ask that is never answered, or a late input past the rollback
+  window that differs, escalates to a resync with a deadline and, last, a
+  drop (`specs/ask_escalation.qnt`). The host's open handler resets the peer
+  (I2), and only the host's channel may send a state header. Driven by
+  `CATCH_UP_HOLE_MS` and `ASK_UNANSWERED_MS` (`ASK_UNANSWERED_ACKS`).
+- Next, the receiver side the 100 ms resend masks: a page far behind (a
+  guest catching up) drops a peer's inputs as too far ahead (`INPUT-OOR`)
+  even when they come on the reliable channel, and nothing asks for them
+  again once the page reaches them; only the sender's resend brings them
+  back. The page should remember the frames it dropped as ahead and ask for
+  them (`resend:`) once it reaches them, modelled first, and then a
+  reliable-channel send can go out once.
 
 Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed
 as not modelled are now modelled.
