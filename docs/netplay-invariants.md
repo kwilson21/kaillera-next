@@ -41,6 +41,7 @@ recovered.
 | RB-INPUT-STALL (rollback gameplay input missing beyond budget). An input from before the last resync's frame minus the delay is never waited for (`_inputFloor`): the state both pages loaded holds its effect, and a guest moved forward by the resync never made it | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer, release rollback input stall | `RB-INPUT-STALL-TIMEOUT` | rollback health audit 2026-04-27; specs/resync_inputs.qnt `noWaitForAnInputThatCannotArrive` |
 | Pending sync state held while a rollback replay is in flight (C refuses `kn_set_frame` mid-replay) | `SYNC_APPLY_REPLAY_WAIT_MS = 1000` | Drop the replay (`kn_clear_replay_state`) and load the state | `SYNC-APPLY-DEFERRED` | two-browser test 2026-09-24 |
 | Pending sync state held while a catch-up runs (`_catchUpTo >= 0`) | `MAX_CATCH_UP_FRAMES` ticks: each slice runs a frame or ends the catch-up | Apply it once the catch-up ends | `SYNC-CATCH-UP` | specs/resync_flow.qnt `theGuestIsNeverRewound` |
+| Catch-up waiting on a peer's input deeper than the rollback window (asked for with `resend:`) | `CATCH_UP_HOLE_WAIT_MS = 3000` | End the catch-up; normal ticks play the rest (and stall and ask there as usual) | `SYNC-CATCH-UP ... stopped: slot N input K not here after 3000ms` | Codex review of #261 |
 | `_lateJoinPaused` (host pauses tick loop while late-joiners load state). The pause belongs to the joiners being served (`_lateJoinServing`): it ends when none is left | `LATE_JOIN_TIMEOUT_MS = 15000` per joiner, armed when its pause begins (before the state is compressed); a repeated request for the same joiner keeps it | `hardDisconnectPeer()` that joiner; resume and broadcast the roster once no joiner is still being served. A timer acts only on its own serve, so it never disconnects a joiner who has since joined | `LATE-JOIN-TIMEOUT` | §MF5; specs/late_join_pause.qnt `holdToday` |
 | Late-join pause on a page that is not the host (`late-join-pause` from the host). Only the host's word pauses or resumes it; a joiner's `late-join-ready` does not | `LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000` from the host's latest pause message (checked in the tick loop; longer than the host's per-joiner deadline) | Resume and reset pacing | `LATE-JOIN-GUEST-PAUSE-TIMEOUT` | specs/late_join_pause.qnt `guestPauseHasADeadline`, `guestResumesOnTheHostsWord` |
 | Joiner waiting for an answer to its state request (`_awaitingLateJoinState`). The request is repeated every `LATE_JOIN_WAIT_RETRY_MS = 5000`; the wait is an Effect program (`web/src/late-join-wait.ts`) | `LATE_JOIN_WAIT_TIMEOUT_MS = 60000` | Report `late-join-timeout` and tell the player to reload. No guess is made about the host: a running host sends no input to a pending joiner, so silence does not mean it is still waiting. A host that is not running yet answers each request with `join-the-start` on the joiner's own data channel, and the joiner then loads as a starter (`emu-ready`) | `LATE-JOIN-WAIT-TIMEOUT` | specs/room_lifecycle.qnt `joinersAreNotLeftWaitingAtTheStart` |
@@ -285,13 +286,20 @@ never corrected and the peers split.
 
 - Every peer's input for a frame is fed again from the page's own record
   before the frame runs, so the replay does not depend on the input ring.
-- It stops at the first frame whose inputs are not all here (run unseen, it
-  would predict inputs too far back to roll back) and leaves the rest to
-  normal ticks.
+- An input not here is predicted where `tick()` would predict it: within the
+  rollback window (`KN_MAX_VISIBLE_ROLLBACK_DEPTH`) of the frame the guest
+  goes on from, or a phantom peer's. A deeper hole is asked for
+  (`_askForMissingInputs`) and waited on up to `CATCH_UP_HOLE_WAIT_MS`; run
+  unseen on a prediction it could not be rolled back once the input came.
+  Past that wait normal ticks play the rest.
+- The slice spends no 60 Hz slot (`_tickReplayOnly`, as a rollback replay),
+  the inputs it runs on are kept until it reaches its target, and the peers'
+  inputs for the frame it goes back to are taken in while it runs (their
+  range check is against that frame).
 - It runs in slices of at most `CATCH_UP_SLICE_MS`, one per tick, so the page
-  keeps taking in messages between them. Each slice runs at least one frame
-  or ends it, and at most `MAX_CATCH_UP_FRAMES` frames are run, so it ends
-  within that many ticks; a newer state waits for it. A state further back is
+  keeps taking in messages between them. Each slice runs at least one frame,
+  waits on a hole within its deadline, or ends it, and at most
+  `MAX_CATCH_UP_FRAMES` frames are run; a newer state waits for it. A state further back is
   not applied (`SYNC-TOO-OLD-DROPPED`) and an owed resync is asked for again,
   or given up visibly (`RESYNC-REASK-GIVEUP`).
 - It does not start over a pending rollback or replay; `kn_pre_tick`

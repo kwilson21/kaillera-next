@@ -677,7 +677,7 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     loop = sl[sl.index("while (_frameNum < _catchUpTo) {") :]
     # Each frame: every peer's input fed again from this page's record, then a
     # forward step as in tick(), pacing bypassed.
-    assert loop.index("_feedCInput(mod, s, key, _remoteInputs[s][key])") < loop.index("mod._kn_pre_tick(")
+    assert loop.index("_feedCInput(mod, p.slot, key, input)") < loop.index("mod._kn_pre_tick(")
     assert "mod._kn_pre_tick(own.buttons, own.lx, own.ly, own.cx, own.cy, -1)" in loop
     order = [
         "mod._kn_pre_tick(",
@@ -689,15 +689,40 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     ]
     positions = [loop.index(x) for x in order]
     assert positions == sorted(positions)
-    # It stops at the first frame whose inputs are not all here, and ends
-    # when it is back or stopped.
-    assert "_remoteInputs[s]?.[key] === undefined" in loop
+    # An input not here is predicted where tick() would predict it: within the
+    # rollback window of the frame it goes back to, a phantom peer's, or one
+    # from before the settled point. A deeper hole is asked for and waited on,
+    # to a deadline (I1); the timer goes when it is filled or the catch-up ends.
+    assert "const nearTheEnd = f >= _catchUpTo - KN_MAX_VISIBLE_ROLLBACK_DEPTH;" in loop
+    hole = loop[loop.index("const hole = remotePeers.find(") :]
+    hole = hole[: hole.index(");")]
+    for cond in (
+        "_remoteInputs[p.slot]?.[key] === undefined",
+        "key >= _inputFloor(p.slot)",
+        "!_peerPhantom[p.slot]",
+        "!nearTheEnd",
+    ):
+        assert cond in hole
+    assert "now - _catchUpHoleSince >= CATCH_UP_HOLE_WAIT_MS" in loop
+    assert "_askForMissingInputs(hole," in loop
+    assert "_catchUpHoleSince = 0;" in loop and "_catchUpHoleSince = 0;" in end
+    assert re.search(r"const CATCH_UP_HOLE_WAIT_MS = \d+;", src)
     assert "if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);" in sl
 
     # Each tick runs the next slice, after the queued inputs are fed and
     # before anything else steps the emulator.
     tick_slice = src.index("if (_catchUpTo >= 0) {\n          _catchUpSlice(tickMod);")
     assert src.rindex("_drainPendingCInputs(tickMod);", 0, tick_slice) > src.rindex("RB-INPUT-STALL f=", 0, tick_slice)
+    # The slice spends no 60 Hz slot, as a rollback replay does not.
+    after_slice = src[tick_slice : src.index("return;", tick_slice)]
+    assert "_tickReplayOnly = true;" in after_slice
+    # Inputs it runs on stay until it reaches its target, and the peers'
+    # inputs for the frame it goes back to are taken in meanwhile.
+    assert "const keepThrough = Math.max(_frameNum, _catchUpTo) + DELAY_FRAMES;" in apply
+    packet = src[src.index("const _processInputPacket = (remoteSid, peer, data) => {") :]
+    packet = packet[: packet.index("INPUT-OOR slot=")]
+    assert "const recvBound = Math.max(_frameNum, _catchUpTo);" in packet
+    assert "recvFrame > recvBound + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES" in packet
     # A newer state waits for it; a stopped match ends it.
     blocks = src[src.index("const _replayBlocksSyncApply = () => {") :]
     assert blocks[: blocks.index("\n  };\n")].index("if (_catchUpTo >= 0) return true;") >= 0

@@ -714,6 +714,13 @@ export const createDesyncDetector = (page: DetectorPage) => {
       for (const f of localDigests.keys()) {
         if (f >= frame) localDigests.delete(f);
       }
+      // A capture queued for a suspect among them would picture the state
+      // that replaced it.
+      for (const [at, payloads] of pendingCaptures) {
+        const kept = payloads.filter((p) => p.frame < frame);
+        if (kept.length === 0) pendingCaptures.delete(at);
+        else if (kept.length < payloads.length) pendingCaptures.set(at, kept);
+      }
     },
 
     events,
@@ -723,6 +730,7 @@ export const createDesyncDetector = (page: DetectorPage) => {
       peerDigests,
       localDigests,
       lastFlagFrame,
+      pendingCaptures,
     },
   };
 };

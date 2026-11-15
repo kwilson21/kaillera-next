@@ -5284,6 +5284,13 @@
   const RUN_LATE_JOIN_PAUSE = 'late-join-pause'; // host paused for joiner
   const RUN_AWAITING_RESYNC = 'awaiting-resync'; // guest waiting for state
   let _runSubstate = RUN_NORMAL;
+  // A catch-up from a host state behind this guest (_startCatchUp).
+  let _catchUpTo = -1; // the frame a catch-up runs to; -1 = none
+  let _catchUpHoleSince = 0; // when the slice first found the hole it waits on; 0 = none
+  let _catchUpFrom = -1;
+  let _catchUpStartedAt = 0;
+  let _catchUpWorkMs = 0;
+  let _catchUpSlices = 0;
 
   // Legacy booleans — still the source of truth until fully migrated.
   // Each is set alongside _phase during the transition period.
@@ -8396,11 +8403,14 @@
     // sit in roughly [_frameNum - 240, _frameNum + DELAY_FRAMES + 60].
     // Reject anything wildly outside that range; INPUT-LATE handles the
     // soft-stale case below.
+    // While a catch-up runs, the frame counter is behind the frame the
+    // guest is going back to, and the peers' inputs are for that one.
+    const recvBound = Math.max(_frameNum, _catchUpTo);
     if (
       !Number.isFinite(recvFrame) ||
       recvFrame < 0 ||
       recvFrame < _frameNum - INPUT_PAST_WINDOW_FRAMES ||
-      recvFrame > _frameNum + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES
+      recvFrame > recvBound + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES
     ) {
       _syncLog(`INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES}`);
       // Too far ahead: the peer has made it and will not send it again on
@@ -15349,6 +15359,9 @@
         if (_catchUpTo >= 0) {
           _catchUpSlice(tickMod);
           _markTickReturn('catch-up');
+          // Old frames run again: the 60 Hz slot is not spent on them, as on
+          // a rollback replay.
+          _tickReplayOnly = true;
           return;
         }
 
@@ -18324,9 +18337,12 @@
   // this page's record before its frame runs, so a gap longer than the
   // engine's 256-frame input ring runs on the real inputs and not on
   // predictions nothing would correct (the pages split after a 272-frame
-  // rewind). It stops at the first frame whose inputs are not all here:
-  // run unseen, it would predict inputs too far back to roll back once they
-  // came. Normal ticks play the rest, as they played all of it before.
+  // rewind). An input not here is predicted where tick() would predict it:
+  // within the rollback window of the frame the guest goes on from, or a
+  // phantom peer's. A deeper hole is asked for and waited on, up to
+  // CATCH_UP_HOLE_WAIT_MS; run unseen on a prediction, it could not be
+  // rolled back once the input came. Past that wait normal ticks play the
+  // rest, as they played all of it before.
   //
   // It runs in slices of at most CATCH_UP_SLICE_MS, one per tick (the first
   // in applySyncState), so the page keeps taking in messages and inputs
@@ -18334,11 +18350,9 @@
   // so it ends within MAX_CATCH_UP_FRAMES ticks. A newer state waits for it
   // (_replayBlocksSyncApply).
   const CATCH_UP_SLICE_MS = 50;
-  let _catchUpTo = -1; // the frame a catch-up runs to; -1 = none
-  let _catchUpFrom = -1;
-  let _catchUpStartedAt = 0;
-  let _catchUpWorkMs = 0;
-  let _catchUpSlices = 0;
+  // A hole deeper than the rollback window is asked for and waited on, this
+  // long at most (I1); then normal ticks play the rest.
+  const CATCH_UP_HOLE_WAIT_MS = 3000;
 
   const _startCatchUp = (mod, fromFrame, toFrame) => {
     if ((mod._kn_get_replay_depth?.() ?? 0) > 0 || (mod._kn_peek_pending_rollback?.() ?? -1) >= 0) {
@@ -18370,15 +18384,16 @@
     );
     _catchUpTo = -1;
     _catchUpFrom = -1;
+    _catchUpHoleSince = 0;
   };
 
   const _catchUpSlice = (mod) => {
     if (_catchUpTo < 0) return;
     const t0 = performance.now();
-    const remoteSlots = [];
+    const remotePeers = [];
     for (const [sid, peer] of Object.entries(_peers)) {
       if (!Number.isInteger(peer.slot) || peer.slot === _playerSlot || _isPeerPendingLateJoin(sid, peer)) continue;
-      remoteSlots.push(peer.slot);
+      remotePeers.push(peer);
     }
     let stoppedAt = '';
     while (_frameNum < _catchUpTo) {
@@ -18390,12 +18405,33 @@
       }
       const key = f - DELAY_FRAMES;
       if (key >= 0) {
-        const missing = remoteSlots.find((s) => _remoteInputs[s]?.[key] === undefined);
-        if (missing !== undefined) {
-          stoppedAt = `slot ${missing} input ${key} not here`;
+        // An input not here is predicted, as in tick(), where a rollback can
+        // still correct it once it comes: within the rollback window of the
+        // frame the guest goes on from, or a phantom peer's. Deeper, it is
+        // asked for and waited on (CATCH_UP_HOLE_WAIT_MS).
+        const nearTheEnd = f >= _catchUpTo - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+        const hole = remotePeers.find(
+          (p) =>
+            _remoteInputs[p.slot]?.[key] === undefined &&
+            key >= _inputFloor(p.slot) &&
+            !_peerPhantom[p.slot] &&
+            !nearTheEnd,
+        );
+        if (hole) {
+          const now = performance.now();
+          if (!_catchUpHoleSince) _catchUpHoleSince = now;
+          if (now - _catchUpHoleSince >= CATCH_UP_HOLE_WAIT_MS) {
+            stoppedAt = `slot ${hole.slot} input ${key} not here after ${CATCH_UP_HOLE_WAIT_MS}ms`;
+          } else {
+            _askForMissingInputs(hole, Math.min(_catchUpTo - DELAY_FRAMES, key + RB_INPUT_ASK_MAX - 1), key);
+          }
           break;
         }
-        for (const s of remoteSlots) _feedCInput(mod, s, key, _remoteInputs[s][key]);
+        _catchUpHoleSince = 0;
+        for (const p of remotePeers) {
+          const input = _remoteInputs[p.slot]?.[key];
+          if (input !== undefined) _feedCInput(mod, p.slot, key, input);
+        }
       }
       // Nothing was pending when it began, and every input fed is one this
       // page had given the engine already, before a frame that applies it
@@ -18589,11 +18625,13 @@
     // dropped. This only holds when the guest's counter matched the host's
     // sync frame; the loadState fallback doesn't realign it, so it keeps the
     // plain purge.
+    // A catch-up still running goes on to its target on these inputs.
+    const keepThrough = Math.max(_frameNum, _catchUpTo) + DELAY_FRAMES;
     for (const [slot, inputs] of Object.entries(_remoteInputs)) {
       if (!inputs) continue;
       const fromHost = timelineAligned && slot === '0';
       for (const f of Object.keys(inputs)) {
-        if (parseInt(f, 10) <= _frameNum + DELAY_FRAMES) continue;
+        if (parseInt(f, 10) <= keepThrough) continue;
         if (fromHost && inputs[f] !== KNShared.ZERO_INPUT) continue;
         delete inputs[f];
       }

@@ -342,3 +342,25 @@ test('a resync that runs frames again drops the digests built for them', () => {
   detector.forgetFrom(120);
   assert.deepEqual([...digests.keys()], [100, 110]);
 });
+
+test('and the captures queued for suspects among them', () => {
+  const page: DetectorPage = { KNState: { isLocalHost: false, matchId: 'm1', peers: {} }, _peers: {} };
+  const detector = createDesyncDetector(page);
+  const pending = detector._testHooks.pendingCaptures;
+  const suspect = (frame: number): DesyncSuspect => ({
+    frame,
+    field: 'stocks',
+    slot: 0,
+    hashes: {},
+    trigger: 'flag',
+    replayMeta: null,
+  });
+  pending.set(150, [suspect(100), suspect(125)]);
+  pending.set(160, [suspect(130)]);
+  detector.forgetFrom(120);
+  assert.deepEqual([...pending.keys()], [150]);
+  assert.deepEqual(
+    pending.get(150)?.map((p) => p.frame),
+    [100],
+  );
+});
