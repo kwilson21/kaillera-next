@@ -233,5 +233,14 @@ def test_a_joiner_that_lost_the_host_resyncs_after_loading():
     # Asked when the host's channel opens, if it was closed at the load.
     assert "if (peer.slot === 0) _resyncAfterLostHost('host channel open');" in src
 
-    # A fresh wait, joining the start and the match stop clear it.
-    assert src.count("_lateJoinLostHost = false;") >= 4
+    # A fresh wait, joining the start, sending the resync, the end of the
+    # match (stopSync) and the page's stop clear it: it cannot outlive a match.
+    assert src.count("_lateJoinLostHost = false;") - src.count("let _lateJoinLostHost = false;") == 5
+    stop_sync = src[src.index("const stopSync = () => {") :]
+    stop_sync = stop_sync[: stop_sync.index("\n  };\n")]
+    assert "_lateJoinLostHost = false;" in stop_sync
+
+    # The resync it asks for is a numbered request (#213): a late answer to
+    # it is handled by the resync request rules.
+    assert "const requestId = _beginResyncRequest();" in helper
+    assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in helper

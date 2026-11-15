@@ -13545,6 +13545,9 @@
     _resyncRequestAt = -1;
     _hostNumbersAnswers = false;
     _syncAnswerFor = 0;
+    // A late join's owed resync belongs to this match: it does not carry
+    // into the next one on this page.
+    _lateJoinLostHost = false;
     _lastAppliedSyncHostFrame = -1;
     _resetStrictMenuResends();
     _clearStrictMenuWait();
