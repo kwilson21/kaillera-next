@@ -140,3 +140,28 @@ def test_a_request_during_a_transfer_is_queued_not_dropped():
     reset = src[src.index("const resetPeerState") :]
     assert "_queuedSyncPushes.delete(opts.sid);" in reset[: reset.index("\n  };\n")]
     assert "_queuedSyncPushes.clear();" in src
+
+
+def test_the_guests_chunk_deadline_is_on_progress():
+    """A deadline on the whole state gave up paced transfers still arriving on
+    any link below about 3.9 Mbit/s: the guest asked over Socket.IO and the host
+    went on pacing the transfer it had dropped, its inputs queued behind it
+    (specs/tick_deadlines.qnt, aTransferMakingProgressIsNotAbandoned,
+    noChunkForATransferTheGuestDropped). Each chunk restarts it; I1 holds: no
+    chunk for SYNC_CHUNK_TIMEOUT_MS still gives the transfer up."""
+    src = ENGINE.read_text()
+    header = src[src.index("if (e.data.startsWith('sync-start:')) {") :]
+    header = header[: header.index("if (e.data.startsWith('sync-regions-start:')) {")]
+    assert "_rearmSyncChunkDeadline = () => {" in header
+    assert "_syncChunkTimeoutTimer = setTimeout(onChunkDeadline, SYNC_CHUNK_TIMEOUT_MS);" in header
+    assert "if (sessionId !== _syncChunkSessionId) return;" in header
+    assert header.count("_rearmSyncChunkDeadline();") == 1
+    assert "_requestSocketFullResync('sync-chunk-timeout');" in header
+    chunks = src[src.index("// Binary: sync state chunks") :]
+    chunks = chunks[: chunks.index("sync-state DC but _syncExpected=0")]
+    assert chunks.index("if (_syncChunks.length < _syncExpected) {") < chunks.index("_rearmSyncChunkDeadline?.();")
+    assert "_rearmSyncChunkDeadline = null;" in chunks
+    # A regions patch has no deadline of its own; a chunk of it must not
+    # restart the last state transfer's.
+    regions = src[src.index("if (e.data.startsWith('sync-regions-start:')) {") :]
+    assert "_rearmSyncChunkDeadline = null;" in regions[: regions.index("return;")]

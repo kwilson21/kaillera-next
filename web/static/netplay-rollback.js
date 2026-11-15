@@ -6471,14 +6471,23 @@
   let _syncFrame = 0; // frame number of incoming sync
   let _syncIsFull = true; // true=full state, false=XOR delta
   let _syncChunkTimeoutTimer = null;
+  // Restarts the chunk deadline of the transfer being received; null when none is.
+  let _rearmSyncChunkDeadline = null;
   let _syncChunkSessionId = 0;
   let _syncLastChunkProgressLogAt = 0;
+  // Guest: a transfer is given up when no chunk of it has arrived for this
+  // long (I1), counted from its header and again from each chunk. A deadline
+  // on the whole state gave up transfers that were still arriving: paced,
+  // 1.4 MB needs more than 3 s on a link below about 3.9 Mbit/s, and the host
+  // then went on pacing the transfer the guest had dropped, its inputs
+  // queued behind it (specs/tick_deadlines.qnt,
+  // aTransferMakingProgressIsNotAbandoned, noChunkForATransferTheGuestDropped).
   const SYNC_CHUNK_TIMEOUT_MS = 3000;
   // Host: a state chunk waits for the channel to hold less than
   // SYNC_SEND_LOW_WATER bytes (polled), at most SYNC_SEND_STALL_MS each (I1;
   // sendSyncChunks). Four 64 KB chunks: the host's inputs never queue behind
   // more than that (0.4 s at 5 Mbit/s), and a page whose main thread is busy
-  // still moves a state well inside the guest's 3 s chunk timeout. With one
+  // still moves each chunk well inside the guest's 3 s chunk timeout. With one
   // chunk, each took two or three turns of the main thread: about 250 ms in
   // the test container, 6 s for a state.
   const SYNC_SEND_LOW_WATER = 4 * 64000;
@@ -9090,7 +9099,9 @@
           if (_syncChunkTimeoutTimer) clearTimeout(_syncChunkTimeoutTimer);
           const sessionId = _syncChunkSessionId;
           const transferAnswers = _syncAnswerFor;
-          _syncChunkTimeoutTimer = setTimeout(() => {
+          const onChunkDeadline = () => {
+            _syncChunkTimeoutTimer = null;
+            _rearmSyncChunkDeadline = null;
             if (sessionId !== _syncChunkSessionId || _syncExpected <= 0) return;
             const received = _syncChunks.length;
             if (_answersAnOlderRequest(transferAnswers)) {
@@ -9105,13 +9116,19 @@
               return;
             }
             _syncLog(
-              `sync chunks timeout: ${received}/${_syncExpected} chunks after ${SYNC_CHUNK_TIMEOUT_MS}ms — requesting socket full sync`,
+              `sync chunks timeout: ${received}/${_syncExpected} chunks, none for ${SYNC_CHUNK_TIMEOUT_MS}ms — requesting socket full sync`,
             );
             _syncChunks = [];
             _syncExpected = 0;
             _resyncRequestInFlight = false;
             _requestSocketFullResync('sync-chunk-timeout');
-          }, SYNC_CHUNK_TIMEOUT_MS);
+          };
+          _rearmSyncChunkDeadline = () => {
+            if (sessionId !== _syncChunkSessionId) return;
+            if (_syncChunkTimeoutTimer) clearTimeout(_syncChunkTimeoutTimer);
+            _syncChunkTimeoutTimer = setTimeout(onChunkDeadline, SYNC_CHUNK_TIMEOUT_MS);
+          };
+          _rearmSyncChunkDeadline();
           _syncLog(
             `sync-start received: frame=${_syncFrame} expected=${_syncExpected} full=${_syncIsFull} proactive=${_syncIsProactive}`,
           );
@@ -9130,6 +9147,7 @@
           _syncChunks = [];
           _syncLastChunkProgressLogAt = 0;
           _syncChunkSessionId++;
+          _rearmSyncChunkDeadline = null;
           _syncLog(`sync-regions-start received: frame=${_syncFrame} expected=${_syncExpected}`);
           return;
         }
@@ -9147,11 +9165,15 @@
             _syncLastChunkProgressLogAt = now;
             _syncLog(`sync chunks progress: ${_syncChunks.length}/${_syncExpected}`);
           }
-          if (_syncChunks.length >= _syncExpected) {
+          if (_syncChunks.length < _syncExpected) {
+            // Progress: the deadline starts again.
+            _rearmSyncChunkDeadline?.();
+          } else {
             if (_syncChunkTimeoutTimer) {
               clearTimeout(_syncChunkTimeoutTimer);
               _syncChunkTimeoutTimer = null;
             }
+            _rearmSyncChunkDeadline = null;
             _syncLog(`sync chunks complete: ${_syncChunks.length}/${_syncExpected} chunks received`);
             handleSyncChunksComplete();
           }
@@ -18468,6 +18490,7 @@
       clearTimeout(_syncChunkTimeoutTimer);
       _syncChunkTimeoutTimer = null;
     }
+    _rearmSyncChunkDeadline = null;
     _syncChunkSessionId++;
     _syncLastChunkProgressLogAt = 0;
     _pushingSyncState = false;
