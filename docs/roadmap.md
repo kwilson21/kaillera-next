@@ -754,3 +754,17 @@ Staying plain JavaScript:
   All application queries are built this way; `db.query` and
   `db.execute_write` remain only for tests and one-off tooling that
   arrange data with hand-written SQL.
+
+## Noted, not scheduled
+
+- **The freeze check reads the canvas back once a second.** With images
+  allowed (the default), `checkFreeze` in `web/src/page/diagnostics.ts`
+  hashes the game canvas (`captureCanvasHash`, a WebGL `readPixels`) every
+  60 frames for its RENDER-STALL check, and `checkCanvasHealth` does the
+  same in the first 300 frames. Each is a GPU sync point on every player's
+  page. On a real GPU that is milliseconds, but it can be a hitch once a
+  second on a low-end or mobile device. In the cloud container's software GL
+  it takes seconds, which is why tests there load pages with
+  `?knperf=light`. A follow-up could check the canvas less often, or only
+  once frames stop changing by some other sign. It cannot be measured in the
+  container.

@@ -92,10 +92,14 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
+        # knperf=light: no canvas reads. The freeze check reads the canvas back
+        # every 60 frames (diagnostics.ts checkFreeze); in the container's
+        # software GL a readback takes seconds, and both pages parked at every
+        # 60th frame, which this test then measured as slow seconds.
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback&knperf=light")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest&knperf=light")
         guest.wait_for_selector("#overlay", timeout=10000)
 
         _load_rom(host, rom_path)
