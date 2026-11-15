@@ -156,9 +156,10 @@
             <label for="mode-select" class="mode-label">Mode:</label>
             <select
               id="mode-select"
-              title="Rollback: every player runs the game and late inputs are corrected by replay (recommended). Streaming: host runs the emulator, guests watch a video stream."
+              title="Rollback: every player runs the game and late inputs are corrected by replay (recommended). Lockstep: every player runs the game and each frame waits for every player's input, so nothing is guessed (feels slower on a long connection). Streaming: host runs the emulator, guests watch a video stream."
             >
               <option value="rollback">Rollback</option>
+              <option value="lockstep">Lockstep</option>
               <option value="streaming">Streaming</option>
             </select>
           </div>

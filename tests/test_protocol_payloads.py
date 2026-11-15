@@ -244,19 +244,17 @@ def test_an_event_without_a_model_cannot_be_emitted():
         _run(signaling._emit("brand-new-event", {}))
 
 
-def test_a_restored_room_with_a_legacy_mode_still_matches():
-    """A room saved before the rename comes back as "rollback", so `mode` can be the two-value literal."""
+def test_a_restored_lockstep_room_matches():
+    """A room saved in lockstep mode comes back in lockstep mode, which the payload literal takes."""
     import json
 
     from src import state
 
     room = signaling.Room(owner="sid-host", room_name="Test", game_id="ssb64", password=None, max_players=4)
     room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
-    room.mode = "rollback"
-    saved = json.loads(state._serialize_room(room))
-    saved["mode"] = "lockstep"
-    restored = state._deserialize_room(saved)
-    assert UsersUpdated.model_validate(_players_payload(restored)).mode == "rollback"
+    room.mode = "lockstep"
+    restored = state._deserialize_room(json.loads(state._serialize_room(room)))
+    assert UsersUpdated.model_validate(_players_payload(restored)).mode == "lockstep"
 
 
 # ── the generator ────────────────────────────────────────────────────────────
@@ -351,5 +349,5 @@ def test_generator_refuses_a_validator_it_does_not_know():
     module.Thing = Thing
     with pytest.raises(gen.Unsupported, match="_lowercase"):
         gen.Generator(module).render()
-    # The one validator payloads.py has is listed, with what the schema does about it.
-    assert set(gen.KNOWN_VALIDATORS) == {"_coerce_legacy_mode"}
+    # payloads.py has no validators: the models' annotations say everything.
+    assert gen.KNOWN_VALIDATORS == {}

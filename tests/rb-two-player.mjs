@@ -433,6 +433,8 @@
  *     candidate map for a ROM that has none yet): the pages run the
  *     detector with it (?desync=force&desyncMap=) and ADDRESS_MAP_CHECK
  *     reads through it.
+ *   MODE=rollback | lockstep   How the host plays the match (lockstep: nothing
+ *     predicted, every frame waits for both players' inputs). Default rollback.
  *   MENU_AUTOPILOT=any-fighter | ssb64   any-fighter: the autopilot takes
  *     whatever fighter its puck lands on and the stage the cursor starts on,
  *     for a ROM whose menus are laid out differently from SSB64's (Smash
@@ -473,6 +475,12 @@ import {
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
 const LAT = Number(process.env.LAT || 50); // one-way ms
+// How the match is played: rollback (default) or lockstep (nothing predicted).
+const MODE = process.env.MODE || 'rollback';
+if (!['rollback', 'lockstep'].includes(MODE)) {
+  console.log(`MODE=${MODE} invalid: "rollback" or "lockstep"`);
+  process.exit(1);
+}
 const JITTER = Number(process.env.JITTER || 0);
 const BATTLE_SECONDS = Number(process.env.BATTLE_SECONDS || 60);
 // Block the host's (or guest's) main thread this long mid-battle (a frozen
@@ -1526,6 +1534,11 @@ await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
 await guest.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 for (const p of [host, guest]) await p.locator("#rom-drop input[type='file']").setInputFiles(ROM);
 await host.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+// The host picks the mode in the lobby, as a player would. The URL's `mode`
+// only fills the picker until the room's first update, which carries the
+// room's own mode (rollback for a new room).
+await host.selectOption('#mode-select', MODE);
+await host.waitForSelector('#start-btn:not([disabled])', { timeout: 20000 });
 ROM_HASH = (await host.evaluate(() => window.KNState?.romHash)) || '';
 if (!MENU_AUTOPILOT) {
   MENU_AUTOPILOT = ROM_HASH && ROM_HASH !== SSB64_US_HASH ? 'any-fighter' : 'ssb64';
@@ -2362,6 +2375,8 @@ const collect = (p, VISUAL_CHECK) =>
       delay: window.NetplayRollback.getHudCounters?.()?.delay ?? null,
       extraDelay: window.NetplayRollback.getHudCounters?.()?.extraDelay ?? null,
       frame: window.NetplayRollback.getHudCounters().currentFrame,
+      // The mode the page's info panel shows.
+      infoMode: window.NetplayRollback.getInfo?.()?.mode ?? null,
       fpsWindowStart: window.__tp.fpsWindowStart,
       fpsWindowEnd,
       clog: m.UTF8ToString(m._kn_get_debug_log()),
@@ -3223,6 +3238,24 @@ const linkReport = (() => {
 
 const summary = {
   room,
+  mode: MODE,
+  // Lockstep: each page logged that it predicts nothing, and how often a
+  // missing input was given up on (each drops the other player).
+  ...(MODE === 'lockstep'
+    ? {
+        lockstep: {
+          predictionsOff: {
+            host: H.sync.includes('LOCKSTEP mode: predictions off'),
+            guest: G.sync.includes('LOCKSTEP mode: predictions off'),
+          },
+          infoMode: { host: H.infoMode, guest: G.infoMode },
+          waitTimeouts: {
+            host: (H.sync.match(/LOCKSTEP-WAIT-TIMEOUT/g) || []).length,
+            guest: (G.sync.match(/LOCKSTEP-WAIT-TIMEOUT/g) || []).length,
+          },
+        },
+      }
+    : {}),
   ...(ADDRESS_MAP_CHECK
     ? { addressMapCheck: { rom: H.mapRom, host: addressMapChecksOf(H), guest: addressMapChecksOf(G) } }
     : {}),
@@ -3625,5 +3658,14 @@ const failed =
   minGameFpsFailed ||
   (THROTTLE_GUEST && !throttleFlipped) ||
   hideGuestFailed ||
-  suspendGuestAudioFailed;
+  suspendGuestAudioFailed ||
+  // A lockstep run whose pages did not turn predictions off, or did not say
+  // lockstep in the info panel, did not test lockstep.
+  (MODE === 'lockstep' &&
+    !(
+      summary.lockstep.predictionsOff.host &&
+      summary.lockstep.predictionsOff.guest &&
+      summary.lockstep.infoMode.host === 'lockstep' &&
+      summary.lockstep.infoMode.guest === 'lockstep'
+    ));
 process.exit(failed ? 1 : 0);
