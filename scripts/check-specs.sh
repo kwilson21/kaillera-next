@@ -391,6 +391,34 @@ done
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+# ── A catch-up waiting on a hole after a reconnect ────────────────────────
+WAIT=specs/catch_up_wait.qnt
+$QUINT typecheck "$WAIT"
+for variant in catch_up_wait_current catch_up_wait_yield_only catch_up_wait_once_only catch_up_wait_fixed; do
+  $QUINT test "$WAIT" --main="$variant" --backend=typescript
+done
+# Today a catch-up waiting on a missing input spins (each tick replay-only,
+# run again at once) and every tick sends the same frame's input on the
+# reliable channel, burying the ask for the hole (catch_up_wait_current;
+# spinThenAskTest). Yielding alone still sends duplicates; sending once alone
+# still spins.
+$QUINT run "$WAIT" --main=catch_up_wait_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=30 --backend=typescript
+
+# ── An ask for a missing input that is never answered ────────────────────
+ESC=specs/ask_escalation.qnt
+$QUINT typecheck "$ESC"
+for variant in ask_escalation_current ask_escalation_push_once ask_escalation_fixed_host ask_escalation_fixed_guest; do
+  $QUINT test "$ESC" --main="$variant" --backend=typescript
+done
+# Today an ask never answered is predicted for the rest of the match
+# (ask_escalation_current; lostForGoodTest); a push with no deadline ends at
+# its lost acknowledgement (ask_escalation_push_once; pushAckLostTest).
+for variant in ask_escalation_fixed_host ask_escalation_fixed_guest; do
+  $QUINT run "$ESC" --main="$variant" --invariant=allHold \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+done
+
 # ── A channel that dies in a match with no event ───────────────────────────
 MESH=specs/mesh_heal.qnt
 $QUINT typecheck "$MESH"

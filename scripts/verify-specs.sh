@@ -29,17 +29,18 @@ verify() { # spec module invariant [init [steps]]
 # The checker must be able to find the bugs these properties exist for, or a
 # pass means nothing. Both older variants of the peer identity rule have a
 # counterexample within 6 steps.
-expect_violation() { # spec module invariant
-  echo "== $2 / $3 must be violated within $STEPS steps"
+expect_violation() { # spec module invariant [steps]
+  local steps="${4:-$STEPS}"
+  echo "== $2 / $3 must be violated within $steps steps"
   local out status=0
-  out="$($QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$STEPS" 2>&1)" || status=$?
+  out="$($QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$steps" 2>&1)" || status=$?
   # Only a reported counterexample counts. A crash, a timeout or a
   # translation error also exits non-zero and must not pass for one.
   if [ "$status" -ne 0 ] && grep -q '\[violation\]' <<<"$out"; then
     return 0
   fi
   echo "$out" | tail -40 >&2
-  echo "expected a counterexample for $3 in $2 (exit $status)" >&2
+  echo "expected a counterexample for $3 in $2 within $steps steps (exit $status)" >&2
   exit 1
 }
 
@@ -286,6 +287,31 @@ rom_at_start() {
   expect_violation "$ROM_START" rom_at_start_no_rejoin serverKnowsTheRom
 }
 
+catch_up_wait() {
+  local WAIT=specs/catch_up_wait.qnt
+  verify "$WAIT" catch_up_wait_fixed allHold init 12
+  # A waiting catch-up ticks twice in one slot and sends the frame again:
+  # 2 steps; six spinning ticks then the ask, buried: 7 steps
+  # (spinThenAskTest carries that one).
+  expect_violation "$WAIT" catch_up_wait_current aWaitingCatchUpDoesNotSpin
+  expect_violation "$WAIT" catch_up_wait_current everyReliableSendIsNew
+  expect_violation "$WAIT" catch_up_wait_yield_only everyReliableSendIsNew
+  expect_violation "$WAIT" catch_up_wait_once_only aWaitingCatchUpDoesNotSpin
+}
+
+ask_escalation() {
+  local ESC=specs/ask_escalation.qnt
+  verify "$ESC" ask_escalation_fixed_host allHold init 14
+  verify "$ESC" ask_escalation_fixed_guest allHold init 14
+  # Three asks (the threshold), the answer lost for good, the asks run out,
+  # nothing more happens: the page predicts the input for the rest of the
+  # match (lostForGoodTest): 8 steps.
+  expect_violation "$ESC" ask_escalation_current everyAskEnds 8
+  # The push escalated to, its acknowledgement lost, and no deadline on it
+  # (pushAckLostTest): 8 steps.
+  expect_violation "$ESC" ask_escalation_push_once everyAskEnds 8
+}
+
 mesh_heal() {
   local MESH=specs/mesh_heal.qnt
   verify "$MESH" mesh_heal_fixed allHold init 10
@@ -320,7 +346,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync mesh_heal
+  rom_at_start ring_after_resync mesh_heal catch_up_wait ask_escalation
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -331,7 +357,7 @@ SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
-  "peer_identity rom_transfer peer_connection rom_at_start"       # ~6.5 min
+  "peer_identity rom_transfer peer_connection rom_at_start catch_up_wait ask_escalation" # ~7.5 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up" # ~6.5 min
 )
 
