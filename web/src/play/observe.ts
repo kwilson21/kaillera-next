@@ -12,7 +12,7 @@ import type { WirePayload } from '../wire.ts';
 /** One disagreement between play.js and the function meant to replace it. */
 export type DisagreeReport = {
   readonly type: 'play-disagree';
-  /** Which decision: 'delay-preference', 'remap-wizard', ... */
+  /** Which decision: 'rom-transfer:chunk', ... */
   readonly message: string;
   /** What play.js decided, and what the new function would have: JSON, cut to a window around the first difference. */
   readonly old: string;
