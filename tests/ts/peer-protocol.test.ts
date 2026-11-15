@@ -256,3 +256,10 @@ test('inputs-settled carries the frame alone, whether or not inputs follow it', 
   bad('lockstep', 'inputs-settled:');
   bad('lockstep', 'inputs-settled:NaN');
 });
+
+test('dropped names why the host dropped the player', () => {
+  ok('lockstep', 'dropped:desync');
+  bad('lockstep', 'dropped:');
+  bad('lockstep', 'dropped:anything');
+  bad('lockstep', 'dropped');
+});

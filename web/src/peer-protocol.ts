@@ -61,6 +61,9 @@ const TEXT_GRAMMAR = {
     resend: `:${INT}`,
     // A guest moved forward by a resync: its inputs before this frame are settled.
     'inputs-settled': `:${INT}`,
+    // dropped:<reason>  the host dropped this player from the match; taken
+    // only from the host (specs/drop_is_final.qnt).
+    dropped: ':desync',
     // rb-check:<frame>:<gameplay hash>[:<game state hash>]
     'rb-check': `:${INT}:${INT}(?::${INT})?`,
     // rb-blocks:<frame>:<8 hex digits per block, no separator>

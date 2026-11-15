@@ -3430,11 +3430,17 @@
         // Engine forwards users-updated — supplementary to our direct listener
       },
       onToast: showToast,
-      onFatal: () => {
+      // `dropped`: the host could not bring this page back in sync and
+      // dropped it (specs/drop_is_final.qnt); otherwise the core trapped.
+      onFatal: (kind) => {
         coreFatal = true;
         engine?.flushSyncLog?.();
         engine?.dumpLogs?.();
-        showError("The emulator crashed and can't continue. Reload the page to rejoin the match.");
+        showError(
+          kind === 'dropped'
+            ? "The host couldn't keep this game in sync and dropped you from the match. Reload the page to rejoin."
+            : "The emulator crashed and can't continue. Reload the page to rejoin the match.",
+        );
       },
       onSyncStatus: showSyncStatus,
       onReconnecting: (sid, isReconnecting) => {

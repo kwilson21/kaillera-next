@@ -193,3 +193,31 @@ def test_an_input_the_page_lacked_keeps_the_peer_live_a_repeat_does_not():
         "if (existingHeaderInput === undefined && _peerLastAdvanceTime[peer.slot] !== undefined) {"
         in after
     )
+
+
+def test_a_player_dropped_in_the_match_comes_back_only_as_a_late_joiner():
+    # specs/drop_is_final.qnt: the mesh check does not add back a player this
+    # page dropped in the running match; the desync give-up tells it first,
+    # and a guest takes `dropped:` only from the host.
+    src = _src()
+    check = src[src.index("const _meshHealthCheck = () => {") :]
+    check = check[: check.index("const p = _peers[sid];")]
+    assert "if (_droppedThisMatch.has(sid)) continue;" in check
+    hard = src[src.index("const hardDisconnectPeer = (remoteSid, { quiet = false } = {}) => {") :]
+    hard = hard[: hard.index("\n  };\n")]
+    assert "if (_phase === PHASE_RUNNING) _droppedThisMatch.add(remoteSid);" in hard
+    late = src[src.index("const handleLateJoinRequest = (msg) => {") :][:400]
+    assert "_droppedThisMatch.delete(msg.requesterSid);" in late
+    # Cleared on a new match and on stop, besides the declaration.
+    assert src.count("let _droppedThisMatch = new Set();") == 1
+    assert src.count("_droppedThisMatch = new Set();") == 3
+    pushes = src[src.index("const _checkOverduePushes = () => {") :]
+    pushes = pushes[: pushes.index("\n  };\n")]
+    assert pushes.index("dc.send('dropped:desync')") < pushes.index("hardDisconnectPeer(push.sid);")
+    handler = src[src.index("if (e.data.startsWith('dropped:')) {") :][:400]
+    assert "if (peer.slot !== 0) {" in handler
+    assert "_endMatchDropped(" in handler
+    end = src[src.index("const _endMatchDropped = (reason) => {") :]
+    end = end[: end.index("\n  };\n")]
+    assert "_phase = PHASE_STOPPED;" in end
+    assert "_config?.onFatal?.('dropped');" in end

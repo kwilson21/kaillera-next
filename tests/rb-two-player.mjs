@@ -223,7 +223,10 @@
  *     (ASK_UNANSWERED_STALL_MS >= 20000) the guest drops its `inputs-settled:` for n ms too,
  *     so no push is acknowledged: fails unless the host pushes again to the
  *     limit, gives up (`INPUT-ASK-PUSH-GAVEUP`) and drops the player
- *     (`peer hard-disconnected`) rather than playing on split.
+ *     (`peer hard-disconnected`) rather than playing on split, the guest's
+ *     page is told and ends its match (`DROPPED-BY-HOST`), and the drop is
+ *     final: no mesh heal adds the player back and no late input follows on
+ *     the host (specs/drop_is_final.qnt).
  *   ASK_UNANSWERED_PHANTOM=1   With HEAL_BOTH_SIDES=1: once the heal's checks
  *     are done (its 15 s after the reconnect's resync), the guest drops its
  *     input for one frame just ahead of it, for good: #272's shape. #272's
@@ -4548,6 +4551,12 @@ const askUnansweredReport = (() => {
     hardDisconnected,
     heals: heals.length,
     stallTimeouts,
+    // ACKS: the drop is final (specs/drop_is_final.qnt): the guest's page
+    // was told and ended its match, and nothing on the host followed it.
+    droppedByHost: linesAfter(G.sync, askUnanswered.guestAt.seq).filter((l) => /DROPPED-BY-HOST reason=desync/.test(l)),
+    pastWindowAfterDrop: gaveUp.length
+      ? linesAfter(H.sync, seqOf(gaveUp[0])).filter((l) => /INPUT-PAST-WINDOW-MISMATCH/.test(l)).length
+      : null,
     freezeMs: askUnanswered.freezeMs,
     lastPushFrame: Math.max(-1, ...settled.map((l) => +(l.match(/ frame=(\d+)/) || [])[1] || -1)),
     comparedFrom: recoveredAt,
@@ -4563,7 +4572,10 @@ const askUnansweredFailed =
       ? // Every push unanswered: pushed again to the limit, then the player dropped.
         askUnansweredReport.pushes.length >= 2 &&
         askUnansweredReport.gaveUp.length > 0 &&
-        askUnansweredReport.hardDisconnected.length > 0
+        askUnansweredReport.hardDisconnected.length > 0 &&
+        askUnansweredReport.droppedByHost.length > 0 &&
+        askUnansweredReport.heals === 0 &&
+        askUnansweredReport.pastWindowAfterDrop === 0
       : askUnansweredReport.settled.length > 0 &&
         askUnansweredReport.gaveUp.length === 0 &&
         // The difference from main: no stall waits out its deadline.

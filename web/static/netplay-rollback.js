@@ -1751,6 +1751,10 @@
   // (specs/ask_escalation.qnt). Not _inputSettledBefore, which the host
   // raises itself once it has handed a state over.
   let _inputSettledAckBefore = {};
+  // Players this page dropped (hardDisconnectPeer) in the running match, by
+  // id: the mesh health check does not add them back; they come back only
+  // as late joiners (specs/drop_is_final.qnt).
+  let _droppedThisMatch = new Set();
   // INPUT-OOR is logged at most once a second per slot, with how many were
   // dropped since the last line: a peer far behind sends every frame, and a
   // line each filled the sync log's ring and evicted everything before it.
@@ -5438,11 +5442,20 @@
         _syncLog(
           `INPUT-ASK-PUSH-GAVEUP f=${_frameNum} slot=${slot} pushes=${push.pushes}: no inputs-settled came — dropping the player`,
         );
-        KNEvent('input-ask-push-giveup', 'A pushed state was never acknowledged', { slot, pushes: push.pushes });
+        KNEvent('desync', 'A pushed state was never acknowledged: player dropped', {
+          slot,
+          pushes: push.pushes,
+          kind: 'input-ask-push-giveup',
+        });
         delete _overduePushes[key];
         const known = _knownPlayers[push.sid];
         const name = known ? known.playerName : `P${slot + 1}`;
         _config?.onToast?.(`${name} could not be brought back in sync and was dropped`);
+        // Tell the player first, while the channel is open: its page ends
+        // its match and the player joins again late (specs/drop_is_final.qnt).
+        try {
+          if (_peers[push.sid]?.dc?.readyState === 'open') _peers[push.sid].dc.send('dropped:desync');
+        } catch (_) {}
         hardDisconnectPeer(push.sid);
       }
     }
@@ -7765,6 +7778,8 @@
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
     if (_playerSlot !== 0) return;
+    // A player dropped in this match comes back this way.
+    if (msg?.requesterSid) _droppedThisMatch.delete(msg.requesterSid);
     if (_phase !== PHASE_RUNNING) {
       // Not running yet: there is no state to send, and this host will not
       // start until that player has loaded. Without an answer both sides
@@ -8062,6 +8077,9 @@
   const _meshHealthCheck = () => {
     for (const [sid, info] of Object.entries(_knownPlayers)) {
       if (_isPeerPendingLateJoin(sid)) continue;
+      // Dropped in this match: added back here it would be an entry outside
+      // the roster, fed but never waited for. It comes back as a late joiner.
+      if (_droppedThisMatch.has(sid)) continue;
       // A phantom is healed too when its channel does not read open: on a
       // C tick the sim is frozen from ROLLBACK_STALL_MS until the player is
       // a phantom, so the first check after a silent death nearly always
@@ -9512,6 +9530,15 @@
           }
           return;
         }
+        if (e.data.startsWith('dropped:')) {
+          // Only the host drops a player.
+          if (peer.slot !== 0) {
+            _syncLog(`dropped: from slot ${peer.slot} refused (not the host)`);
+            return;
+          }
+          _endMatchDropped(e.data.slice('dropped:'.length));
+          return;
+        }
         if (e.data.startsWith('inputs-settled:')) {
           // The peer was moved forward by a resync and never made its inputs
           // from before this frame (_settleInputsAtResync). Only a frame this
@@ -10298,6 +10325,7 @@
     }
 
     const _leftSlot = peer.slot;
+    if (_phase === PHASE_RUNNING) _droppedThisMatch.add(remoteSid);
     delete _peers[remoteSid];
     delete _lockstepReadyPeers[remoteSid];
     KNState.peers = _peers;
@@ -13358,6 +13386,26 @@
   };
 
   let _stepNoRunLastLogAt = 0;
+  // The host dropped this page from the match (`dropped:<reason>`): it ends
+  // its match as a core fault does, and the player joins again late
+  // (specs/drop_is_final.qnt).
+  const _endMatchDropped = (reason) => {
+    if (_phase === PHASE_STOPPED) return;
+    _syncLog(`DROPPED-BY-HOST reason=${reason} f=${_frameNum} — ending the match on this page`);
+    KNEvent('desync', `dropped by the host (${reason})`, { kind: 'dropped-by-host', reason, frame: _frameNum });
+    _phase = PHASE_STOPPED;
+    _checkStateTransition();
+    if (_tickInterval) {
+      clearInterval(_tickInterval);
+      _tickInterval = null;
+    }
+    _workerCoprocAbort(`dropped by the host (${reason})`);
+    try {
+      _config?.onFatal?.('dropped');
+    } catch (cbErr) {
+      console.error('[lockstep] onFatal callback threw:', cbErr);
+    }
+  };
   const _notifyCoreFatal = () => {
     try {
       _config?.onFatal?.();
@@ -13554,6 +13602,7 @@
   };
 
   const _clearInputsForNewMatch = (reason) => {
+    _droppedThisMatch = new Set();
     if (_frameNum !== 0) return; // late join keeps its buffers
     // Runs before this peer sends lockstep-ready: a peer can start as soon as it sees it, and its first inputs
     // (frame 0+) must survive until startLockstep().
@@ -19489,6 +19538,7 @@
   };
 
   const stop = () => {
+    _droppedThisMatch = new Set();
     // Before the final log flush, so its log line reaches the server.
     _clearHostInitialStateWait();
     _restoreLocalSaveFile();
