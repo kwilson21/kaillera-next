@@ -53,11 +53,7 @@ def _deserialize_room(d: dict):
     """Reconstruct Room from a parsed JSON dict."""
     from src.api.signaling import Room
 
-    # Coerce legacy "lockstep" mode to "rollback" — the engine was renamed
-    # without changing semantics, so persisted rooms from before the rename
-    # should load as rollback. Removable once cached Redis state expires.
-    raw_mode = d.get("mode")
-    mode_value = "rollback" if raw_mode == "lockstep" else raw_mode
+    mode_value = d.get("mode")
 
     return Room(
         owner=d["owner"],

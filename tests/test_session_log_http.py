@@ -292,3 +292,23 @@ def test_admin_input_audit_tolerates_non_integer_frames(client, monkeypatch):
 
     r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
     assert r.status_code == 200
+
+
+# ── GET /admin/api/session-logs?mode= ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("mode", ["rollback", "lockstep", "streaming"])
+def test_admin_session_logs_mode_filter_takes_only_that_mode(audit_client, monkeypatch, mode):
+    """Lockstep is a mode of its own: the rollback filter no longer takes its rows."""
+    import src.db as db
+
+    http, fetch = audit_client
+    fetch.return_value = []
+    count = AsyncMock(return_value=0)
+    monkeypatch.setattr(db, "count", count)
+
+    r = http.get(f"/admin/api/session-logs?mode={mode}", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
+    sql = str(count.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert f"session_logs.mode = '{mode}'" in sql
+    assert " IN (" not in sql

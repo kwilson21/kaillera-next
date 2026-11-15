@@ -151,7 +151,8 @@ test('game-started decodes, and only with a known mode and a match id', () => {
   assert.ok(Result.isSuccess(decoded));
   if (Result.isSuccess(decoded)) assert.equal(decoded.success.matchId, MATCH_ID);
   assert.ok(Result.isSuccess(decodeGameStarted({ ...gameStarted, mode: 'streaming' })));
-  assert.ok(Result.isFailure(decodeGameStarted({ ...gameStarted, mode: 'lockstep' })));
+  assert.ok(Result.isSuccess(decodeGameStarted({ ...gameStarted, mode: 'lockstep' })));
+  assert.ok(Result.isFailure(decodeGameStarted({ ...gameStarted, mode: 'turbo' })));
   assert.ok(Result.isFailure(decodeGameStarted({ ...gameStarted, matchId: null })));
   assert.ok(Result.isFailure(decodeGameStarted(without(gameStarted, 'matchId'))));
   assert.ok(Result.isFailure(decodeGameStarted({ ...gameStarted, resyncEnabled: 'yes' })));
@@ -197,11 +198,12 @@ test("the server's own webrtc-signal and the session-log ack decode", () => {
   assert.ok(Result.isFailure(decodeSessionLogAck(null)));
 });
 
-test('a room mode is one of the two modes, or null before one is picked', () => {
+test('a room mode is one of the three modes, or null before one is picked', () => {
   assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: 'streaming' })));
+  assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: 'lockstep' })));
   assert.ok(Result.isSuccess(decodeUsersUpdated({ ...usersUpdated, mode: null })));
-  assert.ok(Result.isFailure(decodeUsersUpdated({ ...usersUpdated, mode: 'lockstep' })));
-  assert.deepEqual(GameMode.literals, ['rollback', 'streaming']);
+  assert.ok(Result.isFailure(decodeUsersUpdated({ ...usersUpdated, mode: 'turbo' })));
+  assert.deepEqual(GameMode.literals, ['rollback', 'lockstep', 'streaming']);
 });
 
 test('serverEvents maps each server-authored event to its schema, relays left out', () => {
@@ -251,11 +253,14 @@ test("the server's bounds are the client's bounds", () => {
   assert.ok(Result.isSuccess(decodeStartGamePayload({ mode: 'streaming', resyncEnabled: false, romHash: null })));
 });
 
-test('the pre-rename mode is not something a current page sends', () => {
-  // The server still coerces "lockstep" from cached pages; the schema leaves it out on purpose.
-  assert.ok(Result.isFailure(decodeStartGamePayload({ mode: 'lockstep' })));
-  assert.ok(Result.isFailure(decodeSetModePayload({ mode: 'lockstep' })));
-  assert.ok(Result.isSuccess(decodeSetModePayload({ mode: 'rollback' })));
+test('a host can start or pick any of the three modes, and nothing else', () => {
+  // "lockstep" was once the old name of rollback; it is its own mode now.
+  for (const mode of ['rollback', 'lockstep', 'streaming']) {
+    assert.ok(Result.isSuccess(decodeStartGamePayload({ mode })));
+    assert.ok(Result.isSuccess(decodeSetModePayload({ mode })));
+  }
+  assert.ok(Result.isFailure(decodeStartGamePayload({ mode: 'turbo' })));
+  assert.ok(Result.isFailure(decodeSetModePayload({ mode: 'turbo' })));
 });
 
 test('a name is measured in code points, as the server measures it', () => {

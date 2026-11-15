@@ -46,12 +46,7 @@ import {{ Schema }} from 'effect';
 # and the schemas are built from the annotations. Each one has to be listed
 # here with what the generated schema does about it; an unlisted validator
 # stops generation, so the schema never silently disagrees with the model.
-KNOWN_VALIDATORS = {
-    # The server still takes the pre-rename mode "lockstep" from cached pages
-    # and reads it as "rollback". The client schema is for what a current page
-    # sends, so it accepts only the current names.
-    "_coerce_legacy_mode": "legacy input the client schema leaves out on purpose",
-}
+KNOWN_VALIDATORS: dict[str, str] = {}
 
 
 class Unsupported(TypeError):

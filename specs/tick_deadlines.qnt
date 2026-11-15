@@ -4,11 +4,20 @@
 // _creditLocalFreeze in web/static/netplay-rollback.js).
 //
 // Every wait in the tick loop has a wall-clock deadline (netplay invariant
-// I1). Three of them end by dropping a peer: the page marks it a phantom and
+// I1). Four of them end by dropping a peer: the page marks it a phantom and
 // plays on without it, and the two resync when it is heard from again.
 //   peer-stale       no input from the peer for 5 s        (PEER-PHANTOM)
 //   input-stall      waiting on one input of the peer 5 s  (RB-INPUT-STALL-TIMEOUT)
 //   pacing-throttle  held back for the peer for 5 s        (PACING-THROTTLE-TIMEOUT)
+//   lockstep-wait    in lockstep mode, waiting on the peer's input for the
+//                    frame about to run, 5 s                (LOCKSTEP-WAIT-TIMEOUT)
+//
+// The lockstep wait is new with lockstep as a mode the host picks: the page
+// predicts nothing and runs a frame only with every player's input for it.
+// The demo page's paused predictions waited the same way with no deadline:
+// its peer is simulated and never stops. In a real match a peer whose input
+// for one frame never arrives (it is still sending later ones, so peer-stale
+// does not fire) would hold the page for ever.
 //
 // A deadline is measured from a time stamp. When the page itself stops for a
 // while (a long garbage collection, a blocked main thread: 4 to 6 s at a
@@ -28,19 +37,24 @@
 // ending, the deadline firing.
 //
 // Not modelled: the deadlines that do not drop a peer and are not credited
-// either (the resync target, the wait before the rollback engine is shut
-// down for a menu, the wait for the host's rollback settings, the phase
-// lock), what makes each wait begin and end, a hidden tab (by design not
-// credited: its handlers keep running), more than one peer.
+// either (the resync target, the wait for the host's rollback settings),
+// what makes each wait begin and end, a hidden tab (by design not credited:
+// its handlers keep running), more than one peer.
 //
 // CREDIT_ALL: a freeze is credited to every deadline that drops a peer.
 //   false = before: peer-stale and input-stall only.
+// LOCKSTEP_DEADLINE: the lockstep wait drops the peer at the limit, and is
+//   credited like the others. false = before: it had no deadline.
 module tick_deadlines {
   const CREDIT_ALL: bool
+  const LOCKSTEP_DEADLINE: bool
 
   pure val LIMIT = 5
-  pure val GATES = Set("peer-stale", "input-stall", "pacing-throttle")
-  pure val CREDITED = if (CREDIT_ALL) GATES else Set("peer-stale", "input-stall")
+  pure val GATES = Set("peer-stale", "input-stall", "pacing-throttle", "lockstep-wait")
+  // The waits that end at the limit by dropping the peer.
+  pure val DEADLINED = if (LOCKSTEP_DEADLINE) GATES else GATES.exclude(Set("lockstep-wait"))
+  pure val CREDITED =
+    if (CREDIT_ALL) DEADLINED else Set("peer-stale", "input-stall")
   pure val IDLE = -1
 
   // Seconds since each wait began, by the time stamp; IDLE = not waiting.
@@ -77,7 +91,7 @@ module tick_deadlines {
   // A second passes with the page running.
   action second = all {
     not(dropped),
-    GATES.exists(g => stamped.get(g) != IDLE and stamped.get(g) < LIMIT),
+    GATES.exists(g => stamped.get(g) != IDLE and (stamped.get(g) < LIMIT or not(DEADLINED.contains(g)))),
     stamped' = plus(stamped, 1, GATES), awake' = plus(awake, 1, GATES),
     dropped' = dropped, unfair' = unfair,
   }
@@ -94,6 +108,7 @@ module tick_deadlines {
   // A deadline is reached: the peer is dropped.
   action fire(g: str): bool = all {
     not(dropped),
+    DEADLINED.contains(g),
     stamped.get(g) >= LIMIT,
     dropped' = true,
     unfair' = (unfair or awake.get(g) < LIMIT),
@@ -112,6 +127,13 @@ module tick_deadlines {
   // freeze is never held against the peer.
   // Violated before the pacing-throttle deadline was credited.
   val ownFreezeIsNotHeldAgainstAPeer = not(unfair)
+
+  // A page waiting on a peer past the limit can still end the wait: no wait
+  // outlasts its deadline without one. (Before the lockstep wait had one, a
+  // page could stand at frame f for ever on one lost input.)
+  // Violated before the lockstep wait had a deadline.
+  val everyWaitHasADeadline =
+    GATES.forall(g => (stamped.get(g) != IDLE and stamped.get(g) >= LIMIT) implies DEADLINED.contains(g))
 
   // The page is held back for its peer, then freezes for 5 s. The peer was
   // sending all along; the first tick after the freeze drops it.
@@ -132,6 +154,25 @@ module tick_deadlines {
       .then(freeze(6))
       .expect(stamped.get("input-stall") == 1 and stamped.get("peer-stale") == 1)
 
+  // Lockstep: one input of the peer never arrives. Before, the page waited
+  // past the limit with nothing to end the wait; now the peer is dropped.
+  run lockstepLostInputTest =
+    init
+      .then(begin("lockstep-wait"))
+      .then(5.reps(_ => second))
+      .expect(everyWaitHasADeadline == LOCKSTEP_DEADLINE)
+      .then(if (LOCKSTEP_DEADLINE) fire("lockstep-wait") else second)
+      .expect(dropped == LOCKSTEP_DEADLINE)
+
+  // Lockstep: the page freezes while it waits. The freeze is credited, so
+  // the peer is not dropped for it.
+  run lockstepFreezeIsCreditedTest =
+    init
+      .then(begin("lockstep-wait"))
+      .then(second)
+      .then(freeze(6))
+      .expect((stamped.get("lockstep-wait") == 1) == (LOCKSTEP_DEADLINE and CREDIT_ALL))
+
   // A peer that really is silent for 5 s is dropped, freeze or not.
   run silentPeerIsDroppedTest =
     init
@@ -143,14 +184,21 @@ module tick_deadlines {
       .expect(dropped and not(unfair))
 }
 
-// Before: the pacing-throttle deadline was not credited.
+// Before: the pacing-throttle deadline was not credited, and the lockstep
+// wait had no deadline.
 module tick_deadlines_before {
-  import tick_deadlines(CREDIT_ALL = false).*
+  import tick_deadlines(CREDIT_ALL = false, LOCKSTEP_DEADLINE = false).*
+}
+
+// Before lockstep was a mode: every deadline credited, the lockstep wait (the
+// demo's paused predictions) with none.
+module tick_deadlines_before_lockstep_mode {
+  import tick_deadlines(CREDIT_ALL = true, LOCKSTEP_DEADLINE = false).*
 }
 
 // Today.
 module tick_deadlines_current {
-  import tick_deadlines(CREDIT_ALL = true).*
+  import tick_deadlines(CREDIT_ALL = true, LOCKSTEP_DEADLINE = true).*
 }
 
 // ── A state transfer and the inputs behind it ───────────────────────────────
