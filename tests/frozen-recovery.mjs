@@ -132,3 +132,28 @@ export const frozenRecoveryNote = (recoveries, framesExcluded, mismatchesExclude
     'A page stopping that long is the cloud container, not the netcode.'
   );
 };
+
+// How far, in frames, a starved span of the link may lie from a phantom and
+// still explain it: the 5 s the other page waited, at the container's 7 to
+// 11 frames a second, and a margin for the two pages' clocks.
+const LINK_STARVED_MARGIN_FRAMES = 60;
+
+/**
+ * A recovery is not proven while the dropped page's own messages were stuck
+ * on a congested link (LINK_KBPS in rb-two-player.mjs): the phantom may be
+ * the link's doing, which is the failure that mode looks for, even when that
+ * page also stopped for a while. Each such recovery comes back unproven with
+ * `linkStarved: true`; the rest are unchanged.
+ *
+ * @param {ReturnType<typeof frozenRecoveries>} recoveries
+ * @param {{host: {from: number, to: number}[], guest: {from: number, to: number}[]}} starvedFrames
+ *   each page's spans, in its own frames, when its input messages waited on the link
+ */
+export const withoutLinkStarved = (recoveries, starvedFrames) =>
+  recoveries.map((recovery) => {
+    const dropped = recovery.declaredBy === 'host' ? 'guest' : 'host';
+    const from = recovery.from - LINK_STARVED_MARGIN_FRAMES;
+    const to = (recovery.to ?? recovery.from) + LINK_STARVED_MARGIN_FRAMES;
+    const starved = (starvedFrames[dropped] ?? []).some((span) => span.from <= to && span.to >= from);
+    return starved && recovery.proven ? { ...recovery, proven: false, linkStarved: true } : recovery;
+  });
