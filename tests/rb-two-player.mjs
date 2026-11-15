@@ -21,9 +21,15 @@
  *     server's client_events table for this room (without KN_DB the query to
  *     run by hand is printed). Reading KN_DB needs Node >= 22.13 (node:sqlite);
  *     on an older Node, or a database that cannot be read, the run fails.
+ *   - no peer message dropped as off its schema: no `[protocol] dropped` line
+ *     in either page's sync log (the engine drops a DataChannel string or a
+ *     session-log ack that does not match web/src/peer-protocol.ts or
+ *     protocol.gen.ts). Every string real pages send must match. Reported as
+ *     `peerDropped` in summary.json; MALFORMED_PEER below expects its own.
  * Exits 1 for gameplay divergence; rollback failure; integrity events; a match
  * that never reaches a battle; fewer than 80% of finalized battle frames
- * compared; a boot input stall timeout; or an observer disagreement.
+ * compared; a boot input stall timeout; an observer disagreement; or a peer
+ * message dropped that the run did not send off its schema.
  *
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [LAT=50] [JITTER=0] [LINK_KBPS=0] [BATTLE_SECONDS=60] [FREEZE_HOST_MS=0 | FREEZE_GUEST_MS=0] \
@@ -436,6 +442,21 @@
  *     other knobs. This is the detector's positive test; every other run
  *     only shows that it stays quiet.
  *
+ *   MALFORMED_PEER=1   A third of the way into the battle each page sends
+ *     the other strings off their schema on its real DataChannels: on
+ *     `lockstep`, rb-check, rb-delay and roster with a field that is not a
+ *     number, a kind no page knows, lockstep-ready JSON whose delay is not a
+ *     number, and text that is not JSON; on `sync-state`, a sync-start
+ *     header that is not one. Read raw, rb-delay and sync-start would have
+ *     set the delay and the state transfer's frame to NaN. Each engine must
+ *     drop them before any handler reads them
+ *     (KNCore.protocol.createBoundary): the run fails unless each page's sync
+ *     log has exactly the expected `[protocol] dropped` lines, all after the
+ *     strings were sent and none with what was sent in it, and each page
+ *     played at least 30 frames in the ten seconds after. Frames are compared as
+ *     usual: no exclusion. Reported as `malformedPeer` in summary.json.
+ *     Mutually exclusive with the knobs that act during the battle.
+ *
  *   ADDRESS_MAP_CHECK=1   Checks the desync detector's address map for the
  *     ROM (web/src/address-maps.ts) against the running game: every 30
  *     frames each page reads the map's fields from RAM, and after the match
@@ -523,6 +544,7 @@ const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS)
 const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
 const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
+const MALFORMED_PEER = process.env.MALFORMED_PEER === '1';
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
 const DELAY_SYNC_ANSWER_AT = process.env.DELAY_SYNC_ANSWER_AT || 'battle';
@@ -882,6 +904,31 @@ if (!(Number.isFinite(DROP_SIGNALING_GUEST_LATE_MS) && DROP_SIGNALING_GUEST_LATE
 }
 if (DROP_SIGNALING_GUEST_LATE_MS > 0 && !(DROP_SIGNALING_MS > 0)) {
   console.log('DROP_SIGNALING_GUEST_LATE_MS only applies with DROP_SIGNALING_MS');
+  process.exit(1);
+}
+if (
+  MALFORMED_PEER &&
+  (FREEZE_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    HIDE_GUEST_MS > 0 ||
+    DESYNC_GUEST ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    SYNC_FOLLOW_UP ||
+    CATCH_UP_MS > 0 ||
+    RESYNC_FAULT ||
+    UNANSWERED_SOCKET_RESYNC ||
+    DOUBLE_RESYNC_ASK ||
+    LINK_KBPS > 0 ||
+    LOSE_INPUTS_BEFORE_FALLBACK ||
+    DROP_SIGNALING_MS > 0)
+) {
+  console.log('MALFORMED_PEER is mutually exclusive with the knobs that act during the battle');
+  process.exit(1);
+}
+// MALFORMED_PEER needs ten seconds of battle after its strings, sent a third of the way in.
+if (MALFORMED_PEER && !(BATTLE_SECONDS >= 15)) {
+  console.log('MALFORMED_PEER needs BATTLE_SECONDS >= 15');
   process.exit(1);
 }
 const dropSignalingNeedsSeconds = Math.ceil(
@@ -1890,6 +1937,32 @@ let throttleFlipped = null; // null until the 15s mark; then whether the flip Pr
 // the fault began ({seq, frame} of its last line), and what the test saw.
 const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null };
 const delaySyncAnswer = { hostAt: null, guestAt: null, timedOut: false, askedAgainAfterMs: null };
+// MALFORMED_PEER: what each page sends the other, all off its schema
+// (web/src/peer-protocol.ts). The "zz-" values must never reach a log line.
+const MALFORMED_STRINGS = {
+  lockstep: [
+    'rb-check:zz-frame:1',
+    'rb-check:zz-frame:2',
+    'rb-delay:zz-delay',
+    'roster:zz-frame:0,1',
+    'rb-zz-unknown:1',
+    JSON.stringify({ type: 'lockstep-ready', delay: 'zz-delay' }),
+    '{zz-not json',
+  ],
+  syncState: ['sync-start:zz-frame:1:1:0'],
+};
+// The `[protocol] dropped <kind>` each receiving page must log, once each.
+const MALFORMED_DROPS = [
+  'dc lockstep rb-check',
+  'dc lockstep rb-delay',
+  'dc lockstep roster',
+  'dc lockstep (unknown)',
+  'dc lockstep lockstep-ready',
+  'dc lockstep (json)',
+  'dc sync-state sync-start',
+];
+const malformedPeer = { hostAt: null, guestAt: null, sent: [false, false], frameLater: [0, 0] };
+const MALFORMED_FRAMES_AFTER = 30;
 // LOSE_INPUTS_BEFORE_FALLBACK: where each page's sync log stood when the drops began.
 const loseBeforeFallback = { hostAt: null, guestAt: null, fellBack: false, rounds: 0 };
 // LINK_KBPS on its own: where the logs stood when the guest asked for its plain resync.
@@ -2508,6 +2581,29 @@ if (inBattle) {
       console.log(`host saw the guest back in the room: ${hostSawGuestReturn}`);
       await host.waitForTimeout(8000);
     }
+  } else if (MALFORMED_PEER) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [malformedPeer.hostAt, malformedPeer.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    // Each page sends the other, on its real channels, what no handler may read.
+    malformedPeer.sent = await Promise.all(
+      [host, guest].map((p) =>
+        p.evaluate((strings) => {
+          const peer = Object.values(window.KNState.peers).find((q) => q?.dc?.readyState === 'open');
+          if (!peer || peer.syncDc?.readyState !== 'open') return false;
+          for (const text of strings.lockstep) peer.dc.send(text);
+          for (const text of strings.syncState) peer.syncDc.send(text);
+          return true;
+        }, MALFORMED_STRINGS),
+      ),
+    );
+    console.log(`MALFORMED_PEER: strings off their schema sent (host, guest): ${malformedPeer.sent}`);
+    await host.waitForTimeout(10000);
+    malformedPeer.frameLater = await Promise.all(
+      [host, guest].map((p) => p.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame)),
+    );
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else {
     await host.waitForTimeout(BATTLE_SECONDS * 1000);
   }
@@ -2815,6 +2911,48 @@ const catchUpReport = (() => {
     tooOld: guestLines.filter((line) => /SYNC-TOO-OLD-DROPPED/.test(line)),
     answers: guestLines.filter((line) => /resync ready \(|SYNC-LATE-ANSWER/.test(line)),
     applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
+  };
+})();
+// Every run: what each engine dropped as off its schema, by the kind it logged.
+const droppedIn = (log) =>
+  log
+    .split('\n')
+    .map((line) => line.match(/\[protocol\] dropped ([^:]+):/))
+    .filter(Boolean)
+    .map((m) => m[1]);
+const peerDropped = { host: droppedIn(H.sync), guest: droppedIn(G.sync) };
+// MALFORMED_PEER: each page dropped exactly what the other sent, only after it
+// was sent and without logging what it was, and went on playing.
+const malformedPeerReport = (() => {
+  if (!MALFORMED_PEER) return null;
+  const side = (log, at, frameAfter) => {
+    const lines = log.split('\n').filter((line) => line.includes('[protocol] dropped'));
+    const after = at ? lines.filter((line) => seqOf(line) > at.seq) : [];
+    const kinds = droppedIn(after.join('\n'));
+    const valuesLogged = lines.filter((line) => /zz-/.test(line)).length;
+    // Frames played in the ten seconds after the strings arrived. A headless
+    // emulator in the cloud container runs at 7-11 fps: 30 is a page still playing.
+    const framesAfter = frameAfter - (at?.frame ?? 0);
+    return {
+      kinds,
+      before: lines.length - after.length,
+      valuesLogged,
+      framesAfter,
+      passed:
+        !!at &&
+        lines.length === after.length &&
+        JSON.stringify(kinds) === JSON.stringify(MALFORMED_DROPS) &&
+        valuesLogged === 0 &&
+        framesAfter >= MALFORMED_FRAMES_AFTER,
+    };
+  };
+  const host = side(H.sync, malformedPeer.hostAt, malformedPeer.frameLater[0]);
+  const guest = side(G.sync, malformedPeer.guestAt, malformedPeer.frameLater[1]);
+  return {
+    sent: malformedPeer.sent,
+    host,
+    guest,
+    passed: malformedPeer.sent.every(Boolean) && host.passed && guest.passed,
   };
 })();
 // LOSE_INPUTS_BEFORE_FALLBACK: the transport, the drops and the switch, and
@@ -3504,6 +3642,8 @@ if (dropPeerReport) summary.dropPeer = dropPeerReport;
 if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
 if (catchUpReport) summary.catchUp = catchUpReport;
 if (LOSE_INPUTS_BEFORE_FALLBACK) summary.loseBeforeFallback = loseBeforeFallbackReport;
+summary.peerDropped = peerDropped;
+if (malformedPeerReport) summary.malformedPeer = malformedPeerReport;
 if (linkReport) summary.link = linkReport;
 if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
 if (RESYNC_FAULT) summary[RESYNC_ONE_BACK ? 'resyncOneBack' : 'resyncSameFrame'] = resyncOneBackReport;
@@ -3839,6 +3979,19 @@ if (LOSE_INPUTS_BEFORE_FALLBACK) {
     JSON.stringify(loseBeforeFallbackReport),
   );
 }
+// A peer message dropped as off its schema, in a run that sent none on purpose:
+// a string real pages send that peer-protocol.ts does not describe.
+const peerDroppedFailed = !MALFORMED_PEER && (peerDropped.host.length > 0 || peerDropped.guest.length > 0);
+if (peerDroppedFailed) console.log('PEER-DROPPED: a real peer message was dropped:', JSON.stringify(peerDropped));
+const malformedPeerFailed = MALFORMED_PEER && !malformedPeerReport?.passed;
+if (MALFORMED_PEER) {
+  console.log(
+    malformedPeerFailed
+      ? 'MALFORMED_PEER: not sent, not dropped as expected, a value logged, or a page stopped:'
+      : 'MALFORMED_PEER: every string dropped once, no value logged, both pages played on:',
+    JSON.stringify(malformedPeerReport),
+  );
+}
 // A disagreement is what the fault modes exist to find: it fails the run like a mismatch.
 const observersFailed = observerDisagreements > 0 || !!observers.db?.error;
 console.log(
@@ -3865,6 +4018,8 @@ const failed =
   delaySyncAnswerFailed ||
   catchUpFailed ||
   loseBeforeFallbackFailed ||
+  peerDroppedFailed ||
+  malformedPeerFailed ||
   doubleResyncAskFailed ||
   unansweredSocketResyncFailed ||
   syncFollowUpFailed ||

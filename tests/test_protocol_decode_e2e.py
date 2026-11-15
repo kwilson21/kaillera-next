@@ -9,13 +9,12 @@ These tests run real pages against the live server and check that nothing
 real is dropped, and that a payload of the wrong shape is, without its
 handler running.
 
-The rollback engine still checks its own DataChannel strings with the old
-observer (a `protocol-mismatch` client event); these tests check those too.
+The rollback engine decodes the strings its DataChannels deliver, and the
+session-log ack, the same way, with a boundary of its own that logs to its
+sync log and the console; these tests check those too.
 
 Run: pytest tests/test_protocol_decode_e2e.py -v   (needs the server running)
 """
-
-import json
 
 from playwright.sync_api import expect
 
@@ -33,34 +32,13 @@ _RECORD = """
 """
 
 
-# Client events leave through navigator.sendBeacon with a Blob body, which the
-# browser does not expose to request listeners: keep a readable copy.
-_KEEP_BEACONS = """
-    window.__beacons = [];
-    const send = navigator.sendBeacon.bind(navigator);
-    navigator.sendBeacon = (url, body) => {
-        if (String(url).includes('/api/client-event') && body && body.text) {
-            body.text().then((text) => window.__beacons.push(text));
-        }
-        return send(url, body);
-    };
-"""
-
-
-def _mismatch_reports(page):
-    """The protocol-mismatch client events this page has posted since it loaded (the engine's)."""
-    events = [json.loads(text) for text in page.evaluate("window.__beacons")]
-    return [e for e in events if e.get("type") == "protocol-mismatch"]
-
-
 def _dropped(page):
-    """What this page's boundary has dropped, as it logged it."""
+    """What this page's boundaries (play.js's and the engine's) have dropped, as they logged it."""
     return [line for line in page.__dict__.setdefault("_kn_console", []) if line.startswith("[protocol] dropped")]
 
 
 def _open(browser, url):
     page = browser.new_page()
-    page.add_init_script(_KEEP_BEACONS)
     lines = page.__dict__.setdefault("_kn_console", [])
     page.on("console", lambda message: lines.append(message.text))
     page.goto(url)
@@ -101,11 +79,9 @@ def test_a_lobby_session_decodes_cleanly(browser, server_url, room):
         )
         assert ack == {"err": None, "issue": None}, ack
 
-        # Nothing real was dropped, and no page reported a mismatch.
+        # Nothing real was dropped.
         for page in (host, guest, watcher):
             assert _dropped(page) == []
-            assert page.evaluate("window.__beacons.length") > 0
-            assert _mismatch_reports(page) == []
     finally:
         host.close()
         guest.close()
@@ -145,21 +121,22 @@ def test_a_payload_off_its_schema_is_dropped_and_its_handler_does_not_run(browse
         guest.close()
 
 
-# Beside the page's and the engine's own observers: every message either would
-# check, and what the schemas say about it, with no sampling.
+# Beside the page's and the engine's own boundaries: every message either
+# checks, and what the schemas say about it. The engine makes its boundary when
+# its first DataChannel string arrives, after this has wrapped the maker.
 _RECORD_PEER = """
     window.__peer = [];
     const protocol = window.KNCore.protocol;
-    const create = protocol.createObserver;
-    protocol.createObserver = (sink) => {
-        const observer = create(sink);
-        const peerText = observer.peerText;
-        observer.peerText = (channel, text) => {
+    const create = protocol.createBoundary;
+    protocol.createBoundary = (log) => {
+        const boundary = create(log);
+        const peerText = boundary.peerText;
+        boundary.peerText = (channel, text) => {
             const verdict = protocol.checkPeerText(channel, text);
             window.__peer.push({ kind: 'dc ' + verdict.kind, issue: verdict.issue });
             return peerText(channel, text);
         };
-        return observer;
+        return boundary;
     };
     window.__test_socket.onAny((event, data) => {
         const relay = protocol.checkRelay(event, data);
@@ -206,9 +183,75 @@ def test_a_started_match_decodes_cleanly_peer_messages_included(browser, server_
             assert [m for m in seen if m["issue"]] == []
             assert {"game-started", "game-ended", "webrtc-signal"} <= kinds, kinds
             assert any(k.startswith("dc lockstep ") for k in kinds), kinds
-            assert _mismatch_reports(page) == []
             assert _dropped(page) == []
         print("peer kinds seen:", sorted({m["kind"] for p in (host, guest) for m in p.evaluate("window.__peer")}))
+    finally:
+        host.close()
+        guest.close()
+
+
+# What a peer sends that is off its schema: known kinds with a bad field, a kind
+# no page knows, JSON with a field of the wrong type, and text that is not JSON.
+# The "zz-" values must never reach a log line.
+_MALFORMED = """async () => {
+    const peer = Object.values(window.KNState.peers)[0];
+    const open = (dc) => dc && dc.readyState === 'open';
+    for (let i = 0; i < 50 && !(open(peer.dc) && open(peer.syncDc)); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    for (let i = 0; i < 3; i++) peer.dc.send(`rb-check:zz-secret-${i}:1`);
+    peer.dc.send('rb-future-kind:1');
+    peer.dc.send(JSON.stringify({ type: 'lockstep-ready', delay: 'zz-two' }));
+    peer.dc.send('{zz-not json');
+    peer.syncDc.send('sync-start:zz-frame');
+    return { lockstep: peer.dc.readyState, syncState: peer.syncDc.readyState };
+}"""
+
+
+def test_a_peer_string_off_its_schema_is_dropped_by_the_engine(browser, server_url, room):
+    """A guest sends the host malformed DataChannel strings mid-match.
+
+    The host's engine drops each one before any handler reads it, logs the
+    first of each kind and reason once (sync log and console), never with what
+    was sent, and the match goes on: the host still ends it normally.
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    try:
+        for page in (host, guest):
+            page.evaluate(_ROM_READY)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        expect(guest.locator("#overlay")).to_be_hidden(timeout=10000)
+        guest.wait_for_function(
+            "Object.values(window.KNState.peers || {}).some((p) => p.dc && p.dc.readyState === 'open')",
+            timeout=30000,
+        )
+        assert guest.evaluate(_MALFORMED) == {"lockstep": "open", "syncState": "open"}
+        host.wait_for_function(
+            "() => (window.NetplayRollback.exportSyncLog() || '').includes('dropped dc sync-state')", timeout=10000
+        )
+
+        expected = [
+            "[protocol] dropped dc lockstep rb-check",
+            "[protocol] dropped dc lockstep (unknown)",
+            "[protocol] dropped dc lockstep lockstep-ready",
+            "[protocol] dropped dc lockstep (json)",
+            "[protocol] dropped dc sync-state sync-start",
+        ]
+        dropped = _dropped(host)
+        assert [line[: line.index(":")] for line in dropped] == expected, dropped
+        sync_log = host.evaluate("window.NetplayRollback.exportSyncLog()")
+        for line in dropped:
+            assert line in sync_log
+            assert "zz-" not in line and "future" not in line, line
+        assert _dropped(guest) == []
+
+        # The host's page is still in charge of its match.
+        host.click("#toolbar-more")
+        host.click("#toolbar-end")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
     finally:
         host.close()
         guest.close()
