@@ -21,4 +21,5 @@ web/src/resync-request.ts
 web/src/play/game-start.ts
 web/src/sync-chunk-room.ts
 web/src/input-ask.ts
+web/src/catch-up.ts
 web/src/input-resend.ts
