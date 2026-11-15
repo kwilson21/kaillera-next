@@ -52,9 +52,19 @@
 //
 // HOLD_WHILE_DECODING: the deadline does not count while an answer is being
 //   decoded (for at most the decode's own bound). The fix's other half.
+//
+// GUARD_LETS_GO: the lifecycle resync guard (armed by the request a tab
+//   shown again sends; it holds the player's input) times out after 15 s
+//   and let go of whatever request was out (_resyncRequestInFlight =
+//   false). With the ask again, that request is the ask again, sent at 8 s
+//   with the guard left as it was: let go one second before its own
+//   deadline, it is never asked again (guardLetsGoOfTheAskAgainTest; found
+//   by review, #243). The request's own deadline bounds it (I1), so the
+//   guard now releases the input only.
 module resync_reask {
   const ASK_AGAIN: bool
   const HOLD_WHILE_DECODING: bool
+  const GUARD_LETS_GO: bool
 
   pure val MAX_ASKS_AGAIN = 2
   // The "now" requests the guest sends on its own in one run.
@@ -175,6 +185,15 @@ module resync_reask {
     ownAsks' = ownAsks, hostWaits' = hostWaits, toGuest' = toGuest, decoding' = decoding, held' = held,
   }
 
+  // The lifecycle guard's timeout lets the request that is out go.
+  action guardTimesOut = all {
+    GUARD_LETS_GO, inFlight,
+    inFlight' = false,
+    newest' = newest, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
+    hostWaits' = hostWaits, toHost' = toHost, toGuest' = toGuest, decoding' = decoding, held' = held,
+    gaveUp' = gaveUp, cutWhileDecoding' = cutWhileDecoding,
+  }
+
   // Time passes and nothing happens (for the scenarios).
   action nothingHappens = all {
     newest' = newest, inFlight' = inFlight, owed' = owed, asksAgain' = asksAgain, ownAsks' = ownAsks,
@@ -183,7 +202,7 @@ module resync_reask {
   }
 
   action step = any {
-    ownAsk, hostReceives, requestLost, hostRateLimitEnds, answerArrives, apply, deadline,
+    ownAsk, hostReceives, requestLost, hostRateLimitEnds, answerArrives, apply, deadline, guardTimesOut,
     nondet behind = oneOf(Set(true, false))
     decoded(behind),
   }
@@ -264,6 +283,19 @@ module resync_reask {
       // second one is on its way. Today: held, since it still ends the request.
       .expect(if (HOLD_WHILE_DECODING) not(owed) else if (ASK_AGAIN) held == 0 and owed else held == 1)
 
+  // A tab shown again asks; the request is lost; at its deadline the guest
+  // asks again, and that one is lost too. The guard, armed by the first,
+  // times out before the ask again's deadline: today and with the ask again
+  // alone it lets the request go, and nothing asks again.
+  run guardLetsGoOfTheAskAgainTest =
+    init
+      .then(ownAsk).then(requestLost).then(deadline)
+      .then(if (ASK_AGAIN) requestLost else nothingHappens)
+      // Today the first deadline already let it go: there is nothing out.
+      .then(if (not(ASK_AGAIN)) nothingHappens else if (GUARD_LETS_GO) guardTimesOut else deadline)
+      .expect(anOwedResyncIsNotForgotten == (ASK_AGAIN and not(GUARD_LETS_GO)))
+      .expect(if (ASK_AGAIN and not(GUARD_LETS_GO)) asksAgain == 2 and toHost == List(3) else true)
+
   // The plain case: asked, answered, applied; the deadline never fires.
   run answeredTest =
     init
@@ -273,15 +305,21 @@ module resync_reask {
 
 // Today: the deadline lets the request go and asks nothing.
 module resync_reask_current {
-  import resync_reask(ASK_AGAIN = false, HOLD_WHILE_DECODING = false).*
+  import resync_reask(ASK_AGAIN = false, HOLD_WHILE_DECODING = false, GUARD_LETS_GO = true).*
 }
 
 // Asking again without holding the deadline while an answer decodes.
 module resync_reask_unguarded {
-  import resync_reask(ASK_AGAIN = true, HOLD_WHILE_DECODING = false).*
+  import resync_reask(ASK_AGAIN = true, HOLD_WHILE_DECODING = false, GUARD_LETS_GO = false).*
+}
+
+// Asking again, holding while an answer decodes, and the guard's timeout
+// still letting the request go (#243 as first pushed).
+module resync_reask_guard_lets_go {
+  import resync_reask(ASK_AGAIN = true, HOLD_WHILE_DECODING = true, GUARD_LETS_GO = true).*
 }
 
 // The fix.
 module resync_reask_fixed {
-  import resync_reask(ASK_AGAIN = true, HOLD_WHILE_DECODING = true).*
+  import resync_reask(ASK_AGAIN = true, HOLD_WHILE_DECODING = true, GUARD_LETS_GO = false).*
 }

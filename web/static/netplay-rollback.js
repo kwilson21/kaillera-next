@@ -14876,10 +14876,12 @@
     const nowInput = performance.now();
     const lifecycleGuardTimedOut =
       _lifecycleResyncPending && nowInput - _lifecycleResyncStartedAt >= LIFECYCLE_RESYNC_PENDING_TIMEOUT_MS;
-    if (lifecycleGuardTimedOut) {
-      _clearLifecycleResyncGuard('lifecycle resync guard timeout');
-      _resyncRequestInFlight = false;
-    }
+    // The guard holds the player's input; the timeout gives the input back.
+    // It does not let the request go: that is the request's own deadline
+    // (_checkResyncRequestDeadline, I1), which asks again for an owed resync.
+    // Letting it go here cut short the deadline's ask again, sent with this
+    // guard still armed (specs/resync_reask.qnt, GUARD_LETS_GO).
+    if (lifecycleGuardTimedOut) _clearLifecycleResyncGuard('lifecycle resync guard timeout');
     const suppressResumeGuardInput = nowInput < _resumeInputGuardUntil || _lifecycleResyncPending;
     if ((suppressEjsPausedInput || suppressResumeGuardInput) && _frameNum % 60 === 0) {
       _syncLog(

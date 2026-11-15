@@ -87,6 +87,16 @@ def test_an_answer_being_decoded_holds_the_deadline_off_for_a_bounded_time():
     assert src.count("await _decodingSyncAnswer(") == 2
 
 
+def test_the_lifecycle_guard_timeout_gives_the_input_back_and_leaves_the_request_to_its_deadline():
+    # specs/resync_reask.qnt, GUARD_LETS_GO: letting the request go there cut
+    # short the deadline's ask again, sent with the guard still armed.
+    src = LOCKSTEP_JS.read_text()
+    at = src.index("const lifecycleGuardTimedOut =")
+    block = src[at : src.index("const suppressResumeGuardInput", at)]
+    assert "if (lifecycleGuardTimedOut) _clearLifecycleResyncGuard('lifecycle resync guard timeout');" in block
+    assert "_resyncRequestInFlight" not in block.split("\n", 2)[2]
+
+
 def test_the_owed_resync_ends_when_a_host_state_is_applied_or_the_match_ends():
     src = LOCKSTEP_JS.read_text()
     apply = _body(src, "const applySyncState = (bytes, frame, fromProactive = false) => {")

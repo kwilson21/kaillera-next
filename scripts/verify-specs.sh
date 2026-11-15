@@ -226,6 +226,8 @@ resync_reask() {
   expect_violation "$REASK" resync_reask_current anOwedResyncIsNotForgotten
   expect_violation "$REASK" resync_reask_current theDecodedAnswerIsNotCut
   expect_violation "$REASK" resync_reask_unguarded theDecodedAnswerIsNotCut
+  # The lifecycle guard's timeout letting the ask again go: 5 steps.
+  expect_violation "$REASK" resync_reask_guard_lets_go anOwedResyncIsNotForgotten
 }
 
 # Every group, in the order a local run takes them.
