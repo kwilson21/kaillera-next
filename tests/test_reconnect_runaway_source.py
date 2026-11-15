@@ -1,0 +1,57 @@
+"""After a reconnect: the catch-up's wait does not spin, the reliable channel
+carries each frame's input once (specs/catch_up_wait.qnt), the host resets the
+peer's state too (I2), and a state header is taken only from the host."""
+
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+LOCKSTEP_JS = ROOT / "web" / "static" / "netplay-rollback.js"
+
+
+def _src() -> str:
+    return LOCKSTEP_JS.read_text()
+
+
+def test_a_frames_input_goes_out_once_on_the_reliable_channel():
+    src = _src()
+    send = src[src.index("const shouldSendRedundancy = _useCRollback") :]
+    send = send[: send.index("_rbTransportPacketsSent++;")]
+    # The skip is decided before the packet is built, and remembers the
+    # channel: a new channel (a reconnect, a fallback) always gets the frame.
+    assert "lastSend.dc === inputDc &&" in send
+    assert "lastSend.frame === _frameNum &&" in send
+    assert (
+        "(inputDc === peer.dc || nowSend - lastSend.at < INPUT_RESEND_EVERY_MS)" in send
+    )
+    assert send.index("continue;") < send.index("KNShared.encodeInput(")
+    assert "peer._knInputSend = { dc: inputDc, frame: _frameNum, at: nowSend };" in src
+    assert "const INPUT_RESEND_EVERY_MS = 16;" in src
+    # Each change of a peer's input channel is logged.
+    assert "`INPUT-CHANNEL f=${_frameNum} slot=${peer.slot} label=" in send
+
+
+def test_the_host_resets_the_peer_when_a_reconnect_opens():
+    # I2: the reset is no longer only a guest's.
+    src = _src()
+    block = src[
+        src.index("// If this is a reconnect, clear reconnecting state and resync") :
+    ]
+    block = block[: block.index("const _reconnectRequestId = _beginResyncRequest();")]
+    reset = block.index(
+        "resetPeerState(peer.slot, 'reconnect', { peer, sid: remoteSid });"
+    )
+    guest_only = block.index("if (_playerSlot !== 0) {\n          _lastResyncTime = 0;")
+    assert reset < guest_only
+
+
+def test_a_state_header_is_taken_only_from_the_host():
+    src = _src()
+    sync = src[src.index("const setupSyncDataChannel = (_remoteSid, ch) => {") :]
+    guard = sync.index("_peers[_remoteSid]?.slot !== 0")
+    assert guard < sync.index("if (e.data.startsWith('sync-start:')) {")
+    assert "e.data.startsWith('sync-regions-start:')" in sync[guard - 200 : guard]
+    assert "state header refused" in sync[guard : guard + 400]
+    # The only sender is pushSyncState, which sends nothing off slot 0.
+    push = src[src.index("const pushSyncState = async (") :]
+    assert "if (_playerSlot !== 0 || !_syncEnabled) return;" in push[:600]
+    assert src.count("`sync-start:${frame}:") == 1

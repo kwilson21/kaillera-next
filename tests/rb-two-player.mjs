@@ -465,7 +465,10 @@
  *     `lockstep`, rb-check, rb-delay and roster with a field that is not a
  *     number, a kind no page knows, lockstep-ready JSON whose delay is not a
  *     number, and text that is not JSON; on `sync-state`, a sync-start
- *     header that is not one. Read raw, rb-delay and sync-start would have
+ *     header that is not one; and the guest also sends a sync-start that IS
+ *     on its schema, which the host must refuse as a state header from a
+ *     page that is not the host (one `state header refused` line on the
+ *     host, none on the guest). Read raw, rb-delay and sync-start would have
  *     set the delay and the state transfer's frame to NaN. Each engine must
  *     drop them before any handler reads them
  *     (KNCore.protocol.createBoundary): the run fails unless each page's sync
@@ -1145,14 +1148,16 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   window.__knHoldInputsMs = 0;
   // CATCH_UP_HOLE_MS (the host page): once window.__knDropInputsAfterOpenMs
   // is above 0, a channel whose first input packet goes out after that drops
-  // every input packet (binary, on `lockstep` or `rollback-input`) for that
-  // long from its first one: the reconnected channel loses the host's
-  // inputs from just before the state it sends, so the guest's catch-up
-  // waits on a hole. Channels opened before arming are untouched. The
-  // dropped frames are kept in __knInputsDroppedAfterOpen.
+  // every input packet (binary, on `lockstep` or `rollback-input`) from its
+  // first one until that long after the page next sends a state
+  // (`sync-start:`): the reconnected channel loses the host's inputs from
+  // just before the state it sends, so the guest's catch-up waits on a
+  // hole. Channels opened before arming are untouched. The dropped frames
+  // are kept in __knInputsDroppedAfterOpen.
   window.__knDropInputsAfterOpenMs = 0;
   window.__knDropArmedAt = 0;
   window.__knInputsDroppedAfterOpen = [];
+  let stateSentAfterArming = 0;
   const firstInputSendAt = new WeakMap();
   // UNANSWERED_SOCKET_RESYNC: each entry of window.__knSyncAnswerDrops is
   // taken by the next numbered answer on `sync-state` (its `sync-answer-id:`
@@ -1313,6 +1318,15 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
     },
   });
   RTCDataChannel.prototype.send = function (data) {
+    if (
+      window.__knDropArmedAt > 0 &&
+      !stateSentAfterArming &&
+      this.label === 'sync-state' &&
+      typeof data === 'string' &&
+      data.startsWith('sync-start:')
+    ) {
+      stateSentAfterArming = performance.now();
+    }
     if (this.label === 'sync-state' && syncStateDrops(data)) return;
     if (window.__knLoseRbInputs && this.label === 'rollback-input' && data instanceof ArrayBuffer) {
       if (data.byteLength >= 4) window.__knRbInputsLost.push(new Int32Array(data, 0, 1)[0]);
@@ -1326,7 +1340,7 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
         window.__knDropInputsAfterOpenMs > 0 &&
         window.__knDropArmedAt > 0 &&
         first >= window.__knDropArmedAt &&
-        now - first < window.__knDropInputsAfterOpenMs
+        (stateSentAfterArming === 0 || now - stateSentAfterArming < window.__knDropInputsAfterOpenMs)
       ) {
         if (data.byteLength >= 4) window.__knInputsDroppedAfterOpen.push(new Int32Array(data, 0, 1)[0]);
         return;
@@ -2073,6 +2087,9 @@ const MALFORMED_STRINGS = {
     '{zz-not json',
   ],
   syncState: ['sync-start:zz-frame:1:1:0'],
+  // On its schema, but a state header from a page that is not the host: the
+  // guest sends it, and the host must refuse it (`state header refused`).
+  guestSyncState: ['sync-start:1:1:1:0'],
 };
 // The `[protocol] dropped <kind>` each receiving page must log, once each, in any order.
 const MALFORMED_DROPS = [
@@ -2777,14 +2794,18 @@ if (inBattle) {
     [malformedPeer.hostAt, malformedPeer.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
     // Each page sends the other, on its real channels, what no handler may read.
     malformedPeer.sent = await Promise.all(
-      [host, guest].map((p) =>
-        p.evaluate((strings) => {
-          const peer = Object.values(window.KNState.peers).find((q) => q?.dc?.readyState === 'open');
-          if (!peer || peer.syncDc?.readyState !== 'open') return false;
-          for (const text of strings.lockstep) peer.dc.send(text);
-          for (const text of strings.syncState) peer.syncDc.send(text);
-          return true;
-        }, MALFORMED_STRINGS),
+      [host, guest].map((p, i) =>
+        p.evaluate(
+          ([strings, isGuest]) => {
+            const peer = Object.values(window.KNState.peers).find((q) => q?.dc?.readyState === 'open');
+            if (!peer || peer.syncDc?.readyState !== 'open') return false;
+            for (const text of strings.lockstep) peer.dc.send(text);
+            for (const text of strings.syncState) peer.syncDc.send(text);
+            if (isGuest) for (const text of strings.guestSyncState) peer.syncDc.send(text);
+            return true;
+          },
+          [MALFORMED_STRINGS, i === 1],
+        ),
       ),
     );
     console.log(`MALFORMED_PEER: strings off their schema sent (host, guest): ${malformedPeer.sent}`);
@@ -3114,7 +3135,10 @@ const peerDropped = { host: droppedIn(H.sync), guest: droppedIn(G.sync) };
 // was sent and without logging what it was, and went on playing.
 const malformedPeerReport = (() => {
   if (!MALFORMED_PEER) return null;
-  const side = (log, at, frameAfter) => {
+  const side = (log, at, frameAfter, refusedExpected) => {
+    const refused = log
+      .split('\n')
+      .filter((line) => (at ? seqOf(line) > at.seq : false) && line.includes('state header refused'));
     const lines = log.split('\n').filter((line) => line.includes('[protocol] dropped'));
     const after = at ? lines.filter((line) => seqOf(line) > at.seq) : [];
     const kinds = droppedIn(after.join('\n'));
@@ -3127,8 +3151,10 @@ const malformedPeerReport = (() => {
       before: lines.length - after.length,
       valuesLogged,
       framesAfter,
+      refused: refused.length,
       passed:
         !!at &&
+        refused.length === refusedExpected &&
         lines.length === after.length &&
         // In any order: the sync-state channel is not ordered against lockstep.
         JSON.stringify([...kinds].sort()) === JSON.stringify([...MALFORMED_DROPS].sort()) &&
@@ -3136,8 +3162,10 @@ const malformedPeerReport = (() => {
         framesAfter >= MALFORMED_FRAMES_AFTER,
     };
   };
-  const host = side(H.sync, malformedPeer.hostAt, malformedPeer.frameLater[0]);
-  const guest = side(G.sync, malformedPeer.guestAt, malformedPeer.frameLater[1]);
+  // The host refuses the guest's state header; the guest refuses nothing
+  // (the host's malformed one is dropped by the schema before the guard).
+  const host = side(H.sync, malformedPeer.hostAt, malformedPeer.frameLater[0], 1);
+  const guest = side(G.sync, malformedPeer.guestAt, malformedPeer.frameLater[1], 0);
   return {
     sent: malformedPeer.sent,
     host,

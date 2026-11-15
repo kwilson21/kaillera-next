@@ -9479,6 +9479,19 @@
           if (syncAnswerIdNext > 0 && _peers[_remoteSid]?.slot === 0) _hostNumbersAnswers = true;
           return;
         }
+        // A state comes only from the host: pushSyncState sends nothing on a
+        // page that is not slot 0, so a header from any other peer is not
+        // one, and is not taken (the same rule as `rb-transport:`). Refused
+        // here, the binary chunks after it are dropped as unexpected.
+        if (
+          (e.data.startsWith('sync-start:') || e.data.startsWith('sync-regions-start:')) &&
+          _peers[_remoteSid]?.slot !== 0
+        ) {
+          _syncLog(
+            `state header refused: from slot=${_peers[_remoteSid]?.slot ?? 'none'} sid=${_remoteSid}, not the host`,
+          );
+          return;
+        }
         // Guest: incoming state transfer header
         if (e.data.startsWith('sync-start:')) {
           const parts = e.data.split(':');
