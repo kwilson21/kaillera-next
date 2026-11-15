@@ -413,6 +413,8 @@ import {
   inFrozenRecoveryAftermath,
   withoutLinkStarved,
 } from './frozen-recovery.mjs';
+import { fileURLToPath } from 'node:url';
+import { requireCurrentBundle } from './bundle-check.mjs';
 import { createLinkSchedule, spansInFrames } from './link-schedule.mjs';
 import {
   observerDbNote,
@@ -715,6 +717,9 @@ if (CLICK_DURING_BATTLE && !(BATTLE_SECONDS > 15)) {
   );
   process.exit(1);
 }
+
+// The play page's TypeScript must be this tree's, built and served (bundle-check.mjs).
+await requireCurrentBundle(fileURLToPath(new globalThis.URL('..', import.meta.url)), URL);
 
 fs.mkdirSync(OUT, { recursive: true });
 const room = 'TP' + Math.random().toString(36).slice(2, 8).toUpperCase();
