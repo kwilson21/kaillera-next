@@ -924,6 +924,7 @@ if (
     DESYNC_GUEST ||
     SYNC_FOLLOW_UP ||
     MALFORMED_PEER ||
+    HEAL_BOTH_SIDES ||
     CATCH_UP_MS > 0)
 ) {
   console.log('C_ROLLBACK_TRAP is mutually exclusive with the other fault knobs');
