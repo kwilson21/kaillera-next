@@ -705,26 +705,31 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert "if (slot === 0) _hostNumbersAnswers = false;" in reset
 
 
-def test_a_late_answer_from_before_the_frame_asked_is_dropped():
-    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate),
-    # with lateAnswerAfterTheTargetDeadlineTest: the frame is the request's,
-    # not the live target, so the drop holds after the target's deadline too.
+def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
+    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate,
+    # lateAndBehind), with lateAnswerAfterTheTargetDeadlineTest: the frame
+    # named is the request's, not the live target, so the drop holds after
+    # the target's deadline too; and immediateLateAnswerTest: a late answer
+    # from before the guest's own frame is dropped when the newest request
+    # named no frame.
     src = LOCKSTEP_JS.read_text()
     older = src[src.index("const _answersAnOlderRequest = (answerFor) =>") :]
     older = older[: older.index(";\n")]
     assert "_resyncObserve('answers-an-older-request', answerFor > 0 && answerFor !== _resyncRequestId," in older
     assert "rules.answersAnOlderRequest(answerFor, _resyncRequestId)" in older
-    late = src[src.index("const _isLateAnswerBeforeFrameAsked = (state) =>") :]
+    late = src[src.index("const _isLateAnswerBehind = (state) =>") :]
     late = late[: late.index(";\n")]
-    assert "_answersAnOlderRequest(state.answerFor || 0)" in late
-    assert "_resyncRequestAt > 0 && state.frame < _resyncRequestAt" in late
-    assert "!!state &&\n    _resyncObserve(\n      'late-answer-before-frame-asked'," in late
     assert (
-        "rules.isLateAnswerBeforeFrameAsked(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt)"
+        "_answersAnOlderRequest(state.answerFor || 0) &&\n"
+        "        (state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))"
+    ) in late
+    assert "!!state &&\n    _resyncObserve(\n      'late-answer-behind'," in late
+    assert (
+        "rules.isLateAnswerBehind(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt, _frameNum)"
     ) in late
     assert "_syncTargetFrame" not in late
     tick = src[src.index("const tick = () => {") :]
-    drop_at = tick.index("if (_isLateAnswerBeforeFrameAsked(_pendingResyncState)) {")
+    drop_at = tick.index("if (_isLateAnswerBehind(_pendingResyncState)) {")
     dropped = tick[drop_at : tick.index("\n    }\n", drop_at)]
     assert "SYNC-LATE-ANSWER-DROPPED f=${_frameNum}" in dropped
     assert "_pendingResyncState = null;" in dropped
@@ -792,7 +797,7 @@ def test_the_resync_rules_are_observed():
     for what, name in (
         ("ends-request", "endsRequest"),
         ("answers-an-older-request", "answersAnOlderRequest"),
-        ("late-answer-before-frame-asked", "isLateAnswerBeforeFrameAsked"),
+        ("late-answer-behind", "isLateAnswerBehind"),
         ("keeps-awaited-answer", "keepsAwaitedAnswer"),
         ("late-join-lost-host", "lateJoinLostHostStep"),
     ):

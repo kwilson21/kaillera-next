@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import {
   answersAnOlderRequest,
   endsRequest,
-  isLateAnswerBeforeFrameAsked,
+  isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
   type LostHostStep,
@@ -43,20 +43,34 @@ test('an older request is a numbered one other than the newest', () => {
 });
 
 test('a late answer from before the frame the newest request named is dropped', () => {
-  assert.equal(isLateAnswerBeforeFrameAsked(1, 99, 2, 100), true);
-  // At or after the frame asked it does not take the guest back.
-  assert.equal(isLateAnswerBeforeFrameAsked(1, 100, 2, 100), false);
-  assert.equal(isLateAnswerBeforeFrameAsked(1, 101, 2, 100), false);
+  // The guest is at 98, short of the frame asked: the target's deadline gave it up.
+  assert.equal(isLateAnswerBehind(1, 99, 2, 100, 98), true);
+  // At or after the frame asked, and at or ahead of the guest, it does not take the guest back.
+  assert.equal(isLateAnswerBehind(1, 100, 2, 100, 100), false);
+  assert.equal(isLateAnswerBehind(1, 101, 2, 100, 100), false);
+});
+
+test('a late answer from before the frame the guest is on is dropped, whether or not a frame was named', () => {
+  // The run that found it: an immediate request, then the first answer (frame 864) with the guest at 994.
+  assert.equal(isLateAnswerBehind(1, 864, 2, -1, 994), true);
+  assert.equal(isLateAnswerBehind(1, 864, 2, 0, 994), true);
+  // Past the frame named, but behind the guest.
+  assert.equal(isLateAnswerBehind(1, 101, 2, 100, 102), true);
+  // One frame behind is behind.
+  assert.equal(isLateAnswerBehind(1, 993, 2, -1, 994), true);
 });
 
 test("the newest request's own answer, and a state with no number, are never dropped", () => {
-  assert.equal(isLateAnswerBeforeFrameAsked(2, 10, 2, 100), false);
-  assert.equal(isLateAnswerBeforeFrameAsked(0, 10, 2, 100), false);
+  assert.equal(isLateAnswerBehind(2, 10, 2, 100, 50), false);
+  assert.equal(isLateAnswerBehind(0, 10, 2, 100, 50), false);
+  assert.equal(isLateAnswerBehind(2, 864, 2, -1, 994), false);
+  assert.equal(isLateAnswerBehind(0, 864, 2, -1, 994), false);
 });
 
-test('a request that named no frame drops nothing', () => {
-  assert.equal(isLateAnswerBeforeFrameAsked(1, 10, 2, -1), false);
-  assert.equal(isLateAnswerBeforeFrameAsked(1, -5, 2, 0), false);
+test('a late answer at or ahead of the guest is kept when no frame was named', () => {
+  assert.equal(isLateAnswerBehind(1, 994, 2, -1, 994), false);
+  assert.equal(isLateAnswerBehind(1, 1000, 2, -1, 994), false);
+  assert.equal(isLateAnswerBehind(1, -5, 2, 0, -5), false);
 });
 
 test('an older answer does not replace the held answer to the newest request', () => {
@@ -103,11 +117,15 @@ const engine = {
   ends: (answerFor: number, resyncRequestId: number, hostNumbersAnswers: boolean) =>
     answerFor > 0 ? answerFor === resyncRequestId : !hostNumbersAnswers,
   older: (answerFor: number, resyncRequestId: number) => answerFor > 0 && answerFor !== resyncRequestId,
-  late: (state: { answerFor?: number; frame: number } | null, resyncRequestId: number, resyncRequestAt: number) =>
+  late: (
+    state: { answerFor?: number; frame: number } | null,
+    resyncRequestId: number,
+    resyncRequestAt: number,
+    frameNum: number,
+  ) =>
     !!state &&
     engine.older(state.answerFor || 0, resyncRequestId) &&
-    resyncRequestAt > 0 &&
-    state.frame < resyncRequestAt,
+    (state.frame < frameNum || (resyncRequestAt > 0 && state.frame < resyncRequestAt)),
   keeps: (answerFor: number, resyncRequestId: number, pending: { answerFor?: number } | null) =>
     !(!engine.older(answerFor, resyncRequestId) || pending?.answerFor !== resyncRequestId),
   lostHost: (
@@ -138,17 +156,24 @@ test("the proved rules agree with the engine's over a grid of inputs", () => {
       assert.equal(answersAnOlderRequest(answerFor, newest), engine.older(answerFor, newest));
       for (const frame of FRAMES) {
         for (const askedAt of FRAMES) {
-          assert.equal(
-            isLateAnswerBeforeFrameAsked(answerFor, frame, newest, askedAt),
-            engine.late({ answerFor, frame }, newest, askedAt),
-            `answerFor=${answerFor} frame=${frame} newest=${newest} askedAt=${askedAt}`,
-          );
-          cases++;
+          for (const guestFrame of FRAMES) {
+            assert.equal(
+              isLateAnswerBehind(answerFor, frame, newest, askedAt, guestFrame),
+              engine.late({ answerFor, frame }, newest, askedAt, guestFrame),
+              `answerFor=${answerFor} frame=${frame} newest=${newest} askedAt=${askedAt} guestFrame=${guestFrame}`,
+            );
+            cases++;
+          }
         }
       }
       // A held state with no answerFor at all reads as 0, as the engine does.
       for (const frame of FRAMES) {
-        assert.equal(isLateAnswerBeforeFrameAsked(0, frame, newest, 100), engine.late({ frame }, newest, 100));
+        for (const guestFrame of FRAMES) {
+          assert.equal(
+            isLateAnswerBehind(0, frame, newest, 100, guestFrame),
+            engine.late({ frame }, newest, 100, guestFrame),
+          );
+        }
       }
       for (const held of HELD) {
         const pending = held < 0 ? null : { answerFor: held };
@@ -184,7 +209,7 @@ test('the engine runs each proved rule beside its own and reports a difference',
   const observed = {
     'ends-request': 'endsRequest',
     'answers-an-older-request': 'answersAnOlderRequest',
-    'late-answer-before-frame-asked': 'isLateAnswerBeforeFrameAsked',
+    'late-answer-behind': 'isLateAnswerBehind',
     'keeps-awaited-answer': 'keepsAwaitedAnswer',
     'late-join-lost-host': 'lateJoinLostHostStep',
   };
@@ -196,7 +221,7 @@ test('the engine runs each proved rule beside its own and reports a difference',
   // Observing only: the engine's own rules are still the ones returned.
   assert.ok(source.includes('answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers'));
   assert.ok(source.includes('answerFor > 0 && answerFor !== _resyncRequestId'));
-  assert.ok(source.includes('_resyncRequestAt > 0 && state.frame < _resyncRequestAt'));
+  assert.ok(source.includes('(state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt))'));
   assert.ok(
     source.includes('_answersAnOlderRequest(answerFor) && _pendingResyncState?.answerFor === _resyncRequestId'),
   );
