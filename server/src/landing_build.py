@@ -42,8 +42,8 @@ def referenced(html: str) -> set[str]:
 def landing_files(web_dir: Path) -> set[str]:
     """The exact set of files (paths relative to `web_dir`) the landing
     Worker serves from assets: the pages themselves, the files they load,
-    EXTRA, every self-hosted font and every screenshot (landing.js loads
-    them, so no page references them by `src=`)."""
+    EXTRA, every self-hosted font and every screenshot (the front page's
+    script loads them, so no page references them by `src=`)."""
     files: set[str] = set(EXTRA) | set(PAGES)
     for page in PAGES:
         files |= referenced((web_dir / page).read_text())

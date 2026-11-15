@@ -197,8 +197,8 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
-    landing.js         Front-page board controller (room creation, open-rooms board)
     landing.css        Front-page styles (direction A tokens)
+    dist/kn-landing.js Front-page board controller (room creation, open-rooms board), built from web/src/landing/front.ts
     dist/kn-join.js    Invite-page controller (room lookup, join/watch states), built from web/src/landing/join.ts
     dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
     dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper, window.KNSite)
@@ -222,10 +222,10 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     version.js             Version display + changelog modal; starts web/src/site/version.ts
     version-guard.js       Cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
-    demo.js                Demo page orchestrator (fake peer + menu autopilot)
+    demo.js                Demo page orchestrator (fake peer + menu autopilot); its options, network settings and HUD text are web/src/demo
     fake-peer.js           Synthetic P2 for the demo page (simulated input/jitter)
     ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (reads RDRAM menu state)
-    rollback-timeline.js   Demo page's live rollback-metrics HUD
+    rollback-timeline.js   Demo page's live rollback-metrics HUD (logic in web/src/page/rollback-timeline.ts)
     socket.io.min.js       Self-hosted Socket.IO client (v4.8.4)
     vendor/fflate.min.js   Self-hosted compression lib used to extract ROM ZIP archives
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization

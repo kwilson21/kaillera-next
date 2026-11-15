@@ -10,6 +10,7 @@
  * every step: same markup, same requests, same timers.
  */
 import { buildSync } from 'esbuild';
+import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
@@ -691,6 +692,7 @@ export class FakePage {
           return bytes;
         },
       },
+      Element: FakeElement,
       Date: { now: () => this.now },
       Math: math,
       fetch,
@@ -750,6 +752,7 @@ export class FakePage {
 
   /** Move the clock on by `ms`, running each timer as it comes due and letting the page settle after each. */
   async advance(ms: number): Promise<void> {
+    await this.settle();
     const until = this.now + ms;
     for (;;) {
       const due = this.timers.filter((timer) => timer.at <= until).sort((a, b) => a.at - b.at || a.id - b.id)[0];
@@ -843,3 +846,48 @@ export const bundleInputs = (entry: 'join-entry.ts' | 'landing-entry.ts'): strin
       logLevel: 'silent',
     }).metafile.inputs,
   );
+
+/** A page's old script and the bundle that replaced it. */
+const SCRIPTS = {
+  'join.html': { old: 'join.js', entry: 'join-entry.ts' },
+  'index.html': { old: 'landing.js', entry: 'landing-entry.ts' },
+} as const;
+
+/**
+ * The old script and the new bundle, each on its own copy of the same page.
+ * Every step is done to both, and they must come out the same.
+ */
+export class PagePair {
+  readonly old: FakePage;
+  readonly next: FakePage;
+  private readonly file: PageOptions['file'];
+
+  constructor(options: PageOptions) {
+    this.file = options.file;
+    this.old = new FakePage(options);
+    this.next = new FakePage(options);
+  }
+
+  /** Decide each request's answer, on both pages. */
+  serve(server: (url: string) => Reply): void {
+    this.old.server = server;
+    this.next.server = server;
+  }
+
+  /** Do the same thing to both pages, let them settle, and require them equal. */
+  async step(what: string, act: (page: FakePage) => void | Promise<void>): Promise<void> {
+    for (const page of [this.old, this.next]) {
+      await act(page);
+      await page.settle();
+    }
+    assert.equal(this.next.snapshot(), this.old.snapshot(), what);
+  }
+
+  /** Run both scripts, as the page loading them would. */
+  async load(): Promise<void> {
+    const { old, entry } = SCRIPTS[this.file];
+    runOldScript(old, this.old);
+    runBundle(entry, this.next);
+    await this.step('after loading', () => {});
+  }
+}

@@ -1,5 +1,6 @@
 // Build the TypeScript core, the small bundle for pages without the core, the
-// standalone landing-page waking art and the invite page as classic scripts.
+// standalone landing-page waking art, the invite page and the front page as
+// classic scripts.
 // The bundles are build output (web/static/dist is git-ignored): the Docker
 // image, CI, the landing and demo builds and local development each run this.
 // With package-lock.json the output is the same bytes everywhere, which the
@@ -54,6 +55,19 @@ await build({
   absWorkingDir: root,
   entryPoints: ['web/src/join-entry.ts'],
   outfile: 'web/static/dist/kn-join.js',
+  bundle: true,
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2022',
+  minify: true,
+  legalComments: 'none',
+  logLevel: 'info',
+});
+
+await build({
+  absWorkingDir: root,
+  entryPoints: ['web/src/landing-entry.ts'],
+  outfile: 'web/static/dist/kn-landing.js',
   bundle: true,
   format: 'iife',
   platform: 'browser',
