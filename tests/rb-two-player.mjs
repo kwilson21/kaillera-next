@@ -296,22 +296,22 @@
  *     unconfirmed (specs/sync_follow_up.qnt). A third of the way in the
  *     guest's input is held neutral and the host page is frozen for 7 s: the
  *     guest's peer recovery asks for a resync at a frame, as with
- *     UNANSWERED_SOCKET_RESYNC=letgo. From before the freeze the guest page
- *     keeps its input packets back, so the host comes back to stale inputs,
- *     stalls, and answers at its deadline with a state it cannot confirm
- *     (SYNC-FOLLOW-UP-WATCH). That answer waits in a busy `sync-state`
- *     channel for 1.5 s (under the guest's chunk timeout), as on a slow
- *     link, and the kept-back inputs are let go as soon as the state is
- *     taken, so they reach the host while it is still handing the state
- *     over: inputs after that are settled and never fed, and could not
- *     change it. `same` keeps the input neutral, so every kept-back input
- *     matches its prediction: fails unless the follow-up is skipped
- *     (SYNC-FOLLOW-UP-SKIPPED), no other state goes out for it, and the
- *     first answer is applied. `changed` holds a button down while the
- *     inputs are kept back, so they differ from it: fails unless
+ *     UNANSWERED_SOCKET_RESYNC=letgo. Then each of the guest's input packets
+ *     is held 2 s until the host answers. If it answers unconfirmed it
+ *     watches the frame it sent (SYNC-FOLLOW-UP-WATCH); whether its deadline
+ *     finds the frame confirmed is a race with its own stall, so an attempt
+ *     answered confirmed is tried again, at most 3 times. `same` keeps the
+ *     input neutral, so every held input matches its prediction: fails
+ *     unless the follow-up is skipped (SYNC-FOLLOW-UP-SKIPPED), no other
+ *     state goes out for it, and the first answer is applied. `changed`
+ *     holds a button down while the inputs are held: fails unless
  *     SYNC-FOLLOW-UP-NEEDED is logged, the follow-up goes out after it, and
- *     the guest applies it. Either way the guest must go on making frames.
- *     Frames are compared as with FREEZE_HOST_MS.
+ *     the guest applies it. In two players `changed` is not reached: the
+ *     guest's late inputs before the frame sent are settled once it is
+ *     handed over and never fed, and pacing and the stale-input stall keep
+ *     the host from answering on predicted inputs that reach that frame
+ *     (docs/roadmap.md, Not verified). Either way the guest must go on
+ *     making frames. Frames are compared as with FREEZE_HOST_MS.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -501,12 +501,14 @@ if (!['', 'same', 'changed'].includes(SYNC_FOLLOW_UP)) {
 // SYNC_FOLLOW_UP freezes the host as letgo does, and how long the guest's
 // inputs are held after it, so the host's answer goes out unconfirmed.
 const SYNC_FOLLOW_UP_FREEZE_MS = 7000;
-// How long the host's answer waits in a busy channel: the window in which the
-// guest's kept-back inputs reach the host.
-// Under the guest's chunk timeout (3 s), which would ask again over the socket.
-const SYNC_FOLLOW_UP_BUSY_MS = 1500;
+// How long each of the guest's input packets is held after the freeze, so the
+// host answers on predicted inputs.
+const SYNC_FOLLOW_UP_HOLD_MS = 2000;
+// Whether the host's deadline finds its frame confirmed is a race with its own
+// stall; an attempt whose answer goes out confirmed is tried again.
+const SYNC_FOLLOW_UP_ATTEMPTS = 3;
 // The recovery request, its answer, the follow-up's decision once confirmed.
-const SYNC_FOLLOW_UP_RECOVER_MS = 30000;
+const SYNC_FOLLOW_UP_RECOVER_MS = 30000 * SYNC_FOLLOW_UP_ATTEMPTS;
 const FREEZE_LIKE = FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || SYNC_FOLLOW_UP !== '';
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
@@ -905,18 +907,10 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // nor counted there), and its frame (the packet's first word) kept.
   window.__knLoseRbInputs = false;
   window.__knRbInputsLost = [];
-  // SYNC_FOLLOW_UP (the guest page): while window.__knGateInputs is set,
-  // every input packet (binary, on `lockstep` or `rollback-input`) is kept
-  // back, in order, until window.__knOpenInputGate() lets them all go. The
-  // page's other messages (its resync request) still go.
-  window.__knGateInputs = false;
-  const gatedMessages = [];
-  // SYNC_FOLLOW_UP (the host page): once window.__knSyncBusyMs is above 0,
-  // the next answer sent on `sync-state` makes that channel report a full
-  // buffer for that long, as a slow link would, so the host's paced send of
-  // its chunks waits (web/src/sync-send.ts).
-  window.__knSyncBusyMs = 0;
-  window.__knSyncBusy = [];
+  // SYNC_FOLLOW_UP (the guest page): while window.__knHoldInputsMs is above
+  // 0, every input packet (binary, on `lockstep` or `rollback-input`) is held
+  // that long. A channel never reorders, so what follows waits behind it.
+  window.__knHoldInputsMs = 0;
   // UNANSWERED_SOCKET_RESYNC: each entry of window.__knSyncAnswerDrops is
   // taken by the next numbered answer on `sync-state` (its `sync-answer-id:`
   // message): 'chunks' passes the answer's id and header and drops its
@@ -1094,39 +1088,13 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
       window.__knSyncAnswersHeld.push({ answer: data, heldAt: performance.now(), ms: hold });
     }
     if (
-      window.__knSyncBusyMs > 0 &&
-      this.label === 'sync-state' &&
-      typeof data === 'string' &&
-      data.startsWith('sync-answer-id:')
-    ) {
-      const until = performance.now() + window.__knSyncBusyMs;
-      window.__knSyncBusyMs = 0;
-      window.__knSyncBusy.push({ answer: data, from: performance.now(), until });
-      Object.defineProperty(this, 'bufferedAmount', {
-        configurable: true,
-        get() {
-          if (performance.now() < until) return 4 * 1024 * 1024;
-          return Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'bufferedAmount').get.call(this);
-        },
-      });
-    }
-    if (
-      window.__knGateInputs &&
+      window.__knHoldInputsMs > 0 &&
       (this.label === 'lockstep' || this.label === 'rollback-input') &&
       data instanceof ArrayBuffer
-    ) {
-      gatedMessages.push({ ch, data });
-      return;
-    }
+    )
+      hold = Math.max(hold, window.__knHoldInputsMs);
     net.send(ch, data, bytesOf(data), hold, performance.now());
     arm(ch.pumped);
-  };
-  window.__knOpenInputGate = () => {
-    window.__knGateInputs = false;
-    for (const { ch, data } of gatedMessages.splice(0)) {
-      net.send(ch, data, bytesOf(data), 0, performance.now());
-      arm(ch.pumped);
-    }
   };
 };
 
@@ -1609,7 +1577,7 @@ const linkResync = { hostAt: null, guestAt: null, applied: false };
 const doubleResyncAsk = { hostAt: null, guestAt: null, applied: false };
 // UNANSWERED_SOCKET_RESYNC: where the logs stood when the guest asked.
 // SYNC_FOLLOW_UP: where the logs stood before the freeze and after the fault.
-const syncFollowUp = { hostAt: null, guestAt: null, hostEnd: null, asked: false, watched: false, framesAfter: 0 };
+const syncFollowUp = { hostAt: null, guestAt: null, hostEnd: null, watched: false, attempts: 0, framesAfter: 0 };
 const unansweredSocketResync = {
   hostAt: null,
   guestAt: null,
@@ -1847,54 +1815,64 @@ if (inBattle) {
     await host.waitForTimeout(before);
     const started = Date.now();
     const NEUTRAL = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
-    // The guest's input, fixed: the host predicts the guest's last input, so
-    // while it stays fixed every prediction holds.
-    await guest.evaluate((n) => {
-      window.__knInputOverride = () => n;
-    }, NEUTRAL);
-    await guest.waitForTimeout(3000);
-    [syncFollowUp.hostAt, syncFollowUp.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
-    // The host's answer will sit in a busy channel for a while, as on a slow link.
-    await host.evaluate((ms) => {
-      window.__knSyncBusyMs = ms;
-    }, SYNC_FOLLOW_UP_BUSY_MS);
-    // The guest's input packets are kept back from before the freeze (its
-    // recovery request still goes): the host comes back to inputs already
-    // stale, stalls (ROLLBACK-STALL), and its request's deadline is met by
-    // the tick's deadline-only pass, which answers unconfirmed with the
-    // state taken at the stall. With `changed` a button is held down
-    // meanwhile, so the kept-back inputs differ from the prediction.
-    await guest.evaluate(
-      ({ changed, n }) => {
-        window.__knGateInputs = true;
-        if (changed) window.__knInputOverride = () => ({ ...n, buttons: 1 });
-      },
-      { changed: SYNC_FOLLOW_UP === 'changed', n: NEUTRAL },
-    );
-    console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: freezing the host for ${SYNC_FOLLOW_UP_FREEZE_MS} ms`);
-    await host.evaluate((ms) => {
-      const t = performance.now();
-      while (performance.now() - t < ms);
-    }, SYNC_FOLLOW_UP_FREEZE_MS);
-    syncFollowUp.asked = await waitForLine(guest, syncFollowUp.guestAt.seq, /peer-recovery resync: sent/, 20000);
-    // The host has taken its state: the inputs go now, and reach it while the
-    // state is still being handed over. Inputs that arrive after that are
-    // settled and never fed (_settleInputsBefore), so this is the one window
-    // in which they can change the state sent.
-    syncFollowUp.watched = await waitForLine(host, syncFollowUp.hostAt.seq, /SYNC-FOLLOW-UP-WATCH /, 20000);
-    await guest.evaluate((n) => {
-      window.__knOpenInputGate();
-      window.__knInputOverride = () => n;
-    }, NEUTRAL);
-    console.log(
-      `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: ` +
-        (syncFollowUp.watched ? 'the host answered unconfirmed; inputs let go' : 'no unconfirmed answer seen'),
-    );
-    // The frame is confirmed and the follow-up decided (and, if sent, applied).
+    while (!syncFollowUp.watched && syncFollowUp.attempts < SYNC_FOLLOW_UP_ATTEMPTS) {
+      syncFollowUp.attempts++;
+      // The guest's input, fixed: the host predicts the guest's last input,
+      // so while it stays fixed every prediction holds.
+      await guest.evaluate((n) => {
+        window.__knInputOverride = () => n;
+      }, NEUTRAL);
+      await guest.waitForTimeout(3000);
+      [syncFollowUp.hostAt, syncFollowUp.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+      console.log(
+        `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: attempt ${syncFollowUp.attempts}, ` +
+          `freezing the host for ${SYNC_FOLLOW_UP_FREEZE_MS} ms`,
+      );
+      await host.evaluate((ms) => {
+        const t = performance.now();
+        while (performance.now() - t < ms);
+      }, SYNC_FOLLOW_UP_FREEZE_MS);
+      // The guest's input packets are held from here until the host has
+      // answered its recovery request, so the host answers on predicted
+      // inputs. With `changed` a button is held down meanwhile, so the held
+      // inputs differ from the prediction.
+      await guest.evaluate(
+        ({ ms, changed, n }) => {
+          window.__knHoldInputsMs = ms;
+          if (changed) window.__knInputOverride = () => ({ ...n, buttons: 1 });
+        },
+        { ms: SYNC_FOLLOW_UP_HOLD_MS, changed: SYNC_FOLLOW_UP === 'changed', n: NEUTRAL },
+      );
+      // Unconfirmed: the host watches the frame it sent. Confirmed: it just
+      // dispatches, and the attempt is tried again.
+      const answered = await waitForLine(
+        host,
+        syncFollowUp.hostAt.seq,
+        /SYNC-FOLLOW-UP-WATCH |coord sync dispatch: /,
+        20000,
+      );
+      if (answered) await host.waitForTimeout(500);
+      syncFollowUp.watched = linesAfter(await syncLogOf(host), syncFollowUp.hostAt.seq).some((l) =>
+        /SYNC-FOLLOW-UP-WATCH /.test(l),
+      );
+      await guest.evaluate((n) => {
+        window.__knHoldInputsMs = 0;
+        window.__knInputOverride = () => n;
+      }, NEUTRAL);
+      console.log(
+        `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: ` +
+          (syncFollowUp.watched
+            ? 'the host answered unconfirmed; inputs released'
+            : answered
+              ? 'the host answered confirmed; trying again'
+              : 'no answer seen'),
+      );
+      if (!syncFollowUp.watched) await guest.waitForTimeout(5000);
+    }
+    // The held inputs arrive, the frame is confirmed, and the follow-up is
+    // decided (and, if sent, applied).
     await guest.waitForTimeout(12000);
     await guest.evaluate(() => {
-      window.__knGateInputs = false;
-      window.__knOpenInputGate();
       window.__knInputOverride = null;
     });
     syncFollowUp.hostEnd = await lastLogLine(host);
@@ -1904,7 +1882,7 @@ if (inBattle) {
     await guest.waitForTimeout(5000);
     syncFollowUp.framesAfter = (await guestFrame()) - frameAt;
     console.log(
-      `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: done (${Date.now() - started} ms); ` +
+      `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: done (${Date.now() - started} ms, ${syncFollowUp.attempts} attempt(s)); ` +
         `the guest made ${syncFollowUp.framesAfter} frames in the next 5 s`,
     );
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
@@ -3316,6 +3294,7 @@ const syncFollowUpReport = (() => {
       : needed > watch && followUpDispatch > needed && skipped < 0 && applied.length >= 2);
   return {
     mode: SYNC_FOLLOW_UP,
+    attempts: syncFollowUp.attempts,
     recoveryAsk: line(guestLines, recoveryAsk),
     watch: line(hostLines, watch),
     needed: line(hostLines, needed),
