@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { afterEach, test } from 'node:test';
 import vm from 'node:vm';
-import { newPageId, readAttemptId } from '../../web/src/peer-observe.ts';
+import { newPageId, readAttemptId } from '../../web/src/attempt-id.ts';
 import * as streamingAttempt from '../../web/src/streaming/attempt.ts';
 import { createStreamingObserver } from '../../web/src/streaming/observe.ts';
 import * as streamingReoffer from '../../web/src/streaming/reoffer.ts';
@@ -210,7 +210,7 @@ interface FakeWindow {
   KNShared: FakeShared;
   KNCore: {
     streaming: typeof STREAMING;
-    peerObserve: { newPageId: typeof newPageId; readAttemptId: typeof readAttemptId };
+    attemptId: { newPageId: typeof newPageId; readAttemptId: typeof readAttemptId };
   };
 }
 
@@ -282,7 +282,7 @@ const page = (sid: string) => {
       encodeInput: () => new Int32Array(6),
       ZERO_INPUT: ZERO,
     },
-    KNCore: { streaming: STREAMING, peerObserve: { newPageId, readAttemptId } },
+    KNCore: { streaming: STREAMING, attemptId: { newPageId, readAttemptId } },
   };
   window.window = window;
   vm.runInNewContext(ENGINE, window);
