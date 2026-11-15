@@ -367,6 +367,17 @@ _DEAF_TO_OFFERS = """() => {
 
 _SYNC_LOG = "window.NetplayRollback.exportSyncLog()"
 
+# Record whether each engine start on the page is a late join.
+_RECORD_ENGINE_STARTS = """() => {
+    window.__engineStarts = [];
+    const engine = window.NetplayRollback;
+    const init = engine.init.bind(engine);
+    engine.init = (config) => {
+        window.__engineStarts.push(!!config.lateJoin);
+        return init(config);
+    };
+}"""
+
 
 def test_a_guest_at_the_rom_prompt_does_not_hold_the_hosts_start(browser, server_url, room):
     host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
@@ -401,6 +412,7 @@ def test_a_guest_that_never_answers_does_not_hold_the_hosts_start(browser, serve
         _load_rom(host)
         _load_rom(guest)
         guest.evaluate(_DEAF_TO_OFFERS)
+        guest.evaluate(_RECORD_ENGINE_STARTS)
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
         _in_match(guest)
@@ -411,6 +423,13 @@ def test_a_guest_that_never_answers_does_not_hold_the_hosts_start(browser, serve
         assert "startup connect failed" in log, log[-3000:]
         assert "reason=startup connect gave up" in log
         assert "START-ALONE" in log
+        # The guest's own deadline on the host (32 s, past the host's retries)
+        # finds no channel: it starts again as a late joiner instead of
+        # waiting for an offer that will not come (nobodyIsInNeither).
+        guest.wait_for_function("window.__engineStarts.length >= 2", timeout=30000)
+        assert guest.evaluate("window.__engineStarts") == [False, True]
+        # The late joiner's engine (a fresh sync log) offers to the host itself.
+        guest.wait_for_function(f"{_SYNC_LOG}.includes('late-joiner always initiates')", timeout=10000)
     finally:
         host.close()
         guest.close()
@@ -442,3 +461,37 @@ def test_in_a_room_of_three_the_other_guest_hears_who_was_left_out(browser, serv
         host.close()
         guest.close()
         deaf.close()
+
+
+def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):
+    """Only the host decides the start group: `left-out:` from another guest changes nothing."""
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    other = _open(browser, f"{server_url}/play.html?room={room}&name=Other")
+    try:
+        for page in (host, guest, other):
+            _load_rom(page)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        other_slot = other.evaluate("window._playerSlot")
+        # The guest's channel to the other guest opens, then it claims the host left the other out.
+        sent = guest.wait_for_function(
+            f"""() => {{
+                const peer = Object.values(window.KNState.peers || {{}}).find((p) => p.slot === {other_slot});
+                if (!peer || !peer.dc || peer.dc.readyState !== 'open') return false;
+                peer.dc.send('left-out:{other_slot}');
+                return true;
+            }}""",
+            timeout=20000,
+        )
+        assert sent
+        host_slot_word = f"left-out:{other_slot}"
+        other.wait_for_function(f"{_SYNC_LOG}.includes('dropped: only the host')", timeout=10000)
+        log = other.evaluate(_SYNC_LOG)
+        assert f"{host_slot_word} from slot" in log, log[-3000:]
+        assert "START-LEFT-OUT" not in log
+        assert "START-LEFT-OUT" not in host.evaluate(_SYNC_LOG)
+    finally:
+        host.close()
+        guest.close()
+        other.close()

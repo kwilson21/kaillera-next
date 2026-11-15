@@ -35,6 +35,13 @@
 // {ready: false}`), and the host, whose ROM is not shared, leaves it out at
 // once instead of after the retries.
 //
+// Only the host sends `left-out:`, and a guest takes it only from the host's
+// channel: one from another guest is dropped and logged. A left-out player
+// whose page is alive must not be left in neither the start nor the late
+// join: a page that has started normally and has no channel to the host by
+// its own deadline (longer than the host's three retries) joins late
+// instead, as does a page at the ROM prompt once a ROM is dropped.
+//
 // Modelled from the host's side, with two other players (a room of three);
 // a player that is not in the room is "absent". A player that answers
 // answers everyone, so a guest's channel to another guest opens when that
@@ -52,11 +59,14 @@
 //   is left out at once.
 // HOST_TELLS_LEFT_OUT: the host tells the other players who it left out, and
 //   they stop waiting for them.
+// GUEST_REJOINS_LATE: a started page with no channel to the host by its own
+//   deadline joins late.
 module start_group {
   const GIVE_UP_LEAVES_OUT: bool
   const DEADLINE_UNTIL_RUNNING: bool
   const ROM_PROMPT_LEAVES_OUT: bool
   const HOST_TELLS_LEFT_OUT: bool
+  const GUEST_REJOINS_LATE: bool
 
   // The startup watchdog's attempts (STARTUP_CONNECT_MAX_ATTEMPTS).
   pure val MAX_ATTEMPTS = 3
@@ -196,6 +206,20 @@ module start_group {
     told' = told,
   }
 
+  // A page that started normally but was left out (it answered too late, or
+  // its network never reached the host) has no channel to the host by its own
+  // deadline: it joins late.
+  action rejoinLate(g: str): bool = all {
+    GUEST_REJOINS_LATE,
+    page.get(g) == "starting",
+    conn.get(g) == "leftOut",
+    page' = page.set(g, "lateJoining"),
+    host' = host,
+    conn' = conn,
+    attempt' = attempt,
+    told' = told,
+  }
+
   // A late joiner joins a running match: the host serves it a player it holds
   // as a late joiner.
   action lateJoin(g: str): bool = all {
@@ -214,7 +238,7 @@ module start_group {
   action step = any {
     start,
     nondet g = GUESTS.oneOf()
-    any { answer(g), deadline(g), romPromptHeard(g), dropRom(g), lateJoin(g) },
+    any { answer(g), deadline(g), romPromptHeard(g), dropRom(g), rejoinLate(g), lateJoin(g) },
     matchRuns,
   }
 
@@ -247,7 +271,14 @@ module start_group {
   val aRunningMatchHasNoSilentPlayer =
     host == "running" implies startGroup.forall(g => conn.get(g) == "open")
 
-  val allHold = neverStuck and aLateJoinerIsHeldAsOne and aRunningMatchHasNoSilentPlayer
+  // No player whose page is alive is in neither the start nor the late join:
+  // a page that started normally and was left out has its own way into the
+  // late join. VIOLATED while it waited for the host's offer for ever
+  // (start_group_no_rejoin, aSlowGuestTest).
+  val nobodyIsInNeither =
+    GUESTS.forall(g => (page.get(g) == "starting" and conn.get(g) == "leftOut") implies GUEST_REJOINS_LATE)
+
+  val allHold = neverStuck and aLateJoinerIsHeldAsOne and aRunningMatchHasNoSilentPlayer and nobodyIsInNeither
 
   // ── scenarios ───────────────────────────────────────────────────────────
 
@@ -260,6 +291,8 @@ module start_group {
     else nothing
   action lateJoinAny(g: str): bool =
     if (page.get(g) == "lateJoining" and host == "running" and conn.get(g) == "leftOut") lateJoin(g) else nothing
+  action rejoinLateAny(g: str): bool =
+    if (GUEST_REJOINS_LATE and page.get(g) == "starting" and conn.get(g) == "leftOut") rejoinLate(g) else nothing
 
   // A room of two; the guest's tab never answers. Before: three attempts, then
   // the host waits for ever. Now the give-up leaves the guest out and the host
@@ -308,6 +341,40 @@ module start_group {
       .expect(page.get("g1") == (if (GIVE_UP_LEAVES_OUT or ROM_PROMPT_LEAVES_OUT) "joined" else "lateJoining"))
       .expect(allHold == (GIVE_UP_LEAVES_OUT or ROM_PROMPT_LEAVES_OUT))
 
+  // A room of two; the guest's page is alive but its answer comes too late
+  // (or never gets through): the host gives up and starts alone. The guest
+  // then joins late by its own deadline; before, it waited for an offer that
+  // did not come, in neither the start nor the late join.
+  run aSlowGuestTest =
+    init
+      .then(startWith("starting", "absent"))
+      .then(deadline("g1"))
+      .then(deadline("g1"))
+      .then(deadlineAny("g1"))
+      .expect(nobodyIsInNeither == (GUEST_REJOINS_LATE or not(GIVE_UP_LEAVES_OUT)))
+      .then(matchRunsAny)
+      .then(rejoinLateAny("g1"))
+      .then(lateJoinAny("g1"))
+      .expect(page.get("g1") == (if (GIVE_UP_LEAVES_OUT and GUEST_REJOINS_LATE) "joined" else "starting"))
+
+  // A room of two; the guest at the ROM prompt is left out at once, then has
+  // its ROM a moment later, before the host's match runs: it waits, joining
+  // late, until the match runs, and is then taken in. No ordering leaves it
+  // in neither.
+  run aRomReadyAMomentLaterTest =
+    init
+      .then(startWith("awaitingRom", "absent"))
+      .then(romPromptAny("g1"))
+      .then(dropRom("g1"))
+      .expect(page.get("g1") == "lateJoining")
+      .expect(allHold)
+      .then(deadlineAny("g1"))
+      .then(deadlineAny("g1"))
+      .then(deadlineAny("g1"))
+      .then(matchRunsAny)
+      .then(lateJoinAny("g1"))
+      .expect(page.get("g1") == (if (GIVE_UP_LEAVES_OUT or ROM_PROMPT_LEAVES_OUT) "joined" else "lateJoining"))
+
   // Two players who answer: nobody is left out and the match runs.
   run everyoneAnswersTest =
     init
@@ -327,6 +394,7 @@ module start_group_before {
     DEADLINE_UNTIL_RUNNING = false,
     ROM_PROMPT_LEAVES_OUT = false,
     HOST_TELLS_LEFT_OUT = false,
+    GUEST_REJOINS_LATE = false,
   ).*
 }
 
@@ -338,6 +406,7 @@ module start_group_give_up_only {
     DEADLINE_UNTIL_RUNNING = false,
     ROM_PROMPT_LEAVES_OUT = false,
     HOST_TELLS_LEFT_OUT = false,
+    GUEST_REJOINS_LATE = false,
   ).*
 }
 
@@ -349,6 +418,7 @@ module start_group_untold {
     DEADLINE_UNTIL_RUNNING = true,
     ROM_PROMPT_LEAVES_OUT = false,
     HOST_TELLS_LEFT_OUT = false,
+    GUEST_REJOINS_LATE = false,
   ).*
 }
 
@@ -360,15 +430,29 @@ module start_group_deadline_only {
     DEADLINE_UNTIL_RUNNING = true,
     ROM_PROMPT_LEAVES_OUT = false,
     HOST_TELLS_LEFT_OUT = true,
+    GUEST_REJOINS_LATE = true,
   ).*
 }
 
-// Today: all four.
+// The host's side complete, but a left-out page that started normally waits
+// for an offer that does not come: in neither the start nor the late join.
+module start_group_no_rejoin {
+  import start_group(
+    GIVE_UP_LEAVES_OUT = true,
+    DEADLINE_UNTIL_RUNNING = true,
+    ROM_PROMPT_LEAVES_OUT = true,
+    HOST_TELLS_LEFT_OUT = true,
+    GUEST_REJOINS_LATE = false,
+  ).*
+}
+
+// Today: all five.
 module start_group_current {
   import start_group(
     GIVE_UP_LEAVES_OUT = true,
     DEADLINE_UNTIL_RUNNING = true,
     ROM_PROMPT_LEAVES_OUT = true,
     HOST_TELLS_LEFT_OUT = true,
+    GUEST_REJOINS_LATE = true,
   ).*
 }

@@ -106,7 +106,7 @@ $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
 START_GROUP=specs/start_group.qnt
 $QUINT typecheck "$START_GROUP"
 for variant in start_group_before start_group_give_up_only start_group_untold start_group_deadline_only \
-  start_group_current; do
+  start_group_no_rejoin start_group_current; do
   $QUINT test "$START_GROUP" --main="$variant" --backend=typescript
 done
 # Today: a host that has started a game always has a way on, a late joiner
@@ -116,8 +116,11 @@ done
 # started), and while the deadline stopped once the game sequence had started
 # (start_group_give_up_only; aThirdPlayerFrozenTest), and while the host
 # told the other players nobody it left out (start_group_untold; the same
-# test: the other guest still waited for the frozen one). It holds without the
-# ROM prompt's word too (start_group_deadline_only), only later.
+# test: the other guest still waited for the frozen one). Nobody alive is in
+# neither the start nor the late join: VIOLATED while a left-out page that had
+# started normally waited for the host's offer for ever (start_group_no_rejoin;
+# aSlowGuestTest). It all holds without the ROM prompt's word too
+# (start_group_deadline_only), only later.
 for variant in start_group_deadline_only start_group_current; do
   $QUINT run "$START_GROUP" --main="$variant" --invariant=allHold \
     --max-samples=20000 --max-steps=25 --backend=typescript

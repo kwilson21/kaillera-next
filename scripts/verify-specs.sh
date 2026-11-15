@@ -292,6 +292,8 @@ start_group() {
   expect_violation "$START_GROUP" start_group_give_up_only neverStuck
   # The same, the frozen guest left out but the other guest not told: 5 steps.
   expect_violation "$START_GROUP" start_group_untold neverStuck
+  # A room of two, the guest slow, three deadlines: 4 steps (aSlowGuestTest).
+  expect_violation "$START_GROUP" start_group_no_rejoin nobodyIsInNeither
 }
 
 ring_after_resync() {

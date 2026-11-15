@@ -8082,6 +8082,40 @@
       clearTimeout(peer._startupConnectTimer);
       peer._startupConnectTimer = null;
     }
+    if (peer?._hostAnswerTimer) {
+      clearTimeout(peer._hostAnswerTimer);
+      peer._hostAnswerTimer = null;
+    }
+  };
+
+  // A guest's own deadline on its connection to the host: longer than the
+  // host's whole startup retry, so the host has given up on this page by
+  // then if it is going to. With no channel to the host at the deadline, the
+  // host started without this page, which joins the match late instead of
+  // waiting for an offer that does not come (specs/start_group.qnt,
+  // rejoinLate; nobodyIsInNeither).
+  const STARTUP_HOST_ANSWER_DEADLINE_MS = STARTUP_CONNECT_TIMEOUT_MS * (STARTUP_CONNECT_MAX_ATTEMPTS + 1);
+  const armHostAnswerDeadline = (remoteSid) => {
+    const peer = _peers[remoteSid];
+    if (!peer || peer.isInitiator || peer.slot !== 0 || _playerSlot === 0 || _isSpectator || _lateJoin) return;
+    if (_phase >= PHASE_RUNNING || peer.dc?.readyState === 'open') return;
+    if (peer._hostAnswerTimer) clearTimeout(peer._hostAnswerTimer);
+    peer._hostAnswerTimer = setTimeout(() => {
+      peer._hostAnswerTimer = null;
+      if (_peers[remoteSid] !== peer) return;
+      const rejoin = window.KNCore.startGroup.rejoinsLate(
+        _playerSlot === 0,
+        _phase >= PHASE_RUNNING,
+        _lateJoin,
+        peer.dc?.readyState === 'open',
+      );
+      if (!rejoin) return;
+      _syncLog(
+        `START-REJOIN-LATE: no channel to the host after ${STARTUP_HOST_ANSWER_DEADLINE_MS}ms ` +
+          `(pc=${peer.pc?.connectionState ?? 'none'} dc=${peer.dc?.readyState ?? 'none'}): joining late`,
+      );
+      _config?.onLeftOutOfStart?.();
+    }, STARTUP_HOST_ANSWER_DEADLINE_MS);
   };
 
   // The start group: who this page waits for before its match runs
@@ -8112,11 +8146,17 @@
   // the host, the match already runs, or the player is in (its channel open)
   // or already out.
   const _leaveOutOfStart = (sid, reason) => {
-    if (_playerSlot !== 0 || _isSpectator || _phase >= PHASE_RUNNING) return false;
+    const rules = window.KNCore.startGroup;
     const peer = _peers[sid];
     const slot = peer?.slot ?? _knownPlayers[sid]?.slot;
-    if (!_isValidPlayerSlot(slot) || slot === _playerSlot || peer?.synthetic) return false;
-    if (peer?.dc?.readyState === 'open' || _leftOutOfStart.has(slot)) return false;
+    const leaves = rules.leavesOut(
+      _playerSlot === 0 && !_isSpectator,
+      _phase >= PHASE_RUNNING,
+      _isValidPlayerSlot(slot) && slot !== _playerSlot && !peer?.synthetic,
+      peer?.dc?.readyState === 'open',
+      _leftOutOfStart.has(slot),
+    );
+    if (!leaves) return false;
     _leftOutOfStart.add(slot);
     _syncLog(`START-LEFT-OUT sid=${sid} slot=${slot} reason=${reason}`);
     const name = _knownPlayers[sid]?.playerName || `P${slot + 1}`;
@@ -8128,10 +8168,14 @@
         other.dc.send(`left-out:${slot}`);
       } catch (_) {}
     }
-    const waitingFor = Object.entries(_peers).some(
-      ([key, p]) => _isValidPlayerSlot(p.slot) && !p.synthetic && !_isPeerPendingLateJoin(key, p),
-    );
-    if (_phase < PHASE_GAME_STARTED && !waitingFor) {
+    const waitingFor = Object.entries(_peers).filter(([key, p]) =>
+      rules.countedByStartGates(
+        _isValidPlayerSlot(p.slot) && !p.synthetic,
+        _isPeerPendingLateJoin(key, p),
+        _leftOutOfStart.has(p.slot),
+      ),
+    ).length;
+    if (rules.startsAlone(true, _phase >= PHASE_GAME_STARTED, waitingFor)) {
       // Nobody left to wait for: start alone, as with no other player.
       _syncLog('START-ALONE: every other player is left out of the start');
       _rttComplete = true;
@@ -8354,6 +8398,7 @@
       createOutgoingPeerChannels(remoteSid, peer);
     } else {
       installPeerDataChannelHandlers(remoteSid, peer);
+      armHostAnswerDeadline(remoteSid);
     }
     return peer;
   };
@@ -8983,19 +9028,23 @@
         // stop waiting for it; it joins late. Only the host's word counts.
         if (e.data.startsWith('left-out:')) {
           const slot = Number(e.data.slice('left-out:'.length));
-          if (
-            peer.slot === 0 &&
-            _playerSlot !== 0 &&
-            _phase < PHASE_RUNNING &&
-            _isValidPlayerSlot(slot) &&
-            slot !== _playerSlot &&
-            !_leftOutOfStart.has(slot)
-          ) {
+          const takes = window.KNCore.startGroup.takesLeftOut(
+            peer.slot ?? -1,
+            _isSpectator ? -1 : (_playerSlot ?? -1),
+            _phase >= PHASE_RUNNING,
+            slot,
+            _leftOutOfStart.has(slot),
+          );
+          if (takes) {
             _leftOutOfStart.add(slot);
             _syncLog(`START-LEFT-OUT slot=${slot} reason=the host left it out`);
             _dropFromStart(slot, 'the host left it out');
             checkAllEmuReady();
             checkAllLockstepReady();
+          } else if (peer.slot !== 0) {
+            // Only the host decides the start group: another player's word
+            // is dropped (as a non-host's rb-transport is).
+            _syncLog(`left-out:${slot} from slot ${peer.slot} dropped: only the host's word counts`);
           }
           return;
         }
@@ -10521,7 +10570,13 @@
     // out of the start never loads into it (specs/start_group.qnt), and
     // waiting for it held the match unstarted.
     const playerPeers = Object.entries(_peers)
-      .filter(([sid, p]) => p.slot !== null && p.slot !== undefined && !_isPeerPendingLateJoin(sid, p))
+      .filter(([sid, p]) =>
+        window.KNCore.startGroup.countedByStartGates(
+          p.slot !== null && p.slot !== undefined,
+          _isPeerPendingLateJoin(sid, p),
+          _leftOutOfStart.has(p.slot),
+        ),
+      )
       .map(([, p]) => p);
 
     const readyPeers = playerPeers.filter((p) => p.emuReady);
@@ -10608,7 +10663,11 @@
     // for them left the match unstarted and their state request unanswered.
     const playerPeerSids = Object.keys(_peers).filter((sid) => {
       const p = _peers[sid];
-      return p.slot !== null && p.slot !== undefined && !_isPeerPendingLateJoin(sid, p);
+      return window.KNCore.startGroup.countedByStartGates(
+        p.slot !== null && p.slot !== undefined,
+        _isPeerPendingLateJoin(sid, p),
+        _leftOutOfStart.has(p.slot),
+      );
     });
     const soloMode = playerPeerSids.length === 0;
     const readyCount = playerPeerSids.filter((sid) => _lockstepReadyPeers[sid]).length;

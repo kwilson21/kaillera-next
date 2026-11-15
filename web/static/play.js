@@ -3471,6 +3471,15 @@
         _sessionStopLateJoinPoll();
         _session?.send({ type: 'admittedToStart' });
       },
+      // The host started without this page: it had no channel to the host by
+      // its own deadline on the start (specs/start_group.qnt, rejoinLate). It
+      // joins late instead of waiting for an offer that will not come.
+      onLeftOutOfStart: () => {
+        crumb('left-out-of-start', {});
+        _session?.send({ type: 'leftOutOfStart' });
+        _sessionWatchLateJoin();
+        initEngine();
+      },
     });
     _session?.send({
       type: 'engineStarted',

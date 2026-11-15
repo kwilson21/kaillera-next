@@ -96,6 +96,12 @@ export const sessionMachine = setupEffect({
        * `returnAfterExpiry` in the Quint model).
        */
       rejoinRefused: Empty,
+      /**
+       * The host started without this page: it had no channel to the host by
+       * its own deadline on the start's connection (specs/start_group.qnt,
+       * `rejoinLate`). It joins the match late instead.
+       */
+      leftOutOfStart: Empty,
       /** A late joiner has no usable ROM and has been asked for one. */
       lateJoinRomNeeded: Empty,
       /** The ROM question is settled; the late join can go ahead. */
@@ -215,6 +221,8 @@ export const sessionMachine = setupEffect({
         // A start this page could not boot (no ROM, none to take from the
         // host: gameStartPlan's askForRom): it waits for one and joins late.
         lateJoinRomNeeded: { target: 'lateJoinAwaitingRom' },
+        // The host started without this page: it joins late.
+        leftOutOfStart: { target: 'lateJoinStarting' },
       },
     },
   },

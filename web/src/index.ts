@@ -106,6 +106,7 @@ import * as streamingVideo from './streaming/video.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
+import { countedByStartGates, leavesOut, rejoinsLate, startsAlone, takesLeftOut } from './start-group.ts';
 import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
@@ -311,6 +312,8 @@ export const KNCore = {
   disconnectDisposition,
   hasAttemptLeft,
   heldAsLateJoiner,
+  /** Who a page waits for before its match runs (web/src/start-group.ts, specs/start_group.qnt). */
+  startGroup: { countedByStartGates, leavesOut, startsAlone, takesLeftOut, rejoinsLate },
   meshHealTargets,
   normalizeAxis,
   peerFacts,
