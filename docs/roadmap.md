@@ -274,9 +274,14 @@ button's rule is observed, `play.js` still decides it). Joining a room:
 the `open-room` and `join-room` requests are built in `connect.ts` and typed
 against the generated schemas, with what each refusal means; whether a page
 comes in as a spectator and how it gets into a match already under way are
-`join-plan.ts` (proved), observed, with `onConnect` still deciding. Left in
-`play.js`: the reconnect banner's timers, the game lifecycle handlers and
-engine start-up, which are effects on the page, the socket and the emulator.
+`join-plan.ts` (proved), observed, with `onConnect` still deciding. What a
+page does when the host starts a game (watch, keep the host's ROM offer up,
+wait for the transfer, stop on a ROM that is not the host's, or boot) and
+whether it has a game's end to handle are `game-start.ts` (proved),
+observed, with `onGameStarted` and `onGameEnded` still deciding. Left in
+`play.js`: the reconnect banner's timers, what the game lifecycle handlers do
+to the page, and engine start-up, which are effects on the page, the socket
+and the emulator.
 
 **Stage 4: engine periphery [done]**
 `shared.js` (input wire format; prove encode/decode round-trips with

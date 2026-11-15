@@ -39,6 +39,7 @@ import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
+import * as gameStart from './play/game-start.ts';
 import * as joinPlan from './play/join-plan.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
@@ -351,6 +352,7 @@ export const KNCore = {
     delay,
     connect,
     joinPlan,
+    gameStart,
     observe,
     remapWizard,
     romTransfer,

@@ -1444,6 +1444,10 @@
 
   // ── Game Lifecycle ─────────────────────────────────────────────────────
 
+  // What a page does when a game starts or ends: web/src/play/game-start.ts
+  // (proved), observed against the handlers below.
+  const _gameStart = window.KNCore.play.gameStart;
+
   const onGameStarted = (data) => {
     // Keep match events from covering the fatal error modal.
     if (coreFatal) return;
@@ -1477,9 +1481,23 @@
 
     _session?.send({ type: 'gameStarted', matchId: String(data?.matchId ?? '') });
 
+    // What this page does now is also web/src/play/game-start.ts; each
+    // branch below reports which one it took and a difference is reported
+    // as play-disagree. The TypeScript takes over once production shows none.
+    const startPlan = _gameStart.gameStartPlan(
+      !!isSpectator || (mode === 'streaming' && !isHost),
+      localRomLoaded(),
+      hostRomMismatch(),
+      !!_romSharingEnabled,
+      _romSharingDecision === 'accepted',
+      _romSharingDecision === null,
+    );
+    const startDecided = (decided) => _playObserver.compare('game-start-plan', decided, startPlan);
+
     // Spectators and streaming-mode guests don't run an emulator — they
     // receive a video stream from the host. Skip ROM checks and boot.
     if (isSpectator || (mode === 'streaming' && !isHost)) {
+      startDecided('watch');
       hideOverlay();
       showToolbar();
       showGameLoading();
@@ -1492,10 +1510,12 @@
       if (_romSharingEnabled && _romSharingDecision === null) {
         // Cached ROM doesn't match but sharing available and user hasn't
         // decided — stay in overlay so they can accept the host's ROM
+        startDecided('askForSharedRom');
         initEngine();
         updateRomSharingUI();
         return;
       }
+      startDecided('wrongRom');
       showError("Your ROM doesn't match the host's game. Drop the correct ROM to continue.");
       return;
     }
@@ -1507,6 +1527,7 @@
     if (_romSharingEnabled && !localRomLoaded()) {
       initEngine();
       if (_romSharingDecision === 'accepted') {
+        startDecided('awaitSharedRom');
         if (_romTransferState === 'idle') {
           _romTransferState = 'resuming';
         }
@@ -1519,12 +1540,14 @@
           waitForDCAndSendRomAccepted();
         }
       } else {
+        startDecided('askForSharedRom');
         console.log('[play] game started — waiting for guest to accept ROM sharing');
         updateRomSharingUI();
       }
       return;
     }
 
+    startDecided('play');
     hideOverlay();
     showToolbar();
     showGameLoading();
@@ -1538,12 +1561,28 @@
 
   const onGameEnded = (data = {}) => {
     const endedMatchId = data?.matchId || KNState.matchId || null;
-    if (endedMatchId && _lastHandledGameEndMatchId === endedMatchId) return;
+    // Whether to handle this end is also web/src/play/game-start.ts
+    // (`handlesGameEnd`), observed as game-end-handled.
+    const endHandled = _gameStart.handlesGameEnd(
+      endedMatchId ? String(endedMatchId) : '',
+      _lastHandledGameEndMatchId ? String(_lastHandledGameEndMatchId) : '',
+      !!data?.leftByMachine,
+      isGameRunning() || !!engine || _isLateJoin() || _isPendingLateJoin(),
+    );
+    const endDecided = (decided) => _playObserver.compare('game-end-handled', decided, endHandled);
+    if (endedMatchId && _lastHandledGameEndMatchId === endedMatchId) {
+      endDecided(false);
+      return;
+    }
     // Nothing to end if no game is on for this page. A caller that has
     // already moved the machine to the lobby (a reconnect that found the
     // game over) says so, because the machine can no longer answer whether
     // there is a game to clean up.
-    if (!data?.leftByMachine && !isGameRunning() && !engine && !_isLateJoin() && !_isPendingLateJoin()) return;
+    if (!data?.leftByMachine && !isGameRunning() && !engine && !_isLateJoin() && !_isPendingLateJoin()) {
+      endDecided(false);
+      return;
+    }
+    endDecided(true);
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
     _endGameInFlight = false;
     console.log(
@@ -1556,9 +1595,7 @@
     );
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
-    showToast(
-      data?.reason === 'dropped' ? 'You were disconnected for too long. Rejoining...' : 'The host has ended the game',
-    );
+    showToast(_gameStart.gameEndedMessage(data?.reason));
     if (engine) {
       engine.stop();
       engine = null;
