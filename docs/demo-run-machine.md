@@ -37,7 +37,6 @@ flowchart LR
       autoCompare_off["off"]
       autoCompare_running["running"]
       autoCompare_paused["paused"]
-      autoCompare_runningUnpausable["runningUnpausable"]
     end
     subgraph mode
       mode_start(( )) --> mode_rollback
@@ -64,13 +63,12 @@ flowchart LR
   match_gamePaused -->|"frame: menus"| match_menus
   match_gamePaused -->|"frame: playing"| match_playing
   interaction_touched -->|"frame: playing (match menus)<br/>frame: game's pause menu (match menus)"| interaction_untouched
-  mode_lockstep -->|"modeSwitched: rollback<br/>auto-compare button (autoCompare off or paused)<br/>frame: menus (match playing or gamePaused)<br/>autoStartDue (match playing or gamePaused, autoCompare off or paused, interaction untouched, not ?autoCompare=0)"| mode_rollback
+  mode_lockstep -->|"modeSwitched: rollback<br/>auto-compare button (autoCompare off)<br/>frame: menus (match playing or gamePaused)<br/>autoStartDue (match playing or gamePaused, autoCompare off, interaction untouched, not ?autoCompare=0)"| mode_rollback
   tick_paused -->|"Pause"| tick_running
   autoCompare_running -->|"rollback button<br/>auto-compare button<br/>frame: menus (match playing or gamePaused)"| autoCompare_off
   autoCompare_running -->|"Pause (tick running)"| autoCompare_paused
+  autoCompare_paused -->|"rollback button<br/>auto-compare button<br/>frame: menus (match playing or gamePaused)"| autoCompare_off
   autoCompare_paused -->|"Pause"| autoCompare_running
-  autoCompare_paused -->|"auto-compare button<br/>autoStartDue (match playing or gamePaused, interaction untouched, not ?autoCompare=0)"| autoCompare_runningUnpausable
-  autoCompare_runningUnpausable -->|"rollback button<br/>auto-compare button<br/>frame: menus (match playing or gamePaused)"| autoCompare_off
   open -->|"Stop, EmulatorJS on the page<br/>reset<br/>Stop (loader loading or done)"| leaving(((leaving)))
 ```
 
@@ -96,8 +94,5 @@ Events and where `demo.js` sends them:
 | `stopClicked` | the Stop button; whether `window.EJS_emulator` is there |
 | `reset` | `_resetDemo`: the Reset button, or the autopilot restarting the demo once |
 
-Two states are there because the code reaches them, not because it should:
-`autoCompare.paused` is not left by leaving the match or by the rollback button (auto-compare
-stops only when its timer runs, and the Pause button clears the timer), and
-`autoCompare.runningUnpausable` is a restart from `paused` that keeps the pause mark, after which
-Pause no longer pauses auto-compare.
+`autoCompare.paused` is auto-compare with the Pause button down: still on, so its button, the
+rollback button and leaving the match stop it as they stop it running.

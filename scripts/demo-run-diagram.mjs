@@ -144,7 +144,7 @@ const ORDER = {
   loader: ['none', 'loading', 'done'],
   match: ['menus', 'playing', 'gamePaused'],
   tick: ['running', 'paused'],
-  autoCompare: ['off', 'running', 'paused', 'runningUnpausable'],
+  autoCompare: ['off', 'running', 'paused'],
   mode: ['rollback', 'lockstep'],
   interaction: ['untouched', 'touched'],
 };
@@ -190,11 +190,8 @@ const lines = [
   '|---|---|',
   ...Object.entries(SENT).map(([event, from]) => `| \`${event}\` | ${from} |`),
   '',
-  'Two states are there because the code reaches them, not because it should:',
-  '`autoCompare.paused` is not left by leaving the match or by the rollback button (auto-compare',
-  'stops only when its timer runs, and the Pause button clears the timer), and',
-  '`autoCompare.runningUnpausable` is a restart from `paused` that keeps the pause mark, after which',
-  'Pause no longer pauses auto-compare.',
+  '`autoCompare.paused` is auto-compare with the Pause button down: still on, so its button, the',
+  'rollback button and leaving the match stop it as they stop it running.',
   '',
 ];
 const out = lines.join('\n');

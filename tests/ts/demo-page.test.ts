@@ -15,7 +15,25 @@ import { lcg } from './load-shared.ts';
 // Both are driven through the same visits, and after every step everything a
 // page can show or hand to the engine must be the same on both.
 
-const OLD_SCRIPT = new vm.Script(readFileSync(new URL('./fixtures/demo.old.js', import.meta.url), 'utf8'));
+const OLD_SOURCE = readFileSync(new URL('./fixtures/demo.old.js', import.meta.url), 'utf8');
+// Changed since, on purpose: auto-compare paused by the Pause button counts as
+// on, so its button, the rollback button and leaving the match stop it, and
+// nothing starts it again over its pause mark. The old script runs with that
+// change and is held to everything else, character for character; the test
+// 'a paused auto-compare' shows the two orderings the change is for.
+const SINCE_THE_OLD_SCRIPT: readonly (readonly [string, string])[] = [
+  [
+    '  const _isAutoCompareRunning = () => _autoCompareTimer !== 0;',
+    '  const _isAutoCompareRunning = () => _autoCompareTimer !== 0 || _autoComparePausedAt !== 0;',
+  ],
+];
+const OLD_SCRIPT = new vm.Script(
+  SINCE_THE_OLD_SCRIPT.reduce((script, [before, after]) => {
+    assert.equal(script.split(before).length, 2, `the old script has this line once: ${before}`);
+    return script.replace(before, after);
+  }, OLD_SOURCE),
+);
+const OLD_SCRIPT_AS_IT_WAS = new vm.Script(OLD_SOURCE);
 const NEW_SCRIPT = new vm.Script(readFileSync(new URL('../../web/static/demo.js', import.meta.url), 'utf8'));
 
 /** Seeded random numbers from 0 up to 1, like `Math.random`. */
@@ -624,6 +642,7 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     hasApi: (): boolean => api !== undefined,
     stored: idb.describe,
     runState: (): DemoApi['runState'] => api?.runState,
+    element: (id: string): FakeElement | undefined => elements.get(id),
   };
 };
 
@@ -801,7 +820,7 @@ test('the seeded visits reach every state of every region of the run-state machi
     ['loader', ['none', 'loading', 'done']],
     ['match', ['menus', 'playing', 'gamePaused']],
     ['tick', ['running', 'paused']],
-    ['autoCompare', ['off', 'running', 'paused', 'runningUnpausable']],
+    ['autoCompare', ['off', 'running', 'paused']],
     ['mode', ['rollback', 'lockstep']],
     ['interaction', ['untouched', 'touched']],
   ] as const;
@@ -844,6 +863,63 @@ test('every address: what the page gives the emulator on load and shows on the w
         { kind: 'record', call: 'getRecording' },
       ]);
     }
+  }
+});
+
+// The two orderings the change since the old script is for. As it was, a
+// paused auto-compare outlived the match and ran in the menus once the tick
+// resumed, and its button (which still read "Stop auto-compare") restarted it
+// with the pause mark left set, after which Pause no longer paused it.
+test('a paused auto-compare: leaving the match or clicking its button stops it, where it used to run on', async () => {
+  const visit: Visit = { search: '', local: [], session: [], closedLoop: false, seed: 1 };
+  const autoComparePaused: Step[] = [
+    { kind: 'load', name: 'game.z64' },
+    { kind: 'match', strict: true, inclusive: true },
+    { kind: 'frame', ms: 16 },
+    // Auto-compare starts 600 ms into the match.
+    { kind: 'frame', ms: 700 },
+    { kind: 'click', id: 'emu-pause' },
+  ];
+  const orderings: [string, Step[]][] = [
+    [
+      'leave the match while paused, then resume',
+      [
+        { kind: 'match', strict: false, inclusive: false },
+        { kind: 'frame', ms: 16 },
+        { kind: 'click', id: 'emu-pause' },
+      ],
+    ],
+    [
+      'click the auto-compare button while paused, then resume and pause again',
+      [
+        { kind: 'click', id: 'auto-compare-btn' },
+        { kind: 'click', id: 'emu-pause' },
+        { kind: 'click', id: 'emu-pause' },
+      ],
+    ],
+  ];
+  /** Whether auto-compare shows as on, and the mode, a cycle (6 s) after the ordering. */
+  const after = async (script: vm.Script, steps: readonly Step[]) => {
+    const page = openDemo(script, script === NEW_SCRIPT ? { demo } : {}, visit);
+    for (const step of [...autoComparePaused, ...steps]) await page.apply(step);
+    const on = page.element('auto-compare')?.classes.has('is-running') ?? false;
+    await page.apply({ kind: 'frame', ms: 6100 });
+    return { on, lockstepAfterACycle: page.element('rollback-toggle')?.classes.has('is-off') ?? false };
+  };
+  for (const [name, steps] of orderings) {
+    assert.deepEqual(await after(NEW_SCRIPT, steps), { on: false, lockstepAfterACycle: false }, `now: ${name}`);
+    assert.deepEqual(
+      await after(OLD_SCRIPT, steps),
+      { on: false, lockstepAfterACycle: false },
+      `old, changed: ${name}`,
+    );
+    assert.deepEqual(
+      await after(OLD_SCRIPT_AS_IT_WAS, steps),
+      { on: true, lockstepAfterACycle: true },
+      `as it was: ${name}`,
+    );
+    // And the new page agrees with the old one changed, step for step.
+    await compareVisit(visit, [...autoComparePaused, ...steps, { kind: 'frame', ms: 6100 }]);
   }
 });
 
