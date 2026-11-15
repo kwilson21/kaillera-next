@@ -323,7 +323,8 @@ $QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostFor
 # ── A "now" resync request asked again at its deadline ─────────────────────
 REASK=specs/resync_reask.qnt
 $QUINT typecheck "$REASK"
-for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_fixed; do
+for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_coordinated_let_go \
+  resync_reask_fixed; do
   $QUINT test "$REASK" --main="$variant" --backend=typescript
 done
 # With the fix: an owed resync is asked for again or given up visibly, the
@@ -333,6 +334,28 @@ done
 # without holding the deadline while an answer decodes cuts it
 # (resync_reask_unguarded; askAgainCutsTheDecodeTest), and the lifecycle
 # guard's timeout letting the request go forgets it again
-# (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest).
+# (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest), and a request
+# coordinated at a frame was never owed, so its lost answer was let go
+# (resync_reask_coordinated_let_go; coordinatedAnswerLostTest).
 $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── The rollback ring across a resync that loads the host's state ─────────
+RING=specs/ring_after_resync.qnt
+$QUINT typecheck "$RING"
+for variant in ring_after_resync_before ring_after_resync_save_only ring_after_resync_current; do
+  $QUINT test "$RING" --main="$variant" --backend=typescript
+done
+# Today: every frame a page runs again after a resync has the host's state in
+# its ring, each ring copy is of the frame it is filed under, and the sparse
+# save mode can rebuild every copy. The first was VIOLATED while kn_set_frame
+# kept the last save: a resync landing one frame behind the page left the
+# page's own copy of that frame (ring_after_resync_before; oneFrameBackTest
+# holds the ordering, which a two-player run found at frame 1021 in #232).
+# It was VIOLATED too while the page skipped kn_set_frame for a state of the
+# frame it was on, after kn_pre_tick had saved that frame and it did not run
+# (ring_after_resync_save_only; savedFrameDidNotRunTest). The last was
+# VIOLATED while kn_set_frame kept the sparse baseline
+# (ring_after_resync_save_only; oneFrameBackTest, twoFramesBackTest).
+$QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript

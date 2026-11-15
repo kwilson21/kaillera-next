@@ -7,6 +7,42 @@ import { demo } from '../../web/src/demo/index.ts';
 import { fakeIndexedDb } from './fake-indexeddb.ts';
 import { lcg } from './load-shared.ts';
 
+// The one piece of real asynchronous work either page does here: hashing a ROM
+// with crypto.subtle, which runs off the main thread and answers late on a
+// busy machine. Counted, so a step waits for its answer (`settle`).
+let digesting = 0;
+const digest = crypto.subtle.digest.bind(crypto.subtle);
+Object.defineProperty(crypto.subtle, 'digest', {
+  configurable: true,
+  value: (...args: Parameters<typeof digest>): ReturnType<typeof digest> => {
+    digesting++;
+    return digest(...args).finally(() => {
+      digesting--;
+    });
+  },
+});
+
+/** Longest a step may leave a page busy: far beyond a digest of a few bytes, even on a loaded machine. */
+const SETTLE_LIMIT_MS = 10_000;
+
+/**
+ * Waits until the pages have finished what a step started: no digest in
+ * flight and no IndexedDB event unfired, for two turns of the event loop in a
+ * row (a digest's answer can start more work, such as saving the ROM). The
+ * fake clock does not move here; a page's timers run only on a frame step.
+ */
+const settle = async (pending: readonly (() => number)[]): Promise<void> => {
+  const deadline = Date.now() + SETTLE_LIMIT_MS;
+  for (let quiet = 0; quiet < 2;) {
+    await nextTurn();
+    const events = pending.reduce((sum, count) => sum + count(), 0);
+    quiet = digesting === 0 && events === 0 ? quiet + 1 : 0;
+    if (Date.now() > deadline) {
+      throw new Error(`still busy after ${SETTLE_LIMIT_MS} ms: ${digesting} digests, ${events} IndexedDB events`);
+    }
+  }
+};
+
 // web/static/demo.js calls web/src/demo for its options, network settings,
 // HUD text, menu script and ROM checks. Here the page script as it is now,
 // with the real TypeScript behind `window.KNCore.demo`, is run beside the
@@ -639,7 +675,7 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
         else script?.onerror?.();
       }
     } else await api?.loadRomFile({ name: step.name, bytes: new Uint8Array([1, 2, 3, 4]).buffer });
-    await nextTurn();
+    await settle([idb.pending]);
   };
 
   /** Everything the page shows, has stored, has set on `window`, and has told the engine and the peer. */
@@ -662,6 +698,8 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     snapshot,
     hasApi: (): boolean => api !== undefined,
     stored: idb.describe,
+    /** IndexedDB events this page has started that have not fired yet. */
+    pending: idb.pending,
     runState: (): DemoApi['runState'] => api?.runState,
     element: (id: string): FakeElement | undefined => elements.get(id),
     /** What the page left in sessionStorage, which a reload keeps. */
@@ -680,14 +718,6 @@ const noteRunState = (page: ReturnType<typeof openDemo>): string => {
   return state;
 };
 
-/** Lets both pages finish what a step started: reading a file, hashing it, clearing the ROM cache. */
-const settle = async (): Promise<void> => {
-  for (let turn = 0; turn < 10; turn++) {
-    await nextTurn();
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
-};
-
 const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void> => {
   // The old script only checks that a core is there; it calls none of it.
   const before = openDemo(OLD_SCRIPT, {}, visit);
@@ -696,7 +726,7 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
   assert.equal(after.snapshot(), before.snapshot(), `on load: ${show(visit)}`);
   // A cached ROM is restored on load: let both pages finish reading and hashing it.
   if (visit.cached !== undefined) {
-    await settle();
+    await settle([before.pending, after.pending]);
     noteRunState(after);
     assert.equal(after.snapshot(), before.snapshot(), `after restoring the cached ROM: ${show(visit)}`);
   }
@@ -710,7 +740,7 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
     // Stop or Reset: the page is reloading, and a browser runs nothing more of
     // it. Both pages finish asking for the reload, and the visit ends there.
     if (state === 'leaving') {
-      await settle();
+      await settle([before.pending, after.pending]);
       assert.equal(after.snapshot(), before.snapshot(), `reloading after step ${done} of ${show(visit)}`);
       return;
     }
@@ -1030,10 +1060,7 @@ test('the ROM cache: what a load keeps, the next visit restores, and Stop forget
     { demo },
     { search: '', local: [], session: [], closedLoop: false, seed: 1, cached: 'saved.z64' },
   );
-  for (let turn = 0; turn < 10; turn++) {
-    await nextTurn();
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
+  await settle([restored.pending]);
   assert.match(restored.snapshot(), /Restoring saved\.z64|init\(/);
 });
 
