@@ -66,10 +66,10 @@
  * overlay up or down), so a run cannot pass with machine and page agreeing on
  * the wrong answer. An uncaught exception on any page fails the scenario.
  *
- * Every scenario also fails on a report from the two observers beside the
- * rollback engine (`peer-disagree`, `resync-disagree`; tests/observer-reports.mjs):
- * in the client events at a checkpoint, and in each page's sync log
- * (`PEER-DISAGREE`, `RESYNC-DISAGREE`) at the end. With KN_DB set to the
+ * Every scenario also fails on a report from the observer beside the
+ * rollback engine (`peer-disagree`; tests/observer-reports.mjs): in the
+ * client events at a checkpoint, and in each page's sync log
+ * (`PEER-DISAGREE`) at the end. With KN_DB set to the
  * server's DB_PATH, the server's client_events rows for the scenario's room
  * are counted too; without it the query to run by hand is printed. Reading
  * KN_DB needs Node >= 22.13 (node:sqlite); on an older Node, or a database

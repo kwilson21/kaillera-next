@@ -160,9 +160,9 @@ without the old code running beside it first.
   decides and the new reports a difference): the play page's moved decisions
   (`play-disagree`), the decoding of server messages and of messages peers
   author (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
-  per-peer machine (`peer-disagree`), the resync request rules
-  (`resync-disagree`) and the streaming rules (`streaming-disagree`). Once
-  all of them decide, the observer plumbing
+  per-peer machine (`peer-disagree`) and the streaming rules
+  (`streaming-disagree`). The resync request rules decide (below). Once all
+  of them decide, the observer plumbing
   (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
@@ -442,7 +442,8 @@ Slice 1, the peer mesh and signaling:
   closes the guest's connection to the host mid-battle and drops their
   WebRTC signaling for that long, so the host's reconnect attempt times out
   and is retried; every run of it and of the lifecycle scenarios now fails on
-  a `peer-disagree` or `resync-disagree` (`tests/observer-reports.mjs`). The
+  a `peer-disagree` (`tests/observer-reports.mjs`; `resync-disagree` too,
+  until the resync request rules decided). The
   first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
   attempt with no disagreement and no mismatch.
 - Next: decide, one rule at a time, by the machine, starting with who
@@ -494,7 +495,7 @@ as not modelled are now modelled.
 Resync, ahead of its slice: the guest's resync request rules (#213, #221),
 modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
 
-- Done (proved, observing): the rules are pure functions with contracts in
+- Done (proved, deciding): the rules are pure functions with contracts in
   `web/src/resync-request.ts`, checked by the `proofs` CI job: which state
   ends the request that is out (`endsRequest`, the model's
   `onlyItsAnswerEndsARequest`), which state answers an older request
@@ -506,14 +507,14 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   (`keepsAwaitedAnswer`, `theAwaitedAnswerIsNotLost`), and what a late
   joiner that lost its channel to the host does next: nothing, wait for the
   channel, wait for the request already out, give up after
-  `LATE_JOIN_LOST_HOST_MAX_ASKS`, or ask (`lateJoinLostHostStep`). The
-  engine keeps its own rules in charge (`_endsResyncRequest`,
-  `_answersAnOlderRequest`, `_isLateAnswerBehind`,
-  `_keepsAwaitedAnswer`, `_resyncAfterLostHost`), runs the proved function
-  beside each on the same inputs through `window.KNCore.resyncRequest`, and
-  reports a difference as a `resync-disagree` client event (and
-  `RESYNC-DISAGREE` in the sync log). None came up in the two-player runs,
-  plain or with the host or the guest frozen for 8 s.
+  `LATE_JOIN_LOST_HOST_MAX_ASKS`, or ask (`lateJoinLostHostStep`), and what
+  a request's deadline does (`resyncDeadlineStep`). They first ran beside
+  the engine's own rules and reported a difference as `resync-disagree`;
+  none came up in any two-player or lifecycle run. The engine now calls them
+  through `window.KNCore.resyncRequest` and its own copies are gone
+  (`tests/ts/resync-request.test.ts` keeps them, checked against the proved
+  functions over a grid of inputs); the server still stores a
+  `resync-disagree` from a page loaded before.
 - Driven by tests too: `tests/rb-two-player.mjs` with
   `DELAY_SYNC_ANSWER_MS` holds the host's answer past the guest's request
   deadline, so the answer arrives after a second request
@@ -546,12 +547,16 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   `SYNC_DECODE_GRACE_MS`): asking again there would make that answer an
   older request's (`theDecodedAnswerIsNotCut`,
   `askAgainCutsTheDecodeTest`). The deadline's step is
-  `resyncDeadlineStep`, proved and observing like the rules above.
+  `resyncDeadlineStep`, proved like the rules above.
   `tests/rb-two-player.mjs` with `DOUBLE_RESYNC_ASK=1` drives it: two
   requests at once, the second rate-limited, the first's answer dropped.
-- Next: the engine calls the proved functions and its own copies are
-  deleted. `DOUBLE_RESYNC_ASK` reaches them; a lifecycle resync that
-  actually happens needs a fault mode first.
+- The lifecycle resync guard: in rollback mode a tab shown again does not
+  resync, so the guard is armed only by a full resync asked over the socket
+  (a chunk timeout, a missing delta base, the ask again's socket path).
+  `tests/rb-two-player.mjs` with `UNANSWERED_SOCKET_RESYNC=1` drops an
+  answer's chunks, the socket answer and the first ask again's answer, so
+  the guard times out under the owed resync and the request's own deadline
+  must still ask again (#243's review).
 - A state transfer starving the inputs behind it (`specs/tick_deadlines.qnt`,
   `input_link`). Two `DELAY_SYNC_ANSWER_MS` runs failed with 83 and 40
   gameplay mismatches and 76 and 20 `DEEP-MISPREDICT-SKIP`. The prediction

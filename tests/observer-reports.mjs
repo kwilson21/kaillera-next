@@ -1,12 +1,12 @@
 /**
- * What the two observers beside the rollback engine reported during a run.
+ * What the observer beside the rollback engine reported during a run.
  *
- * The per-peer connection machine (web/src/peer-observe.ts) and the proved
- * resync request rules (web/src/resync-request.ts) run beside the engine and
- * report any difference from what it did as a client event (`peer-disagree`,
- * `resync-disagree`) and a sync-log line (`PEER-DISAGREE`,
- * `RESYNC-DISAGREE`). Both are written only once the page has an upload
- * token. The end-to-end tests count them in three places: the page's sync
+ * The per-peer connection machine (web/src/peer-observe.ts) runs beside the
+ * engine and reports any difference from what it did as a client event
+ * (`peer-disagree`) and a sync-log line (`PEER-DISAGREE`), written only once
+ * the page has an upload token. (The resync request rules,
+ * web/src/resync-request.ts, decide now and report nothing: their
+ * `resync-disagree` is gone.) The end-to-end tests count them in three places: the page's sync
  * log, the client events the page sent (recorded by the test's KNEvent
  * wrapper), and, when KN_DB names the server's database (its DB_PATH), the
  * server's client_events table for the run's rooms. Any of them above zero
@@ -14,8 +14,8 @@
  * find.
  */
 
-export const OBSERVER_EVENTS = ['peer-disagree', 'resync-disagree'];
-const LINES = { 'peer-disagree': /PEER-DISAGREE/g, 'resync-disagree': /RESYNC-DISAGREE/g };
+export const OBSERVER_EVENTS = ['peer-disagree'];
+const LINES = { 'peer-disagree': /PEER-DISAGREE/g };
 
 const zero = () => Object.fromEntries(OBSERVER_EVENTS.map((type) => [type, 0]));
 
@@ -78,4 +78,4 @@ export const observerDbNote = (dbPath, rooms) =>
     ? null
     : `KN_DB unset: client_events not read. To check by hand, against the server's DB_PATH: ` +
       `SELECT type, COUNT(*) FROM client_events WHERE room IN (${rooms.map((r) => `'${r}'`).join(', ')}) ` +
-      `AND type IN ('peer-disagree', 'resync-disagree') GROUP BY type`;
+      `AND type IN (${OBSERVER_EVENTS.map((t) => `'${t}'`).join(', ')}) GROUP BY type`;
