@@ -22,7 +22,7 @@ Run: KN_ROM=/path/ssb64-us.z64 pytest tests/test_input_resend.py -v -s
 
 import time
 
-from netplay_steps import frame, silence_inputs, sync_log_lines, wait_past_frame
+from netplay_steps import frame, hold_inputs, silence_inputs, sync_log_lines, wait_past_frame
 
 
 def _start(browser, server_url, rom_path, start_game, room, transport=None):
@@ -68,6 +68,7 @@ def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_ur
             "window.NetplayRollback.exportSyncLog().includes('adopted=unreliable')",
             timeout=30000,
         )
+        assert sync_log_lines(host, "rb-transport: host broadcast=unreliable"), "host did not pick unreliable"
         wait_past_frame(guest, frame(guest) + 10)
         phantoms_before = len(_phantoms(host, 1))
         fallbacks_before = len(sync_log_lines(guest, "DC-FALLBACK"))
@@ -94,6 +95,37 @@ def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_ur
         assert not new_phantoms, (
             f"host dropped the guest over a short gap: {new_phantoms}; guest fallbacks: {fallbacks}"
         )
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_slow_reliable_channel_does_not_drop_the_guest(browser, server_url, rom_path, start_game, room):
+    """On the reliable channel, the default, inputs that arrive late but in
+    order hold the host back for a moment: no phantom.
+
+    That channel loses nothing, so the engine sends no redundant inputs on it;
+    what it can do is deliver late. The guest's messages are held for 300 ms
+    and then sent in order, as a slow reliable channel would.
+    """
+    host, guest = _start(browser, server_url, rom_path, start_game, room)
+    try:
+        assert sync_log_lines(host, "rb-transport: host broadcast=reliable"), "host did not pick reliable"
+        phantoms_before = len(_phantoms(host, 1))
+
+        hold_inputs(guest, 300)
+        time.sleep(0.6)
+        held = guest.evaluate("window._knTestHeld")
+        assert held > 0, "nothing was held: the delay did not take"
+
+        frame_before = frame(host)
+        # Longer than the 5 s after which a guest that stayed silent is dropped.
+        time.sleep(7)
+        print(f"\n  held {held} messages; host frames {frame_before} -> {frame(host)}")
+
+        assert frame(host) > frame_before, "host stopped advancing after the delay"
+        new_phantoms = _phantoms(host, 1)[phantoms_before:]
+        assert not new_phantoms, f"host dropped the guest over a 300 ms delay: {new_phantoms}"
     finally:
         host.close()
         guest.close()

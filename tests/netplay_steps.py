@@ -73,3 +73,39 @@ def silence_inputs(page, ms, channels=("dc", "rbDc")):
         }""",
         [ms, list(channels)],
     )
+
+
+def hold_inputs(page, ms):
+    """For `ms` milliseconds, hold back everything the page sends on `dc`, the
+    reliable channel, then send it all in order: what a slow reliable channel
+    does. Nothing is lost. Returns at once. `window._knTestHeld` counts the
+    messages held."""
+    page.evaluate(
+        """(ms) => {
+            window._knTestHeld = window._knTestHeld || 0;
+            for (const p of Object.values(window.KNState.peers || {})) {
+                const ch = p.dc;
+                if (!ch) continue;
+                if (!ch._knTestHold) {
+                    const send = ch.send.bind(ch);
+                    const queue = [];
+                    ch._knTestHold = { until: 0, queue, send };
+                    ch.send = (data) => {
+                        const hold = ch._knTestHold;
+                        if (performance.now() < hold.until || hold.queue.length) {
+                            hold.queue.push(data);
+                            window._knTestHeld++;
+                            return;
+                        }
+                        return send(data);
+                    };
+                }
+                const hold = ch._knTestHold;
+                hold.until = performance.now() + ms;
+                setTimeout(() => {
+                    while (hold.queue.length) hold.send(hold.queue.shift());
+                }, ms);
+            }
+        }""",
+        ms,
+    )
