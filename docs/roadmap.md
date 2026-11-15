@@ -161,8 +161,8 @@ without the old code running beside it first.
   (`play-disagree`), the decoding of server messages and of messages peers
   author (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
   per-peer machine (`peer-disagree`), the resync request rules
-  (`resync-disagree`), the streaming rules (`streaming-disagree`) and the
-  demo page's run state. Once all of them decide, the observer plumbing
+  (`resync-disagree`) and the streaming rules (`streaming-disagree`). Once
+  all of them decide, the observer plumbing
   (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
