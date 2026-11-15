@@ -12,6 +12,13 @@
 // the frame its emulator is on, labelled as the host labels it, or the pages
 // apply inputs at different frames and split.
 //
+// This starts where specs/start_group.qnt ends: a page in the start group
+// whose match runs (startLockstep, once every player it waits for has booted
+// and is lockstep-ready). A player the host left out of the start, or one
+// that rejoins late, is held as a late joiner and arms through the late join
+// (lateJoin below): the host's state carries the frame and the delay the host
+// runs at. The host may have started alone (a delay of 0) or with others.
+//
 // The host arms at its start (startLockstep) with the delay it negotiated and
 // tells each guest the delay (`rb-delay:`, sent at "GO") and its start frame
 // (`rb-init-frame:`, sent when it arms). A guest holds until it has both,
@@ -30,8 +37,8 @@
 //     the frame of the state it loads (`theHostsStartIsWhereTheGuestIs`), so
 //     those branches are dead and go.
 //
-// What is modelled: the host, one guest that starts with it or joins a solo
-// match late, the host's messages to the guest in order on one data channel
+// What is modelled: the host, one guest that starts with it or joins its
+// match late (the host started alone, or with others and left this guest out), the host's messages to the guest in order on one data channel
 // that can close (losing what is in flight) and open again, the guest's wait
 // and its deadline. Messages on an open channel arrive before the wait's
 // clock moves (milliseconds against seconds).
@@ -70,7 +77,7 @@ module engine_start {
   type Guest = NotIn | Waiting | Armed | RunsUnarmed | Stopped
 
   var started: bool         // the host's match has begun
-  var alone: bool           // nobody else was in it at the start
+  var alone: bool           // the guest was not in the start (alone in the room, or left out)
   var hostDelay: int
   var delaySent: bool       // the host has been through "GO"
   var hostRunning: bool
@@ -126,10 +133,11 @@ module engine_start {
     open' = open, toGuest' = toGuest, historySame,
   }
 
-  // The host starts alone.
-  action startAlone = all {
+  // The host starts without the guest: alone in the room at a delay of 0,
+  // or with other players at the delay it negotiated with them.
+  action startWithout(d: int): bool = all {
     not(started),
-    started' = true, alone' = true, hostDelay' = SOLO_DELAY,
+    started' = true, alone' = true, hostDelay' = d,
     delaySent' = true, hostRunning' = false, hostArmed' = false, hostStart' = -1, hostFrame' = 0,
     guestSame, open' = open, toGuest' = toGuest, historySame,
   }
@@ -165,8 +173,9 @@ module engine_start {
     guestSame, open' = open, toGuest' = toGuest, stoppedReachable' = stoppedReachable,
   }
 
-  // A friend joins the solo match. The host's state tells it the frame and
-  // the delay; it starts where the state is.
+  // The guest joins the match late: a friend joining a solo match, or a
+  // player the host left out of the start. The host's state tells it the
+  // frame and the delay; it starts where the state is.
   action lateJoin = all {
     alone, hostRunning, guest == NotIn,
     guest' = if (canArm(hostDelay)) Armed else RunsUnarmed,
@@ -240,8 +249,10 @@ module engine_start {
     hostSame, open' = open, toGuest' = toGuest, stoppedReachable' = stoppedReachable,
   }
 
+  action startAlone = startWithout(SOLO_DELAY)
+
   action step = any {
-    startTogether, startAlone, hostGo, hostStarts, hostStep, lateJoin,
+    startTogether, nondet d = oneOf(Set(SOLO_DELAY, MATCH_DELAY)) startWithout(d), hostGo, hostStarts, hostStep, lateJoin,
     deliver, channelCloses, channelOpens, tick, deadline, guestStep,
   }
 
@@ -298,6 +309,12 @@ module engine_start {
   action tickIfWaiting = if (guest == Waiting and waited < DEADLINE) tick else unchangedAll
   action deadlineIfDue =
     if (guest == Waiting and waited == DEADLINE and (not(open) or toGuest.length() == 0)) deadline else unchangedAll
+
+  // A player the host left out of the start joins late: it arms with the
+  // delay the match runs at, at the frame of the host's state, as before.
+  run leftOutJoinsLateTest =
+    init.then(startWithout(MATCH_DELAY)).then(hostStarts).then(hostStep).then(hostStep).then(lateJoin)
+      .expect(guest == Armed and armDelay == MATCH_DELAY and armFrame == 2 and hostArmed)
 
   // `rb-delay:` is lost to a channel that closes before the host arms, and
   // the channel opens again. Before: the guest hears only the start frame
