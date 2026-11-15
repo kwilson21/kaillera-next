@@ -341,7 +341,8 @@ export const KNCore = {
   },
   /**
    * The streaming engine's decisions (web/static/netplay-streaming.js still
-   * makes them; `createObserver` compares).
+   * makes them; `createObserver` compares), except `signalGate`, which the
+   * engine asks: which offers a page that receives the stream takes.
    */
   streaming: {
     ...streamingRoster,
