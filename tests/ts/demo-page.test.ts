@@ -4,6 +4,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import { demo } from '../../web/src/demo/index.ts';
+import { fakeIndexedDb } from './fake-indexeddb.ts';
 import { lcg } from './load-shared.ts';
 
 // web/static/demo.js calls web/src/demo for its options, network settings,
@@ -153,6 +154,8 @@ type Visit = {
   seed: number;
   /** `KNShared.N64_MAX`, a stick's full deflection; 83 when not given. */
   stickMax?: number;
+  /** The file name of a ROM an earlier visit left in the demo's ROM cache. */
+  cached?: string | undefined;
 };
 
 /** The engine's counters as a step sets them; a missing or off-shape field is part of the test. */
@@ -184,7 +187,8 @@ type Step =
   | { kind: 'input'; real: Pad }
   | { kind: 'mirror'; frame: number }
   | { kind: 'record'; call: 'startRecording' | 'stopRecording' | 'getRecording' }
-  | { kind: 'load'; name: string };
+  | { kind: 'load'; name: string }
+  | { kind: 'shim' };
 
 /** `window.KNDemo`, as demo.js leaves it. */
 type DemoApi = {
@@ -197,6 +201,66 @@ type DemoApi = {
 
 /** `window.KNCore` as a page script finds it. */
 type Core = { demo?: typeof demo };
+
+/** A Blob that keeps what it was made from, so the fake File below can read it at once. */
+class RecordingBlob extends Blob {
+  readonly parts: readonly unknown[];
+  constructor(parts: BlobPart[], options?: BlobPropertyBag) {
+    super(parts, options);
+    this.parts = parts;
+  }
+}
+
+/** A File the fake FileReader reads: its bytes are those of the first part it was made from. */
+class FakeFile {
+  readonly name: string;
+  readonly bytes: ArrayBuffer;
+  constructor(parts: readonly unknown[], name: string) {
+    this.name = name;
+    const first = parts[0];
+    const inner = first instanceof RecordingBlob ? first.parts[0] : first;
+    this.bytes = ArrayBuffer.isView(inner)
+      ? new Uint8Array(inner.buffer, inner.byteOffset, inner.byteLength).slice().buffer
+      : new ArrayBuffer(0);
+  }
+}
+
+/**
+ * A WebGL context class with fresh prototypes for each page, its calls noted
+ * on the instance. The second kind refuses pixelStorei and has no
+ * compressedTexSubImage2D, the two cases the texture-upload shim must step
+ * around.
+ */
+const fakeGlContext = (refuseAlignment: boolean, withSubUpload: boolean) => {
+  class FakeGl {
+    readonly UNPACK_ALIGNMENT = 3317;
+    calls: string[] = [];
+    pixelStorei(pname: number, param: number): void {
+      if (refuseAlignment) throw new Error('refused');
+      this.calls.push(`pixelStorei(${pname},${param})`);
+    }
+    texImage2D(...args: number[]): void {
+      this.calls.push(`texImage2D(${args.join(',')})`);
+    }
+    texSubImage2D(...args: number[]): void {
+      this.calls.push(`texSubImage2D(${args.join(',')})`);
+    }
+    compressedTexImage2D(...args: number[]): void {
+      this.calls.push(`compressedTexImage2D(${args.join(',')})`);
+    }
+  }
+  if (withSubUpload) {
+    Object.assign(FakeGl.prototype, {
+      compressedTexSubImage2D(this: FakeGl, ...args: number[]): void {
+        this.calls.push(`compressedTexSubImage2D(${args.join(',')})`);
+      },
+    });
+  }
+  return FakeGl;
+};
+
+/** The bytes of the ROM an earlier visit left in the cache. */
+const CACHED_BYTES = [9, 8, 7, 6];
 
 /** What demo.js gives the fake peer when it starts it. */
 type PeerStart = {
@@ -220,6 +284,25 @@ const fakeStorage = (initial: [string, string][]) => {
 
 // Run in the page: hands this test what demo.js has left on `window`.
 const READ_WINDOW = new vm.Script(`__read(window.KNDemo, {
+  player: window.EJS_player,
+  core: window.EJS_core,
+  gameId: window.EJS_gameID,
+  path: window.EJS_pathtodata,
+  controls: window.EJS_defaultControls,
+  gl: [window.WebGLRenderingContext, window.WebGL2RenderingContext].map((Context) => {
+    const gl = new Context();
+    const out = [String(Context.prototype.__knUnpackAlignmentPatched)];
+    for (const upload of ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D']) {
+      if (typeof gl[upload] !== 'function') {
+        out.push(upload + ':none');
+        continue;
+      }
+      gl.calls = [];
+      gl[upload](1, 2);
+      out.push(upload + ':' + gl.calls.join('|'));
+    }
+    return out.join(' ');
+  }),
   options: window.EJS_defaultOptions,
   legacy: window.EJS_forceLegacyCores,
   shim: window.__knInstallUnpackAlignmentShim,
@@ -273,6 +356,10 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
 
   const local = fakeStorage(visit.local);
   const session = fakeStorage(visit.session);
+  const idb = fakeIndexedDb();
+  if (visit.cached !== undefined) {
+    idb.seed('kn-demo-rom', 'rom', 'current', { bytes: new Uint8Array(CACHED_BYTES), name: visit.cached });
+  }
   // demo.js replaces readLocalInput on this object with its own wrapper.
   const shared = {
     N64_MAX: visit.stickMax ?? 83,
@@ -295,6 +382,9 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     location: { search: visit.search, reload: (): void => note('reload') },
     localStorage: local,
     sessionStorage: session,
+    indexedDB: idb.factory,
+    WebGLRenderingContext: fakeGlContext(false, true),
+    WebGL2RenderingContext: fakeGlContext(true, false),
     performance: { now: (): number => clock },
     console: {
       log: (...args: Shown[]): void => note('console.log', ...args),
@@ -318,7 +408,8 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     cancelAnimationFrame: (id: number): void => void (frames = frames.filter((frame) => frame.id !== id)),
     crypto: globalThis.crypto,
     URLSearchParams,
-    Blob,
+    Blob: RecordingBlob,
+    File: FakeFile,
     URL: {
       createObjectURL: (): string => `blob:demo-${++blobs}`,
       revokeObjectURL: (url: string): void => note('revokeObjectURL', url),
@@ -432,6 +523,8 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     else if (step.kind === 'record') {
       const said = api?.[step.call]();
       note(step.call, typeof said === 'string' ? said : undefined);
+    } else if (step.kind === 'shim') {
+      vm.runInContext('window.__knInstallUnpackAlignmentShim?.()', context);
     } else await api?.loadRomFile({ name: step.name, bytes: new Uint8Array([1, 2, 3, 4]).buffer });
     await nextTurn();
   };
@@ -443,6 +536,7 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
       ...[...elements.values(), head, body].map((element) => element.describe()),
       show([...local.items]),
       show([...session.items]),
+      idb.describe(),
       onWindow,
       show({ timers: timers.map((timer) => [timer.at, timer.every]), frames: frames.length }),
       // What it has said since the last look.
@@ -450,7 +544,7 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     ].join('\n');
   };
 
-  return { apply, snapshot, hasApi: (): boolean => api !== undefined };
+  return { apply, snapshot, hasApi: (): boolean => api !== undefined, stored: idb.describe };
 };
 
 /** The same visit on the old script and on the new one, compared after every step. */
@@ -459,6 +553,14 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
   const before = openDemo(OLD_SCRIPT, {}, visit);
   const after = openDemo(NEW_SCRIPT, { demo }, visit);
   assert.equal(after.snapshot(), before.snapshot(), `on load: ${show(visit)}`);
+  // A cached ROM is restored on load: let both pages finish reading and hashing it.
+  if (visit.cached !== undefined) {
+    for (let turn = 0; turn < 10; turn++) {
+      await nextTurn();
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    assert.equal(after.snapshot(), before.snapshot(), `after restoring the cached ROM: ${show(visit)}`);
+  }
   let done = 0;
   for (const step of steps) {
     await before.apply(step);
@@ -572,6 +674,7 @@ const randomVisit = (random: () => number, seed: number): Visit => {
     session: random() < 0.3 ? [['kn-demo-autopilot-retried', '1']] : [],
     closedLoop: random() < 0.25,
     seed,
+    cached: random() < 0.25 ? pick(random, ['saved.z64', 'SAVED.N64', 'saved.zip', '']) : undefined,
   };
 };
 
@@ -626,6 +729,55 @@ test('every address: what the page gives the emulator on load and shows on the w
       ]);
     }
   }
+});
+
+test('the ROM cache: what a load keeps, the next visit restores, and Stop forgets', async () => {
+  for (const cached of [undefined, 'saved.z64', 'SAVED.N64', 'saved.zip', '']) {
+    await compareVisit({ search: '', local: [], session: [], closedLoop: false, seed: 1, cached }, [
+      { kind: 'frame', ms: 16 },
+      { kind: 'load', name: 'game.z64' },
+      { kind: 'load', name: 'notes.txt' },
+      // Stop acts once the emulator's loader is on the page, which the start button puts there.
+      { kind: 'click', id: 'gesture-button' },
+      { kind: 'click', id: 'emu-stop' },
+      { kind: 'frame', ms: 16 },
+      { kind: 'click', id: 'emu-reset' },
+    ]);
+  }
+  // The comparison above holds whatever both scripts do; this shows they did use the cache.
+  const page = openDemo(NEW_SCRIPT, { demo }, { search: '', local: [], session: [], closedLoop: false, seed: 1 });
+  await page.apply({ kind: 'load', name: 'game.z64' });
+  assert.match(page.stored(), /"current",\{"bytes":\[1,2,3,4\],"name":"game.z64"\}/);
+  await page.apply({ kind: 'click', id: 'gesture-button' });
+  await page.apply({ kind: 'click', id: 'emu-stop' });
+  assert.doesNotMatch(page.stored(), /game\.z64/);
+  const restored = openDemo(
+    NEW_SCRIPT,
+    { demo },
+    { search: '', local: [], session: [], closedLoop: false, seed: 1, cached: 'saved.z64' },
+  );
+  for (let turn = 0; turn < 10; turn++) {
+    await nextTurn();
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  assert.match(restored.snapshot(), /Restoring saved\.z64|init\(/);
+});
+
+test('every address: the EmulatorJS settings and controls, and the texture-upload shim installed again later', async () => {
+  for (const search of SEARCHES) {
+    await compareVisit({ search, local: [], session: [], closedLoop: false, seed: 1 }, [
+      { kind: 'shim' },
+      { kind: 'shim' },
+    ]);
+  }
+  // The comparison holds whatever both do; this shows the shim does its work.
+  const page = openDemo(
+    NEW_SCRIPT,
+    { demo },
+    { search: '?kngfx=unpack1', local: [], session: [], closedLoop: false, seed: 1 },
+  );
+  assert.match(page.snapshot(), /true texImage2D:pixelStorei\(3317,1\)\|texImage2D\(1,2\)/);
+  assert.match(page.snapshot(), /true texImage2D:texImage2D\(1,2\) [^"]*compressedTexSubImage2D:none/);
 });
 
 test('every slider value: the network handed to the fake peer and the label beside the slider', async () => {

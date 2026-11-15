@@ -19,158 +19,16 @@
   }
   const _demo = window.KNCore.demo;
 
-  const _installEjsGlobals = () => {
-    const settings = _demo.options.ejsSettings(window.location.search || '');
-    window.EJS_player = '#game';
-    window.EJS_core = 'n64';
-    window.EJS_gameID = 'kaillera-next-demo';
-    window.EJS_startOnLoaded = true;
-    window.EJS_pathtodata = '/static/ejs/';
-    window.EJS_defaultOptions = settings.defaultOptions;
-
-    window.__knInstallUnpackAlignmentShim = () => {
-      [window.WebGLRenderingContext, window.WebGL2RenderingContext].forEach((ctor) => {
-        const proto = ctor && ctor.prototype;
-        if (!proto || proto.__knUnpackAlignmentPatched) return;
-        proto.__knUnpackAlignmentPatched = true;
-        ['texImage2D', 'texSubImage2D', 'compressedTexImage2D', 'compressedTexSubImage2D'].forEach((name) => {
-          const original = proto[name];
-          if (typeof original !== 'function') return;
-          proto[name] = function (...args) {
-            try {
-              this.pixelStorei(this.UNPACK_ALIGNMENT, 1);
-            } catch (_) {}
-            return original.apply(this, args);
-          };
-        });
-      });
-    };
-
-    if (settings.forceLegacyCores) window.EJS_forceLegacyCores = true;
-    if (settings.unpackAlignmentShim) window.__knInstallUnpackAlignmentShim();
-
-    window.EJS_defaultControls = {
-      0: {
-        0: { value: 'c', value2: 'BUTTON_2' },
-        1: { value: 'x', value2: 'BUTTON_4' },
-        3: { value: 'v', value2: 'START' },
-        4: { value: 'up arrow', value2: 'DPAD_UP' },
-        5: { value: 'down arrow', value2: 'DPAD_DOWN' },
-        6: { value: 'left arrow', value2: 'DPAD_LEFT' },
-        7: { value: 'right arrow', value2: 'DPAD_RIGHT' },
-        10: { value: 't', value2: 'LEFT_TOP_SHOULDER' },
-        11: { value: 'y', value2: 'RIGHT_TOP_SHOULDER' },
-        12: { value: 'z', value2: 'LEFT_BOTTOM_SHOULDER' },
-        16: { value: 'd', value2: 'LEFT_STICK_X:+1' },
-        17: { value: 'a', value2: 'LEFT_STICK_X:-1' },
-        18: { value: 's', value2: 'LEFT_STICK_Y:+1' },
-        19: { value: 'w', value2: 'LEFT_STICK_Y:-1' },
-        20: { value: 'j', value2: 'RIGHT_STICK_X:+1' },
-        21: { value: 'l', value2: 'RIGHT_STICK_X:-1' },
-        22: { value: 'k', value2: 'RIGHT_STICK_Y:+1' },
-        23: { value: 'i', value2: 'RIGHT_STICK_Y:-1' },
-        24: { value: '', value2: '' },
-        25: { value: '', value2: '' },
-        26: { value: '', value2: '' },
-      },
-      1: {},
-      2: {},
-      3: {},
-    };
-  };
+  // EmulatorJS's settings, controls and the ?kngfx=unpack1 shim, on window
+  // before the emulator loads, and again at each boot.
+  // web/src/demo/ejs-globals.ts.
+  const _installEjsGlobals = () => _demo.installEjsGlobals(window, window.location.search || '');
 
   _installEjsGlobals();
 
-  // ROM cache — IDB so Reset can re-init the engine without making the
-  // user re-drop the ROM. Stop clears it so the next visit hits the
-  // drop-ROM screen normally. Bytes-only persistence; no metadata
-  // beyond filename so we can rebuild the File object on auto-restore.
-  const _ROM_DB_NAME = 'kn-demo-rom';
-  const _ROM_DB_STORE = 'rom';
-  const _ROM_DB_KEY = 'current';
-  const _idbRomSave = (bytes, name) =>
-    new Promise((resolve) => {
-      try {
-        const req = indexedDB.open(_ROM_DB_NAME, 1);
-        req.onupgradeneeded = () => req.result.createObjectStore(_ROM_DB_STORE);
-        req.onsuccess = () => {
-          const db = req.result;
-          try {
-            const tx = db.transaction(_ROM_DB_STORE, 'readwrite');
-            tx.objectStore(_ROM_DB_STORE).put({ bytes, name }, _ROM_DB_KEY);
-            tx.oncomplete = () => {
-              db.close();
-              resolve();
-            };
-            tx.onerror = () => {
-              db.close();
-              resolve();
-            };
-          } catch (_) {
-            db.close();
-            resolve();
-          }
-        };
-        req.onerror = () => resolve();
-      } catch (_) {
-        resolve();
-      }
-    });
-  const _idbRomLoad = () =>
-    new Promise((resolve) => {
-      try {
-        const req = indexedDB.open(_ROM_DB_NAME, 1);
-        req.onupgradeneeded = () => req.result.createObjectStore(_ROM_DB_STORE);
-        req.onsuccess = () => {
-          const db = req.result;
-          try {
-            const tx = db.transaction(_ROM_DB_STORE, 'readonly');
-            const get = tx.objectStore(_ROM_DB_STORE).get(_ROM_DB_KEY);
-            get.onsuccess = () => {
-              db.close();
-              resolve(get.result || null);
-            };
-            get.onerror = () => {
-              db.close();
-              resolve(null);
-            };
-          } catch (_) {
-            db.close();
-            resolve(null);
-          }
-        };
-        req.onerror = () => resolve(null);
-      } catch (_) {
-        resolve(null);
-      }
-    });
-  const _idbRomClear = () =>
-    new Promise((resolve) => {
-      try {
-        const req = indexedDB.open(_ROM_DB_NAME, 1);
-        req.onsuccess = () => {
-          const db = req.result;
-          try {
-            const tx = db.transaction(_ROM_DB_STORE, 'readwrite');
-            tx.objectStore(_ROM_DB_STORE).delete(_ROM_DB_KEY);
-            tx.oncomplete = () => {
-              db.close();
-              resolve();
-            };
-            tx.onerror = () => {
-              db.close();
-              resolve();
-            };
-          } catch (_) {
-            db.close();
-            resolve();
-          }
-        };
-        req.onerror = () => resolve();
-      } catch (_) {
-        resolve();
-      }
-    });
+  // ROM cache: the last ROM dropped, kept so Reset (a reload) comes back
+  // into a running engine. Stop clears it. web/src/demo/rom-store.ts.
+  const _romStore = _demo.romStore(() => window.indexedDB);
 
   let _romBlobUrl = null;
   let _romHash = null;
@@ -820,7 +678,7 @@
     // Stop is the user's "fully quit and forget the ROM" path — clear
     // the IDB cache so the next visit hits the drop-ROM screen rather
     // than auto-restoring. Reset preserves the cache (its whole point).
-    _idbRomClear().finally(() => location.reload());
+    _romStore.clear().finally(() => location.reload());
   };
 
   // User's preferred RTT value (round-trip ms), if they manually moved
@@ -1032,7 +890,7 @@
       // Cache the bytes so Reset (and any future page reload) can
       // restore the ROM without prompting the user to drop it again.
       // Best-effort; failure to cache doesn't block the load.
-      _idbRomSave(new Uint8Array(bytes), file.name).catch(() => {});
+      _romStore.save(new Uint8Array(bytes), file.name).catch(() => {});
       _startEngine();
     } catch (err) {
       _showLoading(false);
@@ -1355,7 +1213,8 @@
     // come back into a running engine instead of dumping the user back at
     // the drop-ROM screen. Stop explicitly clears the cache so it still
     // works as a hard quit.
-    _idbRomLoad()
+    _romStore
+      .load()
       .then((cached) => {
         if (!cached?.bytes || !cached?.name) return;
         const blob = new Blob([cached.bytes], { type: 'application/octet-stream' });
