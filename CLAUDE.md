@@ -142,7 +142,7 @@ kaillera-next/
 ├── build/           # WASM core build system (Docker + patches)
 ├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route live on kaillera-next.thesuperhuman.us)
 ├── tests/           # pytest + Playwright E2E tests
-├── specs/           # Quint models (room lifecycle, peer identity, peer connection); `just spec` model-checks them
+├── specs/           # Quint models (room lifecycle, peer identity, peer connection, streaming connection); `just spec` model-checks them
 ├── tools/           # match analysis scripts; oxlint/anti-slop/ = vendored lint rules
 ├── docs/            # roadmap, netplay invariants, netcode-diagrams.md (index of the generated diagrams: session-machine.md, peer-connection-machine.md, spec-traces.md), design/research notes
 ├── Dockerfile       # production Docker image
