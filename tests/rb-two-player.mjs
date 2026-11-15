@@ -1074,6 +1074,8 @@ const collect = (p, VISUAL_CHECK) =>
       delay: window.NetplayRollback.getHudCounters?.()?.delay ?? null,
       extraDelay: window.NetplayRollback.getHudCounters?.()?.extraDelay ?? null,
       frame: window.NetplayRollback.getHudCounters().currentFrame,
+      // The mode the page's info panel shows.
+      infoMode: window.NetplayRollback.getInfo?.()?.mode ?? null,
       fpsWindowStart: window.__tp.fpsWindowStart,
       fpsWindowEnd,
       clog: m.UTF8ToString(m._kn_get_debug_log()),
@@ -1495,6 +1497,7 @@ const summary = {
             host: H.sync.includes('LOCKSTEP mode: predictions off'),
             guest: G.sync.includes('LOCKSTEP mode: predictions off'),
           },
+          infoMode: { host: H.infoMode, guest: G.infoMode },
           waitTimeouts: {
             host: (H.sync.match(/LOCKSTEP-WAIT-TIMEOUT/g) || []).length,
             guest: (G.sync.match(/LOCKSTEP-WAIT-TIMEOUT/g) || []).length,
@@ -1748,6 +1751,13 @@ const failed =
   (THROTTLE_GUEST && !throttleFlipped) ||
   hideGuestFailed ||
   suspendGuestAudioFailed ||
-  // A lockstep run whose pages did not turn predictions off tested rollback.
-  (MODE === 'lockstep' && !(summary.lockstep.predictionsOff.host && summary.lockstep.predictionsOff.guest));
+  // A lockstep run whose pages did not turn predictions off, or did not say
+  // lockstep in the info panel, did not test lockstep.
+  (MODE === 'lockstep' &&
+    !(
+      summary.lockstep.predictionsOff.host &&
+      summary.lockstep.predictionsOff.guest &&
+      summary.lockstep.infoMode.host === 'lockstep' &&
+      summary.lockstep.infoMode.guest === 'lockstep'
+    ));
 process.exit(failed ? 1 : 0);

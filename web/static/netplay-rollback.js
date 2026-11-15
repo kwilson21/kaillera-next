@@ -649,6 +649,8 @@
   // every player's input for it. Set for the whole match when the host picked
   // lockstep (config.lockstep), or toggled by the demo page.
   let _predictionsPaused = false;
+  // The mode this page plays, as the logs and the info panel name it.
+  const _modeName = () => (_predictionsPaused ? 'lockstep' : 'rollback');
   // The apply frame a lockstep tick is waiting on, and since when (-1/0: not
   // waiting). Ends at the deadline by dropping the player (lockstepStep).
   let _lockstepWaitFrame = -1;
@@ -6156,7 +6158,7 @@
         return 'Player';
       }
     })(),
-    mode: 'rollback',
+    mode: _modeName(),
     // Identifies this ring instance to the server (see db.append_session_log
     // / migration 0002_session_log_chunks.sql): a reload, reconnect, or slot-reuse creates a new
     // ring (new epoch) that restarts seq at 0, and without this the server
@@ -6192,9 +6194,6 @@
       // T4: expose the transport mode in the per-match context so the
       // session log analyzer can group matches by mode without parsing logs.
       rbTransport: _useCRollback ? _rbTransport : 'n/a',
-      // The host picked lockstep: nothing predicted (the session log's mode
-      // stays the engine's, 'rollback').
-      lockstep: _predictionsPaused,
     },
     // Input audit records the server hasn't acked yet (see _auditPending).
     audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, AUDIT_FLUSH_MAX) },
@@ -6332,7 +6331,7 @@
           matchId,
           slot: window._playerSlot,
           playerName: 'Player',
-          mode: 'rollback',
+          mode: _modeName(),
           entries: [],
           summary: {
             desyncs: 0,
@@ -18703,7 +18702,7 @@
         frame: _frameNum,
         running: _phase === PHASE_RUNNING,
         state: _computeState(),
-        mode: 'rollback',
+        mode: _modeName(),
         syncEnabled: _syncEnabled,
         resyncCount: _resyncCount,
         rollback: rollbackInfo,

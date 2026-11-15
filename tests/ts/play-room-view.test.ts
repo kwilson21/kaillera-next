@@ -194,9 +194,9 @@ test('rollback waits for every ROM unless the host shares theirs; streaming need
 
 // ── info panel ───────────────────────────────────────────────────────────────
 
-test('the info panel reads as the old code wrote it', () => {
+test('the info panel reads as the old code wrote it (rollback and streaming)', () => {
   const infos: (EngineInfo | null)[] = [null];
-  for (const mode of ['rollback', 'streaming', 'lockstep']) {
+  for (const mode of ['rollback', 'streaming']) {
     for (const rollback of [null, { rollbacks: 3, predictions: 40 }]) {
       for (const ping of [null, undefined, 0, 41.6]) {
         for (const peers of [
@@ -235,7 +235,31 @@ test('the info panel reads as the old code wrote it', () => {
       assert.deepEqual(infoPanel(info, hasGamepad), oldInfo(info, hasGamepad));
     }
   }
-  assert.equal(infos.length, 217);
+  assert.equal(infos.length, 145);
+});
+
+test('a lockstep match is labelled lockstep, and its delay is felt: no prediction, no rollbacks', () => {
+  assert.deepEqual(
+    infoPanel(
+      {
+        mode: 'lockstep',
+        fps: 60,
+        ping: 33.4,
+        frameDelay: 8,
+        playerCount: 2,
+        rollback: { rollbacks: 0, predictions: 0 },
+        syncEnabled: true,
+        resyncCount: 1,
+        peers: [{ slot: 1, rtt: 33.4 }],
+      },
+      true,
+    ),
+    {
+      header: 'Lockstep | Gamepad',
+      stats: 'FPS: 60 | Ping: 33ms | Delay: 8f | Players: 2 | Resyncs: 1',
+      peers: 'P2: 33ms',
+    },
+  );
 });
 
 test('a rollback match shows delay, rollbacks and each peer; a stream shows its codec and network', () => {
