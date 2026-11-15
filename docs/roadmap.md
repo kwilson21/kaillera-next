@@ -549,6 +549,35 @@ as it is. One file, or one small group, per change, smallest risk first:
    `rollback-timeline.js`
 6. `landing.js`, `join.js`
 
+Done so far:
+
+- Items 1, 2, 3 and 6 are done. Each of those scripts is now a few lines
+  that start its module from `web/src`: `feedback.js` (#214), `version.js`
+  (#211), `version-guard.js` (#206), `kn-capture.js` (#179),
+  `kn-vision-client.js` (#195), `switch2-usb.js` (#197),
+  `controller-settings.js` (#198), `virtual-gamepad.js` (#209) and
+  `kn-audio.js` (#202). Or it has left the page: `storage.js` (#178), and
+  `landing.js` (#212) and `join.js` (#181), which are now the `kn-landing.js`
+  and `kn-join.js` bundles.
+- Item 5's three helpers are done: `fake-peer.js` (#210),
+  `ssb64-menu-autopilot.js` (#201) and `rollback-timeline.js` (#200). Of
+  `demo.js` itself, these are in `web/src/demo` (#186): the options its
+  address takes, the network dial, the HUD's text, the ROM it accepts and
+  the recorded menu script. What remains is the page's wiring: booting the
+  emulator, starting the engine, and connecting the fake peer and the
+  autopilot to it.
+- `netplay-streaming.js` (item 4): its decisions are typed functions in
+  `web/src/streaming` that run beside the engine and report
+  `streaming-disagree`. These cover the roster, the signals and the input
+  path (#183), and the video choices (#185). Two of them decide rather than
+  observe: which offers a page receiving the stream takes (`offer-gate.ts`,
+  #220), and which connection a signal belongs to, together with the host's
+  deadline to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
+  `specs/streaming_connection.qnt`).
+- Next: read the `streaming-disagree` reports. Once they show none, the
+  engine calls the observed functions instead of its own copies, one rule at
+  a time. Then move the demo page's wiring.
+
 Not every page has `window.KNCore`, and some of these scripts run before it:
 
 - The play and demo pages load `kn-core.js` early, before the first script
