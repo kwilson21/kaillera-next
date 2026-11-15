@@ -88,11 +88,16 @@ jobs:
 
   # Exhaustive model checking (Apalache): every run of the specs up to a
   # bounded number of steps, where the spec job's `npm run spec` samples deeper
-  # random runs. Separate job because it needs Java; it took 16 to 27 minutes
-  # on main before the streaming connection spec added about 3.5 more.
+  # random runs. Separate job because it needs Java. In one job it took 32
+  # minutes and grew with every spec, so it runs as parallel shards, each a
+  # few groups of checks (scripts/verify-specs.sh, SHARDS), of 4 to 8 minutes.
   spec-verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -101,8 +106,11 @@ jobs:
       # Apalache needs Java 17+, which the runner image already has.
       - name: Install pinned tools
         run: npm ci --ignore-scripts
+      # A shard the script has and this matrix does not would never run.
+      - name: Every shard has a job
+        run: test "$(bash scripts/verify-specs.sh --shards)" = "${{ strategy.job-total }}"
       - name: Verify specs for every run up to 6 steps
-        run: npm run spec:verify
+        run: bash scripts/verify-specs.sh --shard ${{ matrix.shard }}
 
   # Proofs for the files in LemmaScript-files.txt. `lsc check` regenerates the
   # Dafny from the annotated TypeScript and verifies it; the diff step fails
