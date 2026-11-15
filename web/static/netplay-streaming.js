@@ -400,8 +400,7 @@
   const _attemptPageId = () => {
     if (_attemptPage === null) {
       _attemptPage =
-        window.KNCore?.peerObserve?.newPageId?.() ??
-        `p${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+        window.KNCore?.attemptId?.newPageId?.() ?? `p${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
     }
     return _attemptPage;
   };
@@ -410,7 +409,7 @@
     _offerCounts.set(sid, attempt);
     return { page: _attemptPageId(), attempt };
   };
-  const _readAttempt = (value) => window.KNCore?.peerObserve?.readAttemptId?.(value) ?? null;
+  const _readAttempt = (value) => window.KNCore?.attemptId?.readAttemptId?.(value) ?? null;
   const _withAttempt = (data, attempt) => (attempt ? { ...data, attemptId: attempt } : data);
   const _attemptText = (attempt) => (attempt ? `${attempt.page}#${attempt.attempt}` : 'none');
   const NAMES_NONE = { page: '', attempt: 0 };

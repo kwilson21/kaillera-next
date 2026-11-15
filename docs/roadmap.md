@@ -160,9 +160,9 @@ without the old code running beside it first.
   decides and the new reports a difference): the play page's moved decisions
   (`play-disagree`), the decoding of server messages and of messages peers
   author (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
-  per-peer machine (`peer-disagree`) and the streaming rules
-  (`streaming-disagree`). The resync request rules decide (below). Once all
-  of them decide, the observer plumbing
+  streaming rules (`streaming-disagree`). The resync request rules decide
+  and the per-peer machine is driven (below), so `tests/observer-reports.mjs`
+  counts no report type now. Once all of them decide, the observer plumbing
   (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
@@ -293,9 +293,13 @@ the `open-room` and `join-room` requests are built in `connect.ts` and typed
 against the generated schemas, with what each refusal means; whether a page
 comes in as a spectator and how it gets into a match already under way are
 `join-plan.ts` (proved), which `onConnect` calls, as it does `connect.ts`'s
-reading of each answer. Left in
-`play.js`: the reconnect banner's timers, the game lifecycle handlers and
-engine start-up, which are effects on the page, the socket and the emulator.
+reading of each answer. What a page does when the host starts a game (watch,
+keep the host's ROM offer up, wait for the transfer, stop on a ROM that is not
+the host's, or boot) and whether it has a game's end to handle are
+`game-start.ts` (proved), which `onGameStarted` and `onGameEnded` ask and
+carry out. Left in `play.js`: the reconnect banner's timers, what the game
+lifecycle handlers do to the page, and engine start-up, which are effects on
+the page, the socket and the emulator.
 
 **Stage 4: engine periphery [done]**
 `shared.js` (input wire format; prove encode/decode round-trips with
@@ -381,9 +385,11 @@ Slice 1, the peer mesh and signaling:
   `tests/ts/peer-connection.test.ts` replays the model's scenarios against
   it. Its runner takes each event at once (XState's pure `transition`) and
   returns the commands; its deadlines run as Effect sleeps.
-- Done (observing): the engine runs that machine beside itself, one per
-  other player for as long as the page is loaded
-  (`web/src/peer-observe.ts`). Every `webrtc-signal` now carries
+- Done (driven): the engine drives that machine, one per other player for
+  as long as the page is loaded (`web/src/peer-driver.ts`; it first ran
+  observing, as `peer-observe.ts`, and compared what each did, reporting a
+  difference as `peer-disagree`; the comparison is gone). Every
+  `webrtc-signal` carries
   `attemptId: {page, attempt}`: a random id the page makes once when it
   loads and its count of the offers it has made to that player. An offer
   carries its own, an answer and a candidate that of the offer their
@@ -404,15 +410,22 @@ Slice 1, the peer mesh and signaling:
   left alone, not reported. The model shows why it has to be
   (`oldPageAnswersWithNoLabelTest`): a page that goes by the id drops an
   old page's answer, its own included, and the two never connect.
+- Next: the machine is wired in to decide, one rule at a time (the owner's
+  rule: what makes the netcode more robust is wired in), starting with who
+  offers from the health check (`heal`), then the differences below. In
+  each, the engine's decision reads the machine and its copy is deleted;
+  the old-against-new test asserts the intended difference, the PR names
+  its model scenario, and a two-player fault mode reaches the rule.
 - Not wired: spectators, a page that joined a match in play, a player held
   as a late joiner, more than one machine per player on a page (a player
-  this page offered to before it watched them is left alone), and the
-  machine's view of the health check's timing (it runs on the engine's).
-  The four properties are still violated by the engine; next, the machine
-  decides, one rule at a time, and the engine's copy of each is deleted.
-- Differences the observer is expected to report, where the engine is not
-  what the model's `fixed` rules say (none came up in the two-player and
-  lifecycle runs, which reconnect at most once):
+  this page offered to before it had a machine is left to the engine), and
+  the machine's view of the health check's timing (it runs on the
+  engine's). Each is wired, or kept on the engine's path with a reason,
+  before the engine's last copy goes. The four properties are still
+  violated by the engine.
+- Differences between the engine and the model's `fixed` rules, each a fix
+  the wiring makes (none came up in the two-player and lifecycle runs,
+  which reconnect at most once):
   - the health check offers from the higher slot too (`heal`);
   - a page that answers a reconnect offer without having noticed the drop
     has no give-up (`deadline:giveUpAfter`, from the machine);
@@ -433,7 +446,7 @@ Slice 1, the peer mesh and signaling:
     drop the entry it has; the machine keeps it until the new page offers.
   The server relays `startupReconnect` (it used to drop it), so a page
   tells a startup retry from a reconnect by the offer's flag, and so does
-  the observer. A reconnect offer without it falls back on the page's own
+  the machine. A reconnect offer without it falls back on the page's own
   phase, as every one did before; then a page that had started (in a room
   of three, its channel with another player opened first) took a startup
   retry for a gameplay reconnect and resynced during boot
@@ -441,9 +454,10 @@ Slice 1, the peer mesh and signaling:
 - Driven by tests too: `tests/rb-two-player.mjs` with `DROP_PEER_MS`
   closes the guest's connection to the host mid-battle and drops their
   WebRTC signaling for that long, so the host's reconnect attempt times out
-  and is retried; every run of it and of the lifecycle scenarios now fails on
-  a `peer-disagree` (`tests/observer-reports.mjs`; `resync-disagree` too,
-  until the resync request rules decided). The
+  and is retried; every run of it and of the lifecycle scenarios failed on
+  a `peer-disagree` (until the per-peer comparison went) or a
+  `resync-disagree` (until the resync request rules decided;
+  `tests/observer-reports.mjs`). The
   first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
   attempt with no disagreement and no mismatch.
 - Next: decide, one rule at a time, by the machine, starting with who
