@@ -213,11 +213,16 @@
     return /^[a-z0-9-]{1,32}$/.test(hint || '') ? hint : null;
   };
 
+  // The game a ROM is, from the known-ROMs table or the invite link's hint.
+  // A ROM in neither has no game id: it is not taken for SSB64.
   const _gameIdFromHash = (hash) => {
     if (hash && _knownRoms[hash]?.game_id) return _knownRoms[hash].game_id;
-    const hint = _gameIdHintFromUrl();
-    if (hint) return hint;
-    return 'ssb64'; // default fallback
+    return _gameIdHintFromUrl();
+  };
+
+  // The host tells the room which game its ROM is, or that it has none.
+  const _announceGameId = () => {
+    if (isHost && socket?.connected) socket.emit('set-game-id', { game_id: _gameId || '' });
   };
 
   // ROM drop-zone status line. Every "Loaded: …" update goes through
@@ -949,7 +954,7 @@
       // refuses; it never lets it in as a new player or opens a new room.
       const resume = { slot: _connect.resumeSlot(isSpectator, mySlot), matchId: KNState.matchId || '' };
       const payload = isHost
-        ? _connect.openRoomRequest(joinerNow(), _gameId || 'ssb64', resume)
+        ? _connect.openRoomRequest(joinerNow(), _gameId || '', resume)
         : _connect.joinRoomRequest(joinerNow(), isSpectator, resume);
       // The session owns the rejoin: it cancels it if the socket drops again
       // or the game ends, and then this handler is never called.
@@ -997,7 +1002,7 @@
     }
 
     if (isHost) {
-      socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || 'ssb64', null), (err) => {
+      socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || '', null), (err) => {
         const roomHandedOn = err === 'Room already exists' && _droppedAsHost;
         _playObserver.compare(
           'open-room-answer',
@@ -3235,9 +3240,7 @@
         window.EJS_gameID = hash;
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
         console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026 game_id: ${_gameId}`);
-        if (isHost && _gameId && _gameId !== 'ssb64') {
-          socket.emit('set-game-id', { game_id: _gameId });
-        }
+        _announceGameId();
         _renderRomStatus();
       } catch (err) {
         console.log('[play] hash failed:', err);
@@ -3287,6 +3290,7 @@
     _gameId = null;
     KNState.romHash = null;
     KNState.gameId = null;
+    _announceGameId();
     window.EJS_gameUrl = undefined;
     window.EJS_gameID = 'kaillera-next';
     const romDrop = document.getElementById('rom-drop');
@@ -3337,9 +3341,7 @@
         window.EJS_gameID = hash;
         _safeSet('localStorage', 'kaillera-rom-name', val.name);
         _safeSet('localStorage', 'kaillera-rom-hash', hash);
-        if (isHost && _gameId && _gameId !== 'ssb64') {
-          socket.emit('set-game-id', { game_id: _gameId });
-        }
+        _announceGameId();
         _romLibrary.touch(hash, Date.now()).catch(() => {});
         // Enable ROM sharing checkbox if host
         const romShareCb = document.getElementById('opt-rom-sharing');
