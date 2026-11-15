@@ -161,6 +161,10 @@ resync_flow() {
   expect_violation "$FLOW" resync_flow_any_answer aLateAnswerDoesNotTakeTheGuestBack
   expect_violation "$FLOW" resync_flow_frame_named aLateAnswerDoesNotTakeTheGuestBack
   expect_violation "$FLOW" resync_flow_asked_from aLateAnswerDoesNotTakeTheGuestBack
+  # Six steps too: the boot sync asks with no number, the host answers, the
+  # guest moves on and asks again, and the unnumbered answer is applied
+  # behind it (bootAnswerAfterANewerRequestTest).
+  expect_violation "$FLOW" resync_flow_unnumbered aLateAnswerDoesNotTakeTheGuestBack
   # Rule a, not taken, holds them too (onlyStateComingTest shows its cost).
   verify "$FLOW" resync_flow_drop_older allHold
   # The counterexample to theAwaitedAnswerIsNotLost on resync_flow_any_answer

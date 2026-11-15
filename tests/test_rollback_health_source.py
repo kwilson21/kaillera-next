@@ -635,14 +635,15 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Nine sites ask: one over Socket.IO, eight on a DataChannel (the
+    # Eleven sites ask: one over Socket.IO, ten on a DataChannel (the
     # seventh is a late joiner that lost its channel to the host,
     # specs/late_join_pause.qnt; the eighth the deadline asking again for an
-    # owed "now" resync, specs/resync_reask.qnt). The two that name a target
-    # frame give it to the request, which keeps it after the target's
-    # deadline (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 9
-    assert src.count("_beginResyncRequest()") == 5
+    # owed "now" resync, specs/resync_reask.qnt; the last two the boot sync
+    # and the input stall's, specs/resync_flow.qnt EVERY_REQUEST_NUMBERED).
+    # The two that name a target frame give it to the request, which keeps
+    # it after the target's deadline (specs/resync_flow.qnt, askedAt).
+    assert src.count("_beginResyncRequest(") == 11
+    assert src.count("_beginResyncRequest()") == 7
     assert src.count("_beginResyncRequest(-1, true)") == 1
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
@@ -659,13 +660,28 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 8
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 6
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 10
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 8
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
-    # Sent bare only where no request is marked as out (BOOT-SYNC,
-    # INPUT-STALL-RESYNC): those are not numbered.
-    assert src.count(".send('sync-request-full');") == 2
-    assert ".send(`sync-request-full-at:" not in src
+    # Never sent bare. The boot sync and the input stall's request were, and
+    # their unnumbered answers were applied wherever they found the guest,
+    # even after a newer request (specs/resync_flow.qnt,
+    # bootAnswerAfterANewerRequestTest).
+    assert not re.search(r"""\.send\(['"`]sync-request(?!-id:)""", src)
+    boot = src[src.index("if (_bootDoneForSync && !window._knBootSyncDone) {") :]
+    boot = boot[: boot.index("BOOT-SYNC skipped")]
+    assert "const bootRequestId = _beginResyncRequest();" in boot
+    assert "_sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');" in boot
+    stall = src[src.index("`INPUT-STALL-RESYNC f=${_frameNum}") :]
+    stall = stall[: stall.index("INPUT-STALL-RESYNC send failed")]
+    assert "const stallRequestId = _beginResyncRequest();" in stall
+    assert "_sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');" in stall
+    # A "now" request drops a coordinated target, and the wait at it.
+    for site in (boot, stall):
+        assert site.index("if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;") < site.index(
+            "_beginResyncRequest()"
+        )
+        assert "_syncTargetFrame = -1;" in site
 
     # A new match starts counting again.
     stop = src[src.index("const stopSync = () => {") :]

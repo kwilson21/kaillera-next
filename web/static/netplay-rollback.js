@@ -6598,8 +6598,9 @@
   let _resyncRequestSentAt = 0;
   const RESYNC_REQUEST_TIMEOUT_MS = 8000;
   // A "now" request (no target frame: a reconnect, a network change, a tab
-  // shown again, a missing delta base, the socket fallback) is sent because
-  // this guest's state is known to be wrong. It can go unanswered: the host
+  // shown again, a missing delta base, the socket fallback, the boot sync,
+  // the input stall's) is sent because this guest's state is known to be
+  // wrong. It can go unanswered: the host
   // drops a request inside its rate limit, a channel can lose it, and the
   // guest drops an older request's answer that would take it back. Its
   // deadline let it go and asked nothing, so the guest ran on with the state
@@ -15202,10 +15203,24 @@
           if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
             const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
             if (hostPeer?.dc?.readyState === 'open') {
+              // A "now" request like the others: numbered, out and owed. Sent
+              // bare, its answer came back with no number, which to this
+              // guest is a state the host sent for its own reasons, applied
+              // wherever it finds the guest: arriving after a newer request
+              // it took the guest back 117 frames (specs/resync_flow.qnt,
+              // EVERY_REQUEST_NUMBERED, bootAnswerAfterANewerRequestTest).
+              if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+              _syncTargetFrame = -1;
+              _syncTargetDeadlineAt = 0;
+              const bootRequestId = _beginResyncRequest();
               try {
-                hostPeer.dc.send('sync-request-full');
-                _syncLog(`BOOT-SYNC: guest requesting host state at f=${_frameNum} (JIT boot divergence correction)`);
+                _sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');
+                _syncLog(
+                  `BOOT-SYNC: guest requesting host state at f=${_frameNum} request=${bootRequestId} ` +
+                    '(JIT boot divergence correction)',
+                );
               } catch (e) {
+                _resyncRequestInFlight = false;
                 _syncLog(`BOOT-SYNC send failed: ${e}`);
               }
             }
@@ -17270,9 +17285,17 @@
                 const _hostForResync = Object.values(_peers).find((p) => p.slot === 0);
                 const _hostDcForResync = _hostForResync?.dc;
                 if (_hostDcForResync?.readyState === 'open') {
+                  // Numbered like the boot sync's, and for the same reason: an
+                  // unnumbered answer is applied wherever it finds the guest
+                  // (specs/resync_flow.qnt, EVERY_REQUEST_NUMBERED).
+                  if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
+                  _syncTargetFrame = -1;
+                  _syncTargetDeadlineAt = 0;
+                  const stallRequestId = _beginResyncRequest();
                   try {
-                    _hostDcForResync.send('sync-request-full');
+                    _sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');
                   } catch (_e) {
+                    _resyncRequestInFlight = false;
                     _syncLog(`INPUT-STALL-RESYNC send failed: ${_e}`);
                   }
                 }
