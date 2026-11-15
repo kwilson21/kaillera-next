@@ -218,12 +218,20 @@ def test_a_joiner_that_lost_the_host_resyncs_after_loading():
 
     helper = src[src.index("const _resyncAfterLostHost = (source) => {") :]
     helper = helper[: helper.index("\n  };\n")]
+    # The step is the proved lateJoinLostHostStep (web/src/resync-request.ts):
+    # idle unless marked, a guest, and running.
     assert (
-        "if (!_lateJoinLostHost || _playerSlot === 0 || _phase !== PHASE_RUNNING) {\n"
-        "      observe('idle');\n"
-        "      return;\n"
-        "    }"
+        "const step = window.KNCore.resyncRequest.lateJoinLostHostStep(\n"
+        "      _lateJoinLostHost,\n"
+        "      _playerSlot === 0,\n"
+        "      _phase === PHASE_RUNNING,\n"
+        "      hostDc?.readyState === 'open',\n"
+        "      _resyncRequestInFlight,\n"
+        "      _lateJoinLostHostAsks,\n"
+        "      LATE_JOIN_LOST_HOST_MAX_ASKS,\n"
+        "    );"
     ) in helper
+    assert "if (step === 'idle') return;" in helper
     assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in helper
 
     state = src[src.index("const handleLateJoinState = async (msg) => {") :]
@@ -262,22 +270,19 @@ def test_a_lost_host_resync_that_goes_unanswered_is_asked_again_up_to_a_bound():
     helper = helper[: helper.index("\n  };\n")]
     # Not cleared at send, nor while another request is out.
     send = helper.index("_sendResyncRequest(hostDc, requestId, 'sync-request-full');")
-    in_flight = helper.index("if (_resyncRequestInFlight) {")
+    in_flight = helper.index("if (step === 'inFlight') {")
     assert "_lateJoinLostHost = false;" not in helper[:in_flight]
     assert "_lateJoinLostHost = false;" not in helper[in_flight:send][: helper[in_flight:send].index("\n    }\n")]
     # The cap: checked before each ask, then a visible give-up.
     assert "const LATE_JOIN_LOST_HOST_MAX_ASKS = 3;" in src
-    cap = helper.index("if (_lateJoinLostHostAsks >= LATE_JOIN_LOST_HOST_MAX_ASKS) {")
+    cap = helper.index("if (step === 'giveUp') {")
     assert in_flight < cap < helper.index("_lateJoinLostHostAsks++;") < send
     give_up = helper[cap : helper.index("_lateJoinLostHostAsks++;")]
     assert "_lateJoinLostHost = false;" in give_up
     assert "LATE-JOIN-LOST-HOST-GIVEUP" in give_up
     assert "KNEvent('late-join-lost-host-giveup'" in give_up
-    # Each branch is compared with the proved step (web/src/resync-request.ts)
-    # before it changes anything.
-    assert give_up.index("observe('giveUp');") < give_up.index("_lateJoinLostHost = false;")
-    assert helper.index("observe('ask');\n    _lateJoinLostHostAsks++;") > cap
-    assert "observe('inFlight');" in helper[in_flight : in_flight + 80]
+    # The step decides each branch; nothing compares it any more.
+    assert "observe(" not in helper
     # A failed send asks again, still under the cap.
     catch = helper[helper.index("} catch (e) {") :]
     assert "_resyncRequestInFlight = false;" in catch

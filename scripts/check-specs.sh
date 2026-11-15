@@ -196,7 +196,7 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
 for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
-  resync_flow_asked_from resync_flow_current; do
+  resync_flow_asked_from resync_flow_unnumbered resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
 # A guest stopped at its target has a deadline, a state no newer than the
@@ -214,8 +214,10 @@ $QUINT run "$FLOW" --main=resync_flow_any_answer --invariant=holdWithoutNumbers 
 # lateAnswerTest, lateAnswerAfterTheTargetDeadlineTest and
 # lateAnswerOverTheAwaitedOneTest hold the orderings). The second was
 # violated too while only the frame a request named was checked
-# (resync_flow_frame_named; immediateLateAnswerTest), and is by rule b
-# (resync_flow_asked_from; lateAnswerFromAfterTheAskTest).
+# (resync_flow_frame_named; immediateLateAnswerTest), is by rule b
+# (resync_flow_asked_from; lateAnswerFromAfterTheAskTest), and was while the
+# boot sync and the input stall's request went out with no number
+# (resync_flow_unnumbered; bootAnswerAfterANewerRequestTest).
 $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 # Rule a, not taken, holds them too; it drops the only state coming in
