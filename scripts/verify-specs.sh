@@ -75,6 +75,9 @@ expect_violation "$PAIR" peer_connection_current oneInitiatorPerPair
 expect_violation "$PAIR" peer_connection_current everyWaitHasADeadline
 expect_violation "$PAIR" peer_connection_current staleSignalsAreNotApplied
 expect_violation "$PAIR" peer_connection_before_119 neverEvictsLiveConnection
+# A counter alone for the attempt: a replaced page's candidate reaches its
+# replacement's connection in 5 steps (oldCandidateReachesReplacementConnectionTest).
+expect_violation "$PAIR" peer_connection_counter_only staleSignalsAreNotApplied
 
 PAUSE=specs/late_join_pause.qnt
 verify "$PAUSE" late_join_pause_current allHold
@@ -88,7 +91,14 @@ expect_violation "$PAUSE" late_join_pause_host_side aRepeatedRequestKeepsTheDead
 
 FLOW=specs/resync_flow.qnt
 verify "$FLOW" resync_flow_current allHold
+verify "$FLOW" resync_flow_any_answer holdWithoutNumbers
 expect_violation "$FLOW" resync_flow_before aRequestCanAlwaysEnd
+expect_violation "$FLOW" resync_flow_any_answer onlyItsAnswerEndsARequest
+# The counterexamples to aLateAnswerDoesNotTakeTheGuestBack and
+# theAwaitedAnswerIsNotLost on resync_flow_any_answer are over ten steps
+# long, beyond this bound; lateAnswerTest,
+# lateAnswerAfterTheTargetDeadlineTest and lateAnswerOverTheAwaitedOneTest
+# hold them.
 
 TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer

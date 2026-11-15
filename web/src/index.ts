@@ -7,6 +7,7 @@ import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { addressMapFor } from './address-maps.ts';
 import { bootTimedOut } from './boot.ts';
+import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
@@ -25,10 +26,14 @@ import {
   decodeTokenMessage,
   decodeUsersUpdated,
 } from './protocol.ts';
+import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
 import { menuAutopilot } from './page/menu-autopilot.ts';
 import { rollbackTimeline } from './page/rollback-timeline.ts';
+import { startSwitch2Usb } from './page/switch2-usb.ts';
+import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
+import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
 import { installShared } from './page/shared.ts';
@@ -69,12 +74,14 @@ import { rejoinMachine, RejoinResults, RejoinTransport, type RejoinedRoom } from
 import { checkRelayed } from './relay.ts';
 import { meshHealTargets } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
+import { installSite, KNSite } from './site/index.ts';
 import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
 import * as streamingInput from './streaming/input.ts';
 import { createStreamingObserver } from './streaming/observe.ts';
 import * as streamingRoster from './streaming/roster.ts';
 import * as streamingSignal from './streaming/signal.ts';
+import * as streamingVideo from './streaming/video.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
@@ -289,14 +296,22 @@ export const KNCore = {
   startLateJoinWait,
   startRejoin,
   shouldResumeRomTransfer,
-  /** The play page's own logic, moving here from web/static/play.js piece by piece. */
+  /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */
+  demo,
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
     menuAutopilot,
     rollbackTimeline,
+    startAudio,
     startCapture,
+    startSwitch2Usb,
+    startControllerSettings,
     startVisionClient,
+    startVirtualGamepad,
   },
+  /** What these pages share with the front page; the same object is `window.KNSite` on both. */
+  site: KNSite,
+  /** The play page's own logic, moving here from web/static/play.js piece by piece. */
   play: {
     escapeHtml,
     inviteUrl,
@@ -329,6 +344,7 @@ export const KNCore = {
     ...streamingRoster,
     ...streamingSignal,
     ...streamingInput,
+    ...streamingVideo,
     createObserver: createStreamingObserver,
   },
   protocol: {
@@ -360,4 +376,5 @@ if (typeof window !== 'undefined') {
   installGamepadManager();
   installDiagnostics();
   installDesyncDetector();
+  installSite();
 }

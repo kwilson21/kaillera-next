@@ -66,7 +66,70 @@ export const isRoomAnswer = (value: unknown): value is RoomAnswer =>
   mayHave(value, 'romName', 'string') &&
   mayHave(value, 'closed', 'boolean');
 
+// ── GET /list ───────────────────────────────────────────────────────────────
+
+/** A JSON value: what a response body parses to. */
+export type Json = string | number | boolean | null | readonly Json[] | { readonly [field: string]: Json };
+
+/** Any parsed body is JSON; this only names it. */
+export const isJson = (body: unknown): body is Json => body !== undefined;
+
+/** A listed room as the board needs it. */
+export interface BoardRoom {
+  readonly room_code: string;
+  readonly status: string;
+  readonly player_count: number;
+  readonly max_players: number;
+  readonly spectator_count: number;
+  readonly max_spectators: number;
+  readonly host_name?: string | null;
+  /** The game's name, as the server worked it out. */
+  readonly game?: string | null;
+  /** When the match started, in seconds since the epoch; null in the lobby. */
+  readonly started_at?: number | null;
+  /** The room's latest frame, as a path on the game server; null when it has none. */
+  readonly frame_url?: string | null;
+  readonly frame_age_s?: number | null;
+}
+
+export const isBoardRoom = (value: unknown): value is BoardRoom =>
+  hasText(value, 'room_code') &&
+  value.room_code !== '' &&
+  hasText(value, 'status') &&
+  hasNumber(value, 'player_count') &&
+  hasNumber(value, 'max_players') &&
+  hasNumber(value, 'spectator_count') &&
+  hasNumber(value, 'max_spectators') &&
+  mayHave(value, 'host_name', 'string') &&
+  mayHave(value, 'game', 'string') &&
+  mayHave(value, 'started_at', 'number') &&
+  mayHave(value, 'frame_url', 'string') &&
+  mayHave(value, 'frame_age_s', 'number');
+
+/**
+ * The rooms in a `/list` answer. A body that is not a list is an empty
+ * board, and a row that is not a listed room is left out, as the page always
+ * did for a row with no room code.
+ */
+export const boardRooms = (body: Json): BoardRoom[] => (Array.isArray(body) ? body.filter(isBoardRoom) : []);
+
+// ── GET /api/stats/public ───────────────────────────────────────────────────
+
+/** The front page's numbers. Real or absent: a number the server has not counted is null. */
+export interface PublicStats {
+  readonly matches_this_week?: number | null;
+  readonly people_playing_now?: number | null;
+}
+
+export const isPublicStats = (value: unknown): value is PublicStats =>
+  !Array.isArray(value) &&
+  mayHave(value, 'matches_this_week', 'number') &&
+  mayHave(value, 'people_playing_now', 'number');
+
 // ── Requests ────────────────────────────────────────────────────────────────
+
+/** A request's outcome: the body that was accepted, or (where a 404 is an answer) nothing there. */
+type Answer<T> = { readonly there: true; readonly body: T } | { readonly there: false };
 
 const request = async <T>(
   host: NetHost,
@@ -74,16 +137,16 @@ const request = async <T>(
   timeoutMs: number,
   accepts: (body: unknown) => body is T,
   missingIsAnAnswer: boolean,
-): Promise<T | null> => {
+): Promise<Answer<T>> => {
   const ctl = new AbortController();
   const timer = host.setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await host.fetch(url, { signal: ctl.signal, cache: 'no-store' });
-    if (missingIsAnAnswer && res.status === 404) return null;
+    if (missingIsAnAnswer && res.status === 404) return { there: false };
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body: unknown = await res.json();
     if (!accepts(body)) throw new Error('The answer does not fit');
-    return body;
+    return { there: true, body };
   } finally {
     host.clearTimeout(timer);
   }
@@ -100,15 +163,18 @@ export const getJSON = async <T>(
   timeoutMs: number,
   accepts: (body: unknown) => body is T,
 ): Promise<T> => {
-  const body = await request(host, url, timeoutMs, accepts, false);
-  if (body === null) throw new Error('No answer');
-  return body;
+  const answer = await request(host, url, timeoutMs, accepts, false);
+  if (!answer.there) throw new Error('No answer');
+  return answer.body;
 };
 
 /** `getJSON`, except that a 404 is an answer: null, the thing asked for is not there. */
-export const getJSONIfThere = <T>(
+export const getJSONIfThere = async <T>(
   host: NetHost,
   url: string,
   timeoutMs: number,
   accepts: (body: unknown) => body is T,
-): Promise<T | null> => request(host, url, timeoutMs, accepts, true);
+): Promise<T | null> => {
+  const answer = await request(host, url, timeoutMs, accepts, true);
+  return answer.there ? answer.body : null;
+};
