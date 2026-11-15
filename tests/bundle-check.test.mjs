@@ -60,6 +60,16 @@ test('a build script or dependency manifest newer than the bundle is refused', (
   assert.equal(localBundleProblem(root), null);
 });
 
+test("the proofs' generated files beside the sources do not count", () => {
+  const root = tree({ sourceAt: 1000, bundle: 'x', bundleAt: 2000 });
+  for (const name of ['a.dfy', 'a.dfy.gen']) {
+    const file = path.join(root, 'web', 'src', 'play', name);
+    fs.writeFileSync(file, '// generated\n');
+    fs.utimesSync(file, 3000, 3000);
+  }
+  assert.equal(localBundleProblem(root), null);
+});
+
 test('a bundle built after every source passes', () => {
   assert.equal(localBundleProblem(tree({ sourceAt: 1000, bundle: 'x', bundleAt: 2000 })), null);
 });

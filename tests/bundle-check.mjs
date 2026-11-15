@@ -17,17 +17,22 @@ import path from 'node:path';
 
 const BUNDLE = path.join('web', 'static', 'dist', 'kn-core.js');
 const SOURCES = path.join('web', 'src');
+// What the bundler reads there. The proofs' generated files (.dfy, .dfy.gen)
+// sit beside the sources and are rewritten by `lsc gen-check`; they are not
+// part of the bundle.
+const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.mjs', '.json']);
 // What else makes the bundle's bytes: the build script and the dependencies.
 const BUILD_INPUTS = [path.join('scripts', 'build-web.mjs'), 'package.json', 'package-lock.json'];
 const SERVED_PATH = '/static/dist/kn-core.js';
 // A server that takes the connection and never answers fails the check, not the run.
 const FETCH_TIMEOUT_MS = 10000;
 
-/** The newest modification time (ms) of any file under `dir`, and that file. */
+/** The newest modification time (ms) of any source file under `dir`, and that file. */
 export const newestUnder = (dir) => {
   let newest = { file: null, mtimeMs: 0 };
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
+    if (!entry.isDirectory() && !SOURCE_EXTENSIONS.has(path.extname(entry.name))) continue;
     const candidate = entry.isDirectory() ? newestUnder(full) : { file: full, mtimeMs: fs.statSync(full).mtimeMs };
     if (candidate.mtimeMs > newest.mtimeMs) newest = candidate;
   }
