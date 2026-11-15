@@ -6451,7 +6451,7 @@
   // The frame the newest request named (-1 = it named none). A late answer
   // from before it is dropped whether or not the target is still live: the
   // target's deadline gives the target up, not the frame the guest asked at
-  // (specs/resync_flow.qnt, beforeTheFrameAsked).
+  // (specs/resync_flow.qnt, lateAndBehind).
   let _resyncRequestAt = -1;
   const _requestIdFrom = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
   const _beginResyncRequest = (at = -1) => {
@@ -6502,15 +6502,20 @@
     _resyncObserve('answers-an-older-request', answerFor > 0 && answerFor !== _resyncRequestId, (rules) =>
       rules.answersAnOlderRequest(answerFor, _resyncRequestId),
     );
-  // A state answering an older request, from before the frame the newest one
-  // named: applied, it would take this guest back below that frame.
-  const _isLateAnswerBeforeFrameAsked = (state) =>
+  // A state answering an older request, from before the frame this guest is
+  // on or the frame the newest request named: applied, it would take this
+  // guest back. Whether or not the newest request named a frame: after one
+  // asked "now" (reconnect, network change, lifecycle, a missing delta base,
+  // the late-join lost-host resync) a late answer was applied whatever its
+  // frame (specs/resync_flow.qnt, immediateLateAnswerTest).
+  const _isLateAnswerBehind = (state) =>
     !!state &&
     _resyncObserve(
-      'late-answer-before-frame-asked',
-      _answersAnOlderRequest(state.answerFor || 0) && _resyncRequestAt > 0 && state.frame < _resyncRequestAt,
+      'late-answer-behind',
+      _answersAnOlderRequest(state.answerFor || 0) &&
+        (state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt)),
       (rules) =>
-        rules.isLateAnswerBeforeFrameAsked(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt),
+        rules.isLateAnswerBehind(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt, _frameNum),
     );
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
@@ -14296,13 +14301,14 @@
     // kn_set_frame then, so JS would rewind its frame counter while C kept
     // its own and finished the old replay over the new state (the peers
     // split from that frame). Hold the state until the replay finishes.
-    // The answer to a request given up on, from before the frame the newest
-    // request named: applied, it would take this guest back below that frame
-    // (specs/resync_flow.qnt, aLateAnswerDoesNotTakeTheGuestBack). Dropped
-    // here, before either branch below, so it is dropped after the target's
-    // deadline too (lateAnswerAfterTheTargetDeadlineTest). A wait at the
+    // The answer to a request given up on, from before this guest's frame or
+    // the frame the newest request named: applied, it would take this guest
+    // back (specs/resync_flow.qnt, aLateAnswerDoesNotTakeTheGuestBack).
+    // Dropped here, before either branch below, so it is dropped after the
+    // target's deadline too (lateAnswerAfterTheTargetDeadlineTest), and on
+    // the tick the guest moves past a late answer it held. A wait at the
     // target goes on, to that deadline (I1).
-    if (_isLateAnswerBeforeFrameAsked(_pendingResyncState)) {
+    if (_isLateAnswerBehind(_pendingResyncState)) {
       _syncLog(
         `SYNC-LATE-ANSWER-DROPPED f=${_frameNum} answerFor=${_pendingResyncState.answerFor} ` +
           `newest=${_resyncRequestId} frame=${_pendingResyncState.frame} asked=${_resyncRequestAt} ` +
