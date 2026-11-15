@@ -62,7 +62,13 @@ import {
   romHashMismatch,
 } from './play/rom.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
-import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts';
+import {
+  checkServerMessage,
+  createBoundary,
+  createProtocolObserver,
+  takeAck,
+  takeServerMessage,
+} from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, sendPaced, transferStillFor } from './sync-send.ts';
 import { rosterKey } from './peer-identity.ts';
@@ -404,6 +410,9 @@ export const KNCore = {
     checkPeerText,
     checkRelay,
     createObserver: createProtocolObserver,
+    createBoundary,
+    takeServerMessage,
+    takeAck,
   },
 };
 

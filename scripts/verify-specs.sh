@@ -252,6 +252,18 @@ resync_reask() {
   expect_violation "$REASK" resync_reask_coordinated_let_go aResyncAskedForIsNotForgotten
 }
 
+rom_at_start() {
+  local ROM_START=specs/rom_at_start.qnt
+  verify "$ROM_START" rom_at_start_current allHold
+  # Load, the server hears it, clear: 3 steps (deletedRomTest).
+  expect_violation "$ROM_START" rom_at_start_before serverKnowsTheRom
+  # The same, Start before the clear arrives, the page boots: 5 steps
+  # (startBeforeTheClearArrivesTest).
+  expect_violation "$ROM_START" rom_at_start_clear_only neverBootsWithoutRom
+  # Load, heard, the socket drops, clear, rejoin: 5 steps (clearedWhileDownTest).
+  expect_violation "$ROM_START" rom_at_start_no_rejoin serverKnowsTheRom
+}
+
 ring_after_resync() {
   local RING=specs/ring_after_resync.qnt
   verify "$RING" ring_after_resync_current allHold
@@ -270,7 +282,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask
-  ring_after_resync
+  rom_at_start ring_after_resync
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -281,7 +293,7 @@ SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh"   # ~6.5 min
-  "peer_identity rom_transfer peer_connection"                    # ~6.5 min
+  "peer_identity rom_transfer peer_connection rom_at_start"       # ~6.5 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync" # ~5.5 min
 )
 
