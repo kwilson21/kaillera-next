@@ -20,28 +20,18 @@ import sys
 from functools import wraps
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
-# ── Mode coercion (back-compat) ──────────────────────────────────────────────
-# Pre-rename clients send mode="lockstep". The product-facing engine is now
-# "rollback" (same engine, renamed). Coerce BEFORE Literal validation so old
-# clients keep working until cached tabs churn out. Removable in a follow-up
-# deploy.
-
-
-class _ModeCompatMixin:
-    # The generated client schema does not accept "lockstep": it describes what
-    # a current page sends. scripts/gen_protocol.py lists this validator as
-    # known; any other validator stops generation until it is handled there.
-    @field_validator("mode", mode="before")
-    @classmethod
-    def _coerce_legacy_mode(cls, v: Any) -> Any:
-        if v == "lockstep":
-            return "rollback"
-        return v
-
+# How a match is played. rollback: every player runs the game, predicts the
+# others' late inputs and replays when a guess was wrong. lockstep: every
+# player runs the game and a frame runs only once every player's input for it
+# is here (no prediction). streaming: the host runs the game and streams it.
+# ("lockstep" was also the old name of rollback, until the rename; pages
+# reload on every deploy and rooms last hours, so nothing sends it in that
+# sense any more.)
+GameMode = Literal["rollback", "lockstep", "streaming"]
 
 # ── Decorator ────────────────────────────────────────────────────────────────
 
@@ -145,8 +135,8 @@ class SetNamePayload(BaseModel):
 # ── start-game ───────────────────────────────────────────────────────────────
 
 
-class StartGamePayload(_ModeCompatMixin, BaseModel):
-    mode: Literal["rollback", "streaming"] = "rollback"
+class StartGamePayload(BaseModel):
+    mode: GameMode = "rollback"
     resyncEnabled: bool = True
     romHash: str | None = None
     gameId: str | None = Field(default=None, max_length=32)
@@ -175,8 +165,8 @@ class EndGamePayload(BaseModel):
 # ── set-mode ─────────────────────────────────────────────────────────────────
 
 
-class SetModePayload(_ModeCompatMixin, BaseModel):
-    mode: Literal["rollback", "streaming"] = "rollback"
+class SetModePayload(BaseModel):
+    mode: GameMode = "rollback"
 
 
 class SetGameIdPayload(BaseModel):
@@ -265,7 +255,6 @@ class FeedbackPayload(BaseModel):
 # client schema) before it ships.
 
 RoomStatus = Literal["lobby", "playing"]
-GameMode = Literal["rollback", "streaming"]
 
 
 class _ServerMessage(BaseModel):

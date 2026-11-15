@@ -8,11 +8,11 @@
  */
 import { Schema } from 'effect';
 
+export const GameMode = Schema.Literals(['rollback', 'lockstep', 'streaming']);
+export type GameMode = typeof GameMode.Type;
+
 export const RoomStatus = Schema.Literals(['lobby', 'playing']);
 export type RoomStatus = typeof RoomStatus.Type;
-
-export const GameMode = Schema.Literals(['rollback', 'streaming']);
-export type GameMode = typeof GameMode.Type;
 
 export const OpenRoomExtra = Schema.Struct({
   sessionid: Schema.optional(Schema.String),

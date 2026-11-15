@@ -645,7 +645,15 @@
   let _playerSlot = -1; // 0-3 for players, null for spectators
   let _isSpectator = false;
   let _useCRollback = false; // true when C-level rollback engine is active
-  let _predictionsPaused = false; // demo-only: pause C prediction generation without tearing down rollback state
+  // Lockstep: the C engine runs but predicts nothing; a frame runs only with
+  // every player's input for it. Set for the whole match when the host picked
+  // lockstep (config.lockstep), or toggled by the demo page.
+  let _predictionsPaused = false;
+  // The apply frame a lockstep tick is waiting on, and since when (-1/0: not
+  // waiting). Ends at the deadline by dropping the player (lockstepStep).
+  let _lockstepWaitFrame = -1;
+  let _lockstepWaitStart = 0;
+  let _lockstepWaitLastLogAt = 0;
   let _demoMode = false; // demo-only: disable C pacing-throttle so the engine runs full speed, predicts, and rolls back visibly under simulated lag (instead of pacing to match the slow peer, which feels identical to lockstep)
   let _rbReplayLogged = false; // prevents log spam during amortized replay
   // Tracks step count within the current rollback's replay catch-up.
@@ -6184,6 +6192,9 @@
       // T4: expose the transport mode in the per-match context so the
       // session log analyzer can group matches by mode without parsing logs.
       rbTransport: _useCRollback ? _rbTransport : 'n/a',
+      // The host picked lockstep: nothing predicted (the session log's mode
+      // stays the engine's, 'rollback').
+      lockstep: _predictionsPaused,
     },
     // Input audit records the server hasn't acked yet (see _auditPending).
     audit: { epoch: _auditEpoch, entries: _auditPending.slice(0, AUDIT_FLUSH_MAX) },
@@ -9086,6 +9097,9 @@
       _rbInputStallKey = '';
       _rbInputStallStartTime = 0;
     }
+    // A lockstep wait may be on the peer being reset.
+    _lockstepWaitFrame = -1;
+    _lockstepWaitStart = 0;
   };
 
   const resetPeerRollbackTransport = (peer, sid, reason) => {
@@ -14117,6 +14131,8 @@
       _peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);
     }
     if (_rbInputStallStartTime > 0) _rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);
+    // The lockstep wait drops a player at its deadline too (specs/tick_deadlines.qnt).
+    if (_lockstepWaitStart > 0) _lockstepWaitStart = Math.min(now, _lockstepWaitStart + gap);
     // The pacing throttle's deadline drops a peer too, and is checked on this
     // tick before the throttle can end (specs/tick_deadlines.qnt): a page
     // that froze while held back would drop a peer that never stopped sending.
@@ -14993,36 +15009,68 @@
         // ── Drain queued remote inputs into C engine ──────────────────────
         _drainPendingCInputs(tickMod);
 
-        // ── DEMO-PAUSED: third mode in the hybrid input-stall ladder ────────
-        // When the demo orchestrator pauses predictions to simulate lockstep
-        // behavior under jitter, stall like BOOT/STRICT-MENU do — but only if
-        // no replay is queued and not all input peers have the apply frame.
-        // Use the non-clearing peek; the clearing variant would swallow the
-        // replay before kn_pre_tick consumes it (kn_rollback.c:933-948).
+        // ── LOCKSTEP: a frame runs only with every player's input ──────────
+        // Lockstep mode (and the demo's paused predictions): nothing is
+        // predicted, so a missing input is waited for. The wait asks again
+        // and then drops the player at its deadline (web/src/lockstep-wait.ts,
+        // specs/tick_deadlines.qnt): one lost input must not hold the match
+        // for ever. A replay already queued runs (non-clearing peek: the
+        // clearing one would swallow it before kn_pre_tick consumes it).
         if (_predictionsPaused) {
           const pendingReplay = (tickMod._kn_peek_pending_rollback?.() ?? -1) >= 0;
-          if (!pendingReplay) {
-            const applyFrame = _frameNum - DELAY_FRAMES;
-            // applyFrame < 0 means we haven't advanced far enough for any
-            // remote input to exist for this frame. Mirrors the C engine's
-            // `if (apply_frame >= 0)` guard at kn_rollback.c:1342. Without
-            // this skip, demo's predictions-paused mode hangs at frame 0
-            // forever (applyFrame=-DELAY_FRAMES, never resolves).
-            if (applyFrame >= 0) {
-              let allInputsPresent = true;
-              for (const p of activePeers) {
-                if (p.slot === _playerSlot) continue;
-                if (_peerPhantom[p.slot]) continue;
-                if (_remoteInputs[p.slot]?.[applyFrame] === undefined) {
-                  allInputsPresent = false;
-                  break;
-                }
+          const applyFrame = _frameNum - DELAY_FRAMES;
+          // applyFrame < 0: no remote input exists for this frame yet (the C
+          // engine's own `apply_frame >= 0` guard, kn_rollback.c).
+          if (!pendingReplay && applyFrame >= 0) {
+            const missingSlots = [];
+            for (const p of activePeers) {
+              if (p.slot === _playerSlot) continue;
+              if (_peerPhantom[p.slot]) continue;
+              if (_remoteInputs[p.slot]?.[applyFrame] === undefined) missingSlots.push(p.slot);
+            }
+            const nowLockstep = performance.now();
+            if (missingSlots.length && _lockstepWaitFrame !== applyFrame) {
+              _lockstepWaitFrame = applyFrame;
+              _lockstepWaitStart = nowLockstep;
+            }
+            const waitedMs = missingSlots.length ? nowLockstep - _lockstepWaitStart : 0;
+            const step = window.KNCore.lockstepStep(
+              missingSlots.length,
+              waitedMs,
+              MAX_STALL_MS,
+              MAX_STALL_MS + RESEND_TIMEOUT_MS,
+            );
+            if (step === 'drop') {
+              for (const slot of missingSlots) {
+                markPeerPhantomForStallTimeout(
+                  slot,
+                  'lockstep-wait-timeout',
+                  `waitedMs=${Math.round(waitedMs)} apply=${applyFrame}`,
+                );
               }
-              if (!allInputsPresent) {
-                if (_stallStart === 0) _stallStart = performance.now();
-                _markTickReturn('skip:demo-paused-stall');
-                return; // stall — same shape as BOOT/STRICT-MENU early returns
+              _syncLog(
+                `LOCKSTEP-WAIT-TIMEOUT f=${_frameNum} apply=${applyFrame} slots=[${missingSlots.join(',')}] ` +
+                  `waitedMs=${Math.round(waitedMs)} — dropping, playing on without them`,
+              );
+              _lockstepWaitFrame = -1;
+              _lockstepWaitStart = 0;
+            } else if (step !== 'run') {
+              if (step === 'askAgain') {
+                _requestStrictMenuResends(activePeers, missingSlots, applyFrame, nowLockstep, 'lockstep');
               }
+              if (nowLockstep - _lockstepWaitLastLogAt >= 1000) {
+                _lockstepWaitLastLogAt = nowLockstep;
+                _syncLog(
+                  `LOCKSTEP-WAIT f=${_frameNum} apply=${applyFrame} slots=[${missingSlots.join(',')}] ` +
+                    `waitedMs=${Math.round(waitedMs)}${step === 'askAgain' ? ' (asked again)' : ''}`,
+                );
+              }
+              if (_stallStart === 0) _stallStart = nowLockstep;
+              _markTickReturn('skip:lockstep-wait');
+              return;
+            } else {
+              _lockstepWaitFrame = -1;
+              _lockstepWaitStart = 0;
             }
           }
           _stallStart = 0;
@@ -18061,6 +18109,9 @@
     // Apply pre-game options
     _syncEnabled = config.resyncEnabled !== false; // default: true
     _lateJoin = !!config.lateJoin;
+    // Before the delay is worked out: lockstep sizes it to the whole trip.
+    _predictionsPaused = !!config.lockstep;
+    if (_predictionsPaused) _syncLog('LOCKSTEP mode: predictions off for the match');
 
     window._playerSlot = _playerSlot;
     window._isSpectator = _isSpectator;
@@ -18150,6 +18201,8 @@
     _startTime = 0;
     DELAY_FRAMES = DEFAULT_DELAY_FRAMES;
     _predictionsPaused = false;
+    _lockstepWaitFrame = -1;
+    _lockstepWaitStart = 0;
     _hudRollbackEvents = 0;
     _hudRollbackDepthSamples = [];
     _hudEventTimestamps = [];

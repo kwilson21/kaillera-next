@@ -139,6 +139,8 @@ expect_violation "$FLOW" resync_flow_any_answer onlyItsAnswerEndsARequest
 TICK=specs/tick_deadlines.qnt
 verify "$TICK" tick_deadlines_current ownFreezeIsNotHeldAgainstAPeer
 expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
+verify "$TICK" tick_deadlines_current everyWaitHasADeadline
+expect_violation "$TICK" tick_deadlines_before_lockstep_mode everyWaitHasADeadline
 
 
 RESYNC=specs/resync_inputs.qnt

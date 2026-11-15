@@ -88,16 +88,12 @@
   let mySlot = null;
   let coreFatal = false;
 
-  // Coerce legacy/unknown mode strings to the canonical set. Used at every
-  // mode-intake boundary (URL, dropdown, users-updated, game-started, REST,
-  // data-message). The compat alias for the pre-rename "lockstep" value
-  // becomes "rollback" so cached share links and pre-deploy clients keep
-  // working. Removable once cached tabs churn out post-deploy.
-  const normalizeMode = (raw) => {
-    if (raw === 'lockstep') return 'rollback';
-    if (raw === 'rollback' || raw === 'streaming') return raw;
-    return 'rollback';
-  };
+  // The mode at every intake (URL, dropdown, users-updated, game-started,
+  // REST, data-message): rollback, lockstep or streaming, anything else
+  // rollback (web/src/play/mode.ts). Rollback and lockstep both run the game
+  // on every page; only streaming does not.
+  const normalizeMode = window.KNCore.play.mode.normalizeMode;
+  const everyoneRunsTheGame = window.KNCore.play.mode.everyoneRunsTheGame;
 
   const emulatorMissing = () => {
     const missing = [];
@@ -1030,7 +1026,7 @@
         });
         KNEvent('room_created', '', { mode });
         sendDeviceType();
-        if (mode === 'rollback' || mode === 'streaming') {
+        {
           socket.emit('data-message', { type: 'mode-select', mode });
           socket.emit('set-mode', { mode });
         }
@@ -1339,7 +1335,12 @@
       // Re-emit rom-ready when switching to rollback so the host's "Waiting for ROMs"
       // check clears for guests who had already declared ROM in streaming mode.
       // Skip if ROM hash doesn't match the host's (guest has wrong cached ROM).
-      if (prevMode !== 'rollback' && mode === 'rollback' && localRomLoaded() && (isHost || !hostRomMismatch())) {
+      if (
+        !everyoneRunsTheGame(prevMode) &&
+        everyoneRunsTheGame(mode) &&
+        localRomLoaded() &&
+        (isHost || !hostRomMismatch())
+      ) {
         notifyRomReady();
       }
     }
@@ -1407,7 +1408,7 @@
     }
 
     if (!isHost && !isSpectator && nowPlayer && mode !== 'streaming') {
-      releaseUnsupportedPlayer("The host switched to rollback, which this browser can't run — you're now watching.");
+      releaseUnsupportedPlayer(`The host switched to ${mode}, which this browser can't run — you're now watching.`);
     }
 
     // Diff for toasts
@@ -1704,15 +1705,13 @@
     data = { ...data, sender: from.sid };
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
-      const incoming = normalizeMode(data.mode);
-      if (incoming !== 'rollback' && incoming !== 'streaming') return;
-      mode = incoming;
+      mode = normalizeMode(data.mode);
       const modeSel = document.getElementById('mode-select');
       if (modeSel) modeSel.value = mode;
       updateRomSharingUI();
       if (lastUsersData) updateStartButton(lastUsersData.players || {});
       if (mode !== 'streaming' && !isHost && !isSpectator) {
-        releaseUnsupportedPlayer("The host switched to rollback, which this browser can't run — you're now watching.");
+        releaseUnsupportedPlayer(`The host switched to ${mode}, which this browser can't run — you're now watching.`);
       }
     }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
@@ -2623,7 +2622,7 @@
 
     // If game is running and we were waiting for the ROM (connect-only mode),
     // hide overlay, show toolbar, and boot the emulator
-    if (isGameRunning() && !window.EJS_emulator && (isHost || mode !== 'rollback')) {
+    if (isGameRunning() && !window.EJS_emulator && (isHost || !everyoneRunsTheGame(mode))) {
       hideOverlay();
       showToolbar();
       bootEmulator();
@@ -3479,7 +3478,7 @@
         const _detected = window.GamepadManager ? GamepadManager.getDetected() : [];
         if (_detected.length > 0) VirtualGamepad.setVisible(false);
       }
-      if (!isHost && mode === 'rollback') {
+      if (!isHost && everyoneRunsTheGame(mode)) {
         console.log('[play] initEngine: guest rollback boot deferred until gesture');
       } else {
         ensureEmulatorBooted();
@@ -3507,6 +3506,9 @@
       playerName,
       gameElement: document.getElementById('game'),
       resyncEnabled,
+      // Lockstep: the rollback engine with nothing predicted (every frame
+      // waits for every player's input).
+      lockstep: mode === 'lockstep',
       romHash: _romHash ?? null,
       gameId: _gameId ?? null,
       uploadToken: _uploadToken,
@@ -4832,7 +4834,7 @@
   };
 
   const selectedModeIsRollback = () =>
-    normalizeMode(document.getElementById('mode-select')?.value || mode) === 'rollback';
+    everyoneRunsTheGame(normalizeMode(document.getElementById('mode-select')?.value || mode));
 
   const updatePlayerControlsVisibility = (isRollbackMode = selectedModeIsRollback()) => {
     const playerControls = document.getElementById('player-controls');
@@ -5308,7 +5310,7 @@
       modeSelect.value = mode;
       let _romSharingBeforeStreamingMode = false;
       const updateOpts = () => {
-        const isRollback = normalizeMode(modeSelect.value) === 'rollback';
+        const isRollback = everyoneRunsTheGame(normalizeMode(modeSelect.value));
         mode = normalizeMode(modeSelect.value);
         rollbackOpts.style.display = isRollback ? '' : 'none';
         syncDelayPickerPlacement(isRollback);

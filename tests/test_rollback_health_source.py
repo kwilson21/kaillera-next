@@ -43,7 +43,7 @@ def test_rollback_stall_sites_have_wall_clock_action_markers():
     src = LOCKSTEP_JS.read_text()
     doc = INVARIANTS_DOC.read_text()
 
-    for marker in ("MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT"):
+    for marker in ("MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT", "LOCKSTEP-WAIT-TIMEOUT"):
         assert marker in src
         assert marker in doc
 

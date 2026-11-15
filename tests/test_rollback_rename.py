@@ -50,24 +50,21 @@ def test_play_html_loads_rollback_engine_first_then_shim():
     )
 
 
-def test_mode_select_dropdown_offers_rollback_and_streaming_only():
+def test_mode_select_dropdown_offers_the_three_modes():
     src = PLAY_HTML.read_text()
     assert '<option value="rollback">Rollback</option>' in src
+    # Lockstep is its own mode now (no prediction), not the old name of rollback.
+    assert '<option value="lockstep">Lockstep</option>' in src
     assert '<option value="streaming">Streaming</option>' in src
-    # The legacy option must be gone from the dropdown.
-    assert '<option value="lockstep">' not in src
 
 
-def test_play_js_normalizes_legacy_mode_at_intake():
-    """play.js has a single normalizeMode helper used at every mode-intake
-    boundary (URL params, users-updated, data-message, dropdown). The
-    helper coerces legacy 'lockstep' to 'rollback'."""
+def test_play_js_reads_every_mode_through_one_rule():
+    """play.js reads the mode at every intake (URL params, users-updated,
+    data-message, dropdown) through KNCore.play.mode.normalizeMode."""
     src = PLAY_JS.read_text()
-    assert "const normalizeMode = (raw) =>" in src
-    assert "if (raw === 'lockstep') return 'rollback';" in src
-    # Default mode literal flipped.
+    assert "const normalizeMode = window.KNCore.play.mode.normalizeMode;" in src
     assert "let mode = 'rollback';" in src
-    # Engine dispatch uses the new global.
+    # Rollback and lockstep both use the rollback engine.
     assert "window.NetplayRollback" in src
 
 
@@ -78,7 +75,6 @@ def test_core_redirector_loads_patched_core_for_rollback_mode():
     only skips the redirector for streaming."""
     src = CORE_REDIRECTOR.read_text()
     assert "if (mode === 'streaming') {" in src
-    assert "rawMode === 'lockstep' ? 'rollback' : rawMode" in src
 
 
 def test_engine_getinfo_reports_rollback_mode():

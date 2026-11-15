@@ -196,6 +196,8 @@
  *     candidate map for a ROM that has none yet): the pages run the
  *     detector with it (?desync=force&desyncMap=) and ADDRESS_MAP_CHECK
  *     reads through it.
+ *   MODE=rollback | lockstep   How the host plays the match (lockstep: nothing
+ *     predicted, every frame waits for both players' inputs). Default rollback.
  *   MENU_AUTOPILOT=any-fighter | ssb64   any-fighter: the autopilot takes
  *     whatever fighter its puck lands on and the stage the cursor starts on,
  *     for a ROM whose menus are laid out differently from SSB64's (Smash
@@ -225,6 +227,12 @@ import {
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
 const LAT = Number(process.env.LAT || 50); // one-way ms
+// How the match is played: rollback (default) or lockstep (nothing predicted).
+const MODE = process.env.MODE || 'rollback';
+if (!['rollback', 'lockstep'].includes(MODE)) {
+  console.log(`MODE=${MODE} invalid: "rollback" or "lockstep"`);
+  process.exit(1);
+}
 const JITTER = Number(process.env.JITTER || 0);
 const BATTLE_SECONDS = Number(process.env.BATTLE_SECONDS || 60);
 // Block the host's (or guest's) main thread this long mid-battle (a frozen
@@ -568,7 +576,7 @@ const guest = await mkPage(guestBrowser, 'guest', {
   hidden: HIDE_GUEST_MS > 0,
   suspendAudio: SUSPEND_GUEST_AUDIO,
 });
-await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=rollback${QUERY}`);
+await host.goto(`${URL}/play.html?room=${room}&host=1&name=Host&mode=${MODE}${QUERY}`);
 await host.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
 await guest.goto(`${URL}/play.html?room=${room}&name=Guest${QUERY}`);
 await guest.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
@@ -1472,6 +1480,23 @@ const recoveryIntegrity = {
 
 const summary = {
   room,
+  mode: MODE,
+  // Lockstep: each page logged that it predicts nothing, and how often a
+  // missing input was given up on (each drops the other player).
+  ...(MODE === 'lockstep'
+    ? {
+        lockstep: {
+          predictionsOff: {
+            host: H.sync.includes('LOCKSTEP mode: predictions off'),
+            guest: G.sync.includes('LOCKSTEP mode: predictions off'),
+          },
+          waitTimeouts: {
+            host: (H.sync.match(/LOCKSTEP-WAIT-TIMEOUT/g) || []).length,
+            guest: (G.sync.match(/LOCKSTEP-WAIT-TIMEOUT/g) || []).length,
+          },
+        },
+      }
+    : {}),
   ...(ADDRESS_MAP_CHECK
     ? { addressMapCheck: { rom: H.mapRom, host: addressMapChecksOf(H), guest: addressMapChecksOf(G) } }
     : {}),
@@ -1717,5 +1742,7 @@ const failed =
   minGameFpsFailed ||
   (THROTTLE_GUEST && !throttleFlipped) ||
   hideGuestFailed ||
-  suspendGuestAudioFailed;
+  suspendGuestAudioFailed ||
+  // A lockstep run whose pages did not turn predictions off tested rollback.
+  (MODE === 'lockstep' && !(summary.lockstep.predictionsOff.host && summary.lockstep.predictionsOff.guest));
 process.exit(failed ? 1 : 0);
