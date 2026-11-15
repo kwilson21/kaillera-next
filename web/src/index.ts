@@ -78,7 +78,7 @@ import { checkRelayed } from './relay.ts';
 import {
   answersAnOlderRequest,
   endsRequest,
-  isLateAnswerBeforeFrameAsked,
+  isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
 } from './resync-request.ts';
@@ -307,7 +307,7 @@ export const KNCore = {
   resyncRequest: {
     answersAnOlderRequest,
     endsRequest,
-    isLateAnswerBeforeFrameAsked,
+    isLateAnswerBehind,
     keepsAwaitedAnswer,
     lateJoinLostHostStep,
   },
