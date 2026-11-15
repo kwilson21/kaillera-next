@@ -296,10 +296,11 @@
  *     unconfirmed (specs/sync_follow_up.qnt). A third of the way in the
  *     guest's input is held neutral and the host page is frozen for 7 s: the
  *     guest's peer recovery asks for a resync at a frame, as with
- *     UNANSWERED_SOCKET_RESYNC=letgo. From that ask the guest page keeps its
- *     inputs back, so the host stalls on predicted ones and answers at its
- *     deadline with a state taken on them (SYNC-FOLLOW-UP-WATCH). That
- *     answer waits in a busy `sync-state` channel for 3 s, as on a slow
+ *     UNANSWERED_SOCKET_RESYNC=letgo. From the host's return the guest page
+ *     keeps its input packets back, so the host stalls on predicted ones and
+ *     answers at its deadline with a state taken on them
+ *     (SYNC-FOLLOW-UP-WATCH). That answer waits in a busy `sync-state`
+ *     channel for 1.5 s (under the guest's chunk timeout), as on a slow
  *     link, and the kept-back inputs are let go as soon as the state is
  *     taken, so they reach the host while it is still handing the state
  *     over: inputs after that are settled and never fed, and could not
@@ -498,7 +499,8 @@ if (!['', 'same', 'changed'].includes(SYNC_FOLLOW_UP)) {
 const SYNC_FOLLOW_UP_FREEZE_MS = 7000;
 // How long the host's answer waits in a busy channel: the window in which the
 // guest's kept-back inputs reach the host.
-const SYNC_FOLLOW_UP_BUSY_MS = 3000;
+// Under the guest's chunk timeout (3 s), which would ask again over the socket.
+const SYNC_FOLLOW_UP_BUSY_MS = 1500;
 // The recovery request, its answer, the follow-up's decision once confirmed.
 const SYNC_FOLLOW_UP_RECOVER_MS = 30000;
 const FREEZE_LIKE = FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || SYNC_FOLLOW_UP !== '';
@@ -900,8 +902,9 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   window.__knLoseRbInputs = false;
   window.__knRbInputsLost = [];
   // SYNC_FOLLOW_UP (the guest page): while window.__knGateInputs is set,
-  // every message on `lockstep` and every input packet on `rollback-input`
-  // is kept back, in order, until window.__knOpenInputGate() lets them all go.
+  // every input packet (binary, on `lockstep` or `rollback-input`) is kept
+  // back, in order, until window.__knOpenInputGate() lets them all go. The
+  // page's other messages (its resync request) still go.
   window.__knGateInputs = false;
   const gatedMessages = [];
   // SYNC_FOLLOW_UP (the host page): once window.__knSyncBusyMs is above 0,
@@ -1105,7 +1108,8 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
     }
     if (
       window.__knGateInputs &&
-      (this.label === 'lockstep' || (this.label === 'rollback-input' && data instanceof ArrayBuffer))
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer
     ) {
       gatedMessages.push({ ch, data });
       return;
@@ -1841,11 +1845,11 @@ if (inBattle) {
       const t = performance.now();
       while (performance.now() - t < ms);
     }, SYNC_FOLLOW_UP_FREEZE_MS);
-    // Once the guest has asked for its recovery resync, its inputs are kept
-    // back: the host stalls on predicted inputs and answers at its deadline
-    // with a state taken on them. With `changed` a button is held down
-    // meanwhile, so the kept-back inputs differ from the prediction.
-    syncFollowUp.asked = await waitForLine(guest, syncFollowUp.guestAt.seq, /peer-recovery resync: sent/, 20000);
+    // From the moment the host is back the guest's inputs are kept back (its
+    // recovery request still goes): the host stalls on predicted inputs and
+    // answers at its deadline with a state taken on them. With `changed` a
+    // button is held down meanwhile, so the kept-back inputs differ from the
+    // prediction.
     await guest.evaluate(
       ({ changed, n }) => {
         window.__knGateInputs = true;
@@ -1853,6 +1857,7 @@ if (inBattle) {
       },
       { changed: SYNC_FOLLOW_UP === 'changed', n: NEUTRAL },
     );
+    syncFollowUp.asked = await waitForLine(guest, syncFollowUp.guestAt.seq, /peer-recovery resync: sent/, 20000);
     // The host has taken its state: the inputs go now, and reach it while the
     // state is still being handed over. Inputs that arrive after that are
     // settled and never fed (_settleInputsBefore), so this is the one window
