@@ -90,6 +90,8 @@ import {
   isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  overdueAskStep,
+  pushDeadlineStep,
   resyncDeadlineStep,
 } from './resync-request.ts';
 import { meshHealTargets } from './roster.ts';
@@ -326,6 +328,8 @@ export const KNCore = {
     isLateAnswerBehind,
     keepsAwaitedAnswer,
     lateJoinLostHostStep,
+    overdueAskStep,
+    pushDeadlineStep,
     resyncDeadlineStep,
   },
   rosterKey,

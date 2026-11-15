@@ -234,3 +234,75 @@ export function resyncDeadlineStep(
   if (asksAgain >= maxAsksAgain) return 'stopAsking';
   return 'askAgain';
 }
+
+/**
+ * What a page does about an ask for a missing input that has gone
+ * unanswered (specs/ask_escalation.qnt; I1).
+ *
+ * A page missing a peer's input asks for it every 500 ms and predicts it
+ * meanwhile. If the answer never comes, it predicted that input for the rest
+ * of the match while the peer ran on its real value. After `minAsks` asks
+ * and `minAgeMs` since the first, it is a resync instead: the host pushes its
+ * state to that guest unasked; a guest asks for a coordinated resync. Below
+ * either threshold it waits: an answer comes in under 170 ms in good runs and
+ * asks go out every 500 ms, so a slow answer is never taken for a lost one
+ * (noEarlyEscalation). Nothing is done while a resync is already out.
+ *
+ * @param isHost         this page is the host
+ * @param asksSent       asks sent for the missing input
+ * @param firstAskAgeMs  how long since the first of them
+ * @param minAsks        the asks before a resync
+ * @param minAgeMs       the time since the first ask before a resync
+ * @param resyncOut      a push or a coordinated request is out already
+ */
+export type OverdueAskStep = 'wait' | 'push' | 'ask';
+//@ requires minAsks >= 1 && minAgeMs >= 0
+//@ ensures (resyncOut || asksSent < minAsks || firstAskAgeMs < minAgeMs) ==> \result === "wait"
+//@ ensures \result === "push" <==> !resyncOut && asksSent >= minAsks && firstAskAgeMs >= minAgeMs && isHost
+//@ ensures \result === "ask" <==> !resyncOut && asksSent >= minAsks && firstAskAgeMs >= minAgeMs && !isHost
+export function overdueAskStep(
+  isHost: boolean,
+  asksSent: number,
+  firstAskAgeMs: number,
+  minAsks: number,
+  minAgeMs: number,
+  resyncOut: boolean,
+): OverdueAskStep {
+  if (resyncOut || asksSent < minAsks || firstAskAgeMs < minAgeMs) return 'wait';
+  return isHost ? 'push' : 'ask';
+}
+
+/**
+ * The deadline on the host's push to a guest whose input went unanswered
+ * (specs/ask_escalation.qnt, PUSH_HAS_DEADLINE; I1). The guest's
+ * `inputs-settled:` for the pushed state (it applied it) ends it; without it
+ * by `timeoutMs` the host pushes again, up to `maxPushes`, then gives up,
+ * visibly (pushesAreBounded).
+ *
+ * @param pushOut    a push is out
+ * @param settled    the guest acknowledged it (inputs-settled at or past it)
+ * @param waitedMs   how long since it was pushed
+ * @param timeoutMs  the push's deadline
+ * @param pushes     pushes sent for this input
+ * @param maxPushes  the most pushes
+ */
+export type PushDeadlineStep = 'none' | 'done' | 'wait' | 'pushAgain' | 'giveUp';
+//@ requires pushes >= 1 && maxPushes >= 1
+//@ ensures !pushOut ==> \result === "none"
+//@ ensures pushOut && settled ==> \result === "done"
+//@ ensures pushOut && !settled && waitedMs < timeoutMs ==> \result === "wait"
+//@ ensures \result === "pushAgain" <==> pushOut && !settled && waitedMs >= timeoutMs && pushes < maxPushes
+//@ ensures \result === "giveUp" <==> pushOut && !settled && waitedMs >= timeoutMs && pushes >= maxPushes
+export function pushDeadlineStep(
+  pushOut: boolean,
+  settled: boolean,
+  waitedMs: number,
+  timeoutMs: number,
+  pushes: number,
+  maxPushes: number,
+): PushDeadlineStep {
+  if (!pushOut) return 'none';
+  if (settled) return 'done';
+  if (waitedMs < timeoutMs) return 'wait';
+  return pushes < maxPushes ? 'pushAgain' : 'giveUp';
+}

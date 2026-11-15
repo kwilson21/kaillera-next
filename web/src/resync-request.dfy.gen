@@ -4,6 +4,10 @@ datatype LostHostStep = idle | waitForChannel | inFlight | giveUp | ask
 
 datatype DeadlineStep = noRequest | wait | lostHost | askAgain | stopAsking | letGo
 
+datatype OverdueAskStep = ask | wait | push
+
+datatype PushDeadlineStep = giveUp | wait | none | done | pushAgain
+
 function endsRequest(answerFor: int, newest: int, hostNumbers: bool): bool
 {
   if (answerFor > 0) then
@@ -140,5 +144,57 @@ lemma resyncDeadlineStep_ensures(requestOut: bool, answerComing: bool, decoding:
   ensures (resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).stopAsking? ==> ((owed && !(lostHostOwed)) && (asksAgain >= maxAsksAgain)))
   ensures (resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).letGo? ==> (!(owed) && !(lostHostOwed)))
   ensures (requestOut ==> !(answerComing) ==> !((decoding && (decodingForMs < graceMs))) ==> (waitedMs >= timeoutMs) ==> ((!resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).wait?) && (!resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).noRequest?)))
+{
+}
+
+function overdueAskStep(isHost: bool, asksSent: int, firstAskAgeMs: int, minAsks: int, minAgeMs: int, resyncOut: bool): OverdueAskStep
+  requires (minAsks >= 1)
+  requires (minAgeMs >= 0)
+{
+  if ((resyncOut || (asksSent < minAsks)) || (firstAskAgeMs < minAgeMs)) then
+    OverdueAskStep.wait
+  else
+    if isHost then
+      OverdueAskStep.push
+    else
+      OverdueAskStep.ask
+}
+
+lemma overdueAskStep_ensures(isHost: bool, asksSent: int, firstAskAgeMs: int, minAsks: int, minAgeMs: int, resyncOut: bool)
+  requires (minAsks >= 1)
+  requires (minAgeMs >= 0)
+  ensures (((resyncOut || (asksSent < minAsks)) || (firstAskAgeMs < minAgeMs)) ==> overdueAskStep(isHost, asksSent, firstAskAgeMs, minAsks, minAgeMs, resyncOut).wait?)
+  ensures (overdueAskStep(isHost, asksSent, firstAskAgeMs, minAsks, minAgeMs, resyncOut).push? <==> (((!(resyncOut) && (asksSent >= minAsks)) && (firstAskAgeMs >= minAgeMs)) && isHost))
+  ensures (overdueAskStep(isHost, asksSent, firstAskAgeMs, minAsks, minAgeMs, resyncOut).ask? <==> (((!(resyncOut) && (asksSent >= minAsks)) && (firstAskAgeMs >= minAgeMs)) && !(isHost)))
+{
+}
+
+function pushDeadlineStep(pushOut: bool, settled: bool, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int): PushDeadlineStep
+  requires (pushes >= 1)
+  requires (maxPushes >= 1)
+{
+  if !(pushOut) then
+    PushDeadlineStep.None
+  else
+    if settled then
+      PushDeadlineStep.done
+    else
+      if (waitedMs < timeoutMs) then
+        PushDeadlineStep.wait
+      else
+        if (pushes < maxPushes) then
+          PushDeadlineStep.pushAgain
+        else
+          PushDeadlineStep.giveUp
+}
+
+lemma pushDeadlineStep_ensures(pushOut: bool, settled: bool, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int)
+  requires (pushes >= 1)
+  requires (maxPushes >= 1)
+  ensures (!(pushOut) ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).none?)
+  ensures (pushOut ==> settled ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).done?)
+  ensures (pushOut ==> !(settled) ==> (waitedMs < timeoutMs) ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).wait?)
+  ensures (pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).pushAgain? <==> (((pushOut && !(settled)) && (waitedMs >= timeoutMs)) && (pushes < maxPushes)))
+  ensures (pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).giveUp? <==> (((pushOut && !(settled)) && (waitedMs >= timeoutMs)) && (pushes >= maxPushes)))
 {
 }

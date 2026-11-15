@@ -192,6 +192,19 @@
  *     (phantomForeverTest); before the per-peer machine decided `heal` the
  *     guest offered too and the two offers crossed (crossedHealOffersTest).
  *     Frames are compared as with FREEZE_HOST_MS. Needs BATTLE_SECONDS >= 165.
+ *   CATCH_UP_HOLE_MS=<n>   With DROP_PEER_MS: the host drops its input
+ *     packets on the reconnected channel from that channel's first one until
+ *     n ms after it sends the state, so the guest's catch-up after the
+ *     reconnect waits on a hole (specs/catch_up_wait.qnt). Fails if the
+ *     catch-up stopped on the hole or the pages end more than 300 frames
+ *     apart (the runaway). On main it fails: the waiting catch-up spun and
+ *     sent a reliable input packet per slice, burying its asks.
+ *   ASK_UNANSWERED_MS=<n>   A third of the way into the battle the guest
+ *     drops its input packets for n ms, so the host's asks for them go
+ *     unanswered (specs/ask_escalation.qnt). Fails unless the host's ask goes
+ *     overdue (`INPUT-ASK-OVERDUE … → push`), it pushes its state, and the
+ *     guest's inputs-settled answers it (`INPUT-ASK-PUSH-SETTLED`), with no
+ *     give-up. Frames are compared as usual.
  *   DROP_PEER_MS=<n>   A third of the way into the battle, the guest's page
  *     closes its RTCPeerConnection to the host (pc.close() on the engine's
  *     peer entry for slot 0, KNState.peers), and the WebRTC signaling between
@@ -571,6 +584,11 @@ const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 // CATCH_UP_HOLE_MS: with DROP_PEER_MS, how long the host drops its input
 // packets on the reconnected channel from its first one.
 const CATCH_UP_HOLE_MS = Number(process.env.CATCH_UP_HOLE_MS || 0);
+// ASK_UNANSWERED_MS: how long the guest drops its input packets, a third of
+// the way into the battle, so the host's asks for them go unanswered.
+const ASK_UNANSWERED_MS = Number(process.env.ASK_UNANSWERED_MS || 0);
+const ASK_UNANSWERED_RECOVER_MS = 30000;
+const askUnanswered = { hostAt: null, guestAt: null, dropped: 0 };
 if (CATCH_UP_HOLE_MS > 0 && !(DROP_PEER_MS > 0)) {
   console.log('CATCH_UP_HOLE_MS needs DROP_PEER_MS');
   process.exit(1);
@@ -1155,6 +1173,11 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // hole. Channels opened before arming are untouched. The dropped frames
   // are kept in __knInputsDroppedAfterOpen.
   window.__knDropInputsAfterOpenMs = 0;
+  // ASK_UNANSWERED_MS (the guest page): while performance.now() is before
+  // window.__knDropInputsUntil, every input packet (binary, on `lockstep` or
+  // `rollback-input`) is dropped: the host's asks for them go unanswered.
+  window.__knDropInputsUntil = 0;
+  window.__knInputsDroppedUntil = 0;
   window.__knDropArmedAt = 0;
   window.__knInputsDroppedAfterOpen = [];
   let stateSentAfterArming = 0;
@@ -1330,6 +1353,15 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
     if (this.label === 'sync-state' && syncStateDrops(data)) return;
     if (window.__knLoseRbInputs && this.label === 'rollback-input' && data instanceof ArrayBuffer) {
       if (data.byteLength >= 4) window.__knRbInputsLost.push(new Int32Array(data, 0, 1)[0]);
+      return;
+    }
+    if (
+      window.__knDropInputsUntil > 0 &&
+      performance.now() < window.__knDropInputsUntil &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer
+    ) {
+      window.__knInputsDroppedUntil++;
       return;
     }
     if ((this.label === 'lockstep' || this.label === 'rollback-input') && data instanceof ArrayBuffer) {
@@ -2489,6 +2521,24 @@ if (inBattle) {
       `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: done (${Date.now() - started} ms, ${syncFollowUp.attempts} attempt(s)); ` +
         `the guest made ${syncFollowUp.framesAfter} frames in the next 5 s`,
     );
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (ASK_UNANSWERED_MS > 0) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [askUnanswered.hostAt, askUnanswered.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    await guest.evaluate((ms) => {
+      window.__knDropInputsUntil = performance.now() + ms;
+    }, ASK_UNANSWERED_MS);
+    console.log(`ASK_UNANSWERED_MS: the guest drops its inputs for ${ASK_UNANSWERED_MS} ms`);
+    const settled = await waitForLine(
+      host,
+      askUnanswered.hostAt.seq,
+      /INPUT-ASK-PUSH-SETTLED/,
+      ASK_UNANSWERED_MS + ASK_UNANSWERED_RECOVER_MS,
+    );
+    askUnanswered.dropped = await guest.evaluate(() => window.__knInputsDroppedUntil);
+    console.log(`ASK_UNANSWERED_MS: the host's push was acknowledged: ${settled} (${Date.now() - started} ms)`);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (CATCH_UP_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -4116,6 +4166,34 @@ const catchUpHoleReport = (() => {
   return { dropped: dropped.length, droppedFrames: dropped.slice(0, 8), catchUps, stoppedOnHole };
 })();
 const finalGap = Math.abs(H.frame - G.frame);
+// ASK_UNANSWERED_MS: the host's asks went overdue, it pushed its state to
+// the guest, and the guest's inputs-settled answered the push
+// (specs/ask_escalation.qnt).
+const askUnansweredReport = (() => {
+  if (!(ASK_UNANSWERED_MS > 0) || !askUnanswered.hostAt) return null;
+  const hostLines = linesAfter(H.sync, askUnanswered.hostAt.seq);
+  const overdue = hostLines.filter((l) => /INPUT-ASK-OVERDUE .*→ push/.test(l));
+  const settled = hostLines.filter((l) => /INPUT-ASK-PUSH-SETTLED/.test(l));
+  const gaveUp = hostLines.filter((l) => /INPUT-ASK-PUSH-GAVEUP/.test(l));
+  return { dropped: askUnanswered.dropped, overdue, settled, gaveUp };
+})();
+const askUnansweredFailed =
+  ASK_UNANSWERED_MS > 0 &&
+  !(
+    askUnansweredReport &&
+    askUnansweredReport.dropped > 0 &&
+    askUnansweredReport.overdue.length > 0 &&
+    askUnansweredReport.settled.length > 0 &&
+    askUnansweredReport.gaveUp.length === 0
+  );
+if (ASK_UNANSWERED_MS > 0) {
+  console.log(
+    askUnansweredFailed
+      ? 'ASK_UNANSWERED_MS: no input dropped, no overdue push, or the push was not acknowledged:'
+      : 'ASK_UNANSWERED_MS: the overdue ask ended in a pushed state the guest applied:',
+    JSON.stringify(askUnansweredReport),
+  );
+}
 const catchUpHoleFailed =
   CATCH_UP_HOLE_MS > 0 &&
   !(
@@ -4318,6 +4396,7 @@ const failed =
   linkFailed ||
   dropPeerFailed ||
   catchUpHoleFailed ||
+  askUnansweredFailed ||
   healBothFailed ||
   delaySyncAnswerFailed ||
   catchUpFailed ||

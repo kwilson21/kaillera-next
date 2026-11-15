@@ -753,15 +753,16 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Eleven sites ask: one over Socket.IO, ten on a DataChannel (the
+    # Twelve sites ask: one over Socket.IO, eleven on a DataChannel (the
     # seventh is a late joiner that lost its channel to the host,
     # specs/late_join_pause.qnt; the eighth the deadline asking again for an
-    # owed "now" resync, specs/resync_reask.qnt; the last two the boot sync
-    # and the input stall's, specs/resync_flow.qnt EVERY_REQUEST_NUMBERED).
+    # owed "now" resync, specs/resync_reask.qnt; then the boot sync and the
+    # input stall's, specs/resync_flow.qnt EVERY_REQUEST_NUMBERED; the last a
+    # guest's ask for a missing input gone overdue, specs/ask_escalation.qnt).
     # The two that name a target frame give it to the request, which keeps
     # it after the target's deadline (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 11
-    assert src.count("_beginResyncRequest()") == 7
+    assert src.count("_beginResyncRequest(") == 12
+    assert src.count("_beginResyncRequest()") == 8
     assert src.count("_beginResyncRequest(-1, true)") == 1
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
@@ -778,8 +779,8 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 10
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 8
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 11
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 9
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
     # Never sent bare. The boot sync and the input stall's request were, and
     # their unnumbered answers were applied wherever they found the guest,

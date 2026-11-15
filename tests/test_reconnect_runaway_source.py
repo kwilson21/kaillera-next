@@ -55,3 +55,32 @@ def test_a_state_header_is_taken_only_from_the_host():
     push = src[src.index("const pushSyncState = async (") :]
     assert "if (_playerSlot !== 0 || !_syncEnabled) return;" in push[:600]
     assert src.count("`sync-start:${frame}:") == 1
+
+
+def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
+    # specs/ask_escalation.qnt: overdueAskStep decides; the host pushes, a
+    # guest asks; the push has its own deadline (pushDeadlineStep).
+    src = _src()
+    count = src[src.index("const _countOverdueAsk = (peer, oldest, now) => {") :]
+    count = count[: count.index("\n  };\n")]
+    assert "window.KNCore.resyncRequest.overdueAskStep(" in count
+    assert "pushSyncState(sid, false);" in count
+    assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in count
+    assert "const INPUT_ASK_OVERDUE_ASKS = 3;" in src
+    assert "const INPUT_ASK_OVERDUE_MS = 1500;" in src
+    pushes = src[src.index("const _checkOverduePushes = () => {") :]
+    pushes = pushes[: pushes.index("\n  };\n")]
+    assert "window.KNCore.resyncRequest.pushDeadlineStep(" in pushes
+    assert "(_inputSettledBefore[slot] ?? 0) >= push.frame - DELAY_FRAMES" in pushes
+    assert "_checkResyncRequestDeadline();\n    _checkOverduePushes();" in src
+    # Every ask that goes out is counted.
+    ask = src[
+        src.index("const _askForMissingInputs = (peer, applyFrame, windowEdge) => {") :
+    ]
+    ask = ask[: ask.index("\n  };\n")]
+    assert "if (sent.length) _countOverdueAsk(peer, frames[0], now);" in ask
+    # I2: per-peer state, dropped with the peer.
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "delete _inputAskOverdue[slot];" in reset
+    assert "delete _overduePushes[slot];" in reset

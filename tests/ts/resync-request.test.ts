@@ -7,6 +7,8 @@ import {
   isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  overdueAskStep,
+  pushDeadlineStep,
   resyncDeadlineStep,
   type DeadlineStep,
   type LostHostStep,
@@ -310,4 +312,34 @@ test('the engine calls each proved rule and keeps no copy of its own', () => {
 test('the module is listed for the proofs', () => {
   const listed = readFileSync(new URL('../../LemmaScript-files.txt', import.meta.url), 'utf8').split('\n');
   assert.ok(listed.some((line) => line.trim().split(/\s+/)[0] === 'web/src/resync-request.ts'));
+});
+
+// specs/ask_escalation.qnt: an ask never answered ends in a resync.
+test('an unanswered ask waits below either threshold, then the host pushes and a guest asks', () => {
+  const MIN_ASKS = 3;
+  const MIN_AGE_MS = 1500;
+  assert.equal(overdueAskStep(true, 2, 5000, MIN_ASKS, MIN_AGE_MS, false), 'wait', 'too few asks');
+  assert.equal(overdueAskStep(true, 3, 1499, MIN_ASKS, MIN_AGE_MS, false), 'wait', 'too soon');
+  assert.equal(overdueAskStep(true, 3, 1500, MIN_ASKS, MIN_AGE_MS, false), 'push');
+  assert.equal(overdueAskStep(false, 3, 1500, MIN_ASKS, MIN_AGE_MS, false), 'ask');
+  assert.equal(overdueAskStep(true, 9, 9000, MIN_ASKS, MIN_AGE_MS, true), 'wait', 'a resync is out already');
+});
+
+test('a slow answer is never taken for a lost one: one ask, or less than 1.5 s, always waits', () => {
+  for (const isHost of [true, false])
+    for (let asks = 0; asks <= 6; asks++)
+      for (const age of [0, 170, 500, 1000, 1499, 1500, 3000]) {
+        const step = overdueAskStep(isHost, asks, age, 3, 1500, false);
+        if (asks < 3 || age < 1500) assert.equal(step, 'wait');
+        else assert.equal(step, isHost ? 'push' : 'ask');
+      }
+});
+
+test("the host's push ends on the guest's acknowledgement, is pushed again at its deadline, then given up", () => {
+  assert.equal(pushDeadlineStep(false, false, 9999, 3000, 1, 3), 'none');
+  assert.equal(pushDeadlineStep(true, true, 9999, 3000, 1, 3), 'done');
+  assert.equal(pushDeadlineStep(true, false, 2999, 3000, 1, 3), 'wait');
+  assert.equal(pushDeadlineStep(true, false, 3000, 3000, 1, 3), 'pushAgain');
+  assert.equal(pushDeadlineStep(true, false, 3000, 3000, 2, 3), 'pushAgain');
+  assert.equal(pushDeadlineStep(true, false, 3000, 3000, 3, 3), 'giveUp', 'pushesAreBounded');
 });

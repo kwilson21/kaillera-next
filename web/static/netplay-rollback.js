@@ -1745,6 +1745,17 @@
   const INPUT_OOR_LOG_EVERY_MS = 1000;
   let _inputOorLog = {}; // slot -> { at, dropped }
   let _inputAskedAt = {};
+  // An ask for a missing input never answered ends in a resync
+  // (specs/ask_escalation.qnt; KNCore.resyncRequest.overdueAskStep): per
+  // slot, the oldest frame asked for, how often and since when, and the
+  // host's push for it and its deadline (pushDeadlineStep). Per-peer state:
+  // resetPeerState drops it (I2).
+  const INPUT_ASK_OVERDUE_ASKS = 3;
+  const INPUT_ASK_OVERDUE_MS = 1500;
+  const OVERDUE_PUSH_TIMEOUT_MS = 5000;
+  const OVERDUE_MAX_PUSHES = 3;
+  let _inputAskOverdue = {}; // slot -> { frame, asks, firstAt }
+  let _overduePushes = {}; // slot -> { sid, frame, at, pushes }
   // Per peer slot, the frames of the switch to the reliable input channel's
   // resend not sent yet: {from, upTo, ack} (_switchInputsToReliable). Cleared
   // with the peer's other input state (resetPeerState, I2) and with every
@@ -5241,12 +5252,94 @@
       askedAt[f] = now;
       sent.push(f);
     }
+    if (sent.length) _countOverdueAsk(peer, frames[0], now);
     if (sent.length) {
       _syncLog(
         `RB-INPUT-ASK f=${_frameNum} slot=${slot} frames=${sent[0]}..${sent.at(-1)} count=${sent.length} peerHas=${peerHas}` +
           ` dcBuffered=${peer.dc?.bufferedAmount ?? -1} dcLabel=${peer.dc?.label ?? ''} dcId=${peer.dc?.id ?? -1}` +
           ` pc=${peer.pc?.connectionState ?? 'none'} pcIsDcs=${peer.dc?._knPc === peer.pc} wall=${Date.now()}`,
       );
+    }
+  };
+
+  // One more ask for the oldest frame this page waits on from `peer`. Past
+  // the thresholds the ask is overdue: the host pushes its state to that
+  // guest unasked (the guest applies it as a state the host sent for its own
+  // reasons, and both pages end on the host's state, its prediction of the
+  // input included); a guest asks the host for a resync now (owed: its
+  // deadline asks again, _checkResyncRequestDeadline).
+  const _countOverdueAsk = (peer, oldest, now) => {
+    const slot = peer.slot;
+    let track = _inputAskOverdue[slot];
+    if (!track || track.frame !== oldest) track = _inputAskOverdue[slot] = { frame: oldest, asks: 0, firstAt: now };
+    track.asks++;
+    const isHost = _playerSlot === 0;
+    const step = window.KNCore.resyncRequest.overdueAskStep(
+      isHost,
+      track.asks,
+      now - track.firstAt,
+      INPUT_ASK_OVERDUE_ASKS,
+      INPUT_ASK_OVERDUE_MS,
+      isHost ? !!_overduePushes[slot] : _resyncRequestInFlight,
+    );
+    if (step === 'wait') return;
+    _syncLog(
+      `INPUT-ASK-OVERDUE f=${_frameNum} slot=${slot} frame=${oldest} asks=${track.asks} ` +
+        `ms=${Math.round(now - track.firstAt)} → ${step}`,
+    );
+    delete _inputAskOverdue[slot];
+    if (step === 'push') {
+      const sid = Object.keys(_peers).find((key) => _peers[key] === peer);
+      if (!sid) return;
+      _overduePushes[slot] = { sid, frame: _frameNum, at: now, pushes: 1 };
+      pushSyncState(sid, false);
+      return;
+    }
+    const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+    if (hostDc?.readyState !== 'open') return;
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    const requestId = _beginResyncRequest();
+    try {
+      _sendResyncRequest(hostDc, requestId, 'sync-request-full');
+    } catch (e) {
+      _resyncRequestInFlight = false;
+      _syncLog(`INPUT-ASK-OVERDUE resync request send failed: ${e}`);
+    }
+  };
+
+  // Host: the deadline on each push for an overdue ask (pushDeadlineStep,
+  // I1). The guest's inputs-settled for the pushed frame answers it.
+  const _checkOverduePushes = () => {
+    if (_playerSlot !== 0) return;
+    const now = performance.now();
+    for (const key of Object.keys(_overduePushes)) {
+      const push = _overduePushes[key];
+      const slot = Number(key);
+      const settled = (_inputSettledBefore[slot] ?? 0) >= push.frame - DELAY_FRAMES;
+      const step = window.KNCore.resyncRequest.pushDeadlineStep(
+        true,
+        settled,
+        now - push.at,
+        OVERDUE_PUSH_TIMEOUT_MS,
+        push.pushes,
+        OVERDUE_MAX_PUSHES,
+      );
+      if (step === 'wait' || step === 'none') continue;
+      if (step === 'done') {
+        _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${push.frame} pushes=${push.pushes}`);
+        delete _overduePushes[key];
+      } else if (step === 'pushAgain' && _peers[push.sid]) {
+        push.pushes++;
+        push.at = now;
+        push.frame = _frameNum;
+        _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${push.pushes}/${OVERDUE_MAX_PUSHES}`);
+        pushSyncState(push.sid, false);
+      } else {
+        _syncLog(`INPUT-ASK-PUSH-GAVEUP f=${_frameNum} slot=${slot} pushes=${push.pushes}: no inputs-settled came`);
+        KNEvent('input-ask-push-giveup', 'A pushed state was never acknowledged', { slot, pushes: push.pushes });
+        delete _overduePushes[key];
+      }
     }
   };
 
@@ -5683,6 +5776,8 @@
     delete _inputSettledBefore[slot];
     delete _inputDroppedAheadUpTo[slot];
     delete _inputAskedAt[slot];
+    delete _inputAskOverdue[slot];
+    delete _overduePushes[slot];
     delete _resendAtSwitch[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
@@ -9676,6 +9771,8 @@
     delete _inputSettledBefore[slot];
     delete _inputDroppedAheadUpTo[slot];
     delete _inputAskedAt[slot];
+    delete _inputAskOverdue[slot];
+    delete _overduePushes[slot];
     delete _resendAtSwitch[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
@@ -13120,6 +13217,8 @@
     _inputDroppedAheadUpTo = {};
     _inputOorLog = {};
     _inputAskedAt = {};
+    _inputAskOverdue = {};
+    _overduePushes = {};
     _resendAtSwitch = {};
     _peerInputStarted = preservedPeerStarted;
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
@@ -13916,6 +14015,8 @@
         _inputDroppedAheadUpTo = {};
         _inputOorLog = {};
         _inputAskedAt = {};
+        _inputAskOverdue = {};
+        _overduePushes = {};
         _resendAtSwitch = {};
         for (let d = 0; d < DELAY_FRAMES; d++) {
           _localInputs[_frameNum + d] = KNShared.ZERO_INPUT;
@@ -14705,6 +14806,7 @@
     _chk('post-phase');
     _creditLocalFreeze();
     _checkResyncRequestDeadline();
+    _checkOverduePushes();
     // Deadline-only pass: a tick that stalls returns before the per-frame
     // dispatch below, and a stall can outlast SYNC_COORD_TIMEOUT_MS. Never
     // mid-replay, where the live state isn't at a frame boundary.
@@ -19190,6 +19292,8 @@
     _inputDroppedAheadUpTo = {};
     _inputOorLog = {};
     _inputAskedAt = {};
+    _inputAskOverdue = {};
+    _overduePushes = {};
     _resendAtSwitch = {};
     _peerInputStarted = {};
     _activeRoster = null;
