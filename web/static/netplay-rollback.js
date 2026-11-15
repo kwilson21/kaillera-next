@@ -1730,6 +1730,11 @@
   // (resetPeerState, I2) and with every input timeline.
   let _inputDroppedAheadUpTo = {};
   let _inputAskedAt = {};
+  // Per peer slot, the frames of the switch to the reliable input channel's
+  // resend not sent yet: {from, upTo, ack} (_switchInputsToReliable). Cleared
+  // with the peer's other input state (resetPeerState, I2) and with every
+  // input timeline.
+  let _resendAtSwitch = {};
   // The oldest input from `slot` that can still be missing: nothing before
   // the rollback init or the last resync is waited for.
   const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
@@ -5140,33 +5145,63 @@
   // page keeps, not from the history, which holds only the newest
   // RB_REDUNDANCY_MAX: a stuck channel can leave more than that unacked.
   // Which frames is KNCore.framesToSendAgain (web/src/input-resend.ts,
-  // proved). A frame the peer already holds is dropped there as a duplicate.
-  // One send per frame, no wait and no new per-peer state.
+  // proved), up to the newest input this page has made: a switch between
+  // ticks (rb-dc-close, `rb-transport:`) comes after _frameNum has moved on
+  // and before that frame's input is made, and capping from it would cut
+  // the oldest frame in range for one that does not exist. A frame the peer
+  // already holds is dropped there as a duplicate. One send per frame, no wait.
   const RB_RESEND_AT_SWITCH_MAX = 120;
   const _switchInputsToReliable = (reason) => {
     _rbTransport = 'reliable';
     _syncLog(`DC-FALLBACK: switched to reliable DC (${reason}) — inputs now via primary channel`);
+    const newest = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum) ? _frameNum : _frameNum - 1;
     for (const [sid, peer] of Object.entries(_peers)) {
       if (peer.synthetic === true || peer.slot === null || peer.slot === undefined) continue;
       if (_isPeerPendingLateJoin(sid, peer) || peer.dc?.readyState !== 'open') continue;
       const ack = peer.lastAckFromPeer ?? -1;
-      const frames = window.KNCore.framesToSendAgain(ack, _frameNum, RB_RESEND_AT_SWITCH_MAX);
-      const sent = [];
-      try {
-        for (const f of frames) {
-          const input = _localInputs[f];
-          if (input === undefined) continue;
-          peer.dc.send(KNShared.encodeInput(f, input, peer.lastFrameFromPeer ?? -1).buffer);
-          sent.push(f);
-        }
-      } catch (err) {
-        _syncLog(`DC-FALLBACK resend failed sid=${sid}: ${err}`);
+      const frames = window.KNCore.framesToSendAgain(ack, newest, RB_RESEND_AT_SWITCH_MAX);
+      if (frames.length === 0) {
+        delete _resendAtSwitch[peer.slot];
+        continue;
       }
-      if (sent.length) {
+      _resendAtSwitch[peer.slot] = { from: frames[0], upTo: frames.at(-1), ack };
+      _sendResendAtSwitch(peer);
+    }
+  };
+  // Sends the frames of the switch's resend not sent yet, oldest first. A
+  // send can throw partway (the channel's buffer is full): the frames from
+  // there on stay kept, and each tick sends them again before its own
+  // packet until all are sent or the peer is reset (resetPeerState, I2).
+  // Every kept frame, not only those after the peer's ack: on the reliable
+  // channel a packet carries its own frame alone, so the ack can pass a
+  // frame the peer is missing (specs/input_transport.qnt, RETRY_UNSENT,
+  // resendFailsPartwayTest).
+  const _sendResendAtSwitch = (peer) => {
+    const kept = _resendAtSwitch[peer.slot];
+    if (!kept || peer.dc?.readyState !== 'open') return;
+    const start = kept.from;
+    let count = 0;
+    try {
+      while (kept.from <= kept.upTo) {
+        const input = _localInputs[kept.from];
+        if (input !== undefined) {
+          peer.dc.send(KNShared.encodeInput(kept.from, input, peer.lastFrameFromPeer ?? -1).buffer);
+          count++;
+        }
+        kept.from++;
+      }
+      delete _resendAtSwitch[peer.slot];
+    } catch (err) {
+      // Once per frame it stopped at: a full buffer can throw tick after tick.
+      if (kept.stoppedAt !== kept.from) {
+        kept.stoppedAt = kept.from;
         _syncLog(
-          `DC-FALLBACK resent sid=${sid} slot=${peer.slot} ack=${ack} frames=${sent[0]}..${sent.at(-1)} count=${sent.length}`,
+          `DC-FALLBACK resend stopped slot=${peer.slot} at frame=${kept.from} upTo=${kept.upTo}: ${err} — the rest goes next tick`,
         );
       }
+    }
+    if (count > 0) {
+      _syncLog(`DC-FALLBACK resent slot=${peer.slot} ack=${kept.ack} frames=${start}..${kept.from - 1} count=${count}`);
     }
   };
 
@@ -5520,6 +5555,7 @@
     delete _inputSettledBefore[slot];
     delete _inputDroppedAheadUpTo[slot];
     delete _inputAskedAt[slot];
+    delete _resendAtSwitch[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _menuStartReadyPeers[slot];
@@ -9311,6 +9347,7 @@
     delete _inputSettledBefore[slot];
     delete _inputDroppedAheadUpTo[slot];
     delete _inputAskedAt[slot];
+    delete _resendAtSwitch[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _peerLastAdvanceTime[slot];
@@ -12765,6 +12802,7 @@
     _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
     _inputDroppedAheadUpTo = {};
     _inputAskedAt = {};
+    _resendAtSwitch = {};
     _peerInputStarted = preservedPeerStarted;
     _syncLog(`MATCH-INPUT-CLEAR reason=${reason} local=${localBuffered} remote=${remoteBuffered}`);
   };
@@ -13559,6 +13597,7 @@
         _inputSettledBefore = {};
         _inputDroppedAheadUpTo = {};
         _inputAskedAt = {};
+        _resendAtSwitch = {};
         for (let d = 0; d < DELAY_FRAMES; d++) {
           _localInputs[_frameNum + d] = KNShared.ZERO_INPUT;
         }
@@ -14873,6 +14912,8 @@
     for (let i = 0; i < activePeers.length; i++) {
       const peer = activePeers[i];
       if (peer.synthetic === true) continue;
+      // A resend at the switch to the reliable channel that a send cut short.
+      if (_resendAtSwitch[peer.slot]) _sendResendAtSwitch(peer);
       try {
         const ackFrame = peer.lastFrameFromPeer ?? -1;
         const needsRedundancy = shouldSendRedundancy && (peer.lastAckFromPeer ?? -1) < _frameNum - 1;
@@ -18466,6 +18507,7 @@
     _inputSettledBefore = {};
     _inputDroppedAheadUpTo = {};
     _inputAskedAt = {};
+    _resendAtSwitch = {};
     _peerInputStarted = {};
     _activeRoster = null;
     _lastControllerPresentMask = -1;

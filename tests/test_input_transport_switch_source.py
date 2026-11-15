@@ -37,25 +37,66 @@ def test_both_triggers_go_through_the_one_switch():
 
 
 def test_the_switch_sends_every_unacked_input_from_the_kept_inputs():
-    body = _function_body(ENGINE_JS.read_text(), "_switchInputsToReliable")
+    src = ENGINE_JS.read_text()
+    body = _function_body(src, "_switchInputsToReliable")
 
-    assert "window.KNCore.framesToSendAgain(ack, _frameNum, RB_RESEND_AT_SWITCH_MAX)" in body
+    # Capped from the newest input made, not from _frameNum: a switch between
+    # ticks comes before the input for _frameNum exists.
+    assert (
+        "const newest = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum) ? _frameNum : _frameNum - 1;"
+        in body
+    )
+    assert "window.KNCore.framesToSendAgain(ack, newest, RB_RESEND_AT_SWITCH_MAX)" in body
     assert "const ack = peer.lastAckFromPeer ?? -1;" in body
+    assert "_resendAtSwitch[peer.slot] = { from: frames[0], upTo: frames.at(-1), ack };" in body
+    assert "_sendResendAtSwitch(peer);" in body
+
+    send = _function_body(src, "_sendResendAtSwitch")
     # From the inputs the page keeps, not the redundancy history the cap cuts.
-    assert "_localInputs[f]" in body
-    assert "_rbLocalHistory" not in body
+    assert "const input = _localInputs[kept.from];" in send
+    assert "_rbLocalHistory" not in send
     # On the reliable channel, one packet per frame, and no wait (I1).
-    assert "peer.dc.send(KNShared.encodeInput(f, input" in body
-    assert "rbDc" not in body
-    assert "setTimeout" not in body and "await" not in body
+    assert "peer.dc.send(KNShared.encodeInput(kept.from, input" in send
+    assert "rbDc" not in send
+    assert "setTimeout" not in send and "await" not in send
+    assert "_rbLocalHistory" not in body and "rbDc" not in body
 
 
-def test_the_switch_keeps_no_per_peer_state():
-    # I2: per-peer state is cleared in resetPeerState; the switch adds none.
-    body = _function_body(ENGINE_JS.read_text(), "_switchInputsToReliable")
+def test_a_resend_a_send_cut_short_is_finished_on_the_next_ticks():
+    # specs/input_transport.qnt, RETRY_UNSENT: a send can throw partway; the
+    # frames from there on stay kept and each tick sends them first.
+    src = ENGINE_JS.read_text()
+    send = _function_body(src, "_sendResendAtSwitch")
+    loop = send[send.index("while (kept.from <= kept.upTo) {") : send.index("} catch (err) {")]
+    # The kept start moves past a frame only once its send returned.
+    assert loop.index("peer.dc.send(") < loop.index("kept.from++;")
+    # Done: forgotten. Cut short: kept.
+    assert loop.rstrip().endswith("delete _resendAtSwitch[peer.slot];")
+    catch = send[send.index("} catch (err) {") :]
+    assert "delete _resendAtSwitch" not in catch
+    # Every kept frame is sent, not only those after the ack: on the reliable
+    # channel the ack can pass a frame the peer is missing.
+    assert "lastAckFromPeer" not in send
 
-    assert not re.search(r"\bpeer\.\w+\s*=[^=]", body)
-    assert not re.search(r"\[peer\.slot\]\s*=[^=]", body)
+    tick_send = src[src.index("let _sendFails = 0;") :]
+    tick_send = tick_send[: tick_send.index("const peerBuf = KNShared.encodeInput(")]
+    assert "if (_resendAtSwitch[peer.slot]) _sendResendAtSwitch(peer);" in tick_send
+
+
+def test_the_kept_resend_is_per_peer_state_cleared_with_it():
+    # I2: cleared in resetPeerState, with a late joiner's pending inputs, and
+    # with every input timeline.
+    src = ENGINE_JS.read_text()
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "delete _resendAtSwitch[slot];" in reset
+    assert src.count("delete _resendAtSwitch[slot];") == 2
+    clear = src[src.index("const _clearInputsForNewMatch = (reason) => {") :]
+    clear = clear[: clear.index("\n  };\n")]
+    assert "_resendAtSwitch = {};" in clear
+    # Every place the ask table is cleared (the declarations aside).
+    clears = src.count("_resendAtSwitch = {};") - src.count("let _resendAtSwitch = {};")
+    assert clears == src.count("_inputAskedAt = {};") - src.count("let _inputAskedAt = {};") == 3
 
 
 def test_the_comment_no_longer_promises_redundancy_carries_the_gap():

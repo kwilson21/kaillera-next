@@ -53,6 +53,14 @@
 //   every input it made after the peer's ack, from the inputs it keeps, not
 //   from the history (which the cap may already have cut). The fix.
 //
+// RETRY_UNSENT: the resend at the switch is a burst of sends on the reliable
+//   channel, and a send can throw partway (the channel's buffer is full):
+//   the frames from there on were not sent. With this the page keeps them
+//   and sends them again on its next ticks until they are sent or acked
+//   (or the peer is reset). Without it they were dropped, and since the
+//   page was already on the reliable channel nothing sent them again
+//   (resendFailsPartwayTest; found by review, #240).
+//
 // REDUNDANCY_UNTIL_ACKED: the other way to keep the comment's word: the page
 //   keeps the history and sends it as redundancy on the reliable channel
 //   until the peer has acked the frame it switched at. Not taken: the
@@ -62,6 +70,7 @@ module input_transport {
   const ASK_FOR_MISSING: bool
   const RESEND_AT_SWITCH: bool
   const REDUNDANCY_UNTIL_ACKED: bool
+  const RETRY_UNSENT: bool
 
   // The page makes the inputs for frames 0 .. LAST_FRAME - 1.
   pure val LAST_FRAME = 4
@@ -83,6 +92,8 @@ module input_transport {
   // newest frame then (-1: not switched).
   var unackedAtSwitch: Set[int]
   var switchedAt: int
+  // The resend's frames a send failed on, kept to send again (RETRY_UNSENT).
+  var unsent: Set[int]
 
   pure def newest(s: Set[int]): int = s.fold(-1, (a, k) => if (k > a) k else a)
   pure def framesBetween(lo: int, hi: int): Set[int] = 0.to(LAST_FRAME).filter(k => k > lo and k <= hi)
@@ -105,6 +116,7 @@ module input_transport {
   action init = all {
     made' = 0, history' = Set(), ack' = -1, unreliable' = true, rbOpen' = true,
     lossy' = Set(), ordered' = List(), got' = Set(), unackedAtSwitch' = Set(), switchedAt' = -1,
+    unsent' = Set(),
   }
 
   // One tick: the input for frame `frame` (a new one, or, while the page is
@@ -116,7 +128,7 @@ module input_transport {
       sendOn({ header: frame, frames: Set(frame).union(if (redundancyOn) h.filter(k => k < frame) else Set()) }),
       made' = if (isNew) made + 1 else made,
       ack' = ack, unreliable' = unreliable, rbOpen' = rbOpen, got' = got,
-      unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt,
+      unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt, unsent' = unsent,
     }
   }
 
@@ -127,21 +139,21 @@ module input_transport {
     lossy.contains(p),
     lossy' = lossy.exclude(Set(p)), got' = got.union(p.frames),
     made' = made, history' = history, ack' = ack, unreliable' = unreliable, rbOpen' = rbOpen,
-    ordered' = ordered, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt,
+    ordered' = ordered, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt, unsent' = unsent,
   }
 
   action lose(p: Packet): bool = all {
     lossy.contains(p),
     lossy' = lossy.exclude(Set(p)),
     made' = made, history' = history, ack' = ack, unreliable' = unreliable, rbOpen' = rbOpen,
-    ordered' = ordered, got' = got, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt,
+    ordered' = ordered, got' = got, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt, unsent' = unsent,
   }
 
   action deliverOrdered = all {
     ordered.length() > 0,
     ordered' = ordered.tail(), got' = got.union(ordered.head().frames),
     made' = made, history' = history, ack' = ack, unreliable' = unreliable, rbOpen' = rbOpen,
-    lossy' = lossy, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt,
+    lossy' = lossy, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt, unsent' = unsent,
   }
 
   // The peer's packets carry its ack: the newest frame it holds.
@@ -150,36 +162,61 @@ module input_transport {
     ack' = newest(got),
     made' = made, history' = history, unreliable' = unreliable, rbOpen' = rbOpen,
     lossy' = lossy, ordered' = ordered, got' = got, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt,
+    unsent' = unsent,
   }
 
-  // The switch to the reliable channel, on either trigger.
-  action switchNow(ordered0: List[Packet]): bool = {
+  // The switch to the reliable channel, on either trigger. The resend goes
+  // out oldest first, one send per frame; a send can throw at frame `cut`,
+  // leaving that frame and every later one unsent (cut > made - 1: none).
+  action switchNow(ordered0: List[Packet], cut: int): bool = {
     val unacked = framesBetween(ack, made - 1)
+    val sentNow = unacked.filter(k => k < cut)
+    val left = unacked.filter(k => k >= cut)
     all {
       unreliable' = false,
       unackedAtSwitch' = unacked,
       switchedAt' = made - 1,
-      ordered' = if (RESEND_AT_SWITCH and unacked != Set()) ordered0.append({ header: made - 1, frames: unacked })
+      ordered' = if (RESEND_AT_SWITCH and sentNow != Set()) ordered0.append({ header: newest(sentNow), frames: sentNow })
         else ordered0,
+      unsent' = if (RESEND_AT_SWITCH and RETRY_UNSENT) left else Set(),
     }
   }
 
   // DC-FALLBACK reason=buffer / reason=ack-stale. Packets on the unreliable
   // channel stay there, to arrive or be lost.
-  action healthFallback = all {
+  action healthFallbackAt(cut: int): bool = all {
     unreliable, rbOpen,
-    switchNow(ordered),
+    switchNow(ordered, cut),
     made' = made, history' = history, ack' = ack, rbOpen' = rbOpen, lossy' = lossy, got' = got,
   }
+  // Every send of the resend goes through.
+  action healthFallback = healthFallbackAt(LAST_FRAME)
 
   // The unreliable channel closes: what was in flight on it is lost. With
   // the unreliable transport in use, DC-FALLBACK reason=rb-dc-close.
-  action channelCloses = all {
+  action channelClosesAt(cut: int): bool = all {
     rbOpen,
     rbOpen' = false, lossy' = Set(),
-    if (unreliable) switchNow(ordered)
-    else all { unreliable' = unreliable, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt, ordered' = ordered },
+    if (unreliable) switchNow(ordered, cut)
+    else all {
+      unreliable' = unreliable, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt, ordered' = ordered,
+      unsent' = unsent,
+    },
     made' = made, history' = history, ack' = ack, got' = got,
+  }
+  action channelCloses = channelClosesAt(LAST_FRAME)
+
+  // A later tick sends every kept frame (or a send throws again and the
+  // tick sends none: nothing changes). Not only those after the ack: on the
+  // reliable channel a packet carries its own frame alone, so the ack (the
+  // newest frame the peer holds) can pass a kept frame the peer is missing
+  // (the next tick's packet arrives first). The peer drops a duplicate.
+  action retryUnsent = all {
+    unsent != Set(),
+    ordered' = ordered.append({ header: newest(unsent), frames: unsent }),
+    unsent' = Set(),
+    made' = made, history' = history, ack' = ack, unreliable' = unreliable, rbOpen' = rbOpen,
+    lossy' = lossy, got' = got, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt,
   }
 
   // The peer asks for an input it is missing below the newest it holds; the
@@ -190,11 +227,13 @@ module input_transport {
     not(ordered.indices().exists(i => ordered[i].frames.contains(k))),
     ordered' = ordered.append({ header: k, frames: Set(k) }),
     made' = made, history' = history, ack' = ack, unreliable' = unreliable, rbOpen' = rbOpen,
-    lossy' = lossy, got' = got, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt,
+    lossy' = lossy, got' = got, unackedAtSwitch' = unackedAtSwitch, switchedAt' = switchedAt, unsent' = unsent,
   }
 
   action step = any {
-    tick, tickStalled, deliverOrdered, ackArrives, healthFallback, channelCloses,
+    tick, tickStalled, deliverOrdered, ackArrives, retryUnsent,
+    nondet cut = oneOf(0.to(LAST_FRAME))
+    any { healthFallbackAt(cut), channelClosesAt(cut) },
     nondet p = oneOf(lossy)
     any { deliverLossy(p), lose(p) },
     nondet k = oneOf(0.to(LAST_FRAME))
@@ -209,7 +248,7 @@ module input_transport {
   // The page sends it again without being asked: the header goes out on
   // every tick, and the history with it while redundancy is on.
   def sentAgainUnasked(k: int): bool =
-    k == made - 1 or (redundancyOn and history.contains(k))
+    k == made - 1 or (redundancyOn and history.contains(k)) or unsent.contains(k)
 
   // What the comment at the health monitor promises: every input the peer
   // had not acked when the page switched reaches it without the peer having
@@ -325,25 +364,58 @@ module input_transport {
       .then(lose({ header: 0, frames: Set(0) }))
       .then(deliverLossy({ header: 1, frames: Set(0, 1) }))
       .expect(got == Set(0, 1) and allHold)
+
+  // The channel closes with three inputs unacked; the resend's send throws
+  // at frame 1, so only frame 0 goes out. Frame 2 is the newest: the next
+  // tick's header carries it. Frame 1 is sent by nothing unless the page
+  // kept it (RETRY_UNSENT).
+  run resendFailsPartwayTest =
+    init
+      .then(tick).then(tick).then(tick)
+      .then(channelClosesAt(1))
+      .expect(unackedAtSwitch == Set(0, 1, 2))
+      .expect(ordered == (if (RESEND_AT_SWITCH) List({ header: 0, frames: Set(0) }) else List()))
+      // The history (frames 1 and 2) is past frame 0 already: redundancy
+      // until the ack does not cover it either.
+      .expect(unackedInputsAreSentAgainAtTheSwitch == (RESEND_AT_SWITCH and RETRY_UNSENT))
+      .then(if (RETRY_UNSENT) retryUnsent.then(deliverOrdered).then(deliverOrdered) else tickStalled)
+      .expect(if (RETRY_UNSENT) got == Set(0, 1, 2) and allHold else true)
 }
 
 // Before #235: nothing asked for a hole, and the switch let the history go.
 module input_transport_before_ask {
-  import input_transport(ASK_FOR_MISSING = false, RESEND_AT_SWITCH = false, REDUNDANCY_UNTIL_ACKED = false).*
+  import input_transport(
+    ASK_FOR_MISSING = false, RESEND_AT_SWITCH = false, REDUNDANCY_UNTIL_ACKED = false, RETRY_UNSENT = false
+  ).*
 }
 
 // Today: the peer asks for the hole.
 module input_transport_current {
-  import input_transport(ASK_FOR_MISSING = true, RESEND_AT_SWITCH = false, REDUNDANCY_UNTIL_ACKED = false).*
+  import input_transport(
+    ASK_FOR_MISSING = true, RESEND_AT_SWITCH = false, REDUNDANCY_UNTIL_ACKED = false, RETRY_UNSENT = false
+  ).*
 }
 
 // Option not taken: redundancy on the reliable channel until the peer acks
 // the frame of the switch.
 module input_transport_until_acked {
-  import input_transport(ASK_FOR_MISSING = true, RESEND_AT_SWITCH = false, REDUNDANCY_UNTIL_ACKED = true).*
+  import input_transport(
+    ASK_FOR_MISSING = true, RESEND_AT_SWITCH = false, REDUNDANCY_UNTIL_ACKED = true, RETRY_UNSENT = false
+  ).*
 }
 
-// The fix: the unacked inputs go out again on the reliable channel at the switch.
+// The resend at the switch, with a failed send's frames dropped (#240 as
+// first pushed).
+module input_transport_resend_once {
+  import input_transport(
+    ASK_FOR_MISSING = true, RESEND_AT_SWITCH = true, REDUNDANCY_UNTIL_ACKED = false, RETRY_UNSENT = false
+  ).*
+}
+
+// The fix: the unacked inputs go out again on the reliable channel at the
+// switch, and a failed send's frames on the next ticks.
 module input_transport_fixed {
-  import input_transport(ASK_FOR_MISSING = true, RESEND_AT_SWITCH = true, REDUNDANCY_UNTIL_ACKED = false).*
+  import input_transport(
+    ASK_FOR_MISSING = true, RESEND_AT_SWITCH = true, REDUNDANCY_UNTIL_ACKED = false, RETRY_UNSENT = true
+  ).*
 }

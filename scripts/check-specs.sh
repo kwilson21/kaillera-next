@@ -296,7 +296,7 @@ $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
 INPUTS=specs/input_transport.qnt
 $QUINT typecheck "$INPUTS"
 for variant in input_transport_before_ask input_transport_current input_transport_until_acked \
-  input_transport_fixed; do
+  input_transport_resend_once input_transport_fixed; do
   $QUINT test "$INPUTS" --main="$variant" --backend=typescript
 done
 # Today with the fix: every input the peer had not acked when the page
@@ -306,7 +306,9 @@ done
 # lostThenChannelClosesTest hold the orderings), and is with redundancy kept
 # until the ack instead (input_transport_until_acked;
 # stuckChannelBeyondTheCapTest). The second was violated before #235, when
-# the peer did not ask for a hole (input_transport_before_ask).
+# the peer did not ask for a hole (input_transport_before_ask). The first is
+# violated too when a send that throws partway through the resend drops the
+# frames after it (input_transport_resend_once; resendFailsPartwayTest).
 $QUINT run "$INPUTS" --main=input_transport_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 $QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostForGood \

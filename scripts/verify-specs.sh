@@ -223,6 +223,8 @@ input_transport() {
   # Inputs lost on the unreliable channel, then the switch: 3 to 5 steps.
   expect_violation "$INPUTS" input_transport_current unackedInputsAreSentAgainAtTheSwitch
   expect_violation "$INPUTS" input_transport_until_acked unackedInputsAreSentAgainAtTheSwitch
+  # A resend cut short by a failed send, its rest dropped: 4 steps.
+  expect_violation "$INPUTS" input_transport_resend_once unackedInputsAreSentAgainAtTheSwitch
   expect_violation "$INPUTS" input_transport_before_ask noInputIsLostForGood
 }
 
