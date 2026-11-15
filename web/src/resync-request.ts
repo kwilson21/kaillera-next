@@ -173,8 +173,8 @@ export function lateJoinLostHostStep(
  * (bounded there); `askAgain`, a "now" resync is owed and is asked for again;
  * `stopAsking`, it was asked for again `maxAsksAgain` times: stop,
  * visibly;
- * `letGo`, nothing is owed (a coordinated request: the desync check asks
- * again).
+ * `letGo`, nothing is owed (a host state was applied while the request was
+ * out: the resync it asked for has happened).
  */
 export type DeadlineStep = 'noRequest' | 'wait' | 'lostHost' | 'askAgain' | 'stopAsking' | 'letGo';
 

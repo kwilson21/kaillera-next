@@ -39,6 +39,7 @@ import { startVisionClient } from './page/vision-client.ts';
 import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
+import * as connectionNotices from './play/connection-notices.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
 import * as gameStart from './play/game-start.ts';
@@ -363,6 +364,7 @@ export const KNCore = {
     romLibraryHtml,
     delay,
     connect,
+    connectionNotices,
     joinPlan,
     gameStart,
     observe,

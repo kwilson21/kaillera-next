@@ -336,7 +336,8 @@ $QUINT run "$INPUTS" --main=input_transport_current --invariant=noInputIsLostFor
 # ── A "now" resync request asked again at its deadline ─────────────────────
 REASK=specs/resync_reask.qnt
 $QUINT typecheck "$REASK"
-for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_fixed; do
+for variant in resync_reask_current resync_reask_unguarded resync_reask_guard_lets_go resync_reask_coordinated_let_go \
+  resync_reask_fixed; do
   $QUINT test "$REASK" --main="$variant" --backend=typescript
 done
 # With the fix: an owed resync is asked for again or given up visibly, the
@@ -346,6 +347,8 @@ done
 # without holding the deadline while an answer decodes cuts it
 # (resync_reask_unguarded; askAgainCutsTheDecodeTest), and the lifecycle
 # guard's timeout letting the request go forgets it again
-# (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest).
+# (resync_reask_guard_lets_go; guardLetsGoOfTheAskAgainTest), and a request
+# coordinated at a frame was never owed, so its lost answer was let go
+# (resync_reask_coordinated_let_go; coordinatedAnswerLostTest).
 $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript

@@ -685,47 +685,33 @@
     window._isSpectator = isSpectator;
     startKeepalive();
 
-    let _reconnectErrorTimer = null;
-    let _reconnectDowngradeTimer = null;
+    // What the player is told while the socket is down: the timings and the
+    // rules are web/src/play/connection-notices.ts; these are the page effects.
     const _reconnectBanner = document.getElementById('reconnecting-banner');
     const _reconnectText = document.getElementById('reconnecting-text');
-    const _showReconnecting = () => {
-      if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
-      if (_reconnectText) _reconnectText.textContent = 'Reconnecting to server\u2026';
-    };
-    const _showServerDown = () => {
-      if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
-      if (_reconnectText)
-        _reconnectText.textContent =
-          'Server is unreachable \u2014 your game is unaffected. New players cannot join until the server returns.';
-    };
-    const _hideReconnecting = () => {
-      if (_reconnectBanner) _reconnectBanner.classList.add('hidden');
-      if (_reconnectErrorTimer) {
-        clearTimeout(_reconnectErrorTimer);
-        _reconnectErrorTimer = null;
-      }
-      if (_reconnectDowngradeTimer) {
-        clearTimeout(_reconnectDowngradeTimer);
-        _reconnectDowngradeTimer = null;
-      }
-    };
-    // BF7: warn user if initial connection takes >10s
-    let _initialConnectTimer = setTimeout(() => {
-      if (!socket.connected) {
-        showToast('Unable to reach server \u2014 retrying\u2026', 'error');
-      }
-    }, 10000);
+    const _connectionNotices = window.KNCore.play.connectionNotices.startConnectionNotices({
+      showReconnecting: () => {
+        if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
+        if (_reconnectText) _reconnectText.textContent = 'Reconnecting to server\u2026';
+      },
+      showServerDown: () => {
+        if (_reconnectBanner) _reconnectBanner.classList.remove('hidden');
+        if (_reconnectText)
+          _reconnectText.textContent =
+            'Server is unreachable \u2014 your game is unaffected. New players cannot join until the server returns.';
+      },
+      hide: () => {
+        if (_reconnectBanner) _reconnectBanner.classList.add('hidden');
+      },
+      giveUp: () => showError('Unable to reach server'),
+      slowFirstConnect: () => showToast('Unable to reach server \u2014 retrying\u2026', 'error'),
+    });
     const _connects = window.KNCore?.createConnectTracker() ?? null;
     socket.on('connect', () => {
       // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
       // on the socket, so 'connect' is the event that fires here.
       _session?.socketUp();
-      if (_initialConnectTimer) {
-        clearTimeout(_initialConnectTimer);
-        _initialConnectTimer = null;
-      }
-      _hideReconnecting();
+      _connectionNotices.up();
       // A `connect` after an earlier one is a signaling reconnect; the rule
       // lives in web/src/reconnect.ts.
       const { isReconnect, attempts } = _connects?.connected() ?? { isReconnect: false, attempts: 0 };
@@ -743,40 +729,13 @@
       _session?.send({ type: 'socketDown' });
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       if (reason === 'io client disconnect') return;
-      // Show spinner banner after brief delay (lobby and in-game)
-      setTimeout(() => {
-        if (!socket.connected) _showReconnecting();
-      }, 2000);
-      if (isGameRunning()) {
-        // In-game: swap spinner text to info message after 15s (game still works P2P)
-        if (!_reconnectDowngradeTimer) {
-          _reconnectDowngradeTimer = setTimeout(() => {
-            if (!socket.connected) _showServerDown();
-          }, 15000);
-        }
-      } else {
-        // Lobby: hard error after 30s (can't do anything without server)
-        if (!_reconnectErrorTimer) {
-          _reconnectErrorTimer = setTimeout(() => {
-            if (!socket.connected) showError('Unable to reach server');
-          }, 30000);
-        }
-      }
+      _connectionNotices.down(isGameRunning() ? 'game' : 'lobby');
     });
     socket.on('connect_error', (e) => {
       console.log('[play] connect_error:', e.message);
-      // During games: silent — Socket.IO keeps retrying
-      // During lobby: banner handles visibility, just set 30s hard error
-      if (!isGameRunning()) {
-        setTimeout(() => {
-          if (!socket.connected) _showReconnecting();
-        }, 2000);
-        if (!_reconnectErrorTimer) {
-          _reconnectErrorTimer = setTimeout(() => {
-            if (!socket.connected) showError('Unable to reach server');
-          }, 30000);
-        }
-      }
+      // During games: silent — Socket.IO keeps retrying, and the disconnect
+      // already started the notices.
+      if (!isGameRunning()) _connectionNotices.down('lobby');
     });
     socket.on('users-updated', onUsersUpdated);
     socket.on('upload-token', (data) => {
