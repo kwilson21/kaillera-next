@@ -45,6 +45,12 @@
 //                   page keeps whatever it had: its entry, its connection,
 //                   its timers, and the signals already on their way to and
 //                   from the page that is gone
+//   reloadOld       the same, by a page from before signals carried an
+//                   attempt: what it sends carries no label (an offer, an
+//                   answer to any offer, a candidate), and it applies what
+//                   it receives as today's engine does, whatever the label.
+//                   Only that is modelled of its age: it follows the same
+//                   rules as the other page otherwise
 //
 // Not modelled: more than two players, spectators, a drop before the match
 // starts, PEER-PHANTOM (which stops the health check for that slot), timers
@@ -119,12 +125,16 @@ module peer_connection {
   // `mode` is what an offer says about itself: "first" (the roster's), or a
   // replacement, "startup" before the match and "reconnect" in it
   // (reconnect and startupReconnect in the engine). Empty for an answer.
-  type Msg = { dest: str, kind: str, id: int, mode: str }
+  // `bare`: the signal carries no label at all, because the page that sent
+  // it is old (reloadOld) or it answers or belongs to an offer that had none.
+  type Msg = { dest: str, kind: str, id: int, mode: str, bare: bool }
   // What a signal carries to say which attempt it is for: the offering
   // page's own count, and with ATTEMPT_NAMES_PAGE that page's id (else 0).
+  // An old page's offer goes under none: n = 0.
   type Label = { page: int, n: int }
-  // One loaded page: its id, and how many offers it has made.
-  type Page = { id: int, offers: int }
+  // One loaded page: its id, how many offers it has made, and whether it is
+  // an old page that sends no labels and checks none.
+  type Page = { id: int, offers: int, old: bool }
 
   pure val ABSENT: Side = {
     has: false, made: 0, link: 0, open: false, chan: false, recon: false, giveUp: false,
@@ -146,7 +156,12 @@ module peer_connection {
   // ── helpers ────────────────────────────────────────────────────────────
 
   def canOffer: bool = nextId <= MAX_OFFERS
-  def offer(dest: str, mode: str): Msg = { dest: dest, kind: "offer", id: nextId, mode: mode }
+  def offer(dest: str, mode: str): Msg =
+    { dest: dest, kind: "offer", id: nextId, mode: mode, bare: pages.get(other(dest)).old }
+  // The page `s` has now goes by labels: the rules carry them and it is not old.
+  def checksLabels(s: str): bool = SIGNALS_CARRY_ATTEMPT and not(pages.get(s).old)
+  // An offer that went out under no label.
+  def bareOffer(id: int): bool = labels.get(id).n == 0
 
   // No offer is made in this step.
   action noOffer = all { nextId' = nextId, labels' = labels, pages' = pages, nextPage' = nextPage }
@@ -155,15 +170,18 @@ module peer_connection {
     val mine = pages.get(s)
     all {
       nextId' = nextId + 1,
-      labels' = labels.put(nextId, { page: if (ATTEMPT_NAMES_PAGE) mine.id else 0, n: mine.offers + 1 }),
+      labels' = labels.put(nextId,
+        if (mine.old) { page: 0, n: 0 }
+        else { page: if (ATTEMPT_NAMES_PAGE) mine.id else 0, n: mine.offers + 1 }),
       pages' = pages.set(s, { ...mine, offers: mine.offers + 1 }),
       nextPage' = nextPage,
     }
   }
   // All a page can tell: the two attempts go under the same label. A
-  // connection that took the wrong answer (MISWIRED) is under none.
+  // connection that took the wrong answer (MISWIRED) is under none, and so is
+  // an old page's offer.
   def sameLabel(a: int, b: int): bool =
-    if (a > 0 and b > 0) labels.get(a) == labels.get(b) else false
+    if (a > 0 and b > 0) labels.get(a) == labels.get(b) and not(bareOffer(a)) else false
   // The attempt of the entry's connection: the offer it made or took.
   pure def connectionOf(e: Side): int = if (e.made != 0) e.made else e.link
 
@@ -265,7 +283,9 @@ module peer_connection {
           ansTimer: true,
           closePending: s.closePending or s.chan,
         } else { ...s, has: true, made: 0, link: m.id }),
-      wire' = wire.exclude(Set(m)).union(Set({ dest: other(m.dest), kind: "answer", id: m.id, mode: "" })),
+      wire' = wire.exclude(Set(m)).union(Set({
+        dest: other(m.dest), kind: "answer", id: m.id, mode: "", bare: m.bare or pages.get(m.dest).old,
+      })),
       noOffer,
       unchangedPhase, unchangedHistory,
     }
@@ -275,19 +295,26 @@ module peer_connection {
   // browser refuses it). One that is waiting takes it, today whichever offer
   // it was made for. With SIGNALS_CARRY_ATTEMPT it takes only one under the
   // label of its own offer, and that is the answer to another offer when a
-  // replaced page made an offer under the same label.
+  // replaced page made an offer under the same label. An answer with no
+  // label (from an old page) is under none: a page that checks labels drops
+  // it, even when it is the answer to its offer.
   action receiveAnswer(m: Msg): bool = {
     val s = side.get(m.dest)
+    val checks = checksLabels(m.dest)
     val waiting = s.has and s.made != 0
-    val mine = waiting and s.made == m.id
-    val takenAnyway = waiting and not(mine) and (not(SIGNALS_CARRY_ATTEMPT) or sameLabel(s.made, m.id))
+    val mine = waiting and s.made == m.id and not(checks and m.bare)
+    val takenAnyway = waiting and s.made != m.id
+      and (not(checks) or (not(m.bare) and sameLabel(s.made, m.id)))
     all {
       side' = side.set(m.dest,
         if (mine) { ...s, made: 0, link: m.id }
         else if (takenAnyway) { ...s, made: 0, link: MISWIRED }
         else s),
       wire' = wire.exclude(Set(m)),
-      staleApplied' = (staleApplied or takenAnyway),
+      // An old page applies what it receives as today; what that costs is
+      // not something the rules can prevent, so only a page that checks
+      // labels is held to them.
+      staleApplied' = (staleApplied or (takenAnyway and not(pages.get(m.dest).old))),
       evictedLive' = evictedLive,
       noOffer, unchangedPhase,
     }
@@ -295,7 +322,8 @@ module peer_connection {
 
   // A page sends an ICE candidate of the connection its entry has.
   action candidateSent(s: str): bool = {
-    val m = { dest: other(s), kind: "candidate", id: connectionOf(side.get(s)), mode: "" }
+    val id = connectionOf(side.get(s))
+    val m = { dest: other(s), kind: "candidate", id: id, mode: "", bare: pages.get(s).old or (id > 0 and bareOffer(id)) }
     all {
       side.get(s).has, m.id > 0, not(wire.contains(m)),
       wire' = wire.union(Set(m)),
@@ -310,10 +338,10 @@ module peer_connection {
   action receiveCandidate(m: Msg): bool = {
     val mine = connectionOf(side.get(m.dest))
     val applied = side.get(m.dest).has and mine != 0
-      and (not(SIGNALS_CARRY_ATTEMPT) or sameLabel(mine, m.id))
+      and (not(checksLabels(m.dest)) or (not(m.bare) and sameLabel(mine, m.id)))
     all {
       wire' = wire.exclude(Set(m)),
-      staleApplied' = (staleApplied or (applied and mine != m.id)),
+      staleApplied' = (staleApplied or (applied and mine != m.id and not(pages.get(m.dest).old))),
       evictedLive' = evictedLive,
       side' = side, noOffer, unchangedPhase,
     }
@@ -463,15 +491,18 @@ module peer_connection {
   // A new page of player `s` takes the place of the one that was there. It
   // knows nothing of the other player yet and has made no offers. Nothing
   // else changes: not the other page's entry, and not the signals in flight,
-  // which the server may still deliver to either of them.
-  action reload(s: str): bool = all {
+  // which the server may still deliver to either of them. `old`: the new
+  // page is from before signals carried an attempt (reloadOld).
+  action replacePage(s: str, old: bool): bool = all {
     nextPage <= MAX_PAGES,
     side' = side.set(s, ABSENT),
-    pages' = pages.set(s, { id: nextPage, offers: 0 }),
+    pages' = pages.set(s, { id: nextPage, offers: 0, old: old }),
     nextPage' = nextPage + 1,
     nextId' = nextId, labels' = labels,
     wire' = wire, unchangedPhase, unchangedHistory,
   }
+  action reload(s: str): bool = replacePage(s, false)
+  action reloadOld(s: str): bool = replacePage(s, true)
 
   action stutter = all {
     side' = side, wire' = wire, noOffer, unchangedPhase, unchangedHistory,
@@ -484,7 +515,7 @@ module peer_connection {
     side' = SIDES.mapBy(s => { ...ABSENT, has: true, link: 1, open: true, chan: true }),
     wire' = Set(), nextId' = 2, dead' = Set(),
     labels' = Map(1 -> { page: if (ATTEMPT_NAMES_PAGE) 1 else 0, n: 1 }),
-    pages' = Map("lo" -> { id: 1, offers: 1 }, "hi" -> { id: 2, offers: 0 }), nextPage' = 3,
+    pages' = Map("lo" -> { id: 1, offers: 1, old: false }, "hi" -> { id: 2, offers: 0, old: false }), nextPage' = 3,
     running' = true, stalled' = false,
     staleApplied' = false, evictedLive' = false,
   }
@@ -494,7 +525,7 @@ module peer_connection {
     side' = SIDES.mapBy(s => ABSENT),
     wire' = Set(), nextId' = 1, dead' = Set(),
     labels' = Map(),
-    pages' = Map("lo" -> { id: 1, offers: 0 }, "hi" -> { id: 2, offers: 0 }), nextPage' = 3,
+    pages' = Map("lo" -> { id: 1, offers: 0, old: false }, "hi" -> { id: 2, offers: 0, old: false }), nextPage' = 3,
     running' = false, stalled' = false,
     staleApplied' = false, evictedLive' = false,
   }
@@ -510,7 +541,7 @@ module peer_connection {
       any {
         roster(s), channelOpens(s), notice(s), silentClose(s), oldChannelCloses(s), closeNeverComes(s),
         giveUpTimeout(s), answerTimeout(s), heal(s), rosterRenames(s),
-        candidateSent(s), reload(s),
+        candidateSent(s), reload(s), reloadOld(s),
       }
     },
   }
@@ -595,11 +626,12 @@ module peer_connection {
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
-  def answerTo(dest: str, id: int): Msg = { dest: dest, kind: "answer", id: id, mode: "" }
-  def offerTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "reconnect" }
-  def firstOfferTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "first" }
-  def startupOfferTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "startup" }
-  def candidateTo(dest: str, id: int): Msg = { dest: dest, kind: "candidate", id: id, mode: "" }
+  def answerTo(dest: str, id: int): Msg = { dest: dest, kind: "answer", id: id, mode: "", bare: false }
+  def bareAnswerTo(dest: str, id: int): Msg = { dest: dest, kind: "answer", id: id, mode: "", bare: true }
+  def offerTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "reconnect", bare: false }
+  def firstOfferTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "first", bare: false }
+  def startupOfferTo(dest: str, id: int): Msg = { dest: dest, kind: "offer", id: id, mode: "startup", bare: false }
+  def candidateTo(dest: str, id: int): Msg = { dest: dest, kind: "candidate", id: id, mode: "", bare: false }
   // A signal sent for a replaced page's attempt passes for its replacement's.
   val replacedPageIsMistaken = not(SIGNALS_CARRY_ATTEMPT) or not(ATTEMPT_NAMES_PAGE)
   def bothOpenOn(id: int): bool = SIDES.forall(s => side.get(s).open and side.get(s).link == id)
@@ -831,6 +863,27 @@ module peer_connection {
       .then(candidateSent("lo"))
       .then(deliver(candidateTo("hi", 2)))
       .expect(staleApplied == replacedPageIsMistaken)
+
+  // The higher slot's page is an old one: it answers with no label. Today
+  // the lower slot takes the answer and the pair connects. A page that goes
+  // by labels has no label to match and drops it, the answer to its own
+  // offer included: the pair never connects, nothing is applied stale, and
+  // the lower slot is left to its startup retries, each answered the same
+  // way. So nothing may decide by the label while an old page can be on the
+  // other side; the engine's observer (web/src/peer-observe.ts) only watches
+  // a player whose page has sent a label, and stops at the first signal that
+  // has none.
+  run oldPageAnswersWithNoLabelTest =
+    initLobby
+      .then(reloadOld("hi"))
+      .then(roster("lo"))
+      .then(roster("hi"))
+      .then(deliver(firstOfferTo("hi", 1)))
+      .expect(wire == Set(bareAnswerTo("lo", 1)))
+      .then(deliver(bareAnswerTo("lo", 1)))
+      .expect(not(staleApplied))
+      .expect((side.get("lo").link == 1) == not(SIGNALS_CARRY_ATTEMPT))
+      .expect(alive("lo") == not(SIGNALS_CARRY_ATTEMPT))
 }
 
 // Before #119.

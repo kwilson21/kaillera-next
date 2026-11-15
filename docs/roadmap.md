@@ -346,30 +346,77 @@ Slice 1, the peer mesh and signaling:
   to stop retrying, which entries a new player replaces) and reports a
   difference as a `mesh-disagree` client event. The engine's rules stay in
   charge until production shows none.
-- Built, not yet wired in: the per-peer machine, `web/src/peer-connection.ts`
-  (diagram in `docs/peer-connection-machine.md`). One machine per other
-  player, built to the model's `fixed` variant: the lower slot is the pair's
-  one initiator, every wait in a match has a deadline (delayed transitions,
+- Built: the per-peer machine, `web/src/peer-connection.ts` (diagram in
+  `docs/peer-connection-machine.md`). One machine per other player, built
+  to the model's `fixed` variant: the lower slot is the pair's one
+  initiator, every wait in a match has a deadline (delayed transitions,
   durations given as input), signals and channel events carry the attempt
-  they belong to and one for another attempt is ignored, and a roster update
-  never replaces an open connection. An attempt is named by the page that
-  made the offer and that page's count of its offers: the count alone starts
-  again at 1 on a page that replaces another (a reload), and a signal or
-  channel event of the old page's connection then passes for the new one's
-  (the model's `reload`, violated on its `counter_only` variant). It decides
-  with the proved functions in
-  `peer-signaling.ts` and makes no WebRTC call: what it wants done it issues
-  as commands. `tests/ts/peer-connection.test.ts` replays the model's
-  scenarios against it. Nothing calls it yet, so the four properties are
-  still violated by the engine.
-- Next: run the machine beside the engine, observing: feed it the engine's
-  events and compare its commands with what the engine does. That needs the
-  engine to name each attempt on the wire: every `webrtc-signal` carries
-  `{page, attempt}`, a random id the offering page makes once when it loads
-  and that page's count of its offers. An offer carries its own, an answer
-  the offer's it answers, a candidate the offer's of the connection it was
-  gathered for; the engine reports a channel's open and close under the same
-  pair.
+  they belong to and one for another attempt is ignored, and a roster
+  update never replaces an open connection. An attempt is named by the page
+  that made the offer and that page's count of its offers: the count alone
+  starts again at 1 on a page that replaces another (a reload), and a
+  signal or channel event of the old page's connection then passes for the
+  new one's (the model's `reload`, violated on its `counter_only` variant).
+  It decides with the proved functions in `peer-signaling.ts` and makes no
+  WebRTC call: what it wants done it issues as commands.
+  `tests/ts/peer-connection.test.ts` replays the model's scenarios against
+  it. Its runner takes each event at once (XState's pure `transition`) and
+  returns the commands; its deadlines run as Effect sleeps.
+- Done (observing): the engine runs that machine beside itself, one per
+  other player for as long as the page is loaded
+  (`web/src/peer-observe.ts`). Every `webrtc-signal` now carries
+  `attemptId: {page, attempt}`: a random id the page makes once when it
+  loads and its count of the offers it has made to that player. An offer
+  carries its own, an answer and a candidate that of the offer their
+  connection was made for; the server relays it (`_WEBRTC_KEYS`). The
+  engine brackets each event it acts on (the roster, an offer, an answer, a
+  candidate, a channel that opened, a connection found lost, the end of a
+  player, its startup, attempt, give-up and answer timers, the health
+  check) and reports what it did in the machine's words. The machine is
+  handed the same event, and a difference in what each did, or in what
+  each holds afterwards (an entry, an open channel, reconnecting), is
+  reported once as a `peer-disagree` client event (and `PEER-DISAGREE` in
+  the sync log); that player is not watched again on that page. The
+  engine's timers take the machine's deadline for the same wait when they
+  fire, and the machine's own run 5 s late (the health check's an hour), so
+  what is compared is what is done at a deadline, not when.
+  Nothing accepts or rejects a signal by its id yet.
+  A signal without an id comes from a page from before it: that player is
+  left alone, not reported. The model shows why it has to be
+  (`oldPageAnswersWithNoLabelTest`): a page that goes by the id drops an
+  old page's answer, its own included, and the two never connect.
+- Not wired: spectators, a page that joined a match in play, a player held
+  as a late joiner, more than one machine per player on a page (a player
+  this page offered to before it watched them is left alone), and the
+  machine's view of the health check's timing (it runs on the engine's).
+  The four properties are still violated by the engine; the machine takes
+  over nothing until production shows no `peer-disagree` it should not.
+- Differences the observer is expected to report, where the engine is not
+  what the model's `fixed` rules say (none came up in the two-player and
+  lifecycle runs, which reconnect at most once):
+  - the health check offers from the higher slot too (`heal`);
+  - a page that answers a reconnect offer without having noticed the drop
+    has no give-up (`deadline:giveUpAfter`, from the machine);
+  - an answer or a candidate for an earlier attempt is handed to the
+    connection that replaced it (`answer`, `candidate`);
+  - a page already reconnecting that finds its connection lost again
+    starts another reconnect (`lost`);
+  - between a reconnect attempt's deadline and its retry the engine waits
+    3 s; the machine offers at once;
+  - from the game's start (the first channel open) until the match runs, a
+    lost connection is dropped by the engine and retried by the machine,
+    and the engine stops its startup retries for the other players;
+  - the answerer's 10 s timer also runs before the match, and does nothing
+    once the connection is `connected`, channel or not;
+  - a startup connection that opened and was then lost gets two retries
+    from the engine, three from the machine;
+  - a roster that lists a reloaded player under a new id makes the engine
+    drop the entry it has; the machine keeps it until the new page offers.
+  The server relays only the keys it knows, so `startupReconnect` never
+  arrives: a page tells a late startup retry from a reconnect by its own
+  phase, and so does the observer.
+- Next: read the production reports; then decide, one rule at a time, by
+  the machine, starting with who offers from the health check.
 
 **Stage 6: the remaining page scripts**
 The other hand-written scripts of the play, demo and landing pages move to

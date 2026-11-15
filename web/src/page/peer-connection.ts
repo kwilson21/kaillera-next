@@ -16,6 +16,8 @@ interface SignalPayload {
   candidate?: RTCIceCandidate;
   offer?: RTCSessionDescriptionInit;
   answer?: RTCSessionDescriptionInit;
+  /** The attempt the signal belongs to (web/src/peer-observe.ts). The rollback engine sets it. */
+  attemptId?: { page: string; attempt: number } | null;
 }
 
 /** The part of a peer that candidate buffering keeps. The engines add their own fields. */
@@ -122,15 +124,17 @@ export const createAndSendOffer = async (
   return offer;
 };
 
-// Create an answer, set local description, and emit via socket.
+// Create an answer, set local description, and emit via socket. `attemptId`,
+// when given, is the attempt of the offer it answers, sent with it.
 export const createAndSendAnswer = async (
   pc: RTCPeerConnection,
   socket: SignalSocket,
   targetSid: string,
+  attemptId?: SignalPayload['attemptId'],
 ): Promise<void> => {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
-  socket.emit('webrtc-signal', { target: targetSid, answer });
+  socket.emit('webrtc-signal', attemptId ? { target: targetSid, answer, attemptId } : { target: targetSid, answer });
 };
 
 // Detach handlers from an existing RTCPeerConnection, close it, and

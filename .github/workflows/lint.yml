@@ -154,6 +154,7 @@ jobs:
             ../tests/test_resume_refused.py \
             ../tests/test_abandoned_match.py \
             ../tests/test_relay_sender.py \
+            ../tests/test_webrtc_signal_relay.py \
             ../tests/test_schema.py \
             ../tests/test_query_builder.py \
             ../tests/test_room_logic.py \

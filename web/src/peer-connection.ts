@@ -7,10 +7,11 @@
  * roster update never replaces. The scenario tests in
  * tests/ts/peer-connection.test.ts replay that model's runs against it.
  *
- * Nothing uses it yet. The engine (web/static/netplay-rollback.js) keeps its
- * own flags and timers; this machine is to run beside it, observing, before
- * it decides anything. It makes no WebRTC call: what it wants done it issues
- * as a `PeerCommand`, to be compared with what the engine does.
+ * It decides nothing yet. The engine (web/static/netplay-rollback.js) keeps
+ * its own flags and timers and runs one of these beside it for each other
+ * player, observing (peer-observe.ts). It makes no WebRTC call: what it
+ * wants done it issues as a `PeerCommand`, which the observer sets beside
+ * what the engine does.
  *
  * The states, and the model's `Side` each one stands for:
  *
@@ -66,8 +67,9 @@
  * cohort), more than one other player (there is one machine per player), the
  * pause between reconnect attempts, and PEER-PHANTOM.
  */
-import { Context, Effect, Exit, Schema, Scope } from 'effect';
-import { createEffectActor, setupEffect } from '@xstate/effect';
+import { Context, Duration, Effect, Exit, Fiber, Option, Schema, Scope } from 'effect';
+import { setupEffect } from '@xstate/effect';
+import { initialTransition, transition, type EventFrom } from 'xstate';
 import { disconnectDisposition, hasAttemptLeft, shouldInitiate, signalDisposition } from './peer-signaling.ts';
 
 export type PeerState =
@@ -804,37 +806,114 @@ export const peerConnectionMachine = setupEffect({
 });
 
 /** The events the engine tells the machine. */
-export type PeerEvent = Parameters<Awaited<ReturnType<typeof startActor>>['send']>[0];
+export type PeerEvent = Exclude<EventFrom<typeof peerConnectionMachine>, { type: `xstate.${string}` }>;
 
-const startActor = (input: PeerInput, onCommand: (command: PeerCommand) => void, scope: Scope.Scope) =>
-  Effect.runPromise(
-    createEffectActor(peerConnectionMachine, { input }).pipe(
-      Effect.provideService(Scope.Scope, scope),
-      Effect.provideService(PeerCommands, { issue: (command) => Effect.sync(() => onCommand(command)) }),
-    ),
-  );
+/** The machine's deadlines, by the name of their delay. */
+const PeerDeadline = Schema.Literals(['startupAfter', 'attemptAfter', 'giveUpAfter', 'answerAfter', 'healAfter']);
+export type PeerDeadline = typeof PeerDeadline.Type;
+
+/** A deadline as XState raises it for itself once its delay has passed. */
+const After = Schema.Struct({ type: Schema.Literal('xstate.after'), delay: PeerDeadline, stateId: Schema.String });
+type After = typeof After.Type;
+
+/** What a transition asks of its host: issue a command, arm a deadline, disarm one. */
+const decodeHostEffect = Schema.decodeUnknownOption(
+  Schema.Union([
+    Schema.Struct({ type: Schema.Literal('issue'), args: Schema.Tuple([Schema.Struct({ command: PeerCommand })]) }),
+    Schema.Struct({ type: Schema.Literal('@xstate.raise'), event: After, delay: Schema.Number }),
+    Schema.Struct({ type: Schema.Literal('@xstate.cancel'), event: After }),
+  ]),
+);
+
+// SAFETY: a deadline is an event XState raises for itself and takes like any other; only the
+// type of what a host may send leaves it out.
+const asEvent = (event: PeerEvent | After): PeerEvent => event as PeerEvent;
 
 /**
- * Runs the machine for one other player. Its deadlines run on the actor's
- * clock and change the state, so the state is the actor's: an event sent now
- * shows in `state()` on a later tick. Events sent before the actor is up are
- * held for it and delivered in order.
+ * Runs the machine for one other player. Each event is taken at once, with
+ * XState's pure `transition`, and `send` returns the commands it issued, so a
+ * caller can set them beside what it did itself with the same event. The
+ * deadlines the machine arms run as Effect sleeps in this runner's scope;
+ * when one passes, its commands go to `onDeadline`. `fire` takes an armed
+ * deadline now, as if it had passed: an observer whose engine has its own
+ * timer for the same wait keeps the two in step with it.
  */
-export const createPeerConnection = (input: PeerInput, onCommand: (command: PeerCommand) => void) => {
+export const createPeerConnection = (
+  input: PeerInput,
+  onDeadline: (deadline: PeerDeadline, commands: readonly PeerCommand[]) => void,
+) => {
   const scope = Effect.runSync(Scope.make());
-  const ready = startActor(input, onCommand, scope);
-  let actor: Awaited<typeof ready> | undefined;
-  const held: PeerEvent[] = [];
-  void ready.then((started) => {
-    actor = started;
-    for (const event of held.splice(0)) started.send(event);
-  });
+  const armed = new Map<string, { readonly event: After; readonly fiber: Fiber.Fiber<void> }>();
+  const keyOf = (event: After): string => `${event.delay} ${event.stateId}`;
+  let stopped = false;
+  const disarm = (key: string): void => {
+    const timer = armed.get(key);
+    if (!timer) return;
+    armed.delete(key);
+    Effect.runFork(Fiber.interrupt(timer.fiber));
+  };
+  const absorb = (effects: readonly unknown[]): PeerCommand[] => {
+    const commands: PeerCommand[] = [];
+    for (const raw of effects) {
+      const effect = Option.getOrUndefined(decodeHostEffect(raw));
+      if (!effect) continue;
+      if (effect.type === 'issue') {
+        commands.push(effect.args[0].command);
+      } else if (effect.type === '@xstate.raise') {
+        const key = keyOf(effect.event);
+        disarm(key);
+        if (stopped) continue;
+        const fiber = Effect.runSync(
+          Effect.forkIn(
+            Effect.sleep(Duration.millis(effect.delay)).pipe(Effect.andThen(Effect.sync(() => expire(key)))),
+            scope,
+          ),
+        );
+        armed.set(key, { event: effect.event, fiber });
+      } else {
+        disarm(keyOf(effect.event));
+      }
+    }
+    return commands;
+  };
+  const [first, initial] = initialTransition(peerConnectionMachine, input);
+  let snapshot = first;
+  const step = (event: PeerEvent): PeerCommand[] => {
+    if (stopped) return [];
+    const [next, effects] = transition(peerConnectionMachine, snapshot, event);
+    snapshot = next;
+    return absorb(effects);
+  };
+  const take = (key: string): PeerCommand[] | null => {
+    const timer = armed.get(key);
+    if (!timer) return null;
+    armed.delete(key);
+    return step(asEvent(timer.event));
+  };
+  const expire = (key: string): void => {
+    const event = armed.get(key)?.event;
+    const commands = take(key);
+    if (event && commands) onDeadline(event.delay, commands);
+  };
+  absorb(initial);
   return {
-    send: (event: PeerEvent): void => {
-      if (actor) actor.send(event);
-      else held.push(event);
+    send: (event: PeerEvent): readonly PeerCommand[] => step(event),
+    /** Take the armed deadline `deadline` now. Null when it is not armed. */
+    fire: (deadline: PeerDeadline): readonly PeerCommand[] | null => {
+      const key = [...armed.keys()].find((k) => armed.get(k)?.event.delay === deadline);
+      if (key === undefined) return null;
+      const timer = armed.get(key);
+      if (timer) Effect.runFork(Fiber.interrupt(timer.fiber));
+      return take(key);
     },
-    state: (): PeerState => (actor ? peerStateName(actor.getSnapshot().value) : 'absent'),
-    stop: (): Promise<void> => Effect.runPromise(Scope.close(scope, Exit.void)),
+    /** The deadlines armed now. */
+    armed: (): PeerDeadline[] => [...armed.values()].map((timer) => timer.event.delay),
+    state: (): PeerState => peerStateName(snapshot.value),
+    stop: (): Promise<void> => {
+      stopped = true;
+      armed.clear();
+      return Effect.runPromise(Scope.close(scope, Exit.void));
+    },
   };
 };
+export type PeerConnection = ReturnType<typeof createPeerConnection>;
