@@ -142,8 +142,8 @@ pair peer_connection_counter_only holdWithACounterAlone initLobby
 # ── The pause around a late join ────────────────────────────────────────────
 PAUSE=specs/late_join_pause.qnt
 $QUINT typecheck "$PAUSE"
-for variant in late_join_pause_before late_join_pause_host_side late_join_pause_current \
-  late_join_pause_fixed; do
+for variant in late_join_pause_before late_join_pause_host_side late_join_pause_before_resync \
+  late_join_pause_current; do
   $QUINT test "$PAUSE" --main="$variant" --backend=typescript
 done
 # Today: the game stays paused while a joiner has yet to load, a joiner who
@@ -153,14 +153,14 @@ done
 # player while the host is paused for another (it waits with the rest). The
 # first three were violated before the pause belonged to the joiners being
 # served (late_join_pause_before); the guest's with only the host's side
-# changed (late_join_pause_host_side).
-$QUINT run "$PAUSE" --main=late_join_pause_current --invariant=holdBeforeTheResyncFix \
+# changed (late_join_pause_host_side). And a joiner that lost its channel
+# to the host during its serve is not made a player on a state the host has
+# run past without a resync on its way: violated before the joiner resynced
+# (late_join_pause_before_resync; joinerLosesTheHostAfterTheStateIsSentTest,
+# timerFiresWhileTheStateIsOnItsWayTest).
+$QUINT run "$PAUSE" --main=late_join_pause_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
-# A joiner that lost its channel to the host during its serve is not made a
-# player on a state the host has run past without a resync on its way:
-# violated today (joinerLosesTheHostAfterTheStateIsSentTest,
-# timerFiresWhileTheStateIsOnItsWayTest), held by late_join_pause_fixed.
-$QUINT run "$PAUSE" --main=late_join_pause_fixed --invariant=allHold \
+$QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeTheResyncFix \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
 # ── A resync from request to apply ──────────────────────────────────────────

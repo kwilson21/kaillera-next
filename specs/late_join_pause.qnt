@@ -739,8 +739,9 @@ module late_join_pause_host_side {
   ).*
 }
 
-// Today.
-module late_join_pause_current {
+// Before a joiner that lost its channel to the host resynced: it was made
+// a player on a state the host had run past.
+module late_join_pause_before_resync {
   import late_join_pause(
     PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true, KEEP_FIRST_DEADLINE = true,
     GUEST_RESUMES_ON_HOST_ONLY = true, GUEST_PAUSE_HAS_DEADLINE = true,
@@ -748,9 +749,9 @@ module late_join_pause_current {
   ).*
 }
 
-// Today with a joiner that lost its channel to the host resyncing once it
-// has loaded.
-module late_join_pause_fixed {
+// Today: a joiner that lost its channel to the host asks for a full resync
+// once it has loaded (_lateJoinLostHost, _resyncAfterLostHost).
+module late_join_pause_current {
   import late_join_pause(
     PAUSE_PER_JOINER = true, ARM_AT_PAUSE = true, KEEP_FIRST_DEADLINE = true,
     GUEST_RESUMES_ON_HOST_ONLY = true, GUEST_PAUSE_HAS_DEADLINE = true,

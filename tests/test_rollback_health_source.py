@@ -589,11 +589,13 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Seven sites ask: one over Socket.IO, six on a DataChannel. The two that
-    # name a target frame give it to the request, which keeps it after the
-    # target's deadline (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 7
-    assert src.count("_beginResyncRequest()") == 5
+    # Eight sites ask: one over Socket.IO, seven on a DataChannel (the
+    # seventh is a late joiner that lost its channel to the host,
+    # specs/late_join_pause.qnt). The two that name a target frame give it to
+    # the request, which keeps it after the target's deadline
+    # (specs/resync_flow.qnt, askedAt).
+    assert src.count("_beginResyncRequest(") == 8
+    assert src.count("_beginResyncRequest()") == 6
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
     assert "let _resyncRequestAt = -1;" in src
@@ -609,8 +611,8 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 6
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 4
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 7
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 5
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
     # Sent bare only where no request is marked as out (BOOT-SYNC,
     # INPUT-STALL-RESYNC): those are not numbered.
