@@ -126,7 +126,7 @@ kaillera-next/
 │   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); not wired into the engine yet
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
-│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing); offer-gate.ts decides, for the engine, that a guest or spectator takes an offer only from slot 0
+│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing); offer-gate.ts decides, for the engine, that a guest or spectator takes an offer only from slot 0; attempt.ts decides which connection a signal belongs to and reoffer.ts is the host's deadline to offer again (specs/streaming_connection.qnt)
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
 │   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts, version.ts, feedback.ts)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
@@ -220,7 +220,9 @@ All events go through the default Socket.IO namespace (`/`).
   after repeated throws).
   Host-authoritative resync remains as fallback for reconnection and late join.
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
-  video via WebRTC MediaStream. Guests send input back over DataChannel.
+  video via WebRTC MediaStream. Guests send input back over DataChannel. The host
+  offers a new connection, at a deadline, to every member it lists whose channel is
+  not open, and every signal names the connection it belongs to (`attemptId`).
 - **ROM handling:** User drag-and-drops ROM file; cached in IndexedDB.
 - **Rooms are ephemeral:** Live room state (players, slots, mode) stays in memory, with
   optional Redis persistence for zero-downtime deploys and reconnect survival — no SQL
