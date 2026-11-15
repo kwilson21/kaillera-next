@@ -51,7 +51,8 @@ which fields mean anything in a given frame.
    Every 30 frames each page reads the map's fields from RAM, and the run
    fails unless, on both peers, the scene byte read the character select and
    then the battle, the character ids are the fighters picked, the battle
-   header's status says the match gets under way and stays so, stock counts
+   header's status says the match gets under way and stays so, the game's
+   own battle-state pointer names the mapped battle state, stock counts
    are plausible, the battle header is not empty, the RNG seed moves and the
    fighter-buffer pointer, once set, points into RAM. The checks and what they read are
    printed, and written to `summary.json` as `addressMapCheck`.
@@ -103,6 +104,16 @@ Two things in the steps above catch this, and neither is optional:
 - watching the values, not just their range: over a match the stock counts
   printed by step 3 must move when fighters are KO'd. `0/0` for a whole
   match is the dormant copy.
+
+The second copy is not useless, only idle: a sudden death runs from it
+(the game's battle-state pointer, 0x800A50E8, is moved to it). So the map
+names both. `vsBattleHeader` and `stocksBase` are the copy a normal match
+runs from, and the steps above check them; `suddenDeathHeader` is the
+other, laid out the same way, and the registry hashes the stock counts and
+header of both, live copy first. A sudden death never comes up in the
+two-player run, so the second copy is checked against a RAM dump of one
+instead (`in-sudden-death.rdram.gz`, made by running a timed match out on a
+tie). A ROM with a single copy sets `suddenDeathHeader` to 0.
 
 ## What these steps do not show
 
