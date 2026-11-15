@@ -228,6 +228,26 @@
  *     was applied after the asks (at the request's deadline the guest asks
  *     again: RESYNC-REASK). Reported as `doubleResyncAsk` in summary.json.
  *     The other fault knobs are refused with it.
+ *   UNANSWERED_SOCKET_RESYNC=1   The lifecycle resync guard, armed and left to
+ *     time out under an owed resync (#243's review: its timeout let the ask
+ *     again go one second before the ask's own deadline). In rollback mode a
+ *     tab shown again does not resync; the guard is armed by a full resync
+ *     asked over the socket (_requestSocketFullResync), which a chunk timeout
+ *     sends. A third of the way into the battle the guest's network-change
+ *     handler asks the host for a resync (`online`), and the host page drops
+ *     the binary chunks of its answer on `sync-state` (the header goes
+ *     through), so the guest's 3 s chunk timeout asks over the socket and
+ *     arms the guard. The host page drops its socket answer (a wrapper on
+ *     io.Socket.prototype.emit, in the init script), and then the whole of
+ *     its next answer on `sync-state` (the answer to the guest's first ask
+ *     again, 8 s on). The guard times out at 15 s; the request's own
+ *     deadline asks a second time at 16 s, and that one is answered. No
+ *     engine hook. The run fails unless the chunk timeout armed the guard,
+ *     the host dropped the socket answer and the ask again's answer, the
+ *     guard timed out, the guest then sent its second ask again
+ *     (`RESYNC-REASK ... ask=2/2`), and a host state was applied after it.
+ *     Reported as `unansweredSocketResync` in summary.json. The other fault
+ *     knobs are refused with it.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -388,6 +408,7 @@ const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
 const LOSE_INPUTS_BEFORE_FALLBACK = process.env.LOSE_INPUTS_BEFORE_FALLBACK === '1';
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 const DOUBLE_RESYNC_ASK = process.env.DOUBLE_RESYNC_ASK === '1';
+const UNANSWERED_SOCKET_RESYNC = process.env.UNANSWERED_SOCKET_RESYNC === '1';
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -542,6 +563,26 @@ if (
   console.log('DOUBLE_RESYNC_ASK is mutually exclusive with the other fault knobs');
   process.exit(1);
 }
+if (
+  UNANSWERED_SOCKET_RESYNC &&
+  (FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    LOSE_INPUTS_BEFORE_FALLBACK ||
+    DOUBLE_RESYNC_ASK ||
+    DESYNC_GUEST)
+) {
+  console.log('UNANSWERED_SOCKET_RESYNC is mutually exclusive with the other fault knobs');
+  process.exit(1);
+}
+// The chunk timeout (3 s), the guard's timeout (15 s), the second ask again
+// (16 s), its answer.
+const UNANSWERED_SOCKET_RESYNC_RECOVER_MS = 45000;
 // The request's deadline, the ask again and its answer.
 const DOUBLE_RESYNC_ASK_RECOVER_MS = 30000;
 // LINK_KBPS without DELAY_SYNC_ANSWER_MS: one plain resync a third of the way in.
@@ -571,12 +612,13 @@ const faultNeedsSeconds = Math.ceil(
   (((DROP_PEER_MS > 0 ? DROP_PEER_MS + DROP_PEER_RECOVER_MS : 0) +
     (DELAY_SYNC_ANSWER_MS > 0 ? DELAY_SYNC_ANSWER_MS + DELAY_SYNC_ANSWER_RECOVER_MS : 0) +
     (LINK_RESYNC ? LINK_RESYNC_RECOVER_MS : 0) +
-    (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0)) *
+    (DOUBLE_RESYNC_ASK ? DOUBLE_RESYNC_ASK_RECOVER_MS : 0) +
+    (UNANSWERED_SOCKET_RESYNC ? UNANSWERED_SOCKET_RESYNC_RECOVER_MS : 0)) *
     1.5) /
     1000,
 );
 if (
-  (DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC || DOUBLE_RESYNC_ASK) &&
+  (DROP_PEER_MS > 0 || DELAY_SYNC_ANSWER_MS > 0 || LINK_RESYNC || DOUBLE_RESYNC_ASK || UNANSWERED_SOCKET_RESYNC) &&
   !(BATTLE_SECONDS >= faultNeedsSeconds)
 ) {
   console.log(`this fault needs BATTLE_SECONDS >= ${faultNeedsSeconds}`);
@@ -734,7 +776,58 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // nor counted there), and its frame (the packet's first word) kept.
   window.__knLoseRbInputs = false;
   window.__knRbInputsLost = [];
+  // UNANSWERED_SOCKET_RESYNC: each entry of window.__knSyncAnswerDrops is
+  // taken by the next numbered answer on `sync-state` (its `sync-answer-id:`
+  // message): 'chunks' passes the answer's id and header and drops its
+  // binary chunks; 'whole' drops the id, the header and the chunks. Either
+  // lasts until the next message that starts a transfer. What was dropped is
+  // kept in __knSyncAnswersDropped.
+  window.__knSyncAnswerDrops = [];
+  window.__knSyncAnswersDropped = [];
+  let syncDropping = null;
+  let syncIdJustSent = false;
+  const syncStateDrops = (data) => {
+    if (typeof data === 'string') {
+      if (data.startsWith('sync-answer-id:')) {
+        syncDropping = window.__knSyncAnswerDrops.shift() ?? null;
+        syncIdJustSent = true;
+        if (syncDropping) window.__knSyncAnswersDropped.push({ answer: data, drop: syncDropping });
+        return syncDropping === 'whole';
+      }
+      if (data.startsWith('sync-start:') || data.startsWith('sync-regions-start:')) {
+        if (!syncIdJustSent) syncDropping = null;
+        syncIdJustSent = false;
+        return syncDropping === 'whole';
+      }
+      return false;
+    }
+    return syncDropping !== null;
+  };
+  // UNANSWERED_SOCKET_RESYNC: while window.__knDropSocketAnswers is above 0,
+  // the page's next state answer over the socket (`data-message` of type
+  // `sync-state-socket`) is dropped before it reaches the server, and its
+  // request number kept. socket.io.min.js assigns window.io as it loads.
+  window.__knDropSocketAnswers = 0;
+  window.__knSocketAnswersDropped = [];
+  Object.defineProperty(window, 'io', {
+    configurable: true,
+    set(io) {
+      const emit = io?.Socket?.prototype?.emit;
+      if (emit) {
+        io.Socket.prototype.emit = function (event, data, ...rest) {
+          if (window.__knDropSocketAnswers > 0 && event === 'data-message' && data?.type === 'sync-state-socket') {
+            window.__knDropSocketAnswers--;
+            window.__knSocketAnswersDropped.push(data.requestId ?? null);
+            return this;
+          }
+          return emit.call(this, event, data, ...rest);
+        };
+      }
+      Object.defineProperty(window, 'io', { value: io, writable: true, configurable: true, enumerable: true });
+    },
+  });
   RTCDataChannel.prototype.send = function (data) {
+    if (this.label === 'sync-state' && syncStateDrops(data)) return;
     if (window.__knLoseRbInputs && this.label === 'rollback-input' && data instanceof ArrayBuffer) {
       if (data.byteLength >= 4) window.__knRbInputsLost.push(new Int32Array(data, 0, 1)[0]);
       return;
@@ -1208,6 +1301,8 @@ const loseBeforeFallback = { hostAt: null, guestAt: null, fellBack: false, round
 const linkResync = { hostAt: null, guestAt: null, applied: false };
 // DOUBLE_RESYNC_ASK: where the logs stood when the guest asked twice.
 const doubleResyncAsk = { hostAt: null, guestAt: null, applied: false };
+// UNANSWERED_SOCKET_RESYNC: where the logs stood when the guest asked.
+const unansweredSocketResync = { hostAt: null, guestAt: null, applied: false };
 const syncLogOf = (page) => page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
 const seqOf = (line) => Number(line.split('\t')[0]);
 const lastLogLine = async (page) => {
@@ -1412,6 +1507,37 @@ if (inBattle) {
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (UNANSWERED_SOCKET_RESYNC) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [unansweredSocketResync.hostAt, unansweredSocketResync.guestAt] = await Promise.all([
+      lastLogLine(host),
+      lastLogLine(guest),
+    ]);
+    // The answer to the guest's ask loses its chunks; the socket answer that
+    // follows the chunk timeout is dropped, and the whole of the answer to
+    // the first ask again.
+    await host.evaluate(() => {
+      window.__knSyncAnswerDrops = ['chunks', 'whole'];
+      window.__knDropSocketAnswers = 1;
+    });
+    await guest.evaluate(() => window.dispatchEvent(new Event('online')));
+    console.log('UNANSWERED_SOCKET_RESYNC: guest asked for a resync; its answers are dropped');
+    // The guard times out at 15 s and the request's deadline asks a second
+    // time at 16 s; that answer goes through.
+    const asked = await waitForLine(
+      guest,
+      unansweredSocketResync.guestAt.seq,
+      /RESYNC-REASK .*ask=2\/2/,
+      UNANSWERED_SOCKET_RESYNC_RECOVER_MS,
+    );
+    unansweredSocketResync.applied =
+      asked && (await waitForLine(guest, unansweredSocketResync.guestAt.seq, /sync #\d+ applied/, 15000));
+    console.log(
+      `UNANSWERED_SOCKET_RESYNC: a state applied: ${unansweredSocketResync.applied} (${Date.now() - started} ms)`,
+    );
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (DOUBLE_RESYNC_ASK) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
@@ -1591,6 +1717,8 @@ const collect = (p, VISUAL_CHECK) =>
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       syncAnswersHeld: window.__knSyncAnswersHeld ?? [],
       rbInputsLost: window.__knRbInputsLost ?? [],
+      syncAnswersDropped: window.__knSyncAnswersDropped ?? [],
+      socketAnswersDropped: window.__knSocketAnswersDropped ?? [],
       link: window.__knLink ?? null,
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
@@ -1837,6 +1965,43 @@ const loseBeforeFallbackReport = (() => {
     exercised,
     ...after,
     passed: exercised && Object.values(after).every((lines) => lines.length === 0),
+  };
+})();
+// UNANSWERED_SOCKET_RESYNC: the chunk timeout and the guard it armed, the
+// dropped answers, the guard's timeout, the second ask again and the state
+// applied after it, in that order.
+const unansweredSocketResyncReport = (() => {
+  if (!UNANSWERED_SOCKET_RESYNC || !unansweredSocketResync.guestAt) return null;
+  const guestLines = linesAfter(G.sync, unansweredSocketResync.guestAt.seq);
+  const at = (re, from = 0) => {
+    const i = guestLines.slice(from).findIndex((line) => re.test(line));
+    return i < 0 ? -1 : from + i;
+  };
+  const chunkTimeout = at(/sync chunks timeout: /);
+  const guardArmed = at(/sync-chunk-timeout: lifecycle resync guard armed/);
+  const guardTimedOut = at(/lifecycle resync guard timeout: lifecycle resync guard cleared/, Math.max(0, guardArmed));
+  const secondAsk = at(/RESYNC-REASK .*ask=2\/2/, Math.max(0, guardTimedOut));
+  const appliedAfter = secondAsk < 0 ? -1 : at(/sync #\d+ applied/, secondAsk);
+  const line = (i) => (i < 0 ? null : guestLines[i]);
+  return {
+    syncAnswersDropped: H.syncAnswersDropped,
+    socketAnswersDropped: H.socketAnswersDropped,
+    chunkTimeout: line(chunkTimeout),
+    guardArmed: line(guardArmed),
+    guardTimedOut: line(guardTimedOut),
+    secondAsk: line(secondAsk),
+    appliedAfter: line(appliedAfter),
+    timeouts: guestLines.filter((l) => /RESYNC-REQUEST-TIMEOUT/.test(l)),
+    asksAgain: guestLines.filter((l) => /RESYNC-REASK/.test(l)),
+    applied: guestLines.filter((l) => /sync #\d+ applied/.test(l)),
+    passed:
+      chunkTimeout >= 0 &&
+      guardArmed >= 0 &&
+      H.socketAnswersDropped.length >= 1 &&
+      H.syncAnswersDropped.some((d) => d.drop === 'whole') &&
+      guardTimedOut > guardArmed &&
+      secondAsk > guardTimedOut &&
+      appliedAfter > secondAsk,
   };
 })();
 // DOUBLE_RESYNC_ASK: the rate-limited second request, the dropped late
@@ -2371,6 +2536,7 @@ if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
 if (LOSE_INPUTS_BEFORE_FALLBACK) summary.loseBeforeFallback = loseBeforeFallbackReport;
 if (linkReport) summary.link = linkReport;
 if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
+if (unansweredSocketResyncReport) summary.unansweredSocketResync = unansweredSocketResyncReport;
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
@@ -2589,6 +2755,17 @@ if (doubleResyncAskReport) {
     JSON.stringify(doubleResyncAskReport),
   );
 }
+// UNANSWERED_SOCKET_RESYNC: the guard timed out under the owed resync, and
+// the request's own deadline still asked again and got it.
+const unansweredSocketResyncFailed = UNANSWERED_SOCKET_RESYNC && !unansweredSocketResyncReport?.passed;
+if (UNANSWERED_SOCKET_RESYNC) {
+  console.log(
+    unansweredSocketResyncFailed
+      ? 'UNANSWERED_SOCKET_RESYNC: not exercised, or no ask again after the guard timed out:'
+      : 'UNANSWERED_SOCKET_RESYNC: asked again after the guard timed out, and applied:',
+    JSON.stringify(unansweredSocketResyncReport),
+  );
+}
 // LINK_KBPS: every channel was on its connection's shared link, the fault
 // happened (a plain resync was applied, or DELAY_SYNC_ANSWER_MS's own checks
 // above), and no rollback was skipped after it outside a proven recovery.
@@ -2635,6 +2812,7 @@ const failed =
   delaySyncAnswerFailed ||
   loseBeforeFallbackFailed ||
   doubleResyncAskFailed ||
+  unansweredSocketResyncFailed ||
   observersFailed ||
   signalingDropFailed ||
   gpMis > 0 ||
