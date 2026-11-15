@@ -60,7 +60,7 @@ const cases = [
   ['/join?room=abc%22%3E%3Cx&spectate=1', 'GET', 'Discordbot/2.0'],
   ['/join?room=Case30X&spectate=1', 'GET', 'Discordbot/2.0'],
   ['/join?room=ABC', 'POST', ''],
-  ['/static/landing.js', 'GET', ''],
+  ['/static/dist/kn-landing.js', 'GET', ''],
   ['/static/fonts/ibm-plex-sans-var-latin.woff2', 'GET', ''],
   ['/static/play.js', 'GET', ''],
   ['/static/version.json', 'GET', ''],
@@ -126,8 +126,8 @@ def test_pages_and_their_files_come_from_assets():
         # The static preview tags get the public host.
         assert " og=https://kn.example/og" in _body(r, page)
         assert 'name="kn-origin" content="https://game.example"' in _body(r, page)
-    assert _body(r, "/static/landing.js") == "asset:/static/landing.js"
-    assert r[("/static/landing.js", "GET", "")]["cache"] == "no-cache"
+    assert _body(r, "/static/dist/kn-landing.js") == "asset:/static/dist/kn-landing.js"
+    assert r[("/static/dist/kn-landing.js", "GET", "")]["cache"] == "no-cache"
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
 
 
@@ -697,7 +697,7 @@ const firstMs = Date.now() - firstStarted;
 const firstIsAsset = first.startsWith('asset:');
 await Promise.all(waits.splice(0));
 const secondPage = await get('/');
-const secondAsset = await get('/static/landing.js');
+const secondAsset = await get('/static/dist/kn-landing.js');
 console.log(JSON.stringify({ firstIsAsset, firstMs, secondPage, secondAsset, landingBuildFetches }));
 """
 
@@ -788,7 +788,7 @@ const ctx = { waitUntil: (p) => waits.push(p) };
 // A burst of concurrent requests (some pages, some assets) dispatched
 // without waiting on each other first — as a real burst of visitor traffic
 // would arrive on a fresh isolate.
-const paths = ['/', '/static/landing.js', '/index.html', '/join', '/static/landing.js', '/'];
+const paths = ['/', '/static/dist/kn-landing.js', '/index.html', '/join', '/static/dist/kn-landing.js', '/'];
 await Promise.all(paths.map((p) => worker.fetch(new Request('https://kn.example' + p), env, ctx).then((r) => r.text())));
 console.log(JSON.stringify({ landingBuildFetches }));
 """
@@ -986,7 +986,7 @@ async function timed(path) {
   return Date.now() - t0;
 }
 
-const assetMs = await timed('/static/landing.js');
+const assetMs = await timed('/static/dist/kn-landing.js');
 const pageMs = await timed('/join');
 console.log(JSON.stringify({ assetMs, pageMs }));
 """
@@ -1062,7 +1062,7 @@ await get('/'); // establishes the 'stale' verdict in the background
 await Promise.all(waits.splice(0));
 
 const page = await get('/'); // stale mode, origin times out -> falls back
-const asset = await get('/static/landing.js'); // same
+const asset = await get('/static/dist/kn-landing.js'); // same
 
 let race;
 try {
@@ -1164,9 +1164,9 @@ if (mode === 'build-marker') {
   await get('/'); await settle();
   out = await get('/static/landing-build.json');
 } else if (mode === 'own-id-retry') {
-  await get('/static/landing.js'); await settle();
+  await get('/static/dist/kn-landing.js'); await settle();
   now += 61_000;
-  await get('/static/landing.js'); await settle();
+  await get('/static/dist/kn-landing.js'); await settle();
   out = { ownReads, originBuildReads };
 } else if (mode === 'crawler') {
   await get('/'); await settle();
@@ -1176,7 +1176,7 @@ if (mode === 'build-marker') {
   await get('/'); await settle();
   await get('/'); // first stale proxy times out and arms the cooldown
   await get('/list');
-  const result = await get('/static/landing.js');
+  const result = await get('/static/dist/kn-landing.js');
   out = { ...result, landingFetches };
 } else if (mode === 'metadata-timeout') {
   const started = Date.now();
@@ -1226,7 +1226,7 @@ def test_stale_crawler_preview_timeout_does_not_fetch_join_twice():
 
 @pytest.mark.parametrize(
     ("status", "expected_body", "expected_fetches"),
-    [("200", "origin:/static/landing.js", 2), ("524", "asset:/static/landing.js", 1)],
+    [("200", "origin:/static/dist/kn-landing.js", 2), ("524", "asset:/static/dist/kn-landing.js", 1)],
 )
 def test_only_non_5xx_proxy_responses_clear_landing_cooldown(status, expected_body, expected_fetches):
     out = _run_edge_case(f"cooldown-{status}")

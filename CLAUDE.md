@@ -82,7 +82,6 @@ kaillera-next/
 │   ├── demo.html            # interactive rollback demo (user-supplied ROM required)
 │   ├── error.html           # error/fallback page
 │   └── static/
-│       ├── landing.js           # front page: board poll, waking state, header marks
 │       ├── landing.css          # front page styles (direction A tokens)
 │       ├── play.css             # play page styles (room overlay tokens, direction A)
 │       ├── admin.css            # admin dashboard styles
@@ -103,7 +102,7 @@ kaillera-next/
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
-│       ├── demo.js              # demo page orchestrator (fake peer + menu autopilot)
+│       ├── demo.js              # demo page orchestrator (emulator boot, engine start, fake peer + menu autopilot wiring); its options, network settings, HUD text and menu script are web/src/demo
 │       ├── fake-peer.js         # synthetic P2 for the demo page (simulated input/jitter)
 │       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo (reads RDRAM menu state)
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD (window.KNRollbackTimeline) from web/src/page/rollback-timeline.ts
@@ -113,6 +112,7 @@ kaillera-next/
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
 │       ├── dist/kn-core.js       # built from web/src by `npm run build`; build output, not in git (the Docker image and CI build it)
 │       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
+│       ├── dist/kn-landing.js    # the front page's own small bundle: board poll, waking state, header marks
 │       ├── dist/kn-join.js       # the invite page's own small bundle: room lookup, full/closed/in-app states
 │       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage, window.KNSite
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
@@ -130,11 +130,13 @@ kaillera-next/
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
 │   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts, version.ts, feedback.ts)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
-│   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (join.ts: the invite page; wake.ts, wire.ts: shared)
+│   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (front.ts, board.ts: the front page and its decisions; join.ts: the invite page; wake.ts, wire.ts: shared)
+│   │   ├── landing-entry.ts     # kn-landing.js bundle entry
 │   │   ├── join-entry.ts        # kn-join.js bundle entry
 │   │   ├── page/shared.ts       # window.KNShared and window.KNEvent: cheats, key tracking, local input, input wire format, WebRTC peer helpers (was web/static/shared.js)
 │   │   ├── page/gamepad-manager.ts # window.GamepadManager: gamepad profiles, remapping, slot assignment
 │   │   ├── page/desync-detector.ts # window.KNDesync: field-granular cross-peer desync detection, installed by the bundle
+│   │   ├── demo/                # the demo page's logic, moving out of web/static/demo.js in slices (window.KNCore.demo)
 │   │   ├── wake-art.ts          # shared waking art logic for the landing pages
 │   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
