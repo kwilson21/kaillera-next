@@ -705,6 +705,17 @@ export const createDesyncDetector = (page: DetectorPage) => {
       ingestPeerDigest(peerId, payload);
     },
 
+    // A resync took the engine back to `frame` and runs the frames from it
+    // again (netplay-rollback.js, _startCatchUp). The digests built for
+    // them describe the state they replace: compared with a peer's that
+    // arrives later, they would flag what the resync has corrected. The
+    // ones built from here on read the history the frames run again write.
+    forgetFrom(frame: number): void {
+      for (const f of localDigests.keys()) {
+        if (f >= frame) localDigests.delete(f);
+      }
+    },
+
     events,
     _testHooks: {
       CONFIG,

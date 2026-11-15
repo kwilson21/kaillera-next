@@ -333,3 +333,12 @@ test('decodeDesyncDigest accepts what the detector sends and nothing else', () =
   assert.equal(decodeDesyncDigest({ frame: 7, hashes: fullHashes(), replayMeta: 'x' }), null);
   assert.equal(decodeDesyncDigest({ frame: 7, hashes: fullHashes(), replayMeta: { ...replayMeta, pre: ['a'] } }), null);
 });
+
+test('a resync that runs frames again drops the digests built for them', () => {
+  const page: DetectorPage = { KNState: { isLocalHost: false, matchId: 'm1', peers: {} }, _peers: {} };
+  const detector = createDesyncDetector(page);
+  const digests = detector._testHooks.localDigests;
+  for (const frame of [100, 110, 120, 130]) digests.set(frame, { frame, hashes: [frame] });
+  detector.forgetFrom(120);
+  assert.deepEqual([...digests.keys()], [100, 110]);
+});

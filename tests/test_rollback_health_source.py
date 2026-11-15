@@ -659,6 +659,8 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     for flag in ("_setReplayFullHeadless", "_setReplayRdpSkip", "_setReplayAudioOutputSkip"):
         assert f"{flag}(mod, true, 'catch-up');" in start
     assert start.rstrip().endswith("_catchUpSlice(mod);")
+    # The detector's own digests for the frames run again are dropped.
+    assert "window.KNDesync?.forgetFrom(fromFrame);" in start
     end = src[src.index("const _endCatchUp = (mod, stoppedAt = '') => {") :]
     end = end[: end.index("\n  };\n")]
     for flag in ("_setReplayFullHeadless", "_setReplayRdpSkip", "_setReplayAudioOutputSkip"):

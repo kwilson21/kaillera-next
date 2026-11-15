@@ -6650,11 +6650,14 @@
   let _owedResyncAsksAgain = 0;
   const RESYNC_MAX_ASKS_AGAIN = 2;
   // A host state from before this guest's frame is caught up from: applied,
-  // and the frames up to the guest's run again (_startCatchUp).
-  // Each frame costs main-thread time with the canvas held, so a state
-  // further back than this is not applied (SYNC-TOO-OLD-DROPPED) and an owed
-  // resync is asked for again (specs/resync_flow.qnt, MAX_CATCH_UP).
-  const MAX_CATCH_UP_FRAMES = 300;
+  // and the frames up to the guest's run again (_startCatchUp). Each frame
+  // run again costs emulator time with the canvas held, less than a frame
+  // shown at the game's pace costs on a page that keeps up with the game. 10 s
+  // covers the answer to the guest's own request up to its deadline (8 s,
+  // RESYNC_REQUEST_TIMEOUT_MS); a state further back is not applied
+  // (SYNC-TOO-OLD-DROPPED) and an owed resync is asked for again
+  // (specs/resync_flow.qnt, MAX_CATCH_UP).
+  const MAX_CATCH_UP_FRAMES = 600;
   // An answer whose chunks are all in is decoded off the main thread (the
   // worker decompresses it and, for a delta, XORs it) before it is held: the
   // deadline does not count meanwhile, or it lets the request go while its
@@ -18431,6 +18434,8 @@
     _catchUpFrom = fromFrame;
     _catchUpTo = toFrame;
     _catchUpStartedAt = performance.now();
+    // Its own digests for the frames run again describe the state replaced.
+    window.KNDesync?.forgetFrom(fromFrame);
     _catchUpWorkMs = 0;
     _catchUpSlices = 0;
     _setReplayFullHeadless(mod, true, 'catch-up');
