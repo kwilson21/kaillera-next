@@ -8,7 +8,14 @@
  * rom-transfer-step.ts.
  */
 import type { RomTransferState } from '../reconnect.ts';
-import { afterChannelClosed, afterResumeTimedOut, chunkVerdict, headerVerdict } from './rom-transfer-step.ts';
+import {
+  afterChannelClosed,
+  afterResumeTimedOut,
+  chunkVerdict,
+  headerVerdict,
+  MAX_RETRIES,
+  type RetryVerdict,
+} from './rom-transfer-step.ts';
 
 /** The largest ROM a guest accepts from a host. */
 export const ROM_MAX_SIZE = 128 * 1024 * 1024;
@@ -94,8 +101,8 @@ export type ReceiverStep =
 
 const stay = (state: Receiver): ReceiverStep => ({ state, next: 'none' });
 
-const nextFor = (verdict: 'retry' | 'stalled' | 'wait'): Exclude<ReceiverNext, 'abandoned'> =>
-  verdict === 'retry' ? 'ask-after-pause' : verdict === 'stalled' ? 'stalled' : 'none';
+const nextFor = (verdict: RetryVerdict): Exclude<ReceiverNext, 'abandoned'> =>
+  verdict === 'retry' ? 'ask-after-pause' : 'stalled';
 
 const onHeader = (state: Receiver, size: number, hash: string | undefined, name: string | undefined): ReceiverStep => {
   const sameFile = state.header !== null && state.header.hash === hash && state.header.size === size;
@@ -115,8 +122,9 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
     case 'sharing-off':
       return stay(state.phase === 'receiving' || state.phase === 'resuming' ? { ...state, phase: 'paused' } : state);
     case 'sharing-on':
-      // Resume what was paused part-way, or start a transfer that never began.
-      return (state.phase === 'paused' && state.received > 0) || state.phase === 'idle'
+      // Resume what was paused, with or without bytes, or start a transfer
+      // that never began (`retriesBeforeAsking` in specs/rom_transfer.qnt).
+      return state.phase === 'paused' || state.phase === 'idle'
         ? { state: { ...state, phase: 'resuming' }, next: 'ask' }
         : stay(state);
     case 'retry':
@@ -156,7 +164,7 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
       const retries = state.retries + 1;
       return {
         state: { ...state, phase: 'paused', retries },
-        next: nextFor(afterChannelClosed(retries, state.received)),
+        next: nextFor(afterChannelClosed(retries)),
       };
     }
     case 'backoff-elapsed':
@@ -167,6 +175,22 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
       return { state: { ...state, phase: 'paused', retries }, next: nextFor(afterResumeTimedOut(retries)) };
     }
   }
+};
+
+/**
+ * What the progress line says while the transfer is paused. Paused with the
+ * host still sharing and retries left, a retry is already on its way (a close
+ * or an unanswered request leads to `ask-after-pause`); otherwise the guest
+ * is asked, by the Retry button the page shows.
+ */
+export const pausedText = (state: Receiver, sharing: boolean): string => {
+  if (sharing && state.retries <= MAX_RETRIES) {
+    return `ROM transfer interrupted — retrying (${state.retries}/${MAX_RETRIES})`;
+  }
+  if (state.header !== null && state.header.size > 0) {
+    return `ROM transfer paused — ${Math.round((state.received / state.header.size) * 100)}% received`;
+  }
+  return 'ROM transfer failed';
 };
 
 /** How far a transfer has got, as the progress bar shows it. */

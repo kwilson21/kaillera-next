@@ -66,14 +66,18 @@ done
 # ── ROM transfer: a guest waiting on the host always has a way out ──────────
 ROM=specs/rom_transfer.qnt
 $QUINT typecheck "$ROM"
-for variant in rom_transfer_before rom_transfer_short_kept rom_transfer_current; do
+for variant in rom_transfer_before rom_transfer_short_kept rom_transfer_nothing_received_waits rom_transfer_current; do
   $QUINT test "$ROM" --main="$variant" --backend=typescript
 done
 # Today: every waiting state has a running timer or a Retry button. Violated
 # before the request sent over the engine channel was given a deadline. And
 # what the receiver counts is what the page holds; violated while a short
-# file kept its count (rom_transfer_short_kept).
-for invariant in waitingHasAWayOut timersAloneStop countIsHeld; do
+# file kept its count (rom_transfer_short_kept). And the guest is asked to
+# press Retry only once its automatic retries are used up or the host stopped
+# sharing; violated while a transfer with nothing received was not resumed
+# after a close or the host sharing again (rom_transfer_nothing_received_waits;
+# closedBeforeAnyByteTest, sharingAgainBeforeAnyByteTest).
+for invariant in waitingHasAWayOut timersAloneStop countIsHeld retriesBeforeAsking; do
   $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
     --max-samples=20000 --max-steps=25 --backend=typescript
 done

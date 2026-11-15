@@ -1737,12 +1737,7 @@
       if (progress) progress.hidden = false;
       if (retryBtn) retryBtn.hidden = false;
       const text = document.getElementById('rom-progress-text');
-      if (text && _romReceiver.header) {
-        const pct = Math.round((_romReceiver.received / _romReceiver.header.size) * 100);
-        text.textContent = `ROM transfer paused — ${pct}% received`;
-      } else if (text) {
-        text.textContent = 'ROM transfer failed';
-      }
+      if (text) text.textContent = _romRules.pausedText(_romReceiver, _romSharingEnabled);
     } else if (_romReceiver.phase === 'resuming') {
       // Resuming — show progress bar with reconnecting text
       if (romDrop) romDrop.style.display = 'none';
@@ -2292,7 +2287,7 @@
       if (_romReceiver.phase !== 'receiving') return;
       _romTransferDC = null;
       stopStallTimer();
-      // Retried by itself, after a pause, only once part of the file has
+      // Retried by itself after a pause, whether or not any of the file
       // arrived; after three, the guest decides (rom-transfer-step.ts).
       const next = romStep({ kind: 'closed' });
       console.log('[play] ROM transfer DC closed, retry', _romReceiver.retries, '/ 3');
