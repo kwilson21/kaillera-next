@@ -3,7 +3,9 @@
 Run: pytest tests/test_desync.py -v -s
 """
 import time
-import re
+
+from netplay_steps import frame, silence_inputs, sync_log_lines, syncs_applied, wait_past_frame
+from playwright.sync_api import expect
 
 
 def test_lockstep_no_desync(browser, server_url, rom_path, start_game):
@@ -130,31 +132,29 @@ def _load_rom(page, rom_path):
     page.set_input_files("#rom-drop input[type=file]", rom_path)
 
 
-def test_resync_after_forced_desync(browser, server_url, rom_path, start_game):
-    """Force a desync on the guest, verify rollback/resync recovers."""
+def test_dropped_guest_is_resynced_when_it_returns(browser, server_url, rom_path, start_game):
+    """A guest dropped as a phantom gets the host's state when it comes back.
+
+    This test once corrupted the guest's state and waited for the periodic
+    hash check to notice and resync it. Periodic hash broadcasts are gone
+    (netplay-rollback.js, "Desync Detection & Resync"): with SoftFloat and the
+    AI DMA fix steady play is deterministic, and the host-authoritative resync
+    is kept for the cases that need it, among them a peer that went quiet and
+    came back. While the guest is a phantom the host runs on predicted inputs
+    for it, so the two have split; when the guest's inputs arrive again the
+    host logs PEER-RECOVERED and pushes its full state, and the guest logs
+    `sync #N applied`.
+    """
     host = browser.new_page()
     guest = browser.new_page()
-    guest_logs = []
-    host_logs = []
-
-    def _safe_log(logs, msg):
-        try:
-            logs.append(msg.text)
-        except Exception:
-            pass
-
-    guest.on("console", lambda msg: _safe_log(guest_logs, msg))
-    host.on("console", lambda msg: _safe_log(host_logs, msg))
 
     try:
-        # Host creates room with rollback enabled
         host.goto(f"{server_url}/play.html?room=RESYNC1&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
         guest.goto(f"{server_url}/play.html?room=RESYNC1&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        # Load ROM on both pages
         _load_rom(host, rom_path)
         _load_rom(guest, rom_path)
         time.sleep(1)  # let ROM load complete
@@ -163,66 +163,41 @@ def test_resync_after_forced_desync(browser, server_url, rom_path, start_game):
         host.check("#opt-resync")
 
         start_game(host, guest)
+        wait_past_frame(host, 90)
+        wait_past_frame(guest, 90)
+        assert host.evaluate("window.NetplayRollback.isSyncEnabled()"), "resync is off"
+        applied_before = syncs_applied(guest)
 
-        # Wait for a few sync checks to pass (confirms baseline works)
-        time.sleep(2)
+        # Silent for longer than the 5 s after which the host drops the guest
+        silence_inputs(guest, 8000)
+        host.wait_for_function(
+            "window.NetplayRollback.exportSyncLog().includes('PEER-PHANTOM slot=1')",
+            timeout=15000,
+        )
+        print(f"\n  {sync_log_lines(host, 'PEER-PHANTOM slot=1')[0]}")
 
-        # Force the sync check interval to be very short so we don't wait long
-        guest.evaluate("window.NetplayRollback.setSyncInterval(30)")
-        host.evaluate("window.NetplayRollback.setSyncInterval(30)")
+        # The silence ends by itself; the host sees the guest again...
+        host.wait_for_function(
+            "window.NetplayRollback.exportSyncLog().includes('PEER-RECOVERED slot=1')",
+            timeout=30000,
+        )
+        print(f"  {sync_log_lines(host, 'PEER-RECOVERED slot=1')[0]}")
 
-        # Set up a JS-side resync detection flag before corrupting
-        guest.evaluate("""() => {
-            window._resyncDetected = false;
-            window._resyncFrame = 0;
-        }""")
+        # ...and the guest applies the host's state
+        deadline = time.monotonic() + 60
+        while syncs_applied(guest) <= applied_before and time.monotonic() < deadline:
+            time.sleep(0.5)
+        applied = [line for line in sync_log_lines(guest, " applied (frame ") if "sync #" in line]
+        assert syncs_applied(guest) > applied_before, (
+            "guest never applied the host's state after it came back:\n"
+            + "\n".join(sync_log_lines(guest, "sync")[-20:])
+        )
+        print(f"  {applied[-1]}")
 
-        # Force a desync by corrupting WASM memory on the guest,
-        # and install a listener that sets a flag when resync completes
-        guest.evaluate("""() => {
-            var gm = window.EJS_emulator.gameManager;
-            // Corrupt the guest state to force a hash mismatch
-            var state = gm.getState();
-            var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
-            for (var i = 0; i < 1024; i++) {
-                bytes[i] = bytes[i] ^ 0xFF;
-            }
-            gm.loadState(bytes);
-            console.log('[test] forced desync: corrupted 1KB of guest state');
-
-            // Monkey-patch loadState to detect when resync applies a new state
-            var origLoadState = gm.loadState.bind(gm);
-            gm.loadState = function(data) {
-                origLoadState(data);
-                window._resyncDetected = true;
-                window._resyncFrame = window.KNState.frameNum;
-                console.log('[test] resync state loaded at frame ' + window.KNState.frameNum);
-                // Restore original after first resync
-                gm.loadState = origLoadState;
-            };
-        }""")
-
-        # Wait for resync — Playwright-native wait processes events properly
-        try:
-            guest.wait_for_function(
-                "window._resyncDetected === true",
-                timeout=30000
-            )
-            resync_frame = guest.evaluate("window._resyncFrame")
-            print(f"\n  Resync detected at frame {resync_frame}")
-        except Exception as e:
-            h_sync = host.evaluate("window.NetplayRollback.isSyncEnabled()")
-            g_frame = guest.evaluate("window.KNState.frameNum")
-            print(f"\n  Host sync={h_sync}, Guest frame={g_frame}")
-            raise AssertionError(f"Resync did not happen within 30s: {e}")
-
-        # Verify game is still running after resync
-        time.sleep(1)
-        frame_after = guest.evaluate("window.KNState.frameNum")
-        assert frame_after > resync_frame, "Game stopped advancing after resync"
-        print(f"  Game still running after resync (frame {frame_after})")
-
-        print(f"\nSUCCESS: Resync recovered from forced desync!")
+        # Both play on after the resync
+        frame_after = frame(guest)
+        wait_past_frame(guest, frame_after + 10, timeout_s=30)
+        wait_past_frame(host, frame(host) + 10, timeout_s=30)
 
     finally:
         host.close()
@@ -303,7 +278,9 @@ def test_end_game_with_rollback(browser, server_url, rom_path, start_game):
         # Let it run a bit
         time.sleep(2)
 
-        # End game
+        # End game: it is in the toolbar's More menu
+        host.click("#toolbar-more")
+        expect(host.locator("#toolbar-end")).to_be_visible(timeout=2000)
         host.click("#toolbar-end")
 
         # Both should return to overlay

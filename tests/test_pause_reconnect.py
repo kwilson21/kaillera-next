@@ -2,7 +2,8 @@
 
 Run: pytest tests/test_pause_reconnect.py -v
 
-Requires: dev server running at localhost:27888, and KN_ROM set to the ROM's path.
+Requires KN_ROM, the ROM's path. The server is the one tests/conftest.py starts
+when none is running.
 """
 
 import os
@@ -21,22 +22,6 @@ def _room_id(prefix):
     """Generate a unique room name to avoid stale room conflicts."""
     suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
     return f"{prefix}{suffix}"
-
-
-@pytest.fixture(scope="module")
-def server_url():
-    """Use the already-running dev server (user manages it)."""
-    import requests
-    # KN_TEST_PORT lets parallel checkouts each run their own test server.
-    port = os.environ.get("KN_TEST_PORT", "27888")
-    url = f"http://localhost:{port}"
-    try:
-        r = requests.get(f"{url}/health", timeout=2)
-        if r.status_code != 200:
-            pytest.skip(f"Dev server not running on localhost:{port}")
-    except Exception:
-        pytest.skip(f"Dev server not running on localhost:{port}")
-    return url
 
 
 @pytest.fixture(autouse=True)
@@ -207,11 +192,10 @@ def test_rom_transfer_mobile_ua(browser, server_url):
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
 
-        # Wait for ROM transfer to complete
-        guest.wait_for_function(
-            "document.getElementById('toast-container').textContent.includes('ROM loaded from host')",
-            timeout=60000,
-        )
+        # Wait for the ROM transfer to complete: the guest's ROM status then
+        # reads "Loaded: <name> (from host)". The whole ROM crosses in small
+        # chunks, which takes a while in a slow container.
+        expect(guest.locator("#rom-status")).to_contain_text("(from host)", timeout=120000)
     finally:
         _cleanup(host, guest, host_ctx, mobile_ctx)
 

@@ -1,186 +1,98 @@
-"""Test the input resend protocol for INPUT-STALL recovery.
+"""What the rollback engine does when a guest's inputs stop reaching the host.
 
-Validates that when a peer's input is missing past MAX_STALL_MS (3s),
-a resend request is sent and the peer re-sends from _localInputs.
+These tests once checked the lockstep path's resend protocol: after
+MAX_STALL_MS (3 s) the host sent `resend:<frame>`, and after RESEND_TIMEOUT_MS
+more it went on with a zero input for the missing player (`INPUT-STALL
+resend-request` and `INPUT-STALL hard-timeout`). A game now runs on the C
+rollback engine, which the lockstep path stands in for only when the core
+lacks kn_pre_tick, and the rollback path does neither:
 
-Uses the `server_url` fixture from tests/conftest.py, which starts a test
-server when none is running.
-Run: pytest tests/test_input_resend.py -v -s --no-header
+- every input packet carries all the inputs the peer has not acknowledged,
+  up to RB_REDUNDANCY_MAX (30) frames, so a short gap is filled by the next
+  packet that gets through, with no request;
+- a peer whose inputs stay away is dropped as a phantom after 5 s
+  (`PEER-PHANTOM`, from RB-INPUT-STALL-TIMEOUT or PEER_DEAD_MS), and the
+  others run on without it. When it comes back, the host resyncs it
+  (test_desync.py::test_dropped_guest_is_resynced_when_it_returns).
+
+Run: KN_ROM=/path/ssb64-us.z64 pytest tests/test_input_resend.py -v -s
 """
+
 import time
 
-
-def _load_rom(page, rom_path):
-    page.set_input_files("#rom-drop input[type=file]", rom_path)
+from netplay_steps import frame, silence_inputs, sync_log_lines, wait_past_frame
 
 
-def _sync_log_lines(page, text):
-    """The engine's sync log lines that contain `text` (the console shows them only with ?debug)."""
-    return [line for line in page.evaluate("window.NetplayRollback.exportSyncLog()").splitlines() if text in line]
-
-
-def test_input_resend_on_stall(browser, server_url, rom_path, start_game):
-    """Block guest input sending, verify host sends resend request and recovers."""
+def _start(browser, server_url, rom_path, start_game, room):
     host = browser.new_page()
     guest = browser.new_page()
-    host_logs = []
-    guest_logs = []
+    host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
+    host.wait_for_selector("#overlay", timeout=10000)
+    guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+    guest.wait_for_selector("#overlay", timeout=10000)
+    for page in (host, guest):
+        page.set_input_files("#rom-drop input[type=file]", rom_path)
+    start_game(host, guest)
+    # Running, not only started: the frames move on (the slow container
+    # takes a few seconds over the first ones).
+    wait_past_frame(host, 90)
+    wait_past_frame(guest, 90)
+    return host, guest
 
-    def _log(logs, msg):
-        try:
-            logs.append(msg.text)
-        except Exception:
-            pass
 
-    host.on("console", lambda msg: _log(host_logs, msg))
-    guest.on("console", lambda msg: _log(guest_logs, msg))
+def _phantoms(page, slot):
+    return sync_log_lines(page, f"PEER-PHANTOM slot={slot}")
 
+
+def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_url, rom_path, start_game):
+    """A few lost input packets are made good by the next one: no phantom."""
+    host, guest = _start(browser, server_url, rom_path, start_game, "RESND1")
     try:
-        host.goto(f"{server_url}/play.html?room=RESND1&host=1&name=Host&mode=rollback")
-        host.wait_for_selector("#overlay", timeout=10000)
+        phantoms_before = len(_phantoms(host, 1))
 
-        guest.goto(f"{server_url}/play.html?room=RESND1&name=Guest")
-        guest.wait_for_selector("#overlay", timeout=10000)
+        # About 3 frames at this container's 7-11 fps, well inside the
+        # 30-frame redundancy window.
+        silence_inputs(guest, 300)
+        time.sleep(0.5)
+        dropped = guest.evaluate("window._knTestDropped")
+        assert dropped > 0, "no input packet was dropped: the silence did not take"
 
-        _load_rom(host, rom_path)
-        _load_rom(guest, rom_path)
-        time.sleep(1)
+        frame_before = frame(host)
+        # Longer than the 5 s after which a guest that stayed silent is dropped.
+        time.sleep(7)
+        print(f"\n  dropped {dropped} packets; host frames {frame_before} -> {frame(host)}")
 
-        print("\n  Starting game (WASM boot)...")
-        start_game(host, guest)
-        print("  Lockstep active on both")
-
-        # Let the game run normally for 2 seconds to establish baseline
-        time.sleep(2)
-        frame_before = host.evaluate("window.KNState.frameNum")
-        assert frame_before > 60, f"Game not running: only at frame {frame_before}"
-
-        # Block guest's binary DC sends (inputs) for 4 seconds.
-        # String sends (including resend responses) still work.
-        # After 4s, restore normal sending — the resend handler should
-        # have already re-sent the missing inputs.
-        guest.evaluate("""() => {
-            window._inputsBlocked = 0;
-            window._resendResponses = 0;
-            var peers = window.KNState.peers || {};
-            Object.values(peers).forEach(function(p) {
-                if (!p.dc) return;
-                var origSend = p.dc.send.bind(p.dc);
-                p.dc._origSend = origSend;
-                p.dc.send = function(data) {
-                    // Block binary sends (input packets) but allow strings
-                    if ((data instanceof ArrayBuffer || ArrayBuffer.isView(data)) && window._blockInputs) {
-                        window._inputsBlocked++;
-                        return;
-                    }
-                    return origSend(data);
-                };
-            });
-            window._blockInputs = true;
-            console.log('[test] input blocking enabled');
-            setTimeout(function() {
-                window._blockInputs = false;
-                console.log('[test] input blocking disabled after 4s, blocked ' + window._inputsBlocked + ' inputs');
-            }, 4000);
-        }""")
-
-        # Wait for the block period + resend window (4s block + 1s margin)
-        time.sleep(5.5)
-
-        # Check host logs for resend-request
-        resend_requests = _sync_log_lines(host, "INPUT-STALL resend-request")
-        hard_timeouts = _sync_log_lines(host, "INPUT-STALL hard-timeout")
-
-        print(f"\n  Resend requests sent by host: {len(resend_requests)}")
-        print(f"  Hard timeouts on host: {len(hard_timeouts)}")
-        if resend_requests:
-            print(f"  First resend: {resend_requests[0]}")
-
-        # The host should have sent at least one resend request
-        assert len(resend_requests) > 0, "Host never sent a resend request during stall"
-
-        # Game should still be advancing (not permanently stuck)
-        frame_after = host.evaluate("window.KNState.frameNum")
-        print(f"  Frames: before={frame_before} after={frame_after}")
-        assert frame_after > frame_before, "Game stopped advancing after stall"
-
-        # If any hard timeouts occurred, verify they fabricated 0 (not _lastKnownInput)
-        for ht in hard_timeouts:
-            assert '=0' in ht, f"Hard timeout used non-zero fabrication: {ht}"
-
-        print(f"\n  Input resend protocol working correctly!")
-
+        assert frame(host) > frame_before, "host stopped advancing after the gap"
+        new_phantoms = _phantoms(host, 1)[phantoms_before:]
+        assert not new_phantoms, f"host dropped the guest over a short gap: {new_phantoms}"
     finally:
         host.close()
         guest.close()
 
 
-def test_hard_timeout_fabricates_zero(browser, server_url, rom_path, start_game):
-    """When resend also fails, fabrication must use 0 (deterministic)."""
-    host = browser.new_page()
-    guest = browser.new_page()
-    host_logs = []
-
-    def _log(logs, msg):
-        try:
-            logs.append(msg.text)
-        except Exception:
-            pass
-
-    host.on("console", lambda msg: _log(host_logs, msg))
-
+def test_silent_guest_is_dropped_and_the_host_runs_on(browser, server_url, rom_path, start_game):
+    """A guest silent past 5 s is dropped as a phantom, and the host goes on without it."""
+    host, guest = _start(browser, server_url, rom_path, start_game, "HTIME1")
     try:
-        host.goto(f"{server_url}/play.html?room=HTIME1&host=1&name=Host&mode=rollback")
-        host.wait_for_selector("#overlay", timeout=10000)
+        assert not _phantoms(host, 1), "guest was a phantom before the test silenced it"
+        silent_ms = 14000
+        started = time.monotonic()
+        silence_inputs(guest, silent_ms)
 
-        guest.goto(f"{server_url}/play.html?room=HTIME1&name=Guest")
-        guest.wait_for_selector("#overlay", timeout=10000)
+        host.wait_for_function(
+            "window.NetplayRollback.exportSyncLog().includes('PEER-PHANTOM slot=1')",
+            timeout=12000,
+        )
+        dropped_after = time.monotonic() - started
+        print(f"\n  {_phantoms(host, 1)[0]}")
+        print(f"  dropped {dropped_after:.1f}s into the silence")
+        assert dropped_after >= 4.5, f"guest dropped after only {dropped_after:.1f}s of silence"
 
-        _load_rom(host, rom_path)
-        _load_rom(guest, rom_path)
-        time.sleep(1)
-
-        start_game(host, guest)
-
-        time.sleep(2)
-
-        # Block ALL guest DC sends (binary AND string) so resend response
-        # never reaches the host — forces hard timeout
-        guest.evaluate("""() => {
-            var peers = window.KNState.peers || {};
-            Object.values(peers).forEach(function(p) {
-                if (!p.dc) return;
-                var origSend = p.dc.send.bind(p.dc);
-                p.dc.send = function(data) {
-                    // Block everything
-                    return;
-                };
-            });
-            console.log('[test] all DC sends blocked');
-        }""")
-
-        # Wait for full timeout: MAX_STALL_MS (3s) + RESEND_TIMEOUT_MS (2s) + margin
-        time.sleep(6.5)
-
-        hard_timeouts = _sync_log_lines(host, "INPUT-STALL hard-timeout")
-        print(f"\n  Hard timeouts: {len(hard_timeouts)}")
-        for ht in hard_timeouts:
-            print(f"    {ht}")
-
-        assert len(hard_timeouts) > 0, "Expected hard timeout when resend fails"
-
-        # Every fabricated value must be 0
-        for ht in hard_timeouts:
-            # Parse "fabricated=[s1=0]" — every slot must be =0
-            if 'fabricated=[' in ht:
-                fab_part = ht.split('fabricated=[')[1].split(']')[0]
-                entries = fab_part.split(',')
-                for entry in entries:
-                    val = entry.split('=')[1]
-                    assert val == '0', f"Non-zero fabrication detected: {entry} in {ht}"
-
-        print(f"\n  Hard timeout correctly fabricates 0 for all slots!")
-
+        # Still inside the silence: the host runs on alone.
+        frame_dropped = frame(host)
+        time.sleep(1.5)
+        assert time.monotonic() - started < silent_ms / 1000, "the silence ended before the check"
+        assert frame(host) > frame_dropped, "host did not run on after dropping the silent guest"
     finally:
         host.close()
         guest.close()
