@@ -73,6 +73,14 @@
 // start: no player has a state from it yet, so trying again is not a second
 // sync.
 //
+// A guest's lockstep-ready can cross the host's cut: the host leaves it out
+// at the barrier just as its word is on the way. That page already has the
+// host's own ready, so its match runs, while the host's runs without it. A
+// guest whose match runs takes the word that it is out, and joins late, as
+// long as it has had no input from the host: the host sends none to a player
+// it left out. Before, a page whose match ran ignored the word and ran a
+// match of its own (RUNNING_TAKES_LEFT_OUT, aReadyCrossesTheCutTest).
+//
 // The guest's deadline is the page's, not a connection's: armed when its
 // engine starts, again whenever it loses its channel to the host before its
 // match runs, and restarted at each offer the host sends, so it runs out only
@@ -131,6 +139,9 @@
 // READY_KEPT: the load deadline reads every word of ready a player sent on
 //   its channel, kept past a sync timeout (#277's first push,
 //   `_saidStartReady`), rather than the barrier's own record.
+// RUNNING_TAKES_LEFT_OUT: a guest whose match runs, with no input from the
+//   host yet, takes the word that it is out and joins late; before, a page
+//   whose match ran ignored it.
 module start_group {
   const GIVE_UP_LEAVES_OUT: bool
   const DEADLINE_UNTIL_RUNNING: bool
@@ -146,6 +157,7 @@ module start_group {
   const NO_PROGRESS: bool
   const ONE_SYNC: bool
   const READY_KEPT: bool
+  const RUNNING_TAKES_LEFT_OUT: bool
 
   // The startup watchdog's attempts (STARTUP_CONNECT_MAX_ATTEMPTS).
   pure val MAX_ATTEMPTS = 3
@@ -204,6 +216,14 @@ module start_group {
   // The load deadline has left out a player that was making progress, or
   // one that had said it was ready and was forgotten by a sync timeout.
   var cutHealthy: bool
+  // The guests whose page has said lockstep-ready (once: a page never says
+  // it again, its channel lost or not). The host hears it later, if it still
+  // counts that player.
+  var sentReady: Set[str]
+  // The guests whose own match runs.
+  var guestRuns: Set[str]
+  // The guests whose match runs and that heard they are out, and ran on.
+  var heardOut: Set[str]
 
   action init = all {
     host' = "lobby",
@@ -222,6 +242,9 @@ module start_group {
     loadArmed' = false,
     settleDue' = false,
     cutHealthy' = false,
+    sentReady' = Set(),
+    guestRuns' = Set(),
+    heardOut' = Set(),
   }
 
   // The guest side's state, unchanged.
@@ -237,7 +260,23 @@ module start_group {
     loadArmed' = loadArmed,
     settleDue' = settleDue,
     cutHealthy' = cutHealthy,
+    pagesKeep,
   }
+
+  // The game sequence's waits, unchanged, but not the guests' own words.
+  action syncKeepButPages = all {
+    stage' = stage,
+    loaded' = loaded,
+    saidReady' = saidReady,
+    readyOnChannel' = readyOnChannel,
+    progressed' = progressed,
+    loadArmed' = loadArmed,
+    settleDue' = settleDue,
+    cutHealthy' = cutHealthy,
+  }
+
+  // The guests' own words and matches, unchanged.
+  action pagesKeep = all { sentReady' = sentReady, guestRuns' = guestRuns, heardOut' = heardOut }
 
   // The host starts its game sequence: it loads its own emulator and arms its
   // load deadline, which gives every player a fresh window.
@@ -250,6 +289,7 @@ module start_group {
     loadArmed' = if (arms) LOAD_DEADLINE else loadArmed,
     settleDue' = true,
     cutHealthy' = cutHealthy,
+    pagesKeep,
   }
 
   // The start group: the players the host waits for.
@@ -310,6 +350,7 @@ module start_group {
     loadArmed' = if (host == "waiting") LOAD_DEADLINE else loadArmed,
     settleDue' = true,
     cutHealthy' = cutHealthy,
+    pagesKeep,
   }
 
   // The deadline is armed while the host waits for the game sequence, and
@@ -430,6 +471,7 @@ module start_group {
     loadArmed' = loadArmed,
     settleDue' = settleDue,
     cutHealthy' = cutHealthy,
+    pagesKeep,
   }
 
   // A player at the ROM prompt says it has no ROM; the host, whose ROM is
@@ -460,18 +502,43 @@ module start_group {
     not(loaded.contains(g)),
   }
 
-  // A guest says it is ready once it has the host's state: its channel is
-  // open, its emulator has loaded, it waits for no player the host left out
-  // without telling it nor for one it cannot reach, and it has not said so
-  // on this channel already.
-  def canSayReady(g: str): bool = and {
+  // A guest says it is ready once it has the host's state (which comes with
+  // the host's own ready): its channel is open, its emulator has loaded, it
+  // waits for no player the host left out without telling it nor for one it
+  // cannot reach, and it has not said so before.
+  def canSendReady(g: str): bool = and {
     host == "sequence",
     stage == "barrier",
+    page.get(g) == "starting",
     conn.get(g) == "open",
     loaded.contains(g),
-    not(readyOnChannel.contains(g)),
+    not(sentReady.contains(g)),
     waitedForBehindTheHost.exclude(Set(g)).size() == 0,
     not(waitsForTheOther(g)),
+  }
+
+  // The host hears a guest's ready, if it still counts that player and has
+  // not heard it on this channel already.
+  def canHearReady(g: str): bool = and {
+    sentReady.contains(g),
+    conn.get(g) == "open",
+    not(readyOnChannel.contains(g)),
+  }
+
+  // Whom a guest waits for itself: every other guest in the room the host has
+  // not told it is out.
+  def guestWaitsFor(g: str): Set[str] =
+    GUESTS.exclude(Set(g)).filter(h => page.get(h) != "absent" and not(told.contains(h)))
+
+  // A guest's own match runs once it has said it is ready and has every
+  // ready it waits for: the host's (it came with the state) and each other
+  // guest's that it can reach.
+  def canGuestRun(g: str): bool = and {
+    page.get(g) == "starting",
+    sentReady.contains(g),
+    not(guestRuns.contains(g)),
+    not(heardOut.contains(g)),
+    guestWaitsFor(g).forall(h => sentReady.contains(h) and not(apart)),
   }
 
   // Every player in the start group has loaded, as the host has heard.
@@ -492,6 +559,7 @@ module start_group {
     readyOnChannel' = readyOnChannel,
     loadArmed' = loadArmed,
     cutHealthy' = cutHealthy,
+    pagesKeep,
     host' = host,
     conn' = conn,
     attempt' = attempt,
@@ -505,13 +573,14 @@ module start_group {
   action sync = all {
     canSync,
     stage' = "barrier",
-    saidReady' = Set(),
+    saidReady' = saidReady,
     progressed' = progressed.union(startGroup),
     settleDue' = false,
     loaded' = loaded,
     readyOnChannel' = readyOnChannel,
     loadArmed' = loadArmed,
     cutHealthy' = cutHealthy,
+    pagesKeep,
     host' = host,
     conn' = conn,
     attempt' = attempt,
@@ -520,8 +589,22 @@ module start_group {
     guestsKeep,
   }
 
-  action sayReady(g: str): bool = all {
-    canSayReady(g),
+  action sendReady(g: str): bool = all {
+    canSendReady(g),
+    sentReady' = sentReady.union(Set(g)),
+    guestRuns' = guestRuns,
+    heardOut' = heardOut,
+    syncKeepButPages,
+    host' = host,
+    conn' = conn,
+    attempt' = attempt,
+    page' = page,
+    told' = told,
+    guestsKeep,
+  }
+
+  action hearReady(g: str): bool = all {
+    canHearReady(g),
     saidReady' = saidReady.union(Set(g)),
     readyOnChannel' = readyOnChannel.union(Set(g)),
     progressed' = progressed.union(Set(g)),
@@ -530,12 +613,56 @@ module start_group {
     loadArmed' = loadArmed,
     settleDue' = settleDue,
     cutHealthy' = cutHealthy,
+    pagesKeep,
     host' = host,
     conn' = conn,
     attempt' = attempt,
     page' = page,
     told' = told,
     guestsKeep,
+  }
+
+  action guestRunsItsMatch(g: str): bool = all {
+    canGuestRun(g),
+    guestRuns' = guestRuns.union(Set(g)),
+    sentReady' = sentReady,
+    heardOut' = heardOut,
+    syncKeepButPages,
+    host' = host,
+    conn' = conn,
+    attempt' = attempt,
+    page' = page,
+    told' = told,
+    guestsKeep,
+  }
+
+  // A guest whose match runs hears from the host that it is out (it was cut
+  // at the barrier as its ready was on the way). It has had no input from the
+  // host, which sends none to a player it left out: it joins late, or,
+  // before, ran on with a match of its own.
+  action hearLeftOut(g: str): bool = all {
+    page.get(g) == "starting",
+    guestRuns.contains(g),
+    conn.get(g) == "leftOut",
+    told.contains(g),
+    not(heardOut.contains(g)),
+    if (RUNNING_TAKES_LEFT_OUT)
+      all {
+        page' = page.set(g, "lateJoining"),
+        guestRuns' = guestRuns.exclude(Set(g)),
+        heardOut' = heardOut,
+        guestDeadline' = guestDeadline.exclude(Set(g)),
+      }
+    else
+      all { page' = page, guestRuns' = guestRuns, heardOut' = heardOut.union(Set(g)), guestDeadline' = guestDeadline },
+    sentReady' = sentReady,
+    syncKeepButPages,
+    host' = host,
+    conn' = conn,
+    attempt' = attempt,
+    told' = told,
+    apart' = apart,
+    openToNobody' = openToNobody,
   }
 
   // The host's sync times out with a player not ready. Before, it went back
@@ -555,6 +682,7 @@ module start_group {
     progressed' = progressed,
     loadArmed' = loadArmed,
     cutHealthy' = cutHealthy,
+    pagesKeep,
     host' = host,
     conn' = conn,
     attempt' = attempt,
@@ -580,6 +708,7 @@ module start_group {
     loadArmed' = false,
     settleDue' = settleDue,
     cutHealthy' = cutHealthy,
+    pagesKeep,
   }
 
   // The player at the ROM prompt drops one: it joins late.
@@ -629,6 +758,7 @@ module start_group {
     progressed' = Set(),
     loadArmed' = DEADLINE_LIVE,
     settleDue' = (settleDue or DEADLINE_LIVE or dueNow.size() > 0),
+    pagesKeep,
     stage' = stage,
     loaded' = loaded,
     saidReady' = saidReady,
@@ -671,6 +801,7 @@ module start_group {
     page.get(g) == "starting",
     conn.get(g).in(Set("leftOut", "dropped")),
     guestDeadline.contains(g),
+    not(guestRuns.contains(g)),
     page' = page.set(g, "lateJoining"),
     apart' = apart,
     guestDeadline' = guestDeadline.exclude(Set(g)),
@@ -706,7 +837,10 @@ module start_group {
       answer(g),
       deadline(g),
       load(g),
-      sayReady(g),
+      sendReady(g),
+      hearReady(g),
+      guestRunsItsMatch(g),
+      hearLeftOut(g),
       reportApart(g),
       lateOpen(g),
       guestLosesHost(g),
@@ -730,7 +864,7 @@ module start_group {
   val aRomPromptIsHeard = ROM_PROMPT_LEAVES_OUT and startGroup.exists(g => page.get(g) == "awaitingRom")
   val aPairIsSplit = HOST_ARBITRATES and apart and GUESTS.forall(g => conn.get(g) == "open")
   // A guest's own next step: it loads, or says it is ready.
-  val aGuestStepComes = startGroup.exists(g => canLoad(g) or canSayReady(g))
+  val aGuestStepComes = startGroup.exists(g => canLoad(g) or canSendReady(g) or canHearReady(g))
   // The load deadline is armed and its run moves the start on: it leaves
   // someone out now, or, armed again, later, or it goes on with a wait that
   // nothing else will look at again.
@@ -802,9 +936,15 @@ module start_group {
   // had said it was ready never said it again, and was cut).
   val aPlayerMakingProgressStays = not(cutHealthy)
 
+  // A guest the host left out does not run a match of its own once it has
+  // heard so. VIOLATED while a page whose match ran ignored the word
+  // (start_group_running_ignores_left_out, aReadyCrossesTheCutTest: its ready
+  // crossed the host's cut at the barrier).
+  val aLeftOutGuestDoesNotRunAlone = GUESTS.forall(g => not(guestRuns.contains(g) and heardOut.contains(g)))
+
   val allHold =
     neverStuck and aLateJoinerIsHeldAsOne and aRunningMatchHasNoSilentPlayer and nobodyIsInNeither
-      and aPlayerMakingProgressStays
+      and aPlayerMakingProgressStays and aLeftOutGuestDoesNotRunAlone
 
   // ── scenarios ───────────────────────────────────────────────────────────
 
@@ -812,7 +952,18 @@ module start_group {
   action deadlineAny(g: str): bool = if (deadlineArmed and conn.get(g) == "connecting") deadline(g) else nothing
   action loadAny(g: str): bool = if (canLoad(g)) load(g) else nothing
   action syncAny = if (canSync) sync else nothing
-  action sayReadyAny(g: str): bool = if (canSayReady(g)) sayReady(g) else nothing
+  action sendReadyAny(g: str): bool = if (canSendReady(g)) sendReady(g) else nothing
+  action hearReadyAny(g: str): bool = if (canHearReady(g)) hearReady(g) else nothing
+  action guestRunsAny(g: str): bool = if (canGuestRun(g)) guestRunsItsMatch(g) else nothing
+  action hearLeftOutAny(g: str): bool =
+    if (
+      page.get(g) == "starting" and guestRuns.contains(g) and conn.get(g) == "leftOut" and told.contains(g)
+        and not(heardOut.contains(g))
+    )
+      hearLeftOut(g)
+    else nothing
+  // A guest says it is ready, and the host hears it.
+  run sayReadyAny(g: str): bool = sendReadyAny(g).then(hearReadyAny(g))
   action matchRunsStep = if (canRun) matchRuns else nothing
   action syncTimesOutAny =
     if (not(ONE_SYNC) and host == "sequence" and stage == "barrier" and not(everyoneIsIn)) syncTimesOut else nothing
@@ -833,7 +984,7 @@ module start_group {
   action rejoinLateAny(g: str): bool =
     if (
       GUEST_REJOINS_LATE and page.get(g) == "starting" and conn.get(g).in(Set("leftOut", "dropped"))
-        and guestDeadline.contains(g)
+        and guestDeadline.contains(g) and not(guestRuns.contains(g))
     )
       rejoinLate(g)
     else nothing
@@ -1140,6 +1291,32 @@ module start_group {
       // waited on the host's state.
       .expect(aPlayerMakingProgressStays == not(LOAD_DEADLINE and not(NO_PROGRESS)))
 
+  // A room of two; the guest is slow to take the host's state in, and says it
+  // is ready just as the host's load deadline leaves it out: its word reaches
+  // a host that no longer counts it. The guest has the host's own ready, so
+  // its match runs. It hears it is out with no input from the host: it joins
+  // late. Before, its match ran on, a match of its own.
+  run aReadyCrossesTheCutTest =
+    init
+      .then(startWith("starting", "absent"))
+      .then(answer("g1"))
+      .then(loadAny("g1"))
+      .then(syncAny)
+      .then(sendReadyAny("g1"))
+      .then(guestRunsAny("g1"))
+      .expect(guestRuns.contains("g1"))
+      .then(loadDeadlineAny)
+      .then(hearReadyAny("g1"))
+      .then(hearLeftOutAny("g1"))
+      .expect(
+        aLeftOutGuestDoesNotRunAlone == not(LOAD_DEADLINE and HOST_TELLS_LEFT_OUT and not(RUNNING_TAKES_LEFT_OUT))
+      )
+      .then(matchRunsStep)
+      .then(lateJoinAny("g1"))
+      .expect(
+        (LOAD_DEADLINE and HOST_TELLS_LEFT_OUT and RUNNING_TAKES_LEFT_OUT) implies page.get("g1") == "joined"
+      )
+
   // Two players who answer: nobody is left out and the match runs.
   run everyoneAnswersTest =
     init
@@ -1169,6 +1346,7 @@ module start_group_before {
     NO_PROGRESS = false,
     ONE_SYNC = false,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = false,
   ).*
 }
 
@@ -1190,6 +1368,7 @@ module start_group_give_up_only {
     NO_PROGRESS = false,
     ONE_SYNC = false,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = false,
   ).*
 }
 
@@ -1215,6 +1394,7 @@ module start_group_untold {
     NO_PROGRESS = true,
     ONE_SYNC = true,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = false,
   ).*
 }
 
@@ -1236,6 +1416,7 @@ module start_group_deadline_only {
     NO_PROGRESS = true,
     ONE_SYNC = true,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = true,
   ).*
 }
 
@@ -1258,6 +1439,7 @@ module start_group_untold_no_load {
     NO_PROGRESS = false,
     ONE_SYNC = false,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = false,
   ).*
 }
 
@@ -1279,6 +1461,7 @@ module start_group_no_rejoin {
     NO_PROGRESS = true,
     ONE_SYNC = true,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = true,
   ).*
 }
 
@@ -1301,6 +1484,7 @@ module start_group_open_after_give_up {
     NO_PROGRESS = true,
     ONE_SYNC = true,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = true,
   ).*
 }
 
@@ -1320,6 +1504,7 @@ module start_group_deadline_with_the_connection {
     NO_PROGRESS = true,
     ONE_SYNC = true,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = true,
   ).*
 }
 
@@ -1341,6 +1526,7 @@ module start_group_lost_dropped {
     NO_PROGRESS = false,
     ONE_SYNC = false,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = false,
   ).*
 }
 
@@ -1362,6 +1548,7 @@ module start_group_apart_unarbitrated {
     NO_PROGRESS = false,
     ONE_SYNC = false,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = false,
   ).*
 }
 
@@ -1385,6 +1572,7 @@ module start_group_deadline_once {
     NO_PROGRESS = false,
     ONE_SYNC = false,
     READY_KEPT = true,
+    RUNNING_TAKES_LEFT_OUT = false,
   ).*
 }
 
@@ -1406,6 +1594,7 @@ module start_group_absolute_deadline {
     NO_PROGRESS = false,
     ONE_SYNC = true,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = true,
   ).*
 }
 
@@ -1427,10 +1616,33 @@ module start_group_resync {
     NO_PROGRESS = true,
     ONE_SYNC = false,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = true,
   ).*
 }
 
-// Today: all fourteen.
+// #277 before the crossing was fixed (c9d2d53): a guest whose match ran
+// ignored the word that it was out.
+module start_group_running_ignores_left_out {
+  import start_group(
+    GIVE_UP_LEAVES_OUT = true,
+    DEADLINE_UNTIL_RUNNING = true,
+    ROM_PROMPT_LEAVES_OUT = true,
+    HOST_TELLS_LEFT_OUT = true,
+    GUEST_REJOINS_LATE = true,
+    GIVE_UP_CLOSES = true,
+    GUEST_DEADLINE_ON_LOSS = true,
+    LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
+    HOST_ARBITRATES = true,
+    DEADLINE_LIVE = true,
+    NO_PROGRESS = true,
+    ONE_SYNC = true,
+    READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = false,
+  ).*
+}
+
+// Today: all fifteen.
 module start_group_current {
   import start_group(
     GIVE_UP_LEAVES_OUT = true,
@@ -1447,5 +1659,6 @@ module start_group_current {
     NO_PROGRESS = true,
     ONE_SYNC = true,
     READY_KEPT = false,
+    RUNNING_TAKES_LEFT_OUT = true,
   ).*
 }

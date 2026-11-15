@@ -168,11 +168,18 @@ export function leavesOutUnreachable(
  * Does a page take `left-out:<slot>` naming itself: the host started without
  * it, so it joins late?
  *
- * Only from the host's own channel (`fromSlot`), only on a guest (`mySlot`)
- * before its match runs, and not when it is joining late already (a late
- * joiner the host held as out hears the word too, when its channel opens).
+ * Only from the host's own channel (`fromSlot`), only on a guest (`mySlot`),
+ * and not when it is joining late already (a late joiner the host held as out
+ * hears the word too, when its channel opens). Before its match runs; or
+ * once it runs, while it has had no input from the host (`hostInputSeen`):
+ * its lockstep-ready crossed the host's cut at the barrier, and it holds the
+ * host's own ready, so its match ran while the host's runs without it. The
+ * host sends no input to a player it left out (specs/start_group.qnt,
+ * RUNNING_TAKES_LEFT_OUT). A guest that has had the host's input is in the
+ * host's match: the word is stale.
  */
-//@ ensures \result ==> fromSlot === 0 && mySlot > 0 && mySlot < 4 && slot === mySlot && !running && !lateJoin
+//@ ensures \result ==> fromSlot === 0 && mySlot > 0 && mySlot < 4 && slot === mySlot && !lateJoin
+//@ ensures \result ==> !running || !hostInputSeen
 //@ ensures fromSlot !== 0 ==> !\result
 export function leftOutItself(
   fromSlot: number,
@@ -180,10 +187,11 @@ export function leftOutItself(
   running: boolean,
   slot: number,
   lateJoin: boolean,
+  hostInputSeen: boolean,
 ): boolean {
   if (fromSlot !== HOST_SLOT) return false;
   if (mySlot <= HOST_SLOT || mySlot >= 4) return false;
-  return slot === mySlot && !running && !lateJoin;
+  return slot === mySlot && (!running || !hostInputSeen) && !lateJoin;
 }
 
 /**

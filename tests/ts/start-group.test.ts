@@ -124,15 +124,22 @@ test('a guest told by the host that it is out joins late; nobody else can tell i
     for (const mine of SLOTS)
       for (const slot of SLOTS)
         for (const running of BOOLS)
-          for (const lateJoin of BOOLS) {
-            const out = leftOutItself(from, mine, running, slot, lateJoin);
-            const expected = from === 0 && mine > 0 && mine < 4 && slot === mine && !running && !lateJoin;
-            assert.equal(
-              out,
-              expected,
-              `from=${from} mine=${mine} slot=${slot} running=${running} lateJoin=${lateJoin}`,
-            );
-          }
+          for (const lateJoin of BOOLS)
+            for (const hostInput of BOOLS) {
+              const out = leftOutItself(from, mine, running, slot, lateJoin, hostInput);
+              const expected =
+                from === 0 && mine > 0 && mine < 4 && slot === mine && (!running || !hostInput) && !lateJoin;
+              assert.equal(
+                out,
+                expected,
+                `from=${from} mine=${mine} slot=${slot} running=${running} lateJoin=${lateJoin} hostInput=${hostInput}`,
+              );
+            }
+  // Its ready crossed the host's cut: its match runs, with no input from the
+  // host, which runs without it. It joins late.
+  assert.equal(leftOutItself(0, 1, true, 1, false, false), true);
+  // In the host's match (it has the host's input): the word is stale.
+  assert.equal(leftOutItself(0, 1, true, 1, false, true), false);
   // takesLeftOut is for the others: never a page's own slot.
   assert.equal(takesLeftOut(0, 2, false, 2, false), false);
 });

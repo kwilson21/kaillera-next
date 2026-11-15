@@ -9426,11 +9426,25 @@
           const slot = Number(e.data.slice('left-out:'.length));
           const mySlot = _isSpectator ? -1 : (_playerSlot ?? -1);
           // This page itself: it missed the host's load deadline, and joins
-          // late (as at its own deadline, armHostAnswerDeadline).
+          // late (as at its own deadline, armHostAnswerDeadline). Its match
+          // may run already: its lockstep-ready crossed the host's cut, and it
+          // had the host's own ready. While it has had no input from the
+          // host, which sends none to a player it left out, that match is its
+          // own: it joins late (specs/start_group.qnt, RUNNING_TAKES_LEFT_OUT).
+          const running = _phase >= PHASE_RUNNING;
           if (
-            window.KNCore.startGroup.leftOutItself(peer.slot ?? -1, mySlot, _phase >= PHASE_RUNNING, slot, _lateJoin)
+            window.KNCore.startGroup.leftOutItself(
+              peer.slot ?? -1,
+              mySlot,
+              running,
+              slot,
+              _lateJoin,
+              !!_peerInputStarted[0],
+            )
           ) {
-            _syncLog('START-REJOIN-LATE: the host left this page out of the start: joining late');
+            _syncLog(
+              `START-REJOIN-LATE: the host left this page out of the start${running ? ' (its own match ran, with no input from the host)' : ''}: joining late`,
+            );
             _config?.onLeftOutOfStart?.();
             return;
           }

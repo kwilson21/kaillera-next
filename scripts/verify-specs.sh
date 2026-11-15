@@ -327,7 +327,9 @@ start_group() {
   expect_violation "$START_GROUP" start_group_absolute_deadline aPlayerMakingProgressStays
   # start_group_resync's counterexample (aReadyThenATimeoutTest: a guest says
   # it is ready, the other is slow, the sync times out, the host syncs again)
-  # is 11 steps, past this bound: check-specs.sh runs that scenario.
+  # is 11 steps, past this bound: check-specs.sh runs that scenario. So is
+  # start_group_running_ignores_left_out's (aReadyCrossesTheCutTest: the
+  # guest's ready crosses the cut, its match runs, it hears it is out), 10.
 }
 
 mesh_heal() {

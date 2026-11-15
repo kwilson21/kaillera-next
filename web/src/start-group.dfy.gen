@@ -107,7 +107,7 @@ lemma leavesOutUnreachable_ensures(isHost: bool, running: bool, fromSlot: int, s
 {
 }
 
-function leftOutItself(fromSlot: int, mySlot: int, running: bool, slot: int, lateJoin: bool): bool
+function leftOutItself(fromSlot: int, mySlot: int, running: bool, slot: int, lateJoin: bool, hostInputSeen: bool): bool
 {
   if (fromSlot != HOST_SLOT) then
     false
@@ -115,12 +115,13 @@ function leftOutItself(fromSlot: int, mySlot: int, running: bool, slot: int, lat
     if ((mySlot <= HOST_SLOT) || (mySlot >= 4)) then
       false
     else
-      (((slot == mySlot) && !(running)) && !(lateJoin))
+      (((slot == mySlot) && (!(running) || !(hostInputSeen))) && !(lateJoin))
 }
 
-lemma leftOutItself_ensures(fromSlot: int, mySlot: int, running: bool, slot: int, lateJoin: bool)
-  ensures (leftOutItself(fromSlot, mySlot, running, slot, lateJoin) ==> ((((((fromSlot == 0) && (mySlot > 0)) && (mySlot < 4)) && (slot == mySlot)) && !(running)) && !(lateJoin)))
-  ensures ((fromSlot != 0) ==> !(leftOutItself(fromSlot, mySlot, running, slot, lateJoin)))
+lemma leftOutItself_ensures(fromSlot: int, mySlot: int, running: bool, slot: int, lateJoin: bool, hostInputSeen: bool)
+  ensures (leftOutItself(fromSlot, mySlot, running, slot, lateJoin, hostInputSeen) ==> (((((fromSlot == 0) && (mySlot > 0)) && (mySlot < 4)) && (slot == mySlot)) && !(lateJoin)))
+  ensures (leftOutItself(fromSlot, mySlot, running, slot, lateJoin, hostInputSeen) ==> (!(running) || !(hostInputSeen)))
+  ensures ((fromSlot != 0) ==> !(leftOutItself(fromSlot, mySlot, running, slot, lateJoin, hostInputSeen)))
 {
 }
 
