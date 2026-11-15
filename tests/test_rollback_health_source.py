@@ -587,15 +587,22 @@ def test_a_resync_request_that_is_out_has_a_deadline():
     for snippet in (
         "if (!_resyncRequestInFlight) return;",
         # An answer arriving, held, or waited for at a target has its own deadline.
-        "if (_syncExpected > 0 || _pendingResyncState || _syncTargetFrame > 0) return;",
+        "const answerComing = _syncExpected > 0 || !!_pendingResyncState || _syncTargetFrame > 0;",
+        # An answer being decoded holds it off, for a bounded time
+        # (specs/resync_reask.qnt, theDecodedAnswerIsNotCut).
+        "if (answerComing || (decoding && decodingForMs < SYNC_DECODE_GRACE_MS)) return;",
         "if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;",
         "_resyncRequestInFlight = false;",
         "RESYNC-REQUEST-TIMEOUT f=${_frameNum}",
     ):
         assert snippet in check_src
+    # The waits come before the request is let go.
+    assert check_src.index("if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;") < check_src.index(
+        "_resyncRequestInFlight = false;"
+    )
     # Every site that sends a request stamps it: they all go through the one
     # function that sets the flag.
-    begin = src[src.index("const _beginResyncRequest = (at = -1) => {") :]
+    begin = src[src.index("const _beginResyncRequest = (at = -1, again = false) => {") :]
     begin = begin[: begin.index("\n  };\n")]
     assert "_resyncRequestInFlight = true;\n    _resyncRequestSentAt = performance.now();" in begin
     assert src.count("_resyncRequestInFlight = true;") == 1
@@ -615,7 +622,7 @@ def test_a_resync_request_that_is_out_has_a_deadline():
 def test_every_resync_request_that_is_out_is_numbered():
     # specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST: a request has a number.
     src = LOCKSTEP_JS.read_text()
-    begin = src[src.index("const _beginResyncRequest = (at = -1) => {") :]
+    begin = src[src.index("const _beginResyncRequest = (at = -1, again = false) => {") :]
     begin = begin[: begin.index("\n  };\n")]
     for snippet in (
         "_resyncRequestInFlight = true;",
@@ -628,21 +635,23 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Eight sites ask: one over Socket.IO, seven on a DataChannel (the
+    # Nine sites ask: one over Socket.IO, eight on a DataChannel (the
     # seventh is a late joiner that lost its channel to the host,
-    # specs/late_join_pause.qnt). The two that name a target frame give it to
-    # the request, which keeps it after the target's deadline
-    # (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 8
-    assert src.count("_beginResyncRequest()") == 6
+    # specs/late_join_pause.qnt; the eighth the deadline asking again for an
+    # owed "now" resync, specs/resync_reask.qnt). The two that name a target
+    # frame give it to the request, which keeps it after the target's
+    # deadline (specs/resync_flow.qnt, askedAt).
+    assert src.count("_beginResyncRequest(") == 9
+    assert src.count("_beginResyncRequest()") == 5
+    assert src.count("_beginResyncRequest(-1, true)") == 1
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
     assert "let _resyncRequestAt = -1;" in src
     stop = src[src.index("const stopSync = () => {") :]
     assert "_resyncRequestAt = -1;" in stop[: stop.index("\n  };\n")]
-    socket_req = src[src.index("function _requestSocketFullResync(reason) {") :]
+    socket_req = src[src.index("function _requestSocketFullResync(reason, again = false) {") :]
     socket_req = socket_req[: socket_req.index("\n  }\n")]
-    assert "const requestId = _beginResyncRequest();" in socket_req
+    assert "const requestId = _beginResyncRequest(-1, again);" in socket_req
     assert "frame: _frameNum,\n        requestId,\n      });" in socket_req
 
     # On a DataChannel the number goes ahead of the request, which keeps the
@@ -650,8 +659,8 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 7
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 5
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 8
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 6
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
     # Sent bare only where no request is marked as out (BOOT-SYNC,
     # INPUT-STALL-RESYNC): those are not numbered.
@@ -838,6 +847,7 @@ def test_the_resync_rules_are_observed():
         ("late-answer-behind", "isLateAnswerBehind"),
         ("keeps-awaited-answer", "keepsAwaitedAnswer"),
         ("late-join-lost-host", "lateJoinLostHostStep"),
+        ("deadline-step", "resyncDeadlineStep"),
     ):
         assert f"_resyncObserve('{what}'," in src or f"_resyncObserve(\n      '{what}'," in src, what
         assert f"rules.{name}(" in src, name

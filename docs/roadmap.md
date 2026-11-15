@@ -514,6 +514,22 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   late answer ahead of the guest when the host's rate limit dropped the
   newest request (`onlyStateComingTest`); dropping only below the frame the
   guest asked from (rule b, `resync_flow_asked_from`) still takes it back.
+- That case left the guest with nothing coming: the host had dropped the
+  newest request, the guest dropped the only answer, and the request's
+  deadline let it go and asked nothing, so a guest that had asked "now"
+  (a reconnect, a network change) ran on with the state it had asked to
+  replace (`specs/resync_reask.qnt`, `anOwedResyncIsNotForgotten`,
+  `lateAnswerBehindTest`). A "now" request now owes a resync until a host
+  state is applied; its deadline asks again, at most
+  `RESYNC_MAX_ASKS_AGAIN` (2) times, then gives up visibly
+  (`RESYNC-REASK-GIVEUP`, client event `resync-reask-giveup`). The deadline
+  no longer counts while an answer is being decoded (bounded by
+  `SYNC_DECODE_GRACE_MS`): asking again there would make that answer an
+  older request's (`theDecodedAnswerIsNotCut`,
+  `askAgainCutsTheDecodeTest`). The deadline's step is
+  `resyncDeadlineStep`, proved and observing like the rules above.
+  `tests/rb-two-player.mjs` with `DOUBLE_RESYNC_ASK=1` drives it: two
+  requests at once, the second rate-limited, the first's answer dropped.
 - Next: read the production reports; once they show none, the engine calls
   the proved functions instead of its own copies.
 - A state transfer starving the inputs behind it (`specs/tick_deadlines.qnt`,
