@@ -469,6 +469,17 @@ done
 $QUINT run "$REC" --main=reconnect_inputs_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+# ── A player dropped in a running match comes back only late ──────────────
+DROP=specs/drop_is_final.qnt
+$QUINT typecheck "$DROP"
+for variant in drop_is_final_current drop_is_final_fixed; do
+  $QUINT test "$DROP" --main="$variant" --backend=typescript
+done
+# Today the mesh check adds a dropped player back outside the roster
+# (drop_is_final_current; desyncThenHealTest).
+$QUINT run "$DROP" --main=drop_is_final_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend=typescript
+
 # ── A channel that dies in a match with no event ───────────────────────────
 MESH=specs/mesh_heal.qnt
 $QUINT typecheck "$MESH"

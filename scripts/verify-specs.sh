@@ -326,6 +326,14 @@ reconnect_inputs() {
   expect_violation "$REC" reconnect_inputs_current theHostNeverPredictsAFrameThePeerHasMade 2
 }
 
+drop_is_final() {
+  local DROP=specs/drop_is_final.qnt
+  verify "$DROP" drop_is_final_fixed allHold init 10
+  # A give-up, then the health check adds the player back outside the
+  # roster: 2 steps (desyncThenHealTest).
+  expect_violation "$DROP" drop_is_final_current aDroppedPlayerComesBackOnlyAsALateJoiner 3
+}
+
 start_group() {
   local START_GROUP=specs/start_group.qnt
   verify "$START_GROUP" start_group_current allHold
@@ -381,7 +389,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync start_group mesh_heal catch_up_wait ask_escalation reconnect_inputs
+  rom_at_start ring_after_resync start_group mesh_heal catch_up_wait ask_escalation reconnect_inputs drop_is_final
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -391,7 +399,7 @@ SPEC_GROUPS=(
 SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
-  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
+  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
   "peer_identity rom_transfer peer_connection rom_at_start catch_up_wait ask_escalation" # ~7.5 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs" # ~7.5 min
 )
