@@ -16,16 +16,29 @@ import { lcg } from './load-shared.ts';
 // page can show or hand to the engine must be the same on both.
 
 const OLD_SOURCE = readFileSync(new URL('./fixtures/demo.old.js', import.meta.url), 'utf8');
-// Changed since, on purpose: auto-compare paused by the Pause button counts as
-// on, so its button, the rollback button and leaving the match stop it, and
-// nothing starts it again over its pause mark. The old script runs with that
-// change and is held to everything else, character for character; the test
-// 'a paused auto-compare' shows the two orderings the change is for.
+// Changed since, on purpose. The old script runs with these changes and is
+// held to everything else, character for character:
+//  - Auto-compare paused by the Pause button counts as on, so its button, the
+//    rollback button and leaving the match stop it, and nothing starts it
+//    again over its pause mark. The test 'a paused auto-compare' shows the two
+//    orderings the change is for.
+//  - Once the page has asked to reload (Reset, or the autopilot's retry), it
+//    takes no more of the match's edges: the run state has left. The old
+//    script took them in the rest of the HUD frame that restarted the demo,
+//    and could clear the autopilot's retry mark there, so the next stall
+//    restarted the demo again instead of handing over.
 const SINCE_THE_OLD_SCRIPT: readonly (readonly [string, string])[] = [
   [
     '  const _isAutoCompareRunning = () => _autoCompareTimer !== 0;',
     '  const _isAutoCompareRunning = () => _autoCompareTimer !== 0 || _autoComparePausedAt !== 0;',
   ],
+  ["    _setStatus('Resetting demo…');", "    _reloading = true;\n    _setStatus('Resetting demo…');"],
+  ['  const _resetDemo = () => {', '  let _reloading = false;\n  const _resetDemo = () => {'],
+  [
+    '    if (inMatchStrict !== _lastFakePeerMatchActive) {',
+    '    if (!_reloading && inMatchStrict !== _lastFakePeerMatchActive) {',
+  ],
+  ['    if (inMatch !== _wasInMatch) {', '    if (!_reloading && inMatch !== _wasInMatch) {'],
 ];
 const OLD_SCRIPT = new vm.Script(
   SINCE_THE_OLD_SCRIPT.reduce((script, [before, after]) => {
@@ -203,6 +216,13 @@ type Counters = {
 /** `NetplayRollback.getSceneStatus()`. */
 type Scene = { ready: boolean; scene: number | undefined; status: number | undefined };
 
+/** SSB64's battle scene. */
+const BATTLE_SCENE = 22;
+
+/** The engine's match readings: the battle scene, in one of these game statuses. */
+const battle = (scene: Scene | undefined, statuses: readonly number[]): boolean =>
+  scene?.ready === true && scene.scene === BATTLE_SCENE && statuses.includes(scene.status ?? -1);
+
 /** One thing done to the page or said by the engine. */
 type Step =
   | { kind: 'slider'; value: string }
@@ -231,7 +251,8 @@ type DemoApi = {
   stopRecording: () => void;
   getRecording: () => string;
   /** The run-state machine beside the flags; the old script has none. */
-  runState?: { state: () => string; disagreements: () => readonly { message: string; old: string; next: string }[] };
+  /** The run state as one line (web/src/demo/run-state.ts); the old script has none. */
+  runState?: { state: () => string };
 };
 
 /** `window.KNCore` as a page script finds it. */
@@ -400,8 +421,6 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
   // What the fake engine, peer and gamepads answer with; steps change it.
   let counters: Counters | undefined;
   let scene: Scene | undefined;
-  let strict = false;
-  let inclusive = false;
   let cRollback = false;
   let pilotFailure: string | null = null;
   let gamepads: { id: string }[] = [];
@@ -512,8 +531,9 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
       init: (options: Shown): void => note('init', options),
       getHudCounters: (): Counters | undefined => counters,
       getSceneStatus: (): Scene | undefined => scene,
-      isInMatch: (): boolean => strict,
-      isInMatchOrPaused: (): boolean => inclusive,
+      // Read from the scene status as the engine does, so it never reports a match on a menu scene.
+      isInMatch: (): boolean => battle(scene, [1]),
+      isInMatchOrPaused: (): boolean => battle(scene, [1, 2, 3]),
       isCRollback: (): boolean => cRollback,
       readRdram32: (): number => 0,
       setPredictionsPaused: (paused: boolean): void => note('setPredictionsPaused', paused),
@@ -592,8 +612,9 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     else if (step.kind === 'cRollback') cRollback = step.on;
     else if (step.kind === 'pilotFailure') pilotFailure = step.failure;
     else if (step.kind === 'match') {
-      strict = step.strict;
-      inclusive = step.inclusive;
+      // Into the battle (status 1, Go), its pause menu (2), or out of it (5, End).
+      if (step.inclusive) scene = { ready: true, scene: BATTLE_SCENE, status: step.strict ? 1 : 2 };
+      else if (battle(scene, [1, 2, 3])) scene = { ready: true, scene: BATTLE_SCENE, status: 5 };
     } else if (step.kind === 'gamepads') {
       gamepads = step.ids.map((id) => ({ id }));
       gamepadsChanged?.();
@@ -643,6 +664,8 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
     stored: idb.describe,
     runState: (): DemoApi['runState'] => api?.runState,
     element: (id: string): FakeElement | undefined => elements.get(id),
+    /** What the page left in sessionStorage, which a reload keeps. */
+    session: (): [string, string][] => [...session.items],
   };
 };
 
@@ -650,27 +673,31 @@ const openDemo = (script: vm.Script, core: Core | undefined, visit: Visit) => {
 /** The run-state machine's states the visits have reached, by region (`engine:running`, ...). */
 const REACHED = new Set<string>();
 
-/** The new page's run-state machine agrees with its flags: no disagreement, ever. */
-const assertRunStateAgrees = (page: ReturnType<typeof openDemo>, where: string): void => {
-  const runState = page.runState();
-  if (!runState) return;
-  for (const part of runState.state().split(' ')) REACHED.add(part);
-  assert.deepEqual(runState.disagreements(), [], `run state disagrees with the flags ${where}`);
+/** Notes the new page's run state among those reached, and returns it. */
+const noteRunState = (page: ReturnType<typeof openDemo>): string => {
+  const state = page.runState()?.state() ?? '';
+  for (const part of state.split(' ')) REACHED.add(part);
+  return state;
+};
+
+/** Lets both pages finish what a step started: reading a file, hashing it, clearing the ROM cache. */
+const settle = async (): Promise<void> => {
+  for (let turn = 0; turn < 10; turn++) {
+    await nextTurn();
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
 };
 
 const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void> => {
   // The old script only checks that a core is there; it calls none of it.
   const before = openDemo(OLD_SCRIPT, {}, visit);
   const after = openDemo(NEW_SCRIPT, { demo }, visit);
-  assertRunStateAgrees(after, `on load: ${show(visit)}`);
+  noteRunState(after);
   assert.equal(after.snapshot(), before.snapshot(), `on load: ${show(visit)}`);
   // A cached ROM is restored on load: let both pages finish reading and hashing it.
   if (visit.cached !== undefined) {
-    for (let turn = 0; turn < 10; turn++) {
-      await nextTurn();
-      await new Promise((resolve) => setTimeout(resolve, 2));
-    }
-    assertRunStateAgrees(after, `after restoring the cached ROM: ${show(visit)}`);
+    await settle();
+    noteRunState(after);
     assert.equal(after.snapshot(), before.snapshot(), `after restoring the cached ROM: ${show(visit)}`);
   }
   let done = 0;
@@ -678,8 +705,15 @@ const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void>
     await before.apply(step);
     await after.apply(step);
     done++;
-    assertRunStateAgrees(after, `at step ${done} ${show(step)} of ${show(visit)}`);
+    const state = noteRunState(after);
     assert.equal(after.snapshot(), before.snapshot(), `step ${done} ${show(step)} of ${show(visit)}`);
+    // Stop or Reset: the page is reloading, and a browser runs nothing more of
+    // it. Both pages finish asking for the reload, and the visit ends there.
+    if (state === 'leaving') {
+      await settle();
+      assert.equal(after.snapshot(), before.snapshot(), `reloading after step ${done} of ${show(visit)}`);
+      return;
+    }
   }
 };
 
@@ -921,6 +955,54 @@ test('a paused auto-compare: leaving the match or clicking its button stops it, 
     // And the new page agrees with the old one changed, step for step.
     await compareVisit(visit, [...autoComparePaused, ...steps, { kind: 'frame', ms: 6100 }]);
   }
+});
+
+// The ordering the run state's `leaving` is for. The closed-loop autopilot
+// reports a failure on the frame the battle begins: the page marks its one
+// retry and restarts the demo. The old script went on with that frame and
+// took the match's edge, which clears the retry mark, so after the reload the
+// next failure restarted the demo again, and again. Now the page takes
+// nothing more once it has asked to reload: the mark survives, and the next
+// failure hands the player control.
+test('a restart in the frame a match begins: the retry mark survives the reload, where it used to be cleared', async () => {
+  const visit: Visit = { search: '', local: [], session: [], closedLoop: true, seed: 1 };
+  const failsAsTheBattleBegins: Step[] = [
+    { kind: 'load', name: 'game.z64' },
+    { kind: 'pilotFailure', failure: 'cursor lost' },
+    { kind: 'match', strict: true, inclusive: true },
+    { kind: 'frame', ms: 16 },
+  ];
+  /** The page after the failing frame, and what the next visit (the reload) does with what it left. */
+  const visitAndReload = async (script: vm.Script) => {
+    const core = script === NEW_SCRIPT ? { demo } : {};
+    const first = openDemo(script, core, visit);
+    for (const step of failsAsTheBattleBegins) await first.apply(step);
+    const left = first.session();
+    const firstSaid = first.snapshot();
+    const second = openDemo(script, core, { ...visit, session: left });
+    await second.apply({ kind: 'load', name: 'game.z64' });
+    await second.apply({ kind: 'pilotFailure', failure: 'cursor lost' });
+    await second.apply({ kind: 'frame', ms: 16 });
+    const secondSaid = second.snapshot();
+    return {
+      retryMarkKept: left.some(([key, value]) => key === 'kn-demo-autopilot-retried' && value === '1'),
+      matchEdgeAfterReload: /reload\(\)[\s\S]*peer\.setMatchActive\(true\)/.test(firstSaid),
+      restartsAgain: secondSaid.includes('reload()'),
+      handsOver: secondSaid.includes("you're in control"),
+    };
+  };
+  assert.deepEqual(await visitAndReload(NEW_SCRIPT), {
+    retryMarkKept: true,
+    matchEdgeAfterReload: false,
+    restartsAgain: false,
+    handsOver: true,
+  });
+  assert.deepEqual(await visitAndReload(OLD_SCRIPT), await visitAndReload(NEW_SCRIPT), 'the old script, changed');
+  assert.deepEqual(
+    await visitAndReload(OLD_SCRIPT_AS_IT_WAS),
+    { retryMarkKept: false, matchEdgeAfterReload: true, restartsAgain: true, handsOver: false },
+    'the old script as it was',
+  );
 });
 
 test('the ROM cache: what a load keeps, the next visit restores, and Stop forgets', async () => {
