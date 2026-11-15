@@ -5060,10 +5060,15 @@
         // sent the state: tell each one where they start again.
         if (own.length) peer.dc.send(`inputs-settled:${from}`);
         for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
+        const askedAt = (_inputAskedAt[peer.slot] ??= {});
+        const askedNow = performance.now();
         for (let f = from; f < frame; f++) {
           const have = _remoteInputs[peer.slot]?.[f];
           if (have !== undefined && have !== KNShared.ZERO_INPUT) continue;
           peer.dc.send(`resend:${f}`);
+          // The stall's asking (_askForMissingInputs) waits its interval
+          // before asking for these again.
+          askedAt[f] = askedNow;
           asked.push(`${peer.slot}@${f}`);
         }
       } catch (err) {
