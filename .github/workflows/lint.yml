@@ -204,6 +204,7 @@ jobs:
             ../tests/test_emulator_boot_sequence.py \
             ../tests/test_core_desync_exports.py \
             ../tests/test_sync_send_source.py \
+            ../tests/test_late_join_simple.py \
             ../tests/test_browser_shard.py
       # The desync registry compiled natively and read against a RAM dump of
       # a match: its addresses, the byte order of one-byte fields, the replay
