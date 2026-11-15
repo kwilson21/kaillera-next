@@ -62,7 +62,8 @@ interface UploadContext {
   readonly UNPACK_ALIGNMENT: number;
 }
 
-type Upload = (this: UploadContext, ...args: never[]) => void;
+/** An upload method: WebGL's return nothing, and the wrapper hands back whatever the original returned. */
+type Upload = (this: UploadContext, ...args: never[]) => undefined;
 
 /** A WebGL context prototype, as far as the shim reads and writes it. */
 type GlPrototype = Partial<Record<(typeof UPLOADS)[number], Upload>> & { __knUnpackAlignmentPatched?: boolean };
@@ -94,7 +95,7 @@ const installUnpackAlignmentShim = (page: EjsPage): void => {
     for (const name of UPLOADS) {
       const original = proto[name];
       if (!isUpload(original)) continue;
-      proto[name] = function (this: UploadContext, ...args: never[]): void {
+      proto[name] = function (this: UploadContext, ...args: never[]): undefined {
         try {
           this.pixelStorei(this.UNPACK_ALIGNMENT, 1);
         } catch {
