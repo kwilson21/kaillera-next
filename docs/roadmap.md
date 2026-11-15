@@ -172,6 +172,17 @@ without the old code running beside it first.
   Quint models are drawn as sequence diagrams from the traces the model
   checker replays. `docs/netcode-diagrams.md` lists them all.
 
+**Not verified: waits for a third emulator.** The cloud container boots two
+emulators, not three. These paths are proved and modelled but no run reaches
+them yet; each needs `tests/rb-two-player.mjs` (or a 3–4 player successor)
+once a third can boot:
+- A follow-up to an unconfirmed resync answer that is needed
+  (`SYNC-FOLLOW-UP-NEEDED`, specs/sync_follow_up.qnt). In two players the
+  target guest's late inputs are settled once the state is handed over and
+  never fed, and pacing and the stale-input stall keep the host from taking
+  a state on predicted inputs that reach its frame, so only another player's
+  inputs can still change it. `SYNC_FOLLOW_UP=changed` is the mode to extend.
+
 **Stage 1: foundation [done]**
 Toolchain (TypeScript 7, esbuild, oxfmt, oxlint + anti-slop, Biome, antislop,
 Quint, LemmaScript) and CI. First modules: `protocol.ts` (Effect Schema for
