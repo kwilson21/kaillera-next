@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  chunkTaken,
-  comparable,
-  headerRefused,
   IDLE,
   receiverStep,
   ROM_MAX_SIZE,
@@ -18,11 +15,19 @@ import {
   headerVerdict,
 } from '../../web/src/play/rom-transfer-step.ts';
 
-// ── the code these rules restate, kept as an oracle ──────────────────────────
+// ── the code these rules replaced, kept as an oracle ─────────────────────────
 // The receiver in web/static/play.js as of #142: its state variables and what
-// each handler does to them, with the channel, the timers and the page taken
-// out. play.js is still the code that runs; this is the same logic the
-// observer there compares against.
+// each handler did to them, with the channel, the timers and the page taken
+// out. play.js now keeps its transfer in `receiverStep`'s state.
+
+/** A transfer laid out as play.js held its own (`view` below). */
+const comparable = (state: Receiver) => ({
+  phase: state.phase,
+  retries: state.retries,
+  received: state.received,
+  headerSize: state.header?.size ?? null,
+  headerHash: state.header?.hash ?? null,
+});
 
 type OldHeader = { size: number; hash: string | undefined };
 
@@ -179,7 +184,6 @@ test('agrees with the receiver in play.js over random transfers', () => {
       const event = randomEvent(next);
       old.apply(event);
       state = receiverStep(state, event).state;
-      // The observer in play.js compares these two strings.
       assert.equal(JSON.stringify(comparable(state)), old.view(), `seed ${seed}, event ${i}: ${JSON.stringify(event)}`);
       compared++;
     }
@@ -197,7 +201,8 @@ test('whole-number size check matches the old floating-point one', () => {
   for (const size of sizes) {
     const line = Math.floor((size * 11) / 10);
     for (let total = Math.max(0, line - 3); total <= line + 3; total++) {
-      assert.equal(chunkTaken(0, total, size), !(total > size * 1.1), `size ${size}, total ${total}`);
+      const taken = chunkVerdict(0, total, size, ROM_MAX_SIZE) === 'accept';
+      assert.equal(taken, !(total > size * 1.1), `size ${size}, total ${total}`);
       checked++;
     }
   }
@@ -298,14 +303,22 @@ test('a resumed channel keeps what arrived; a new file from the host drops it', 
   assert.equal(receiverStep(resumed, { kind: 'header', size: 400_000, hash: 'Saa' }).state.received, 0);
 });
 
-test('a ROM past the size limit is refused, by header or by bytes', () => {
-  assert.equal(headerRefused(ROM_MAX_SIZE), false);
-  assert.equal(headerRefused(ROM_MAX_SIZE + 1), true);
+const why = (step: ReturnType<typeof receiverStep>): string | null => (step.next === 'abandoned' ? step.reason : null);
+
+test('a ROM past the size limit is refused, by header or by bytes, and says which', () => {
   const receiving = run({ kind: 'accept' }, { kind: 'channel' });
+  const atLimit = receiverStep(receiving, { kind: 'header', size: ROM_MAX_SIZE, hash: undefined });
+  assert.equal(atLimit.next, 'none');
   const refused = receiverStep(receiving, { kind: 'header', size: ROM_MAX_SIZE + 1, hash: undefined });
-  assert.deepEqual([refused.next, refused.state], ['abandoned', IDLE]);
+  assert.deepEqual([refused.next, refused.state, why(refused)], ['abandoned', IDLE, 'tooLarge']);
   const flooded = receiverStep(receiving, { kind: 'chunk', bytes: ROM_MAX_SIZE + 1 });
-  assert.deepEqual([flooded.next, flooded.state], ['abandoned', IDLE]);
+  assert.deepEqual([flooded.next, flooded.state, why(flooded)], ['abandoned', IDLE, 'tooLarge']);
+  const announced = receiverStep(receiving, { kind: 'header', size: 100_000, hash: 'Saa', name: 'game.z64' }).state;
+  assert.equal(announced.header?.name, 'game.z64');
+  const over = receiverStep(announced, { kind: 'chunk', bytes: 110_001 });
+  assert.deepEqual([over.next, why(over)], ['abandoned', 'overHeader']);
+  const short = receiverStep(receiverStep(announced, { kind: 'chunk', bytes: 50_000 }).state, { kind: 'complete' });
+  assert.deepEqual([short.next, why(short)], ['abandoned', 'sizeMismatch']);
 });
 
 test('the host turning sharing off pauses, and on again resumes only what had started', () => {

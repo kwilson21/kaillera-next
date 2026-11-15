@@ -157,11 +157,12 @@ without the old code running beside it first.
   per-peer machine below) is asserted by the test and named, with its model
   scenario, in the PR; any other difference blocks the change.
 - Still observing, each to be switched to deciding that way (the old code
-  decides and the new reports a difference): the play page's moved decisions
-  (`play-disagree`), the engine's checks of the DataChannel strings peers
-  send (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
-  streaming rules (`streaming-disagree`). The resync request rules decide
-  and the per-peer machine is driven (below), so `tests/observer-reports.mjs`
+  decides and the new reports a difference): the engine's checks of the
+  DataChannel strings peers send (`protocol-mismatch`), the mesh rules
+  (`mesh-disagree`), the streaming rules (`streaming-disagree`). The play
+  page's moved decisions all decide (the ROM receiver was the last; play.js
+  sends no `play-disagree`), the resync request rules decide and the
+  per-peer machine is driven (below), so `tests/observer-reports.mjs`
   counts no report type now. Once all of them decide, the observer plumbing
   (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
@@ -286,10 +287,11 @@ hands each input to it and carries out the outcome; whether an input is
 taken, ignored or rejected is `remap-step.ts`, proven with LemmaScript). Moved as they were, being page
 effects with nothing to compare: the page's passing messages and small menus
 (`notices.ts`: toasts, the error card, the room-full banner; `menus.ts`: the
-invite menu, share or copy, the More menu). Observing: a guest receiving the
-host's ROM (`rom-transfer.ts`, decisions proved in `rom-transfer-step.ts`,
-modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
-keeps the channel, the timers and the page. The host's sending side and the
+invite menu, share or copy, the More menu). A guest receiving the host's
+ROM: where the transfer stands and what it does next is `rom-transfer.ts`
+(decisions proved in `rom-transfer-step.ts`, modelled in
+`specs/rom_transfer.qnt`); `play.js`'s receiver moves it on every event and
+keeps the channel, the timers, the bytes and the page. The host's sending side and the
 WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
 (each player slot, the spectator line, the in-game info panel, and whether
 the host may start). Joining a room:

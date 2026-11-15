@@ -163,8 +163,10 @@ _VALID_EVENT_TYPES = {
     # The play page sent it for server messages too before it dropped them
     # instead; kept for both: tests/test_session_reports.py.
     "protocol-mismatch",
-    # A decision moved out of play.js disagreed with the play.js code still in
-    # charge of it (web/src/play/observe.ts): tests/test_session_reports.py.
+    # A decision moved out of play.js disagreed with the play.js code then in
+    # charge of it (web/src/play/observe.ts). No longer sent: every such
+    # decision now decides. Kept so a page loaded before that still has its
+    # report stored: tests/test_session_reports.py.
     "play-disagree",
     # A streaming rule in web/src/streaming disagreed with the engine still in
     # charge of it (web/src/streaming/observe.ts): tests/test_session_reports.py.
