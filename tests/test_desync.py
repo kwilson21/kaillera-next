@@ -6,7 +6,7 @@ import time
 import re
 
 
-def test_lockstep_no_desync(browser, server_url, rom_path):
+def test_lockstep_no_desync(browser, server_url, rom_path, start_game):
     """Two players in lockstep should have identical game state at the same frame."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -21,11 +21,7 @@ def test_lockstep_no_desync(browser, server_url, rom_path):
         _load_rom(host, rom_path)
         _load_rom(guest, rom_path)
 
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
-
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        start_game(host, guest)
 
         # Inject a hook on BOTH sides: capture state at exactly frame 300.
         # Using a 1ms polling interval ensures we don't miss the exact frame.
@@ -87,7 +83,7 @@ def test_lockstep_no_desync(browser, server_url, rom_path):
         guest.close()
 
 
-def test_lockstep_frame_pacing(browser, server_url, rom_path):
+def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game):
     """Verify both emulators advance at the same rate (network-paced)."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -102,11 +98,7 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path):
         _load_rom(host, rom_path)
         _load_rom(guest, rom_path)
 
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
-
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        start_game(host, guest)
 
         # Sample frame numbers every second for 5 seconds
         samples = []
@@ -138,7 +130,7 @@ def _load_rom(page, rom_path):
     page.set_input_files("#rom-drop input[type=file]", rom_path)
 
 
-def test_resync_after_forced_desync(browser, server_url, rom_path):
+def test_resync_after_forced_desync(browser, server_url, rom_path, start_game):
     """Force a desync on the guest, verify rollback/resync recovers."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -170,11 +162,7 @@ def test_resync_after_forced_desync(browser, server_url, rom_path):
         # Resync on (the host option, on by default)
         host.check("#opt-resync")
 
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
-
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        start_game(host, guest)
 
         # Wait for a few sync checks to pass (confirms baseline works)
         time.sleep(2)
@@ -241,7 +229,7 @@ def test_resync_after_forced_desync(browser, server_url, rom_path):
         guest.close()
 
 
-def test_resync_sustains_over_time(browser, server_url, rom_path):
+def test_resync_sustains_over_time(browser, server_url, rom_path, start_game):
     """With rollback on, resyncs should keep correcting drift over 10+ seconds."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -257,11 +245,7 @@ def test_resync_sustains_over_time(browser, server_url, rom_path):
         time.sleep(1)
 
         host.check("#opt-resync")
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
-
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        start_game(host, guest)
 
         # Run for 10 seconds, sampling every 2s
         samples = []
@@ -293,7 +277,7 @@ def test_resync_sustains_over_time(browser, server_url, rom_path):
         guest.close()
 
 
-def test_end_game_with_rollback(browser, server_url, rom_path):
+def test_end_game_with_rollback(browser, server_url, rom_path, start_game):
     """End game should work cleanly when rollback/sync is enabled."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -314,11 +298,7 @@ def test_end_game_with_rollback(browser, server_url, rom_path):
         time.sleep(1)
 
         host.check("#opt-resync")
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
-
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        start_game(host, guest)
 
         # Let it run a bit
         time.sleep(2)

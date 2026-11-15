@@ -19,7 +19,7 @@ def _sync_log_lines(page, text):
     return [line for line in page.evaluate("window.NetplayRollback.exportSyncLog()").splitlines() if text in line]
 
 
-def test_input_resend_on_stall(browser, server_url, rom_path):
+def test_input_resend_on_stall(browser, server_url, rom_path, start_game):
     """Block guest input sending, verify host sends resend request and recovers."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -46,15 +46,9 @@ def test_input_resend_on_stall(browser, server_url, rom_path):
         _load_rom(guest, rom_path)
         time.sleep(1)
 
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        print("\n  Starting game...")
-        host.click("#start-btn")
-
-        print("  Waiting for lockstep to activate (WASM boot)...")
-        host.wait_for_function("window._lockstepActive === true", timeout=120000)
-        print("  Host lockstep active")
-        guest.wait_for_function("window._lockstepActive === true", timeout=120000)
-        print("  Guest lockstep active")
+        print("\n  Starting game (WASM boot)...")
+        start_game(host, guest)
+        print("  Lockstep active on both")
 
         # Let the game run normally for 2 seconds to establish baseline
         time.sleep(2)
@@ -121,7 +115,7 @@ def test_input_resend_on_stall(browser, server_url, rom_path):
         guest.close()
 
 
-def test_hard_timeout_fabricates_zero(browser, server_url, rom_path):
+def test_hard_timeout_fabricates_zero(browser, server_url, rom_path, start_game):
     """When resend also fails, fabrication must use 0 (deterministic)."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -146,11 +140,7 @@ def test_hard_timeout_fabricates_zero(browser, server_url, rom_path):
         _load_rom(guest, rom_path)
         time.sleep(1)
 
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
-
-        host.wait_for_function("window._lockstepActive === true", timeout=120000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=120000)
+        start_game(host, guest)
 
         time.sleep(2)
 

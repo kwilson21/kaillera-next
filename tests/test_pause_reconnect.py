@@ -76,7 +76,7 @@ def _cleanup(*pages_and_contexts):
             pass
 
 
-def _start_lockstep_game(host, guest, server_url, room):
+def _start_lockstep_game(host, guest, server_url, room, start_game):
     """Set up a 2-player lockstep game with real ROM, wait for lockstep loop."""
     host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host",
               wait_until="networkidle")
@@ -89,34 +89,26 @@ def _start_lockstep_game(host, guest, server_url, room):
     _load_rom(host)
     _load_rom(guest)
 
-    expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
-    host.click("#start-btn")
-
-    # Wait for game to start (toolbar visible)
-    expect(host.locator("#toolbar")).to_be_visible(timeout=15000)
-    expect(guest.locator("#toolbar")).to_be_visible(timeout=15000)
-
-    # Wait for lockstep loop to actually start (emulator booted, synced)
-    host.wait_for_function("window._lockstepActive === true", timeout=30000)
-    guest.wait_for_function("window._lockstepActive === true", timeout=30000)
+    # Start, and wait for the lockstep loop to run on both (emulator booted, synced)
+    start_game(host, guest)
 
     # Wait for DCs to be open
     host.wait_for_function(
-        """window._peers && Object.values(window._peers).some(function(p) {
+        """window.KNState.peers && Object.values(window.KNState.peers).some(function(p) {
             return p.dc && p.dc.readyState === 'open';
         })""",
         timeout=10000,
     )
 
 
-def test_resume_toast_on_visibility_change(browser, server_url):
+def test_resume_toast_on_visibility_change(browser, server_url, start_game):
     """Returning from background sends 'returned' toast to peers."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, _room_id("P1"))
+        _start_lockstep_game(host, guest, server_url, _room_id("P1"), start_game)
 
         # Simulate guest going to background then returning after >500ms
         guest.evaluate("""
@@ -144,18 +136,18 @@ def test_resume_toast_on_visibility_change(browser, server_url):
         _cleanup(host, guest, ctx)
 
 
-def test_reconnect_toast_on_dc_close(browser, server_url):
+def test_reconnect_toast_on_dc_close(browser, server_url, start_game):
     """DC death shows toast notifications (no blocking overlay)."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, _room_id("RC"))
+        _start_lockstep_game(host, guest, server_url, _room_id("RC"), start_game)
 
         # Kill guest's DataChannel (only DC in 2-player game)
         guest.evaluate("""
-            var peers = Object.values(window._peers);
+            var peers = Object.values(window.KNState.peers);
             for (var i = 0; i < peers.length; i++) {
                 if (peers[i].dc) peers[i].dc.close();
             }
@@ -224,17 +216,17 @@ def test_rom_transfer_mobile_ua(browser, server_url):
         _cleanup(host, guest, host_ctx, mobile_ctx)
 
 
-def test_background_tab_resumes_cleanly(browser, server_url):
+def test_background_tab_resumes_cleanly(browser, server_url, start_game):
     """Background tab resumes on return."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, _room_id("P2"))
+        _start_lockstep_game(host, guest, server_url, _room_id("P2"), start_game)
 
         # Record host frame
-        initial_frame = host.evaluate("window._frameNum")
+        initial_frame = host.evaluate("window.KNState.frameNum")
 
         # Simulate guest going to background then returning after >500ms
         guest.evaluate("""
@@ -248,7 +240,7 @@ def test_background_tab_resumes_cleanly(browser, server_url):
         time.sleep(2)
 
         # Host should keep advancing
-        later_frame = host.evaluate("window._frameNum")
+        later_frame = host.evaluate("window.KNState.frameNum")
         assert later_frame > initial_frame, (
             f"Host stalled: frame stayed at {initial_frame}"
         )
@@ -263,7 +255,7 @@ def test_background_tab_resumes_cleanly(browser, server_url):
 
         # Guest should resume (frame advances past 0)
         guest.wait_for_function(
-            "window._frameNum > 0",
+            "window.KNState.frameNum > 0",
             timeout=10000,
         )
     finally:
