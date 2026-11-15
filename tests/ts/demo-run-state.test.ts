@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { initialTransition, transition, type SnapshotFrom } from 'xstate';
 import {
-  RUN_FLAGS,
   RUN_REGIONS,
   createRunState,
   demoRunMachine,
+  issuedCommands,
   region,
-  runFlags,
   runStateName,
+  type RunCommand,
   type RunEvent,
-  type RunFlags,
+  type RunHandlers,
 } from '../../web/src/demo/run-state.ts';
 
 // The demo page's run-state machine (web/src/demo/run-state.ts). Its
@@ -21,8 +21,7 @@ import {
 type Snapshot = SnapshotFrom<typeof demoRunMachine>;
 
 const EVENTS: readonly RunEvent[] = [
-  { type: 'romLoaded', engineAvailable: true },
-  { type: 'romLoaded', engineAvailable: false },
+  { type: 'engineStarted' },
   { type: 'loaderInjected' },
   { type: 'loaderSettled' },
   // The engine's strict reading implies its inclusive one: both read the same scene status.
@@ -42,7 +41,13 @@ const EVENTS: readonly RunEvent[] = [
   { type: 'reset' },
 ];
 
-type Step = { readonly from: Snapshot; readonly event: RunEvent; readonly to: Snapshot; readonly disabled: boolean };
+type Step = {
+  readonly from: Snapshot;
+  readonly event: RunEvent;
+  readonly to: Snapshot;
+  readonly commands: readonly RunCommand[];
+  readonly disabled: boolean;
+};
 
 /** Every transition from every reachable state, for one setting of ?autoCompare=0. */
 const walk = (autoCompareDisabled: boolean) => {
@@ -54,8 +59,8 @@ const walk = (autoCompareDisabled: boolean) => {
     const from = queue.shift();
     if (!from) break;
     for (const event of EVENTS) {
-      const [to] = transition(demoRunMachine, from, event);
-      steps.push({ from, event, to, disabled: autoCompareDisabled });
+      const [to, effects] = transition(demoRunMachine, from, event);
+      steps.push({ from, event, to, commands: issuedCommands(effects), disabled: autoCompareDisabled });
       const name = runStateName(to.value);
       if (!seen.has(name)) {
         seen.set(name, to);
@@ -73,8 +78,7 @@ const steps = both.flatMap((one) => one.steps);
 const at = (snapshot: Snapshot, name: (typeof RUN_REGIONS)[number]): string => region(snapshot.value, name);
 const leaving = (snapshot: Snapshot): boolean => runStateName(snapshot.value) === 'leaving';
 const inMatch = (snapshot: Snapshot): boolean => at(snapshot, 'match') !== 'menus';
-const autoCompareRuns = (snapshot: Snapshot): boolean =>
-  at(snapshot, 'autoCompare') === 'running' || at(snapshot, 'autoCompare') === 'runningUnpausable';
+const autoCompareRuns = (snapshot: Snapshot): boolean => at(snapshot, 'autoCompare') === 'running';
 const describe = (step: Step): string =>
   `${runStateName(step.from.value)} --${JSON.stringify(step.event)}--> ${runStateName(step.to.value)}`;
 
@@ -84,7 +88,7 @@ test('the walk reaches every state of every region, and leaving', () => {
     loader: ['none', 'loading', 'done'],
     match: ['menus', 'playing', 'gamePaused'],
     tick: ['running', 'paused'],
-    autoCompare: ['off', 'running', 'paused', 'runningUnpausable'],
+    autoCompare: ['off', 'running', 'paused'],
     mode: ['rollback', 'lockstep'],
     interaction: ['untouched', 'touched'],
   };
@@ -95,14 +99,14 @@ test('the walk reaches every state of every region, and leaving', () => {
   assert.ok(states.some(leaving));
 });
 
-test('the engine starts at most once, only on a ROM with the engine there, and never stops', () => {
+test('the engine starts at most once and never stops', () => {
   for (const step of steps) {
     if (leaving(step.to)) continue;
     const before = at(step.from, 'engine');
     const after = at(step.to, 'engine');
     if (before === 'running') assert.equal(after, 'running', describe(step));
     if (before === 'idle' && after === 'running') {
-      assert.deepEqual(step.event, { type: 'romLoaded', engineAvailable: true }, describe(step));
+      assert.equal(step.event.type, 'engineStarted', describe(step));
     }
   }
 });
@@ -119,14 +123,13 @@ test('the loader goes on the page at most once, and is loading only between goin
   }
 });
 
-test('leaving a match turns rollback on, and auto-compare off unless the Pause button has it paused', () => {
+test('leaving a match turns rollback on and auto-compare off, paused or not', () => {
   let seen = 0;
   for (const step of steps) {
     if (leaving(step.from) || step.event.type !== 'frame' || step.event.inclusive || !inMatch(step.from)) continue;
     seen++;
     assert.equal(at(step.to, 'mode'), 'rollback', describe(step));
-    const expected = at(step.from, 'autoCompare') === 'paused' ? 'paused' : 'off';
-    assert.equal(at(step.to, 'autoCompare'), expected, describe(step));
+    assert.equal(at(step.to, 'autoCompare'), 'off', describe(step));
   }
   assert.ok(seen > 0);
 });
@@ -177,96 +180,166 @@ test('Stop leaves once the loader or EmulatorJS is on the page; Reset always lea
   }
 });
 
-test('the flags tell every state apart, so a comparison can see any difference', () => {
-  const byFlags = new Map<string, string>();
-  for (const snapshot of states) {
-    if (leaving(snapshot)) continue;
-    const flags = JSON.stringify(runFlags(snapshot.value));
-    const name = runStateName(snapshot.value);
-    const other = byFlags.get(flags);
-    assert.ok(other === undefined || other === name, `${name} and ${other} have the same flags`);
-    byFlags.set(flags, name);
-  }
-});
-
-// Today's code does these, and the fix will make them unreachable: the
-// assertions are here so the fix has to change them.
-test('known: a paused auto-compare outlives the match, and a restart from paused cannot be paused again', () => {
+// The two orderings that used to strand a paused auto-compare: it outlived
+// the match and ran in the menus once the tick resumed, and a click on its
+// button ("Stop auto-compare") restarted it with the pause mark left set.
+test('a paused auto-compare stops on leaving the match, the rollback button and its own button', () => {
   const run = (events: readonly RunEvent[]): Snapshot =>
     events.reduce(
       (snapshot, event) => transition(demoRunMachine, snapshot, event)[0],
       initialTransition(demoRunMachine, { autoCompareDisabled: false })[0],
     );
   const pausedInMatch: RunEvent[] = [
-    { type: 'romLoaded', engineAvailable: true },
+    { type: 'engineStarted' },
     { type: 'frame', strict: true, inclusive: true },
     { type: 'autoStartDue' },
     { type: 'pauseClicked', tickControl: true },
   ];
-  const outlives = run([
-    ...pausedInMatch,
+  assert.equal(at(run(pausedInMatch), 'autoCompare'), 'paused');
+  const resume: RunEvent = { type: 'pauseClicked', tickControl: true };
+  for (const stop of [
     { type: 'frame', strict: false, inclusive: false },
-    { type: 'pauseClicked', tickControl: true },
-  ]);
-  assert.equal(at(outlives, 'match'), 'menus');
-  assert.equal(at(outlives, 'autoCompare'), 'running');
-  const unpausable = run([
-    ...pausedInMatch,
+    { type: 'rollbackToggleClicked' },
     { type: 'autoCompareClicked' },
-    { type: 'pauseClicked', tickControl: true },
-    { type: 'pauseClicked', tickControl: true },
-  ]);
-  assert.equal(at(unpausable, 'tick'), 'paused');
-  assert.equal(at(unpausable, 'autoCompare'), 'runningUnpausable');
+  ] satisfies RunEvent[]) {
+    const stopped = run([...pausedInMatch, stop]);
+    assert.equal(at(stopped, 'autoCompare'), 'off', stop.type);
+    const resumed = run([...pausedInMatch, stop, resume]);
+    assert.equal(at(resumed, 'tick'), 'running', stop.type);
+    assert.equal(at(resumed, 'autoCompare'), 'off', `${stop.type}, then the tick resumes`);
+  }
+  // Nor does the timer set on entering a match start it over its pause mark.
+  assert.equal(at(run([...pausedInMatch, { type: 'autoStartDue' }]), 'autoCompare'), 'paused');
 });
 
-test('the observer compares after each event, reports a difference once, and stops at leaving', () => {
-  const lines: string[] = [];
-  let flags: RunFlags = runFlags(initialTransition(demoRunMachine, { autoCompareDisabled: false })[0].value);
-  const observer = createRunState({ autoCompareDisabled: false, read: () => flags, warn: (line) => lines.push(line) });
-  observer.send({ type: 'interacted' });
-  assert.equal(observer.disagreements().length, 1, 'the page forgot the touch');
-  flags = { ...flags, userInteracted: true };
-  observer.send({ type: 'interacted' });
-  assert.equal(observer.disagreements().length, 1);
-  observer.send({ type: 'romLoaded', engineAvailable: true });
-  observer.send({ type: 'romLoaded', engineAvailable: true });
-  // The same difference after the same event is reported once.
-  assert.equal(observer.disagreements().length, 2);
-  assert.equal(lines.length, 2);
-  assert.match(lines[1] ?? '', /demo-run:romLoaded/);
-  // Flags in another order compare the same.
-  flags = {
-    userInteracted: true,
-    rollbackEnabled: true,
-    autoComparePaused: false,
-    autoCompareRunning: false,
-    tickPaused: false,
-    fakePeerActive: false,
-    inMatch: false,
-    bootInFlight: false,
-    loaderInjected: false,
-    engineRunning: true,
-    engineStarted: true,
-  };
-  assert.deepEqual(Object.keys(flags), [...RUN_FLAGS].reverse());
-  observer.send({ type: 'interacted' });
-  assert.equal(observer.disagreements().length, 2);
-  observer.send({ type: 'reset' });
-  assert.equal(observer.state(), 'leaving');
-  flags = { ...flags, engineStarted: false };
-  observer.send({ type: 'interacted' });
-  assert.equal(observer.disagreements().length, 2, 'nothing is compared once the page is leaving');
+/**
+ * The commands a step should issue, from what changed: what the page has to
+ * do about it, and nothing else.
+ */
+const expectedCommands = (step: Step): RunCommand[] => {
+  const { from, event, to } = step;
+  if (leaving(from)) return [];
+  if (leaving(to)) return event.type === 'stopClicked' ? [{ type: 'stop' }] : [];
+  const was = (name: (typeof RUN_REGIONS)[number]): string => at(from, name);
+  const now = (name: (typeof RUN_REGIONS)[number]): string => at(to, name);
+  switch (event.type) {
+    case 'frame': {
+      const commands: RunCommand[] = [];
+      if ((was('match') === 'playing') !== (now('match') === 'playing')) {
+        commands.push({ type: 'fakePeerActive', active: now('match') === 'playing' });
+      }
+      if (was('match') === 'menus' && now('match') !== 'menus') commands.push({ type: 'matchEntered' });
+      if (was('match') !== 'menus' && now('match') === 'menus') {
+        commands.push({
+          type: 'matchLeft',
+          stopAutoCompare: was('autoCompare') !== 'off',
+          rollbackChanged: was('mode') === 'lockstep',
+        });
+      }
+      return commands;
+    }
+    case 'autoCompareClicked':
+    case 'autoStartDue':
+      if (was('autoCompare') === 'off' && now('autoCompare') === 'running') {
+        return [{ type: 'startAutoCompare', rollbackChanged: was('mode') === 'lockstep' }];
+      }
+      return was('autoCompare') !== 'off' && now('autoCompare') === 'off' ? [{ type: 'stopAutoCompare' }] : [];
+    case 'rollbackToggleClicked':
+      return [
+        ...(was('autoCompare') !== 'off' ? [{ type: 'stopAutoCompare' } as const] : []),
+        { type: 'switchMode', rollback: was('mode') !== 'rollback' },
+      ];
+    case 'modeSwitched':
+      return [{ type: 'applyMode', changed: was('mode') !== now('mode') }];
+    case 'pauseClicked':
+      if (was('tick') === now('tick')) return [];
+      return now('tick') === 'paused'
+        ? [{ type: 'pauseTick', pauseAutoCompare: was('autoCompare') === 'running' }]
+        : [{ type: 'resumeTick', resumeAutoCompare: was('autoCompare') === 'paused' }];
+    default:
+      return [];
+  }
+};
+
+test('every step issues exactly the commands its changes call for, in the order the page does them', () => {
+  for (const step of steps) assert.deepEqual(step.commands, expectedCommands(step), describe(step));
 });
 
-test('the observer never throws into the page', () => {
-  const observer = createRunState({
+test("the commands' parts match the state they leave: auto-compare pauses and resumes with the tick, and starts in rollback", () => {
+  for (const step of steps) {
+    if (leaving(step.to)) continue;
+    for (const command of step.commands) {
+      if (command.type === 'pauseTick') {
+        assert.equal(command.pauseAutoCompare, at(step.to, 'autoCompare') === 'paused', describe(step));
+      } else if (command.type === 'resumeTick') {
+        assert.equal(command.resumeAutoCompare, at(step.from, 'autoCompare') === 'paused', describe(step));
+        if (command.resumeAutoCompare) assert.equal(at(step.to, 'autoCompare'), 'running', describe(step));
+      } else if (command.type === 'startAutoCompare' || command.type === 'matchLeft') {
+        assert.equal(at(step.to, 'mode'), 'rollback', describe(step));
+      }
+    }
+  }
+});
+
+/** Handlers that note each command, as the page's would run it. */
+const noting = (calls: string[], also: Partial<RunHandlers> = {}): RunHandlers => ({
+  fakePeerActive: (active) => calls.push(`fakePeerActive ${active}`),
+  matchEntered: () => calls.push('matchEntered'),
+  matchLeft: (stop, changed) => calls.push(`matchLeft ${stop} ${changed}`),
+  startAutoCompare: (changed) => calls.push(`startAutoCompare ${changed}`),
+  stopAutoCompare: () => calls.push('stopAutoCompare'),
+  switchMode: (rollback) => calls.push(`switchMode ${rollback}`),
+  applyMode: (changed) => calls.push(`applyMode ${changed}`),
+  pauseTick: (pause) => calls.push(`pauseTick ${pause}`),
+  resumeTick: (resume) => calls.push(`resumeTick ${resume}`),
+  stop: () => calls.push('stop'),
+  ...also,
+});
+
+test('the runner hands each command to its handler, in order, and takes an event a handler sends at once', () => {
+  const calls: string[] = [];
+  const run: ReturnType<typeof createRunState> = createRunState({
     autoCompareDisabled: false,
-    read: () => {
-      throw new Error('flag read failed');
-    },
-    warn: () => undefined,
+    handlers: noting(calls, {
+      // As the page does: a switch sets the mode, which comes back as `applyMode`.
+      switchMode: (rollback) => {
+        calls.push(`switchMode ${rollback}`);
+        run.send({ type: 'modeSwitched', rollback });
+      },
+    }),
   });
-  assert.doesNotThrow(() => observer.send({ type: 'interacted' }));
-  assert.equal(observer.disagreements()[0]?.next, '"Error: flag read failed"');
+  run.send({ type: 'engineStarted' });
+  run.send({ type: 'frame', strict: true, inclusive: true });
+  run.send({ type: 'autoStartDue' });
+  run.send({ type: 'rollbackToggleClicked' });
+  assert.deepEqual(calls, [
+    'fakePeerActive true',
+    'matchEntered',
+    'startAutoCompare false',
+    'stopAutoCompare',
+    'switchMode false',
+    'applyMode true',
+  ]);
+  assert.equal(run.flags().rollbackEnabled, false);
+  assert.equal(run.flags().autoCompareOn, false);
+  assert.equal(run.flags().userInteracted, true);
+  calls.length = 0;
+  run.send({ type: 'frame', strict: false, inclusive: false });
+  assert.deepEqual(calls, ['fakePeerActive false', 'matchLeft false true']);
+  assert.equal(run.flags().rollbackEnabled, true);
+});
+
+test('Stop runs its handler once the loader is on the page, and after it the runner takes nothing', () => {
+  const calls: string[] = [];
+  const run = createRunState({ autoCompareDisabled: false, handlers: noting(calls) });
+  run.send({ type: 'stopClicked', emulator: false });
+  assert.deepEqual(calls, []);
+  assert.equal(run.flags().userInteracted, true);
+  run.send({ type: 'loaderInjected' });
+  run.send({ type: 'stopClicked', emulator: false });
+  assert.deepEqual(calls, ['stop']);
+  assert.equal(run.state(), 'leaving');
+  run.send({ type: 'frame', strict: true, inclusive: true });
+  run.send({ type: 'autoCompareClicked' });
+  assert.deepEqual(calls, ['stop']);
 });

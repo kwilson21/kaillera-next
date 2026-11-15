@@ -160,10 +160,9 @@ without the old code running beside it first.
   decides and the new reports a difference): the play page's moved decisions
   (`play-disagree`), the decoding of server messages and of messages peers
   author (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
-  streaming rules (`streaming-disagree`) and the demo page's run state. The
-  resync request rules decide and the per-peer machine is driven (below), so
-  `tests/observer-reports.mjs` counts no report type now. Once all of them
-  decide, the observer plumbing
+  streaming rules (`streaming-disagree`). The resync request rules decide
+  and the per-peer machine is driven (below), so `tests/observer-reports.mjs`
+  counts no report type now. Once all of them decide, the observer plumbing
   (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
@@ -294,7 +293,8 @@ button's rule is observed, `play.js` still decides it). Joining a room:
 the `open-room` and `join-room` requests are built in `connect.ts` and typed
 against the generated schemas, with what each refusal means; whether a page
 comes in as a spectator and how it gets into a match already under way are
-`join-plan.ts` (proved), observed, with `onConnect` still deciding. Left in
+`join-plan.ts` (proved), which `onConnect` calls, as it does `connect.ts`'s
+reading of each answer. Left in
 `play.js`: the reconnect banner's timers, the game lifecycle handlers and
 engine start-up, which are effects on the page, the socket and the emulator.
 
