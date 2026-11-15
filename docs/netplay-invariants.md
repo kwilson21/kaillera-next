@@ -85,6 +85,13 @@ separate path that discards all peer state at once instead.
 - `_auditLastRemote[slot]` — last audited remote input
 - `_lateJoinActivatedAtFrame[slot]` — post-activation grace window
 - `_lateJoinSeededInputFrames[slot]` — seeded late-join input frames
+- `_inputDroppedAheadUpTo[slot]` — furthest frame dropped as too far ahead
+- `_inputAskedAt[slot]` — when each missing input was last asked for
+- `_inputAskOverdue[slot]` — asks counted toward escalation (specs/ask_escalation.qnt)
+- `_overduePushes[slot]` — the host's escalation push and its deadline
+- `_awaitFirstInputAfterReset[slot]` — cleared, then set again by a
+  `reconnect` reset: frames wait for that peer's first input
+  (specs/reconnect_inputs.qnt)
 
 **Per-peer-object ack state** (on `_peers[sid]`):
 
@@ -110,7 +117,7 @@ dropping `_remoteInputs[slot]` or phase history.
 |-----------|---------------|
 | `hardDisconnectPeer` (host path) | `hard-disconnect` |
 | `hardDisconnectPeer` (non-host, roster-gated) | `hard-disconnect-non-host` |
-| Reconnect resync (after DC close + rebuild) | `reconnect` |
+| Reconnect resync (after DC close + rebuild), on the host and on the guest | `reconnect` |
 | Stale peer evicted when roster shows a new sid for its slot | `zombie-eviction` |
 | Late-join peer replaced by a reconnect | `late-join-reconnect-replace` |
 | Mesh-heal re-adds a peer missing from the roster | `mesh-heal` |
