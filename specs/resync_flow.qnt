@@ -94,14 +94,32 @@
 //   asked the newest request (or the frame that request named). The guest
 //   moves on after asking, so a late answer from between the two still takes
 //   it back (lateAnswerFromAfterTheAskTest).
+//
+// CATCH_UP: a state from before the guest's frame is applied where it is
+//   from and the frames between it and the guest's frame are run again at
+//   once, unseen, with the inputs both pages already have; the guest goes on
+//   from the frame it was on. Only MAX_CATCH_UP frames are run again: a state
+//   further back is not applied (SYNC-TOO-OLD-DROPPED) and the guest asks
+//   again if it is owed one. false = before: the guest's frame went back to
+//   the state's and the frames between were played again in sight, at the
+//   game's pace, while the host waited for the guest's inputs. Even the
+//   answer to the request that is out comes from the frame the host was on
+//   when it heard the request, and the guest has moved on by the time it
+//   arrives: a few frames on a fast link, seconds on a slow one. A two-player
+//   run with the boot sync's answer held 12 s (rb-two-player.mjs,
+//   DELAY_SYNC_ANSWER_AT=boot) took the guest back 272 frames, past the
+//   engine's 256-frame input ring, and the pages split
+//   (ownAnswerBehindTest).
 module resync_flow {
   const REQUEST_HAS_DEADLINE: bool
   const ANSWERS_CARRY_REQUEST: bool
   const LATE_RULE: str
   const EVERY_REQUEST_NUMBERED: bool
+  const CATCH_UP: bool
 
   pure val DELTA = 2        // how far ahead the guest sets its target
   pure val HOLD = 1         // a state this far ahead is held, not applied early
+  pure val MAX_CATCH_UP = 2 // frames run again at most after a state from before the guest's frame
   pure val FOLLOW_UPS = 1   // syncs the host sends again after an unconfirmed one
   pure val LAST_FRAME = 8
   pure val NONE = -1
@@ -139,6 +157,7 @@ module resync_flow {
   var takenBack: bool        // history: a late answer was applied below the guest's frame or the frame the newest request named
   var asks: int              // history: the requests the guest has sent, numbered or not
   var lostOwn: bool          // history: a late answer replaced the awaited one before it was applied
+  var rewound: bool          // history: applying a state moved the guest's frame back
   // host
   var scheduled: Scheduled   // a capture owed to the guest; target NONE = none
   var cooling: bool          // answered this guest less than 5 s ago
@@ -153,7 +172,7 @@ module resync_flow {
     guestFrame' = 0, hostFrame' = 0,
     target' = NONE, targetDeadline' = false, asked' = false, askedId' = 0, askedAt' = NONE, askedFrom' = NONE, askDeadline' = false,
     stalled' = false, pending' = noPending, lastApplied' = NONE, appliedOlder' = false,
-    lateEnded' = false, takenBack' = false, lostOwn' = false, asks' = 0,
+    lateEnded' = false, takenBack' = false, lostOwn' = false, asks' = 0, rewound' = false,
     scheduled' = noSchedule, cooling' = false,
     requests' = [], states' = [],
   }
@@ -162,6 +181,7 @@ module resync_flow {
   action hostUnchanged = all { scheduled' = scheduled, cooling' = cooling }
   action historyUnchanged = all {
     appliedOlder' = appliedOlder, lateEnded' = lateEnded, takenBack' = takenBack, lostOwn' = lostOwn, asks' = asks,
+    rewound' = rewound,
   }
   action guestUnchanged = all {
     target' = target, targetDeadline' = targetDeadline, asked' = asked, askedId' = askedId, askedAt' = askedAt,
@@ -171,12 +191,13 @@ module resync_flow {
 
   // ── the guest asks ─────────────────────────────────────────────────────
 
-  // A desync was detected: ask for the state at a frame a little ahead.
   // The bound counts every request, numbered or not.
   action history(newAsks) = all {
     appliedOlder' = appliedOlder, lateEnded' = lateEnded, takenBack' = takenBack, lostOwn' = lostOwn, asks' = newAsks,
+    rewound' = rewound,
   }
 
+  // A desync was detected: ask for the state at a frame a little ahead.
   action guestAsksAt = all {
     not(asked),
     asks < MAX_REQUESTS,
@@ -287,11 +308,16 @@ module resync_flow {
 
   // ── the guest's tick ───────────────────────────────────────────────────
 
+  // The guest's frame after the state is applied: the state's, or, catching
+  // up, the one it was on.
+  def landsAt: int = if (CATCH_UP and pending.frame < guestFrame) guestFrame else pending.frame
+
   action apply = all {
-    guestFrame' = pending.frame,
+    guestFrame' = landsAt,
     lastApplied' = pending.frame,
     appliedOlder' = (appliedOlder or pending.frame <= lastApplied),
     takenBack' = (takenBack or staleAndBehind),
+    rewound' = (rewound or landsAt < guestFrame),
     lateEnded' = lateEnded, lostOwn' = lostOwn, asks' = asks,
     pending' = noPending, target' = NONE, targetDeadline' = false, stalled' = false,
     asked' = asked, askedId' = askedId, askedAt' = askedAt, askedFrom' = askedFrom, askDeadline' = askDeadline,
@@ -363,8 +389,14 @@ module resync_flow {
     else and { askedAt != NONE, pending.frame < askedAt },
   }
 
+  // A state further back than the guest can run again (CATCH_UP).
+  def tooOldToCatchUp: bool = and {
+    CATCH_UP, pending.frame != NONE, guestFrame - pending.frame > MAX_CATCH_UP,
+  }
+
   // Such a state is not what the guest is waiting for. It is dropped
   // wherever the guest is; a wait at the target goes on, to its own deadline.
+  // A state too old to catch up from is dropped the same way.
   action dropLate = all {
     pending' = noPending, stalled' = stalled,
     guestFrame' = guestFrame, target' = target, targetDeadline' = targetDeadline,
@@ -372,7 +404,7 @@ module resync_flow {
   }
 
   action guestTick = all {
-    if (lateToDrop) dropLate
+    if (lateToDrop or tooOldToCatchUp) dropLate
     else if (target != NONE and guestFrame >= target) {
       // At the target.
       if (pending.frame != NONE and ahead > 0 and ahead <= HOLD) hold
@@ -412,7 +444,7 @@ module resync_flow {
         lostOwn' = (lostOwn or (overAwaited and not(kept))),
       },
       target' = target, targetDeadline' = targetDeadline, stalled' = stalled,
-      lastApplied' = lastApplied, appliedOlder' = appliedOlder, takenBack' = takenBack, asks' = asks,
+      lastApplied' = lastApplied, appliedOlder' = appliedOlder, takenBack' = takenBack, asks' = asks, rewound' = rewound,
       framesUnchanged, hostUnchanged, requests' = requests,
     }
   }
@@ -490,10 +522,18 @@ module resync_flow {
   // lateAnswerOverTheAwaitedOneTest holds the ordering).
   val theAwaitedAnswerIsNotLost = not(lostOwn)
 
+  // No state applied moves the guest's frame back, whichever request it
+  // answers, its own included.
+  // Violated before the guest caught up (resync_flow_rewinds;
+  // ownAnswerBehindTest): the answer to the request that is out is the
+  // host's state from when the host heard it, and the guest had moved on.
+  val theGuestIsNeverRewound = not(rewound)
+
   // What held once a request had a deadline, before requests had numbers.
   val holdWithoutNumbers = everyStallHasADeadline and neverAppliesAnOlderState and aRequestCanAlwaysEnd
   val allHold = and {
     holdWithoutNumbers, onlyItsAnswerEndsARequest, aLateAnswerDoesNotTakeTheGuestBack, theAwaitedAnswerIsNotLost,
+    theGuestIsNeverRewound,
   }
 
   // ── scenarios ──────────────────────────────────────────────────────────
@@ -709,16 +749,53 @@ module resync_flow {
       .expect((EVERY_REQUEST_NUMBERED and ANSWERS_CARRY_REQUEST) implies and {
         lastApplied == 5, guestFrame == 5, not(asked),
       })
+
+  // The answer to the request that is out, from before the guest's frame:
+  // the host answers a "now" request with its state from when it heard it,
+  // and the guest has played on by the time the state arrives. Before, the
+  // guest's frame went back to the state's; catching up, the state is
+  // applied and the frames between run again, and the guest stays where it
+  // was.
+  run ownAnswerBehindTest =
+    init
+      .then(guestAsksNow)
+      .then(hostHearsRequest)
+      .expect(states.length() == 1 and states[0].frame == 0 and states[0].req == 1)
+      .then(2.reps(_ => guestTick))
+      .then(guestHearsState)
+      .expect(not(asked) and pending.frame == 0 and guestFrame == 2)
+      .then(guestTick)
+      .expect(lastApplied == 0 and pending == noPending)
+      .expect(theGuestIsNeverRewound == CATCH_UP)
+      .expect(guestFrame == (if (CATCH_UP) 2 else 0))
+
+  // The same answer, from further back than the guest runs again: it is not
+  // applied, and the guest plays on from where it is.
+  run tooOldToCatchUpTest =
+    init
+      .then(guestAsksNow)
+      .then(hostHearsRequest)
+      .then(3.reps(_ => guestTick))
+      .then(guestHearsState)
+      .expect(pending.frame == 0 and guestFrame == 3)
+      .then(guestTick)
+      .expect(theGuestIsNeverRewound == CATCH_UP)
+      .expect(CATCH_UP implies (lastApplied == NONE and pending == noPending and guestFrame == 3))
+      .expect(not(CATCH_UP) implies (lastApplied == 0 and guestFrame == 0))
 }
 
 // The variants below up to resync_flow_unnumbered check the rule each was
 // about with every request numbered, which leaves out the two the guest sent
 // bare until resync_flow_unnumbered's fix; their results stand as recorded.
+// All but resync_flow_drop_older and resync_flow_current leave out catching
+// up, which came last; resync_flow_drop_older keeps it so that it is checked
+// against the same properties as today.
 
 // Before: a request that was out had no deadline.
 module resync_flow_before {
   import resync_flow(
     REQUEST_HAS_DEADLINE = false, ANSWERS_CARRY_REQUEST = false, LATE_RULE = "frameNamed", EVERY_REQUEST_NUMBERED = true,
+    CATCH_UP = false,
   ).*
 }
 
@@ -727,6 +804,7 @@ module resync_flow_before {
 module resync_flow_any_answer {
   import resync_flow(
     REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = false, LATE_RULE = "frameNamed", EVERY_REQUEST_NUMBERED = true,
+    CATCH_UP = false,
   ).*
 }
 
@@ -737,6 +815,7 @@ module resync_flow_any_answer {
 module resync_flow_frame_named {
   import resync_flow(
     REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "frameNamed", EVERY_REQUEST_NUMBERED = true,
+    CATCH_UP = false,
   ).*
 }
 
@@ -745,6 +824,7 @@ module resync_flow_frame_named {
 module resync_flow_drop_older {
   import resync_flow(
     REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "older", EVERY_REQUEST_NUMBERED = true,
+    CATCH_UP = true,
   ).*
 }
 
@@ -754,6 +834,7 @@ module resync_flow_drop_older {
 module resync_flow_asked_from {
   import resync_flow(
     REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "askedFrom", EVERY_REQUEST_NUMBERED = true,
+    CATCH_UP = false,
   ).*
 }
 
@@ -764,14 +845,27 @@ module resync_flow_asked_from {
 module resync_flow_unnumbered {
   import resync_flow(
     REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "behind", EVERY_REQUEST_NUMBERED = false,
+    CATCH_UP = false,
+  ).*
+}
+
+// Before the guest caught up: a state from before the guest's frame took the
+// guest's frame back to it. Violates theGuestIsNeverRewound
+// (ownAnswerBehindTest).
+module resync_flow_rewinds {
+  import resync_flow(
+    REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "behind", EVERY_REQUEST_NUMBERED = true,
+    CATCH_UP = false,
   ).*
 }
 
 // Today: every request has a deadline and a number, its answer carries the
-// number, and a late answer is dropped wherever it would take the guest
-// back.
+// number, a late answer is dropped wherever it would take the guest back,
+// and any other state from before the guest's frame is caught up from, or
+// dropped when it is too far back.
 module resync_flow_current {
   import resync_flow(
     REQUEST_HAS_DEADLINE = true, ANSWERS_CARRY_REQUEST = true, LATE_RULE = "behind", EVERY_REQUEST_NUMBERED = true,
+    CATCH_UP = true,
   ).*
 }

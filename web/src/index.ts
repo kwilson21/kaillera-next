@@ -17,6 +17,7 @@ import { installGamepadManager } from './page/gamepad-manager.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
+import { catchUpStep } from './catch-up.ts';
 import { framesToSendAgain } from './input-resend.ts';
 import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
@@ -277,6 +278,8 @@ export const KNCore = {
   classifyRunnerStep,
   addressMapFor,
   captureFrame,
+  /** apply, catch up or refuse a host state from before this guest's frame (catch-up.ts, proved). */
+  catchUpStep,
   framesToAskFor,
   framesToSendAgain,
   checkRelayed,
