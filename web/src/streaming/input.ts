@@ -1,8 +1,8 @@
 /**
  * The streaming engine's input path: the packet a guest sends, when it sends
- * one, and what the host takes from a packet it receives. The rules are the
- * ones web/static/netplay-streaming.js applies today (sendGuestInput and the
- * data channel's onmessage). The engine still decides; observe.ts compares.
+ * one, and what the host takes from a packet it receives.
+ * web/static/netplay-streaming.js asks them in sendGuestInput and the data
+ * channel's onmessage.
  *
  * The packet is the shared input wire format (input-wire.ts), used in its
  * smallest shape. The rollback engine sends a frame number, an ack and

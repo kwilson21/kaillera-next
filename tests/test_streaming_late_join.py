@@ -248,8 +248,6 @@ def test_streaming_guest_refuses_an_offer_from_another_player(context, server_ur
         assert guest.evaluate("document.querySelector('#guest-video').srcObject === window.__streamBefore")
         guest.wait_for_function(_HAS_VIDEO, timeout=5000)
         assert guest.evaluate(f"window.KNState.peers['{host_sid}'].pc.connectionState") == "connected"
-        # The typed rule and the engine agree on what happened.
-        assert guest.evaluate("window.NetplayStreaming.observed().disagreed") == 0
     finally:
         for page in pages:
             try:

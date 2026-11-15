@@ -1,21 +1,31 @@
 /**
  * A guest receiving the host's ROM: where the transfer stands after each
- * thing that happens to it. The rules of web/static/play.js's receiver
- * (onExtraDataChannel and the functions around it) as one pure function.
- *
- * play.js is still in charge: it owns the channel, the timers and the page,
- * and gives this every event beside its own handling; the two are compared
- * and a difference is reported as play-disagree. The model is
- * specs/rom_transfer.qnt; the decisions are rom-transfer-step.ts.
+ * thing that happens to it, as one pure function. web/static/play.js's
+ * receiver (onExtraDataChannel and the functions around it) keeps its
+ * transfer in this state and moves it only through `receiverStep`; it owns
+ * the channel, the timers, the bytes and the page, and does what each step
+ * says next. The model is specs/rom_transfer.qnt; the decisions are
+ * rom-transfer-step.ts.
  */
 import type { RomTransferState } from '../reconnect.ts';
-import { afterChannelClosed, afterResumeTimedOut, chunkVerdict, headerVerdict } from './rom-transfer-step.ts';
+import {
+  afterChannelClosed,
+  afterResumeTimedOut,
+  chunkVerdict,
+  headerVerdict,
+  MAX_RETRIES,
+  type RetryVerdict,
+} from './rom-transfer-step.ts';
 
 /** The largest ROM a guest accepts from a host. */
 export const ROM_MAX_SIZE = 128 * 1024 * 1024;
 
-/** What the host said it is sending. */
-export type RomHeader = { readonly size: number; readonly hash: string | undefined };
+/** What the host said it is sending. `name` is the file's, for the guest's library. */
+export type RomHeader = {
+  readonly size: number;
+  readonly hash: string | undefined;
+  readonly name?: string | undefined;
+};
 
 /** Where a guest's transfer stands. */
 export type Receiver = {
@@ -46,7 +56,12 @@ export type ReceiverEvent =
   | { readonly kind: 'reset' }
   /** The host opened a rom-transfer channel. */
   | { readonly kind: 'channel' }
-  | { readonly kind: 'header'; readonly size: number; readonly hash: string | undefined }
+  | {
+      readonly kind: 'header';
+      readonly size: number;
+      readonly hash: string | undefined;
+      readonly name?: string | undefined;
+    }
   | { readonly kind: 'chunk'; readonly bytes: number }
   /** The host said the file is complete. */
   | { readonly kind: 'complete' }
@@ -65,6 +80,8 @@ export type ReceiverNext =
   | 'ask'
   /** Ask again after the pause. */
   | 'ask-after-pause'
+  /** The host stopped sharing: close the channel and cancel any ask on its way. */
+  | 'stop'
   /** Out of automatic retries: the guest decides. */
   | 'stalled'
   /** The transfer was refused or abandoned; everything received is dropped. */
@@ -72,18 +89,28 @@ export type ReceiverNext =
   /** The file is whole. */
   | 'finished';
 
-export type ReceiverStep = { readonly state: Receiver; readonly next: ReceiverNext };
+/**
+ * Why a transfer was abandoned. `tooLarge`: past the largest ROM a guest
+ * accepts, by header or by bytes. `overHeader`: more bytes than the header
+ * announced, by over a tenth. `sizeMismatch`: complete, but not as many bytes
+ * as the header announced.
+ */
+export type AbandonedFor = 'tooLarge' | 'overHeader' | 'sizeMismatch';
+
+export type ReceiverStep =
+  | { readonly state: Receiver; readonly next: Exclude<ReceiverNext, 'abandoned'> }
+  | { readonly state: Receiver; readonly next: 'abandoned'; readonly reason: AbandonedFor };
 
 const stay = (state: Receiver): ReceiverStep => ({ state, next: 'none' });
 
-const nextFor = (verdict: 'retry' | 'stalled' | 'wait'): ReceiverNext =>
-  verdict === 'retry' ? 'ask-after-pause' : verdict === 'stalled' ? 'stalled' : 'none';
+const nextFor = (verdict: RetryVerdict): Exclude<ReceiverNext, 'abandoned'> =>
+  verdict === 'retry' ? 'ask-after-pause' : 'stalled';
 
-const onHeader = (state: Receiver, size: number, hash: string | undefined): ReceiverStep => {
+const onHeader = (state: Receiver, size: number, hash: string | undefined, name: string | undefined): ReceiverStep => {
   const sameFile = state.header !== null && state.header.hash === hash && state.header.size === size;
   const verdict = headerVerdict(size, ROM_MAX_SIZE, state.header !== null, sameFile);
-  if (verdict === 'tooLarge') return { state: IDLE, next: 'abandoned' };
-  const header = { size, hash };
+  if (verdict === 'tooLarge') return { state: IDLE, next: 'abandoned', reason: 'tooLarge' };
+  const header = { size, hash, name };
   return stay(verdict === 'restart' ? { ...state, received: 0, header } : { ...state, header });
 };
 
@@ -95,10 +122,17 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
     case 'game-started':
       return stay(state.phase === 'idle' ? { ...state, phase: 'resuming' } : state);
     case 'sharing-off':
-      return stay(state.phase === 'receiving' || state.phase === 'resuming' ? { ...state, phase: 'paused' } : state);
+      // Also when already paused: the host closes its channel as it stops
+      // sharing, and the guest can see that close, and schedule a retry,
+      // before it hears that sharing is off (`noRetryWhileHostStopped` in
+      // specs/rom_transfer.qnt).
+      return state.phase === 'receiving' || state.phase === 'resuming' || state.phase === 'paused'
+        ? { state: { ...state, phase: 'paused' }, next: 'stop' }
+        : stay(state);
     case 'sharing-on':
-      // Resume what was paused part-way, or start a transfer that never began.
-      return (state.phase === 'paused' && state.received > 0) || state.phase === 'idle'
+      // Resume what was paused, with or without bytes, or start a transfer
+      // that never began (`retriesBeforeAsking` in specs/rom_transfer.qnt).
+      return state.phase === 'paused' || state.phase === 'idle'
         ? { state: { ...state, phase: 'resuming' }, next: 'ask' }
         : stay(state);
     case 'retry':
@@ -118,12 +152,12 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
           : { ...IDLE, phase: 'receiving' },
       );
     case 'header':
-      return onHeader(state, event.size, event.hash);
+      return onHeader(state, event.size, event.hash, event.name);
     case 'chunk': {
       const verdict = chunkVerdict(state.received, event.bytes, state.header?.size ?? -1, ROM_MAX_SIZE);
       return verdict === 'accept'
         ? stay({ ...state, received: state.received + event.bytes })
-        : { state: IDLE, next: 'abandoned' };
+        : { state: IDLE, next: 'abandoned', reason: verdict };
     }
     case 'complete':
       // Short or long of what the host announced: not the file. The page
@@ -131,14 +165,14 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
       // starts the file again rather than resuming from bytes no longer held
       // (`countIsHeld` in specs/rom_transfer.qnt).
       return state.header !== null && state.header.size !== state.received
-        ? { state: IDLE, next: 'abandoned' }
+        ? { state: IDLE, next: 'abandoned', reason: 'sizeMismatch' }
         : { state: { ...state, phase: 'complete' }, next: 'finished' };
     case 'closed': {
       if (state.phase !== 'receiving') return stay(state);
       const retries = state.retries + 1;
       return {
         state: { ...state, phase: 'paused', retries },
-        next: nextFor(afterChannelClosed(retries, state.received)),
+        next: nextFor(afterChannelClosed(retries)),
       };
     }
     case 'backoff-elapsed':
@@ -151,21 +185,21 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
   }
 };
 
-/** Whether a header of this size is refused outright. */
-export const headerRefused = (size: number): boolean => headerVerdict(size, ROM_MAX_SIZE, false, false) === 'tooLarge';
-
-/** Whether a chunk of `bytes` after `received` is taken (`headerSize` -1 before a header). */
-export const chunkTaken = (received: number, bytes: number, headerSize: number): boolean =>
-  chunkVerdict(received, bytes, headerSize, ROM_MAX_SIZE) === 'accept';
-
-/** A transfer laid out as play.js holds its own, for comparing the two. */
-export const comparable = (state: Receiver) => ({
-  phase: state.phase,
-  retries: state.retries,
-  received: state.received,
-  headerSize: state.header?.size ?? null,
-  headerHash: state.header?.hash ?? null,
-});
+/**
+ * What the progress line says while the transfer is paused. Paused with the
+ * host still sharing and retries left, a retry is already on its way (a close
+ * or an unanswered request leads to `ask-after-pause`); otherwise the guest
+ * is asked, by the Retry button the page shows.
+ */
+export const pausedText = (state: Receiver, sharing: boolean): string => {
+  if (sharing && state.retries <= MAX_RETRIES) {
+    return `ROM transfer interrupted — retrying (${state.retries}/${MAX_RETRIES})`;
+  }
+  if (state.header !== null && state.header.size > 0) {
+    return `ROM transfer paused — ${Math.round((state.received / state.header.size) * 100)}% received`;
+  }
+  return 'ROM transfer failed';
+};
 
 /** How far a transfer has got, as the progress bar shows it. */
 export const romProgress = (received: number, total: number) => {

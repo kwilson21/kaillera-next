@@ -93,7 +93,7 @@ kaillera-next/
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
-│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming, except which offers a guest takes, which it asks web/src/streaming (`signalGate`)
+│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are web/src/streaming's, which it calls
 │       ├── switch2-usb.js       # starts the WebUSB handshake that wakes the Switch 2 Pro Controller (window.Switch2USB) from web/src/page/switch2-usb.ts
 │       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
 │       ├── virtual-gamepad.js   # starts the on-screen touch controls (window.VirtualGamepad) from web/src/page/virtual-gamepad/
@@ -130,7 +130,7 @@ kaillera-next/
 │   │   ├── attempt-id.ts        # the `attemptId` {page, attempt} every webrtc-signal carries: which connection attempt it belongs to
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
-│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing); offer-gate.ts decides, for the engine, that a guest or spectator takes an offer only from slot 0; attempt.ts decides which connection a signal belongs to and reoffer.ts is the host's deadline to offer again (specs/streaming_connection.qnt)
+│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming), which netplay-streaming.js calls: roster.ts, signal.ts, input.ts and video.ts; offer-gate.ts: a guest or spectator takes an offer only from slot 0; attempt.ts decides which connection a signal belongs to and reoffer.ts is the host's deadline to offer again (specs/streaming_connection.qnt)
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
 │   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts, version.ts, feedback.ts)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry

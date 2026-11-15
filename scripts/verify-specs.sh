@@ -55,7 +55,11 @@ rom_transfer() {
   local ROMT=specs/rom_transfer.qnt
   verify "$ROMT" rom_transfer_current waitingHasAWayOut
   verify "$ROMT" rom_transfer_current timersAloneStop
+  verify "$ROMT" rom_transfer_current retriesBeforeAsking
+  verify "$ROMT" rom_transfer_current noRetryWhileHostStopped
   expect_violation "$ROMT" rom_transfer_before waitingHasAWayOut
+  expect_violation "$ROMT" rom_transfer_nothing_received_waits retriesBeforeAsking
+  expect_violation "$ROMT" rom_transfer_retry_outlives_sharing noRetryWhileHostStopped
 }
 
 # room_lifecycle is the largest, so it is checked in two halves: the start of a

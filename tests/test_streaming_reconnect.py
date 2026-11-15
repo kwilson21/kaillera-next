@@ -99,8 +99,6 @@ def test_two_player_stream_connects_and_carries_input(context, server_url):
             f"{_GUEST_HOST_PEER}.attempt.page"
         )
         assert same
-        assert host.evaluate("window.NetplayStreaming.observed().disagreed") == 0
-        assert guest.evaluate("window.NetplayStreaming.observed().disagreed") == 0
     finally:
         _close(pages)
 
@@ -131,8 +129,6 @@ def _reconnected(host, guest, sid):
     # The sync logs (one tab-separated line per entry) say what each page did.
     host_log = host.evaluate("window.NetplayStreaming.exportSyncLog()")
     assert f"STREAM-REOFFER {sid}" in host_log, host_log[-3000:]
-    assert host.evaluate("window.NetplayStreaming.observed().disagreed") == 0
-    assert guest.evaluate("window.NetplayStreaming.observed().disagreed") == 0
     return guest.evaluate("window.NetplayStreaming.exportSyncLog()")
 
 
