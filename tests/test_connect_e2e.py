@@ -67,6 +67,8 @@ def _disagreements(page):
 
 def _observed(page):
     # What the page sends as it closes: how often each decision was compared.
+    # Hidden twice (a page kept in the back-forward cache), it sends them once.
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
     page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
     page.wait_for_timeout(300)
     events = [json.loads(text) for text in page.evaluate("window.__beacons")]

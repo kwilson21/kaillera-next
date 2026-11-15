@@ -96,5 +96,16 @@ export const createComparer = (sink: (report: DisagreeReport) => boolean) => {
   /** Every decision compared so far, with its counts. */
   const counts = (): ObservedCounts => Object.fromEntries(tally);
 
-  return { compare, flush, counts };
+  /**
+   * The counts since the last time they were taken, then start again: a page
+   * the browser keeps in its back-forward cache can be hidden, shown and
+   * hidden again, and each comparison must be sent once.
+   */
+  const takeCounts = (): ObservedCounts => {
+    const taken = counts();
+    tally.clear();
+    return taken;
+  };
+
+  return { compare, flush, counts, takeCounts };
 };

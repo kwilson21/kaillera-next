@@ -60,6 +60,10 @@ PAGE_SUMMARY_TYPES = ["play-observed"]
 def test_the_play_page_sends_its_observed_counts():
     play = (SESSION_TS.parents[1] / "static" / "play.js").read_text()
     assert "KNEvent('play-observed', '', { counts: observed });" in play
+    # Sent before the page asks to leave: a room its last player leaves is
+    # deleted, and the server takes client events only for a live room.
+    leave = play[play.index("const leaveGame = () => {") :]
+    assert leave.index("_sendObservedCounts();") < leave.index("socket.emit('leave-room'")
 
 
 def test_the_engine_sends_the_type_it_is_allowed():

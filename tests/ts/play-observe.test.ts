@@ -103,3 +103,13 @@ test('the counts of every decision fit the client event meta limit', () => {
   // server/src/api/app.py refuses meta over 2048 bytes.
   assert.ok(meta.length <= 2048, `${meta.length}`);
 });
+
+test('taking the counts starts them again, so a page hidden twice sends each comparison once', () => {
+  const { comparer } = collecting();
+  comparer.compare('delay-preference', 1, 1);
+  comparer.compare('delay-preference', 1, 2);
+  assert.deepEqual(comparer.takeCounts(), { 'delay-preference': { compared: 2, disagreed: 1 } });
+  assert.deepEqual(comparer.takeCounts(), {});
+  comparer.compare('delay-preference', 3, 3);
+  assert.deepEqual(comparer.takeCounts(), { 'delay-preference': { compared: 1, disagreed: 0 } });
+});

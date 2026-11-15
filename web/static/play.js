@@ -164,6 +164,13 @@
     KNEvent(type, message, { old, next });
     return true;
   });
+  // How often each observed decision ran, and how often it disagreed, since
+  // they were last sent: what lets one take over. Sent when the page leaves
+  // the room or is hidden (web/src/play/observe.ts).
+  const _sendObservedCounts = () => {
+    const observed = _playObserver.takeCounts();
+    if (Object.keys(observed).length > 0) KNEvent('play-observed', '', { counts: observed });
+  };
   let _sessionLateJoinPoll = null;
   const _sessionStopLateJoinPoll = () => {
     if (_sessionLateJoinPoll) clearInterval(_sessionLateJoinPoll);
@@ -631,10 +638,7 @@
   // ── Clean tab close ───────────────────────────────────────────────────
 
   window.addEventListener('pagehide', () => {
-    // How often each observed decision ran on this page, and how often it
-    // disagreed: what lets one take over (web/src/play/observe.ts).
-    const observed = _playObserver.counts();
-    if (Object.keys(observed).length > 0) KNEvent('play-observed', '', { counts: observed });
+    _sendObservedCounts();
     // Flush session log via HTTP keepalive (survives page close)
     if (engine?.exportSyncLog) {
       try {
@@ -3729,6 +3733,9 @@
         }
       }
     }
+    // Before leave-room: a room its last player leaves is deleted, and the
+    // server takes client events only for a live room.
+    _sendObservedCounts();
     socket.emit('leave-room', {});
     if (engine) {
       engine.stop();
