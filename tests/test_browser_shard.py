@@ -17,6 +17,8 @@ def test_the_browser_files_are_the_ones_that_take_a_playwright_fixture():
     # Files this repository has had for a long time, on both sides of the line.
     assert "tests/test_e2e.py" in names
     assert "tests/test_room_overlay.py" in names
+    # Its test methods take only `self`; a class-level autouse fixture takes `browser`.
+    assert "tests/test_virtual_gamepad.py" in names
     assert "tests/test_db.py" not in names
     assert "tests/test_browser_shard.py" not in names
 

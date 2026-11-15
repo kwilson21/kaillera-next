@@ -1,9 +1,10 @@
 """Print the browser test files one CI shard runs (.github/workflows/browser.yml).
 
-A browser test file is a tests/test_*.py with a test that takes one of
-pytest-playwright's fixtures (browser, context, page). Files are dealt out by
-their number of tests, largest first, each to the shard with the fewest so
-far, so a new file needs no list kept up to date.
+A browser test file is a tests/test_*.py in which a test, a test method or a
+fixture (a class's autouse `setup`, say) takes one of pytest-playwright's
+fixtures: browser, context or page. Files are dealt out by their number of
+tests, largest first, each to the shard with the fewest so far, so a new file
+needs no list kept up to date.
 
 Usage: python scripts/browser_shard.py SHARD COUNT   (SHARD counts from 1)
        python scripts/browser_shard.py --all         (every browser test file)
@@ -14,10 +15,12 @@ import sys
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent.parent / "tests"
-# A test whose parameters name a Playwright fixture, on one line or several.
-_BROWSER_TEST = re.compile(r"^(?:async )?def test_\w+\(([^)]*)\)", re.MULTILINE)
+# Any function's parameters (a test, a method, a fixture; on one line or
+# several), and the Playwright fixtures among them.
+_ANY_DEF = re.compile(r"^\s*(?:async )?def \w+\(([^)]*)\)", re.MULTILINE)
 _FIXTURE = re.compile(r"\b(browser|context|page)\b")
-_ANY_TEST = re.compile(r"^(?:async )?def test_", re.MULTILINE)
+# Test functions and test methods.
+_ANY_TEST = re.compile(r"^\s*(?:async )?def test_", re.MULTILINE)
 
 
 def browser_files() -> list[tuple[str, int]]:
@@ -25,7 +28,7 @@ def browser_files() -> list[tuple[str, int]]:
     found = []
     for path in sorted(TESTS.glob("test_*.py")):
         text = path.read_text()
-        if any(_FIXTURE.search(params) for params in _BROWSER_TEST.findall(text)):
+        if any(_FIXTURE.search(params) for params in _ANY_DEF.findall(text)):
             found.append((f"tests/{path.name}", len(_ANY_TEST.findall(text))))
     return found
 
