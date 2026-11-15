@@ -254,6 +254,17 @@ resync_reask() {
   expect_violation "$REASK" resync_reask_coordinated_let_go aResyncAskedForIsNotForgotten
 }
 
+sync_follow_up() {
+  local FOLLOW=specs/sync_follow_up.qnt
+  # An unconfirmed answer followed up at three deadlines, then given up: 12 steps.
+  verify "$FOLLOW" sync_follow_up_fixed allHold init 12
+  verify "$FOLLOW" sync_follow_up_current atMostOneAnswerInFlight
+  # A follow-up sent for a state no input changed: 5 steps. A misprediction
+  # while the state is compressed, recorded from the send only: 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_current aFollowUpCarriesANewState
+  expect_violation "$FOLLOW" sync_follow_up_from_send theGuestEndsOnTheHostsState
+}
+
 rom_at_start() {
   local ROM_START=specs/rom_at_start.qnt
   verify "$ROM_START" rom_at_start_current allHold
@@ -283,7 +294,7 @@ ring_after_resync() {
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
-  tick_deadlines resync_inputs resync_mesh input_transport resync_reask
+  tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
   rom_at_start ring_after_resync
 )
 
@@ -296,7 +307,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh"   # ~6.5 min
   "peer_identity rom_transfer peer_connection rom_at_start"       # ~6.5 min
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync" # ~5.5 min
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up" # ~6.5 min
 )
 
 # Each group is in exactly one shard, and each shard names only groups.

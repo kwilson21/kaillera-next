@@ -361,6 +361,21 @@ done
 $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 
+# ── The follow-up to an answer sent unconfirmed ────────────────────────────
+FOLLOW=specs/sync_follow_up.qnt
+$QUINT typecheck "$FOLLOW"
+for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend=typescript
+done
+# With the fix: a follow-up goes out only for a state an input changed after
+# it was taken, the guest ends on the host's state, and at most one answer is
+# on the channel. Today every unconfirmed answer is followed up
+# (sync_follow_up_current; unchangedFollowUpTest); recording the change from
+# the send only misses one made while the state is compressed
+# (sync_follow_up_from_send; mispredictWhileCompressingTest).
+$QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
 # ── The rollback ring across a resync that loads the host's state ─────────
 RING=specs/ring_after_resync.qnt
 $QUINT typecheck "$RING"
