@@ -83,6 +83,30 @@ test('a resync that lands as the phantom is declared belongs to the recovery bef
   assert.equal(recoveries[0].proven, true);
 });
 
+test('a resync that takes the guest back below the frame it was seen again at still ends its recovery', () => {
+  // The host stops for 5.1 s at 187; the guest, running on alone, drops it
+  // at 191, sees it again at 198 and is taken back to the host's 196.
+  const guestLog =
+    resync(1, 127) +
+    line(191, 'PEER-PHANTOM slot=0 lastAdvance=20105 staleSec=5.0 — excluded from pacing') +
+    line(198, 'PEER-RECOVERED slot=0 f=183 — resuming normal pacing') +
+    resync(2, 196);
+  const recoveries = frozenRecoveries({ host: freeze(187, 5136), guest: guestLog });
+  assert.deepEqual(recoveries, [
+    { declaredBy: 'guest', from: 179, to: 196, stoppedPage: 'host', stoppedMs: 5136, proven: true },
+  ]);
+});
+
+test("on the guest's log a resync from before the page was seen again is not this recovery's", () => {
+  const guestLog =
+    line(191, 'PEER-PHANTOM slot=0 lastAdvance=20105 staleSec=5.0 — excluded from pacing') +
+    resync(2, 193) +
+    line(198, 'PEER-RECOVERED slot=0 f=183 — resuming normal pacing');
+  const recoveries = frozenRecoveries({ host: freeze(187, 5136), guest: guestLog });
+  assert.equal(recoveries[0].to, null);
+  assert.equal(recoveries[0].proven, false);
+});
+
 test('a page seen again but resynced much later is not left out', () => {
   const host =
     line(166, 'PEER-PHANTOM slot=1 lastAdvance=19431 staleSec=5.0 — excluded from pacing') +

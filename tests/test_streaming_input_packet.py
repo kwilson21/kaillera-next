@@ -100,6 +100,7 @@ def test_streaming_host_applies_controller_present_mask_like_lockstep():
 def test_streaming_late_join_waits_until_guest_listener_is_ready():
     streaming = STREAMING_JS.read_text()
     play = PLAY_JS.read_text()
+    session = (ROOT / "web/src/session.ts").read_text()
 
     assert "socket.on('data-message', onDataMessage);" in streaming
     assert "socket.off('data-message', onDataMessage);" in streaming
@@ -121,7 +122,13 @@ def test_streaming_late_join_waits_until_guest_listener_is_ready():
     assert "createPeer(remoteSid, remoteSlot, true)" in data_window
     assert "sendOffer(remoteSid);" in data_window
     assert "resending pending offer" in data_window
-    assert "_lateJoin = !isSpectator || mode === 'streaming';" in play
+    # A page joining a match in play is a late joiner, a spectator of a
+    # streamed match included (the session machine, web/src/session.ts), and
+    # play.js hands that to the engine, which then says it is listening.
+    assert "const target = event.spectator && !event.streaming ? 'running' : 'lateJoinStarting';" in session
+    assert "return state === 'lateJoinAwaitingRom' || state === 'lateJoinStarting';" in session
+    assert "const lateJoin = _isLateJoin();" in play
+    assert "      lateJoin,\n" in play
 
 
 def test_streaming_direct_capture_is_default_with_blit_escape_hatch():

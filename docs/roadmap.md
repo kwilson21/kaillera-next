@@ -142,9 +142,28 @@ without the old code running beside it first.
 
 **Rules for every stage**
 
-- A new module starts by observing: it runs next to the code it will replace
-  and reports disagreement (`session-disagree`). It takes over only after
-  production shows none.
+- New logic decides from the change it lands in; nothing observes. The
+  change makes the page or engine call the new module and deletes the copy
+  it replaces. The site has too little traffic for production reports to
+  show agreement, so the evidence comes before the merge, end to end as in
+  stage 2: an old-against-new test that runs both on the same inputs before
+  the old one is deleted, the proofs and models, and runs of the engine the
+  logic belongs to, with a fault mode for each rare path:
+  `tests/rb-two-player.mjs` and the lifecycle tests for rollback;
+  `tests/test_streaming_*.py` and a real-ROM streaming run for streaming
+  (`rb-two-player.mjs` opens `mode=rollback` only). A rule no run reaches gets
+  a fault mode or a harness step before it decides. A difference the new
+  logic is meant to make (a fix the model shows, like those listed for the
+  per-peer machine below) is asserted by the test and named, with its model
+  scenario, in the PR; any other difference blocks the change.
+- Still observing, each to be switched to deciding that way (the old code
+  decides and the new reports a difference): the play page's moved decisions
+  (`play-disagree`), the decoding of server messages and of messages peers
+  author (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
+  per-peer machine (`peer-disagree`), the resync request rules
+  (`resync-disagree`), the streaming rules (`streaming-disagree`) and the
+  demo page's run state. Once all of them decide, the observer plumbing
+  (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
 - State logic is modelled in Quint first; pure functions with a contract are
@@ -242,8 +261,8 @@ every one to its model as it goes out (`_emit`, `checked`): a mismatch raises
 under tests and logs `PAYLOAD-CONTRACT` in production. The page decodes every
 server-authored event and the `join-room` ack (`web/src/socket-boundary.ts`),
 observing: a message off its schema is reported as `protocol-mismatch` and the
-handlers still run on the raw payload. Handlers move onto decoded values once
-production shows no reports. Messages peers author (DataChannel control
+handlers still run on the raw payload. Next: handlers move onto decoded values,
+and a message off its schema is dropped. Messages peers author (DataChannel control
 strings and JSON, and the `data-message` / `webrtc-signal` / `rom-signal`
 relays) are described in `web/src/peer-protocol.ts` and checked the same way;
 DataChannel strings are sampled (the first 16 of each kind) because they
@@ -344,8 +363,8 @@ Slice 1, the peer mesh and signaling:
   `web/src/peer-signaling.ts` beside its own decisions (who offers, what a
   signal does to the connection table, what a lost connection leads to, when
   to stop retrying, which entries a new player replaces) and reports a
-  difference as a `mesh-disagree` client event. The engine's rules stay in
-  charge until production shows none.
+  difference as a `mesh-disagree` client event. Next: the engine calls them
+  and its own rules are deleted.
 - Built: the per-peer machine, `web/src/peer-connection.ts` (diagram in
   `docs/peer-connection-machine.md`). One machine per other player, built
   to the model's `fixed` variant: the lower slot is the pair's one
@@ -389,8 +408,8 @@ Slice 1, the peer mesh and signaling:
   as a late joiner, more than one machine per player on a page (a player
   this page offered to before it watched them is left alone), and the
   machine's view of the health check's timing (it runs on the engine's).
-  The four properties are still violated by the engine; the machine takes
-  over nothing until production shows no `peer-disagree` it should not.
+  The four properties are still violated by the engine; next, the machine
+  decides, one rule at a time, and the engine's copy of each is deleted.
 - Differences the observer is expected to report, where the engine is not
   what the model's `fixed` rules say (none came up in the two-player and
   lifecycle runs, which reconnect at most once):
@@ -419,8 +438,15 @@ Slice 1, the peer mesh and signaling:
   of three, its channel with another player opened first) took a startup
   retry for a gameplay reconnect and resynced during boot
   (`startupRetryToAStartedPageTest`).
-- Next: read the production reports; then decide, one rule at a time, by
-  the machine, starting with who offers from the health check.
+- Driven by tests too: `tests/rb-two-player.mjs` with `DROP_PEER_MS`
+  closes the guest's connection to the host mid-battle and drops their
+  WebRTC signaling for that long, so the host's reconnect attempt times out
+  and is retried; every run of it and of the lifecycle scenarios now fails on
+  a `peer-disagree` or `resync-disagree` (`tests/observer-reports.mjs`). The
+  first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
+  attempt with no disagreement and no mismatch.
+- Next: decide, one rule at a time, by the machine, starting with who
+  offers from the health check.
 
 Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed
 as not modelled are now modelled.
@@ -472,30 +498,88 @@ modelled in `specs/resync_flow.qnt` and `specs/late_join_pause.qnt`.
   `web/src/resync-request.ts`, checked by the `proofs` CI job: which state
   ends the request that is out (`endsRequest`, the model's
   `onlyItsAnswerEndsARequest`), which state answers an older request
-  (`answersAnOlderRequest`), which late answer is dropped because it is from
-  before the frame the newest request named (`isLateAnswerBeforeFrameAsked`,
-  `aLateAnswerDoesNotTakeTheGuestBack` / `beforeTheFrameAsked`), which is set
+  (`answersAnOlderRequest`), which late answer is dropped because, applied,
+  it would take the guest back: from before the frame the guest is on or the
+  frame the newest request named (`isLateAnswerBehind`,
+  `aLateAnswerDoesNotTakeTheGuestBack` / `lateAndBehind`), which is set
   aside because the newest request's answer is already held
   (`keepsAwaitedAnswer`, `theAwaitedAnswerIsNotLost`), and what a late
   joiner that lost its channel to the host does next: nothing, wait for the
   channel, wait for the request already out, give up after
   `LATE_JOIN_LOST_HOST_MAX_ASKS`, or ask (`lateJoinLostHostStep`). The
   engine keeps its own rules in charge (`_endsResyncRequest`,
-  `_answersAnOlderRequest`, `_isLateAnswerBeforeFrameAsked`,
+  `_answersAnOlderRequest`, `_isLateAnswerBehind`,
   `_keepsAwaitedAnswer`, `_resyncAfterLostHost`), runs the proved function
   beside each on the same inputs through `window.KNCore.resyncRequest`, and
   reports a difference as a `resync-disagree` client event (and
   `RESYNC-DISAGREE` in the sync log). None came up in the two-player runs,
   plain or with the host or the guest frozen for 8 s.
-- Next: read the production reports; once they show none, the engine calls
-  the proved functions instead of its own copies.
+- Driven by tests too: `tests/rb-two-player.mjs` with
+  `DELAY_SYNC_ANSWER_MS` holds the host's answer past the guest's request
+  deadline, so the answer arrives after a second request
+  (`sync state is not the answer awaited`); `tests/lifecycle-e2e.mjs`
+  scenario `late-join-lost-host` closes the joiner's connection to the host
+  as the state arrives (marker, `LATE-JOIN-LOST-HOST-RESYNC`, then `the
+  lost-host resync is done`). No disagreement in either. In the first, the
+  late answer to an immediate request was applied and took the guest back
+  130 frames before the awaited answer took it forward again (the hashes
+  still matched, but for about 1.5 s the guest made no new frame, so input
+  in that window was never sampled): the rules then dropped a late answer
+  only when the newest request named a frame. The model now forbids it
+  (`immediateLateAnswerTest`, violated on `resync_flow_frame_named`), and a
+  late answer is dropped when it is behind the guest's own frame too
+  (`SYNC-LATE-ANSWER-DROPPED`). Dropping every older answer (rule a,
+  `resync_flow_drop_older`) holds the properties as well, but also drops a
+  late answer ahead of the guest when the host's rate limit dropped the
+  newest request (`onlyStateComingTest`); dropping only below the frame the
+  guest asked from (rule b, `resync_flow_asked_from`) still takes it back.
+- That case left the guest with nothing coming: the host had dropped the
+  newest request, the guest dropped the only answer, and the request's
+  deadline let it go and asked nothing, so a guest that had asked "now"
+  (a reconnect, a network change) ran on with the state it had asked to
+  replace (`specs/resync_reask.qnt`, `anOwedResyncIsNotForgotten`,
+  `lateAnswerBehindTest`). A "now" request now owes a resync until a host
+  state is applied; its deadline asks again, at most
+  `RESYNC_MAX_ASKS_AGAIN` (2) times, then gives up visibly
+  (`RESYNC-REASK-GIVEUP`, client event `resync-reask-giveup`). The deadline
+  no longer counts while an answer is being decoded (bounded by
+  `SYNC_DECODE_GRACE_MS`): asking again there would make that answer an
+  older request's (`theDecodedAnswerIsNotCut`,
+  `askAgainCutsTheDecodeTest`). The deadline's step is
+  `resyncDeadlineStep`, proved and observing like the rules above.
+  `tests/rb-two-player.mjs` with `DOUBLE_RESYNC_ASK=1` drives it: two
+  requests at once, the second rate-limited, the first's answer dropped.
+- Next: the engine calls the proved functions and its own copies are
+  deleted. `DOUBLE_RESYNC_ASK` reaches them; a lifecycle resync that
+  actually happens needs a fault mode first.
+- A state transfer starving the inputs behind it (`specs/tick_deadlines.qnt`,
+  `input_link`). Two `DELAY_SYNC_ANSWER_MS` runs failed with 83 and 40
+  gameplay mismatches and 76 and 20 `DEEP-MISPREDICT-SKIP`. The prediction
+  window's guard held; it leaves out a phantom peer by design, and the guest
+  made the host a phantom at the peer-stale deadline (5 s) while the host's
+  inputs sat unsent behind two answers' worth of state (2.9 MB) on the
+  shared connection (the host's input channel stood at 5.7 KB buffered). The
+  guest then ran 38 to 84 frames past the window. Fixed: the host hands its
+  state over a chunk at a time, waiting for the channel to hold less than
+  256 KB (`KNCore.syncSend`, `mayHandChunk` proved, the wait an Effect
+  program with a 15 s deadline per chunk, `SYNC-SEND-STALLED`); a request
+  that comes in meanwhile is queued, not dropped. The two-player harness
+  counts what its simulated link holds in the `sync-state` channel's
+  `bufferedAmount`. After the fix the delayed run at 90 s had no mismatch
+  and no deep rollback, and so did the plain, frozen-host, frozen-guest and
+  dropped-peer runs.
+  Known limit: on links under about 170 kbit/s one 64 KB state chunk takes
+  more than 3 s, so the guest's progress deadline still fires and the
+  transfer falls back to the socket; nothing is planned unless production
+  shows it.
 
 **Stage 6: the remaining page scripts**
 The other hand-written scripts of the play, demo and landing pages move to
 `web/src` the way `play.js` does: the logic becomes strict TypeScript and the
-script shrinks to a thin caller or leaves the page. A decision the old code
-also makes starts by observing; a page effect with nothing to compare moves
-as it is. One file, or one small group, per change, smallest risk first:
+script shrinks to a thin caller or leaves the page. A decision moves and
+decides in the same change, checked against the old code by a test before the
+old code is deleted; a page effect with nothing to compare moves as it is.
+One file, or one small group, per change, smallest risk first:
 
 1. `feedback.js`, `version.js`, `version-guard.js`, `storage.js`,
    `kn-capture.js`, `kn-vision-client.js`, `switch2-usb.js`
@@ -505,6 +589,35 @@ as it is. One file, or one small group, per change, smallest risk first:
 5. `demo.js`, `fake-peer.js`, `ssb64-menu-autopilot.js`,
    `rollback-timeline.js`
 6. `landing.js`, `join.js`
+
+Done so far:
+
+- Items 1, 2, 3 and 6 are done. Each of those scripts is now a few lines
+  that start its module from `web/src`: `feedback.js` (#214), `version.js`
+  (#211), `version-guard.js` (#206), `kn-capture.js` (#179),
+  `kn-vision-client.js` (#195), `switch2-usb.js` (#197),
+  `controller-settings.js` (#198), `virtual-gamepad.js` (#209) and
+  `kn-audio.js` (#202). Or it has left the page: `storage.js` (#178), and
+  `landing.js` (#212) and `join.js` (#181), which are now the `kn-landing.js`
+  and `kn-join.js` bundles.
+- Item 5's three helpers are done: `fake-peer.js` (#210),
+  `ssb64-menu-autopilot.js` (#201) and `rollback-timeline.js` (#200). Of
+  `demo.js` itself, these are in `web/src/demo` (#186): the options its
+  address takes, the network dial, the HUD's text, the ROM it accepts and
+  the recorded menu script. What remains is the page's wiring: booting the
+  emulator, starting the engine, and connecting the fake peer and the
+  autopilot to it.
+- `netplay-streaming.js` (item 4): its decisions are typed functions in
+  `web/src/streaming` that run beside the engine and report
+  `streaming-disagree`. These cover the roster, the signals and the input
+  path (#183), and the video choices (#185). Two of them decide rather than
+  observe: which offers a page receiving the stream takes (`offer-gate.ts`,
+  #220), and which connection a signal belongs to, together with the host's
+  deadline to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
+  `specs/streaming_connection.qnt`).
+- Next: the engine calls the observed functions and its own copies are
+  deleted, one rule at a time, each with a real-ROM streaming run that
+  reaches it (connect, input, a dropped guest, a reconnect). Then move the demo page's wiring.
 
 Not every page has `window.KNCore`, and some of these scripts run before it:
 

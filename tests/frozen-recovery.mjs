@@ -37,7 +37,9 @@ const RECOVERY_WITHIN_FRAMES = 60;
 // that length on the dropped page shows the page itself was frozen.
 const FROZEN_AT_LEAST_MS = 4000;
 
-const framesOf = (log, pattern) => [...log.matchAll(pattern)].map((match) => Number(match[1]));
+// Each match with its frame and its place in the log.
+const entriesOf = (log, pattern) =>
+  [...log.matchAll(pattern)].map((match) => ({ at: match.index, frame: Number(match[1]) }));
 
 /**
  * Every phantom in the two sync logs, with the frames it covers and whether
@@ -53,19 +55,28 @@ export const frozenRecoveries = (syncLogs) => {
     }
   }
   // Only the guest is resynced; the frame it lands on is the second number.
-  const resyncedAt = framesOf(syncLogs.guest, /sync #\d+ applied \(frame \d+ -> (\d+)/g);
+  const resyncs = entriesOf(syncLogs.guest, /sync #\d+ applied \(frame \d+ -> (\d+)/g);
   const recoveries = [];
   for (const [page, log] of Object.entries(syncLogs)) {
-    const seenAgainAt = framesOf(log, /\tf=(\d+)\tPEER-RECOVERED /g);
-    for (const frame of framesOf(log, /\tf=(\d+)\tPEER-PHANTOM /g)) {
-      const seenAgain = seenAgainAt.filter((at) => at >= frame).sort((a, b) => a - b)[0] ?? frame;
+    const seenAgainAll = entriesOf(log, /\tf=(\d+)\tPEER-RECOVERED /g);
+    for (const phantom of entriesOf(log, /\tf=(\d+)\tPEER-PHANTOM /g)) {
+      const frame = phantom.frame;
+      const seen = seenAgainAll.find((s) => s.at > phantom.at) ?? phantom;
       // The resync that ends this recovery comes once the page is seen
-      // again; one before that ended an earlier recovery.
-      const later = resyncedAt.filter((at) => at >= seenAgain).sort((a, b) => a - b);
-      let to = later[0] !== undefined && later[0] <= seenAgain + RECOVERY_WITHIN_FRAMES ? later[0] : null;
+      // again; one before that ended an earlier recovery. When the guest
+      // declared the phantom, its own log says which came first: a resync
+      // may take it back below the frame it had reached, so the frame
+      // cannot. When the host did, the resync lands on the host's frames,
+      // and one from before it saw the guest again lands on an earlier one.
+      const later =
+        page === 'guest'
+          ? resyncs.filter((r) => r.at > seen.at).sort((a, b) => a.at - b.at)
+          : resyncs.filter((r) => r.frame >= seen.frame).sort((a, b) => a.frame - b.frame);
+      const first = later[0];
+      let to = first !== undefined && first.frame <= seen.frame + RECOVERY_WITHIN_FRAMES ? first.frame : null;
       // Recovery can take a second resync right after the first; the split
       // ends at the last of them.
-      for (const at of later) if (to !== null && at > to && at <= to + BEFORE_PHANTOM_FRAMES) to = at;
+      for (const r of later) if (to !== null && r.frame > to && r.frame <= to + BEFORE_PHANTOM_FRAMES) to = r.frame;
       // The longest stop on the other page shortly before, which is what the
       // phantom was declared for.
       const stopped = freezes
@@ -121,3 +132,28 @@ export const frozenRecoveryNote = (recoveries, framesExcluded, mismatchesExclude
     'A page stopping that long is the cloud container, not the netcode.'
   );
 };
+
+// How far, in frames, a starved span of the link may lie from a phantom and
+// still explain it: the 5 s the other page waited, at the container's 7 to
+// 11 frames a second, and a margin for the two pages' clocks.
+const LINK_STARVED_MARGIN_FRAMES = 60;
+
+/**
+ * A recovery is not proven while the dropped page's own messages were stuck
+ * on a congested link (LINK_KBPS in rb-two-player.mjs): the phantom may be
+ * the link's doing, which is the failure that mode looks for, even when that
+ * page also stopped for a while. Each such recovery comes back unproven with
+ * `linkStarved: true`; the rest are unchanged.
+ *
+ * @param {ReturnType<typeof frozenRecoveries>} recoveries
+ * @param {{host: {from: number, to: number}[], guest: {from: number, to: number}[]}} starvedFrames
+ *   each page's spans, in its own frames, when its input messages waited on the link
+ */
+export const withoutLinkStarved = (recoveries, starvedFrames) =>
+  recoveries.map((recovery) => {
+    const dropped = recovery.declaredBy === 'host' ? 'guest' : 'host';
+    const from = recovery.from - LINK_STARVED_MARGIN_FRAMES;
+    const to = (recovery.to ?? recovery.from) + LINK_STARVED_MARGIN_FRAMES;
+    const starved = (starvedFrames[dropped] ?? []).some((span) => span.from <= to && span.to >= from);
+    return starved && recovery.proven ? { ...recovery, proven: false, linkStarved: true } : recovery;
+  });

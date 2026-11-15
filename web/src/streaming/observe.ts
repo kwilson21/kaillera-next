@@ -14,6 +14,7 @@
  * 60 times a second for each guest, so its decisions are sampled.
  */
 import type { WireInput } from '../input-wire.ts';
+import { readAttemptId } from '../peer-observe.ts';
 import { createComparer } from '../play/observe.ts';
 import { checkRelayed, type Relayed } from '../relay.ts';
 import type { WirePayload } from '../wire.ts';
@@ -25,6 +26,7 @@ import {
   guardedSignalAction,
   lateJoinReadyAction,
   signalKind,
+  type AttemptName,
   type LateJoinReadyInput,
 } from './signal.ts';
 import { blitCrop, capturePlan, coreFpsReset, sdpSummary, tuneEncoding, tuneOfferSdp } from './video.ts';
@@ -47,8 +49,11 @@ export const SAMPLE_MAX = 64;
 /** A connection as the engine holds it: only what the rules read. */
 export interface PeerView {
   slot?: Slot;
+  /** The connection attempt it belongs to (attempt.ts); null when it names none. */
+  attempt?: AttemptName | null;
   pc?: {
     connectionState?: string;
+    signalingState?: string;
     localDescription?: { type?: string } | null;
     getSenders?: () => readonly { track?: unknown }[];
   } | null;
@@ -80,7 +85,13 @@ type RosterMessage = {
   players?: Readonly<Record<string, { socketId: string; slot?: Slot }>> | null;
   spectators?: Readonly<Record<string, { socketId: string }>> | null;
 };
-type SignalMessage = { sender?: string; offer?: unknown; answer?: unknown; candidate?: unknown };
+type SignalMessage = {
+  sender?: string;
+  offer?: unknown;
+  answer?: unknown;
+  candidate?: unknown;
+  attemptId?: WirePayload;
+};
 
 /** What the input handler leaves behind: the slot and the decoded input it applied. */
 type InputSeen = { applied?: readonly [Slot, WireInput] };
@@ -225,22 +236,26 @@ export const createStreamingObserver = (
         const kind = signalKind(data);
         const what = `signal:${kind}`;
         if (!wants(what)) return seen;
-        const had = view.peers()[sender] !== undefined;
+        const before = view.peers()[sender];
         const input = {
           sender,
           kind,
           mySlot: view.slot(),
           roster: { players: { ...view.known() }, spectators: [...view.spectators()] },
-          hasEntry: had,
+          hasEntry: before !== undefined,
           offerHeld: view.heldOffers().includes(sender),
+          held: before?.attempt ?? null,
+          named: readAttemptId(data.attemptId),
+          awaitingAnswer: before?.pc?.signalingState === 'have-local-offer',
         };
         defer(() =>
           check(
             what,
             () => {
               const peer = view.peers()[sender];
-              const create = !had && peer !== undefined;
-              return { create, slot: create ? (peer.slot ?? null) : null, act: seen.act };
+              const create = before === undefined && peer !== undefined;
+              const replace = before !== undefined && peer !== undefined && peer !== before;
+              return { create, replace, slot: create || replace ? (peer.slot ?? null) : null, act: seen.act };
             },
             () => ({ ...guardedSignalAction(input) }),
           ),

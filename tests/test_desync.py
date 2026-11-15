@@ -3,26 +3,27 @@
 Run: pytest tests/test_desync.py -v -s
 """
 import time
-import re
+
+from netplay_steps import frame, silence_inputs, sync_log_lines, syncs_applied, wait_past_frame
+from playwright.sync_api import expect
 
 
-def test_lockstep_no_desync(browser, server_url):
+def test_lockstep_no_desync(browser, server_url, rom_path, start_game, room):
     """Two players in lockstep should have identical game state at the same frame."""
     host = browser.new_page()
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=DSYNC1&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=DSYNC1&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
 
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        start_game(host, guest)
 
         # Inject a hook on BOTH sides: capture state at exactly frame 300.
         # Using a 1ms polling interval ensures we don't miss the exact frame.
@@ -31,7 +32,7 @@ def test_lockstep_no_desync(browser, server_url):
             window._captureAtFrame = {target_frame};
             window._capturedState = null;
             var check = setInterval(() => {{
-                if (window._frameNum === window._captureAtFrame && !window._capturedState) {{
+                if (window.KNState.frameNum === window._captureAtFrame && !window._capturedState) {{
                     var gm = window.EJS_emulator.gameManager;
                     var state = gm.getState();
                     var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
@@ -43,7 +44,7 @@ def test_lockstep_no_desync(browser, server_url):
                     }}
                     window._capturedState = {{
                         hash: hash | 0,
-                        frameNum: window._frameNum,
+                        frameNum: window.KNState.frameNum,
                         stateSize: bytes.length,
                         first2k: Array.from(bytes.slice(0, 2048))
                     }};
@@ -84,188 +85,161 @@ def test_lockstep_no_desync(browser, server_url):
         guest.close()
 
 
-def test_lockstep_frame_pacing(browser, server_url):
+def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
     """Verify both emulators advance at the same rate (network-paced)."""
     host = browser.new_page()
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=PACE1&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=PACE1&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
 
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        start_game(host, guest)
 
-        # Sample frame numbers every second for 5 seconds
+        # A page stalls once it is delay + KN_MAX_VISIBLE_ROLLBACK_DEPTH (7)
+        # + 1 frames past its peer's last input (_rbInputStallThreshold in
+        # netplay-rollback.js), so neither can lead the other by more. The
+        # pages are read one after the other, each read taking up to a few
+        # hundred ms here, so the host is read between two reads of the guest
+        # and must be within that lead of the guest's frame at some moment
+        # between them: g1 - lead <= host <= g2 + lead.
+        def lead():
+            return 8 + max(
+                page.evaluate("window.NetplayRollback.getHudCounters().delay") for page in (host, guest)
+            )
+
         samples = []
         for _ in range(5):
             time.sleep(1)
-            h_frame = host.evaluate("window._frameNum")
-            g_frame = guest.evaluate("window._frameNum")
-            diff = abs(h_frame - g_frame)
-            samples.append((h_frame, g_frame, diff))
-            print(f"  Host: {h_frame}, Guest: {g_frame}, Diff: {diff}")
-
-        max_diff = max(s[2] for s in samples)
-        assert max_diff <= 10, f"Frame pacing too divergent: max diff = {max_diff}"
+            g1 = frame(guest)
+            h = frame(host)
+            g2 = frame(guest)
+            most = lead()
+            samples.append((h, g2))
+            print(f"  Guest: {g1}..{g2}, Host: {h}, lead allowed: {most}")
+            assert g1 - most <= h <= g2 + most, (
+                f"host at {h} while the guest went {g1}..{g2}: more than {most} frames apart"
+            )
 
         h_advance = samples[-1][0] - samples[0][0]
         g_advance = samples[-1][1] - samples[0][1]
         assert h_advance > 100, f"Host stalled: only advanced {h_advance} frames in 5s"
         assert g_advance > 100, f"Guest stalled: only advanced {g_advance} frames in 5s"
 
-        print(f"\nFrame pacing OK: max diff = {max_diff}, host rate = {h_advance/5:.0f}fps, guest rate = {g_advance/5:.0f}fps")
+        print(f"\nFrame pacing OK: host rate = {h_advance/5:.0f}fps, guest rate = {g_advance/5:.0f}fps")
 
     finally:
         host.close()
         guest.close()
 
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
-
-
-def _load_rom(page):
+def _load_rom(page, rom_path):
     """Load ROM into the play page via the hidden file input."""
-    page.set_input_files("#rom-drop input[type=file]", ROM_PATH)
+    page.set_input_files("#rom-drop input[type=file]", rom_path)
 
 
-def test_resync_after_forced_desync(browser, server_url):
-    """Force a desync on the guest, verify rollback/resync recovers."""
+def test_dropped_guest_is_resynced_when_it_returns(browser, server_url, rom_path, start_game, room):
+    """A guest dropped as a phantom gets the host's state when it comes back.
+
+    This test once corrupted the guest's state and waited for the periodic
+    hash check to notice and resync it. Periodic hash broadcasts are gone
+    (netplay-rollback.js, "Desync Detection & Resync"): with SoftFloat and the
+    AI DMA fix steady play is deterministic, and the host-authoritative resync
+    is kept for the cases that need it, among them a peer that went quiet and
+    came back. While the guest is a phantom the host runs on predicted inputs
+    for it, so the two have split; when the guest's inputs arrive again the
+    host logs PEER-RECOVERED and pushes its full state, and the guest logs
+    `sync #N applied`.
+    """
     host = browser.new_page()
     guest = browser.new_page()
-    guest_logs = []
-    host_logs = []
-
-    def _safe_log(logs, msg):
-        try:
-            logs.append(msg.text)
-        except Exception:
-            pass
-
-    guest.on("console", lambda msg: _safe_log(guest_logs, msg))
-    host.on("console", lambda msg: _safe_log(host_logs, msg))
 
     try:
-        # Host creates room with rollback enabled
-        host.goto(f"{server_url}/play.html?room=RESYNC1&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=RESYNC1&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        # Load ROM on both pages
-        _load_rom(host)
-        _load_rom(guest)
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
         time.sleep(1)  # let ROM load complete
 
-        # Enable rollback checkbox on host before starting
-        host.check("#opt-rollback")
+        # Resync on (the host option, on by default)
+        host.check("#opt-resync")
 
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
+        start_game(host, guest)
+        wait_past_frame(host, 90)
+        wait_past_frame(guest, 90)
+        assert host.evaluate("window.NetplayRollback.isSyncEnabled()"), "resync is off"
+        applied_before = syncs_applied(guest)
 
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        # Silent for longer than the 5 s after which the host drops the guest
+        silence_inputs(guest, 8000)
+        host.wait_for_function(
+            "window.NetplayRollback.exportSyncLog().includes('PEER-PHANTOM slot=1')",
+            timeout=15000,
+        )
+        print(f"\n  {sync_log_lines(host, 'PEER-PHANTOM slot=1')[0]}")
 
-        # Wait for a few sync checks to pass (confirms baseline works)
-        time.sleep(2)
+        # The silence ends by itself; the host sees the guest again...
+        host.wait_for_function(
+            "window.NetplayRollback.exportSyncLog().includes('PEER-RECOVERED slot=1')",
+            timeout=30000,
+        )
+        print(f"  {sync_log_lines(host, 'PEER-RECOVERED slot=1')[0]}")
 
-        # Force the sync check interval to be very short so we don't wait long
-        guest.evaluate("window.NetplayRollback.setSyncInterval(30)")
-        host.evaluate("window.NetplayRollback.setSyncInterval(30)")
+        # ...and the guest applies the host's state
+        deadline = time.monotonic() + 60
+        while syncs_applied(guest) <= applied_before and time.monotonic() < deadline:
+            time.sleep(0.5)
+        applied = [line for line in sync_log_lines(guest, " applied (frame ") if "sync #" in line]
+        assert syncs_applied(guest) > applied_before, (
+            "guest never applied the host's state after it came back:\n"
+            + "\n".join(sync_log_lines(guest, "sync")[-20:])
+        )
+        print(f"  {applied[-1]}")
 
-        # Set up a JS-side resync detection flag before corrupting
-        guest.evaluate("""() => {
-            window._resyncDetected = false;
-            window._resyncFrame = 0;
-        }""")
-
-        # Force a desync by corrupting WASM memory on the guest,
-        # and install a listener that sets a flag when resync completes
-        guest.evaluate("""() => {
-            var gm = window.EJS_emulator.gameManager;
-            // Corrupt the guest state to force a hash mismatch
-            var state = gm.getState();
-            var bytes = state instanceof Uint8Array ? state : new Uint8Array(state);
-            for (var i = 0; i < 1024; i++) {
-                bytes[i] = bytes[i] ^ 0xFF;
-            }
-            gm.loadState(bytes);
-            console.log('[test] forced desync: corrupted 1KB of guest state');
-
-            // Monkey-patch loadState to detect when resync applies a new state
-            var origLoadState = gm.loadState.bind(gm);
-            gm.loadState = function(data) {
-                origLoadState(data);
-                window._resyncDetected = true;
-                window._resyncFrame = window._frameNum;
-                console.log('[test] resync state loaded at frame ' + window._frameNum);
-                // Restore original after first resync
-                gm.loadState = origLoadState;
-            };
-        }""")
-
-        # Wait for resync — Playwright-native wait processes events properly
-        try:
-            guest.wait_for_function(
-                "window._resyncDetected === true",
-                timeout=30000
-            )
-            resync_frame = guest.evaluate("window._resyncFrame")
-            print(f"\n  Resync detected at frame {resync_frame}")
-        except Exception as e:
-            h_sync = host.evaluate("window.NetplayRollback.isSyncEnabled()")
-            g_frame = guest.evaluate("window._frameNum")
-            print(f"\n  Host sync={h_sync}, Guest frame={g_frame}")
-            raise AssertionError(f"Resync did not happen within 30s: {e}")
-
-        # Verify game is still running after resync
-        time.sleep(1)
-        frame_after = guest.evaluate("window._frameNum")
-        assert frame_after > resync_frame, "Game stopped advancing after resync"
-        print(f"  Game still running after resync (frame {frame_after})")
-
-        print(f"\nSUCCESS: Resync recovered from forced desync!")
+        # Both play on after the resync
+        frame_after = frame(guest)
+        wait_past_frame(guest, frame_after + 10, timeout_s=30)
+        wait_past_frame(host, frame(host) + 10, timeout_s=30)
 
     finally:
         host.close()
         guest.close()
 
 
-def test_resync_sustains_over_time(browser, server_url):
+def test_resync_sustains_over_time(browser, server_url, rom_path, start_game, room):
     """With rollback on, resyncs should keep correcting drift over 10+ seconds."""
     host = browser.new_page()
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=SUST01&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
-        guest.goto(f"{server_url}/play.html?room=SUST01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        _load_rom(host)
-        _load_rom(guest)
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
         time.sleep(1)
 
-        host.check("#opt-rollback")
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
-
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        host.check("#opt-resync")
+        start_game(host, guest)
 
         # Run for 10 seconds, sampling every 2s
         samples = []
         for i in range(5):
             time.sleep(2)
-            h_frame = host.evaluate("window._frameNum")
-            g_frame = guest.evaluate("window._frameNum")
+            h_frame = host.evaluate("window.KNState.frameNum")
+            g_frame = guest.evaluate("window.KNState.frameNum")
             diff = abs(h_frame - g_frame)
             samples.append((h_frame, g_frame, diff))
             print(f"  Sample {i+1}: host={h_frame} guest={g_frame} diff={diff}")
@@ -290,7 +264,7 @@ def test_resync_sustains_over_time(browser, server_url):
         guest.close()
 
 
-def test_end_game_with_rollback(browser, server_url):
+def test_end_game_with_rollback(browser, server_url, rom_path, start_game, room):
     """End game should work cleanly when rollback/sync is enabled."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -300,27 +274,25 @@ def test_end_game_with_rollback(browser, server_url):
     guest.on("pageerror", lambda err: guest_errors.append(str(err)))
 
     try:
-        host.goto(f"{server_url}/play.html?room=END01&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=END01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
-        _load_rom(host)
-        _load_rom(guest)
+        _load_rom(host, rom_path)
+        _load_rom(guest, rom_path)
         time.sleep(1)
 
-        host.check("#opt-rollback")
-        host.wait_for_selector("#start-btn:not([disabled])", timeout=15000)
-        host.click("#start-btn")
-
-        host.wait_for_function("window._lockstepActive === true", timeout=60000)
-        guest.wait_for_function("window._lockstepActive === true", timeout=60000)
+        host.check("#opt-resync")
+        start_game(host, guest)
 
         # Let it run a bit
         time.sleep(2)
 
-        # End game
+        # End game: it is in the toolbar's More menu
+        host.click("#toolbar-more")
+        expect(host.locator("#toolbar-end")).to_be_visible(timeout=2000)
         host.click("#toolbar-end")
 
         # Both should return to overlay
