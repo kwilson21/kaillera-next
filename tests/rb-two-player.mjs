@@ -565,6 +565,15 @@ const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const MALFORMED_PEER = process.env.MALFORMED_PEER === '1';
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
+// CATCH_UP_HOLE_MS: with DROP_PEER_MS, how long the host drops its input
+// packets on the reconnected channel from its first one.
+const CATCH_UP_HOLE_MS = Number(process.env.CATCH_UP_HOLE_MS || 0);
+if (CATCH_UP_HOLE_MS > 0 && !(DROP_PEER_MS > 0)) {
+  console.log('CATCH_UP_HOLE_MS needs DROP_PEER_MS');
+  process.exit(1);
+}
+// A host this many frames ahead of the guest at the end has run away from it.
+const RUNAWAY_FRAMES = 300;
 const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
 const DELAY_SYNC_ANSWER_AT = process.env.DELAY_SYNC_ANSWER_AT || 'battle';
 if (!['battle', 'boot'].includes(DELAY_SYNC_ANSWER_AT)) {
@@ -1134,6 +1143,17 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // 0, every input packet (binary, on `lockstep` or `rollback-input`) is held
   // that long. A channel never reorders, so what follows waits behind it.
   window.__knHoldInputsMs = 0;
+  // CATCH_UP_HOLE_MS (the host page): once window.__knDropInputsAfterOpenMs
+  // is above 0, a channel whose first input packet goes out after that drops
+  // every input packet (binary, on `lockstep` or `rollback-input`) for that
+  // long from its first one: the reconnected channel loses the host's
+  // inputs from just before the state it sends, so the guest's catch-up
+  // waits on a hole. Channels opened before arming are untouched. The
+  // dropped frames are kept in __knInputsDroppedAfterOpen.
+  window.__knDropInputsAfterOpenMs = 0;
+  window.__knDropArmedAt = 0;
+  window.__knInputsDroppedAfterOpen = [];
+  const firstInputSendAt = new WeakMap();
   // UNANSWERED_SOCKET_RESYNC: each entry of window.__knSyncAnswerDrops is
   // taken by the next numbered answer on `sync-state` (its `sync-answer-id:`
   // message): 'chunks' passes the answer's id and header and drops its
@@ -1297,6 +1317,20 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
     if (window.__knLoseRbInputs && this.label === 'rollback-input' && data instanceof ArrayBuffer) {
       if (data.byteLength >= 4) window.__knRbInputsLost.push(new Int32Array(data, 0, 1)[0]);
       return;
+    }
+    if ((this.label === 'lockstep' || this.label === 'rollback-input') && data instanceof ArrayBuffer) {
+      const now = performance.now();
+      if (!firstInputSendAt.has(this)) firstInputSendAt.set(this, now);
+      const first = firstInputSendAt.get(this);
+      if (
+        window.__knDropInputsAfterOpenMs > 0 &&
+        window.__knDropArmedAt > 0 &&
+        first >= window.__knDropArmedAt &&
+        now - first < window.__knDropInputsAfterOpenMs
+      ) {
+        if (data.byteLength >= 4) window.__knInputsDroppedAfterOpen.push(new Int32Array(data, 0, 1)[0]);
+        return;
+      }
     }
     const ch = scheduleOf(this);
     let hold = 0;
@@ -2014,7 +2048,7 @@ let desyncGuestAt = -1; // DESYNC_GUEST: the guest's frame when its stock count 
 let throttleFlipped = null; // null until the 15s mark; then whether the flip Promise.all resolved or rejected
 // DROP_PEER_MS / DELAY_SYNC_ANSWER_MS: where each page's sync log stood when
 // the fault began ({seq, frame} of its last line), and what the test saw.
-const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null };
+const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null, holeDropped: [] };
 // HEAL_BOTH_SIDES: where the logs stood, what was silenced, and the frames after.
 const healBoth = {
   hostAt: null,
@@ -2287,6 +2321,12 @@ if (inBattle) {
     [dropPeer.hostAt, dropPeer.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
     const frameNow = () => window.NetplayRollback.getHudCounters().currentFrame;
     dropPeer.hostFrame = await host.evaluate(frameNow);
+    if (CATCH_UP_HOLE_MS > 0) {
+      await host.evaluate((ms) => {
+        window.__knDropInputsAfterOpenMs = ms;
+        window.__knDropArmedAt = performance.now();
+      }, CATCH_UP_HOLE_MS);
+    }
     peerSignalBlock.until = Date.now() + DROP_PEER_MS;
     dropPeer.closed = await guest.evaluate(() => {
       const frame = window.NetplayRollback.getHudCounters().currentFrame;
@@ -2307,6 +2347,8 @@ if (inBattle) {
     );
     console.log(`DROP_PEER_MS: guest resynced after the reconnect: ${reconnected} (${Date.now() - started} ms)`);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+    if (CATCH_UP_HOLE_MS > 0)
+      dropPeer.holeDropped = await host.evaluate(() => window.__knInputsDroppedAfterOpen.slice());
   } else if (delayBootSyncAnswer) {
     // The boot sync's answer was held from the start; by the battle the
     // guest has normally timed out, asked again and been answered.
@@ -4033,6 +4075,36 @@ if (dropPeerReport) {
     JSON.stringify(dropPeerReport),
   );
 }
+// CATCH_UP_HOLE_MS: the host's inputs were dropped on the reconnected
+// channel, the guest's catch-up after the reconnect did not stop on a
+// missing input, and the host did not run away from the guest
+// (specs/catch_up_wait.qnt).
+const catchUpHoleReport = (() => {
+  if (!(CATCH_UP_HOLE_MS > 0) || !dropPeer.guestAt) return null;
+  const dropped = dropPeer.holeDropped;
+  const guestLines = linesAfter(G.sync, dropPeer.guestAt.seq);
+  const catchUps = guestLines.filter((l) => /SYNC-CATCH-UP from=/.test(l));
+  const stoppedOnHole = catchUps.filter((l) => /stopped: slot \d+ input \d+ not here/.test(l));
+  return { dropped: dropped.length, droppedFrames: dropped.slice(0, 8), catchUps, stoppedOnHole };
+})();
+const finalGap = Math.abs(H.frame - G.frame);
+const catchUpHoleFailed =
+  CATCH_UP_HOLE_MS > 0 &&
+  !(
+    catchUpHoleReport &&
+    catchUpHoleReport.dropped > 0 &&
+    catchUpHoleReport.catchUps.length > 0 &&
+    catchUpHoleReport.stoppedOnHole.length === 0 &&
+    finalGap < RUNAWAY_FRAMES
+  );
+if (CATCH_UP_HOLE_MS > 0) {
+  console.log(
+    catchUpHoleFailed
+      ? 'CATCH_UP_HOLE_MS: no input dropped, the catch-up stopped on a hole, or the host ran away:'
+      : 'CATCH_UP_HOLE_MS: the catch-up filled its hole and the pages stayed together:',
+    JSON.stringify({ ...catchUpHoleReport, finalGap }),
+  );
+}
 // DELAY_SYNC_ANSWER_MS: the late answer must have been late, and handled.
 const delaySyncAnswerFailed =
   DELAY_SYNC_ANSWER_MS > 0 &&
@@ -4217,6 +4289,7 @@ const failed =
   resyncOneBackFailed ||
   linkFailed ||
   dropPeerFailed ||
+  catchUpHoleFailed ||
   healBothFailed ||
   delaySyncAnswerFailed ||
   catchUpFailed ||
