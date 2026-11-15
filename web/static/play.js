@@ -148,13 +148,11 @@
     null;
   const isGameRunning = () => _session?.gameOn() ?? false;
   KNState.gameOn = isGameRunning;
-  // The observer holds its reports until the server has sent this page load
-  // an upload token (client events need one).
-  const _protocol =
-    window.KNCore?.protocol?.createObserver?.(({ type, message, issue }) => {
-      KNEvent(type, message, { issue });
-      return true;
-    }) ?? null;
+  // What the server and peers send this page is decoded before a handler sees
+  // it (web/src/socket-boundary.ts): a server event, a join-room ack, a relay
+  // of what a peer sent, a ROM transfer channel's text. A message off its
+  // schema is dropped and logged; no handler runs on it.
+  const _boundary = window.KNCore.protocol.createBoundary((line) => console.warn(line));
   // Decisions moved to web/src/play that play.js still makes itself are
   // compared here (web/src/play/observe.ts); a difference is a play-disagree
   // client event.
@@ -679,10 +677,6 @@
 
   const connect = () => {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
-    // Stage 3, observing: each message the server authors is decoded against
-    // the schema generated from the server's models, and one that does not
-    // match is reported. The handlers below still get the raw payload.
-    _protocol?.observe(socket);
     window._isSpectator = isSpectator;
     startKeepalive();
 
@@ -738,31 +732,37 @@
       // already started the notices.
       if (!isGameRunning()) _connectionNotices.down('lobby');
     });
-    socket.on('users-updated', onUsersUpdated);
-    socket.on('upload-token', (data) => {
-      _uploadToken = data?.token || '';
-      KNState.uploadToken = _uploadToken;
-      try {
-        if (_uploadTokenKey) _safeSet('localStorage', _uploadTokenKey, _uploadToken);
-      } catch (_) {}
-      fetch(`/ice-servers?token=${encodeURIComponent(_uploadToken)}&room=${encodeURIComponent(roomCode || '')}`)
-        .then((r) => r.json())
-        .then((s) => {
-          window._iceServers = s;
-        })
-        .catch(() => {});
-    });
-    socket.on('reconnect-token', (data) => {
-      _reconnectToken = data?.token || '';
-      try {
-        _safeSet('sessionStorage', 'kn-reconnect-token', _reconnectToken);
-      } catch (_) {}
-    });
-    socket.on('game-started', onGameStarted);
-    socket.on('game-ended', onGameEnded);
+    socket.on('users-updated', _boundary.server('users-updated', onUsersUpdated));
+    socket.on(
+      'upload-token',
+      _boundary.server('upload-token', (data) => {
+        _uploadToken = data?.token || '';
+        KNState.uploadToken = _uploadToken;
+        try {
+          if (_uploadTokenKey) _safeSet('localStorage', _uploadTokenKey, _uploadToken);
+        } catch (_) {}
+        fetch(`/ice-servers?token=${encodeURIComponent(_uploadToken)}&room=${encodeURIComponent(roomCode || '')}`)
+          .then((r) => r.json())
+          .then((s) => {
+            window._iceServers = s;
+          })
+          .catch(() => {});
+      }),
+    );
+    socket.on(
+      'reconnect-token',
+      _boundary.server('reconnect-token', (data) => {
+        _reconnectToken = data?.token || '';
+        try {
+          _safeSet('sessionStorage', 'kn-reconnect-token', _reconnectToken);
+        } catch (_) {}
+      }),
+    );
+    socket.on('game-started', _boundary.server('game-started', onGameStarted));
+    socket.on('game-ended', _boundary.server('game-ended', onGameEnded));
     socket.on('room-closed', onRoomClosed);
-    socket.on('rom-sharing-updated', onRomSharingUpdated);
-    socket.on('data-message', onDataMessage);
+    socket.on('rom-sharing-updated', _boundary.server('rom-sharing-updated', onRomSharingUpdated));
+    socket.on('data-message', _boundary.relay('data-message', onDataMessage));
 
     // Lockstep peer-phantom notifications — P1-6: replaced with a persistent
     // corner status indicator instead of transient center-screen toasts.
@@ -965,9 +965,10 @@
         if (isReconnect) resumeRomTransferAfterReconnect();
         // join-room's reconnect path says what the room is doing now. (The
         // host's open-room does not: only the host starts and ends games, so
-        // its page cannot fall behind while it is still the owner.)
-        if (rejoinEvent === 'join-room') _protocol?.checkAck('join-room', outcome.room);
-        if (outcome.room?.status) _reconcileAfterRejoin(outcome.room);
+        // its page cannot fall behind while it is still the owner.) An ack off
+        // its schema is dropped: the page then hears the room from users-updated.
+        const rejoinedRoom = rejoinEvent === 'join-room' ? _boundary.ack('join-room', outcome.room) : outcome.room;
+        if (rejoinedRoom?.status) _reconcileAfterRejoin(rejoinedRoom);
       });
       return;
     }
@@ -1055,7 +1056,7 @@
           }
         }
 
-        socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), isSpectator, null), (err, joinData) => {
+        socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), isSpectator, null), (err, joinAck) => {
           if (err) {
             // What each refusal says is connect.ts (the spectator-cap copy
             // is §7.2 M3 #3, whichever cap tripped).
@@ -1064,12 +1065,12 @@
             if (refusal.kind === 'watch-instead') {
               isSpectator = true;
               _autoSpectated = true;
-              socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), true, null), (err2, joinData2) => {
+              socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), true, null), (err2, joinAck2) => {
                 if (err2) {
                   showError(`Failed to join: ${err2}`);
                   return;
                 }
-                _protocol?.checkAck('join-room', joinData2);
+                const joinData2 = _boundary.ack('join-room', joinAck2);
                 mySlot = null;
                 if (joinData2) lastUsersData = joinData2;
                 sendDeviceType();
@@ -1083,7 +1084,9 @@
             return;
           }
 
-          _protocol?.checkAck('join-room', joinData);
+          // The ack's data, decoded; one off its schema is dropped, and the page
+          // goes on from the room it looked up and the users-updated that follows.
+          const joinData = _boundary.ack('join-room', joinAck);
           _takeRoomGameId(joinData?.gameId ?? joinData?.game_id);
           applyHostRomFromData(joinData || roomData);
 
@@ -1946,7 +1949,8 @@
 
   const registerRomSignalHandler = () => {
     if (_romSignalHandler) return;
-    _romSignalHandler = async (data) => {
+    // A relayed signal that is not one a peer may send is dropped.
+    _romSignalHandler = _boundary.relay('rom-signal', async (data) => {
       const remoteSid = data.sender;
       if (!remoteSid) return;
 
@@ -1993,7 +1997,7 @@
           } catch (_) {}
         }
       }
-    };
+    });
     socket.on('rom-signal', _romSignalHandler);
   };
 
@@ -2082,7 +2086,8 @@
       answer.channelOpened();
     };
     dc.onmessage = (e) => {
-      if (typeof e.data === 'string') _protocol?.peerText('rom-transfer', e.data);
+      // A string that is not a message this channel carries is dropped.
+      if (typeof e.data === 'string' && !_boundary.peerText('rom-transfer', e.data)) return;
       answer.received(e.data, dc.readyState === 'open');
     };
   };
@@ -2288,7 +2293,8 @@
 
     channel.onmessage = (e) => {
       if (typeof e.data === 'string') {
-        _protocol?.peerText('rom-transfer', e.data);
+        // A string that is not a message this channel carries is dropped.
+        if (!_boundary.peerText('rom-transfer', e.data)) return;
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'rom-header') {

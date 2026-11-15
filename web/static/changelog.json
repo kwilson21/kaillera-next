@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.30",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync one frame back saves the host's state for that frame (#254)"
+      }
+    ]
+  },
+  {
     "version": "0.68.29",
     "date": "2026-11-15",
     "changes": [
