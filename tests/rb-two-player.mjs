@@ -226,12 +226,14 @@
  *     (`peer hard-disconnected`) rather than playing on split.
  *   ASK_UNANSWERED_PHANTOM=1   With HEAL_BOTH_SIDES=1: once the heal's checks
  *     are done (its 15 s after the reconnect's resync), the guest drops its
- *     input for one frame just ahead of it, for good. #272's split: on main
- *     the host still holds the guest as a phantom after the heal, so the
- *     hole is predicted, never stalled on, and never corrected. Fails unless
- *     the input was dropped and the frames after the guest's last applied
- *     state match (the host's reset on open makes the hole stall and be
- *     asked for, and the ask escalates).
+ *     input for one frame just ahead of it, for good: #272's shape. #272's
+ *     split (the host still holding the guest as a phantom after the heal,
+ *     so the hole was never stalled on) is gone on main: the heal resets the
+ *     peer (mesh-heal), and main recovers the hole by its 5 s stall
+ *     deadline. Fails unless the input was dropped, the host's ask
+ *     escalated and its push was acknowledged (INPUT-ASK-PUSH-SETTLED), no
+ *     stall timed out, and the frames after the guest's last applied state
+ *     match.
  *   ROLLBACK_AT_EDGE=1   A third of the way into the battle the host's
  *     input is held at nothing for a second and set to a button for frame F
  *     alone, so the guest predicts F wrong (C predicts from the newest input
@@ -4614,6 +4616,10 @@ const askPhantomFailed =
   !(
     askPhantomReport?.armed &&
     askPhantomReport.dropped > 0 &&
+    // The difference from main, whose stall deadline recovers the hole:
+    // the ask escalates, the push is acknowledged, no stall times out.
+    askPhantomReport.settled.length > 0 &&
+    askPhantomReport.stallTimeouts === 0 &&
     gpMis === 0 &&
     gsMis === 0 &&
     recoveredAt > askPhantomReport.frame
@@ -4621,7 +4627,7 @@ const askPhantomFailed =
 if (ASK_UNANSWERED_PHANTOM)
   console.log(
     askPhantomFailed
-      ? 'ASK_UNANSWERED_PHANTOM: not dropped, no state applied after the hole, or the frames after it differ:'
+      ? 'ASK_UNANSWERED_PHANTOM: not dropped, no acknowledged push, a stall timed out, or the frames after the last state differ:'
       : 'ASK_UNANSWERED_PHANTOM: the hole ended in a state both pages agree on:',
     JSON.stringify(askPhantomReport),
   );
