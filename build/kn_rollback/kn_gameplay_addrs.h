@@ -51,8 +51,9 @@ typedef struct {
 #define KN_ADDR_LIVE_PLAYER_STOCKS_BASE 0xA4D33   /* P1; +0x74 per player */
 
 /* The copy used for sudden death, laid out the same way. kn_gameplay_hash
- * reads it as well as the live one, so a sudden death is covered too; the
- * desync registry reads the live one only. */
+ * and the desync registry read it as well as the live one, so a sudden
+ * death is covered too (tests/hash-golden/fixtures/in-sudden-death.rdram.gz
+ * is a dump of one: the game's pointer names this copy there). */
 #define KN_ADDR_SUDDEN_DEATH_BATTLE_HEADER      0xA4EF8
 #define KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE 0xA4F23   /* P1; +0x74 per player */
 

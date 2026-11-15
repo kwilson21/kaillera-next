@@ -35,6 +35,14 @@ export interface AddressMap {
   /** Holds an N64 pointer to the fighter structs; `ftBufferSize` bytes are hashed from there. */
   readonly ftBufferPtr: number;
   readonly ftBufferSize: number;
+  /**
+   * The second copy of the battle state, laid out like the one at
+   * `vsBattleHeader`; 0 when the ROM has none. SSB64 runs a sudden death
+   * from it (scvsbattle.c points gSCManagerBattleState at it), and the
+   * registry hashes the stock counts and header of both copies, so a
+   * divergence is seen whichever one the game is running from.
+   */
+  readonly suddenDeathHeader: number;
 }
 
 /**
@@ -57,6 +65,7 @@ export const ADDRESS_MAP_ORDER = [
   'ftMotionCount',
   'ftBufferPtr',
   'ftBufferSize',
+  'suddenDeathHeader',
 ] as const satisfies readonly (keyof AddressMap)[];
 
 /** The scene numbers the detector gates fields on. */
@@ -83,6 +92,13 @@ export interface RomAddresses {
 export interface BattleStatus {
   readonly offset: number;
   readonly ongoing: number;
+  /**
+   * The game's own pointer to the battle state it runs from (SSB64:
+   * gSCManagerBattleState). During a normal match it names `vsBattleHeader`;
+   * in a sudden death, `suddenDeathHeader`. Not hashed; the verifier checks
+   * the first, and tests/hash-golden checks the second against a RAM dump.
+   */
+  readonly pointer: number;
 }
 
 /** What the page hands the detector: the map packed in registry order. */
@@ -122,9 +138,10 @@ const SSB64_US: RomAddresses = {
     ftMotionCount: 0x130d94,
     ftBufferPtr: 0x130d84,
     ftBufferSize: 4096,
+    suddenDeathHeader: 0xa4ef8,
   },
   scenes: { characterSelect: 16, stageSelect: 21, battle: 22 },
-  battleStatus: { offset: 0x11, ongoing: 1 },
+  battleStatus: { offset: 0x11, ongoing: 1, pointer: 0xa50e8 },
 };
 
 /**
@@ -175,6 +192,11 @@ export const addressMapProblem = (map: AddressMap): string | null => {
   }
   if (map.vsBattleHeaderSize === 0) return 'vsBattleHeaderSize is 0';
   if (map.ftBufferSize === 0) return 'ftBufferSize is 0';
+  // The second copy's stock counts sit at the live ones' distance from the
+  // header (kn_field_map_set refuses a map where they come before it).
+  if (map.suddenDeathHeader !== 0 && map.stocksBase < map.vsBattleHeader) {
+    return 'stocksBase is before vsBattleHeader, so the sudden-death copy has no stock counts to read';
+  }
   const lastPlayer = PLAYERS - 1;
   const reads: readonly (readonly [string, number])[] = [
     ["the last player's stock count", map.stocksBase + lastPlayer * map.playerStride + 1],
@@ -186,6 +208,15 @@ export const addressMapProblem = (map: AddressMap): string | null => {
     ["the last player's cssSelectedFlag", map.cssBase + lastPlayer * map.cssStride + map.cssSelectedFlag + 4],
     ['ftMotionCount', map.ftMotionCount + 4],
     ['ftBufferPtr', map.ftBufferPtr + 4],
+    ...(map.suddenDeathHeader === 0
+      ? []
+      : ([
+          ['the sudden-death battle header', map.suddenDeathHeader + map.vsBattleHeaderSize],
+          [
+            "the sudden-death copy's last stock count",
+            map.suddenDeathHeader + (map.stocksBase - map.vsBattleHeader) + lastPlayer * map.playerStride + 1,
+          ],
+        ] as const)),
   ];
   for (const [what, end] of reads) {
     if (end > RDRAM_SIZE) return `${what} would be read past the end of RDRAM`;
