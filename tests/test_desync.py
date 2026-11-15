@@ -115,8 +115,12 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
                 page.evaluate("window.NetplayRollback.getHudCounters().delay") for page in (host, guest)
             )
 
+        # Past the boot and the first scenes, which load at their own pace.
+        for page in (host, guest):
+            wait_past_frame(page, 300, timeout_s=120)
+
         samples = []
-        for _ in range(5):
+        for _ in range(11):
             time.sleep(1)
             g1 = frame(guest)
             h = frame(host)
@@ -132,15 +136,19 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
         # cloud container runs at 7-11 fps, a laptop's at 60, so a fixed count
         # of frames (it was 100 in 4 s) tested the machine. What the netplay
         # owes is that the pages go together (the lead check above) and that
-        # neither stalls: no second in which a page advanced far less than in
-        # a typical second of the same run. The page's own fps counter is no
-        # yardstick: it is this same advance, over a one-second window.
+        # neither stalls. A stall (I1) is a second with next to no advance,
+        # not a slow one: both pages slow together under load on the machine
+        # or in a heavy scene (a run here went 17, 58, 50, 15 frames a second
+        # on both pages, within a few frames of each other). The page's own
+        # fps counter is no yardstick: it is this same advance, over a
+        # one-second window.
         rates = []
         for name, idx in (("Host", 0), ("Guest", 1)):
             per_second = [b[idx] - a[idx] for a, b in pairwise(samples)]
             typical = sorted(per_second)[len(per_second) // 2]
             assert typical > 0, f"{name} did not advance: {per_second} frames per second"
-            assert min(per_second) >= typical / 4, f"{name} stalled for a second: {per_second} frames per second"
+            stalled = max(2, typical / 10)
+            assert min(per_second) > stalled, f"{name} stalled for a second: {per_second} frames per second"
             rates.append(per_second)
         print(f"\nFrame pacing OK: host {rates[0]}, guest {rates[1]} frames per second")
 
