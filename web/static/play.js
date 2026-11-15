@@ -3931,38 +3931,18 @@
     if (!btn || !isHost) return;
     const sel = document.getElementById('mode-select');
     const selectedMode = sel ? sel.value : mode;
-    const playerCount = Object.keys(players).length;
     const entries = Object.values(players);
-
-    if (playerCount < 1) {
-      btn.disabled = true;
-      btn.textContent = 'Start Game';
-    } else if (selectedMode === 'streaming' && playerCount < 2) {
-      btn.disabled = true;
-      btn.textContent = 'Start Game (need 2+)';
-    } else if (selectedMode === 'streaming') {
-      // Streaming: host runs the only emulator; guests don't need a ROM.
-      btn.disabled = false;
-      btn.textContent = 'Start Game';
-    } else {
-      // Rollback: check ROMs loaded
-      const allReady = entries.every((p) => p.romReady);
-      if (!allReady && !_romSharingEnabled) {
-        btn.disabled = true;
-        const readyCount = entries.filter((p) => p.romReady).length;
-        btn.textContent = `Waiting for ROMs (${readyCount}/${playerCount})`;
-      } else {
-        btn.disabled = false;
-        btn.textContent = 'Start Game';
-      }
-    }
-    // Whether the host may start is still decided above; room-view.ts
-    // computes it beside this and a difference is reported as play-disagree.
-    _playObserver.compare(
-      'start-button',
-      { disabled: btn.disabled, label: btn.textContent },
-      _roomView.startButton(playerCount, entries.filter((p) => p.romReady).length, selectedMode, _romSharingEnabled),
+    // Whether the host may start, and what the button says, is room-view.ts:
+    // streaming needs two players and no ROMs (the host runs the only
+    // emulator); rollback needs every player's ROM, unless the host shares.
+    const look = _roomView.startButton(
+      entries.length,
+      entries.filter((p) => p.romReady).length,
+      selectedMode,
+      _romSharingEnabled,
     );
+    btn.disabled = look.disabled;
+    btn.textContent = look.label;
   };
 
   // ── UI: Toolbar ────────────────────────────────────────────────────────
@@ -4690,28 +4670,11 @@
 
   // ── Delay Preference ────────────────────────────────────────────────
 
-  // The wording beside the picker is web/src/play/delay.ts. The delay itself
-  // (what this player asks the engine for) is still decided here: delay.ts
-  // computes it beside this code and a difference is reported as
-  // play-disagree. It takes over once production shows none; then
-  // sanitizeFrameDelay, currentAutoDelayValue and getDelayPreference below
-  // become calls into it.
+  // The delay itself (what this player asks the engine for), what Auto means
+  // and the wording beside the picker are web/src/play/delay.ts.
   const _delay = window.KNCore.play.delay;
 
-  const SOLO_FRAME_DELAY = 0;
-  const DEFAULT_FRAME_DELAY = 2;
-  const MIN_FRAME_DELAY = 1;
-  const MAX_FRAME_DELAY = 9;
-
-  const sanitizeFrameDelay = (value, fallback = DEFAULT_FRAME_DELAY, { allowZero = false } = {}) => {
-    const parsed = parseInt(value, 10);
-    if (!Number.isFinite(parsed)) return fallback;
-    if (allowZero && parsed === SOLO_FRAME_DELAY) return SOLO_FRAME_DELAY;
-    if (parsed <= 0) return fallback;
-    return Math.min(MAX_FRAME_DELAY, Math.max(MIN_FRAME_DELAY, parsed));
-  };
-
-  KNState.delayAutoValue = DEFAULT_FRAME_DELAY;
+  KNState.delayAutoValue = _delay.DEFAULT_FRAME_DELAY;
 
   const isSoloDelayContext = () => {
     if (isSpectator || !lastUsersData?.players) return false;
@@ -4727,31 +4690,16 @@
   });
 
   const currentAutoDelayValue = () =>
-    isSoloDelayContext() ? SOLO_FRAME_DELAY : sanitizeFrameDelay(KNState.delayAutoValue);
+    _delay.currentAutoDelay({ solo: isSoloDelayContext(), autoValue: KNState.delayAutoValue });
 
-  const getDelayPreference = () => {
-    const decided = decideDelayPreference();
-    _playObserver.compare('delay-preference', decided, _delay.delayPreference(delayPickerNow()));
-    return decided;
-  };
-
-  const decideDelayPreference = () => {
-    if (isSoloDelayContext()) return SOLO_FRAME_DELAY;
-    const autoEl = document.getElementById('delay-auto');
-    const selectEl = document.getElementById('delay-select');
-    if (autoEl?.checked) {
-      return currentAutoDelayValue();
-    }
-    if (selectEl) {
-      return sanitizeFrameDelay(selectEl.value);
-    }
-    return DEFAULT_FRAME_DELAY;
-  };
+  // The delay this player asks the match for is delay.ts: none when solo,
+  // Auto's measurement when Auto is on, else the select's value.
+  const getDelayPreference = () => _delay.delayPreference(delayPickerNow());
 
   window.getDelayPreference = getDelayPreference;
 
   const setAutoDelay = (value) => {
-    KNState.delayAutoValue = sanitizeFrameDelay(value);
+    KNState.delayAutoValue = _delay.sanitizeFrameDelay(value);
     const selectEl = document.getElementById('delay-select');
     const autoEl = document.getElementById('delay-auto');
     if (selectEl && autoEl?.checked) {
