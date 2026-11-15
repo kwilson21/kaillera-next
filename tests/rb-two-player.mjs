@@ -259,8 +259,9 @@
  *     at the input deadline (PEER-PHANTOM) and plays on. The engine used to
  *     clear the replay and go on, and after three throws turn rollback off
  *     on that page alone (C-ROLLBACK-FALLBACK). The run fails unless the
- *     guest threw once, ended the match, showed the error and stopped
- *     advancing, and the host dropped it and kept advancing. The guest is
+ *     guest threw once, ended the match, showed the error, turned its worker
+ *     coprocessor off (WORKER-COPROC AUTO-DISABLED) and stopped advancing,
+ *     and the host dropped it and kept advancing. The guest is
  *     gone after that, so the run ends there: no hash compare. Reported as
  *     `cRollbackTrap` in summary.json. The other fault knobs are refused
  *     with it.
@@ -2575,10 +2576,13 @@ if (inBattle) {
     const guestLines = linesAfter(guestSync, trap.guestAt.seq);
     trap.throws = guestLines.filter((line) => /C-ROLLBACK-THROW/.test(line)).length;
     trap.fellBack = guestLines.some((line) => /C-ROLLBACK-FALLBACK/.test(line));
+    // No worker replay may land on the trapped core: its coprocessor is off.
+    trap.coprocOff = /WORKER-COPROC AUTO-DISABLED/.test(guestSync);
     const trapFailed = !(
       trap.fatal &&
       trap.throws === 1 &&
       !trap.fellBack &&
+      trap.coprocOff &&
       trap.guestFramesAfter === 0 &&
       /emulator crashed/i.test(trap.error || '') &&
       trap.hostDropped &&

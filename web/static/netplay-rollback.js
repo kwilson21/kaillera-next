@@ -12779,6 +12779,10 @@
       clearInterval(_tickInterval);
       _tickInterval = null;
     }
+    // A replay the worker coprocessor is still running would otherwise be
+    // applied to the trapped core when its result arrives; with nothing
+    // pending, the result handler drops it as stale.
+    _workerCoprocAbort(`core fatal (${branch})`);
     _notifyCoreFatal();
   };
 
