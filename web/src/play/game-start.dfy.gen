@@ -2,7 +2,7 @@
 
 datatype Option<T> = None | Some(value: T)
 
-datatype GameStartPlan = watch | askForSharedRom | awaitSharedRom | wrongRom | play
+datatype GameStartPlan = watch | askForSharedRom | awaitSharedRom | askForRom | wrongRom | play
 
 function gameStartPlan(needsNoRom: bool, hasRom: bool, romDiffers: bool, hostShares: bool, tookHostsRom: bool, undecided: bool): GameStartPlan
 {
@@ -21,13 +21,18 @@ function gameStartPlan(needsNoRom: bool, hasRom: bool, romDiffers: bool, hostSha
         else
           GameStartPlan.askForSharedRom
       else
-        GameStartPlan.play
+        if !(hasRom) then
+          GameStartPlan.askForRom
+        else
+          GameStartPlan.play
 }
 
 lemma gameStartPlan_ensures(needsNoRom: bool, hasRom: bool, romDiffers: bool, hostShares: bool, tookHostsRom: bool, undecided: bool)
   ensures (needsNoRom ==> gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).watch?)
   ensures (!(needsNoRom) ==> hasRom ==> (!(romDiffers) || tookHostsRom) ==> gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).play?)
-  ensures (gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).play? ==> ((!(needsNoRom) && (!(romDiffers) || tookHostsRom)) && (hasRom || !(hostShares))))
+  ensures (gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).play? ==> ((!(needsNoRom) && hasRom) && (!(romDiffers) || tookHostsRom)))
+  ensures (!(needsNoRom) ==> !(hasRom) ==> !(hostShares) ==> (!(romDiffers) || tookHostsRom) ==> gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).askForRom?)
+  ensures (gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).askForRom? ==> ((!(needsNoRom) && !(hasRom)) && !(hostShares)))
   ensures (gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).wrongRom? ==> (((!(needsNoRom) && romDiffers) && !(tookHostsRom)) && !((hostShares && undecided))))
   ensures (gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).awaitSharedRom? ==> (((!(needsNoRom) && hostShares) && tookHostsRom) && !(hasRom)))
   ensures (gameStartPlan(needsNoRom, hasRom, romDiffers, hostShares, tookHostsRom, undecided).askForSharedRom? ==> ((!(needsNoRom) && hostShares) && !(tookHostsRom)))
