@@ -17,6 +17,7 @@ import { installGamepadManager } from './page/gamepad-manager.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
+import { catchUpStep, tooOldStep } from './catch-up.ts';
 import { framesToSendAgain } from './input-resend.ts';
 import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
@@ -61,7 +62,13 @@ import {
   romHashMismatch,
 } from './play/rom.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
-import { checkServerMessage, createProtocolObserver } from './socket-boundary.ts';
+import {
+  checkServerMessage,
+  createBoundary,
+  createProtocolObserver,
+  takeAck,
+  takeServerMessage,
+} from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, sendPaced, transferStillFor } from './sync-send.ts';
 import { changesWatchedFrame, followUpIsUnneeded } from './sync-follow-up.ts';
@@ -281,6 +288,8 @@ export const KNCore = {
   classifyRunnerStep,
   addressMapFor,
   captureFrame,
+  /** A host state from before this guest's frame: apply, catch up or refuse it, and what then (catch-up.ts, proved). */
+  catchUp: { catchUpStep, tooOldStep },
   framesToAskFor,
   framesToSendAgain,
   checkRelayed,
@@ -404,6 +413,9 @@ export const KNCore = {
     checkPeerText,
     checkRelay,
     createObserver: createProtocolObserver,
+    createBoundary,
+    takeServerMessage,
+    takeAck,
   },
 };
 

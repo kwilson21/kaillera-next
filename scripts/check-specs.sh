@@ -75,6 +75,23 @@ for invariant in waitingHasAWayOut timersAloneStop; do
   $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
+# ── A game start: a page never boots without a ROM ───────────────────────────
+ROM_START=specs/rom_at_start.qnt
+$QUINT typecheck "$ROM_START"
+for variant in rom_at_start_before rom_at_start_clear_only rom_at_start_no_rejoin rom_at_start_current; do
+  $QUINT test "$ROM_START" --main="$variant" --backend=typescript
+done
+# Today: the server knows whether a page has a ROM once its messages are in,
+# a page never boots without one, and a page a started game left out is
+# asked for one. The first was VIOLATED while clearing a ROM told the server
+# nothing (rom_at_start_before; deletedRomTest), and while a page that
+# rejoined without a ROM said nothing (rom_at_start_no_rejoin;
+# clearedWhileDownTest); the second while the start plan answered `play`
+# without a ROM, even once clearing told the server (rom_at_start_clear_only;
+# startBeforeTheClearArrivesTest).
+$QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
 # ── Desync digests: which frame a peer may report a hash for ────────────────
 DIGEST=specs/desync_digest.qnt
 $QUINT typecheck "$DIGEST"
@@ -196,7 +213,7 @@ $QUINT run "$PAUSE" --main=late_join_pause_before_resync --invariant=holdBeforeT
 FLOW=specs/resync_flow.qnt
 $QUINT typecheck "$FLOW"
 for variant in resync_flow_before resync_flow_any_answer resync_flow_frame_named resync_flow_drop_older \
-  resync_flow_asked_from resync_flow_unnumbered resync_flow_current; do
+  resync_flow_asked_from resync_flow_unnumbered resync_flow_rewinds resync_flow_current; do
   $QUINT test "$FLOW" --main="$variant" --backend=typescript
 done
 # A guest stopped at its target has a deadline, a state no newer than the
@@ -217,7 +234,9 @@ $QUINT run "$FLOW" --main=resync_flow_any_answer --invariant=holdWithoutNumbers 
 # (resync_flow_frame_named; immediateLateAnswerTest), is by rule b
 # (resync_flow_asked_from; lateAnswerFromAfterTheAskTest), and was while the
 # boot sync and the input stall's request went out with no number
-# (resync_flow_unnumbered; bootAnswerAfterANewerRequestTest).
+# (resync_flow_unnumbered; bootAnswerAfterANewerRequestTest). Nor is the guest
+# rewound by any state, its own request's answer included, which it was before
+# it caught up from a state behind it (resync_flow_rewinds; ownAnswerBehindTest).
 $QUINT run "$FLOW" --main=resync_flow_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
 # Rule a, not taken, holds them too; it drops the only state coming in

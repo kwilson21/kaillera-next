@@ -121,7 +121,7 @@ kaillera-next/
 │   │   ├── poll.ts              # looking again at intervals as Effect code: a bounded poll and a repeating one (emulator boot, gamepad hot-plug)
 │   │   ├── kn-state.ts          # cross-module shared state: the type and starting values of window.KNState, set by the bundle
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
-│   │   ├── socket-boundary.ts   # decodes server-authored Socket.IO messages against protocol.gen.ts; reports `protocol-mismatch` (observing)
+│   │   ├── socket-boundary.ts   # decodes what the server and peers send the play page (protocol.gen.ts, peer-protocol.ts); drops what is off its schema
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
 │   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); driven from the engine (peer-driver.ts), being wired in to decide one rule at a time
 │   │   ├── peer-driver.ts       # hands the rollback engine's events to one peer-connection.ts machine per other player

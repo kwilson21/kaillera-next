@@ -40,7 +40,12 @@
 // the follow-up's deadline, and the bound on follow-ups.
 //
 // Not modelled: the guest applying a state (it applies each in order; the
-// guest's side is specs/resync_flow.qnt), more than one guest, a channel
+// guest's side is specs/resync_flow.qnt). Whether the guest moves back to
+// F or, since #261, applies the state at F and runs the frames up to its
+// own again unseen (CATCH_UP, theGuestIsNeverRewound), it starts from the
+// state sent for F. So whether that state is still the host's, the one
+// thing a follow-up decides, is the same either way; a follow-up, skipped
+// or sent, is applied the same way as the answer. More than one guest, a channel
 // closing (resetPeerState drops the request, I2), and the rollback itself
 // (only whether the host's state at F changed).
 //
