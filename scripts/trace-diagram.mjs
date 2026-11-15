@@ -48,17 +48,29 @@ const SPECS = [
   },
   {
     file: 'specs/streaming_connection.qnt',
-    main: 'streaming_connection_current',
+    main: 'streaming_connection_before_reoffer',
     hub: 'Network',
     // A roster reaching the host, a signal delivered or lost, the network
     // failing a connection or carrying it again.
     hubActions: ['roster', 'deliver', 'lose', 'blip', 'recovers'],
-    runs: ['droppedGuestIsNeverReconnectedTest'],
+    runs: ['droppedGuestTest'],
     about:
       "The streaming engine's connection between the host and a guest, as each page holds it. " +
       'Network stands for the server relaying the roster and signals and for the connection between the pages; ' +
       'its notes are its own state (`broken`, `closed`), and a dashed arrow is what a step did to a page. ' +
-      "The ordering today's engine never recovers from: the guest is left with no connection, with both pages still in the room.",
+      'The ordering the engine never recovered from before the host had a deadline to offer again: ' +
+      'the guest is left with no connection, with both pages still in the room.',
+  },
+  {
+    file: 'specs/streaming_connection.qnt',
+    main: 'streaming_connection_current',
+    hub: 'Network',
+    hubActions: ['roster', 'deliver', 'lose', 'blip', 'recovers'],
+    runs: ['droppedGuestTest', 'guestStillHoldsTheOldConnectionTest'],
+    about:
+      "The same drop on today's engine. The host's deadline (`reoffer`) offers a new connection and the pair connects " +
+      'again, also when the guest has not yet noticed that its old connection is gone: the new offer names a newer ' +
+      'connection than the one the guest holds, so the guest replaces it.',
   },
 ];
 
