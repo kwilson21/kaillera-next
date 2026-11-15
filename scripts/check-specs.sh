@@ -306,6 +306,13 @@ $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldA
 # lockstep wait had one (tick_deadlines_before_lockstep_mode).
 $QUINT run "$TICK" --main=tick_deadlines_current --invariant=everyWaitHasADeadline \
   --max-samples=20000 --max-steps=25 --backend=typescript
+# The peer-stale clock: a peer catching up is not stale, a peer that only
+# repeats itself still is (peer_staleness_before; peer_staleness_any_input).
+for variant in peer_staleness_before peer_staleness_any_input peer_staleness_current; do
+  $QUINT test "$TICK" --main="$variant" --backend=typescript
+done
+$QUINT run "$TICK" --main=peer_staleness_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
 # A state transfer and the host's inputs behind it on one connection.
 for variant in input_link_burst input_link_paced_unguarded input_link_paced_whole_deadline input_link_paced; do
   $QUINT test "$TICK" --main="$variant" --backend=typescript

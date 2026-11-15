@@ -702,3 +702,122 @@ module input_link_paced_whole_deadline {
 module input_link_paced {
   import input_link(PACED = true, GUARD_QUEUED = true, SETTLE_WHEN_SENT = true, PROGRESS_DEADLINE = true).*
 }
+
+// ── The peer-stale clock and a peer catching up ─────────────────────────────
+//
+// The host's peer-stale clock (_peerLastAdvanceTime, PEER-PHANTOM at 5 s)
+// restarted only when an input for a new highest frame came in. A guest
+// taken back by a resync re-runs frames it had already sent (a catch-up,
+// 40 frames in 3.4 s in a DROP_PEER_MS run) and sends their inputs again,
+// all below that frame: the host marked a live guest a phantom, predicted
+// it, and resynced it again when its new frames came (13 frames of differing
+// play between the two states).
+//
+// COUNT_NEW_INPUTS: an input the host did not hold (its record grew)
+//   restarts the clock, a new highest frame or not.
+// ANY_INPUT: (considered, not the fix) any input restarts it. A peer stuck
+//   on one frame resends that frame's input every 100 ms
+//   (INPUT_RESEND_RELIABLE_MS), so its clock would never run out and it
+//   would never be dropped (I1 broken the other way).
+//
+// What is modelled: one peer, either catching up (each send is an input the
+// host lacks, at least one every NEW_EVERY ticks, then a new frame once it
+// is through) or stuck (each send is a frame the host holds); the clock in
+// whole seconds. Not modelled: what the phantom then does (above).
+module peer_staleness {
+  const COUNT_NEW_INPUTS: bool
+  const ANY_INPUT: bool
+
+  pure val LIMIT = 5        // PEER_DEAD_MS, in ticks
+  pure val NEW_EVERY = 2    // a catching-up peer's inputs are at most this far apart
+  pure val CATCH_UP = 6     // inputs it re-sends before it reaches a new frame
+
+  var catchingUp: bool      // the peer is live and catching up (else stuck)
+  var clock: int            // ticks since the clock last restarted
+  var sinceNew: int         // ticks since the catching-up peer's last input
+  var sent: int             // inputs the catching-up peer has re-sent
+  var phantom: bool
+  var freshenedByRepeat: bool  // history: a repeat restarted the clock
+
+  action init = all {
+    nondet c = Set(true, false).oneOf()
+    catchingUp' = c,
+    clock' = 0, sinceNew' = 0, sent' = 0, phantom' = false, freshenedByRepeat' = false,
+  }
+
+  def restartsOnNewInput: bool = COUNT_NEW_INPUTS or ANY_INPUT
+
+  // A catching-up peer's input for a frame the host lacks, below its highest.
+  action sendNew = all {
+    catchingUp, sent < CATCH_UP, not(phantom),
+    sent' = sent + 1,
+    sinceNew' = 0,
+    clock' = if (restartsOnNewInput) 0 else clock,
+    catchingUp' = catchingUp, phantom' = phantom, freshenedByRepeat' = freshenedByRepeat,
+  }
+
+  // Through the catch-up: a new highest frame, which restarts it in every rule.
+  action newFrame = all {
+    catchingUp, sent >= CATCH_UP, not(phantom),
+    clock' = 0, sinceNew' = 0,
+    catchingUp' = catchingUp, sent' = sent, phantom' = phantom, freshenedByRepeat' = freshenedByRepeat,
+  }
+
+  // A stuck peer resends the input of a frame the host holds.
+  action sendRepeat = all {
+    not(catchingUp), not(phantom),
+    clock' = if (ANY_INPUT) 0 else clock,
+    freshenedByRepeat' = (freshenedByRepeat or (ANY_INPUT and clock > 0)),
+    catchingUp' = catchingUp, sinceNew' = sinceNew, sent' = sent, phantom' = phantom,
+  }
+
+  // A second passes. A catching-up peer's next input comes within NEW_EVERY.
+  action tick = all {
+    not(phantom), not(catchingUp and sinceNew >= NEW_EVERY),
+    clock' = clock + 1,
+    sinceNew' = sinceNew + 1,
+    phantom' = clock + 1 >= LIMIT,
+    catchingUp' = catchingUp, sent' = sent, freshenedByRepeat' = freshenedByRepeat,
+  }
+
+  action stutter = all {
+    catchingUp' = catchingUp, clock' = clock, sinceNew' = sinceNew, sent' = sent,
+    phantom' = phantom, freshenedByRepeat' = freshenedByRepeat,
+  }
+
+  action step = any { sendNew, newFrame, sendRepeat, tick, stutter }
+
+  // A live peer catching up is never taken for a dead one.
+  val aCatchingUpPeerIsNotStale = catchingUp implies not(phantom)
+  // A peer that only repeats itself is not kept alive by its repeats.
+  val aRepeatingPeerStillGoesStale = not(freshenedByRepeat)
+  val allHold = aCatchingUpPeerIsNotStale and aRepeatingPeerStillGoesStale
+
+  // The DROP_PEER_MS run: a catch-up of inputs below the highest frame.
+  run catchingUpTest =
+    init.then(all { catchingUp' = true, clock' = 0, sinceNew' = 0, sent' = 0, phantom' = false, freshenedByRepeat' = false })
+      .then(tick).then(sendNew).then(tick).then(sendNew).then(tick).then(sendNew)
+      .then(tick).then(sendNew).then(tick)
+      .expect(aCatchingUpPeerIsNotStale == restartsOnNewInput)
+
+  // A stuck peer resending one frame.
+  run repeatingTest =
+    init.then(all { catchingUp' = false, clock' = 0, sinceNew' = 0, sent' = 0, phantom' = false, freshenedByRepeat' = false })
+      .then(tick).then(sendRepeat)
+      .expect(aRepeatingPeerStillGoesStale == not(ANY_INPUT))
+}
+
+// Before: only a new highest frame restarts the clock.
+module peer_staleness_before {
+  import peer_staleness(COUNT_NEW_INPUTS = false, ANY_INPUT = false).*
+}
+
+// Any input restarts it: a stuck peer is never dropped.
+module peer_staleness_any_input {
+  import peer_staleness(COUNT_NEW_INPUTS = false, ANY_INPUT = true).*
+}
+
+// The fix: an input the host did not hold restarts it.
+module peer_staleness_current {
+  import peer_staleness(COUNT_NEW_INPUTS = true, ANY_INPUT = false).*
+}

@@ -192,6 +192,12 @@ tick_deadlines() {
   expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
   verify "$TICK" tick_deadlines_current everyWaitHasADeadline
   expect_violation "$TICK" tick_deadlines_before_lockstep_mode everyWaitHasADeadline
+  verify "$TICK" peer_staleness_current allHold init 14
+  # A live peer catching up below its highest frame: five ticks, the clock
+  # never restarted (catchingUpTest).
+  expect_violation "$TICK" peer_staleness_before aCatchingUpPeerIsNotStale 10
+  # A stuck peer's resend restarts the clock: 2 steps (repeatingTest).
+  expect_violation "$TICK" peer_staleness_any_input aRepeatingPeerStillGoesStale 3
   verify "$TICK" input_link_paced allHold
   # Two chunks ahead of the inputs, two seconds, the deadline, a second: 5 steps.
   expect_violation "$TICK" input_link_burst allHold
