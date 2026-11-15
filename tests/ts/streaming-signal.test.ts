@@ -2,14 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { disconnectDisposition } from '../../web/src/peer-signaling.ts';
 import { checkRelayed } from '../../web/src/relay.ts';
+import { offerGate } from '../../web/src/streaming/offer-gate.ts';
 import type { Slot } from '../../web/src/streaming/roster.ts';
 import {
   channelOpenAction,
   connectionLost,
+  guardedSignalAction,
   lateJoinReadyAction,
+  rosterHostSid,
   signalAction,
+  signalGate,
   signalKind,
   type LateJoinReadyInput,
+  type OfferRoster,
   type SignalKind,
 } from '../../web/src/streaming/signal.ts';
 import { lcg } from './load-shared.ts';
@@ -20,7 +25,10 @@ import { lcg } from './load-shared.ts';
 
 type Signal = { sender?: string; offer?: object; answer?: object; candidate?: object };
 
-/** `onWebRTCSignal` (lines 582-617). */
+/**
+ * `onWebRTCSignal` (lines 582-617) before the offer gate, which now runs first:
+ * what the engine still does with a signal the gate lets through.
+ */
 const oldSignal = (data: Signal | null, peers: Map<string, Slot>, known: Map<string, Slot>) => {
   const nothing = { create: false, slot: null, act: 'none' };
   if (!data) return nothing;
@@ -116,6 +124,148 @@ test('only an offer makes a connection; an answer or a candidate for none is dro
     assert.equal(signalAction(true, kind, false, 1).act, 'none');
     assert.equal(signalAction(true, kind, true, 1).act, kind);
   }
+});
+
+// ── the offer gate: the one place the new rule differs from the oracle ──────
+// `oldSignal` above stays what the engine did before the gate: any page's
+// offer answered. A page that receives the stream now applies an offer only
+// from the socket its roster places at slot 0 (offer-gate.ts). The tests
+// below hold the new rule to the old one everywhere else.
+
+const ROOM: OfferRoster = {
+  players: { host: { slot: 0 }, p2: { slot: 1 }, p3: { slot: 2 } },
+  spectators: ['w1'],
+};
+const NO_ROSTER: OfferRoster = { players: {}, spectators: [] };
+/** The host reloaded: its new socket holds slot 0; the old one is gone from the roster. */
+const RELOADED: OfferRoster = { players: { host2: { slot: 0 }, p2: { slot: 1 }, p3: { slot: 2 } }, spectators: ['w1'] };
+/** The host left mid-match: nobody holds slot 0 (the server never moves slots then). */
+const HOSTLESS: OfferRoster = { players: { p2: { slot: 1 }, p3: { slot: 2 } }, spectators: ['w1'] };
+
+test('the offer gate keeps its contract on every input', () => {
+  const sids = ['', 'host', 'p3'];
+  for (const receiver of BOOLS) {
+    for (const isOffer of BOOLS) {
+      for (const sender of sids) {
+        for (const hostSid of sids) {
+          for (const senderListed of BOOLS) {
+            const gate = offerGate(receiver, isOffer, sender, hostSid, senderListed);
+            const fromHost = hostSid.length > 0 && sender === hostSid;
+            const why = JSON.stringify({ receiver, isOffer, sender, hostSid, senderListed });
+            if (!receiver || !isOffer) assert.equal(gate, 'apply', why);
+            else if (fromHost) assert.equal(gate, 'apply', why);
+            else assert.equal(gate, senderListed ? 'refuse' : 'hold', why);
+            // What the gate is for: a receiver applies an offer only from slot 0.
+            if (receiver && isOffer && gate === 'apply') assert.ok(fromHost, why);
+          }
+        }
+      }
+    }
+  }
+});
+
+test("a guest applies the host's offer and refuses one from any other player or spectator", () => {
+  assert.equal(rosterHostSid(ROOM.players), 'host');
+  assert.equal(signalGate(1, 'offer', 'host', ROOM), 'apply');
+  assert.equal(signalGate(1, 'offer', 'p3', ROOM), 'refuse');
+  assert.equal(signalGate(1, 'offer', 'w1', ROOM), 'refuse');
+  // A spectator's page is held to the same rule.
+  assert.equal(signalGate(null, 'offer', 'host', ROOM), 'apply');
+  assert.equal(signalGate(null, 'offer', 'p2', ROOM), 'refuse');
+  assert.equal(signalGate(null, 'offer', 'w1', ROOM), 'refuse');
+  // A refused offer makes no connection and is answered by nobody.
+  const refused = { sender: 'p3', kind: 'offer', mySlot: 1, roster: ROOM, hasEntry: false, offerHeld: false } as const;
+  assert.deepEqual(guardedSignalAction(refused), { create: false, slot: null, act: 'refused' });
+  assert.deepEqual(guardedSignalAction({ ...refused, sender: 'host' }), { create: true, slot: 0, act: 'offer' });
+  // A renegotiation from the host on the connection it has is applied, as before.
+  assert.deepEqual(guardedSignalAction({ ...refused, sender: 'host', hasEntry: true }), {
+    create: false,
+    slot: null,
+    act: 'offer',
+  });
+});
+
+test('an offer before any roster is held, then applied at slot 0 or dropped anywhere else', () => {
+  assert.equal(signalGate(1, 'offer', 'host', NO_ROSTER), 'hold');
+  const early = {
+    sender: 'host',
+    kind: 'offer',
+    mySlot: 1,
+    roster: NO_ROSTER,
+    hasEntry: false,
+    offerHeld: false,
+  } as const;
+  assert.deepEqual(guardedSignalAction(early), { create: false, slot: null, act: 'held' });
+  // Its candidates wait with it; with no offer held they are dropped, as before.
+  const candidate = { ...early, kind: 'candidate', offerHeld: true } as const;
+  assert.deepEqual(guardedSignalAction(candidate), { create: false, slot: null, act: 'held' });
+  assert.deepEqual(guardedSignalAction({ ...candidate, offerHeld: false }), { create: false, slot: null, act: 'none' });
+  // The roster that places the sender decides.
+  assert.equal(signalGate(1, 'offer', 'host', ROOM), 'apply');
+  assert.equal(
+    signalGate(1, 'offer', 'host', { players: { p1: { slot: 0 }, host: { slot: 1 } }, spectators: [] }),
+    'refuse',
+  );
+  assert.equal(signalGate(1, 'offer', 'host', { players: { p1: { slot: 0 } }, spectators: ['host'] }), 'refuse');
+  // A roster that still does not list the sender leaves it held.
+  assert.equal(signalGate(1, 'offer', 'host', { players: { p1: { slot: 0 } }, spectators: [] }), 'hold');
+});
+
+test('a reloaded host is taken at its new socket once the roster places it, and a hostless room takes nobody', () => {
+  assert.equal(signalGate(1, 'offer', 'host2', RELOADED), 'apply');
+  // An offer from the new socket before the roster that names it is held, not lost.
+  assert.equal(signalGate(1, 'offer', 'host2', ROOM), 'hold');
+  // The old socket is off the roster: held, never applied, unless a roster places it at slot 0 again.
+  assert.equal(signalGate(1, 'offer', 'host', RELOADED), 'hold');
+  for (const sender of ['p2', 'p3', 'w1']) assert.equal(signalGate(1, 'offer', sender, HOSTLESS), 'refuse');
+  assert.equal(rosterHostSid(HOSTLESS.players), '');
+});
+
+test('answers, candidates and everything the host receives are handled as before', () => {
+  const later: readonly SignalKind[] = ['answer', 'candidate', 'none'];
+  for (const roster of [ROOM, NO_ROSTER, HOSTLESS]) {
+    for (const sender of ['host', 'p3', 'w1', 'x']) {
+      for (const kind of later) assert.equal(signalGate(1, kind, sender, roster), 'apply');
+      assert.equal(signalGate(0, 'offer', sender, roster), 'apply');
+    }
+  }
+});
+
+test("the guarded signal is the old engine's, except an offer a receiver does not take from slot 0", () => {
+  const parts: readonly Signal[] = [{}, { offer: {} }, { answer: {} }, { candidate: {} }, { offer: {}, answer: {} }];
+  const differences = new Set<string>();
+  for (const part of parts) {
+    for (const sender of ['host', 'host2', 'p3', 'w1', 'x', '', undefined]) {
+      for (const roster of [ROOM, NO_ROSTER, RELOADED, HOSTLESS]) {
+        for (const mySlot of [0, 1, null] as const) {
+          for (const hasEntry of BOOLS) {
+            for (const offerHeld of BOOLS) {
+              const data: Signal = sender === undefined ? part : { ...part, sender };
+              const kind = signalKind(data);
+              const known = new Map<string, Slot>(Object.entries(roster.players).map(([sid, p]) => [sid, p.slot]));
+              const peers = new Map<string, Slot>(hasEntry && sender ? [[sender, 1]] : []);
+              const old = oldSignal(data, peers, known);
+              const mine = guardedSignalAction({ sender, kind, mySlot, roster, hasEntry, offerHeld });
+              const why = JSON.stringify({ data, roster, mySlot, hasEntry, offerHeld });
+              // The documented difference, stated without the gate's code.
+              const host = Object.entries(roster.players).find(([, p]) => p.slot === 0)?.[0];
+              const listed = Boolean(sender) && (known.has(sender ?? '') || roster.spectators.includes(sender ?? ''));
+              const receiverOffer = mySlot !== 0 && Boolean(sender) && kind === 'offer' && sender !== host;
+              const heldCandidate = mySlot !== 0 && Boolean(sender) && kind === 'candidate' && !hasEntry && offerHeld;
+              if (!receiverOffer && !heldCandidate) {
+                assert.deepEqual(mine, old, why);
+                continue;
+              }
+              const act = heldCandidate || !listed ? 'held' : 'refused';
+              assert.deepEqual(mine, { create: false, slot: null, act }, why);
+              differences.add(`${kind}:${act}`);
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.deepEqual([...differences].sort(), ['candidate:held', 'offer:held', 'offer:refused']);
 });
 
 const stamped = (sid: string, slot: number | null) => ({

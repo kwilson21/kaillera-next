@@ -22,8 +22,8 @@ import { controllerPresentMask, hostRosterPlan, type RosterInput, type Slot } fr
 import {
   channelOpenAction,
   connectionLost,
+  guardedSignalAction,
   lateJoinReadyAction,
-  signalAction,
   signalKind,
   type LateJoinReadyInput,
 } from './signal.ts';
@@ -63,6 +63,10 @@ export interface EngineView {
   peers: () => Readonly<Record<string, PeerView>>;
   /** The players on the last roster, by socket id. */
   known: () => Readonly<Record<string, { slot?: Slot }>>;
+  /** The spectators on the last roster: their socket ids. */
+  spectators: () => readonly string[];
+  /** The senders whose offer is held until a roster places them. */
+  heldOffers: () => readonly string[];
   running: () => boolean;
   live: () => boolean;
   capture: () => { mode: string; scale: number };
@@ -209,7 +213,8 @@ export const createStreamingObserver = (
 
     /**
      * A `webrtc-signal` arrived. Call first in the handler; the handler sets
-     * `act` on the record to the part it handed to the connection.
+     * `act` on the record to the part it handed to the connection, or to
+     * `held` or `refused` where the offer gate kept it from one.
      */
     signal: safe(
       () => ({ act: 'none' }),
@@ -221,7 +226,14 @@ export const createStreamingObserver = (
         const what = `signal:${kind}`;
         if (!wants(what)) return seen;
         const had = view.peers()[sender] !== undefined;
-        const knownSlot = view.known()[sender]?.slot;
+        const input = {
+          sender,
+          kind,
+          mySlot: view.slot(),
+          roster: { players: { ...view.known() }, spectators: [...view.spectators()] },
+          hasEntry: had,
+          offerHeld: view.heldOffers().includes(sender),
+        };
         defer(() =>
           check(
             what,
@@ -230,7 +242,7 @@ export const createStreamingObserver = (
               const create = !had && peer !== undefined;
               return { create, slot: create ? (peer.slot ?? null) : null, act: seen.act };
             },
-            () => ({ ...signalAction(true, kind, had, knownSlot) }),
+            () => ({ ...guardedSignalAction(input) }),
           ),
         );
         return seen;

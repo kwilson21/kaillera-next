@@ -158,3 +158,104 @@ def test_streaming_third_player_late_join_gets_video_port_and_input(context, ser
                 pass
             if not page.is_closed():
                 page.close()
+
+
+_HAS_VIDEO = """
+    (() => {
+      const v = document.querySelector('#guest-video');
+      return !!(v && v.srcObject && v.srcObject.getVideoTracks().length >= 1);
+    })()
+"""
+
+
+def test_streaming_guest_refuses_an_offer_from_another_player(context, server_url):
+    """A guest answers only the host's offers: another player's is refused, and its stream stays the host's."""
+    room = f"STR{secrets.token_hex(3).upper()}"
+    pages = []
+
+    try:
+        host = context.new_page()
+        guest = context.new_page()
+        other = context.new_page()
+        pages = [host, guest, other]
+
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=streaming")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        _wait_for_socket(host)
+        _install_fake_streaming_host(host)
+
+        for page, name in ((guest, "P2"), (other, "P3")):
+            page.goto(f"{server_url}/play.html?room={room}&name={name}")
+            expect(page.locator("#overlay")).to_be_visible(timeout=10000)
+            _wait_for_socket(page)
+
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        host.wait_for_function(
+            "document.querySelector('#toolbar-status')?.textContent.includes('Hosting')",
+            timeout=30000,
+        )
+        guest.wait_for_function(_HAS_VIDEO, timeout=30000)
+        other.wait_for_function(_HAS_VIDEO, timeout=30000)
+
+        host_sid = host.evaluate("window.__test_socket.id")
+        guest_sid = guest.evaluate("window.__test_socket.id")
+        other_sid = other.evaluate("window.__test_socket.id")
+        guest.evaluate("window.__streamBefore = document.querySelector('#guest-video').srcObject")
+        assert guest.evaluate("Object.keys(window.KNState.peers)") == [host_sid]
+
+        # P3 makes a real offer and sends it to P2 through the server, twice,
+        # with a candidate, and listens for an answer.
+        other.evaluate(
+            """async (target) => {
+              window.__answers = [];
+              window.__test_socket.on('webrtc-signal', (data) => {
+                if (data && data.sender === target && data.answer) window.__answers.push(data);
+              });
+              const pc = new RTCPeerConnection();
+              pc.createDataChannel('inputs');
+              pc.addTransceiver('video', { direction: 'sendonly' });
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              window.__forgedPc = pc;
+              const sdp = { type: offer.type, sdp: offer.sdp };
+              window.__test_socket.emit('webrtc-signal', { target, offer: sdp });
+              window.__test_socket.emit('webrtc-signal', { target, offer: sdp });
+              window.__test_socket.emit('webrtc-signal', {
+                target,
+                candidate: { candidate: 'candidate:1 1 udp 1 192.0.2.1 9 typ host', sdpMid: '0', sdpMLineIndex: 0 },
+              });
+            }""",
+            guest_sid,
+        )
+        refused = f"refused offer from {other_sid}"
+        # Until P2 has refused it, or taken it (what a guest did before).
+        guest.wait_for_function(
+            """([text, sid]) => window.NetplayStreaming.exportSyncLog().includes(text) ||
+                window.KNState.peers[sid] !== undefined""",
+            arg=[refused, other_sid],
+            timeout=10000,
+        )
+        guest.wait_for_timeout(1500)
+
+        # No answer, no connection: P2 holds only its connection to the host.
+        assert other.evaluate("window.__answers.length") == 0
+        assert guest.evaluate("Object.keys(window.KNState.peers)") == [host_sid]
+        assert guest.evaluate("(sid) => window.NetplayStreaming.getPeerConnection(sid) === null", other_sid)
+        # Refused twice, logged once.
+        assert guest.evaluate("window.NetplayStreaming.exportSyncLog()").count(refused) == 1
+        # Still the host's stream, still playing.
+        assert guest.evaluate("document.querySelector('#guest-video').srcObject === window.__streamBefore")
+        guest.wait_for_function(_HAS_VIDEO, timeout=5000)
+        assert guest.evaluate(f"window.KNState.peers['{host_sid}'].pc.connectionState") == "connected"
+        # The typed rule and the engine agree on what happened.
+        assert guest.evaluate("window.NetplayStreaming.observed().disagreed") == 0
+    finally:
+        for page in pages:
+            try:
+                page.evaluate("window.__forgedPc && window.__forgedPc.close()")
+                page.evaluate("window.__test_socket && window.__test_socket.disconnect()")
+            except Exception:
+                pass
+            if not page.is_closed():
+                page.close()

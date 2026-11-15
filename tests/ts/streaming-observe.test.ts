@@ -17,6 +17,8 @@ type EngineState = {
   spectator: boolean;
   peers: Map<string, PeerView>;
   known: Map<string, { slot?: Slot }>;
+  spectators: Set<string>;
+  held: Set<string>;
   running: boolean;
   live: boolean;
   capture: { mode: string; scale: number };
@@ -31,6 +33,8 @@ const engine = (ready: () => boolean = () => true) => {
     spectator: false,
     peers: new Map(),
     known: new Map(),
+    spectators: new Set(),
+    held: new Set(),
     running: false,
     live: false,
     capture: { mode: 'none', scale: 1 },
@@ -42,6 +46,8 @@ const engine = (ready: () => boolean = () => true) => {
     spectator: () => state.spectator,
     peers: () => Object.fromEntries(state.peers),
     known: () => Object.fromEntries(state.known),
+    spectators: () => [...state.spectators],
+    heldOffers: () => [...state.held],
     running: () => state.running,
     live: () => state.live,
     capture: () => state.capture,
@@ -159,6 +165,57 @@ test('an engine doing what the rules say reports nothing, and every decision is 
   });
 });
 
+test('a guest that takes offers only from slot 0 reports nothing', () => {
+  const { state, observer, sent, settle } = engine();
+  state.sid = 'p2';
+  state.slot = 1;
+
+  // An offer before any roster is held; so is the candidate that follows it.
+  observer.signal({ sender: 'host', offer: {} }).act = 'held';
+  state.held.add('host');
+  observer.signal({ sender: 'host', candidate: {} }).act = 'held';
+  settle();
+
+  // The roster places the sender at slot 0: the engine hands the held offer on as if it had just come.
+  observer.roster({
+    players: { a: { socketId: 'host', slot: 0 }, b: { socketId: 'p2', slot: 1 }, c: { socketId: 'p3', slot: 2 } },
+    spectators: { w: { socketId: 'w1' } },
+  });
+  state.known.set('host', { slot: 0 }).set('p2', { slot: 1 }).set('p3', { slot: 2 });
+  state.spectators.add('w1');
+  settle();
+  state.held.delete('host');
+  observer.signal({ sender: 'host', offer: {} }).act = 'offer';
+  state.peers.set('host', { slot: 0 });
+  observer.signal({ sender: 'host', candidate: {} }).act = 'candidate';
+  settle();
+
+  // Another player's offer, and a spectator's, are refused: no connection is made.
+  observer.signal({ sender: 'p3', offer: {} }).act = 'refused';
+  observer.signal({ sender: 'w1', offer: {} }).act = 'refused';
+  // A candidate from a page with no connection and no held offer is dropped, as before.
+  observer.signal({ sender: 'p3', candidate: {} });
+  settle();
+
+  assert.deepEqual(sent, []);
+  assert.deepEqual(observer.counts().compared, { 'signal:offer': 4, 'signal:candidate': 3, roster: 1 });
+});
+
+test("a guest that answers another player's offer is reported", () => {
+  const { state, observer, sent, settle } = engine();
+  state.sid = 'p2';
+  state.slot = 1;
+  state.known.set('host', { slot: 0 }).set('p2', { slot: 1 }).set('p3', { slot: 2 });
+  // What the engine did before the offer gate: a connection for p3, and an answer.
+  observer.signal({ sender: 'p3', offer: {} }).act = 'offer';
+  state.peers.set('p3', { slot: 2 });
+  settle();
+  assert.deepEqual(
+    sent.map((report) => [report.message, report.old, report.next]),
+    [['signal:offer', '{"act":"offer","create":true,"slot":2}', '{"act":"refused","create":false,"slot":null}']],
+  );
+});
+
 test('a guest that sends when the rules say so reports nothing', () => {
   const { state, observer, sent, settle } = engine();
   state.slot = 1;
@@ -236,6 +293,8 @@ test('nothing the observer does can throw into the engine', () => {
       spectator: broken,
       peers: broken,
       known: broken,
+      spectators: broken,
+      heldOffers: broken,
       running: broken,
       live: broken,
       capture: broken,

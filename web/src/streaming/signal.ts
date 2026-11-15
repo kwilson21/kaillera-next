@@ -2,12 +2,15 @@
  * What a message does to the streaming engine's connections: a relayed
  * WebRTC signal, a late joiner saying it is ready, a data channel opening,
  * a connection failing. Each is the rule web/static/netplay-streaming.js
- * applies today (onWebRTCSignal, onDataMessage, setupDataChannel's onOpen,
- * onconnectionstatechange). The engine still decides; observe.ts compares.
+ * applies (onWebRTCSignal, onDataMessage, setupDataChannel's onOpen,
+ * onconnectionstatechange). The engine still decides, and observe.ts
+ * compares, with one exception: which offers a page that receives the
+ * stream takes (`signalGate`) is decided here, and the engine asks.
  */
 import { signalDisposition } from '../peer-signaling.ts';
 import { checkRelayed, type Relayed } from '../relay.ts';
-import { HOST_SLOT, type Connection, type Slot } from './roster.ts';
+import { offerGate, type OfferGate } from './offer-gate.ts';
+import { HOST_SLOT, offersConnections, type Connection, type Slot } from './roster.ts';
 
 export type SignalKind = 'offer' | 'answer' | 'candidate' | 'none';
 
@@ -32,13 +35,16 @@ export interface SignalAction {
 }
 
 /**
- * What an incoming WebRTC signal does.
+ * What an incoming WebRTC signal does to the connection table, once the
+ * offer gate has let it through (`guardedSignalAction` puts the two
+ * together).
  *
  * The table rule is the rollback engine's (`signalDisposition`) with its two
  * reconnect inputs off, and that is where streaming differs: an offer for a
  * connection that exists is always applied to it as a renegotiation, never
- * taken as a replacement, and the offer's `reconnect` flag is not read. Any
- * page's offer is answered, including one the roster does not list.
+ * taken as a replacement, and the offer's `reconnect` flag is not read.
+ * Before the gate, this was the whole rule, and any page's offer was
+ * answered, including one the roster does not list.
  *
  * @param hasSender  the server said who sent it
  * @param hasEntry   a connection for the sender exists
@@ -56,6 +62,84 @@ export const signalAction = (
   if (disposition === 'drop') return nothing;
   const create = disposition === 'create';
   return { create, slot: create ? (knownSlot ?? null) : null, act: kind };
+};
+
+/** The roster as the offer gate reads it: the latest `users-updated` the page handled. */
+export interface OfferRoster {
+  /** The players, by socket id. */
+  readonly players: Readonly<Record<string, { readonly slot?: Slot }>>;
+  /** The spectators' socket ids. */
+  readonly spectators: readonly string[];
+}
+
+/** The socket id of the player at slot 0 on the roster; empty when no player holds it. */
+export const rosterHostSid = (players: OfferRoster['players']): string =>
+  Object.entries(players).find(([, player]) => player.slot === HOST_SLOT)?.[0] ?? '';
+
+/**
+ * Does this page take the signal: `offerGate` (offer-gate.ts) read from what
+ * the engine holds.
+ *
+ * A page that is not at slot 0 applies an offer only from the socket its
+ * roster places at slot 0, holds one from a sender the roster does not list
+ * (no roster yet, or a socket newer than it), and refuses one from any other
+ * player or spectator. The host's own page, and every answer and candidate,
+ * get `apply`: they are handled as before.
+ *
+ * @param mySlot  this page's slot
+ * @param kind    which part of the signal the engine reads (`signalKind`)
+ * @param sender  the socket id the server stamped as the sender
+ * @param roster  the page's latest roster
+ */
+export const signalGate = (mySlot: Slot, kind: SignalKind, sender: string, roster: OfferRoster): OfferGate => {
+  const listed = Object.hasOwn(roster.players, sender) || roster.spectators.includes(sender);
+  const gate = offerGate(!offersConnections(mySlot), kind === 'offer', sender, rosterHostSid(roster.players), listed);
+  return gate === 'hold' || gate === 'refuse' ? gate : 'apply';
+};
+
+/** What the engine does with a signal: hand it on as `signalAction` says, or hold it, or refuse it. */
+export type GuardedAct = SignalKind | 'held' | 'refused';
+
+export interface GuardedSignalAction {
+  readonly create: boolean;
+  readonly slot: number | null;
+  readonly act: GuardedAct;
+}
+
+export interface GuardedSignalInput {
+  /** The socket id the server stamped as the sender; undefined or empty when it said none. */
+  readonly sender: string | undefined;
+  readonly kind: SignalKind;
+  readonly mySlot: Slot;
+  readonly roster: OfferRoster;
+  /** A connection for the sender exists. */
+  readonly hasEntry: boolean;
+  /** An offer from the sender is held, waiting for a roster that places it. */
+  readonly offerHeld: boolean;
+}
+
+/**
+ * What an incoming WebRTC signal does, offer gate included.
+ *
+ * `held`: an offer the roster cannot place yet, kept (the latest one per
+ * sender) until a roster places its sender; at slot 0 it is then handled as
+ * if it had just come, anywhere else it is dropped. A candidate that comes
+ * while its sender's offer is held, with no connection to give it to, is
+ * kept with that offer: the offer was made before it, and an offer applied
+ * without its candidates may never connect. `refused`: dropped, and no
+ * connection is made. Everything else is `signalAction`.
+ */
+export const guardedSignalAction = (input: GuardedSignalInput): GuardedSignalAction => {
+  const { sender } = input;
+  if (!sender) return signalAction(false, input.kind, input.hasEntry, undefined);
+  const gate = signalGate(input.mySlot, input.kind, sender, input.roster);
+  if (gate !== 'apply') return { create: false, slot: null, act: gate === 'hold' ? 'held' : 'refused' };
+  const receiver = !offersConnections(input.mySlot);
+  if (receiver && input.kind === 'candidate' && !input.hasEntry && input.offerHeld) {
+    return { create: false, slot: null, act: 'held' };
+  }
+  const knownSlot = Object.hasOwn(input.roster.players, sender) ? input.roster.players[sender]?.slot : undefined;
+  return signalAction(true, input.kind, input.hasEntry, knownSlot);
 };
 
 /** A connection as the late-join rule sees it. */
