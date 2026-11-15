@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { catchUpStep } from '../../web/src/catch-up.ts';
+import { catchUpStep, tooOldStep } from '../../web/src/catch-up.ts';
 import { KNCore } from '../../web/src/index.ts';
 
 test('a state from this frame or later is applied as before', () => {
@@ -22,6 +22,16 @@ test('a state further back than the bound is refused', () => {
   assert.equal(catchUpStep(0, 1, 0), 'refuse');
 });
 
-test('the page reaches it through KNCore', () => {
-  assert.equal(KNCore.catchUpStep, catchUpStep);
+test('after a state too old to catch up from, an owed resync is asked for again, then given up', () => {
+  assert.equal(tooOldStep(true, false, 0, 2), 'askAgain');
+  assert.equal(tooOldStep(true, false, 1, 2), 'askAgain');
+  assert.equal(tooOldStep(true, false, 2, 2), 'stopAsking');
+  // None owed, or a request out already: nothing.
+  assert.equal(tooOldStep(false, false, 0, 2), 'nothing');
+  assert.equal(tooOldStep(true, true, 0, 2), 'nothing');
+});
+
+test('the page reaches them through KNCore', () => {
+  assert.equal(KNCore.catchUp.catchUpStep, catchUpStep);
+  assert.equal(KNCore.catchUp.tooOldStep, tooOldStep);
 });

@@ -44,3 +44,29 @@ export function catchUpStep(stateFrame: number, guestFrame: number, max: number)
   if (guestFrame - stateFrame > max) return 'refuse';
   return 'catchUp';
 }
+
+/**
+ * After a state too far back to catch up from was not applied: the request
+ * it answered has ended, so nothing else will ask for one. A resync that is
+ * owed (a "now" request was sent and no host state applied since) is asked
+ * for again, up to `maxAsksAgain` times, then given up visibly, as the
+ * request's deadline does (resync-request.ts, resyncDeadlineStep). Nothing is
+ * done when none is owed, or when a request is out already.
+ */
+export type TooOldStep = 'askAgain' | 'stopAsking' | 'nothing';
+
+/**
+ * @param owed          a "now" resync was asked for and none applied since
+ * @param requestOut    a resync request is out
+ * @param asksAgain     asks sent again for the owed resync
+ * @param maxAsksAgain  the most asks sent again
+ */
+//@ requires asksAgain >= 0 && maxAsksAgain >= 1
+//@ ensures \result === "askAgain" <==> owed && !requestOut && asksAgain < maxAsksAgain
+//@ ensures \result === "stopAsking" <==> owed && !requestOut && asksAgain >= maxAsksAgain
+//@ ensures \result === "nothing" <==> !owed || requestOut
+export function tooOldStep(owed: boolean, requestOut: boolean, asksAgain: number, maxAsksAgain: number): TooOldStep {
+  if (!owed || requestOut) return 'nothing';
+  if (asksAgain >= maxAsksAgain) return 'stopAsking';
+  return 'askAgain';
+}

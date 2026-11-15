@@ -2,6 +2,8 @@
 
 datatype CatchUpStep = apply | catchUp | refuse
 
+datatype TooOldStep = askAgain | stopAsking | nothing
+
 function catchUpStep(stateFrame: int, guestFrame: int, max: int): CatchUpStep
   requires (max >= 0)
 {
@@ -19,5 +21,27 @@ lemma catchUpStep_ensures(stateFrame: int, guestFrame: int, max: int)
   ensures (catchUpStep(stateFrame, guestFrame, max).apply? <==> (stateFrame >= guestFrame))
   ensures (catchUpStep(stateFrame, guestFrame, max).catchUp? <==> ((stateFrame < guestFrame) && ((guestFrame - stateFrame) <= max)))
   ensures (catchUpStep(stateFrame, guestFrame, max).refuse? <==> ((guestFrame - stateFrame) > max))
+{
+}
+
+function tooOldStep(owed: bool, requestOut: bool, asksAgain: int, maxAsksAgain: int): TooOldStep
+  requires (asksAgain >= 0)
+  requires (maxAsksAgain >= 1)
+{
+  if (!(owed) || requestOut) then
+    TooOldStep.nothing
+  else
+    if (asksAgain >= maxAsksAgain) then
+      TooOldStep.stopAsking
+    else
+      TooOldStep.askAgain
+}
+
+lemma tooOldStep_ensures(owed: bool, requestOut: bool, asksAgain: int, maxAsksAgain: int)
+  requires (asksAgain >= 0)
+  requires (maxAsksAgain >= 1)
+  ensures (tooOldStep(owed, requestOut, asksAgain, maxAsksAgain).askAgain? <==> ((owed && !(requestOut)) && (asksAgain < maxAsksAgain)))
+  ensures (tooOldStep(owed, requestOut, asksAgain, maxAsksAgain).stopAsking? <==> ((owed && !(requestOut)) && (asksAgain >= maxAsksAgain)))
+  ensures (tooOldStep(owed, requestOut, asksAgain, maxAsksAgain).nothing? <==> (!(owed) || requestOut))
 {
 }

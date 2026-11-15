@@ -6062,13 +6062,12 @@
   };
   const _meshCore = () => window.KNCore ?? null;
 
-  // Stage 5, observing: the per-peer connection machine
-  // (web/src/peer-connection.ts) runs beside the mesh code below, one per
-  // other player, through web/src/peer-observe.ts. The code below brackets
-  // each event it acts on with _peerObs().open/close and reports what it did
-  // with .did; the machine is handed the same event and a difference is
-  // reported as a peer-disagree client event. Nothing here changes what the
-  // engine does.
+  // The per-peer connection machine (web/src/peer-connection.ts) is driven
+  // from the mesh code below, one per other player, through
+  // web/src/peer-driver.ts: the code brackets each event it acts on with
+  // _peerDriver().open/close, and close hands the machine the event. The
+  // machine decides nothing yet; it is being wired in one rule at a time
+  // (docs/roadmap.md).
   //
   // Every webrtc-signal carries attemptId {page, attempt}: this page's id,
   // made once when it loads, and its count of the offers it has made to that
@@ -6081,8 +6080,7 @@
   const _attemptPageId = () => {
     if (_attemptPage === null) {
       _attemptPage =
-        window.KNCore?.peerObserve?.newPageId?.() ??
-        `p${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
+        window.KNCore?.attemptId?.newPageId?.() ?? `p${Math.random().toString(16).slice(2)}${Date.now().toString(16)}`;
     }
     return _attemptPage;
   };
@@ -6093,36 +6091,20 @@
     _offerCounts.set(countKey, attempt);
     return { page: _attemptPageId(), attempt };
   };
-  const _readAttemptId = (value) => window.KNCore?.peerObserve?.readAttemptId?.(value) ?? null;
+  const _readAttemptId = (value) => window.KNCore?.attemptId?.readAttemptId?.(value) ?? null;
   const _slotOfKey = (key) => _peers[key]?.slot ?? _knownPlayers[key]?.slot ?? null;
-  // What the engine holds for a player slot, as the machine's facts.
-  const _peerFactsOfSlot = (slot) => {
-    const held = Object.values(_peers).filter((p) => p.slot === slot);
-    const peer = held.find((p) => p.dc?.readyState === 'open') ?? held[0];
-    return {
-      entry: !!peer,
-      open: peer?.dc?.readyState === 'open',
-      reconnecting: !!peer?.reconnecting,
-    };
-  };
-  let _peerObserver;
-  const _peerObs = () => {
-    if (_peerObserver === undefined) {
-      _peerObserver =
-        window.KNCore?.peerObserve?.createPeerObserver?.({
+  let _peerDriverInstance;
+  const _peerDriver = () => {
+    if (_peerDriverInstance === undefined) {
+      _peerDriverInstance =
+        window.KNCore?.peerDriver?.createPeerDriver?.({
           page: _attemptPageId(),
           mySlot: () => (_isSpectator ? null : _playerSlot),
           offersMade: (slot) => _offerCounts.get(slot) ?? 0,
-          facts: _peerFactsOfSlot,
-          sink: ({ message, old, next }) => {
-            if (!window.KNState?.uploadToken) return false;
-            window.KNEvent?.('peer-disagree', message, { old, next });
-            return true;
-          },
           log: (line) => _syncLog(line),
         }) ?? null;
     }
-    return _peerObserver;
+    return _peerDriverInstance;
   };
 
   // Stage 3, observing: the strings peers send over the DataChannels (and the
@@ -6677,38 +6659,31 @@
       _syncDecodes--;
     }
   };
-  // The deadline's step is resyncDeadlineStep (web/src/resync-request.ts),
-  // written out here and compared with it when the deadline acts (observing).
+  // The deadline's step is resyncDeadlineStep (web/src/resync-request.ts,
+  // proved): wait, or let the request go and then hand a late joiner to its
+  // lost-host step, ask again for an owed resync, stop asking, or nothing.
   const _checkResyncRequestDeadline = () => {
     if (!_resyncRequestInFlight) return;
     const now = performance.now();
-    const waitedMs = now - _resyncRequestSentAt;
     // An answer arriving or held, or a coordinated target, has its own deadline.
     const answerComing = _syncExpected > 0 || !!_pendingResyncState || _syncTargetFrame > 0;
     const decoding = _syncDecodes > 0;
     const decodingForMs = decoding ? now - _syncDecodeStartedAt : 0;
-    if (answerComing || (decoding && decodingForMs < SYNC_DECODE_GRACE_MS)) return;
-    if (waitedMs < RESYNC_REQUEST_TIMEOUT_MS) return;
-    let step;
-    if (_lateJoinLostHost) step = 'lostHost';
-    else if (!_owedResync) step = 'letGo';
-    else if (_owedResyncAsksAgain >= RESYNC_MAX_ASKS_AGAIN) step = 'stopAsking';
-    else step = 'askAgain';
-    _resyncObserve('deadline-step', step, (rules) =>
-      rules.resyncDeadlineStep(
-        _resyncRequestInFlight,
-        answerComing,
-        decoding,
-        decodingForMs,
-        SYNC_DECODE_GRACE_MS,
-        waitedMs,
-        RESYNC_REQUEST_TIMEOUT_MS,
-        _lateJoinLostHost,
-        _owedResync,
-        _owedResyncAsksAgain,
-        RESYNC_MAX_ASKS_AGAIN,
-      ),
+    const waitedMs = now - _resyncRequestSentAt;
+    const step = window.KNCore.resyncRequest.resyncDeadlineStep(
+      _resyncRequestInFlight,
+      answerComing,
+      decoding,
+      decodingForMs,
+      SYNC_DECODE_GRACE_MS,
+      waitedMs,
+      RESYNC_REQUEST_TIMEOUT_MS,
+      _lateJoinLostHost,
+      _owedResync,
+      _owedResyncAsksAgain,
+      RESYNC_MAX_ASKS_AGAIN,
     );
+    if (step === 'noRequest' || step === 'wait') return;
     _resyncRequestInFlight = false;
     _syncLog(
       `RESYNC-REQUEST-TIMEOUT f=${_frameNum} waitedMs=${Math.round(waitedMs)} ` +
@@ -6793,40 +6768,15 @@
     dc.send(`sync-request-id:${requestId}`);
     dc.send(request);
   };
-  // Stage 5, observing: the resync request rules below decide as before; the
-  // proved functions of web/src/resync-request.ts run on the same inputs and
-  // a difference is reported as a resync-disagree client event (and
-  // RESYNC-DISAGREE in the sync log). They take over once production shows
-  // none. Returns the engine's value, whatever the proved one is; without
-  // KNCore nothing is compared. Looked up on first use: kn-core.js loads
-  // after this file.
-  let _resyncObserver;
-  const _resyncObserve = (what, engineValue, proved) => {
-    const rules = window.KNCore?.resyncRequest;
-    if (!rules) return engineValue;
-    if (_resyncObserver === undefined) {
-      _resyncObserver =
-        window.KNCore?.play?.observe?.createComparer?.(({ message, old, next }) => {
-          if (!window.KNState?.uploadToken) return false;
-          _syncLog(`RESYNC-DISAGREE ${message} engine=${old} proved=${next}`);
-          window.KNEvent?.('resync-disagree', message, { old, next });
-          return true;
-        }) ?? null;
-    }
-    try {
-      _resyncObserver?.compare(what, engineValue, proved(rules));
-    } catch (_) {}
-    return engineValue;
-  };
+  // The resync request rules are web/src/resync-request.ts (proved), reached
+  // through window.KNCore.resyncRequest when a rule is used: kn-core.js loads
+  // after this file. The models are specs/resync_flow.qnt,
+  // specs/late_join_pause.qnt and specs/resync_reask.qnt.
   // Only its own answer ends a request (onlyItsAnswerEndsARequest).
   const _endsResyncRequest = (answerFor) =>
-    _resyncObserve('ends-request', answerFor > 0 ? answerFor === _resyncRequestId : !_hostNumbersAnswers, (rules) =>
-      rules.endsRequest(answerFor, _resyncRequestId, _hostNumbersAnswers),
-    );
+    window.KNCore.resyncRequest.endsRequest(answerFor, _resyncRequestId, _hostNumbersAnswers);
   const _answersAnOlderRequest = (answerFor) =>
-    _resyncObserve('answers-an-older-request', answerFor > 0 && answerFor !== _resyncRequestId, (rules) =>
-      rules.answersAnOlderRequest(answerFor, _resyncRequestId),
-    );
+    window.KNCore.resyncRequest.answersAnOlderRequest(answerFor, _resyncRequestId);
   // A state answering an older request, from before the frame this guest is
   // on or the frame the newest request named: applied, it would take this
   // guest back. Whether or not the newest request named a frame: after one
@@ -6835,12 +6785,12 @@
   // frame (specs/resync_flow.qnt, immediateLateAnswerTest).
   const _isLateAnswerBehind = (state) =>
     !!state &&
-    _resyncObserve(
-      'late-answer-behind',
-      _answersAnOlderRequest(state.answerFor || 0) &&
-        (state.frame < _frameNum || (_resyncRequestAt > 0 && state.frame < _resyncRequestAt)),
-      (rules) =>
-        rules.isLateAnswerBehind(state.answerFor || 0, state.frame, _resyncRequestId, _resyncRequestAt, _frameNum),
+    window.KNCore.resyncRequest.isLateAnswerBehind(
+      state.answerFor || 0,
+      state.frame,
+      _resyncRequestId,
+      _resyncRequestAt,
+      _frameNum,
     );
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
@@ -7863,7 +7813,6 @@
   const _evictPeer = (sid, reason) => {
     const peer = _peers[sid];
     if (!peer) return;
-    _peerObs()?.did(peer.slot, sid, { type: 'drop' });
     try {
       peer.pc?.close();
     } catch (_) {}
@@ -7935,11 +7884,11 @@
       const shouldHoldForLateJoin = !_lateJoin && !_isSpectator && _isValidPlayerSlot(p.slot) && held;
 
       const key = _peerKey(p.socketId);
-      // Observing: the machine for this slot is told the roster lists them.
-      if (_lateJoin && !_isSpectator) _peerObs()?.joinedLate();
-      if (shouldHoldForLateJoin) _peerObs()?.stopWatching(p.slot, key, 'held as a late joiner');
-      if (_peers[key]) _peerObs()?.identify(key, p.slot);
-      const rosterFrame = _peerObs()?.open(p.slot, key);
+      // The machine for this slot is told the roster lists them.
+      if (_lateJoin && !_isSpectator) _peerDriver()?.joinedLate();
+      if (shouldHoldForLateJoin) _peerDriver()?.stopWatching(p.slot, key, 'held as a late joiner');
+      if (_peers[key]) _peerDriver()?.identify(key, p.slot);
+      const rosterFrame = _peerDriver()?.open(p.slot, key);
       if (_peers[key]) {
         _syncLog(`onUsersUpdated: peer ${key} (slot ${p.slot}) already exists, skipping`);
         _peers[key].slot = p.slot;
@@ -7948,7 +7897,7 @@
         } else if (_activeRoster?.has(p.slot)) {
           _clearPendingLateJoinPeer(key, p.slot, 'users-updated active roster');
         }
-        _peerObs()?.close(rosterFrame, { type: 'roster' });
+        _peerDriver()?.close(rosterFrame, { type: 'roster' });
         continue;
       }
 
@@ -8015,7 +7964,7 @@
 
       createPeer(p.socketId, p.slot, shouldInitiate);
       if (shouldInitiate) sendOffer(p.socketId);
-      _peerObs()?.close(rosterFrame, { type: 'roster' });
+      _peerDriver()?.close(rosterFrame, { type: 'roster' });
     }
     _tagPeerIdentities();
 
@@ -8090,9 +8039,9 @@
     if (peer.dc?.readyState === 'open') return;
     clearStartupConnectWatchdog(peer);
     peer._startupConnectTimer = setTimeout(() => {
-      const frame = _peerObs()?.open(peer.slot, remoteSid);
+      const frame = _peerDriver()?.open(peer.slot, remoteSid);
       retryStartupConnection(remoteSid);
-      _peerObs()?.close(frame, { type: 'deadline', deadline: 'startupAfter' });
+      _peerDriver()?.close(frame, { type: 'deadline', deadline: 'startupAfter' });
     }, STARTUP_CONNECT_TIMEOUT_MS);
   };
 
@@ -8117,7 +8066,6 @@
           `dc=${peer.dc?.readyState ?? 'none'}`,
       );
       setStatus('Peer connection stalled — reload or rejoin to retry');
-      _peerObs()?.did(peer.slot, remoteSid, { type: 'stalled' });
       KNEvent('webrtc-fail', 'Startup WebRTC connection stalled', {
         slot: peer.slot,
         remoteSid,
@@ -8146,10 +8094,10 @@
       _syncLog(`startup retry peer ${remoteSid} connection-state: ${s}`);
       if (s === 'connecting') setStatus('Connecting to players...');
       if (s === 'failed') {
-        const frame = _peerObs()?.open(peer.slot, remoteSid);
+        const frame = _peerDriver()?.open(peer.slot, remoteSid);
         const lost = peer.pc._knAttempt;
         retryStartupConnection(remoteSid);
-        _peerObs()?.close(frame, { type: 'lost', page: lost?.page ?? '', attempt: lost?.attempt ?? 0 });
+        _peerDriver()?.close(frame, { type: 'lost', page: lost?.page ?? '', attempt: lost?.attempt ?? 0 });
       }
     };
     createOutgoingPeerChannels(remoteSid, peer);
@@ -8196,10 +8144,10 @@
       if (s === 'failed') {
         if (_phase < PHASE_GAME_STARTED && peer.isInitiator) {
           _syncLog(`startup peer ${remoteSid} failed before game start — retrying`);
-          const frame = _peerObs()?.open(peer.slot, remoteSid);
+          const frame = _peerDriver()?.open(peer.slot, remoteSid);
           const lost = peer.pc._knAttempt;
           retryStartupConnection(remoteSid);
-          _peerObs()?.close(frame, { type: 'lost', page: lost?.page ?? '', attempt: lost?.attempt ?? 0 });
+          _peerDriver()?.close(frame, { type: 'lost', page: lost?.page ?? '', attempt: lost?.attempt ?? 0 });
           return;
         }
         // Failed is terminal — disconnect immediately
@@ -8269,11 +8217,6 @@
         `${reconnect ? ' [reconnect]' : ''}${startup ? ' [startup]' : ''} attempt=${attemptId.page}#${attemptId.attempt}`,
     );
     peer.pc._knAttempt = attemptId;
-    _peerObs()?.did(peer.slot, remoteSid, {
-      type: 'offer',
-      attempt: attemptId.attempt,
-      mode: startup ? 'startup' : reconnect ? 'reconnect' : 'first',
-    });
     const offer = await peer.pc.createOffer();
     await peer.pc.setLocalDescription(offer);
     _signalSocket.emit('webrtc-signal', {
@@ -8292,41 +8235,39 @@
     if (!senderSid) return;
     let key = _peerKey(senderSid);
     const sigType = data.offer ? 'offer' : data.answer ? 'answer' : data.candidate ? 'candidate' : 'other';
-    const obsAttempt = _readAttemptId(data.attemptId);
+    const signalAttempt = _readAttemptId(data.attemptId);
     _syncLog(
       `onWebRTCSignal: ${sigType} from ${senderSid}${key !== senderSid ? ` (peer ${key})` : ''}, ` +
         `hasPeer=${!!_peers[key]}, knownPlayer=${!!_knownPlayers[key]}, ` +
-        `attempt=${obsAttempt ? `${obsAttempt.page}#${obsAttempt.attempt}` : 'none'}`,
+        `attempt=${signalAttempt ? `${signalAttempt.page}#${signalAttempt.attempt}` : 'none'}`,
     );
 
-    // Observing: the machine for this player is told the same signal once
-    // the code below has decided what to do with it (before its first await).
-    // A signal that names no attempt comes from a page from before attemptId:
-    // that player is not watched from then on.
-    const obsHadEntry = !!_peers[key];
-    const obsUnderEarlierId = key !== senderSid;
-    let obsNew = false;
-    let obsFrame = sigType === 'other' ? null : _peerObs()?.open(_slotOfKey(key), key);
-    let obsEvent = null;
-    const obsDone = () => {
-      if (!obsFrame) return;
-      const frame = obsFrame;
-      obsFrame = null;
-      _peerObs()?.close(frame, obsEvent);
+    // The machine for this player is handed the same signal once the code
+    // below has decided what to do with it (before its first await). A signal
+    // that names no attempt comes from a page from before attemptId: that
+    // player is left to the engine from then on.
+    const signalUnderEarlierId = key !== senderSid;
+    let signalFrame = sigType === 'other' ? null : _peerDriver()?.open(_slotOfKey(key), key);
+    let signalEvent = null;
+    const signalDone = () => {
+      if (!signalFrame) return;
+      const frame = signalFrame;
+      signalFrame = null;
+      _peerDriver()?.close(frame, signalEvent);
     };
-    if (obsFrame && !obsAttempt) {
-      _peerObs()?.stopWatching(_slotOfKey(key), key, `their page sends no attempt id (${sigType})`);
-    } else if (obsFrame && _isPeerPendingLateJoin(key)) {
-      _peerObs()?.stopWatching(_slotOfKey(key), key, 'a late joiner');
-    } else if (obsAttempt && sigType === 'offer') {
+    if (signalFrame && !signalAttempt) {
+      _peerDriver()?.stopWatching(_slotOfKey(key), key, `their page sends no attempt id (${sigType})`);
+    } else if (signalFrame && _isPeerPendingLateJoin(key)) {
+      _peerDriver()?.stopWatching(_slotOfKey(key), key, 'a late joiner');
+    } else if (signalAttempt && sigType === 'offer') {
       const mode = !data.reconnect
         ? 'first'
         : data.startupReconnect || _phase < PHASE_GAME_STARTED
           ? 'startup'
           : 'reconnect';
-      obsEvent = { type: 'offer', ...obsAttempt, mode, underEarlierId: obsUnderEarlierId };
-    } else if (obsAttempt) {
-      obsEvent = { type: sigType, ...obsAttempt };
+      signalEvent = { type: 'offer', ...signalAttempt, mode, underEarlierId: signalUnderEarlierId };
+    } else if (signalAttempt) {
+      signalEvent = { type: sigType, ...signalAttempt };
     }
 
     // A fresh offer from a player whose connection was kept across their
@@ -8351,7 +8292,6 @@
     if (data.offer && !data.reconnect && key !== senderSid) {
       _syncLog(`onWebRTCSignal: fresh offer from ${senderSid} — dropping kept connection ${key}`);
       _evictPeer(key, 'replaced-by-new-page');
-      obsNew = true;
       if (_lastUsersUpdated) onUsersUpdated(_lastUsersUpdated);
       key = _peerKey(senderSid);
     }
@@ -8361,13 +8301,12 @@
       const known = _knownPlayers[key];
       _syncLog(`onWebRTCSignal: on-demand createPeer for ${key}, slot=${known?.slot ?? 'null'}`);
       createPeer(key, known ? known.slot : null, false);
-      obsNew = true;
     }
 
     let peer = _peers[key];
     if (!peer) {
       _syncLog(`onWebRTCSignal: no peer for ${key}, dropping ${sigType}`);
-      obsDone();
+      signalDone();
       return;
     }
 
@@ -8392,15 +8331,14 @@
           // Timeout: if reconnect doesn't reach 'connected' within 10s, close and retry
           let _reconnectTimer = setTimeout(() => {
             const state = existingPeer.pc.connectionState;
-            const frame = _peerObs()?.open(existingPeer.slot, key);
+            const frame = _peerDriver()?.open(existingPeer.slot, key);
             if (state !== 'connected') {
               _syncLog(`reconnect timeout (state=${state}) — closing stale PC for ${senderSid}`);
-              if (_peers[key] === existingPeer) _peerObs()?.did(existingPeer.slot, key, { type: 'close' });
               try {
                 existingPeer.pc.close();
               } catch (_) {}
             }
-            _peerObs()?.close(frame, { type: 'deadline', deadline: 'answerAfter' });
+            _peerDriver()?.close(frame, { type: 'deadline', deadline: 'answerAfter' });
           }, 10000);
           existingPeer.pc.onconnectionstatechange = () => {
             const s = existingPeer.pc.connectionState;
@@ -8412,35 +8350,25 @@
           installPeerDataChannelHandlers(key, existingPeer);
 
           peer = existingPeer;
-          obsNew = true;
         }
 
         // The connection now belongs to this offer's attempt (none from an old page).
-        peer.pc._knAttempt = obsAttempt;
-        if (obsAttempt) {
-          _peerObs()?.did(peer.slot, key, {
-            type: 'answer',
-            ...obsAttempt,
-            connection: obsNew || !obsHadEntry ? 'new' : 'kept',
-          });
-        }
-        obsDone();
+        peer.pc._knAttempt = signalAttempt;
+        signalDone();
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await KNShared.drainCandidates(peer);
         await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key, peer.pc._knAttempt);
       } else if (data.answer) {
-        if (obsAttempt) _peerObs()?.did(peer.slot, key, { type: 'applyAnswer', ...obsAttempt });
-        obsDone();
+        signalDone();
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
         await KNShared.drainCandidates(peer);
       } else if (data.candidate) {
-        if (obsAttempt) _peerObs()?.did(peer.slot, key, { type: 'applyCandidate', ...obsAttempt });
-        obsDone();
+        signalDone();
         await KNShared.addBufferedCandidate(peer, data.candidate);
       }
-      obsDone();
+      signalDone();
     } catch (err) {
-      obsDone();
+      signalDone();
       _syncLog(`WebRTC signal error: ${err.message || err}`);
       setStatus(`WebRTC error: ${err.message || err}`);
     }
@@ -8693,7 +8621,7 @@
       const peer = _peers[remoteSid];
       if (!peer) return;
       const openedAttempt = ch._knPc?._knAttempt;
-      const openedFrame = _peerObs()?.open(peer.slot, remoteSid);
+      const openedFrame = _peerDriver()?.open(peer.slot, remoteSid);
       const known = _knownPlayers[remoteSid];
       const peerName = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
       _syncLog(`DC open with ${remoteSid} slot: ${peer.slot} ${peerName}`);
@@ -8823,9 +8751,9 @@
       if (peer.slot === 0) _resyncAfterLostHost('host channel open');
 
       if (!openedAttempt) {
-        _peerObs()?.stopWatching(peer.slot, remoteSid, 'a channel opened on a connection with no attempt id');
+        _peerDriver()?.stopWatching(peer.slot, remoteSid, 'a channel opened on a connection with no attempt id');
       }
-      _peerObs()?.close(openedFrame, openedAttempt ? { type: 'opened', ...openedAttempt } : null);
+      _peerDriver()?.close(openedFrame, openedAttempt ? { type: 'opened', ...openedAttempt } : null);
       if (_phase < PHASE_GAME_STARTED) startGameSequence();
     };
     ch.onopen = onOpen;
@@ -9506,7 +9434,7 @@
    * @param {string} [opts.sid] - socket.io sid to filter scheduled syncs
    */
   const resetPeerState = (slot, reason, opts = {}) => {
-    _peerObs()?.peerReset(slot, opts.sid ?? null, reason);
+    _peerDriver()?.peerReset(slot, opts.sid ?? null);
     if (slot === null || slot === undefined) return;
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A joiner that was being served is gone: the pause is not kept for it.
@@ -9588,12 +9516,12 @@
       _syncLog('late-join: lost the channel to the host before loading; a resync follows the load');
     }
     // The machine does not cover a late joiner: that player is left alone.
-    if (_isPeerPendingLateJoin(remoteSid, peer)) _peerObs()?.stopWatching(peer.slot, remoteSid, 'a late joiner');
-    const frame = _peerObs()?.open(peer.slot, remoteSid);
+    if (_isPeerPendingLateJoin(remoteSid, peer)) _peerDriver()?.stopWatching(peer.slot, remoteSid, 'a late joiner');
+    const frame = _peerDriver()?.open(peer.slot, remoteSid);
     try {
       _handlePeerDisconnect(remoteSid, peer);
     } finally {
-      _peerObs()?.close(
+      _peerDriver()?.close(
         frame,
         peer._intentionalLeave
           ? { type: 'left' }
@@ -9664,9 +9592,9 @@
       peer._reconnectTimeout = setTimeout(() => {
         if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
         _syncLog(`reconnect timeout for ${remoteSid} after ${peer._reconnectAttempts || 1} attempts`);
-        const frame = _peerObs()?.open(peer.slot, remoteSid);
+        const frame = _peerDriver()?.open(peer.slot, remoteSid);
         hardDisconnectPeer(remoteSid);
-        _peerObs()?.close(frame, { type: 'deadline', deadline: 'giveUpAfter' });
+        _peerDriver()?.close(frame, { type: 'deadline', deadline: 'giveUpAfter' });
       }, 45000);
 
       return;
@@ -9679,7 +9607,6 @@
   const hardDisconnectPeer = (remoteSid) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
-    _peerObs()?.did(peer.slot, remoteSid, { type: 'drop' });
     clearStartupConnectWatchdog(peer);
     if (peer._reconnectTimeout) {
       clearTimeout(peer._reconnectTimeout);
@@ -9749,9 +9676,6 @@
     // A retry's attempt was named when the retry was decided (retryOrGiveUp).
     const reserved = attempt > 1 ? peer._knNextAttempt : null;
     const attemptId = reserved ?? _nextAttemptId(peer.slot, remoteSid);
-    if (!reserved) {
-      _peerObs()?.did(peer.slot, remoteSid, { type: 'offer', attempt: attemptId.attempt, mode: 'reconnect' });
-    }
     peer._knNextAttempt = null;
     const peerGuard = (p) => _peers[remoteSid] === p;
     KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, _signalSocket, peerGuard);
@@ -9760,11 +9684,11 @@
 
     const retryOrGiveUp = () => {
       if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
-      const frame = _peerObs()?.open(peer.slot, remoteSid);
+      const frame = _peerDriver()?.open(peer.slot, remoteSid);
       try {
         _retryOrGiveUp();
       } finally {
-        _peerObs()?.close(frame, { type: 'deadline', deadline: 'attemptAfter' });
+        _peerDriver()?.close(frame, { type: 'deadline', deadline: 'attemptAfter' });
       }
     };
     const _retryOrGiveUp = () => {
@@ -9778,7 +9702,6 @@
         setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
         const next = _nextAttemptId(peer.slot, remoteSid);
         peer._knNextAttempt = next;
-        _peerObs()?.did(peer.slot, remoteSid, { type: 'offer', attempt: next.attempt, mode: 'reconnect' });
         setTimeout(() => attemptReconnect(remoteSid, attempt + 1), _RECONNECT_RETRY_DELAY);
       } else {
         _syncLog(`reconnect failed after ${_MAX_RECONNECT_ATTEMPTS} attempts — hard disconnect ${remoteSid}`);
@@ -11392,39 +11315,29 @@
   // request has the resync request's own deadline (I1), which calls this
   // again; after LATE_JOIN_LOST_HOST_MAX_ASKS unanswered asks it gives up.
   const _resyncAfterLostHost = (source) => {
-    // Observing: the proved step (web/src/resync-request.ts) on the same
-    // inputs, compared with each branch below before that branch changes any.
-    const observe = (taken) =>
-      _resyncObserve('late-join-lost-host', taken, (rules) =>
-        rules.lateJoinLostHostStep(
-          _lateJoinLostHost,
-          _playerSlot === 0,
-          _phase === PHASE_RUNNING,
-          Object.values(_peers).find((p) => p.slot === 0)?.dc?.readyState === 'open',
-          _resyncRequestInFlight,
-          _lateJoinLostHostAsks,
-          LATE_JOIN_LOST_HOST_MAX_ASKS,
-        ),
-      );
-    if (!_lateJoinLostHost || _playerSlot === 0 || _phase !== PHASE_RUNNING) {
-      observe('idle');
-      return;
-    }
+    // The step is lateJoinLostHostStep (web/src/resync-request.ts, proved).
     const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
-    if (hostDc?.readyState !== 'open') {
-      observe('waitForChannel');
+    const step = window.KNCore.resyncRequest.lateJoinLostHostStep(
+      _lateJoinLostHost,
+      _playerSlot === 0,
+      _phase === PHASE_RUNNING,
+      hostDc?.readyState === 'open',
+      _resyncRequestInFlight,
+      _lateJoinLostHostAsks,
+      LATE_JOIN_LOST_HOST_MAX_ASKS,
+    );
+    if (step === 'idle') return;
+    if (step === 'waitForChannel') {
       _syncLog(`late-join resync after a lost host channel waits for it to open (${source})`);
       return;
     }
     // A request already out: its answer, applied, clears the marker; its
     // deadline brings this back if none comes.
-    if (_resyncRequestInFlight) {
-      observe('inFlight');
+    if (step === 'inFlight') {
       _syncLog(`late-join resync after a lost host channel: a resync is already on its way (${source})`);
       return;
     }
-    if (_lateJoinLostHostAsks >= LATE_JOIN_LOST_HOST_MAX_ASKS) {
-      observe('giveUp');
+    if (step === 'giveUp') {
       _lateJoinLostHost = false;
       _lateJoinLostHostAsks = 0;
       // Its asks marked a "now" resync owed: this give-up ends that too.
@@ -11438,7 +11351,6 @@
       });
       return;
     }
-    observe('ask');
     _lateJoinLostHostAsks++;
     _setLastSyncState(null, 'late-join-lost-host');
     _syncTargetFrame = -1;
@@ -13075,7 +12987,7 @@
     }
     if (_phase === PHASE_RUNNING) return;
     _phase = PHASE_RUNNING;
-    _peerObs()?.matchStarted();
+    _peerDriver()?.matchStarted();
     window._knPreventRetroArchVisibilityPause = true;
     _checkStateTransition();
 
@@ -14014,8 +13926,8 @@
   const stopSync = () => {
     _phase = PHASE_STOPPED;
     _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
-    // Observing: every connection is about to close; each machine is told, and its per-match state goes.
-    _peerObs()?.sessionEnded();
+    // Every connection is about to close; each machine is told, and its per-match state goes.
+    _peerDriver()?.sessionEnded();
     _runSubstate = RUN_NORMAL;
     _checkStateTransition();
     window._lockstepActive = false;
@@ -14700,14 +14612,14 @@
       );
       _pendingResyncState = null;
     }
-    // A state further back than this guest catches up from (KNCore.catchUpStep,
+    // A state further back than this guest catches up from (KNCore.catchUp.catchUpStep,
     // proved; specs/resync_flow.qnt, tooOldToCatchUpTest): not applied, as a
     // late answer is not. The request it answered has ended, so an owed
     // resync is asked for again here, or given up visibly.
     if (
       _pendingResyncState &&
       _canCatchUp() &&
-      window.KNCore.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'
+      window.KNCore.catchUp.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'
     ) {
       _syncLog(
         `SYNC-TOO-OLD-DROPPED f=${_frameNum} frame=${_pendingResyncState.frame} ` +
@@ -14715,13 +14627,14 @@
           `answerFor=${_pendingResyncState.answerFor ?? 0} newest=${_resyncRequestId}`,
       );
       _pendingResyncState = null;
-      if (_owedResync && !_resyncRequestInFlight) {
-        if (_owedResyncAsksAgain >= RESYNC_MAX_ASKS_AGAIN) {
-          _stopAskingForOwedResync('its answers came too late to catch up from');
-        } else {
-          _askAgainForOwedResync();
-        }
-      }
+      const then = window.KNCore.catchUp.tooOldStep(
+        _owedResync,
+        _resyncRequestInFlight,
+        _owedResyncAsksAgain,
+        RESYNC_MAX_ASKS_AGAIN,
+      );
+      if (then === 'askAgain') _askAgainForOwedResync();
+      else if (then === 'stopAsking') _stopAskingForOwedResync('its answers came too late to catch up from');
     }
     const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;
     if (_syncTargetFrame > 0) {
@@ -17499,11 +17412,8 @@
           // reconnects the roster still lists us under the old id until
           // users-updated arrives), a peer with an open DC, and a reconnect
           // already in progress.
-          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) {
-            _peerObs()?.check(info.slot);
-            continue;
-          }
-          const healFrame = _peerObs()?.open(info.slot, sid);
+          if (!_needsMeshHeal(sid, p?.dc?.readyState === 'open', !!p?.reconnecting)) continue;
+          const healFrame = _peerDriver()?.open(info.slot, sid);
           const healFound = p?.pc?._knAttempt;
           const pcState = p?.pc?.connectionState;
           _syncLog(
@@ -17520,7 +17430,11 @@
           }
           createPeer(sid, info.slot, true);
           sendOffer(sid, { reconnect: true });
-          _peerObs()?.close(healFrame, { type: 'heal', page: healFound?.page ?? '', attempt: healFound?.attempt ?? 0 });
+          _peerDriver()?.close(healFrame, {
+            type: 'heal',
+            page: healFound?.page ?? '',
+            attempt: healFound?.attempt ?? 0,
+          });
         }
       }
       _remoteApplied++;
@@ -18240,10 +18154,10 @@
   // finishing its decode later (one over the socket, one over the channel)
   // does not take its place (specs/resync_flow.qnt, theAwaitedAnswerIsNotLost).
   const _keepsAwaitedAnswer = (answerFor, frame) => {
-    const keeps = _resyncObserve(
-      'keeps-awaited-answer',
-      _answersAnOlderRequest(answerFor) && _pendingResyncState?.answerFor === _resyncRequestId,
-      (rules) => rules.keepsAwaitedAnswer(answerFor, _resyncRequestId, _pendingResyncState?.answerFor ?? -1),
+    const keeps = window.KNCore.resyncRequest.keepsAwaitedAnswer(
+      answerFor,
+      _resyncRequestId,
+      _pendingResyncState?.answerFor ?? -1,
     );
     if (!keeps) return false;
     _syncLog(
@@ -18401,7 +18315,7 @@
   // guest was on run again, unseen and unheard, with the inputs both pages
   // already have, as fast as the emulator goes, instead of being played
   // again in sight at the game's pace while the host waits for this guest's
-  // inputs (specs/resync_flow.qnt, CATCH_UP; KNCore.catchUpStep, proved).
+  // inputs (specs/resync_flow.qnt, CATCH_UP; KNCore.catchUp, proved).
   // The canvas keeps the frame it showed until the guest is back.
   //
   // Each frame is a forward step as in tick(): its inputs fed to the
@@ -18659,7 +18573,7 @@
     if (
       timelineAligned &&
       _canCatchUp() &&
-      window.KNCore.catchUpStep(frame, frameBeforeApply, MAX_CATCH_UP_FRAMES) === 'catchUp'
+      window.KNCore.catchUp.catchUpStep(frame, frameBeforeApply, MAX_CATCH_UP_FRAMES) === 'catchUp'
     ) {
       _startCatchUp(gm.Module, frame, frameBeforeApply);
     }

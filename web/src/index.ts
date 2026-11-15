@@ -17,7 +17,7 @@ import { installGamepadManager } from './page/gamepad-manager.ts';
 import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis } from './gamepad-axes.ts';
 import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
-import { catchUpStep } from './catch-up.ts';
+import { catchUpStep, tooOldStep } from './catch-up.ts';
 import { framesToSendAgain } from './input-resend.ts';
 import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
@@ -40,8 +40,10 @@ import { startVisionClient } from './page/vision-client.ts';
 import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
+import * as connectionNotices from './play/connection-notices.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
+import * as gameStart from './play/game-start.ts';
 import * as joinPlan from './play/join-plan.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
@@ -65,7 +67,8 @@ import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, sendPaced, transferStillFor } from './sync-send.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
-import { createPeerObserver, newPageId, readAttemptId } from './peer-observe.ts';
+import { newPageId, readAttemptId } from './attempt-id.ts';
+import { createPeerDriver } from './peer-driver.ts';
 import {
   disconnectDisposition,
   hasAttemptLeft,
@@ -278,13 +281,13 @@ export const KNCore = {
   classifyRunnerStep,
   addressMapFor,
   captureFrame,
-  /** apply, catch up or refuse a host state from before this guest's frame (catch-up.ts, proved). */
-  catchUpStep,
+  /** A host state from before this guest's frame: apply, catch up or refuse it, and what then (catch-up.ts, proved). */
+  catchUp: { catchUpStep, tooOldStep },
   framesToAskFor,
   framesToSendAgain,
   checkRelayed,
   createConnectTracker,
-  /** The per-peer connection machine (peer-connection.ts). The engine runs it observing, through `peerObserve`. */
+  /** The per-peer connection machine (peer-connection.ts). The engine drives it, through `peerDriver`. */
   createPeerConnection,
   createSession,
   createStickDeadband,
@@ -308,8 +311,10 @@ export const KNCore = {
   normalizeAxis,
   peerFacts,
   peerTiming: PEER_TIMING,
-  /** The per-peer machine run beside the rollback engine, observing (peer-observe.ts). */
-  peerObserve: { createPeerObserver, newPageId, readAttemptId },
+  /** Which connection attempt a WebRTC signal belongs to (attempt-id.ts); both engines use it. */
+  attemptId: { newPageId, readAttemptId },
+  /** The per-peer machine, driven from the rollback engine's events (peer-driver.ts). */
+  peerDriver: { createPeerDriver },
   /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */
   resyncRequest: {
     answersAnOlderRequest,
@@ -362,7 +367,9 @@ export const KNCore = {
     romLibraryHtml,
     delay,
     connect,
+    connectionNotices,
     joinPlan,
+    gameStart,
     observe,
     remapWizard,
     romTransfer,
