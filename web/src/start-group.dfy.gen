@@ -24,14 +24,29 @@ lemma leavesOut_ensures(isHost: bool, running: bool, otherPlayer: bool, channelO
 {
 }
 
-function missedLoadDeadline(emuReady: bool, hostSaidReady: bool, saidReady: bool): bool
+function behindTheStart(emuReady: bool, hostReady: bool, readyThisSync: bool): bool
 {
-  (!(emuReady) || (hostSaidReady && !(saidReady)))
+  (!(emuReady) || (hostReady && !(readyThisSync)))
 }
 
-lemma missedLoadDeadline_ensures(emuReady: bool, hostSaidReady: bool, saidReady: bool)
-  ensures (!(emuReady) ==> missedLoadDeadline(emuReady, hostSaidReady, saidReady))
-  ensures (missedLoadDeadline(emuReady, hostSaidReady, saidReady) <==> (!(emuReady) || (hostSaidReady && !(saidReady))))
+lemma behindTheStart_ensures(emuReady: bool, hostReady: bool, readyThisSync: bool)
+  ensures (!(emuReady) ==> behindTheStart(emuReady, hostReady, readyThisSync))
+  ensures (behindTheStart(emuReady, hostReady, readyThisSync) <==> (!(emuReady) || (hostReady && !(readyThisSync))))
+{
+}
+
+function missedLoadDeadline(behind: bool, sinceStepMs: int, deadlineMs: int): bool
+  requires (sinceStepMs >= 0)
+  requires (deadlineMs > 0)
+{
+  (behind && (sinceStepMs >= deadlineMs))
+}
+
+lemma missedLoadDeadline_ensures(behind: bool, sinceStepMs: int, deadlineMs: int)
+  requires (sinceStepMs >= 0)
+  requires (deadlineMs > 0)
+  ensures (missedLoadDeadline(behind, sinceStepMs, deadlineMs) ==> behind)
+  ensures (missedLoadDeadline(behind, sinceStepMs, deadlineMs) <==> (behind && (sinceStepMs >= deadlineMs)))
 {
 }
 

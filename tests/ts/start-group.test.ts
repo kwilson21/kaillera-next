@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import { KNCore } from '../../web/src/index.ts';
 import { startDeadline } from '../../web/src/start-deadline.ts';
 import {
+  behindTheStart,
   countedByStartGates,
   leavesOut,
   leavesOutUnreachable,
@@ -50,18 +51,33 @@ test('only the host leaves a player out, before its match runs; one that answere
   assert.equal(leavesOut(true, false, true, true, false, false), false);
 });
 
-test('at the load deadline a player missed it if it has not loaded, or the host is at the ready barrier and it is not', () => {
+test('a player is behind the start if it has not loaded, or the host is ready at its barrier and it is not', () => {
   for (const emuReady of BOOLS)
-    for (const hostSaidReady of BOOLS)
-      for (const saidReady of BOOLS) {
-        const missed = missedLoadDeadline(emuReady, hostSaidReady, saidReady);
-        assert.equal(missed, !emuReady || (hostSaidReady && !saidReady), `${emuReady} ${hostSaidReady} ${saidReady}`);
+    for (const hostReady of BOOLS)
+      for (const readyThisSync of BOOLS) {
+        const behind = behindTheStart(emuReady, hostReady, readyThisSync);
+        assert.equal(behind, !emuReady || (hostReady && !readyThisSync), `${emuReady} ${hostReady} ${readyThisSync}`);
       }
   // A page from before `left-out:` that loaded but waits for a player the
   // host left out: it never reaches the barrier the host has reached.
-  assert.equal(missedLoadDeadline(true, true, false), true);
-  // While the host is still syncing itself, a player that loaded is not cut.
-  assert.equal(missedLoadDeadline(true, false, false), false);
+  assert.equal(behindTheStart(true, true, false), true);
+  // While the host is still syncing itself, a player that loaded waits on it.
+  assert.equal(behindTheStart(true, false, false), false);
+});
+
+test('the load deadline leaves out only a player behind with no start step for a whole window', () => {
+  const WINDOW = 60000;
+  for (const behind of BOOLS)
+    for (const sinceStepMs of [0, 1, WINDOW - 1, WINDOW, WINDOW + 1, 10 * WINDOW]) {
+      const missed = missedLoadDeadline(behind, sinceStepMs, WINDOW);
+      assert.equal(missed, behind && sinceStepMs >= WINDOW, `${behind} ${sinceStepMs}`);
+      if (missed) assert.equal(behind, true);
+    }
+  // A guest that loaded a moment ago, or is still taking the host's state
+  // in, has just made a step: it stays, however long the start has run.
+  assert.equal(missedLoadDeadline(true, 5000, WINDOW), false);
+  // One that is not behind (it said it is ready) is never left out.
+  assert.equal(missedLoadDeadline(false, 10 * WINDOW, WINDOW), false);
 });
 
 test('the host leaves out the guest another guest cannot reach, both in the start, once a give-up could have come', () => {

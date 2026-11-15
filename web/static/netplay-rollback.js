@@ -587,7 +587,6 @@
   const broadcastLockstepReady = () => {
     const dl = window.getDelayPreference ? window.getDelayPreference() : DEFAULT_DELAY_FRAMES;
     const caps = _localRollbackCaps();
-    if (!_isSpectator && _isValidPlayerSlot(_playerSlot)) _saidStartReady.add(_playerSlot);
     for (const p of Object.values(_peers)) {
       // Not to a player left out of this start: its channel may be kept open
       // so that it hears it is out, and a page from before `left-out:` would
@@ -8290,11 +8289,23 @@
   // up (leavesOutUnreachable).
   let _startedAt = 0;
 
-  // The slots that reached the start's ready barrier (said `lockstep-ready`)
-  // in this start, this page's own included. Kept past a sync timeout: the
-  // host's load deadline reads it to find a player that loaded but waits for
-  // something the host does not (specs/start_group.qnt, ready).
-  const _saidStartReady = new Set();
+  // The host's load deadline measures each player from its last start step
+  // (specs/start_group.qnt, NO_PROGRESS): its channel opening, its
+  // emu-ready, its lockstep-ready (by slot), the deadline's arming, and the
+  // host's own readiness, which every player then waits on. Cleared with the
+  // peer (resetPeerState), at stop and when the match runs.
+  const _startSteps = new Map(); // slot -> performance.now()
+  let _startArmedAt = 0;
+  let _hostReadyAt = 0;
+  const _noteStartStep = (slot) => {
+    if (_playerSlot !== 0 || !_isValidPlayerSlot(slot) || _phase >= PHASE_RUNNING) return;
+    _startSteps.set(slot, performance.now());
+  };
+  const _clearStartSteps = () => {
+    _startSteps.clear();
+    _startArmedAt = 0;
+    _hostReadyAt = 0;
+  };
 
   // Stop waiting for the player in `slot`: it is held as a late joiner, under
   // each key this page knows it by. Its connection is closed, not only
@@ -8455,20 +8466,28 @@
     }
   };
 
-  // I1 deadline: the host's wait for its start group to load, from when the
-  // host has loaded its own emulator until its match runs (both the
-  // emu-ready wait and the ready barrier). Before it, a player that answered
-  // but never loaded (a core that crashed, a tab frozen after it connected,
-  // a page from before `left-out:` still waiting for a player the host left
-  // out) held the start for ever. Effect code (web/src/start-deadline.ts): at
-  // the deadline each player that missed it is left out and told so, and
-  // joins late (specs/start_group.qnt, loadDeadline).
+  // I1 deadline: the host's wait for its start group, from when the host has
+  // loaded its own emulator until its match runs (both the emu-ready wait and
+  // the ready barrier). Before it, a player that answered but never loaded (a
+  // core that crashed, a tab frozen after it connected, a page from before
+  // `left-out:` still waiting for a player the host left out) held the start
+  // for ever. Effect code (web/src/start-deadline.ts), armed again after each
+  // run until the match runs (specs/start_group.qnt, DEADLINE_LIVE). A run
+  // leaves out each player behind (behindTheStart) that has made no start
+  // step for a whole window (missedLoadDeadline, NO_PROGRESS): a player still
+  // loading, or still taking the host's state in, stays. Each player left out
+  // is told so and joins late. Then the run goes on with the start whether or
+  // not it left anyone out: a wait nothing else would look at again moves on
+  // here.
   const START_LOAD_DEADLINE_MS = 60000;
+  // The next run comes no sooner than this after the last.
+  const START_LOAD_RECHECK_MIN_MS = 1000;
   let _startLoadWait = null;
-  const _armStartLoadDeadline = () => {
+  const _armStartLoadDeadline = (deadlineMs = START_LOAD_DEADLINE_MS) => {
     if (_startLoadWait || _isSpectator || _playerSlot !== 0 || _phase >= PHASE_RUNNING) return;
+    if (!_startArmedAt) _startArmedAt = performance.now();
     const wait = window.KNCore.startGroup.startDeadline({
-      deadlineMs: START_LOAD_DEADLINE_MS,
+      deadlineMs,
       onDeadline: () => {
         if (_startLoadWait !== wait) return;
         _startLoadWait = null;
@@ -8488,19 +8507,27 @@
   const _onStartLoadDeadline = () => {
     if (_phase >= PHASE_RUNNING || _isSpectator || _playerSlot !== 0) return;
     const rules = window.KNCore.startGroup;
-    const hostSaidReady = _saidStartReady.has(_playerSlot);
-    const missed = _startGroupPeers()
-      .filter(([, p]) => rules.missedLoadDeadline(!!p.emuReady, hostSaidReady, _saidStartReady.has(p.slot)))
-      .map(([sid]) => sid);
-    _syncLog(
-      `START-LOAD-DEADLINE after ${START_LOAD_DEADLINE_MS}ms phase=${_phase} hostSaidReady=${hostSaidReady} ` +
-        `missed=[${missed.map((sid) => _peers[sid]?.slot).join(',')}]`,
-    );
-    let leftAnyOut = false;
-    for (const sid of missed) {
-      if (_leaveOutOfStart(sid, 'it did not load in time', { cannotPlay: true, settle: false })) leftAnyOut = true;
+    const now = performance.now();
+    const hostReady = _phase >= PHASE_LOCKSTEP_READY;
+    const missed = [];
+    let nextDueMs = START_LOAD_DEADLINE_MS;
+    for (const [sid, p] of _startGroupPeers()) {
+      const behind = rules.behindTheStart(!!p.emuReady, hostReady, !!_lockstepReadyPeers[sid]);
+      const lastStep = Math.max(_startSteps.get(p.slot) ?? 0, _startArmedAt, _hostReadyAt);
+      const sinceStepMs = Math.max(0, Math.floor(now - lastStep));
+      if (rules.missedLoadDeadline(behind, sinceStepMs, START_LOAD_DEADLINE_MS)) missed.push(sid);
+      else if (behind) nextDueMs = Math.min(nextDueMs, START_LOAD_DEADLINE_MS - sinceStepMs);
     }
-    if (leftAnyOut) _settleStartGroup();
+    _syncLog(
+      `START-LOAD-DEADLINE phase=${_phase} hostReady=${hostReady} ` +
+        `missed=[${missed.map((sid) => _peers[sid]?.slot).join(',')}] next=${Math.max(START_LOAD_RECHECK_MIN_MS, nextDueMs)}ms`,
+    );
+    for (const sid of missed) {
+      const reason = _peers[sid]?.emuReady ? 'it did not get ready in time' : 'it did not load in time';
+      _leaveOutOfStart(sid, reason, { cannotPlay: true, settle: false });
+    }
+    _settleStartGroup();
+    _armStartLoadDeadline(Math.max(START_LOAD_RECHECK_MIN_MS, nextDueMs));
   };
 
   const installPeerDataChannelHandlers = (remoteSid, peer) => {
@@ -9159,6 +9186,7 @@
       peer.ready = true;
       clearStartupConnectWatchdog(peer);
       peer._startupConnectAttempt = 0;
+      _noteStartStep(peer.slot);
       if (peer.startupReconnecting) {
         peer.startupReconnecting = false;
         _syncLog(`startup reconnect complete sid=${remoteSid} slot=${peer.slot}`);
@@ -9328,6 +9356,7 @@
         }
         if (e.data === 'emu-ready') {
           peer.emuReady = true;
+          _noteStartStep(peer.slot);
           checkAllEmuReady();
         }
         // Pause and resume are the host's word alone: no other peer can hold
@@ -9820,7 +9849,7 @@
               peer.delayValue = msg.delay || 2;
               peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
               _lockstepReadyPeers[remoteSid] = true;
-              if (_isValidPlayerSlot(peer.slot)) _saidStartReady.add(peer.slot);
+              _noteStartStep(peer.slot);
               checkAllLockstepReady();
             } else if (msg.type === 'digest') {
               if (window.KNDesync) {
@@ -10043,8 +10072,8 @@
     _peerDriver()?.peerReset(slot, opts.sid ?? null);
     if (slot === null || slot === undefined) return;
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
-    // A player that comes back reaches the ready barrier again.
-    _saidStartReady.delete(slot);
+    // A player that comes back is measured from its next start step.
+    _startSteps.delete(slot);
     // A channel kept open for a left-out player's word is gone.
     if (opts.sid) _endKeptOpen(opts.sid);
     // A joiner that was being served is gone: the pause is not kept for it.
@@ -11035,6 +11064,8 @@
     if (_coreFatalError) return; // a dead core cannot enter the start sequence
     if (_phase < PHASE_LOCKSTEP_READY) return;
     if (_phase === PHASE_RUNNING) return;
+    // The host is ready: every player now waits on its state, a fresh window.
+    if (_playerSlot === 0 && !_hostReadyAt) _hostReadyAt = performance.now();
 
     // Check that at least 1 player peer is lockstep-ready
     // Not the players held as late joiners: they joined after the initial
@@ -13625,7 +13656,7 @@
     _phase = PHASE_RUNNING;
     _endHostAnswerDeadline(true);
     _endStartLoadWait(true);
-    _saidStartReady.clear();
+    _clearStartSteps();
     _peerDriver()?.matchStarted();
     window._knPreventRetroArchVisibilityPause = true;
     _checkStateTransition();
@@ -19510,7 +19541,7 @@
     _stopUnreachableReports();
     _endHostAnswerDeadline(false);
     _endStartLoadWait(false);
-    _saidStartReady.clear();
+    _clearStartSteps();
     _startCohortSlots = null;
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;

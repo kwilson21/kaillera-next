@@ -62,21 +62,36 @@ export function leavesOut(
 }
 
 /**
- * At the host's load deadline: has this player missed it?
+ * Is this player behind the host's start?
  *
- * `emuReady`: the player said it has loaded its emulator. `hostSaidReady`:
- * the host has reached the start's ready barrier (said `lockstep-ready`) in
- * this start. `saidReady`: the player has too. A player that loaded but did
- * not reach the barrier while the host did waits for something the host
- * does not: a player the host left out without that page hearing of it (one
- * from before `left-out:`). While the host has not reached the barrier
- * itself, only a player that has not loaded missed the deadline: the host is
- * the one still syncing.
+ * `emuReady`: the player said it has loaded its emulator. `hostReady`: the
+ * host has synced and is ready at its barrier itself. `readyThisSync`: the
+ * player said `lockstep-ready` to that barrier (the barrier's own record,
+ * the only one). A player that has not loaded is behind; one that has, only
+ * once the host is ready and it is not: while the host is still syncing
+ * itself, the player waits on the host.
  */
 //@ ensures !emuReady ==> \result
-//@ ensures \result <==> !emuReady || (hostSaidReady && !saidReady)
-export function missedLoadDeadline(emuReady: boolean, hostSaidReady: boolean, saidReady: boolean): boolean {
-  return !emuReady || (hostSaidReady && !saidReady);
+//@ ensures \result <==> !emuReady || (hostReady && !readyThisSync)
+export function behindTheStart(emuReady: boolean, hostReady: boolean, readyThisSync: boolean): boolean {
+  return !emuReady || (hostReady && !readyThisSync);
+}
+
+/**
+ * At a run of the host's load deadline: does it leave this player out?
+ *
+ * Only a player behind (behindTheStart) that has made no start step for a
+ * whole window: `sinceStepMs`, since its last (its channel opening, its
+ * emu-ready, its lockstep-ready, or the host's own readiness, which it then
+ * waits on, and the deadline's arming), at least `deadlineMs`. A player
+ * still loading, or still taking the host's state in, keeps making steps and
+ * is never left out (specs/start_group.qnt, aPlayerMakingProgressStays).
+ */
+//@ requires sinceStepMs >= 0 && deadlineMs > 0
+//@ ensures \result ==> behind
+//@ ensures \result <==> behind && sinceStepMs >= deadlineMs
+export function missedLoadDeadline(behind: boolean, sinceStepMs: number, deadlineMs: number): boolean {
+  return behind && sinceStepMs >= deadlineMs;
 }
 
 /**
