@@ -9,12 +9,13 @@ Validates:
 Run: pytest tests/test_mobile_audio.py -v -s
 """
 
+from netplay_steps import sync_log
 from playwright.sync_api import expect
 
 
 
 
-def test_guest_boots_and_audio_initializes(browser, server_url, rom_path):
+def test_guest_boots_and_audio_initializes(browser, server_url, rom_path, room):
     """Guest emulator boots into lockstep and audio pipeline initializes."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -24,7 +25,7 @@ def test_guest_boots_and_audio_initializes(browser, server_url, rom_path):
 
     try:
         # Host creates room, loads ROM, enables sharing
-        host.goto(f"{server_url}/play.html?room=AUDIO1&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
@@ -35,7 +36,7 @@ def test_guest_boots_and_audio_initializes(browser, server_url, rom_path):
 
         # Guest joins, accepts ROM sharing
         # ?debug: the guest's console logs, read below, are muted without it.
-        guest.goto(f"{server_url}/play.html?room=AUDIO1&name=Guest&debug")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest&debug")
         expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
         guest.click("#rom-accept-btn")
 
@@ -54,6 +55,12 @@ def test_guest_boots_and_audio_initializes(browser, server_url, rom_path):
         gesture.click()
         expect(gesture).to_be_hidden(timeout=3000)
 
+        # The host taps to start as well (every player does, so that each
+        # makes its AudioContext inside a tap); the game waits for both.
+        host_gesture = host.locator("#gesture-prompt")
+        expect(host_gesture).to_be_visible(timeout=10000)
+        host_gesture.click()
+
         # Wait for guest to enter lockstep (emulator booted past frame 120)
         print("\nWaiting for lockstep to activate...")
         guest.wait_for_function(
@@ -65,11 +72,15 @@ def test_guest_boots_and_audio_initializes(browser, server_url, rom_path):
         # Let lockstep run for a few seconds so audio pipeline kicks in
         guest.wait_for_timeout(3000)
 
-        guest_frame = guest.evaluate("window._frameNum || 0")
+        guest_frame = guest.evaluate("window.KNState.frameNum || 0")
         print(f"Guest lockstep frame: {guest_frame}")
         assert guest_frame > 10, f"Lockstep not advancing (frame={guest_frame})"
 
-        # Check audio-related console logs
+        # Some of these lines are console logs, some are in the engine's sync
+        # log (which the console shows only in part): read both.
+        guest_logs.extend(sync_log(guest).splitlines())
+
+        # Check audio-related logs
         audio_logs = [l for l in guest_logs if 'audio' in l.lower() or 'AudioContext' in l]
         print(f"\nAudio logs ({len(audio_logs)}):")
         for l in audio_logs:

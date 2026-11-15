@@ -8,16 +8,16 @@ from netplay_steps import frame, silence_inputs, sync_log_lines, syncs_applied, 
 from playwright.sync_api import expect
 
 
-def test_lockstep_no_desync(browser, server_url, rom_path, start_game):
+def test_lockstep_no_desync(browser, server_url, rom_path, start_game, room):
     """Two players in lockstep should have identical game state at the same frame."""
     host = browser.new_page()
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=DSYNC1&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=DSYNC1&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
         _load_rom(host, rom_path)
@@ -85,16 +85,16 @@ def test_lockstep_no_desync(browser, server_url, rom_path, start_game):
         guest.close()
 
 
-def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game):
+def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
     """Verify both emulators advance at the same rate (network-paced)."""
     host = browser.new_page()
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=PACE1&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=PACE1&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
         _load_rom(host, rom_path)
@@ -132,7 +132,7 @@ def _load_rom(page, rom_path):
     page.set_input_files("#rom-drop input[type=file]", rom_path)
 
 
-def test_dropped_guest_is_resynced_when_it_returns(browser, server_url, rom_path, start_game):
+def test_dropped_guest_is_resynced_when_it_returns(browser, server_url, rom_path, start_game, room):
     """A guest dropped as a phantom gets the host's state when it comes back.
 
     This test once corrupted the guest's state and waited for the periodic
@@ -149,10 +149,10 @@ def test_dropped_guest_is_resynced_when_it_returns(browser, server_url, rom_path
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=RESYNC1&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=RESYNC1&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
         _load_rom(host, rom_path)
@@ -204,15 +204,15 @@ def test_dropped_guest_is_resynced_when_it_returns(browser, server_url, rom_path
         guest.close()
 
 
-def test_resync_sustains_over_time(browser, server_url, rom_path, start_game):
+def test_resync_sustains_over_time(browser, server_url, rom_path, start_game, room):
     """With rollback on, resyncs should keep correcting drift over 10+ seconds."""
     host = browser.new_page()
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=SUST01&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
-        guest.goto(f"{server_url}/play.html?room=SUST01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
         _load_rom(host, rom_path)
@@ -252,7 +252,7 @@ def test_resync_sustains_over_time(browser, server_url, rom_path, start_game):
         guest.close()
 
 
-def test_end_game_with_rollback(browser, server_url, rom_path, start_game):
+def test_end_game_with_rollback(browser, server_url, rom_path, start_game, room):
     """End game should work cleanly when rollback/sync is enabled."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -262,10 +262,10 @@ def test_end_game_with_rollback(browser, server_url, rom_path, start_game):
     guest.on("pageerror", lambda err: guest_errors.append(str(err)))
 
     try:
-        host.goto(f"{server_url}/play.html?room=END01&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=END01&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         guest.wait_for_selector("#overlay", timeout=10000)
 
         _load_rom(host, rom_path)

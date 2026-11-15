@@ -9,7 +9,7 @@ import os
 from playwright.sync_api import expect
 
 
-def test_rom_drop_and_boot(browser, server_url, rom_path):
+def test_rom_drop_and_boot(browser, server_url, rom_path, room):
     """Drop a ROM file, start game, verify EmulatorJS loader is injected."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -21,7 +21,7 @@ def test_rom_drop_and_boot(browser, server_url, rom_path):
     try:
 
         # Host creates room
-        host.goto(f"{server_url}/play.html?room=ROMTEST&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Verify drop zone exists
@@ -44,7 +44,7 @@ def test_rom_drop_and_boot(browser, server_url, rom_path):
         assert ejs_url != "NOT SET", "EJS_gameUrl was not set after file drop"
 
         # Guest joins
-        guest.goto(f"{server_url}/play.html?room=ROMTEST&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         # Guest also needs a ROM

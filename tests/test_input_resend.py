@@ -44,9 +44,9 @@ def _phantoms(page, slot):
     return sync_log_lines(page, f"PEER-PHANTOM slot={slot}")
 
 
-def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_url, rom_path, start_game):
+def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_url, rom_path, start_game, room):
     """A few lost input packets are made good by the next one: no phantom."""
-    host, guest = _start(browser, server_url, rom_path, start_game, "RESND1")
+    host, guest = _start(browser, server_url, rom_path, start_game, room)
     try:
         phantoms_before = len(_phantoms(host, 1))
 
@@ -70,9 +70,9 @@ def test_short_input_gap_is_filled_without_dropping_the_guest(browser, server_ur
         guest.close()
 
 
-def test_silent_guest_is_dropped_and_the_host_runs_on(browser, server_url, rom_path, start_game):
+def test_silent_guest_is_dropped_and_the_host_runs_on(browser, server_url, rom_path, start_game, room):
     """A guest silent past 5 s is dropped as a phantom, and the host goes on without it."""
-    host, guest = _start(browser, server_url, rom_path, start_game, "HTIME1")
+    host, guest = _start(browser, server_url, rom_path, start_game, room)
     try:
         assert not _phantoms(host, 1), "guest was a phantom before the test silenced it"
         silent_ms = 14000

@@ -11,7 +11,7 @@ from playwright.sync_api import expect
 
 
 
-def test_gesture_prompt_visible_for_guest(browser, server_url, rom_path):
+def test_gesture_prompt_visible_for_guest(browser, server_url, rom_path, room):
     """Guest sees gesture prompt overlay after game starts."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -21,7 +21,7 @@ def test_gesture_prompt_visible_for_guest(browser, server_url, rom_path):
 
     try:
         # Host creates room, loads ROM, enables sharing
-        host.goto(f"{server_url}/play.html?room=GESTURE1&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
@@ -32,7 +32,7 @@ def test_gesture_prompt_visible_for_guest(browser, server_url, rom_path):
 
         # Guest joins, accepts ROM sharing
         # ?debug: the guest's console logs, read below, are muted without it.
-        guest.goto(f"{server_url}/play.html?room=GESTURE1&name=Guest&debug")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest&debug")
         expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
         guest.click("#rom-accept-btn")
 
@@ -78,7 +78,7 @@ def test_gesture_prompt_visible_for_guest(browser, server_url, rom_path):
         guest.close()
 
 
-def test_host_taps_to_start_too(browser, server_url, rom_path):
+def test_host_taps_to_start_too(browser, server_url, rom_path, room):
     """The host gets the tap-to-start prompt too, and its tap starts the emulator.
 
     Every player is shown the prompt before boot, the host included, so that the
@@ -90,12 +90,12 @@ def test_host_taps_to_start_too(browser, server_url, rom_path):
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room=GESTURE2&host=1&name=Host&mode=rollback")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
 
-        guest.goto(f"{server_url}/play.html?room=GESTURE2&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
         guest.evaluate("window.__test_socket.emit('rom-ready', { ready: true })")
 

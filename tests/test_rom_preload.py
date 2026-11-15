@@ -12,7 +12,7 @@ from playwright.sync_api import expect
 
 
 
-def test_rom_preload_before_game_start(browser, server_url, rom_path):
+def test_rom_preload_before_game_start(browser, server_url, rom_path, room):
     """ROM transfers immediately when guest accepts sharing, before game starts."""
     host = browser.new_page()
     guest = browser.new_page()
@@ -26,7 +26,7 @@ def test_rom_preload_before_game_start(browser, server_url, rom_path):
         # Host creates room, loads ROM, enables sharing
         # The pages print their console logs, which these checks read, only with
         # ?debug (play.html mutes console.log without it).
-        host.goto(f"{server_url}/play.html?room=PRELOAD1&host=1&name=Host&mode=rollback&debug")
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback&debug")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
         host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
         host.wait_for_timeout(500)
@@ -39,7 +39,7 @@ def test_rom_preload_before_game_start(browser, server_url, rom_path):
         host.wait_for_timeout(300)
 
         # Guest joins, sees sharing prompt, accepts
-        guest.goto(f"{server_url}/play.html?room=PRELOAD1&name=Guest&debug")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest&debug")
         expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
         guest.click("#rom-accept-btn")
 
