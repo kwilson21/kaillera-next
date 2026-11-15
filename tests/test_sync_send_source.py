@@ -25,7 +25,7 @@ def _send_body() -> str:
 def test_chunks_go_through_the_paced_sender():
     body = _send_body()
     assert "window.KNCore.syncSend.sendPaced(" in body
-    assert "lowWaterBytes: CHUNK_SIZE" in body
+    assert "lowWaterBytes: SYNC_SEND_LOW_WATER" in body
     assert "buffered: () => dc.bufferedAmount" in body
     # No loop hands the chunks to the channel directly any more.
     assert not re.search(r"for \(let i = 0; i < numChunks; i\+\+\)", body)

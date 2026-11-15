@@ -9,8 +9,8 @@
  * inputs unsent for seconds, the guest gave up on the host at the peer-stale
  * deadline and ran past its prediction window, and the inputs then arrived
  * up to 83 frames deep (DEEP-MISPREDICT-SKIP, a desync). So the next chunk
- * goes only once less than a chunk of the state is waiting in the channel:
- * an input never queues behind more than one chunk.
+ * goes only once less than `lowWaterBytes` are waiting in the channel: an
+ * input never queues behind more than that.
  *
  * Written as one Effect program so that the wait for room cannot go on
  * without a deadline: each chunk waits at most `stallMs`, then the transfer

@@ -6415,8 +6415,14 @@
   let _syncChunkSessionId = 0;
   let _syncLastChunkProgressLogAt = 0;
   const SYNC_CHUNK_TIMEOUT_MS = 3000;
-  // Host: a state chunk waits for the channel to hold less than one chunk of
-  // it (polled), at most SYNC_SEND_STALL_MS each (I1; sendSyncChunks).
+  // Host: a state chunk waits for the channel to hold less than
+  // SYNC_SEND_LOW_WATER bytes (polled), at most SYNC_SEND_STALL_MS each (I1;
+  // sendSyncChunks). Four 64 KB chunks: the host's inputs never queue behind
+  // more than that (0.4 s at 5 Mbit/s), and a page whose main thread is busy
+  // still moves a state well inside the guest's 3 s chunk timeout. With one
+  // chunk, each took two or three turns of the main thread: about 250 ms in
+  // the test container, 6 s for a state.
+  const SYNC_SEND_LOW_WATER = 4 * 64000;
   const SYNC_SEND_POLL_MS = 5;
   const SYNC_SEND_STALL_MS = 15000;
   const SOCKET_SYNC_B64_SOFT_LIMIT = 3900000;
@@ -17677,8 +17683,8 @@
     const skipped = [];
     // Host: send compressed state/delta via DC in 64KB chunks, handed to the
     // channel one at a time (KNCore.syncSend, specs/tick_deadlines.qnt
-    // `input_link`): the next goes only once less than a chunk of this state
-    // is still waiting in the channel. The host's inputs share the
+    // `input_link`): the next goes only once less than SYNC_SEND_LOW_WATER
+    // bytes are still waiting in the channel. The host's inputs share the
     // connection and queue behind whatever it has been given; handed a whole
     // state at once (two answers, 2.9 MB, in a two-player run) it left them
     // unsent for seconds, the guest gave up on the host at the peer-stale
@@ -17737,7 +17743,7 @@
           send: (i) => dc.send(compressed.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, compressed.length))),
           buffered: () => dc.bufferedAmount,
           open: () => dc.readyState === 'open' && epoch === _syncQueueEpoch,
-          lowWaterBytes: CHUNK_SIZE,
+          lowWaterBytes: SYNC_SEND_LOW_WATER,
           pollMs: SYNC_SEND_POLL_MS,
           stallMs: SYNC_SEND_STALL_MS,
         });

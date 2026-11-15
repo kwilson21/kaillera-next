@@ -185,8 +185,9 @@ module tick_deadlines_current {
 //
 // PACED: the host hands its channel a chunk only while no chunk of its is
 //   waiting there (sendSyncChunks waits for the channel's bufferedAmount to
-//   fall below one chunk), and starts a transfer only once the last one has
-//   gone (_pushingSyncState holds a request until then).
+//   fall below SYNC_SEND_LOW_WATER: a "chunk" here is that much, four of
+//   the engine's), and starts a transfer only once the last one has gone
+//   (_pushingSyncState queues a request until then).
 //   false = before: every chunk is handed over at once, and a second answer
 //   behind the first.
 module input_link {

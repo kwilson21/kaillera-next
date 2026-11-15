@@ -1,6 +1,6 @@
 /**
  * Whether the next chunk may be handed to the channel, given the bytes still
- * waiting in it (`bufferedAmount`) and the low-water mark (one chunk).
+ * waiting in it (`bufferedAmount`) and the low-water mark.
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */

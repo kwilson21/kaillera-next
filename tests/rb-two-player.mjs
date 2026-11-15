@@ -519,7 +519,7 @@ const initScript = ({ lat, jitter }) => {
   // What this queue holds has been handed to send() and not yet taken by the
   // simulated link, which is what a real channel's bufferedAmount counts.
   // The engine hands its resync state over a chunk at a time, waiting for
-  // bufferedAmount to fall below a chunk (KNCore.syncSend); without this the
+  // bufferedAmount to fall below a low-water mark (KNCore.syncSend); without this the
   // queue hid a held answer from it, and on release the whole of it, 2.9 MB
   // with the next answer behind it, went into the connection at once. Only
   // the `sync-state` channel: the input channels' own buffer checks
