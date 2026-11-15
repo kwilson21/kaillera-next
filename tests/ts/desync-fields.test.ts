@@ -333,3 +333,34 @@ test('decodeDesyncDigest accepts what the detector sends and nothing else', () =
   assert.equal(decodeDesyncDigest({ frame: 7, hashes: fullHashes(), replayMeta: 'x' }), null);
   assert.equal(decodeDesyncDigest({ frame: 7, hashes: fullHashes(), replayMeta: { ...replayMeta, pre: ['a'] } }), null);
 });
+
+test('a resync that runs frames again drops the digests built for them', () => {
+  const page: DetectorPage = { KNState: { isLocalHost: false, matchId: 'm1', peers: {} }, _peers: {} };
+  const detector = createDesyncDetector(page);
+  const digests = detector._testHooks.localDigests;
+  for (const frame of [100, 110, 120, 130]) digests.set(frame, { frame, hashes: [frame] });
+  detector.forgetFrom(120);
+  assert.deepEqual([...digests.keys()], [100, 110]);
+});
+
+test('and the captures queued for suspects among them', () => {
+  const page: DetectorPage = { KNState: { isLocalHost: false, matchId: 'm1', peers: {} }, _peers: {} };
+  const detector = createDesyncDetector(page);
+  const pending = detector._testHooks.pendingCaptures;
+  const suspect = (frame: number): DesyncSuspect => ({
+    frame,
+    field: 'stocks',
+    slot: 0,
+    hashes: {},
+    trigger: 'flag',
+    replayMeta: null,
+  });
+  pending.set(150, [suspect(100), suspect(125)]);
+  pending.set(160, [suspect(130)]);
+  detector.forgetFrom(120);
+  assert.deepEqual([...pending.keys()], [150]);
+  assert.deepEqual(
+    pending.get(150)?.map((p) => p.frame),
+    [100],
+  );
+});

@@ -212,6 +212,9 @@ export const sessionMachine = setupEffect({
         },
         // A game-started for a page already in the match changes nothing but the match id.
         gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
+        // A start this page could not boot (no ROM, none to take from the
+        // host: gameStartPlan's askForRom): it waits for one and joins late.
+        lateJoinRomNeeded: { target: 'lateJoinAwaitingRom' },
       },
     },
   },

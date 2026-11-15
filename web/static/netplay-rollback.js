@@ -4981,6 +4981,43 @@
     return { buttons: heap[0], lx: heap[1], ly: heap[2], cx: heap[3], cy: heap[4] };
   };
 
+  // The inputs the engine applies on `frame` (applyFrame = frame - delay),
+  // read from its ring and written to the controllers, every slot's at once.
+  // Returns this page's own. Every slot, local included, is applied at
+  // applyFrame, so an input sampled at frame F runs at F + delay on every
+  // peer — the GGPO model, where input delay applies to everyone's input
+  // alike. Applying local input at the current frame (the previous "true
+  // rollback" split) made each peer simulate its own input `delay` frames
+  // earlier than the other peer did, so peers diverged as soon as anyone
+  // pressed anything. True-rollback mode keeps a small delay (jitter-sized,
+  // see _recomputeDelay) and leaves the rest of the latency to rollback; the
+  // C replay path applies local input the same way (kn_pre_tick replay
+  // branch). Legacy mode differs only in its delay sizing and thresholds.
+  // tick() and the catch-up (_catchUpSlice) both write a forward frame's
+  // inputs here.
+  const _writeRingInputs = (mod, applyFrame) => {
+    for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
+    if (RB_TRUE_ROLLBACK) {
+      const localApplied = applyFrame >= 0 ? _rbGetInput(mod, _playerSlot, applyFrame) : KNShared.ZERO_INPUT;
+      writeInputToMemory(_playerSlot, localApplied);
+      if (applyFrame >= 0) {
+        for (let s = 0; s < rb_numPlayers; s++) {
+          if (s === _playerSlot) continue;
+          writeInputToMemory(s, _rbGetInput(mod, s, applyFrame));
+        }
+      }
+      return localApplied;
+    }
+    if (applyFrame < 0) return KNShared.ZERO_INPUT;
+    let localApplied = KNShared.ZERO_INPUT;
+    for (let s = 0; s < rb_numPlayers; s++) {
+      const inp = _rbGetInput(mod, s, applyFrame);
+      writeInputToMemory(s, inp);
+      if (s === _playerSlot) localApplied = inp;
+    }
+    return localApplied;
+  };
+
   // Bounds on legitimate remote input frames, shared by _processInputPacket's
   // guard and the rollback-init backfill.
   const INPUT_PAST_WINDOW_FRAMES = 240; // ~4s at 60fps — generous for a stalled peer
@@ -5247,6 +5284,13 @@
   const RUN_LATE_JOIN_PAUSE = 'late-join-pause'; // host paused for joiner
   const RUN_AWAITING_RESYNC = 'awaiting-resync'; // guest waiting for state
   let _runSubstate = RUN_NORMAL;
+  // A catch-up from a host state behind this guest (_startCatchUp).
+  let _catchUpTo = -1; // the frame a catch-up runs to; -1 = none
+  let _catchUpHoleSince = 0; // when the slice first found the hole it waits on; 0 = none
+  let _catchUpFrom = -1;
+  let _catchUpStartedAt = 0;
+  let _catchUpWorkMs = 0;
+  let _catchUpSlices = 0;
 
   // Legacy booleans — still the source of truth until fully migrated.
   // Each is set alongside _phase during the transition period.
@@ -6599,6 +6643,15 @@
   let _owedResync = false;
   let _owedResyncAsksAgain = 0;
   const RESYNC_MAX_ASKS_AGAIN = 2;
+  // A host state from before this guest's frame is caught up from: applied,
+  // and the frames up to the guest's run again (_startCatchUp). Each frame
+  // run again costs emulator time with the canvas held, less than a frame
+  // shown at the game's pace costs on a page that keeps up with the game. 10 s
+  // covers the answer to the guest's own request up to its deadline (8 s,
+  // RESYNC_REQUEST_TIMEOUT_MS); a state further back is not applied
+  // (SYNC-TOO-OLD-DROPPED) and an owed resync is asked for again
+  // (specs/resync_flow.qnt, MAX_CATCH_UP).
+  const MAX_CATCH_UP_FRAMES = 600;
   // An answer whose chunks are all in is decoded off the main thread (the
   // worker decompresses it and, for a delta, XORs it) before it is held: the
   // deadline does not count meanwhile, or it lets the request go while its
@@ -8355,11 +8408,14 @@
     // sit in roughly [_frameNum - 240, _frameNum + DELAY_FRAMES + 60].
     // Reject anything wildly outside that range; INPUT-LATE handles the
     // soft-stale case below.
+    // While a catch-up runs, the frame counter is behind the frame the
+    // guest is going back to, and the peers' inputs are for that one.
+    const recvBound = Math.max(_frameNum, _catchUpTo);
     if (
       !Number.isFinite(recvFrame) ||
       recvFrame < 0 ||
       recvFrame < _frameNum - INPUT_PAST_WINDOW_FRAMES ||
-      recvFrame > _frameNum + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES
+      recvFrame > recvBound + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES
     ) {
       _syncLog(`INPUT-OOR slot=${peer.slot} recvF=${recvFrame} myF=${_frameNum} delay=${DELAY_FRAMES}`);
       // Too far ahead: the peer has made it and will not send it again on
@@ -13884,6 +13940,7 @@
 
   const stopSync = () => {
     _phase = PHASE_STOPPED;
+    _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
     // Every connection is about to close; each machine is told, and its per-match state goes.
     _peerDriver()?.sessionEnded();
     _runSubstate = RUN_NORMAL;
@@ -14188,6 +14245,9 @@
   const SYNC_APPLY_REPLAY_WAIT_MS = 1000;
   let _syncApplyDeferredAt = 0;
   const _replayBlocksSyncApply = () => {
+    // A catch-up ends within MAX_CATCH_UP_FRAMES ticks (_startCatchUp): the
+    // newer state is applied then, from the frame the guest is back on.
+    if (_catchUpTo >= 0) return true;
     const mod = window.EJS_emulator?.gameManager?.Module;
     const busy = mod?._kn_get_replay_depth?.() > 0 || (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
     if (!busy) {
@@ -14566,6 +14626,30 @@
           `target=${_syncTargetFrame}`,
       );
       _pendingResyncState = null;
+    }
+    // A state further back than this guest catches up from (KNCore.catchUp.catchUpStep,
+    // proved; specs/resync_flow.qnt, tooOldToCatchUpTest): not applied, as a
+    // late answer is not. The request it answered has ended, so an owed
+    // resync is asked for again here, or given up visibly.
+    if (
+      _pendingResyncState &&
+      _canCatchUp() &&
+      window.KNCore.catchUp.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'
+    ) {
+      _syncLog(
+        `SYNC-TOO-OLD-DROPPED f=${_frameNum} frame=${_pendingResyncState.frame} ` +
+          `behind=${_frameNum - _pendingResyncState.frame} max=${MAX_CATCH_UP_FRAMES} ` +
+          `answerFor=${_pendingResyncState.answerFor ?? 0} newest=${_resyncRequestId}`,
+      );
+      _pendingResyncState = null;
+      const then = window.KNCore.catchUp.tooOldStep(
+        _owedResync,
+        _resyncRequestInFlight,
+        _owedResyncAsksAgain,
+        RESYNC_MAX_ASKS_AGAIN,
+      );
+      if (then === 'askAgain') _askAgainForOwedResync();
+      else if (then === 'stopAsking') _stopAskingForOwedResync('its answers came too late to catch up from');
     }
     const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;
     if (_syncTargetFrame > 0) {
@@ -15275,6 +15359,17 @@
         // ── Drain queued remote inputs into C engine ──────────────────────
         _drainPendingCInputs(tickMod);
 
+        // A catch-up from a state behind this guest goes on: its next slice
+        // is this tick's work (_startCatchUp).
+        if (_catchUpTo >= 0) {
+          _catchUpSlice(tickMod);
+          _markTickReturn('catch-up');
+          // Old frames run again: the 60 Hz slot is not spent on them, as on
+          // a rollback replay.
+          _tickReplayOnly = true;
+          return;
+        }
+
         // ── DEMO-PAUSED: third mode in the hybrid input-stall ladder ────────
         // When the demo orchestrator pauses predictions to simulate lockstep
         // behavior under jitter, stall like BOOT/STRICT-MENU do — but only if
@@ -15938,32 +16033,18 @@
             }
           }
         }
-        for (let zs = 0; zs < 4; zs++) writeInputToMemory(zs, 0);
-        // Every slot, local included, is applied at applyFrame = frame - delay,
-        // so an input sampled at frame F runs at F + delay on every peer — the
-        // GGPO model, where input delay applies to everyone's input alike.
-        // Applying local input at the current frame (the previous "true
-        // rollback" split) made each peer simulate its own input `delay`
-        // frames earlier than the other peer did, so peers diverged as soon
-        // as anyone pressed anything. True-rollback mode keeps a small delay
-        // (jitter-sized, see _recomputeDelay) and leaves the rest of the
-        // latency to rollback; the C replay path applies local input the same
-        // way (kn_pre_tick replay branch). Legacy mode differs only in its
-        // delay sizing and thresholds.
+        const localApplied = _writeRingInputs(tickMod, applyFrame);
         if (RB_TRUE_ROLLBACK) {
-          const localApplied = applyFrame >= 0 ? _rbGetInput(tickMod, _playerSlot, applyFrame) : KNShared.ZERO_INPUT;
-          writeInputToMemory(_playerSlot, localApplied);
           // Defer log-string allocation until we actually log. Per-tick at
           // 60 Hz we'd otherwise build N+1 template-literal strings + a
           // regex-tested array even though only ~1% of ticks log
           // (anyNonZero short-circuits and 60-frame heartbeat).
           let anyNonZero = !!(localApplied.buttons || localApplied.lx || localApplied.ly);
           if (applyFrame >= 0) {
-            for (let s = 0; s < rb_numPlayers; s++) {
+            for (let s = 0; s < rb_numPlayers && !anyNonZero; s++) {
               if (s === _playerSlot) continue;
               const inp = _rbGetInput(tickMod, s, applyFrame);
-              writeInputToMemory(s, inp);
-              if (!anyNonZero && (inp.buttons || inp.lx || inp.ly)) anyNonZero = true;
+              if (inp.buttons || inp.lx || inp.ly) anyNonZero = true;
             }
           }
           if (anyNonZero || _frameNum % 60 === 0) {
@@ -15978,13 +16059,12 @@
             _syncLog(line);
           }
         } else if (applyFrame >= 0) {
-          // Same deferral pattern: read + write inputs, only build the log
-          // string once we know we'll actually log it.
+          // Same deferral pattern: only build the log string once we know
+          // we'll actually log it.
           let anyNonZero = false;
-          for (let s = 0; s < rb_numPlayers; s++) {
+          for (let s = 0; s < rb_numPlayers && !anyNonZero; s++) {
             const inp = _rbGetInput(tickMod, s, applyFrame);
-            writeInputToMemory(s, inp);
-            if (!anyNonZero && (inp.buttons || inp.lx || inp.ly)) anyNonZero = true;
+            if (inp.buttons || inp.lx || inp.ly) anyNonZero = true;
           }
           if (anyNonZero || _frameNum % 60 === 0) {
             let line = `NORMAL-INPUT f=${applyFrame}`;
@@ -18257,6 +18337,162 @@
     }
   };
 
+  // Catching up runs forward frames through the C engine, after a kn_sync
+  // load that put the frame counter on the state's frame.
+  const _canCatchUp = () => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    return (
+      _useCRollback &&
+      _hasKnSync &&
+      Number.isInteger(_playerSlot) &&
+      !!mod?._kn_pre_tick &&
+      !!mod?._kn_post_tick &&
+      !!mod?._kn_get_frame
+    );
+  };
+
+  // A host state from before this guest's frame (the answer to a "now"
+  // request is the host's state from when it heard the request, and the
+  // guest has played on): the frames from the state's up to the one the
+  // guest was on run again, unseen and unheard, with the inputs both pages
+  // already have, as fast as the emulator goes, instead of being played
+  // again in sight at the game's pace while the host waits for this guest's
+  // inputs (specs/resync_flow.qnt, CATCH_UP; KNCore.catchUp, proved).
+  // The canvas keeps the frame it showed until the guest is back.
+  //
+  // Each frame is a forward step as in tick(): its inputs fed to the
+  // engine, kn_pre_tick, the ring's inputs written to the controllers, the
+  // emulator stepped, kn_post_tick. Every peer's input is fed again from
+  // this page's record before its frame runs, so a gap longer than the
+  // engine's 256-frame input ring runs on the real inputs and not on
+  // predictions nothing would correct (the pages split after a 272-frame
+  // rewind). An input not here is predicted where tick() would predict it:
+  // within the rollback window of the frame the guest goes on from, or a
+  // phantom peer's. A deeper hole is asked for and waited on, up to
+  // CATCH_UP_HOLE_WAIT_MS; run unseen on a prediction, it could not be
+  // rolled back once the input came. Past that wait normal ticks play the
+  // rest, as they played all of it before.
+  //
+  // It runs in slices of at most CATCH_UP_SLICE_MS, one per tick (the first
+  // in applySyncState), so the page keeps taking in messages and inputs
+  // between them; each slice runs at least one frame or ends the catch-up,
+  // so it ends within MAX_CATCH_UP_FRAMES ticks. A newer state waits for it
+  // (_replayBlocksSyncApply).
+  const CATCH_UP_SLICE_MS = 50;
+  // A hole deeper than the rollback window is asked for and waited on, this
+  // long at most (I1); then normal ticks play the rest.
+  const CATCH_UP_HOLE_WAIT_MS = 3000;
+
+  const _startCatchUp = (mod, fromFrame, toFrame) => {
+    if ((mod._kn_get_replay_depth?.() ?? 0) > 0 || (mod._kn_peek_pending_rollback?.() ?? -1) >= 0) {
+      _syncLog(`SYNC-CATCH-UP skipped from=${fromFrame} of=${toFrame}: a rollback is pending`);
+      return;
+    }
+    _catchUpFrom = fromFrame;
+    _catchUpTo = toFrame;
+    _catchUpStartedAt = performance.now();
+    // Its own digests for the frames run again describe the state replaced.
+    window.KNDesync?.forgetFrom(fromFrame);
+    _catchUpWorkMs = 0;
+    _catchUpSlices = 0;
+    _setReplayFullHeadless(mod, true, 'catch-up');
+    _setReplayRdpSkip(mod, true, 'catch-up');
+    _setReplayAudioOutputSkip(mod, true, 'catch-up');
+    _catchUpSlice(mod);
+  };
+
+  const _endCatchUp = (mod, stoppedAt = '') => {
+    if (_catchUpTo < 0) return;
+    _setReplayAudioOutputSkip(mod, false, 'catch-up');
+    _setReplayRdpSkip(mod, false, 'catch-up');
+    _setReplayFullHeadless(mod, false, 'catch-up');
+    _syncLog(
+      `SYNC-CATCH-UP from=${_catchUpFrom} to=${_frameNum} of=${_catchUpTo} frames=${_frameNum - _catchUpFrom} ` +
+        `ms=${(performance.now() - _catchUpStartedAt).toFixed(1)} workMs=${_catchUpWorkMs.toFixed(1)} ` +
+        `slices=${_catchUpSlices}${stoppedAt ? ` stopped: ${stoppedAt}` : ''}`,
+    );
+    _catchUpTo = -1;
+    _catchUpFrom = -1;
+    _catchUpHoleSince = 0;
+  };
+
+  const _catchUpSlice = (mod) => {
+    if (_catchUpTo < 0) return;
+    const t0 = performance.now();
+    const remotePeers = [];
+    for (const [sid, peer] of Object.entries(_peers)) {
+      if (!Number.isInteger(peer.slot) || peer.slot === _playerSlot || _isPeerPendingLateJoin(sid, peer)) continue;
+      remotePeers.push(peer);
+    }
+    let stoppedAt = '';
+    while (_frameNum < _catchUpTo) {
+      const f = _frameNum;
+      const own = _localInputs[f];
+      if (!own) {
+        stoppedAt = `own input ${f} not here`;
+        break;
+      }
+      const key = f - DELAY_FRAMES;
+      if (key >= 0) {
+        // An input not here is predicted, as in tick(), where a rollback can
+        // still correct it once it comes: within the rollback window of the
+        // frame the guest goes on from, or a phantom peer's. Deeper, it is
+        // asked for and waited on (CATCH_UP_HOLE_WAIT_MS).
+        const nearTheEnd = f >= _catchUpTo - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+        const hole = remotePeers.find(
+          (p) =>
+            _remoteInputs[p.slot]?.[key] === undefined &&
+            key >= _inputFloor(p.slot) &&
+            !_peerPhantom[p.slot] &&
+            !nearTheEnd,
+        );
+        if (hole) {
+          const now = performance.now();
+          if (!_catchUpHoleSince) _catchUpHoleSince = now;
+          if (now - _catchUpHoleSince >= CATCH_UP_HOLE_WAIT_MS) {
+            stoppedAt = `slot ${hole.slot} input ${key} not here after ${CATCH_UP_HOLE_WAIT_MS}ms`;
+          } else {
+            _askForMissingInputs(hole, Math.min(_catchUpTo - DELAY_FRAMES, key + RB_INPUT_ASK_MAX - 1), key);
+          }
+          break;
+        }
+        _catchUpHoleSince = 0;
+        for (const p of remotePeers) {
+          const input = _remoteInputs[p.slot]?.[key];
+          if (input !== undefined) _feedCInput(mod, p.slot, key, input);
+        }
+      }
+      // Nothing was pending when it began, and every input fed is one this
+      // page had given the engine already, before a frame that applies it
+      // ran: kn_pre_tick has no rollback to start, and anything else is
+      // logged and left to normal ticks.
+      const step = mod._kn_pre_tick(own.buttons, own.lx, own.ly, own.cx, own.cy, -1);
+      if (step !== 0) {
+        stoppedAt = `kn_pre_tick returned ${step}`;
+        break;
+      }
+      _frameNum = mod._kn_get_frame();
+      KNState.frameNum = _frameNum;
+      _writeRingInputs(mod, _frameNum - DELAY_FRAMES);
+      if (mod._kn_reset_audio) {
+        mod._kn_reset_audio();
+        _resetAudioCallsSinceRb++;
+      }
+      _syncRNGSeed(mod, _frameNum);
+      if (!_runStepOneFrame('catch-up')) {
+        stoppedAt = 'step did not run';
+        break;
+      }
+      _syncRNGSeed(mod, _frameNum);
+      _frameNum = mod._kn_post_tick();
+      KNState.frameNum = _frameNum;
+      if (performance.now() - t0 >= CATCH_UP_SLICE_MS) break;
+    }
+    _catchUpWorkMs += performance.now() - t0;
+    _catchUpSlices++;
+    if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
+  };
+
   const applySyncState = (bytes, frame, fromProactive = false) => {
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
@@ -18265,6 +18501,7 @@
     // keeps it where it is.
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
+    const frameBeforeApply = _frameNum;
 
     if (_hasKnSync) {
       // C-level write: copy into WASM buffer, call kn_sync_write
@@ -18403,26 +18640,41 @@
       _syncLog(`loadState: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
     }
 
-    // Purge stale remote inputs above the new frame. The host's real inputs
-    // are keyed in the host's frame numbering, which the state we just loaded
-    // uses too, so they stay valid. A boot sync that rewinds the guest
-    // (151 -> 134) would otherwise delete host inputs it already received;
-    // the host doesn't resend them, so the guest stalls on the gap until the
-    // peer is marked phantom and the match desyncs. Only fabricated
-    // placeholders (KNShared.ZERO_INPUT) from the host are dropped. This only
-    // holds when the guest's counter now matches the host's sync frame; the
-    // loadState fallback doesn't realign it, so it keeps the plain purge.
     const timelineAligned = frame != null && _frameNum === frame;
+    if (timelineAligned) _settleInputsAtResync(gm.Module, frame);
+    // A state from before this guest's frame: the frames up to it run again
+    // (_startCatchUp; the first slice runs here). One too far back was not
+    // applied (tick(), SYNC-TOO-OLD-DROPPED).
+    if (
+      timelineAligned &&
+      _canCatchUp() &&
+      window.KNCore.catchUp.catchUpStep(frame, frameBeforeApply, MAX_CATCH_UP_FRAMES) === 'catchUp'
+    ) {
+      _startCatchUp(gm.Module, frame, frameBeforeApply);
+    }
+
+    // Purge stale remote inputs above the frame this guest goes on from: the
+    // state's, or the one it caught up to (after the catch-up, which runs on
+    // them). The host's real inputs are keyed in the host's frame numbering,
+    // which the state we just loaded uses too, so they stay valid. A boot sync
+    // that rewinds the guest (151 -> 134) would otherwise delete host inputs
+    // it already received; the host doesn't resend them, so the guest stalls
+    // on the gap until the peer is marked phantom and the match desyncs. Only
+    // fabricated placeholders (KNShared.ZERO_INPUT) from the host are
+    // dropped. This only holds when the guest's counter matched the host's
+    // sync frame; the loadState fallback doesn't realign it, so it keeps the
+    // plain purge.
+    // A catch-up still running goes on to its target on these inputs.
+    const keepThrough = Math.max(_frameNum, _catchUpTo) + DELAY_FRAMES;
     for (const [slot, inputs] of Object.entries(_remoteInputs)) {
       if (!inputs) continue;
       const fromHost = timelineAligned && slot === '0';
       for (const f of Object.keys(inputs)) {
-        if (parseInt(f, 10) <= _frameNum + DELAY_FRAMES) continue;
+        if (parseInt(f, 10) <= keepThrough) continue;
         if (fromHost && inputs[f] !== KNShared.ZERO_INPUT) continue;
         delete inputs[f];
       }
     }
-    if (timelineAligned) _settleInputsAtResync(gm.Module, frame);
 
     _syncMismatchStreak = 0;
     _lastAppliedSyncHostFrame = frame; // discard any explicit state older than this

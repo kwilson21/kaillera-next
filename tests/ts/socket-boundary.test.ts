@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   checkServerMessage,
+  createBoundary,
   createProtocolObserver,
+  DROP_LOG_LIMIT,
+  takeAck,
+  takeServerMessage,
   type ProtocolReport,
   redactPath,
   type WirePayload,
@@ -175,4 +179,204 @@ test('a page sends a bounded number of reports', () => {
 test('KNCore exposes the observer to play.js', () => {
   assert.equal(KNCore.protocol.createObserver, createProtocolObserver);
   assert.equal(KNCore.protocol.checkServerMessage, checkServerMessage);
+});
+
+// ── deciding: handlers sit behind the boundary ───────────────────────────────
+
+const ROM_HASH = `S${'ab'.repeat(32)}`;
+const hostRom = {
+  hash: ROM_HASH,
+  name: 'Smash.z64',
+  size: 16777216,
+  gameId: 'ssb64',
+  game_id: 'ssb64',
+};
+const room = {
+  players: {
+    'pid-host': {
+      socketId: 'sid-host',
+      playerName: 'Host',
+      slot: 0,
+      romReady: true,
+      inputType: 'gamepad',
+      deviceType: 'desktop',
+    },
+  },
+  spectators: { 'pid-spec': { socketId: 'sid-spec', playerName: 'Watcher' } },
+  owner: 'sid-host',
+  romSharing: true,
+  romHash: ROM_HASH,
+  romName: 'Smash.z64',
+  rom_name: 'Smash.z64',
+  romSize: 16777216,
+  rom_size: 16777216,
+  hostRom,
+  gameId: 'ssb64',
+  game_id: 'ssb64',
+  mode: null,
+  status: 'playing',
+  listed: false,
+};
+
+/** One payload of each server-authored event, as the server builds it (its models forbid other keys). */
+const SENT = [
+  ['users-updated', room],
+  [
+    'game-started',
+    {
+      mode: 'streaming',
+      resyncEnabled: false,
+      romHash: null,
+      romName: null,
+      rom_name: null,
+      romSize: null,
+      rom_size: null,
+      hostRom: {
+        hash: null,
+        name: null,
+        size: null,
+        gameId: 'ssb64',
+        game_id: 'ssb64',
+      },
+      gameId: 'ssb64',
+      matchId: '5b0c9a4e-7f1d-4c55-9a53-0e6f1f2f7a10',
+    },
+  ],
+  ['game-ended', { matchId: null }],
+  ['rom-sharing-updated', { romSharing: false }],
+  ['upload-token', token],
+  ['reconnect-token', token],
+] as const;
+
+const logging = () => {
+  const lines: string[] = [];
+  return { lines, boundary: createBoundary((line) => lines.push(line)) };
+};
+
+test('every server message as the server sends it reaches its handler as sent', () => {
+  const { lines, boundary } = logging();
+  for (const [event, payload] of SENT) {
+    const got: WirePayload[] = [];
+    boundary.server(event, (value) => got.push(value))(payload);
+    // The handler used to get the raw payload; it now gets the decoded one, which is the same.
+    assert.deepEqual(got, [payload], event);
+    assert.ok(takeServerMessage(event, payload).ok, event);
+  }
+  assert.deepEqual(lines, []);
+});
+
+test('a server message off its schema is dropped: its handler does not run, and it is logged once per reason', () => {
+  const { lines, boundary } = logging();
+  let ran = 0;
+  const handler = boundary.server('rom-sharing-updated', () => {
+    ran++;
+  });
+  handler({ unexpected: true });
+  handler({ unexpected: true });
+  handler({ romSharing: 'yes' });
+  boundary.server('users-updated', () => ran++)({ ...room, owner: 7 });
+  assert.equal(ran, 0);
+  assert.equal(lines.length, 3);
+  assert.match(lines[0] ?? '', /^\[protocol\] dropped rom-sharing-updated: .*romSharing/);
+  assert.match(lines[2] ?? '', /^\[protocol\] dropped users-updated: .*owner/);
+  // The handler still runs on the next message that decodes.
+  handler({ romSharing: true });
+  assert.equal(ran, 1);
+});
+
+test('a relay a peer may send is handed on as sent; anything else is dropped', () => {
+  const { lines, boundary } = logging();
+  const got: WirePayload[] = [];
+  const onData = boundary.relay('data-message', (data) => got.push(data));
+  const stamped = {
+    type: 'mode-select',
+    mode: 'streaming',
+    knFrom: { sid: 'sid-host', slot: 0, owner: true },
+  };
+  onData(stamped);
+  onData({ type: 'rom-accepted', sender: 'sid-guest' });
+  onData({ type: 'mode-select', mode: 'lockstep-ish' });
+  onData({ type: 'no-such-message' });
+  onData('not an object');
+  assert.deepEqual(got, [stamped, { type: 'rom-accepted', sender: 'sid-guest' }]);
+  assert.equal(lines.length, 3);
+  const signals: WirePayload[] = [];
+  const onSignal = boundary.relay('rom-signal', (data) => signals.push(data));
+  onSignal({
+    sender: 'sid-host',
+    target: 'sid-guest',
+    candidate: { candidate: 'candidate:1', sdpMid: '0', sdpMLineIndex: 0 },
+  });
+  onSignal({ candidate: 7 });
+  assert.equal(signals.length, 1);
+});
+
+test('a join-room ack: decoded when it matches, null when absent or off its schema', () => {
+  const { lines, boundary } = logging();
+  const ack = { ...room, rom_hash: ROM_HASH, rom_sharing: true, matchId: 'm1' };
+  assert.deepEqual(boundary.ack('join-room', ack), ack);
+  assert.equal(boundary.ack('join-room', null), null);
+  assert.equal(boundary.ack('join-room', undefined), null);
+  assert.deepEqual(lines, []);
+  assert.equal(boundary.ack('join-room', { ...ack, matchId: 3 }), null);
+  assert.match(lines[0] ?? '', /^\[protocol\] dropped join-room ack: .*matchId/);
+  assert.ok(takeAck('session-log', { lastSeq: 3, auditLastSeq: -1 }).ok);
+});
+
+// A page loaded before a deploy runs against the new server until version-guard reloads it.
+test('a newer server: a field this page does not know is left out, and the message still reaches its handler', () => {
+  const { lines, boundary } = logging();
+  for (const [event, payload] of SENT) {
+    const got: WirePayload[] = [];
+    boundary.server(event, (value) => got.push(value))({ ...payload, addedByANewerServer: { any: 'thing' } });
+    assert.deepEqual(got, [payload], event);
+  }
+  const ack = { ...room, rom_hash: ROM_HASH, rom_sharing: true, matchId: 'm1' };
+  assert.deepEqual(boundary.ack('join-room', { ...ack, addedByANewerServer: 1 }), ack);
+  const roster = { ...room, players: { 'pid-host': { ...room.players['pid-host'], addedByANewerServer: 1 } } };
+  const rosters: WirePayload[] = [];
+  boundary.server('users-updated', (value) => rosters.push(value))(roster);
+  assert.deepEqual(rosters, [room]);
+  assert.deepEqual(lines, []);
+});
+
+test('a newer server: a room status or mode this page does not know still updates the roster', () => {
+  const { lines, boundary } = logging();
+  const newer = { ...room, status: 'paused', mode: 'spectate-only' };
+  const rosters: WirePayload[] = [];
+  boundary.server('users-updated', (value) => rosters.push(value))(newer);
+  assert.deepEqual(rosters, [newer]);
+  const ack = { ...newer, rom_hash: ROM_HASH, rom_sharing: true, matchId: null };
+  assert.deepEqual(boundary.ack('join-room', ack), ack);
+  assert.deepEqual(lines, []);
+});
+
+test('a newer server: a game started in a mode this page does not know is dropped', () => {
+  const { lines, boundary } = logging();
+  const started = SENT.find(([event]) => event === 'game-started')?.[1];
+  let ran = 0;
+  boundary.server('game-started', () => ran++)({ ...started, mode: 'spectate-only' });
+  assert.equal(ran, 0);
+  assert.match(lines[0] ?? '', /^\[protocol\] dropped game-started: .*mode/);
+});
+
+test('a ROM transfer channel string: what the channel carries is taken, anything else dropped', () => {
+  const { lines, boundary } = logging();
+  assert.equal(boundary.peerText('rom-transfer', JSON.stringify({ type: 'rom-resume', offset: 65536 })), true);
+  assert.equal(boundary.peerText('rom-transfer', JSON.stringify({ type: 'rom-complete' })), true);
+  assert.equal(boundary.peerText('rom-transfer', JSON.stringify({ type: 'rom-resume', offset: 'start' })), false);
+  assert.equal(boundary.peerText('rom-transfer', 'not json'), false);
+  assert.equal(lines.length, 2);
+});
+
+test('a page logs a bounded number of dropped messages', () => {
+  const { lines, boundary } = logging();
+  for (let i = 0; i < 100; i++) boundary.ack('join-room', { players: i });
+  for (let i = 0; i < 100; i++) boundary.server('game-ended', () => undefined)({ matchId: i });
+  assert.ok(lines.length <= DROP_LOG_LIMIT);
+});
+
+test('KNCore gives play.js the boundary', () => {
+  assert.equal(KNCore.protocol.createBoundary, createBoundary);
+  assert.equal(KNCore.protocol.takeServerMessage, takeServerMessage);
 });
