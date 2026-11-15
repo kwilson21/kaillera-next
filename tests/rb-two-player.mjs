@@ -204,7 +204,11 @@
  *     unanswered (specs/ask_escalation.qnt). Fails unless the host's ask goes
  *     overdue (`INPUT-ASK-OVERDUE … → push`), it pushes its state, and the
  *     guest's inputs-settled answers it (`INPUT-ASK-PUSH-SETTLED`), with no
- *     give-up. Frames are compared as usual.
+ *     give-up. Frames are compared as usual. With ASK_UNANSWERED_ACKS=1
+ *     (ASK_UNANSWERED_MS >= 20000) the guest drops its `inputs-settled:` too,
+ *     so no push is acknowledged: fails unless the host pushes again to the
+ *     limit, gives up (`INPUT-ASK-PUSH-GAVEUP`) and drops the player
+ *     (`peer hard-disconnected`) rather than playing on split.
  *   DROP_PEER_MS=<n>   A third of the way into the battle, the guest's page
  *     closes its RTCPeerConnection to the host (pc.close() on the engine's
  *     peer entry for slot 0, KNState.peers), and the WebRTC signaling between
@@ -588,6 +592,14 @@ const CATCH_UP_HOLE_MS = Number(process.env.CATCH_UP_HOLE_MS || 0);
 // the way into the battle, so the host's asks for them go unanswered.
 const ASK_UNANSWERED_MS = Number(process.env.ASK_UNANSWERED_MS || 0);
 const ASK_UNANSWERED_RECOVER_MS = 30000;
+// ASK_UNANSWERED_ACKS=1: the guest drops its acknowledgements too, so every
+// push goes unanswered and the host drops the player (needs a window longer
+// than the escalation and three 5 s push deadlines, about 17 s).
+const ASK_UNANSWERED_ACKS = process.env.ASK_UNANSWERED_ACKS === '1';
+if (ASK_UNANSWERED_ACKS && !(ASK_UNANSWERED_MS >= 20000)) {
+  console.log('ASK_UNANSWERED_ACKS needs ASK_UNANSWERED_MS >= 20000');
+  process.exit(1);
+}
 const askUnanswered = { hostAt: null, guestAt: null, dropped: 0 };
 if (CATCH_UP_HOLE_MS > 0 && !(DROP_PEER_MS > 0)) {
   console.log('CATCH_UP_HOLE_MS needs DROP_PEER_MS');
@@ -1178,6 +1190,10 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
   // `rollback-input`) is dropped: the host's asks for them go unanswered.
   window.__knDropInputsUntil = 0;
   window.__knInputsDroppedUntil = 0;
+  // ASK_UNANSWERED_ACKS: in the same window, the guest's `inputs-settled:`
+  // (its acknowledgement of a pushed state) is dropped too.
+  window.__knDropSettledToo = false;
+  window.__knSettledDropped = 0;
   window.__knDropArmedAt = 0;
   window.__knInputsDroppedAfterOpen = [];
   let stateSentAfterArming = 0;
@@ -1362,6 +1378,15 @@ const initScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
       data instanceof ArrayBuffer
     ) {
       window.__knInputsDroppedUntil++;
+      return;
+    }
+    if (
+      window.__knDropSettledToo &&
+      performance.now() < window.__knDropInputsUntil &&
+      typeof data === 'string' &&
+      data.startsWith('inputs-settled:')
+    ) {
+      window.__knSettledDropped++;
       return;
     }
     if ((this.label === 'lockstep' || this.label === 'rollback-input') && data instanceof ArrayBuffer) {
@@ -2527,14 +2552,18 @@ if (inBattle) {
     await host.waitForTimeout(before);
     const started = Date.now();
     [askUnanswered.hostAt, askUnanswered.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
-    await guest.evaluate((ms) => {
-      window.__knDropInputsUntil = performance.now() + ms;
-    }, ASK_UNANSWERED_MS);
+    await guest.evaluate(
+      ([ms, acksToo]) => {
+        window.__knDropSettledToo = acksToo;
+        window.__knDropInputsUntil = performance.now() + ms;
+      },
+      [ASK_UNANSWERED_MS, ASK_UNANSWERED_ACKS],
+    );
     console.log(`ASK_UNANSWERED_MS: the guest drops its inputs for ${ASK_UNANSWERED_MS} ms`);
     const settled = await waitForLine(
       host,
       askUnanswered.hostAt.seq,
-      /INPUT-ASK-PUSH-SETTLED/,
+      ASK_UNANSWERED_ACKS ? /INPUT-ASK-PUSH-GAVEUP/ : /INPUT-ASK-PUSH-SETTLED/,
       ASK_UNANSWERED_MS + ASK_UNANSWERED_RECOVER_MS,
     );
     askUnanswered.dropped = await guest.evaluate(() => window.__knInputsDroppedUntil);
@@ -4175,7 +4204,9 @@ const askUnansweredReport = (() => {
   const overdue = hostLines.filter((l) => /INPUT-ASK-OVERDUE .*→ push/.test(l));
   const settled = hostLines.filter((l) => /INPUT-ASK-PUSH-SETTLED/.test(l));
   const gaveUp = hostLines.filter((l) => /INPUT-ASK-PUSH-GAVEUP/.test(l));
-  return { dropped: askUnanswered.dropped, overdue, settled, gaveUp };
+  const hardDisconnected = hostLines.filter((l) => /peer hard-disconnected: .* slot: 1/.test(l));
+  const pushes = hostLines.filter((l) => /INPUT-ASK-PUSH-AGAIN/.test(l));
+  return { dropped: askUnanswered.dropped, overdue, settled, pushes, gaveUp, hardDisconnected };
 })();
 const askUnansweredFailed =
   ASK_UNANSWERED_MS > 0 &&
@@ -4183,8 +4214,12 @@ const askUnansweredFailed =
     askUnansweredReport &&
     askUnansweredReport.dropped > 0 &&
     askUnansweredReport.overdue.length > 0 &&
-    askUnansweredReport.settled.length > 0 &&
-    askUnansweredReport.gaveUp.length === 0
+    (ASK_UNANSWERED_ACKS
+      ? // Every push unanswered: pushed again to the limit, then the player dropped.
+        askUnansweredReport.pushes.length >= 2 &&
+        askUnansweredReport.gaveUp.length > 0 &&
+        askUnansweredReport.hardDisconnected.length > 0
+      : askUnansweredReport.settled.length > 0 && askUnansweredReport.gaveUp.length === 0)
   );
 if (ASK_UNANSWERED_MS > 0) {
   console.log(

@@ -276,8 +276,9 @@ export function overdueAskStep(
  * The deadline on the host's push to a guest whose input went unanswered
  * (specs/ask_escalation.qnt, PUSH_HAS_DEADLINE; I1). The guest's
  * `inputs-settled:` for the pushed state (it applied it) ends it; without it
- * by `timeoutMs` the host pushes again, up to `maxPushes`, then gives up,
- * visibly (pushesAreBounded).
+ * by `timeoutMs` the host pushes again, up to `maxPushes`, then gives up and
+ * drops the player, who rejoins onto the host's state rather than playing on
+ * split (pushesAreBounded, everyAskEnds).
  *
  * @param pushOut    a push is out
  * @param settled    the guest acknowledged it (inputs-settled at or past it)

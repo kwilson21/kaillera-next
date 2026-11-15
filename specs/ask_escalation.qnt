@@ -22,8 +22,10 @@
 //
 // PUSH_HAS_DEADLINE: the host's push is answered by the guest's
 //   `inputs-settled:` (it applied the state); without it by the deadline the
-//   host pushes again, up to MAX_PUSHES, then gives up visibly
-//   (pushDeadlineStep). Without the deadline a lost push was the end of it.
+//   host pushes again, up to MAX_PUSHES, then drops the player through the
+//   normal path (hardDisconnectPeer, the player told why), who rejoins onto
+//   the host's state (pushDeadlineStep). An event alone would leave the guest
+//   playing on split. Without the deadline a lost push was the end of it.
 //
 // What is modelled: one ask for one input; its answer arriving or being
 // lost for good; the escalation; the push, its acknowledgement arriving or
@@ -51,41 +53,41 @@ module ask_escalation {
   var pushes: int
   var ackLost: bool           // this push's acknowledgement will never come
   var applied: bool           // the resync was applied: both pages on the host's state
-  var gaveUp: bool            // the host gave up pushing, visibly
+  var dropped: bool           // the host gave up pushing and dropped the player
 
   action init = all {
     asks' = 0, aged' = false, answered' = false, lost' = false,
-    resyncOut' = false, pushes' = 0, ackLost' = false, applied' = false, gaveUp' = false,
+    resyncOut' = false, pushes' = 0, ackLost' = false, applied' = false, dropped' = false,
   }
 
-  def open: bool = not(answered) and not(applied) and not(gaveUp)
+  def open: bool = not(answered) and not(applied) and not(dropped)
 
   action ask = all {
     open, not(resyncOut), asks < MAX_ASKS,
     asks' = asks + 1,
     aged' = aged, answered' = answered, lost' = lost, resyncOut' = resyncOut,
-    pushes' = pushes, ackLost' = ackLost, applied' = applied, gaveUp' = gaveUp,
+    pushes' = pushes, ackLost' = ackLost, applied' = applied, dropped' = dropped,
   }
 
   action age = all {
     open, asks > 0, not(aged),
     aged' = true,
     asks' = asks, answered' = answered, lost' = lost, resyncOut' = resyncOut,
-    pushes' = pushes, ackLost' = ackLost, applied' = applied, gaveUp' = gaveUp,
+    pushes' = pushes, ackLost' = ackLost, applied' = applied, dropped' = dropped,
   }
 
   action answer = all {
     open, asks > 0, not(lost),
     answered' = true,
     asks' = asks, aged' = aged, lost' = lost, resyncOut' = resyncOut,
-    pushes' = pushes, ackLost' = ackLost, applied' = applied, gaveUp' = gaveUp,
+    pushes' = pushes, ackLost' = ackLost, applied' = applied, dropped' = dropped,
   }
 
   action loseAnswer = all {
     open, not(lost), not(answered),
     lost' = true,
     asks' = asks, aged' = aged, answered' = answered, resyncOut' = resyncOut,
-    pushes' = pushes, ackLost' = ackLost, applied' = applied, gaveUp' = gaveUp,
+    pushes' = pushes, ackLost' = ackLost, applied' = applied, dropped' = dropped,
   }
 
   // overdueAskStep: 'push' (host) or 'ask' (guest) once both thresholds pass.
@@ -96,7 +98,7 @@ module ask_escalation {
     pushes' = if (IS_HOST) pushes + 1 else pushes,
     ackLost' = false,
     asks' = asks, aged' = aged, answered' = answered, lost' = lost,
-    applied' = applied, gaveUp' = gaveUp,
+    applied' = applied, dropped' = dropped,
   }
 
   // The state arrives and is applied; the guest's `inputs-settled:` (host's
@@ -105,7 +107,7 @@ module ask_escalation {
     resyncOut, not(applied), not(ackLost),
     applied' = true, resyncOut' = false,
     asks' = asks, aged' = aged, answered' = answered, lost' = lost,
-    pushes' = pushes, ackLost' = ackLost, gaveUp' = gaveUp,
+    pushes' = pushes, ackLost' = ackLost, dropped' = dropped,
   }
 
   // The push (or its acknowledgement) is lost.
@@ -113,7 +115,7 @@ module ask_escalation {
     resyncOut, not(applied), not(ackLost), IS_HOST,
     ackLost' = true,
     asks' = asks, aged' = aged, answered' = answered, lost' = lost,
-    resyncOut' = resyncOut, pushes' = pushes, applied' = applied, gaveUp' = gaveUp,
+    resyncOut' = resyncOut, pushes' = pushes, applied' = applied, dropped' = dropped,
   }
 
   // pushDeadlineStep: push again, or give up visibly after MAX_PUSHES.
@@ -121,7 +123,7 @@ module ask_escalation {
     PUSH_HAS_DEADLINE, IS_HOST, resyncOut, ackLost, not(applied),
     pushes' = if (pushes < MAX_PUSHES) pushes + 1 else pushes,
     ackLost' = false,
-    gaveUp' = pushes >= MAX_PUSHES,
+    dropped' = pushes >= MAX_PUSHES,
     resyncOut' = pushes < MAX_PUSHES,
     asks' = asks, aged' = aged, answered' = answered, lost' = lost, applied' = applied,
   }
@@ -130,7 +132,7 @@ module ask_escalation {
   // everyAskEnds does not count it as a move).
   action stutter = all {
     asks' = asks, aged' = aged, answered' = answered, lost' = lost, resyncOut' = resyncOut,
-    pushes' = pushes, ackLost' = ackLost, applied' = applied, gaveUp' = gaveUp,
+    pushes' = pushes, ackLost' = ackLost, applied' = applied, dropped' = dropped,
   }
 
   action step = any { ask, age, answer, loseAnswer, escalate, applyResync, loseAck, pushDeadline, stutter }
@@ -145,9 +147,10 @@ module ask_escalation {
     resyncOut and not(applied) and not(ackLost),
     PUSH_HAS_DEADLINE and IS_HOST and resyncOut and ackLost and not(applied),
   }
-  // Every ask ends: answered, a resync applied, or the host gives up
-  // visibly. Never a page predicting that input for the rest of the match.
-  val everyAskEnds = canMove or answered or applied or gaveUp
+  // Every ask ends: answered, a resync applied, or the player dropped (to
+  // rejoin onto the host's state). Never a page predicting that input for
+  // the rest of the match, and never two pages playing on split.
+  val everyAskEnds = canMove or answered or applied or dropped
   // No escalation before both thresholds: a slow answer is not a lost one.
   val noEarlyEscalation = (resyncOut or applied) implies (asks >= MIN_ASKS and aged)
   // The host never pushes more than MAX_PUSHES times.

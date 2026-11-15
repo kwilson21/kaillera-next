@@ -73,6 +73,11 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     assert "window.KNCore.resyncRequest.pushDeadlineStep(" in pushes
     assert "(_inputSettledBefore[slot] ?? 0) >= push.frame - DELAY_FRAMES" in pushes
     assert "_checkResyncRequestDeadline();\n    _checkOverduePushes();" in src
+    # The last push unanswered: the player is dropped (I1's recovery), not
+    # left playing on split; the event alone is not one.
+    give_up = pushes[pushes.index("INPUT-ASK-PUSH-GAVEUP") :]
+    assert "hardDisconnectPeer(push.sid);" in give_up
+    assert "could not be brought back in sync and was dropped" in give_up
     # Every ask that goes out is counted.
     ask = src[
         src.index("const _askForMissingInputs = (peer, applyFrame, windowEdge) => {") :

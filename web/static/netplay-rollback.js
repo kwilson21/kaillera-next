@@ -5336,9 +5336,20 @@
         _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${push.pushes}/${OVERDUE_MAX_PUSHES}`);
         pushSyncState(push.sid, false);
       } else {
-        _syncLog(`INPUT-ASK-PUSH-GAVEUP f=${_frameNum} slot=${slot} pushes=${push.pushes}: no inputs-settled came`);
+        // The guest is still on a state that may differ from the host's,
+        // and nothing else will correct it: it is dropped through the
+        // normal path, so it rejoins (or late-joins) onto the host's state
+        // rather than playing on split (I1: the deadline's recovery is the
+        // drop, not the event).
+        _syncLog(
+          `INPUT-ASK-PUSH-GAVEUP f=${_frameNum} slot=${slot} pushes=${push.pushes}: no inputs-settled came — dropping the player`,
+        );
         KNEvent('input-ask-push-giveup', 'A pushed state was never acknowledged', { slot, pushes: push.pushes });
         delete _overduePushes[key];
+        const known = _knownPlayers[push.sid];
+        const name = known ? known.playerName : `P${slot + 1}`;
+        _config?.onToast?.(`${name} could not be brought back in sync and was dropped`);
+        hardDisconnectPeer(push.sid);
       }
     }
   };
