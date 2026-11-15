@@ -11,6 +11,8 @@ import { startDeadline } from '../../web/src/start-deadline.ts';
 import {
   countedByStartGates,
   leavesOut,
+  leftOutItself,
+  missedLoadDeadline,
   rejoinsLate,
   startHasItsHost,
   startsAlone,
@@ -30,17 +32,53 @@ test('a player left out, or held as a late joiner, is counted by no start wait',
       }
 });
 
-test('only the host leaves a player out, before its match runs, and never one whose channel is open', () => {
+test('only the host leaves a player out, before its match runs; one that answered only for missing the load deadline', () => {
   for (const isHost of BOOLS)
     for (const running of BOOLS)
       for (const other of BOOLS)
         for (const open of BOOLS)
-          for (const out of BOOLS) {
-            const leaves = leavesOut(isHost, running, other, open, out);
-            assert.equal(leaves, isHost && !running && other && !open && !out);
-          }
+          for (const missed of BOOLS)
+            for (const out of BOOLS) {
+              const leaves = leavesOut(isHost, running, other, open, missed, out);
+              assert.equal(leaves, isHost && !running && other && !out && (!open || missed));
+              if (leaves && open) assert.equal(missed, true);
+            }
   // A guest whose deadline gave up waits for the host's word.
-  assert.equal(leavesOut(false, false, true, false, false), false);
+  assert.equal(leavesOut(false, false, true, false, false, false), false);
+  // A player that answered and is loading is in.
+  assert.equal(leavesOut(true, false, true, true, false, false), false);
+});
+
+test('at the load deadline a player missed it if it has not loaded, or the host is at the ready barrier and it is not', () => {
+  for (const emuReady of BOOLS)
+    for (const hostSaidReady of BOOLS)
+      for (const saidReady of BOOLS) {
+        const missed = missedLoadDeadline(emuReady, hostSaidReady, saidReady);
+        assert.equal(missed, !emuReady || (hostSaidReady && !saidReady), `${emuReady} ${hostSaidReady} ${saidReady}`);
+      }
+  // A page from before `left-out:` that loaded but waits for a player the
+  // host left out: it never reaches the barrier the host has reached.
+  assert.equal(missedLoadDeadline(true, true, false), true);
+  // While the host is still syncing itself, a player that loaded is not cut.
+  assert.equal(missedLoadDeadline(true, false, false), false);
+});
+
+test('a guest told by the host that it is out joins late; nobody else can tell it so', () => {
+  for (const from of SLOTS)
+    for (const mine of SLOTS)
+      for (const slot of SLOTS)
+        for (const running of BOOLS)
+          for (const lateJoin of BOOLS) {
+            const out = leftOutItself(from, mine, running, slot, lateJoin);
+            const expected = from === 0 && mine > 0 && mine < 4 && slot === mine && !running && !lateJoin;
+            assert.equal(
+              out,
+              expected,
+              `from=${from} mine=${mine} slot=${slot} running=${running} lateJoin=${lateJoin}`,
+            );
+          }
+  // takesLeftOut is for the others: never a page's own slot.
+  assert.equal(takesLeftOut(0, 2, false, 2, false), false);
 });
 
 test('the host starts alone only with nobody left in its start group', () => {
@@ -90,6 +128,8 @@ test('KNCore gives the engine the start group decisions', () => {
   assert.equal(KNCore.startGroup.startsAlone, startsAlone);
   assert.equal(KNCore.startGroup.takesLeftOut, takesLeftOut);
   assert.equal(KNCore.startGroup.rejoinsLate, rejoinsLate);
+  assert.equal(KNCore.startGroup.leftOutItself, leftOutItself);
+  assert.equal(KNCore.startGroup.missedLoadDeadline, missedLoadDeadline);
   assert.equal(KNCore.startGroup.startHasItsHost, startHasItsHost);
   assert.equal(KNCore.startGroup.startDeadline, startDeadline);
 });

@@ -42,6 +42,14 @@
 // its own deadline joins late instead, as does a page at the ROM prompt once
 // a ROM is dropped.
 //
+// A player that answered but has not loaded its emulator by the host's load
+// deadline (60 s from when the host has loaded its own) is left out the same
+// way, and told so, itself included (its channel is kept open for the word),
+// and joins late: a core that crashed, a tab frozen after it connected, a
+// player who never taps "Tap to start", or a page from before `left-out:`
+// still waiting for a player the host left out (it ignores the word) no
+// longer holds the start.
+//
 // The guest's deadline is the page's, not a connection's: armed when its
 // engine starts, again whenever it loses its channel to the host before its
 // match runs, and restarted at each offer the host sends, so it runs out only
@@ -81,6 +89,8 @@
 // LOST_IS_RETRIED: a connection lost before the match runs is retried, then
 //   given up on; before, after the game sequence had started it was dropped
 //   and nobody was told.
+// LOAD_DEADLINE: the host leaves out a player that answered but has not
+//   loaded by its load deadline, and tells that player too.
 module start_group {
   const GIVE_UP_LEAVES_OUT: bool
   const DEADLINE_UNTIL_RUNNING: bool
@@ -90,6 +100,7 @@ module start_group {
   const GIVE_UP_CLOSES: bool
   const GUEST_DEADLINE_ON_LOSS: bool
   const LOST_IS_RETRIED: bool
+  const LOAD_DEADLINE: bool
 
   // The startup watchdog's attempts (STARTUP_CONNECT_MAX_ATTEMPTS).
   pure val MAX_ATTEMPTS = 3
@@ -97,8 +108,9 @@ module start_group {
   // What a player's page does once the game starts. "starting" answers the
   // connection; "awaitingRom" shows the ROM prompt and runs no engine;
   // "frozen" never answers (a tab stopped at start, a network with no
-  // route); "absent" is not in the room.
-  pure val STARTS = Set("starting", "awaitingRom", "frozen", "absent")
+  // route); "stuck" answers but never loads its emulator (a core that
+  // crashed, a tab frozen after it connected); "absent" is not in the room.
+  pure val STARTS = Set("starting", "awaitingRom", "frozen", "stuck", "absent")
 
   // "lobby" | "waiting": the game started, no game sequence yet |
   // "sequence": the game sequence started (gesture prompt), the match not
@@ -164,7 +176,7 @@ module start_group {
   // open channel starts its game sequence.
   action answer(g: str): bool = all {
     conn.get(g) == "connecting",
-    page.get(g) == "starting",
+    page.get(g).in(Set("starting", "stuck")),
     conn' = conn.set(g, "open"),
     host' = if (host == "waiting") "sequence" else host,
     attempt' = attempt,
@@ -290,10 +302,16 @@ module start_group {
   val waitedForBehindTheHost =
     GUESTS.filter(g => conn.get(g).in(Set("leftOut", "dropped")) and not(told.contains(g)))
 
-  // Every player in the start group is open, and none of them still waits
-  // for a player the host left out: each one boots, and the match runs.
-  val everyoneIsIn =
-    startGroup.forall(g => conn.get(g) == "open") and (startGroup.size() == 0 or waitedForBehindTheHost.size() == 0)
+  // A player in the start group has loaded: it answered, its emulator runs,
+  // and it waits for no player the host left out without telling it.
+  def ready(g: str): bool = and {
+    conn.get(g) == "open",
+    page.get(g) != "stuck",
+    waitedForBehindTheHost.exclude(Set(g)).size() == 0,
+  }
+
+  // Every player in the start group has loaded: the match runs.
+  val everyoneIsIn = startGroup.forall(g => ready(g))
 
   // The host's match runs once every player in its start group is in.
   action matchRuns = all {
@@ -318,9 +336,28 @@ module start_group {
     guestsKeep,
   }
 
+  // The host's load deadline: a player that answered has not loaded. It is
+  // left out and told so, itself included: a page that hears it joins late
+  // (its way into the late join is armed, as by its own deadline). A page
+  // from before `left-out:` does not hear it.
+  action loadDeadline(g: str): bool = all {
+    LOAD_DEADLINE,
+    host == "sequence",
+    conn.get(g) == "open",
+    not(ready(g)),
+    conn' = conn.set(g, "leftOut"),
+    told' = if (HOST_TELLS_LEFT_OUT) told.union(Set(g)) else told,
+    guestDeadline' = if (HOST_TELLS_LEFT_OUT) guestDeadline.union(Set(g)) else guestDeadline,
+    openToNobody' = openToNobody,
+    host' = host,
+    attempt' = attempt,
+    page' = page,
+  }
+
   // A page that started normally but was left out (it answered too late, or
-  // its network never reached the host) has no channel to the host when its
-  // own deadline runs out: it joins late. The deadline restarts at each of the
+  // its network never reached the host, or it had not loaded by the host's
+  // load deadline and was told) has no channel to the host when its own
+  // deadline runs out, or hears it is out: it joins late. The deadline restarts at each of the
   // host's offers, so it runs out only once the host has stopped trying.
   action rejoinLate(g: str): bool = all {
     GUEST_REJOINS_LATE,
@@ -358,6 +395,7 @@ module start_group {
     any {
       answer(g),
       deadline(g),
+      loadDeadline(g),
       lateOpen(g),
       guestLosesHost(g),
       lose(g),
@@ -375,6 +413,8 @@ module start_group {
   val anAnswerComes = GUESTS.exists(g => conn.get(g) == "connecting" and page.get(g) == "starting")
   val aDeadlineRuns = deadlineArmed and GUESTS.exists(g => conn.get(g) == "connecting")
   val aRomPromptIsHeard = ROM_PROMPT_LEAVES_OUT and startGroup.exists(g => page.get(g) == "awaitingRom")
+  val aLoadDeadlineRuns =
+    LOAD_DEADLINE and host == "sequence" and startGroup.exists(g => conn.get(g) == "open" and not(ready(g)))
   val theHostCanGoOn = or {
     host == "waiting" and GUESTS.exists(g => conn.get(g) == "open"),
     host == "sequence" and everyoneIsIn,
@@ -387,7 +427,13 @@ module start_group {
   // starts) and while the deadline stopped at the game sequence
   // (start_group_give_up_only, aThirdPlayerFrozenTest).
   val neverStuck =
-    host.in(Set("waiting", "sequence")) implies or { theHostCanGoOn, anAnswerComes, aDeadlineRuns, aRomPromptIsHeard }
+    host.in(Set("waiting", "sequence")) implies or {
+      theHostCanGoOn,
+      anAnswerComes,
+      aDeadlineRuns,
+      aRomPromptIsHeard,
+      aLoadDeadlineRuns,
+    }
 
   // A late joiner waiting on a running match is held as one: the host has
   // left it out of the start, so the late join can take it.
@@ -461,7 +507,7 @@ module start_group {
       .then(deadlineAny("g2"))
       .then(matchRunsAny)
       .expect(host == (if (GIVE_UP_LEAVES_OUT and DEADLINE_UNTIL_RUNNING and HOST_TELLS_LEFT_OUT) "running" else "sequence"))
-      .expect(neverStuck == (GIVE_UP_LEAVES_OUT and DEADLINE_UNTIL_RUNNING and HOST_TELLS_LEFT_OUT))
+      .expect(neverStuck == (GIVE_UP_LEAVES_OUT and DEADLINE_UNTIL_RUNNING and (HOST_TELLS_LEFT_OUT or LOAD_DEADLINE)))
 
   // A room of two; the guest has no ROM and takes the ROM prompt
   // (tests/test_gesture_prompt.py found it). The host leaves it out at once
@@ -560,12 +606,59 @@ module start_group {
       .then(answer("g1"))
       .then(answer("g2"))
       .then(lose("g2"))
-      .expect(neverStuck == LOST_IS_RETRIED)
+      .expect(neverStuck == (LOST_IS_RETRIED or LOAD_DEADLINE))
       .then(deadlineAny("g2"))
       .then(deadlineAny("g2"))
       .then(deadlineAny("g2"))
       .then(matchRunsAny)
-      .expect(host == (if (LOST_IS_RETRIED) "running" else "sequence"))
+      // The other guest still waits for a player it was not told of: the load
+      // deadline leaves it out too.
+      .then(loadDeadlineAny("g1"))
+      .then(matchRunsAny)
+      .expect(
+        host == (
+          if (LOAD_DEADLINE or (LOST_IS_RETRIED and HOST_TELLS_LEFT_OUT and DEADLINE_UNTIL_RUNNING)) "running"
+          else "sequence"
+        )
+      )
+
+  action loadDeadlineAny(g: str): bool =
+    if (LOAD_DEADLINE and host == "sequence" and conn.get(g) == "open" and not(ready(g))) loadDeadline(g) else nothing
+
+  // A room of two; the guest answers but its emulator never loads. Before,
+  // the host waited at emu-ready for ever. Now its load deadline leaves the
+  // guest out, and the match runs.
+  run aStuckGuestTest =
+    init
+      .then(startWith("stuck", "absent"))
+      .then(answer("g1"))
+      .expect(host == "sequence")
+      .expect(neverStuck == LOAD_DEADLINE)
+      .then(loadDeadlineAny("g1"))
+      .then(matchRunsAny)
+      .expect(host == (if (LOAD_DEADLINE) "running" else "sequence"))
+
+  // A room of three with a page from before `left-out:`: the other guest
+  // answers, the third never does. The host leaves the third out but the old
+  // page does not hear of it and waits for it. The load deadline leaves the
+  // old page out too, and the host's match runs. The old page sits waiting
+  // until it reloads (in neither the start nor the late join).
+  run anOldGuestTest =
+    init
+      .then(startWith("starting", "frozen"))
+      .then(answer("g1"))
+      .then(deadlineAny("g2"))
+      .then(deadlineAny("g2"))
+      .then(deadlineAny("g2"))
+      .then(matchRunsAny)
+      .then(loadDeadlineAny("g1"))
+      .then(matchRunsAny)
+      .expect(
+        host == (
+          if (GIVE_UP_LEAVES_OUT and DEADLINE_UNTIL_RUNNING and (HOST_TELLS_LEFT_OUT or LOAD_DEADLINE)) "running"
+          else "sequence"
+        )
+      )
 
   // Two players who answer: nobody is left out and the match runs.
   run everyoneAnswersTest =
@@ -590,6 +683,7 @@ module start_group_before {
     GIVE_UP_CLOSES = false,
     GUEST_DEADLINE_ON_LOSS = false,
     LOST_IS_RETRIED = false,
+    LOAD_DEADLINE = false,
   ).*
 }
 
@@ -605,21 +699,27 @@ module start_group_give_up_only {
     GIVE_UP_CLOSES = false,
     GUEST_DEADLINE_ON_LOSS = false,
     LOST_IS_RETRIED = false,
+    LOAD_DEADLINE = false,
   ).*
 }
 
-// The host leaves the player out at every stage but tells nobody: in a room
-// of three the other guest still waits for it, and so does the host's match.
+// A host of today with guests from before `left-out:` (they ignore the word,
+// have no deadline of their own on the host, and say nothing at the ROM
+// prompt the host takes for the prompt). The load deadline leaves an old page
+// that waits for a player the host left out out too, so the host's match runs
+// (neverStuck holds); the old page waits on, in neither the start nor the
+// late join, until it reloads (nobodyIsInNeither does not).
 module start_group_untold {
   import start_group(
     GIVE_UP_LEAVES_OUT = true,
     DEADLINE_UNTIL_RUNNING = true,
-    ROM_PROMPT_LEAVES_OUT = false,
+    ROM_PROMPT_LEAVES_OUT = true,
     HOST_TELLS_LEFT_OUT = false,
     GUEST_REJOINS_LATE = false,
-    GIVE_UP_CLOSES = false,
+    GIVE_UP_CLOSES = true,
     GUEST_DEADLINE_ON_LOSS = false,
-    LOST_IS_RETRIED = false,
+    LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
   ).*
 }
 
@@ -635,6 +735,24 @@ module start_group_deadline_only {
     GIVE_UP_CLOSES = true,
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
+  ).*
+}
+
+// The same with #274's host, which has no load deadline: in a room of three
+// the old page waits for the left-out player, and the host's match waits for
+// the old page.
+module start_group_untold_no_load {
+  import start_group(
+    GIVE_UP_LEAVES_OUT = true,
+    DEADLINE_UNTIL_RUNNING = true,
+    ROM_PROMPT_LEAVES_OUT = true,
+    HOST_TELLS_LEFT_OUT = false,
+    GUEST_REJOINS_LATE = false,
+    GIVE_UP_CLOSES = true,
+    GUEST_DEADLINE_ON_LOSS = false,
+    LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = false,
   ).*
 }
 
@@ -650,6 +768,7 @@ module start_group_no_rejoin {
     GIVE_UP_CLOSES = true,
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
   ).*
 }
 
@@ -666,6 +785,7 @@ module start_group_open_after_give_up {
     GIVE_UP_CLOSES = false,
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
   ).*
 }
 
@@ -679,9 +799,12 @@ module start_group_deadline_with_the_connection {
     GIVE_UP_CLOSES = true,
     GUEST_DEADLINE_ON_LOSS = false,
     LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
   ).*
 }
 
+// A connection lost after the game sequence is dropped, with #274's host (no
+// load deadline: the load deadline would end that stall too).
 module start_group_lost_dropped {
   import start_group(
     GIVE_UP_LEAVES_OUT = true,
@@ -692,10 +815,11 @@ module start_group_lost_dropped {
     GIVE_UP_CLOSES = true,
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = false,
+    LOAD_DEADLINE = false,
   ).*
 }
 
-// Today: all eight.
+// Today: all nine.
 module start_group_current {
   import start_group(
     GIVE_UP_LEAVES_OUT = true,
@@ -706,5 +830,6 @@ module start_group_current {
     GIVE_UP_CLOSES = true,
     GUEST_DEADLINE_ON_LOSS = true,
     LOST_IS_RETRIED = true,
+    LOAD_DEADLINE = true,
   ).*
 }

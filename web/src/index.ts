@@ -109,6 +109,8 @@ import { heldAsLateJoiner } from './start-cohort.ts';
 import {
   countedByStartGates,
   leavesOut,
+  leftOutItself,
+  missedLoadDeadline,
   rejoinsLate,
   startHasItsHost,
   startsAlone,
@@ -326,6 +328,8 @@ export const KNCore = {
     leavesOut,
     startsAlone,
     takesLeftOut,
+    leftOutItself,
+    missedLoadDeadline,
     rejoinsLate,
     startHasItsHost,
     /** A start wait with a deadline, an Effect program (web/src/start-deadline.ts). */

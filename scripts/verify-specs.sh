@@ -295,8 +295,16 @@ start_group() {
   # A room of three, one guest answers, the other frozen: 2 steps
   # (aThirdPlayerFrozenTest).
   expect_violation "$START_GROUP" start_group_give_up_only neverStuck
-  # The same, the frozen guest left out but the other guest not told: 5 steps.
-  expect_violation "$START_GROUP" start_group_untold neverStuck
+  # The same, the frozen guest left out but the other guest not told, and no
+  # load deadline: 5 steps (anOldGuestTest).
+  expect_violation "$START_GROUP" start_group_untold_no_load neverStuck
+  # With the load deadline the host's match runs beside a page that ignores
+  # `left-out:`.
+  verify "$START_GROUP" start_group_untold neverStuck
+  # But an old page can end in neither: its deadline went with a connection
+  # that failed, 5 steps (aGuestLosesTheHostTest), or it is left out at the
+  # load deadline and does not hear it (anOldGuestTest).
+  expect_violation "$START_GROUP" start_group_untold nobodyIsInNeither
   # A room of two, the guest slow, three deadlines: 4 steps (aSlowGuestTest).
   expect_violation "$START_GROUP" start_group_no_rejoin nobodyIsInNeither
   # The same, and the last attempt opens after the give-up: 5 steps (aLateOpenTest).

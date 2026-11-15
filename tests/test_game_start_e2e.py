@@ -24,8 +24,9 @@ a ROM and joins late once one is dropped, without being reported stranded.
 A player that does not answer the start's connections does not hold the
 host's start (specs/start_group.qnt): one at the ROM prompt says it has no
 ROM and the host starts without it at once; one that never answers is left
-out after the startup retries; and in a room of three the other guest hears
-whom the host left out and stops waiting for it. The host's gesture prompt is
+out after the startup retries; in a room of three the other guest hears
+whom the host left out and stops waiting for it; and a guest the host tells
+it is out (its load deadline, a harness step here) joins late. The host's gesture prompt is
 shown when its game sequence starts, before anything is booted, so these run
 without a ROM; the late join that follows is in tests/test_gesture_prompt.py.
 
@@ -499,6 +500,44 @@ def test_in_a_room_of_three_the_other_guest_hears_who_was_left_out(browser, serv
         host.close()
         guest.close()
         deaf.close()
+
+
+def test_a_guest_the_host_tells_it_is_out_joins_late(browser, server_url, room):
+    """A guest that answered and is then left out hears so on its channel, and joins late.
+
+    The host's load deadline leaves out a player that answered but has not
+    loaded, and tells it (`left-out:<its slot>`) on the channel it keeps open
+    for that. Nothing boots here, so the host's deadline never runs: the word
+    is sent from the host page's own channel (a harness step). The host's
+    deadline itself is in tests/test_gesture_prompt.py.
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    try:
+        _load_rom(host)
+        _load_rom(guest)
+        guest.evaluate(_RECORD_ENGINE_STARTS)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        guest_slot = guest.evaluate("window._playerSlot")
+        sent = host.wait_for_function(
+            f"""() => {{
+                const peer = Object.values(window.KNState.peers || {{}}).find((p) => p.slot === {guest_slot});
+                if (!peer || !peer.dc || peer.dc.readyState !== 'open') return false;
+                peer.dc.send('left-out:{guest_slot}');
+                return true;
+            }}""",
+            timeout=20000,
+        )
+        assert sent
+        # The guest starts again as a late joiner (web/src/start-group.ts,
+        # leftOutItself), whose engine (a fresh sync log) offers to the host.
+        guest.wait_for_function("window.__engineStarts.length >= 2", timeout=10000)
+        assert guest.evaluate("window.__engineStarts") == [False, True]
+        guest.wait_for_function(f"{_SYNC_LOG}.includes('late-joiner always initiates')", timeout=10000)
+    finally:
+        host.close()
+        guest.close()
 
 
 def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):

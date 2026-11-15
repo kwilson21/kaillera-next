@@ -4,14 +4,15 @@
  * decision and carries out the answer.
  *
  * The host decides the start group. A player its startup deadline gives up
- * on, or one that says it has no ROM while the host's is not shared, is left
- * out: held as a late joiner, it is counted by none of the start's waits, and
- * a host with nobody left to wait for starts alone. The host tells the other
- * players (`left-out:<slot>`); a guest takes that word only from the host's
- * own channel and never leaves anyone out itself. A guest whose page started
- * normally but has no channel to the host by its own deadline joins late
- * instead, so no player whose page is alive ends up in neither the start nor
- * the late join; a guest without that channel never goes on with its start.
+ * on, one at the ROM prompt while the host's is not shared, or one that has
+ * not loaded its emulator by the host's load deadline is left out: held as a
+ * late joiner, it is counted by none of the start's waits, and a host with
+ * nobody left to wait for starts alone. The host tells the players
+ * (`left-out:<slot>`), the one left out included; a guest takes that word
+ * only from the host's own channel and never leaves anyone out itself. A
+ * guest told it is out, or whose page started normally but has no channel to
+ * the host by its own deadline, joins late instead, so no player whose page
+ * is alive ends up in neither the start nor the late join; a guest without that channel never goes on with its start.
  *
  * Verified with LemmaScript (Dafny backend); see LemmaScript-files.txt.
  */
@@ -39,19 +40,41 @@ export function countedByStartGates(isPlayer: boolean, heldAsLateJoiner: boolean
  * `isHost`: this page is the host (a guest never leaves anyone out).
  * `running`: this page's match runs (the start is over). `otherPlayer`: the
  * connection is to another player, not this page or a synthetic one.
- * `channelOpen`: that player's channel is open (it is in). `alreadyOut`: it
- * was left out already.
+ * `channelOpen`: that player's channel is open (it answered). `missedLoad`:
+ * it has not loaded its emulator by the host's load deadline. `alreadyOut`:
+ * it was left out already. A player that answered is left out only for
+ * missing the load deadline.
  */
-//@ ensures \result ==> isHost && !running && otherPlayer && !channelOpen && !alreadyOut
-//@ ensures isHost && !running && otherPlayer && !channelOpen && !alreadyOut ==> \result
+//@ ensures \result ==> isHost && !running && otherPlayer && !alreadyOut
+//@ ensures \result && channelOpen ==> missedLoad
+//@ ensures isHost && !running && otherPlayer && !alreadyOut && (!channelOpen || missedLoad) ==> \result
 export function leavesOut(
   isHost: boolean,
   running: boolean,
   otherPlayer: boolean,
   channelOpen: boolean,
+  missedLoad: boolean,
   alreadyOut: boolean,
 ): boolean {
-  return isHost && !running && otherPlayer && !channelOpen && !alreadyOut;
+  return isHost && !running && otherPlayer && !alreadyOut && (!channelOpen || missedLoad);
+}
+
+/**
+ * At the host's load deadline: has this player missed it?
+ *
+ * `emuReady`: the player said it has loaded its emulator. `hostSaidReady`:
+ * the host has reached the start's ready barrier (said `lockstep-ready`) in
+ * this start. `saidReady`: the player has too. A player that loaded but did
+ * not reach the barrier while the host did waits for something the host
+ * does not: a player the host left out without that page hearing of it (one
+ * from before `left-out:`). While the host has not reached the barrier
+ * itself, only a player that has not loaded missed the deadline: the host is
+ * the one still syncing.
+ */
+//@ ensures !emuReady ==> \result
+//@ ensures \result <==> !emuReady || (hostSaidReady && !saidReady)
+export function missedLoadDeadline(emuReady: boolean, hostSaidReady: boolean, saidReady: boolean): boolean {
+  return !emuReady || (hostSaidReady && !saidReady);
 }
 
 /**
@@ -88,6 +111,28 @@ export function takesLeftOut(
   if (mySlot <= HOST_SLOT || mySlot >= 4) return false;
   if (running || alreadyOut) return false;
   return slot > HOST_SLOT && slot < 4 && slot !== mySlot;
+}
+
+/**
+ * Does a page take `left-out:<slot>` naming itself: the host started without
+ * it, so it joins late?
+ *
+ * Only from the host's own channel (`fromSlot`), only on a guest (`mySlot`)
+ * before its match runs, and not when it is joining late already (a late
+ * joiner the host held as out hears the word too, when its channel opens).
+ */
+//@ ensures \result ==> fromSlot === 0 && mySlot > 0 && mySlot < 4 && slot === mySlot && !running && !lateJoin
+//@ ensures fromSlot !== 0 ==> !\result
+export function leftOutItself(
+  fromSlot: number,
+  mySlot: number,
+  running: boolean,
+  slot: number,
+  lateJoin: boolean,
+): boolean {
+  if (fromSlot !== HOST_SLOT) return false;
+  if (mySlot <= HOST_SLOT || mySlot >= 4) return false;
+  return slot === mySlot && !running && !lateJoin;
 }
 
 /**

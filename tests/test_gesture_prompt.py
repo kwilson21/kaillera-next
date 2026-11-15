@@ -1,7 +1,8 @@
 """Test the "Tap to start" overlay every player is shown before boot.
 
 Validates that it sits above EmulatorJS, that clicking it dismisses it, and
-that the host gets it too.
+that the host gets it too. A guest at the ROM prompt, or one whose player
+never taps, does not hold the host's start: it joins late.
 
 Run: pytest tests/test_gesture_prompt.py -v -s
 """
@@ -164,6 +165,87 @@ def test_a_guest_at_the_rom_prompt_joins_late_once_it_drops_one(browser, server_
         guest.wait_for_function(
             f"(window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0) > {joined_at}",
             timeout=90000,
+        )
+        # Both keep playing.
+        host_then, guest_then = _frame(host), _frame(guest)
+        host.wait_for_timeout(3000)
+        assert _frame(host) > host_then
+        assert _frame(guest) > guest_then
+
+    finally:
+        host.close()
+        guest.close()
+
+
+# Record whether each engine start on the page is a late join.
+_RECORD_ENGINE_STARTS = """() => {
+    window.__engineStarts = [];
+    const engine = window.NetplayRollback;
+    const init = engine.init.bind(engine);
+    engine.init = (config) => {
+        window.__engineStarts.push(!!config.lateJoin);
+        return init(config);
+    };
+}"""
+
+
+def test_a_guest_that_never_loads_does_not_hold_the_hosts_start_and_joins_late(browser, server_url, rom_path, room):
+    """A guest that answers the start but never loads is left out at the host's load deadline, and joins late.
+
+    The guest's page connects to the host, but its player does not tap "Tap
+    to start", so its emulator never loads (as a core that crashed, or a tab
+    frozen after it connected). Before, the host waited at "Waiting for Guest
+    to load" for ever. The host's load deadline (60 s from when its own
+    emulator has loaded) leaves the guest out and tells it; the host plays,
+    and the guest's page starts again as a late joiner, which joins the
+    running match once its player taps (specs/start_group.qnt, loadDeadline).
+    """
+    host = browser.new_page()
+    guest = browser.new_page()
+
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        host.locator("#rom-drop input[type='file']").set_input_files(rom_path)
+        host.wait_for_timeout(500)
+
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.locator("#rom-drop input[type='file']").set_input_files(rom_path)
+        guest.wait_for_function("!!window.NetplayRollback", timeout=10000)
+        guest.evaluate(_RECORD_ENGINE_STARTS)
+
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+
+        # The host taps and loads; the guest's channel opens (it answered),
+        # and its prompt waits untapped.
+        prompt = host.locator("#gesture-prompt")
+        expect(prompt).to_be_visible(timeout=15000)
+        prompt.click()
+        expect(guest.locator("#gesture-prompt")).to_be_visible(timeout=15000)
+
+        # At the load deadline the host leaves the guest out and plays.
+        host.wait_for_function(
+            "(window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0) > 60",
+            timeout=180000,
+        )
+        log = host.evaluate("window.NetplayRollback.exportSyncLog()")
+        assert "START-LOAD-DEADLINE" in log, log[-3000:]
+        assert "reason=it did not load in time" in log, log[-3000:]
+
+        # The guest heard it and started again as a late joiner.
+        guest.wait_for_function("window.__engineStarts.length >= 2", timeout=30000)
+        assert guest.evaluate("window.__engineStarts") == [False, True]
+
+        # Its player taps, and it joins the running match.
+        guest_prompt = guest.locator("#gesture-prompt")
+        expect(guest_prompt).to_be_visible(timeout=30000)
+        guest_prompt.click()
+        joined_at = _frame(host)
+        guest.wait_for_function(
+            f"(window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0) > {joined_at}",
+            timeout=120000,
         )
         # Both keep playing.
         host_then, guest_then = _frame(host), _frame(guest)
