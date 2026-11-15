@@ -223,6 +223,27 @@ def test_a_rom_the_site_does_not_know_is_not_labelled_ssb64(browser, server_url,
         host.close()
 
 
+def test_a_guest_drops_the_game_id_when_the_hosts_rom_has_none(browser, server_url, room):
+    """A guest takes the room's game id as it is, empty included: keeping an
+    earlier id (Smash Remix's here) would turn that game's workarounds on for
+    another ROM."""
+    host = browser.new_page()
+    guest = browser.new_page()
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&game=smash-remix")
+        expect(host.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
+        guest.wait_for_function("window.KNState.gameId === 'smash-remix'", timeout=10000)
+
+        # The host's ROM turns out to be one the site does not list.
+        host.evaluate("window.__test_socket.emit('set-game-id', { game_id: '' })")
+        guest.wait_for_function("window.KNState.gameId === null", timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
 # ── Watching instead: player releases their slot without leaving the room ─
 
 

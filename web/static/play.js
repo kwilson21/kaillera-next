@@ -225,6 +225,18 @@
     if (isHost && socket?.connected) socket.emit('set-game-id', { game_id: _gameId || '' });
   };
 
+  // The room's game id is the host's ROM. A guest takes whatever the room
+  // says, empty included: the host's ROM is one the site does not list, and
+  // keeping an earlier id (say Smash Remix's) would turn on that game's
+  // workarounds for another. The host's own ROM decides its id; it takes the
+  // room's only when the room names a game, as before.
+  const _takeRoomGameId = (gameId) => {
+    if (typeof gameId !== 'string') return;
+    if (isHost && !gameId) return;
+    _gameId = gameId || null;
+    KNState.gameId = _gameId;
+  };
+
   // ROM drop-zone status line. Every "Loaded: …" update goes through
   // _setRomStatus so a ROM missing from the known_roms table is flagged no
   // matter how it was loaded (drop, library, host transfer). Only SHA-256
@@ -557,10 +569,7 @@
     _hostRomIdentityResolved = true;
     // Flush any deferred autoload now that we know what the host has.
     if (_flushPendingRomAutoload) _flushPendingRomAutoload('host-rom-resolved');
-    if (next.gameId) {
-      _gameId = next.gameId;
-      KNState.gameId = _gameId;
-    }
+    _takeRoomGameId(next.gameId);
     const cachedHash = _safeGet('localStorage', 'kaillera-rom-hash');
     if (!localRomLoaded() && _hostRomHash && cachedHash && romHashMismatch(_hostRomHash, cachedHash)) {
       console.warn(
@@ -984,6 +993,9 @@
         }
         console.log('[play] mid-game rejoin succeeded');
         sendDeviceType();
+        // The server keeps a returning host's room as it was: a ROM changed
+        // while the socket was down is told now.
+        _announceGameId();
         // A player taken back after its grace window ran out is on a new
         // socket the server has no ROM report for: without this the next
         // start would wait for a ROM everybody already has.
@@ -1041,6 +1053,9 @@
         }
         // If ROM was already loaded from cache, notify server immediately
         if (_romBlob || _romBlobUrl) notifyRomReady();
+        // A host taken back into its own room keeps the room's old game id
+        // (the server ignores open-room's then): say the current one.
+        if (isReconnect) _announceGameId();
         showOverlay();
       });
     } else {
@@ -1053,11 +1068,7 @@
         }
         const roomData = await response.json();
         if (!roomData) return;
-        const roomGameId = roomData.gameId || roomData.game_id;
-        if (roomGameId) {
-          _gameId = roomGameId;
-          KNState.gameId = _gameId;
-        }
+        _takeRoomGameId(roomData.gameId ?? roomData.game_id);
         applyHostRomFromData(roomData);
 
         // Room full: auto-join as spectator with banner. A page that already
@@ -1125,11 +1136,7 @@
           }
 
           _protocol?.checkAck('join-room', joinData);
-          const joinGameId = joinData?.gameId || joinData?.game_id;
-          if (joinGameId) {
-            _gameId = joinGameId;
-            KNState.gameId = _gameId;
-          }
+          _takeRoomGameId(joinData?.gameId ?? joinData?.game_id);
           applyHostRomFromData(joinData || roomData);
 
           if (!isSpectator && joinData?.players) {
@@ -1472,10 +1479,7 @@
     );
     mode = data.mode || mode;
     _gameResyncEnabled = data.resyncEnabled !== false;
-    if (data.gameId) {
-      _gameId = data.gameId;
-      KNState.gameId = _gameId;
-    }
+    _takeRoomGameId(data.gameId);
     applyHostRomFromData(data);
     KNState.matchId = data.matchId || null;
     _gfxRecoveryAttempt = 0;
@@ -5164,6 +5168,9 @@
         if (_romHash) {
           _gameId = _gameIdFromHash(_romHash);
           KNState.gameId = _gameId;
+          // A ROM loaded from the cache before the table arrived was
+          // announced with no game id.
+          _announceGameId();
           if (_romStatusText) _renderRomStatus();
         }
         updateHostRomInfo();
