@@ -1764,8 +1764,8 @@
   // back to the reliable primary DC. iOS Safari's usrsctp silently
   // stops delivering on unordered streams — and the bug is at the
   // association level, so DC rotation doesn't help. Immediate fallback
-  // to the reliable DC keeps inputs flowing; GGPO redundancy covers
-  // the brief gap.
+  // to the reliable DC keeps inputs flowing; the inputs the peer had not
+  // acked go out again on it at the switch (_switchInputsToReliable).
   const _dcBufferStaleStreak = {}; // sid -> consecutive frames above threshold
   const DC_BUFFER_THRESHOLD = 2048; // bytes — ~100 input packets
   const DC_BUFFER_STALE_FRAMES = 10; // consecutive frames before fallback
@@ -5126,6 +5126,50 @@
     }
   };
 
+  // The switch from the unreliable input channel to the reliable one, on
+  // either trigger: the DC health monitor (DC-FALLBACK reason=buffer,
+  // reason=ack-stale) or the unreliable channel closing (reason=rb-dc-close).
+  // From the next tick on, packets carry their own frame's input alone and
+  // the redundancy history is trimmed to nothing, so an input lost on the
+  // unreliable channel just before the switch, and not acked, would be sent
+  // by nothing: the peer stalled on the hole until it asked for it
+  // (RB-INPUT-ASK), or before that until its 5 s deadline
+  // (specs/input_transport.qnt, unackedInputsAreSentAgainAtTheSwitch). So
+  // every input after each peer's ack goes out again now, on the reliable
+  // channel, ahead of the next tick's packet. They come from the inputs this
+  // page keeps, not from the history, which holds only the newest
+  // RB_REDUNDANCY_MAX: a stuck channel can leave more than that unacked.
+  // Which frames is KNCore.framesToSendAgain (web/src/input-resend.ts,
+  // proved). A frame the peer already holds is dropped there as a duplicate.
+  // One send per frame, no wait and no new per-peer state.
+  const RB_RESEND_AT_SWITCH_MAX = 120;
+  const _switchInputsToReliable = (reason) => {
+    _rbTransport = 'reliable';
+    _syncLog(`DC-FALLBACK: switched to reliable DC (${reason}) — inputs now via primary channel`);
+    for (const [sid, peer] of Object.entries(_peers)) {
+      if (peer.synthetic === true || peer.slot === null || peer.slot === undefined) continue;
+      if (_isPeerPendingLateJoin(sid, peer) || peer.dc?.readyState !== 'open') continue;
+      const ack = peer.lastAckFromPeer ?? -1;
+      const frames = window.KNCore.framesToSendAgain(ack, _frameNum, RB_RESEND_AT_SWITCH_MAX);
+      const sent = [];
+      try {
+        for (const f of frames) {
+          const input = _localInputs[f];
+          if (input === undefined) continue;
+          peer.dc.send(KNShared.encodeInput(f, input, peer.lastFrameFromPeer ?? -1).buffer);
+          sent.push(f);
+        }
+      } catch (err) {
+        _syncLog(`DC-FALLBACK resend failed sid=${sid}: ${err}`);
+      }
+      if (sent.length) {
+        _syncLog(
+          `DC-FALLBACK resent sid=${sid} slot=${peer.slot} ack=${ack} frames=${sent[0]}..${sent.at(-1)} count=${sent.length}`,
+        );
+      }
+    }
+  };
+
   // -- Audio (delegated to kn-audio.js / window.KNAudio) --
   // Canvas hash checks only run after reconnect events — during steady-state
   // gameplay, trust AI DMA determinism. GPU rendering differences between platforms
@@ -8411,8 +8455,8 @@
       if (peer && peer.rbDc === ch) {
         resetPeerRollbackTransport(peer, remoteSid, 'rb-dc-close');
         if (_rbTransport === 'unreliable') {
-          _rbTransport = 'reliable';
           _syncLog(`DC-FALLBACK reason=rb-dc-close sid=${remoteSid} — inputs now via primary channel`);
+          _switchInputsToReliable('rb-dc-close');
         }
       }
       _syncLog(`rb-input DC closed sid=${remoteSid}`);
@@ -8857,6 +8901,9 @@
         // other than 'unreliable' is treated as reliable (the safe default).
         if (e.data.startsWith('rb-transport:')) {
           const mode = e.data.slice('rb-transport:'.length);
+          // Told to leave the unreliable channel: the same switch as a
+          // fallback, so the inputs not acked go out again.
+          if (mode !== 'unreliable' && _rbTransport === 'unreliable') _switchInputsToReliable('rb-transport');
           _rbTransport = mode === 'unreliable' ? 'unreliable' : 'reliable';
           _syncLog(`rb-transport: host=${mode} adopted=${_rbTransport}`);
           return;
@@ -14859,9 +14906,10 @@
     // ── DC health monitor: detect stuck unreliable DC, fall back immediately ──
     // iOS Safari's SCTP bug affects ALL unordered streams on the association,
     // so DC rotation doesn't help — new streams die too. Instead, detect the
-    // failure and switch to the reliable primary DC immediately. The GGPO
-    // redundancy layer covers the brief gap (first reliable packet carries
-    // all unACKed frames).
+    // failure and switch to the reliable primary DC immediately. The
+    // switch sends every input the peer has not acked again on the reliable
+    // DC, ahead of the next tick's packet, which carries its own frame alone
+    // (_switchInputsToReliable).
     if (_useCRollback && _rbTransport === 'unreliable') {
       const nowDc = performance.now();
       for (const [sid, peer] of Object.entries(_peers)) {
@@ -14893,10 +14941,9 @@
         }
 
         if (shouldFallback) {
-          _rbTransport = 'reliable';
-          _syncLog('DC-FALLBACK: switched to reliable DC — inputs now via primary channel');
           // Reset ack tracking so peer isn't immediately marked phantom
           peer.lastAckAdvanceTime = nowDc;
+          if (_rbTransport === 'unreliable') _switchInputsToReliable('health');
         }
       }
     }
