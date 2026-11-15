@@ -1646,14 +1646,20 @@
 
     // Host re-enabled sharing — resume if we have cached progress
     if (!isHost && _romSharingEnabled && !wasEnabled && _romSharingDecision === 'accepted' && !_romBlob) {
+      // In the lobby the host answers over a fresh pre-game connection, whose
+      // signals the sharing-off above stopped listening for.
+      const askAgain = () => {
+        if (!isGameRunning()) registerRomSignalHandler();
+        requestResumeTransfer();
+      };
       if (_romTransferState === 'paused' && _romTransferBytesReceived > 0) {
         console.log('[play] ROM sharing re-enabled — resuming from offset', _romTransferBytesReceived);
         _romTransferState = 'resuming';
-        requestResumeTransfer();
+        askAgain();
       } else if (_romTransferState === 'idle') {
         console.log('[play] ROM sharing re-enabled — starting fresh transfer');
         _romTransferState = 'resuming';
-        requestResumeTransfer();
+        askAgain();
       }
       romShadow({ kind: 'sharing-on' });
     }
@@ -2530,8 +2536,14 @@
 
     if (_romTransferHeader && _romTransferHeader.size !== totalSize) {
       setRomTransferState('failed', 'ROM transfer size mismatch — load manually');
+      // The bytes are dropped, so what was counted goes with them: a later
+      // request starts the file again rather than resuming from bytes this
+      // page no longer holds (specs/rom_transfer.qnt, `countIsHeld`).
       _romTransferState = 'idle';
       _romTransferChunks = [];
+      _romTransferHeader = null;
+      _romTransferBytesReceived = 0;
+      _romTransferRetries = 0;
       updateRomSharingUI();
       return;
     }
@@ -5265,4 +5277,6 @@
     _romBlobUrl = 'blob:test';
     window.__test_skipBoot = true;
   };
+  // The ROM this page holds (a Blob once one has arrived from the host), or null.
+  window.__test_romBlob = () => _romBlob;
 })();

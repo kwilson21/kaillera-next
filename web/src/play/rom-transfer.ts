@@ -126,9 +126,12 @@ export const receiverStep = (state: Receiver, event: ReceiverEvent): ReceiverSte
         : { state: IDLE, next: 'abandoned' };
     }
     case 'complete':
-      // Short or long of what the host announced: not the file.
+      // Short or long of what the host announced: not the file. The page
+      // drops the bytes, so the count and header go too: a later request
+      // starts the file again rather than resuming from bytes no longer held
+      // (`countIsHeld` in specs/rom_transfer.qnt).
       return state.header !== null && state.header.size !== state.received
-        ? { state: { ...state, phase: 'idle' }, next: 'abandoned' }
+        ? { state: IDLE, next: 'abandoned' }
         : { state: { ...state, phase: 'complete' }, next: 'finished' };
     case 'closed': {
       if (state.phase !== 'receiving') return stay(state);
