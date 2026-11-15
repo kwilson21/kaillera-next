@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.68.25",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "falling back to the reliable input channel sends the unacked inputs again, so the peer doesn't stall on them (#240)"
+      }
+    ]
+  },
+  {
     "version": "0.68.24",
     "date": "2026-11-15",
     "changes": [
