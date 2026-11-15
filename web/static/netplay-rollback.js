@@ -8937,6 +8937,13 @@
         // other than 'unreliable' is treated as reliable (the safe default).
         if (e.data.startsWith('rb-transport:')) {
           const mode = e.data.slice('rb-transport:'.length);
+          // Only the host's word sets the transport. A guest's would let any
+          // player flip it, and each flip to reliable makes this page send
+          // every peer up to RB_RESEND_AT_SWITCH_MAX inputs again.
+          if (_peers[remoteSid]?.slot !== 0) {
+            _syncLog(`rb-transport: ${mode} from slot=${_peers[remoteSid]?.slot ?? 'unknown'} ignored — not the host`);
+            return;
+          }
           // Told to leave the unreliable channel: the same switch as a
           // fallback, so the inputs not acked go out again.
           if (mode !== 'unreliable' && _rbTransport === 'unreliable') _switchInputsToReliable('rb-transport');

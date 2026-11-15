@@ -104,3 +104,16 @@ def test_the_comment_no_longer_promises_redundancy_carries_the_gap():
 
     assert "first reliable packet carries" not in src
     assert "GGPO redundancy covers\n  // the brief gap" not in src
+
+
+def test_only_the_host_sets_the_transport():
+    # The message is host-authoritative; acted on from a guest, any player
+    # could flip it, and each flip to reliable resends up to
+    # RB_RESEND_AT_SWITCH_MAX inputs to every peer.
+    src = ENGINE_JS.read_text()
+    handler = src[src.index("if (e.data.startsWith('rb-transport:')) {") :]
+    handler = handler[: handler.index("\n        }\n        if (e.data.startsWith('fpu-trace:'))")]
+    guard = handler.index("if (_peers[remoteSid]?.slot !== 0) {")
+    assert guard < handler.index("_switchInputsToReliable('rb-transport')")
+    assert guard < handler.index("_rbTransport = mode")
+    assert "return;" in handler[guard : handler.index("_switchInputsToReliable('rb-transport')")]
