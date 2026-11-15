@@ -15021,10 +15021,17 @@
           // applyFrame < 0: no remote input exists for this frame yet (the C
           // engine's own `apply_frame >= 0` guard, kn_rollback.c).
           if (!pendingReplay && applyFrame >= 0) {
+            // Every player in the match, as the rollback input stall counts
+            // them: one whose channel closed is still waited for (and dropped
+            // at the deadline), never predicted. An input from before the last
+            // resync is not waited for: the state loaded holds its effect
+            // (specs/resync_inputs.qnt, noWaitForAnInputThatCannotArrive).
+            const lockstepPeers = getInputPeers();
             const missingSlots = [];
-            for (const p of activePeers) {
+            for (const p of lockstepPeers) {
               if (p.slot === _playerSlot) continue;
               if (_peerPhantom[p.slot]) continue;
+              if (applyFrame < _inputFloor(p.slot)) continue;
               if (_remoteInputs[p.slot]?.[applyFrame] === undefined) missingSlots.push(p.slot);
             }
             const nowLockstep = performance.now();
@@ -15055,7 +15062,7 @@
               _lockstepWaitStart = 0;
             } else if (step !== 'run') {
               if (step === 'askAgain') {
-                _requestStrictMenuResends(activePeers, missingSlots, applyFrame, nowLockstep, 'lockstep');
+                _requestStrictMenuResends(lockstepPeers, missingSlots, applyFrame, nowLockstep, 'lockstep');
               }
               if (nowLockstep - _lockstepWaitLastLogAt >= 1000) {
                 _lockstepWaitLastLogAt = nowLockstep;

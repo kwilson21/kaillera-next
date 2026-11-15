@@ -77,16 +77,17 @@ def test_core_redirector_loads_patched_core_for_rollback_mode():
     assert "if (mode === 'streaming') {" in src
 
 
-def test_engine_getinfo_reports_rollback_mode():
-    """window.NetplayRollback.getInfo().mode must report 'rollback' (the
-    canonical wire value), not 'lockstep'. Verified by source pattern
-    because the actual call requires a full browser stack."""
+def test_engine_names_its_mode_in_one_place():
+    """getInfo().mode and the session-log payloads say 'rollback', or
+    'lockstep' when the host picked lockstep (predictions off for the match).
+    Verified by source pattern because the actual call requires a full
+    browser stack; tests/rb-two-player.mjs checks getInfo() in a real match."""
     src = ROLLBACK_JS.read_text()
-    # The getInfo() return literal.
-    assert "        mode: 'rollback'," in src
-    # Session log payloads also use 'rollback'.
-    assert "    mode: 'rollback'," in src
-    # No leftover 'mode: lockstep' string-literal mode reports.
+    assert "const _modeName = () => (_predictionsPaused ? 'lockstep' : 'rollback');" in src
+    # getInfo() and both session-log payloads (socket and HTTP fallback).
+    assert src.count("mode: _modeName(),") == 3
+    # No mode reported as a fixed literal.
+    assert "mode: 'rollback'," not in src
     assert "mode: 'lockstep'," not in src
 
 
