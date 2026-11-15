@@ -210,6 +210,9 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
 test("signal relays carry a sender; the server's own renegotiate request does not", () => {
   const offer = { type: 'offer', sdp: 'v=0...' };
   assert.equal(issueOf('webrtc-signal', { sender: 'a', target: 'b', offer, reconnect: true }), null);
+  const startupRetry = { sender: 'a', target: 'b', offer, reconnect: true, startupReconnect: true };
+  assert.equal(issueOf('webrtc-signal', startupRetry), null);
+  assert.notEqual(issueOf('webrtc-signal', { ...startupRetry, startupReconnect: 'yes' }), null);
   assert.equal(issueOf('webrtc-signal', { sender: 'a', target: 'b', answer: { type: 'answer', sdp: 'v=0' } }), null);
   const candidate = { candidate: 'candidate:1 1 udp ...', sdpMid: '0', sdpMLineIndex: 0 };
   assert.equal(issueOf('webrtc-signal', { sender: 'a', target: 'b', candidate }), null);

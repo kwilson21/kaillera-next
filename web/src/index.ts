@@ -28,6 +28,8 @@ import {
 } from './protocol.ts';
 import { startAudio } from './page/audio.ts';
 import { startCapture } from './page/capture.ts';
+import { startFakePeer } from './page/fake-peer.ts';
+import { menuAutopilot } from './page/menu-autopilot.ts';
 import { rollbackTimeline } from './page/rollback-timeline.ts';
 import { startSwitch2Usb } from './page/switch2-usb.ts';
 import { startControllerSettings } from './page/controller-settings/panel.ts';
@@ -302,6 +304,7 @@ export const KNCore = {
   demo,
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
+    menuAutopilot,
     rollbackTimeline,
     startAudio,
     startCapture,
@@ -309,6 +312,7 @@ export const KNCore = {
     startControllerSettings,
     startVisionClient,
     startVirtualGamepad,
+    startFakePeer,
   },
   /** What these pages share with the front page; the same object is `window.KNSite` on both. */
   site: KNSite,
