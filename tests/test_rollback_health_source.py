@@ -198,7 +198,9 @@ def test_resync_settles_the_inputs_before_its_frame():
 
     # A new match starts a new input timeline.
     clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
-    assert "_inputSettledBefore = {};" in src[clear_idx : src.index("\n  };\n", clear_idx)]
+    assert "_resetInputMaps();" in src[clear_idx : src.index("\n  };\n", clear_idx)]
+    maps_idx = src.index("const _resetInputMaps = () => {")
+    assert "_inputSettledBefore = {};" in src[maps_idx : src.index("\n  };\n", maps_idx)]
     apply_idx = src.index("const applySyncState = (bytes, frame, fromProactive = false) => {")
     assert "if (timelineAligned) _settleInputsAtResync(gm.Module, frame);" in src[apply_idx:]
 
@@ -211,7 +213,9 @@ def test_resync_settles_the_inputs_before_its_frame():
 
     # I2: the floor is per-peer state.
     reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
-    assert "delete _inputSettledBefore[slot];" in src[reset_idx : src.index("\n  };\n", reset_idx)]
+    assert "_clearSlotInputState(slot);" in src[reset_idx : src.index("\n  };\n", reset_idx)]
+    slot_idx = src.index("const _clearSlotInputState = (slot) => {")
+    assert "delete _inputSettledBefore[slot];" in src[slot_idx : src.index("\n  };\n", slot_idx)]
 
 
 def test_a_stalled_page_asks_for_the_inputs_it_dropped():
@@ -244,11 +248,17 @@ def test_a_stalled_page_asks_for_the_inputs_it_dropped():
     # I2: both tables are per-peer state, and go with every input timeline.
     reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
     reset_src = src[reset_idx : src.index("\n  };\n", reset_idx)]
-    assert "delete _inputDroppedAheadUpTo[slot];" in reset_src
-    assert "delete _inputAskedAt[slot];" in reset_src
+    assert "_clearSlotInputState(slot);" in reset_src
+    slot_idx = src.index("const _clearSlotInputState = (slot) => {")
+    slot_src = src[slot_idx : src.index("\n  };\n", slot_idx)]
+    assert "delete _inputDroppedAheadUpTo[slot];" in slot_src
+    assert "delete _inputAskedAt[slot];" in slot_src
     clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
     clear_src = src[clear_idx : src.index("\n  };\n", clear_idx)]
-    assert "_inputDroppedAheadUpTo = {};" in clear_src and "_inputAskedAt = {};" in clear_src
+    assert "_resetInputMaps();" in clear_src
+    maps_idx = src.index("const _resetInputMaps = () => {")
+    maps_src = src[maps_idx : src.index("\n  };\n", maps_idx)]
+    assert "_inputDroppedAheadUpTo = {};" in maps_src and "_inputAskedAt = {};" in maps_src
 
 
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():

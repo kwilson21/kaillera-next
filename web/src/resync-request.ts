@@ -274,36 +274,81 @@ export function overdueAskStep(
 
 /**
  * The deadline on the host's push to a guest whose input went unanswered
- * (specs/ask_escalation.qnt, PUSH_HAS_DEADLINE; I1). The guest's
- * `inputs-settled:` for the pushed state (it applied it) ends it; without it
- * by `timeoutMs` the host pushes again, up to `maxPushes`, then gives up and
- * drops the player, who rejoins onto the host's state rather than playing on
- * split (pushesAreBounded, everyAskEnds).
+ * (specs/ask_escalation.qnt push_deadline, specs/escalation_push.qnt; I1).
  *
- * @param pushOut    a push is out
- * @param settled    the guest acknowledged it (inputs-settled at or past it)
- * @param waitedMs   how long since it was pushed
- * @param timeoutMs  the push's deadline
- * @param pushes     pushes sent for this input
- * @param maxPushes  the most pushes
+ * A push is a transfer that takes time: it may wait behind another transfer
+ * to that guest, and its deadline starts only when its own state is handed
+ * over (MARK_BY_FRAME), never when an earlier one is. The guest's
+ * `inputs-settled:` for a state from the first push on ends it (done); a
+ * reconnect or a phantom ends it too, its own resync superseding the push
+ * (ended). Until the hand-over it is `sending`; a transfer that ended
+ * without handing the state over, or none within `backstopMs` (longer than a
+ * transfer queued behind another), lets it go (LET_GO_ON_OUTCOME), not counted
+ * against the guest. Handed over and unanswered by `timeoutMs`, the host
+ * pushes again, up to `maxPushes`, then gives up and drops the player, who
+ * rejoins onto the host's state (pushesAreBounded, everyAskEnds). The caller
+ * credits a freeze of its page to both clocks (CREDIT_FREEZE).
+ *
+ * @param pushOut     a push is out (not let go)
+ * @param guestAway   the guest is reconnecting, a phantom, or gone
+ * @param settled     the guest acknowledged a state from the first push on
+ * @param handedOver  this push's own state was handed over
+ * @param sendFailed  this push's own transfer ended without handing it over
+ * @param sendingMs   how long since this push was started
+ * @param backstopMs  the longest a push may take to be handed over
+ * @param waitedMs    how long since it was handed over
+ * @param timeoutMs   the deadline after the hand-over
+ * @param pushes      pushes sent for this input
+ * @param maxPushes   the most pushes
  */
-export type PushDeadlineStep = 'noPush' | 'done' | 'wait' | 'pushAgain' | 'giveUp';
+export type PushDeadlineStep = 'noPush' | 'ended' | 'done' | 'sending' | 'letGo' | 'wait' | 'pushAgain' | 'giveUp';
 //@ requires pushes >= 1 && maxPushes >= 1
 //@ ensures !pushOut ==> \result === "noPush"
-//@ ensures pushOut && settled ==> \result === "done"
-//@ ensures pushOut && !settled && waitedMs < timeoutMs ==> \result === "wait"
-//@ ensures \result === "pushAgain" <==> pushOut && !settled && waitedMs >= timeoutMs && pushes < maxPushes
-//@ ensures \result === "giveUp" <==> pushOut && !settled && waitedMs >= timeoutMs && pushes >= maxPushes
+//@ ensures pushOut && guestAway ==> \result === "ended"
+//@ ensures pushOut && !guestAway && settled ==> \result === "done"
+//@ ensures \result === "sending" <==> pushOut && !guestAway && !settled && !handedOver && !sendFailed && sendingMs < backstopMs
+//@ ensures \result === "letGo" <==> pushOut && !guestAway && !settled && !handedOver && (sendFailed || sendingMs >= backstopMs)
+//@ ensures \result === "wait" <==> pushOut && !guestAway && !settled && handedOver && waitedMs < timeoutMs
+//@ ensures \result === "pushAgain" <==> pushOut && !guestAway && !settled && handedOver && waitedMs >= timeoutMs && pushes < maxPushes
+//@ ensures \result === "giveUp" <==> pushOut && !guestAway && !settled && handedOver && waitedMs >= timeoutMs && pushes >= maxPushes
 export function pushDeadlineStep(
   pushOut: boolean,
+  guestAway: boolean,
   settled: boolean,
+  handedOver: boolean,
+  sendFailed: boolean,
+  sendingMs: number,
+  backstopMs: number,
   waitedMs: number,
   timeoutMs: number,
   pushes: number,
   maxPushes: number,
 ): PushDeadlineStep {
   if (!pushOut) return 'noPush';
+  if (guestAway) return 'ended';
   if (settled) return 'done';
+  if (!handedOver) return sendFailed || sendingMs >= backstopMs ? 'letGo' : 'sending';
   if (waitedMs < timeoutMs) return 'wait';
   return pushes < maxPushes ? 'pushAgain' : 'giveUp';
+}
+
+/**
+ * The number of the push an escalation starts (specs/escalation_push.qnt,
+ * COUNT_SURVIVES). A push let go keeps its count for the same hole: escalated
+ * again, the hole gets the next push, and past `maxPushes` none (0): it is
+ * left to the stall path (its deadline, the phantom and its resync) instead
+ * of being pushed for ever. A new hole starts at 1.
+ *
+ * @param sameHole     the last push let go for this guest was for this hole
+ * @param pushesSoFar  the pushes that hole had
+ * @param maxPushes    the most pushes
+ */
+//@ requires maxPushes >= 1 && pushesSoFar >= 0
+//@ ensures !sameHole ==> \result === 1
+//@ ensures sameHole && pushesSoFar < maxPushes ==> \result === pushesSoFar + 1
+//@ ensures sameHole && pushesSoFar >= maxPushes ==> \result === 0
+//@ ensures \result <= maxPushes
+export function nextEscalationPush(sameHole: boolean, pushesSoFar: number, maxPushes: number): number {
+  if (!sameHole) return 1;
+  return pushesSoFar < maxPushes ? pushesSoFar + 1 : 0;
 }

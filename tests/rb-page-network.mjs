@@ -137,6 +137,13 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
   // `inputs-settled:` (its acknowledgement of a pushed state) is dropped too.
   window.__knDropSettledUntil = 0;
   window.__knSettledDropped = 0;
+  // ASK_UNANSWERED_ACKS (the host page): until __knDropSyncStateUntil, and only
+  // until the host gives up on the guest (its input-ask-push-giveup event),
+  // every send on `sync-state` is dropped. The engine hands each state over
+  // as usual; the guest never gets one, so it never applies or acknowledges
+  // a push and plays on its own frames.
+  window.__knDropSyncStateUntil = 0;
+  window.__knSyncStateDropped = 0;
   window.__knDropArmedAt = 0;
   window.__knInputsDroppedAfterOpen = [];
   let stateSentAfterArming = 0;
@@ -310,6 +317,14 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
       stateSentAfterArming = performance.now();
     }
     if (this.label === 'sync-state' && syncStateDrops(data)) return;
+    if (
+      this.label === 'sync-state' &&
+      performance.now() < window.__knDropSyncStateUntil &&
+      !(window.__knEvents ?? []).some((e) => e.meta?.kind === 'input-ask-push-giveup')
+    ) {
+      window.__knSyncStateDropped++;
+      return;
+    }
     if (window.__knLoseRbInputs && this.label === 'rollback-input' && data instanceof ArrayBuffer) {
       if (data.byteLength >= 4) window.__knRbInputsLost.push(new Int32Array(data, 0, 1)[0]);
       return;

@@ -79,7 +79,7 @@ def test_a_queued_transfer_never_reaches_a_new_connection():
     capture = push.index("const targets = _syncTargetsFor(targetSid);")
     assert push.index("const frame = _frameNum;") < capture < push.index("await ")
     assert "_syncQueueGen[targetSid] || 0" in push[capture : push.index("await ")]
-    assert "sendSyncChunks(compressed, frame, isFull, targets, isProactive, requestIds)" in push
+    assert "sendSyncChunks(compressed, frame, isFull, targets, isProactive, requestIds, attempts)" in push
     assert "if (!_syncTargetCurrent(socketTarget)) {" in push
     targets_for = _block(src, "const _syncTargetsFor = (targetSid) => {")
     assert "epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0" in targets_for
@@ -135,7 +135,10 @@ def test_a_request_during_a_transfer_is_queued_not_dropped():
     src = ENGINE.read_text()
     start = src.index("const pushSyncState = async")
     head = src[start : src.index("const gm = window.EJS_emulator?.gameManager;", start)]
-    assert "_queuedSyncPushes.set(targetSid || '', options);" in head
+    # Newest options kept; a full state stays full and escalation attempts
+    # queued before go with it.
+    assert "_queuedSyncPushes.set(" in head
+    assert "full: !!(prev.full || options.full)," in head
     assert "_runQueuedSyncPush();" in src[start:]
     # Per-peer state: resetPeerState drops the peer's queued push (I2), and
     # stop() all of them.

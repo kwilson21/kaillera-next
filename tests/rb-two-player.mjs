@@ -220,14 +220,19 @@
  *     straddles the first push is predicted until the next push, then both
  *     pages are on the host's state: frames are compared from the last state
  *     the guest applied, which must be at or after the last push. With ASK_UNANSWERED_ACKS=1
- *     (ASK_UNANSWERED_STALL_MS >= 20000) the guest drops its `inputs-settled:` for n ms too,
- *     so no push is acknowledged: fails unless the host pushes again to the
+ *     (ASK_UNANSWERED_STALL_MS >= 20000) the host's pushed states never reach the guest for
+ *     n ms (until it gives up), so no push is applied or acknowledged and the guest plays
+ *     on: fails unless the host pushes again to the
  *     limit, gives up (`INPUT-ASK-PUSH-GAVEUP`) and drops the player
  *     (`peer hard-disconnected`) rather than playing on split, the guest's
  *     page is told (`DROPPED-BY-HOST`) and joins again late onto the host's
  *     state (`late-join loaded`), no mesh heal adds it back, no late input
  *     follows on the host, and the frames from the late join's state match
- *     (specs/drop_is_final.qnt).
+ *     (specs/drop_is_final.qnt). With ASK_UNANSWERED_ACK_LOST=1 the guest
+ *     applies each push but drops its `inputs-settled:` for n ms: fails
+ *     unless the push ends on the phantom the host's stall makes
+ *     (`INPUT-ASK-PUSH-ENDED … phantom`), `PEER-RECOVERED` resyncs, nobody
+ *     is given up on or dropped, and the frames from the last resync match.
  *   ASK_UNANSWERED_PHANTOM=1   With HEAL_BOTH_SIDES=1: once the heal's checks
  *     are done (its 15 s after the reconnect's resync), the guest drops its
  *     input for one frame just ahead of it, for good: #272's shape. #272's
@@ -654,18 +659,34 @@ const CATCH_UP_HOLE_MS = Number(process.env.CATCH_UP_HOLE_MS || 0);
 // the way into the battle, so the host's asks for them go unanswered.
 const ASK_UNANSWERED_STALL_MS = Number(process.env.ASK_UNANSWERED_STALL_MS || 0);
 const ASK_UNANSWERED_RECOVER_MS = 30000;
-// ASK_UNANSWERED_ACKS=1: the guest drops its acknowledgements too, so every
-// push goes unanswered and the host drops the player (needs a window longer
-// than the escalation and three 5 s push deadlines, about 17 s).
+// ASK_UNANSWERED_ACKS=1: the host's pushed states never reach the guest, so
+// every push goes unanswered while the guest plays on, and the host drops the
+// player (needs a window longer than the escalation and three 5 s push
+// deadlines, about 17 s).
 const ASK_UNANSWERED_ACKS = process.env.ASK_UNANSWERED_ACKS === '1';
+// ASK_UNANSWERED_ACK_LOST=1: the guest gets each push and applies it, but its
+// acknowledgement is dropped. That message also tells the host not to wait
+// for the frames the state skipped, so the host stalls on them, its 5 s stall
+// deadline makes the guest a phantom, and the phantom ends the push
+// (END_ON_RECONNECT): PEER-RECOVERED's resync recovers it, nobody is dropped.
+const ASK_UNANSWERED_ACK_LOST = process.env.ASK_UNANSWERED_ACK_LOST === '1';
 // RESYNC_OFF=1: the host starts the game with resync off (the room's
-// toggle). With ASK_UNANSWERED_STALL_MS: no escalation push can go out, so
-// none is armed and nobody is dropped; the hole stays with the stall path,
-// and the pages may stay apart (as on main with the toggle off: no hash or
-// integrity failure counts then).
+// toggle). Only with ASK_UNANSWERED_STALL_MS: no escalation push can go out,
+// so none is armed and nobody is dropped; the hole stays with the stall path.
+// Nothing corrects the hole with resync off, so the pages may differ from
+// it on (as on main with the toggle off): frames are compared from the boot
+// sync up to the hole's first frame, and must match there.
 const RESYNC_OFF = process.env.RESYNC_OFF === '1';
-if (ASK_UNANSWERED_ACKS && !(ASK_UNANSWERED_STALL_MS >= 20000)) {
-  console.log('ASK_UNANSWERED_ACKS needs ASK_UNANSWERED_STALL_MS >= 20000');
+if (RESYNC_OFF && !(ASK_UNANSWERED_STALL_MS > 0)) {
+  console.log('RESYNC_OFF needs ASK_UNANSWERED_STALL_MS (the hash checks end at its hole)');
+  process.exit(1);
+}
+if ((ASK_UNANSWERED_ACKS || ASK_UNANSWERED_ACK_LOST) && !(ASK_UNANSWERED_STALL_MS >= 20000)) {
+  console.log('ASK_UNANSWERED_ACKS and ASK_UNANSWERED_ACK_LOST need ASK_UNANSWERED_STALL_MS >= 20000');
+  process.exit(1);
+}
+if (ASK_UNANSWERED_ACKS && ASK_UNANSWERED_ACK_LOST) {
+  console.log('ASK_UNANSWERED_ACKS and ASK_UNANSWERED_ACK_LOST are separate runs');
   process.exit(1);
 }
 const askUnanswered = {
@@ -676,6 +697,7 @@ const askUnanswered = {
   freezeMs: 0,
   droppedByHost: null,
   lateJoinedAt: null,
+  statesDropped: 0,
 };
 // ASK_UNANSWERED_ACKS: how long the dropped guest may take to join again late
 // (a gesture tap, the state, the boot).
@@ -2462,11 +2484,16 @@ if (inBattle) {
         if (acksToo) window.__knDropSettledUntil = performance.now() + ms;
         return [window.__knDropInputFrom, window.__knDropInputTo];
       },
-      [ASK_UNANSWERED_STALL_MS, ASK_UNANSWERED_ACKS],
+      [ASK_UNANSWERED_STALL_MS, ASK_UNANSWERED_ACK_LOST],
     );
+    if (ASK_UNANSWERED_ACKS)
+      await host.evaluate((ms) => {
+        window.__knDropSyncStateUntil = performance.now() + ms;
+      }, ASK_UNANSWERED_STALL_MS);
     console.log(
       `ASK_UNANSWERED_STALL_MS: the guest drops its inputs for frames ${askUnanswered.range[0]}..${askUnanswered.range[1] - 1} for good` +
-        (ASK_UNANSWERED_ACKS ? `, and its acknowledgements for ${ASK_UNANSWERED_STALL_MS} ms` : ''),
+        (ASK_UNANSWERED_ACKS ? `, and the host's states never reach it for ${ASK_UNANSWERED_STALL_MS} ms` : '') +
+        (ASK_UNANSWERED_ACK_LOST ? `, and its acknowledgements for ${ASK_UNANSWERED_STALL_MS} ms` : ''),
     );
     // The longest the host's frame stood still while this ran (sampled).
     let sampling = true;
@@ -2486,7 +2513,11 @@ if (inBattle) {
     const settled = await waitForLine(
       host,
       askUnanswered.hostAt.seq,
-      ASK_UNANSWERED_ACKS ? /INPUT-ASK-PUSH-GAVEUP/ : /INPUT-ASK-PUSH-SETTLED/,
+      ASK_UNANSWERED_ACKS
+        ? /INPUT-ASK-PUSH-GAVEUP/
+        : ASK_UNANSWERED_ACK_LOST
+          ? /INPUT-ASK-PUSH-ENDED/
+          : /INPUT-ASK-PUSH-SETTLED/,
       ASK_UNANSWERED_STALL_MS + ASK_UNANSWERED_RECOVER_MS,
     );
     // A stall on main ends at its 5 s deadline; keep sampling past that.
@@ -2494,7 +2525,8 @@ if (inBattle) {
     sampling = false;
     await sampler;
     askUnanswered.dropped = await guest.evaluate(() => window.__knInputsDroppedUntil);
-    console.log(`ASK_UNANSWERED_STALL_MS: the host's push was acknowledged: ${settled} (${Date.now() - started} ms)`);
+    if (ASK_UNANSWERED_ACKS) askUnanswered.statesDropped = await host.evaluate(() => window.__knSyncStateDropped);
+    console.log(`ASK_UNANSWERED_STALL_MS: the push ended as the mode expects: ${settled} (${Date.now() - started} ms)`);
     if (ASK_UNANSWERED_ACKS && settled) {
       // The guest is told it was dropped and joins again late by itself
       // (specs/drop_is_final.qnt). Its engine starts over (and its sync log
@@ -3044,15 +3076,19 @@ const resyncFaultLanded =
         faultResyncApplied?.frame === faultTarget &&
         faultResyncApplied?.counter === faultTarget
       : false;
-const recoveredAt = RESYNC_FAULT
-  ? resyncFaultLanded
-    ? faultTarget
-    : Infinity
-  : FREEZE_LIKE
-    ? resyncs.length
-      ? resyncs[resyncs.length - 1]
+const recoveredAt = RESYNC_OFF
+  ? bootSyncFrame
+  : RESYNC_FAULT
+    ? resyncFaultLanded
+      ? faultTarget
       : Infinity
-    : bootSyncFrame;
+    : FREEZE_LIKE
+      ? resyncs.length
+        ? resyncs[resyncs.length - 1]
+        : Infinity
+      : bootSyncFrame;
+// RESYNC_OFF: the last frame compared is the one before the hole.
+const compareUntil = RESYNC_OFF && askUnanswered.range ? askUnanswered.range[0] : Infinity;
 let both = 0,
   gpMis = 0,
   fullMis = 0,
@@ -3434,7 +3470,7 @@ const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f],
     b = G.hashes[f];
-  if (!b || !a[0] || !b[0] || +f < recoveredAt) continue;
+  if (!b || !a[0] || !b[0] || +f < recoveredAt || +f >= compareUntil) continue;
   if (inFrozenRecovery(dropWindows, +f)) {
     dropPeerReport.framesExcluded++;
     if (a[0] !== b[0] || a[2] !== b[2]) dropPeerReport.mismatchesExcluded++;
@@ -3545,7 +3581,7 @@ const schedulerCounters = { host: lastTickPerf(H.sync), guest: lastTickPerf(G.sy
 // Finalized battle frames both peers could have hashed (hashing trails the
 // head by 12 frames); coverage below 80% means the comparison proves little.
 const spanFrom = Math.max(battleFrom, recoveredAt);
-const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - spanFrom + 1 : 0;
+const battleSpan = battleFrom > 0 ? Math.min(Math.min(H.frame, G.frame) - 12, compareUntil - 1) - spanFrom + 1 : 0;
 const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
 
 // Visual check: decode both peers' downscaled canvas captures and diff
@@ -3596,7 +3632,7 @@ if (VISUAL_CHECK) {
   let windowFramesExcluded = 0;
   for (const [f, hb] of hMap) {
     const gb = gMap.get(f);
-    if (!gb || f < recoveredAt) continue;
+    if (!gb || f < recoveredAt || f >= compareUntil) continue;
     // The proven windows the hash compare leaves out (a frozen-page recovery,
     // a DROP_PEER_MS reconnect): the peers' pictures differ there by design too.
     if (inFrozenRecovery([...recoveries, ...dropWindows], f)) {
@@ -4008,7 +4044,7 @@ const integrityAfterRecovery = (log, marker) => {
         // (myF=), as cIntegrityAfterRecovery reads the same line below.
         const named = l.includes('[C] ') ? l.match(/myF=(\d+)/) : null;
         const f = named ? +named[1] : +(l.split('\t')[2] || '').replace('f=', '');
-        return f >= recoveredAt + 30 && count(l, INTEGRITY) > 0;
+        return f >= recoveredAt + 30 && f < compareUntil && count(l, INTEGRITY) > 0;
       }).length;
 };
 // The C debug log has no frame column; its entries name the frame they
@@ -4024,7 +4060,7 @@ const cIntegrityAfterRecovery = (clog, marker) => {
   return lines.slice(from + 1).filter((l) => {
     if (count(l, INTEGRITY) === 0) return false;
     const m = l.match(/myF=(\d+)/) || l.match(/\bf=(\d+)/);
-    return !m || +m[1] >= recoveredAt + 30;
+    return !m || (+m[1] >= recoveredAt + 30 && +m[1] < compareUntil);
   }).length;
 };
 const postRecoveryIntegrity =
@@ -4223,6 +4259,8 @@ const askUnansweredReport = (() => {
   const gaveUp = hostLines.filter((l) => /INPUT-ASK-PUSH-GAVEUP/.test(l));
   const hardDisconnected = hostLines.filter((l) => /peer hard-disconnected: .* slot: 1/.test(l));
   const pushes = hostLines.filter((l) => /INPUT-ASK-PUSH-AGAIN/.test(l));
+  const endedOnPhantom = hostLines.filter((l) => /INPUT-ASK-PUSH-ENDED .*phantom/.test(l));
+  const recovered = hostLines.filter((l) => /PEER-RECOVERED slot=1/.test(l));
   // Main's recovery for a stalled hole; the escalation should come first.
   const stallTimeouts = hostLines.filter((l) => /RB-INPUT-STALL-TIMEOUT/.test(l));
   // After a drop, the health check may offer to the player again: each
@@ -4239,6 +4277,9 @@ const askUnansweredReport = (() => {
     heals: heals.length,
     stallTimeouts,
     notSent: hostLines.filter((l) => /INPUT-ASK-PUSH-NOT-SENT/.test(l)).length,
+    endedOnPhantom,
+    recovered: recovered.length,
+    statesDropped: askUnanswered.statesDropped,
     // ACKS: the drop is final (specs/drop_is_final.qnt): the guest's page
     // was told and ended its match, and nothing on the host followed it.
     droppedByHost: askUnanswered.droppedByHost ? [askUnanswered.droppedByHost] : [],
@@ -4268,24 +4309,32 @@ const askUnansweredFailed = RESYNC_OFF
       askUnansweredReport &&
       askUnansweredReport.dropped > 0 &&
       askUnansweredReport.overdue.length > 0 &&
-      (ASK_UNANSWERED_ACKS
-        ? // Every push unanswered: pushed again to the limit, then the player dropped.
-          askUnansweredReport.pushes.length >= 2 &&
-          askUnansweredReport.gaveUp.length > 0 &&
-          askUnansweredReport.hardDisconnected.length > 0 &&
-          askUnansweredReport.droppedByHost.length > 0 &&
-          // It joined again late, onto the host's state; frames are compared
-          // from there (FREEZE_LIKE).
-          askUnansweredReport.lateJoined.length > 0 &&
-          askUnansweredReport.heals === 0 &&
-          askUnansweredReport.pastWindowAfterDrop === 0
-        : askUnansweredReport.settled.length > 0 &&
+      (ASK_UNANSWERED_ACK_LOST
+        ? // The phantom the host's stall makes ends the push; its own resync
+          // recovers the guest, and nobody is dropped.
+          askUnansweredReport.endedOnPhantom.length > 0 &&
+          askUnansweredReport.recovered > 0 &&
           askUnansweredReport.gaveUp.length === 0 &&
-          // The difference from main: no stall waits out its deadline.
-          askUnansweredReport.stallTimeouts.length === 0 &&
-          askUnansweredReport.freezeMs < STALL_DEADLINE_MS &&
-          // The frames compared start at or after the last push's frame.
-          recoveredAt >= askUnansweredReport.lastPushFrame)
+          askUnansweredReport.hardDisconnected.length === 0
+        : ASK_UNANSWERED_ACKS
+          ? // Every push unanswered: pushed again to the limit, then the player dropped.
+            askUnansweredReport.statesDropped > 0 &&
+            askUnansweredReport.pushes.length >= 2 &&
+            askUnansweredReport.gaveUp.length > 0 &&
+            askUnansweredReport.hardDisconnected.length > 0 &&
+            askUnansweredReport.droppedByHost.length > 0 &&
+            // It joined again late, onto the host's state; frames are compared
+            // from there (FREEZE_LIKE).
+            askUnansweredReport.lateJoined.length > 0 &&
+            askUnansweredReport.heals === 0 &&
+            askUnansweredReport.pastWindowAfterDrop === 0
+          : askUnansweredReport.settled.length > 0 &&
+            askUnansweredReport.gaveUp.length === 0 &&
+            // The difference from main: no stall waits out its deadline.
+            askUnansweredReport.stallTimeouts.length === 0 &&
+            askUnansweredReport.freezeMs < STALL_DEADLINE_MS &&
+            // The frames compared start at or after the last push's frame.
+            recoveredAt >= askUnansweredReport.lastPushFrame)
     );
 if (ASK_UNANSWERED_STALL_MS > 0) {
   console.log(
@@ -4635,11 +4684,11 @@ const failed =
   syncFollowUpFailed ||
   observersFailed ||
   signalingDropFailed ||
-  (gpMis > 0 && !RESYNC_OFF) ||
-  (gsMis > 0 && !RESYNC_OFF) ||
+  gpMis > 0 ||
+  gsMis > 0 ||
   summary.bootInputStallTimeouts.host > 0 ||
   summary.bootInputStallTimeouts.guest > 0 ||
-  (integrityFailed && !RESYNC_OFF) ||
+  integrityFailed ||
   H.inBattleAt < 0 ||
   G.inBattleAt < 0 ||
   battleCoverage < 0.8 ||

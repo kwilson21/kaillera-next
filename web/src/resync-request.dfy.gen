@@ -6,7 +6,7 @@ datatype DeadlineStep = noRequest | wait | lostHost | askAgain | stopAsking | le
 
 datatype OverdueAskStep = ask | wait | push
 
-datatype PushDeadlineStep = giveUp | wait | noPush | done | pushAgain
+datatype PushDeadlineStep = giveUp | wait | letGo | noPush | ended | done | sending | pushAgain
 
 function endsRequest(answerFor: int, newest: int, hostNumbers: bool): bool
 {
@@ -169,32 +169,67 @@ lemma overdueAskStep_ensures(isHost: bool, asksSent: int, firstAskAgeMs: int, mi
 {
 }
 
-function pushDeadlineStep(pushOut: bool, settled: bool, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int): PushDeadlineStep
+function pushDeadlineStep(pushOut: bool, guestAway: bool, settled: bool, handedOver: bool, sendFailed: bool, sendingMs: int, backstopMs: int, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int): PushDeadlineStep
   requires (pushes >= 1)
   requires (maxPushes >= 1)
 {
   if !(pushOut) then
     PushDeadlineStep.noPush
   else
-    if settled then
-      PushDeadlineStep.done
+    if guestAway then
+      PushDeadlineStep.ended
     else
-      if (waitedMs < timeoutMs) then
-        PushDeadlineStep.wait
+      if settled then
+        PushDeadlineStep.done
       else
-        if (pushes < maxPushes) then
-          PushDeadlineStep.pushAgain
+        if !(handedOver) then
+          if (sendFailed || (sendingMs >= backstopMs)) then
+            PushDeadlineStep.letGo
+          else
+            PushDeadlineStep.sending
         else
-          PushDeadlineStep.giveUp
+          if (waitedMs < timeoutMs) then
+            PushDeadlineStep.wait
+          else
+            if (pushes < maxPushes) then
+              PushDeadlineStep.pushAgain
+            else
+              PushDeadlineStep.giveUp
 }
 
-lemma pushDeadlineStep_ensures(pushOut: bool, settled: bool, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int)
+lemma pushDeadlineStep_ensures(pushOut: bool, guestAway: bool, settled: bool, handedOver: bool, sendFailed: bool, sendingMs: int, backstopMs: int, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int)
   requires (pushes >= 1)
   requires (maxPushes >= 1)
-  ensures (!(pushOut) ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).noPush?)
-  ensures (pushOut ==> settled ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).done?)
-  ensures (pushOut ==> !(settled) ==> (waitedMs < timeoutMs) ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).wait?)
-  ensures (pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).pushAgain? <==> (((pushOut && !(settled)) && (waitedMs >= timeoutMs)) && (pushes < maxPushes)))
-  ensures (pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).giveUp? <==> (((pushOut && !(settled)) && (waitedMs >= timeoutMs)) && (pushes >= maxPushes)))
+  ensures (!(pushOut) ==> pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes).noPush?)
+  ensures (pushOut ==> guestAway ==> pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes).ended?)
+  ensures (pushOut ==> !(guestAway) ==> settled ==> pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes).done?)
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes).sending? <==> (((((pushOut && !(guestAway)) && !(settled)) && !(handedOver)) && !(sendFailed)) && (sendingMs < backstopMs)))
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes).letGo? <==> ((((pushOut && !(guestAway)) && !(settled)) && !(handedOver)) && (sendFailed || (sendingMs >= backstopMs))))
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes).wait? <==> ((((pushOut && !(guestAway)) && !(settled)) && handedOver) && (waitedMs < timeoutMs)))
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes).pushAgain? <==> (((((pushOut && !(guestAway)) && !(settled)) && handedOver) && (waitedMs >= timeoutMs)) && (pushes < maxPushes)))
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes).giveUp? <==> (((((pushOut && !(guestAway)) && !(settled)) && handedOver) && (waitedMs >= timeoutMs)) && (pushes >= maxPushes)))
+{
+}
+
+function nextEscalationPush(sameHole: bool, pushesSoFar: int, maxPushes: int): int
+  requires (maxPushes >= 1)
+  requires (pushesSoFar >= 0)
+{
+  if !(sameHole) then
+    1
+  else
+    if (pushesSoFar < maxPushes) then
+      (pushesSoFar + 1)
+    else
+      0
+}
+
+lemma nextEscalationPush_ensures(sameHole: bool, pushesSoFar: int, maxPushes: int)
+  requires (maxPushes >= 1)
+  requires (pushesSoFar >= 0)
+  ensures (!(sameHole) ==> (nextEscalationPush(sameHole, pushesSoFar, maxPushes) == 1))
+  ensures (sameHole ==> (pushesSoFar < maxPushes) ==> (nextEscalationPush(sameHole, pushesSoFar, maxPushes) == (pushesSoFar + 1)))
+  ensures (sameHole ==> (pushesSoFar >= maxPushes) ==> (nextEscalationPush(sameHole, pushesSoFar, maxPushes) == 0))
+  ensures (nextEscalationPush(sameHole, pushesSoFar, maxPushes) <= maxPushes)
 {
 }

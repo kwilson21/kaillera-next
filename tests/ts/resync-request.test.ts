@@ -9,6 +9,7 @@ import {
   lateJoinLostHostStep,
   overdueAskStep,
   pushDeadlineStep,
+  nextEscalationPush,
   resyncDeadlineStep,
   type DeadlineStep,
   type LostHostStep,
@@ -336,10 +337,54 @@ test('a slow answer is never taken for a lost one: one ask, or less than 1.5 s, 
 });
 
 test("the host's push ends on the guest's acknowledgement, is pushed again at its deadline, then given up", () => {
-  assert.equal(pushDeadlineStep(false, false, 9999, 3000, 1, 3), 'noPush');
-  assert.equal(pushDeadlineStep(true, true, 9999, 3000, 1, 3), 'done');
-  assert.equal(pushDeadlineStep(true, false, 2999, 3000, 1, 3), 'wait');
-  assert.equal(pushDeadlineStep(true, false, 3000, 3000, 1, 3), 'pushAgain');
-  assert.equal(pushDeadlineStep(true, false, 3000, 3000, 2, 3), 'pushAgain');
-  assert.equal(pushDeadlineStep(true, false, 3000, 3000, 3, 3), 'giveUp', 'pushesAreBounded');
+  // (pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes)
+  type Case = {
+    pushOut?: boolean;
+    away?: boolean;
+    settled?: boolean;
+    handed?: boolean;
+    failed?: boolean;
+    sendingMs?: number;
+    waited?: number;
+    pushes?: number;
+  };
+  const step = (o: Case) =>
+    pushDeadlineStep(
+      o.pushOut ?? true,
+      o.away ?? false,
+      o.settled ?? false,
+      o.handed ?? true,
+      o.failed ?? false,
+      o.sendingMs ?? 0,
+      60000,
+      o.waited ?? 0,
+      5000,
+      o.pushes ?? 1,
+      3,
+    );
+  assert.equal(step({ pushOut: false, away: true, settled: true }), 'noPush');
+  assert.equal(step({ away: true, settled: true, waited: 9999, pushes: 3 }), 'ended', 'END_ON_RECONNECT');
+  assert.equal(step({ settled: true, handed: false }), 'done', 'SETTLE_ON_FIRST, even before the hand-over');
+  assert.equal(step({ waited: 4999 }), 'wait');
+  assert.equal(step({ waited: 5000 }), 'pushAgain');
+  assert.equal(step({ waited: 5000, pushes: 2 }), 'pushAgain');
+  assert.equal(step({ waited: 5000, pushes: 3 }), 'giveUp', 'pushesAreBounded');
+});
+
+test('a push not handed over has no deadline: it is let go only when its own transfer fails or at the backstop', () => {
+  const step = (failed: boolean, sendingMs: number, waited: number) =>
+    pushDeadlineStep(true, false, false, false, failed, sendingMs, 60000, waited, 5000, 3, 3);
+  // Queued behind another transfer for 45 s, the push is still on its way
+  // (noLetGoOfAPushOnItsWay), and never pushed again or given up.
+  assert.equal(step(false, 45000, 45000), 'sending');
+  assert.equal(step(true, 100, 0), 'letGo', 'LET_GO_ON_OUTCOME');
+  assert.equal(step(false, 60000, 0), 'letGo', 'the backstop (I1)');
+});
+
+test('a push let go keeps its count for the same hole; past the limit the hole is left to the stall path', () => {
+  assert.equal(nextEscalationPush(false, 2, 3), 1);
+  assert.equal(nextEscalationPush(true, 1, 3), 2);
+  assert.equal(nextEscalationPush(true, 2, 3), 3);
+  assert.equal(nextEscalationPush(true, 3, 3), 0, 'pushesAreBoundedPerHole');
+  for (let n = 0; n <= 5; n++) assert.ok(nextEscalationPush(true, n, 3) <= 3);
 });
