@@ -33,6 +33,18 @@
  *   caught up all the way to the frame it was on, and every page's hashes
  *   still match the host's.
  *
+ * SCREEN_SIZE: the core's render size (default 320x240, the core's own
+ *   default is 640x480). Four emulators on software GL are what stops pages
+ *   for seconds in a cloud container; a quarter of the pixels is a quarter
+ *   of that work. It changes what is drawn, not what is emulated.
+ *
+ * A frame the engine no longer holds hashes to 0 (kn_gameplay_hash and the
+ * others read the frame from the ring buffer), as right after a resync takes
+ * a page back; such frames are counted as `unrecorded`, not compared.
+ * summary.json lists the differing frames and, per page, the stops of its
+ * main thread of 4 s or more (`LOCAL-FREEZE`), which get a page dropped as a
+ * phantom; OUT/p<n>-hashes.json has every page's hashes.
+ *
  * The simulated network (LAT, JITTER, LINK_KBPS, the answer hold) is
  * tests/rb-page-network.mjs, the two-player run's.
  */
@@ -55,6 +67,7 @@ const CATCH_UP_SLOT = Number(process.env.CATCH_UP_SLOT || 2);
 const QUERY = process.env.KN_QUERY || '';
 const OUT = process.env.OUT || '/tmp/rb-mesh';
 const HEADLESS = process.env.HEADED !== '1';
+const SCREEN_SIZE = process.env.SCREEN_SIZE || '320x240';
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The held answer, then its catch-up.
@@ -71,6 +84,7 @@ const fail = (msg) => {
 };
 if (!ROM || !fs.existsSync(ROM)) fail('KN_ROM must name the ROM file');
 if (![3, 4].includes(PLAYERS)) fail(`PLAYERS=${process.env.PLAYERS} invalid: 3 or 4`);
+if (!/^\d+x\d+$/.test(SCREEN_SIZE)) fail(`SCREEN_SIZE=${SCREEN_SIZE} invalid: WIDTHxHEIGHT, e.g. 320x240`);
 for (const [name, v] of Object.entries({ LAT, JITTER, LINK_KBPS, BATTLE_SECONDS, MENU_TIMEOUT_S, CATCH_UP_MS })) {
   if (!(Number.isFinite(v) && v >= 0)) fail(`${name}=${process.env[name]} invalid: a finite number >= 0`);
 }
@@ -95,6 +109,9 @@ const browser = await chromium.launch(launch);
 const mkPage = async (name) => {
   const ctx = await browser.newContext({ viewport: { width: 960, height: 720 } });
   await addNetworkInitScript(ctx, { lat: LAT, jitter: JITTER, kbps: LINK_KBPS });
+  await ctx.addInitScript((size) => {
+    window.EJS_defaultOptions = Object.assign(window.EJS_defaultOptions || {}, { 'mupen64plus-43screensize': size });
+  }, SCREEN_SIZE);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
   return page;
@@ -312,7 +329,10 @@ const P = await Promise.all(
     }))),
   })),
 );
-P.forEach((x, i) => fs.writeFileSync(`${OUT}/p${i + 1}-sync.txt`, x.sync));
+P.forEach((x, i) => {
+  fs.writeFileSync(`${OUT}/p${i + 1}-sync.txt`, x.sync);
+  fs.writeFileSync(`${OUT}/p${i + 1}-hashes.json`, JSON.stringify(x.hashes));
+});
 await browser.close();
 
 const catchUpsOf = (log, afterSeq = -1) =>
@@ -324,38 +344,67 @@ const catchUpsOf = (log, afterSeq = -1) =>
       return m ? [{ from: +m[1], to: +m[2], of: +m[3], frames: +m[4], ms: +m[5], stopped: /stopped:/.test(line) }] : [];
     });
 
+// Frames as runs: [[from, to], ...], to keep summary.json short.
+const spans = (frames) =>
+  frames
+    .toSorted((a, b) => a - b)
+    .reduce((out, f) => {
+      const last = out.at(-1);
+      if (last && f === last[1] + 1) last[1] = f;
+      else out.push([f, f]);
+      return out;
+    }, []);
+
 const H = P[0];
 const pairs = P.slice(1).map((G, gi) => {
   const slot = gi + 1;
   const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
   let compared = 0;
   let battle = 0;
+  let unrecorded = 0;
   const mismatches = { gameplay: [], gameState: [], fullState: 0 };
   for (const k of Object.keys(G.hashes)) {
     const f = +k;
     const h = H.hashes[k];
     if (!h) continue;
     const g = G.hashes[k];
+    // 0: that page's engine no longer held the frame when it was recorded.
+    if (h[0] === 0 || g[0] === 0) {
+      unrecorded++;
+      continue;
+    }
     compared++;
     if (f >= battleFrom) battle++;
     if (h[0] !== g[0]) mismatches.gameplay.push(f);
-    if (h[1] !== g[1]) mismatches.gameState.push(f);
-    if (h[2] !== g[2]) mismatches.fullState++;
+    if (h[1] !== 0 && g[1] !== 0 && h[1] !== g[1]) mismatches.gameState.push(f);
+    if (h[2] !== 0 && g[2] !== 0 && h[2] !== g[2]) mismatches.fullState++;
   }
-  mismatches.gameplay.sort((a, b) => a - b);
-  mismatches.gameState.sort((a, b) => a - b);
   return {
     slot,
     compared,
+    unrecorded,
     battleFramesCompared: battle,
     gameplayMismatches: mismatches.gameplay.length,
-    firstGameplayMismatch: mismatches.gameplay[0] ?? null,
+    gameplayMismatchFrames: spans(mismatches.gameplay),
+    battleGameplayMismatches: mismatches.gameplay.filter((f) => f >= battleFrom).length,
     gameStateMismatches: mismatches.gameState.length,
-    firstGameStateMismatch: mismatches.gameState[0] ?? null,
+    gameStateMismatchFrames: spans(mismatches.gameState),
     fullStateMismatches: mismatches.fullState,
     catchUps: catchUpsOf(G.sync),
   };
 });
+
+// Each page's main-thread stops long enough to get it dropped as a phantom,
+// and the phantoms it declared: what a cloud container does to four emulators.
+const PHANTOM_STOP_MS = 4000;
+const stops = P.map((x) =>
+  [...x.sync.matchAll(/\tf=(\d+)\tLOCAL-FREEZE f=\d+ gap=(\d+)ms/g)].flatMap((m) =>
+    +m[2] >= PHANTOM_STOP_MS ? [{ f: +m[1], ms: +m[2] }] : [],
+  ),
+);
+const phantoms = P.map((x) =>
+  [...x.sync.matchAll(/\tf=(\d+)\tPEER-PHANTOM slot=(\d+)/g)].map((m) => ({ f: +m[1], slot: +m[2] })),
+);
 
 const catchUpReport =
   CATCH_UP_MS > 0
@@ -395,8 +444,11 @@ const summary = {
   linkKbps: LINK_KBPS,
   inBattleAt: P.map((x) => x.inBattleAt),
   lastFrame: P.map((x) => x.lastR),
+  screenSize: SCREEN_SIZE,
   fighters: H.fighters,
   fighterProblems,
+  stops,
+  phantoms,
   pairs,
   catchUp: catchUpReport,
 };
