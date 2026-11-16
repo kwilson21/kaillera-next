@@ -12,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "web/static/netplay-rollback.js"
 HARNESS = ROOT / "tests/rb-two-player.mjs"
+# The simulated network the two-player and mesh runs install in each page.
+NETWORK = ROOT / "tests/rb-page-network.mjs"
 INVARIANTS_DOC = ROOT / "docs/netplay-invariants.md"
 
 
@@ -113,7 +115,7 @@ def test_inputs_are_settled_only_for_a_state_that_was_sent():
 
 
 def test_harness_counts_queued_state_in_buffered_amount():
-    src = HARNESS.read_text()
+    src = NETWORK.read_text()
     assert "Object.defineProperty(RTCDataChannel.prototype, 'bufferedAmount'" in src
     # sync-state: everything the simulated network still holds for it; the
     # other channels: their own bytes the capped link has not carried.
@@ -121,12 +123,12 @@ def test_harness_counts_queued_state_in_buffered_amount():
 
 
 def test_harness_link_is_shared_by_a_connections_channels():
-    src = HARNESS.read_text()
+    src = NETWORK.read_text()
     # LINK_KBPS: one link per RTCPeerConnection, found from the channels it
     # creates and the ones it receives.
     assert "RealPC.prototype.createDataChannel = function" in src
     assert "pc.addEventListener('datachannel', (e) => pcOf.set(e.channel, pc));" in src
-    assert "kbps: LINK_KBPS" in src
+    assert "addNetworkInitScript(ctx, { lat: LAT, jitter: JITTER, kbps: LINK_KBPS })" in HARNESS.read_text()
 
 
 def test_a_request_during_a_transfer_is_queued_not_dropped():
