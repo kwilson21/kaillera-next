@@ -287,9 +287,9 @@ export function overdueAskStep(
  * @param pushes     pushes sent for this input
  * @param maxPushes  the most pushes
  */
-export type PushDeadlineStep = 'none' | 'done' | 'wait' | 'pushAgain' | 'giveUp';
+export type PushDeadlineStep = 'noPush' | 'done' | 'wait' | 'pushAgain' | 'giveUp';
 //@ requires pushes >= 1 && maxPushes >= 1
-//@ ensures !pushOut ==> \result === "none"
+//@ ensures !pushOut ==> \result === "noPush"
 //@ ensures pushOut && settled ==> \result === "done"
 //@ ensures pushOut && !settled && waitedMs < timeoutMs ==> \result === "wait"
 //@ ensures \result === "pushAgain" <==> pushOut && !settled && waitedMs >= timeoutMs && pushes < maxPushes
@@ -302,7 +302,7 @@ export function pushDeadlineStep(
   pushes: number,
   maxPushes: number,
 ): PushDeadlineStep {
-  if (!pushOut) return 'none';
+  if (!pushOut) return 'noPush';
   if (settled) return 'done';
   if (waitedMs < timeoutMs) return 'wait';
   return pushes < maxPushes ? 'pushAgain' : 'giveUp';

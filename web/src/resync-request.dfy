@@ -6,7 +6,7 @@ datatype DeadlineStep = noRequest | wait | lostHost | askAgain | stopAsking | le
 
 datatype OverdueAskStep = ask | wait | push
 
-datatype PushDeadlineStep = giveUp | wait | none | done | pushAgain
+datatype PushDeadlineStep = giveUp | wait | noPush | done | pushAgain
 
 function endsRequest(answerFor: int, newest: int, hostNumbers: bool): bool
 {
@@ -174,7 +174,7 @@ function pushDeadlineStep(pushOut: bool, settled: bool, waitedMs: int, timeoutMs
   requires (maxPushes >= 1)
 {
   if !(pushOut) then
-    PushDeadlineStep.None
+    PushDeadlineStep.noPush
   else
     if settled then
       PushDeadlineStep.done
@@ -191,7 +191,7 @@ function pushDeadlineStep(pushOut: bool, settled: bool, waitedMs: int, timeoutMs
 lemma pushDeadlineStep_ensures(pushOut: bool, settled: bool, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int)
   requires (pushes >= 1)
   requires (maxPushes >= 1)
-  ensures (!(pushOut) ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).none?)
+  ensures (!(pushOut) ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).noPush?)
   ensures (pushOut ==> settled ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).done?)
   ensures (pushOut ==> !(settled) ==> (waitedMs < timeoutMs) ==> pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).wait?)
   ensures (pushDeadlineStep(pushOut, settled, waitedMs, timeoutMs, pushes, maxPushes).pushAgain? <==> (((pushOut && !(settled)) && (waitedMs >= timeoutMs)) && (pushes < maxPushes)))

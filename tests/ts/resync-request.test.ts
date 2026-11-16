@@ -336,7 +336,7 @@ test('a slow answer is never taken for a lost one: one ask, or less than 1.5 s, 
 });
 
 test("the host's push ends on the guest's acknowledgement, is pushed again at its deadline, then given up", () => {
-  assert.equal(pushDeadlineStep(false, false, 9999, 3000, 1, 3), 'none');
+  assert.equal(pushDeadlineStep(false, false, 9999, 3000, 1, 3), 'noPush');
   assert.equal(pushDeadlineStep(true, true, 9999, 3000, 1, 3), 'done');
   assert.equal(pushDeadlineStep(true, false, 2999, 3000, 1, 3), 'wait');
   assert.equal(pushDeadlineStep(true, false, 3000, 3000, 1, 3), 'pushAgain');

@@ -5425,7 +5425,7 @@
         push.pushes,
         OVERDUE_MAX_PUSHES,
       );
-      if (step === 'wait' || step === 'none') continue;
+      if (step === 'wait' || step === 'noPush') continue;
       if (step === 'done') {
         _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${push.frame} pushes=${push.pushes}`);
         delete _overduePushes[key];
