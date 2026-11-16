@@ -57,7 +57,10 @@ def test_the_jobs_run_the_files_the_rule_finds():
     unit_step = unit_step[: unit_step.index("- name:", 1)]
     assert "python scripts/browser_shard.py --unit" in unit_step
     assert "../tests/test_" not in unit_step
-    assert "python scripts/browser_shard.py ${{ matrix.shard }} 4" in (workflows / "browser.yml").read_text()
+    browser_workflow = (workflows / "browser.yml").read_text()
+    assert "python scripts/browser_shard.py --all" in browser_workflow
+    assert "-p scripts.pytest_browser_shard" in browser_workflow
+    assert "--ci-shard-index ${{ matrix.shard }} --ci-shard-count ${{ strategy.job-total }}" in browser_workflow
 
 
 @pytest.mark.parametrize("count", [1, 2, 3, 4, 6])

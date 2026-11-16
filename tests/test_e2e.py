@@ -6,6 +6,7 @@ Run: pytest tests/test_e2e.py -v
 import re
 import secrets
 
+import pytest
 from playwright.sync_api import expect
 
 _R = secrets.token_hex(3).upper()  # unique per run to avoid stale room collisions
@@ -70,7 +71,8 @@ def test_host_guest_start_end(context, server_url):
         guest.close()
 
 
-def test_host_leave_midgame_keeps_room(context, server_url):
+@pytest.mark.parametrize("offer_delay_ms", [0, 1000], ids=["normal", "delayed-offer"])
+def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
     """When the host leaves mid-game, the guest stays in the game and the room stays open.
 
     The server used to close the room on a host disconnect (`room-closed`) and
@@ -79,9 +81,19 @@ def test_host_leave_midgame_keeps_room(context, server_url):
     becomes the owner (signaling._leave; tests/test_room_logic.py,
     tests/test_host_reload.py). The guest is told the host left.
     """
+    if offer_delay_ms:
+        # The toolbar is visible before WebRTC connects. A delayed offer makes
+        # that ordering deterministic instead of relying on runner load.
+        context.add_init_script(f"""(() => {{
+            const createOffer = RTCPeerConnection.prototype.createOffer;
+            RTCPeerConnection.prototype.createOffer = async function(...args) {{
+                await new Promise(resolve => setTimeout(resolve, {offer_delay_ms}));
+                return createOffer.apply(this, args);
+            }};
+        }})();""")
     host = context.new_page()
     guest = context.new_page()
-    room_code = f"E2E02{_R}"
+    room_code = f"E2E02{_R}{offer_delay_ms}"
 
     try:
         host.goto(f"{server_url}/play.html?room={room_code}&host=1&name=Host")
@@ -97,6 +109,15 @@ def test_host_leave_midgame_keeps_room(context, server_url):
         host.click("#start-btn")
         expect(host.locator("#toolbar")).to_be_visible(timeout=10000)
         expect(guest.locator("#toolbar")).to_be_visible(timeout=10000)
+
+        # Toolbar visibility only says that the start was received. Departing
+        # before either channel opens tests a never-connected startup instead
+        # of the established peer disconnect this test asserts below.
+        for player in (host, guest):
+            player.wait_for_function(
+                "Object.values(window.KNState.peers || {}).some(peer => peer.dc?.readyState === 'open')",
+                timeout=10000,
+            )
 
         # Host navigates away (Socket.IO disconnect; 'leaving' over the DataChannel)
         host.goto("about:blank")
