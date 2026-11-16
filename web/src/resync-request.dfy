@@ -10,6 +10,8 @@ datatype PushDeadlineStep = giveUp | wait | letGo | noPush | ended | done | send
 
 datatype EscalationForHole = wait | push | exhausted
 
+datatype MissedDeliveryStep = giveUp | wait | pushAgain
+
 function endsRequest(answerFor: int, newest: int, hostNumbers: bool): bool
 {
   if (answerFor > 0) then
@@ -242,5 +244,37 @@ function transferReportApplies(pushIsCurrent: bool, attemptIsCurrent: bool, forT
 
 lemma transferReportApplies_ensures(pushIsCurrent: bool, attemptIsCurrent: bool, forThisGuest: bool, decided: bool)
   ensures (transferReportApplies(pushIsCurrent, attemptIsCurrent, forThisGuest, decided) <==> (((pushIsCurrent && attemptIsCurrent) && forThisGuest) && !(decided)))
+{
+}
+
+function acknowledgesDeliveredPush(handedOver: bool, deliveredBefore: int, acknowledgedBefore: int): bool
+{
+  ((handedOver && (deliveredBefore >= 0)) && (acknowledgedBefore == deliveredBefore))
+}
+
+lemma acknowledgesDeliveredPush_ensures(handedOver: bool, deliveredBefore: int, acknowledgedBefore: int)
+  ensures (acknowledgesDeliveredPush(handedOver, deliveredBefore, acknowledgedBefore) <==> ((handedOver && (deliveredBefore >= 0)) && (acknowledgedBefore == deliveredBefore)))
+{
+}
+
+function missedDeliveryStep(failed: bool, failedForMs: int, backoffMs: int, pushes: int, maxPushes: int): MissedDeliveryStep
+  requires (pushes >= 1)
+  requires (maxPushes >= 1)
+{
+  if (failed && (failedForMs < backoffMs)) then
+    MissedDeliveryStep.wait
+  else
+    if (pushes < maxPushes) then
+      MissedDeliveryStep.pushAgain
+    else
+      MissedDeliveryStep.giveUp
+}
+
+lemma missedDeliveryStep_ensures(failed: bool, failedForMs: int, backoffMs: int, pushes: int, maxPushes: int)
+  requires (pushes >= 1)
+  requires (maxPushes >= 1)
+  ensures (failed ==> (failedForMs < backoffMs) ==> missedDeliveryStep(failed, failedForMs, backoffMs, pushes, maxPushes).wait?)
+  ensures (missedDeliveryStep(failed, failedForMs, backoffMs, pushes, maxPushes).pushAgain? <==> (!((failed && (failedForMs < backoffMs))) && (pushes < maxPushes)))
+  ensures (missedDeliveryStep(failed, failedForMs, backoffMs, pushes, maxPushes).giveUp? <==> (!((failed && (failedForMs < backoffMs))) && (pushes >= maxPushes)))
 {
 }

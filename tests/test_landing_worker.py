@@ -29,7 +29,9 @@ const env = {
     fetch: async (req) => {
       const p = new URL(req.url).pathname;
       const og = p === '/join.html' ? ' <meta property="og:url" content="https://__KN_HOST__/join" />' : '';
-      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og <meta name="kn-origin" content="__KN_ORIGIN__">' + og : ''), { status: 200 });
+      const canonical = p === '/index.html' ? '<link rel="canonical" href="https://__KN_HOST__/" />' : '';
+      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og <meta name="kn-origin" content="__KN_ORIGIN__">' + og + canonical : ''), { status: 200 });
+
     },
   },
 };
@@ -53,6 +55,9 @@ const ctx = { waitUntil: (p) => waits.push(p) };
 const cases = [
   ['/', 'GET', ''],
   ['/index.html', 'GET', ''],
+  ['/robots.txt', 'GET', ''],
+  ['/sitemap.xml', 'GET', ''],
+  ['/robots.txt', 'HEAD', ''],
   ['/join?room=ABC', 'GET', ''],
   ['/privacy', 'GET', ''],
   ['/privacy.html', 'GET', ''],
@@ -88,6 +93,7 @@ for (const [path, method, ua] of cases) {
     body: await res.text(),
     csp: res.headers.get('Content-Security-Policy'),
     cache: res.headers.get('Cache-Control'),
+    contentType: res.headers.get('Content-Type'),
   });
 }
 await Promise.all(waits);
@@ -128,6 +134,8 @@ def test_pages_and_their_files_come_from_assets():
         assert 'name="kn-origin" content="https://game.example"' in _body(r, page)
     assert _body(r, "/static/dist/kn-landing.js") == "asset:/static/dist/kn-landing.js"
     assert r[("/static/dist/kn-landing.js", "GET", "")]["cache"] == "no-cache"
+    assert '<link rel="canonical" href="https://kn.example/" />' in _body(r, "/")
+
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
 
 
@@ -161,6 +169,22 @@ def test_version_and_changelog_only_ever_come_from_the_game_server():
     assert _body(down, "/list") == "error:napping"
     assert _body(down, "/static/version.json") == "error:napping"
     assert _body(down, "/static/changelog.json") == "error:napping"
+
+
+def test_robots_and_sitemap_are_deliberate_static_metadata():
+    r = _run(origin_up=False)
+    robots = _body(r, "/robots.txt")
+    assert r[("/robots.txt", "GET", "")]["contentType"] == "text/plain; charset=utf-8"
+    assert "Allow: /" in robots
+    assert "Disallow: /join" not in robots and "Disallow: /play.html" in robots
+    assert "Disallow: /admin\n" in robots
+    assert "Disallow: /room/" in robots and "Disallow: /api/" in robots
+    assert "Sitemap: https://kaillera-next.thesuperhuman.us/sitemap.xml" in robots
+    sitemap = _body(r, "/sitemap.xml")
+    assert r[("/sitemap.xml", "GET", "")]["contentType"] == "application/xml; charset=utf-8"
+    assert "<loc>https://kaillera-next.thesuperhuman.us/</loc>" in sitemap
+    assert "/join" not in sitemap and "/play.html" not in sitemap
+    assert _body(r, "/robots.txt", "HEAD") == ""
 
 
 def test_everything_else_goes_to_the_game_server_untouched():
@@ -683,7 +707,10 @@ globalThis.fetch = async (req, init) => {
       headers: { 'Content-Type': 'application/json' },
     });
   }
-  return new Response('origin-page', { status: 200, headers: { 'Content-Type': 'text/html' } });
+  const body = scenario === 'stale' && new URL(url).pathname === '/'
+    ? '<link rel="canonical" href="https://__KN_HOST__/" />'
+    : 'origin-page';
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/html' } });
 };
 
 const env = { ORIGIN: 'https://game.example', ASSETS: assets };
@@ -739,7 +766,7 @@ def test_freshness_fresh_keeps_serving_assets():
 
 def test_freshness_stale_proxies_pages_and_landing_assets():
     out = _run_freshness("stale")
-    assert out["secondPage"] == "origin-page"
+    assert out["secondPage"] == '<link rel="canonical" href="https://kn.example/" />'
     assert out["secondAsset"] == "origin-page"
 
 

@@ -95,6 +95,8 @@ import {
   pushDeadlineStep,
   escalationForHole,
   transferReportApplies,
+  acknowledgesDeliveredPush,
+  missedDeliveryStep,
   resyncDeadlineStep,
 } from './resync-request.ts';
 import { meshHealTargets } from './roster.ts';
@@ -364,6 +366,8 @@ export const KNCore = {
     pushDeadlineStep,
     escalationForHole,
     transferReportApplies,
+    acknowledgesDeliveredPush,
+    missedDeliveryStep,
     resyncDeadlineStep,
   },
   rosterKey,

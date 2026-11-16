@@ -376,3 +376,34 @@ export function transferReportApplies(
 ): boolean {
   return pushIsCurrent && attemptIsCurrent && forThisGuest && !decided;
 }
+
+/** Only a fresh acknowledgement of this delivered push may settle it.
+ * Pre-delivery high-water marks cannot acknowledge a future transfer.
+ * specs/recovery_delivery.qnt prematureAckTest.
+ */
+//@ ensures \result <==> handedOver && deliveredBefore >= 0 && acknowledgedBefore === deliveredBefore
+export function acknowledgesDeliveredPush(
+  handedOver: boolean,
+  deliveredBefore: number,
+  acknowledgedBefore: number,
+): boolean {
+  return handedOver && deliveredBefore >= 0 && acknowledgedBefore === deliveredBefore;
+}
+
+/** A missing hand-over remains owed, with bounded retries and backoff.
+ * Call only after pushDeadlineStep returns letGo. */
+export type MissedDeliveryStep = 'wait' | 'pushAgain' | 'giveUp';
+//@ requires pushes >= 1 && maxPushes >= 1
+//@ ensures failed && failedForMs < backoffMs ==> \result === "wait"
+//@ ensures \result === "pushAgain" <==> !(failed && failedForMs < backoffMs) && pushes < maxPushes
+//@ ensures \result === "giveUp" <==> !(failed && failedForMs < backoffMs) && pushes >= maxPushes
+export function missedDeliveryStep(
+  failed: boolean,
+  failedForMs: number,
+  backoffMs: number,
+  pushes: number,
+  maxPushes: number,
+): MissedDeliveryStep {
+  if (failed && failedForMs < backoffMs) return 'wait';
+  return pushes < maxPushes ? 'pushAgain' : 'giveUp';
+}

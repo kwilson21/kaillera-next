@@ -601,3 +601,9 @@ def test_admin_redirects_to_the_dashboard(client):
     for path in ("/admin", "/admin/"):
         r = client.get(path, follow_redirects=False)
         assert r.status_code == 302 and r.headers["location"] == "/admin.html"
+
+
+def test_homepage_canonical_uses_validated_server_host(client):
+    html = client.get("/").text
+    assert '<link rel="canonical" href="https://play.example/" />' in html
+    assert "__KN_HOST__" not in html

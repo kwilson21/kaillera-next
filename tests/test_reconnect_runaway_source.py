@@ -83,13 +83,14 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     escalate = escalate[: escalate.index("\n  };\n")]
     # The first push goes to every guest (escalation_peers); the hole keeps
     # its count across a let-go (escalation_push COUNT_SURVIVES).
-    assert "_sendEscalationPush(slot, push, null);" in escalate
+    assert "pushSyncState(null, false, { escalation: attempts });" in escalate
+    assert "_overduePushes[recipientSlot] = push;" in escalate
     # Counted per hole (hole_counts), the decision proved.
     assert "window.KNCore.resyncRequest.escalationForHole(" in escalate
     assert "const counts = (_holePushCounts[slot] ??= {});" in escalate
     # Logged once, where a let-go leaves the hole at its limit.
     assert (
-        "INPUT-ASK-PUSH-EXHAUSTED"
+        "INPUT-ASK-PUSH-NOT-SENT"
         in src[src.index("const _checkOverduePushes = () => {") :][:6000]
     )
     assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in escalate
@@ -101,7 +102,7 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     # Answered by the guest's inputs-settled alone, not the host's own
     # hand-over of the state (which raises _inputSettledBefore).
     assert (
-        "(_inputSettledAckBefore[slot] ?? -1) >= push.firstFrame - DELAY_FRAMES"
+        "push.settled,"
         in pushes
     )
     assert "_inputSettledBefore[slot]" not in pushes
@@ -251,7 +252,9 @@ def test_a_player_dropped_in_the_match_comes_back_only_as_a_late_joiner():
     )
     assert "_endMatchDropped('lost-host');" in hard
     late = src[src.index("const handleLateJoinRequest = (msg) => {") :][:400]
-    assert "_droppedThisMatch.delete(_peerKey(msg.requesterSid));" in late
+    assert "_droppedThisMatch.delete" not in late
+    serve = src[src.index("async function sendLateJoinState(remoteSid)") :]
+    assert serve.index("_markPendingLateJoinPeer(remoteSid") < serve.index("_droppedThisMatch.delete(remoteSid)")
     # Cleared on a new match and on stop, besides the declaration.
     assert src.count("let _droppedThisMatch = new Set();") == 1
     assert src.count("_droppedThisMatch = new Set();") == 3
@@ -293,11 +296,11 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     # Only the push's own transfer starts its deadline, reported by
     # pushSyncState for each attempt it carries, on both paths.
     report = src[
-        src.index("const _onEscalationTransfer = (attempts, sid, sent) => {") :
+        src.index("const _onEscalationTransfer = (attempts, sid, sent, frame = -1) => {") :
     ]
     report = report[: report.index("\n  };\n")]
     assert "window.KNCore.resyncRequest.transferReportApplies(" in report
-    assert "_onEscalationTransfer(attempts, targetSid, true);" in src
+    assert "_onEscalationTransfer(attempts, targetSid, true, frame);" in src
     # Each guest's outcome as its own chain ends (PER_TARGET).
     # Each target settles alone, a rejection included (allSettled per target).
     send = src[src.index("const sendSyncChunks = async (") :]
@@ -306,7 +309,7 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
         "_syncLog(`sync send to ${t.sid} failed: ${err}`);\n              return 'failed';"
         in send
     )
-    assert "_onEscalationTransfer(attempts, t.sid, outcome === 'sent');" in send
+    assert "_onEscalationTransfer(attempts, t.sid, outcome === 'sent', frame);" in send
     # The chain moves when a transfer starts, has a chunk accepted, or ends.
     assert src.count("_syncChainMovedAt[t.sid] = performance.now();") == 3
     assert "else if (a.push.attempt === a) a.push.enqueued = true;" in send
@@ -388,3 +391,22 @@ def test_the_per_slot_only_maps_are_reset_where_their_timeline_starts_over():
     ]
     ff = ff[: ff.index("_resetInputMaps();") + 20]
     assert "_lastRemoteFramePerSlot = {};" not in ff
+
+
+def test_recovery_transfers_are_bounded_and_only_the_delivered_state_is_acknowledged():
+    src = _src()
+    push = src[src.index("const pushSyncState = async ("):]
+    assert push.index("_escalationTransfers.has(slot)") < push.index("mod._kn_sync_read(")
+    assert "_escalationTransfers.set(a.slot, a)" in push
+    assert "_releaseEscalationTransfers(attempts);" in push
+    assert "_escalationTransfers.get(a.slot) === a" in src
+    assert "_releaseEscalationTransfers(attempts, t.sid);" in src
+    assert push.index("    try {") < push.index("mod._kn_sync_read(")
+    handler = src[src.index("if (e.data.startsWith('inputs-settled:')) {"):]
+    handler = handler[:handler.index("return;")]
+    assert "acknowledgesDeliveredPush(" in handler
+    assert "push.at !== null" in handler
+    send = src[src.index("const _sendSyncChunksTo = async ("):]
+    send = send[:send.index("\n  };\n")]
+    assert "const dc = target.syncDc;" in send
+    assert "? target.syncDc : target.dc" not in send

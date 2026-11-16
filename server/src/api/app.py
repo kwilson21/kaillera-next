@@ -35,6 +35,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import html as html_lib
 import json
 import logging
 import os
@@ -704,9 +705,8 @@ class ErrorPageMiddleware:
                     await send({"type": "http.response.body", "body": body})
                     return
                 await send(message)
-            elif message["type"] == "http.response.body":
-                if not intercepted:
-                    await send(message)
+            elif message["type"] == "http.response.body" and not intercepted:
+                await send(message)
 
         await self.app(scope, receive, capture_send)
 
@@ -2067,6 +2067,7 @@ def create_app(lifespan=None) -> FastAPI:
         host = _validated_host(request)
         tags = build_og_tags(host)
         html = inject_og_tags(_get_index_html(), tags)
+        html = html.replace("https://__KN_HOST__/", f"https://{html_lib.escape(host, quote=True)}/")
         return Response(content=html, media_type="text/html")
 
     # ── Vision desync verdict endpoint ────────────────────────────────────

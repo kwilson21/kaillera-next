@@ -11,6 +11,8 @@ import {
   pushDeadlineStep,
   escalationForHole,
   transferReportApplies,
+  acknowledgesDeliveredPush,
+  missedDeliveryStep,
   resyncDeadlineStep,
   type DeadlineStep,
   type LostHostStep,
@@ -396,4 +398,33 @@ test("only the push's own latest attempt, for its guest, decides it, once", () =
   assert.equal(transferReportApplies(true, false, true, false), false, 'an earlier attempt');
   assert.equal(transferReportApplies(true, true, false, false), false, "another guest's outcome");
   assert.equal(transferReportApplies(true, true, true, true), false, 'already decided');
+});
+
+test('only an acknowledgement of this delivered recovery state settles its recipient', () => {
+  for (const handedOver of BOOLS) {
+    for (const delivered of FRAMES) {
+      for (const ack of FRAMES) {
+        assert.equal(
+          acknowledgesDeliveredPush(handedOver, delivered, ack),
+          handedOver && delivered >= 0 && ack === delivered,
+        );
+      }
+    }
+  }
+  // Before the patch a stale/future high-water mark acknowledged a new push.
+  assert.equal(acknowledgesDeliveredPush(false, 100, 100), false);
+  assert.equal(acknowledgesDeliveredPush(true, 100, 101), false);
+});
+
+test('a missed recipient is retried after backoff and never forgotten as settled', () => {
+  for (const failed of BOOLS) {
+    for (const age of [0, 4999, 5000, 5001, 20000]) {
+      for (const pushes of [1, 2, 3, 4]) {
+        assert.equal(
+          missedDeliveryStep(failed, age, 5000, pushes, 3),
+          failed && age < 5000 ? 'wait' : pushes < 3 ? 'pushAgain' : 'giveUp',
+        );
+      }
+    }
+  }
 });

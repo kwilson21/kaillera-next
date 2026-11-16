@@ -346,6 +346,17 @@ ask_escalation() {
 }
 
 escalation_push() {
+  local DELIVERY=specs/recovery_delivery.qnt
+  verify "$DELIVERY" recovery_delivery_fixed allHold init 10
+  verify "$DELIVERY" recovery_capacity_fixed atMostOneTransferPerSlot init 10
+  verify "$DELIVERY" recovery_reservation_fixed otherGuestsDoNotBlockRetry init 5
+  verify "$DELIVERY" recovery_reservation_fixed oldCleanupNeverReleasesRetry init 5
+  expect_violation "$DELIVERY" recovery_reservation_together otherGuestsDoNotBlockRetry 3
+  expect_violation "$DELIVERY" recovery_reservation_unowned oldCleanupNeverReleasesRetry 4
+  expect_violation "$DELIVERY" recovery_capacity_before atMostOneTransferPerSlot 4
+  expect_violation "$DELIVERY" recovery_delivery_before onlyDeliveredStatesAreAcknowledged 2
+  expect_violation "$DELIVERY" recovery_delivery_before everyUnsettledGuestRemainsPending 3
+  expect_violation "$DELIVERY" recovery_delivery_before aRateLimitedJoinNeverHealsOutsideRoster 3
   local ESCP=specs/escalation_push.qnt
   verify "$ESCP" escalation_push_fixed allHold init 12
   verify "$ESCP" sync_base_fixed noDeltaOnAForeignBase init 8

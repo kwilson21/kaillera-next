@@ -667,6 +667,21 @@ done
 $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# Recovery broadcast obligations and untrusted acknowledgement ordering.
+DELIVERY=specs/recovery_delivery.qnt
+$QUINT typecheck "$DELIVERY"
+for variant in recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed; do
+  $QUINT test "$DELIVERY" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$DELIVERY" --main=recovery_delivery_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+
+$QUINT run "$DELIVERY" --main=recovery_capacity_fixed --invariant=atMostOneTransferPerSlot \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+
+$QUINT run "$DELIVERY" --main=recovery_reservation_fixed --invariant=allHold \
+  --max-samples=10000 --max-steps=6 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2
