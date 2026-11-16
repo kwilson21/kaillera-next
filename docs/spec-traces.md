@@ -483,3 +483,87 @@ sequenceDiagram
   host->>Network: channelOpens("host", "guest")
   Note over host: conns: {guest: {offer: 2, state: open}, spect: {offer: 0, state: none}}
 ```
+
+## `specs/rom_identity.qnt` (`rom_identity_before`)
+
+A guest's page judging and announcing its ROM while a dropped file is still being hashed, before the page kept each hash with the load it was computed for. `loaded` is the file the page holds, `hash` and `hashLoad` are `_romHash` and the load it belongs to, `told` is what the server last heard. The host's ROM, dropped over a wrong one, is refused by the wrong one's hash, and its own hash, landing after, says ready with no ROM; a late hash refuses the ROM a newer drop brought.
+
+### rightOverWrongTest
+
+The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Today the old hash refuses the right ROM, and its hash, landing after, says ready with no ROM.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: drop("wrong")
+  Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong
+  Guest->>Guest: hashLands(1, "wrong")
+  Note over Guest: hashLoad = 1<br/>told = wrong<br/>hash = wrong<br/>hashing = {}
+  Guest->>Guest: drop("right")
+  Note over Guest: hashing = {(2, right)}<br/>load = 2<br/>loaded = right
+  Guest->>Guest: hostArrives
+  Note over Guest: banner = true<br/>hashLoad = 3<br/>told = none<br/>hash = none<br/>hostKnown = true<br/>loadedIsDrop = false<br/>load = 3<br/>clearedRight = true<br/>loaded = none
+  Guest->>Guest: hashLands(2, "right")
+  Note over Guest: banner = false<br/>hashLoad = 2<br/>told = right<br/>hash = right<br/>hashing = {}<br/>toldStale = true
+```
+
+### twoDropsTest
+
+Two drops, the second (the host's ROM) hashed first: the first's hash, landing late, is taken as the loaded ROM's. Today it refuses the host's ROM; judging by own hash alone, the page keeps the ROM but its own hash is gone, so it can never be announced again.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: hostKnown = true
+  Guest->>Guest: drop("wrong")
+  Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong
+  Guest->>Guest: drop("right")
+  Note over Guest: hashing = {(1, wrong), (2, right)}<br/>load = 2<br/>loaded = right
+  Guest->>Guest: hashLands(2, "right")
+  Note over Guest: hashLoad = 2<br/>told = right<br/>hash = right<br/>hashing = {(1, wrong)}
+  Guest->>Guest: hashLands(1, "wrong")
+  Note over Guest: banner = true<br/>hashLoad = 3<br/>told = none<br/>hash = none<br/>loadedIsDrop = false<br/>hashing = {}<br/>load = 3<br/>clearedRight = true<br/>loaded = none
+```
+
+## `specs/rom_identity.qnt` (`rom_identity_current`)
+
+The same orderings today. While a load is being hashed the page waits (`pending`): the host's ROM arriving refuses nothing and nothing is announced, and the drop's own hash, once it lands, decides. A hash for a load the page no longer holds changes nothing.
+
+### rightOverWrongTest
+
+The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Today the old hash refuses the right ROM, and its hash, landing after, says ready with no ROM.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: drop("wrong")
+  Note over Guest: loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true
+  Guest->>Guest: hashLands(1, "wrong")
+  Note over Guest: hash = wrong<br/>told = wrong<br/>hashLoad = 1<br/>hashing = {}
+  Guest->>Guest: drop("right")
+  Note over Guest: loaded = right<br/>load = 2<br/>hashing = {(2, right)}
+  Guest->>Guest: hostArrives
+  Note over Guest: hostKnown = true
+  Guest->>Guest: hashLands(2, "right")
+  Note over Guest: hash = right<br/>told = right<br/>hashLoad = 2<br/>hashing = {}
+```
+
+### twoDropsTest
+
+Two drops, the second (the host's ROM) hashed first: the first's hash, landing late, is taken as the loaded ROM's. Today it refuses the host's ROM; judging by own hash alone, the page keeps the ROM but its own hash is gone, so it can never be announced again.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: hostKnown = true
+  Guest->>Guest: drop("wrong")
+  Note over Guest: loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true
+  Guest->>Guest: drop("right")
+  Note over Guest: loaded = right<br/>load = 2<br/>hashing = {(1, wrong), (2, right)}
+  Guest->>Guest: hashLands(2, "right")
+  Note over Guest: hash = right<br/>told = right<br/>hashLoad = 2<br/>hashing = {(1, wrong)}
+  Guest->>Guest: hashLands(1, "wrong")
+  Note over Guest: hashing = {}
+```
