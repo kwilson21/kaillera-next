@@ -262,7 +262,7 @@ def _load_match(jsonl_paths: list[Path]) -> pl.DataFrame:
     """Load all peer JSONL files into one Polars DataFrame via DuckDB."""
     con = duckdb.connect(":memory:")
     paths_str = ", ".join(f"'{p}'" for p in jsonl_paths)
-    df = con.execute(
+    df = con.sql(
         f"""
         SELECT * FROM read_json_auto([{paths_str}],
             format='newline_delimited',
