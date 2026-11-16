@@ -16,7 +16,7 @@ run the generator named beside it.
 
 | Diagram | What it covers | Source | Generator |
 |---|---|---|---|
-| [Spec scenarios](spec-traces.md) | The `run` scenarios of the room lifecycle model as sequence diagrams: host reload, socket drop, late join with and without a ROM, joining while others load. From the streaming connection model, a dropped connection: never offered again before the host's deadline, and offered again today | `specs/room_lifecycle.qnt`, `specs/streaming_connection.qnt` | `npm run traces` |
+| [Spec scenarios](spec-traces.md) | The `run` scenarios of the room lifecycle model as sequence diagrams: host reload, socket drop, late join with and without a ROM, joining while others load. From the streaming connection model, a dropped connection: never offered again before the host's deadline, and offered again today. From the ROM identity model, a guest's ROM judged while a drop is being hashed: the host's ROM refused by the previous ROM's hash before, and kept today | `specs/room_lifecycle.qnt`, `specs/streaming_connection.qnt`, `specs/rom_identity.qnt` | `npm run traces` |
 
 A counterexample the model checker finds can be drawn the same way; the commands are at
 the top of `scripts/trace-diagram.mjs`.

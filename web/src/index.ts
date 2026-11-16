@@ -54,6 +54,7 @@ import * as remapWizard from './play/remap-wizard.ts';
 import * as romTransfer from './play/rom-transfer.ts';
 import * as roomView from './play/room-view.ts';
 import { newStoredRom, openRomLibrary, romLibraryHtml } from './play/rom-library.ts';
+import * as romIdentity from './play/rom-identity.ts';
 import { escapeHtml, inviteUrl, roomClosedMessage, rosterToasts } from './play/room-text.ts';
 import {
   formatRomSize,
@@ -397,6 +398,7 @@ export const KNCore = {
     hostRomIdentityKey,
     romFromArchive,
     romHashMismatch,
+    romIdentity,
     newStoredRom,
     openRomLibrary,
     romLibraryHtml,
