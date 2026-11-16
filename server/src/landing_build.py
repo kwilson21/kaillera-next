@@ -25,11 +25,11 @@ EXTRA = [
     "static/kn-logo.svg",  # reusable large logo for previews and community pages
 ]
 # NOT in EXTRA, and not packaged at all: static/version.json and
-# static/changelog.json. CI rewrites both on every release and never redeploys
-# the Worker, so any copy of them in the Worker names an old release, and
-# counting them here would mark the landing bundle stale after releases that
-# did not change the landing page. The Worker passes them to the game server
-# (deploy/static/worker.js).
+# static/changelog.json. CI rewrites both on every release, so a copy of them
+# in the Worker names an old release whenever the Worker is behind the game
+# server, and counting them here would mark the landing bundle stale after
+# releases that did not change the landing page. The Worker passes them to the
+# game server (deploy/static/worker.js).
 
 _STATIC_REF = re.compile(r'(?:src|href)="(/static/[^"?#]+)"')
 
