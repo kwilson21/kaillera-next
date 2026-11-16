@@ -532,6 +532,21 @@ for variant in ask_escalation_fixed_host ask_escalation_fixed_guest; do
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
 
+# ── The escalation push as a transfer that takes time ────────────────────
+ESCP=specs/escalation_push.qnt
+$QUINT typecheck "$ESCP"
+# Before this round: the count starts again after a let-go, a queued push is
+# let go on a timer, any hand-over starts the deadline, a freeze counts
+# against it (escalation_push_current); each fix left out alone breaks the
+# property it is for (queuedBehindTest, earlierMarksTest, freezeTest,
+# failTwiceTest).
+for variant in escalation_push_current escalation_push_count_resets escalation_push_timer_let_go \
+  escalation_push_any_hand_over escalation_push_no_credit escalation_push_fixed; do
+  $QUINT test "$ESCP" --main="$variant" --backend=typescript
+done
+$QUINT run "$ESCP" --main=escalation_push_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend=typescript
+
 # ── After a reconnect, frames run before the peer's inputs ────────────────
 REC=specs/reconnect_inputs.qnt
 $QUINT typecheck "$REC"

@@ -328,6 +328,21 @@ ask_escalation() {
   expect_violation "$ESC" escalation_peers_one everyPeerOnTheHostState 2
 }
 
+escalation_push() {
+  local ESCP=specs/escalation_push.qnt
+  verify "$ESCP" escalation_push_fixed allHold init 12
+  # Queued behind a transfer in flight, let go on the timer: 2 steps.
+  expect_violation "$ESCP" escalation_push_current noLetGoOfAPushOnItsWay 3
+  expect_violation "$ESCP" escalation_push_timer_let_go noLetGoOfAPushOnItsWay 6
+  # The transfer ahead of the push handed over, the deadline due before the
+  # push is: 5 steps.
+  expect_violation "$ESCP" escalation_push_any_hand_over noRetryBeforeTheGuestCouldAnswer 5
+  # Handed over, the host frozen past the deadline: 7 steps.
+  expect_violation "$ESCP" escalation_push_no_credit noRetryBeforeTheGuestCouldAnswer 7
+  # Two transfers fail for one hole and it is escalated a third time: 5 steps.
+  expect_violation "$ESCP" escalation_push_count_resets pushesAreBoundedPerHole 5
+}
+
 reconnect_inputs() {
   local REC=specs/reconnect_inputs.qnt
   verify "$REC" reconnect_inputs_fixed allHold init 12
@@ -429,7 +444,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync start_group mesh_heal catch_up_wait ask_escalation reconnect_inputs drop_is_final
+  rom_at_start ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -440,7 +455,7 @@ SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
-  "peer_identity rom_transfer peer_connection rom_at_start catch_up_wait ask_escalation" # ~7.5 min
+  "peer_identity rom_transfer peer_connection rom_at_start catch_up_wait ask_escalation escalation_push" # ~8 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs" # ~7.5 min
 )
 
