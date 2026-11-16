@@ -4042,8 +4042,9 @@ if (START_LOST) {
     armLine,
     hostDelay: armDelayOf(H.sync),
     armedWithHostDelay: !!armDelayOf(H.sync) && armDelayOf(G.sync) === armDelayOf(H.sync),
+    // Every start message the host sent before the close was dropped, so
+    // the guest can only have armed from the ones sent when its channel opened.
     stopped: /START-FAIL/.test(G.sync),
-    resent: (H.sync.match(/rb-init-frame/g) || []).length,
   });
   summary.startLost = startLostReport;
 }
