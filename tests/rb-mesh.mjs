@@ -302,6 +302,13 @@ const P = await Promise.all(
       hashes: window.__mesh.hashes,
       inBattleAt: window.__mesh.inBattleAt,
       lastR: window.__mesh.lastR,
+      // Who the battle state says is playing: each player's kind (0 = human)
+      // and fighter, the bytes at +2 and +3 of its 0x74-byte entry from
+      // 0x800A4D28 (gSCManagerTransferBattleState's players, web/src/address-maps.ts).
+      fighters: [0, 1, 2, 3].map((i) => {
+        const w = window.NetplayRollback.readRdram32(0x800a4d28 + 0x74 * i);
+        return { kind: (w >>> 8) & 0xff, fkind: w & 0xff };
+      }),
     }))),
   })),
 );
@@ -363,6 +370,23 @@ const catchUpReport =
 const catchUpFailed =
   CATCH_UP_MS > 0 && !catchUpReport.catchUps.some((c) => c.frames > 0 && c.to === c.of && !c.stopped);
 
+// The battle has every page's player in it, each on the fighter its
+// autopilot picks (PORTRAIT_TARGETS in web/src/page/menu-autopilot.ts:
+// Mario, DK, Link, Samus), and every page agrees.
+const FIGHTERS = [0, 2, 5, 3];
+const HUMAN = 0;
+const fighterProblems = P.flatMap((x, page) =>
+  x.fighters.flatMap((f, i) => {
+    if (i >= PLAYERS) return [];
+    if (f.kind !== HUMAN) return [`P${page + 1} sees player ${i + 1} as kind ${f.kind}, not human`];
+    if (!anyFighter && f.fkind !== FIGHTERS[i])
+      return [`P${page + 1} sees player ${i + 1} on fighter ${f.fkind}, not ${FIGHTERS[i]}`];
+    if (f.fkind !== H.fighters[i].fkind)
+      return [`P${page + 1} sees player ${i + 1} on fighter ${f.fkind}, the host ${H.fighters[i].fkind}`];
+    return [];
+  }),
+);
+
 const summary = {
   room,
   players: PLAYERS,
@@ -371,6 +395,8 @@ const summary = {
   linkKbps: LINK_KBPS,
   inBattleAt: P.map((x) => x.inBattleAt),
   lastFrame: P.map((x) => x.lastR),
+  fighters: H.fighters,
+  fighterProblems,
   pairs,
   catchUp: catchUpReport,
 };
@@ -379,13 +405,14 @@ console.log(JSON.stringify(summary, null, 2));
 
 const failed =
   P.some((x) => x.inBattleAt < 0) ||
+  fighterProblems.length > 0 ||
   pairs.some(
     (p) => p.gameplayMismatches > 0 || p.gameStateMismatches > 0 || p.battleFramesCompared < MIN_BATTLE_FRAMES,
   ) ||
   catchUpFailed;
 console.log(
   failed
-    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? '; the catch-up did not run all the way' : ''}`
-    : `PASS: every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
+    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? '; the catch-up did not run all the way' : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}`
+    : `PASS: all ${PLAYERS} fighters in the battle; every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
 );
 process.exit(failed ? 1 : 0);
