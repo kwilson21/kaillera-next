@@ -24,8 +24,9 @@ a ROM and joins late once one is dropped, without being reported stranded.
 A player that does not answer the start's connections does not hold the
 host's start (specs/start_group.qnt): one at the ROM prompt says it has no
 ROM and the host starts without it at once; one that never answers is left
-out after the startup retries; and in a room of three the other guest hears
-whom the host left out and stops waiting for it. The host's gesture prompt is
+out after the startup retries; in a room of three the other guest hears
+whom the host left out and stops waiting for it; and a guest the host tells
+it is out (its load deadline, a harness step here) joins late. The host's gesture prompt is
 shown when its game sequence starts, before anything is booted, so these run
 without a ROM; the late join that follows is in tests/test_gesture_prompt.py.
 
@@ -498,17 +499,112 @@ def test_in_a_room_of_three_the_other_guest_hears_who_was_left_out(browser, serv
         deaf_slot = _slot(deaf)
         # The host's deadline on the silent player runs on past that, gives
         # up, and the host tells the guest, which stops waiting for it too.
-        # The deadline used to stop once the sequence had started.
+        # The deadline used to stop once the sequence had started. The
+        # guest's own deadline on that player gives up at about the same
+        # time and tells the host it cannot reach it: whichever comes first
+        # leaves it out.
         guest.wait_for_function(
             f"{_SYNC_LOG}.includes('START-LEFT-OUT slot={deaf_slot} reason=the host left it out')",
             timeout=45000,
         )
-        assert "reason=startup connect gave up" in host.evaluate(_SYNC_LOG)
-        assert "START-ALONE" not in host.evaluate(_SYNC_LOG)
+        log = host.evaluate(_SYNC_LOG)
+        assert "reason=startup connect gave up" in log or "reason=slot 1 cannot reach it" in log, log[-3000:]
+        assert "START-ALONE" not in log
     finally:
         host.close()
         guest.close()
         deaf.close()
+
+
+def test_a_guest_the_host_tells_it_is_out_joins_late(browser, server_url, room):
+    """A guest that answered and is then left out hears so on its channel, and joins late.
+
+    The host's load deadline leaves out a player that answered but has not
+    loaded, and tells it (`left-out:<its slot>`) on the channel it keeps open
+    for that. Nothing boots here, so the host's deadline never runs: the word
+    is sent from the host page's own channel (a harness step). The host's
+    deadline itself is in tests/test_gesture_prompt.py.
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    try:
+        _load_rom(host)
+        _load_rom(guest)
+        guest.evaluate(_RECORD_ENGINE_STARTS)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        guest_slot = _slot(guest)
+        sent = host.wait_for_function(
+            f"""() => {{
+                const peer = Object.values(window.KNState.peers || {{}}).find((p) => p.slot === {guest_slot});
+                if (!peer || !peer.dc || peer.dc.readyState !== 'open') return false;
+                peer.dc.send('left-out:{guest_slot}');
+                return true;
+            }}""",
+            timeout=45000,
+        )
+        assert sent
+        # The guest starts again as a late joiner (web/src/start-group.ts,
+        # leftOutItself), whose engine (a fresh sync log) offers to the host.
+        guest.wait_for_function("window.__engineStarts.length >= 2", timeout=10000)
+        assert guest.evaluate("window.__engineStarts") == [False, True]
+        guest.wait_for_function(f"{_SYNC_LOG}.includes('late-joiner always initiates')", timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
+# The page hears no WebRTC signal from one sender (a network between two
+# guests that never lets them through), and all the others.
+_DEAF_TO = """(sender) => {
+    const socket = window.__test_socket;
+    const deaf = (handler) => (data) => (data?.sender === sender ? undefined : handler(data));
+    const handlers = socket.listeners('webrtc-signal');
+    socket.off('webrtc-signal');
+    const on = socket.on.bind(socket);
+    for (const handler of handlers) on('webrtc-signal', deaf(handler));
+    socket.on = (event, handler) => on(event, event === 'webrtc-signal' ? deaf(handler) : handler);
+}"""
+
+
+def test_two_guests_that_cannot_reach_each_other_do_not_hold_the_start(browser, server_url, room):
+    """Two guests that each reach the host but not each other: the host decides who plays.
+
+    Each would wait for the other's emu-ready for ever, and neither may leave
+    the other out. The guest whose deadline gives up on the other tells the
+    host (`unreachable:<slot>`); the host leaves that one out and tells it, and
+    it joins late (specs/start_group.qnt, reportApart).
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    other = _open(browser, f"{server_url}/play.html?room={room}&name=Other")
+    try:
+        for page in (host, guest, other):
+            _load_rom(page)
+        other.evaluate(_DEAF_TO, guest.evaluate("window.__test_socket.id"))
+        other.evaluate(_RECORD_ENGINE_STARTS)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        guest_slot = _slot(guest)
+        other_slot = _slot(other)
+        assert 0 < guest_slot < other_slot  # the guest offers to the other guest
+        # The guest gives up on the other guest after its retries and tells the host.
+        host.wait_for_function(
+            f"{_SYNC_LOG}.includes('reason=slot {guest_slot} cannot reach it')",
+            timeout=60000,
+        )
+        assert f"START-UNREACHABLE: told the host slot {other_slot}" in guest.evaluate(_SYNC_LOG)
+        guest.wait_for_function(
+            f"{_SYNC_LOG}.includes('START-LEFT-OUT slot={other_slot} reason=the host left it out')",
+            timeout=10000,
+        )
+        # The other guest hears it is out and joins late.
+        other.wait_for_function("window.__engineStarts.length >= 2", timeout=15000)
+        assert other.evaluate("window.__engineStarts") == [False, True]
+    finally:
+        host.close()
+        guest.close()
+        other.close()
 
 
 def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):

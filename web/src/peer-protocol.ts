@@ -56,6 +56,8 @@ const TEXT_GRAMMAR = {
     roster: `:${INT}:(?:\\d+(?:,\\d+)*)?`,
     // left-out:<slot>  the host left that player out of the start; it joins late (specs/start_group.qnt)
     'left-out': ':\\d+',
+    // unreachable:<slot>  a guest cannot reach that player; the host decides who plays
+    unreachable: ':\\d+',
     // menu-ready:<frame>:<scene>
     'menu-ready': `:${INT}:${INT}`,
     resend: `:${INT}`,
