@@ -167,17 +167,23 @@ $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
 # ── A guest's ROM: judged and announced by its own hash ──────────────────────
 ROM_IDENTITY=specs/rom_identity.qnt
 $QUINT typecheck "$ROM_IDENTITY"
-for variant in rom_identity_before rom_identity_judge_only rom_identity_no_retract rom_identity_current; do
+for variant in rom_identity_before rom_identity_judge_only rom_identity_no_retract rom_identity_first_push \
+  rom_identity_current; do
   $QUINT test "$ROM_IDENTITY" --main="$variant" --backend="$BACKEND"
 done
 # Today: a page never announces a hash that is not its ROM's, never clears
 # the host's ROM, once nothing is being hashed holds the host's ROM (or
-# none) with its own hash, and a start never counts it ready on the previous
-# ROM's word. VIOLATED while every check read `_romHash` whatever load it was
-# for (rom_identity_before; rightOverWrongTest), while a late hash was still
-# taken as the loaded ROM's (rom_identity_judge_only; twoDropsTest), and
-# while a drop left the server holding the previous ROM's word
-# (rom_identity_no_retract; startWhileHashingTest).
+# none) with its own hash, a start never counts it ready on the previous
+# ROM's word, it never boots a ROM that is not the host's, and the host never
+# starts on its previous hash. VIOLATED while every check read `_romHash`
+# whatever load it was for (rom_identity_before; rightOverWrongTest), while a
+# late hash was still taken as the loaded ROM's (rom_identity_judge_only;
+# twoDropsTest), while a drop left the server holding the previous ROM's word
+# (rom_identity_no_retract; startWhileHashingTest), and in #289 as first
+# pushed, which booted a ROM still being hashed, let the host start on its
+# previous hash, left a failed hash pending for good and a rejoin with the
+# previous ROM's word (rom_identity_first_push; bootWhileHashingTest,
+# hostStartsWhileHashingTest, hashFailsTest, rejoinWhileHashingTest).
 $QUINT run "$ROM_IDENTITY" --main=rom_identity_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

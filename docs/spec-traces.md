@@ -490,7 +490,7 @@ A guest's page judging and announcing its ROM while a dropped file is still bein
 
 ### rightOverWrongTest
 
-The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Today the old hash refuses the right ROM, and its hash, landing after, says ready with no ROM.
+The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Before, the old hash refused the right ROM, and its hash, landing after, said ready with no ROM.
 
 ```mermaid
 sequenceDiagram
@@ -498,18 +498,18 @@ sequenceDiagram
   Guest->>Guest: drop("wrong")
   Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: told = wrong<br/>hash = wrong<br/>hashing = {}<br/>toldFor = 1<br/>hashLoad = 1
+  Note over Guest: hashing = {}<br/>toldFor = 1<br/>hashLoad = 1<br/>hash = wrong<br/>told = wrong
   Guest->>Guest: drop("right")
   Note over Guest: hashing = {(2, right)}<br/>load = 2<br/>loaded = right
   Guest->>Guest: hostArrives
-  Note over Guest: told = none<br/>hash = none<br/>hostKnown = true<br/>loadedIsDrop = false<br/>clearedRight = true<br/>load = 3<br/>loaded = none<br/>banner = true<br/>hashLoad = 3
+  Note over Guest: hostKnown = true<br/>loadedIsDrop = false<br/>load = 3<br/>loaded = none<br/>banner = true<br/>clearedRight = true<br/>toldFor = 3<br/>hashLoad = 3<br/>hash = none<br/>told = none
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: told = right<br/>hash = right<br/>hashing = {}<br/>toldStale = true<br/>banner = false<br/>toldFor = 2<br/>hashLoad = 2
+  Note over Guest: hashing = {}<br/>banner = false<br/>toldFor = 2<br/>hashLoad = 2<br/>toldStale = true<br/>hash = right<br/>told = right
 ```
 
 ### twoDropsTest
 
-Two drops, the second (the host's ROM) hashed first: the first's hash, landing late, is taken as the loaded ROM's. Today it refuses the host's ROM; judging by own hash alone, the page keeps the ROM but its own hash is gone, so it can never be announced again.
+Two drops, the second (the host's ROM) hashed first: the first's hash, landing late, is taken as the loaded ROM's. Before, it refused the host's ROM; judging by own hash alone, the page keeps the ROM but its own hash is gone, so it can never be announced again.
 
 ```mermaid
 sequenceDiagram
@@ -521,9 +521,9 @@ sequenceDiagram
   Guest->>Guest: drop("right")
   Note over Guest: hashing = {(1, wrong), (2, right)}<br/>load = 2<br/>loaded = right
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: told = right<br/>hash = right<br/>hashing = {(1, wrong)}<br/>toldFor = 2<br/>hashLoad = 2
+  Note over Guest: hashing = {(1, wrong)}<br/>toldFor = 2<br/>hashLoad = 2<br/>hash = right<br/>told = right
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: told = none<br/>hash = none<br/>loadedIsDrop = false<br/>clearedRight = true<br/>hashing = {}<br/>load = 3<br/>loaded = none<br/>banner = true<br/>hashLoad = 3
+  Note over Guest: loadedIsDrop = false<br/>hashing = {}<br/>load = 3<br/>loaded = none<br/>banner = true<br/>clearedRight = true<br/>toldFor = 3<br/>hashLoad = 3<br/>hash = none<br/>told = none
 ```
 
 ## `specs/rom_identity.qnt` (`rom_identity_current`)
@@ -532,26 +532,26 @@ The same orderings today. While a load is being hashed the page waits (`pending`
 
 ### rightOverWrongTest
 
-The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Today the old hash refuses the right ROM, and its hash, landing after, says ready with no ROM.
+The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Before, the old hash refused the right ROM, and its hash, landing after, said ready with no ROM.
 
 ```mermaid
 sequenceDiagram
   participant Guest
   Guest->>Guest: drop("wrong")
-  Note over Guest: loadedIsDrop = true<br/>loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}
+  Note over Guest: load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true<br/>toldFor = 1<br/>loaded = wrong
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: hash = wrong<br/>told = wrong<br/>hashLoad = 1<br/>toldFor = 1<br/>hashing = {}
+  Note over Guest: hashing = {}<br/>hash = wrong<br/>told = wrong<br/>hashLoad = 1
   Guest->>Guest: drop("right")
-  Note over Guest: told = none<br/>loaded = right<br/>load = 2<br/>hashing = {(2, right)}
+  Note over Guest: load = 2<br/>hashing = {(2, right)}<br/>told = none<br/>toldFor = 2<br/>loaded = right
   Guest->>Guest: hostArrives
   Note over Guest: hostKnown = true
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hash = right<br/>told = right<br/>hashLoad = 2<br/>toldFor = 2<br/>hashing = {}
+  Note over Guest: hashing = {}<br/>hash = right<br/>told = right<br/>hashLoad = 2
 ```
 
 ### twoDropsTest
 
-Two drops, the second (the host's ROM) hashed first: the first's hash, landing late, is taken as the loaded ROM's. Today it refuses the host's ROM; judging by own hash alone, the page keeps the ROM but its own hash is gone, so it can never be announced again.
+Two drops, the second (the host's ROM) hashed first: the first's hash, landing late, is taken as the loaded ROM's. Before, it refused the host's ROM; judging by own hash alone, the page keeps the ROM but its own hash is gone, so it can never be announced again.
 
 ```mermaid
 sequenceDiagram
@@ -559,11 +559,11 @@ sequenceDiagram
   Guest->>Guest: hostArrives
   Note over Guest: hostKnown = true
   Guest->>Guest: drop("wrong")
-  Note over Guest: loadedIsDrop = true<br/>loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}
+  Note over Guest: load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true<br/>toldFor = 1<br/>loaded = wrong
   Guest->>Guest: drop("right")
-  Note over Guest: loaded = right<br/>load = 2<br/>hashing = {(1, wrong), (2, right)}
+  Note over Guest: load = 2<br/>hashing = {(1, wrong), (2, right)}<br/>toldFor = 2<br/>loaded = right
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hash = right<br/>told = right<br/>hashLoad = 2<br/>toldFor = 2<br/>hashing = {(1, wrong)}
+  Note over Guest: hashing = {(1, wrong)}<br/>hash = right<br/>told = right<br/>hashLoad = 2
   Guest->>Guest: hashLands(1, "wrong")
   Note over Guest: hashing = {}
 ```

@@ -311,9 +311,19 @@ rom_identity() {
   # A drop, the host's ROM picked from the library, the drop's hash lands:
   # 3 steps (pickWhileHashingTest).
   expect_violation "$ROM_IDENTITY" rom_identity_judge_only aSettledRomKeepsItsHash
-  # The host's ROM hashed and heard, a wrong one dropped, Start: 4 steps
-  # (startWhileHashingTest).
+  # The host's ROM hashed and heard, the host's ROM known, a wrong one
+  # dropped, Start: 5 steps (startWhileHashingTest).
   expect_violation "$ROM_IDENTITY" rom_identity_no_retract aStartCountsOnlyTheLoadedRom
+  # The host sharing, its ROM known, a wrong one the same size dropped, Start,
+  # the start reaching the page: 4 steps (bootWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push neverBootsAWrongRom
+  # The host's ROM known, the host drops another, Start: 3 steps
+  # (hostStartsWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push theHostStartsOnItsOwnHash
+  # A drop whose hash fails: 2 steps (hashFailsTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push aSettledRomKeepsItsHash
+  # A rejoin while the drop is hashed is 7 steps, past the bound: its scenario
+  # (rejoinWhileHashingTest) checks it.
 }
 
 start_group() {
