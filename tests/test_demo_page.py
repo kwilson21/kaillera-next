@@ -130,7 +130,7 @@ def test_icon_button_optical_spacing_and_targets(demo_page, width):
         assert metrics["height"] >= 44
         assert demo_page.locator(selector).bounding_box()["height"] >= 44
         name = {".gesture-button": "start", ".auto-compare button": "compare", ".play-cta-button": "cta"}[selector]
-        demo_page.locator(selector).screenshot(path=f"../test-results/optical-{width}-{name}.png")
+        demo_page.locator(selector).screenshot(path=f"../test-results/optical-{width}-{name}.png", animations="disabled")
         assert 0 < metrics["gap"] < metrics["font"] / 2
         assert 0 < metrics["icon"] < metrics["font"]
         assert metrics["content"] == '""'
@@ -139,4 +139,7 @@ def test_icon_button_optical_spacing_and_targets(demo_page, width):
     assert demo_page.locator("#auto-compare-btn").evaluate(
         "el => getComputedStyle(el, '::before').clipPath"
     ) == "none"
-
+    demo_page.locator("#auto-compare-btn").evaluate("el => el.textContent = 'Stop auto-compare'")
+    demo_page.locator("#auto-compare-btn").screenshot(
+        path=f"../test-results/optical-{width}-compare-running.png", animations="disabled"
+    )
