@@ -1,5 +1,5 @@
 /* Room overlay tokens (docs/landing-design.md §7.5, direction A) — shared
-   with web/static/landing.css and join.js/join.html. Only the pre-game
+   with web/static/landing.css and the invite page (join.html). Only the pre-game
    overlay and its states are restyled to this direction (§7.2 M3); the
    in-game toolbar/HUD keep their existing look. */
 @font-face {
@@ -1620,4 +1620,24 @@ button:hover {
   font-size: 18px;
   color: #ccc;
   letter-spacing: 0.5px;
+}
+
+/* Diagnostic image preference stays available to every player, not just hosts. */
+.capture-options label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.capture-options .opt-hint {
+  margin-top: 8px;
+  line-height: 1.5;
+}
+.capture-options a {
+  color: inherit;
+  text-decoration: underline;
+}
+a.more-option {
+  color: inherit;
+  display: block;
+  text-decoration: none;
 }

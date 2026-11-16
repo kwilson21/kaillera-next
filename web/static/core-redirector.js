@@ -17,12 +17,26 @@
   'use strict';
 
   const params = new URLSearchParams(window.location.search);
-  const rawMode = params.get('mode') || 'rollback';
-  // Legacy "lockstep" is the same engine as "rollback" — coerce here so
-  // cached share links keep loading the patched core.
-  const mode = rawMode === 'lockstep' ? 'rollback' : rawMode;
+  // Rollback and lockstep both run the patched core; only streaming does not.
+  const mode = params.get('mode') || 'rollback';
+
+  // EmulatorJS asks its CDN for the latest version when the page is served
+  // from localhost. The page's CSP blocks that request and EmulatorJS does not
+  // catch the rejection, so it surfaced as an uncaught "Failed to fetch".
+  // Answer it from the local copy instead.
+  const isVersionCheck = (u) => u.includes('cdn.emulatorjs.org') && u.includes('version.json');
+  const LOCAL_VERSION_URL = '/static/ejs/version.json';
 
   if (mode === 'streaming') {
+    // No core to redirect: the stock core is used. Only the version check
+    // is answered locally.
+    const nativeFetch = window.fetch;
+    // NOTE: kept as function — uses `this` and `arguments`
+    window.fetch = function (url, opts) {
+      const u = typeof url === 'string' ? url : (url?.url ?? '');
+      if (isVersionCheck(u)) return nativeFetch.call(this, LOCAL_VERSION_URL, opts);
+      return nativeFetch.apply(this, arguments);
+    };
     window._knCoreReady = Promise.resolve();
     window._knCoreRestore = () => {};
     return;
@@ -78,14 +92,30 @@
   // through our intercept whenever the core file changes. The CORE_HASH
   // we read above is content-addressed, so this also handles the "WASM
   // rebuilt" case automatically — no manual constant to bump.
+  // The hash is kept in localStorage directly. This runs from a fetch
+  // callback that can fire before the later scripts (storage.js, the bundle
+  // that sets KNState) have loaded, so it depends on neither. A browser that
+  // blocks storage reads no hash and clears the cache on every load.
+  const readCoreHash = () => {
+    try {
+      return window.localStorage.getItem('kn-core-hash');
+    } catch (_) {
+      return null;
+    }
+  };
+  const writeCoreHash = (hash) => {
+    try {
+      window.localStorage.setItem('kn-core-hash', hash);
+    } catch (_) {}
+  };
   let idbClearPromise = coreInfoPromise.then(() => {
     try {
       const cacheKey = CORE_HASH || 'unknown';
-      if (KNState.safeGet('localStorage', 'kn-core-hash') === cacheKey) {
+      if (readCoreHash() === cacheKey) {
         return null;
       }
       if (typeof indexedDB === 'undefined' || !indexedDB.databases) {
-        KNState.safeSet('localStorage', 'kn-core-hash', cacheKey);
+        writeCoreHash(cacheKey);
         return null;
       }
       return indexedDB
@@ -95,6 +125,11 @@
             .filter(
               (db) =>
                 db.name &&
+                // Never the player's cartridge saves: Emscripten's IDBFS
+                // names its database after its mount point, and EmulatorJS
+                // mounts the save directory at /data/saves. A new core does
+                // not change the save format.
+                db.name !== '/data/saves' &&
                 (db.name.includes('emulator') ||
                   db.name.includes('EJS') ||
                   db.name.includes('ejs') ||
@@ -112,7 +147,7 @@
           return Promise.all(deletes);
         })
         .then(() => {
-          KNState.safeSet('localStorage', 'kn-core-hash', cacheKey);
+          writeCoreHash(cacheKey);
           console.log('[core-redirector] IDB cache cleared for new core hash');
         });
     } catch (_) {
@@ -137,8 +172,8 @@
       return origFetch.call(this, LOCAL_CORE_URL, opts);
     }
     // Redirect EmulatorJS CDN version check to local file
-    if (u.includes('cdn.emulatorjs.org') && u.includes('version.json')) {
-      return origFetch.call(this, '/static/ejs/version.json', opts);
+    if (isVersionCheck(u)) {
+      return origFetch.call(this, LOCAL_VERSION_URL, opts);
     }
     return origFetch.apply(this, arguments);
   };

@@ -1,7 +1,7 @@
-"""Build the static front page + invite page into dist-landing/ for the
+"""Build the static front, invite, and privacy pages into dist-landing/ for the
 landing Worker (hosting option A, deploy/static/README.md).
 
-    dist-landing/index.html, join.html      web/index.html, web/join.html
+    dist-landing/{index,join,privacy}.html  corresponding web/ pages
     dist-landing/static/...                 only the files those pages load
     dist-landing/static/landing-build.json  {"id": <landing build id>}
 
@@ -22,6 +22,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import web_bundles
+
 REPO = Path(__file__).resolve().parent.parent
 WEB = REPO / "web"
 DIST = REPO / "dist-landing"
@@ -34,13 +36,13 @@ from src.landing_build import (  # noqa: E402
     referenced,
 )
 
-FALLBACK_METADATA = {"static/version.json", "static/changelog.json"}
-
 
 def main() -> None:
+    # The pages load bundles from web/static/dist, which is build output.
+    web_bundles.build()
     if DIST.exists():
         shutil.rmtree(DIST)
-    files: set[str] = set(EXTRA) | FALLBACK_METADATA
+    files: set[str] = set(EXTRA)
     for page in PAGES:
         html = (WEB / page).read_text()
         files |= referenced(html)

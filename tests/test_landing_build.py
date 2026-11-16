@@ -74,6 +74,21 @@ def test_changing_one_landing_file_changes_the_id(tmp_path):
     assert after_asset_edit != after_edit
 
 
+def test_privacy_notice_is_packaged_and_changes_the_landing_build_id(tmp_path):
+    assert "privacy.html" in landing_build.landing_files(REPO / "web")
+    _copy_landing_source(tmp_path)
+    before = landing_build.landing_build_id(tmp_path)
+    notice = tmp_path / "privacy.html"
+    notice.write_text(notice.read_text() + "\n<!-- edited -->\n")
+    assert landing_build.landing_build_id(tmp_path) != before
+
+
+def test_landing_pages_keep_the_worker_origin_marker():
+    for page in ("index.html", "join.html"):
+        html = (REPO / "web" / page).read_text()
+        assert '<meta name="kn-origin" content="__KN_ORIGIN__"' in html
+
+
 def test_release_metadata_is_not_part_of_landing_build_id(tmp_path):
     """Frequently rewritten footer metadata must not make landing stale."""
     _copy_landing_source(tmp_path)
@@ -86,7 +101,7 @@ def test_release_metadata_is_not_part_of_landing_build_id(tmp_path):
 
 
 def test_screenshot_slots_have_accessible_lazy_image_contract():
-    script = (REPO / "web" / "static" / "landing.js").read_text()
+    script = (REPO / "web" / "src" / "landing" / "front.ts").read_text()
     # Every listed shot is a real WebP within the screenshot budget.
     srcs = re.findall(r"""src: ['"](/static/shots/[^'"]+)['"]""", script)
     assert srcs, "SHOTS lists no screenshots"

@@ -9,7 +9,7 @@ Thanks for your interest in contributing! This project is open to contributions 
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip for dependency management
 - [just](https://github.com/casey/just) (command runner)
-- Node.js (for Prettier formatting)
+- Node.js (for the JS formatter, linters and the Quint model checker)
 - Optionally: Docker (for Redis), [lego](https://go-acme.github.io/lego/) + a
   Cloudflare API token (for HTTPS dev — see `just certs` in the README)
 
@@ -33,6 +33,7 @@ and Docker deployment.
 ### Bug reports
 
 Found something broken? [Open an issue](https://github.com/kwilson21/kaillera-next/issues/new) with:
+
 - What you were doing
 - What happened vs. what you expected
 - Browser + OS + device (especially mobile)
@@ -45,6 +46,7 @@ The most valuable contribution right now is just **using the app** and reporting
 ### Gamepad testing
 
 If you have a controller that doesn't work well or has wrong mappings, open an issue with:
+
 - Controller name (as shown in the overlay)
 - Browser + OS
 - What's wrong (buttons swapped, analog drift, etc.)
@@ -57,14 +59,14 @@ If you have a controller that doesn't work well or has wrong mappings, open an i
 4. Run the pre-commit hooks (`pre-commit run --all-files`)
 5. Open a PR — **the title must use a conventional commit prefix**:
 
-| Prefix | When to use | Version bump |
-|--------|-------------|-------------|
-| `feat:` | New feature | minor (0.X.0) |
-| `fix:` | Bug fix | patch (0.0.X) |
-| `docs:` | Documentation only | none |
-| `chore:` | Maintenance, deps | none |
-| `refactor:` | Code restructuring | none |
-| `test:` | Adding/fixing tests | none |
+| Prefix      | When to use         | Version bump  |
+| ----------- | ------------------- | ------------- |
+| `feat:`     | New feature         | minor (0.X.0) |
+| `fix:`      | Bug fix             | patch (0.0.X) |
+| `docs:`     | Documentation only  | none          |
+| `chore:`    | Maintenance, deps   | none          |
+| `refactor:` | Code restructuring  | none          |
+| `test:`     | Adding/fixing tests | none          |
 
 Examples: `feat: add multiplayer chat`, `fix: resolve audio crackling on iOS`
 
@@ -94,23 +96,23 @@ Do not convert to ES modules.
 (function () {
   'use strict';
   // ... private state and functions ...
-  window.ModuleName = { /* public API */ };
+  window.ModuleName = {/* public API */};
 })();
 ```
 
 #### Cross-module communication: KNState
 
-Modules communicate through `window.KNState` (defined in `kn-state.js`). Each
+Modules communicate through `window.KNState` (typed and built in `web/src/kn-state.ts`, part of the bundle). Each
 property documents its writer and readers inline:
 
 ```js
 window.KNState = {
-  remapActive: false,    // play.js → rollback.js, streaming.js
-  touchInput: {},        // virtual-gamepad.js → rollback.js, streaming.js
-  peers: {},             // rollback/streaming.js → play.js
-  frameNum: 0,           // rollback.js → play.js info overlay
-  delayAutoValue: 2,     // play.js → rollback.js
-  romHash: null,         // play.js → gamepad-manager.js
+  remapActive: false, // play.js → rollback.js, streaming.js
+  touchInput: {}, // virtual-gamepad.js → rollback.js, streaming.js
+  peers: {}, // rollback/streaming.js → play.js
+  frameNum: 0, // rollback.js → play.js info overlay
+  delayAutoValue: 2, // play.js → rollback.js
+  romHash: null, // play.js → the gamepad manager
 };
 ```
 
@@ -123,80 +125,119 @@ earlier ones to have set up their `window.*` exports:
 
 1. `api-sandbox.js` — saves native browser APIs before anything overrides them
 2. `core-redirector.js` — intercepts fetch/XHR for patched WASM core
-3. `storage.js` — safe localStorage/sessionStorage wrapper
-4. `kn-state.js` — shared state namespace
-5. `gamepad-manager.js` — gamepad profiles and mapping
-6. `switch2-usb.js` — WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad
-7. `shared.js` — input encoding/decoding, cheats, wire format
-8. `virtual-gamepad.js` — touch controls for mobile
-9. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
-10. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
-11. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
-12. `controller-settings.js` — in-game controller settings panel
-13. `play.js` — page orchestrator (connects everything)
-14. `version.js` — version display + changelog modal
-15. `feedback.js` — in-app feedback collection
+3. `socket.io.min.js` — self-hosted Socket.IO client
+4. `vendor/fflate.min.js` — compression lib used to extract ROM ZIP archives
+5. `dist/kn-core.js` — the TypeScript bundle built from `web/src`: `window.KNCore`, safe storage `window.KNStorage` (`web/src/site/storage.ts`), `window.KNSite` (what this page shares with the front page), the shared state `window.KNState`, and the page globals that used to be scripts of their own: `window.KNShared` and `window.KNEvent` (`page/shared.ts`), `window.GamepadManager` (`page/gamepad-manager.ts`), `window.KNDiag` (`page/diagnostics.ts`) and `window.KNDesync` (`page/desync-detector.ts`)
+6. `version-guard.js` — cross-tab version mismatch guard (forces reload after deploys); starts `web/src/site/version-guard.ts`
+7. `kn-capture.js` — diagnostic gameplay-canvas capture opt-out policy
+8. `switch2-usb.js` — starts the WebUSB handshake that makes the Switch 2 Pro Controller appear as a gamepad (`web/src/page/switch2-usb.ts`)
+9. `virtual-gamepad.js` — starts the touch controls for mobile (`web/src/page/virtual-gamepad/`)
+10. `kn-audio.js` — AudioWorklet pump + rollback audio capture (the logic is `web/src/page/audio.ts`)
+11. `kn-vision-client.js` — starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)
+12. `netplay-rollback.js` — rollback engine (exposes `window.NetplayRollback`, plus `window.NetplayLockstep` as a legacy alias)
+13. `netplay-lockstep.js` — deprecated compat shim; if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work
+14. `netplay-streaming.js` — streaming engine (exposes `window.NetplayStreaming`)
+15. `controller-settings.js` — starts the in-game controller settings panel (logic in `web/src/page/controller-settings/`)
+16. `play.js` — page orchestrator (connects everything)
+17. `version.js` — version display + changelog modal; starts `web/src/site/version.ts`
+18. `feedback.js` — in-app feedback collection (`window.KNFeedback`); starts `web/src/site/feedback.ts`
 
 #### Server structure
 
 The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 `server/src/dbbackend/`:
 
-| File | Purpose |
-|---|---|
-| `main.py` | Entry point — mounts FastAPI, Socket.IO, static files, HTTPS |
-| `api/app.py` | REST endpoints, security headers (COOP/COEP/CSP), admin API |
-| `api/signaling.py` | Socket.IO event handlers — rooms, WebRTC relay, game data |
-| `api/payloads.py` | Pydantic v2 payload models + `@validated` decorator for Socket.IO events |
-| `api/og.py` | Open Graph meta-tag injection + build-time-rendered OG cards |
-| `api/og_card.py` | Live per-room invite card composed from the host's latest frame (PIL) |
-| `api/turn.py` | Cloudflare Realtime TURN credentials for `/ice-servers` |
-| `state.py` | Redis-backed room persistence for zero-downtime deploys |
-| `ratelimit.py` | Per-IP rolling-window rate limiting |
-| `db.py` | SQLite/D1 database (aiosqlite/D1 via `dbbackend/`), session/feedback/retention storage |
-| `migrate.py` | Plain-SQL schema migrations in `server/migrations/` (replaced Alembic) |
-| `retention.py` | Flags matches with a crash/freeze/desync for retention; sweeps expired ones |
-| `match_rotation.py` | Rolls up ended session logs into Parquet + `match_metrics` rows |
-| `blobstore.py` | Blob storage for screenshots (R2 in prod, local folder in dev) |
+| File                    | Purpose                                                                                |
+| ----------------------- | -------------------------------------------------------------------------------------- |
+| `main.py`               | Entry point — mounts FastAPI, Socket.IO, static files, HTTPS                           |
+| `api/app.py`            | REST endpoints, security headers (COOP/COEP/CSP), admin API                            |
+| `api/signaling.py`      | Socket.IO event handlers — rooms, WebRTC relay, game data                              |
+| `api/payloads.py`       | Pydantic v2 payload models + `@validated` decorator for Socket.IO events               |
+| `api/og.py`             | Open Graph meta-tag injection + build-time-rendered OG cards                           |
+| `api/og_card.py`        | Live per-room invite card composed from the host's latest frame (PIL)                  |
+| `api/turn.py`           | Cloudflare Realtime TURN credentials for `/ice-servers`                                |
+| `state.py`              | Redis-backed room persistence for zero-downtime deploys                                |
+| `state_cache.py`        | Redis-backed save-state cache for late joiners                                         |
+| `ratelimit.py`          | Per-IP rolling-window rate limiting                                                    |
+| `db.py`                 | SQLite/D1 database (aiosqlite/D1 via `dbbackend/`), session/feedback/retention storage |
+| `migrate.py`            | Plain-SQL schema migrations in `server/migrations/` (replaced Alembic)                 |
+| `retention.py`          | Flags matches with a crash/freeze/desync for retention; sweeps expired ones            |
+| `match_rotation.py`     | Rolls up ended session logs into Parquet + `match_metrics` rows                        |
+| `blobstore.py`          | Blob storage for screenshots (R2 in prod, local folder in dev)                         |
+| `stats.py`              | "Matches started in last 7 days" counter for the front page                            |
+| `landing_build.py`      | Content-hash build id shared by the server and the landing Worker                      |
+| `api/desync_vision.py`  | Claude vision endpoint for screenshot diff                                             |
+| `api/desync_prompts.py` | Prompt templates for vision-based desync analysis                                      |
 
 #### Frontend file map
 
-| File | Lines | What it does | Talks to |
-|---|---|---|---|
-| `play.js` | ~5,820 | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle | everything |
-| `netplay-rollback.js` | ~18,250 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file | play.js, KNState, shared.js |
-| `rollback-shadow-worker.js` | — | Shadow worker (OffscreenCanvas overlay, second forward-only mupen64plus instance): presentation in Mode 1, a replay coprocessor whose corrected state main adopts in Mode 2 | netplay-rollback.js |
-| `netplay-lockstep.js` | ~52 | Deprecated compat shim — if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work. Remove once cached tabs are gone. | (none) |
-| `netplay-streaming.js` | ~1,530 | Streaming engine (host video → guests via WebRTC MediaStream) | play.js, KNState, shared.js |
-| `shared.js` | ~1,060 | Input encoding/decoding, N64 button map, cheat codes, wire format | rollback, streaming |
-| `gamepad-manager.js` | ~550 | Profile-based gamepad detection, deadzone, analog mapping | play.js, KNState |
-| `switch2-usb.js` | ~250 | WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C); owns the Connect button and its status line | play.html |
-| `controller-settings.js` | ~980 | In-game controller settings panel (deadzone, sensitivity, profiles) | play.js, gamepad-manager |
-| `virtual-gamepad.js` | ~1,194 | On-screen touch controls for mobile | KNState |
-| `kn-audio.js` | — | AudioWorklet pump + rollback audio capture | rollback, play.js |
-| `kn-desync-detector.js` | — | Field-granular cross-peer desync detection (RDRAM probes) | rollback |
-| `kn-diagnostics.js` | — | Rollback diagnostics ring buffer (RB-CHECK, audit log) | rollback |
-| `kn-vision-client.js` | — | Claude vision client for screenshot-diff desync analysis | rollback |
-| `feedback.js` | ~540 | In-app feedback collection UI | play.js |
-| `api-sandbox.js` | — | Saves/restores native rAF, performance.now, getGamepads | rollback, core-redirector |
-| `core-redirector.js` | — | Intercepts EJS core download → serves patched WASM from IDB | api-sandbox |
-| `storage.js` | ~24 | Safe localStorage/sessionStorage wrapper (KNStorage) | all modules |
-| `kn-state.js` | ~37 | Cross-module shared state namespace | all modules |
-| `version.js` | ~350 | Version display + changelog modal | play.js |
-| `version-guard.js` | — | Cross-tab version mismatch guard — forces reload when a deploy lands | play.js |
-| `ejs-loader.js` | — | EmulatorJS loader shim (booting + script setup hooks) | play.js |
-| `landing.js` | — | Front-page board controller (room creation, open-rooms board) on index.html | — |
-| `join.js` | — | Invite-page controller (room lookup, join/watch states) on join.html | — |
-| `admin.js` | — | Admin dashboard logic (sessions, events, feedback, screenshots) | admin.html only |
+| File                                                     | Lines   | What it does                                                                                                                                                                           | Talks to                                                    |
+| -------------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `play.js`                                                | ~5,820  | Page orchestrator: Socket.IO, overlay, ROM handling, gamepad wizard, engine lifecycle                                                                                                  | everything                                                  |
+| `netplay-rollback.js`                                    | ~18,250 | Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay, frame stepping, desync/resync); strict lockstep is the silent stall fallback inside this file        | play.js, KNState, KNShared                                  |
+| `rollback-shadow-worker.js`                              | —       | Shadow worker (OffscreenCanvas overlay, second forward-only mupen64plus instance): presentation in Mode 1, a replay coprocessor whose corrected state main adopts in Mode 2            | netplay-rollback.js                                         |
+| `netplay-lockstep.js`                                    | ~52     | Deprecated compat shim — if rollback didn't load under its old filename, re-fetches `netplay-rollback.js` so cached `play.html` requests still work. Remove once cached tabs are gone. | (none)                                                      |
+| `netplay-streaming.js`                                   | ~1,600  | Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from `web/src/streaming`                                                                     | play.js, KNState, KNShared                                  |
+| `web/src/page/shared.ts` (in `dist/kn-core.js`)          | ~650    | `window.KNShared`: input encoding/decoding, N64 button map, cheat codes, wire format                                                                                                   | rollback, streaming                                         |
+| `web/src/page/gamepad-manager.ts` (in `dist/kn-core.js`) | ~570    | Profile-based gamepad detection, deadzone, analog mapping (`window.GamepadManager`)                                                                                                    | play.js, KNState                                            |
+| `switch2-usb.js`                                         | —       | Starts the WebUSB handshake that wakes the Switch 2 Pro Controller (USB-C), which owns the Connect button and its status line (`web/src/page/switch2-usb.ts`)                          | play.html                                                   |
+| `controller-settings.js`                                 | —       | Starts the in-game controller settings panel (deadzone, sensitivity, profiles); the logic is `web/src/page/controller-settings/`                                                       | play.js, gamepad-manager                                    |
+| `virtual-gamepad.js`                                     | ~7      | Starts the on-screen touch controls for mobile; the logic is `web/src/page/virtual-gamepad/`                                                                                           | KNCore, KNState                                             |
+| `kn-audio.js`                                            | —       | AudioWorklet pump + rollback audio capture; starts `web/src/page/audio.ts` as `window.KNAudio`                                                                                         | rollback, play.js                                           |
+| `kn-vision-client.js`                                    | —       | Starts the Claude vision client for screenshot-diff desync analysis (`web/src/page/vision-client.ts`)                                                                                  | rollback                                                    |
+| `audio-worklet-processor.js`                             | ~85     | AudioWorklet ring buffer for rollback audio                                                                                                                                            | kn-audio.js                                                 |
+| `feedback.js`                                            | —       | In-app feedback collection UI (`window.KNFeedback`); a small caller of `web/src/site/feedback.ts`                                                                                      | dist/kn-core.js or dist/kn-site.js                          |
+| `api-sandbox.js`                                         | —       | Saves/restores native rAF, performance.now, getGamepads                                                                                                                                | rollback, core-redirector                                   |
+| `core-redirector.js`                                     | —       | Intercepts EJS core download → serves patched WASM from IDB                                                                                                                            | api-sandbox                                                 |
+| `web/src/site/storage.ts` (in `dist/kn-core.js`)         | —       | Safe localStorage/sessionStorage wrapper (`window.KNStorage`), set by the bundle                                                                                                       | all modules                                                 |
+| `kn-capture.js`                                          | —       | Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)                                                                                                                  | rollback, streaming                                         |
+| `version.js`                                             | —       | Version display + changelog modal; a small caller of `web/src/site/version.ts`                                                                                                         | dist/kn-core.js or dist/kn-site.js                          |
+| `version-guard.js`                                       | —       | Cross-tab version mismatch guard — forces reload when a deploy lands; a small caller of `web/src/site/version-guard.ts`                                                                | dist/kn-core.js or dist/kn-site.js                          |
+| `ejs-loader.js`                                          | —       | EmulatorJS loader shim (booting + script setup hooks)                                                                                                                                  | play.js                                                     |
+| `dist/kn-landing.js`                                     | —       | Front-page board controller (room creation, open-rooms board), built from `web/src/landing/front.ts`                                                                                   | index.html                                                  |
+| `dist/kn-join.js`                                        | —       | Invite-page controller (room lookup, join/watch states), built from `web/src/landing/join.ts`                                                                                          | join.html                                                   |
+| `dist/kn-wake-art.js`                                    | —       | Standalone TypeScript bundle for waking-state art while a room wakes                                                                                                                   | index.html, join.html                                       |
+| `dist/kn-site.js`                                        | —       | Small TypeScript bundle for pages without the core: `KNStorage`, and `KNSite` (`web/src/site/`), which the play page gets from the core                                                | index.html, admin.html                                      |
+| `admin.js`                                               | —       | Admin dashboard logic (sessions, events, feedback, screenshots)                                                                                                                        | admin.html only                                             |
+| `demo.js`                                                | ~1,475  | Demo page orchestrator (fake peer + menu autopilot); its options, network settings, HUD text and menu script are `web/src/demo` (`KNCore.demo`)                                        | fake-peer.js, ssb64-menu-autopilot.js, rollback-timeline.js |
+| `fake-peer.js`                                           | —       | Synthetic P2 for the demo page (simulated input/jitter); the logic is `web/src/page/fake-peer.ts`                                                                                      | demo.js                                                     |
+| `ssb64-menu-autopilot.js`                                | —       | Closed-loop menu driver for the demo (reads RDRAM menu state); the logic is `web/src/page/menu-autopilot.ts`                                                                           | demo.js, tests/rb-two-player.mjs                            |
+| `rollback-timeline.js`                                   | —       | Demo page's live rollback-metrics HUD; the logic is `web/src/page/rollback-timeline.ts`                                                                                                | demo.js                                                     |
 
 ### Conventions
 
 - **Modern ECMAScript** — `const`/`let` (never `var`), arrow functions, template
   literals, `async`/`await`, optional chaining. No ES modules (see above).
 - **Python** — formatted by ruff, type hints encouraged.
-- **HTML/CSS** — formatted by prettier.
+- **TypeScript** — new frontend logic lives in `web/src/` (strict mode,
+  Effect, Effect Schema, XState). `just build` type-checks, runs
+  `tests/ts`, and bundles it to `web/static/dist/kn-core.js`. The bundles
+  are build output and not in git: run `npm ci && npm run build` after a
+  fresh checkout and after changing `web/src`. The Docker image builds them
+  itself. The static landing pages are strict TypeScript too, without
+  Effect (`web/src/landing/`): the waking art, the invite page and the front page
+  are built as their own small bundles, `web/static/dist/kn-wake-art.js`,
+  `web/static/dist/kn-join.js` and `web/static/dist/kn-landing.js`. The existing
+  `web/static/*.js` files stay plain scripts until their turn in the
+  migration (`docs/roadmap.md`).
+- **JS/TS/HTML/CSS** — formatted by oxfmt (`just fmt`), same style Prettier
+  produced. Linted by oxlint with the vendored anti-slop rules
+  (`tools/oxlint/anti-slop/`, yours to edit) and by Biome (`just lint`).
+  Errors fail CI; warnings are the existing backlog. Fix warnings in files
+  you touch, but not in netplay code without a two-player run.
+- **Comments** — `just slop` (antislop) rejects placeholder, deferral and
+  hedging comments in Python, JS/TS, C and shell. Install it with
+  `cargo install antislop --version 0.3.0 --locked`.
+- **Specs** — `specs/*.qnt` are Quint models of the room lifecycle. Run
+  `just spec`. Change the model in the same PR when you change how rooms
+  start, end, or handle a reconnect.
+- **Proofs** — functions listed in `LemmaScript-files.txt` carry `//@`
+  contracts that CI proves with Dafny. After editing one, run
+  `npx lsc gen --backend=dafny <file>` and commit the regenerated
+  `.dfy.gen`; `npx lsc check --backend=dafny` verifies locally if you have
+  Dafny 4.11.
 - **No unnecessary comments** — code should be self-evident. Add comments only
-  where the *why* isn't obvious from the *what*.
+  where the _why_ isn't obvious from the _what_.
 - **Commit messages** — use [conventional commits](https://www.conventionalcommits.org/):
   `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, etc. This drives auto-versioning.
 - Pre-commit hooks handle formatting automatically.
@@ -209,6 +250,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 docs/
   roadmap.md                 — V1 feature roadmap (all phases complete)
   mvp-plan.md                — MVP implementation plan (all items shipped or cut)
+  netplay-invariants.md      — Codified tick-loop and rollback-integrity invariants
   superpowers/
     specs/YYYY-MM-DD-*.md    — Design specs
     plans/YYYY-MM-DD-*.md    — Implementation plans
@@ -216,7 +258,7 @@ docs/
 
 Design specs and plans are **historical snapshots** — they reflect decisions and
 code state at the time they were written. The source of truth is always the code
-itself. Use these docs for context on *why* something was built a certain way, not
+itself. Use these docs for context on _why_ something was built a certain way, not
 as a reference for current behavior.
 
 ### Running the server

@@ -1,45 +1,34 @@
-"""Tests for back-compat coercion of the legacy "lockstep" mode value.
+"""The three ways a match is played, as the server takes them.
 
-The product-facing engine was renamed from "lockstep" to "rollback". Pre-deploy
-clients, cached share links, and persisted Redis rooms still carry the legacy
-value. These tests verify the three coercion shims:
+rollback, lockstep and streaming are each their own mode. "lockstep" was also
+the name rollback had before it was renamed; the server used to read it as
+rollback. Pages reload on every deploy and rooms last hours, so nothing sends
+it in that sense any more, and it now means the lockstep mode a host picks.
 
-  1. Pydantic field_validator on StartGamePayload / SetModePayload
-     (server/src/api/payloads.py)
-  2. Redis Room deserialization (server/src/state.py)
-  3. (E2E URL-param coercion is covered by test_e2e.py.)
-
-Removable once cached state churns out post-deploy.
+Run: cd server && uv run pytest ../tests/test_mode_coercion.py -v
 """
 
+import json
+
+from src import state
+from src.api import signaling
 from src.api.payloads import SetModePayload, StartGamePayload
 
 
-def test_start_game_payload_coerces_legacy_lockstep_mode():
-    """Pre-deploy clients emit mode='lockstep' over Socket.IO. The Pydantic
-    field_validator runs before Literal validation and rewrites it to
-    'rollback' so the model passes validation cleanly.
-    """
-    payload = StartGamePayload.model_validate({"mode": "lockstep"})
-    assert payload.mode == "rollback"
-
-
-def test_set_mode_payload_coerces_legacy_lockstep_mode():
-    payload = SetModePayload.model_validate({"mode": "lockstep"})
-    assert payload.mode == "rollback"
-
-
 def test_payloads_default_to_rollback():
-    """Default mode for both payloads is 'rollback' after the rename."""
     assert StartGamePayload().mode == "rollback"
     assert SetModePayload().mode == "rollback"
 
 
-def test_payloads_accept_streaming_unchanged():
-    assert StartGamePayload.model_validate({"mode": "streaming"}).mode == "streaming"
-    assert SetModePayload.model_validate({"mode": "streaming"}).mode == "streaming"
+def test_every_mode_is_taken_as_itself():
+    for mode in ("rollback", "lockstep", "streaming"):
+        assert StartGamePayload.model_validate({"mode": mode}).mode == mode
+        assert SetModePayload.model_validate({"mode": mode}).mode == mode
 
 
-def test_payloads_accept_rollback_directly():
-    assert StartGamePayload.model_validate({"mode": "rollback"}).mode == "rollback"
-    assert SetModePayload.model_validate({"mode": "rollback"}).mode == "rollback"
+def test_the_server_keeps_a_lockstep_room_lockstep():
+    assert "lockstep" in signaling._VALID_MODES
+    room = signaling.Room(owner="sid-host", room_name="Test", game_id="ssb64", password=None, max_players=4)
+    room.mode = "lockstep"
+    restored = state._deserialize_room(json.loads(state._serialize_room(room)))
+    assert restored.mode == "lockstep"

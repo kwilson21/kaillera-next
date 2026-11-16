@@ -34,7 +34,7 @@ EOF
 
 gcc -shared -fPIC \
     -I"$ROOT/build/kn_rollback" \
-    -O0 -g \
+    -O0 -g -DKN_ENABLE_HASH_REGISTRY \
     "$ROOT/build/kn_rollback/kn_hash_registry.c" \
     "$OUT/test_shim.c" \
     -o "$OUT/libkn_hash_registry_test.so"

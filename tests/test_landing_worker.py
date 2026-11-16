@@ -20,7 +20,7 @@ HARNESS = r"""
 const mod = await import(process.argv[1]);
 const worker = mod.default;
 const env = {
-  ORIGIN: 'https://game.example',
+  ORIGIN: process.argv[3] || 'https://game.example',
   // Pages carry the static preview block's host placeholder. The freshness
   // check's own-build-id fetch gets plain text here (not JSON), so it comes
   // back inconclusive and the verdict stays 'unknown' — same as before this
@@ -30,7 +30,8 @@ const env = {
       const p = new URL(req.url).pathname;
       const og = p === '/join.html' ? ' <meta property="og:url" content="https://__KN_HOST__/join" />' : '';
       const canonical = p === '/index.html' ? '<link rel="canonical" href="https://__KN_HOST__/" />' : '';
-      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og' + og + canonical : ''), { status: 200 });
+      return new Response('asset:' + p + (p.endsWith('.html') ? ' og=https://__KN_HOST__/og <meta name="kn-origin" content="__KN_ORIGIN__">' + og + canonical : ''), { status: 200 });
+
     },
   },
 };
@@ -58,17 +59,20 @@ const cases = [
   ['/sitemap.xml', 'GET', ''],
   ['/robots.txt', 'HEAD', ''],
   ['/join?room=ABC', 'GET', ''],
+  ['/privacy', 'GET', ''],
+  ['/privacy.html', 'GET', ''],
   ['/join?room=ABC', 'GET', 'Discordbot/2.0'],
   ['/join?room=abc%22%3E%3Cx&spectate=1', 'GET', 'Discordbot/2.0'],
   ['/join?room=Case30X&spectate=1', 'GET', 'Discordbot/2.0'],
   ['/join?room=ABC', 'POST', ''],
-  ['/static/landing.js', 'GET', ''],
+  ['/static/dist/kn-landing.js', 'GET', ''],
   ['/static/fonts/ibm-plex-sans-var-latin.woff2', 'GET', ''],
   ['/static/play.js', 'GET', ''],
   ['/static/version.json', 'GET', ''],
   ['/static/changelog.json', 'GET', ''],
   ['/play.html?room=ABC', 'GET', ''],
   ['/list', 'GET', ''],
+  ['/api/wake-event', 'POST', ''],
   ['/socket.io/?EIO=4', 'GET', ''],
 ];
 const out = [];
@@ -97,12 +101,12 @@ console.log(JSON.stringify(out));
 """
 
 
-def _run(origin_up: bool):
+def _run(origin_up: bool, origin="https://game.example"):
     node = shutil.which("node")
     if not node:
         pytest.skip("node not installed")
     res = subprocess.run(
-        [node, "--input-type=module", "-e", HARNESS, WORKER.as_uri(), "up" if origin_up else "down"],
+        [node, "--input-type=module", "-e", HARNESS, WORKER.as_uri(), "up" if origin_up else "down", origin],
         capture_output=True,
         text=True,
         timeout=30,
@@ -120,25 +124,51 @@ def test_pages_and_their_files_come_from_assets():
     assert _body(r, "/").startswith("asset:/index.html")
     assert _body(r, "/index.html").startswith("asset:/index.html")
     assert _body(r, "/join?room=ABC").startswith("asset:/join.html")
-    for page in ["/", "/join?room=ABC"]:
+    for page in ["/", "/join?room=ABC", "/privacy", "/privacy.html"]:
         assert "script-src 'self'" in r[(page, "GET", "")]["csp"]
+        assert "connect-src 'self' https://game.example;" in r[(page, "GET", "")]["csp"]
+        assert "img-src 'self' data:;" in r[(page, "GET", "")]["csp"]
         assert r[(page, "GET", "")]["cache"] == "no-store"
         # The static preview tags get the public host.
         assert " og=https://kn.example/og" in _body(r, page)
+        assert 'name="kn-origin" content="https://game.example"' in _body(r, page)
+    assert _body(r, "/static/dist/kn-landing.js") == "asset:/static/dist/kn-landing.js"
+    assert r[("/static/dist/kn-landing.js", "GET", "")]["cache"] == "no-cache"
     assert '<link rel="canonical" href="https://kn.example/" />' in _body(r, "/")
-    assert _body(r, "/static/landing.js") == "asset:/static/landing.js"
-    assert r[("/static/landing.js", "GET", "")]["cache"] == "no-cache"
+
     assert _body(r, "/static/fonts/ibm-plex-sans-var-latin.woff2").startswith("asset:")
 
 
-def test_version_and_changelog_prefer_origin_and_fall_back_to_assets():
-    """Release metadata is current when Render is up and instant when down."""
+def test_pages_do_not_add_a_connect_origin_when_origin_is_the_public_host():
+    r = _run(origin_up=True, origin="https://kn.example")
+    for path in ("/", "/join?room=ABC", "/privacy"):
+        assert "connect-src 'self';" in r[(path, "GET", "")]["csp"]
+        assert 'name="kn-origin" content=""' in _body(r, path)
+
+
+def test_privacy_notice_is_available_without_the_game_server():
+    for origin_up in (True, False):
+        r = _run(origin_up=origin_up)
+        for path in ("/privacy", "/privacy.html"):
+            assert _body(r, path).startswith("asset:/privacy.html")
+            assert r[(path, "GET", "")]["cache"] == "no-store"
+            assert "script-src 'self'" in r[(path, "GET", "")]["csp"]
+
+
+def test_version_and_changelog_only_ever_come_from_the_game_server():
+    """CI rewrites both files on every release, so a copy in the Worker's
+    assets names an old release whenever the Worker is behind the game server:
+    production's footer showed v0.67.0 from the Worker while the game server
+    had v0.69.3. They are passed through like the API, napping or not."""
     r = _run(origin_up=True)
     assert _body(r, "/static/version.json") == "origin:/static/version.json og=https://game.example/card"
     assert _body(r, "/static/changelog.json") == "origin:/static/changelog.json og=https://game.example/card"
+    # With the game server napping they fail the way /list does, and the
+    # footer asks again (web/src/site/version.ts).
     down = _run(origin_up=False)
-    assert _body(down, "/static/version.json") == "asset:/static/version.json"
-    assert _body(down, "/static/changelog.json") == "asset:/static/changelog.json"
+    assert _body(down, "/list") == "error:napping"
+    assert _body(down, "/static/version.json") == "error:napping"
+    assert _body(down, "/static/changelog.json") == "error:napping"
 
 
 def test_robots_and_sitemap_are_deliberate_static_metadata():
@@ -146,7 +176,8 @@ def test_robots_and_sitemap_are_deliberate_static_metadata():
     robots = _body(r, "/robots.txt")
     assert r[("/robots.txt", "GET", "")]["contentType"] == "text/plain; charset=utf-8"
     assert "Allow: /" in robots
-    assert "Disallow: /join" in robots and "Disallow: /play.html" in robots
+    assert "Disallow: /join" not in robots and "Disallow: /play.html" in robots
+    assert "Disallow: /admin\n" in robots
     assert "Disallow: /room/" in robots and "Disallow: /api/" in robots
     assert "Sitemap: https://kaillera-next.thesuperhuman.us/sitemap.xml" in robots
     sitemap = _body(r, "/sitemap.xml")
@@ -161,6 +192,7 @@ def test_everything_else_goes_to_the_game_server_untouched():
     for path, method in [
         ("/static/play.js", "GET"),
         ("/list", "GET"),
+        ("/api/wake-event", "POST"),
         ("/socket.io/?EIO=4", "GET"),
     ]:
         assert _body(r, path, method) == f"origin:{path} og=https://game.example/card"
@@ -200,10 +232,11 @@ def test_build_lists_exactly_the_files_the_pages_load():
     assert res.returncode == 0, res.stderr + res.stdout
     dist = REPO / "dist-landing"
     assert (dist / "index.html").is_file() and (dist / "join.html").is_file()
-    assert (dist / "static" / "join.js").is_file()
+    assert (dist / "privacy.html").read_bytes() == (REPO / "web" / "privacy.html").read_bytes()
+    assert (dist / "static" / "dist" / "kn-join.js").is_file()
     assert (dist / "static" / "og" / "home.png").is_file()  # the static pages' og:image
-    assert (dist / "static" / "version.json").is_file()
-    assert (dist / "static" / "changelog.json").is_file()
+    assert not (dist / "static" / "version.json").exists()
+    assert not (dist / "static" / "changelog.json").exists()
     assert not (dist / "static" / "play.js").exists()
     build_json = dist / "static" / "landing-build.json"
     assert build_json.is_file()
@@ -274,6 +307,8 @@ def test_real_runtime_serves_the_pages_without_redirects():
             ("/", 'id="board"'),
             ("/index.html", 'id="board"'),
             ("/join?room=ROOM1&spectate=1", 'id="inv-main"'),
+            ("/privacy", 'id="image-controls"'),
+            ("/privacy.html", 'id="image-controls"'),
         ]:
             status, ctype, body = get(path)
             assert status == 200, (path, status)
@@ -695,7 +730,7 @@ const firstMs = Date.now() - firstStarted;
 const firstIsAsset = first.startsWith('asset:');
 await Promise.all(waits.splice(0));
 const secondPage = await get('/');
-const secondAsset = await get('/static/landing.js');
+const secondAsset = await get('/static/dist/kn-landing.js');
 console.log(JSON.stringify({ firstIsAsset, firstMs, secondPage, secondAsset, landingBuildFetches }));
 """
 
@@ -786,7 +821,7 @@ const ctx = { waitUntil: (p) => waits.push(p) };
 // A burst of concurrent requests (some pages, some assets) dispatched
 // without waiting on each other first — as a real burst of visitor traffic
 // would arrive on a fresh isolate.
-const paths = ['/', '/static/landing.js', '/index.html', '/join', '/static/landing.js', '/'];
+const paths = ['/', '/static/dist/kn-landing.js', '/index.html', '/join', '/static/dist/kn-landing.js', '/'];
 await Promise.all(paths.map((p) => worker.fetch(new Request('https://kn.example' + p), env, ctx).then((r) => r.text())));
 console.log(JSON.stringify({ landingBuildFetches }));
 """
@@ -984,7 +1019,7 @@ async function timed(path) {
   return Date.now() - t0;
 }
 
-const assetMs = await timed('/static/landing.js');
+const assetMs = await timed('/static/dist/kn-landing.js');
 const pageMs = await timed('/join');
 console.log(JSON.stringify({ assetMs, pageMs }));
 """
@@ -1060,7 +1095,7 @@ await get('/'); // establishes the 'stale' verdict in the background
 await Promise.all(waits.splice(0));
 
 const page = await get('/'); // stale mode, origin times out -> falls back
-const asset = await get('/static/landing.js'); // same
+const asset = await get('/static/dist/kn-landing.js'); // same
 
 let race;
 try {
@@ -1138,14 +1173,8 @@ globalThis.fetch = async (req, init) => {
   if (url.pathname === '/list') {
     return new Response('list', { status: mode === 'cooldown-524' ? 524 : 200 });
   }
-  if (url.pathname === '/static/version.json') return hang(init);
   landingFetches++;
   if (landingFetches === 1 && mode.startsWith('cooldown-')) return hang(init);
-  if (mode === 'metadata-page') {
-    return new Promise((resolve) => setTimeout(() => resolve(new Response('origin:' + url.pathname, {
-      status: 200, headers: { 'Content-Type': 'text/plain' },
-    })), 1500));
-  }
   return new Response('origin:' + url.pathname, { status: 200, headers: { 'Content-Type': 'text/plain' } });
 };
 const env = { ORIGIN: 'https://game.example', ASSETS: assets };
@@ -1162,9 +1191,9 @@ if (mode === 'build-marker') {
   await get('/'); await settle();
   out = await get('/static/landing-build.json');
 } else if (mode === 'own-id-retry') {
-  await get('/static/landing.js'); await settle();
+  await get('/static/dist/kn-landing.js'); await settle();
   now += 61_000;
-  await get('/static/landing.js'); await settle();
+  await get('/static/dist/kn-landing.js'); await settle();
   out = { ownReads, originBuildReads };
 } else if (mode === 'crawler') {
   await get('/'); await settle();
@@ -1174,19 +1203,8 @@ if (mode === 'build-marker') {
   await get('/'); await settle();
   await get('/'); // first stale proxy times out and arms the cooldown
   await get('/list');
-  const result = await get('/static/landing.js');
+  const result = await get('/static/dist/kn-landing.js');
   out = { ...result, landingFetches };
-} else if (mode === 'metadata-timeout') {
-  const started = Date.now();
-  const result = await get('/static/version.json');
-  out = { ...result, elapsed: Date.now() - started };
-} else if (mode === 'metadata-page') {
-  await get('/'); await settle();
-  await get('/static/version.json'); // times out on the metadata budget
-  const landingFetchesBeforePage = landingFetches;
-  const started = Date.now();
-  const result = await get('/');
-  out = { ...result, elapsed: Date.now() - started, pageFetches: landingFetches - landingFetchesBeforePage };
 }
 console.log(JSON.stringify(out));
 """
@@ -1224,25 +1242,12 @@ def test_stale_crawler_preview_timeout_does_not_fetch_join_twice():
 
 @pytest.mark.parametrize(
     ("status", "expected_body", "expected_fetches"),
-    [("200", "origin:/static/landing.js", 2), ("524", "asset:/static/landing.js", 1)],
+    [("200", "origin:/static/dist/kn-landing.js", 2), ("524", "asset:/static/dist/kn-landing.js", 1)],
 )
 def test_only_non_5xx_proxy_responses_clear_landing_cooldown(status, expected_body, expected_fetches):
     out = _run_edge_case(f"cooldown-{status}")
     assert out["body"] == expected_body
     assert out["landingFetches"] == expected_fetches
-
-
-def test_metadata_falls_back_to_assets_with_the_short_timeout():
-    out = _run_edge_case("metadata-timeout")
-    assert out["body"] == "asset:/static/version.json"
-    assert out["elapsed"] < 1500
-
-
-def test_metadata_timeout_does_not_suppress_a_viable_stale_page_fetch():
-    out = _run_edge_case("metadata-page")
-    assert out["body"] == "origin:/"
-    assert 1000 < out["elapsed"] < 2500
-    assert out["pageFetches"] == 1
 
 
 # ── Public-host rewrite in proxied HTML ──────────────────────────────────

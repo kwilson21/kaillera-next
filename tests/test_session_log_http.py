@@ -17,9 +17,8 @@ def _patch_browser_ssl():
 
 @pytest.fixture
 def client(monkeypatch):
-    from fastapi.testclient import TestClient
-
     import src.db as db
+    from fastapi.testclient import TestClient
     from src.api import app as appmod
 
     monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
@@ -93,15 +92,14 @@ def test_live_match_in_this_room_is_accepted_without_a_db_check(client, monkeypa
 
 @pytest.fixture
 def audit_client(monkeypatch):
-    from fastapi.testclient import TestClient
-
     import src.db as db
+    from fastapi.testclient import TestClient
     from src.api import app as appmod
 
     monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
     monkeypatch.setenv("ADMIN_KEY", "k")
     query = AsyncMock()
-    monkeypatch.setattr(db, "query", query)
+    monkeypatch.setattr(db, "fetch", query)
     # No streamed records: each peer's audit comes from context.inputAudit.
     monkeypatch.setattr(db, "get_input_audit", AsyncMock(return_value=[]))
     return TestClient(appmod.create_app()), query
@@ -217,7 +215,7 @@ def test_admin_input_audit_is_assembled_from_streamed_records(client, monkeypatc
 
     records = {0: [rec(0, "L", 1), rec(1, 1, 1)], 1: [rec(0, "L", 1), rec(1, 0, 1)]}
     rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
-    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "fetch", AsyncMock(return_value=rows))
     monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
 
     r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
@@ -241,7 +239,7 @@ def test_admin_input_audit_compares_trimmed_histories_from_the_later_start(clien
         1: [rec(10, 0, 5), rec(11, 0, 9), rec(12, "L", 5), rec(13, "L", 9)],
     }
     rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
-    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "fetch", AsyncMock(return_value=rows))
     monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
 
     r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
@@ -270,7 +268,7 @@ def test_admin_input_audit_keeps_the_senders_run_at_a_trimmed_start(client, monk
         1: [rec(10, 0, 6, 5), rec(11, 0, 9, 9), rec(12, "L", 6, 6)],
     }
     rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
-    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "fetch", AsyncMock(return_value=rows))
     monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
 
     r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
@@ -289,8 +287,28 @@ def test_admin_input_audit_tolerates_non_integer_frames(client, monkeypatch):
     good = {"seq": 0, "s": 0, "f": 3, "b": 0, "lx": 0, "ly": 0, "cx": 0, "cy": 0}
     records = {0: [bad], 1: [good]}
     rows = [{"slot": 0, "player_name": "A", "context": "{}"}, {"slot": 1, "player_name": "B", "context": "{}"}]
-    monkeypatch.setattr(db, "query", AsyncMock(return_value=rows))
+    monkeypatch.setattr(db, "fetch", AsyncMock(return_value=rows))
     monkeypatch.setattr(db, "get_input_audit", AsyncMock(side_effect=lambda match_id, slot: records[slot]))
 
     r = http.get("/admin/api/input-audit/m1", headers={"X-Admin-Key": "k"})
     assert r.status_code == 200
+
+
+# ── GET /admin/api/session-logs?mode= ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("mode", ["rollback", "lockstep", "streaming"])
+def test_admin_session_logs_mode_filter_takes_only_that_mode(audit_client, monkeypatch, mode):
+    """Lockstep is a mode of its own: the rollback filter no longer takes its rows."""
+    import src.db as db
+
+    http, fetch = audit_client
+    fetch.return_value = []
+    count = AsyncMock(return_value=0)
+    monkeypatch.setattr(db, "count", count)
+
+    r = http.get(f"/admin/api/session-logs?mode={mode}", headers={"X-Admin-Key": "k"})
+    assert r.status_code == 200
+    sql = str(count.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert f"session_logs.mode = '{mode}'" in sql
+    assert " IN (" not in sql
