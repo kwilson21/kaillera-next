@@ -1,0 +1,87 @@
+"""The page lifecycle machine's reports must reach the database.
+
+The machine in web/src/session.ts reports `late-join-stranded`, and the
+observers beside it report disagreements, as client events. The server
+accepts a fixed list of event types and answers 400 to anything else, so a
+report type missing from that list is dropped without a trace, and "no
+reports" would be read as "nothing to report".
+
+Run: cd server && uv run pytest ../tests/test_session_reports.py -v
+"""
+
+import re
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi.testclient import TestClient
+
+SESSION_TS = Path(__file__).parent.parent / "web" / "src" / "session.ts"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _patch_browser_ssl():
+    """No browser needed (overrides the Playwright fixture in conftest.py)."""
+    yield
+
+
+def _report_types() -> list[str]:
+    """The `type` literals of the SessionReport union in session.ts, and of
+    play/observe.ts's DisagreeReport."""
+    source = SESSION_TS.read_text()
+    union = source[source.index("export type SessionReport") : source.index("/** Where reports go.")]
+    observe = (SESSION_TS.parent / "play" / "observe.ts").read_text()
+    disagree = observe[observe.index("export type DisagreeReport") :]
+    disagree = disagree[: disagree.index("};")]
+    return re.findall(r"readonly type: '([^']+)'", union + disagree)
+
+
+def test_the_union_is_found():
+    assert set(_report_types()) >= {"late-join-stranded", "play-disagree"}
+
+
+# The engine reports with createComparer too, under its own types (the peer
+# mesh's decisions against web/src/peer-signaling.ts, in netplay-rollback.js).
+ENGINE_REPORT_TYPES = ["mesh-disagree"]
+# Types no page sends any more that the server still stores, for a page
+# loaded before the change: resync-disagree (the resync request rules
+# decide since web/src/resync-request.ts took over), streaming-disagree
+# (netplay-streaming.js calls the rules in web/src/streaming) and
+# protocol-mismatch (a message off its schema is dropped and logged:
+# createBoundary in web/src/socket-boundary.ts).
+RETIRED_REPORT_TYPES = ["resync-disagree", "streaming-disagree", "protocol-mismatch"]
+STATIC = SESSION_TS.parents[1] / "static"
+
+
+def test_the_engine_sends_the_type_it_is_allowed():
+    engine = (STATIC / "netplay-rollback.js").read_text()
+    for report_type in ENGINE_REPORT_TYPES:
+        assert f"window.KNEvent?.('{report_type}'," in engine
+
+
+@pytest.mark.parametrize("engine", ["netplay-rollback.js", "netplay-streaming.js"])
+def test_the_engines_no_longer_send_a_retired_type(engine):
+    source = (STATIC / engine).read_text()
+    for report_type in RETIRED_REPORT_TYPES:
+        assert f"'{report_type}'" not in source
+
+
+@pytest.mark.parametrize("report_type", _report_types() + ENGINE_REPORT_TYPES + RETIRED_REPORT_TYPES)
+def test_server_stores_every_report_type(report_type, monkeypatch):
+    import src.db as db
+    from src.api import app as appmod
+    from src.api.signaling import make_upload_token
+
+    stored = AsyncMock(return_value=1)
+    monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
+    monkeypatch.setitem(appmod.rooms, "ROOM1", object())  # client events need a live room
+    monkeypatch.setattr(db, "insert_client_event", stored)
+    client = TestClient(appmod.create_app())
+
+    response = client.post(
+        f"/api/client-event?room=ROOM1&token={make_upload_token('ROOM1')}",
+        json={"type": report_type, "msg": "", "meta": {"matchId": None}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert stored.await_args.args[0]["type"] == report_type

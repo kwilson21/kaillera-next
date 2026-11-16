@@ -37,24 +37,34 @@ def test_rollback_guest_boot_is_deferred_until_gesture():
     assert cheats_idx > boot_idx
 
 
+def _take_rom_hash(source):
+    # Every load that knows its hash takes it through one helper
+    # (specs/rom_identity.qnt): the hash, the game id, the EJS identity and the
+    # hibernated core's check.
+    idx = source.find("const takeRomHash = (load, hash) =>")
+    assert idx != -1
+    return source[idx : idx + 600]
+
+
 def test_library_rom_updates_ejs_identity_for_next_boot():
     source = (REPO_ROOT / "web/static/play.js").read_text()
     load_idx = source.find("const loadRomFromLibrary =")
     assert load_idx != -1
     window = source[load_idx : load_idx + 1600]
 
-    assert "window.EJS_gameID = hash" in window
+    assert "takeRomHash(load, hash)" in window
+    assert "window.EJS_gameID = hash" in _take_rom_hash(source)
 
 
 def test_non_ssb64_boot_clears_stale_standard_cheats():
-    source = (REPO_ROOT / "web/static/shared.js").read_text()
-    boot_idx = source.find("function bootWithCheats(label)")
+    source = (REPO_ROOT / "web/src/page/shared.ts").read_text()
+    boot_idx = source.find("function bootWithCheats(label?: string)")
     assert boot_idx != -1
     window = source[boot_idx : boot_idx + 700]
 
     assert "window.KNState?.romHash === SSB64_HASH" in window
     assert "applyStandardCheats(SSB64_ONLINE_CHEATS)" in window
-    assert "window.EJS_cheats = []" in window
+    assert "page().EJS_cheats = []" in window
     assert "clearCheats(false)" in window
     assert "gm.resetCheat()" in source or "gm.Module?._reset_cheat" in source
     assert "async function clearCheats(disableKnownCheats = true)" in source
@@ -62,7 +72,7 @@ def test_non_ssb64_boot_clears_stale_standard_cheats():
     assert "SSB64_HASH: SSB64_HASH" in source
 
 
-def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
+def test_smash_remix_startup_uses_kn_sync_and_starts_c_rollback_at_once():
     source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
 
     assert "const REMIX_INITIAL_SYNC_USE_KN_SYNC = true" in source
@@ -75,8 +85,9 @@ def test_smash_remix_startup_uses_kn_sync_and_disables_c_rollback():
     assert "const INITIAL_SMASH_CONFIRM_INPUT = Object.freeze({ buttons: (1 << 0) | (1 << 3)" in source
     assert "Smash Remix initial sync: confirm pulse scene=${scene} coreFrame=${frame}" in source
     assert "Smash Remix initial sync: capturing fallback scene=${scene}" in source
-    assert "C-ROLLBACK deferred for Smash Remix" in source
-    assert "window._rbDeferredForGameplay = tryInitRollback" in source
+    # Rollback starts with the match, not at the first battle frame.
+    assert "C-ROLLBACK deferred for Smash Remix" not in source
+    assert "_rbDeferredForGameplay" not in source
     assert "KNShared.clearCheats(false)" in source
 
 
@@ -92,9 +103,7 @@ def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fal
     initial_idx = source.find("initial-sync-load", source.find("if (isKnSyncInitialState)"))
     assert initial_idx != -1
     initial_window = source[initial_idx : initial_idx + 1800]
-    remix_log_idx = initial_window.find(
-        "initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup"
-    )
+    remix_log_idx = initial_window.find("initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup")
     hidden_idx = initial_window.find("_restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load')")
     audio_idx = initial_window.find("_restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load')")
     cleanup_idx = initial_window.find("_postStateLoadCleanup(readyMod, 'initial-sync-load')")
@@ -150,9 +159,7 @@ def test_smash_remix_runtime_mismatch_uses_direct_host_title_kn_sync():
     assert "initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup" in source
     assert "_postStateLoadCleanup(mod, `${reason}:post-kn-sync`);" not in source
     assert "post-state cleanup applied" in source
-    assert (
-        "const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally;"
-    ) in source
+    assert ("const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally;") in source
 
     # Host and guest now run the IDENTICAL restore stack from the same
     # `loadKnSyncStateAtStartBoundary` call — `hasLocalKnSyncCapture` only
@@ -189,9 +196,20 @@ def test_smash_remix_rng_seed_sync_stays_out_of_live_tick_path():
     tick_window = source[tick_idx : tick_idx + 700]
     assert tick_window.count("_syncRNGSeed(tickMod, _frameNum);") == 1
     sync_idx = tick_window.find("_syncRNGSeed(tickMod, _frameNum);")
-    step_idx = tick_window.find("stepOneFrame();")
+    # The tick loop steps through _runStepOneFrame (STEP-NORUN / STEP-THREW
+    # handling), which is the wrapper around the raw stepOneFrame() call.
+    step_idx = tick_window.find("_runStepOneFrame('fallback')")
     assert sync_idx != -1
     assert step_idx > sync_idx
+
+    runner_idx = source.find("const _runStepOneFrame = (branch) => {")
+    assert runner_idx != -1
+    # Whole wrapper body: up to the closing brace at the wrapper's own indent.
+    runner_end = source.find("\n  };\n", runner_idx)
+    assert runner_end != -1
+    runner_window = source[runner_idx:runner_end]
+    assert "stepOneFrame();" in runner_window
+    assert "_syncRNGSeed" not in runner_window
 
 
 def test_determinism_harness_has_setup_only_css_character_gate():
@@ -218,11 +236,16 @@ def test_determinism_harness_has_setup_only_css_character_gate():
     assert "css_selected_flag" in source
     assert "setup gate OK" in source
 
-    scripted_idx = source.find("'scripted-post-nav',", source.find("const setupAlignment = await requireMatchSetupAligned("))
+    scripted_idx = source.find(
+        "'scripted-post-nav',", source.find("const setupAlignment = await requireMatchSetupAligned(")
+    )
     assert scripted_idx != -1
     scripted_window = source[scripted_idx : scripted_idx + 700]
     assert "if (SETUP_ONLY)" in scripted_window
-    assert "await finishSetupOnly(host, guest, hostBrowser, guestBrowser, 'scripted-post-nav', setupAlignment)" in scripted_window
+    assert (
+        "await finishSetupOnly(host, guest, hostBrowser, guestBrowser, 'scripted-post-nav', setupAlignment)"
+        in scripted_window
+    )
     assert "return;" in scripted_window
 
 
@@ -250,8 +273,11 @@ def test_same_rom_resumes_hibernated_core_and_rom_switch_discards_old_core():
     assert "if (!_hibernated) return" in helper_window
     assert "if (nextHash && _hibernatedRomHash === nextHash) return" in helper_window
     assert "destroyEmulator()" in helper_window
-    assert "discardHibernatedEmulatorForRomChange(expectedHash)" in source
-    assert "discardHibernatedEmulatorForRomChange(hash)" in source
+    # A ROM from the host (its hash known at once) and a hashed drop both
+    # discard a hibernated core for another ROM, through takeRomHash.
+    assert "takeRomHash(load, expectedHash)" in source
+    assert "takeRomHash(load, hash)" in source
+    assert "discardHibernatedEmulatorForRomChange(hash)" in _take_rom_hash(source)
     assert "discardHibernatedEmulatorForRomChange(null)" in source
 
     assert "const markSameRomEmulatorResume = (reason) => {" in source
@@ -296,13 +322,22 @@ def test_same_rom_remix_resume_skips_title_wait_and_syncs_current_state():
 
     wait_idx = source.find("const waitForSmashTitleState = async (gm) => {")
     assert wait_idx != -1
-    wait_window = source[wait_idx : wait_idx + 900]
+    # The window covers the early-return branches (config skip, same-ROM
+    # resume) up to the point the title wait resumes the main loop.
+    wait_window = source[wait_idx : wait_idx + 1500]
     resume_idx = wait_window.find("if (_isSameRomEmulatorResume())")
     title_wait_idx = wait_window.find("Smash Remix initial sync: waiting for title-screen state")
+    main_loop_resume_idx = wait_window.find("mod.resumeMainLoop?.()")
     assert resume_idx != -1
     assert title_wait_idx > resume_idx
-    assert "same-ROM resume, capturing current state" in wait_window
-    assert "mod.pauseMainLoop?.()" in wait_window
+    assert main_loop_resume_idx > title_wait_idx
+    # Only the same-ROM branch itself: up to its closing brace.
+    resume_end = wait_window.find("\n    }\n", resume_idx)
+    assert resume_idx < resume_end < title_wait_idx
+    resume_branch = wait_window[resume_idx:resume_end]
+    assert "return;" in resume_branch
+    assert "same-ROM resume, capturing current state" in resume_branch
+    assert "mod.pauseMainLoop?.()" in resume_branch
 
 
 def test_host_runs_same_kn_sync_restore_stack_as_guest():

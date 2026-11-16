@@ -33,16 +33,16 @@ def test_console_debug_flag(page, server_url):
 
 
 def test_sync_log_ring_available(page, server_url):
-    """SyncLogRing is exported from shared.js (extracted from both engines)."""
+    """The sync log ring is exported from the shared utilities (web/src/page/shared.ts) (extracted from both engines)."""
     page.goto(f"{server_url}/play.html?room=HA02{_R}&host=1&name=Host")
-    page.wait_for_function("typeof window.SyncLogRing !== 'undefined'", timeout=10000)
+    page.wait_for_function("typeof window.KNShared?.createSyncLogRing === 'function'", timeout=10000)
 
     result = page.evaluate("""(() => {
-        const r = new window.SyncLogRing(5);
-        r.push({ msg: 'a' }); r.push({ msg: 'b' });
-        return r.entries().length;
+        const r = window.KNShared.createSyncLogRing(5);
+        r.push({ t: 0, f: 0, msg: 'a' }); r.push({ t: 1, f: 1, msg: 'b' });
+        return { length: r.length, msgs: r.entriesAfter(-1, 10).map((e) => e.msg) };
     })()""")
-    assert result == 2
+    assert result == {"length": 2, "msgs": ["a", "b"]}
 
 
 def test_console_restored_after_game_end(context, server_url):

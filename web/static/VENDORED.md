@@ -30,7 +30,9 @@ Last updated: 2026-10-05
 ### `ejs/cores/mupen64plus_next_libretro.{js,wasm}` + `mupen64plus_next-wasm.data`
 - **Version:** built locally by `build/build.sh` — see "Build sources" below for pinned SHAs
 - **Patches applied:** see Stage 2 in `build/build.sh` (deterministic timing, SoftFloat FPU,
-  rollback exports, RSP audio skip, sync v3, hidden-state fingerprint)
+  rollback exports, RSP audio skip, sync v3, hidden-state fingerprint, and the
+  `kn_hash_registry` field-hash exports the desync detector requires; on by default,
+  `KN_ENABLE_HASH_REGISTRY=0` builds without them)
 - **`ejs/build.json`:** records `{minimumEJSVersion, version}` for the packaged core data file
 
 ### `ejs/compression/{extract7z.js, extractzip.js, libunrar.{js,wasm}}`

@@ -51,7 +51,7 @@ python deploy/vps/deploy.py dns      # DNS cutover: only with the owner's OK
 barely matters to players: game traffic is peer to peer.
 
 `dns` points the hostname at the tunnel. It refuses while the hostname is
-still attached to the demo Worker as a custom domain. Detach that first.
+still attached to a Worker as a custom domain. Detach that first.
 
 ## Secrets on the server
 

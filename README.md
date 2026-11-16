@@ -169,13 +169,24 @@ server/              Python signaling server (FastAPI + Socket.IO + uvloop)
   src/
     main.py            Entry point — serves API, Socket.IO, and static frontend
     state.py           Redis-backed room persistence
+    state_cache.py     Redis-backed save-state cache for late joiners
     ratelimit.py       Per-IP rolling-window rate limiting
     db.py              Database: SQLite or Cloudflare D1 backend, SQL migrations in server/migrations/
+    migrate.py         Plain-SQL schema migrations shared by SQLite/D1 (replaces Alembic)
+    retention.py       Flags matches with a crash/freeze/desync; sweeps expired ones
+    match_rotation.py  Rolls up ended session logs into Parquet + match_metrics rows
+    blobstore.py       Blob storage for screenshots (R2 in prod, local folder in dev)
+    stats.py           "Matches started in last 7 days" counter for the front page
+    landing_build.py   Content-hash build id shared by the server and the landing Worker
     api/
       app.py           REST endpoints, security headers (COOP/COEP/CSP), admin API
       signaling.py     Socket.IO events — rooms, WebRTC relay, ROM sharing, game data
       payloads.py      Pydantic v2 payload models + @validated decorator
       og.py            Open Graph meta-tag injection + build-time-rendered OG cards (no runtime browser)
+      og_card.py       Live per-room invite card composed from the host's latest frame (PIL)
+      turn.py          Cloudflare Realtime TURN credentials for /ice-servers
+      desync_vision.py   Claude vision endpoint for screenshot diff
+      desync_prompts.py  Prompt templates for vision-based desync analysis
 web/                 Static frontend (HTML + JS, served by FastAPI)
   index.html           Lobby — create/join rooms, invite links
   join.html            Invite page (/join?room=CODE) — who invited you, Join vs Watch, waking
@@ -183,48 +194,43 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
   admin.html           Admin dashboard (session logs, events, feedback, screenshots)
   privacy.html         Privacy notice — what's collected (diagnostics, screenshots), opt-out
   demo.html            Interactive rollback demo (user-supplied ROM required)
-  lag-test.html        Standalone dev harness for lagviz.js
   error.html           Error/fallback page
   static/
     play.js            Play page orchestrator (Socket.IO, overlay, ROM handling, engine dispatch)
-    landing.js         Front-page board controller (room creation, open-rooms board)
     landing.css        Front-page styles (direction A tokens)
-    join.js            Invite-page controller (room lookup, join/watch states)
-    lagviz.js          Waking-state lag visualizer (front page + invite page)
+    dist/kn-landing.js Front-page board controller (room creation, open-rooms board), built from web/src/landing/front.ts
+    dist/kn-join.js    Invite-page controller (room lookup, join/watch states), built from web/src/landing/join.ts
+    dist/kn-wake-art.js Standalone TypeScript bundle for waking-state art on the static landing pages
+    dist/kn-site.js    Small TypeScript bundle for pages without the core (safe storage wrapper, window.KNSite)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     admin.css          Admin dashboard styles
     play.css           Play page styles (room overlay tokens, direction A)
     netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
     rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
-    netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream)
-    gamepad-manager.js     True analog gamepad input (3-stage pipeline: deadzone → scale → N64 quantize)
-    switch2-usb.js         WebUSB handshake for the Switch 2 Pro Controller
-    controller-settings.js In-game controller settings panel
-    virtual-gamepad.js     On-screen touch controls for mobile
-    shared.js              Input encoding/decoding, wire format, input application to WASM
-    kn-audio.js            AudioWorklet pump + rollback audio capture
+    netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from web/src/streaming
+    switch2-usb.js         Starts the WebUSB handshake for the Switch 2 Pro Controller (web/src/page/switch2-usb.ts)
+    controller-settings.js Starts the in-game controller settings panel (logic in web/src/page/controller-settings/)
+    virtual-gamepad.js     Starts the on-screen touch controls (web/src/page/virtual-gamepad/)
+    kn-audio.js            Starts the AudioWorklet pump + rollback audio capture (web/src/page/audio.ts)
     kn-capture.js          Diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
-    kn-desync-detector.js  Field-granular cross-peer desync detection (RDRAM probes)
-    kn-diagnostics.js      Rollback diagnostics ring buffer (RB-CHECK, audit log)
-    kn-vision-client.js    Claude vision client for screenshot-diff desync analysis
+    kn-vision-client.js    Starts the desync-vision client (web/src/page/vision-client.ts)
     audio-worklet-processor.js  AudioWorklet ring buffer for rollback audio
     core-redirector.js     Redirect EJS core download to patched WASM, IDB cache management
     api-sandbox.js         Browser API interception (rAF, performance.now, getGamepads)
-    storage.js             Safe localStorage/sessionStorage wrapper
-    kn-state.js            Shared cross-module state
-    feedback.js            In-app feedback collection
-    version.js             Version display + changelog modal
-    version-guard.js       Cross-tab version mismatch guard (forces reload after deploys)
+    feedback.js            In-app feedback collection; starts web/src/site/feedback.ts
+    version.js             Version display + changelog modal; starts web/src/site/version.ts
+    version-guard.js       Cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
     ejs-loader.js          EmulatorJS loader shim (boot + script setup hooks)
-    demo.js                Demo page orchestrator (fake peer + menu autopilot)
-    fake-peer.js           Synthetic P2 for the demo page (simulated input/jitter)
-    ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (reads RDRAM menu state)
-    rollback-timeline.js   Demo page's live rollback-metrics HUD
+    demo.js                Demo page orchestrator (fake peer + menu autopilot); its options, network settings and HUD text are web/src/demo
+    fake-peer.js           Synthetic P2 for the demo page (logic in web/src/page/fake-peer.ts)
+    ssb64-menu-autopilot.js  Closed-loop menu driver for the demo (logic in web/src/page/menu-autopilot.ts)
+    rollback-timeline.js   Demo page's live rollback-metrics HUD (logic in web/src/page/rollback-timeline.ts)
     socket.io.min.js       Self-hosted Socket.IO client (v4.8.4)
     vendor/fflate.min.js   Self-hosted compression lib used to extract ROM ZIP archives
     ejs/                   Self-hosted EmulatorJS runtime, compression libs, localization
     ejs/cores/             Patched mupen64plus-next WASM core
+  src/                    Strict TypeScript frontend, including standalone landing-page waking art
 build/               WASM core build system (Docker + C patches)
 tests/               E2E tests (pytest + Playwright) + VGP visual regression
 docs/                Roadmap, MVP plan, design specs
@@ -237,7 +243,7 @@ The pre-built patched core is included at `web/static/ejs/cores/`. You only need
 
 The build compiles a patched mupen64plus-next core with:
 - Deterministic timing exports (`_kn_set_deterministic`, `_kn_set_frame_time`)
-- C-level resync exports (`_kn_sync_hash`, `_kn_sync_read`, `_kn_sync_write`, `_kn_sync_hash_regions`)
+- C-level resync exports (`_kn_sync_hash`, `_kn_sync_read`, `_kn_sync_write`, `_kn_rdram_block_hashes`)
 - Frame-locked audio exports (`_kn_get_audio_ptr`, `_kn_get_audio_samples`, `_kn_reset_audio`, `_kn_get_audio_rate`)
 - Strict IEEE 754 floating-point (`-fno-fast-math`, `-ffp-contract=off`)
 - NaN canonicalization via `wasm-opt --denan` (injected before `--asyncify`)
@@ -265,10 +271,20 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | Patch | Description |
 |---|---|
 | `mupen64plus-kn-all.patch` | Core exports: deterministic timing, resync hash/read/write, audio capture |
+| `audio-backend-skip-output.patch` | Bypasses the libretro audio output path (sinc resampler + `audio_batch_cb`) during netplay — confirmed cross-engine noisy |
 | `mupen64plus-deterministic-timing.patch` | `features_cpu.c` and `profile.c` timing fixes |
 | `mupen64plus-wasm-determinism.patch` | Strict FP compile flags, FPU NaN canonicalization, `srand(0)`, deterministic RTC |
 | `mupen64plus-ai-determinism.patch` | AI DMA deterministic audio interface timing |
+| `mupen64plus-cheat-set-overflow.patch` | Fixes a one-byte stack buffer overflow in `retro_cheat_set`'s hex parsing |
 | `mupen64plus-fpu-trace.patch` | FPU operation tracing for cross-platform determinism verification |
+| `mupen64plus-headless-tick.patch` | Skips `video_cb` presentation in `retro_run()` during rollback replay while keeping GLSM/GL state in sync |
+| `mupen64plus-glsm-uniform-bounds.patch` | Bounds-checks GLSM uniform/program-id lookups (Emscripten GL ids pass 1024 within a match) |
+| `mupen64plus-rdp-replay-skip.patch` | Skips GLideN64 raster submission and framebuffer/depth copybacks during masked replay |
+| `mupen64plus-static-save-scratch.patch` | Static reusable buffer for `savestates_save_m64p` instead of malloc/free; records the RDRAM offset for taint-aware hashing |
+| `mupen64plus-rsp-taint.patch` | Taints RDRAM blocks written by direct RSP HLE memcpys so `kn_game_state_hash` can skip them |
+| `gliden64-rdram-taint.patch` | Taints RDRAM blocks written by GLideN64's color/depth buffer readback |
+| `gliden64-pbo-scope.patch` | Keeps GLideN64's `GL_PIXEL_PACK_BUFFER` binding scoped to its own readback calls |
+| `gliden64-vertex-bounds.patch` | Backports two upstream GLideN64 fixes for out-of-bounds vertex-buffer indexing from malformed display lists |
 | `mupen64plus-softfloat.patch` | SoftFloat FPU for bit-exact cross-platform floating point |
 | `retroarch-deterministic-timing.patch` | RetroArch `_emscripten_get_now()` override + AUDIO_FLAG_SUSPENDED bypass |
 
@@ -284,11 +300,13 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `REDIS_HOST` | `redis` | Redis host (used if REDIS_URL not set) |
 | `REDIS_PORT` | `6379` | Redis port |
 | `REDIS_PASSWORD` | — | Redis password |
+| `REDIS_DB` | `0` | Redis logical DB index (used if REDIS_URL not set) |
 | `ADMIN_KEY` | — | Admin API key for management endpoints |
 | `LOG_RETENTION_DAYS` | `7` | Auto-delete old session data after N days |
 | `FLAGGED_STALE_DAYS` | `180` | Auto-delete unresolved flagged matches after N days |
 | `DB_PATH` | `data/kn.db` | SQLite database file path |
 | `D1_DATABASE_ID`, `D1_API_TOKEN`, `CF_ACCOUNT_ID` | — | Switch to the Cloudflare D1 backend instead of SQLite |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` (with `CF_ACCOUNT_ID`) | — | Switch screenshot blob storage to Cloudflare R2 instead of a local folder |
 | `IP_HASH_SALT` | random | Salt for IP address hashing (random per restart if unset) |
 | `KN_PROXY_SECRET` | — | Shared secret trusting the landing Worker's forwarded client IP |
 | `PUBLIC_ORIGINS` | — | Extra origins allowed to read `/health`, `/list`, `/room/*`, `/api/stats/public` |

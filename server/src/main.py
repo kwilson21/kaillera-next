@@ -124,6 +124,10 @@ def run() -> None:
         app.mount("/static", StaticFiles(directory=os.path.join(web_dir, "static")), name="static")
         app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
         log.info("Serving web frontend from %s", web_dir)
+        # The TypeScript bundles are build output, not in git: the Docker image
+        # builds them, a checkout has to. Without them the pages cannot start.
+        if not os.path.isfile(os.path.join(web_dir, "static", "dist", "kn-core.js")):
+            log.error("web/static/dist/kn-core.js is missing: run `npm ci && npm run build` in the repo root")
     else:
         log.warning("web/ directory not found at %s — frontend not served", web_dir)
 
