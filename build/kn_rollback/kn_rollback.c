@@ -2024,6 +2024,23 @@ const kn_gameplay_addr_t kn_gameplay_addrs[] = {
      * rollback engine into thousands of spurious replays and masking
      * actual determinism status with noise.
      *
+     * CORRECTION (2026-11): the labels above are the wrong way round. A
+     * normal VS match runs from the transfer struct at 0x800A4D08
+     * (gSCManagerBattleState points at it; a RAM dump of a match shows its
+     * game_status 1 and live stock counts). gSCManagerVSBattleState at
+     * 0x800A4EF8 is used for sudden death and is dormant otherwise, which
+     * is why the mismatches stopped: from then on this hash compared a
+     * struct that does not change, and could not see a stock count that
+     * differed between peers.
+     *
+     * The entries below read the live struct again, and the other one
+     * as well. The mismatches from
+     * f=149 that the note above reports did not come back: two-player runs
+     * compare this hash on every frame, menus included, and the PR that
+     * made this change lists them. One-byte entries are also read at the
+     * right byte now (kn_gameplay_addr_offset), which they were not then.
+     * See kn_gameplay_addrs.h.
+     *
      * The old "P1-P4 stock count" entries also used offset 0x2B within
      * the player struct. In SCPlayerData, offset 0x2B is the LSB of
      * the undocumented u32 `unk_pblock_0x28` field, NOT stock_count
@@ -2040,21 +2057,31 @@ const kn_gameplay_addr_t kn_gameplay_addrs[] = {
      */
     { KN_ADDR_SCENE_CURR, 1 },   /* gSCManagerSceneData.scene_curr */
 
-    /* gSCManagerVSBattleState: full header (32 bytes) covers
+    /* The live battle state's header (32 bytes) covers
      * game_type, gkind, is_team_battle, game_rules, pl_count,
      * cp_count, time_limit, stocks, handicap, is_team_attack,
      * is_stage_select, damage_ratio, item_toggles, is_reset_players,
      * game_status, time_remain, time_passed, item_appearance_rate,
      * and is_show_score/is_not_teamshadows bitfields. */
-    { KN_ADDR_VS_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER },
+    { KN_ADDR_LIVE_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER },
 
-    /* gSCManagerVSBattleState.players[N].stock_count
-     *   base 0xA4EF8 + players offset 0x20 + player index * 0x74
+    /* The live battle state's players[N].stock_count
+     *   base 0xA4D08 + players offset 0x20 + player index * 0x74
      *   + stock_count offset 0xB within SCPlayerData. */
-    { KN_ADDR_PLAYER_STOCKS_BASE + 0*KN_PLAYER_STRIDE, 1 },   /* P1 stock_count */
-    { KN_ADDR_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE, 1 },   /* P2 stock_count */
-    { KN_ADDR_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE, 1 },   /* P3 stock_count */
-    { KN_ADDR_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE, 1 },   /* P4 stock_count */
+    { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 0*KN_PLAYER_STRIDE, 1 },   /* P1 stock_count */
+    { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE, 1 },   /* P2 stock_count */
+    { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE, 1 },   /* P3 stock_count */
+    { KN_ADDR_LIVE_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE, 1 },   /* P4 stock_count */
+
+    /* The copy the game uses for sudden death, same layout. It was all
+     * this table read of the battle state until 2026-11, and two peers
+     * never differed on it in a healthy match, so keeping it costs nothing
+     * and keeps a sudden death covered. */
+    { KN_ADDR_SUDDEN_DEATH_BATTLE_HEADER, KN_SIZE_VS_BATTLE_HEADER },
+    { KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE + 0*KN_PLAYER_STRIDE, 1 },
+    { KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE + 1*KN_PLAYER_STRIDE, 1 },
+    { KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE + 2*KN_PLAYER_STRIDE, 1 },
+    { KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE + 3*KN_PLAYER_STRIDE, 1 },
     /* RNG seed — sample the REAL game RNG so cross-peer divergence at
      * char-pick time surfaces via RB-CHECK. Prior table sampled 0x05B940
      * which was thought to be the seed but is actually gSYAudioHeapBuffer
@@ -2143,6 +2170,19 @@ const size_t kn_gameplay_addr_count = sizeof(kn_gameplay_addrs) / sizeof(kn_game
 
 /* Backward-compat for callers that used the legacy macro form. */
 #define KN_GAMEPLAY_ADDR_COUNT kn_gameplay_addr_count
+
+/* Where table entry `a` lives in an RDRAM image. RDRAM is stored as
+ * host-order (little-endian) 32-bit words, so the single N64 byte at
+ * address A is at offset A ^ 3; a 4-byte-aligned run of whole words is
+ * where its address says. Until this, the five one-byte entries (the scene
+ * and the four stock counts) were read at A itself, the byte three places
+ * along in the same word: the hash never covered a stock count or the
+ * scene. tests/rb-two-player.mjs with DESYNC_GUEST=1 changes one stock
+ * count on one peer and found this hash still equal on both. */
+static inline size_t kn_gameplay_addr_offset(size_t a) {
+    size_t off = kn_gameplay_addrs[a].rdram_offset;
+    return kn_gameplay_addrs[a].size == 1 ? (off ^ (size_t)3) : off;
+}
 /* Total bytes across all gameplay addresses (209 bytes as of writing).
  * Used for the stack-allocated stash buffer in kn_post_tick. Padded
  * to 256 for alignment and headroom if addresses are added. */
@@ -2475,7 +2515,7 @@ uint32_t kn_gameplay_hash(int frame) {
     uint32_t hash = KN_FNV1A_OFFSET;
 
     for (size_t a = 0; a < KN_GAMEPLAY_ADDR_COUNT; a++) {
-        size_t off = state_base + kn_gameplay_addrs[a].rdram_offset;
+        size_t off = state_base + kn_gameplay_addr_offset(a);
         uint32_t sz = kn_gameplay_addrs[a].size;
         if (off + sz > state_limit) continue; /* bounds check */
         hash = kn_fnv1a_stride(hash, state + off, sz, 1);
@@ -2507,7 +2547,7 @@ uint32_t kn_live_gameplay_hash(void) {
         if (!rb_ensure_rdram_base()) return 0;
         uint32_t hash = KN_FNV1A_OFFSET;
         for (int a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
-            size_t off = kn_gameplay_addrs[a].rdram_offset;
+            size_t off = kn_gameplay_addr_offset((size_t)a);
             uint32_t sz = kn_gameplay_addrs[a].size;
             if (off + sz > rb.split_rdram_size) continue;
             hash = kn_fnv1a_stride(hash, rb.rdram_base + off, sz, 1);
@@ -2532,7 +2572,7 @@ uint32_t kn_live_gameplay_hash(void) {
     /* Same address-list loop as kn_gameplay_hash but over scratch. */
     uint32_t hash = KN_FNV1A_OFFSET;
     for (int a = 0; a < (int)KN_GAMEPLAY_ADDR_COUNT; a++) {
-        size_t off = kn_rdram_offset_in_state + kn_gameplay_addrs[a].rdram_offset;
+        size_t off = kn_rdram_offset_in_state + kn_gameplay_addr_offset((size_t)a);
         uint32_t sz = kn_gameplay_addrs[a].size;
         if (off + sz > state_size) continue;
         hash = kn_fnv1a_stride(hash, scratch + off, sz, 1);
@@ -3162,6 +3202,19 @@ void kn_set_frame(int frame) {
         return;
     }
     rb.frame = frame;
+    /* The live state is no longer the one last saved: a resync has just
+     * loaded the host's state for `frame` (the page calls this on every
+     * state it loads, the frame changed or not), and the page may already
+     * have saved `frame` itself. kn_pre_tick saves a frame only when
+     * last_save_frame differs from it, so keeping the old value here left
+     * the page's own copy of `frame` in the ring when the resync landed
+     * exactly one frame behind it, and a rollback to `frame` restored that
+     * copy (specs/ring_after_resync.qnt, everyRerunFrameIsTheHosts). For
+     * the same reason the sparse save mode's baseline is not the copy filed
+     * before `frame`: the next save is whole, as after the worker's state
+     * apply (kn_apply_split_state_partial_with_aux; everyCopyIsWhole). */
+    rb.last_save_frame = -1;
+    rb.baseline_initialized = 0;
     rb_log("kn_set_frame: %d", frame);
 }
 

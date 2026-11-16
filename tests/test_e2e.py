@@ -6,6 +6,7 @@ Run: pytest tests/test_e2e.py -v
 import re
 import secrets
 
+import pytest
 from playwright.sync_api import expect
 
 _R = secrets.token_hex(3).upper()  # unique per run to avoid stale room collisions
@@ -70,16 +71,35 @@ def test_host_guest_start_end(context, server_url):
         guest.close()
 
 
-def test_host_leave_midgame_closes_room(context, server_url):
-    """When host leaves mid-game, guest gets room-closed and redirects to lobby."""
+@pytest.mark.parametrize("offer_delay_ms", [0, 1000], ids=["normal", "delayed-offer"])
+def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
+    """When the host leaves mid-game, the guest stays in the game and the room stays open.
+
+    The server used to close the room on a host disconnect (`room-closed`) and
+    the guest was sent back to the lobby. It now keeps the room and the match:
+    the host may come back, and after the disconnect grace a remaining player
+    becomes the owner (signaling._leave; tests/test_room_logic.py,
+    tests/test_host_reload.py). The guest is told the host left.
+    """
+    if offer_delay_ms:
+        # The toolbar is visible before WebRTC connects. A delayed offer makes
+        # that ordering deterministic instead of relying on runner load.
+        context.add_init_script(f"""(() => {{
+            const createOffer = RTCPeerConnection.prototype.createOffer;
+            RTCPeerConnection.prototype.createOffer = async function(...args) {{
+                await new Promise(resolve => setTimeout(resolve, {offer_delay_ms}));
+                return createOffer.apply(this, args);
+            }};
+        }})();""")
     host = context.new_page()
     guest = context.new_page()
+    room_code = f"E2E02{_R}{offer_delay_ms}"
 
     try:
-        host.goto(f"{server_url}/play.html?room=E2E02{_R}&host=1&name=Host")
+        host.goto(f"{server_url}/play.html?room={room_code}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room=E2E02{_R}&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room_code}&name=Guest")
         expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
         _mark_rom_ready(host)
@@ -90,11 +110,33 @@ def test_host_leave_midgame_closes_room(context, server_url):
         expect(host.locator("#toolbar")).to_be_visible(timeout=10000)
         expect(guest.locator("#toolbar")).to_be_visible(timeout=10000)
 
-        # Host navigates away (triggers Socket.IO disconnect)
+        # Toolbar visibility only says that the start was received. Departing
+        # before either channel opens tests a never-connected startup instead
+        # of the established peer disconnect this test asserts below.
+        for player in (host, guest):
+            player.wait_for_function(
+                "Object.values(window.KNState.peers || {}).some(peer => peer.dc?.readyState === 'open')",
+                timeout=10000,
+            )
+
+        # Host navigates away (Socket.IO disconnect; 'leaving' over the DataChannel)
         host.goto("about:blank")
 
-        # Guest should be redirected to lobby (2s toast delay + Socket.IO detection)
-        guest.wait_for_url(re.compile(r"/$"), timeout=15000)
+        # Guest is told the host left ("Host dropped" once the host's 'leaving'
+        # arrives; "Host disconnected — reconnecting..." if the channel closed first)...
+        expect(guest.locator("#toast-container")).to_contain_text(
+            re.compile(r"Host (dropped|disconnected)"), timeout=15000
+        )
+        # ...and is not sent back to the lobby (the old redirect came 2 s after its toast)
+        guest.wait_for_timeout(3000)
+        expect(guest).to_have_url(re.compile(rf"/play\.html\?room={room_code}"))
+        expect(guest.locator("#toolbar")).to_be_visible()
+        expect(guest.locator("#overlay")).to_be_hidden()
+
+        # The room is still open, with its match still running
+        resp = guest.request.get(f"{server_url}/room/{room_code}")
+        assert resp.ok, f"room lookup failed: {resp.status}"
+        assert resp.json()["status"] == "playing"
     finally:
         if not host.is_closed():
             host.close()
@@ -136,7 +178,12 @@ def test_guest_nonexistent_room(page, server_url):
 
 
 def test_rom_sharing_prompt_appears(context, server_url):
-    """When host enables ROM sharing, joiners see accept/decline prompt."""
+    """When host enables ROM sharing, joiners see accept/decline prompt.
+
+    Accepting is the "Accept from Host" button; declining is loading your own
+    ROM, so the drop zone stays beside the offer (the separate Decline button
+    is gone).
+    """
     host = context.new_page()
     guest = context.new_page()
 
@@ -154,13 +201,16 @@ def test_rom_sharing_prompt_appears(context, server_url):
             document.getElementById('opt-rom-sharing').click();
         """)
 
-        # Guest should see the accept/decline prompt (not the ROM drop zone)
+        # Guest sees the offer to accept the host's ROM...
         expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
-        expect(guest.locator("#rom-drop")).to_be_hidden()
+        expect(guest.locator("#rom-accept-btn")).to_be_visible()
+        expect(guest.locator("#rom-accept-btn")).to_contain_text("Accept from Host")
+        # ...beside the drop zone for loading their own instead
+        expect(guest.locator("#rom-drop")).to_be_visible()
 
         # Verify prompt text
         expect(guest.locator(".rom-sharing-prompt-text")).to_contain_text(
-            "offering to share"
+            "accept ROM from host"
         )
     finally:
         host.close()
@@ -168,9 +218,16 @@ def test_rom_sharing_prompt_appears(context, server_url):
 
 
 def test_rom_sharing_decline_shows_drop_zone(context, server_url):
-    """When joiner declines ROM sharing, ROM drop zone reappears."""
+    """When joiner declines ROM sharing, the ROM drop zone is theirs to use.
+
+    There is no Decline button any more: the drop zone stays beside the offer,
+    and a joiner declines by loading their own ROM there, which takes the offer
+    away.
+    """
     host = context.new_page()
     guest = context.new_page()
+    # A generated file stands in for the ROM: nothing is booted.
+    guest.add_init_script("window.__test_skipBoot = true;")
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS02{_R}&host=1&name=Host")
@@ -186,15 +243,24 @@ def test_rom_sharing_decline_shows_drop_zone(context, server_url):
             document.getElementById('opt-rom-sharing').click();
         """)
 
-        # Wait for prompt
+        # Wait for prompt, with the drop zone beside it
         expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
+        expect(guest.locator("#rom-drop")).to_be_visible()
 
-        # Guest declines
-        guest.click("#rom-decline-btn")
+        # Guest declines by loading their own ROM from the drop zone
+        guest.set_input_files(
+            "#rom-drop input[type=file]",
+            {"name": "own.z64", "mimeType": "application/octet-stream", "buffer": bytes(range(256)) * 16},
+        )
+        expect(guest.locator("#rom-status")).to_contain_text("own.z64", timeout=10000)
 
-        # ROM drop zone should reappear, prompt hidden
+        # ROM drop zone stays (showing their ROM), prompt hidden
         expect(guest.locator("#rom-drop")).to_be_visible(timeout=5000)
-        expect(guest.locator("#rom-sharing-prompt")).to_be_hidden()
+        expect(guest.locator("#rom-sharing-prompt")).to_be_hidden(timeout=5000)
+
+        # Removing that ROM leaves them with none, so the offer comes back
+        guest.locator("#rom-library .rom-library-item.active .rom-delete").click(timeout=10000)
+        expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=5000)
     finally:
         host.close()
         guest.close()
@@ -282,9 +348,11 @@ def test_rom_sharing_joiner_after_toggle(context, server_url):
             guest.goto(f"{server_url}/play.html?room=ROMS05{_R}&name=Guest")
             expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
 
-            # Guest should see the prompt (from users-updated romSharing field)
+            # Guest should see the prompt (from users-updated romSharing field),
+            # offered beside the drop zone
             expect(guest.locator("#rom-sharing-prompt")).to_be_visible(timeout=10000)
-            expect(guest.locator("#rom-drop")).to_be_hidden()
+            expect(guest.locator("#rom-accept-btn")).to_be_visible()
+            expect(guest.locator("#rom-drop")).to_be_visible()
         finally:
             guest.close()
     finally:
@@ -292,22 +360,28 @@ def test_rom_sharing_joiner_after_toggle(context, server_url):
 
 
 def test_host_disclaimer_visible(context, server_url):
-    """Host sees legal disclaimer when sharing checkbox is checked."""
+    """Host sees legal disclaimer when sharing checkbox is checked.
+
+    The sharing checkbox and its disclaimer live in the host's collapsed
+    Advanced section, so the host opens it first.
+    """
     host = context.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS06{_R}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)
 
-        # Disclaimer hidden by default
+        # Open the host's Advanced options, where the sharing checkbox is
+        host.click("#host-controls .advanced-options > summary")
+        expect(host.locator("#opt-rom-sharing")).to_be_visible(timeout=5000)
+
+        # Disclaimer hidden by default, even with Advanced open
         expect(host.locator("#rom-sharing-disclaimer")).to_be_hidden()
 
-        # Enable sharing
+        # Enable sharing (the checkbox is enabled once a ROM is loaded)
         _mark_rom_ready(host)
-        host.evaluate("""
-            document.getElementById('opt-rom-sharing').disabled = false;
-            document.getElementById('opt-rom-sharing').click();
-        """)
+        host.evaluate("document.getElementById('opt-rom-sharing').disabled = false;")
+        host.check("#opt-rom-sharing")
 
         # Disclaimer visible
         expect(host.locator("#rom-sharing-disclaimer")).to_be_visible(timeout=5000)
@@ -625,7 +699,11 @@ def test_worker_compress_and_encode(page, server_url):
 
 
 def test_share_dropdown_copies_links(context, server_url):
-    """In-game share button shows dropdown with play and watch links."""
+    """In-game share menu offers play and watch links and copies one.
+
+    The links are the Invite group of the toolbar's More menu (they had a
+    toolbar button and dropdown of their own once).
+    """
     host = context.new_page()
     guest = context.new_page()
 
@@ -642,21 +720,23 @@ def test_share_dropdown_copies_links(context, server_url):
         host.click("#start-btn")
         expect(host.locator("#toolbar")).to_be_visible(timeout=10000)
 
-        # Share button exists
-        expect(host.locator("#toolbar-share")).to_be_visible()
+        # The More button (which holds the Invite links) exists
+        expect(host.locator("#toolbar-more")).to_be_visible()
 
-        # Dropdown initially hidden
-        expect(host.locator("#share-dropdown")).to_be_hidden()
+        # Menu initially hidden
+        expect(host.locator("#more-dropdown")).to_be_hidden()
 
-        # Click opens dropdown
-        host.click("#toolbar-share")
-        expect(host.locator("#share-dropdown")).to_be_visible(timeout=2000)
+        # Click opens the menu with both invite links
+        host.click("#toolbar-more")
+        expect(host.locator("#more-dropdown")).to_be_visible(timeout=2000)
+        expect(host.locator("#invite-submenu")).to_contain_text("Invite")
         expect(host.locator("#share-play")).to_be_visible()
         expect(host.locator("#share-watch")).to_be_visible()
 
-        # Click share-play copies and closes dropdown
+        # Click share-play copies the play link and closes the menu
         host.click("#share-play")
-        expect(host.locator("#share-dropdown")).to_be_hidden(timeout=2000)
+        expect(host.locator("#toast-container")).to_contain_text("Play link copied!", timeout=2000)
+        expect(host.locator("#more-dropdown")).to_be_hidden(timeout=2000)
     finally:
         host.close()
         guest.close()

@@ -43,7 +43,7 @@ def test_rollback_stall_sites_have_wall_clock_action_markers():
     src = LOCKSTEP_JS.read_text()
     doc = INVARIANTS_DOC.read_text()
 
-    for marker in ("PHASE-LOCK-WAIT", "MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT"):
+    for marker in ("MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT", "LOCKSTEP-WAIT-TIMEOUT"):
         assert marker in src
         assert marker in doc
 
@@ -59,7 +59,6 @@ def test_strict_menu_lockstep_never_fabricates_or_phantoms_inputs():
     assert "phase-lock-timeout" not in src
     assert "menu-lockstep-timeout" not in src
     assert "MENU-LOCKSTEP-WAIT" in src
-    assert "PHASE-LOCK-WAIT" in src
     assert "holding strict menu lockstep" in src
 
 
@@ -71,7 +70,6 @@ def test_strict_menu_resend_cadence_is_per_slot():
     assert "const resendKey = `${source}:${slot}:${applyFrame}`;" in src
     assert "prev?.key === resendKey && nowMs - prev.lastAt < RESEND_TIMEOUT_MS" in src
     assert "_strictMenuResendState[slot] = { key: resendKey, lastAt: nowMs };" in src
-    assert re.search(r"_requestStrictMenuResends\(\s*bootInputPeers,\s*missingSlots,", src)
     assert "_requestStrictMenuResends(inputPeers, _missingSlots, applyFrame, now, 'js-menu')" in src
 
 
@@ -120,16 +118,6 @@ def test_solo_delay_does_not_initialize_rollback():
     assert "C-ROLLBACK disabled for zero-delay solo play" in src
 
 
-def test_phase_lock_deadline_tracks_intermittent_phase_mismatch():
-    src = LOCKSTEP_JS.read_text()
-
-    assert "const phaseMismatchSlots = [];" in src
-    assert "notePhaseMismatch(p.slot);" in src
-    assert "phaseMismatchSlots," in src
-    assert "const phaseLockSlots = [...new Set(phaseMismatchSlots)].sort((a, b) => a - b);" in src
-    assert "mismatchPeers=[${phaseLockSlots.join(',')}]" in src
-    assert "if (phaseWaitSlots.length && !holdReplayDue) {" in src
-
 
 def test_resync_state_load_clears_pending_c_inputs():
     src = LOCKSTEP_JS.read_text()
@@ -158,121 +146,6 @@ def test_pre_tick_local_input_uses_c_frame_after_host_authoritative_init():
     assert "localInput.buttons" not in pre_tick_call
 
 
-def test_gameplay_to_menu_schedules_per_match_input_reset():
-    src = LOCKSTEP_JS.read_text()
-
-    helper_idx = src.index("const _resetMatchInputState = (reason) => {")
-    helper_src = src[helper_idx : src.index("const _scheduleMatchInputReset", helper_idx)]
-    for snippet in (
-        "_localInputs = {};",
-        "_remoteInputs = {};",
-        "_peerInputStarted = {};",
-        "_lastRemoteFramePerSlot = {};",
-        "_rbLocalHistory.length = 0;",
-        "for (const k of Object.keys(_lastKnownInput)) delete _lastKnownInput[k];",
-        "peer.lastAckFromPeer = -1;",
-        "peer.lastFrameFromPeer = -1;",
-        "peer.lastAckAdvanceTime = 0;",
-        "MATCH-INPUT-RESET reason=${reason}",
-    ):
-        assert snippet in helper_src
-
-    assert "let _pendingMatchInputResetReason = '';" in src
-    assert (
-        "_scheduleMatchInputReset(`gameplay-menu:f${_frameNum}:scene${sceneCurr}:status${gameStatus}`);"
-        in src
-    )
-    assert "_flushPendingMatchInputReset('post-c-replay-tick')" in src
-    assert "_flushPendingMatchInputReset('post-c-tick')" in src
-    assert "if (_pendingMatchInputResetReason && _frameNum <= 0) _flushPendingMatchInputReset('tick-start');" in src
-
-    transition_idx = src.index("GAMEPLAY→MENU transition")
-    schedule_idx = src.index("_scheduleMatchInputReset(`gameplay-menu", transition_idx)
-    shutdown_idx = src.index("_shutdownCRollbackForMenu(tickMod", transition_idx)
-    assert transition_idx < schedule_idx < shutdown_idx
-
-
-def test_gameplay_to_menu_c_shutdown_keeps_frame_timeline():
-    # Smash Remix pause (scene 22, status 2) tears down the C engine. The
-    # tick must stop right there: running on into _kn_post_tick resets
-    # _frameNum to -1 on only the peer that got that far, and the other
-    # peer's lockstep waits on frames that never come.
-    src = LOCKSTEP_JS.read_text()
-    transition_idx = src.index("GAMEPLAY→MENU transition")
-    branch_src = src[transition_idx : src.index("MENU-LOCKSTEP armed at", transition_idx)]
-
-    guard = "if (!_shutdownCRollback) {"
-    assert guard in branch_src
-    assert branch_src.index(guard) < branch_src.index("_scheduleMatchInputReset(`gameplay-menu")
-
-    call_idx = branch_src.index("_shutdownCRollbackForMenu(tickMod")
-    after_shutdown = branch_src[call_idx:]
-    assert "_markTickReturn('skip:rb-shutdown');" in after_shutdown
-    assert after_shutdown.index("_markTickReturn('skip:rb-shutdown');") < after_shutdown.index("return;")
-
-    helper_idx = src.index("const _shutdownCRollbackForMenu = (tickMod")
-    helper_src = src[helper_idx : src.index("\n  };\n", helper_idx)]
-    assert "C-ROLLBACK shutdown on GAMEPLAY→MENU" in helper_src
-    # Skipping the reset must not keep a whole match of input history alive.
-    assert "const keepFrom = _frameNum - 600;" in helper_src
-
-
-def test_gameplay_to_menu_c_shutdown_waits_for_confirmed_state():
-    # Shutting down with mispredicted frames still uncorrected leaves the
-    # peers on different states that the lockstep path never repairs. Hold
-    # the shutdown until the live state is final, with a deadline (I1).
-    src = LOCKSTEP_JS.read_text()
-    doc = INVARIANTS_DOC.read_text()
-    transition_idx = src.index("GAMEPLAY→MENU transition")
-    branch_src = src[transition_idx : src.index("MENU-LOCKSTEP armed at", transition_idx)]
-
-    assert "const RB_SHUTDOWN_HOLD_MS = " in src
-    assert "_rbShutdownHold = { since: performance.now(), frame: _frameNum };" in branch_src
-    drain_idx = branch_src.index("_drainPendingCInputs(tickMod);")
-    confirm_idx = branch_src.index("_liveStateConfirmed(tickMod)")
-    deadline_idx = branch_src.index("RB_SHUTDOWN_HOLD_MS")
-    call_idx = branch_src.index("_shutdownCRollbackForMenu(tickMod")
-    # Arrived inputs are fed before judging, so a stalled tab can't time out
-    # on inputs that are already here.
-    assert drain_idx < confirm_idx < call_idx and deadline_idx < call_idx
-    assert "RB-SHUTDOWN-HOLD-TIMEOUT" in branch_src
-    assert "RB-SHUTDOWN-HOLD-TIMEOUT" in doc and "RB_SHUTDOWN_HOLD_MS" in doc
-
-    # While held the frame doesn't advance unless a replay is due, and any
-    # step it does take is strict lockstep (no prediction at match end).
-    hold_wait = branch_src[call_idx:]
-    assert "_kn_peek_pending_rollback" in hold_wait
-    assert hold_wait.index("_markTickReturn('skip:rb-shutdown-hold');") > hold_wait.index("holdReplayDue =")
-    assert "const _menuLockstepActive = strictInputLockstep || !!_rbShutdownHold;" in src
-    # Missing inputs are requested, not just waited on until the deadline.
-    resend = "_requestStrictMenuResends([m.peer], [m.peer.slot], m.frame, nowMs, 'rb-hold');"
-    assert "for (const m of _missingConsumedInputs()) {" in hold_wait
-    assert hold_wait.index(resend) < hold_wait.index("_markTickReturn('skip:rb-shutdown-hold');")
-    # A due replay is never blocked by the strict phase/menu stalls.
-    assert "if (phaseWaitSlots.length && !holdReplayDue) {" in src
-    assert "if (_menuLockstepActive && !holdReplayDue) {" in src
-    assert "return _missingConsumedInputs().length === 0;" in src
-
-    # A hold never outlives the engine it was for.
-    init_idx = src.index("const doRollbackInit = (effectiveDelay")
-    assert "_rbShutdownHold = null;" in src[init_idx : src.index("if (!detMod?._kn_rollback_init)", init_idx)]
-    fallback_idx = src.index("if (consecutiveThrows >= 3 && _useCRollback) {")
-    assert "_rbShutdownHold = null;" in src[fallback_idx : src.index("C-ROLLBACK-FALLBACK", fallback_idx)]
-    helper_idx = src.index("const _shutdownCRollbackForMenu = (tickMod")
-    assert "_clearPendingCInputs('rb-shutdown');" in src[helper_idx : src.index("\n  };\n", helper_idx)]
-
-    # Back in gameplay before the hold ends: the engine never stopped.
-    menu_to_gameplay = src[src.index("MENU→GAMEPLAY transition at") : transition_idx]
-    assert "_rbShutdownHold = null;" in menu_to_gameplay
-
-    # The confirmation check is shared with the host's sync dispatch.
-    assert "_hostStateConfirmed" not in src
-    assert "_dispatchScheduledSyncs(() => _liveStateConfirmed(tickMod));" in src
-
-    # Match stop clears a hold left over from the finished match.
-    stop_idx = src.index("const stopSync = () => {")
-    assert "_rbShutdownHold = null;" in src[stop_idx : src.index("\n  };\n", stop_idx)]
-
 
 def test_rollback_gap_check_ignores_frames_before_c_init():
     # Legacy lockstep deletes consumed remote inputs, so before a deferred
@@ -280,7 +153,102 @@ def test_rollback_gap_check_ignores_frames_before_c_init():
     src = LOCKSTEP_JS.read_text()
     idx = src.index("const gapAtEdge =")
     gap_src = src[idx : src.index(";", idx)]
-    assert "windowEdge >= Math.max(0, _rbInitFrame - DELAY_FRAMES)" in gap_src
+    assert "windowEdge >= _inputFloor(p.slot)" in gap_src
+    floor_idx = src.index("const _inputFloor = (slot) =>")
+    assert "_rbInitFrame - DELAY_FRAMES" in src[floor_idx : src.index(";", floor_idx)]
+
+
+def test_resync_settles_the_inputs_before_its_frame():
+    # specs/resync_inputs.qnt: after a resync that moves the guest forward,
+    # neither page may wait for an input from the frames the guest skipped.
+    src = LOCKSTEP_JS.read_text()
+
+    floor_idx = src.index("const _inputFloor = (slot) =>")
+    assert "_inputSettledBefore[slot] ?? 0" in src[floor_idx : src.index(";", floor_idx)]
+
+    # Both gap checks use the same floor.
+    missing_idx = src.index("const _missingConsumedInputs = () => {")
+    missing_src = src[missing_idx : src.index("\n  };\n", missing_idx)]
+    assert "Math.max(_inputFloor(p.slot), windowStart)" in missing_src
+
+    # Guest: settles every peer's inputs, makes the ones it skipped that are
+    # still to be applied, sends every one of its own for that range (one made
+    # earlier may have been dropped by a peer as out of range:
+    # specs/resync_inputs.qnt, resync_inputs_only_new), and asks for the
+    # peers' it lacks.
+    settle_idx = src.index("const _settleInputsAtResync = (mod, frame) => {")
+    settle_src = src[settle_idx : src.index("\n  };\n", settle_idx)]
+    for snippet in (
+        "const from = Math.max(0, frame - DELAY_FRAMES);",
+        "_localInputs[f] = KNShared.ZERO_INPUT;",
+        "_feedCInput(mod, _playerSlot, f, _localInputs[f]);",
+        "_settleInputsBefore(peer.slot, frame);",
+        "if (own.length) peer.dc.send(`inputs-settled:${from}`);",
+        "for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);",
+        "peer.dc.send(`resend:${f}`);",
+    ):
+        assert snippet in settle_src
+
+    # Every peer waits on the moved page's inputs, so each is told the floor;
+    # a floor past what this page could be waiting on is refused.
+    told_idx = src.index("if (e.data.startsWith('inputs-settled:')) {")
+    told_src = src[told_idx : src.index("if (e.data === 'peer-resumed')", told_idx)]
+    assert "settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES" in told_src
+    assert "_inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);" in told_src
+
+    # A new match starts a new input timeline.
+    clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
+    assert "_inputSettledBefore = {};" in src[clear_idx : src.index("\n  };\n", clear_idx)]
+    apply_idx = src.index("const applySyncState = (bytes, frame, fromProactive = false) => {")
+    assert "if (timelineAligned) _settleInputsAtResync(gm.Module, frame);" in src[apply_idx:]
+
+    # Host: settles the guest's inputs when the state goes out, on both routes:
+    # over a DataChannel once every chunk is handed over (the per-guest
+    # transfer body, _sendSyncChunksTo), over Socket.IO once it is emitted.
+    send_idx = src.index("const _sendSyncChunksTo = async (")
+    assert "_settleInputsBefore(target.slot, frame);" in src[send_idx:]
+    assert "_settleInputsBefore(_peers[targetSid].slot, frame);" in src
+
+    # I2: the floor is per-peer state.
+    reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
+    assert "delete _inputSettledBefore[slot];" in src[reset_idx : src.index("\n  };\n", reset_idx)]
+
+
+def test_a_stalled_page_asks_for_the_inputs_it_dropped():
+    # specs/resync_inputs.qnt, ASK_FOR_MISSING: a page that dropped a peer's
+    # inputs as too far ahead remembers that the peer made them, and while
+    # the rollback input stall waits on them it asks for them again; the
+    # frames are KNCore.framesToAskFor (web/src/input-ask.ts, proved).
+    src = LOCKSTEP_JS.read_text()
+
+    oor_idx = src.index("_syncLog(`INPUT-OOR slot=")
+    oor_src = src[oor_idx : src.index("return false;", oor_idx)]
+    assert "_inputDroppedAheadUpTo[peer.slot] = Math.max(" in oor_src
+
+    ask_idx = src.index("const _askForMissingInputs = (peer, applyFrame, windowEdge) => {")
+    ask_src = src[ask_idx : src.index("\n  };\n", ask_idx)]
+    for snippet in (
+        "const from = Math.max(0, windowEdge, _inputFloor(slot));",
+        "_inputDroppedAheadUpTo[slot] ?? -1",
+        "window.KNCore.framesToAskFor(have, from, applyFrame, peerHas, RB_INPUT_ASK_MAX)",
+        "now - (askedAt[f] ?? -Infinity) < RB_INPUT_ASK_EVERY_MS",
+        "peer.dc.send(`resend:${f}`);",
+    ):
+        assert snippet in ask_src
+
+    # It asks from inside the stall, before the stall returns.
+    stall_idx = src.index("// Too far ahead — stall to let peer catch up")
+    stall_src = src[stall_idx : src.index("_markTickReturn('skip:rb-input-stall');", stall_idx)]
+    assert "_askForMissingInputs(p, rbApplyFrame, windowEdge);" in stall_src
+
+    # I2: both tables are per-peer state, and go with every input timeline.
+    reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
+    reset_src = src[reset_idx : src.index("\n  };\n", reset_idx)]
+    assert "delete _inputDroppedAheadUpTo[slot];" in reset_src
+    assert "delete _inputAskedAt[slot];" in reset_src
+    clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
+    clear_src = src[clear_idx : src.index("\n  };\n", clear_idx)]
+    assert "_inputDroppedAheadUpTo = {};" in clear_src and "_inputAskedAt = {};" in clear_src
 
 
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():
@@ -472,8 +440,8 @@ def test_start_wait_rtt_timer_does_not_gate_on_phase_floor():
 
 
 def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
-    # Nonzero-frame rollback inits (RB-INIT-CATCHUP, the remixMenuLockstep
-    # deferred init, RB-INIT-TIMEOUT at f>0) left remote frames past the init
+    # Nonzero-frame rollback inits (RB-INIT-CATCHUP, RB-INIT-TIMEOUT
+    # at f>0) left remote frames past the init
     # frame that arrived before init JS-only: the receive path dedups later
     # copies against _remoteInputs, so C predicted them and never verified.
     # Past _frameNum a ZERO_INPUT placeholder (late join) must stay unfed.
@@ -520,3 +488,508 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
     input_guard_end = src.index("const recvInput =", input_guard_start)
     input_guard = src[input_guard_start:input_guard_end]
     assert "INPUT_FUTURE_MARGIN_FRAMES" in input_guard
+
+
+def test_local_freeze_is_credited_to_every_deadline_that_drops_a_peer():
+    # specs/tick_deadlines.qnt: a page's own freeze must not count against a
+    # peer. Three deadlines drop a peer; all three stamps move with the gap.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const _creditLocalFreeze = () => {")
+    credit_src = src[idx : src.index("\n  };\n", idx)]
+    for snippet in (
+        "_peerLastAdvanceTime[s] = Math.min(now, _peerLastAdvanceTime[s] + gap);",
+        "_rbInputStallStartTime = Math.min(now, _rbInputStallStartTime + gap);",
+        "_pacingThrottleStartAt = Math.min(now, _pacingThrottleStartAt + gap);",
+    ):
+        assert snippet in credit_src
+    # The credit runs before the pacing deadline is checked in the same tick.
+    tick_idx = src.index("const tick = () => {")
+    assert src.index("_creditLocalFreeze();", tick_idx) < src.index("PACING-THROTTLE-TIMEOUT f=", tick_idx)
+
+
+def test_a_page_running_alone_keeps_its_own_input():
+    # specs/resync_inputs.qnt (aPageAppliesWhatItSent). kn_pre_tick's pacing
+    # gate returns 3 before it stores the page's own input, records what it
+    # applied or saves the frame. A frame must not be run on that 3.
+    src = LOCKSTEP_JS.read_text()
+    c_src = (LOCKSTEP_JS.parents[2] / "build" / "kn_rollback" / "kn_rollback.c").read_text()
+    pre_tick = c_src[c_src.index("int kn_pre_tick(") :]
+    assert pre_tick.index("return 3; /* ring maintained, skip frame advance */") < pre_tick.index(
+        "/* ── Store local input ── */"
+    )
+
+    # With nobody left to be ahead of, the advantage is 0, so the gate is open.
+    pacing = src[src.index("// If no active pacing peers remain, release any active cap") :]
+    pacing = pacing[: pacing.index("_frameAdvRaw = _frameNum - minRemoteFrame;")]
+    assert "if (activePacingPeers === 0) _frameAdvRaw = 0;" in pacing
+
+    # And a 3 with every peer a phantom is asked again with pacing off,
+    # before anything acts on it.
+    tick = src[src.index("let catchingUp = tickMod._kn_pre_tick(") :]
+    solo = tick[: tick.index("_refreshRunnerAfterRollbackRestore(tickMod);")]
+    assert "if (catchingUp === 3 && getInputPeers().every((p) => _peerPhantom[p.slot])) {" in solo
+    rerun = solo[solo.index("if (catchingUp === 3 && getInputPeers()") :]
+    rerun = rerun[rerun.index("catchingUp = tickMod._kn_pre_tick(") :]
+    assert "-1,\n" in rerun[: rerun.index(");")]
+    assert "// Fall through to normal tick instead of returning" not in src
+
+
+def test_a_settled_input_is_not_fed_to_the_engine():
+    # A returning peer's backlog is from frames the resync's state already
+    # covers. Fed to the C engine it is compared with what was predicted while
+    # this page ran alone, too deep to roll back, and counted as failed
+    # rollbacks.
+    src = LOCKSTEP_JS.read_text()
+    drain = src[src.index("const _drainPendingCInputs = (tickMod) => {") :]
+    drain = drain[: drain.index("\n  };\n")]
+    skip = drain.index("if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {")
+    assert skip < drain.index("tickMod._kn_feed_input(qi.slot, qi.frame,")
+    # The host settles the guest's backlog when it schedules the recovery
+    # resync: that state is for this frame or a later one. A guest does not:
+    # it may be taken back to an earlier frame.
+    recovered = src[src.index("} else if (_playerSlot === 0 && peer.slot !== 0 && _syncEnabled) {") :]
+    recovered = recovered[: recovered.index("peer-recovery resync: host scheduled full sync")]
+    assert "_settleInputsBefore(peer.slot, _frameNum);" in recovered
+
+
+def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
+    # specs/resync_inputs.qnt (aPageAppliesWhatItSent, the keys it leaves
+    # out): a resync that takes the guest back puts it on frames whose inputs
+    # it has already made and sent. It must apply those, not read the
+    # controller again: the host may hold the first copy, and a second value
+    # for the same key replaces a real input in the engine without a rollback.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);")
+    use = src[idx : idx + 1400]
+    assert "const localInput = hadLocalInputForFrame\n      ? _localInputs[_frameNum]\n      : _applyExtraInputDelay(" in use
+    # A new input is stored once; the cached one is never overwritten.
+    assert use.index("if (!hadLocalInputForFrame) {") < use.index("_localInputs[_frameNum] = localInput;")
+    # It is sent on every tick of the frame, cached or new, so a host that
+    # dropped the first copy as out of range gets it again.
+    send = src[idx : src.index("DC health monitor", idx)]
+    assert "const peerBuf = KNShared.encodeInput(\n          _frameNum,\n          localInput," in send
+    assert send.index("if (!hadLocalInputForFrame) {") < send.index("const peerBuf = KNShared.encodeInput(")
+    # No resync path drops the cached inputs: only a new match, a stop, and
+    # the fast-forward at lockstep start do (and the declaration).
+    assert src.count("_localInputs = {};") == 4
+    settle = src[src.index("const _settleInputsAtResync = (mod, frame) => {") :]
+    settle = settle[: settle.index("\n  };\n")]
+    assert "delete _localInputs" not in settle and "_localInputs = {}" not in settle
+
+
+def test_a_resync_request_that_is_out_has_a_deadline():
+    # specs/resync_flow.qnt: the host drops a request inside its rate limit
+    # without answering, so the guest's "a request is out" flag needs a
+    # deadline of its own or the guest never asks again.
+    src = LOCKSTEP_JS.read_text()
+    idx = src.index("const _checkResyncRequestDeadline = () => {")
+    check_src = src[idx : src.index("\n  };\n", idx)]
+    for snippet in (
+        "if (!_resyncRequestInFlight) return;",
+        # An answer arriving, held, or waited for at a target has its own deadline.
+        "const answerComing = _syncExpected > 0 || !!_pendingResyncState || _syncTargetFrame > 0;",
+        # An answer being decoded holds it off, for a bounded time
+        # (specs/resync_reask.qnt, theDecodedAnswerIsNotCut): the proved
+        # resyncDeadlineStep waits on these (tests/ts/resync-request.test.ts).
+        "const decoding = _syncDecodes > 0;",
+        "SYNC_DECODE_GRACE_MS,",
+        "RESYNC_REQUEST_TIMEOUT_MS,",
+        "if (step === 'noRequest' || step === 'wait') return;",
+        "_resyncRequestInFlight = false;",
+        "RESYNC-REQUEST-TIMEOUT f=${_frameNum}",
+    ):
+        assert snippet in check_src
+    # The waits come before the request is let go.
+    assert check_src.index("if (step === 'noRequest' || step === 'wait') return;") < check_src.index(
+        "_resyncRequestInFlight = false;"
+    )
+    # Every site that sends a request stamps it: they all go through the one
+    # function that sets the flag.
+    begin = src[src.index("const _beginResyncRequest = (at = -1, again = false) => {") :]
+    begin = begin[: begin.index("\n  };\n")]
+    assert "_resyncRequestInFlight = true;\n    _resyncRequestSentAt = performance.now();" in begin
+    assert src.count("_resyncRequestInFlight = true;") == 1
+    # Longer than the host's rate limit plus its capture deadline.
+    assert "const RESYNC_REQUEST_TIMEOUT_MS = 8000;" in src
+    assert "const _SYNC_REQUEST_COOLDOWN_MS = 5000;" in src
+    assert "const SYNC_COORD_TIMEOUT_MS = 3000;" in src
+    tick_idx = src.index("const tick = () => {")
+    assert "_checkResyncRequestDeadline();" in src[tick_idx : tick_idx + 1200]
+    # The page's own freeze does not count against a request that is out.
+    credit = src[src.index("const _creditLocalFreeze = () => {") :]
+    credit = credit[: credit.index("\n  };\n")]
+    assert "if (_resyncRequestInFlight) _resyncRequestSentAt = Math.min(now, _resyncRequestSentAt + gap);" in credit
+    assert src.index("_creditLocalFreeze();", tick_idx) < src.index("_checkResyncRequestDeadline();", tick_idx)
+
+
+def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
+    # specs/resync_flow.qnt CATCH_UP, theGuestIsNeverRewound: a host state from
+    # before the guest's frame is applied and the frames up to the guest's run
+    # again at once; one further back than MAX_CATCH_UP_FRAMES is not applied.
+    src = LOCKSTEP_JS.read_text()
+    assert re.search(r"const MAX_CATCH_UP_FRAMES = \d+;", src)
+
+    # The decision is the proved one, in both places it is taken.
+    assert src.count("window.KNCore.catchUp.catchUpStep(") == 2
+    tick_refuse = src[src.index("SYNC-LATE-ANSWER-DROPPED f=${_frameNum}") :]
+    tick_refuse = tick_refuse[: tick_refuse.index("const syncApplyBlocked = ")]
+    assert (
+        "window.KNCore.catchUp.catchUpStep(_pendingResyncState.frame, _frameNum, MAX_CATCH_UP_FRAMES) === 'refuse'"
+        in tick_refuse
+    )
+    assert "SYNC-TOO-OLD-DROPPED" in tick_refuse
+    assert "_pendingResyncState = null;" in tick_refuse
+    # The request it answered has ended: an owed resync is asked for again, or
+    # given up, as the proved tooOldStep says.
+    assert "window.KNCore.catchUp.tooOldStep(" in tick_refuse
+    assert "if (then === 'askAgain') _askAgainForOwedResync();" in tick_refuse
+    assert "else if (then === 'stopAsking') _stopAskingForOwedResync(" in tick_refuse
+
+    apply = src[src.index("const applySyncState = (bytes, frame, fromProactive = false) => {") :]
+    apply = apply[: apply.index("\n  };\n")]
+    assert "const frameBeforeApply = _frameNum;" in apply
+    catch = apply.index("window.KNCore.catchUp.catchUpStep(frame, frameBeforeApply, MAX_CATCH_UP_FRAMES) === 'catchUp'")
+    # Inputs are settled at the state's frame first, and purged only after the
+    # catch-up's first slice has run on them.
+    assert apply.index("_settleInputsAtResync(gm.Module, frame);") < catch
+    assert catch < apply.index("_startCatchUp(gm.Module, frame, frameBeforeApply);")
+    assert apply.index("_startCatchUp(gm.Module, frame, frameBeforeApply);") < apply.index(
+        "for (const [slot, inputs] of Object.entries(_remoteInputs)) {"
+    )
+
+    start = src[src.index("const _startCatchUp = (mod, fromFrame, toFrame) => {") :]
+    start = start[: start.index("\n  };\n")]
+    # Not over a rollback in flight; unseen and unheard; the first slice at once.
+    assert "_kn_peek_pending_rollback" in start and "_kn_get_replay_depth" in start
+    for flag in ("_setReplayFullHeadless", "_setReplayRdpSkip", "_setReplayAudioOutputSkip"):
+        assert f"{flag}(mod, true, 'catch-up');" in start
+    assert start.rstrip().endswith("_catchUpSlice(mod);")
+    # The detector's own digests for the frames run again are dropped.
+    assert "window.KNDesync?.forgetFrom(fromFrame);" in start
+    end = src[src.index("const _endCatchUp = (mod, stoppedAt = '') => {") :]
+    end = end[: end.index("\n  };\n")]
+    for flag in ("_setReplayFullHeadless", "_setReplayRdpSkip", "_setReplayAudioOutputSkip"):
+        assert f"{flag}(mod, false, 'catch-up');" in end
+    assert "SYNC-CATCH-UP from=" in end and "_catchUpTo = -1;" in end
+
+    sl = src[src.index("const _catchUpSlice = (mod) => {") :]
+    sl = sl[: sl.index("\n  };\n")]
+    loop = sl[sl.index("while (_frameNum < _catchUpTo) {") :]
+    # Each frame: every peer's input fed again from this page's record, then a
+    # forward step as in tick(), pacing bypassed.
+    assert loop.index("_feedCInput(mod, p.slot, key, input)") < loop.index("mod._kn_pre_tick(")
+    assert "mod._kn_pre_tick(own.buttons, own.lx, own.ly, own.cx, own.cy, -1)" in loop
+    order = [
+        "mod._kn_pre_tick(",
+        "_writeRingInputs(mod, _frameNum - DELAY_FRAMES);",
+        "_syncRNGSeed(mod, _frameNum);",
+        "_runStepOneFrame('catch-up')",
+        "_frameNum = mod._kn_post_tick();",
+        "if (performance.now() - t0 >= CATCH_UP_SLICE_MS) break;",
+    ]
+    positions = [loop.index(x) for x in order]
+    assert positions == sorted(positions)
+    # An input not here is predicted where tick() would predict it: within the
+    # rollback window of the frame it goes back to, a phantom peer's, or one
+    # from before the settled point. A deeper hole is asked for and waited on,
+    # to a deadline (I1); the timer goes when it is filled or the catch-up ends.
+    assert "const nearTheEnd = f >= _catchUpTo - KN_MAX_VISIBLE_ROLLBACK_DEPTH;" in loop
+    hole = loop[loop.index("const hole = remotePeers.find(") :]
+    hole = hole[: hole.index(");")]
+    for cond in (
+        "_remoteInputs[p.slot]?.[key] === undefined",
+        "key >= _inputFloor(p.slot)",
+        "!_peerPhantom[p.slot]",
+        "!nearTheEnd",
+    ):
+        assert cond in hole
+    assert "now - _catchUpHoleSince >= CATCH_UP_HOLE_WAIT_MS" in loop
+    # Each wait is counted, the first logged when it begins.
+    wait = loop[loop.index("if (!_catchUpHoleSince) {") :]
+    wait = wait[: wait.index("if (now - _catchUpHoleSince")]
+    assert "_catchUpWaits++;" in wait
+    assert "if (_catchUpWaits === 1) _syncLog(`SYNC-CATCH-UP-WAIT f=${f} slot=${hole.slot} input=${key}`);" in wait
+    assert "_catchUpWaits = 0;" in start
+    assert "waits=${_catchUpWaits}" in end
+    assert "_askForMissingInputs(hole," in loop
+    assert "_catchUpHoleSince = 0;" in loop and "_catchUpHoleSince = 0;" in end
+    assert re.search(r"const CATCH_UP_HOLE_WAIT_MS = \d+;", src)
+    assert "if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);" in sl
+
+    # Each tick runs the next slice, after the queued inputs are fed and
+    # before anything else steps the emulator.
+    tick_slice = src.index(
+        "if (_catchUpTo >= 0) {\n          const catchUpFrom = _frameNum;\n          _catchUpSlice(tickMod);"
+    )
+    assert src.rindex("_drainPendingCInputs(tickMod);", 0, tick_slice) > src.rindex("RB-INPUT-STALL f=", 0, tick_slice)
+    # A slice that ran frames spends no 60 Hz slot, as a rollback replay does
+    # not. One that ran none, waiting for an input, spends it: marked
+    # replay-only, the pump would call it again and again for its whole
+    # budget every pump (a four-player run counted 102988 slices in a 3 s
+    # wait).
+    after_slice = src[tick_slice : src.index("return;", tick_slice)]
+    assert "if (_frameNum > catchUpFrom) _tickReplayOnly = true;" in after_slice
+    assert after_slice.count("_tickReplayOnly") == 1
+    # Inputs it runs on stay until it reaches its target, and the peers'
+    # inputs for the frame it goes back to are taken in meanwhile.
+    assert "const keepThrough = Math.max(_frameNum, _catchUpTo) + DELAY_FRAMES;" in apply
+    packet = src[src.index("const _processInputPacket = (remoteSid, peer, data) => {") :]
+    packet = packet[: packet.index("INPUT-OOR slot=")]
+    assert "const recvBound = Math.max(_frameNum, _catchUpTo);" in packet
+    assert "recvFrame > recvBound + DELAY_FRAMES + INPUT_FUTURE_MARGIN_FRAMES" in packet
+    # A newer state waits for it; a stopped match ends it.
+    blocks = src[src.index("const _replayBlocksSyncApply = () => {") :]
+    assert blocks[: blocks.index("\n  };\n")].index("if (_catchUpTo >= 0) return true;") >= 0
+    stop = src[src.index("const stopSync = () => {") :]
+    assert "_endCatchUp(" in stop[: stop.index("\n  };\n")]
+
+    # tick() writes a forward frame's inputs through the same helper.
+    assert src.count("_writeRingInputs(") == 2  # tick() and the catch-up
+    assert "const localApplied = _writeRingInputs(tickMod, applyFrame);" in src
+
+
+def test_every_resync_request_that_is_out_is_numbered():
+    # specs/resync_flow.qnt, ANSWERS_CARRY_REQUEST: a request has a number.
+    src = LOCKSTEP_JS.read_text()
+    begin = src[src.index("const _beginResyncRequest = (at = -1, again = false) => {") :]
+    begin = begin[: begin.index("\n  };\n")]
+    for snippet in (
+        "_resyncRequestInFlight = true;",
+        "_resyncRequestId++;",
+        "_resyncRequestAt = at;",
+        "return _resyncRequestId;",
+    ):
+        assert snippet in begin
+    # The flag is set nowhere else, so a request that is out always has one.
+    assert src.count("_resyncRequestInFlight = true;") == 1
+    assert "let _resyncRequestId = 0;" in src
+
+    # Eleven sites ask: one over Socket.IO, ten on a DataChannel (the
+    # seventh is a late joiner that lost its channel to the host,
+    # specs/late_join_pause.qnt; the eighth the deadline asking again for an
+    # owed "now" resync, specs/resync_reask.qnt; the last two the boot sync
+    # and the input stall's, specs/resync_flow.qnt EVERY_REQUEST_NUMBERED).
+    # The two that name a target frame give it to the request, which keeps
+    # it after the target's deadline (specs/resync_flow.qnt, askedAt).
+    assert src.count("_beginResyncRequest(") == 11
+    assert src.count("_beginResyncRequest()") == 7
+    assert src.count("_beginResyncRequest(-1, true)") == 1
+    assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
+    assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
+    assert "let _resyncRequestAt = -1;" in src
+    stop = src[src.index("const stopSync = () => {") :]
+    assert "_resyncRequestAt = -1;" in stop[: stop.index("\n  };\n")]
+    socket_req = src[src.index("function _requestSocketFullResync(reason, again = false) {") :]
+    socket_req = socket_req[: socket_req.index("\n  }\n")]
+    assert "const requestId = _beginResyncRequest(-1, again);" in socket_req
+    assert "frame: _frameNum,\n        requestId,\n      });" in socket_req
+
+    # On a DataChannel the number goes ahead of the request, which keeps the
+    # text a host on an older version matches exactly.
+    send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
+    send = send[: send.index("\n  };\n")]
+    assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 10
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 8
+    assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
+    # Never sent bare. The boot sync and the input stall's request were, and
+    # their unnumbered answers were applied wherever they found the guest,
+    # even after a newer request (specs/resync_flow.qnt,
+    # bootAnswerAfterANewerRequestTest).
+    assert not re.search(r"""\.send\(['"`]sync-request(?!-id:)""", src)
+    boot = src[src.index("if (_bootDoneForSync && !window._knBootSyncDone) {") :]
+    boot = boot[: boot.index("BOOT-SYNC skipped: initial state")]
+    assert "const bootRequestId = _beginResyncRequest();" in boot
+    assert "_sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');" in boot
+    stall = src[src.index("`INPUT-STALL-RESYNC f=${_frameNum}") :]
+    stall = stall[: stall.index("INPUT-STALL-RESYNC send failed")]
+    assert "const stallRequestId = _beginResyncRequest();" in stall
+    assert "_sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');" in stall
+    # Neither asks over a request that is out (its answer brings a host
+    # state; asked over, that answer would be dropped as an older request's),
+    # nor gives up a target, which would apply a held state early
+    # (specs/resync_flow.qnt, guestAsksOnItsOwn).
+    for site in (boot, stall):
+        assert site.index("if (_resyncRequestInFlight) {") < site.index("_beginResyncRequest()")
+        assert "_syncTargetFrame" not in site
+
+    # A new match starts counting again.
+    stop = src[src.index("const stopSync = () => {") :]
+    stop = stop[: stop.index("\n  };\n")]
+    assert "_resyncRequestId = 0;" in stop
+    assert "_hostNumbersAnswers = false;" in stop
+
+
+def test_only_its_own_answer_ends_a_resync_request():
+    # specs/resync_flow.qnt onlyItsAnswerEndsARequest: the answer to a request
+    # the guest gave up on must not end the one that is out now.
+    src = LOCKSTEP_JS.read_text()
+    ends = src[src.index("const _endsResyncRequest = (answerFor) =>") :]
+    ends = ends[: ends.index(";\n")]
+    # The proved rule decides (web/src/resync-request.ts, test_the_resync_rules_decide).
+    assert "window.KNCore.resyncRequest.endsRequest(answerFor, _resyncRequestId, _hostNumbersAnswers)" in ends
+
+    handle = src[src.index("async function _handleDecodedSyncPayload({") :]
+    handle = handle[: handle.index("\n  }\n")]
+    assert "answerFor = 0," in handle
+    assert "if (_endsResyncRequest(answerFor)) _resyncRequestInFlight = false;" in handle
+    assert "const endsRequest = _endsResyncRequest(answerFor);\n      if (endsRequest) _resyncRequestInFlight = false;" in handle
+    # The one unconditional clear left there is the delta-base override,
+    # which asks again at once.
+    assert handle.count("_resyncRequestInFlight = false;") == 4
+    assert "_resyncRequestInFlight = false; // allow fresh request" in handle
+    assert "_pendingResyncState = { bytes: fullBytes, frame, answerFor };" in handle
+    assert "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };" in handle
+
+    # Host: the number comes just ahead of the request and is for that
+    # request only, answered or rate limited.
+    host = src[src.index("if (e.data.startsWith('sync-request-id:')) {") :]
+    host = host[: host.index("// JSON messages")]
+    assert "if (_playerSlot === 0) syncRequestIdNext = _requestIdFrom(Number(e.data.substring(16)));" in host
+    assert host.index("syncRequestIdNext = 0;") < host.index("rate-limited sync-request from")
+    assert "forceFull: isFull,\n              requestId," in host
+    assert "pushSyncState(remoteSid, false, { requestIds: { [remoteSid]: requestId } });" in host
+    assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
+
+    # A scheduled capture, its follow-ups and re-queues keep the number; a
+    # sync the host schedules for its own reasons has none.
+    dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
+    dispatch = dispatch[: dispatch.index("\n  };\n")]
+    assert "requestId: r.requestId || 0," in dispatch
+    assert "for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;" in dispatch
+    assert "pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] })" in dispatch
+    recovery = src[src.index("push its state to the guest once it is final") :]
+    recovery = recovery[: recovery.index("_settleInputsBefore(")]
+    assert "requestId" not in recovery
+
+    # The answer carries it: ahead of the header on a DataChannel, as a
+    # field over Socket.IO. Never on a proactive push.
+    push = src[src.index("const pushSyncState = async (") :]
+    push = push[: push.index("const sendSyncChunks = async (")]
+    assert "const requestIds = (!isProactive && options.requestIds) || {};" in push
+    assert "...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {})," in push
+    # sendSyncChunks queues each guest's transfer behind that guest's one
+    # before; the body is _sendSyncChunksTo, which reads the request id by sid.
+    wrapper = src[src.index("const sendSyncChunks = async (") :]
+    wrapper = wrapper[: wrapper.index("\n  };\n")]
+    assert "_sendSyncChunksTo(t, compressed, frame, isFull, isProactive, requestIds)" in wrapper
+    chunks = src[src.index("const _sendSyncChunksTo = async (") :]
+    chunks = chunks[: chunks.index("\n  };\n")]
+    assert chunks.index("if (answerFor) dc.send(`sync-answer-id:${answerFor}`);") < chunks.index("dc.send(header);")
+    # The header an older guest parses is unchanged.
+    assert "`sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}:${isProactive ? '1' : '0'}`" in chunks
+
+    # Guest: the number is for the next state on that channel only.
+    sync_dc = src[src.index("const setupSyncDataChannel = (_remoteSid, ch) => {") :]
+    sync_dc = sync_dc[: sync_dc.index("// -- Per-peer state cleanup")]
+    assert "syncAnswerIdNext = _requestIdFrom(Number(e.data.substring(15)));" in sync_dc
+    assert sync_dc.count("_syncAnswerFor = syncAnswerIdNext;\n          syncAnswerIdNext = 0;") == 2
+    # A host that has never numbered an answer is on a version that does not:
+    # its states end a request as before. Learned from the host only, and
+    # forgotten when the host's peer state is reset (I2).
+    assert "if (syncAnswerIdNext > 0 && _peers[_remoteSid]?.slot === 0) _hostNumbersAnswers = true;" in sync_dc
+    assert "if (answerFor > 0) _hostNumbersAnswers = true;" in src
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "if (slot === 0) _hostNumbersAnswers = false;" in reset
+
+
+def test_a_late_answer_that_would_take_the_guest_back_is_dropped():
+    # specs/resync_flow.qnt aLateAnswerDoesNotTakeTheGuestBack (dropLate,
+    # lateAndBehind), with lateAnswerAfterTheTargetDeadlineTest: the frame
+    # named is the request's, not the live target, so the drop holds after
+    # the target's deadline too; and immediateLateAnswerTest: a late answer
+    # from before the guest's own frame is dropped when the newest request
+    # named no frame.
+    src = LOCKSTEP_JS.read_text()
+    older = src[src.index("const _answersAnOlderRequest = (answerFor) =>") :]
+    older = older[: older.index(";\n")]
+    assert "window.KNCore.resyncRequest.answersAnOlderRequest(answerFor, _resyncRequestId)" in older
+    late = src[src.index("const _isLateAnswerBehind = (state) =>") :]
+    late = late[: late.index(";\n")]
+    assert (
+        "!!state &&\n    window.KNCore.resyncRequest.isLateAnswerBehind(\n      state.answerFor || 0,\n"
+        "      state.frame,\n      _resyncRequestId,\n      _resyncRequestAt,\n      _frameNum,\n    )"
+    ) in late
+    assert "_syncTargetFrame" not in late
+    tick = src[src.index("const tick = () => {") :]
+    drop_at = tick.index("if (_isLateAnswerBehind(_pendingResyncState)) {")
+    dropped = tick[drop_at : tick.index("\n    }\n", drop_at)]
+    assert "SYNC-LATE-ANSWER-DROPPED f=${_frameNum}" in dropped
+    assert "_pendingResyncState = null;" in dropped
+    # The wait goes on: the target and its deadline are left as they are.
+    assert "_syncTargetFrame = " not in dropped and "_syncTargetDeadlineAt" not in dropped
+    # After the target's deadline gives the target up, before either branch
+    # holds or applies anything.
+    assert tick.index("COORD-SYNC-TIMEOUT target=") < drop_at
+    assert drop_at < tick.index("const syncApplyBlocked = _pendingResyncState ? _replayBlocksSyncApply() : false;")
+    assert drop_at < tick.index("if (_frameNum >= _syncTargetFrame) {")
+    assert drop_at < tick.index("} else if (_pendingResyncState && !syncApplyBlocked) {")
+    # The stale-state check stays.
+    assert "explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}" in src
+
+
+def test_a_late_answer_does_not_replace_the_awaited_one():
+    # specs/resync_flow.qnt theAwaitedAnswerIsNotLost.
+    src = LOCKSTEP_JS.read_text()
+    keep = src[src.index("const _keepsAwaitedAnswer = (answerFor, frame) => {") :]
+    keep = keep[: keep.index("\n  };\n")]
+    assert (
+        "const keeps = window.KNCore.resyncRequest.keepsAwaitedAnswer(\n      answerFor,\n"
+        "      _resyncRequestId,\n      _pendingResyncState?.answerFor ?? -1,\n    );"
+    ) in keep
+    assert keep.index("const keeps = ") < keep.index("if (!keeps) return false;") < keep.index("SYNC-LATE-ANSWER-IGNORED")
+    assert "SYNC-LATE-ANSWER-IGNORED" in keep
+    payload = src[src.index("async function _handleDecodedSyncPayload({") :]
+    payload = payload[: payload.index("const handleSyncChunksComplete = async () => {")]
+    for pending in (
+        "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };",
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor };",
+    ):
+        at = payload.index(pending)
+        assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 200
+
+
+def test_a_stale_late_answer_keeps_the_lifecycle_guard():
+    # The guard belongs to the request that is out; the answer to an older
+    # request does not end it. The guard keeps its own 15 s timeout (I1).
+    src = LOCKSTEP_JS.read_text()
+    payload = src[src.index("async function _handleDecodedSyncPayload({") :]
+    payload = payload[: payload.index("const handleSyncChunksComplete = async () => {")]
+    assert "if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('regions sync stale');" in payload
+    assert "if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('explicit sync stale');" in payload
+    assert payload.count("_clearLifecycleResyncGuard(") == 2
+    assert "_clearLifecycleResyncGuard('lifecycle resync guard timeout');" in src
+
+
+def test_the_resync_rules_decide():
+    # The proved functions of web/src/resync-request.ts decide; the engine's
+    # own copies and the observer that compared them are gone (CLAUDE.md:
+    # new logic decides, nothing observes). tests/ts/resync-request.test.ts
+    # keeps the deleted copies and checks them against the proved functions
+    # over a grid of inputs.
+    src = LOCKSTEP_JS.read_text()
+    assert "_resyncObserve" not in src
+    assert "resync-disagree" not in src and "RESYNC-DISAGREE" not in src
+    for name in (
+        "endsRequest",
+        "answersAnOlderRequest",
+        "isLateAnswerBehind",
+        "keepsAwaitedAnswer",
+        "lateJoinLostHostStep",
+        "resyncDeadlineStep",
+    ):
+        assert src.count(f"window.KNCore.resyncRequest.{name}(") == 1, name
+
+
+def test_a_chunk_timeout_is_scoped_to_the_request_its_transfer_answers():
+    src = LOCKSTEP_JS.read_text()
+    start = src.index("if (e.data.startsWith('sync-start:')) {")
+    header = src[start : src.index("if (e.data.startsWith('sync-regions-start:')) {", start)]
+    assert "const transferAnswers = _syncAnswerFor;" in header
+    older = header.index("if (_answersAnOlderRequest(transferAnswers)) {")
+    branch = header[older : header.index("\n            }\n", older)]
+    assert "return;" in branch
+    assert "_resyncRequestInFlight" not in branch and "_requestSocketFullResync" not in branch
+    assert older < header.index("_resyncRequestInFlight = false;")
+    assert older < header.index("_requestSocketFullResync('sync-chunk-timeout');")

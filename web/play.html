@@ -156,9 +156,10 @@
             <label for="mode-select" class="mode-label">Mode:</label>
             <select
               id="mode-select"
-              title="Rollback: GGPO-style prediction in-game with lockstep stall in menus (recommended). Streaming: host runs the emulator, guests watch a video stream."
+              title="Rollback: every player runs the game and late inputs are corrected by replay (recommended). Lockstep: every player runs the game and each frame waits for every player's input, so nothing is guessed (feels slower on a long connection). Streaming: host runs the emulator, guests watch a video stream."
             >
               <option value="rollback">Rollback</option>
+              <option value="lockstep">Lockstep</option>
               <option value="streaming">Streaming</option>
             </select>
           </div>
@@ -388,9 +389,6 @@
         });
     </script>
 
-    <!-- Version-mismatch force-reload guard (must load first so stale
-         tabs are caught before app code initializes) -->
-    <script src="/static/version-guard.js"></script>
     <!-- Native API reference management (must load before everything) -->
     <script src="/static/api-sandbox.js"></script>
 
@@ -483,7 +481,7 @@
           window.__knInstallUnpackAlignmentShim();
         }
       })();
-      // Sync EJS keyboard defaults with our DEFAULT_N64_KEYMAP (shared.js).
+      // Sync EJS keyboard defaults with our DEFAULT_N64_KEYMAP (web/src/page/shared.ts).
       // This ensures the Emscripten SDL keyboard layer uses the same keys
       // as our netplay input system, preventing EJS TFGH defaults from
       // conflicting with our WASD analog mapping.
@@ -523,29 +521,25 @@
     <!-- fflate — fast ZIP extraction for ROM .zip files -->
     <script src="/static/vendor/fflate.min.js"></script>
 
-    <!-- Safe storage (in-memory fallback for privacy browsers) -->
-    <script src="/static/storage.js"></script>
+    <!-- The TypeScript core (window.KNCore), safe storage (window.KNStorage,
+         with an in-memory fallback for privacy browsers), the state the
+         scripts share (window.KNState) and the shared netplay utilities
+         (window.KNShared: cheats, keymap, input tracking, input codec). Loaded
+         before every script that builds on any of them. -->
+    <script src="/static/dist/kn-core.js"></script>
+    <!-- Version-mismatch reload guard (window.KNSite, set by the core): a
+         stale tab is caught before the engine scripts start. -->
+    <script src="/static/version-guard.js"></script>
     <script src="/static/kn-capture.js"></script>
-
-    <!-- Centralized cross-module state -->
-    <script src="/static/kn-state.js"></script>
-
-    <!-- Gamepad manager (profiles, hot-plug, slot assignment) -->
-    <script src="/static/gamepad-manager.js"></script>
 
     <!-- Switch 2 Pro Controller: WebUSB handshake that makes it appear as a gamepad -->
     <script src="/static/switch2-usb.js"></script>
-
-    <!-- Shared netplay utilities (cheats, keymap, input tracking) -->
-    <script src="/static/shared.js"></script>
 
     <!-- Virtual gamepad for mobile streaming guests -->
     <script src="/static/virtual-gamepad.js"></script>
 
     <!-- Netplay engines (both loaded so host can switch mode in the overlay) -->
     <script src="/static/kn-audio.js"></script>
-    <script src="/static/kn-diagnostics.js"></script>
-    <script src="/static/kn-desync-detector.js"></script>
     <script src="/static/kn-vision-client.js"></script>
     <script src="/static/netplay-rollback.js"></script>
     <script src="/static/netplay-lockstep.js"></script>

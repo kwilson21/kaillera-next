@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "singleQuote": true,
+  "trailingComma": "all",
+  "printWidth": 120,
+  "tabWidth": 2,
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    "build/src/",
+    "web/static/ejs/",
+    "server/.venv/",
+    "node_modules/",
+    "*.wasm",
+    "*.data",
+    "*.min.js",
+    "tools/oxlint/anti-slop/",
+    "CHANGELOG.md",
+    "web/static/changelog.json",
+    "web/static/version.json",
+    "docs/",
+    "web/static/dist/"
+  ]
+}

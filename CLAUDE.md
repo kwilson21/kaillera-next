@@ -40,6 +40,8 @@ V1 — Browser-based
     emulator and exchange inputs over WebRTC DataChannels; misprediction triggers
     bit-exact replay via the patched WASM core. Strict lockstep is the silent
     fallback path inside the same engine when the core does not export kn_pre_tick.
+  Lockstep mode: the same engine with nothing predicted; a frame runs only once
+    every player's input for it is here (a missing one is dropped at 5 s).
   Streaming mode: host runs the only emulator and streams video via WebRTC MediaStream.
   Server is idle once signaling completes (rollback) or relays save states for
   initial sync and late join.
@@ -57,6 +59,7 @@ kaillera-next/
 │       ├── state_cache.py   # Redis-backed save-state cache for late joiners
 │       ├── ratelimit.py     # per-IP rate limiting
 │       ├── db.py            # database: SQLite or Cloudflare D1 backend (src/dbbackend/), SQL migrations in server/migrations/
+│       ├── schema.py        # model classes the query builder builds from (SQLAlchemy, compiled to SQL in db.py); tested against the migrations
 │       ├── migrate.py       # plain-SQL schema migrations shared by SQLite/D1 (replaces Alembic)
 │       ├── blobstore.py     # blob storage for screenshots (R2 in prod, local folder in dev)
 │       ├── retention.py     # flags matches with a crash/freeze/desync; sweeps expired ones
@@ -69,7 +72,7 @@ kaillera-next/
 │           ├── og_card.py   # live per-room invite card composed from the host's latest frame (PIL)
 │           ├── turn.py      # Cloudflare Realtime TURN credentials for /ice-servers
 │           ├── signaling.py # Socket.IO events — rooms, WebRTC relay, game data
-│           ├── payloads.py  # Pydantic v2 payload models for Socket.IO validation
+│           ├── payloads.py  # Pydantic v2 payload models, both directions; source of web/src/protocol.gen.ts (`npm run protocol`)
 │           ├── desync_vision.py  # Claude vision endpoint for screenshot diff
 │           └── desync_prompts.py # Prompt templates for vision-based desync analysis
 ├── web/             # Static frontend
@@ -80,11 +83,7 @@ kaillera-next/
 │   ├── privacy.html         # privacy notice: what's collected (diagnostics, screenshots), opt-out
 │   ├── demo.html            # interactive rollback demo (user-supplied ROM required)
 │   ├── error.html           # error/fallback page
-│   ├── lag-test.html        # standalone input-lag visualizer (no ROM needed)
 │   └── static/
-│       ├── landing.js           # front page: board poll, waking state, header marks
-│       ├── join.js              # invite page: room lookup, full/closed/in-app states
-│       ├── lagviz.js            # waking-state lag visualizer (front page + invite page)
 │       ├── landing.css          # front page styles (direction A tokens)
 │       ├── play.css             # play page styles (room overlay tokens, direction A)
 │       ├── admin.css            # admin dashboard styles
@@ -94,95 +93,122 @@ kaillera-next/
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
-│       ├── netplay-streaming.js # streaming engine (host video → guests)
-│       ├── shared.js            # input encoding/decoding, cheats, wire format
-│       ├── gamepad-manager.js   # gamepad profiles, remapping, slot assignment
-│       ├── switch2-usb.js       # WebUSB handshake that wakes the Switch 2 Pro Controller
-│       ├── controller-settings.js # in-game controller settings panel
-│       ├── virtual-gamepad.js   # on-screen touch controls for mobile
-│       ├── kn-state.js          # cross-module shared state (KNState)
-│       ├── kn-audio.js          # AudioWorklet + lockstep audio capture
-│       ├── kn-capture.js        # diagnostic gameplay-canvas capture opt-out policy (localStorage flag)
-│       ├── kn-desync-detector.js # field-granular cross-peer desync detection
-│       ├── kn-diagnostics.js    # rollback diagnostics (RB-CHECK, audit log)
-│       ├── kn-vision-client.js  # Claude vision API client for screenshot diff
-│       ├── storage.js           # safe localStorage/sessionStorage wrapper
+│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are web/src/streaming's, which it calls
+│       ├── switch2-usb.js       # starts the WebUSB handshake that wakes the Switch 2 Pro Controller (window.Switch2USB) from web/src/page/switch2-usb.ts
+│       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
+│       ├── virtual-gamepad.js   # starts the on-screen touch controls (window.VirtualGamepad) from web/src/page/virtual-gamepad/
+│       ├── kn-audio.js          # starts the engine's audio pipeline (window.KNAudio) from web/src/page/audio.ts
+│       ├── kn-capture.js        # starts the diagnostic-image capture policy (window.KNCapture) from web/src/page/capture.ts
+│       ├── kn-vision-client.js  # starts the desync-vision client (window.KNVision) from web/src/page/vision-client.ts
 │       ├── api-sandbox.js       # save/restore native browser APIs
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
-│       ├── demo.js              # demo page orchestrator (fake peer + menu autopilot)
-│       ├── fake-peer.js         # synthetic P2 for the demo page (simulated input/jitter)
-│       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo (reads RDRAM menu state)
-│       ├── rollback-timeline.js # demo page's live rollback-metrics HUD
-│       ├── feedback.js          # in-app feedback collection
-│       ├── version.js           # version display + changelog modal
-│       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys)
+│       ├── demo.js              # demo page orchestrator: what the page shows, and a recording's and the autopilot's progress; its options, network settings, HUD text, menu script and wiring (emulator boot, engine start, fake peer + menu autopilot) are web/src/demo
+│       ├── fake-peer.js         # starts the demo page's synthetic P2 (window.KNFakePeer) from web/src/page/fake-peer.ts
+│       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo and the two-player test (window.KNMenuAutopilot) from web/src/page/menu-autopilot.ts
+│       ├── rollback-timeline.js # demo page's live rollback-metrics HUD (window.KNRollbackTimeline) from web/src/page/rollback-timeline.ts
+│       ├── feedback.js          # in-app feedback collection (window.KNFeedback); starts web/src/site/feedback.ts
+│       ├── version.js           # version display + changelog modal; starts web/src/site/version.ts
+│       ├── version-guard.js     # cross-tab version mismatch guard (forces reload after deploys); starts web/src/site/version-guard.ts
 │       ├── admin.js             # admin dashboard logic (sessions, events, feedback, screenshots)
+│       ├── dist/kn-core.js       # built from web/src by `npm run build`; build output, not in git (the Docker image and CI build it)
+│       ├── dist/kn-wake-art.js   # standalone small bundle for the landing pages' waking art
+│       ├── dist/kn-landing.js    # the front page's own small bundle: board poll, waking state, header marks
+│       ├── dist/kn-join.js       # the invite page's own small bundle: room lookup, full/closed/in-app states
+│       ├── dist/kn-site.js       # small bundle for pages without the core (front page, admin): safe storage, window.KNSite
 │       └── ejs/cores/           # patched mupen64plus-next WASM core
+│   ├── src/                     # strict TypeScript frontend
+│   │   ├── index.ts             # core entry, bundled as window.KNCore
+│   │   ├── poll.ts              # looking again at intervals as Effect code: a bounded poll and a repeating one (emulator boot, gamepad hot-plug)
+│   │   ├── kn-state.ts          # cross-module shared state: the type and starting values of window.KNState, set by the bundle
+│   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
+│   │   ├── socket-boundary.ts   # decodes what the server and peers send the play page and the rollback engine (protocol.gen.ts, peer-protocol.ts); drops what is off its schema
+│   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
+│   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); driven from the engine (peer-driver.ts), being wired in to decide one rule at a time
+│   │   ├── peer-driver.ts       # hands the rollback engine's events to one peer-connection.ts machine per other player
+│   │   ├── attempt-id.ts        # the `attemptId` {page, attempt} every webrtc-signal carries: which connection attempt it belongs to
+│   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
+│   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
+│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming), which netplay-streaming.js calls: roster.ts, signal.ts, input.ts and video.ts; offer-gate.ts: a guest or spectator takes an offer only from slot 0; attempt.ts decides which connection a signal belongs to and reoffer.ts is the host's deadline to offer again (specs/streaming_connection.qnt)
+│   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
+│   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts, version.ts, feedback.ts)
+│   │   ├── site-entry.ts        # kn-site.js bundle entry
+│   │   ├── landing/             # the static landing pages' logic; no Effect, hand-written checks of what the server sends (front.ts, board.ts: the front page and its decisions; join.ts: the invite page; wake.ts, wire.ts: shared)
+│   │   ├── landing-entry.ts     # kn-landing.js bundle entry
+│   │   ├── join-entry.ts        # kn-join.js bundle entry
+│   │   ├── page/shared.ts       # window.KNShared and window.KNEvent: cheats, key tracking, local input, input wire format, WebRTC peer helpers (was web/static/shared.js)
+│   │   ├── page/gamepad-manager.ts # window.GamepadManager: gamepad profiles, remapping, slot assignment
+│   │   ├── page/desync-detector.ts # window.KNDesync: field-granular cross-peer desync detection, installed by the bundle
+│   │   ├── demo/                # the demo page's logic, moving out of web/static/demo.js in slices (window.KNCore.demo)
+│   │   ├── wake-art.ts          # shared waking art logic for the landing pages
+│   │   └── wake-art-entry.ts    # standalone landing-page art bundle entry
 ├── build/           # WASM core build system (Docker + patches)
 ├── deploy/static/   # landing Worker (serves / and /join, proxies the rest; route live on kaillera-next.thesuperhuman.us)
 ├── tests/           # pytest + Playwright E2E tests
-├── docs/            # roadmap, netplay invariants, and design/research notes
+├── specs/           # Quint models (room lifecycle, peer identity, peer connection, streaming connection); `just spec` model-checks them
+├── tools/           # match analysis scripts; oxlint/anti-slop/ = vendored lint rules
+├── docs/            # roadmap, netplay invariants, netcode-diagrams.md (index of the generated diagrams: session-machine.md, peer-connection-machine.md, spec-traces.md), design/research notes
 ├── Dockerfile       # production Docker image
 └── CHANGELOG.md     # version history
 ```
 
 ## V1 scope
 
-| Feature | Status |
-|---|---|
-| Socket.IO signaling server (rooms + WebRTC relay) | done |
-| Web lobby (create/join/spectate) | done |
-| EmulatorJS embed + ROM drag-and-drop | done |
-| Rollback netplay (up to 4 players, GGPO-style C-level engine, mesh WebRTC, lockstep stall fallback) | done |
-| Streaming netplay (host video → guests via WebRTC MediaStream) | done |
-| Spectators (canvas video stream from host) | done |
-| Gamepad support (profiles, remapping wizard) | done |
-| Late join (mid-game join with state sync) | done |
-| Desync detection + resync (opt-in) | done |
-| Security hardening (CSP, rate limiting, non-root Docker) | done |
-| User auth / persistent rooms | later |
-| Mupen64Plus desktop client | v2 |
-| Kaillera protocol compat | v2 |
-| KREC recording/playback | v2 |
+| Feature                                                                                             | Status |
+| --------------------------------------------------------------------------------------------------- | ------ |
+| Socket.IO signaling server (rooms + WebRTC relay)                                                   | done   |
+| Web lobby (create/join/spectate)                                                                    | done   |
+| EmulatorJS embed + ROM drag-and-drop                                                                | done   |
+| Rollback netplay (up to 4 players, GGPO-style C-level engine, mesh WebRTC, lockstep stall fallback) | done   |
+| Streaming netplay (host video → guests via WebRTC MediaStream)                                      | done   |
+| Spectators (canvas video stream from host)                                                          | done   |
+| Gamepad support (profiles, remapping wizard)                                                        | done   |
+| Late join (mid-game join with state sync)                                                           | done   |
+| Desync detection + resync (opt-in)                                                                  | done   |
+| Security hardening (CSP, rate limiting, non-root Docker)                                            | done   |
+| User auth / persistent rooms                                                                        | later  |
+| Mupen64Plus desktop client                                                                          | v2     |
+| Kaillera protocol compat                                                                            | v2     |
+| KREC recording/playback                                                                             | v2     |
 
 ## Socket.IO events
 
 All events go through the default Socket.IO namespace (`/`).
 
-| Event | Direction | Payload | Description |
-|---|---|---|---|
-| `open-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id}, password, maxPlayers}` | Create room |
-| `join-room` | client→server | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate}, password}` | Join/spectate |
-| `leave-room` | client→server | `{}` | Leave room |
-| `claim-slot` | client→server | `{slot}` | Spectator → player |
-| `release-slot` | client→server | `{}` | Player → spectator ("Watch instead"), lobby only |
-| `start-game` | client→server | `{mode, resyncEnabled, romHash, gameId}` | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`) |
-| `end-game` | client→server | `{}` | Host ends game |
-| `set-name` | client→server | `{name}` | Update player display name |
-| `set-mode` | client→server | `{mode}` | Host sets game mode |
-| `set-game-id` | client→server | `{game_id}` | Host updates game_id after ROM identification |
-| `webrtc-signal` | bidirectional | `{target, offer/answer/candidate/reconnect/requestRenegotiate}` | WebRTC relay |
-| `rom-signal` | bidirectional | `{target, ...}` | Pre-game ROM transfer signaling |
-| `data-message` | client→server→room | `{type, ...}` | Save state / late-join relay (4MB max) |
-| `snapshot` | client→server→room | `{...}` | Game snapshot relay (64KB max) |
-| `input` | client→server→room | `{...}` | Input relay (streaming mode, 64KB max) |
-| `rom-sharing-toggle` | client→server | `{enabled}` | Toggle host ROM sharing |
-| `set-listed` | client→server | `{listed}` | Host lists the room on the front-page board (never with a password) |
-| `rom-ready` | client→server | `{ready, hash, name, size}` | Player signals ROM loaded (hash/name/size establish or check ROM identity) |
-| `input-type` | client→server | `{type}` | Player reports input type (keyboard/gamepad) |
-| `device-type` | client→server | `{type}` | Player reports device type |
-| `session-log` | client→server | `{matchId, epoch, entries, summary, context, audit}` | Periodic sync log flush: only the log entries and input audit records (`audit: {epoch, entries}`) the server hasn't acked; acks `{lastSeq, auditLastSeq}` |
-| `debug-sync` | client→server | `{...}` | Upload sync diagnostic log |
-| `debug-logs` | client→server | `{...}` | Upload debug console log |
-| `game-screenshot` | client→server | `{matchId, slot, frame, data}` | Periodic gameplay screenshot (debug mode) |
-| `users-updated` | server→room | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}` | Room state broadcast |
-| `upload-token` | server→client | `{token}` | HMAC token for upload endpoints |
-| `reconnect-token` | server→client | `{token}` | HMAC token for session reconnection |
-| `rom-sharing-updated` | server→room | `{romSharing}` | ROM sharing state changed |
-| `game-started` | server→room | `{mode, resyncEnabled, romHash, romName, romSize, hostRom, gameId, matchId}` | Game started |
-| `game-ended` | server→room | `{matchId}` | Back to lobby |
+| Event                 | Direction          | Payload                                                                                                                                   | Description                                                                                                                                                                                                                      |
+| --------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `open-room`           | client→server      | `{extra: {sessionid, persistentId, reconnectToken, player_name, room_name, game_id, fresh, resume, slot, matchId}, password, maxPlayers}` | Create room (`fresh`: the page has no game running; `resume`: it has one, in `slot` of `matchId`, and is taking its place back. A player the room dropped is taken back into that match and slot, or refused with `Not in room`) |
+| `join-room`           | client→server      | `{extra: {sessionid, persistentId, reconnectToken, player_name, spectate, resume, slot, matchId}, password}`                              | Join/spectate (`resume`, `slot`, `matchId` as for `open-room`)                                                                                                                                                                   |
+| `leave-room`          | client→server      | `{}`                                                                                                                                      | Leave room                                                                                                                                                                                                                       |
+| `claim-slot`          | client→server      | `{slot}`                                                                                                                                  | Spectator → player                                                                                                                                                                                                               |
+| `release-slot`        | client→server      | `{}`                                                                                                                                      | Player → spectator ("Watch instead"), lobby only                                                                                                                                                                                 |
+| `start-game`          | client→server      | `{mode, resyncEnabled, romHash, gameId}`                                                                                                  | Host starts game (`mode`: `"rollback"` \| `"lockstep"` \| `"streaming"`)                                                                                                                            |
+| `end-game`            | client→server      | `{}`                                                                                                                                      | Host ends game                                                                                                                                                                                                                   |
+| `match-joined`        | client→server      | `{matchId}`                                                                                                                               | A player who joined a match in play is now in it. Until then the server counts it as waiting, and ends a match only waiting players are left in                                                                                  |
+| `set-name`            | client→server      | `{name}`                                                                                                                                  | Update player display name                                                                                                                                                                                                       |
+| `set-mode`            | client→server      | `{mode}`                                                                                                                                  | Host sets game mode                                                                                                                                                                                                              |
+| `set-game-id`         | client→server      | `{game_id}`                                                                                                                               | Host updates game_id after ROM identification                                                                                                                                                                                    |
+| `webrtc-signal`       | bidirectional      | `{target, offer/answer/candidate/reconnect/startupReconnect/requestRenegotiate, attemptId}`                                               | WebRTC relay. `attemptId` `{page, attempt}`, optional (older pages send none): the offering page's id and its count of its offers; an answer or candidate carries its offer's. `startupReconnect`: the offer is a startup retry  |
+| `rom-signal`          | bidirectional      | `{target, ...}`                                                                                                                           | Pre-game ROM transfer signaling                                                                                                                                                                                                  |
+| `data-message`        | client→server→room | `{type, ...}`                                                                                                                             | Save state / late-join relay (4MB max). The server stamps every relayed `data-message`, `snapshot` and `input` with `knFrom: {sid, slot, owner}`, the true sender; pages check it (`KNCore.checkRelayed`)                        |
+| `snapshot`            | client→server→room | `{...}`                                                                                                                                   | Game snapshot relay (64KB max)                                                                                                                                                                                                   |
+| `input`               | client→server→room | `{...}`                                                                                                                                   | Input relay (streaming mode, 64KB max)                                                                                                                                                                                           |
+| `rom-sharing-toggle`  | client→server      | `{enabled}`                                                                                                                               | Toggle host ROM sharing                                                                                                                                                                                                          |
+| `set-listed`          | client→server      | `{listed}`                                                                                                                                | Host lists the room on the front-page board (never with a password)                                                                                                                                                              |
+| `rom-ready`           | client→server      | `{ready, prompt, hash, name, size}`                                                                                                       | Player signals ROM loaded (hash/name/size establish or check ROM identity). `prompt` with `ready: false`: the page shows the ROM prompt (users-updated `romPrompt`)                                                              |
+| `input-type`          | client→server      | `{type}`                                                                                                                                  | Player reports input type (keyboard/gamepad)                                                                                                                                                                                     |
+| `device-type`         | client→server      | `{type}`                                                                                                                                  | Player reports device type                                                                                                                                                                                                       |
+| `session-log`         | client→server      | `{matchId, epoch, entries, summary, context, audit}`                                                                                      | Periodic sync log flush: only the log entries and input audit records (`audit: {epoch, entries}`) the server hasn't acked; acks `{lastSeq, auditLastSeq}`                                                                        |
+| `debug-sync`          | client→server      | `{...}`                                                                                                                                   | Upload sync diagnostic log                                                                                                                                                                                                       |
+| `debug-logs`          | client→server      | `{...}`                                                                                                                                   | Upload debug console log                                                                                                                                                                                                         |
+| `game-screenshot`     | client→server      | `{matchId, slot, frame, data}`                                                                                                            | Periodic gameplay screenshot (debug mode)                                                                                                                                                                                        |
+| `users-updated`       | server→room        | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}`                              | Room state broadcast. Each player carries `romReady`, and `romPrompt` while its page shows the ROM prompt                                                                                                                                |
+| `upload-token`        | server→client      | `{token}`                                                                                                                                 | HMAC token for upload endpoints                                                                                                                                                                                                  |
+| `reconnect-token`     | server→client      | `{token}`                                                                                                                                 | HMAC token for session reconnection                                                                                                                                                                                              |
+| `rom-sharing-updated` | server→room        | `{romSharing}`                                                                                                                            | ROM sharing state changed                                                                                                                                                                                                        |
+| `game-started`        | server→room        | `{mode, resyncEnabled, romHash, romName, romSize, hostRom, gameId, matchId}`                                                              | Game started                                                                                                                                                                                                                     |
+| `game-ended`          | server→room        | `{matchId}`                                                                                                                               | Back to lobby                                                                                                                                                                                                                    |
 
 ## Key decisions
 
@@ -192,12 +218,16 @@ All events go through the default Socket.IO namespace (`/`).
   emulator; the C-level GGPO-style rollback engine (`build/kn_rollback/kn_rollback.c`)
   predicts remote inputs, advances locally, and replays via state ring buffer +
   amortized restore on misprediction. Cross-platform determinism via SoftFloat FPU.
-  Strict lockstep is the silent stall fallback inside the same engine (boot
-  convergence, menu phase-lock gate) and the path used when the core does not
-  export `kn_pre_tick`. Menu lockstep gate reads `game_status` from RDRAM.
+  Rollback runs on every screen, menus included; nothing in the engine's tick
+  depends on the scene the game is showing. Strict lockstep is the path used
+  when the core does not export `kn_pre_tick`. A throw out of the C engine's
+  tick is a WASM trap and ends the match on that page (`FATAL-CORE-ABORT`),
+  as any core trap does; nothing switches a page off rollback mid-match.
   Host-authoritative resync remains as fallback for reconnection and late join.
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
-  video via WebRTC MediaStream. Guests send input back over DataChannel.
+  video via WebRTC MediaStream. Guests send input back over DataChannel. The host
+  offers a new connection, at a deadline, to every member it lists whose channel is
+  not open, and every signal names the connection it belongs to (`attemptId`).
 - **ROM handling:** User drag-and-drops ROM file; cached in IndexedDB.
 - **Rooms are ephemeral:** Live room state (players, slots, mode) stays in memory, with
   optional Redis persistence for zero-downtime deploys and reconnect survival — no SQL
@@ -230,7 +260,7 @@ A detection-only tick watchdog (MF6) logs `TICK-STUCK` for any residual
 stall past I1/I2. **It takes no recovery action by design** — its only
 job is to surface bugs we haven't found yet. Auto-recovery was
 considered and rejected; see the rejected-alternatives section in the
-invariants doc before proposing any watchdog that *acts* on stalls.
+invariants doc before proposing any watchdog that _acts_ on stalls.
 
 ## Versioning
 
@@ -238,6 +268,12 @@ invariants doc before proposing any watchdog that *acts* on stalls.
   that runs `scripts/bump-version.sh` on push to `main` (also runnable locally via `just deploy`)
 - Commit messages use **conventional commits**: `feat:` → minor bump, `fix:` → patch bump, anything else → no bump
 - Only runs on the `main` branch
+- The same workflow then deploys: it calls Render's deploy hook
+  (`RENDER_DEPLOY_HOOK_URL` secret) once per push to `main`, bump or not.
+  Render's own auto-deploy is off (`render.yaml`); see `deploy/render/README.md`.
+  Right after, it deploys the landing Worker from the same commit
+  (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` secrets); see
+  `deploy/static/README.md`
 - Version displayed in page footer (`web/static/version.json`), changelog in modal (`web/static/changelog.json`)
 - PRs are squash-merged; PR title becomes the commit message
 
@@ -261,23 +297,104 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   unrelated edits in a separate `git worktree`.
 - **The cloud container distorts results.** Two headless emulators run at
   ~7–11 fps with software GL; canvas readbacks take seconds (use
-  `?knperf=light`), measured RTT is inflated (so negotiated delay is too), and
-  the menu autopilot can overshoot into Team Battle at delay ≥ 10. Treat
-  multi-second freezes and menu timeouts there as environment first; confirm
-  real bugs from the logs.
-- **Which hash to trust.** `kn_game_state_hash` is the determinism signal:
-  RDRAM minus blocks tainted by audio/framebuffer writes, plus the saved CPU
-  state unless `kn_skip_post_rdram_in_hash` is set, so equal hashes don't
-  always prove equal CPU state. `kn_full_state_hash` includes the tainted
-  blocks, which legitimately differ after headless replays.
+  `?knperf=light`), and measured RTT is inflated (so negotiated delay is too).
+  Treat multi-second freezes there as environment first; confirm real bugs
+  from the logs. A menu timeout is not one of them: the run that sat on the
+  character select in Team Battle at delay ≥ 9 was the menu autopilot pressing
+  A where the puck had coasted to, fixed in #166. A menu timeout now leaves
+  `host-stuck.png` in the run's `OUT` folder; look at it before rerunning. A page that freezes for 5 s there is dropped as a
+  phantom and resynced (about one match in three). `tests/rb-two-player.mjs`
+  leaves the frames of such a recovery out of its hash compare when the logs
+  prove the dropped page's main thread stopped, and says so
+  (`frozenRecovery` in its summary, `tests/frozen-recovery.mjs`). Any other
+  mismatch is real.
+- **Which hash to trust.** None of the three covers the whole game state;
+  know what each one reads. `kn_gameplay_hash` hashes a short list of game
+  addresses (scene, VS battle header, stock counts, RNG seed, character
+  select); it is the one that sees a changed stock count. `kn_game_state_hash`
+  is RDRAM minus every 64 KB block tainted by an audio or framebuffer write,
+  sampled every 16th byte, plus the saved CPU state unless
+  `kn_skip_post_rdram_in_hash` is set. In an SSB64 match 107 of 128 blocks are
+  tainted, the battle state's among them, so equal hashes prove little; a
+  two-player run reports the coverage as `gameStateRdramBlocksHashed`.
+  `kn_full_state_hash` samples one byte in 64 and includes the tainted
+  blocks, which legitimately differ after headless replays. A run with
+  `DESYNC_GUEST=1` shows which of them (and the desync detector) notice a
+  real divergence.
 - **Core artifacts ship together.** The `.data` archive and the standalone
   `mupen64plus_next_libretro.{js,wasm}` (used by the Mode 2 worker) must come
   from the same build; URLs are content-hashed via `/api/core-info`.
+- **TypeScript is the direction for the frontend.** New frontend logic goes
+  in `web/src/*.ts` (strict TypeScript, Effect, Effect Schema, XState via
+  `@xstate/effect`) and reaches the plain-script pages through `window.KNCore`.
+  Logic for the static landing pages (front page, invite page) is written in
+  web/src TypeScript but ships in its own small bundle rather than through
+  window.KNCore, because those pages must stay light and are served while the
+  server sleeps.
+  The play and demo pages require the bundle: if `window.KNCore` is missing
+  they tell the player to reload and stop, so `play.js`, `demo.js` and the
+  engine call `window.KNCore` without a fallback. `window.KNShared` is
+  defined by the bundle too (`web/src/page/shared.ts`); tests import that
+  module directly instead of loading a script outside a page.
+  The bundles in `web/static/dist` are build output and are not in git: run
+  `npm ci` once and `npm run build` after a fresh checkout and after changing
+  `web/src`, before starting the server or any browser test (the server logs
+  an error at startup when the core bundle is missing). Never commit them.
+  The Docker image, CI and the landing and demo builds build them from
+  `package-lock.json`, so the bytes are the same everywhere. Migration stages
+  are in `docs/roadmap.md`. **New logic decides; nothing observes.** A change
+  that moves a decision into `web/src` makes the page or engine call it and
+  deletes the copy it replaces, in the same PR. There is no phase where the
+  new code runs beside the old and reports disagreement: the site has too
+  little traffic for production reports to show anything. The evidence comes
+  before the merge instead: an old-against-new test that runs both on the
+  same inputs before the old one is deleted (like
+  `tests/ts/demo-page.test.ts`), the proofs and models, and runs of the engine
+  the logic belongs to, with a fault mode for each rare path: for the rollback
+  engine `tests/rb-two-player.mjs` (`JITTER=20`) and the lifecycle tests; for
+  the streaming engine `tests/test_streaming_*.py` (a painted canvas in place
+  of the emulator) and a real-ROM streaming run (`mode=streaming`, `KN_ROM`).
+  A rule no run reaches gets a fault mode or a harness step before it decides.
+  Where the new logic is meant to differ from the old (a fix the model shows,
+  like the per-peer machine offering only from the lower slot), the
+  old-against-new test asserts that difference and the PR names its model
+  scenario; any other difference blocks the change. The modules that still observe (they send
+  `*-disagree` reports) are being switched to deciding the same way; don't
+  add a new one.
+- **Model and prove before you patch state logic.** This applies to plans
+  as much as to code: a plan for anything involving state, ordering or
+  reconnects names the model, the invariant and the diagram it will change
+  before it names a file to edit. In order:
+  1. **Quint first.** Add the states and the property you expect to
+     `specs/room_lifecycle.qnt` (or a new spec) and run `just spec` before
+     writing the fix. A bug found by a test run is modelled before it is
+     patched, with the failing ordering as a scenario, so the model shows the
+     fix works and CI keeps it fixed. Properties today's code violates are
+     checked on a `*_fixed` variant and listed as violated in the spec, never
+     dropped.
+  2. **States go in the XState machine** (`web/src/session.ts`), not in new
+     boolean flags in `play.js` or the engine. `docs/session-machine.md` is
+     generated from the machine (`npm run diagram`); put the diagram in the
+     plan and in the PR when the states change. A failing ordering can
+     be drawn from the model too (`scripts/trace-diagram.mjs`);
+     `docs/netcode-diagrams.md` lists every generated diagram.
+  3. **Decisions are pure functions with a contract** in `web/src`, listed
+     in `LemmaScript-files.txt` and checked by the `proofs` CI job (Dafny is
+     not installed locally by default). "Which connection does this player
+     keep", "who do we reconnect to" and the like are proved, not patched
+     inline in `netplay-rollback.js`.
+  4. **Effects with a deadline are Effect code** (timeouts, retries, scoped
+     cleanup), not bare callbacks and `setTimeout`.
+     Two bugs this would have caught earlier: the host evicting a live peer when
+     its signaling returned before the guest's (#119, an ordering a model
+     enumerates), and a late joiner chasing a match the host had already
+     replaced (found by the model the day the late-join states were added).
 - **Never tolerate a prediction mismatch.** Any "close enough" input match
   leaves peers with different state that nothing corrects. The C engine
   used to accept stick values in the same zone without a rollback; #14 made
   matching exact. Don't reintroduce a tolerance: filter jitter at the input
   source instead (`KNShared.createStickDeadband`).
+- **Wire in what makes the netcode more robust.** A modelled fix (a machine or rule built to a spec's `*_fixed` variant) is wired in to decide, not left beside the engine or deleted.
 
 ## Dev environment
 

@@ -1,6 +1,8 @@
 """Invite page (/join, docs/landing-design.md §7.2 M2, W3): every state with
 mocked /health and /room/{code} answers."""
 
+import time
+
 import pytest
 from playwright.sync_api import expect
 
@@ -121,17 +123,30 @@ def test_host_name_is_text_not_html(invite):
 
 def test_waking_then_the_room(page, server_url):
     up = {"on": False}
+    page.add_init_script("window.__KN_WAKE_ART_CYCLE_MS__ = 0")
     page.route("**/health", lambda r: r.fulfill(json={"status": "ok"}) if up["on"] else r.abort())
     page.route("**/room/*", lambda r: r.fulfill(json=_room()))
     page.goto(f"{server_url}/join?room=KAZ12345")
     expect(page.locator("#inv-waking")).to_be_visible()
     expect(page.locator("#inv-waking")).to_have_attribute("role", "status")
-    page.locator("#viz").focus()
-    page.keyboard.press("Space")
-    expect(page.locator("#v-in")).not_to_have_text("--")
+    stage = page.locator("#inv-waking .wake-art")
+    expect(stage).to_have_attribute("aria-hidden", "true")
+    expect(stage.locator('[data-art="a"]')).to_have_class("wake-art-view is-active")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view")
+    expect(stage.locator('[data-art="b"]')).to_have_class("wake-art-view wake-rollback")
+    page.evaluate("window.__KN_WAKE_ART_STEP__()")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view is-active")
+    expect(page.locator("#elapsed")).to_be_visible()
+    expect(page.locator("#inv-waking .prog")).to_be_visible()
+    expect(page.locator("#inv-waking")).to_contain_text("The room server naps when nobody's around")
+    assert page.locator("#inv-waking #viz").count() == 0
+    assert page.locator("#inv-waking #viz-send").count() == 0
     up["on"] = True
     expect(page.locator("#inv-main")).to_be_visible(timeout=10000)
     expect(page.locator("#inv-waking")).to_be_hidden()
+    expect(stage.locator('[data-art="a"]')).to_have_class("wake-art-view is-active")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view")
+    expect(stage.locator('[data-art="b"]')).to_have_class("wake-art-view wake-rollback")
 
 
 def test_waking_sends_one_direct_origin_wake_request(page, server_url):
@@ -147,6 +162,45 @@ def test_waking_sends_one_direct_origin_wake_request(page, server_url):
     page.wait_for_timeout(3500)
     assert direct_wakes == ["https://wake-origin.example/health"]
     expect(page.locator("#inv-waking")).to_be_visible()  # same-origin health still controls the page state
+
+
+def test_wake_duration_is_reported_once_after_health_recovers(page, server_url):
+    ready = {"value": False}
+    health_calls = {"count": 0}
+    reports = []
+    page.route(f"{server_url}/join*", lambda route: _landing_with_origin(route, "https://wake-origin.example"))
+
+    def health(route):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            time.sleep(1.1)  # The initial probe is part of the wake duration.
+        route.fulfill(json={"status": "ok"}) if ready["value"] else route.abort()
+
+    page.route("**/health", health)
+    page.route("**://wake-origin.example/health*", lambda route: route.fulfill(status=204))
+    page.route("**/room/*", lambda route: route.fulfill(json=_room()))
+    page.route("**/api/wake-event", lambda route: (reports.append(route.request.post_data_json), route.fulfill(status=204)))
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-waking")).to_be_visible()
+    page.wait_for_timeout(1200)
+    ready["value"] = True
+    expect(page.locator("#inv-main")).to_be_visible(timeout=10000)
+    page.wait_for_timeout(100)
+    assert len(reports) == 1
+    assert reports == [{"page": "invite", "elapsed_ms": reports[0]["elapsed_ms"], "direct_wake_sent": True}]
+    assert reports[0]["elapsed_ms"] >= 4000
+    page.wait_for_timeout(1200)
+    assert len(reports) == 1
+
+
+def test_ready_invite_page_does_not_report_a_wake(page, server_url):
+    reports = []
+    _mock(page, room=_room())
+    page.route("**/api/wake-event", lambda route: (reports.append(route.request.post_data_json), route.fulfill(status=204)))
+    page.goto(f"{server_url}/join?room=KAZ12345")
+    expect(page.locator("#inv-main")).to_be_visible()
+    page.wait_for_timeout(100)
+    assert reports == []
 
 
 @pytest.mark.parametrize("origin", ["", "__KN_ORIGIN__", "{page_origin}"])

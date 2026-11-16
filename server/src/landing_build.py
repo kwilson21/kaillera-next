@@ -24,12 +24,12 @@ EXTRA = [
     "static/og/home.png",  # the generic link-preview image (og:image)
     "static/kn-logo.svg",  # reusable large logo for previews and community pages
 ]
-# NOT in EXTRA, but packaged separately as Worker fallback assets:
-# static/version.json and static/changelog.json. CI rewrites both on nearly
-# every merge, so including them would mark the landing bundle stale after
-# releases which did not change the landing page. The Worker tries the origin
-# first for current metadata, then uses its instant bundled copy while the
-# origin is unavailable; see scripts/build_landing.py and worker.js.
+# NOT in EXTRA, and not packaged at all: static/version.json and
+# static/changelog.json. CI rewrites both on every release, so a copy of them
+# in the Worker names an old release whenever the Worker is behind the game
+# server, and counting them here would mark the landing bundle stale after
+# releases that did not change the landing page. The Worker passes them to the
+# game server (deploy/static/worker.js).
 
 _STATIC_REF = re.compile(r'(?:src|href)="(/static/[^"?#]+)"')
 
@@ -42,8 +42,8 @@ def referenced(html: str) -> set[str]:
 def landing_files(web_dir: Path) -> set[str]:
     """The exact set of files (paths relative to `web_dir`) the landing
     Worker serves from assets: the pages themselves, the files they load,
-    EXTRA, every self-hosted font and every screenshot (landing.js loads
-    them, so no page references them by `src=`)."""
+    EXTRA, every self-hosted font and every screenshot (the front page's
+    script loads them, so no page references them by `src=`)."""
     files: set[str] = set(EXTRA) | set(PAGES)
     for page in PAGES:
         files |= referenced((web_dir / page).read_text())

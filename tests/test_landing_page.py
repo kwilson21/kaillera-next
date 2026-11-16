@@ -63,6 +63,14 @@ def _state(page):
     return page.locator("#board").get_attribute("data-state")
 
 
+def test_removed_lag_visualizer_is_a_normal_missing_page(page, server_url):
+    missing = page.request.get(f"{server_url}/missing-page.html")
+    lag_visualizer = page.request.get(f"{server_url}/lag-test.html")
+
+    assert lag_visualizer.status == missing.status == 404
+    assert lag_visualizer.text() == missing.text()
+
+
 @pytest.fixture
 def landing(page, server_url):
     def go(**kw):
@@ -150,6 +158,7 @@ def test_server_strings_are_text_not_html(landing):
 
 def test_waking_state_disables_actions_and_recovers(page, server_url):
     alive = {"up": False}
+    page.add_init_script("window.__KN_WAKE_ART_CYCLE_MS__ = 0")
     _mock(page)
     page.unroute("**/health")
     page.route(
@@ -159,20 +168,25 @@ def test_waking_state_disables_actions_and_recovers(page, server_url):
     page.goto(server_url)
     expect(page.locator("#board")).to_have_attribute("data-state", "waking")
     expect(page.locator("#st-waking")).to_have_attribute("role", "status")
+    stage = page.locator("#st-waking .wake-art")
+    expect(stage).to_have_attribute("aria-hidden", "true")
+    expect(stage.locator('[data-art="a"]')).to_have_class("wake-art-view is-active")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view")
+    expect(stage.locator('[data-art="b"]')).to_have_class("wake-art-view wake-rollback")
+    page.evaluate("window.__KN_WAKE_ART_STEP__()")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view is-active")
+    expect(page.locator("#elapsed")).to_be_visible()
+    expect(page.locator("#st-waking .prog")).to_be_visible()
     expect(page.locator("#create-btn")).to_be_disabled()
     expect(page.locator("#create-btn")).to_have_text("Create a room · ready in a moment")
-    # The visualizer answers SPACE while waking.
-    page.keyboard.press("Space")
-    expect(page.locator("#v-in")).to_have_text("0 ms")
-    # ...and its Send button. The controls sit beside a real button, not
-    # inside a role="button" wrapper (axe: nested-interactive).
-    assert page.locator("#viz").get_attribute("role") is None
-    page.evaluate("document.getElementById('v-in').textContent = '--'")
-    page.locator("#viz-send").focus()
-    page.keyboard.press("Enter")
-    expect(page.locator("#v-in")).to_have_text("0 ms")
+    expect(page.locator("#st-waking")).to_contain_text("Your visit woke it up")
+    assert page.locator("#st-waking #viz").count() == 0
+    assert page.locator("#st-waking #viz-send").count() == 0
     alive["up"] = True
     expect(page.locator("#board")).to_have_attribute("data-state", "empty", timeout=10000)
+    expect(stage.locator('[data-art="a"]')).to_have_class("wake-art-view is-active")
+    expect(stage.locator('[data-art="c"]')).to_have_class("wake-art-view")
+    expect(stage.locator('[data-art="b"]')).to_have_class("wake-art-view wake-rollback")
     expect(page.locator("#create-btn")).to_be_enabled()
 
 
@@ -191,6 +205,44 @@ def test_waking_sends_one_direct_origin_wake_request(page, server_url):
     page.wait_for_timeout(3500)
     assert len(direct_wakes) == 1
     assert _state(page) == "waking"  # same-origin health still controls the page state
+
+
+def test_wake_duration_is_reported_once_after_health_recovers(page, server_url):
+    ready = {"value": False}
+    health_calls = {"count": 0}
+    reports = []
+    page.route("**/", lambda route: _landing_with_origin(route, "https://wake-origin.example"))
+
+    def health(route):
+        health_calls["count"] += 1
+        if health_calls["count"] == 1:
+            time.sleep(1.1)  # The initial probe is part of the wake duration.
+        route.fulfill(json={"status": "ok"}) if ready["value"] else route.abort()
+
+    page.route("**/health", health)
+    page.route("**://wake-origin.example/health*", lambda route: route.fulfill(status=204))
+    page.route("**/api/wake-event", lambda route: (reports.append(route.request.post_data_json), route.fulfill(status=204)))
+    page.goto(server_url)
+    expect(page.locator("#board")).to_have_attribute("data-state", "waking")
+    page.wait_for_timeout(1200)
+    ready["value"] = True
+    expect(page.locator("#board")).to_have_attribute("data-state", "empty", timeout=10000)
+    page.wait_for_timeout(100)
+    assert len(reports) == 1
+    assert reports == [{"page": "front", "elapsed_ms": reports[0]["elapsed_ms"], "direct_wake_sent": True}]
+    assert reports[0]["elapsed_ms"] >= 4000
+    page.wait_for_timeout(1200)
+    assert len(reports) == 1
+
+
+def test_ready_front_page_does_not_report_a_wake(page, server_url):
+    reports = []
+    _mock(page)
+    page.route("**/api/wake-event", lambda route: (reports.append(route.request.post_data_json), route.fulfill(status=204)))
+    page.goto(server_url)
+    expect(page.locator("#board")).to_have_attribute("data-state", "empty")
+    page.wait_for_timeout(100)
+    assert reports == []
 
 
 @pytest.mark.parametrize("origin", ["", "__KN_ORIGIN__", "{page_origin}"])
@@ -442,17 +494,6 @@ def test_focus_survives_a_room_above_it_leaving(page, server_url):
     page.evaluate(REFRESH)
     expect(page.locator(".room")).to_have_count(2)
     assert page.evaluate("document.activeElement.getAttribute('aria-label')") == "Join Third's room, needs your ROM"
-
-
-def test_rollback_checkbox_toggles_from_the_keyboard(page, server_url):
-    _mock(page, health=False)
-    page.goto(server_url)
-    expect(page.locator("#board")).to_have_attribute("data-state", "waking")
-    page.locator("#rb").focus()
-    page.keyboard.press("Space")
-    expect(page.locator("#rb")).not_to_be_checked()
-    expect(page.locator("#verdict")).to_have_text("240 ms wait per input")
-    expect(page.locator("#v-in")).to_have_text("--")  # the checkbox got the key, not the visualizer
 
 
 def test_empty_board_keeps_a_real_player_count(page, server_url):

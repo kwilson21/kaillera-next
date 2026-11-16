@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+# Build output, web/static/dist/ included: the TypeScript bundles are built by
+# `npm run build` (locally, in CI and in the Docker image), never committed.
 dist/
 
 # EmulatorJS core build artifacts (source repos + compiled output)
@@ -19,9 +21,9 @@ web/static/roms/
 # Environment
 .env
 
-# Node (prettier dev dependency)
+# Node. package-lock.json is committed: the Docker image and the landing
+# Worker's build must produce the same bundle bytes (the landing build id).
 node_modules/
-package-lock.json
 
 # OS
 .DS_Store
@@ -60,6 +62,7 @@ build/softfloat/libsoftfloat.a
 
 # Hash-golden native test build output
 tests/hash-golden/build/
+tests/rollback-native/build/
 # Root-level ./static symlink that points at web/static — scoped with
 # a leading slash so it doesn't also block new files under web/static/.
 /static
@@ -83,3 +86,6 @@ test-results/
 # Wrangler local dev state
 .wrangler/
 dist-landing/
+
+# Apalache working files from `quint verify`
+_apalache-out/
