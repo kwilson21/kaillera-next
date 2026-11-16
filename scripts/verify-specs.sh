@@ -356,6 +356,11 @@ escalation_push() {
   # A transfer still making progress at the second round's backstop.
   expect_violation "$ESCP" escalation_push_round_two noLetGoOfAPushOnItsWay 9
   expect_violation "$ESCP" escalation_push_backstop noLetGoOfAPushOnItsWay 9
+  # The third round's global, chunks-only clock: a silent transfer kept alive
+  # by another guest's syncs; a transfer ahead failing at its own limit not
+  # counted as the chain moving.
+  expect_violation "$ESCP" escalation_push_round_three aLostPushIsLetGo 7
+  expect_violation "$ESCP" escalation_push_round_three noLetGoOfAPushOnItsWay 7
   # Handed over, its report held by another guest's transfer, let go.
   expect_violation "$ESCP" escalation_push_reported_together noLetGoOfAPushOnItsWay 7
   # The transfer ahead of the push handed over, the deadline due before the

@@ -557,12 +557,14 @@ done
 # ── The escalation push as a transfer that takes time ────────────────────
 ESCP=specs/escalation_push.qnt
 $QUINT typecheck "$ESCP"
-# Before #286's second round, its second round, and the fix with each part
-# left out alone (queuedBehindTest, progressingTest, slowOtherGuestTest,
+# Before #286's second round, its second and third rounds, and the fix with
+# each part left out alone (queuedBehindTest, progressingTest, twoAheadTest,
+# lostReportTest, slowOtherGuestTest,
 # earlierMarksTest, freezeTest, failTwiceTest); the host's delta base with a
 # state sent to one guest (sync_base; otherGuestAsksTest); pushes counted per
 # hole (hole_counts; alternatingHolesTest).
-for variant in escalation_push_current escalation_push_round_two escalation_push_count_resets \
+for variant in escalation_push_current escalation_push_round_two escalation_push_round_three \
+  escalation_push_count_resets \
   escalation_push_timer_let_go escalation_push_backstop escalation_push_reported_together \
   escalation_push_any_hand_over escalation_push_no_credit escalation_push_fixed \
   sync_base_current sync_base_esc_clears sync_base_fixed hole_counts_one_record hole_counts_fixed; do
