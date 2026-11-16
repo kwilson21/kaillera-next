@@ -65,7 +65,11 @@ const OLD_SOURCE = readFileSync(new URL('./fixtures/demo.old.js', import.meta.ur
 //    script took them in the rest of the HUD frame that restarted the demo,
 //    and could clear the autopilot's retry mark there, so the next stall
 //    restarted the demo again instead of handing over.
+//  - Decorative button glyphs now come from CSS, not the accessible label.
 const SINCE_THE_OLD_SCRIPT: readonly (readonly [string, string])[] = [
+  ['Play now →', 'Play now'],
+  ['▶ Auto-compare every 6s', 'Auto-compare every 6s'],
+  ['■ Stop auto-compare', 'Stop auto-compare'],
   [
     '  const _isAutoCompareRunning = () => _autoCompareTimer !== 0;',
     '  const _isAutoCompareRunning = () => _autoCompareTimer !== 0 || _autoComparePausedAt !== 0;',
