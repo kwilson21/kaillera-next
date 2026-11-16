@@ -302,6 +302,21 @@ def test_a_guest_arms_on_the_rule_and_never_with_its_own_delay():
     assert "_sendHostStart(ch);" in src  # on every channel that opens
 
 
+def test_a_rollback_never_reaches_back_before_a_players_first_input():
+    """A late input rolls back only a frame its player's input was predicted
+    for, and a slot is predicted only once its first input has been fed. So
+    no rollback targets a frame from before a player joined, and a page that
+    played alone needs its ring only from the join on (specs/engine_start.qnt:
+    solo play runs on the C engine; skipping its saves is a follow-up that
+    relies on this)."""
+    c_src = ROLLBACK_C.read_text()
+    feed = c_src[c_src.index("int kn_feed_input(") : c_src.index("int kn_pre_tick(")]
+    assert "slot_active[slot] = 1;" in feed
+    assert "if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {" in feed
+    pre_tick = c_src[c_src.index("int kn_pre_tick(") :]
+    assert "if (!rb.slot_active[s]) continue;" in pre_tick
+
+
 def test_failed_frame_step_does_not_advance_bookkeeping():
     src = LOCKSTEP_JS.read_text()
 
