@@ -282,7 +282,8 @@ def test_the_hosts_rom_dropped_over_another_is_kept_when_the_hosts_arrives_befor
     # over another and still being hashed when the host's arrived, was
     # refused by the other one's hash; its own hash, landing after, then said
     # ready with no ROM. The two ROMs are the same size, so only the hash
-    # tells them apart.
+    # tells them apart. The drop also says "not ready" at once
+    # (startWhileHashingTest).
     host, guest = _guest_in_a_room(browser, server_url, room)
     try:
         _load_rom(guest, OTHER_ROM)
@@ -295,10 +296,12 @@ def test_the_hosts_rom_dropped_over_another_is_kept_when_the_hosts_arrives_befor
         host_hash = host.evaluate("window.KNState.romHash")
         expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
         # The host's ROM is known and the drop is not hashed yet: the page
-        # keeps it, says nothing against it, and announces nothing.
+        # keeps it and says nothing against it. The drop told the server it
+        # is not ready, so a start now would not count it in on the other
+        # ROM's word, and nothing has said ready since.
         expect(guest.locator("#rom-status")).to_contain_text("test.z64")
         expect(guest.locator("#rom-mismatch")).to_be_hidden()
-        assert guest.evaluate("window.__romReady") == []
+        assert guest.evaluate("window.__romReady") == [{"ready": False}]
         guest.evaluate(_RELEASE_READS)
         # Its own hash lands, is the host's, and is announced.
         guest.wait_for_function("(h) => window.KNState.romHash === h", arg=host_hash, timeout=15000)
@@ -308,7 +311,7 @@ def test_the_hosts_rom_dropped_over_another_is_kept_when_the_hosts_arrives_befor
         expect(guest.locator("#rom-status")).to_contain_text("test.z64")
         expect(guest.locator("#rom-mismatch")).to_be_hidden()
         sent = guest.evaluate("window.__romReady")
-        assert all(m.get("ready") and m.get("hash") == host_hash for m in sent), sent
+        assert all(m.get("hash") == host_hash for m in sent if m.get("ready")), sent
     finally:
         host.close()
         guest.close()

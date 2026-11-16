@@ -3107,6 +3107,11 @@
   const loadRomData = (file, displayName) => {
     hideRomMismatch();
     const load = ++_romLoad;
+    // Until this file is hashed the server still holds the previous ROM's
+    // word: a start in that moment would count a guest ready with that ROM.
+    // Its own hash says ready when it lands (specs/rom_identity.qnt). Not the
+    // host: its "not ready" clears the room's ROM for every guest.
+    if (!isHost && socket?.connected) socket.emit('rom-ready', { ready: false });
     _romBlob = file;
     _romName = displayName;
     _romDroppedName = displayName;

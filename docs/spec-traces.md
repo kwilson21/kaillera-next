@@ -498,13 +498,13 @@ sequenceDiagram
   Guest->>Guest: drop("wrong")
   Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: hashLoad = 1<br/>told = wrong<br/>hash = wrong<br/>hashing = {}
+  Note over Guest: told = wrong<br/>hash = wrong<br/>hashing = {}<br/>toldFor = 1<br/>hashLoad = 1
   Guest->>Guest: drop("right")
   Note over Guest: hashing = {(2, right)}<br/>load = 2<br/>loaded = right
   Guest->>Guest: hostArrives
-  Note over Guest: banner = true<br/>hashLoad = 3<br/>told = none<br/>hash = none<br/>hostKnown = true<br/>loadedIsDrop = false<br/>load = 3<br/>clearedRight = true<br/>loaded = none
+  Note over Guest: told = none<br/>hash = none<br/>hostKnown = true<br/>loadedIsDrop = false<br/>clearedRight = true<br/>load = 3<br/>loaded = none<br/>banner = true<br/>hashLoad = 3
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: banner = false<br/>hashLoad = 2<br/>told = right<br/>hash = right<br/>hashing = {}<br/>toldStale = true
+  Note over Guest: told = right<br/>hash = right<br/>hashing = {}<br/>toldStale = true<br/>banner = false<br/>toldFor = 2<br/>hashLoad = 2
 ```
 
 ### twoDropsTest
@@ -521,9 +521,9 @@ sequenceDiagram
   Guest->>Guest: drop("right")
   Note over Guest: hashing = {(1, wrong), (2, right)}<br/>load = 2<br/>loaded = right
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hashLoad = 2<br/>told = right<br/>hash = right<br/>hashing = {(1, wrong)}
+  Note over Guest: told = right<br/>hash = right<br/>hashing = {(1, wrong)}<br/>toldFor = 2<br/>hashLoad = 2
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: banner = true<br/>hashLoad = 3<br/>told = none<br/>hash = none<br/>loadedIsDrop = false<br/>hashing = {}<br/>load = 3<br/>clearedRight = true<br/>loaded = none
+  Note over Guest: told = none<br/>hash = none<br/>loadedIsDrop = false<br/>clearedRight = true<br/>hashing = {}<br/>load = 3<br/>loaded = none<br/>banner = true<br/>hashLoad = 3
 ```
 
 ## `specs/rom_identity.qnt` (`rom_identity_current`)
@@ -538,15 +538,15 @@ The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives 
 sequenceDiagram
   participant Guest
   Guest->>Guest: drop("wrong")
-  Note over Guest: loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true
+  Note over Guest: loadedIsDrop = true<br/>loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: hash = wrong<br/>told = wrong<br/>hashLoad = 1<br/>hashing = {}
+  Note over Guest: hash = wrong<br/>told = wrong<br/>hashLoad = 1<br/>toldFor = 1<br/>hashing = {}
   Guest->>Guest: drop("right")
-  Note over Guest: loaded = right<br/>load = 2<br/>hashing = {(2, right)}
+  Note over Guest: told = none<br/>loaded = right<br/>load = 2<br/>hashing = {(2, right)}
   Guest->>Guest: hostArrives
   Note over Guest: hostKnown = true
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hash = right<br/>told = right<br/>hashLoad = 2<br/>hashing = {}
+  Note over Guest: hash = right<br/>told = right<br/>hashLoad = 2<br/>toldFor = 2<br/>hashing = {}
 ```
 
 ### twoDropsTest
@@ -559,11 +559,11 @@ sequenceDiagram
   Guest->>Guest: hostArrives
   Note over Guest: hostKnown = true
   Guest->>Guest: drop("wrong")
-  Note over Guest: loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true
+  Note over Guest: loadedIsDrop = true<br/>loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}
   Guest->>Guest: drop("right")
   Note over Guest: loaded = right<br/>load = 2<br/>hashing = {(1, wrong), (2, right)}
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hash = right<br/>told = right<br/>hashLoad = 2<br/>hashing = {(1, wrong)}
+  Note over Guest: hash = right<br/>told = right<br/>hashLoad = 2<br/>toldFor = 2<br/>hashing = {(1, wrong)}
   Guest->>Guest: hashLands(1, "wrong")
   Note over Guest: hashing = {}
 ```

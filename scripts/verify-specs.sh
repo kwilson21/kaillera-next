@@ -311,6 +311,9 @@ rom_identity() {
   # A drop, the host's ROM picked from the library, the drop's hash lands:
   # 3 steps (pickWhileHashingTest).
   expect_violation "$ROM_IDENTITY" rom_identity_judge_only aSettledRomKeepsItsHash
+  # The host's ROM hashed and heard, a wrong one dropped, Start: 4 steps
+  # (startWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_no_retract aStartCountsOnlyTheLoadedRom
 }
 
 start_group() {
