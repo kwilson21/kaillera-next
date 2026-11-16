@@ -148,6 +148,10 @@ def test_invalid_and_empty_shards_fail_before_starting_workers():
         ["--workers", "5"],
         ["--worker-cpus", "0"],
         ["--worker-cpus", "5"],
+        ["--solo-shards", "-1"],
+        ["--solo-shards", "1"],
+        ["--solo-worker-cpus", "0"],
+        ["--solo-worker-cpus", "5"],
         ["--timeout", "0"],
         ["--shard", "64", "--shards", "64", "--workers", "4"],
     ):
@@ -373,8 +377,8 @@ def test_worker_cpu_budget_reaches_jvm(monkeypatch, tmp_path, cpus):
     verify.STOP.clear()
     with pytest.raises(RuntimeError, match="stop before"):
         verify.worker(0, [], Path("unused"), tmp_path, 1, cpus)
-    assert f"-XX:ActiveProcessorCount={cpus}" in captured["env"]["JDK_JAVA_OPTIONS"]
-    assert "-Xmx2g" in captured["env"]["JDK_JAVA_OPTIONS"]
+    assert f"-XX:ActiveProcessorCount={cpus}" in captured["env"]["JVM_ARGS"]
+    assert "-Xmx4g" in captured["env"]["JVM_ARGS"]
 
 
 def streaming_ast_fixture():
@@ -487,3 +491,82 @@ def test_measured_weights_override_component_fallbacks():
     other = verify.dataclasses.replace(component, module="new_model", invariant="new_property", origin=1)
     bins = verify.partition([component, other], 2, {component.key: 1, other.key: 50})
     assert bins == [[other], [component]]
+
+
+def test_solo_layout_preserves_full_plan_and_all_negatives():
+    plan = verify.load_plan()
+    durations = json.loads((ROOT / "scripts/verify-spec-times.json").read_text())["seconds"]
+    jobs = verify.partition_jobs(plan, 18, 2, durations, 5)
+    assert [len(job) for job in jobs] == [1] * 5 + [2] * 13
+    flat = [check for job in jobs for batch in job for check in batch]
+    assert collections.Counter(flat) == collections.Counter(plan)
+    assert all(batch for job in jobs for batch in job)
+    expected = sorted(
+        (c for c in plan if c.expect == "hold"), key=lambda c: (-verify.estimate(c, durations), c.origin, c.key)
+    )[:5]
+    assert jobs[:5] == [[[check]] for check in expected]
+    paired = [check for job in jobs[5:] for batch in job for check in batch]
+    assert collections.Counter(c for c in paired if c.expect == "violation") == collections.Counter(
+        c for c in plan if c.expect == "violation"
+    )
+    assert all(batch[0].expect == "violation" for job in jobs[5:] for batch in job)
+    # Default solo=0 has the same worker assignment and ordering as before.
+    old = verify.partition(plan, 28, durations)
+    assert verify.partition_jobs(plan, 14, 2, durations) == [old[n : n + 2] for n in range(0, 28, 2)]
+    # A new measured heavy proof is not filtered out or blocked by a fixed allowlist.
+    new = verify.dataclasses.replace(plan[0], module="future_model", expect="hold", origin=99999)
+    changed = verify.partition_jobs([*plan, new], 18, 2, {**durations, new.key: 9999}, 5)
+    assert changed[0] == [[new]]
+    assert collections.Counter(c for job in changed for batch in job for c in batch) == collections.Counter(
+        [*plan, new]
+    )
+
+
+def test_solo_layout_rejects_impossible_or_empty_assignments():
+    positive = verify.Check("some.qnt", "some", "holds", "init", 6, "hold", 0)
+    negative = verify.dataclasses.replace(positive, expect="violation", origin=1)
+    for shards, workers, solos in ((0, 2, 0), (2, 0, 0), (2, 2, -1), (2, 2, 2), (3, 2, 2), (18, 2, 1)):
+        with pytest.raises(ValueError):
+            verify.partition_jobs([positive, negative], shards, workers, {}, solos)
+
+
+@pytest.mark.parametrize(
+    ("shard", "count", "cpus", "failures"), [(1, 1, 4, 0), (2, 2, 2, 0), (1, 1, 4, 1), (2, 2, 2, 1)]
+)
+def test_main_routes_solo_and_paired_cpu_budgets(monkeypatch, capsys, shard, count, cpus, failures):
+    checks = [
+        verify.Check("some.qnt", "some", f"property{n}", "init", 6, "violation" if n < 2 else "hold", n)
+        for n in range(10)
+    ]
+    calls = []
+    monkeypatch.setattr(verify, "load_plan", lambda: checks)
+    monkeypatch.setattr(verify, "fetch_apalache", lambda _: Path("unused"))
+    monkeypatch.setattr(verify.signal, "signal", lambda *_: None)
+
+    def worker(index, batch, executable, directory, timeout, worker_cpus):
+        calls.append((batch, worker_cpus))
+        return failures
+
+    monkeypatch.setattr(verify, "worker", worker)
+    assert verify.main(
+        [
+            "--shards",
+            "3",
+            "--shard",
+            str(shard),
+            "--workers",
+            "2",
+            "--worker-cpus",
+            "2",
+            "--solo-shards",
+            "1",
+            "--solo-worker-cpus",
+            "4",
+        ]
+    ) == int(failures != 0)
+    assert len(calls) == count
+    assert all(cpu == cpus for _, cpu in calls)
+    telemetry = json.loads(capsys.readouterr().out)
+    assert telemetry["workers"] == count
+    assert telemetry["cpus_per_worker"] == cpus
+    assert telemetry["heap_gib_per_worker"] == 4

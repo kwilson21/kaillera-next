@@ -302,6 +302,22 @@ def load_plan():
     return checks
 
 
+def estimate(check, durations):
+    if check.key in durations:
+        return float(durations[check.key])
+    if check.module == "streaming_connection_current" and check.invariant in STREAMING_CONJUNCTS:
+        return 70.0 if check.steps <= 5 else 90.0
+    if check.module == "room_current" and check.invariant in ROOM_FORWARD_PARTITIONS:
+        return 90.0
+    if check.module == "resync_inputs_current" and check.invariant in CONJUNCTS:
+        return 75.0
+    if check.module == "room_current" and check.invariant in ROOM_DIRECTIONS:
+        return 90.0 if check.invariant == ROOM_DIRECTIONS[0] else 60.0
+    if check.module == "room_current" and check.invariant in ROOM_NOT_STRANDED:
+        return 60.0
+    return float(durations.get(check.key, 5.0 if check.expect == "violation" else 30.0))
+
+
 def partition(checks, slots, durations):
     """Advisory timings balance work; new commands are always included."""
     if slots < 1:
@@ -309,36 +325,39 @@ def partition(checks, slots, durations):
     bins = [[] for _ in range(slots)]
     loads = [0.0] * slots
 
-    def estimate(check):
-        if check.key in durations:
-            return float(durations[check.key])
-        if check.module == "streaming_connection_current" and check.invariant in STREAMING_CONJUNCTS:
-            return 70.0 if check.steps <= 5 else 90.0
-        if check.module == "room_current" and check.invariant in ROOM_FORWARD_PARTITIONS:
-            return 90.0
-        if check.module == "resync_inputs_current" and check.invariant in CONJUNCTS:
-            return 75.0
-        if check.module == "room_current" and check.invariant in ROOM_DIRECTIONS:
-            return 90.0 if check.invariant == ROOM_DIRECTIONS[0] else 60.0
-        if check.module == "room_current" and check.invariant in ROOM_NOT_STRANDED:
-            return 60.0
-        return float(durations.get(check.key, 5.0 if check.expect == "violation" else 30.0))
-
     # A genuine existing counterexample warms each JVM and exercises its
     # failure path before positive proofs. No extra or omitted checks.
-    negatives = sorted((c for c in checks if c.expect == "violation"), key=lambda c: (estimate(c), c.origin))
+    negatives = sorted((c for c in checks if c.expect == "violation"), key=lambda c: (estimate(c, durations), c.origin))
     seeded = negatives[:slots] if len(negatives) >= slots else []
     for index, check in enumerate(seeded):
         bins[index].append(check)
-        loads[index] += estimate(check)
+        loads[index] += estimate(check, durations)
     remaining = [c for c in checks if c not in seeded]
-    for check in sorted(remaining, key=lambda c: (-estimate(c), c.origin, c.key)):
+    for check in sorted(remaining, key=lambda c: (-estimate(c, durations), c.origin, c.key)):
         index = min(range(slots), key=lambda i: (loads[i], i))
         bins[index].append(check)
-        loads[index] += estimate(check)
+        loads[index] += estimate(check, durations)
     for batch in bins:
-        batch.sort(key=lambda c: (c.expect != "violation", -estimate(c), c.origin))
+        batch.sort(key=lambda c: (c.expect != "violation", -estimate(c, durations), c.origin))
     return bins
+
+
+def partition_jobs(checks, shards, workers, durations, solo_shards=0):
+    """Isolate measured heavy positive proofs; partition every other check."""
+    if shards < 1 or workers < 1 or not 0 <= solo_shards < shards:
+        raise ValueError("require positive shard/worker counts and 0 <= solo shards < shards")
+    positives = sorted(
+        (c for c in checks if c.expect == "hold"), key=lambda c: (-estimate(c, durations), c.origin, c.key)
+    )
+    if len(positives) < solo_shards:
+        raise ValueError("each solo shard needs one positive proof")
+    solo = [[check] for check in positives[:solo_shards]]
+    assigned = {check for batch in solo for check in batch}
+    remaining = [check for check in checks if check not in assigned]
+    batches = partition(remaining, (shards - solo_shards) * workers, durations)
+    if not all(batches):
+        raise ValueError("every worker must have checks; reduce the shard/worker count")
+    return [[batch] for batch in solo] + [batches[index : index + workers] for index in range(0, len(batches), workers)]
 
 
 def accepted(check, returncode, output):
@@ -444,9 +463,7 @@ def worker(index, checks, executable, directory, timeout, worker_cpus=1):
             start_new_session=True,
             env=dict(
                 os.environ,
-                JDK_JAVA_OPTIONS=(
-                    os.environ.get("JDK_JAVA_OPTIONS", "") + f" -Xmx2g -XX:ActiveProcessorCount={worker_cpus}"
-                ),
+                JVM_ARGS=(os.environ.get("JVM_ARGS", "") + f" -Xmx4g -XX:ActiveProcessorCount={worker_cpus}"),
             ),
         )
         SERVERS.append(server)
@@ -546,16 +563,21 @@ def main(argv=None):
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--workers", type=int, choices=range(1, 5), default=2)
     parser.add_argument("--worker-cpus", type=int, choices=range(1, 5), default=1)
+    parser.add_argument("--solo-shards", type=int, default=0)
+    parser.add_argument("--solo-worker-cpus", type=int, choices=range(1, 5), default=4)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--plan", action="store_true")
     args = parser.parse_args(argv)
     if not 1 <= args.shard <= args.shards <= 64 or args.timeout <= 0:
         parser.error("require 1 <= shard <= shards <= 64 and a positive timeout")
+    if not 0 <= args.solo_shards < args.shards:
+        parser.error("require 0 <= solo shards < shards")
     plan = load_plan()
     timing_data = json.loads((ROOT / "scripts/verify-spec-times.json").read_text())
     durations = {**timing_data.get("estimated_seconds", {}), **timing_data["seconds"]}
-    bins = partition(plan, args.shards * args.workers, durations)
-    selected = bins[(args.shard - 1) * args.workers : args.shard * args.workers]
+    jobs = partition_jobs(plan, args.shards, args.workers, durations, args.solo_shards)
+    selected = jobs[args.shard - 1]
+    worker_cpus = args.solo_worker_cpus if args.shard <= args.solo_shards else args.worker_cpus
     if not all(selected):
         parser.error("each selected worker must have checks; reduce the shard/worker count")
     if args.plan:
@@ -565,9 +587,9 @@ def main(argv=None):
         json.dumps(
             {
                 "runner_cpus": os.cpu_count(),
-                "workers": args.workers,
-                "cpus_per_worker": args.worker_cpus,
-                "heap_gib_per_worker": 2,
+                "workers": len(selected),
+                "cpus_per_worker": worker_cpus,
+                "heap_gib_per_worker": 4,
             }
         ),
         flush=True,
@@ -577,11 +599,11 @@ def main(argv=None):
     signal.signal(signal.SIGINT, interrupted)
     with (
         tempfile.TemporaryDirectory(prefix="apalache-workers-") as temp,
-        concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool,
+        concurrent.futures.ThreadPoolExecutor(max_workers=len(selected)) as pool,
     ):
         executable = fetch_apalache(Path(temp) / "distribution")
         futures = [
-            pool.submit(worker, n, batch, executable, Path(temp), args.timeout, args.worker_cpus)
+            pool.submit(worker, n, batch, executable, Path(temp), args.timeout, worker_cpus)
             for n, batch in enumerate(selected)
         ]
         failures = 0
