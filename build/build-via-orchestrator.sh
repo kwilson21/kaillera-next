@@ -8,6 +8,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATCHES_DIR="${SCRIPT_DIR}/patches"
 BUILD_DIR="${SCRIPT_DIR}/src/emulatorjs-build"
+# Required before any setup or network access, just as in build.sh.
+IS_VIEWER_PATCH="${PATCHES_DIR}/mupen64plus-is-viewer-bounds.patch"
+if [ ! -f "${IS_VIEWER_PATCH}" ]; then
+    echo "FATAL: missing required IS Viewer bounds patch" >&2
+    exit 1
+fi
 
 cd "${BUILD_DIR}"
 
@@ -78,6 +84,11 @@ fi
 echo "==> Applying mupen64plus deterministic timing patch..."
 cd mupen64plus_next
 git checkout -- . 2>/dev/null || true
+git apply --check "${IS_VIEWER_PATCH}" && git apply "${IS_VIEWER_PATCH}" || {
+    echo "FATAL: IS Viewer bounds patch failed" >&2
+    exit 1
+}
+echo "    Applied IS Viewer integer-overflow bounds fix"
 if [ -f "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch" ]; then
     git apply "${PATCHES_DIR}/mupen64plus-deterministic-timing.patch"
     echo "    Applied mupen64plus patch"

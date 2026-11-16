@@ -73,6 +73,23 @@ class IsViewerBounds(unittest.TestCase):
         result = run([str(binary)], env={**os.environ, "ASAN_OPTIONS": "detect_leaks=0:halt_on_error=1", "UBSAN_OPTIONS": "halt_on_error=1"})
         print(result.stdout.strip())
 
+    def test_orchestrator_patch_and_missing_patch_fail_closed(self):
+        build = (ROOT / "build/build-via-orchestrator.sh").read_text()
+        script = self.tree / "build-via-orchestrator.sh"
+        script.write_text(build)
+        missing = subprocess.run(["bash", str(script)], text=True, capture_output=True)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("FATAL: missing required IS Viewer bounds patch", missing.stderr)
+        start = build.index('git apply --check "${IS_VIEWER_PATCH}"')
+        end = build.index('echo "    Applied IS Viewer', start)
+        result = subprocess.run(
+            ["bash", "-c", "set -euo pipefail\n" + build[start:end]],
+            cwd=self.tree, text=True, capture_output=True,
+            env={**os.environ, "IS_VIEWER_PATCH": str(PATCH)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(end, build.index('emmake make -j'))
+
     def test_missing_patch_fails_before_clone(self):
         # Copy only build.sh: it must fail before creating sources or using network.
         script = self.tree / "build.sh"
