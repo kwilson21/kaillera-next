@@ -428,4 +428,4 @@ export default {
   },
 };
 
-export { PAGES, ASSET_FILES, CRAWLER, ROBOTS, SITEMAP };
+export { PAGES, ASSET_FILES, CRAWLER };
