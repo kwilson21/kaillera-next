@@ -385,6 +385,11 @@ P.forEach((x, i) => {
   fs.writeFileSync(`${OUT}/p${i + 1}-sync.txt`, x.sync);
   fs.writeFileSync(`${OUT}/p${i + 1}-hashes.json`, JSON.stringify(x.hashes));
 });
+let hostEnd;
+if (process.env.HOST_END_CHECK === '1') {
+  const { checkHostEnd } = await import('./rb-end-game.mjs');
+  hostEnd = await checkHostEnd(pages, OUT);
+}
 await browser.close();
 
 const catchUpsOf = (log, afterSeq = -1) =>
@@ -552,6 +557,7 @@ const summary = {
   catchUp: catchUpReport,
   hole: holeReport,
 };
+if (hostEnd) summary.hostEnd = hostEnd;
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 2));
 console.log(JSON.stringify(summary, null, 2));
 
