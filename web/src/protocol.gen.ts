@@ -83,7 +83,9 @@ export const MatchJoinedPayload = Schema.Struct({
 });
 export type MatchJoinedPayload = typeof MatchJoinedPayload.Type;
 
-export const EndGamePayload = Schema.Struct({});
+export const EndGamePayload = Schema.Struct({
+  matchId: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(64)))),
+});
 export type EndGamePayload = typeof EndGamePayload.Type;
 
 export const SetModePayload = Schema.Struct({

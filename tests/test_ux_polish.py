@@ -5,6 +5,7 @@ Run: pytest tests/test_ux_polish.py -v
 
 import secrets
 
+import pytest
 from playwright.sync_api import expect
 
 _R = secrets.token_hex(3).upper()
@@ -77,7 +78,9 @@ def test_host_end_game_ack_returns_to_lobby_without_self_broadcast(browser, serv
         expect(host.locator("#overlay")).to_be_hidden(timeout=10000)
         expect(host.locator("#toolbar")).to_be_visible(timeout=10000)
 
-        host.evaluate("window.__test_socket.off('game-ended')")
+        host.evaluate(
+            "window.__test_socket.off('game-ended'); window.__test_socket.off('users-updated')"
+        )
         host.click("#toolbar-more")
         expect(host.locator("#toolbar-end")).to_be_visible(timeout=2000)
         host.click("#toolbar-end")
@@ -160,3 +163,56 @@ def test_nonexistent_room_shows_error_with_escape(page, server_url):
     expect(page.locator("#error-msg")).to_be_visible(timeout=10000)
     expect(page.locator(".error-card")).to_contain_text("Room not found")
     expect(page.locator(".error-back")).to_be_visible()
+
+
+@pytest.mark.parametrize("player_count", [2, 3])
+def test_end_game_roster_repairs_missed_event(browser, server_url, player_count):
+    """Every player exits even when its one-shot game-ended event is lost."""
+    pages = [browser.new_page() for _ in range(player_count)]
+    host = pages[0]
+    room = f"END{secrets.token_hex(4).upper()}"
+    try:
+        for index, page in enumerate(pages):
+            page.goto(
+                f"{server_url}/play.html?room={room}&host={int(index == 0)}&name=P{index}"
+            )
+            expect(page.locator("#overlay")).to_be_visible(timeout=10000)
+            _mark_rom_ready(page)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        for page in pages:
+            expect(page.locator("#overlay")).to_be_hidden(timeout=10000)
+            page.evaluate("window.__test_socket.off('game-ended')")
+        host.click("#toolbar-more")
+        host.click("#toolbar-end")
+        for page in pages:
+            expect(page.locator("#overlay")).to_be_visible(timeout=3000)
+            expect(page.locator("#toolbar")).to_be_hidden()
+    finally:
+        for page in pages:
+            page.close()
+
+
+def test_unanswered_end_does_not_end_only_host(browser, server_url):
+    """A transport outage must not pretend the whole game ended locally."""
+    host = browser.new_page()
+    try:
+        host.goto(
+            f"{server_url}/play.html?room=END{secrets.token_hex(4).upper()}&host=1&name=Host"
+        )
+        _mark_rom_ready(host)
+        host.click("#start-btn")
+        expect(host.locator("#overlay")).to_be_hidden(timeout=10000)
+        host.evaluate("""() => {
+          const socket = window.__test_socket;
+          const emit = socket.emit.bind(socket);
+          socket.emit = (event, ...args) => event === 'end-game' ? socket : emit(event, ...args);
+        }""")
+        host.click("#toolbar-more")
+        host.click("#toolbar-end")
+        expect(host.locator("#toast-container")).to_contain_text(
+            "Could not confirm", timeout=10000
+        )
+        expect(host.locator("#overlay")).to_be_hidden()
+    finally:
+        host.close()

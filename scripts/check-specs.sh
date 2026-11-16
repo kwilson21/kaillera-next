@@ -575,3 +575,7 @@ if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2
   exit 2
 fi
+
+$QUINT typecheck specs/game_end.qnt
+$QUINT test specs/game_end.qnt --main=game_end_before --backend="$BACKEND"
+$QUINT test specs/game_end.qnt --main=game_end_fixed --backend="$BACKEND"

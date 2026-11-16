@@ -6,6 +6,39 @@ replayed by the model checker and drawn from the trace that produced. Do not edi
 
 To draw a counterexample instead, see the top of `scripts/trace-diagram.mjs`.
 
+## `specs/game_end.qnt` (`game_end_fixed`)
+
+A host end request waits for the server rather than ending only the host on timeout. The authoritative lobby roster repairs a lost end event, and a delayed request cannot end a rematch.
+
+### timeoutDoesNotEndOnlyHostTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: timeout
+```
+
+### rosterRepairsLostEndTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: receiveEnd
+  Note over Room: serverMatch = 0
+  Room->>Room: roster
+  Note over Room: hostMatch = 0<br/>guestMatch = 0
+```
+
+### staleRetryDoesNotEndRematchTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: rematch
+  Note over Room: serverMatch = 2<br/>hostMatch = 2<br/>guestMatch = 2
+  Room->>Room: receiveEnd
+```
+
 ## `specs/room_lifecycle.qnt` (`room_current`)
 
 The server's view of a room against what each player's page is doing. The note on a page is the state it moves to; a dashed arrow is what an action did to another page.
