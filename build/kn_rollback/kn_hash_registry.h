@@ -26,6 +26,55 @@ uint32_t kn_hash_fnv1a(const uint8_t* data, size_t len);
  * envelope, well below RDRAM size. */
 #define KN_FT_BUFFER_SIZE 4096
 
+/* ── The address map ─────────────────────────────────────────────────
+ * Where each field lives is data, not code: one uint32 per entry below, in
+ * this order. The built-in values are SSB64 US's (kn_gameplay_addrs.h and
+ * the citation blocks in this header). A page that knows another ROM's map
+ * installs it with kn_field_map_set before the match starts; the maps and
+ * the checks a map must pass are in web/src/address-maps.ts and
+ * docs/address-maps.md. Offsets are N64 RDRAM offsets (address & 0x00FFFFFF);
+ * the registry applies the byte swap for one-byte fields itself. */
+enum {
+    KN_MAP_STOCKS_BASE = 0,     /* P1 stock_count (1 byte); + player * PLAYER_STRIDE */
+    KN_MAP_PLAYER_STRIDE,
+    KN_MAP_SCENE_CURR,          /* scene_curr (1 byte) */
+    KN_MAP_VS_BATTLE_HEADER,
+    KN_MAP_VS_BATTLE_HEADER_SIZE,
+    KN_MAP_RNG_SEED,            /* 4 bytes */
+    KN_MAP_CSS_BASE,            /* P1 character-select struct; + player * CSS_STRIDE */
+    KN_MAP_CSS_STRIDE,
+    KN_MAP_CSS_OFF_CHAR_ID,     /* 4 bytes each, within the struct */
+    KN_MAP_CSS_OFF_CURSOR_STATE,
+    KN_MAP_CSS_OFF_SELECTED_FLAG,
+    KN_MAP_FT_MOTION_COUNT,     /* 4 bytes */
+    KN_MAP_FT_BUFFER_PTR,       /* holds an N64 pointer to the fighter structs */
+    KN_MAP_FT_BUFFER_SIZE,      /* bytes hashed from that pointer */
+    KN_MAP_SUDDEN_DEATH_HEADER, /* the other copy of the battle state, laid out
+                                 * like the one at VS_BATTLE_HEADER; 0 = none.
+                                 * See "Two copies of the battle state" below. */
+    KN_MAP_COUNT
+};
+
+/* Two copies of the battle state. SSB64 runs a normal VS match from the
+ * copy at VS_BATTLE_HEADER and a sudden death from a second copy the game
+ * fills from it (scVSBattleStartScene, scvsbattle.c: gSCManagerBattleState
+ * is pointed at gSCManagerVSBattleState). When SUDDEN_DEATH_HEADER is set,
+ * the stocks and battle-header fields hash both copies, the live one first,
+ * so a divergence in either is seen whichever one the game is running from.
+ * The copy not in use holds the same bytes on every peer. */
+
+/* Install a map: `count` must be KN_MAP_COUNT and every entry must fit in
+ * 8 MB of RDRAM (sizes and strides at most 64 KB). Returns 1 and clears the
+ * history rings, or 0 and changes nothing. It checks each entry on its own,
+ * not that a base plus its size or strides stays inside RDRAM: a read that
+ * runs off the end hashes to 0, like any unavailable field. The page checks
+ * whole reads before it installs a map (addressMapProblem in
+ * web/src/address-maps.ts). */
+int kn_field_map_set(const uint32_t* values, uint32_t count);
+uint32_t kn_field_map_count(void);
+/* The entry in use at `index`; 0xFFFFFFFF if out of range. */
+uint32_t kn_field_map_value(uint32_t index);
+
 /* Per-field exports declared in Tasks 3+ on top of this skeleton.
  * Each entry MUST carry the citation block above its declaration. */
 
@@ -40,14 +89,23 @@ uint32_t kn_hash_fnv1a(const uint8_t* data, size_t len);
 int kn_hash_registry_post_tick(int32_t frame, int in_replay);
 
 /* kn_hash_stocks
- * Source:  SCManagerVSBattleState.players[player_idx].stock_count
+ * Source:  gSCManagerTransferBattleState.players[player_idx].stock_count,
+ *          the battle state a normal VS match runs from (the map's
+ *          STOCKS_BASE; see kn_gameplay_addrs.h on the two copies)
  * decomp:  lib/ssb-decomp-re/include/sc/sctypes.h:218 (SCPlayerData.stock_count @ +0xB)
- *          lib/ssb-decomp-re/include/sc/sctypes.h:301 (SCManagerVSBattleState.players @ +0x20)
- * Address: KN_ADDR_PLAYER_STOCKS_BASE + player_idx * KN_PLAYER_STRIDE  (1 byte)
+ *          lib/ssb-decomp-re/include/sc/sctypes.h:301 (SCBattleState.players @ +0x20)
+ *          lib/ssb-decomp-re/src/sc/sccommon/scvsbattle.c (scVSBattleStartScene
+ *          points gSCManagerBattleState at the transfer struct)
+ * Address: KN_ADDR_LIVE_PLAYER_STOCKS_BASE + player_idx * KN_PLAYER_STRIDE  (1 byte),
+ *          then the same byte of the sudden-death copy, gSCManagerVSBattleState
+ *          (SUDDEN_DEATH_HEADER + the same distance from its header;
+ *          scVSBattleStartScene points gSCManagerBattleState at it for a
+ *          sudden death, tests/hash-golden/fixtures/in-sudden-death.rdram.gz)
  * Sampling: kn_post_tick (post-physics, pre-render)
  *
- * Returns FNV-1a of the single byte. Returns 0 if RDRAM unavailable
- * or player_idx >= 4. Frame param informational; pass -1 for live read.
+ * Returns FNV-1a of the two bytes (of the live byte alone when the map has
+ * no second copy). Returns 0 if RDRAM unavailable or player_idx >= 4.
+ * Frame param informational; pass -1 for live read.
  */
 uint32_t kn_hash_stocks(uint8_t player_idx, int32_t frame);
 
@@ -102,13 +160,16 @@ uint32_t kn_hash_match_phase(int32_t frame);
 size_t kn_hash_history_match_phase(uint32_t count, uint32_t* out_pairs);
 
 /* kn_hash_vs_battle_hdr
- * Source:  gSCManagerVSBattleState header (32 bytes — game_type, gkind,
+ * Source:  gSCManagerTransferBattleState header, the live battle state
+ *          (32 bytes — game_type, gkind,
  *          is_team_battle, game_rules, pl_count, cp_count, time_limit,
  *          stocks, handicap, is_team_attack, is_stage_select,
  *          damage_ratio, item_toggles, is_reset_players, game_status,
  *          time_remain, time_passed, item_appearance_rate)
- * decomp:  lib/ssb-decomp-re/include/sc/sctypes.h (SCManagerVSBattleState)
- * Address: KN_ADDR_VS_BATTLE_HEADER  (KN_SIZE_VS_BATTLE_HEADER bytes)
+ * decomp:  lib/ssb-decomp-re/include/sc/sctypes.h (SCBattleState)
+ * Address: KN_ADDR_LIVE_BATTLE_HEADER  (KN_SIZE_VS_BATTLE_HEADER bytes),
+ *          then the same bytes of the sudden-death copy at
+ *          KN_ADDR_SUDDEN_DEATH_BATTLE_HEADER, hashed as one run
  * Sampling: kn_post_tick (post-physics, pre-render)
  */
 uint32_t kn_hash_vs_battle_hdr(int32_t frame);

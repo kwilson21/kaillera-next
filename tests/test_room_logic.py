@@ -175,6 +175,12 @@ class TestSwapSid:
         assert "new-sid" in room.rom_ready
         assert "old-sid" not in room.rom_ready
 
+    def test_swaps_rom_prompt(self):
+        room = _make_room()
+        room.rom_prompt.add("old-sid")
+        _swap_sid(room, "pid-1", "old-sid", "new-sid")
+        assert room.rom_prompt == {"new-sid"}
+
     def test_swaps_input_and_device_types(self):
         room = _make_room()
         room.input_types["old-sid"] = "gamepad"
@@ -321,6 +327,31 @@ class TestRomReady:
 
         assert err == "ROM does not match host"
         assert "sid-2" not in room.rom_ready
+
+    def test_a_guest_at_the_rom_prompt_says_so_until_it_has_one(self):
+        room = _make_room(owner="sid-host")
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[0] = "pid-host"
+        room.slots[1] = "pid-2"
+        room.rom_ready.update({"sid-host", "sid-2"})
+        rooms["ROOM7"] = room
+        _sid_to_room["sid-2"] = ("ROOM7", "pid-2", False)
+
+        # A page that has not loaded one yet is not at the prompt.
+        assert self._run("sid-2", {"ready": False}) is None
+        assert "sid-2" not in room.rom_ready
+        assert _players_payload(room)["players"]["pid-2"]["romPrompt"] is False
+
+        # The page at the ROM prompt says so.
+        assert self._run("sid-2", {"ready": False, "prompt": True}) is None
+        assert room.rom_prompt == {"sid-2"}
+        assert _players_payload(room)["players"]["pid-2"]["romPrompt"] is True
+
+        # Its ROM dropped, it is ready and at the prompt no longer.
+        assert self._run("sid-2", {"ready": True}) is None
+        assert "sid-2" in room.rom_ready
+        assert room.rom_prompt == set()
 
 
 class TestReleaseSlot:
@@ -599,13 +630,18 @@ def test_screenshot_claiming_another_players_slot_is_dropped():
 
 
 def _flush(register):
-    append = AsyncMock(return_value=0)
+    append = AsyncMock(return_value={"lastSeq": 0, "auditLastSeq": -1})
     patches = [
         patch.object(signaling, "check", new=lambda sid, event: True),
         patch.object(signaling.db, "register_match", new=register),
-        patch.object(signaling.db, "append_session_log", new=append),
+        patch.object(signaling.db, "append_session_flush", new=append),
     ]
-    _run_with(patches, signaling.session_log_handler("sid-host", {"matchId": "match-1", "entries": []}))
+
+    async def flush():
+        await signaling.session_log_handler("sid-host", {"matchId": "match-1", "entries": []})
+        await asyncio.gather(*signaling._registering.values())
+
+    _run_with(patches, flush())
     return append
 
 
@@ -621,6 +657,56 @@ def test_session_log_flush_survives_register_failure():
     _host_room().match_id = "match-1"
     append = _flush(AsyncMock(side_effect=RuntimeError("D1 down")))
     append.assert_awaited_once()
+
+
+def test_session_log_flushes_never_wait_on_a_slow_registration():
+    """After a restart a match's first flushes register it with D1. Flushes must
+    not wait on that holding their decoded payloads, or they pile up outside
+    append_session_log's cap while registration stays slow."""
+    _host_room().match_id = "match-1"
+    registered = asyncio.Event()
+    register_calls = 0
+    in_flight = peak = 0
+
+    async def blocked_register(*args):
+        nonlocal register_calls
+        register_calls += 1
+        await registered.wait()
+
+    async def append(*args):
+        await asyncio.sleep(0.05)
+        return {"lastSeq": 0, "auditLastSeq": -1}
+
+    patches = [
+        patch.object(signaling, "check", new=lambda sid, event: True),
+        patch.object(signaling.db, "_require", new=lambda: None),
+        patch.object(signaling.db, "register_match", new=blocked_register),
+        patch.object(signaling.db, "_append_session_log_locked", new=append),
+    ]
+
+    async def flush():
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            return await signaling.session_log_handler("sid-host", {"matchId": "match-1", "entries": []})
+        finally:
+            in_flight -= 1
+
+    async def staggered():
+        tasks = []
+        for _ in range(20):
+            tasks.append(asyncio.create_task(flush()))
+            await asyncio.sleep(0.01)
+        results = await asyncio.gather(*tasks)
+        registered.set()
+        await asyncio.gather(*signaling._registering.values())
+        return results
+
+    results = _run_with(patches, staggered())
+    assert sum(r is not None for r in results) >= 4  # appends kept completing
+    assert peak <= 3  # two holding places, plus one arriving to be turned away
+    assert register_calls == 1
 
 
 def test_start_game_gives_up_on_a_slow_registration():
@@ -646,3 +732,36 @@ def test_start_game_gives_up_on_a_slow_registration():
     assert _time.monotonic() - started < 2
     assert room.status == "playing"
 
+
+# ── the room's game id ──────────────────────────────────────────────────────
+
+
+def test_a_room_without_a_known_game_has_no_game_id():
+    from src.api.signaling import _clean_game_id
+
+    # A host with no ROM yet, or one the site does not know, sends nothing:
+    # the room is not labelled with a game it is not (it used to say ssb64).
+    assert _clean_game_id("") == ""
+    assert _clean_game_id("ssb64") == "ssb64"
+    assert _clean_game_id("smash-remix") == "smash-remix"
+    assert _clean_game_id("<script>") == "unknown"
+    assert _clean_game_id("x" * 33) == "unknown"
+
+
+def test_the_host_can_clear_and_change_the_game_id():
+    from src.api.signaling import set_game_id
+
+    room = _host_room()
+    room.game_id = "ssb64"
+    patches = [
+        patch.object(signaling.sio, "emit", new=AsyncMock()),
+        patch.object(signaling.state, "save_room", new=AsyncMock()),
+        patch.object(signaling, "check", new=lambda sid, event: True),
+    ]
+    assert _run_with(patches, set_game_id("sid-host", {"game_id": ""})) is None
+    assert room.game_id == ""
+    assert _run_with(patches, set_game_id("sid-host", {"game_id": "smash-remix"})) is None
+    assert room.game_id == "smash-remix"
+    # A request without the field is not taken as SSB64 either.
+    assert _run_with(patches, set_game_id("sid-host", {})) is None
+    assert room.game_id == ""

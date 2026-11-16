@@ -27,12 +27,35 @@ typedef struct {
 /* Match phase / scene state */
 #define KN_ADDR_SCENE_CURR              0xA4AD0   /* gSCManagerSceneData.scene_curr (1 byte) */
 
-/* VS battle state header (32 bytes covering game_type, stocks, status, etc.) */
-#define KN_ADDR_VS_BATTLE_HEADER        0xA4EF8
-#define KN_SIZE_VS_BATTLE_HEADER        32
+/* SSB64 keeps two copies of the battle state (SCBattleState, sctypes.h):
+ *
+ *   gSCManagerTransferBattleState @ 0x800A4D08  the one a normal VS match
+ *       runs from: gSCManagerBattleState (0x800A50E8) points at it
+ *       (scvsbattle.c scVSBattleStartScene), its game_status reads 1 while
+ *       the match is on and its stock counts fall as fighters are KO'd.
+ *   gSCManagerVSBattleState       @ 0x800A4EF8  used for sudden death. In a
+ *       normal VS match it is dormant: game_status stays 0 and every stock
+ *       count stays 0.
+ *
+ * tests/hash-golden reads both from a RAM dump of a match (pointer
+ * 0x800A4D08, live status 1 and stocks 3,3; dormant status 0 and stocks 0).
+ *
+ * Both the desync registry (kn_hash_registry.c) and kn_gameplay_hash read
+ * the LIVE struct. Until 2026-11 they read only the other one, so neither
+ * could see a stock count that differed between peers in a normal match. */
 
-/* Per-player stocks (offset 0xB inside SCPlayerData; players[] starts at +0x20) */
-#define KN_ADDR_PLAYER_STOCKS_BASE      0xA4F23   /* P1; +0x74 per player */
+/* Live battle state: header (32 bytes) and per-player stock counts
+ * (SCPlayerData.stock_count at +0xB; players[] starts at +0x20). */
+#define KN_ADDR_LIVE_BATTLE_HEADER      0xA4D08
+#define KN_SIZE_VS_BATTLE_HEADER        32
+#define KN_ADDR_LIVE_PLAYER_STOCKS_BASE 0xA4D33   /* P1; +0x74 per player */
+
+/* The copy used for sudden death, laid out the same way. kn_gameplay_hash
+ * and the desync registry read it as well as the live one, so a sudden
+ * death is covered too (tests/hash-golden/fixtures/in-sudden-death.rdram.gz
+ * is a dump of one: the game's pointer names this copy there). */
+#define KN_ADDR_SUDDEN_DEATH_BATTLE_HEADER      0xA4EF8
+#define KN_ADDR_SUDDEN_DEATH_PLAYER_STOCKS_BASE 0xA4F23   /* P1; +0x74 per player */
 
 /* RNG */
 #define KN_ADDR_SY_UTILS_RANDOM_SEED    0x03B940  /* sSYUtilsRandomSeed (4 bytes) */

@@ -2,7 +2,8 @@
 
 Run: pytest tests/test_pause_reconnect.py -v
 
-Requires: dev server running at localhost:27888, ROM file at ROM_PATH.
+Requires KN_ROM, the ROM's path. The server is the one tests/conftest.py starts
+when none is running.
 """
 
 import os
@@ -14,7 +15,7 @@ import time
 import pytest
 from playwright.sync_api import expect
 
-ROM_PATH = "/Users/kazon/Downloads/Super Smash Bros. (USA)/Super Smash Bros. (USA).z64"
+ROM_PATH = os.environ.get("KN_ROM", "")
 
 
 def _room_id(prefix):
@@ -23,27 +24,13 @@ def _room_id(prefix):
     return f"{prefix}{suffix}"
 
 
-@pytest.fixture(scope="module")
-def server_url():
-    """Use the already-running dev server (user manages it)."""
-    import requests
-    # KN_TEST_PORT lets parallel checkouts each run their own test server.
-    port = os.environ.get("KN_TEST_PORT", "27888")
-    url = f"http://localhost:{port}"
-    try:
-        r = requests.get(f"{url}/health", timeout=2)
-        if r.status_code != 200:
-            pytest.skip(f"Dev server not running on localhost:{port}")
-    except Exception:
-        pytest.skip(f"Dev server not running on localhost:{port}")
-    return url
-
-
 @pytest.fixture(autouse=True)
 def _require_rom():
     """Skip all tests if ROM file is not available."""
-    if not os.path.exists(ROM_PATH):
-        pytest.skip(f"ROM file not found: {ROM_PATH}")
+    if not ROM_PATH:
+        pytest.skip("needs a ROM: set KN_ROM to the path of the SSB64 (USA) .z64")
+    if not os.path.isfile(ROM_PATH):
+        pytest.skip(f"KN_ROM is not a file: {ROM_PATH}")
 
 
 def _load_rom(page):
@@ -74,7 +61,7 @@ def _cleanup(*pages_and_contexts):
             pass
 
 
-def _start_lockstep_game(host, guest, server_url, room):
+def _start_lockstep_game(host, guest, server_url, room, start_game):
     """Set up a 2-player lockstep game with real ROM, wait for lockstep loop."""
     host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host",
               wait_until="networkidle")
@@ -87,34 +74,26 @@ def _start_lockstep_game(host, guest, server_url, room):
     _load_rom(host)
     _load_rom(guest)
 
-    expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
-    host.click("#start-btn")
-
-    # Wait for game to start (toolbar visible)
-    expect(host.locator("#toolbar")).to_be_visible(timeout=15000)
-    expect(guest.locator("#toolbar")).to_be_visible(timeout=15000)
-
-    # Wait for lockstep loop to actually start (emulator booted, synced)
-    host.wait_for_function("window._lockstepActive === true", timeout=30000)
-    guest.wait_for_function("window._lockstepActive === true", timeout=30000)
+    # Start, and wait for the lockstep loop to run on both (emulator booted, synced)
+    start_game(host, guest)
 
     # Wait for DCs to be open
     host.wait_for_function(
-        """window._peers && Object.values(window._peers).some(function(p) {
+        """window.KNState.peers && Object.values(window.KNState.peers).some(function(p) {
             return p.dc && p.dc.readyState === 'open';
         })""",
         timeout=10000,
     )
 
 
-def test_resume_toast_on_visibility_change(browser, server_url):
+def test_resume_toast_on_visibility_change(browser, server_url, start_game):
     """Returning from background sends 'returned' toast to peers."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, _room_id("P1"))
+        _start_lockstep_game(host, guest, server_url, _room_id("P1"), start_game)
 
         # Simulate guest going to background then returning after >500ms
         guest.evaluate("""
@@ -142,18 +121,18 @@ def test_resume_toast_on_visibility_change(browser, server_url):
         _cleanup(host, guest, ctx)
 
 
-def test_reconnect_toast_on_dc_close(browser, server_url):
+def test_reconnect_toast_on_dc_close(browser, server_url, start_game):
     """DC death shows toast notifications (no blocking overlay)."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, _room_id("RC"))
+        _start_lockstep_game(host, guest, server_url, _room_id("RC"), start_game)
 
         # Kill guest's DataChannel (only DC in 2-player game)
         guest.evaluate("""
-            var peers = Object.values(window._peers);
+            var peers = Object.values(window.KNState.peers);
             for (var i = 0; i < peers.length; i++) {
                 if (peers[i].dc) peers[i].dc.close();
             }
@@ -213,26 +192,25 @@ def test_rom_transfer_mobile_ua(browser, server_url):
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
 
-        # Wait for ROM transfer to complete
-        guest.wait_for_function(
-            "document.getElementById('toast-container').textContent.includes('ROM loaded from host')",
-            timeout=60000,
-        )
+        # Wait for the ROM transfer to complete: the guest's ROM status then
+        # reads "Loaded: <name> (from host)". The whole ROM crosses in small
+        # chunks, which takes a while in a slow container.
+        expect(guest.locator("#rom-status")).to_contain_text("(from host)", timeout=120000)
     finally:
         _cleanup(host, guest, host_ctx, mobile_ctx)
 
 
-def test_background_tab_resumes_cleanly(browser, server_url):
+def test_background_tab_resumes_cleanly(browser, server_url, start_game):
     """Background tab resumes on return."""
     ctx = browser.new_context()
     host = ctx.new_page()
     guest = ctx.new_page()
 
     try:
-        _start_lockstep_game(host, guest, server_url, _room_id("P2"))
+        _start_lockstep_game(host, guest, server_url, _room_id("P2"), start_game)
 
         # Record host frame
-        initial_frame = host.evaluate("window._frameNum")
+        initial_frame = host.evaluate("window.KNState.frameNum")
 
         # Simulate guest going to background then returning after >500ms
         guest.evaluate("""
@@ -246,7 +224,7 @@ def test_background_tab_resumes_cleanly(browser, server_url):
         time.sleep(2)
 
         # Host should keep advancing
-        later_frame = host.evaluate("window._frameNum")
+        later_frame = host.evaluate("window.KNState.frameNum")
         assert later_frame > initial_frame, (
             f"Host stalled: frame stayed at {initial_frame}"
         )
@@ -261,7 +239,7 @@ def test_background_tab_resumes_cleanly(browser, server_url):
 
         # Guest should resume (frame advances past 0)
         guest.wait_for_function(
-            "window._frameNum > 0",
+            "window.KNState.frameNum > 0",
             timeout=10000,
         )
     finally:

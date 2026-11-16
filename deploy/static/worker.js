@@ -2,7 +2,7 @@
  * Landing Worker (hosting option A, deploy/static/README.md).
  *
  * One domain, two hosts behind it:
- *   - the front page (/) and the invite page (/join) come from this Worker's
+ *   - the front page (/), invite page (/join), and privacy notice (/privacy) come from this Worker's
  *     static assets, so they load instantly even while the game server naps;
  *   - everything else (the game page, the API, Socket.IO) is passed through
  *     to the game server at env.ORIGIN, WebSocket upgrades included.
@@ -23,28 +23,35 @@
  * doesn't fully cover.
  *
  * Build: python scripts/build_landing.py   Deploy: npx wrangler deploy -c wrangler.landing.jsonc
+ * (.github/workflows/version-bump.yml runs both once per merge to main).
  */
 
-// Every file the two pages load. Serving all of them here matters: the
+// Every file the static pages load. Serving all of them here matters: the
 // pages' scripts are `defer`, so one proxied script behind a napping server
 // would hold up the waking screen itself.
 //
-// version.json and changelog.json are packaged for instant footer fallback,
-// but deliberately excluded from the landing build id because CI rewrites
-// them on nearly every merge (server/src/landing_build.py has the reason).
-const PAGES = { '/': '/index.html', '/index.html': '/index.html', '/join': '/join.html' };
+// version.json and changelog.json are not here: CI rewrites them on every
+// release, so a copy here names an old one whenever this Worker is behind the
+// game server (it named v0.67.0 while v0.69.3 was live). They go to the game
+// server like the API; the footer fetches the version without blocking
+// anything, and asks again while the server wakes.
+const PAGES = {
+  '/': '/index.html',
+  '/index.html': '/index.html',
+  '/join': '/join.html',
+  '/privacy': '/privacy.html',
+  '/privacy.html': '/privacy.html',
+};
 const ASSET_PREFIXES = ['/static/fonts/', '/static/shots/'];
 const ASSET_FILES = new Set([
   '/static/landing.css',
-  '/static/landing.js',
-  '/static/lagviz.js',
-  '/static/join.js',
-  '/static/storage.js',
+  '/static/dist/kn-landing.js',
+  '/static/dist/kn-wake-art.js',
+  '/static/dist/kn-join.js',
+  '/static/dist/kn-site.js',
   '/static/version.js',
   '/static/version-guard.js',
   '/static/feedback.js',
-  '/static/version.json',
-  '/static/changelog.json',
   '/static/favicon.svg',
   '/static/kn-logo.svg',
   '/static/apple-touch-icon.png',
@@ -62,13 +69,14 @@ const CRAWLER =
   /Discordbot|Twitterbot|facebookexternalhit|Facebot|Slackbot|WhatsApp|TelegramBot|LinkedInBot|SkypeUriPreview|Applebot|redditbot|Embedly|Iframely/i;
 const PREVIEW_TIMEOUT_MS = 1500;
 
-function withHeaders(res, isPage) {
+function withHeaders(res, isPage, connectOrigin = '') {
   const out = new Response(res.body, res);
   out.headers.set('X-Content-Type-Options', 'nosniff');
   out.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   out.headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
   if (isPage) {
-    out.headers.set('Content-Security-Policy', CSP);
+    const csp = connectOrigin ? CSP.replace("connect-src 'self';", `connect-src 'self' ${connectOrigin};`) : CSP;
+    out.headers.set('Content-Security-Policy', csp);
     out.headers.set('X-Frame-Options', 'SAMEORIGIN');
     out.headers.set('Cache-Control', 'no-store');
   } else {
@@ -80,8 +88,12 @@ function withHeaders(res, isPage) {
 // The static pages carry generic preview tags with a host placeholder. On
 // /join the canonical link keeps the invite (only a room ID that fits the
 // server's pattern goes in; anything else is left out).
-async function staticPage(res, url) {
-  let html = (await res.text()).replaceAll('https://__KN_HOST__', `https://${url.host}`);
+async function staticPage(res, url, env) {
+  const origin = new URL(env.ORIGIN).origin;
+  const connectOrigin = origin === url.origin ? '' : origin;
+  let html = (await res.text())
+    .replaceAll('https://__KN_HOST__', `https://${url.host}`)
+    .replaceAll('__KN_ORIGIN__', connectOrigin);
   const raw = url.searchParams.get('room') || '';
   const room = /^[A-Za-z0-9]{3,16}$/.test(raw) ? raw : ''; // case-sensitive, like the server
   if (url.pathname === '/join' && room) {
@@ -91,7 +103,7 @@ async function staticPage(res, url) {
       `property="og:url" content="https://${url.host}/join?room=${room}${spectate}"`,
     );
   }
-  return withHeaders(new Response(html, res), true);
+  return withHeaders(new Response(html, res), true, connectOrigin);
 }
 
 async function previewPage(request, env, url) {
@@ -202,21 +214,17 @@ async function proxy(request, env, url) {
 // timeout or any error this returns null so the caller falls back to this
 // Worker's own (possibly outdated, but instant) copy instead.
 const STALE_PROXY_TIMEOUT_MS = 3000;
-const METADATA_PROXY_TIMEOUT_MS = 800;
 const ORIGIN_SLOW_COOLDOWN_MS = 30_000;
 let _originSlowUntil = 0;
-let _metadataSlowUntil = 0;
 
 function originSucceeded() {
   _originSlowUntil = 0;
-  _metadataSlowUntil = 0;
 }
 
-async function proxyLanding(request, env, url, timeoutMs = STALE_PROXY_TIMEOUT_MS, isMetadata = false) {
+async function proxyLanding(request, env, url) {
   if (Date.now() < _originSlowUntil) return null;
-  if (isMetadata && Date.now() < _metadataSlowUntil) return null;
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const timer = setTimeout(() => ctl.abort(), STALE_PROXY_TIMEOUT_MS);
   try {
     const target = new URL(url.pathname + url.search, env.ORIGIN);
     const req = new Request(target, request);
@@ -226,11 +234,7 @@ async function proxyLanding(request, env, url, timeoutMs = STALE_PROXY_TIMEOUT_M
     if (!res.ok && res.status !== 304) return null;
     return await rewriteOriginHost(res, env, url, request.method);
   } catch {
-    if (isMetadata) {
-      _metadataSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
-    } else {
-      _originSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
-    }
+    _originSlowUntil = Date.now() + ORIGIN_SLOW_COOLDOWN_MS;
     return null; // timed out or errored: caller falls back to our own copy
   } finally {
     clearTimeout(timer);
@@ -383,18 +387,13 @@ export default {
       const verdict = await currentVerdict(env, ctx, true);
       if (verdict === 'stale' && !previewFailed) {
         const proxied = await proxyLanding(request, env, url);
-        if (proxied) return proxied;
+        if (proxied) return staticPage(proxied, url, env);
       }
       const res = await env.ASSETS.fetch(new Request(new URL(page, url), request));
-      return staticPage(res, url);
+      return staticPage(res, url, env);
     }
     if (isAsset) {
       if (url.pathname === '/static/landing-build.json') {
-        return withHeaders(await env.ASSETS.fetch(request), false);
-      }
-      if (url.pathname === '/static/version.json' || url.pathname === '/static/changelog.json') {
-        const proxied = await proxyLanding(request, env, url, METADATA_PROXY_TIMEOUT_MS, true);
-        if (proxied) return proxied;
         return withHeaders(await env.ASSETS.fetch(request), false);
       }
       const verdict = await currentVerdict(env, ctx, false);

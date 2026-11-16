@@ -9,7 +9,7 @@ dependencies = [
     "python-socketio>=5.11.0",
     "python-dotenv>=1.0.0",
     "redis[hiredis]>=5.0.0",
-    "aiosqlite==0.20.0",
+    "aiosqlite==0.22.1",
     # Parquet rotation (src/match_rotation.py) — turns finished matches
     # into Parquet files + precomputed metrics so admin queries and
     # analyze_match.py don't re-parse the session_logs JSON blob.
@@ -23,6 +23,7 @@ dependencies = [
     "Pillow>=10.0.0",
     # Cloudflare R2 blob storage (src/blobstore.py) through its S3-compatible API.
     "boto3>=1.34",
+    "sqlalchemy>=2.0.40",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +35,7 @@ dev = [
     # The runtime server has no browser dependency.
     "playwright>=1.40.0",
     "pytest-playwright>=0.5",
-    "ruff>=0.8.0",
+    "ruff>=0.17.1",
 ]
 analysis = [
     # tools/analyze_match.py — DuckDB for scanning rotated Parquet files

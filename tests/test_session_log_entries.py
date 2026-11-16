@@ -96,3 +96,23 @@ def test_context_ignores_non_dict_input():
     from src.api.signaling import _session_log_context
 
     assert _session_log_context("not a dict", ["nope"]) == "{}"
+
+
+# ── input audit deltas ────────────────────────────────────────────────────────
+
+
+def test_audit_records_without_an_epoch_are_dropped():
+    from src.api.signaling import _session_log_audit
+
+    assert _session_log_audit({"entries": [{"seq": 0}]}) == ("", [])
+    assert _session_log_audit("not a dict") == ("", [])
+
+
+def test_audit_keeps_the_newest_records_that_fit(monkeypatch):
+    from src.api import signaling
+
+    records = [{"seq": i, "s": "L", "f": i, "b": 0, "lx": 0, "ly": 0, "cx": 0, "cy": 0} for i in range(100)]
+    monkeypatch.setattr(signaling, "_SESSION_LOG_AUDIT_MAX", 1000)
+    epoch, kept = signaling._session_log_audit({"epoch": "a1", "entries": records})
+    assert epoch == "a1"
+    assert kept and kept[-1]["seq"] == 99 and len(kept) < 100

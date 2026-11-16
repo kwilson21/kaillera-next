@@ -25,10 +25,10 @@ GAME_INFO: dict[str, dict[str, str]] = {
     "smash-remix": {"image": "smash-remix.jpg", "name": "Smash Remix"},
 }
 
-# Raw env var values — evaluated per-request via feature_enabled_for_host().
-# Each can be "true" (all hosts), "false" (no hosts), or "domain1.com,domain2.com"
+# Raw env var value — evaluated per-request via feature_enabled_for_host().
+# Can be "true" (all hosts), "false" (no hosts), or "domain1.com,domain2.com"
 # (enabled only for the listed hostnames, port-stripped).
-_GAME_IMAGES_RAW = os.environ.get("GAME_IMAGES_ENABLED", "true")
+_GAME_IMAGES_RAW = os.environ.get("GAME_IMAGES_ENABLED", "true")  # read but not wired to anything yet
 _ROM_SHARING_RAW = os.environ.get("ROM_SHARING_ENABLED", "true")
 
 

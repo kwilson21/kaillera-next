@@ -1,4 +1,16 @@
-FROM python:3.13.3-slim-bookworm
+# The TypeScript bundles (web/static/dist), built from web/src at the versions
+# in package-lock.json. Only production dependencies are installed: the three
+# libraries the bundle contains and esbuild.
+FROM node:24.22.3-bookworm-slim AS web
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev
+COPY tsconfig.json ./
+COPY scripts/build-web.mjs scripts/build-web.mjs
+COPY web/src web/src
+RUN node scripts/build-web.mjs
+
+FROM python:3.13.16-slim-bookworm
 
 # Prevent .pyc files and enable unbuffered output for logging
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -11,7 +23,7 @@ WORKDIR /app
 # build if the lock is out of date with pyproject.toml). Resolving from
 # pyproject.toml alone picked up whatever was newest on build day.
 COPY server/pyproject.toml server/uv.lock server/
-RUN pip install --no-cache-dir uv==0.8.17 \
+RUN pip install --no-cache-dir uv==0.13.1 \
     && uv export --quiet --project server --locked --no-dev --no-emit-project --no-hashes -o /tmp/requirements.txt \
     && pip install --no-cache-dir -r /tmp/requirements.txt \
     && pip uninstall -y uv && rm /tmp/requirements.txt
@@ -19,6 +31,7 @@ RUN pip install --no-cache-dir uv==0.8.17 \
 # Copy application code
 COPY server/ server/
 COPY web/ web/
+COPY --from=web /build/web/static/dist web/static/dist
 
 # Create non-root user and logs directory
 RUN groupadd -r appuser && useradd -r -g appuser -s /usr/sbin/nologin appuser \

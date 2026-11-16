@@ -187,6 +187,37 @@ async def _run_insert_client_event(tmp_db):
     await close_db()
 
 
+def test_reopen_session(tmp_db):
+    """A player taken back into its match is no longer marked as having left it."""
+    _run_async(_run_reopen_session(tmp_db))
+
+
+async def _run_reopen_session(tmp_db):
+    from src.db import append_session_log, close_db, init_db, query, reopen_session, set_session_ended
+
+    await init_db(tmp_db)
+    await append_session_log({
+        "match_id": "reopen-1",
+        "room": "XYZ",
+        "slot": 1,
+        "player_name": "P2",
+        "mode": "rollback",
+        "entries": [],
+        "summary": "{}",
+        "context": "{}",
+        "ip_hash": "abc",
+    })
+    await set_session_ended("reopen-1", 1, "disconnect")
+    await reopen_session("reopen-1", 1)
+    rows = await query("SELECT ended_by FROM session_logs WHERE match_id='reopen-1' AND slot=1", ())
+    assert rows[0]["ended_by"] is None
+    # The game-end update can now record how the match really ended for it.
+    await set_session_ended("reopen-1", None, "game-end")
+    rows = await query("SELECT ended_by FROM session_logs WHERE match_id='reopen-1' AND slot=1", ())
+    assert rows[0]["ended_by"] == "game-end"
+    await close_db()
+
+
 def test_set_session_ended(tmp_db):
     """set_session_ended updates the ended_by field."""
     _run_async(_run_set_session_ended(tmp_db))
@@ -623,6 +654,43 @@ async def _run_concurrent_appends(tmp_db):
     await close_db()
 
 
+# A burst of flushes for one (match_id, slot) must not queue without bound:
+# each waiter holds its whole decoded flush, and a desync's burst once ran a
+# 512 MB instance out of memory. One runs, one waits, the rest are turned away.
+
+
+def test_append_session_log_turns_away_flushes_past_one_waiting(tmp_db):
+    _run_async(_run_append_burst(tmp_db))
+
+
+async def _run_append_burst(tmp_db):
+    import asyncio
+
+    from src.db import append_session_log, close_db, get_full_log_entries, init_db, session_log_busy
+
+    await init_db(tmp_db)
+    base = {
+        "match_id": "m-burst", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+        "summary": "{}", "context": "{}", "ip_hash": "abc", "epoch": "e1",
+    }
+
+    def flush(n):
+        return append_session_log({**base, "entries": [{"seq": i, "t": i, "f": i, "msg": f"a{i}"} for i in range(n)]})
+
+    tasks = [asyncio.create_task(flush(n)) for n in (2, 3, 4, 5)]
+    await asyncio.sleep(0)
+    assert session_log_busy("m-burst", 0)
+    results = await asyncio.gather(*tasks)
+    assert results == [1, 2, None, None]
+    assert not session_log_busy("m-burst", 0)
+
+    # The turned-away entries arrive with the client's next flush.
+    assert await flush(5) == 4
+    full = await get_full_log_entries("m-burst", 0, None)
+    assert sorted(e["seq"] for e in full) == [0, 1, 2, 3, 4]
+    await close_db()
+
+
 # ── retention sweep (cleanup_old_data) ───────────────────────────────────────
 
 
@@ -691,7 +759,7 @@ async def _run_init_twice(tmp_db):
     await close_db()
     await init_db(tmp_db)
     rows = await query("SELECT version FROM schema_migrations ORDER BY version", ())
-    assert [r["version"] for r in rows] == ["0001", "0002", "0003", "0004"]
+    assert [r["version"] for r in rows] == ["0001", "0002", "0003", "0004", "0005"]
     await close_db()
 
 
@@ -753,3 +821,75 @@ async def _run_cleanup_sleep_order():
             pass
     assert sleeps == [60, 6 * 3600]
     sweep.assert_awaited_once()
+
+
+# ── input audit deltas ───────────────────────────────────────────────────────
+#
+# Audit records stream in like log entries: only records past the stored
+# audit position are kept, as kind = 'audit' chunks under their own seq and
+# epoch (migration 0005), invisible to the log readers.
+
+
+def _audit_record(i):
+    return {"seq": i, "s": "L", "f": i * 10, "b": 0, "lx": i, "ly": 0, "cx": 0, "cy": 0}
+
+
+_AUDIT_BASE = {
+    "match_id": "m-audit", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+    "summary": "{}", "context": "{}", "ip_hash": "abc", "epoch": "e1", "audit_epoch": "a1",
+}
+
+
+def test_append_session_flush_streams_audit_records(tmp_db):
+    _run_async(_run_audit_flushes(tmp_db))
+
+
+async def _run_audit_flushes(tmp_db):
+    from src.db import append_session_flush, close_db, get_full_log_entries, get_input_audit, init_db
+
+    await init_db(tmp_db)
+    base = _AUDIT_BASE
+    acks = await append_session_flush(
+        {**base, "entries": [{"seq": 0, "msg": "x"}], "audit_entries": [_audit_record(0), _audit_record(1)]}
+    )
+    assert acks == {"lastSeq": 0, "auditLastSeq": 1}
+
+    # A resend of acked records plus a new one stores only the new one.
+    acks = await append_session_flush({**base, "entries": [], "audit_entries": [_audit_record(1), _audit_record(2)]})
+    assert acks == {"lastSeq": 0, "auditLastSeq": 2}
+    assert [r["seq"] for r in await get_input_audit("m-audit", 0)] == [0, 1, 2]
+    assert [e["msg"] for e in await get_full_log_entries("m-audit", 0, None)] == ["x"]
+
+    # A new audit epoch (the client reset its audit) starts again from seq 0.
+    acks = await append_session_flush({**base, "entries": [], "audit_epoch": "a2", "audit_entries": [_audit_record(0)]})
+    assert acks["auditLastSeq"] == 0
+    assert len(await get_input_audit("m-audit", 0)) == 4
+
+    # A flush with no audit epoch (an older client) leaves the audit position alone.
+    acks = await append_session_flush({**base, "entries": [], "audit_epoch": "", "audit_entries": []})
+    assert acks["auditLastSeq"] == 0
+    await close_db()
+
+
+def test_audit_chunk_cap_keeps_the_newest_and_leaves_the_log_alone(tmp_db):
+    _run_async(_run_audit_cap(tmp_db))
+
+
+async def _run_audit_cap(tmp_db):
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, get_full_log_entries, get_input_audit, init_db
+
+    await init_db(tmp_db)
+    original_cap = db_mod._SESSION_LOG_AUDIT_CAP
+    db_mod._SESSION_LOG_AUDIT_CAP = 300
+    try:
+        for i in range(10):
+            await append_session_flush(
+                {**_AUDIT_BASE, "entries": [{"seq": i, "msg": "log"}], "audit_entries": [_audit_record(i)]}
+            )
+        audit = await get_input_audit("m-audit", 0)
+        assert 0 < len(audit) < 10 and audit[-1]["seq"] == 9
+        assert len(await get_full_log_entries("m-audit", 0, None)) == 10
+    finally:
+        db_mod._SESSION_LOG_AUDIT_CAP = original_cap
+    await close_db()
