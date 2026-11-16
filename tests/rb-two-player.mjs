@@ -661,7 +661,18 @@ if (ASK_UNANSWERED_ACKS && !(ASK_UNANSWERED_STALL_MS >= 20000)) {
   console.log('ASK_UNANSWERED_ACKS needs ASK_UNANSWERED_STALL_MS >= 20000');
   process.exit(1);
 }
-const askUnanswered = { hostAt: null, guestAt: null, dropped: 0, range: null, freezeMs: 0 };
+const askUnanswered = {
+  hostAt: null,
+  guestAt: null,
+  dropped: 0,
+  range: null,
+  freezeMs: 0,
+  droppedByHost: null,
+  lateJoinedAt: null,
+};
+// ASK_UNANSWERED_ACKS: how long the dropped guest may take to join again late
+// (a gesture tap, the state, the boot).
+const ASK_LATE_JOIN_MS = 90000;
 const askPhantom = { hostAt: null, guestAt: null, range: null, dropped: 0, armed: false };
 const pastWindow = { hostAt: null, guestAt: null, frame: null, held: 0, releasedAt: null, released: false };
 if (CATCH_UP_HOLE_MS > 0 && !(DROP_PEER_MS > 0)) {
@@ -2845,6 +2856,36 @@ if (inBattle) {
     await sampler;
     askUnanswered.dropped = await guest.evaluate(() => window.__knInputsDroppedUntil);
     console.log(`ASK_UNANSWERED_STALL_MS: the host's push was acknowledged: ${settled} (${Date.now() - started} ms)`);
+    if (ASK_UNANSWERED_ACKS && settled) {
+      // The guest is told it was dropped and joins again late by itself
+      // (specs/drop_is_final.qnt). Its engine starts over (and its sync log
+      // with it), so the drop is read from its client events. The player
+      // taps the page's gesture prompt as at the start; the input and hash
+      // driver goes on the new engine once the late join has loaded.
+      const told = Date.now() + 15000;
+      while (Date.now() < told && !askUnanswered.droppedByHost) {
+        askUnanswered.droppedByHost = await guest
+          .evaluate(() => (window.__knEvents ?? []).find((e) => e.meta?.kind === 'dropped-by-host') ?? null)
+          .catch(() => null);
+        if (!askUnanswered.droppedByHost) await guest.waitForTimeout(200);
+      }
+      const joined = Date.now() + ASK_LATE_JOIN_MS;
+      while (Date.now() < joined && !askUnanswered.lateJoinedAt) {
+        if (await guest.locator('#gesture-prompt:not(.hidden)').count())
+          await guest
+            .locator('#gesture-prompt')
+            .click({ force: true })
+            .catch(() => {});
+        const log = await guest.evaluate(() => window.NetplayRollback?.exportSyncLog?.() ?? '').catch(() => '');
+        const m = log.match(/late-join loaded at frame (\d+)/);
+        if (m) askUnanswered.lateJoinedAt = +m[1];
+        else await guest.waitForTimeout(500);
+      }
+      if (askUnanswered.lateJoinedAt !== null) await install(guest, 'guest');
+      console.log(
+        `ASK_UNANSWERED_ACKS: told: ${!!askUnanswered.droppedByHost}; joined again late at frame ${askUnanswered.lateJoinedAt}`,
+      );
+    }
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (CATCH_UP_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -4560,8 +4601,8 @@ const askUnansweredReport = (() => {
     stallTimeouts,
     // ACKS: the drop is final (specs/drop_is_final.qnt): the guest's page
     // was told and ended its match, and nothing on the host followed it.
-    droppedByHost: linesAfter(G.sync, askUnanswered.guestAt.seq).filter((l) => /DROPPED-BY-HOST reason=desync/.test(l)),
-    lateJoined: G.sync.split('\n').filter((l) => /late-join loaded at frame/.test(l)),
+    droppedByHost: askUnanswered.droppedByHost ? [askUnanswered.droppedByHost] : [],
+    lateJoined: askUnanswered.lateJoinedAt === null ? [] : [askUnanswered.lateJoinedAt],
     pastWindowAfterDrop: gaveUp.length
       ? linesAfter(H.sync, seqOf(gaveUp[0])).filter((l) => /INPUT-PAST-WINDOW-MISMATCH/.test(l)).length
       : null,
