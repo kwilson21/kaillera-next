@@ -1,3 +1,5 @@
+import { createRecoveryManager } from './recovery-delivery.ts';
+import { createRecoveryTransferPool } from './recovery-transfer.ts';
 /**
  * Entry point of the TypeScript core, bundled to web/static/dist/kn-core.js
  * and exposed to the plain-script pages as `window.KNCore`.
@@ -356,6 +358,7 @@ export const KNCore = {
   /** The per-peer machine, driven from the rollback engine's events (peer-driver.ts). */
   peerDriver: { createPeerDriver },
   /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */
+  recovery: { createRecoveryManager, createRecoveryTransferPool },
   resyncRequest: {
     answersAnOlderRequest,
     endsRequest,

@@ -20,6 +20,13 @@
  * PLAYERS: 3 or 4 (default 4). Four emulators share the machine: in a cloud
  *   container each runs at a few frames a second, so the menus take minutes.
  *   MENU_TIMEOUT_S bounds them (default 1800).
+ * MISSING_RECIPIENT=1 (PLAYERS=3|4): fail recovery to MISSING_RECIPIENT_SLOT
+ *   (default last guest, slot 2 or 3). MISSING_RECIPIENT_FAILURES=1|2 defaults
+ *   to one failed header; two exercises sustained loss through the final retry.
+ *   P2 loses input frames to trigger recovery. Require independent healthy
+ *   recipient settlement, bounded target
+ *   retry/settlement, no drop, and 60 later matching frames. No hash exclusions
+ *   are added: the ordinary all-frame gameplay/game-state oracle still applies.
  * CATCH_UP_MS=<n>: a third of the way into the battle the guest in
  *   CATCH_UP_SLOT (default 2, a guest that is not the host's first one) asks
  *   the host for a full resync through its network-change handler (a window
@@ -78,6 +85,9 @@ const JITTER = Number(process.env.JITTER || 0);
 const LINK_KBPS = Number(process.env.LINK_KBPS || 0);
 const BATTLE_SECONDS = Number(process.env.BATTLE_SECONDS || 45);
 const MENU_TIMEOUT_S = Number(process.env.MENU_TIMEOUT_S || 1800);
+const MISSING_RECIPIENT = process.env.MISSING_RECIPIENT === '1';
+const MISSING_RECIPIENT_SLOT = Number(process.env.MISSING_RECIPIENT_SLOT || PLAYERS - 1);
+const MISSING_RECIPIENT_FAILURES = Number(process.env.MISSING_RECIPIENT_FAILURES || 1);
 const CATCH_UP_MS = Number(process.env.CATCH_UP_MS || 0);
 const CATCH_UP_SLOT = Number(process.env.CATCH_UP_SLOT || 2);
 const CATCH_UP_HOLE = process.env.CATCH_UP_HOLE === '1';
@@ -106,6 +116,15 @@ if (!/^\d+x\d+$/.test(SCREEN_SIZE)) fail(`SCREEN_SIZE=${SCREEN_SIZE} invalid: WI
 for (const [name, v] of Object.entries({ LAT, JITTER, LINK_KBPS, BATTLE_SECONDS, MENU_TIMEOUT_S, CATCH_UP_MS })) {
   if (!(Number.isFinite(v) && v >= 0)) fail(`${name}=${process.env[name]} invalid: a finite number >= 0`);
 }
+if (
+  MISSING_RECIPIENT &&
+  (CATCH_UP_MS > 0 ||
+    !Number.isInteger(MISSING_RECIPIENT_SLOT) ||
+    MISSING_RECIPIENT_SLOT < 2 ||
+    MISSING_RECIPIENT_SLOT >= PLAYERS ||
+    ![1, 2].includes(MISSING_RECIPIENT_FAILURES))
+)
+  fail('MISSING_RECIPIENT requires no catch-up fault, target slot 2..PLAYERS-1, and 1 or 2 failures');
 if (CATCH_UP_MS > 0 && !(CATCH_UP_MS < RESYNC_REQUEST_TIMEOUT_MS)) {
   fail(`CATCH_UP_MS must be shorter than the guest's request deadline (${RESYNC_REQUEST_TIMEOUT_MS})`);
 }
@@ -324,10 +343,83 @@ const waitForLine = async (page, afterSeq, re, timeoutMs) => {
   return false;
 };
 
+// MISSING_RECIPIENT=1: P2's missing input triggers an actual overdue broadcast.
+// Fail selected recipient transfers at their header, before any chunk is sent.
+// Nothing is changed in the runtime, and P2's channel is never obstructed.
+const missingRecipient = {
+  enabled: MISSING_RECIPIENT,
+  slot: MISSING_RECIPIENT_SLOT,
+  failures: MISSING_RECIPIENT_FAILURES,
+  hostAt: null,
+  range: null,
+  settled: false,
+  recoveredFrame: null,
+};
 // The battle, with the catch-up fault a third of the way in.
 const catchUp = { guestAt: null, seen: false };
 const hole = { pageAt: null, pausedAt: null, phantomSeen: false, resumedAt: null };
 const tBattle = Date.now();
+if (MISSING_RECIPIENT) {
+  await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
+  missingRecipient.hostAt = await lastSeq(host);
+  await host.evaluate(
+    ({ slot, failures }) => {
+      const peer = Object.values(window.KNState?.peers ?? {}).find((p) => p.slot === slot);
+      if (peer?.syncDc?.readyState !== 'open') throw new Error('target sync channel is not open');
+      const dc = peer.syncDc;
+      const send = dc.send;
+      window.__meshMissingRecipient = { failures: 0, headers: [], failedHeaders: [] };
+      dc.send = function (data) {
+        if (typeof data === 'string' && data.startsWith('sync-start:')) {
+          const report = window.__meshMissingRecipient;
+          report.headers.push({ frame: Number(data.split(':')[1]), at: performance.now() });
+          if (report.failures < failures) {
+            report.failures++;
+            report.failedHeader ??= { ...report.headers.at(-1) };
+            report.failedHeaders.push({ ...report.headers.at(-1) });
+            throw new Error('TEST: selected recovery transfer failed');
+          }
+        }
+        return send.call(this, data);
+      };
+    },
+    { slot: MISSING_RECIPIENT_SLOT, failures: MISSING_RECIPIENT_FAILURES },
+  );
+  missingRecipient.range = await pages[1].evaluate(() => {
+    const frame = window.NetplayRollback.getHudCounters().currentFrame;
+    const from = frame + 20,
+      to = frame + 28;
+    const peer = Object.values(window.KNState?.peers ?? {}).find((p) => p.slot === 0);
+    if (peer?.dc?.readyState !== 'open') throw new Error('P2 host channel is not open');
+    window.__meshMissingInputs = 0;
+    for (const dc of new Set([peer.dc, peer.rbDc].filter(Boolean))) {
+      const send = dc.send;
+      dc.send = function (data) {
+        if (data instanceof ArrayBuffer && data.byteLength >= 4) {
+          const f = new Int32Array(data, 0, 1)[0];
+          if (f >= from && f < to) {
+            window.__meshMissingInputs++;
+            return;
+          }
+        }
+        return send.call(this, data);
+      };
+    }
+    return [from, to];
+  });
+  const p2 = await waitForLine(host, missingRecipient.hostAt, /INPUT-ASK-PUSH-SETTLED .*slot=1 /, 60000);
+  const target = await waitForLine(
+    host,
+    missingRecipient.hostAt,
+    new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} `),
+    30000,
+  );
+  missingRecipient.settled = p2 && target;
+  missingRecipient.recoveredFrame = await host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+  // Keep observing after settlement: transient success followed by another
+  // retry/drop is not recovery. At least 60 later hash frames are required.
+  await host.waitForTimeout(20000);
+}
 if (CATCH_UP_MS > 0) {
   await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
   const guest = pages[CATCH_UP_SLOT];
@@ -368,6 +460,8 @@ const P = await Promise.all(
   pages.map(async (p) => ({
     sync: await syncLogOf(p),
     ...(await p.evaluate(() => ({
+      missingRecipientWire: window.__meshMissingRecipient ?? null,
+      missingInputs: window.__meshMissingInputs ?? 0,
       hashes: window.__mesh.hashes,
       inBattleAt: window.__mesh.inBattleAt,
       lastR: window.__mesh.lastR,
@@ -428,6 +522,9 @@ const pairs = P.slice(1).map((G, gi) => {
   const split = slot === CATCH_UP_HOLE_SLOT ? holeSplit : null;
   let compared = 0;
   let battle = 0;
+  let postRecovery = 0;
+  let preFaultBattle = 0;
+  const recoveryMismatches = { before: 0, during: 0, after: 0 };
   let unrecorded = 0;
   let leftOut = 0;
   const mismatches = { gameplay: [], gameState: [], fullState: 0 };
@@ -446,7 +543,17 @@ const pairs = P.slice(1).map((G, gi) => {
       continue;
     }
     compared++;
+    if (MISSING_RECIPIENT && f > missingRecipient.recoveredFrame) postRecovery++;
     if (f >= battleFrom) battle++;
+    if (MISSING_RECIPIENT) {
+      if (f >= battleFrom && f < missingRecipient.range[0]) preFaultBattle++;
+      const differs = h[0] !== g[0] || (h[1] !== 0 && g[1] !== 0 && h[1] !== g[1]);
+      if (differs) {
+        const phase =
+          f < missingRecipient.range[0] ? 'before' : f > missingRecipient.recoveredFrame ? 'after' : 'during';
+        recoveryMismatches[phase]++;
+      }
+    }
     if (h[0] !== g[0]) mismatches.gameplay.push(f);
     if (h[1] !== 0 && g[1] !== 0 && h[1] !== g[1]) mismatches.gameState.push(f);
     if (h[2] !== 0 && g[2] !== 0 && h[2] !== g[2]) mismatches.fullState++;
@@ -457,6 +564,9 @@ const pairs = P.slice(1).map((G, gi) => {
     unrecorded,
     leftOut,
     battleFramesCompared: battle,
+    postRecoveryFramesCompared: postRecovery,
+    preFaultBattleFramesCompared: preFaultBattle,
+    recoveryMismatches,
     gameplayMismatches: mismatches.gameplay.length,
     gameplayMismatchFrames: spans(mismatches.gameplay),
     battleGameplayMismatches: mismatches.gameplay.filter((f) => f >= battleFrom).length,
@@ -535,7 +645,139 @@ const fighterProblems = P.flatMap((x, page) =>
   }),
 );
 
+const missingLines = MISSING_RECIPIENT
+  ? H.sync.split('\n').filter((line) => seqOf(line) > missingRecipient.hostAt)
+  : [];
+const missingRetries = missingLines.filter((line) =>
+  new RegExp(`INPUT-ASK-PUSH-AGAIN .*slot=${MISSING_RECIPIENT_SLOT} `).test(line),
+);
+const p2SettledIndex = missingLines.findIndex((line) => /INPUT-ASK-PUSH-SETTLED .*slot=1 /.test(line));
+const targetSettledIndex = missingLines.findIndex((line) =>
+  new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} `).test(line),
+);
+const targetRetryIndex = missingLines.findIndex((line) =>
+  new RegExp(`INPUT-ASK-PUSH-AGAIN .*slot=${MISSING_RECIPIENT_SLOT} `).test(line),
+);
+const selectedPushes = missingLines.flatMap((line, index) => {
+  const m = line.match(/INPUT-ASK-PUSH f=(\d+) slot=1 hole=(\d+)/);
+  if (!m || !missingRecipient.range) return [];
+  const frame = Number(m[1]),
+    hole = Number(m[2]);
+  return hole >= missingRecipient.range[0] && hole < missingRecipient.range[1] ? [{ frame, hole, index }] : [];
+});
+const correlatedPush = selectedPushes.find((push) => push.frame === H.missingRecipientWire?.failedHeader?.frame);
+const healthyRecipients = Array.from({ length: PLAYERS - 1 }, (_, i) => i + 1).filter(
+  (slot) => slot !== MISSING_RECIPIENT_SLOT,
+);
+const healthyProblems = healthyRecipients.flatMap((slot) => {
+  const settled = missingLines.findIndex((line) => {
+    const m = line.match(new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${slot} frame=(\\d+) `));
+    return m && Number(m[1]) === correlatedPush?.frame;
+  });
+  const retried = missingLines.some((line) => new RegExp(`INPUT-ASK-PUSH-AGAIN .*slot=${slot} `).test(line));
+  return !correlatedPush || settled <= correlatedPush.index || settled >= targetRetryIndex || retried
+    ? [`healthy P${slot + 1} failed correlated independent settlement before target retry`]
+    : [];
+});
+const targetRetryEvents = missingLines.flatMap((line, index) => {
+  const m = line.match(new RegExp(`INPUT-ASK-PUSH-AGAIN f=(\\d+) slot=${MISSING_RECIPIENT_SLOT} push=(\\d+)/`));
+  return m ? [{ frame: Number(m[1]), attempt: Number(m[2]), index }] : [];
+});
+const correlatedTargetSettled = missingLines.findIndex((line) => {
+  const m = line.match(
+    new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} frame=(\\d+) pushes=(\\d+)`),
+  );
+  return m && Number(m[1]) === correlatedPush?.frame && Number(m[2]) === MISSING_RECIPIENT_FAILURES + 1;
+});
+const failedHeaders = H.missingRecipientWire?.failedHeaders ?? [];
+const retryFailuresCorrelated =
+  failedHeaders.length === MISSING_RECIPIENT_FAILURES &&
+  failedHeaders
+    .slice(1)
+    .every((header, i) => header.frame === targetRetryEvents[i]?.frame && targetRetryEvents[i]?.attempt === i + 2);
+const missingProblems = !MISSING_RECIPIENT
+  ? []
+  : [
+      ...healthyProblems,
+      ...(!retryFailuresCorrelated ? ['failed target retry headers do not match the same recovery attempts'] : []),
+      ...(correlatedTargetSettled <= (targetRetryEvents.at(-1)?.index ?? Infinity)
+        ? ['target did not settle the selected recovery after its last retry']
+        : []),
+      ...(!(P[1].missingInputs > 0) ? ['P2 input fault did not fire'] : []),
+      ...(!missingLines.some((line) => /INPUT-ASK-PUSH .*slot=1 /.test(line))
+        ? ['P2 overdue broadcast was not observed']
+        : []),
+      ...(!correlatedPush ? ['failed target header is not the broadcast for the selected P2 hole'] : []),
+      ...(correlatedPush && correlatedPush.index >= p2SettledIndex
+        ? ['P2 settlement preceded the selected broadcast']
+        : []),
+      ...(p2SettledIndex < 0 || targetRetryIndex <= p2SettledIndex
+        ? ['healthy P2 did not settle before the first target retry']
+        : []),
+      ...(!missingRecipient.settled ? ['both recipients did not settle'] : []),
+      ...(H.missingRecipientWire?.failures !== MISSING_RECIPIENT_FAILURES
+        ? ['selective fault count differs from requested']
+        : []),
+      ...(!(
+        H.missingRecipientWire?.headers.length >= MISSING_RECIPIENT_FAILURES + 1 &&
+        H.missingRecipientWire.headers.length <= 3
+      )
+        ? ['target transfer attempts were absent or unbounded']
+        : []),
+      ...(!(missingRetries.length >= MISSING_RECIPIENT_FAILURES && missingRetries.length <= 2)
+        ? ['target retry count outside 1..2']
+        : []),
+      ...(p2SettledIndex < 0 || targetSettledIndex <= p2SettledIndex
+        ? ['healthy P2 did not settle before target']
+        : []),
+      ...(missingLines.some((line) =>
+        /INPUT-ASK-PUSH-AGAIN .*slot=1 |INPUT-ASK-PUSH-GAVEUP|INPUT-ASK-PUSH-ENDED|PEER-PHANTOM|hardDisconnect/.test(
+          line,
+        ),
+      )
+        ? ['healthy recipient retried or a peer was dropped/ended']
+        : []),
+      ...(pairs.some((p) => p.postRecoveryFramesCompared < MIN_BATTLE_FRAMES)
+        ? ['insufficient post-recovery hash comparisons']
+        : []),
+    ];
+// Secondary recovery result, not an exemption from the original hash oracle.
+// The lower boundary is the first deliberately lost input frame, recorded
+// BEFORE the fault, and the upper boundary is the observed host frame after
+// both source and target settlements, not a boundary inferred from mismatches.
+// No frame is removed from pairs, and full-hash failures still fail the run.
+const recoveryOracle = !MISSING_RECIPIENT
+  ? null
+  : {
+      window: { from: missingRecipient.range[0], through: missingRecipient.recoveredFrame },
+      status:
+        missingProblems.length === 0 &&
+        pairs.every(
+          (p) =>
+            p.preFaultBattleFramesCompared >= MIN_BATTLE_FRAMES &&
+            p.postRecoveryFramesCompared >= MIN_BATTLE_FRAMES &&
+            p.recoveryMismatches.before === 0 &&
+            p.recoveryMismatches.after === 0,
+        )
+          ? 'recovered-with-clean-pre-and-post-fault-frames'
+          : 'failed',
+      fullHashOracle: pairs.every((p) => p.gameplayMismatches === 0 && p.gameStateMismatches === 0)
+        ? 'passed'
+        : 'failed',
+      transientMismatchFrames: pairs.map((p) => ({ slot: p.slot, ...p.recoveryMismatches })),
+    };
 const summary = {
+  recoveryOracle,
+  missingRecipient: {
+    ...missingRecipient,
+    wire: H.missingRecipientWire,
+    retries: missingRetries,
+    targetRetryEvents,
+    correlatedTargetSettled,
+    selectedPushes,
+    correlatedPush: correlatedPush ?? null,
+    problems: missingProblems,
+  },
   room,
   players: PLAYERS,
   latencyMs: LAT,
@@ -556,6 +798,7 @@ fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 2));
 console.log(JSON.stringify(summary, null, 2));
 
 const failed =
+  missingProblems.length > 0 ||
   P.some((x) => x.inBattleAt < 0) ||
   fighterProblems.length > 0 ||
   pairs.some(

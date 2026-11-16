@@ -84,34 +84,21 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     # The first push goes to every guest (escalation_peers); the hole keeps
     # its count across a let-go (escalation_push COUNT_SURVIVES).
     assert "pushSyncState(null, false, { escalation: attempts });" in escalate
-    assert "_overduePushes[recipientSlot] = push;" in escalate
-    # Counted per hole (hole_counts), the decision proved.
-    assert "window.KNCore.resyncRequest.escalationForHole(" in escalate
-    assert "const counts = (_holePushCounts[slot] ??= {});" in escalate
-    # Logged once, where a let-go leaves the hole at its limit.
-    assert (
-        "INPUT-ASK-PUSH-NOT-SENT"
-        in src[src.index("const _checkOverduePushes = () => {") :][:6000]
-    )
+    assert "_recovery.begin(slot, hole, recipients, _frameNum, now, _syncEnabled)" in escalate
+    assert "_overduePushes" not in src
+    assert "_holePushCounts" not in src
     assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in escalate
     assert "const INPUT_ASK_OVERDUE_ASKS = 3;" in src
     assert "const INPUT_ASK_OVERDUE_MS = 1500;" in src
     pushes = src[src.index("const _checkOverduePushes = () => {") :]
     pushes = pushes[: pushes.index("\n  };\n")]
-    assert "window.KNCore.resyncRequest.pushDeadlineStep(" in pushes
-    # Answered by the guest's inputs-settled alone, not the host's own
-    # hand-over of the state (which raises _inputSettledBefore).
-    assert (
-        "push.settled,"
-        in pushes
-    )
+    machine = (ROOT / "web/src/recovery-delivery.ts").read_text()
+    assert "pushDeadlineStep(" in machine
+    assert "_recovery.event(attempt," in pushes
     assert "_inputSettledBefore[slot]" not in pushes
     assert "_checkResyncRequestDeadline();\n    _checkOverduePushes();" in src
-    # The last push unanswered: the player is dropped (I1's recovery), not
-    # left playing on split; the event alone is not one.
-    give_up = pushes[pushes.index("INPUT-ASK-PUSH-GAVEUP") :]
-    assert "hardDisconnectPeer(push.sid, { tell: 'desync' });" in give_up
-    assert "could not be brought back in sync and was dropped" in give_up
+    assert "hardDisconnectPeer(sid, { tell: 'desync' });" in src
+    assert "could not be brought back in sync and was dropped" in src
     # Every ask that goes out is counted.
     ask = src[
         src.index("const _askForMissingInputs = (peer, applyFrame, windowEdge) => {") :
@@ -123,7 +110,8 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     # I2: per-peer state, dropped with the peer.
     clear = _slot_clear(src)
     assert "    _inputAskOverdue,\n" in clear
-    assert "    _overduePushes,\n" in clear
+    assert "_recovery.reset(slot);" in src
+    assert "_recovery.resetAll();" in src
 
 
 def test_an_input_past_the_window_that_differs_escalates_like_an_overdue_ask():
@@ -274,32 +262,22 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     src = _src()
     pushes = src[src.index("const _checkOverduePushes = () => {") :]
     pushes = pushes[: pushes.index("\n  };\n")]
-    assert "!target || !!target.reconnecting || !!_peerPhantom[slot]," in pushes
-    assert "push.at !== null," in pushes
-    # Let go on no progress, never a clock from the push's start (LET_GO
-    # "progress"); a push let go leaves only its hole's count behind.
-    # The push's own guest's chain (CLOCK "chain"), from when it reached it.
-    assert (
-        "now - Math.max(push.armedAt, push.enqueued ? (_syncChainMovedAt[push.sid] ?? 0) : 0),"
-        in pushes
-    )
+    assert "away: !target || !!target.reconnecting || !!_peerPhantom[attempt.slot]," in pushes
+    assert "chainProgress: _syncChainMovedAt[attempt.sid] ?? 0," in pushes
+    machine = (ROOT / "web/src/recovery-delivery.ts").read_text()
+    assert "Math.max(context.armedAt, context.enqueuedAt < 0 ? 0 : event.chainProgress)" in machine
+    assert "event.now - context.handedAt" in machine
     assert "_syncProgressAt" not in src
-    assert "OVERDUE_PUSH_QUIET_MS," in pushes
     assert "OVERDUE_PUSH_BACKSTOP_MS" not in src
-    assert "letGo: " not in src
-    assert "INPUT-ASK-PUSH-ENDED" in pushes
-    assert "INPUT-ASK-PUSH-NOT-SENT" in pushes
-    # The retry goes to the guest that did not answer only.
-    assert "_sendEscalationPush(slot, push, push.sid);" in pushes
-    assert "_canPushSyncState" not in src
-    assert "_markOverduePushSent" not in src
+    assert "pushSyncState(sid, false, { escalation: [attempt] });" in src
     # Only the push's own transfer starts its deadline, reported by
     # pushSyncState for each attempt it carries, on both paths.
     report = src[
         src.index("const _onEscalationTransfer = (attempts, sid, sent, frame = -1) => {") :
     ]
     report = report[: report.index("\n  };\n")]
-    assert "window.KNCore.resyncRequest.transferReportApplies(" in report
+    assert "_recovery.event(" in report
+    assert "attempt: attempt.sequence" in report
     assert "_onEscalationTransfer(attempts, targetSid, true, frame);" in src
     # Each guest's outcome as its own chain ends (PER_TARGET).
     # Each target settles alone, a rejection included (allSettled per target).
@@ -312,18 +290,18 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     assert "_onEscalationTransfer(attempts, t.sid, outcome === 'sent', frame);" in send
     # The chain moves when a transfer starts, has a chunk accepted, or ends.
     assert src.count("_syncChainMovedAt[t.sid] = performance.now();") == 3
-    assert "else if (a.push.attempt === a) a.push.enqueued = true;" in send
+    assert "_recovery.event(a, { type: 'enqueued', attempt: a.sequence, now: performance.now() });" in send
     # A freeze of the host's page is credited to the push's clocks.
     credit = src[src.index("const _creditLocalFreeze = () => {") :]
     credit = credit[: credit.index("\n  };\n")]
-    assert "push.armedAt = Math.min(now, push.armedAt + gap);" in credit
-    assert "if (push.at !== null) push.at = Math.min(now, push.at + gap);" in credit
+    assert "_recovery.freeze(gap, now);" in credit
     assert (
         "for (const sid in _syncChainMovedAt) _syncChainMovedAt[sid] = Math.min(now, _syncChainMovedAt[sid] + gap);"
         in credit
     )
     # Recovered, a peer's holes start their count again.
-    assert src.count("_forgetHolePushes(") == 3
+    assert src.count("_forgetHolePushes(") == 1
+    assert "counts.delete(slot)" in machine
     # P2: one per-slot clear for both callers (I2), one map reset for three.
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
@@ -347,7 +325,7 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
 
 def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
     src = _src()
-    assert "pushSyncState(targetSid, false, { escalation: [attempt] });" in src
+    assert "pushSyncState(sid, false, { escalation: [attempt] });" in src
     push = src[
         src.index(
             "const pushSyncState = async (targetSid, isProactive = false, options = {}) => {"
@@ -396,16 +374,17 @@ def test_the_per_slot_only_maps_are_reset_where_their_timeline_starts_over():
 def test_recovery_transfers_are_bounded_and_only_the_delivered_state_is_acknowledged():
     src = _src()
     push = src[src.index("const pushSyncState = async ("):]
-    assert push.index("_escalationTransfers.has(slot)") < push.index("mod._kn_sync_read(")
-    assert "_escalationTransfers.set(a.slot, a)" in push
-    assert "_releaseEscalationTransfers(attempts);" in push
-    assert "_escalationTransfers.get(a.slot) === a" in src
-    assert "_releaseEscalationTransfers(attempts, t.sid);" in src
-    assert push.index("    try {") < push.index("mod._kn_sync_read(")
+    assert push.index("_recoveryTransfers.run(") < push.index("mod._kn_sync_read(")
+    pool = (ROOT / "web/src/recovery-transfer.ts").read_text()
+    assert "Effect.acquireUseRelease(" in pool
+    assert "reservations.get(attempt.slot) === attempt" in pool
+    assert "_recoveryTransfers.release(attempts, t.sid);" in src
+    assert push.index("try {") < push.index("mod._kn_sync_read(")
     handler = src[src.index("if (e.data.startsWith('inputs-settled:')) {"):]
     handler = handler[:handler.index("return;")]
-    assert "acknowledgesDeliveredPush(" in handler
-    assert "push.at !== null" in handler
+    assert "_recovery.acknowledge(peer.slot, settled);" in handler
+    machine = (ROOT / "web/src/recovery-delivery.ts").read_text()
+    assert "acknowledgesDeliveredPush(true, context.deliveredBefore, event.before)" in machine
     send = src[src.index("const _sendSyncChunksTo = async ("):]
     send = send[:send.index("\n  };\n")]
     assert "const dc = target.syncDc;" in send

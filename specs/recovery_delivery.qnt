@@ -117,3 +117,112 @@ module recovery_reservation {
 module recovery_reservation_together { import recovery_reservation(RELEASE_EACH = false, OWNED_RELEASE = true).* }
 module recovery_reservation_unowned { import recovery_reservation(RELEASE_EACH = true, OWNED_RELEASE = false).* }
 module recovery_reservation_fixed { import recovery_reservation(RELEASE_EACH = true, OWNED_RELEASE = true).* }
+
+// The typed actor replaces JS flag combinations, without changing the
+// engine's freeze-credited logical clock. Delivered/failed outcomes have
+// bounded retry deadlines; quiet in-flight work also ends logically, while
+// its physical reservation remains until the operation actually settles.
+// Disabled resync never creates a recovery obligation.
+module recovery_actor {
+  const ENABLED: bool
+  var state: str
+  var attempt: int
+  var deliveredAttempt: int
+  action init = all {
+    state' = if (ENABLED) "sending" else "inactive", attempt' = 1, deliveredAttempt' = 0,
+  }
+  action deliver = all {
+    state == "sending", state' = "awaitingAck", attempt' = attempt, deliveredAttempt' = attempt,
+  }
+  action transferFailed = all {
+    state == "sending", state' = "backoff", attempt' = attempt, deliveredAttempt' = deliveredAttempt,
+  }
+  action ack = all {
+    state' = if (state == "awaitingAck" and deliveredAttempt == attempt) "settled" else state,
+    attempt' = attempt, deliveredAttempt' = deliveredAttempt,
+  }
+  action timeout = all {
+    Set("sending", "awaitingAck", "backoff").contains(state),
+    state' = if (attempt < 3) "sending" else "exhausted",
+    attempt' = if (attempt < 3) attempt + 1 else attempt,
+    deliveredAttempt' = 0,
+  }
+  action cancel = all { state != "inactive", state' = "ended", attempt' = attempt, deliveredAttempt' = deliveredAttempt }
+  action step = any { deliver, transferFailed, ack, timeout, cancel }
+  val noUndeliveredAcknowledgement = (state == "settled") implies deliveredAttempt == attempt
+  val attemptsAreBounded = attempt <= 3
+  val disabledNeverRecoversOrDrops = not(ENABLED) implies state == "inactive"
+  val allHold = noUndeliveredAcknowledgement and attemptsAreBounded and disabledNeverRecoversOrDrops
+  run ackBeforeDeliveryTest = init.then(ack).expect(state == (if (ENABLED) "sending" else "inactive"))
+  run failuresEndTest = if (ENABLED)
+    init.then(transferFailed).then(timeout).then(transferFailed).then(timeout).then(transferFailed).then(timeout).expect(state == "exhausted")
+  else init.then(ack).expect(state == "inactive")
+  run retryNeedsOwnDeliveryTest = if (ENABLED)
+    init.then(deliver).then(timeout).then(ack).expect(state == "sending")
+  else init.then(ack).expect(state == "inactive")
+}
+module recovery_actor_enabled { import recovery_actor(ENABLED = true).* }
+module recovery_actor_disabled { import recovery_actor(ENABLED = false).* }
+
+// A settled source can discover another hole while a different recipient
+// still retries the first broadcast. Global coalescing starves that source;
+// admitting only free recipient slots preserves outstanding obligations.
+module recovery_followup {
+  const PER_SOURCE: bool
+  var aPending: bool
+  var bPending: bool
+  var bAttempt: int
+  var followup: bool
+  var blocked: bool
+  action init = all {
+    aPending' = true, bPending' = true, bAttempt' = 1,
+    followup' = false, blocked' = false,
+  }
+  action settleA = all {
+    aPending, aPending' = false, bPending' = bPending, bAttempt' = bAttempt,
+    followup' = followup, blocked' = blocked,
+  }
+  action retryB = all {
+    bPending, bAttempt < 3, bAttempt' = bAttempt + 1,
+    aPending' = aPending, bPending' = bPending, followup' = followup, blocked' = blocked,
+  }
+  action newHoleA = all {
+    not(aPending), not(followup), followup' = true,
+    blocked' = (not(PER_SOURCE) and bPending),
+    aPending' = (PER_SOURCE or not(bPending)),
+    bPending' = bPending, bAttempt' = bAttempt,
+  }
+  action step = any { settleA, retryB, newHoleA }
+  val healthySourceIsNeverBlocked = not(blocked)
+  val pendingRecipientIsPreserved = bPending and bAttempt >= 1 and bAttempt <= 3
+  val allHold = healthySourceIsNeverBlocked and pendingRecipientIsPreserved
+  run trailingHoleTest = init.then(settleA).then(newHoleA)
+    .expect(healthySourceIsNeverBlocked == PER_SOURCE)
+  run independentRetryTest = init.then(settleA).then(retryB).then(newHoleA)
+    .expect(bPending and bAttempt == 2)
+}
+module recovery_followup_before { import recovery_followup(PER_SOURCE = false).* }
+module recovery_followup_fixed { import recovery_followup(PER_SOURCE = true).* }
+
+// Logical reset does not cancel the old physical B transfer. A new broadcast
+// partitions permits instead of rejecting A merely because B remains busy.
+module recovery_partial_admission {
+  const PARTIAL: bool
+  var aStarted: bool
+  var bCopies: int
+  var bOwed: bool
+  var requested: bool
+  action init = all { aStarted' = false, bCopies' = 1, bOwed' = false, requested' = false }
+  action request = all {
+    not(requested), requested' = true,
+    aStarted' = PARTIAL, bCopies' = bCopies, bOwed' = true,
+  }
+  action step = request
+  val freeRecipientProceeds = requested implies aStarted
+  val blockedRecipientRemainsBoundedAndOwed = bCopies == 1 and (requested implies bOwed)
+  val allHold = freeRecipientProceeds and blockedRecipientRemainsBoundedAndOwed
+  run resetDuringPhysicalTransferTest = init.then(request)
+    .expect(freeRecipientProceeds == PARTIAL and blockedRecipientRemainsBoundedAndOwed)
+}
+module recovery_partial_before { import recovery_partial_admission(PARTIAL = false).* }
+module recovery_partial_fixed { import recovery_partial_admission(PARTIAL = true).* }

@@ -598,6 +598,7 @@
  * emulators headless on one machine run slowly and measure noisy RTTs, so
  * compare runs with each other; HEADED=1 on a real machine is closer to play.
  */
+import { resyncOffEvidence } from './resync-off-evidence.mjs';
 import { chromium, webkit } from 'playwright';
 import fs from 'fs';
 import {
@@ -671,9 +672,8 @@ const ASK_UNANSWERED_ACKS = process.env.ASK_UNANSWERED_ACKS === '1';
 // (END_ON_RECONNECT): PEER-RECOVERED's resync recovers it, nobody is dropped.
 const ASK_UNANSWERED_ACK_LOST = process.env.ASK_UNANSWERED_ACK_LOST === '1';
 // RESYNC_OFF=1: the host starts the game with resync off (the room's
-// toggle). Only with ASK_UNANSWERED_STALL_MS: an escalation push's transfer
-// reports it not sent, so it is let go (INPUT-ASK-PUSH-NOT-SENT), nobody is
-// pushed again or dropped, and the hole stays with the stall path.
+// toggle). Only with ASK_UNANSWERED_STALL_MS: no recovery actor is started,
+// nobody is pushed again or dropped, and the hole stays with the stall path.
 // Nothing corrects the hole with resync off, so the pages may differ from
 // it on (as on main with the toggle off): frames are compared from the boot
 // sync up to the hole's first frame, and must match there.
@@ -1702,7 +1702,8 @@ if (FORCE_DELAY !== null) {
 if (RESYNC_OFF) {
   await host.evaluate(() => {
     const box = document.getElementById('opt-resync');
-    if (box) box.checked = false;
+    if (!box) throw new Error('Missing resync toggle');
+    box.checked = false;
   });
   console.log('RESYNC_OFF: the host starts with resync off');
 }
@@ -2514,11 +2515,13 @@ if (inBattle) {
     const settled = await waitForLine(
       host,
       askUnanswered.hostAt.seq,
-      ASK_UNANSWERED_ACKS
-        ? /INPUT-ASK-PUSH-GAVEUP/
-        : ASK_UNANSWERED_ACK_LOST
-          ? /INPUT-ASK-PUSH-ENDED/
-          : /INPUT-ASK-PUSH-SETTLED/,
+      RESYNC_OFF
+        ? /RB-INPUT-STALL-TIMEOUT .*slot=1 |PEER-PHANTOM slot=1 lastAdvance=[\d.]+ staleSec=5\./
+        : ASK_UNANSWERED_ACKS
+          ? /INPUT-ASK-PUSH-GAVEUP/
+          : ASK_UNANSWERED_ACK_LOST
+            ? /INPUT-ASK-PUSH-ENDED/
+            : /INPUT-ASK-PUSH-SETTLED/,
       ASK_UNANSWERED_STALL_MS + ASK_UNANSWERED_RECOVER_MS,
     );
     // A stall on main ends at its 5 s deadline; keep sampling past that.
@@ -4268,6 +4271,14 @@ const askUnansweredReport = (() => {
   // drop and heal is counted, so a cycle that does not end shows.
   const heals = hostLines.filter((l) => /MESH-HEAL f=.* slot=1/.test(l));
   return {
+    baselineWithoutResync: RESYNC_OFF
+      ? resyncOffEvidence({
+          lines: hostLines,
+          range: askUnanswered.range,
+          dropped: askUnanswered.dropped,
+          lastFrame: H.frame,
+        })
+      : null,
     range: askUnanswered.range,
     dropped: askUnanswered.dropped,
     overdue,
@@ -4293,13 +4304,16 @@ const askUnansweredReport = (() => {
     comparedFrom: recoveredAt,
   };
 })();
+if (RESYNC_OFF) fs.writeFileSync(`${OUT}/resync-off-evidence.json`, JSON.stringify(askUnansweredReport, null, 2));
 const askUnansweredFailed = RESYNC_OFF
-  ? // Resync off: every push is let go unsent; none is pushed again, settled or given up.
+  ? // Resync off: the injected hole takes the normal stall path, never recovery.
     ASK_UNANSWERED_STALL_MS > 0 &&
     !(
       askUnansweredReport &&
       askUnansweredReport.dropped > 0 &&
-      askUnansweredReport.notSent > 0 &&
+      askUnansweredReport.baselineWithoutResync?.passed === true &&
+      askUnansweredReport.notSent === 0 &&
+      askUnansweredReport.overdue.length === 0 &&
       askUnansweredReport.settled.length === 0 &&
       askUnansweredReport.pushes.length === 0 &&
       askUnansweredReport.gaveUp.length === 0 &&

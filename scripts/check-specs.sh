@@ -670,7 +670,7 @@ $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
 # Recovery broadcast obligations and untrusted acknowledgement ordering.
 DELIVERY=specs/recovery_delivery.qnt
 $QUINT typecheck "$DELIVERY"
-for variant in recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed; do
+for variant in recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed recovery_actor_enabled recovery_actor_disabled recovery_followup_before recovery_followup_fixed recovery_partial_before recovery_partial_fixed; do
   $QUINT test "$DELIVERY" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$DELIVERY" --main=recovery_delivery_fixed --invariant=allHold \
@@ -681,6 +681,13 @@ $QUINT run "$DELIVERY" --main=recovery_capacity_fixed --invariant=atMostOneTrans
 
 $QUINT run "$DELIVERY" --main=recovery_reservation_fixed --invariant=allHold \
   --max-samples=10000 --max-steps=6 --backend="$BACKEND"
+
+for variant in recovery_actor_enabled recovery_actor_disabled; do
+  $QUINT run "$DELIVERY" --main="$variant" --invariant=allHold \
+    --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+done
+
+$QUINT run "$DELIVERY" --main=recovery_followup_fixed --invariant=allHold --max-samples=10000 --max-steps=15 --backend="$BACKEND"
 
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
