@@ -109,12 +109,16 @@ import { heldAsLateJoiner } from './start-cohort.ts';
 import {
   countedByStartGates,
   leavesOut,
+  leavesOutUnreachable,
+  behindTheStart,
+  leftOutItself,
+  missedLoadDeadline,
   rejoinsLate,
   startHasItsHost,
   startsAlone,
   takesLeftOut,
 } from './start-group.ts';
-import { startDeadline } from './start-deadline.ts';
+import { sayUntilHeard, startDeadline } from './start-deadline.ts';
 import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
@@ -326,10 +330,15 @@ export const KNCore = {
     leavesOut,
     startsAlone,
     takesLeftOut,
+    leftOutItself,
+    leavesOutUnreachable,
+    behindTheStart,
+    missedLoadDeadline,
     rejoinsLate,
     startHasItsHost,
     /** A start wait with a deadline, an Effect program (web/src/start-deadline.ts). */
     startDeadline,
+    sayUntilHeard,
   },
   meshHealTargets,
   normalizeAxis,
