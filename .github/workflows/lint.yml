@@ -33,6 +33,12 @@ on:
       - 'oxlint.config.mts'
       - '.oxfmtrc.json'
 
+# Initial runs for the same PR coalesce. Reruns, main pushes and merge
+# queues keep independent full verification.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && github.event.pull_request.number || github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 permissions:
   contents: read
 
@@ -94,7 +100,7 @@ jobs:
       - name: Model-check specs (Quint)
         env:
           QUINT_BACKEND: rust
-        run: npm run spec -- --shard ${{ matrix.shard }} ${{ strategy.job-total }}
+        run: bash scripts/check-specs-pair.sh ${{ strategy.job-index }} ${{ strategy.job-total }}
 
   spec:
     runs-on: ubuntu-latest
@@ -115,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

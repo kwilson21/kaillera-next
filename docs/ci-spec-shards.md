@@ -1,16 +1,17 @@
 # Quint CI shards
 
 `npm run spec` still runs the entire suite in `scripts/check-specs.sh` locally.
-CI runs those same invocations across four jobs:
+CI runs those same invocations across four jobs, each running two of eight
+logical shards concurrently:
 
 ```sh
-npm run spec -- --shard 1 4
+bash scripts/check-specs-pair.sh 0 4
 bash scripts/check-specs.sh --list
-bash scripts/check-specs.sh --list --shard 1 4
+bash scripts/check-specs.sh --list --shard 1 8
 ```
 
 Each of the typecheck, scenario-test and random-run streams is dealt
-independently, reversing lane order each round (1, 2, 3, 4, 4, 3, 2, 1). This
+independently, reversing lane order each round (1 through 8, then 8 through 1). This
 spreads adjacent expensive checks without a hand-maintained timing manifest.
 Every invocation occurs once. Adding a check to the script needs
 no parallel manifest. No model, variant, invariant, sample count, step bound or
@@ -57,3 +58,21 @@ The runner invokes the installed, locked Quint CLI with Node directly rather
 than starting npm for every command. The executable, arguments and failure
 propagation are unchanged; if dependencies are missing, the check fails rather
 than downloading a replacement.
+
+### Two native processes per runner
+
+The four native jobs each run two logical shards concurrently. The wrapper uses
+GitHub's zero-based `strategy.job-index` and actual `strategy.job-total`, mapping
+each job to `index + 1` and `index + total + 1` of `2 * total` logical shards.
+The existing command discovery and serpentine partition remain unchanged. Both
+children must succeed, and both are awaited even when one fails. Their logs are
+printed separately after completion, then temporary log files are removed.
+
+Install the verified native evaluator before starting either child. Native
+requests and results use process-private pipes; these commands request no trace
+output files. On cancellation the wrapper stops/reaps its direct shell children;
+GitHub Actions remains responsible for descendant process-tree cleanup.
+
+This is a controlled hosted performance trial, not a guarantee of a two-minute
+workflow. A local two-CPU paired comparison saved 18.5% wall time, with substantial
+CPU contention. Hosted timing must establish the benefit on the standard runner.
