@@ -316,6 +316,16 @@ ask_escalation() {
   # The push escalated to, its acknowledgement lost, and no deadline on it
   # (pushAckLostTest): 8 steps.
   expect_violation "$ESC" ask_escalation_push_once everyAskEnds 8
+  verify "$ESC" push_deadline_current allHold init 10
+  verify "$ESC" push_deadline_current_resync_off allHold init 10
+  # Resync off: armed, three deadlines, dropped with nothing sent: 4 steps.
+  expect_violation "$ESC" push_deadline_before_resync_off noDropWithoutASentPush 6
+  # A push, a reconnect, three deadlines: 5 steps.
+  expect_violation "$ESC" push_deadline_before noDropDuringAReconnect 6
+  # A push acknowledged, then pushed again past it to the give-up: 6 steps.
+  expect_violation "$ESC" push_deadline_before noDropAfterAnAcknowledgement 7
+  verify "$ESC" escalation_peers_all everyPeerOnTheHostState init 3
+  expect_violation "$ESC" escalation_peers_one everyPeerOnTheHostState 2
 }
 
 reconnect_inputs() {
@@ -331,7 +341,12 @@ drop_is_final() {
   verify "$DROP" drop_is_final_fixed allHold init 10
   # A give-up, then the health check adds the player back outside the
   # roster: 2 steps (desyncThenHealTest).
-  expect_violation "$DROP" drop_is_final_current aDroppedPlayerComesBackOnlyAsALateJoiner 3
+  expect_violation "$DROP" drop_is_final_before aDroppedPlayerComesBackOnlyAsALateJoiner 3
+  # #286 as first written: both pages give up on a dead link, the guest
+  # plays on alone (reconnectGiveUpTest): 2 steps; a guest that dropped
+  # another guest blocks that link (guestGuestTest): 1 step.
+  expect_violation "$DROP" drop_is_final_skip_everywhere aPageThatLostTheHostDoesNotPlayAlone 3
+  expect_violation "$DROP" drop_is_final_skip_everywhere guestLinksCanHeal 2
 }
 
 start_group() {

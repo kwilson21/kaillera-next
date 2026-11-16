@@ -226,3 +226,188 @@ module ask_escalation_fixed_host {
 module ask_escalation_fixed_guest {
   import ask_escalation(ESCALATE = true, PUSH_HAS_DEADLINE = true, IS_HOST = false).*
 }
+
+// ── The host's push and its deadline, in detail ─────────────────────────────
+//
+// What _escalateLostInput and _checkOverduePushes do with one push (the
+// code review of #286):
+//
+// ARM_ONLY_SENT: a deadline runs only on a push that went out. pushSyncState
+//   returns without sending when resync is off (the toolbar's toggle, as
+//   main's PEER-RECOVERED resync is gated), the core is fatal, or the state
+//   read fails; arming then dropped a guest that was never sent anything.
+//   Without a push the ask stays with the stall path, as on main.
+// END_ON_RECONNECT: a reconnect (or the peer going phantom) ends the push:
+//   the reconnect's own resync supersedes it. Before, the deadline ran on and
+//   dropped a guest mid-reconnect, inside the 45 s window.
+// SETTLE_ON_FIRST: an acknowledgement of any state from the first push on
+//   settles it. Before, a push again moved the frame forward, so a late
+//   acknowledgement of the first push did not settle the second.
+module push_deadline {
+  const ARM_ONLY_SENT: bool
+  const END_ON_RECONNECT: bool
+  const SETTLE_ON_FIRST: bool
+  // Resync on, the core alive, the state readable: a push can go out.
+  const CAN_SEND: bool
+
+  pure val MAX_PUSHES = 3
+
+  var armed: bool          // a push deadline runs
+  var sent: int            // pushes that went out
+  var pushes: int          // pushes counted by the deadline
+  var acked: int           // the push the guest's latest acknowledgement answers (0: none)
+  var reconnecting: bool
+  var dropped: bool
+  var droppedUnsent: bool          // history: dropped with no push sent
+  var droppedReconnecting: bool    // history: dropped mid-reconnect
+  var droppedAcked: bool           // history: dropped after an acknowledgement came
+
+  action init = all {
+    armed' = false, sent' = 0, pushes' = 0, acked' = 0,
+    reconnecting' = false, dropped' = false,
+    droppedUnsent' = false, droppedReconnecting' = false, droppedAcked' = false,
+  }
+
+  action keep = all {
+    reconnecting' = reconnecting,
+    droppedUnsent' = droppedUnsent, droppedReconnecting' = droppedReconnecting, droppedAcked' = droppedAcked,
+  }
+
+  // The ask goes overdue: push.
+  action escalate = all {
+    not(armed), not(dropped), pushes == 0,
+    if (ARM_ONLY_SENT and not(CAN_SEND))
+      all { armed' = false, sent' = sent, pushes' = pushes }
+    else
+      all { armed' = true, sent' = if (CAN_SEND) sent + 1 else sent, pushes' = 1 },
+    acked' = acked, dropped' = dropped, keep,
+  }
+
+  // The guest acknowledges the push it applied (perhaps an earlier one).
+  action ack = all {
+    armed, sent > 0, not(dropped),
+    nondet which = 1.to(sent).oneOf()
+    acked' = which,
+    armed' = armed, sent' = sent, pushes' = pushes, dropped' = dropped, keep,
+  }
+
+  // The deadline: settled, push again, or give up.
+  def settled: bool = if (SETTLE_ON_FIRST) acked >= 1 else acked == pushes and acked > 0
+  action deadline = all {
+    armed, not(dropped),
+    not(END_ON_RECONNECT and reconnecting),
+    if (settled)
+      all { armed' = false, pushes' = pushes, sent' = sent, dropped' = false,
+            droppedUnsent' = droppedUnsent, droppedReconnecting' = droppedReconnecting, droppedAcked' = droppedAcked }
+    else if (pushes < MAX_PUSHES)
+      all { armed' = true, pushes' = pushes + 1, sent' = if (CAN_SEND) sent + 1 else sent, dropped' = false,
+            droppedUnsent' = droppedUnsent, droppedReconnecting' = droppedReconnecting, droppedAcked' = droppedAcked }
+    else
+      all { armed' = false, pushes' = pushes, sent' = sent, dropped' = true,
+            droppedUnsent' = (droppedUnsent or sent == 0),
+            droppedReconnecting' = (droppedReconnecting or reconnecting),
+            droppedAcked' = (droppedAcked or acked > 0) },
+    acked' = acked, reconnecting' = reconnecting,
+  }
+
+  // The peer's channel drops and it reconnects (or goes phantom).
+  action reconnect = all {
+    not(reconnecting), not(dropped),
+    reconnecting' = true,
+    armed' = if (END_ON_RECONNECT) false else armed,
+    sent' = sent, pushes' = pushes, acked' = acked, dropped' = dropped,
+    droppedUnsent' = droppedUnsent, droppedReconnecting' = droppedReconnecting, droppedAcked' = droppedAcked,
+  }
+
+  action stutter = all {
+    armed' = armed, sent' = sent, pushes' = pushes, acked' = acked, dropped' = dropped, keep,
+  }
+
+  action step = any { escalate, ack, deadline, reconnect, stutter }
+
+  // A guest is never dropped for a push that never went out.
+  val noDropWithoutASentPush = not(droppedUnsent)
+  // Nor while it is reconnecting: the reconnect's resync supersedes the push.
+  val noDropDuringAReconnect = not(droppedReconnecting)
+  // Nor after it acknowledged a state the host pushed for this hole.
+  val noDropAfterAnAcknowledgement = not(droppedAcked)
+  val allHold = and { noDropWithoutASentPush, noDropDuringAReconnect, noDropAfterAnAcknowledgement }
+
+  // Resync off: nothing goes out (the variants with CAN_SEND false).
+  run resyncOffTest =
+    init.then(all { armed' = false, sent' = 0, pushes' = 0, acked' = 0, reconnecting' = false,
+                    dropped' = false, droppedUnsent' = false, droppedReconnecting' = false, droppedAcked' = false })
+      .then(escalate)
+      .expect(armed == (CAN_SEND or not(ARM_ONLY_SENT)))
+
+  // The first push acknowledged late, after the second went out.
+  run lateAckTest =
+    if (not(CAN_SEND)) init else
+    init.then(all { armed' = false, sent' = 0, pushes' = 0, acked' = 0, reconnecting' = false,
+                    dropped' = false, droppedUnsent' = false, droppedReconnecting' = false, droppedAcked' = false })
+      .then(escalate).then(deadline)
+      .then(all { acked' = 1, armed' = armed, sent' = sent, pushes' = pushes, dropped' = dropped,
+                  reconnecting' = reconnecting, droppedUnsent' = droppedUnsent,
+                  droppedReconnecting' = droppedReconnecting, droppedAcked' = droppedAcked })
+      .then(deadline)
+      .expect(not(armed) == SETTLE_ON_FIRST)
+}
+
+module push_deadline_before {
+  import push_deadline(ARM_ONLY_SENT = false, END_ON_RECONNECT = false, SETTLE_ON_FIRST = false, CAN_SEND = true).*
+}
+
+// Before, with resync off: armed on pushes that never go out.
+module push_deadline_before_resync_off {
+  import push_deadline(ARM_ONLY_SENT = false, END_ON_RECONNECT = false, SETTLE_ON_FIRST = false, CAN_SEND = false).*
+}
+
+module push_deadline_current {
+  import push_deadline(ARM_ONLY_SENT = true, END_ON_RECONNECT = true, SETTLE_ON_FIRST = true, CAN_SEND = true).*
+}
+
+module push_deadline_current_resync_off {
+  import push_deadline(ARM_ONLY_SENT = true, END_ON_RECONNECT = true, SETTLE_ON_FIRST = true, CAN_SEND = false).*
+}
+
+// ── Three players: whom the escalation's state reaches ─────────────────────
+//
+// The host predicted guest 1's input past the window (or never got it);
+// guest 2 got the real one. Pushing the host's state to guest 1 alone puts
+// guest 1 with the host and leaves guest 2 apart (and in the past-window case
+// overwrites the one guest that was right). PUSH_ALL: the escalation's state
+// goes to every guest in the match.
+module escalation_peers {
+  const PUSH_ALL: bool
+
+  // Which timeline each page plays: true = the host's.
+  var g1OnHost: bool
+  var g2OnHost: bool
+  var escalated: bool
+
+  action init = all { g1OnHost' = false, g2OnHost' = false, escalated' = false }
+
+  action escalate = all {
+    not(escalated),
+    escalated' = true,
+    g1OnHost' = true,
+    g2OnHost' = if (PUSH_ALL) true else g2OnHost,
+  }
+
+  action stutter = all { g1OnHost' = g1OnHost, g2OnHost' = g2OnHost, escalated' = escalated }
+  action step = any { escalate, stutter }
+
+  // After the escalation every page plays the host's timeline.
+  val everyPeerOnTheHostState = escalated implies (g1OnHost and g2OnHost)
+
+  run threePlayersTest =
+    init.then(escalate).expect(everyPeerOnTheHostState == PUSH_ALL)
+}
+
+module escalation_peers_one {
+  import escalation_peers(PUSH_ALL = false).*
+}
+
+module escalation_peers_all {
+  import escalation_peers(PUSH_ALL = true).*
+}

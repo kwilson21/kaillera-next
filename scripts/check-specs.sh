@@ -489,6 +489,20 @@ $QUINT typecheck "$ESC"
 for variant in ask_escalation_current ask_escalation_push_once ask_escalation_fixed_host ask_escalation_fixed_guest; do
   $QUINT test "$ESC" --main="$variant" --backend=typescript
 done
+# The push's deadline in detail (push_deadline_before: armed on a push that
+# never went out, run on through a reconnect, unsettled by a late
+# acknowledgement) and whom the state reaches in three players
+# (escalation_peers_one).
+for variant in push_deadline_before push_deadline_before_resync_off push_deadline_current \
+  push_deadline_current_resync_off escalation_peers_one escalation_peers_all; do
+  $QUINT test "$ESC" --main="$variant" --backend=typescript
+done
+$QUINT run "$ESC" --main=push_deadline_current --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend=typescript
+$QUINT run "$ESC" --main=push_deadline_current_resync_off --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend=typescript
+$QUINT run "$ESC" --main=escalation_peers_all --invariant=everyPeerOnTheHostState \
+  --max-samples=2000 --max-steps=5 --backend=typescript
 # Today an ask never answered is predicted for the rest of the match
 # (ask_escalation_current; lostForGoodTest); a push with no deadline ends at
 # its lost acknowledgement (ask_escalation_push_once; pushAckLostTest).
@@ -512,11 +526,13 @@ $QUINT run "$REC" --main=reconnect_inputs_fixed --invariant=allHold \
 # ── A player dropped in a running match comes back only late ──────────────
 DROP=specs/drop_is_final.qnt
 $QUINT typecheck "$DROP"
-for variant in drop_is_final_current drop_is_final_fixed; do
+for variant in drop_is_final_before drop_is_final_skip_everywhere drop_is_final_fixed; do
   $QUINT test "$DROP" --main="$variant" --backend=typescript
 done
-# Today the mesh check adds a dropped player back outside the roster
-# (drop_is_final_current; desyncThenHealTest).
+# Before #286 the mesh check added a dropped player back outside the roster
+# (drop_is_final_before; desyncThenHealTest); #286 as first written left a
+# guest that gave up on its host playing alone and blocked guest links
+# (drop_is_final_skip_everywhere).
 $QUINT run "$DROP" --main=drop_is_final_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=20 --backend=typescript
 
