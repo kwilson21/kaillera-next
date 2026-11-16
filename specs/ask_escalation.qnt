@@ -240,6 +240,14 @@ module ask_escalation_fixed_guest {
 // END_ON_RECONNECT: a reconnect (or the peer going phantom) ends the push:
 //   the reconnect's own resync supersedes it. Before, the deadline ran on and
 //   dropped a guest mid-reconnect, inside the 45 s window.
+//   Two equal deadlines race here: the push's (OVERDUE_PUSH_TIMEOUT_MS,
+//   5 s) and the host's input stall (MAX_STALL_MS + RESEND_TIMEOUT_MS, 5 s),
+//   which makes the guest a phantom when the frames a pushed state skipped
+//   are never settled (its `inputs-settled:` lost). Whichever fires first
+//   owns the recovery and the other ends: the phantom ends the push here
+//   (`reconnect` below may come at any step, so the checker takes both
+//   orders), and a push settled, or a player dropped, ends the stall. The
+//   race is safe by construction, not by timing.
 // SETTLE_ON_FIRST: an acknowledgement of any state from the first push on
 //   settles it. Before, a push again moved the frame forward, so a late
 //   acknowledgement of the first push did not settle the second.
