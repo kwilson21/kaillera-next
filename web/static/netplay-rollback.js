@@ -5353,6 +5353,7 @@
   let _catchUpStartedAt = 0;
   let _catchUpWorkMs = 0;
   let _catchUpSlices = 0;
+  let _catchUpWaits = 0; // holes it waited on
 
   // Legacy booleans — still the source of truth until fully migrated.
   // Each is set alongside _phase during the transition period.
@@ -16137,11 +16138,15 @@
         // A catch-up from a state behind this guest goes on: its next slice
         // is this tick's work (_startCatchUp).
         if (_catchUpTo >= 0) {
+          const catchUpFrom = _frameNum;
           _catchUpSlice(tickMod);
           _markTickReturn('catch-up');
           // Old frames run again: the 60 Hz slot is not spent on them, as on
-          // a rollback replay.
-          _tickReplayOnly = true;
+          // a rollback replay. A slice that ran none, waiting for a player's
+          // input (CATCH_UP_HOLE_WAIT_MS), spends it: the pump looks again
+          // at the next slot instead of calling the slice back to back for
+          // its whole replay budget, every pump, until the input comes.
+          if (_frameNum > catchUpFrom) _tickReplayOnly = true;
           return;
         }
 
@@ -19082,6 +19087,7 @@
     window.KNDesync?.forgetFrom(fromFrame);
     _catchUpWorkMs = 0;
     _catchUpSlices = 0;
+    _catchUpWaits = 0;
     _setReplayFullHeadless(mod, true, 'catch-up');
     _setReplayRdpSkip(mod, true, 'catch-up');
     _setReplayAudioOutputSkip(mod, true, 'catch-up');
@@ -19096,7 +19102,7 @@
     _syncLog(
       `SYNC-CATCH-UP from=${_catchUpFrom} to=${_frameNum} of=${_catchUpTo} frames=${_frameNum - _catchUpFrom} ` +
         `ms=${(performance.now() - _catchUpStartedAt).toFixed(1)} workMs=${_catchUpWorkMs.toFixed(1)} ` +
-        `slices=${_catchUpSlices}${stoppedAt ? ` stopped: ${stoppedAt}` : ''}`,
+        `slices=${_catchUpSlices} waits=${_catchUpWaits}${stoppedAt ? ` stopped: ${stoppedAt}` : ''}`,
     );
     _catchUpTo = -1;
     _catchUpFrom = -1;
@@ -19135,7 +19141,12 @@
         );
         if (hole) {
           const now = performance.now();
-          if (!_catchUpHoleSince) _catchUpHoleSince = now;
+          if (!_catchUpHoleSince) {
+            _catchUpHoleSince = now;
+            _catchUpWaits++;
+            // The first wait is logged; the rest are counted (waits=).
+            if (_catchUpWaits === 1) _syncLog(`SYNC-CATCH-UP-WAIT f=${f} slot=${hole.slot} input=${key}`);
+          }
           if (now - _catchUpHoleSince >= CATCH_UP_HOLE_WAIT_MS) {
             stoppedAt = `slot ${hole.slot} input ${key} not here after ${CATCH_UP_HOLE_WAIT_MS}ms`;
           } else {

@@ -331,7 +331,11 @@ never corrected and the peers split.
   returning anything but a normal step stops it, logged.
 
 Each catch-up logs `SYNC-CATCH-UP from=… to=… of=… frames=… ms=… workMs=…
-slices=…`, with `stopped: …` when it ended short of the guest's frame.
+slices=… waits=…`, with `stopped: …` when it ended short of the guest's
+frame. `waits` counts the holes it waited on; the first is logged when the
+wait begins (`SYNC-CATCH-UP-WAIT f=… slot=… input=…`). A slice that runs no
+frame, waiting, spends the tick's 60 Hz slot, so a wait looks again once a
+slot rather than in a loop for the tick pump's whole replay budget.
 
 ### Detection events
 
