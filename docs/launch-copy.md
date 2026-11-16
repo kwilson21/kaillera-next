@@ -104,7 +104,6 @@ Alt (more direct):
 >
 > Code: <https://github.com/kwilson21/kaillera-next> (GPL-2)
 > Live demo: [link]
-> Lag visualizer (no ROM needed): [link]
 >
 > Things I'd love feedback on:
 >
@@ -162,7 +161,7 @@ Alt (more direct):
 > and rewinds on misprediction. Below 200 ms of network lag, you can't feel
 > the network.
 >
-> [Try the rollback demo →] &nbsp; [Lag visualizer (no ROM) →] &nbsp; [Create a room →]
+> [Try the rollback demo →] &nbsp; [Create a room →]
 
 ---
 

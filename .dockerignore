@@ -10,6 +10,10 @@ __pycache__
 *.egg-info
 .venv
 dist
+# The TypeScript bundles are built inside the image (Dockerfile, stage `web`);
+# a copy built on the host must not replace them.
+web/static/dist
+node_modules
 
 # Build artifacts (WASM core compilation — very large)
 build/

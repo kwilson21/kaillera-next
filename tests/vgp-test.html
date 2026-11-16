@@ -70,6 +70,8 @@
       window.KNState = { touchInput: {} };
       for (let i = 0; i < 24; i++) window.KNState.touchInput[i] = 0;
     </script>
+    <!-- The controls are in the TypeScript bundle; virtual-gamepad.js starts them. -->
+    <script src="/static/dist/kn-core.js"></script>
     <script src="/static/virtual-gamepad.js"></script>
     <script>
       VirtualGamepad.init();

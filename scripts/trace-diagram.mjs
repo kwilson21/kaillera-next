@@ -1,0 +1,195 @@
+/**
+ * Draws Quint traces as Mermaid sequence diagrams (script./quint-trace.mts).
+ *
+ * With no arguments it writes docs/spec-traces.md: every `run` scenario of
+ * the specs listed in SPECS (or the ones an entry names), replayed by
+ * `quint test` and drawn from the trace that produced, so a diagram cannot
+ * show an ordering the model does not have. `--check` fails when the
+ * committed file is out of date.
+ *
+ *   node scripts/trace-diagram.mjs [--check]
+ *
+ * It also draws any trace file, which is how a counterexample is read:
+ *
+ *   npx quint run specs/room_lifecycle.qnt --main=room_before_start_fix \
+ *     --invariant=startIsNotHeldUpByALateJoiner --backend=typescript \
+ *     --mbt --out-itf=trace.itf.json
+ *   node scripts/trace-diagram.mjs --itf trace.itf.json [--hub Server] [--hub-actions graceExpire,serveLateJoin]
+ *
+ * `--hub-actions` names the actions that are the hub's own although they
+ * take a player; any other step is drawn as coming from the player it names.
+ *
+ * `--mbt` makes Quint record the action of each step; without it the steps
+ * are numbered. The diagram goes to standard output.
+ */
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { mbtLabels, runScenarios, sequenceDiagram } from './quint-trace.mts';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const OUT = path.join(ROOT, 'docs/spec-traces.md');
+
+// The scenarios drawn in docs/spec-traces.md. `hub` names the lifeline for
+// everything the model does not keep per player. `runs`, when given, names
+// the only runs of the spec that are drawn; otherwise every run is.
+const SPECS = [
+  {
+    file: 'specs/room_lifecycle.qnt',
+    main: 'room_current',
+    hub: 'Server',
+    // What the server, or the host answering a joiner, does to a player.
+    hubActions: ['graceExpire', 'serveLateJoin', 'admitToStart'],
+    about:
+      "The server's view of a room against what each player's page is doing. " +
+      'The note on a page is the state it moves to; a dashed arrow is what an action did to another page.',
+  },
+  {
+    file: 'specs/streaming_connection.qnt',
+    main: 'streaming_connection_before_reoffer',
+    hub: 'Network',
+    // A roster reaching the host, a signal delivered or lost, the network
+    // failing a connection or carrying it again.
+    hubActions: ['roster', 'deliver', 'lose', 'blip', 'recovers'],
+    runs: ['droppedGuestTest'],
+    about:
+      "The streaming engine's connection between the host and a guest, as each page holds it. " +
+      'Network stands for the server relaying the roster and signals and for the connection between the pages; ' +
+      'its notes are its own state (`broken`, `closed`), and a dashed arrow is what a step did to a page. ' +
+      'The ordering the engine never recovered from before the host had a deadline to offer again: ' +
+      'the guest is left with no connection, with both pages still in the room.',
+  },
+  {
+    file: 'specs/streaming_connection.qnt',
+    main: 'streaming_connection_current',
+    hub: 'Network',
+    hubActions: ['roster', 'deliver', 'lose', 'blip', 'recovers'],
+    runs: ['droppedGuestTest', 'guestStillHoldsTheOldConnectionTest'],
+    about:
+      "The same drop on today's engine. The host's deadline (`reoffer`) offers a new connection and the pair connects " +
+      'again, also when the guest has not yet noticed that its old connection is gone: the new offer names a newer ' +
+      'connection than the one the guest holds, so the guest replaces it.',
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_before',
+    hub: 'Guest',
+    runs: ['rightOverWrongTest', 'twoDropsTest'],
+    about:
+      "A guest's page judging and announcing its ROM while a dropped file is still being hashed, before the page " +
+      'kept each hash with the load it was computed for. `loaded` is the file the page holds, `hash` and ' +
+      "`hashLoad` are `_romHash` and the load it belongs to, `told` is what the server last heard. The host's " +
+      "ROM, dropped over a wrong one, is refused by the wrong one's hash, and its own hash, landing after, says " +
+      'ready with no ROM; a late hash refuses the ROM a newer drop brought.',
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_current',
+    hub: 'Guest',
+    runs: ['rightOverWrongTest', 'twoDropsTest'],
+    about:
+      "The same orderings today. While a load is being hashed the page waits (`pending`): the host's ROM " +
+      "arriving refuses nothing and nothing is announced, and the drop's own hash, once it lands, decides. A " +
+      'hash for a load the page no longer holds changes nothing.',
+  },
+];
+
+const argument = (name) => {
+  const at = process.argv.indexOf(name);
+  return at < 0 ? undefined : process.argv[at + 1];
+};
+
+const itf = argument('--itf');
+if (itf !== undefined) {
+  const trace = JSON.parse(fs.readFileSync(itf, 'utf8'));
+  process.stdout.write(
+    sequenceDiagram(trace, mbtLabels(trace), {
+      hub: argument('--hub') ?? 'Model',
+      hubActions: (argument('--hub-actions') ?? '').split(',').filter(Boolean),
+    }),
+  );
+  process.exit(0);
+}
+
+/** Replay every run of a spec and return its traces by run name. */
+const tracesOf = (spec) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kn-traces-'));
+  try {
+    execFileSync(
+      path.join(ROOT, 'node_modules/.bin/quint'),
+      [
+        'test',
+        spec.file,
+        `--main=${spec.main}`,
+        '--backend=typescript',
+        `--out-itf=${dir}/{test}.itf.json`,
+        ...(spec.runs ? [`--match=^(${spec.runs.join('|')})$`] : []),
+      ],
+      { cwd: ROOT, stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    const traces = new Map();
+    for (const file of fs.readdirSync(dir)) {
+      // Quint names the file after the run: module::...::name.
+      const name = file
+        .replace(/\.itf\.json$/, '')
+        .split('::')
+        .pop();
+      traces.set(name, JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8')));
+    }
+    return traces;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+};
+
+const lines = [
+  '# Spec scenarios as sequence diagrams',
+  '',
+  'Generated by `node scripts/trace-diagram.mjs` from the `run` scenarios of the Quint specs: each one is',
+  'replayed by the model checker and drawn from the trace that produced. Do not edit by hand;',
+  '`npm run check` fails when it is out of date.',
+  '',
+  'To draw a counterexample instead, see the top of `scripts/trace-diagram.mjs`.',
+  '',
+];
+for (const spec of SPECS) {
+  const source = fs.readFileSync(path.join(ROOT, spec.file), 'utf8');
+  const traces = tracesOf(spec);
+  lines.push(`## \`${spec.file}\` (\`${spec.main}\`)`, '', spec.about, '');
+  const scenarios = runScenarios(source, spec.main).filter(
+    (scenario) => spec.runs === undefined || spec.runs.includes(scenario.name),
+  );
+  // A run named here that the spec does not have would otherwise be dropped
+  // without a word.
+  const missing = (spec.runs ?? []).filter((name) => !scenarios.some((scenario) => scenario.name === name));
+  if (missing.length > 0) throw new Error(`${spec.file}: no run called ${missing.join(', ')}`);
+  // Every run Quint replayed must be drawn: a run this script failed to read
+  // from the spec would otherwise go missing without a word.
+  const unread = [...traces.keys()].filter((name) => !scenarios.some((scenario) => scenario.name === name));
+  if (unread.length > 0) throw new Error(`${spec.file}: no steps read for ${unread.join(', ')}`);
+  for (const scenario of scenarios) {
+    const trace = traces.get(scenario.name);
+    if (trace === undefined) throw new Error(`quint wrote no trace for ${scenario.name}`);
+    lines.push(`### ${scenario.name}`, '');
+    if (scenario.comment) lines.push(scenario.comment, '');
+    lines.push(
+      '```mermaid',
+      sequenceDiagram(trace, scenario.steps, { hub: spec.hub, hubActions: spec.hubActions }).trimEnd(),
+      '```',
+      '',
+    );
+  }
+}
+const text = lines.join('\n');
+
+if (process.argv.includes('--check')) {
+  const current = fs.existsSync(OUT) ? fs.readFileSync(OUT, 'utf8') : '';
+  if (current !== text) {
+    console.log('docs/spec-traces.md is out of date; run: node scripts/trace-diagram.mjs');
+    process.exit(1);
+  }
+} else {
+  fs.writeFileSync(OUT, text);
+}

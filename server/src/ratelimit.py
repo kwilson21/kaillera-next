@@ -27,7 +27,13 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "set-mode": (5, 10),
     "rom-sharing-toggle": (5, 10),
     "set-listed": (5, 10),
-    "rom-ready": (10, 10),
+    "match-joined": (5, 10),
+    # Players behind one IP (a household, carrier NAT), each: a guest's drop
+    # says "not ready" at once and "ready" when its hash lands
+    # (specs/rom_identity.qnt), the host's ROM arriving says it again, and a
+    # join, a rejoin or the ROM prompt says it once more. A refused one is not
+    # sent again, and the server would keep the previous word.
+    "rom-ready": (40, 10),
     "input-type": (5, 10),
     "device-type": (5, 10),
     "snapshot": (2, 1),
@@ -52,6 +58,7 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "cache-state": (5, 60),
     "session-log": (16, 30),  # 4 players × 1 flush per 30s + late-join bursts
     "client-event": (60, 60),
+    "wake-event": (6, 3600),
     "debug-sync": (5, 1),
     "debug-logs": (5, 60),
     "game-screenshot": (12, 5),  # 4 players burst simultaneously every 5s; headroom for spectators/jitter/local dev

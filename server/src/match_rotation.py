@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -46,7 +47,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from src import db, retention
+from sqlalchemy import func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+from src import db, retention, schema
+from src.schema import MatchRetention, SessionLog
 
 log = logging.getLogger(__name__)
 
@@ -275,10 +280,7 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
     still writes a metrics row (peer_count=0 or entry_count=0) so the
     sweeper doesn't keep picking it up on every tick.
     """
-    rows = await db.query(
-        "SELECT * FROM session_logs WHERE match_id = ? ORDER BY slot",
-        (match_id,),
-    )
+    rows = await db.fetch(select(SessionLog).where(SessionLog.match_id == match_id).order_by(SessionLog.slot))
     if not rows:
         log.warning("rotate_match: no session_logs rows for match %s", match_id[:8])
         return None
@@ -315,64 +317,10 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
 
 async def _upsert_metrics(m: MatchMetrics) -> None:
     """Insert-or-replace one match_metrics row."""
-    await db.execute_write(
-        """
-        INSERT INTO match_metrics (
-            match_id, mode, peer_count, frames, duration_sec, ended_by,
-            mismatch_count, first_divergence_frame, last_clean_frame,
-            rollbacks, predictions, correct_predictions, max_rollback_depth,
-            failed_rollbacks, tolerance_hits, pacing_throttle_count,
-            parquet_path, parquet_bytes, entry_count, rotated_at
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?,
-            ?, ?, ?,
-            ?, ?, ?, ?,
-            ?, ?, ?,
-            ?, ?, ?, datetime('now')
-        )
-        ON CONFLICT(match_id) DO UPDATE SET
-            mode=excluded.mode,
-            peer_count=excluded.peer_count,
-            frames=excluded.frames,
-            duration_sec=excluded.duration_sec,
-            ended_by=excluded.ended_by,
-            mismatch_count=excluded.mismatch_count,
-            first_divergence_frame=excluded.first_divergence_frame,
-            last_clean_frame=excluded.last_clean_frame,
-            rollbacks=excluded.rollbacks,
-            predictions=excluded.predictions,
-            correct_predictions=excluded.correct_predictions,
-            max_rollback_depth=excluded.max_rollback_depth,
-            failed_rollbacks=excluded.failed_rollbacks,
-            tolerance_hits=excluded.tolerance_hits,
-            pacing_throttle_count=excluded.pacing_throttle_count,
-            parquet_path=excluded.parquet_path,
-            parquet_bytes=excluded.parquet_bytes,
-            entry_count=excluded.entry_count,
-            rotated_at=datetime('now')
-        """,
-        (
-            m.match_id,
-            m.mode,
-            m.peer_count,
-            m.frames,
-            m.duration_sec,
-            m.ended_by,
-            m.mismatch_count,
-            m.first_divergence_frame,
-            m.last_clean_frame,
-            m.rollbacks,
-            m.predictions,
-            m.correct_predictions,
-            m.max_rollback_depth,
-            m.failed_rollbacks,
-            m.tolerance_hits,
-            m.pacing_throttle_count,
-            m.parquet_path,
-            m.parquet_bytes,
-            m.entry_count,
-        ),
-    )
+    row = dataclasses.asdict(m)
+    upsert = sqlite_insert(schema.MatchMetrics).values(**row, rotated_at=db.now())
+    replaced = {column: upsert.excluded[column] for column in row if column != "match_id"}
+    await db.run(upsert.on_conflict_do_update(index_elements=["match_id"], set_={**replaced, "rotated_at": db.now()}))
 
 
 # ── Sweeper ──────────────────────────────────────────────────────────────────
@@ -388,33 +336,32 @@ async def sweep_pending(limit: int = 50) -> int:
     # A match is "ended" when at least one of its session_log rows has
     # ended_by set. We find distinct match_ids meeting that, minus the
     # ones already rotated.
-    rows = await db.query(
-        """
-        SELECT DISTINCT s.match_id
-        FROM session_logs s
-        LEFT JOIN match_metrics m ON m.match_id = s.match_id
-        WHERE s.ended_by IS NOT NULL
-          AND m.match_id IS NULL
-        LIMIT ?
-        """,
-        (limit,),
+    metrics = schema.MatchMetrics
+    rows = await db.fetch(
+        select(SessionLog.match_id)
+        .distinct()
+        .outerjoin(metrics, metrics.match_id == SessionLog.match_id)
+        .where(SessionLog.ended_by.is_not(None), metrics.match_id.is_(None))
+        .limit(limit)
     )
     # The first rotation can run on partial logs (one player leaving sets
     # ended_by mid-match), so a match is rotated once more after its upload
     # window closes: 30 min after game-end, or 4 h after start if it never
     # ended. That final pass re-runs the retention classifier on every log.
-    rows += await db.query(
-        """
-        SELECT m.match_id
-        FROM match_metrics m
-        JOIN match_retention r ON r.match_id = m.match_id
-        WHERE r.deleting_at IS NULL
-          AND r.created_at > datetime('now', '-1 day')  -- every window closes within 4 h; keeps the scan on the index
-          AND COALESCE(datetime(r.ended_at, '+30 minutes'), datetime(r.created_at, '+4 hours')) < datetime('now')
-          AND m.rotated_at < COALESCE(datetime(r.ended_at, '+30 minutes'), datetime(r.created_at, '+4 hours'))
-        LIMIT ?
-        """,
-        (limit,),
+    window_closed = func.coalesce(
+        func.datetime(MatchRetention.ended_at, "+30 minutes"), func.datetime(MatchRetention.created_at, "+4 hours")
+    )
+    rows += await db.fetch(
+        select(metrics.match_id)
+        .join(MatchRetention, MatchRetention.match_id == metrics.match_id)
+        .where(
+            MatchRetention.deleting_at.is_(None),
+            # Every window closes within 4 h; this keeps the scan on the index.
+            MatchRetention.created_at > db.ago("-1 day"),
+            window_closed < db.now(),
+            metrics.rotated_at < window_closed,
+        )
+        .limit(limit)
     )
     rotated = 0
     for r in rows:
@@ -480,9 +427,8 @@ async def _cli_main() -> None:
             await rotate_match(args.match_id)
             return
         if args.force:
-            rows = await db.query(
-                "SELECT DISTINCT match_id FROM session_logs WHERE ended_by IS NOT NULL LIMIT ?",
-                (args.limit,),
+            rows = await db.fetch(
+                select(SessionLog.match_id).distinct().where(SessionLog.ended_by.is_not(None)).limit(args.limit)
             )
             for r in rows:
                 mid = r.get("match_id")

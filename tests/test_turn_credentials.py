@@ -4,6 +4,7 @@ ROM-sharing off switch the public deploy relies on."""
 import asyncio
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 
 from src.api import turn  # noqa: E402
+
+
+def _run(coro):
+    """Run a coroutine to the end on a thread of its own. Under the full suite
+    tests/conftest.py starts a browser for every test, whose sync API keeps an
+    event loop running on this thread, and asyncio.run refuses to start inside
+    it (the same helper as tests/test_abandoned_match.py)."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(coro)).result()
+
 
 CF_RESPONSE = {
     "iceServers": [
@@ -49,7 +60,7 @@ def test_generates_turn_servers_and_drops_port_53_and_stun():
         seen.append(req)
         return httpx.Response(200, json=CF_RESPONSE)
 
-    servers = asyncio.run(turn.ice_servers(_client(handler)))
+    servers = _run(turn.ice_servers(_client(handler)))
     assert servers == [
         {
             "urls": [
@@ -77,7 +88,7 @@ def test_cached_between_calls():
         async with _client(handler) as c:
             return await turn.ice_servers(c), await turn.ice_servers(c)
 
-    a, b = asyncio.run(twice())
+    a, b = _run(twice())
     assert a == b and len(calls) == 1
 
 
@@ -89,7 +100,7 @@ def test_single_object_response_shape():
             "credential": "c",
         }
     }
-    servers = asyncio.run(
+    servers = _run(
         turn.ice_servers(_client(lambda r: httpx.Response(200, json=body)))
     )
     assert servers == [
@@ -119,7 +130,7 @@ def test_failure_returns_empty_and_backs_off(response):
         async with _client(handler) as c:
             return await turn.ice_servers(c), await turn.ice_servers(c)
 
-    assert asyncio.run(twice()) == ([], [])
+    assert _run(twice()) == ([], [])
     assert len(calls) == 1  # the second call is inside the failure backoff
 
 
@@ -136,7 +147,7 @@ def test_rotated_credentials_refetch(monkeypatch):
             monkeypatch.setenv("CF_TURN_API_TOKEN", "rotated")
             await turn.ice_servers(c)
 
-    asyncio.run(run())
+    _run(run())
     assert calls == ["Bearer tok456", "Bearer rotated"]
 
 
@@ -147,7 +158,7 @@ def test_unconfigured_makes_no_request(monkeypatch):
         raise AssertionError("no request expected")
 
     assert not turn.configured()
-    assert asyncio.run(turn.ice_servers(_client(handler))) == []
+    assert _run(turn.ice_servers(_client(handler))) == []
 
 
 def test_endpoint_falls_back_to_hmac_turn_when_cloudflare_fails(monkeypatch):
@@ -220,11 +231,11 @@ def sig(monkeypatch):
 def test_rom_sharing_handlers_follow_the_switch(sig, monkeypatch, raw, allowed):
     signaling, room, emitted, relayed = sig
     monkeypatch.setenv("ROM_SHARING_ENABLED", raw)
-    err = asyncio.run(signaling.rom_sharing_toggle("host", {"enabled": True}))
+    err = _run(signaling.rom_sharing_toggle("host", {"enabled": True}))
     assert (err is None) is allowed
     assert room.rom_sharing is allowed
     assert bool(emitted) is allowed
-    asyncio.run(signaling.rom_signal("host", {"target": "guest", "offer": {}}))
+    _run(signaling.rom_signal("host", {"target": "guest", "offer": {}}))
     assert relayed == (["rom-signal"] if allowed else [])
 
 
@@ -240,8 +251,8 @@ def test_restored_room_flag_is_not_advertised_when_off(sig, monkeypatch):
 def test_guest_on_unlisted_host_can_answer_an_allowed_host(sig, monkeypatch):
     signaling, room, _, relayed = sig
     monkeypatch.setenv("ROM_SHARING_ENABLED", "play.example")
-    asyncio.run(signaling.rom_signal("guest", {"target": "host", "answer": {}}))
+    _run(signaling.rom_signal("guest", {"target": "host", "answer": {}}))
     assert relayed == []  # host hasn't enabled sharing yet
-    assert asyncio.run(signaling.rom_sharing_toggle("host", {"enabled": True})) is None
-    asyncio.run(signaling.rom_signal("guest", {"target": "host", "answer": {}}))
+    assert _run(signaling.rom_sharing_toggle("host", {"enabled": True})) is None
+    _run(signaling.rom_signal("guest", {"target": "host", "answer": {}}))
     assert relayed == ["rom-signal"]

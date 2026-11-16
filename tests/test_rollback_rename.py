@@ -50,24 +50,21 @@ def test_play_html_loads_rollback_engine_first_then_shim():
     )
 
 
-def test_mode_select_dropdown_offers_rollback_and_streaming_only():
+def test_mode_select_dropdown_offers_the_three_modes():
     src = PLAY_HTML.read_text()
     assert '<option value="rollback">Rollback</option>' in src
+    # Lockstep is its own mode now (no prediction), not the old name of rollback.
+    assert '<option value="lockstep">Lockstep</option>' in src
     assert '<option value="streaming">Streaming</option>' in src
-    # The legacy option must be gone from the dropdown.
-    assert '<option value="lockstep">' not in src
 
 
-def test_play_js_normalizes_legacy_mode_at_intake():
-    """play.js has a single normalizeMode helper used at every mode-intake
-    boundary (URL params, users-updated, data-message, dropdown). The
-    helper coerces legacy 'lockstep' to 'rollback'."""
+def test_play_js_reads_every_mode_through_one_rule():
+    """play.js reads the mode at every intake (URL params, users-updated,
+    data-message, dropdown) through KNCore.play.mode.normalizeMode."""
     src = PLAY_JS.read_text()
-    assert "const normalizeMode = (raw) =>" in src
-    assert "if (raw === 'lockstep') return 'rollback';" in src
-    # Default mode literal flipped.
+    assert "const normalizeMode = window.KNCore.play.mode.normalizeMode;" in src
     assert "let mode = 'rollback';" in src
-    # Engine dispatch uses the new global.
+    # Rollback and lockstep both use the rollback engine.
     assert "window.NetplayRollback" in src
 
 
@@ -78,26 +75,26 @@ def test_core_redirector_loads_patched_core_for_rollback_mode():
     only skips the redirector for streaming."""
     src = CORE_REDIRECTOR.read_text()
     assert "if (mode === 'streaming') {" in src
-    assert "rawMode === 'lockstep' ? 'rollback' : rawMode" in src
 
 
-def test_engine_getinfo_reports_rollback_mode():
-    """window.NetplayRollback.getInfo().mode must report 'rollback' (the
-    canonical wire value), not 'lockstep'. Verified by source pattern
-    because the actual call requires a full browser stack."""
+def test_engine_names_its_mode_in_one_place():
+    """getInfo().mode and the session-log payloads say 'rollback', or
+    'lockstep' when the host picked lockstep (predictions off for the match).
+    Verified by source pattern because the actual call requires a full
+    browser stack; tests/rb-two-player.mjs checks getInfo() in a real match."""
     src = ROLLBACK_JS.read_text()
-    # The getInfo() return literal.
-    assert "        mode: 'rollback'," in src
-    # Session log payloads also use 'rollback'.
-    assert "    mode: 'rollback'," in src
-    # No leftover 'mode: lockstep' string-literal mode reports.
+    assert "const _modeName = () => (_predictionsPaused ? 'lockstep' : 'rollback');" in src
+    # getInfo() and both session-log payloads (socket and HTTP fallback).
+    assert src.count("mode: _modeName(),") == 3
+    # No mode reported as a fixed literal.
+    assert "mode: 'rollback'," not in src
     assert "mode: 'lockstep'," not in src
 
 
 def test_internal_lockstep_vocabulary_is_preserved():
     """The rename intentionally keeps 'lockstep' as implementation vocabulary
-    for strict input stalls (boot convergence, menu phase-lock gate, the
-    in-engine fallback) and as stable protocol/log labels. Guard against
+    for strict input stalls (the in-engine fallback when the C engine
+    is not running) and as stable protocol/log labels. Guard against
     accidental over-renames that would break the analyzer or the cheat
     pipeline."""
     src = ROLLBACK_JS.read_text()
@@ -105,7 +102,7 @@ def test_internal_lockstep_vocabulary_is_preserved():
     assert "type: 'lockstep-ready'" in src
     # Console-log prefix.
     assert "console.log(`[lockstep] " in src
-    # Cheat-context name (internal contract with shared.js).
+    # Cheat-context name (internal contract with web/src/page/shared.ts).
     assert "KNShared.bootWithCheats('lockstep')" in src
     # Window flag set during a lockstep stall window.
     assert "window._lockstepActive" in src

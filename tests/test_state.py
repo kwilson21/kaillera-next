@@ -105,10 +105,10 @@ def test_serialize_roundtrip_with_spectators():
     assert restored.slots[1] == "pid-2"
 
 
-def test_legacy_lockstep_mode_coerced_to_rollback():
-    """Persisted Redis rooms from before the lockstep→rollback rename
-    deserialize to mode='rollback'. The engine name changed without
-    changing semantics, so old state should load on the new wire schema.
+def test_a_lockstep_room_is_restored_as_lockstep():
+    """A room saved in lockstep mode comes back in lockstep mode. ("lockstep"
+    was once the old name of rollback and was read as rollback; it is its own
+    mode now, and rooms last hours, so none is left saved in the old sense.)
     """
     legacy_payload = {
         "owner": "sid-owner",
@@ -119,11 +119,11 @@ def test_legacy_lockstep_mode_coerced_to_rollback():
         "slots": {},
         "spectators": {},
         "status": "lobby",
-        "mode": "lockstep",  # pre-rename value persisted in Redis
+        "mode": "lockstep",
         "rom_ready": [],
         "rom_declared": [],
         "input_types": {},
         "device_types": {},
     }
     restored = _deserialize_room(legacy_payload)
-    assert restored.mode == "rollback"
+    assert restored.mode == "lockstep"
