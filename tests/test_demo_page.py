@@ -107,3 +107,36 @@ def test_tap_targets_are_44px_on_phone(demo_page, page):
         box = page.locator(sel).bounding_box()
         assert box is not None, f"{sel} not found"
         assert box["height"] >= 44, f"{sel} height {box['height']} < 44px"
+
+
+@pytest.mark.parametrize("width", [390, 1280])
+def test_icon_button_optical_spacing_and_targets(demo_page, width):
+    """Decorative glyphs stay separate from labels in both comparison states."""
+    demo_page.set_viewport_size({"width": width, "height": 900})
+    demo_page.locator("#gesture-prompt").evaluate("el => el.classList.remove('hidden')")
+    for selector, side in [
+        (".gesture-button", "left"),
+        (".auto-compare button", "left"),
+        (".play-cta-button", "right"),
+    ]:
+        metrics = demo_page.locator(selector).evaluate("""(el) => {
+            const s = getComputedStyle(el);
+            const icon = getComputedStyle(el, el.matches('.play-cta-button') ? '::after' : '::before');
+            return {left: parseFloat(s.paddingLeft), right: parseFloat(s.paddingRight),
+                height: parseFloat(s.minHeight), gap: parseFloat(s.columnGap),
+                icon: parseFloat(icon.width), font: parseFloat(s.fontSize), content: icon.content};
+        }""")
+        assert metrics[side] < metrics["right" if side == "left" else "left"]
+        assert metrics["height"] >= 44
+        assert demo_page.locator(selector).bounding_box()["height"] >= 44
+        name = {".gesture-button": "start", ".auto-compare button": "compare", ".play-cta-button": "cta"}[selector]
+        demo_page.locator(selector).screenshot(path=f"../test-results/optical-{width}-{name}.png")
+        assert 0 < metrics["gap"] < metrics["font"] / 2
+        assert 0 < metrics["icon"] < metrics["font"]
+        assert metrics["content"] == '""'
+    expect(demo_page.locator("#auto-compare-btn")).to_have_text("Auto-compare every 6s")
+    demo_page.locator("#auto-compare").evaluate("el => el.classList.add('is-running')")
+    assert demo_page.locator("#auto-compare-btn").evaluate(
+        "el => getComputedStyle(el, '::before').clipPath"
+    ) == "none"
+

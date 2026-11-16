@@ -92,6 +92,13 @@ jobs:
           PYTHONPATH="$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}" uv run --directory server --frozen --extra dev pytest $(printf '../%s ' $files) \
             --browser chromium -q -rs --durations=15 -p scripts.pytest_browser_shard \
             --ci-shard-index ${{ matrix.shard }} --ci-shard-count ${{ strategy.job-total }}
+      - name: Optical button screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optical-buttons-${{ matrix.shard }}
+          path: test-results/optical-*.png
+          if-no-files-found: ignore
       - name: Server log
         if: failure()
         run: tail -n 400 "$RUNNER_TEMP/server.log"

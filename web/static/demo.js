@@ -398,7 +398,7 @@
     const sub = $('play-cta-sub');
     if (sub) sub.textContent = 'Bring a friend. No installs.';
     const btn = $('play-cta-button');
-    if (btn) btn.textContent = 'Play now →';
+    if (btn) btn.textContent = 'Play now';
   };
 
   // Load the emulator with the dropped ROM (web/src/demo/wiring.ts).
@@ -806,7 +806,7 @@
     const wrapper = $('auto-compare');
     if (wrapper) wrapper.classList.remove('is-running');
     const btn = $('auto-compare-btn');
-    if (btn) btn.textContent = '▶ Auto-compare every 6s';
+    if (btn) btn.textContent = 'Auto-compare every 6s';
   };
 
   // Suspend the timer + visually freeze the progress fill, but preserve the
@@ -844,7 +844,7 @@
     const wrapper = $('auto-compare');
     if (wrapper) wrapper.classList.add('is-running');
     const btn = $('auto-compare-btn');
-    if (btn) btn.textContent = '■ Stop auto-compare';
+    if (btn) btn.textContent = 'Stop auto-compare';
   };
 
   // The run state, which decides when the page does each of the above.
