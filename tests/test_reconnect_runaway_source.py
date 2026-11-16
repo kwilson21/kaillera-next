@@ -339,3 +339,32 @@ def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
     stop = src[src.index("  const stop = () => {") :]
     stop = stop[: stop.index("\n  };\n")]
     assert "_predictedKnownCount = 0;" in stop
+
+
+def test_the_per_slot_only_maps_are_reset_where_their_timeline_starts_over():
+    # Not in _slotInputMaps: a new match (startLockstep, frames from 0) and
+    # stop() reset them; a fast-forward keeps them, since it moves only this
+    # page's frame.
+    src = _src()
+    start = src[src.index("const startLockstep = ") :]
+    start = start[: start.index("_peerLastAdvanceTime = {};")]
+    fresh = start[start.index("if (_frameNum === 0) {") :]
+    assert "_lateJoinActivatedAtFrame = {};" in fresh
+    assert "_lateJoinSeededInputFrames = {};" in fresh
+    assert (
+        "_lastRemoteFramePerSlot = {};"
+        in start[start.index("_fpsLastTime = performance.now();") :]
+    )
+    stop = src[src.index("  const stop = () => {") :]
+    stop = stop[: stop.index("\n  };\n")]
+    for name in (
+        "_lastRemoteFramePerSlot",
+        "_lateJoinActivatedAtFrame",
+        "_lateJoinSeededInputFrames",
+    ):
+        assert f"{name} = {{}};" in stop
+    ff = src[
+        src.index("_syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}`);") :
+    ]
+    ff = ff[: ff.index("_resetInputMaps();") + 20]
+    assert "_lastRemoteFramePerSlot = {};" not in ff

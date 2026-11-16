@@ -6043,10 +6043,13 @@
   ];
   // A peer slot's input state. Both a reconnect (resetPeerState) and a player
   // held as a late joiner (_markPendingLateJoinPeer) start it clean (I2); each
-  // clears its own state besides. The maps below are per-slot only: a new
-  // input timeline keeps or rebuilds them itself (_remoteInputs and
-  // _peerInputStarted by each site; the frame last heard and the late-join
-  // windows outlive a new match, which does not move a peer's frame).
+  // clears its own state besides. The maps below are per-slot only, each
+  // reset where the timeline it belongs to starts over: _remoteInputs and
+  // _peerInputStarted by each reset site (a new match keeps a synthetic
+  // peer's); the frame last heard from each peer and the late-join windows
+  // by startLockstep (a new match restarts frames at 0) and stop(). A
+  // fast-forward keeps them: it moves this page's frame only, and the peers'
+  // frames and the windows already passed still hold.
   const _clearSlotInputState = (slot) => {
     for (const map of _slotInputMaps()) delete map[slot];
     delete _remoteInputs[slot];
