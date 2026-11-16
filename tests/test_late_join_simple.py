@@ -241,8 +241,14 @@ def test_a_joiner_that_lost_the_host_resyncs_after_loading():
         "_resyncAfterLostHost('late-join state loaded');"
     )
 
-    # Asked when the host's channel opens, if it was closed at the load.
-    assert "if (peer.slot === 0) _resyncAfterLostHost('host channel open');" in src
+    # Asked when the host's channel opens, if it was closed at the load. The
+    # same opening ends a guest's wait for its host at the start (#274).
+    assert (
+        "      if (peer.slot === 0) {\n"
+        "        _endHostAnswerDeadline(true);\n"
+        "        _resyncAfterLostHost('host channel open');\n"
+        "      }\n"
+    ) in src
 
     # A fresh wait, joining the start, an applied host state, the give-up,
     # the end of the match (stopSync) and the page's stop clear it: it cannot

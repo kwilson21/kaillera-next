@@ -32,9 +32,15 @@ def test_play_join_adopts_room_game_id_before_mid_game_init():
     assert mid_game_idx != -1
     window = source[room_fetch_idx:mid_game_idx]
 
-    assert "const roomGameId = roomData.gameId || roomData.game_id" in window
-    assert "KNState.gameId = _gameId" in window
+    # Both spellings, taken before the mid-game join (`_takeRoomGameId`
+    # replaced the inline `roomGameId` this once read).
+    assert "_takeRoomGameId(roomData.gameId ?? roomData.game_id)" in window
     assert "applyHostRomFromData(roomData)" in window
+
+    taker_idx = source.find("const _takeRoomGameId = (gameId) => {")
+    assert taker_idx != -1
+    taker = source[taker_idx : source.find("\n  };\n", taker_idx)]
+    assert "KNState.gameId = _gameId" in taker
 
 
 def test_join_ack_payload_includes_game_id_aliases():

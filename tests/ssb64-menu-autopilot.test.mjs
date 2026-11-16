@@ -85,6 +85,41 @@ test('an actor asked for frames ahead of the game does not take them for time go
   }
 });
 
+// Each player picks from its own page (tests/rb-mesh.mjs): P3 Link, P4
+// Samus. The game starts the battle as soon as two have picked, so P1 waits
+// for all of them before pressing Start, or the others are left out.
+test('with three or four players, every one picks before P1 starts the battle', () => {
+  for (const players of [3, 4]) {
+    for (let seed = 1; seed <= 150; seed++) {
+      const r = rng(seed * 6007 + players);
+      const opts = {
+        seed: seed + players * 10000,
+        players,
+        delayP1: 2 + Math.floor(r() * 8),
+        delayP2: 2 + Math.floor(r() * 8),
+        delayOthers: 2 + Math.floor(r() * 8),
+        dropProb: r() * 0.2,
+        mapsStart: [0, 1, 2, 3, 5, 7, 8, 9][Math.floor(r() * 8)],
+        stageSelect: true,
+        maxFrames: 9000,
+      };
+      const res = simulate(opts);
+      const at = `${players} players seed ${seed}`;
+      assert.ok(res.ok, `${at} stuck: ${JSON.stringify({ ...res, trace: undefined })}`);
+      assert.deepEqual(
+        res.slots.map((s) => s.fkind),
+        [0, 2, 5, 3].slice(0, players),
+        `${at}: Mario, DK, Link, Samus`,
+      );
+      assert.ok(
+        res.slots.every((s) => s.selected),
+        `${at}: every player picked`,
+      );
+      assert.equal(res.strayPresses, 0, `${at}: A pressed on the bar above the portraits`);
+    }
+  }
+});
+
 test('stops on a layout mismatch instead of steering blind', () => {
   // CSS pointers that never validate (e.g. a different ROM revision).
   const mem = new Map([[0x800a4ad0, SCENE.PLAYERS_VS << 24]]);

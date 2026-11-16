@@ -273,7 +273,10 @@ invariants doc before proposing any watchdog that _acts_ on stalls.
 - Only runs on the `main` branch
 - The same workflow then deploys: it calls Render's deploy hook
   (`RENDER_DEPLOY_HOOK_URL` secret) once per push to `main`, bump or not.
-  Render's own auto-deploy is off (`render.yaml`); see `deploy/render/README.md`
+  Render's own auto-deploy is off (`render.yaml`); see `deploy/render/README.md`.
+  Right after, it deploys the landing Worker from the same commit
+  (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` secrets); see
+  `deploy/static/README.md`
 - Version displayed in page footer (`web/static/version.json`), changelog in modal (`web/static/changelog.json`)
 - PRs are squash-merged; PR title becomes the commit message
 

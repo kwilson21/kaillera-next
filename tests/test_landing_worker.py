@@ -148,10 +148,10 @@ def test_privacy_notice_is_available_without_the_game_server():
 
 
 def test_version_and_changelog_only_ever_come_from_the_game_server():
-    """CI rewrites both files on every release and never redeploys the Worker,
-    so a copy in its assets names an old release: production's footer showed
-    v0.67.0 from the Worker while the game server had v0.69.3. They are
-    passed through like the API, napping or not."""
+    """CI rewrites both files on every release, so a copy in the Worker's
+    assets names an old release whenever the Worker is behind the game server:
+    production's footer showed v0.67.0 from the Worker while the game server
+    had v0.69.3. They are passed through like the API, napping or not."""
     r = _run(origin_up=True)
     assert _body(r, "/static/version.json") == "origin:/static/version.json og=https://game.example/card"
     assert _body(r, "/static/changelog.json") == "origin:/static/changelog.json og=https://game.example/card"

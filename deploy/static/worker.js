@@ -23,6 +23,7 @@
  * doesn't fully cover.
  *
  * Build: python scripts/build_landing.py   Deploy: npx wrangler deploy -c wrangler.landing.jsonc
+ * (.github/workflows/version-bump.yml runs both once per merge to main).
  */
 
 // Every file the static pages load. Serving all of them here matters: the
@@ -30,10 +31,10 @@
 // would hold up the waking screen itself.
 //
 // version.json and changelog.json are not here: CI rewrites them on every
-// release and never redeploys this Worker, so a copy of them here would name
-// an old release (it named v0.67.0 while v0.69.3 was live). They go
-// to the game server like the API; the footer fetches the version without
-// blocking anything, and asks again while the server wakes.
+// release, so a copy here names an old one whenever this Worker is behind the
+// game server (it named v0.67.0 while v0.69.3 was live). They go to the game
+// server like the API; the footer fetches the version without blocking
+// anything, and asks again while the server wakes.
 const PAGES = {
   '/': '/index.html',
   '/index.html': '/index.html',
