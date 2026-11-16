@@ -3611,10 +3611,6 @@ if (linkReport) summary.link = linkReport;
 if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
 if (RESYNC_FAULT) summary[RESYNC_ONE_BACK ? 'resyncOneBack' : 'resyncSameFrame'] = resyncOneBackReport;
 if (unansweredSocketResyncReport) summary.unansweredSocketResync = unansweredSocketResyncReport;
-if (process.env.HOST_END_CHECK === '1') {
-  const { checkHostEnd } = await import('./rb-end-game.mjs');
-  summary.hostEnd = await checkHostEnd([host, guest], OUT);
-}
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
@@ -3648,6 +3644,11 @@ if (process.env.RESET_COMBO_CHECK === '1') {
   }
   fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
   console.log('RESET_COMBO_CHECK:', JSON.stringify(summary.resetCombo));
+}
+if (process.env.HOST_END_CHECK === '1') {
+  const { checkHostEnd } = await import('./rb-end-game.mjs');
+  summary.hostEnd = await checkHostEnd([host, guest], OUT);
+  fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 }
 // Close each distinct browser instance once (host and guest may share one,
 // e.g. the Chromium/Chromium default, or both resolve to the one WebKit
