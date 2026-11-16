@@ -21,5 +21,9 @@ def build() -> list[str]:
         raise SystemExit("node is not installed: the TypeScript bundles cannot be built")
     if not (REPO / "node_modules" / "esbuild").is_dir():
         raise SystemExit("run `npm ci` first: the TypeScript bundles are built with esbuild")
-    subprocess.run(["node", "scripts/build-web.mjs"], cwd=REPO, check=True, capture_output=True)
+    # Quiet on success (esbuild lists every bundle); on failure its error is
+    # the only clue, so it is shown rather than a bare exit status.
+    result = subprocess.run(["node", "scripts/build-web.mjs"], cwd=REPO, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f"node scripts/build-web.mjs failed:\n{result.stderr or result.stdout}")
     return sorted(str(p.relative_to(REPO)) for p in DIST.glob("*.js"))

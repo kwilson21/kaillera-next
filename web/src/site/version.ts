@@ -6,7 +6,21 @@
  * changelog (`/static/changelog.json`, fetched on the first click).
  * `#kn-about` opens the About window, which needs no request and so works
  * while the server is asleep.
+ *
+ * Both files come from the game server, never from a copy the landing Worker
+ * carries: CI rewrites them on every release. While the server wakes the
+ * version request can fail, so the footer asks again until it answers.
  */
+
+/** How long the footer waits before asking for the version again. */
+export const VERSION_RETRY_MS = 3000;
+
+/**
+ * How many times the footer asks for the version before leaving it empty:
+ * about two minutes, the time the front page waits before it calls a wake
+ * slow (web/src/landing/wake.ts).
+ */
+export const VERSION_ATTEMPTS = 40;
 
 /** A JSON value that is not an object or a list. */
 export type JsonScalar = string | number | boolean | null;
@@ -226,12 +240,14 @@ export interface VersionHost<E extends SiteElement<E>> {
     readonly removeEventListener: (type: 'keydown', listener: (event: SiteKey) => void) => void;
   };
   readonly fetch: (url: string) => Promise<{ readonly json: () => Promise<StaticJson> }>;
+  readonly setTimeout: (handler: () => void, ms: number) => void;
 }
 
 /**
  * Start the version display on a page: wires `#kn-about`, then fills and
- * wires `#kn-version` once `/static/version.json` has answered. Waits for
- * the document when it is still loading.
+ * wires `#kn-version` once `/static/version.json` has answered, asking up to
+ * `VERSION_ATTEMPTS` times `VERSION_RETRY_MS` apart. Waits for the document
+ * when it is still loading.
  */
 export const startVersion = <E extends SiteElement<E>>(host: VersionHost<E>): void => {
   const { document } = host;
@@ -418,21 +434,34 @@ export const startVersion = <E extends SiteElement<E>>(host: VersionHost<E>): vo
     show(backdrop, card);
   };
 
+  const fetchVersion = async (): Promise<string | null> => {
+    try {
+      const response = await host.fetch(`/static/version.json?_t=${Date.now()}`);
+      return decodeVersionFile(await response.json());
+    } catch {
+      return null;
+    }
+  };
+
+  const fillVersion = async (attempt: number): Promise<void> => {
+    const version = await fetchVersion();
+    if (version === null) {
+      // The server may still be waking. Out of attempts, the footer keeps
+      // what the page was served with.
+      if (attempt < VERSION_ATTEMPTS) host.setTimeout(() => void fillVersion(attempt + 1), VERSION_RETRY_MS);
+      return;
+    }
+    currentVersion = version;
+    for (const control of document.querySelectorAll('#kn-version')) {
+      control.textContent = `v${version}`;
+      control.addEventListener('click', () => void showChangelog());
+    }
+  };
+
   const start = async (): Promise<void> => {
     // About is wired first: it must open even when the version cannot be fetched.
     for (const control of document.querySelectorAll('#kn-about')) control.addEventListener('click', showAbout);
-    try {
-      const response = await host.fetch(`/static/version.json?_t=${Date.now()}`);
-      const version = decodeVersionFile(await response.json());
-      if (version === null) return;
-      currentVersion = version;
-      for (const control of document.querySelectorAll('#kn-version')) {
-        control.textContent = `v${version}`;
-        control.addEventListener('click', () => void showChangelog());
-      }
-    } catch {
-      /* no version to show: the footer keeps what the page was served with */
-    }
+    await fillVersion(1);
   };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void start());

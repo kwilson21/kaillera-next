@@ -41,6 +41,8 @@ a `chore(version)` commit when there is a `feat:` or `fix:` since the last
 one, then calls the service's deploy hook, which deploys the tip of `main`.
 Runs go one at a time; if one is cancelled or fails, the next covers it.
 When merges land together, only the run for the newest one releases.
+The same run then deploys the landing Worker from that commit
+(deploy/static/README.md, "Deploys").
 
 Render's auto-deploy is off (`autoDeployTrigger: 'off'` in `render.yaml`).
 With it on, a merge produced two deploys seconds apart, one for the merge

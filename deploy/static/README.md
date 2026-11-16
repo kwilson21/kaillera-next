@@ -87,11 +87,13 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   no COEP, `no-store`). The static files those pages load come from assets
   too: every one of them is listed in `ASSET_FILES`, because the pages'
   scripts are `defer`red and one proxied script behind a napping server
-  would hold up the waking screen. `static/version.json` and
-  `static/changelog.json` are also in `ASSET_FILES` as fallbacks: the Worker
-  tries the origin first, but they are not part of the landing build id (see
-  "Self-correcting" below). Everything else, WebSocket upgrades included,
-  is passed to `ORIGIN`.
+  would hold up the waking screen. Everything else, WebSocket upgrades
+  included, is passed to `ORIGIN`. That includes `static/version.json` and
+  `static/changelog.json`: CI rewrites them on every release, so a copy here
+  names an old release whenever this Worker is behind the game server (the
+  footer showed v0.67.0 while v0.69 was live, whenever Render was napping).
+  The footer fetches the version without blocking the page and asks again
+  while the server wakes (`web/src/site/version.ts`).
 - Proxied HTML keeps the public host: the game server builds absolute URLs
   (OG tags, links) from the `Host` header it was asked on, which through a
   proxied request is the origin's own hostname. `worker.js` rewrites
@@ -113,14 +115,10 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   - `server/src/landing_build.py` computes a "landing build id" — a stable
     content hash over exactly the files the Worker serves from assets (the
     two pages, the files they reference, `EXTRA`, and every self-hosted
-    font). `static/version.json` and `static/changelog.json` are excluded from
-    that id on purpose: CI's version-bump workflow rewrites both on nearly
-    every merge to `main`, which should not mark the landing bundle stale.
-    They are still packaged as fallback assets. The Worker first tries the
-    origin for current release metadata, then uses its own copy after at most
-    one short probe per isolate per 30-second metadata cooldown when the
-    origin is unavailable, so the footer and changelog do not wait for
-    Render to wake.
+    font). `static/version.json` and `static/changelog.json` are not served
+    from assets and are excluded from that id: CI's version-bump workflow
+    rewrites both on nearly every merge to `main`, which should not mark the
+    landing bundle stale.
     `scripts/build_landing.py` imports this module (rather than duplicating
     the logic) to write the *build's own* id into
     `dist-landing/static/landing-build.json`, and the game server imports
@@ -165,18 +163,15 @@ static host (Cloudflare Pages / Worker)   game server (Render)
     (possibly outdated, but instant) copy rather than leaving the visitor on
     a blank tab. After a landing page or asset timeout/network error, the
     isolate skips all landing-origin attempts for 30 seconds and serves its
-    bundled copies immediately. Metadata timeouts instead start a separate
-    30-second cooldown consulted only by `version.json` and `changelog.json`,
-    so their shorter budget can never suppress a viable stale-page fetch.
-    The landing cooldown still suppresses metadata probes. A proxied response
-    clears both cooldowns only when its status is below 500, while a successful
-    freshness request also clears both. Thus a stale
+    bundled copies immediately. A proxied response clears the cooldown only
+    when its status is below 500, and so does a successful freshness request.
+    Thus a stale
     bundle remains in stale mode until it is redeployed, but a sleeping origin
     costs at most one short probe per isolate per cooldown rather than one
-    delay for every page and render-blocking asset. The timeout is ~3 s for
-    landing pages/assets in stale mode and ~800 ms for `version.json` and
-    `changelog.json` in every mode. The API, Socket.IO, WebSocket upgrades
-    and `/play.html` are always proxied with no timeout, exactly as before. A real redeploy
+    delay for every page and render-blocking asset. The timeout is ~3 s, for
+    landing pages/assets in stale mode only. The API, Socket.IO, WebSocket
+    upgrades, `/play.html`, `version.json` and `changelog.json` are always
+    proxied with no timeout. A real redeploy
     (`npx wrangler deploy -c wrangler.landing.jsonc`) is still the way to
     get instant static pages back immediately, rather than waiting on the
     next background check.
@@ -195,7 +190,29 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   `tests/test_landing_build.py` checks `landing_build.py` against the
   repo's `web/` directory and that editing a landing file moves the id.
 
-**Redeploying**, after any change to the landing pages or `worker.js`:
+**Deploys.** `.github/workflows/version-bump.yml` deploys this Worker once
+per merge to `main`, right after it asks Render to deploy the same commit
+(deploy/render/README.md): `npm ci`, `build_landing.py`, `wrangler deploy`.
+Until Render's deploy finishes, the Worker sees its build id differ from the
+game server's and passes the pages through to it (see "Self-correcting"
+above). Before this step the Worker was redeployed by hand, and it fell
+behind: on 2026-11-15 it had last been deployed at v0.67.0 while `main` was
+at v0.69.3.
+
+Setup, once: GitHub → repo → **Settings → Secrets and variables → Actions**,
+two repository secrets:
+
+- `CLOUDFLARE_API_TOKEN`: a Cloudflare API token from the **Edit Cloudflare
+  Workers** template, limited to this account and the `thesuperhuman.us`
+  zone (it needs Workers Scripts: Edit and, for the route, Workers Routes:
+  Edit).
+- `CLOUDFLARE_ACCOUNT_ID`: the account's ID (`npx wrangler whoami` prints
+  it).
+
+Without them the workflow's run fails with a message saying so, after Render
+has been asked to deploy.
+
+**Redeploying by hand** (the same steps CI runs):
 
 ```sh
 git pull                                         # the same commit the server runs
