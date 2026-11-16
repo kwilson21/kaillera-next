@@ -346,7 +346,24 @@ ask_escalation() {
 }
 
 escalation_push() {
+  verify specs/recovery_apply_boundary.qnt recovery_apply_boundary_fixed allHold init 4
+  expect_violation specs/recovery_apply_boundary.qnt recovery_apply_boundary_before allHold 2
+  verify specs/sync_channel_owner.qnt sync_channel_owner_fixed allHold init 6
+  expect_violation specs/sync_channel_owner.qnt sync_channel_owner_before allHold 2
+  local ACK=specs/recovery_ack.qnt
+  verify "$ACK" recovery_ack_fixed exactAttemptOnly init 5
+  expect_violation "$ACK" recovery_ack_before exactAttemptOnly 2
+  local LIFECYCLE=specs/recovery_lifecycle.qnt
+  verify "$LIFECYCLE" recovery_lifecycle_fixed allHold init 5
+  expect_violation "$LIFECYCLE" recovery_lifecycle_before stoppedWorkSettles 2
+  expect_violation "$LIFECYCLE" recovery_lifecycle_before failedJoinStaysGated 2
+  expect_violation "$LIFECYCLE" recovery_lifecycle_before unusableChannelDoesNotCapture 2
+  verify specs/input_placeholder.qnt input_placeholder_fixed allHold init 4
+  expect_violation specs/input_placeholder.qnt input_placeholder_before allHold 2
   local DELIVERY=specs/recovery_delivery.qnt
+  verify "$DELIVERY" recovery_source_budget_fixed allHold init 8
+  expect_violation "$DELIVERY" recovery_source_budget_before capturesBoundedWithinWindow 4
+  expect_violation "$DELIVERY" recovery_source_budget_before pendingWaitersBounded 2
   verify "$DELIVERY" recovery_partial_fixed allHold init 3
   expect_violation "$DELIVERY" recovery_partial_before freeRecipientProceeds 2
   verify "$DELIVERY" recovery_followup_fixed allHold init 10

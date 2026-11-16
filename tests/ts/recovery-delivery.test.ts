@@ -77,7 +77,7 @@ test('a delivered source guest cannot settle the third guest whose recovery tran
   assert.equal(run('sends[0].options.escalation.length'), 2);
   run(`_onEscalationTransfer(sends[0].options.escalation, 'a', true, 1000);
        _onEscalationTransfer(sends[0].options.escalation, 'b', false, 1000);
-       _recovery.acknowledge(1, 997);
+       _recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0);
        _checkOverduePushes();`);
   assert.equal(run('_recovery.state(1) !== null'), false);
   assert.equal(run('_recovery.state(2) !== null'), true);
@@ -86,7 +86,7 @@ test('a delivered source guest cannot settle the third guest whose recovery tran
   assert.equal(run('sends.length'), 2);
   assert.equal(run('sends[1].sid'), 'b');
   run(`_onEscalationTransfer(sends[1].options.escalation, 'b', true, 1001);
-       _recovery.acknowledge(2, 998);
+       _recovery.acknowledge(2, 998, _recovery.entries().find((a) => a.slot === 2)?.wireId ?? 0);
        _checkOverduePushes();`);
   assert.equal(run('_recovery.entries().length'), 0);
   assert.equal(run('drops.length'), 0);
@@ -105,7 +105,7 @@ test('late acknowledgement of an earlier attempt cannot settle its replacement',
        _onEscalationTransfer(sends[0].options.escalation, 'a', true, 1000);
        now += 5000; _checkOverduePushes();`);
   assert.equal(run('_recovery.state(1)'), 'sending');
-  run('_recovery.acknowledge(1, 997);');
+  run('_recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0);');
   assert.equal(run('_recovery.state(1)'), 'sending');
   run(`_onEscalationTransfer(sends[0].options.escalation, 'a', true, 1000);`);
   assert.equal(run('_recovery.state(1)'), 'sending');
@@ -117,7 +117,7 @@ test('four-player recovery keeps each missing recipient independently owed', () 
        _onEscalationTransfer(sends[0].options.escalation, 'a', true, 1000);
        _onEscalationTransfer(sends[0].options.escalation, 'b', false, 1000);
        _onEscalationTransfer(sends[0].options.escalation, 'c', false, 1000);
-       _recovery.acknowledge(1, 997);
+       _recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0);
        _checkOverduePushes(); now += 5000; _checkOverduePushes();`);
   assert.equal(run('sends[0].options.escalation.length'), 3);
   assert.equal(run('sends.length'), 3);
@@ -125,7 +125,7 @@ test('four-player recovery keeps each missing recipient independently owed', () 
   assert.equal(run('sends[2].sid'), 'c');
   // One recipient answers; the other misses three transfers and must rejoin.
   run(`_onEscalationTransfer(sends[1].options.escalation, 'b', true, 1001);
-       _recovery.acknowledge(2, 998);
+       _recovery.acknowledge(2, 998, _recovery.entries().find((a) => a.slot === 2)?.wireId ?? 0);
        _onEscalationTransfer(sends[2].options.escalation, 'c', false, 1001);
        _checkOverduePushes(); now += 5000; _checkOverduePushes();
        _onEscalationTransfer(sends[3].options.escalation, 'c', false, 1002);
@@ -302,7 +302,7 @@ test('whole recovery lifecycle preserves baseline observable traces across deliv
     _onEscalationTransfer(sends[0].options.escalation,'b',false,1000);`);
   compare();
   oldRun('_overduePushes[1].settled = true;');
-  newRun('_recovery.acknowledge(1,997);');
+  newRun('_recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0);');
   compare();
   both('now += 5000;');
   compare();
@@ -339,7 +339,7 @@ test('slow in-flight recipient with chain progress does not consume retries or g
   assert.deepEqual(notices, []);
   assert.equal(manager.current(a), true);
   manager.event(a, { type: 'delivered', attempt: 1, now: 310000, before: 997 });
-  manager.acknowledge(1, 997);
+  manager.acknowledge(1, 997, manager.entries().find((a) => a.slot === 1)?.wireId ?? 0);
   assert.deepEqual(notices, ['settled']);
 });
 
@@ -373,7 +373,7 @@ test('a settled source recovers a trailing hole while another recipient remains 
     await flush();
     run("const originalB = _recovery.entries().find(a => a.slot === 2); pendingTransports[0].resolve('sent');");
     await flush();
-    run('_recovery.acknowledge(1, 997); now += 1500;');
+    run('_recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0); now += 1500;');
     assert.equal(run('_recovery.held(1, 997)'), false);
     run("_escalateLostInput(_peers.a, 'push', now, 997);");
     await flush();
@@ -383,20 +383,20 @@ test('a settled source recovers a trailing hole while another recipient remains 
     assert.equal(run('_recoveryTransfers.size()'), guests);
     run("pendingTransports.at(-1).resolve('sent');");
     await flush();
-    run('_recovery.acknowledge(1, 997);');
+    run('_recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0);');
     assert.equal(run('_recovery.state(1)'), null);
     // B may make slow progress for arbitrarily many acknowledgement periods.
-    // Each later source hole still proceeds without resetting B's token or
+    // Each later rate-limited source hole proceeds without resetting B's token or
     // releasing B's physically pending operation.
     for (let i = 0; i < 5; i++) {
-      run(`now += 4000; _syncChainMovedAt.b = now; _syncChainMovedAt.c = now;
+      run(`now += 30001; _syncChainMovedAt.b = now; _syncChainMovedAt.c = now;
            _checkOverduePushes(); _escalateLostInput(_peers.a, 'push', now, ${998 + i});`);
       await flush();
       assert.equal(run('_recovery.current(originalB)'), true);
       assert.equal(run('_recoveryTransfers.size()'), guests);
       run("pendingTransports.at(-1).resolve('sent');");
       await flush();
-      run('_recovery.acknowledge(1, 997);');
+      run('_recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0);');
       assert.equal(run('drops.length'), 0);
     }
     run("pendingTransports.forEach(t => t.resolve('sent'));");
@@ -410,12 +410,14 @@ test('persistent failed recipient cannot starve new healthy-source recovery or r
   run(`_escalateLostInput(_peers.a, 'push', now, 900);
     _onEscalationTransfer(sends[0].options.escalation, 'a', true, 1000);
     _onEscalationTransfer(sends[0].options.escalation, 'b', false);
-    _recovery.acknowledge(1, 997);`);
+    _recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0);`);
   for (let i = 0; i < 3; i++) {
     assert.equal(run(`_recovery.held(1, ${997 + i})`), false);
-    run(`_escalateLostInput(_peers.a, 'push', now, ${997 + i});
+    if (i < 2)
+      run(`_escalateLostInput(_peers.a, 'push', now, ${997 + i});
       _onEscalationTransfer(sends.at(-1).options.escalation, 'a', true, 1000);
-      _recovery.acknowledge(1, 997); now += 5000; _checkOverduePushes();`);
+      _recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0);`);
+    run('now += 5000; _checkOverduePushes();');
     if (i < 2) run("_onEscalationTransfer(sends.at(-1).options.escalation, 'b', false);");
   }
   assert.equal(run('JSON.stringify(drops)'), '["b"]');
@@ -428,7 +430,7 @@ test('a reset recipient retaining a physical permit cannot reject a healthy reci
   await flush();
   run("pendingTransports[0].resolve('sent');");
   await flush();
-  run('_recovery.acknowledge(1, 997); _recovery.reset(2);');
+  run('_recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0); _recovery.reset(2);');
   assert.equal(run('_recoveryTransfers.size()'), 1);
   run("_escalateLostInput(_peers.a, 'push', now, 997);");
   await flush();
@@ -438,7 +440,9 @@ test('a reset recipient retaining a physical permit cannot reject a healthy reci
   assert.equal(run('_recovery.state(2)'), 'backoff');
   run("pendingTransports[2].resolve('sent');");
   await flush();
-  run('_recovery.acknowledge(1, 997); now += 5000; _checkOverduePushes();');
+  run(
+    '_recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0); now += 5000; _checkOverduePushes();',
+  );
   await flush();
   assert.equal(run('_recovery.state(1)'), null);
   assert.equal(run('pendingTransports.length'), 3);
@@ -451,7 +455,173 @@ test('a reset recipient retaining a physical permit cannot reject a healthy reci
   assert.equal(run('pendingTransports[3].sid'), 'b');
   run("pendingTransports[3].resolve('sent');");
   await flush();
-  run('_recovery.acknowledge(2, 997);');
+  run('_recovery.acknowledge(2, 997, _recovery.entries().find((a) => a.slot === 2)?.wireId ?? 0);');
   assert.equal(run('drops.length'), 0);
   assert.equal(run('_recoveryTransfers.size()'), 0);
+});
+
+test('recovery ACK identifies the exact recipient and attempt across retries and match resets', () => {
+  const notices: string[] = [];
+  const manager = createRecoveryManager({ timeoutMs: 5000, quietMs: 20000, maxPushes: 3 }, (n) => notices.push(n.type));
+  const recipients = [
+    { sid: 'a', slot: 1 },
+    { sid: 'b', slot: 2 },
+  ];
+  const [old, other] = manager.begin(1, 900, recipients, 1000, 0, true);
+  assert.ok(old);
+  assert.ok(other);
+  manager.event(old, { type: 'delivered', attempt: 1, now: 0, before: 997 });
+  manager.event(old, { type: 'tick', now: 5001, away: false, chainProgress: 0 });
+  const retry = manager.entries().find((a) => a.slot === 1)!;
+  assert.notEqual(retry.wireId, old.wireId);
+  manager.event(retry, { type: 'delivered', attempt: retry.sequence, now: 5001, before: 997 });
+  for (const id of [old.wireId, other.wireId, 0, -1, NaN, Infinity, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    manager.acknowledge(1, 997, id);
+    assert.equal(manager.state(1), 'awaitingAck');
+  }
+  manager.acknowledge(1, 997, retry.wireId);
+  assert.equal(manager.state(1), null);
+  manager.resetAll();
+  const [nextMatch] = manager.begin(1, 900, recipients, 1000, 0, true);
+  assert.ok(nextMatch);
+  manager.event(nextMatch, { type: 'delivered', attempt: 1, now: 0, before: 997 });
+  manager.acknowledge(1, 997, retry.wireId);
+  assert.equal(manager.state(1), 'awaitingAck');
+  manager.acknowledge(1, 997, nextMatch.wireId);
+  assert.equal(manager.state(1), null);
+});
+
+test('actual receiver keeps tokens across buffering, rejects stale decode and same-frame duplicate', async () => {
+  const start = source.indexOf('  async function _handleDecodedSyncPayload(');
+  const handler = source.slice(start, source.indexOf('\n  const handleSyncChunksComplete', start));
+  const context = vm.createContext({});
+  vm.runInContext(
+    `
+    let _lastAppliedRecoveryId = 7, _lastAppliedSyncHostFrame = 1000;
+    let _pendingResyncState = null, _resyncRequestInFlight = false, _resyncRequestId=0;
+    const _syncLog = () => {}, _clearLifecycleResyncGuard = () => {};
+    const _endsResyncRequest = () => false, _answersAnOlderRequest = () => false;
+    const _keepsAwaitedAnswer = () => false;
+    ${handler}
+    const receive = (id, frame=1000, full=true) => _handleDecodedSyncPayload({
+      recoveryId:id, frame, isFull:full, isRegions:false, isProactive:false,
+      decompressed:new Uint8Array([1,2]), wireSize:2, source:'dc'
+    });
+  `,
+    context,
+  );
+  for (const id of [0, 6, 7]) {
+    await vm.runInContext(`receive(${id})`, context);
+    assert.equal(vm.runInContext('_pendingResyncState', context), null);
+  }
+  await vm.runInContext('receive(8)', context);
+  assert.equal(vm.runInContext('_pendingResyncState.recoveryId', context), 8);
+  await vm.runInContext('receive(10)', context);
+  await vm.runInContext('receive(9)', context);
+  assert.equal(vm.runInContext('_pendingResyncState.recoveryId', context), 10);
+  vm.runInContext('_pendingResyncState=null; _lastAppliedRecoveryId=10;', context);
+  await vm.runInContext('receive(10)', context);
+  await vm.runInContext('receive(11,999)', context);
+  await vm.runInContext('receive(11,1000,false)', context);
+  assert.equal(vm.runInContext('_pendingResyncState', context), null);
+});
+
+test('actual guest keeps legacy settlement and returns exact recovery ACK only to host', () => {
+  const context = vm.createContext({});
+  vm.runInContext(
+    `
+    const messages=[[],[]], DELAY_FRAMES=0, _playerSlot=null;
+    const _peers={host:{slot:0,dc:{readyState:'open',send:m=>messages[0].push(m)}},
+      other:{slot:2,dc:{readyState:'open',send:m=>messages[1].push(m)}}};
+    const _isPeerPendingLateJoin=()=>false, _settleInputsBefore=()=>{};
+    const _inputAskedAt={}, performance={now:()=>0};
+    ${engineFunction('_settleInputsAtResync')}
+    _settleInputsAtResync({},1000,17);
+  `,
+    context,
+  );
+  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(messages)', context)), [
+    ['inputs-settled:1000', 'recovery-settled:1000:17'],
+    ['inputs-settled:1000'],
+  ]);
+});
+
+test('new holes and valid acknowledgements cannot renew the cumulative source capture budget', () => {
+  const run = room();
+  for (let i = 0; i < 3; i++) {
+    run(`_escalateLostInput(_peers.a, 'push', now, ${900 + i});
+      _onEscalationTransfer(sends.at(-1).options.escalation, 'a', true, 1000);
+      _onEscalationTransfer(sends.at(-1).options.escalation, 'b', true, 1000);
+      _recovery.acknowledge(1, 997, _recovery.entries().find((a) => a.slot === 1)?.wireId ?? 0); _recovery.acknowledge(2, 997, _recovery.entries().find((a) => a.slot === 2)?.wireId ?? 0);
+      _recovery.forgetHistory(1); now += 1500;`);
+  }
+  assert.equal(run('sends.length'), 3);
+  run("_recovery.reset(1); _escalateLostInput(_peers.a, 'push', now, 904);");
+  assert.equal(run('sends.length'), 3);
+  assert.equal(run('JSON.stringify(drops)'), '["a"]');
+  assert.equal(run('!!_peers.b'), true);
+});
+
+test('capture budget expires by source and a new match resets its history', () => {
+  const notices: string[] = [];
+  const manager = createRecoveryManager({ timeoutMs: 5000, quietMs: 20000, maxPushes: 3 }, (n) => notices.push(n.type));
+  for (let i = 0; i < 3; i++) {
+    manager.begin(1, i, [{ slot: 1, sid: 'a' }], 100, i * 1500, true);
+    manager.reset(1);
+  }
+  assert.equal(manager.begin(1, 4, [{ slot: 1, sid: 'a' }], 100, 30000, true).length, 1);
+  manager.reset(1);
+  manager.resetAll();
+  assert.equal(manager.begin(1, 5, [{ slot: 1, sid: 'a' }], 100, 30001, true).length, 1);
+  assert.equal(notices.includes('budget-exhausted'), false);
+});
+
+test('wire request flood retains one queued completion and creates no extra Effect operations', async () => {
+  const run = room(2, true);
+  run("holdCompression = true; const first = pushSyncState('a');");
+  await flush();
+  run("const queued = pushSyncState('a', false, { requestIds: {a: 1} });");
+  await flush();
+  await run(
+    "Promise.all(Array.from({length: 1000}, (_, i) => pushSyncState('a', false, {waitForResult:false, requestIds:{a:i+2}})))",
+  );
+  assert.equal(run('_queuedSyncPushes.size'), 1);
+  assert.equal(run('compressions'), 1);
+  assert.equal(run("_queuedSyncPushes.get('a').options.requestIds.a"), 1001);
+  assert.equal(run("'waiters' in _queuedSyncPushes.get('a')"), false);
+  assert.equal(run("typeof _queuedSyncPushes.get('a').resolve"), 'function');
+  // A coordinated caller colliding with wire traffic waits for the real send,
+  // not null (which its dispatch treats as a failed send and requeues).
+  run(
+    "let coordinatedDone = false; const coordinated = pushSyncState('a', false, {watchFor:['a']}).then(result => { coordinatedDone = true; return result; });",
+  );
+  await flush();
+  assert.equal(run('coordinatedDone'), false);
+  run('releaseCompression();');
+  await flush();
+  run("pendingTransports.forEach(t => t.resolve('sent'));");
+  await flush();
+  run("pendingTransports.forEach(t => t.resolve('sent'));");
+  await run('Promise.all([first, queued, coordinated])');
+  assert.equal(run('coordinatedDone'), true);
+  assert.notEqual(await run('coordinated'), null);
+  assert.equal(run('compressions'), 2);
+  assert.equal(run('_queuedSyncPushes.size'), 0);
+});
+
+test('source identity budget survives slot changes without charging a replacement guest', () => {
+  const notices: string[] = [];
+  const manager = createRecoveryManager({ timeoutMs: 5000, quietMs: 20000, maxPushes: 3 }, (n) =>
+    notices.push(n.attempt.sid),
+  );
+  for (let i = 0; i < 3; i++) {
+    manager.begin(1, i, [{ slot: 1, sid: 'a' }], 100, i * 1000, true);
+    manager.reset(1);
+  }
+  assert.equal(manager.begin(1, 4, [{ slot: 1, sid: 'replacement' }], 100, 4000, true).length, 1);
+  assert.equal(manager.begin(2, 4, [{ slot: 2, sid: 'a' }], 100, 4000, true).length, 0);
+  assert.equal(notices.at(-1), 'a');
+  manager.reset(2);
+  assert.equal(manager.begin(2, 5, [{ slot: 2, sid: 'a' }], 100, 5000, true).length, 0);
+  assert.equal(notices.at(-1), 'a');
 });

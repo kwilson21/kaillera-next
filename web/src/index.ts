@@ -69,7 +69,7 @@ import {
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
-import { mayHandChunk, sendPaced, transferStillFor } from './sync-send.ts';
+import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
 import { changesWatchedFrame, followUpIsUnneeded } from './sync-follow-up.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
@@ -380,7 +380,7 @@ export const KNCore = {
   staleHoldersOf,
   startLateJoinWait,
   /** The host's resync state, a chunk at a time (sync-send.ts). */
-  syncSend: { mayHandChunk, sendPaced, transferStillFor },
+  syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
   /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
   syncFollowUp: { changesWatchedFrame, followUpIsUnneeded },
   startRejoin,

@@ -278,3 +278,14 @@ lemma missedDeliveryStep_ensures(failed: bool, failedForMs: int, backoffMs: int,
   ensures (missedDeliveryStep(failed, failedForMs, backoffMs, pushes, maxPushes).giveUp? <==> (!((failed && (failedForMs < backoffMs))) && (pushes >= maxPushes)))
 {
 }
+
+function sourceCaptureAllowed(used: int, limit: int): bool
+{
+  (used < limit)
+}
+
+lemma sourceCaptureAllowed_ensures(used: int, limit: int)
+  ensures (sourceCaptureAllowed(used, limit) == (used < limit))
+  ensures ((used >= limit) ==> !(sourceCaptureAllowed(used, limit)))
+{
+}

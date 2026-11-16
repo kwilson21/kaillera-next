@@ -136,14 +136,22 @@ def test_a_request_during_a_transfer_is_queued_not_dropped():
     start = src.index("const pushSyncState = async")
     head = src[start : src.index("const gm = window.EJS_emulator?.gameManager;", start)]
     # Newest options kept (the newer dispatch's watches are current); the
-    # earlier requests' numbers go with it, and every caller that queued gets
-    # the run's result, not undefined.
+    # earlier requests' numbers go with it. Coordinated callers share one
+    # completion; unbounded wire duplicates do not retain waiters.
     assert "_queuedSyncPushes.set(key, entry);" in head
     assert "? { ...options, requestIds: { ...(prev.options.requestIds || {}), ...(options.requestIds || {}) } }" in head
     assert "watchFor: [...new Set(" not in head
-    assert "return new Promise((resolve) => entry.waiters.push(resolve));" in head
+    assert (
+        "entry.promise = new Promise((resolve) => (entry.resolve = resolve));" in head
+    )
+    assert "return options.waitForResult === false ? null : prev.promise;" in head
+    assert "return options.waitForResult === false ? null : entry.promise;" in head
+    assert "entry.waiters" not in head
+    assert head.index("_queuedSyncPushes.set(key, entry);") < head.index(
+        "_recoveryTransfers.run("
+    )
     run = src[src.index("const _runQueuedSyncPush = () => {") :][:600]
-    assert "(result) => entry.waiters.forEach((w) => w(result))," in run
+    assert "(result) => entry.resolve?.(result)," in run
     # An escalation push takes no lock and is never queued here.
     assert "if (!escalation && (isProactive ? _proactivePushInFlight : _pushingSyncState)) {" in head
     assert "_runQueuedSyncPush();" in src[start:]

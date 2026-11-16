@@ -125,7 +125,7 @@
   };
   let lastUsersData = null;
   let engine = null;
-  let _endGameInFlight = false;
+  let _endGameRequest = null;
   let _lastHandledGameEndMatchId = null;
   let _gameResyncEnabled = true;
   let previousPlayers = {};
@@ -1311,6 +1311,9 @@
 
   const onUsersUpdated = (data) => {
     lastUsersData = data;
+    // The server sends this after game-ended as well. Reconcile its lobby
+    // state even if the one-shot end event was missed (specs/game_end.qnt).
+    if (data.status === 'lobby') _reconcileAfterRejoin(data);
     if (data.listed !== undefined) {
       const listedCb = document.getElementById('opt-listed');
       if (listedCb) listedCb.checked = !!data.listed;
@@ -1460,6 +1463,8 @@
   const _gameStart = window.KNCore.play.gameStart;
 
   const onGameStarted = (data) => {
+    _endGameRequest?.cancel();
+    _endGameRequest = null;
     // Keep match events from covering the fatal error modal.
     if (coreFatal) return;
     crumb('game-started', {
@@ -1578,6 +1583,7 @@
 
   const onGameEnded = (data = {}) => {
     const endedMatchId = data?.matchId || KNState.matchId || null;
+    if (!_gameStart.endMatchesCurrent(endedMatchId ?? '', KNState.matchId ?? '')) return;
     // Whether this page has the end to handle (web/src/play/game-start.ts,
     // `handlesGameEnd`): not the same match's end twice, and nothing to end
     // if no game is on for this page. A caller that has already moved the
@@ -1592,7 +1598,8 @@
     );
     if (!handled) return;
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
-    _endGameInFlight = false;
+    _endGameRequest?.cancel();
+    _endGameRequest = null;
     console.log(
       '[play] onGameEnded:',
       `engine=${!!engine}`,
@@ -1637,6 +1644,8 @@
   };
 
   const onRoomClosed = (data) => {
+    _endGameRequest?.cancel();
+    _endGameRequest = null;
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'roomClosed' });
     if (engine) {
@@ -3695,32 +3704,39 @@
   };
 
   const endGame = () => {
-    if (_endGameInFlight) return;
-    _endGameInFlight = true;
+    if (_endGameRequest) return;
     const endingMatchId = KNState.matchId || null;
-    socket.emit('end-game', {}, (err) => {
-      if (err) {
-        _endGameInFlight = false;
-        console.log('[play] end-game error:', err);
-        showToast(`End game failed: ${err}`);
-        return;
-      }
-      // The server emits game-ended to the whole room, but the host should not
-      // remain in gameplay if its own self-broadcast is missed. The handler is
-      // idempotent, so this is harmless when the normal event arrives first.
-      onGameEnded({ matchId: endingMatchId, localAck: true });
+    showToast('Ending game for everyone...');
+    // The shared Effect request runner has bounded retries and cancellation.
+    // No host-only timeout: that used to leave everyone else in the match.
+    const request = window.KNCore.startRejoin({
+      send: (answer) => {
+        if (socket?.connected) socket.emit('end-game', { matchId: endingMatchId }, answer);
+      },
+      answerWithinMs: 2000,
+      retryAfterMs: 250,
+      attempts: 3,
     });
-    setTimeout(() => {
-      if (!_endGameInFlight) return;
-      _endGameInFlight = false;
-      if (isGameRunning() || engine) {
-        showToast('Ending game locally...');
-        onGameEnded({ matchId: endingMatchId, localTimeout: true });
+    _endGameRequest = request;
+    void request.outcome.then((outcome) => {
+      if (_endGameRequest !== request) return;
+      _endGameRequest = null;
+      if (!_gameStart.endMatchesCurrent(endingMatchId ?? '', KNState.matchId ?? '')) return;
+      if (outcome.kind === 'resumed') {
+        onGameEnded({ matchId: endingMatchId, localAck: true });
+      } else {
+        showToast(
+          outcome.kind === 'noAnswer'
+            ? 'Could not confirm the game ended. Check your connection and try End Game again.'
+            : `End game failed: ${outcome.reason}`,
+        );
       }
-    }, 5000);
+    });
   };
 
   const leaveGame = () => {
+    _endGameRequest?.cancel();
+    _endGameRequest = null;
     // Notify peers this is intentional (prevents reconnect attempt)
     if (engine && KNState.peers) {
       for (const p of Object.values(KNState.peers)) {

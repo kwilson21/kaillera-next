@@ -89,3 +89,10 @@ export function handlesGameEnd(
 /** The toast a page shows when its game ends. */
 export const gameEndedMessage = (reason: string | null | undefined): string =>
   reason === 'dropped' ? 'You were disconnected for too long. Rejoining...' : 'The host has ended the game';
+
+/** A late end event/ack belongs only to the match the page is still showing. */
+//@ ensures \result ==> ended === "" || current === "" || ended === current
+//@ ensures ended === "" || current === "" || ended === current ==> \result
+export function endMatchesCurrent(ended: string, current: string): boolean {
+  return ended === '' || current === '' || ended === current;
+}

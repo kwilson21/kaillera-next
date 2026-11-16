@@ -1288,6 +1288,9 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     session_id, room = result
     if room.owner != sid:
         return "Only the host can end the game"
+    # A delayed retry from the previous match must not end a rematch.
+    if payload.matchId is not None and room.match_id != payload.matchId:
+        return None
     await _end_match(session_id, room, "game-end")
     return None
 

@@ -5,7 +5,12 @@
 import { Context, Effect, Option, Schema } from 'effect';
 import { setupEffect } from '@xstate/effect';
 import { initialTransition, transition, type EventFrom } from 'xstate';
-import { acknowledgesDeliveredPush, missedDeliveryStep, pushDeadlineStep } from './resync-request.ts';
+import {
+  acknowledgesDeliveredPush,
+  missedDeliveryStep,
+  pushDeadlineStep,
+  sourceCaptureAllowed,
+} from './resync-request.ts';
 
 const Input = Schema.Struct({
   sid: Schema.String,
@@ -221,12 +226,13 @@ export interface RecoveryAttempt {
   readonly slot: number;
   readonly sid: string;
   readonly sequence: number;
+  readonly wireId: number;
 }
 const decodeIssue = Schema.decodeUnknownOption(
   Schema.Struct({ type: Schema.Literal('issue'), args: Schema.Tuple([Schema.Struct({ command: Command })]) }),
 );
 export interface RecoveryNotice {
-  readonly type: Command['type'];
+  readonly type: Command['type'] | 'budget-exhausted';
   readonly attempt: RecoveryAttempt;
   readonly pushes: number;
   readonly hole: number;
@@ -242,8 +248,21 @@ export interface RecoveryTiming {
  * Commands run through Effect; no second JS state machine observes it. */
 export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: RecoveryNotice) => void) => {
   type Snapshot = ReturnType<typeof initialTransition<typeof recoveryMachine>>[0];
+  // Never reset across matches/reconnects: an old ACK cannot name a new attempt.
+  let nextWireId = 0;
   const records = new Map<number, { snapshot: Snapshot; token: RecoveryAttempt }>();
   const counts = new Map<number, Map<number, number>>();
+  // Resource budget is source-scoped and deliberately survives ACKs and peer
+  // resets: a new hole is not permission for unlimited room-wide captures.
+  // This conservative policy intentionally evicts a source on a fourth new
+  // capture within 30s, even for unrelated holes; it is not a measured latency
+  // threshold. A match reset clears it. Three admissions allow a trailing-hole follow-up
+  // without allowing a fresh 8 MiB capture every 1.5 seconds indefinitely.
+  const sourceCaptures = new Map<string, number[]>();
+  const budgetNotified = new Set<string>();
+  const sourceBySlot = new Map<number, string>();
+  const SOURCE_CAPTURE_WINDOW_MS = 30000;
+  const SOURCE_CAPTURE_LIMIT = 3;
   const count = (slot: number, hole: number) => counts.get(slot)?.get(hole) ?? 0;
   const remember = (slot: number, hole: number, pushes: number) => {
     let history = counts.get(slot);
@@ -259,7 +278,12 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
     const [next, effects] = transition(recoveryMachine, record.snapshot, event);
     record.snapshot = next;
     if (next.context.attempt !== record.token.sequence)
-      record.token = Object.freeze({ slot, sid: next.context.sid, sequence: next.context.attempt });
+      record.token = Object.freeze({
+        slot,
+        sid: next.context.sid,
+        sequence: next.context.attempt,
+        wireId: ++nextWireId,
+      });
     const notices: RecoveryNotice[] = [];
     for (const raw of effects) {
       const effect = Option.getOrUndefined(decodeIssue(raw));
@@ -285,6 +309,37 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       enabled: boolean,
     ): readonly RecoveryAttempt[] => {
       if (!enabled || records.has(sourceSlot) || count(sourceSlot, hole) >= timing.maxPushes) return [];
+      const source = recipients.find(({ slot }) => slot === sourceSlot);
+      if (!source) return [];
+      // Expire inactive identities too, so connection churn cannot grow this map forever.
+      for (const [sid, times] of sourceCaptures) {
+        if (times.every((at) => now - at >= SOURCE_CAPTURE_WINDOW_MS)) {
+          sourceCaptures.delete(sid);
+          budgetNotified.delete(sid);
+        }
+      }
+      sourceBySlot.set(sourceSlot, source.sid);
+      const recent = (sourceCaptures.get(source.sid) ?? []).filter((at) => now - at < SOURCE_CAPTURE_WINDOW_MS);
+      sourceCaptures.set(source.sid, recent);
+      if (!sourceCaptureAllowed(recent.length, SOURCE_CAPTURE_LIMIT)) {
+        if (!budgetNotified.has(source.sid)) {
+          budgetNotified.add(source.sid);
+          Effect.runSync(
+            Effect.sync(() =>
+              issue({
+                type: 'budget-exhausted',
+                attempt: Object.freeze({ ...source, sequence: 0, wireId: 0 }),
+                pushes: recent.length,
+                hole,
+                firstFrame: frame,
+              }),
+            ),
+          );
+        }
+        return [];
+      }
+      budgetNotified.delete(source.sid);
+      recent.push(now);
       const pushes = count(sourceSlot, hole) + 1;
       remember(sourceSlot, hole, pushes);
       // Another recipient may still be delivering an earlier broadcast. Do not
@@ -301,7 +356,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
           pushes,
           ...timing,
         });
-        const token = Object.freeze({ sid, slot, sequence: 1 });
+        const token = Object.freeze({ sid, slot, sequence: 1, wireId: ++nextWireId });
         records.set(slot, { snapshot, token });
         return [token];
       });
@@ -311,11 +366,20 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
     event: (attempt: RecoveryAttempt, event: RecoveryEvent): void => {
       if (records.get(attempt.slot)?.token === attempt) send(attempt.slot, event);
     },
-    acknowledge: (slot: number, before: number): void => send(slot, { type: 'acknowledged', before }),
+    // Legacy inputs-settled updates input history only. It cannot prove which
+    // of two same-frame snapshots was applied. Old guests can still recover
+    // through input progress, but never settle a token-bearing attempt by frame.
+    acknowledge: (slot: number, before: number, wireId: number): void => {
+      if (!Number.isSafeInteger(wireId) || wireId <= 0 || records.get(slot)?.token.wireId !== wireId) return;
+      send(slot, { type: 'acknowledged', before });
+    },
     freeze: (gap: number, now: number): void => {
       for (const slot of records.keys()) send(slot, { type: 'freeze', gap, now });
     },
     reset: (slot: number): void => {
+      const sid = sourceBySlot.get(slot);
+      if (sid) budgetNotified.delete(sid);
+      sourceBySlot.delete(slot);
       send(slot, { type: 'stop' });
       records.delete(slot);
       counts.delete(slot);
@@ -324,6 +388,9 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       for (const slot of records.keys()) send(slot, { type: 'stop' });
       records.clear();
       counts.clear();
+      sourceCaptures.clear();
+      sourceBySlot.clear();
+      budgetNotified.clear();
     },
     forgetHistory: (slot: number): void => {
       counts.delete(slot);

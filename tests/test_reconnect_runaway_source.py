@@ -380,9 +380,12 @@ def test_recovery_transfers_are_bounded_and_only_the_delivered_state_is_acknowle
     assert "reservations.get(attempt.slot) === attempt" in pool
     assert "_recoveryTransfers.release(attempts, t.sid);" in src
     assert push.index("try {") < push.index("mod._kn_sync_read(")
-    handler = src[src.index("if (e.data.startsWith('inputs-settled:')) {"):]
+    handler = src[src.index("if (e.data.startsWith('recovery-settled:')) {") :]
     handler = handler[:handler.index("return;")]
-    assert "_recovery.acknowledge(peer.slot, settled);" in handler
+    assert "_recovery.acknowledge(peer.slot, before, Number(idText));" in handler
+    legacy = src[src.index("if (e.data.startsWith('inputs-settled:')) {") :]
+    legacy = legacy[: legacy.index("return;")]
+    assert "_recovery.acknowledge(" not in legacy
     machine = (ROOT / "web/src/recovery-delivery.ts").read_text()
     assert "acknowledgesDeliveredPush(true, context.deliveredBefore, event.before)" in machine
     send = src[src.index("const _sendSyncChunksTo = async ("):]

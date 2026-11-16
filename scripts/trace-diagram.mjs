@@ -37,6 +37,14 @@ const OUT = path.join(ROOT, 'docs/spec-traces.md');
 // the only runs of the spec that are drawn; otherwise every run is.
 const SPECS = [
   {
+    file: 'specs/game_end.qnt',
+    main: 'game_end_fixed',
+    hub: 'Room',
+    about:
+      'A host end request waits for the server rather than ending only the host on timeout. ' +
+      'The authoritative lobby roster repairs a lost end event, and a delayed request cannot end a rematch.',
+  },
+  {
     file: 'specs/room_lifecycle.qnt',
     main: 'room_current',
     hub: 'Server',

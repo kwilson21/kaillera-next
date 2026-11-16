@@ -670,7 +670,7 @@ $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
 # Recovery broadcast obligations and untrusted acknowledgement ordering.
 DELIVERY=specs/recovery_delivery.qnt
 $QUINT typecheck "$DELIVERY"
-for variant in recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed recovery_actor_enabled recovery_actor_disabled recovery_followup_before recovery_followup_fixed recovery_partial_before recovery_partial_fixed; do
+for variant in recovery_source_budget_before recovery_source_budget_fixed recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed recovery_actor_enabled recovery_actor_disabled recovery_followup_before recovery_followup_fixed recovery_partial_before recovery_partial_fixed; do
   $QUINT test "$DELIVERY" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$DELIVERY" --main=recovery_delivery_fixed --invariant=allHold \
@@ -688,6 +688,43 @@ for variant in recovery_actor_enabled recovery_actor_disabled; do
 done
 
 $QUINT run "$DELIVERY" --main=recovery_followup_fixed --invariant=allHold --max-samples=10000 --max-steps=15 --backend="$BACKEND"
+
+# Only the current host channel may mutate incoming state assembly.
+$QUINT typecheck specs/sync_channel_owner.qnt
+for variant in sync_channel_owner_before sync_channel_owner_fixed; do
+  $QUINT test specs/sync_channel_owner.qnt --main="$variant" --backend="$BACKEND"
+done
+$QUINT run specs/sync_channel_owner.qnt --main=sync_channel_owner_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+LIFECYCLE=specs/recovery_lifecycle.qnt
+$QUINT typecheck "$LIFECYCLE"
+for variant in recovery_lifecycle_before recovery_lifecycle_fixed; do
+  $QUINT test "$LIFECYCLE" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$LIFECYCLE" --main=recovery_lifecycle_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+
+# Neutral JS placeholders must not suppress the first real native input.
+$QUINT typecheck specs/input_placeholder.qnt
+$QUINT test specs/input_placeholder.qnt --main=input_placeholder_before --backend="$BACKEND"
+$QUINT test specs/input_placeholder.qnt --main=input_placeholder_fixed --backend="$BACKEND"
+$QUINT run specs/input_placeholder.qnt --main=input_placeholder_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+ACK=specs/recovery_ack.qnt
+$QUINT typecheck "$ACK"
+for variant in recovery_ack_before recovery_ack_fixed; do
+  $QUINT test "$ACK" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$ACK" --main=recovery_ack_fixed --invariant=exactAttemptOnly --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+
+# Recovery state application retains ordering and requires native alignment.
+$QUINT typecheck specs/recovery_apply_boundary.qnt
+$QUINT test specs/recovery_apply_boundary.qnt --main=recovery_apply_boundary_before --backend="$BACKEND"
+$QUINT test specs/recovery_apply_boundary.qnt --main=recovery_apply_boundary_fixed --backend="$BACKEND"
+$QUINT run specs/recovery_apply_boundary.qnt --main=recovery_apply_boundary_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+
+$QUINT run specs/recovery_delivery.qnt --main=recovery_source_budget_fixed --invariant=allHold --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
+$QUINT typecheck specs/game_end.qnt
+$QUINT test specs/game_end.qnt --main=game_end_before --backend="$BACKEND"
+$QUINT test specs/game_end.qnt --main=game_end_fixed --backend="$BACKEND"
 
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then

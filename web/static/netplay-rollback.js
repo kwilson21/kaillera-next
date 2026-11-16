@@ -5264,7 +5264,7 @@
   //    ahead, before it was taken back and moved forward again, and a peer
   //    far behind at the time dropped it as out of range.
   //  - The peers' inputs for the same range that are missing are asked for.
-  const _settleInputsAtResync = (mod, frame) => {
+  const _settleInputsAtResync = (mod, frame, recoveryId = 0) => {
     const from = Math.max(0, frame - DELAY_FRAMES);
     const made = [];
     const own = [];
@@ -5294,6 +5294,7 @@
         // Always, even with none of its own to resend: the host's
         // escalation push is answered by it (specs/ask_escalation.qnt).
         peer.dc.send(`inputs-settled:${from}`);
+        if (peer.slot === 0 && recoveryId > 0) peer.dc.send(`recovery-settled:${from}:${recoveryId}`);
         for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
         const askedAt = (_inputAskedAt[peer.slot] ??= {});
         const askedNow = performance.now();
@@ -5443,6 +5444,17 @@
       _syncLog(
         `INPUT-ASK-PUSH-ENDED f=${_frameNum} slot=${slot}: ${!target ? 'no entry' : target.reconnecting ? 'reconnecting' : 'phantom'}, its own resync supersedes the push`,
       );
+    } else if (type === 'budget-exhausted') {
+      _syncLog(
+        `INPUT-ASK-SOURCE-BUDGET f=${_frameNum} slot=${slot}: repeated new holes exhausted capture budget (used=${pushes} limit=3 windowMs=30000)`,
+      );
+      KNEvent('desync', 'Repeated recovery requests exceeded the source capture budget', {
+        slot,
+        hole,
+        kind: 'input-ask-source-budget',
+      });
+      _config?.onToast?.(`P${slot + 1} repeatedly lost synchronization and was dropped`);
+      hardDisconnectPeer(sid, { tell: 'desync' });
     } else if (type === 'drop') {
       _syncLog(
         `INPUT-ASK-PUSH-GAVEUP f=${_frameNum} slot=${slot} pushes=${pushes}: recovery was not acknowledged — dropping the player`,
@@ -6950,6 +6962,7 @@
 
   let _syncChunks = []; // incoming chunks from host DC
   let _syncExpected = 0; // expected chunk count
+  let _syncRecoveryId = 0;
   let _syncFrame = 0; // frame number of incoming sync
   let _syncIsFull = true; // true=full state, false=XOR delta
   let _syncChunkTimeoutTimer = null;
@@ -7166,6 +7179,7 @@
       _resyncRequestAt,
       _frameNum,
     );
+  let _lastAppliedRecoveryId = 0;
   let _lastAppliedSyncHostFrame = -1; // host frame of the most recently applied sync state (discard stale explicit)
   let _pendingResyncState = null; // {bytes, frame} buffered for async apply at frame boundary
   // C-level sync: kn_sync_hash/read/write bypass retro_serialize for seamless resync
@@ -7334,6 +7348,7 @@
     try {
       return (await compressAndEncode(bytes)).data;
     } catch (e) {
+      if (e?.name === 'AbortError') throw e;
       _syncLog(`save RAM encode failed: ${e?.message || e}`);
       return null;
     }
@@ -7343,6 +7358,7 @@
       if (msg?.saveRam) return await decodeAndDecompress(msg.saveRam);
       if (msg?.saveData) return base64ToUint8(msg.saveData); // pre-gzip late-join senders
     } catch (e) {
+      if (e?.name === 'AbortError') throw e;
       _syncLog(`save RAM decode failed: ${e?.message || e}`);
     }
     return null;
@@ -7713,6 +7729,7 @@
     _syncLog(`received socket sync-request-full from ${requesterSid} reason=${msg.reason || 'unknown'}`);
     pushSyncState(requesterSid, false, {
       transport: 'socket',
+      waitForResult: false,
       reason: msg.reason || 'socket-request',
       requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) },
     });
@@ -9313,7 +9330,12 @@
       }
     }
     const existingHeaderInput = _remoteInputs[peer.slot][recvFrame];
-    const headerDuplicate = existingHeaderInput !== undefined && _inputEq(existingHeaderInput, recvInput);
+    // A neutral placeholder can exist only in JS (future late-join frames
+    // are deliberately skipped by native backfill). Its first real input,
+    // even neutral, must reach C before equality-based duplicate filtering.
+    const headerPlaceholder = existingHeaderInput === KNShared.ZERO_INPUT;
+    const headerDuplicate =
+      existingHeaderInput !== undefined && !headerPlaceholder && _inputEq(existingHeaderInput, recvInput);
     const headerWasSeeded = _consumeLateJoinSeededInput(peer.slot, recvFrame);
     _remoteInputs[peer.slot][recvFrame] = recvInput;
     // An input this page did not hold restarts the peer-stale clock, below
@@ -9353,12 +9375,16 @@
         const existingRedundantInput = _remoteInputs[peer.slot][r.frame];
         const redundantWasSeeded = _consumeLateJoinSeededInput(peer.slot, r.frame);
         // Already have real input for this frame? Skip — just a dup.
-        if (existingRedundantInput !== undefined && !redundantWasSeeded) {
+        const redundantPlaceholder = existingRedundantInput === KNShared.ZERO_INPUT;
+        if (existingRedundantInput !== undefined && !redundantWasSeeded && !redundantPlaceholder) {
           _rbTransportDupsRecv++;
           continue;
         }
         _remoteInputs[peer.slot][r.frame] = redundantInput;
-        if (_useCRollback && (!existingRedundantInput || !_inputEq(existingRedundantInput, redundantInput))) {
+        if (
+          _useCRollback &&
+          (!existingRedundantInput || redundantPlaceholder || !_inputEq(existingRedundantInput, redundantInput))
+        ) {
           _pendingCInputs.push({
             slot: peer.slot,
             frame: r.frame,
@@ -9879,6 +9905,19 @@
           _endMatchDropped(e.data.slice('dropped:'.length));
           return;
         }
+        if (e.data.startsWith('recovery-settled:')) {
+          const [, beforeText, idText] = e.data.split(':');
+          const before = Number(beforeText);
+          if (
+            _isValidPlayerSlot(peer.slot) &&
+            Number.isSafeInteger(before) &&
+            before >= 0 &&
+            before <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES
+          ) {
+            _recovery.acknowledge(peer.slot, before, Number(idText));
+          }
+          return;
+        }
         if (e.data.startsWith('inputs-settled:')) {
           // The peer was moved forward by a resync and never made its inputs
           // from before this frame (_settleInputsAtResync). Only a frame this
@@ -9893,7 +9932,7 @@
           ) {
             _inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);
             _inputSettledAckBefore[peer.slot] = Math.max(_inputSettledAckBefore[peer.slot] ?? -1, settled);
-            _recovery.acknowledge(peer.slot, settled);
+
             _syncLog(`INPUTS-SETTLED slot=${peer.slot} before=${settled} f=${_frameNum}`);
           }
           return;
@@ -10201,7 +10240,7 @@
             });
             _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
           } else {
-            pushSyncState(remoteSid, false, { requestIds: { [remoteSid]: requestId } });
+            pushSyncState(remoteSid, false, { waitForResult: false, requestIds: { [remoteSid]: requestId } });
           }
         }
         // JSON messages
@@ -10259,16 +10298,38 @@
 
   const setupSyncDataChannel = (_remoteSid, ch) => {
     ch.binaryType = 'arraybuffer';
-    // Reset sync assembly state — after reconnect the old DC's partial
-    // state must not carry over or binary chunks will be dropped as unexpected.
-    _syncExpected = 0;
-    _syncChunks = [];
+    // Only replacement of the authenticated host channel resets assembly.
+    // Other peers opening a sync channel must not discard the host's bytes.
+    const ownsAssembly = () =>
+      window.KNCore.syncSend.mayReceiveState(_peers[_remoteSid]?.slot ?? -1, _peers[_remoteSid]?.syncDc === ch);
+    if (ownsAssembly()) {
+      _syncExpected = 0;
+      _syncChunks = [];
+      _syncChunkSessionId++;
+      if (_syncChunkTimeoutTimer) clearTimeout(_syncChunkTimeoutTimer);
+      _syncChunkTimeoutTimer = null;
+      _rearmSyncChunkDeadline = null;
+    }
     // Guest: the request the next state on this channel answers, sent just
     // ahead of its header. It lives and dies with the channel.
     let syncAnswerIdNext = 0;
+    let recoveryIdNext = 0;
     ch.onmessage = (e) => {
+      // Check every message, including binary chunks and answer ids. A
+      // replaced host channel is stale even though its peer still has slot 0.
+      if (!ownsAssembly()) {
+        if (typeof e.data === 'string' && e.data.startsWith('sync-start:')) {
+          _syncLog(`state header refused: from non-current host channel sid=${_remoteSid}`);
+        }
+        return;
+      }
       if (typeof e.data === 'string') {
         if (!_peerBoundary().peerText('sync-state', e.data)) return;
+        if (e.data.startsWith('sync-recovery-id:')) {
+          const id = Number(e.data.substring(17));
+          recoveryIdNext = _peers[_remoteSid]?.slot === 0 && Number.isSafeInteger(id) && id > 0 ? id : 0;
+          return;
+        }
         if (e.data.startsWith('sync-answer-id:')) {
           syncAnswerIdNext = _requestIdFrom(Number(e.data.substring(15)));
           // Only the host's word says what the host does.
@@ -10296,6 +10357,8 @@
           _syncIsFull = parts[3] === '1';
           _syncIsProactive = parts[4] === '1';
           _syncIsRegions = false;
+          _syncRecoveryId = recoveryIdNext;
+          recoveryIdNext = 0;
           _syncAnswerFor = syncAnswerIdNext;
           syncAnswerIdNext = 0;
           _syncChunks = [];
@@ -10347,6 +10410,8 @@
           _syncIsFull = true;
           _syncIsProactive = false;
           _syncIsRegions = true;
+          _syncRecoveryId = recoveryIdNext;
+          recoveryIdNext = 0;
           _syncAnswerFor = syncAnswerIdNext;
           syncAnswerIdNext = 0;
           _syncChunks = [];
@@ -10380,7 +10445,7 @@
             }
             _rearmSyncChunkDeadline = null;
             _syncLog(`sync chunks complete: ${_syncChunks.length}/${_syncExpected} chunks received`);
-            handleSyncChunksComplete();
+            handleSyncChunksComplete(ownsAssembly);
           }
           return;
         }
@@ -10497,6 +10562,7 @@
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
       _followUpWatches.delete(opts.sid);
+      _queuedSyncPushes.get(opts.sid)?.resolve?.(null);
       _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
       // the new peer session, and a transfer on its chain, running or still
@@ -12162,6 +12228,7 @@
           .catch((e) => _syncLog(`background cache failed: ${e.message || e}`));
       }
     } catch (err) {
+      if (err?.name === 'AbortError') return;
       _syncLog(`failed to send initial state: ${err}`);
       if (_playerSlot === 0) _retryHostState();
     }
@@ -12287,10 +12354,8 @@
       return;
     }
     _markPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer');
-    // Only an accepted serve clears the drop marker. A rate-limited request
-    // must not let the mesh health check add this slot outside the roster
-    // (specs/recovery_delivery.qnt cooldownTest).
-    _droppedThisMatch.delete(remoteSid);
+    // Keep the drop marker through capture/compression: failed serves must
+    // never let mesh healing activate a guest that has not loaded state.
     // A repeated request for a joiner already being served (its state was
     // lost, or is still being compressed) is the same serve: it keeps the
     // deadline of the first, or each repeat would push the pause back.
@@ -12416,6 +12481,7 @@
         hiddenWords,
         audioFifo,
       });
+      _droppedThisMatch.delete(remoteSid);
     } catch (err) {
       _syncLog(`failed to send late-join state: ${err}`);
       _clearPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer failed');
@@ -15091,6 +15157,7 @@
     _lateJoinLostHost = false;
     _lateJoinLostHostAsks = 0;
     _lastAppliedSyncHostFrame = -1;
+    _lastAppliedRecoveryId = 0;
     _resetStrictMenuResends();
     _clearStrictMenuWait();
 
@@ -15430,7 +15497,7 @@
     // opens, or resetPeerState drops it when that peer disconnects (I2).
     const reachable = (r) => {
       const p = _peers[r.targetSid];
-      const ok = [p?.syncDc, p?.dc].some((ch) => ch?.readyState === 'open');
+      const ok = p?.syncDc?.readyState === 'open';
       if (!ok && !r.unreachableLogged) {
         r.unreachableLogged = true;
         _syncLog(`coord sync held: target ${r.targetSid} has no open channel`);
@@ -15848,7 +15915,7 @@
           if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
-          applySyncState(pending.bytes, pending.frame, pending.fromProactive);
+          applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId);
         } else if (_runSubstate !== RUN_AWAITING_RESYNC) {
           // Reached target frame but state not here yet — stall until it arrives
           _runSubstate = RUN_AWAITING_RESYNC;
@@ -15879,10 +15946,11 @@
       } else {
         _pendingResyncState = null;
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        applySyncState(pending.bytes, pending.frame, pending.fromProactive);
+        applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId);
       }
     }
 
+    if (_coreFatalError) return; // sync application may have failed after loading native state
     _chk('post-sync-target');
 
     // ── Rollback-mode peer stall freeze ─────────────────────────────────
@@ -18837,7 +18905,8 @@
       const id = _syncWorkerNextId++;
       msg.id = id;
       _syncWorkerCallbacks[id] = (result) => {
-        if (result.error) reject(new Error(result.error));
+        if (result.cancelled) reject(new DOMException('Match stopped', 'AbortError'));
+        else if (result.error) reject(new Error(result.error));
         else resolve(result);
       };
       // Transfer ArrayBuffers zero-copy to worker (detaches on main thread)
@@ -18854,6 +18923,7 @@
       const result = await workerPost({ type: 'compress', data: bytes });
       return result.data;
     } catch (e) {
+      if (e?.name === 'AbortError') throw e;
       // Worker fallback: compress on main thread
       return compressStateFallback(bytes);
     }
@@ -18885,6 +18955,7 @@
       const result = await workerPost({ type: 'decompress', data: bytes });
       return result.data;
     } catch (e) {
+      if (e?.name === 'AbortError') throw e;
       // Worker fallback: decompress on main thread
       const ds = new DecompressionStream('gzip');
       const writer = ds.writable.getWriter();
@@ -18931,6 +19002,7 @@
       const result = await workerPost({ type: 'compress-and-encode', data: bytes });
       return result;
     } catch (e) {
+      if (e?.name === 'AbortError') throw e;
       // Fallback: main thread
       const compressed = await compressStateFallback(bytes);
       return {
@@ -18946,6 +19018,7 @@
       const result = await workerPost({ type: 'decode-and-decompress', data: b64 });
       return result.data;
     } catch (e) {
+      if (e?.name === 'AbortError') throw e;
       // Fallback: main thread
       const compressed = base64ToUint8(b64);
       return decompressState(compressed);
@@ -18965,16 +19038,17 @@
   // every guest): sent next, newest options kept. A paced transfer lasts as
   // long as the link takes, so dropping them, as before, would lose a guest's
   // request for as long (its request deadline would ask again 8 s later).
-  // Each caller that queued gets the result of the run that serves it.
-  const _queuedSyncPushes = new Map(); // key -> { options, waiters }
+  // One shared completion per target serves coordinated callers. Fire-and-forget
+  // wire requests update options without retaining another Promise or Effect fiber.
+  const _queuedSyncPushes = new Map(); // key -> { options, resolve, promise }
   const _runQueuedSyncPush = () => {
     const next = _queuedSyncPushes.entries().next();
     if (next.done) return;
     const [sid, entry] = next.value;
     _queuedSyncPushes.delete(sid);
     pushSyncState(sid || null, false, entry.options).then(
-      (result) => entry.waiters.forEach((w) => w(result)),
-      () => entry.waiters.forEach((w) => w(null)),
+      (result) => entry.resolve?.(result),
+      () => entry.resolve?.(null),
     );
   };
   let _proactivePushInFlight = false; // separate flag so proactive pushes never block explicit sync-requests
@@ -19007,38 +19081,42 @@
     // follows (specs/escalation_push.qnt, CLOCK "chain"). Each chain sends one
     // transfer at a time, so nothing interleaves.
     const escalation = attempts.length > 0;
+    // Proactive and explicit syncs use separate in-flight guards so that a
+    // proactive push in progress never drops a sync-request from a reconnecting guest.
+    if (!escalation && (isProactive ? _proactivePushInFlight : _pushingSyncState)) {
+      if (!isProactive) {
+        // Newest options kept: the newer dispatch's watches are the current
+        // ones for the guests it covers. The numbers of the requests queued
+        // before still go with it; duplicates need no extra completion waiter.
+        const key = targetSid || '';
+        const prev = _queuedSyncPushes.get(key);
+        const entry = {
+          options: prev
+            ? { ...options, requestIds: { ...(prev.options.requestIds || {}), ...(options.requestIds || {}) } }
+            : options,
+          resolve: null,
+        };
+        if (prev) {
+          prev.options = entry.options;
+          return options.waitForResult === false ? null : prev.promise; // wire floods retain no waiter
+        }
+        _queuedSyncPushes.set(key, entry);
+        _syncLog(`sync push for ${targetSid || 'all'} queued behind the one in flight`);
+        entry.promise = new Promise((resolve) => (entry.resolve = resolve));
+        return options.waitForResult === false ? null : entry.promise;
+      }
+      return;
+    }
+    if (!escalation) {
+      if (isProactive) _proactivePushInFlight = true;
+      else _pushingSyncState = true;
+    }
     return _recoveryTransfers.run(
       attempts,
       async (admittedAttempts) => {
         // Physical admission is per recipient, including after logical reset.
         const attempts = admittedAttempts;
-        // Proactive and explicit syncs use separate in-flight guards so that a
-        // proactive push in progress never drops a sync-request from a reconnecting guest.
-        if (!escalation && (isProactive ? _proactivePushInFlight : _pushingSyncState)) {
-          if (!isProactive) {
-            // Newest options kept: the newer dispatch's watches are the current
-            // ones for the guests it covers. The numbers of the requests queued
-            // before still go with it, and each caller gets the run's result.
-            const key = targetSid || '';
-            const prev = _queuedSyncPushes.get(key);
-            const entry = {
-              options: prev
-                ? { ...options, requestIds: { ...(prev.options.requestIds || {}), ...(options.requestIds || {}) } }
-                : options,
-              waiters: prev ? prev.waiters : [],
-            };
-            _queuedSyncPushes.set(key, entry);
-            _syncLog(`sync push for ${targetSid || 'all'} queued behind the one in flight`);
-            return new Promise((resolve) => entry.waiters.push(resolve));
-          }
-          return;
-        }
 
-        const gm = window.EJS_emulator?.gameManager;
-        if (!gm) {
-          notSent('no emulator', attempts);
-          return null;
-        }
         const release = () => {
           if (escalation) return;
           if (isProactive) _proactivePushInFlight = false;
@@ -19047,12 +19125,11 @@
             _runQueuedSyncPush();
           }
         };
-        if (escalation) {
-          // The Effect pool owns these reservations.
-        } else if (isProactive) {
-          _proactivePushInFlight = true;
-        } else {
-          _pushingSyncState = true;
+        const gm = window.EJS_emulator?.gameManager;
+        if (!gm) {
+          notSent('no emulator', attempts);
+          release();
+          return null;
         }
         try {
           let currentState;
@@ -19267,7 +19344,14 @@
           if (attempts.length && !attempts.some((a) => a.sid === t.sid && _recovery.current(a))) return 'skipped';
           // Once a transfer starts, drain its framing; cancellation invalidates
           // its actor outcome, not the physically in-flight channel operation.
-          return _sendSyncChunksTo(t, compressed, frame, isProactive, requestIds);
+          return _sendSyncChunksTo(
+            t,
+            compressed,
+            frame,
+            isProactive,
+            requestIds,
+            attempts.find((a) => a.sid === t.sid)?.wireId ?? 0,
+          );
         });
         _syncSendChains[t.sid] = run.catch(() => {});
         // Each guest's outcome as its own chain settles, a failure included:
@@ -19315,7 +19399,7 @@
   // closed with the guest still on it), 'dropped' (reconnected or the match
   // ended since the state was taken), 'busy' (a proactive push onto a
   // backed-up channel), 'stalled' or 'failed'.
-  const _sendSyncChunksTo = async (t, compressed, frame, isProactive, requestIds) => {
+  const _sendSyncChunksTo = async (t, compressed, frame, isProactive, requestIds, recoveryId = 0) => {
     const CHUNK_SIZE = 64000;
     // The transfer starting moves its guest's chain.
     _syncChainMovedAt[t.sid] = performance.now();
@@ -19352,6 +19436,7 @@
       // strictly, and ignores a string it does not know.
       const answerFor = requestIds[t.sid] || 0;
       if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
+      dc.send(`sync-recovery-id:${recoveryId}`);
       dc.send(header);
       // I1: each chunk waits at most SYNC_SEND_STALL_MS for room; then the
       // transfer is given up (the guest's chunk and request deadlines ask
@@ -19424,11 +19509,23 @@
     wireSize,
     source,
     answerFor = 0,
+    recoveryId = 0,
   }) {
+    // Recheck after async legacy XOR too: a newer recovery can finish while
+    // an older ordinary/socket payload is still decoding. A strictly newer
+    // ordinary frame remains useful; equal/older frames cannot erase its ACK.
+    const supersededRecovery = () =>
+      recoveryId
+        ? !isFull ||
+          isRegions ||
+          recoveryId <= _lastAppliedRecoveryId ||
+          recoveryId < (_pendingResyncState?.recoveryId ?? 0)
+        : (_pendingResyncState?.recoveryId ?? 0) > 0 && frame <= _pendingResyncState.frame;
+    if (supersededRecovery()) return;
     // Regions patch: decompress directly, buffer for apply — no delta chain.
     if (isRegions) {
       if (_endsResyncRequest(answerFor)) _resyncRequestInFlight = false;
-      if (frame <= _lastAppliedSyncHostFrame) {
+      if (frame < _lastAppliedSyncHostFrame || (frame === _lastAppliedSyncHostFrame && !recoveryId)) {
         _syncLog(`regions sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
         if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('regions sync stale');
         return;
@@ -19472,6 +19569,8 @@
       fullBytes = xorResult.data;
     }
 
+    if (supersededRecovery()) return;
+
     if (isProactive) {
       // Proactive push: buffer for instant resync, don't apply yet.
       // Do NOT advance _lastSyncState — proactive states are independent of the
@@ -19489,7 +19588,7 @@
       }
       // Discard if we already applied a state at or after this frame (e.g. proactive
       // fast-path already jumped us forward — applying an older explicit would roll back).
-      if (frame <= _lastAppliedSyncHostFrame) {
+      if (frame < _lastAppliedSyncHostFrame || (frame === _lastAppliedSyncHostFrame && !recoveryId)) {
         _syncLog(`explicit sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
         // The guard belongs to the request that is out; the answer to an
         // older one does not end it.
@@ -19497,7 +19596,7 @@
         return;
       }
       if (_keepsAwaitedAnswer(answerFor, frame)) return;
-      _pendingResyncState = { bytes: fullBytes, frame, answerFor };
+      _pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };
       _syncLog(
         `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +
           `answerFor=${answerFor} newest=${_resyncRequestId} endsRequest=${endsRequest})`,
@@ -19505,7 +19604,8 @@
     }
   }
 
-  const handleSyncChunksComplete = async () => {
+  const handleSyncChunksComplete = async (ownsAssembly = () => true) => {
+    const decodeEpoch = _syncQueueEpoch;
     // Guest: reassemble chunks, decompress, reconstruct state, buffer for apply.
     const total = _syncChunks.reduce((a, c) => a + c.length, 0);
     const assembled = new Uint8Array(total);
@@ -19516,6 +19616,8 @@
     }
     _syncChunks = [];
     _syncExpected = 0;
+    const recoveryId = _syncRecoveryId;
+    _syncRecoveryId = 0;
     const frame = _syncFrame;
     const isFull = _syncIsFull;
     const isProactive = _syncIsProactive;
@@ -19527,6 +19629,9 @@
     try {
       await _decodingSyncAnswer(async () => {
         const decompressed = await decompressState(assembled);
+        // Main-thread fallback cannot be canceled by terminating the worker.
+        // Its old state must not enter a replacement channel or new match.
+        if (decodeEpoch !== _syncQueueEpoch || !ownsAssembly()) return;
         await _handleDecodedSyncPayload({
           decompressed,
           frame,
@@ -19535,6 +19640,7 @@
           isRegions,
           wireSize: assembled.length,
           source: 'dc',
+          recoveryId,
           answerFor,
         });
       });
@@ -19711,7 +19817,8 @@
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
   };
 
-  const applySyncState = (bytes, frame, fromProactive = false) => {
+  const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {
+    if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return;
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
     // never fires mid-tick or mid-input-processing. The kn_sync path moves
@@ -19817,13 +19924,18 @@
       // engine does not refuse it here.
       if (frame != null && mod._kn_set_frame) {
         const oldFrame = _frameNum;
-        _frameNum = frame;
-        KNState.frameNum = frame;
         mod._kn_set_frame(frame);
         const cFrame = mod._kn_get_frame?.();
         if (cFrame !== undefined && cFrame !== frame) {
+          // The state was loaded but the native timeline refused to move.
+          // Continuing would run it under the wrong frame; do not claim a
+          // successful recovery or let this tick advance the inconsistent core.
           _syncLog(`SYNC-FRAME-MISMATCH js=${frame} c=${cFrame} — kn_set_frame refused`);
+          _handleCoreFatal('sync-frame', new Error(`Native frame ${cFrame} refused sync frame ${frame}`));
+          return;
         }
+        _frameNum = frame;
+        KNState.frameNum = frame;
         if (oldFrame !== frame) {
           _resetStrictMenuResends();
           _clearStrictMenuWait();
@@ -19859,7 +19971,10 @@
     }
 
     const timelineAligned = frame != null && _frameNum === frame;
-    if (timelineAligned) _settleInputsAtResync(gm.Module, frame);
+    if (timelineAligned) {
+      _lastAppliedRecoveryId = Math.max(_lastAppliedRecoveryId, recoveryId);
+      _settleInputsAtResync(gm.Module, frame, recoveryId);
+    }
     // A state from before this guest's frame: the frames up to it run again
     // (_startCatchUp; the first slice runs here). One too far back was not
     // applied (tick(), SYNC-TOO-OLD-DROPPED).
@@ -20192,6 +20307,7 @@
     _syncChunkSessionId++;
     _syncLastChunkProgressLogAt = 0;
     _pushingSyncState = false;
+    for (const entry of _queuedSyncPushes.values()) entry.resolve?.(null);
     _queuedSyncPushes.clear();
     _proactivePushInFlight = false;
     _pendingResyncState = null;
@@ -20224,7 +20340,11 @@
       URL.revokeObjectURL(_syncWorkerUrl);
       _syncWorkerUrl = null;
     }
+    // The worker is terminated: physical work has ceased, so reject every
+    // waiter and let its Effect finalizer release its own reservation.
+    const cancelledWork = _syncWorkerCallbacks;
     _syncWorkerCallbacks = {};
+    for (const cb of Object.values(cancelledWork)) cb({ cancelled: true });
     _syncLogRing.clear();
 
     // Clean up audio (delegated to kn-audio.js)

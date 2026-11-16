@@ -271,3 +271,14 @@ test('dropped names why the host dropped the player', () => {
   bad('lockstep', 'dropped:anything');
   bad('lockstep', 'dropped');
 });
+
+test('recovery attempt metadata is separate from legacy headers and rejects malformed IDs', () => {
+  ok('sync-state', 'sync-recovery-id:17');
+  ok('sync-state', 'sync-start:1000:2:1:0');
+  ok('lockstep', 'recovery-settled:997:17');
+  ok('lockstep', 'inputs-settled:997');
+  for (const id of ['-1', '1.5', 'NaN', '1x', '', '1:2']) {
+    bad('sync-state', `sync-recovery-id:${id}`);
+    bad('lockstep', `recovery-settled:997:${id}`);
+  }
+});

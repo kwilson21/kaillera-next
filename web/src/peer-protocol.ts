@@ -63,6 +63,7 @@ const TEXT_GRAMMAR = {
     resend: `:${INT}`,
     // A guest moved forward by a resync: its inputs before this frame are settled.
     'inputs-settled': `:${INT}`,
+    'recovery-settled': `:${INT}:\\d+`,
     // dropped:<reason>  the host dropped this player from the match (desync:
     // its pushes went unanswered; host: any other drop); taken only from the
     // host (specs/drop_is_final.qnt).
@@ -100,6 +101,7 @@ const TEXT_GRAMMAR = {
     // The request the state that follows on the same channel answers; a state
     // the host sent for its own reasons has none.
     'sync-answer-id': ':\\d+',
+    'sync-recovery-id': ':\\d+',
     'sync-request-full': '',
     'sync-request-id': ':\\d+',
   },

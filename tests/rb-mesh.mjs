@@ -27,6 +27,9 @@
  *   recipient settlement, bounded target
  *   retry/settlement, no drop, and 60 later matching frames. No hash exclusions
  *   are added: the ordinary all-frame gameplay/game-state oracle still applies.
+ * MISSING_RECIPIENT_PERMANENT=1 (PLAYERS=4): fail every transfer on the
+ *   original target channel; require three attempts, notified removal, normal
+ *   late rejoin and clean post-rejoin hashes. Full historical oracle stays strict.
  * CATCH_UP_MS=<n>: a third of the way into the battle the guest in
  *   CATCH_UP_SLOT (default 2, a guest that is not the host's first one) asks
  *   the host for a full resync through its network-change handler (a window
@@ -39,22 +42,14 @@
  *   for the host and for the other guests. The run fails unless the guest
  *   caught up all the way to the frame it was on, and every page's hashes
  *   still match the host's.
- * CATCH_UP_HOLE=1 (with CATCH_UP_MS): the catch-up needs an input that is not
- *   there yet. First the guest in CATCH_UP_HOLE_SLOT (default 1) stops
- *   ticking (NetplayRollback.pauseTick) until the catch-up guest drops it as
- *   a phantom and runs on without it; then the catch-up guest asks, and the
- *   stopped guest ticks again shortly before the held answer lands, far
- *   behind. The frames the catch-up runs again need that guest's inputs for
- *   frames it has not run: the catch-up asks for them and waits (up to the
- *   engine's CATCH_UP_HOLE_WAIT_MS, 3000), then goes on or stops there, as
- *   designed. The run fails unless the catch-up waited on that guest
- *   (`SYNC-CATCH-UP-WAIT slot=<n>`, or it stopped on that guest's input), and
- *   unless the wait cost about one slice per 60 Hz slot rather than a slice
- *   back to back for the tick pump's whole budget: slices at most frames +
- *   ms / 12 + 5. The stopped guest's own frames from its stop to the resync
- *   that brings it back split from the host's by design (it ran them later,
- *   on its own new inputs, where the others had predicted them) and are left
- *   out of its compare, as tests/rb-two-player.mjs leaves out a frozen page's.
+ * CATCH_UP_HOLE=1: hold one input frame from CATCH_UP_HOLE_SLOT only on
+ *   the catch-up guest's receive path (reliable and rollback-input channels,
+ *   including redundancy/resend carriers). Arm before asking for the state,
+ *   then pin to the captured host snapshot frame. Other frames continue.
+ *   Release only after an actual SYNC-CATCH-UP-WAIT names this held input.
+ *   Require real held packets, wait-before-release, completed catch-up, and
+ *   strict hashes for every player including at least 60 post-recovery frames.
+ *   No pause/phantom injection or hash exclusions are used.
  *
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
@@ -87,7 +82,8 @@ const BATTLE_SECONDS = Number(process.env.BATTLE_SECONDS || 45);
 const MENU_TIMEOUT_S = Number(process.env.MENU_TIMEOUT_S || 1800);
 const MISSING_RECIPIENT = process.env.MISSING_RECIPIENT === '1';
 const MISSING_RECIPIENT_SLOT = Number(process.env.MISSING_RECIPIENT_SLOT || PLAYERS - 1);
-const MISSING_RECIPIENT_FAILURES = Number(process.env.MISSING_RECIPIENT_FAILURES || 1);
+const PERMANENT_RECIPIENT = process.env.MISSING_RECIPIENT_PERMANENT === '1';
+const MISSING_RECIPIENT_FAILURES = PERMANENT_RECIPIENT ? 3 : Number(process.env.MISSING_RECIPIENT_FAILURES || 1);
 const CATCH_UP_MS = Number(process.env.CATCH_UP_MS || 0);
 const CATCH_UP_SLOT = Number(process.env.CATCH_UP_SLOT || 2);
 const CATCH_UP_HOLE = process.env.CATCH_UP_HOLE === '1';
@@ -110,6 +106,7 @@ const fail = (msg) => {
   console.log(msg);
   process.exit(1);
 };
+if (PERMANENT_RECIPIENT && !MISSING_RECIPIENT) fail('MISSING_RECIPIENT_PERMANENT requires MISSING_RECIPIENT=1');
 if (!ROM || !fs.existsSync(ROM)) fail('KN_ROM must name the ROM file');
 if (![3, 4].includes(PLAYERS)) fail(`PLAYERS=${process.env.PLAYERS} invalid: 3 or 4`);
 if (!/^\d+x\d+$/.test(SCREEN_SIZE)) fail(`SCREEN_SIZE=${SCREEN_SIZE} invalid: WIDTHxHEIGHT, e.g. 320x240`);
@@ -122,7 +119,7 @@ if (
     !Number.isInteger(MISSING_RECIPIENT_SLOT) ||
     MISSING_RECIPIENT_SLOT < 2 ||
     MISSING_RECIPIENT_SLOT >= PLAYERS ||
-    ![1, 2].includes(MISSING_RECIPIENT_FAILURES))
+    !(PERMANENT_RECIPIENT ? PLAYERS === 4 : [1, 2].includes(MISSING_RECIPIENT_FAILURES)))
 )
   fail('MISSING_RECIPIENT requires no catch-up fault, target slot 2..PLAYERS-1, and 1 or 2 failures');
 if (CATCH_UP_MS > 0 && !(CATCH_UP_MS < RESYNC_REQUEST_TIMEOUT_MS)) {
@@ -158,6 +155,26 @@ const browser = await chromium.launch(launch);
 const mkPage = async (name) => {
   const ctx = await browser.newContext({ viewport: { width: 960, height: 720 } });
   await addNetworkInitScript(ctx, { lat: LAT, jitter: JITTER, kbps: LINK_KBPS });
+  await ctx.addInitScript(() => {
+    window.__knEvents = [];
+    let real;
+    Object.defineProperty(window, 'KNEvent', {
+      configurable: true,
+      set: (fn) => {
+        real = fn;
+      },
+      get: () =>
+        real &&
+        ((type, msg, meta) => {
+          window.__knEvents.push({ type, meta: meta ?? {} });
+          if (meta?.kind === 'dropped-by-host' && !window.__meshDroppedSnapshot) {
+            window.__meshDroppedSnapshot = window.__mesh ? JSON.parse(JSON.stringify(window.__mesh)) : null;
+            window.__meshPreDropSync = window.NetplayRollback?.exportSyncLog?.() ?? '';
+          }
+          return real(type, msg, meta);
+        }),
+    });
+  });
   await ctx.addInitScript((size) => {
     window.EJS_defaultOptions = Object.assign(window.EJS_defaultOptions || {}, { 'mupen64plus-43screensize': size });
   }, SCREEN_SIZE);
@@ -354,16 +371,19 @@ const missingRecipient = {
   range: null,
   settled: false,
   recoveredFrame: null,
+  permanent: PERMANENT_RECIPIENT
+    ? { gaveUp: false, notified: null, lateJoinedAt: null, framesAtDrop: null, framesAfterJoin: null }
+    : null,
 };
 // The battle, with the catch-up fault a third of the way in.
 const catchUp = { guestAt: null, seen: false };
-const hole = { pageAt: null, pausedAt: null, phantomSeen: false, resumedAt: null };
+const hole = { header: null, gate: null, evidence: null, recoveredFrame: null };
 const tBattle = Date.now();
 if (MISSING_RECIPIENT) {
   await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
   missingRecipient.hostAt = await lastSeq(host);
   await host.evaluate(
-    ({ slot, failures }) => {
+    ({ slot, failures, permanent }) => {
       const peer = Object.values(window.KNState?.peers ?? {}).find((p) => p.slot === slot);
       if (peer?.syncDc?.readyState !== 'open') throw new Error('target sync channel is not open');
       const dc = peer.syncDc;
@@ -373,7 +393,7 @@ if (MISSING_RECIPIENT) {
         if (typeof data === 'string' && data.startsWith('sync-start:')) {
           const report = window.__meshMissingRecipient;
           report.headers.push({ frame: Number(data.split(':')[1]), at: performance.now() });
-          if (report.failures < failures) {
+          if (permanent || report.failures < failures) {
             report.failures++;
             report.failedHeader ??= { ...report.headers.at(-1) };
             report.failedHeaders.push({ ...report.headers.at(-1) });
@@ -383,7 +403,7 @@ if (MISSING_RECIPIENT) {
         return send.call(this, data);
       };
     },
-    { slot: MISSING_RECIPIENT_SLOT, failures: MISSING_RECIPIENT_FAILURES },
+    { slot: MISSING_RECIPIENT_SLOT, failures: MISSING_RECIPIENT_FAILURES, permanent: PERMANENT_RECIPIENT },
   );
   missingRecipient.range = await pages[1].evaluate(() => {
     const frame = window.NetplayRollback.getHudCounters().currentFrame;
@@ -408,13 +428,59 @@ if (MISSING_RECIPIENT) {
     return [from, to];
   });
   const p2 = await waitForLine(host, missingRecipient.hostAt, /INPUT-ASK-PUSH-SETTLED .*slot=1 /, 60000);
-  const target = await waitForLine(
-    host,
-    missingRecipient.hostAt,
-    new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} `),
-    30000,
-  );
-  missingRecipient.settled = p2 && target;
+  if (PERMANENT_RECIPIENT) {
+    const targetPage = pages[MISSING_RECIPIENT_SLOT];
+    const evidence = missingRecipient.permanent;
+    evidence.gaveUp = await waitForLine(
+      host,
+      missingRecipient.hostAt,
+      new RegExp(`INPUT-ASK-PUSH-GAVEUP .*slot=${MISSING_RECIPIENT_SLOT} pushes=3`),
+      45000,
+    );
+    evidence.framesAtDrop = await Promise.all(
+      pages.map((p) => p.evaluate(() => window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1)),
+    );
+    const toldUntil = Date.now() + 15000;
+    while (Date.now() < toldUntil && !evidence.notified) {
+      evidence.notified = await targetPage.evaluate(
+        () => (window.__knEvents ?? []).find((e) => e.meta?.kind === 'dropped-by-host') ?? null,
+      );
+      if (!evidence.notified) await targetPage.waitForTimeout(200);
+    }
+    // Match the existing two-player drop/rejoin lifecycle. No direct
+    // production mutation or synthetic join: only the normal gesture prompt.
+    const joinedUntil = Date.now() + 90000;
+    while (Date.now() < joinedUntil && evidence.lateJoinedAt === null) {
+      if (await targetPage.locator('#gesture-prompt:not(.hidden)').count())
+        await targetPage
+          .locator('#gesture-prompt')
+          .click({ force: true })
+          .catch(() => {});
+      const log = await syncLogOf(targetPage);
+      const m = log.match(/late-join loaded at frame (\d+)/);
+      if (m) evidence.lateJoinedAt = Number(m[1]);
+      else await targetPage.waitForTimeout(500);
+    }
+    const before = await targetPage.evaluate(() => ({
+      sync: window.__meshPreDropSync ?? '',
+      hashes: window.__meshDroppedSnapshot?.hashes ?? {},
+    }));
+    fs.writeFileSync(`${OUT}/target-pre-drop-sync.txt`, before.sync);
+    fs.writeFileSync(`${OUT}/target-pre-drop-hashes.json`, JSON.stringify(before.hashes));
+    if (evidence.lateJoinedAt !== null) await install(targetPage, MISSING_RECIPIENT_SLOT);
+    evidence.framesAfterJoin = await Promise.all(
+      pages.map((p) => p.evaluate(() => window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1)),
+    );
+    missingRecipient.settled = p2 && evidence.gaveUp && !!evidence.notified && evidence.lateJoinedAt !== null;
+  } else {
+    const target = await waitForLine(
+      host,
+      missingRecipient.hostAt,
+      new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} `),
+      30000,
+    );
+    missingRecipient.settled = p2 && target;
+  }
   missingRecipient.recoveredFrame = await host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
   // Keep observing after settlement: transient success followed by another
   // retry/drop is not recovery. At least 60 later hash frames are required.
@@ -423,16 +489,12 @@ if (MISSING_RECIPIENT) {
 if (CATCH_UP_MS > 0) {
   await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
   const guest = pages[CATCH_UP_SLOT];
-  const holePage = pages[CATCH_UP_HOLE_SLOT];
   if (CATCH_UP_HOLE) {
-    hole.pageAt = await lastSeq(holePage);
-    const guestAt = await lastSeq(guest);
-    hole.pausedAt = await holePage.evaluate(() => {
-      window.NetplayRollback.pauseTick();
-      return window.NetplayRollback.getHudCounters().currentFrame;
-    });
-    console.log(`CATCH_UP_HOLE: P${CATCH_UP_HOLE_SLOT + 1} stopped ticking at frame ${hole.pausedAt}`);
-    hole.phantomSeen = await waitForLine(guest, guestAt, new RegExp(`PEER-PHANTOM slot=${CATCH_UP_HOLE_SLOT} `), 30000);
+    await guest.evaluate((slot) => window.__knDirectionalInputGate.arm(slot), CATCH_UP_HOLE_SLOT);
+    await host.evaluate((slot) => {
+      window.__knWatchSyncTargetSlot = slot;
+      window.__knWatchedSyncHeaders = [];
+    }, CATCH_UP_SLOT);
   }
   catchUp.guestAt = await lastSeq(guest);
   await host.evaluate((ms) => {
@@ -441,17 +503,42 @@ if (CATCH_UP_MS > 0) {
   await guest.evaluate(() => window.dispatchEvent(new Event('online')));
   console.log(`CATCH_UP_MS: P${CATCH_UP_SLOT + 1} asked for a resync; the host's answer is held ${CATCH_UP_MS} ms`);
   if (CATCH_UP_HOLE) {
-    // Ticking again shortly before the answer lands: seen again by then,
-    // and still far behind the frames the catch-up runs.
-    await host.waitForTimeout(CATCH_UP_MS - 1000);
-    hole.resumedAt = await holePage.evaluate(() => {
-      window.NetplayRollback.resumeTick();
-      return window.NetplayRollback.getHudCounters().currentFrame;
-    });
-    console.log(`CATCH_UP_HOLE: P${CATCH_UP_HOLE_SLOT + 1} ticks again from frame ${hole.resumedAt}`);
+    try {
+      await host.waitForFunction(() => window.__knWatchedSyncHeaders?.length > 0, null, { timeout: 10000 });
+      hole.header = await host.evaluate(() => window.__knWatchedSyncHeaders[0]);
+      await guest.evaluate(
+        ({ frame, slot, afterSeq }) => {
+          window.__knDirectionalInputGate.pin(frame, frame + 1);
+          window.__knHoleWaitEvidence = null;
+          const timer = setInterval(() => {
+            const lines = (window.NetplayRollback.exportSyncLog() || '').split('\n');
+            for (const line of lines) {
+              if (Number(line.split('\t')[0]) <= afterSeq) continue;
+              const m = line.match(/SYNC-CATCH-UP-WAIT f=(\d+) slot=(\d+) input=(\d+)/);
+              if (!m || Number(m[2]) !== slot || Number(m[3]) !== frame) continue;
+              const before = window.__knDirectionalInputGate.stats();
+              if (before.queued <= 0) continue;
+              window.__knHoleWaitEvidence = { line, input: Number(m[3]), waitObservedAt: performance.now(), before };
+              window.__knDirectionalInputGate.release(Number(m[3]));
+              clearInterval(timer);
+              return;
+            }
+          }, 10);
+        },
+        { frame: hole.header.frame, slot: CATCH_UP_HOLE_SLOT, afterSeq: catchUp.guestAt },
+      );
+    } catch (error) {
+      hole.invalidInjection = String(error);
+    }
   }
   catchUp.seen = await waitForLine(guest, catchUp.guestAt, /SYNC-CATCH-UP from=/, CATCH_UP_MS + CATCH_UP_RECOVER_MS);
   console.log(catchUp.seen ? 'CATCH_UP_MS: the guest caught up' : 'CATCH_UP_MS: the guest never logged SYNC-CATCH-UP');
+  if (CATCH_UP_HOLE) {
+    hole.gate = await guest.evaluate(() => window.__knDirectionalInputGate.stats());
+    hole.evidence = await guest.evaluate(() => window.__knHoleWaitEvidence ?? null);
+    hole.recoveredFrame = await guest.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+    await host.waitForTimeout(20000);
+  }
 }
 await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - (Date.now() - tBattle)));
 
@@ -462,8 +549,11 @@ const P = await Promise.all(
     ...(await p.evaluate(() => ({
       missingRecipientWire: window.__meshMissingRecipient ?? null,
       missingInputs: window.__meshMissingInputs ?? 0,
-      hashes: window.__mesh.hashes,
-      inBattleAt: window.__mesh.inBattleAt,
+      hashes: { ...(window.__meshDroppedSnapshot?.hashes ?? {}), ...window.__mesh.hashes },
+      dropNotifications: (window.__knEvents ?? []).filter((e) => e.meta?.kind === 'dropped-by-host').length,
+      preDropHashes: window.__meshDroppedSnapshot?.hashes ?? {},
+      preDropHashCount: Object.keys(window.__meshDroppedSnapshot?.hashes ?? {}).length,
+      inBattleAt: window.__meshDroppedSnapshot?.inBattleAt ?? window.__mesh.inBattleAt,
       lastR: window.__mesh.lastR,
       // Who the battle state says is playing: each player's kind (0 = human)
       // and fighter, the bytes at +2 and +3 of its 0x74-byte entry from
@@ -479,6 +569,11 @@ P.forEach((x, i) => {
   fs.writeFileSync(`${OUT}/p${i + 1}-sync.txt`, x.sync);
   fs.writeFileSync(`${OUT}/p${i + 1}-hashes.json`, JSON.stringify(x.hashes));
 });
+let hostEnd;
+if (process.env.HOST_END_CHECK === '1') {
+  const { checkHostEnd } = await import('./rb-end-game.mjs');
+  hostEnd = await checkHostEnd(pages, OUT);
+}
 await browser.close();
 
 const catchUpsOf = (log, afterSeq = -1) =>
@@ -505,21 +600,10 @@ const spans = (frames) =>
       return out;
     }, []);
 
-// CATCH_UP_HOLE: the stopped guest's split, from its stop (less the hashes'
-// lag) to the frame of the first resync it applied after it.
-const holeSplit = (() => {
-  if (!CATCH_UP_HOLE || hole.pausedAt === null) return null;
-  const log = P[CATCH_UP_HOLE_SLOT].sync;
-  const line = log.split('\n').find((l) => seqOf(l) > hole.pageAt && /sync #\d+ applied \(frame \d+ -> \d+/.test(l));
-  const m = line?.match(/sync #\d+ applied \(frame \d+ -> (\d+)/);
-  return m ? { from: hole.pausedAt - HASH_LAG, to: Number(m[1]) } : null;
-})();
-
 const H = P[0];
 const pairs = P.slice(1).map((G, gi) => {
   const slot = gi + 1;
   const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
-  const split = slot === CATCH_UP_HOLE_SLOT ? holeSplit : null;
   let compared = 0;
   let battle = 0;
   let postRecovery = 0;
@@ -538,12 +622,12 @@ const pairs = P.slice(1).map((G, gi) => {
       unrecorded++;
       continue;
     }
-    if (split && f >= split.from && f < split.to) {
-      leftOut++;
-      continue;
-    }
     compared++;
-    if (MISSING_RECIPIENT && f > missingRecipient.recoveredFrame) postRecovery++;
+    if (
+      (MISSING_RECIPIENT && f > missingRecipient.recoveredFrame) ||
+      (CATCH_UP_HOLE && hole.recoveredFrame !== null && f > hole.recoveredFrame)
+    )
+      postRecovery++;
     if (f >= battleFrom) battle++;
     if (MISSING_RECIPIENT) {
       if (f >= battleFrom && f < missingRecipient.range[0]) preFaultBattle++;
@@ -558,8 +642,16 @@ const pairs = P.slice(1).map((G, gi) => {
     if (h[1] !== 0 && g[1] !== 0 && h[1] !== g[1]) mismatches.gameState.push(f);
     if (h[2] !== 0 && g[2] !== 0 && h[2] !== g[2]) mismatches.fullState++;
   }
+  const preDropMismatches = { gameplay: [], gameState: [] };
+  for (const [key, old] of Object.entries(G.preDropHashes)) {
+    const h = H.hashes[key];
+    if (!h || !h[0] || !old[0]) continue;
+    if (h[0] !== old[0]) preDropMismatches.gameplay.push(Number(key));
+    if (h[1] && old[1] && h[1] !== old[1]) preDropMismatches.gameState.push(Number(key));
+  }
   return {
     slot,
+    preDropMismatches,
     compared,
     unrecorded,
     leftOut,
@@ -599,33 +691,31 @@ const catchUpReport =
         tooOld: P[CATCH_UP_SLOT].sync.split('\n').filter((line) => /SYNC-TOO-OLD-DROPPED/.test(line)),
       }
     : null;
-// CATCH_UP_HOLE: the catch-up waited on the stopped guest's input
-// (SYNC-CATCH-UP-WAIT, or it stopped on it), and the wait cost about a slice
-// per 60 Hz slot.
-const holeReport = (() => {
-  if (!CATCH_UP_HOLE) return null;
-  const lines = P[CATCH_UP_SLOT].sync.split('\n').filter((line) => seqOf(line) > catchUp.guestAt);
-  const waitedOn = lines.filter((line) =>
-    new RegExp(`SYNC-CATCH-UP-WAIT f=\\d+ slot=${CATCH_UP_HOLE_SLOT} `).test(line),
-  );
-  const stoppedOn = catchUpReport.catchUps.find((c) => c.stopped?.startsWith(`slot ${CATCH_UP_HOLE_SLOT} input`));
-  const spin = catchUpReport.catchUps.filter((c) => c.slices > c.frames + c.ms / 12 + 5);
-  return {
-    slot: CATCH_UP_HOLE_SLOT,
-    pausedAt: hole.pausedAt,
-    phantomSeen: hole.phantomSeen,
-    resumedAt: hole.resumedAt,
-    split: holeSplit,
-    waitedOn: waitedOn.map((line) => line.split('\t').at(-1)),
-    stoppedOn: stoppedOn ?? null,
-    waited: waitedOn.length > 0 || !!stoppedOn,
-    spin,
-  };
-})();
+const holeReport = CATCH_UP_HOLE
+  ? {
+      slot: CATCH_UP_HOLE_SLOT,
+      phantomDuringFault: P[CATCH_UP_SLOT].sync
+        .split('\n')
+        .some((line) => seqOf(line) > catchUp.guestAt && line.includes(`PEER-PHANTOM slot=${CATCH_UP_HOLE_SLOT} `)),
+      ...hole,
+      waited:
+        !!hole.evidence?.line &&
+        hole.gate?.held > 0 &&
+        hole.evidence.waitObservedAt <= hole.gate.releasedAt &&
+        hole.gate.laterInputs > 0,
+      completed: catchUpReport.catchUps.some((c) => c.frames > 0 && c.to === c.of && !c.stopped),
+      spin: catchUpReport.catchUps.filter((c) => c.slices > c.frames + c.ms / 12 + 5),
+    }
+  : null;
 const catchUpFailed =
   CATCH_UP_MS > 0 &&
   (CATCH_UP_HOLE
-    ? !catchUp.seen || !holeReport.waited || holeReport.spin.length > 0 || !holeSplit
+    ? !catchUp.seen ||
+      !holeReport.waited ||
+      holeReport.phantomDuringFault ||
+      !holeReport.completed ||
+      holeReport.spin.length > 0 ||
+      pairs.some((p) => p.postRecoveryFramesCompared < MIN_BATTLE_FRAMES)
     : !catchUpReport.catchUps.some((c) => c.frames > 0 && c.to === c.of && !c.stopped));
 
 // The battle has every page's player in it, each on the fighter its
@@ -695,7 +785,7 @@ const retryFailuresCorrelated =
   failedHeaders
     .slice(1)
     .every((header, i) => header.frame === targetRetryEvents[i]?.frame && targetRetryEvents[i]?.attempt === i + 2);
-const missingProblems = !MISSING_RECIPIENT
+const transientMissingProblems = !MISSING_RECIPIENT
   ? []
   : [
       ...healthyProblems,
@@ -741,6 +831,68 @@ const missingProblems = !MISSING_RECIPIENT
         ? ['insufficient post-recovery hash comparisons']
         : []),
     ];
+// Permanent failure has a distinct contract: bounded, notified removal,
+// normal late-join acceptance and clean convergence. It does not pretend the
+// removed peer stayed synchronized, and never changes the full-hash result.
+const permanent = missingRecipient.permanent;
+const targetGiveups = missingLines.filter((line) =>
+  new RegExp(`INPUT-ASK-PUSH-GAVEUP .*slot=${MISSING_RECIPIENT_SLOT} pushes=3`).test(line),
+);
+const targetDrops = missingLines.filter((line) =>
+  new RegExp(`peer hard-disconnected: .* slot: ${MISSING_RECIPIENT_SLOT}$`).test(line),
+);
+const pendingJoinIndex = missingLines.findIndex((line) =>
+  new RegExp(`late-join pending: .* slot=${MISSING_RECIPIENT_SLOT}(?: |$)`).test(line),
+);
+const giveupIndex = missingLines.findIndex((line) => targetGiveups.includes(line));
+const dropIndex = missingLines.findIndex((line) => targetDrops.includes(line));
+const permanentProblems = !PERMANENT_RECIPIENT
+  ? []
+  : [
+      ...healthyProblems,
+      ...(!correlatedPush || !retryFailuresCorrelated
+        ? ['permanent failure is not correlated with the selected recovery']
+        : []),
+      ...(!(P[1].missingInputs > 0) ? ['P2 input fault did not fire'] : []),
+      ...(H.missingRecipientWire?.failures !== 3 ||
+      H.missingRecipientWire?.headers.length !== 3 ||
+      targetRetryEvents.length !== 2
+        ? ['permanent target did not exhaust exactly three bounded transfers']
+        : []),
+      ...(targetGiveups.length !== 1 ||
+      targetDrops.length !== 1 ||
+      giveupIndex <= (targetRetryEvents.at(-1)?.index ?? Infinity) ||
+      dropIndex <= giveupIndex ||
+      pendingJoinIndex <= dropIndex
+        ? ['drop and late-join ordering not proven']
+        : []),
+      ...(!permanent?.notified || permanent.lateJoinedAt === null || !missingRecipient.settled
+        ? ['target notification or normal late rejoin missing']
+        : []),
+      ...(P[MISSING_RECIPIENT_SLOT].dropNotifications !== 1 ? ['target was not notified exactly once'] : []),
+      ...(P[MISSING_RECIPIENT_SLOT].preDropHashCount === 0 ? ['target pre-drop history was not preserved'] : []),
+      ...(healthyRecipients.some((slot) => {
+        const bad = new RegExp(
+          `(?:INPUT-ASK-PUSH-GAVEUP|INPUT-ASK-PUSH-ENDED|PEER-PHANTOM).*slot=${slot}(?: |$)|peer hard-disconnected: .* slot: ${slot}$`,
+        );
+        return missingLines.some((line) => bad.test(line));
+      })
+        ? ['a healthy recipient was dropped or ended']
+        : []),
+      ...(missingLines.some((line) => new RegExp(`MESH-HEAL .*slot=${MISSING_RECIPIENT_SLOT}(?: |$)`).test(line))
+        ? ['target healed outside the late-join lifecycle']
+        : []),
+      ...(healthyRecipients.some(
+        (slot) => (permanent.framesAfterJoin?.[slot] ?? -1) <= (permanent.framesAtDrop?.[slot] ?? Infinity),
+      )
+        ? ['healthy recipients did not advance during removal/rejoin']
+        : []),
+      ...(pairs.some((pair) => pair.postRecoveryFramesCompared < MIN_BATTLE_FRAMES)
+        ? ['insufficient post-rejoin hash comparisons']
+        : []),
+    ];
+const missingProblems = PERMANENT_RECIPIENT ? permanentProblems : transientMissingProblems;
+
 // Secondary recovery result, not an exemption from the original hash oracle.
 // The lower boundary is the first deliberately lost input frame, recorded
 // BEFORE the fault, and the upper boundary is the observed host frame after
@@ -761,7 +913,13 @@ const recoveryOracle = !MISSING_RECIPIENT
         )
           ? 'recovered-with-clean-pre-and-post-fault-frames'
           : 'failed',
-      fullHashOracle: pairs.every((p) => p.gameplayMismatches === 0 && p.gameStateMismatches === 0)
+      fullHashOracle: pairs.every(
+        (p) =>
+          p.gameplayMismatches === 0 &&
+          p.gameStateMismatches === 0 &&
+          p.preDropMismatches.gameplay.length === 0 &&
+          p.preDropMismatches.gameState.length === 0,
+      )
         ? 'passed'
         : 'failed',
       transientMismatchFrames: pairs.map((p) => ({ slot: p.slot, ...p.recoveryMismatches })),
@@ -794,6 +952,7 @@ const summary = {
   catchUp: catchUpReport,
   hole: holeReport,
 };
+if (hostEnd) summary.hostEnd = hostEnd;
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 2));
 console.log(JSON.stringify(summary, null, 2));
 
@@ -802,7 +961,12 @@ const failed =
   P.some((x) => x.inBattleAt < 0) ||
   fighterProblems.length > 0 ||
   pairs.some(
-    (p) => p.gameplayMismatches > 0 || p.gameStateMismatches > 0 || p.battleFramesCompared < MIN_BATTLE_FRAMES,
+    (p) =>
+      p.gameplayMismatches > 0 ||
+      p.gameStateMismatches > 0 ||
+      p.preDropMismatches.gameplay.length > 0 ||
+      p.preDropMismatches.gameState.length > 0 ||
+      p.battleFramesCompared < MIN_BATTLE_FRAMES,
   ) ||
   catchUpFailed;
 console.log(

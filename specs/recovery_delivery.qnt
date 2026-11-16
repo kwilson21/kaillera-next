@@ -106,7 +106,16 @@ module recovery_reservation {
     not(bDone), bDone' = true, aDone' = aDone, retry' = retry, blocked' = blocked,
     reservation' = if (not(OWNED_RELEASE) or reservation == 1) 0 else reservation,
   }
-  action step = any { aFails, retryA, bFinishes }
+  // The finite race is over only after both original sends and the retry
+  // admission settle. Preserve that terminal state under later bounded steps.
+  action finished = all {
+    aDone, bDone, retry,
+    aDone' = aDone, bDone' = bDone, retry' = retry,
+    reservation' = reservation, blocked' = blocked,
+  }
+  action step = any { aFails, retryA, bFinishes, finished }
+  run terminalStateTest = init.then(aFails).then(retryA).then(bFinishes)
+    .then(finished).then(finished).expect(aDone and bDone and retry)
   val otherGuestsDoNotBlockRetry = not(blocked)
   val oldCleanupNeverReleasesRetry = (retry and not(blocked)) implies reservation == 2
   val allHold = otherGuestsDoNotBlockRetry and oldCleanupNeverReleasesRetry
@@ -192,7 +201,18 @@ module recovery_followup {
     aPending' = (PER_SOURCE or not(bPending)),
     bPending' = bPending, bAttempt' = bAttempt,
   }
-  action step = any { settleA, retryB, newHoleA }
+  // No more events are modeled after A settles its follow-up and B reaches
+  // the retry bound. Idle here must not erase B's still-pending obligation.
+  action finished = all {
+    not(aPending), followup, bAttempt == 3,
+    aPending' = aPending, bPending' = bPending, bAttempt' = bAttempt,
+    followup' = followup, blocked' = blocked,
+  }
+  action step = any { settleA, retryB, newHoleA, finished }
+  run terminalStateTest = init.then(settleA).then(newHoleA)
+    .then(retryB).then(retryB)
+    .then(if (PER_SOURCE) settleA else finished)
+    .then(finished).expect(bPending and bAttempt == 3 and followup)
   val healthySourceIsNeverBlocked = not(blocked)
   val pendingRecipientIsPreserved = bPending and bAttempt >= 1 and bAttempt <= 3
   val allHold = healthySourceIsNeverBlocked and pendingRecipientIsPreserved
@@ -217,7 +237,14 @@ module recovery_partial_admission {
     not(requested), requested' = true,
     aStarted' = PARTIAL, bCopies' = bCopies, bOwed' = true,
   }
-  action step = request
+  // This model covers one admission decision, not transfer completion.
+  action finished = all {
+    requested, aStarted' = aStarted, bCopies' = bCopies,
+    bOwed' = bOwed, requested' = requested,
+  }
+  action step = any { request, finished }
+  run terminalStateTest = init.then(request).then(finished).then(finished)
+    .expect(requested and bCopies == 1 and bOwed)
   val freeRecipientProceeds = requested implies aStarted
   val blockedRecipientRemainsBoundedAndOwed = bCopies == 1 and (requested implies bOwed)
   val allHold = freeRecipientProceeds and blockedRecipientRemainsBoundedAndOwed
@@ -226,3 +253,51 @@ module recovery_partial_admission {
 }
 module recovery_partial_before { import recovery_partial_admission(PARTIAL = false).* }
 module recovery_partial_fixed { import recovery_partial_admission(PARTIAL = true).* }
+
+// Acknowledging one hole does not buy unlimited new full-state captures.
+// Queue coalescing preserves one pending caller per admitted target, not one
+// Promise/Effect waiter per wire request. Before variants reproduce floods.
+module recovery_source_budget {
+  const FIXED: bool
+  var admitted: int
+  var used: int
+  var waiters: int
+  var requests: int
+  var sourceDropped: bool
+  var healthyDropped: bool
+  action init = all {
+    admitted' = 0, used' = 0, waiters' = 0, requests' = 0,
+    sourceDropped' = false, healthyDropped' = false,
+  }
+  action captureAndAck = all {
+    not(sourceDropped),
+    admitted' = if (FIXED and used >= 3) admitted else admitted + 1,
+    used' = if (FIXED) (if (used < 3) used + 1 else used) else 0,
+    sourceDropped' = (FIXED and used >= 3), healthyDropped' = healthyDropped,
+    waiters' = waiters, requests' = requests,
+  }
+  action queueRequest = all {
+    requests < 10, requests' = requests + 1,
+    waiters' = if (FIXED) 1 else waiters + 1,
+    used' = used, admitted' = admitted,
+    sourceDropped' = sourceDropped, healthyDropped' = healthyDropped,
+  }
+  action idle = all {
+    admitted' = admitted, used' = used, waiters' = waiters, requests' = requests,
+    sourceDropped' = sourceDropped, healthyDropped' = healthyDropped,
+  }
+  action step = any { captureAndAck, queueRequest, idle }
+  val capturesBoundedWithinWindow = admitted <= 3
+  val pendingWaitersBounded = waiters <= 1
+  val healthyRecipientNotDropped = not(healthyDropped)
+  val allHold = capturesBoundedWithinWindow and pendingWaitersBounded and healthyRecipientNotDropped
+  run ackDoesNotRenewBudgetTest = init.then(captureAndAck).then(captureAndAck).then(captureAndAck)
+    .expect(used == (if (FIXED) 3 else 0))
+  run exhaustedSourceDoesNotStallRoomTest = init.then(captureAndAck).then(captureAndAck)
+    .then(captureAndAck).then(captureAndAck)
+    .expect(sourceDropped == FIXED and not(healthyDropped))
+  run duplicateQueueTest = init.then(queueRequest).then(queueRequest)
+    .expect(pendingWaitersBounded == FIXED)
+}
+module recovery_source_budget_before { import recovery_source_budget(FIXED = false).* }
+module recovery_source_budget_fixed { import recovery_source_budget(FIXED = true).* }

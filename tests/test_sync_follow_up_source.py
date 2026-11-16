@@ -5,6 +5,7 @@ misprediction count moves when a fed input differs from what it predicted.
 """
 
 import json
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -94,7 +95,7 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
         in push
     )
     # A watch superseded by a newer state is marked changed: its follow-up goes out.
-    assert "w.changed = true;\n        _followUpWatches.delete(sid);" in push
+    assert re.search(r"w\.changed = true;\s+_followUpWatches\.delete\(sid\);", push)
     # I2: a reset or the match ending drops the watches.
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]

@@ -4002,6 +4002,10 @@ if (linkReport) summary.link = linkReport;
 if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
 if (RESYNC_FAULT) summary[RESYNC_ONE_BACK ? 'resyncOneBack' : 'resyncSameFrame'] = resyncOneBackReport;
 if (unansweredSocketResyncReport) summary.unansweredSocketResync = unansweredSocketResyncReport;
+if (process.env.HOST_END_CHECK === '1') {
+  const { checkHostEnd } = await import('./rb-end-game.mjs');
+  summary.hostEnd = await checkHostEnd([host, guest], OUT);
+}
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));

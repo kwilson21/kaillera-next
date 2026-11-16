@@ -214,7 +214,7 @@ def test_lockstep_surfaces_and_recovers_browser_focus_loss():
     assert start_idx != -1
     assert stop_idx != -1
     start_window = source[start_idx : start_idx + 1100]
-    stop_window = source[stop_idx : stop_idx + 7000]
+    stop_window = source[stop_idx : source.index("\n  };", stop_idx)]
 
     assert "event?.target?.closest?.('#virtual-gamepad')" in start_window
     assert "TAB-FOCUS recovered via virtual-gamepad" in start_window

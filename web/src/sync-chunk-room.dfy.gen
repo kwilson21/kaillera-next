@@ -21,3 +21,13 @@ lemma transferStillFor_ensures(queuedEpoch: int, queuedGen: int, epoch: int, gen
   ensures (transferStillFor(queuedEpoch, queuedGen, epoch, gen) == ((queuedEpoch == epoch) && (queuedGen == gen)))
 {
 }
+
+function mayReceiveState(slot: int, currentChannel: bool): bool
+{
+  ((slot == 0) && currentChannel)
+}
+
+lemma mayReceiveState_ensures(slot: int, currentChannel: bool)
+  ensures (mayReceiveState(slot, currentChannel) == ((slot == 0) && currentChannel))
+{
+}

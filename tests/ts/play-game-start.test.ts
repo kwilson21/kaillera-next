@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { gameEndedMessage, gameStartPlan, handlesGameEnd } from '../../web/src/play/game-start.ts';
+import { endMatchesCurrent, gameEndedMessage, gameStartPlan, handlesGameEnd } from '../../web/src/play/game-start.ts';
 import { lateJoinPlan } from '../../web/src/play/join-plan.ts';
 
 const BOOLS = [true, false] as const;
@@ -148,4 +148,10 @@ test('the toast at a game end says why', () => {
   assert.equal(gameEndedMessage('dropped'), 'You were disconnected for too long. Rejoining...');
   for (const reason of [undefined, null, '', 'ended'])
     assert.equal(gameEndedMessage(reason), 'The host has ended the game');
+});
+
+test('an end acknowledgement for an old match cannot end the rematch', () => {
+  assert.equal(endMatchesCurrent('old', 'new'), false);
+  assert.equal(endMatchesCurrent('same', 'same'), true);
+  assert.equal(endMatchesCurrent('', 'same'), true);
 });

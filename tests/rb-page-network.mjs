@@ -7,8 +7,9 @@
  * harness sets them.
  */
 import { createLinkSchedule } from './link-schedule.mjs';
+import { createDirectionalInputGate } from './directional-input-gate.mjs';
 
-export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
+export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, createDirectionalInputGate) => {
   // Simulated network (tests/link-schedule.mjs): every outgoing DataChannel
   // message is held (DELAY_SYNC_ANSWER_MS), carried by its connection's link
   // at LINK_KBPS (no limit when 0), then delayed LAT ms + up to JITTER ms.
@@ -251,6 +252,14 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
     syncChunksLeft--;
     if (syncChunksLeft === 0 && heldSocketPackets.length) releaseHeldSocketAnswers();
   };
+  const receiveGate = createDirectionalInputGate({
+    now: () => performance.now(),
+    target: (ch, slot) =>
+      Object.values(window.NetplayRollback?._getPeers?.() ?? {}).some(
+        (peer) => peer.slot === slot && (peer.dc === ch || peer.rbDc === ch),
+      ),
+  });
+  window.__knDirectionalInputGate = receiveGate;
   const realOnmessage = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'onmessage');
   Object.defineProperty(RTCDataChannel.prototype, 'onmessage', {
     configurable: true,
@@ -264,7 +273,7 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
       }
       const ch = this;
       realOnmessage.set.call(this, function (e) {
-        const result = fn.call(this, e);
+        const result = receiveGate.receive(ch, e.data, () => fn.call(this, e));
         if (ch.label === 'sync-state') afterSyncStateMessage(e.data);
         return result;
       });
@@ -372,6 +381,16 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
         return;
       }
     }
+    if (
+      this.label === 'sync-state' &&
+      typeof data === 'string' &&
+      data.startsWith('sync-start:') &&
+      Object.values(window.NetplayRollback?._getPeers?.() ?? {}).some(
+        (peer) => peer.slot === window.__knWatchSyncTargetSlot && peer.syncDc === this,
+      )
+    ) {
+      (window.__knWatchedSyncHeaders ??= []).push({ frame: Number(data.split(':')[1]), at: performance.now() });
+    }
     const ch = scheduleOf(this);
     let hold = 0;
     if (
@@ -398,5 +417,5 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
 /** Install the simulated network on a browser context: LAT ms plus up to JITTER ms, at kbps (0 = no cap). */
 export const addNetworkInitScript = (ctx, { lat, jitter, kbps = 0 }) =>
   ctx.addInitScript({
-    content: `(${networkInitScript})(${JSON.stringify({ lat, jitter, kbps })}, ${createLinkSchedule});`,
+    content: `(${networkInitScript})(${JSON.stringify({ lat, jitter, kbps })}, ${createLinkSchedule}, ${createDirectionalInputGate});`,
   });

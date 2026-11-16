@@ -407,3 +407,11 @@ export function missedDeliveryStep(
   if (failed && failedForMs < backoffMs) return 'wait';
   return pushes < maxPushes ? 'pushAgain' : 'giveUp';
 }
+
+/** Cumulative per-source capture admission, independent of per-hole ACKs.
+ * A rejection triggers source-only eviction rather than indefinite prediction. */
+//@ ensures \result === (used < limit)
+//@ ensures used >= limit ==> !\result
+export function sourceCaptureAllowed(used: number, limit: number): boolean {
+  return used < limit;
+}
