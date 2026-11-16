@@ -555,17 +555,16 @@
   // The loaded ROM's hash, landed for `load`. The hash and what is read from
   // it first and the load number after, so nothing on the way can leave the
   // previous ROM's hash marked as this load's (specs/rom_identity.qnt). A
-  // ROM from the host whose hash failed takes none (it is the host's by size).
+  // ROM from the host whose hash failed takes none (it is the host's by size),
+  // and no game id or emulator identity of the ROM before it.
   const takeRomHash = (load, hash) => {
     _romHash = hash;
     KNState.romHash = hash;
-    if (hash) {
-      _gameId = _gameIdFromHash(hash);
-      KNState.gameId = _gameId;
-      window.EJS_gameID = hash;
-    }
+    _gameId = _gameIdFromHash(hash);
+    KNState.gameId = _gameId;
+    window.EJS_gameID = hash || 'kaillera-next';
     _romHashLoad = load;
-    if (hash) discardHibernatedEmulatorForRomChange(hash);
+    discardHibernatedEmulatorForRomChange(hash);
   };
 
   const handleHostRomChanged = (hadPrevious, hasNext, toastOnChange) => {
