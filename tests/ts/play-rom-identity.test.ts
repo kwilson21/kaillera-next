@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { announcesRom, hashIsTheLoadedRoms, romVerdict } from '../../web/src/play/rom-identity.ts';
+import {
+  announcesRom,
+  hashIsTheLoadedRoms,
+  offersHostsRom,
+  romDecided,
+  romVerdict,
+  type RomVerdict,
+} from '../../web/src/play/rom-identity.ts';
 import { KNCore } from '../../web/src/index.ts';
 
 const BOOLS = [false, true] as const;
@@ -51,8 +58,25 @@ test("a page announces a ROM only once that ROM's own hash is in", () => {
   assert.equal(announcesRom(false, false), false);
 });
 
+const VERDICTS: readonly RomVerdict[] = ['noRom', 'pending', 'match', 'mismatch'];
+
+test('the plans count a ROM only once its own hash or its size has decided it', () => {
+  for (const v of VERDICTS) {
+    assert.equal(romDecided(v), v === 'match' || v === 'mismatch', v);
+    for (const shares of [false, true]) {
+      assert.equal(offersHostsRom(v, shares), shares && v !== 'pending', `${v} ${shares}`);
+    }
+  }
+  // A drop still being hashed: no ROM yet for the plans, and no offer, so the
+  // start waits for it and the hash landing decides.
+  assert.equal(romDecided('pending'), false);
+  assert.equal(offersHostsRom('pending', true), false);
+});
+
 test('the play page reads these from the core bundle', () => {
   assert.equal(KNCore.play.romIdentity.romVerdict, romVerdict);
   assert.equal(KNCore.play.romIdentity.hashIsTheLoadedRoms, hashIsTheLoadedRoms);
   assert.equal(KNCore.play.romIdentity.announcesRom, announcesRom);
+  assert.equal(KNCore.play.romIdentity.romDecided, romDecided);
+  assert.equal(KNCore.play.romIdentity.offersHostsRom, offersHostsRom);
 });

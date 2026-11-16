@@ -37,6 +37,26 @@ lemma romVerdict_ensures(hasRom: bool, hashIsLoaded: bool, hashDiffers: bool, si
 {
 }
 
+function romDecided(v: RomVerdict): bool
+{
+  (v.match_? || v.mismatch?)
+}
+
+lemma romDecided_ensures(v: RomVerdict)
+  ensures (romDecided(v) <==> (v.match_? || v.mismatch?))
+{
+}
+
+function offersHostsRom(v: RomVerdict, hostShares: bool): bool
+{
+  (hostShares && (!v.pending?))
+}
+
+lemma offersHostsRom_ensures(v: RomVerdict, hostShares: bool)
+  ensures (offersHostsRom(v, hostShares) <==> (hostShares && (!v.pending?)))
+{
+}
+
 function announcesRom(hasRom: bool, hashIsLoaded: bool): bool
 {
   (hasRom && hashIsLoaded)

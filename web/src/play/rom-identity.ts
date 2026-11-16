@@ -54,6 +54,29 @@ export function romVerdict(
 }
 
 /**
+ * Whether the start and late-join plans (`gameStartPlan`, `lateJoinPlan`)
+ * count the page's ROM: only once its own hash, or its size, has decided it.
+ * A ROM still being hashed is none yet: the page waits in the started game
+ * and joins it late once the hash lands and says it is the host's, so it
+ * never boots a file before its hash says whose it is.
+ */
+//@ ensures \result <==> v === "match" || v === "mismatch"
+export function romDecided(v: RomVerdict): boolean {
+  return v === 'match' || v === 'mismatch';
+}
+
+/**
+ * Whether the plans offer the host's ROM. Not while the page's own ROM is
+ * being hashed: the plan's no-ROM answer then waits for a ROM in the started
+ * game, and the hash landing either joins the game with this ROM or refuses
+ * it, which brings the offer back.
+ */
+//@ ensures \result <==> hostShares && v !== "pending"
+export function offersHostsRom(v: RomVerdict, hostShares: boolean): boolean {
+  return hostShares && v !== 'pending';
+}
+
+/**
  * The page tells the server it is ready with its ROM (`rom-ready`) only with
  * a ROM, and only once that ROM's own hash is in: the server takes the hash
  * it is sent with the size, and the previous ROM's hash with a new file's size

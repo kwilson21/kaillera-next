@@ -169,14 +169,14 @@ test('the spectator line names who is watching, or is empty', () => {
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
-test('the Start button is what the old code made it', () => {
+test("the Start button is what the old code made it, once the host's own ROM is hashed", () => {
   let compared = 0;
   for (const mode of ['rollback', 'streaming', 'lockstep', '']) {
     for (const romSharing of [true, false]) {
       for (let count = 0; count <= 4; count++) {
         for (let ready = 0; ready <= count; ready++) {
           const players = Array.from({ length: count }, (_, i) => ({ romReady: i < ready }));
-          assert.deepEqual(startButton(count, ready, mode, romSharing), oldStart(players, mode, romSharing));
+          assert.deepEqual(startButton(count, ready, mode, romSharing, true), oldStart(players, mode, romSharing));
           compared++;
         }
       }
@@ -186,10 +186,20 @@ test('the Start button is what the old code made it', () => {
 });
 
 test('rollback waits for every ROM unless the host shares theirs; streaming needs a second person', () => {
-  assert.deepEqual(startButton(2, 1, 'rollback', false), { disabled: true, label: 'Waiting for ROMs (1/2)' });
-  assert.deepEqual(startButton(2, 1, 'rollback', true), { disabled: false, label: 'Start Game' });
-  assert.deepEqual(startButton(1, 0, 'streaming', false), { disabled: true, label: 'Start Game (need 2+)' });
-  assert.deepEqual(startButton(2, 0, 'streaming', false), { disabled: false, label: 'Start Game' });
+  assert.deepEqual(startButton(2, 1, 'rollback', false, true), { disabled: true, label: 'Waiting for ROMs (1/2)' });
+  assert.deepEqual(startButton(2, 1, 'rollback', true, true), { disabled: false, label: 'Start Game' });
+  assert.deepEqual(startButton(1, 0, 'streaming', false, true), { disabled: true, label: 'Start Game (need 2+)' });
+  assert.deepEqual(startButton(2, 0, 'streaming', false, true), { disabled: false, label: 'Start Game' });
+});
+
+test('the host cannot start while its own ROM is being hashed (specs/rom_identity.qnt)', () => {
+  for (const mode of ['rollback', 'streaming']) {
+    for (const romSharing of [true, false]) {
+      assert.deepEqual(startButton(2, 2, mode, romSharing, false), { disabled: true, label: 'Checking your ROM…' });
+    }
+  }
+  // An empty room says so first.
+  assert.deepEqual(startButton(0, 0, 'rollback', false, false), { disabled: true, label: 'Start Game' });
 });
 
 // ── info panel ───────────────────────────────────────────────────────────────
