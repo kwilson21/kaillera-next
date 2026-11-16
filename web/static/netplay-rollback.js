@@ -1746,6 +1746,8 @@
   // (specs/reconnect_inputs.qnt, WAIT_FIRST_INPUT).
   let _awaitFirstInputAfterReset = {};
   let _predictedKnownCount = 0;
+  // RESEND log lines per peer slot: at most one a second, with the count.
+  let _resendLog = {};
   // The frame before which each guest said it has applied a state the host
   // sent (its `inputs-settled:`): the answer to an escalation push
   // (specs/ask_escalation.qnt). Not _inputSettledBefore, which the host
@@ -5325,7 +5327,9 @@
       askedAt[f] = now;
       sent.push(f);
     }
-    if (sent.length) _countOverdueAsk(peer, frames[0], now);
+    // Counted only when the oldest missing frame itself was asked for: asks
+    // for later frames alone would reach the threshold in milliseconds.
+    if (sent.includes(frames[0])) _countOverdueAsk(peer, frames[0], now);
     if (sent.length) {
       _syncLog(
         `RB-INPUT-ASK f=${_frameNum} slot=${slot} frames=${sent[0]}..${sent.at(-1)} count=${sent.length} peerHas=${peerHas}` +
@@ -5384,13 +5388,40 @@
     if (step !== 'wait') _escalateLostInput(peer, step, now);
   };
 
+  // Whether pushSyncState can send at all (its own guards).
+  const _canPushSyncState = () =>
+    !_coreFatalError && _playerSlot === 0 && _syncEnabled && !!window.EJS_emulator?.gameManager;
+  // A state went to this guest: an escalation push waiting on it starts its
+  // deadline now.
+  const _markOverduePushSent = (slot) => {
+    const push = _overduePushes[slot];
+    if (push && push.at === null) push.at = performance.now();
+  };
   const _escalateLostInput = (peer, step, now) => {
     const slot = peer.slot;
     if (step === 'push') {
       const sid = Object.keys(_peers).find((key) => _peers[key] === peer);
       if (!sid) return;
-      _overduePushes[slot] = { sid, frame: _frameNum, at: now, pushes: 1 };
-      pushSyncState(sid, false);
+      // No push can go out (resync off, as main's PEER-RECOVERED resync is
+      // gated; the core fatal; no emulator): nothing is armed, and the ask
+      // stays with the stall path (specs/ask_escalation.qnt push_deadline,
+      // ARM_ONLY_SENT).
+      if (!_canPushSyncState()) {
+        _syncLog(
+          `INPUT-ASK-PUSH-NOT-SENT f=${_frameNum} slot=${slot} resync=${_syncEnabled} fatal=${_coreFatalError}: ` +
+            'left to the stall path',
+        );
+        return;
+      }
+      // The deadline runs from when the push is handed over (at), and the
+      // guest's acknowledgement of any state from the first push on settles
+      // it (firstFrame).
+      _overduePushes[slot] = { sid, firstFrame: _frameNum, at: null, armedAt: now, pushes: 1 };
+      // To every guest, not only this one: in three or four players the
+      // others ran on this player's real input, or on the host's prediction,
+      // and only one state for all brings every page onto the host's
+      // (specs/ask_escalation.qnt escalation_peers).
+      pushSyncState(null, false);
       return;
     }
     const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
@@ -5414,9 +5445,31 @@
     for (const key of Object.keys(_overduePushes)) {
       const push = _overduePushes[key];
       const slot = Number(key);
-      // Answered only by the guest: it has applied a state from at least
-      // this push's frame (the host's own hand-over does not count).
-      const settled = (_inputSettledAckBefore[slot] ?? -1) >= push.frame - DELAY_FRAMES;
+      // A reconnect or a phantom ends it: the reconnect's own resync (or
+      // PEER-RECOVERED's) supersedes the push (push_deadline,
+      // END_ON_RECONNECT). Counting on would drop a guest mid-reconnect.
+      const target = _peers[push.sid];
+      if (!target || target.reconnecting || _peerPhantom[slot]) {
+        _syncLog(
+          `INPUT-ASK-PUSH-ENDED f=${_frameNum} slot=${slot}: ` +
+            `${!target ? 'no entry' : target.reconnecting ? 'reconnecting' : 'phantom'}, its own resync supersedes the push`,
+        );
+        delete _overduePushes[key];
+        continue;
+      }
+      // Not handed over yet: no deadline runs (ARM_ONLY_SENT). One that never
+      // goes out is let go, not counted against the guest.
+      if (push.at === null) {
+        if (now - push.armedAt >= OVERDUE_PUSH_TIMEOUT_MS) {
+          _syncLog(`INPUT-ASK-PUSH-NOT-SENT f=${_frameNum} slot=${slot}: the state did not go out; let go`);
+          delete _overduePushes[key];
+        }
+        continue;
+      }
+      // Answered only by the guest: it has applied a state from at least the
+      // first push's frame (the host's own hand-over does not count; a late
+      // acknowledgement of an earlier push counts, SETTLE_ON_FIRST).
+      const settled = (_inputSettledAckBefore[slot] ?? -1) >= push.firstFrame - DELAY_FRAMES;
       const step = window.KNCore.resyncRequest.pushDeadlineStep(
         true,
         settled,
@@ -5427,14 +5480,19 @@
       );
       if (step === 'wait' || step === 'noPush') continue;
       if (step === 'done') {
-        _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${push.frame} pushes=${push.pushes}`);
+        _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${push.firstFrame} pushes=${push.pushes}`);
         delete _overduePushes[key];
-      } else if (step === 'pushAgain' && _peers[push.sid]) {
+      } else if (step === 'pushAgain') {
+        if (!_canPushSyncState()) {
+          _syncLog(`INPUT-ASK-PUSH-NOT-SENT f=${_frameNum} slot=${slot}: resync off or no core; let go`);
+          delete _overduePushes[key];
+          continue;
+        }
         push.pushes++;
-        push.at = now;
-        push.frame = _frameNum;
+        push.at = null;
+        push.armedAt = now;
         _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${push.pushes}/${OVERDUE_MAX_PUSHES}`);
-        pushSyncState(push.sid, false);
+        pushSyncState(null, false);
       } else {
         // The guest is still on a state that may differ from the host's,
         // and nothing else will correct it: it is dropped through the
@@ -5453,12 +5511,9 @@
         const known = _knownPlayers[push.sid];
         const name = known ? known.playerName : `P${slot + 1}`;
         _config?.onToast?.(`${name} could not be brought back in sync and was dropped`);
-        // Tell the player first, while the channel is open: its page ends
-        // its match and the player joins again late (specs/drop_is_final.qnt).
-        try {
-          if (_peers[push.sid]?.dc?.readyState === 'open') _peers[push.sid].dc.send('dropped:desync');
-        } catch (_) {}
-        hardDisconnectPeer(push.sid);
+        // hardDisconnectPeer tells the player first while the channel is
+        // open: its page joins again late (specs/drop_is_final.qnt).
+        hardDisconnectPeer(push.sid, { tell: 'desync' });
       }
     }
   };
@@ -5898,6 +5953,8 @@
     delete _inputDroppedAheadUpTo[slot];
     delete _awaitFirstInputAfterReset[slot];
     delete _inputSettledAckBefore[slot];
+    delete _inputOorLog[slot];
+    delete _resendLog[slot];
     delete _inputAskedAt[slot];
     delete _inputAskOverdue[slot];
     delete _overduePushes[slot];
@@ -7782,7 +7839,7 @@
     // Only host responds to late-join requests
     if (_playerSlot !== 0) return;
     // A player dropped in this match comes back this way.
-    if (msg?.requesterSid) _droppedThisMatch.delete(msg.requesterSid);
+    if (msg?.requesterSid) _droppedThisMatch.delete(_peerKey(msg.requesterSid));
     if (_phase !== PHASE_RUNNING) {
       // Not running yet: there is no state to send, and this host will not
       // start until that player has loaded. Without an answer both sides
@@ -8082,7 +8139,7 @@
       if (_isPeerPendingLateJoin(sid)) continue;
       // Dropped in this match: added back here it would be an entry outside
       // the roster, fed but never waited for. It comes back as a late joiner.
-      if (_droppedThisMatch.has(sid)) continue;
+      if (_playerSlot === 0 && _droppedThisMatch.has(_peerKey(sid))) continue;
       // A phantom is healed too when its channel does not read open: on a
       // C tick the sim is frozen from ROLLBACK_STALL_MS until the player is
       // a phantom, so the first check after a silent death nearly always
@@ -9521,11 +9578,20 @@
         if (e.data.startsWith('resend:')) {
           const resendFrame = parseInt(e.data.split(':')[1], 10);
           const localInput = _localInputs[resendFrame];
-          _syncLog(
-            `RESEND f=${_frameNum} slot=${peer.slot} frame=${resendFrame} have=${localInput !== undefined} ` +
-              `via=${peer.dc === ch ? 'same' : 'other'} dc=${peer.dc?.readyState ?? 'none'} chId=${ch.id ?? -1} ` +
-              `wall=${Date.now()}`,
-          );
+          // At most one line a second per peer (a stall asks every 500 ms
+          // for every frame missing): the count says how many it covers.
+          const resendLog = (_resendLog[peer.slot] ??= { at: -Infinity, count: 0 });
+          resendLog.count++;
+          const resendNow = performance.now();
+          if (resendNow - resendLog.at >= INPUT_OOR_LOG_EVERY_MS) {
+            _syncLog(
+              `RESEND f=${_frameNum} slot=${peer.slot} frame=${resendFrame} have=${localInput !== undefined} ` +
+                `via=${peer.dc === ch ? 'same' : 'other'} dc=${peer.dc?.readyState ?? 'none'} chId=${ch.id ?? -1} ` +
+                `count=${resendLog.count} wall=${Date.now()}`,
+            );
+            resendLog.at = resendNow;
+            resendLog.count = 0;
+          }
           if (localInput !== undefined) {
             try {
               peer.dc.send(KNShared.encodeInput(resendFrame, localInput).buffer);
@@ -10135,6 +10201,8 @@
     delete _inputDroppedAheadUpTo[slot];
     delete _awaitFirstInputAfterReset[slot];
     delete _inputSettledAckBefore[slot];
+    delete _inputOorLog[slot];
+    delete _resendLog[slot];
     delete _inputAskedAt[slot];
     delete _inputAskOverdue[slot];
     delete _overduePushes[slot];
@@ -10301,9 +10369,17 @@
 
   // `quiet`: the player is not gone, only out of this start
   // (_leaveOutOfStart), so nobody is told it dropped.
-  const hardDisconnectPeer = (remoteSid, { quiet = false } = {}) => {
+  // `tell`: why, sent to the player (`dropped:<tell>`) when the host drops it
+  // with its channel open (specs/drop_is_final.qnt, TELL).
+  const hardDisconnectPeer = (remoteSid, { quiet = false, tell = 'host' } = {}) => {
     const peer = _peers[remoteSid];
     if (!peer) return;
+    const running = _phase === PHASE_RUNNING;
+    if (_playerSlot === 0 && running && !quiet && !peer._intentionalLeave && peer.dc?.readyState === 'open') {
+      try {
+        peer.dc.send(`dropped:${tell}`);
+      } catch (_) {}
+    }
     clearStartupConnectWatchdog(peer);
     if (peer._reconnectTimeout) {
       clearTimeout(peer._reconnectTimeout);
@@ -10328,7 +10404,10 @@
     }
 
     const _leftSlot = peer.slot;
-    if (_phase === PHASE_RUNNING) _droppedThisMatch.add(remoteSid);
+    // Only the host keeps whom it dropped: it owns the roster, and a guest
+    // that kept it would refuse to heal a guest link for the rest of the
+    // match (HOST_ONLY).
+    if (_playerSlot === 0 && running) _droppedThisMatch.add(_peerKey(remoteSid));
     delete _peers[remoteSid];
     delete _lockstepReadyPeers[remoteSid];
     KNState.peers = _peers;
@@ -10356,6 +10435,11 @@
     }
     _config?.onToast?.(`${name} dropped`);
     _config?.onReconnecting?.(remoteSid, false);
+    // A guest that gave up on its host (its 45 s, or its reconnect attempts
+    // ran out) joins again late rather than playing on alone
+    // (GUEST_LATE_JOIN). Not when the host left on purpose: the server ends
+    // that match.
+    if (_playerSlot !== 0 && _leftSlot === 0 && running && !peer._intentionalLeave) _endMatchDropped('lost-host');
   };
 
   const _MAX_RECONNECT_ATTEMPTS = 3;
@@ -13399,7 +13483,13 @@
     _droppedByHost = true;
     _syncLog(`DROPPED-BY-HOST reason=${reason} f=${_frameNum} — joining again late`);
     KNEvent('desync', `dropped by the host (${reason})`, { kind: 'dropped-by-host', reason, frame: _frameNum });
-    _config?.onToast?.('The host could not keep this game in sync: joining again');
+    _config?.onToast?.(
+      reason === 'desync'
+        ? 'The host could not keep this game in sync: joining again'
+        : reason === 'lost-host'
+          ? 'Lost the connection to the host: joining again'
+          : 'The host dropped this page: joining again',
+    );
     // Out of this channel's message handler first: the late join stops this
     // engine.
     queueMicrotask(() => _config?.onLeftOutOfStart?.());
@@ -13623,6 +13713,7 @@
     _inputSettledBefore = {}; // a new match starts a new input timeline at frame 0
     _inputDroppedAheadUpTo = {};
     _awaitFirstInputAfterReset = {};
+    _resendLog = {};
     _inputSettledAckBefore = {};
     _inputOorLog = {};
     _inputAskedAt = {};
@@ -14431,6 +14522,7 @@
         _inputSettledBefore = {};
         _inputDroppedAheadUpTo = {};
         _awaitFirstInputAfterReset = {};
+        _resendLog = {};
         _inputSettledAckBefore = {};
         _inputOorLog = {};
         _inputAskedAt = {};
@@ -18763,6 +18855,7 @@
             ...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {}),
           });
           _settleInputsBefore(_peers[targetSid].slot, frame);
+          _markOverduePushSent(_peers[targetSid].slot);
           _syncLog(
             `socket sync sent to slot=${_peers[targetSid].slot}: ${isFull ? 'full' : 'delta'} ` +
               `${wireKB}KB gzip (${b64KB}KB b64) frame=${frame}`,
@@ -18904,6 +18997,7 @@
         // its late inputs from before that frame must still be fed
         // (specs/tick_deadlines.qnt, inputsAreSettledOnlyForADeliveredState).
         _settleInputsBefore(target.slot, frame);
+        _markOverduePushSent(target.slot);
         _syncLog(`sync sent to slot=${target.slot}: header + ${numChunks} chunks`);
         return 'sent';
       }
@@ -19636,6 +19730,7 @@
     _inputSettledBefore = {};
     _inputDroppedAheadUpTo = {};
     _awaitFirstInputAfterReset = {};
+    _resendLog = {};
     _inputSettledAckBefore = {};
     _inputOorLog = {};
     _inputAskedAt = {};

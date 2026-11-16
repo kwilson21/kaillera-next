@@ -69,7 +69,11 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     assert "_escalateLostInput(peer, step, now);" in count
     escalate = src[src.index("const _escalateLostInput = (peer, step, now) => {") :]
     escalate = escalate[: escalate.index("\n  };\n")]
-    assert "pushSyncState(sid, false);" in escalate
+    # To every guest (escalation_peers), and only when a push can go out.
+    assert "pushSyncState(null, false);" in escalate
+    assert escalate.index("if (!_canPushSyncState()) {") < escalate.index(
+        "_overduePushes[slot] = {"
+    )
     assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in escalate
     assert "const INPUT_ASK_OVERDUE_ASKS = 3;" in src
     assert "const INPUT_ASK_OVERDUE_MS = 1500;" in src
@@ -78,20 +82,25 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     assert "window.KNCore.resyncRequest.pushDeadlineStep(" in pushes
     # Answered by the guest's inputs-settled alone, not the host's own
     # hand-over of the state (which raises _inputSettledBefore).
-    assert "(_inputSettledAckBefore[slot] ?? -1) >= push.frame - DELAY_FRAMES" in pushes
+    assert (
+        "(_inputSettledAckBefore[slot] ?? -1) >= push.firstFrame - DELAY_FRAMES"
+        in pushes
+    )
     assert "_inputSettledBefore[slot]" not in pushes
     assert "_checkResyncRequestDeadline();\n    _checkOverduePushes();" in src
     # The last push unanswered: the player is dropped (I1's recovery), not
     # left playing on split; the event alone is not one.
     give_up = pushes[pushes.index("INPUT-ASK-PUSH-GAVEUP") :]
-    assert "hardDisconnectPeer(push.sid);" in give_up
+    assert "hardDisconnectPeer(push.sid, { tell: 'desync' });" in give_up
     assert "could not be brought back in sync and was dropped" in give_up
     # Every ask that goes out is counted.
     ask = src[
         src.index("const _askForMissingInputs = (peer, applyFrame, windowEdge) => {") :
     ]
     ask = ask[: ask.index("\n  };\n")]
-    assert "if (sent.length) _countOverdueAsk(peer, frames[0], now);" in ask
+    assert (
+        "if (sent.includes(frames[0])) _countOverdueAsk(peer, frames[0], now);" in ask
+    )
     # I2: per-peer state, dropped with the peer.
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
@@ -202,18 +211,33 @@ def test_a_player_dropped_in_the_match_comes_back_only_as_a_late_joiner():
     src = _src()
     check = src[src.index("const _meshHealthCheck = () => {") :]
     check = check[: check.index("const p = _peers[sid];")]
-    assert "if (_droppedThisMatch.has(sid)) continue;" in check
-    hard = src[src.index("const hardDisconnectPeer = (remoteSid, { quiet = false } = {}) => {") :]
+    # Host only, keyed by _peerKey everywhere (HOST_ONLY).
+    assert (
+        "if (_playerSlot === 0 && _droppedThisMatch.has(_peerKey(sid))) continue;"
+        in check
+    )
+    hard = src[
+        src.index(
+            "const hardDisconnectPeer = (remoteSid, { quiet = false, tell = 'host' } = {}) => {"
+        ) :
+    ]
     hard = hard[: hard.index("\n  };\n")]
-    assert "if (_phase === PHASE_RUNNING) _droppedThisMatch.add(remoteSid);" in hard
+    assert (
+        "if (_playerSlot === 0 && running) _droppedThisMatch.add(_peerKey(remoteSid));"
+        in hard
+    )
+    # The host tells the player while its channel is open (TELL); a guest
+    # that gave up on its host joins again late (GUEST_LATE_JOIN).
+    assert "peer.dc.send(`dropped:${tell}`);" in hard
+    assert hard.index("peer.dc.send(`dropped:${tell}`);") < hard.index(
+        "delete _peers[remoteSid];"
+    )
+    assert "_endMatchDropped('lost-host');" in hard
     late = src[src.index("const handleLateJoinRequest = (msg) => {") :][:400]
-    assert "_droppedThisMatch.delete(msg.requesterSid);" in late
+    assert "_droppedThisMatch.delete(_peerKey(msg.requesterSid));" in late
     # Cleared on a new match and on stop, besides the declaration.
     assert src.count("let _droppedThisMatch = new Set();") == 1
     assert src.count("_droppedThisMatch = new Set();") == 3
-    pushes = src[src.index("const _checkOverduePushes = () => {") :]
-    pushes = pushes[: pushes.index("\n  };\n")]
-    assert pushes.index("dc.send('dropped:desync')") < pushes.index("hardDisconnectPeer(push.sid);")
     handler = src[src.index("if (e.data.startsWith('dropped:')) {") :][:400]
     assert "if (peer.slot !== 0) {" in handler
     assert "_endMatchDropped(" in handler
@@ -221,3 +245,27 @@ def test_a_player_dropped_in_the_match_comes_back_only_as_a_late_joiner():
     end = src[src.index("const _endMatchDropped = (reason) => {") :]
     end = end[: end.index("\n  };\n")]
     assert "queueMicrotask(() => _config?.onLeftOutOfStart?.());" in end
+
+
+def test_the_push_deadline_runs_only_on_a_push_that_went_out_and_ends_on_a_reconnect():
+    # specs/ask_escalation.qnt push_deadline: ARM_ONLY_SENT, END_ON_RECONNECT,
+    # SETTLE_ON_FIRST.
+    src = _src()
+    pushes = src[src.index("const _checkOverduePushes = () => {") :]
+    pushes = pushes[: pushes.index("\n  };\n")]
+    ended = pushes.index("if (!target || target.reconnecting || _peerPhantom[slot]) {")
+    unsent = pushes.index("if (push.at === null) {")
+    deadline = pushes.index("window.KNCore.resyncRequest.pushDeadlineStep(")
+    assert ended < unsent < deadline
+    assert "INPUT-ASK-PUSH-ENDED" in pushes
+    assert "push.at = null;" in pushes
+    assert "push.frame = _frameNum;" not in pushes
+    # The deadline starts when the state is handed over, on both paths (DC and socket).
+    assert src.count("_markOverduePushSent(") == 2
+    # The P2s: the overflow logs are reset with the peer (I2) and RESEND is throttled.
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "delete _inputOorLog[slot];" in reset
+    assert "delete _resendLog[slot];" in reset
+    resend = src[src.index("if (e.data.startsWith('resend:')) {") :][:1400]
+    assert "if (resendNow - resendLog.at >= INPUT_OOR_LOG_EVERY_MS) {" in resend

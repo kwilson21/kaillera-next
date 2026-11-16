@@ -658,6 +658,12 @@ const ASK_UNANSWERED_RECOVER_MS = 30000;
 // push goes unanswered and the host drops the player (needs a window longer
 // than the escalation and three 5 s push deadlines, about 17 s).
 const ASK_UNANSWERED_ACKS = process.env.ASK_UNANSWERED_ACKS === '1';
+// RESYNC_OFF=1: the host starts the game with resync off (the room's
+// toggle). With ASK_UNANSWERED_STALL_MS: no escalation push can go out, so
+// none is armed and nobody is dropped; the hole stays with the stall path,
+// and the pages may stay apart (as on main with the toggle off: no hash or
+// integrity failure counts then).
+const RESYNC_OFF = process.env.RESYNC_OFF === '1';
 if (ASK_UNANSWERED_ACKS && !(ASK_UNANSWERED_STALL_MS >= 20000)) {
   console.log('ASK_UNANSWERED_ACKS needs ASK_UNANSWERED_STALL_MS >= 20000');
   process.exit(1);
@@ -1669,6 +1675,13 @@ if (FORCE_DELAY !== null) {
     }, FORCE_DELAY);
   }
   console.log(`FORCE_DELAY: both pages pick ${FORCE_DELAY}`);
+}
+if (RESYNC_OFF) {
+  await host.evaluate(() => {
+    const box = document.getElementById('opt-resync');
+    if (box) box.checked = false;
+  });
+  console.log('RESYNC_OFF: the host starts with resync off');
 }
 await host.click('#start-btn');
 
@@ -4225,6 +4238,7 @@ const askUnansweredReport = (() => {
     hardDisconnected,
     heals: heals.length,
     stallTimeouts,
+    notSent: hostLines.filter((l) => /INPUT-ASK-PUSH-NOT-SENT/.test(l)).length,
     // ACKS: the drop is final (specs/drop_is_final.qnt): the guest's page
     // was told and ended its match, and nothing on the host followed it.
     droppedByHost: askUnanswered.droppedByHost ? [askUnanswered.droppedByHost] : [],
@@ -4237,31 +4251,42 @@ const askUnansweredReport = (() => {
     comparedFrom: recoveredAt,
   };
 })();
-const askUnansweredFailed =
-  ASK_UNANSWERED_STALL_MS > 0 &&
-  !(
-    askUnansweredReport &&
-    askUnansweredReport.dropped > 0 &&
-    askUnansweredReport.overdue.length > 0 &&
-    (ASK_UNANSWERED_ACKS
-      ? // Every push unanswered: pushed again to the limit, then the player dropped.
-        askUnansweredReport.pushes.length >= 2 &&
-        askUnansweredReport.gaveUp.length > 0 &&
-        askUnansweredReport.hardDisconnected.length > 0 &&
-        askUnansweredReport.droppedByHost.length > 0 &&
-        // It joined again late, onto the host's state; frames are compared
-        // from there (FREEZE_LIKE).
-        askUnansweredReport.lateJoined.length > 0 &&
-        askUnansweredReport.heals === 0 &&
-        askUnansweredReport.pastWindowAfterDrop === 0
-      : askUnansweredReport.settled.length > 0 &&
-        askUnansweredReport.gaveUp.length === 0 &&
-        // The difference from main: no stall waits out its deadline.
-        askUnansweredReport.stallTimeouts.length === 0 &&
-        askUnansweredReport.freezeMs < STALL_DEADLINE_MS &&
-        // The frames compared start at or after the last push's frame.
-        recoveredAt >= askUnansweredReport.lastPushFrame)
-  );
+const askUnansweredFailed = RESYNC_OFF
+  ? // Resync off: no push goes out, none is armed, nobody is dropped.
+    ASK_UNANSWERED_STALL_MS > 0 &&
+    !(
+      askUnansweredReport &&
+      askUnansweredReport.dropped > 0 &&
+      askUnansweredReport.notSent > 0 &&
+      askUnansweredReport.settled.length === 0 &&
+      askUnansweredReport.pushes.length === 0 &&
+      askUnansweredReport.gaveUp.length === 0 &&
+      askUnansweredReport.hardDisconnected.length === 0
+    )
+  : ASK_UNANSWERED_STALL_MS > 0 &&
+    !(
+      askUnansweredReport &&
+      askUnansweredReport.dropped > 0 &&
+      askUnansweredReport.overdue.length > 0 &&
+      (ASK_UNANSWERED_ACKS
+        ? // Every push unanswered: pushed again to the limit, then the player dropped.
+          askUnansweredReport.pushes.length >= 2 &&
+          askUnansweredReport.gaveUp.length > 0 &&
+          askUnansweredReport.hardDisconnected.length > 0 &&
+          askUnansweredReport.droppedByHost.length > 0 &&
+          // It joined again late, onto the host's state; frames are compared
+          // from there (FREEZE_LIKE).
+          askUnansweredReport.lateJoined.length > 0 &&
+          askUnansweredReport.heals === 0 &&
+          askUnansweredReport.pastWindowAfterDrop === 0
+        : askUnansweredReport.settled.length > 0 &&
+          askUnansweredReport.gaveUp.length === 0 &&
+          // The difference from main: no stall waits out its deadline.
+          askUnansweredReport.stallTimeouts.length === 0 &&
+          askUnansweredReport.freezeMs < STALL_DEADLINE_MS &&
+          // The frames compared start at or after the last push's frame.
+          recoveredAt >= askUnansweredReport.lastPushFrame)
+    );
 if (ASK_UNANSWERED_STALL_MS > 0) {
   console.log(
     askUnansweredFailed
@@ -4610,11 +4635,11 @@ const failed =
   syncFollowUpFailed ||
   observersFailed ||
   signalingDropFailed ||
-  gpMis > 0 ||
-  gsMis > 0 ||
+  (gpMis > 0 && !RESYNC_OFF) ||
+  (gsMis > 0 && !RESYNC_OFF) ||
   summary.bootInputStallTimeouts.host > 0 ||
   summary.bootInputStallTimeouts.guest > 0 ||
-  integrityFailed ||
+  (integrityFailed && !RESYNC_OFF) ||
   H.inBattleAt < 0 ||
   G.inBattleAt < 0 ||
   battleCoverage < 0.8 ||

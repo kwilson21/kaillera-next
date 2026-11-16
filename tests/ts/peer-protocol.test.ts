@@ -259,6 +259,7 @@ test('inputs-settled carries the frame alone, whether or not inputs follow it', 
 
 test('dropped names why the host dropped the player', () => {
   ok('lockstep', 'dropped:desync');
+  ok('lockstep', 'dropped:host');
   bad('lockstep', 'dropped:');
   bad('lockstep', 'dropped:anything');
   bad('lockstep', 'dropped');
