@@ -7,9 +7,10 @@
  * (lobby up or down, frames advancing) at each step. Each checkpoint also
  * blips the page's signaling socket, to take it through a rejoin, and fails
  * on any disagreement an observing TypeScript module reported
- * (`play-disagree`, the engine's `protocol-mismatch`; `session-disagree` from
- * a page built before the old page flags were deleted), and on any message
- * the page's socket boundary dropped as off its schema. The machine reports
+ * (`session-disagree`, `play-disagree` and `protocol-mismatch` from a page
+ * built before the old page flags, comparisons and protocol observer were
+ * deleted), and on any message the page's socket boundary, or the rollback
+ * engine's, dropped as off its schema. The machine reports
  * `late-join-stranded` when a late joiner has waited more than 20 s for
  * state. For the late joiner that is a notice: the scenario times the wait
  * itself and fails only if the notice and the measured wait contradict each

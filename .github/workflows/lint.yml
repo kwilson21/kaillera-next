@@ -15,6 +15,8 @@ on:
       - 'specs/**'
       - 'tools/oxlint/**'
       - 'scripts/check-specs.sh'
+      - 'scripts/browser_shard.py'
+      - 'scripts/build_landing.py'
       - 'package.json'
       - 'package-lock.json'
       - 'Dockerfile'
@@ -157,7 +159,7 @@ jobs:
 
   # Server unit tests that need no browser and no running server. `--noconftest`
   # skips tests/conftest.py, whose session fixtures launch a browser for the
-  # end-to-end tests. A new server test file belongs in this list.
+  # end-to-end tests.
   server-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -174,36 +176,21 @@ jobs:
       # it needs the server's Python environment (and no node_modules).
       - name: Generated client schemas match server/src/api/payloads.py
         run: npm run protocol:check
+      # The landing tests build the landing pages from the web bundles and run
+      # its Worker, as the capture-privacy job does.
+      - name: Install locked Node dependencies and build the web bundles
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      # Every test file that needs neither the browser job's server nor
+      # Playwright (scripts/browser_shard.py --unit): found by rule, so a new
+      # file is never left out of CI.
       - name: Server unit tests
         run: |
+          files=$(python scripts/browser_shard.py --unit)
+          echo "$files"
           uv run --directory server --frozen --extra dev pytest --noconftest -p no:playwright -q \
-            ../tests/test_session_reports.py \
-            ../tests/test_host_reload.py \
-            ../tests/test_resume_refused.py \
-            ../tests/test_abandoned_match.py \
-            ../tests/test_relay_sender.py \
-            ../tests/test_webrtc_signal_relay.py \
-            ../tests/test_socket_cors.py \
-            ../tests/test_turn_credentials.py \
-            ../tests/test_schema.py \
-            ../tests/test_query_builder.py \
-            ../tests/test_room_logic.py \
-            ../tests/test_protocol_payloads.py \
-            ../tests/test_db.py \
-            ../tests/test_db_backends.py \
-            ../tests/test_d1_backend.py \
-            ../tests/test_migrate.py \
-            ../tests/test_session_logging.py \
-            ../tests/test_session_log_http.py \
-            ../tests/test_session_log_entries.py \
-            ../tests/test_match_registration.py \
-            ../tests/test_retention.py \
-            ../tests/test_retention_sweep.py \
-            ../tests/test_screenshots.py \
-            ../tests/test_state.py \
-            ../tests/test_emulator_boot_sequence.py \
-            ../tests/test_core_desync_exports.py \
-            ../tests/test_sync_send_source.py
+            $(printf '../%s ' $files)
       # The desync registry compiled natively and read against a RAM dump of
       # a match: its addresses, the byte order of one-byte fields, the replay
       # rewrite and the address map. Its own conftest builds the library.

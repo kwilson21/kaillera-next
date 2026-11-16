@@ -1,10 +1,9 @@
 /**
  * The streaming host's video choices: how the canvas is captured, what the
  * offer's SDP asks for, the encoder's limits, and when a core running too
- * fast is reset. Each is the rule web/static/netplay-streaming.js applies
- * today (getCaptureModePreference, computeDirectScaleDownBy, computeCrop,
- * setSDPBitrate, preferCodecs, optimizeVideoEncoding, the frame-rate
- * watchdog). The engine still decides; observe.ts compares.
+ * fast is reset. web/static/netplay-streaming.js asks them when it starts
+ * capture, crops the blit canvas, makes an offer, tunes a video sender and
+ * samples the core's frame rate.
  */
 import type { WirePayload } from '../wire.ts';
 

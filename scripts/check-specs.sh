@@ -66,12 +66,22 @@ done
 # ── ROM transfer: a guest waiting on the host always has a way out ──────────
 ROM=specs/rom_transfer.qnt
 $QUINT typecheck "$ROM"
-for variant in rom_transfer_before rom_transfer_current; do
+for variant in rom_transfer_before rom_transfer_short_kept rom_transfer_nothing_received_waits \
+  rom_transfer_retry_outlives_sharing rom_transfer_current; do
   $QUINT test "$ROM" --main="$variant" --backend=typescript
 done
 # Today: every waiting state has a running timer or a Retry button. Violated
-# before the request sent over the engine channel was given a deadline.
-for invariant in waitingHasAWayOut timersAloneStop; do
+# before the request sent over the engine channel was given a deadline. And
+# what the receiver counts is what the page holds; violated while a short
+# file kept its count (rom_transfer_short_kept). And the guest is asked to
+# press Retry only once its automatic retries are used up or the host stopped
+# sharing; violated while a transfer with nothing received was not resumed
+# after a close or the host sharing again (rom_transfer_nothing_received_waits;
+# closedBeforeAnyByteTest, sharingAgainBeforeAnyByteTest). And nothing asks
+# the host again by itself once it stopped sharing; violated while sharing off
+# did not cancel a retry the guest's close had scheduled first
+# (rom_transfer_retry_outlives_sharing; closeBeforeSharingOffTest).
+for invariant in waitingHasAWayOut timersAloneStop countIsHeld retriesBeforeAsking noRetryWhileHostStopped; do
   $QUINT run "$ROM" --main=rom_transfer_current --invariant="$invariant" \
     --max-samples=20000 --max-steps=25 --backend=typescript
 done
@@ -91,6 +101,37 @@ done
 # startBeforeTheClearArrivesTest).
 $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── A game start: who a page waits for before its match runs ─────────────────
+START_GROUP=specs/start_group.qnt
+$QUINT typecheck "$START_GROUP"
+for variant in start_group_before start_group_give_up_only start_group_untold start_group_deadline_only \
+  start_group_no_rejoin start_group_open_after_give_up start_group_deadline_with_the_connection \
+  start_group_lost_dropped start_group_current; do
+  $QUINT test "$START_GROUP" --main="$variant" --backend=typescript
+done
+# Today: a host that has started a game always has a way on, a late joiner
+# is held as one, and a running match waited for no silent player. The first
+# was VIOLATED while the startup watchdog's give-up waited on
+# (start_group_before; aFrozenGuestTest: in a room of two the host never
+# started), and while the deadline stopped once the game sequence had started
+# (start_group_give_up_only; aThirdPlayerFrozenTest), and while the host
+# told the other players nobody it left out (start_group_untold; the same
+# test: the other guest still waited for the frozen one). Nobody alive is in
+# neither the start nor the late join: VIOLATED while a left-out page that had
+# started normally waited for the host's offer for ever (start_group_no_rejoin;
+# aSlowGuestTest), while the give-up left the connection open to complete later
+# (start_group_open_after_give_up; aLateOpenTest), and while the guest's
+# deadline went with a connection that failed
+# (start_group_deadline_with_the_connection; aGuestLosesTheHostTest). The host
+# never stuck: VIOLATED while a connection lost after the game sequence had
+# started was dropped without a word (start_group_lost_dropped;
+# aLostAfterTheSequenceTest). It all holds without the ROM prompt's word too
+# (start_group_deadline_only), only later.
+for variant in start_group_deadline_only start_group_current; do
+  $QUINT run "$START_GROUP" --main="$variant" --invariant=allHold \
+    --max-samples=20000 --max-steps=25 --backend=typescript
+done
 
 # ── Desync digests: which frame a peer may report a hash for ────────────────
 DIGEST=specs/desync_digest.qnt
@@ -122,7 +163,7 @@ PAIR=specs/peer_connection.qnt
 $QUINT typecheck "$PAIR"
 # The scenarios say what each variant does with the same ordering.
 for variant in peer_connection_before_119 peer_connection_before_startup_flag peer_connection_current \
-  peer_connection_counter_only peer_connection_fixed; do
+  peer_connection_heal_one_side peer_connection_counter_only peer_connection_fixed; do
   $QUINT test "$PAIR" --main="$variant" --backend=typescript
 done
 pair() { # module invariant init
@@ -143,6 +184,13 @@ pair peer_connection_current holdToday initLobby
 # (startupRetryToAStartedPageTest).
 pair peer_connection_fixed allHold init
 pair peer_connection_fixed allHold initLobby
+# The per-peer machine deciding `heal` alone (the lower slot's health check
+# offers, the higher slot's notices a drop): what holds today, and the pair
+# no longer offers to each other at once or is left with nothing pending. A
+# new higher slot meeting an old lower slot during a deploy is this module;
+# an old higher slot with either is peer_connection_current.
+pair peer_connection_heal_one_side holdWithHealOneSide init
+pair peer_connection_heal_one_side holdWithHealOneSide initLobby
 # With attempts told apart by the offering page's counter alone (the per-peer
 # machine as first written), staleSignalsAreNotApplied is VIOLATED: a page
 # that replaces another numbers its offers from 1 again, and what was sent for
@@ -247,12 +295,16 @@ $QUINT run "$FLOW" --main=resync_flow_drop_older --invariant=allHold \
 # ── The tick loop's deadlines and a page that freezes ───────────────────────
 TICK=specs/tick_deadlines.qnt
 $QUINT typecheck "$TICK"
-for variant in tick_deadlines_before tick_deadlines_current; do
+for variant in tick_deadlines_before tick_deadlines_before_lockstep_mode tick_deadlines_current; do
   $QUINT test "$TICK" --main="$variant" --backend=typescript
 done
 # Today: a page's own freeze is never held against its peer. Violated before
 # the pacing-throttle deadline was credited (tick_deadlines_before).
 $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldAgainstAPeer \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+# Today: no wait outlasts its deadline without one. Violated before the
+# lockstep wait had one (tick_deadlines_before_lockstep_mode).
+$QUINT run "$TICK" --main=tick_deadlines_current --invariant=everyWaitHasADeadline \
   --max-samples=20000 --max-steps=25 --backend=typescript
 # A state transfer and the host's inputs behind it on one connection.
 for variant in input_link_burst input_link_paced_unguarded input_link_paced_whole_deadline input_link_paced; do
@@ -354,6 +406,43 @@ done
 # (resync_reask_coordinated_let_go; coordinatedAnswerLostTest).
 $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── The follow-up to an answer sent unconfirmed ────────────────────────────
+FOLLOW=specs/sync_follow_up.qnt
+$QUINT typecheck "$FOLLOW"
+for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_fixed; do
+  $QUINT test "$FOLLOW" --main="$variant" --backend=typescript
+done
+# With the fix: a follow-up goes out only for a state an input changed after
+# it was taken, the guest ends on the host's state, and at most one answer is
+# on the channel. Today every unconfirmed answer is followed up
+# (sync_follow_up_current; unchangedFollowUpTest); recording the change from
+# the send only misses one made while the state is compressed
+# (sync_follow_up_from_send; mispredictWhileCompressingTest).
+$QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend=typescript
+
+# ── A channel that dies in a match with no event ───────────────────────────
+MESH=specs/mesh_heal.qnt
+$QUINT typecheck "$MESH"
+for variant in mesh_heal_current mesh_heal_c_tick_only mesh_heal_no_reset_on_open mesh_heal_fresh_entry \
+  mesh_heal_fixed mesh_heal_fixed_guest_lower; do
+  $QUINT test "$MESH" --main="$variant" --backend=typescript
+done
+# Today a C-rollback tick never reaches the mesh health check, so a channel
+# that dies with no event leaves a phantom for the rest of the match
+# (mesh_heal_current; phantomForeverTest). Run on C ticks but still skipping
+# phantoms it rarely acts, since frames are frozen until the player is one
+# (mesh_heal_c_tick_only). Without the guest's reset when the reconnected
+# channel opens, PEER-RECOVERED asks for a second resync
+# (mesh_heal_no_reset_on_open; secondRequestTest). A lower slot that is not
+# the host made a fresh entry when it healed, so it played on from its
+# predictions instead of asking the host for state (mesh_heal_fresh_entry;
+# nonHostLowerTest).
+for variant in mesh_heal_fixed mesh_heal_fixed_guest_lower; do
+  $QUINT run "$MESH" --main="$variant" --invariant=allHold \
+    --max-samples=20000 --max-steps=20 --backend=typescript
+done
 
 # ── The rollback ring across a resync that loads the host's state ─────────
 RING=specs/ring_after_resync.qnt

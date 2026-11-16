@@ -158,16 +158,20 @@ _VALID_EVENT_TYPES = {
     # Kept so a page loaded before that still has its report stored.
     "session-disagree",
     "late-join-stranded",
-    # A DataChannel string or session-log ack the rollback engine received did
-    # not match its schema (createProtocolObserver in web/src/socket-boundary.ts).
-    # The play page sent it for server messages too before it dropped them
-    # instead; kept for both: tests/test_session_reports.py.
+    # A message a page received did not match its schema. No longer sent: the
+    # play page and the rollback engine both drop such a message and log it
+    # (createBoundary in web/src/socket-boundary.ts). Kept so a page loaded
+    # before that still has its report stored: tests/test_session_reports.py.
     "protocol-mismatch",
-    # A decision moved out of play.js disagreed with the play.js code still in
-    # charge of it (web/src/play/observe.ts): tests/test_session_reports.py.
+    # A decision moved out of play.js disagreed with the play.js code then in
+    # charge of it (web/src/play/observe.ts). No longer sent: every such
+    # decision now decides. Kept so a page loaded before that still has its
+    # report stored: tests/test_session_reports.py.
     "play-disagree",
-    # A streaming rule in web/src/streaming disagreed with the engine still in
-    # charge of it (web/src/streaming/observe.ts): tests/test_session_reports.py.
+    # A streaming rule in web/src/streaming disagreed with the code in
+    # netplay-streaming.js then in charge of it. No longer sent: the engine
+    # calls those rules. Kept so a page loaded before that still has its
+    # report stored: tests/test_session_reports.py.
     "streaming-disagree",
     # A decision of the peer mesh disagreed with the proved function meant to
     # replace it (web/src/peer-signaling.ts, compared in netplay-rollback.js).
@@ -1459,13 +1463,10 @@ def create_app(lifespan=None) -> FastAPI:
             matching = matching.where(SessionLog.room == room)
         if match_id:
             matching = matching.where(SessionLog.match_id == match_id)
-        if mode == "rollback":
-            # Include legacy "lockstep" rows as historical synonym — the engine
-            # was renamed without changing semantics, so analytics for "rollback"
-            # should include all sessions whether logged before or after the rename.
-            matching = matching.where(SessionLog.mode.in_(["rollback", "lockstep"]))
-        elif mode in ("streaming", "lockstep"):
-            # "lockstep" on its own is the direct legacy filter: pre-rename rows only.
+        if mode in ("rollback", "lockstep", "streaming"):
+            # Each mode is its own: "lockstep" is the mode a host picks (no
+            # prediction). Rows from before v0.64.0 (2026-09-30) used
+            # "lockstep" for rollback; they are older than the default window.
             matching = matching.where(SessionLog.mode == mode)
         if has_desyncs == "true":
             matching = matching.where(db.json_field(SessionLog.summary, "$.desyncs") > 0)

@@ -1,10 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  chunkTaken,
-  comparable,
-  headerRefused,
   IDLE,
+  pausedText,
   receiverStep,
   ROM_MAX_SIZE,
   romProgress,
@@ -18,11 +16,19 @@ import {
   headerVerdict,
 } from '../../web/src/play/rom-transfer-step.ts';
 
-// ── the code these rules restate, kept as an oracle ──────────────────────────
+// ── the code these rules replaced, kept as an oracle ─────────────────────────
 // The receiver in web/static/play.js as of #142: its state variables and what
-// each handler does to them, with the channel, the timers and the page taken
-// out. play.js is still the code that runs; this is the same logic the
-// observer there compares against.
+// each handler did to them, with the channel, the timers and the page taken
+// out. play.js now keeps its transfer in `receiverStep`'s state.
+
+/** A transfer laid out as play.js held its own (`view` below). */
+const comparable = (state: Receiver) => ({
+  phase: state.phase,
+  retries: state.retries,
+  received: state.received,
+  headerSize: state.header?.size ?? null,
+  headerHash: state.header?.hash ?? null,
+});
 
 type OldHeader = { size: number; hash: string | undefined };
 
@@ -54,8 +60,10 @@ const oldReceiver = () => {
         if (state === 'receiving' || state === 'resuming') state = 'paused';
         break;
       case 'sharing-on':
-        if (state === 'paused' && received > 0) state = 'resuming';
-        else if (state === 'idle') state = 'resuming';
+        // Changed since, on purpose: a paused transfer resumes whether or
+        // not any of the file arrived (it used to need some). See the
+        // nothing-received tests below.
+        if (state === 'paused' || state === 'idle') state = 'resuming';
         break;
       case 'retry':
         if (state !== 'paused' && state !== 'idle') return;
@@ -98,8 +106,10 @@ const oldReceiver = () => {
         break;
       case 'complete':
         state = 'complete';
-        // finishRomTransfer: the chunks add up to `received`.
-        if (header && header.size !== received) state = 'idle';
+        // finishRomTransfer: the chunks add up to `received`. Changed since,
+        // on purpose: a short file drops the count and header with the bytes
+        // (it used to set only the phase to idle). See the short-file test.
+        if (header && header.size !== received) cancel();
         break;
       case 'closed':
         if (state === 'receiving') {
@@ -177,7 +187,6 @@ test('agrees with the receiver in play.js over random transfers', () => {
       const event = randomEvent(next);
       old.apply(event);
       state = receiverStep(state, event).state;
-      // The observer in play.js compares these two strings.
       assert.equal(JSON.stringify(comparable(state)), old.view(), `seed ${seed}, event ${i}: ${JSON.stringify(event)}`);
       compared++;
     }
@@ -195,7 +204,8 @@ test('whole-number size check matches the old floating-point one', () => {
   for (const size of sizes) {
     const line = Math.floor((size * 11) / 10);
     for (let total = Math.max(0, line - 3); total <= line + 3; total++) {
-      assert.equal(chunkTaken(0, total, size), !(total > size * 1.1), `size ${size}, total ${total}`);
+      const taken = chunkVerdict(0, total, size, ROM_MAX_SIZE) === 'accept';
+      assert.equal(taken, !(total > size * 1.1), `size ${size}, total ${total}`);
       checked++;
     }
   }
@@ -204,6 +214,7 @@ test('whole-number size check matches the old floating-point one', () => {
 
 const run = (...events: ReceiverEvent[]) => events.reduce((s, e) => receiverStep(s, e).state, IDLE);
 const last = (state: Receiver, event: ReceiverEvent) => receiverStep(state, event).next;
+const after = (state: Receiver, ...events: ReceiverEvent[]) => events.reduce((s, e) => receiverStep(s, e).state, state);
 
 test('a transfer from accept to finished', () => {
   const receiving = run(
@@ -235,14 +246,51 @@ test('a file short of what the host announced is not kept', () => {
   );
   const step = receiverStep(short, { kind: 'complete' });
   assert.equal(step.next, 'abandoned');
-  assert.equal(step.state.phase, 'idle');
+  assert.deepEqual(step.state, IDLE);
 });
 
-test('a closed channel is retried by itself only after part of the file arrived', () => {
+// The ordering specs/rom_transfer.qnt found (`countIsHeld`): the page drops a
+// short file's bytes, so a later request must not resume from its count.
+test('after a short file, the next request starts the file again from nothing', () => {
+  const short = run(
+    { kind: 'accept' },
+    { kind: 'channel' },
+    { kind: 'header', size: 300_000, hash: 'Saa' },
+    { kind: 'chunk', bytes: 100_000 },
+    { kind: 'complete' },
+  );
+  for (const again of [{ kind: 'sharing-on' }, { kind: 'game-started' }, { kind: 'reconnected' }] as const) {
+    const asked = receiverStep(short, again).state;
+    assert.equal(asked.phase, 'resuming', again.kind);
+    const resumed = receiverStep(asked, { kind: 'channel' }).state;
+    assert.equal(resumed.received, 0, `${again.kind}: the host is asked for the file from its start`);
+    assert.equal(resumed.header, null, again.kind);
+  }
+});
+
+// Where these rules now differ from play.js's old receiver, on purpose: a
+// transfer with nothing received used to stop and wait for Retry. A channel
+// closes with nothing received when the host never heard the guest's first
+// message (specs/rom_transfer.qnt, `retriesBeforeAsking`).
+test('a closed channel is retried by itself, whether or not any of the file arrived', () => {
   const noBytes = run({ kind: 'accept' }, { kind: 'channel' });
-  assert.equal(last(noBytes, { kind: 'closed' }), 'none');
+  // Before: 'none', and the page showed "ROM transfer failed" until Retry.
+  assert.equal(last(noBytes, { kind: 'closed' }), 'ask-after-pause');
   const someBytes = run({ kind: 'accept' }, { kind: 'channel' }, { kind: 'chunk', bytes: 1000 });
   assert.equal(last(someBytes, { kind: 'closed' }), 'ask-after-pause');
+});
+
+test('channels that close before any byte use the three retries, then the guest decides', () => {
+  let state = run({ kind: 'accept' }, { kind: 'channel' });
+  const nexts: string[] = [];
+  for (let close = 0; close < 4; close++) {
+    const closed = receiverStep(state, { kind: 'closed' });
+    nexts.push(closed.next);
+    state = closed.state;
+    if (closed.next === 'ask-after-pause') state = after(state, { kind: 'backoff-elapsed' }, { kind: 'channel' });
+  }
+  assert.deepEqual(nexts, ['ask-after-pause', 'ask-after-pause', 'ask-after-pause', 'stalled']);
+  assert.equal(state.retries, 4);
 });
 
 test('three automatic retries, then the guest decides; Retry starts the count again', () => {
@@ -277,31 +325,71 @@ test('a resumed channel keeps what arrived; a new file from the host drops it', 
   assert.equal(receiverStep(resumed, { kind: 'header', size: 400_000, hash: 'Saa' }).state.received, 0);
 });
 
-test('a ROM past the size limit is refused, by header or by bytes', () => {
-  assert.equal(headerRefused(ROM_MAX_SIZE), false);
-  assert.equal(headerRefused(ROM_MAX_SIZE + 1), true);
+const why = (step: ReturnType<typeof receiverStep>): string | null => (step.next === 'abandoned' ? step.reason : null);
+
+test('a ROM past the size limit is refused, by header or by bytes, and says which', () => {
   const receiving = run({ kind: 'accept' }, { kind: 'channel' });
+  const atLimit = receiverStep(receiving, { kind: 'header', size: ROM_MAX_SIZE, hash: undefined });
+  assert.equal(atLimit.next, 'none');
   const refused = receiverStep(receiving, { kind: 'header', size: ROM_MAX_SIZE + 1, hash: undefined });
-  assert.deepEqual([refused.next, refused.state], ['abandoned', IDLE]);
+  assert.deepEqual([refused.next, refused.state, why(refused)], ['abandoned', IDLE, 'tooLarge']);
   const flooded = receiverStep(receiving, { kind: 'chunk', bytes: ROM_MAX_SIZE + 1 });
-  assert.deepEqual([flooded.next, flooded.state], ['abandoned', IDLE]);
+  assert.deepEqual([flooded.next, flooded.state, why(flooded)], ['abandoned', IDLE, 'tooLarge']);
+  const announced = receiverStep(receiving, { kind: 'header', size: 100_000, hash: 'Saa', name: 'game.z64' }).state;
+  assert.equal(announced.header?.name, 'game.z64');
+  const over = receiverStep(announced, { kind: 'chunk', bytes: 110_001 });
+  assert.deepEqual([over.next, why(over)], ['abandoned', 'overHeader']);
+  const short = receiverStep(receiverStep(announced, { kind: 'chunk', bytes: 50_000 }).state, { kind: 'complete' });
+  assert.deepEqual([short.next, why(short)], ['abandoned', 'sizeMismatch']);
 });
 
-test('the host turning sharing off pauses, and on again resumes only what had started', () => {
+test('the host turning sharing off pauses, and on again resumes, with or without bytes', () => {
   const receiving = run({ kind: 'accept' }, { kind: 'channel' }, { kind: 'chunk', bytes: 1000 });
   const paused = receiverStep(receiving, { kind: 'sharing-off' }).state;
   assert.equal(paused.phase, 'paused');
   assert.equal(last(paused, { kind: 'sharing-on' }), 'ask');
   const pausedEmpty = receiverStep(run({ kind: 'accept' }), { kind: 'sharing-off' }).state;
-  assert.equal(last(pausedEmpty, { kind: 'sharing-on' }), 'none');
+  // Before: 'none', and the guest stayed paused though the host shared again.
+  assert.equal(last(pausedEmpty, { kind: 'sharing-on' }), 'ask');
+});
+
+test('the host stopping sharing stops the transfer, also when its channel close came first', () => {
+  // The host closes its channel as it stops sharing; the guest can see the
+  // close, and schedule a retry, before the message that sharing is off.
+  const closedFirst = receiverStep(run({ kind: 'accept' }, { kind: 'channel' }), { kind: 'closed' });
+  assert.equal(closedFirst.next, 'ask-after-pause');
+  const off = receiverStep(closedFirst.state, { kind: 'sharing-off' });
+  // Before: 'none' with the phase unchanged, so the page kept the retry and
+  // asked a host that was not sharing.
+  assert.deepEqual([off.next, off.state.phase], ['stop', 'paused']);
+  const receiving = run({ kind: 'accept' }, { kind: 'channel' }, { kind: 'chunk', bytes: 1000 });
+  assert.equal(last(receiving, { kind: 'sharing-off' }), 'stop');
+  assert.equal(last(run({ kind: 'accept' }), { kind: 'sharing-off' }), 'stop');
+  assert.equal(last(IDLE, { kind: 'sharing-off' }), 'none');
+});
+
+test('while paused, the page says a retry is coming, or what is left to the guest', () => {
+  const closed = (bytes: number, closes: number) => {
+    let state = run({ kind: 'accept' }, { kind: 'channel' }, { kind: 'header', size: 1000, hash: 'Saa' });
+    if (bytes > 0) state = after(state, { kind: 'chunk', bytes });
+    for (let close = 1; close < closes; close++) {
+      state = after(state, { kind: 'closed' }, { kind: 'backoff-elapsed' }, { kind: 'channel' });
+    }
+    return receiverStep(state, { kind: 'closed' }).state;
+  };
+  assert.equal(pausedText(closed(0, 1), true), 'ROM transfer interrupted — retrying (1/3)');
+  assert.equal(pausedText(closed(500, 3), true), 'ROM transfer interrupted — retrying (3/3)');
+  // Out of retries: the guest decides.
+  assert.equal(pausedText(closed(500, 4), true), 'ROM transfer paused — 50% received');
+  assert.equal(pausedText(closed(0, 4), true), 'ROM transfer paused — 0% received');
+  // The host stopped sharing: nothing is retried until it shares again.
+  const stopped = receiverStep(run({ kind: 'accept' }, { kind: 'channel' }), { kind: 'sharing-off' }).state;
+  assert.equal(pausedText(stopped, false), 'ROM transfer failed');
 });
 
 test('the proved decisions, restated over small cases', () => {
   for (let retries = 1; retries <= 6; retries++) {
-    for (const received of [0, 1, 1000]) {
-      const closed = afterChannelClosed(retries, received);
-      assert.equal(closed, retries > 3 ? 'stalled' : received > 0 ? 'retry' : 'wait');
-    }
+    assert.equal(afterChannelClosed(retries), retries <= 3 ? 'retry' : 'stalled');
     assert.equal(afterResumeTimedOut(retries), retries <= 3 ? 'retry' : 'stalled');
   }
   assert.equal(chunkVerdict(0, 10, -1, 100), 'accept');

@@ -4,10 +4,11 @@ import { afterEach, test } from 'node:test';
 import vm from 'node:vm';
 import { newPageId, readAttemptId } from '../../web/src/attempt-id.ts';
 import * as streamingAttempt from '../../web/src/streaming/attempt.ts';
-import { createStreamingObserver } from '../../web/src/streaming/observe.ts';
 import * as streamingReoffer from '../../web/src/streaming/reoffer.ts';
 import * as streamingRoster from '../../web/src/streaming/roster.ts';
 import * as streamingSignal from '../../web/src/streaming/signal.ts';
+import * as streamingVideo from '../../web/src/streaming/video.ts';
+import * as streamingInput from '../../web/src/streaming/input.ts';
 
 // web/static/netplay-streaming.js itself, run on a fake page whose socket and
 // WebRTC record what the engine does: the host's deadline to offer again, and
@@ -170,7 +171,6 @@ interface EngineApi {
     onStatus: (text: string) => void;
   }) => void;
   stop: () => void;
-  observed: () => { compared: Record<string, number>; disagreed: number; failed: number };
 }
 
 /** Every engine a test started. Each is stopped after its test, passed or failed, so no deadline outlives it. */
@@ -186,7 +186,8 @@ const STREAMING = {
   ...streamingReoffer,
   startReofferDeadlines: (options: streamingReoffer.ReofferOptions) =>
     streamingReoffer.startReofferDeadlines({ ...options, delayMs: () => DEADLINE_MS }),
-  createObserver: createStreamingObserver,
+  ...streamingInput,
+  ...streamingVideo,
 };
 
 /** The page's global object: what the engine reads from it, and what it leaves there. */
@@ -361,7 +362,6 @@ test('a lost offer is offered again on a new connection at the deadline, until t
   const count = offersTo(host.sent, 'p2').length;
   await wait(DEADLINE_MS * 2.5);
   assert.equal(offersTo(host.sent, 'p2').length, count);
-  assert.equal(host.engine.observed().disagreed, 0, host.reports.join('\n'));
   host.engine.stop();
 });
 
@@ -380,7 +380,6 @@ test("the host drops the answer to an offer it replaced and takes the one to its
   host.signal({ sender: 'p2', answer: { type: 'answer' }, attemptId: current.attempt });
   await settle();
   assert.equal(current.pc.signalingState, 'stable');
-  assert.equal(host.engine.observed().disagreed, 0, host.reports.join('\n'));
   host.engine.stop();
 });
 
@@ -466,7 +465,6 @@ test("a guest replaces its connection for the host's newer offer, and drops an o
   guest.signal(offer(2));
   await settle();
   assert.equal(guest.peers()['host'], second);
-  assert.equal(guest.engine.observed().disagreed, 0, guest.reports.join('\n'));
   assert.deepEqual(guest.reports, []);
   guest.engine.stop();
 });
@@ -509,6 +507,5 @@ test('signals that name no connection, from a page from before, are handled as b
     first.pendingCandidates.map((c) => c.candidate),
     ['x'],
   );
-  assert.equal(guest.engine.observed().disagreed, 0, guest.reports.join('\n'));
   guest.engine.stop();
 });

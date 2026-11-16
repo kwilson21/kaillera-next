@@ -1,5 +1,105 @@
 [
   {
+    "version": "0.69.7",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the footer shows the live version, not the landing Worker's old copy (#275)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.6",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a player that never answers the start no longer holds the host's game (#274)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.5",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a trap in the C rollback tick ends the match on that page, as any core trap does (#273)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.4",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "heal a silently dead channel on C-rollback ticks, and let the per-peer machine decide who offers (#272)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.3",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a ROM transfer channel that closes before any byte recovers on its own (#268)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.2",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the host follows up an unconfirmed answer only when an input changed its frame (#262)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.1",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a short ROM file starts again from nothing, and a guest re-shared a ROM hears the host's new offer (#255)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.0",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "lockstep is a mode the host can pick (#232)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.33",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "the remap wizard decides with remap-wizard.ts, so Back after a refused stick push lets it move (#263)"
+      }
+    ]
+  },
+  {
+    "version": "0.68.32",
+    "date": "2026-11-15",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a guest catches up from a host state behind it instead of rewinding to it (#261)"
+      }
+    ]
+  },
+  {
     "version": "0.68.31",
     "date": "2026-11-15",
     "changes": [

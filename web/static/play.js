@@ -88,16 +88,12 @@
   let mySlot = null;
   let coreFatal = false;
 
-  // Coerce legacy/unknown mode strings to the canonical set. Used at every
-  // mode-intake boundary (URL, dropdown, users-updated, game-started, REST,
-  // data-message). The compat alias for the pre-rename "lockstep" value
-  // becomes "rollback" so cached share links and pre-deploy clients keep
-  // working. Removable once cached tabs churn out post-deploy.
-  const normalizeMode = (raw) => {
-    if (raw === 'lockstep') return 'rollback';
-    if (raw === 'rollback' || raw === 'streaming') return raw;
-    return 'rollback';
-  };
+  // The mode at every intake (URL, dropdown, users-updated, game-started,
+  // REST, data-message): rollback, lockstep or streaming, anything else
+  // rollback (web/src/play/mode.ts). Rollback and lockstep both run the game
+  // on every page; only streaming does not.
+  const normalizeMode = window.KNCore.play.mode.normalizeMode;
+  const everyoneRunsTheGame = window.KNCore.play.mode.everyoneRunsTheGame;
 
   const emulatorMissing = () => {
     const missing = [];
@@ -153,15 +149,6 @@
   // of what a peer sent, a ROM transfer channel's text. A message off its
   // schema is dropped and logged; no handler runs on it.
   const _boundary = window.KNCore.protocol.createBoundary((line) => console.warn(line));
-  // Decisions moved to web/src/play that play.js still makes itself are
-  // compared here (web/src/play/observe.ts); a difference is a play-disagree
-  // client event.
-  // Reports wait for the room's upload token (client events need one).
-  const _playObserver = window.KNCore.play.observe.createComparer(({ type, message, old, next }) => {
-    if (!_uploadToken) return false;
-    KNEvent(type, message, { old, next });
-    return true;
-  });
   let _sessionLateJoinPoll = null;
   const _sessionStopLateJoinPoll = () => {
     if (_sessionLateJoinPoll) clearInterval(_sessionLateJoinPoll);
@@ -288,17 +275,26 @@
   };
 
   let _romSharingEnabled = false; // room-level: host has sharing toggled on
-  let _romSharingDecision = null; // 'accepted', 'declined', or null (page-lifetime)
-  let _romTransferState = 'idle'; // 'idle' | 'receiving' | 'paused' | 'resuming' | 'complete'
+  let _romSharingDecision = null; // 'accepted' once the player takes the host's ROM, else null
+  // Where this guest's transfer of the host's ROM stands: its phase, retries,
+  // the bytes counted and the host's header. It moves only through
+  // rom-transfer.ts's receiverStep (`romStep` below), which also says what to
+  // do next; the code here keeps the channel, the timers, the bytes and the page.
+  const _romRules = window.KNCore.play.romTransfer;
+  let _romReceiver = _romRules.IDLE;
+  const romStepWhole = (event) => {
+    const step = _romRules.receiverStep(_romReceiver, event);
+    _romReceiver = step.state;
+    return step;
+  };
+  const romStep = (event) => romStepWhole(event).next;
   let _romTransferStallTimer = null; // setTimeout ID — resets on each chunk
   let _romTransferResumeTimer = null; // setTimeout ID — 15s resume timeout
-  let _romTransferRetries = 0; // auto-retry count, capped at 3
-  let _romTransferChunks = [];
-  let _romTransferHeader = null;
+  let _romTransferChunks = []; // the bytes held, as many as the receiver counts
   let _romTransferDC = null; // active rom-transfer DataChannel (receiver side)
   let _romTransferDCs = {}; // active rom-transfer DataChannels (sender side, keyed by sid)
   let _romAcceptPollInterval = null; // polling interval for mid-game accept signaling
-  const ROM_MAX_SIZE = 128 * 1024 * 1024; // 128MB
+  const ROM_MAX_SIZE = _romRules.ROM_MAX_SIZE; // the largest ROM a guest accepts (rom-transfer.ts)
   const _GFX_RECOVERY_PROFILES = ['texrect', 'texrect-unopt', 'webgl1', 'angrylion'];
   let _gfxRecoveryAttempt = 0;
   let _runtimeGfxProfile = null;
@@ -430,7 +426,6 @@
 
   const ROM_CHUNK_SIZE = 64 * 1024; // 64KB — same for all platforms
   const ROM_BUFFER_THRESHOLD = 1024 * 1024; // 1MB — DC handles this fine on mobile
-  let _romTransferBytesReceived = 0;
   let _romTransferLastChunkAt = 0;
   let _funnelRomLoadedSent = false; // P0-1 funnel: fire rom_loaded once per session
   let _preGamePC = null; // guest: pre-game RTCPeerConnection for ROM preload
@@ -508,7 +503,7 @@
   };
 
   const resetTransferForHostRomChange = () => {
-    if (_romTransferState !== 'idle' || _romTransferBytesReceived > 0) {
+    if (_romReceiver.phase !== 'idle' || _romReceiver.received > 0) {
       resetRomTransfer();
       setRomTransferState('idle');
     }
@@ -858,8 +853,7 @@
 
   // The requests a page sends to open or join a room, and what the answers
   // mean, are web/src/play/connect.ts; the decisions are join-plan.ts
-  // (proved). onConnect still makes each decision itself and the two are
-  // compared (play-disagree).
+  // (proved). onConnect calls them and does what they answer.
   const _connect = window.KNCore.play.connect;
   const _joinPlan = window.KNCore.play.joinPlan;
   const joinerNow = () => ({
@@ -1005,7 +999,7 @@
         });
         KNEvent('room_created', '', { mode });
         sendDeviceType();
-        if (mode === 'rollback' || mode === 'streaming') {
+        {
           socket.emit('data-message', { type: 'mode-select', mode });
           socket.emit('set-mode', { mode });
         }
@@ -1291,7 +1285,12 @@
       // Re-emit rom-ready when switching to rollback so the host's "Waiting for ROMs"
       // check clears for guests who had already declared ROM in streaming mode.
       // Skip if ROM hash doesn't match the host's (guest has wrong cached ROM).
-      if (prevMode !== 'rollback' && mode === 'rollback' && localRomLoaded() && (isHost || !hostRomMismatch())) {
+      if (
+        !everyoneRunsTheGame(prevMode) &&
+        everyoneRunsTheGame(mode) &&
+        localRomLoaded() &&
+        (isHost || !hostRomMismatch())
+      ) {
         notifyRomReady();
       }
     }
@@ -1359,7 +1358,7 @@
     }
 
     if (!isHost && !isSpectator && nowPlayer && mode !== 'streaming') {
-      releaseUnsupportedPlayer("The host switched to rollback, which this browser can't run — you're now watching.");
+      releaseUnsupportedPlayer(`The host switched to ${mode}, which this browser can't run — you're now watching.`);
     }
 
     // Diff for toasts
@@ -1438,7 +1437,6 @@
       hostRomMismatch(),
       !!_romSharingEnabled,
       _romSharingDecision === 'accepted',
-      _romSharingDecision === null,
     );
 
     // Spectators and streaming-mode guests don't run an emulator — they
@@ -1457,6 +1455,13 @@
     // (specs/rom_at_start.qnt); booting would run the emulator with nothing.
     if (startPlan === 'askForRom') {
       crumb('start-rom-prompt', { sharing: false });
+      // Say so: this page runs no engine until a ROM is dropped and will not
+      // answer the start's connections, and the host starts without it
+      // rather than after its retries (specs/start_group.qnt). `prompt`: at the
+      // ROM prompt, not merely without a ROM yet (a page that reloaded shows
+      // that until its rom-ready arrives). The server may still count it
+      // ready (the start took the word while it was on its way).
+      if (socket?.connected) socket.emit('rom-ready', { ready: false, prompt: true });
       // As a late joiner's: tells the machine once frames run, so the join is
       // not reported as stranded.
       if (!isSpectator && mode !== 'streaming') _sessionWatchLateJoin();
@@ -1485,10 +1490,7 @@
     // lobby while it does (the host may start before the transfer ends).
     if (startPlan === 'awaitSharedRom') {
       initEngine();
-      if (_romTransferState === 'idle') {
-        _romTransferState = 'resuming';
-      }
-      romShadow({ kind: 'game-started' });
+      romStep({ kind: 'game-started' });
       updateRomSharingUI();
       if (_preGamePC) {
         console.log('[play] game started — pre-game ROM transfer in progress');
@@ -1587,34 +1589,6 @@
 
   // ── ROM Sharing ──────────────────────────────────────────────────────
 
-  // The receiver below is in charge. Its rules are also
-  // web/src/play/rom-transfer.ts, which is given every event beside it
-  // (_romShadow): the two are compared after each one and a difference is
-  // reported as play-disagree. The TypeScript rules take over once
-  // production shows none.
-  const _romRules = window.KNCore.play.romTransfer;
-  let _romShadow = _romRules.IDLE;
-  // Set at the first difference, so one cause is not reported at every chunk.
-  let _romShadowOff = false;
-  const romShadow = (event) => {
-    if (_romShadowOff) return;
-    try {
-      _romShadow = _romRules.receiverStep(_romShadow, event).state;
-      const mine = {
-        phase: _romTransferState,
-        retries: _romTransferRetries,
-        received: _romTransferBytesReceived,
-        headerSize: _romTransferHeader?.size ?? null,
-        headerHash: _romTransferHeader?.hash ?? null,
-      };
-      if (!_playObserver.compare(`rom-transfer:${event.kind}`, mine, _romRules.comparable(_romShadow))) {
-        _romShadowOff = true;
-      }
-    } catch (_) {
-      _romShadowOff = true;
-    }
-  };
-
   const onRomSharingUpdated = (data) => {
     if (!_ROM_SHARING_FEATURE) return;
     const wasEnabled = _romSharingEnabled;
@@ -1628,7 +1602,9 @@
 
     // Host disabled sharing — pause transfer but KEEP chunks
     if (wasEnabled && !_romSharingEnabled) {
-      if (_romTransferState === 'receiving' || _romTransferState === 'resuming') {
+      // Stop the transfer and cancel any retry on its way, also one a close of
+      // the host's channel, seen before this message, already scheduled.
+      if (romStep({ kind: 'sharing-off' }) === 'stop') {
         if (_romTransferDC) {
           try {
             _romTransferDC.close();
@@ -1638,24 +1614,20 @@
         stopStallTimer();
         clearTimeout(_romTransferResumeTimer);
         _romTransferResumeTimer = null;
-        _romTransferState = 'paused';
       }
-      romShadow({ kind: 'sharing-off' });
       cleanupPreGameConnections();
     }
 
     // Host re-enabled sharing — resume if we have cached progress
     if (!isHost && _romSharingEnabled && !wasEnabled && _romSharingDecision === 'accepted' && !_romBlob) {
-      if (_romTransferState === 'paused' && _romTransferBytesReceived > 0) {
-        console.log('[play] ROM sharing re-enabled — resuming from offset', _romTransferBytesReceived);
-        _romTransferState = 'resuming';
-        requestResumeTransfer();
-      } else if (_romTransferState === 'idle') {
-        console.log('[play] ROM sharing re-enabled — starting fresh transfer');
-        _romTransferState = 'resuming';
+      // Resume what was paused part-way, or start a transfer that never began.
+      if (romStep({ kind: 'sharing-on' }) === 'ask') {
+        console.log('[play] ROM sharing re-enabled — asking from offset', _romReceiver.received);
+        // In the lobby the host answers over a fresh pre-game connection,
+        // whose signals the sharing-off above stopped listening for.
+        if (!isGameRunning()) registerRomSignalHandler();
         requestResumeTransfer();
       }
-      romShadow({ kind: 'sharing-on' });
     }
 
     updateRomSharingUI();
@@ -1683,15 +1655,13 @@
     data = { ...data, sender: from.sid };
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
-      const incoming = normalizeMode(data.mode);
-      if (incoming !== 'rollback' && incoming !== 'streaming') return;
-      mode = incoming;
+      mode = normalizeMode(data.mode);
       const modeSel = document.getElementById('mode-select');
       if (modeSel) modeSel.value = mode;
       updateRomSharingUI();
       if (lastUsersData) updateStartButton(lastUsersData.players || {});
       if (mode !== 'streaming' && !isHost && !isSpectator) {
-        releaseUnsupportedPlayer("The host switched to rollback, which this browser can't run — you're now watching.");
+        releaseUnsupportedPlayer(`The host switched to ${mode}, which this browser can't run — you're now watching.`);
       }
     }
     if (data.type === 'rom-accepted' && isHost && _romSharingEnabled && data.sender) {
@@ -1750,7 +1720,7 @@
 
     console.log(
       `[play] updateRomSharingUI: enabled=${_romSharingEnabled}` +
-        ` decision=${_romSharingDecision} state=${_romTransferState}` +
+        ` decision=${_romSharingDecision} state=${_romReceiver.phase}` +
         ` hasRom=${!!_romBlob}`,
     );
 
@@ -1762,32 +1732,27 @@
       if (romDrop) romDrop.style.display = '';
       if (prompt) prompt.hidden = false;
       if (progress) progress.hidden = true;
-    } else if (_romTransferState === 'receiving') {
+    } else if (_romReceiver.phase === 'receiving') {
       // Transfer in progress — show progress bar
       if (romDrop) romDrop.style.display = 'none';
       if (prompt) prompt.hidden = true;
       if (progress) progress.hidden = false;
-    } else if (_romTransferState === 'paused') {
+    } else if (_romReceiver.phase === 'paused') {
       // Paused — show progress bar with retry button
       if (romDrop) romDrop.style.display = 'none';
       if (prompt) prompt.hidden = true;
       if (progress) progress.hidden = false;
       if (retryBtn) retryBtn.hidden = false;
       const text = document.getElementById('rom-progress-text');
-      if (text && _romTransferHeader) {
-        const pct = Math.round((_romTransferBytesReceived / _romTransferHeader.size) * 100);
-        text.textContent = `ROM transfer paused — ${pct}% received`;
-      } else if (text) {
-        text.textContent = 'ROM transfer failed';
-      }
-    } else if (_romTransferState === 'resuming') {
+      if (text) text.textContent = _romRules.pausedText(_romReceiver, _romSharingEnabled);
+    } else if (_romReceiver.phase === 'resuming') {
       // Resuming — show progress bar with reconnecting text
       if (romDrop) romDrop.style.display = 'none';
       if (prompt) prompt.hidden = true;
       if (progress) progress.hidden = false;
       const text = document.getElementById('rom-progress-text');
       if (text) text.textContent = 'ROM transfer reconnecting...';
-    } else if (_romTransferState === 'complete' || (_romSharingDecision === 'accepted' && _romBlob)) {
+    } else if (_romReceiver.phase === 'complete' || (_romSharingDecision === 'accepted' && _romBlob)) {
       // Transfer complete
       if (romDrop) {
         romDrop.style.display = '';
@@ -1817,11 +1782,7 @@
     crumb('rom-sharing-accept');
     _romSharingDecision = 'accepted';
     _romTransferChunks = [];
-    _romTransferHeader = null;
-    _romTransferBytesReceived = 0;
-    _romTransferRetries = 0;
-    _romTransferState = 'resuming';
-    romShadow({ kind: 'accept' });
+    romStep({ kind: 'accept' });
     updateRomSharingUI();
 
     // Pre-game: initiate early ROM transfer via standalone WebRTC connection
@@ -1876,7 +1837,7 @@
         clearInterval(_romAcceptPollInterval);
         _romAcceptPollInterval = null;
         // DC didn't open in time — fall back to Socket.IO with retry logic
-        if (_romTransferState === 'resuming' && !_romBlob) {
+        if (_romReceiver.phase === 'resuming' && !_romBlob) {
           console.log('[play] waitForDCAndSendRomAccepted timed out — falling back to Socket.IO');
           requestResumeTransfer();
         }
@@ -1884,14 +1845,8 @@
     }, 15000);
   };
 
-  const declineRomSharing = () => {
-    crumb('rom-sharing-decline');
-    _romSharingDecision = 'declined';
-    updateRomSharingUI();
-  };
-
   const cancelRomTransfer = () => {
-    _romTransferState = 'idle';
+    romStep({ kind: 'reset' });
     if (_romTransferDC) {
       try {
         _romTransferDC.close();
@@ -1907,20 +1862,13 @@
       _romAcceptPollInterval = null;
     }
     _romTransferChunks = [];
-    _romTransferHeader = null;
-    _romTransferBytesReceived = 0;
-    _romTransferRetries = 0;
-    romShadow({ kind: 'reset' });
     cleanupPreGameConnections();
     updateRomSharingUI();
     setRomTransferState('idle');
   };
 
   const retryRomTransfer = () => {
-    if (_romTransferState !== 'paused' && _romTransferState !== 'idle') return;
-    _romTransferRetries = 0;
-    _romTransferState = 'resuming';
-    romShadow({ kind: 'retry' });
+    if (romStep({ kind: 'retry' }) !== 'ask') return;
     updateRomSharingUI();
     setRomTransferState('retrying', 'Retrying ROM transfer…');
     requestResumeTransfer();
@@ -1928,7 +1876,7 @@
 
   const resetRomTransfer = () => {
     // Game-end cleanup — same as cancel but no toast, also closes sender DCs
-    _romTransferState = 'idle';
+    romStep({ kind: 'reset' });
     if (_romTransferDC) {
       try {
         _romTransferDC.close();
@@ -1950,10 +1898,6 @@
       _romAcceptPollInterval = null;
     }
     _romTransferChunks = [];
-    _romTransferHeader = null;
-    _romTransferBytesReceived = 0;
-    _romTransferRetries = 0;
-    romShadow({ kind: 'reset' });
   };
 
   // ── Pre-game ROM Preloading ─────────────────────────────────────────
@@ -2269,26 +2213,22 @@
     _romTransferDC = channel;
     channel.binaryType = 'arraybuffer';
 
-    if (_romTransferState === 'resuming' || _romTransferState === 'paused') {
-      // Resume: keep cached chunks
+    // A channel that arrives while waiting to resume keeps what it has; any
+    // other starts the file again.
+    const resumed = _romReceiver.phase === 'resuming' || _romReceiver.phase === 'paused';
+    romStep({ kind: 'channel' });
+    if (resumed) {
       clearTimeout(_romTransferResumeTimer);
       _romTransferResumeTimer = null;
-      console.log('[play] resuming ROM transfer from offset', _romTransferBytesReceived);
+      console.log('[play] resuming ROM transfer from offset', _romReceiver.received);
     } else {
-      // Fresh transfer: clear any stale state
       _romTransferChunks = [];
-      _romTransferHeader = null;
-      _romTransferBytesReceived = 0;
-      _romTransferRetries = 0;
     }
-
-    _romTransferState = 'receiving';
-    romShadow({ kind: 'channel' });
 
     // Always tell the host where to start sending from.
     // offset 0 = fresh (host sends header + all chunks)
     // offset N = resume (host sends chunks from N, no header)
-    const resumeOffset = _romTransferBytesReceived;
+    const resumeOffset = _romReceiver.received;
     const sendResumeMsg = () => {
       console.log('[play] sending rom-resume offset', resumeOffset);
       channel.send(JSON.stringify({ type: 'rom-resume', offset: resumeOffset }));
@@ -2309,98 +2249,72 @@
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === 'rom-header') {
-            _playObserver.compare(
-              'rom-transfer:header-refused',
-              msg.size > ROM_MAX_SIZE,
-              _romRules.headerRefused(msg.size),
-            );
-            if (msg.size > ROM_MAX_SIZE) {
+            const counted = _romReceiver.received;
+            const next = romStep({ kind: 'header', size: msg.size, hash: msg.hash, name: msg.name });
+            if (next === 'abandoned') {
               setRomTransferState('failed', 'ROM too large — loading manually');
               channel.close();
               cancelRomTransfer();
               return;
             }
-            // If header differs from cached (host changed ROM), clear chunks
-            if (_romTransferHeader && (msg.hash !== _romTransferHeader.hash || msg.size !== _romTransferHeader.size)) {
+            // The host is now sending a different file: what arrived is dropped.
+            if (counted > 0 && _romReceiver.received === 0) {
               console.log('[play] ROM changed — clearing cached chunks');
               _romTransferChunks = [];
-              _romTransferBytesReceived = 0;
             }
-            _romTransferHeader = msg;
-            romShadow({ kind: 'header', size: msg.size, hash: msg.hash });
-            if (_romTransferBytesReceived === 0) {
+            if (_romReceiver.received === 0) {
               updateRomProgress(0, msg.size);
             }
           } else if (msg.type === 'rom-complete') {
             stopStallTimer();
-            _romTransferState = 'complete';
-            finishRomTransfer();
-            romShadow({ kind: 'complete' });
+            finishRomTransfer(romStep({ kind: 'complete' }));
           }
         } catch (_) {}
       } else if (e.data instanceof ArrayBuffer) {
+        const step = romStepWhole({ kind: 'chunk', bytes: e.data.byteLength });
+        if (step.next === 'abandoned') {
+          setRomTransferState(
+            'failed',
+            step.reason === 'tooLarge' ? 'ROM transfer too large — aborting' : 'ROM transfer size mismatch — aborting',
+          );
+          channel.close();
+          cancelRomTransfer();
+          return;
+        }
         _romTransferChunks.push(new Uint8Array(e.data));
-        _romTransferBytesReceived += e.data.byteLength;
-        _playObserver.compare(
-          'rom-transfer:chunk-taken',
-          !(
-            _romTransferBytesReceived > ROM_MAX_SIZE ||
-            (_romTransferHeader && _romTransferBytesReceived > _romTransferHeader.size * 1.1)
-          ),
-          _romRules.chunkTaken(
-            _romTransferBytesReceived - e.data.byteLength,
-            e.data.byteLength,
-            _romTransferHeader?.size ?? -1,
-          ),
-        );
-        if (_romTransferBytesReceived > ROM_MAX_SIZE) {
-          setRomTransferState('failed', 'ROM transfer too large — aborting');
-          channel.close();
-          cancelRomTransfer();
-          return;
-        }
-        if (_romTransferHeader && _romTransferBytesReceived > _romTransferHeader.size * 1.1) {
-          setRomTransferState('failed', 'ROM transfer size mismatch — aborting');
-          channel.close();
-          cancelRomTransfer();
-          return;
-        }
-        romShadow({ kind: 'chunk', bytes: e.data.byteLength });
         _romTransferLastChunkAt = Date.now();
         resetStallTimer();
-        if (_romTransferHeader) {
-          updateRomProgress(_romTransferBytesReceived, _romTransferHeader.size);
+        if (_romReceiver.header) {
+          updateRomProgress(_romReceiver.received, _romReceiver.header.size);
         }
       }
     };
 
     channel.onclose = () => {
-      if (_romTransferState === 'receiving') {
-        _romTransferDC = null;
-        stopStallTimer();
-        _romTransferRetries++;
-        _romTransferState = 'paused';
-        console.log('[play] ROM transfer DC closed, retry', _romTransferRetries, '/ 3');
-
-        if (_romTransferRetries <= 3 && _romTransferBytesReceived > 0) {
-          setRomTransferState('retrying', `ROM transfer interrupted — retry ${_romTransferRetries}/3`);
-          // Auto-retry after backoff
-          _romTransferResumeTimer = setTimeout(() => {
-            if (_romTransferState !== 'paused') return;
-            _romTransferState = 'resuming';
-            romShadow({ kind: 'backoff-elapsed' });
-            updateRomSharingUI();
-            requestResumeTransfer();
-          }, 2000);
-        } else if (_romTransferRetries > 3) {
-          setRomTransferState('stalled', 'ROM transfer stalled — cancel or wait for host');
-        }
-        romShadow({ kind: 'closed' });
-        updateRomSharingUI();
+      if (_romReceiver.phase !== 'receiving') return;
+      _romTransferDC = null;
+      stopStallTimer();
+      // Retried by itself after a pause, whether or not any of the file
+      // arrived; after three, the guest decides (rom-transfer-step.ts).
+      const next = romStep({ kind: 'closed' });
+      console.log('[play] ROM transfer DC closed, retry', _romReceiver.retries, '/ 3');
+      if (next === 'ask-after-pause') {
+        setRomTransferState('retrying', `ROM transfer interrupted — retry ${_romReceiver.retries}/3`);
+        _romTransferResumeTimer = setTimeout(romBackoffElapsed, 2000);
+      } else if (next === 'stalled') {
+        setRomTransferState('stalled', 'ROM transfer stalled — cancel or wait for host');
       }
+      updateRomSharingUI();
     };
 
     updateRomSharingUI();
+  };
+
+  // The pause before an automatic retry ended: ask again, if still paused.
+  const romBackoffElapsed = () => {
+    if (romStep({ kind: 'backoff-elapsed' }) !== 'ask') return;
+    updateRomSharingUI();
+    requestResumeTransfer();
   };
 
   const requestResumeTransfer = () => {
@@ -2416,24 +2330,16 @@
   const armResumeDeadline = () => {
     clearTimeout(_romTransferResumeTimer);
     _romTransferResumeTimer = setTimeout(() => {
-      if (_romTransferState !== 'resuming') return;
-      _romTransferState = 'paused';
-      _romTransferRetries++;
-      console.log('[play] ROM resume timed out, retry', _romTransferRetries);
-      if (_romTransferRetries <= 3) {
+      // Nothing to do unless still waiting for the channel.
+      const next = romStep({ kind: 'resume-timed-out' });
+      if (next === 'none') return;
+      console.log('[play] ROM resume timed out, retry', _romReceiver.retries);
+      if (next === 'ask-after-pause') {
         setRomTransferState('retrying', 'ROM transfer resume timed out — will retry');
-        // Schedule another attempt
-        _romTransferResumeTimer = setTimeout(() => {
-          if (_romTransferState !== 'paused') return;
-          _romTransferState = 'resuming';
-          romShadow({ kind: 'backoff-elapsed' });
-          updateRomSharingUI();
-          requestResumeTransfer();
-        }, 2000);
+        _romTransferResumeTimer = setTimeout(romBackoffElapsed, 2000);
       } else {
         setRomTransferState('stalled', 'ROM transfer stalled — cancel or wait for host');
       }
-      romShadow({ kind: 'resume-timed-out' });
       updateRomSharingUI();
     }, 15000);
   };
@@ -2445,16 +2351,14 @@
       isHost,
       sharingDecision: _romSharingDecision,
       hasRom: !!_romBlob,
-      transferState: _romTransferState,
+      transferState: _romReceiver.phase,
       askingOverEngine: !!_romAcceptPollInterval,
     });
     if (!resume) return;
     console.log('[play] resuming ROM transfer after reconnect');
     cleanupPreGameConnections();
     registerRomSignalHandler();
-    _romTransferRetries = 0;
-    _romTransferState = 'resuming';
-    romShadow({ kind: 'reconnected' });
+    romStep({ kind: 'reconnected' });
     clearTimeout(_romTransferResumeTimer);
     _romTransferResumeTimer = null;
     requestResumeTransfer();
@@ -2472,7 +2376,7 @@
   };
 
   const onStallTimeout = () => {
-    if (_romTransferState !== 'receiving') return;
+    if (_romReceiver.phase !== 'receiving') return;
     console.log('[play] ROM transfer stalled — no chunks for 10s');
     // Close DC — onclose will transition to paused
     if (_romTransferDC) {
@@ -2530,23 +2434,21 @@
     if (cancelBtn) cancelBtn.hidden = false;
   };
 
-  const finishRomTransfer = () => {
-    let totalSize = 0;
-    for (const chunk of _romTransferChunks) {
-      totalSize += chunk.byteLength;
-    }
-
-    if (_romTransferHeader && _romTransferHeader.size !== totalSize) {
+  // The host said the file is complete; `next` is what the receiver made of it.
+  const finishRomTransfer = (next) => {
+    if (next === 'abandoned') {
+      // Short or long of what the host announced: not the file. The receiver
+      // has dropped its count and header; the bytes go too, so a later request
+      // starts the file again (specs/rom_transfer.qnt, `countIsHeld`).
       setRomTransferState('failed', 'ROM transfer size mismatch — load manually');
-      _romTransferState = 'idle';
       _romTransferChunks = [];
       updateRomSharingUI();
       return;
     }
 
     const blob = new Blob(_romTransferChunks);
-    const displayName = _romTransferHeader?.name ?? 'rom.z64';
-    const expectedHash = _romTransferHeader?.hash ?? null;
+    const displayName = _romReceiver.header?.name ?? 'rom.z64';
+    const expectedHash = _romReceiver.header?.hash ?? null;
 
     _romBlob = blob;
     _romName = displayName;
@@ -2558,7 +2460,6 @@
     _safeSet('localStorage', 'kaillera-rom-name', displayName);
     cacheRom(blob, { name: displayName, source: 'p2p' });
 
-    _romTransferState = 'complete';
     _romTransferChunks = [];
     _romTransferDC = null;
 
@@ -2605,7 +2506,7 @@
 
     // If game is running and we were waiting for the ROM (connect-only mode),
     // hide overlay, show toolbar, and boot the emulator
-    if (isGameRunning() && !window.EJS_emulator && (isHost || mode !== 'rollback')) {
+    if (isGameRunning() && !window.EJS_emulator && (isHost || !everyoneRunsTheGame(mode))) {
       hideOverlay();
       showToolbar();
       bootEmulator();
@@ -3476,7 +3377,7 @@
         const _detected = window.GamepadManager ? GamepadManager.getDetected() : [];
         if (_detected.length > 0) VirtualGamepad.setVisible(false);
       }
-      if (!isHost && mode === 'rollback') {
+      if (!isHost && everyoneRunsTheGame(mode)) {
         console.log('[play] initEngine: guest rollback boot deferred until gesture');
       } else {
         ensureEmulatorBooted();
@@ -3504,6 +3405,9 @@
       playerName,
       gameElement: document.getElementById('game'),
       resyncEnabled,
+      // Lockstep: the rollback engine with nothing predicted (every frame
+      // waits for every player's input).
+      lockstep: mode === 'lockstep',
       romHash: _romHash ?? null,
       gameId: _gameId ?? null,
       uploadToken: _uploadToken,
@@ -3557,7 +3461,7 @@
       },
       onPeerReconnected: (sid) => {
         // Resume ROM transfer if paused — mark DC to wait for receiver's rom-resume
-        if (_romTransferState === 'paused' && engine?.getPeerConnection) {
+        if (_romReceiver.phase === 'paused' && engine?.getPeerConnection) {
           startRomTransferTo(sid);
         }
       },
@@ -3568,6 +3472,15 @@
       onLateJoinAdmitted: () => {
         _sessionStopLateJoinPoll();
         _session?.send({ type: 'admittedToStart' });
+      },
+      // The host started without this page: it had no channel to the host by
+      // its own deadline on the start (specs/start_group.qnt, rejoinLate). It
+      // joins late instead of waiting for an offer that will not come.
+      onLeftOutOfStart: () => {
+        crumb('left-out-of-start', {});
+        _session?.send({ type: 'leftOutOfStart' });
+        _sessionWatchLateJoin();
+        initEngine();
       },
     });
     _session?.send({
@@ -4216,91 +4129,36 @@
   };
 
   // ── Remap Wizard ──────────────────────────────────────────────────────
-  // This wizard is in charge. Its rules are also web/src/play/remap-wizard.ts,
-  // which is given every input beside it (_wizardShadow): the two are
-  // compared after each one and a difference is reported as play-disagree.
-  // The TypeScript rules take over once production shows none.
+  // What each input does (which step takes it, what it does to the mapping,
+  // Back and Skip) is web/src/play/remap-wizard.ts; whether a step takes it
+  // is remap-step.ts (proved). This keeps what touches the page: polling the
+  // pads, the key listener, the debounce, the prompts and saving.
 
   const _remap = window.KNCore.play.remapWizard;
-  let _wizardShadow = null;
-  // Set once the two are known to differ for the rest of a run, so one cause
-  // is not reported at every later step.
-  let _wizardShadowOff = false;
-
-  const wizardShadowStart = (savedKb) => {
-    _wizardShadowOff = false;
-    try {
-      const profile = _wizardGamepadProfile ? _remap.customProfileFrom(_wizardGamepadProfile) : null;
-      _wizardShadow = _remap.startWizardState(profile, savedKb);
-      wizardShadowCompare();
-    } catch (_) {
-      _wizardShadow = null;
-    }
-  };
-
-  const wizardShadowCompare = () => {
-    const mine = {
-      step: _wizardStep,
-      keyMap: _wizardKeyMap,
-      buttons: _wizardGamepadProfile?.buttons ?? null,
-      axisButtons: _wizardGamepadProfile?.axisButtons ?? null,
-      axisCaptures: _wizardAxisCaptures,
-    };
-    if (!_playObserver.compare('remap-wizard', mine, _remap.comparable(_wizardShadow))) _wizardShadowOff = true;
-  };
-
-  // Give the TypeScript rules the input this wizard just handled.
-  const wizardShadowInput = (input) => {
-    if (!_wizardShadow || _wizardShadowOff) return;
-    try {
-      const outcome = _remap.wizardInput(_wizardShadow, input);
-      _wizardShadow = outcome.state;
-      // A rejected stick input leaves a Back snapshot here and none there
-      // (the TypeScript rules fix that), so Back differs from now on by design.
-      if (outcome.result === 'wrong-stick') {
-        _wizardShadowOff = true;
-        return;
-      }
-      wizardShadowCompare();
-    } catch (_) {
-      _wizardShadowOff = true;
-    }
-  };
-
-  const WIZARD_STEPS = [
-    { prompt: 'Press: A', type: 'button', bit: 0 },
-    { prompt: 'Press: B', type: 'button', bit: 1 },
-    { prompt: 'Press: Start', type: 'button', bit: 3 },
-    { prompt: 'Press: Z', type: 'button', bit: 12 },
-    { prompt: 'Press: L', type: 'button', bit: 10 },
-    { prompt: 'Press: R', type: 'button', bit: 11 },
-    { prompt: 'Press: D-Up', type: 'button', bit: 4 },
-    { prompt: 'Press: D-Down', type: 'button', bit: 5 },
-    { prompt: 'Press: D-Left', type: 'button', bit: 6 },
-    { prompt: 'Press: D-Right', type: 'button', bit: 7 },
-    { prompt: 'Push stick UP', type: 'axis', bit: 19, axisGroup: 'stickY' },
-    { prompt: 'Push stick DOWN', type: 'axis', bit: 18, axisGroup: 'stickY' },
-    { prompt: 'Push stick LEFT', type: 'axis', bit: 17, axisGroup: 'stickX' },
-    { prompt: 'Push stick RIGHT', type: 'axis', bit: 16, axisGroup: 'stickX' },
-    { prompt: 'Press: C-Up', type: 'cbutton', bit: 23 },
-    { prompt: 'Press: C-Down', type: 'cbutton', bit: 22 },
-    { prompt: 'Press: C-Left', type: 'cbutton', bit: 20 },
-    { prompt: 'Press: C-Right', type: 'cbutton', bit: 21 },
-  ];
 
   let _wizardActive = false;
   let _wizardInGame = false; // true when wizard launched from in-game toolbar
-  let _wizardStep = 0;
+  let _wizard = null; // the rules' state (remap-wizard.ts) for the current run
   let _wizardDebounce = 0;
   let _wizardRafId = null;
   let _wizardKeyHandler = null;
-  let _wizardGamepadProfile = null;
-  let _wizardKeyMap = null;
   let _wizardBaselineButtons = null;
-  let _wizardAxisCaptures = {};
-  let _wizardSnapshots = []; // state snapshots for go-back
   let _wizardHadGamepad = false;
   let _wizardHotPlugCheck = 0;
+
+  // The pad buttons held right now: a step takes only a button pressed after it began.
+  const wizardHeldButtons = () => {
+    const held = {};
+    const gps = GamepadManager.nativeGetGamepads();
+    for (let gi = 0; gi < gps.length; gi++) {
+      if (gps[gi]) {
+        for (let bi = 0; bi < gps[gi].buttons.length; bi++) {
+          if (gps[gi].buttons[bi].pressed) held[`${gi}:${bi}`] = true;
+        }
+      }
+    }
+    return held;
+  };
 
   const startWizard = (inGame) => {
     // Idempotent: if the wizard is already running, tear it down first so we
@@ -4309,58 +4167,21 @@
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
     const gamepadId = detected.length > 0 ? detected[0].id : null;
 
-    // Initialize gamepad profile from current (default or saved)
+    // The wizard edits a copy of the pad's current profile (saved or default)
+    // and the saved key map (the default one when none is saved).
+    let profile = null;
     if (gamepadId && window.GamepadManager) {
       const current = GamepadManager.hasCustomProfile(gamepadId)
         ? JSON.parse(_safeGet('localStorage', `gamepad-profile:${gamepadId}`))
         : GamepadManager.getDefaultProfile(gamepadId);
-      _wizardGamepadProfile = {
-        name: 'Custom',
-        buttons: { ...current.buttons },
-        axes: JSON.parse(JSON.stringify(current.axes)),
-        axisButtons: JSON.parse(JSON.stringify(current.axisButtons || {})),
-        axisRange: current.axisRange,
-        axisCenter: current.axisCenter,
-        deadzone: current.deadzone || 0.3,
-      };
-    } else {
-      _wizardGamepadProfile = null;
+      profile = _remap.customProfileFrom(current);
     }
-
-    // Initialize keyboard map from current (saved or DEFAULT_N64_KEYMAP)
     let savedKb = null;
     try {
       savedKb = JSON.parse(_safeGet('localStorage', 'keyboard-mapping'));
     } catch (_) {}
-    if (savedKb && Object.keys(savedKb).length > 0) {
-      _wizardKeyMap = { ...savedKb };
-    } else {
-      _wizardKeyMap = {
-        67: 0,
-        88: 1,
-        86: 3,
-        38: 4,
-        40: 5,
-        37: 6,
-        39: 7,
-        84: 10,
-        89: 11,
-        90: 12,
-        68: 16,
-        65: 17,
-        83: 18,
-        87: 19,
-        74: 20,
-        76: 21,
-        75: 22,
-        73: 23,
-      };
-    }
+    _wizard = _remap.startWizardState(profile, savedKb);
 
-    _wizardAxisCaptures = {};
-    _wizardSnapshots = [];
-    _wizardStep = 0;
-    wizardShadowStart(savedKb);
     _wizardActive = true;
     KNState.remapActive = true; // exposed for netplay input suppression
     _wizardInGame = !!inGame;
@@ -4381,17 +4202,7 @@
     }
 
     // Capture baseline gamepad buttons (ignore already-pressed)
-    _wizardBaselineButtons = {};
-    if (gamepadId) {
-      const gps = GamepadManager.nativeGetGamepads();
-      for (let gi = 0; gi < gps.length; gi++) {
-        if (gps[gi]) {
-          for (let bi = 0; bi < gps[gi].buttons.length; bi++) {
-            if (gps[gi].buttons[bi].pressed) _wizardBaselineButtons[`${gi}:${bi}`] = true;
-          }
-        }
-      }
-    }
+    _wizardBaselineButtons = gamepadId ? wizardHeldButtons() : {};
 
     // Keyboard listener
     _wizardKeyHandler = (e) => {
@@ -4402,7 +4213,7 @@
       } // Escape
       e.preventDefault();
       if (Date.now() < _wizardDebounce) return;
-      captureKeyboard(e.keyCode);
+      wizardInput({ kind: 'key', keyCode: e.keyCode });
     };
     document.addEventListener('keydown', _wizardKeyHandler, true);
 
@@ -4450,25 +4261,16 @@
   };
 
   const saveWizard = () => {
-    // Save gamepad profile
+    // Save the gamepad profile, with each stick whose two directions were captured
     const detected = window.GamepadManager ? GamepadManager.getDetected() : [];
-    if (detected.length > 0 && _wizardGamepadProfile) {
-      // Assemble axis captures into profile
-      for (const groupName in _wizardAxisCaptures) {
-        const cap = _wizardAxisCaptures[groupName];
-        if (cap.index !== undefined && cap.posBit !== undefined && cap.negBit !== undefined) {
-          _wizardGamepadProfile.axes[groupName] = {
-            index: cap.index,
-            bits: [cap.posBit, cap.negBit],
-          };
-        }
-      }
-      GamepadManager.saveGamepadProfile(detected[0].id, _wizardGamepadProfile);
+    const profile = _remap.finishedProfile(_wizard);
+    if (detected.length > 0 && profile) {
+      GamepadManager.saveGamepadProfile(detected[0].id, profile);
     }
 
     // Save keyboard mapping
     try {
-      _safeSet('localStorage', 'keyboard-mapping', JSON.stringify(_wizardKeyMap));
+      _safeSet('localStorage', 'keyboard-mapping', JSON.stringify(_wizard.keyMap));
     } catch (_) {}
     // Tell the netplay engine to re-read its cached keymap so the
     // wizard's binding changes actually reach readLocalInput.
@@ -4492,61 +4294,56 @@
     updateGamepadUI();
   };
 
-  const updateWizardPrompt = () => {
+  const wizardPromptElements = () => {
     const prefix = _wizardInGame ? 'ingame-remap' : 'remap';
-    const promptEl = document.getElementById(`${prefix}-prompt`);
-    const progressEl = document.getElementById(`${prefix}-progress`);
-    const backBtn = document.getElementById(`${prefix}-back`);
-    if (promptEl) promptEl.textContent = `${WIZARD_STEPS[_wizardStep].prompt} (gamepad or key)`;
-    if (progressEl) progressEl.textContent = `(${_wizardStep + 1}/${WIZARD_STEPS.length})`;
-    if (backBtn) backBtn.disabled = _wizardStep === 0;
+    return {
+      promptEl: document.getElementById(`${prefix}-prompt`),
+      progressEl: document.getElementById(`${prefix}-progress`),
+      backBtn: document.getElementById(`${prefix}-back`),
+    };
   };
 
-  const wizardSaveSnapshot = () => {
-    _wizardSnapshots.push({
-      gamepadProfile: _wizardGamepadProfile ? JSON.parse(JSON.stringify(_wizardGamepadProfile)) : null,
-      keyMap: _wizardKeyMap ? { ..._wizardKeyMap } : null,
-      axisCaptures: JSON.parse(JSON.stringify(_wizardAxisCaptures)),
-    });
+  const updateWizardPrompt = () => {
+    if (!_wizardActive) return;
+    const { promptEl, progressEl, backBtn } = wizardPromptElements();
+    const { prompt, progress, canGoBack } = _remap.wizardPrompt(_wizard);
+    if (promptEl) promptEl.textContent = prompt;
+    if (progressEl) progressEl.textContent = progress;
+    if (backBtn) backBtn.disabled = !canGoBack;
   };
 
-  const wizardAdvance = () => {
+  // Hand one input to the rules and carry out what they decided.
+  const wizardInput = (input) => {
+    const outcome = _remap.wizardInput(_wizard, input);
+    _wizard = outcome.state;
+    if (outcome.result === 'ignored') return;
+    if (outcome.result === 'wrong-stick') {
+      // The other direction of this stick was captured on another axis.
+      const { promptEl } = wizardPromptElements();
+      if (promptEl) {
+        promptEl.textContent = `Must use same stick as ${outcome.pairName} — try again`;
+        setTimeout(updateWizardPrompt, 1000);
+      }
+      return;
+    }
     _wizardDebounce = Date.now() + 150;
-    _wizardStep++;
-    if (_wizardStep >= WIZARD_STEPS.length) {
+    if (outcome.result === 'done') {
       saveWizard();
       return;
     }
-    // Reset baseline for new step
-    _wizardBaselineButtons = {};
-    const gps = GamepadManager.nativeGetGamepads();
-    for (let gi = 0; gi < gps.length; gi++) {
-      if (gps[gi]) {
-        for (let bi = 0; bi < gps[gi].buttons.length; bi++) {
-          if (gps[gi].buttons[bi].pressed) _wizardBaselineButtons[`${gi}:${bi}`] = true;
-        }
-      }
-    }
+    // A new step takes only a button pressed after it began (Back keeps the old baseline).
+    if (input.kind !== 'back') _wizardBaselineButtons = wizardHeldButtons();
     updateWizardPrompt();
   };
 
   const wizardBack = () => {
-    if (!_wizardActive || _wizardStep === 0 || _wizardSnapshots.length === 0) return;
-    const snap = _wizardSnapshots.pop();
-    _wizardStep--;
-    _wizardGamepadProfile = snap.gamepadProfile;
-    _wizardKeyMap = snap.keyMap;
-    _wizardAxisCaptures = snap.axisCaptures;
-    _wizardDebounce = Date.now() + 150;
-    wizardShadowInput({ kind: 'back' });
-    updateWizardPrompt();
+    if (!_wizardActive) return;
+    wizardInput({ kind: 'back' });
   };
 
   const wizardSkip = () => {
     if (!_wizardActive) return;
-    wizardSaveSnapshot();
-    wizardAdvance();
-    wizardShadowInput({ kind: 'skip' });
+    wizardInput({ kind: 'skip' });
   };
 
   const wizardPoll = () => {
@@ -4578,7 +4375,7 @@
       }
     }
 
-    const step = WIZARD_STEPS[_wizardStep];
+    const step = _remap.WIZARD_STEPS[_wizard.step];
 
     for (let gi = 0; gi < gps.length; gi++) {
       const gp = gps[gi];
@@ -4588,7 +4385,7 @@
       if (step.type === 'button' || step.type === 'cbutton') {
         for (let bi = 0; bi < gp.buttons.length; bi++) {
           if (gp.buttons[bi].pressed && !_wizardBaselineButtons[`${gi}:${bi}`]) {
-            captureGamepadButton(bi, step);
+            wizardInput({ kind: 'button', index: bi });
             return;
           }
         }
@@ -4600,87 +4397,12 @@
         for (let ai = 0; ai < gp.axes.length; ai++) {
           const val = gp.axes[ai];
           if (Math.abs(val) > dz) {
-            captureGamepadAxis(ai, val > 0, step);
+            wizardInput({ kind: 'axis', index: ai, positive: val > 0 });
             return;
           }
         }
       }
     }
-  };
-
-  const captureGamepadButton = (buttonIndex, step) => {
-    if (!_wizardGamepadProfile) return;
-    wizardSaveSnapshot();
-    _wizardGamepadProfile.buttons[buttonIndex] = 1 << step.bit;
-    wizardAdvance();
-    wizardShadowInput({ kind: 'button', index: buttonIndex });
-  };
-
-  const captureGamepadAxis = (axisIndex, isPositive, step) => {
-    if (!_wizardGamepadProfile) return;
-    wizardSaveSnapshot();
-
-    if (step.type === 'axis') {
-      const group = step.axisGroup;
-      if (!_wizardAxisCaptures[group]) {
-        _wizardAxisCaptures[group] = {};
-      }
-      const cap = _wizardAxisCaptures[group];
-
-      // Check if partner direction was already captured on a different axis
-      if (cap.index !== undefined && cap.index !== axisIndex) {
-        const prefix = _wizardInGame ? 'ingame-remap' : 'remap';
-        const promptEl = document.getElementById(`${prefix}-prompt`);
-        if (promptEl) {
-          const pairName = group === 'stickY' ? 'UP' : 'LEFT';
-          promptEl.textContent = `Must use same stick as ${pairName} — try again`;
-          setTimeout(() => {
-            updateWizardPrompt();
-          }, 1000);
-        }
-        wizardShadowInput({ kind: 'axis', index: axisIndex, positive: isPositive });
-        return;
-      }
-
-      cap.index = axisIndex;
-      if (isPositive) {
-        cap.posBit = step.bit;
-      } else {
-        cap.negBit = step.bit;
-      }
-
-      wizardAdvance();
-      wizardShadowInput({ kind: 'axis', index: axisIndex, positive: isPositive });
-    } else if (step.type === 'cbutton') {
-      if (!_wizardGamepadProfile.axisButtons) _wizardGamepadProfile.axisButtons = {};
-      if (!_wizardGamepadProfile.axisButtons[axisIndex]) {
-        _wizardGamepadProfile.axisButtons[axisIndex] = { pos: 0, neg: 0 };
-      }
-      if (isPositive) {
-        _wizardGamepadProfile.axisButtons[axisIndex].pos |= 1 << step.bit;
-      } else {
-        _wizardGamepadProfile.axisButtons[axisIndex].neg |= 1 << step.bit;
-      }
-      wizardAdvance();
-      wizardShadowInput({ kind: 'axis', index: axisIndex, positive: isPositive });
-    }
-  };
-
-  const captureKeyboard = (keyCode) => {
-    const step = WIZARD_STEPS[_wizardStep];
-    wizardSaveSnapshot();
-
-    // Remove old entry for this keyCode (key can only map to one function)
-    for (const k in _wizardKeyMap) {
-      if (parseInt(k, 10) === keyCode) {
-        delete _wizardKeyMap[k];
-      }
-    }
-
-    // Add new entry
-    _wizardKeyMap[keyCode] = step.bit;
-    wizardAdvance();
-    wizardShadowInput({ kind: 'key', keyCode });
   };
 
   // ── Delay Preference ────────────────────────────────────────────────
@@ -4777,7 +4499,7 @@
   };
 
   const selectedModeIsRollback = () =>
-    normalizeMode(document.getElementById('mode-select')?.value || mode) === 'rollback';
+    everyoneRunsTheGame(normalizeMode(document.getElementById('mode-select')?.value || mode));
 
   const updatePlayerControlsVisibility = (isRollbackMode = selectedModeIsRollback()) => {
     const playerControls = document.getElementById('player-controls');
@@ -5256,7 +4978,7 @@
       modeSelect.value = mode;
       let _romSharingBeforeStreamingMode = false;
       const updateOpts = () => {
-        const isRollback = normalizeMode(modeSelect.value) === 'rollback';
+        const isRollback = everyoneRunsTheGame(normalizeMode(modeSelect.value));
         mode = normalizeMode(modeSelect.value);
         rollbackOpts.style.display = isRollback ? '' : 'none';
         syncDelayPickerPlacement(isRollback);
@@ -5461,4 +5183,6 @@
     _romBlobUrl = 'blob:test';
     window.__test_skipBoot = true;
   };
+  // The ROM this page holds (a Blob once one has arrived from the host), or null.
+  window.__test_romBlob = () => _romBlob;
 })();

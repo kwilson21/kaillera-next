@@ -10,6 +10,7 @@ import { bootTimedOut } from './boot.ts';
 import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
+import { lockstepStep } from './lockstep-wait.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
@@ -45,6 +46,7 @@ import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
 import * as gameStart from './play/game-start.ts';
 import * as joinPlan from './play/join-plan.ts';
+import * as mode from './play/mode.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
 import * as observe from './play/observe.ts';
@@ -62,15 +64,10 @@ import {
   romHashMismatch,
 } from './play/rom.ts';
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
-import {
-  checkServerMessage,
-  createBoundary,
-  createProtocolObserver,
-  takeAck,
-  takeServerMessage,
-} from './socket-boundary.ts';
+import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, sendPaced, transferStillFor } from './sync-send.ts';
+import { changesWatchedFrame, followUpIsUnneeded } from './sync-follow-up.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
 import { newPageId, readAttemptId } from './attempt-id.ts';
@@ -102,7 +99,6 @@ import { installSafeStorage } from './site/storage.ts';
 import { createStickDeadband } from './stick-deadband.ts';
 import * as streamingAttempt from './streaming/attempt.ts';
 import * as streamingInput from './streaming/input.ts';
-import { createStreamingObserver } from './streaming/observe.ts';
 import * as streamingReoffer from './streaming/reoffer.ts';
 import * as streamingRoster from './streaming/roster.ts';
 import * as streamingSignal from './streaming/signal.ts';
@@ -110,6 +106,15 @@ import * as streamingVideo from './streaming/video.ts';
 import { createSyncLogRing } from './sync-log-ring.ts';
 import { createRomResumeAnswerer } from './rom-resume.ts';
 import { heldAsLateJoiner } from './start-cohort.ts';
+import {
+  countedByStartGates,
+  leavesOut,
+  rejoinsLate,
+  startHasItsHost,
+  startsAlone,
+  takesLeftOut,
+} from './start-group.ts';
+import { startDeadline } from './start-deadline.ts';
 import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
@@ -307,12 +312,25 @@ export const KNCore = {
   gamepadDisplayName,
   hashPixels,
   inputEqual,
+  /** Lockstep mode: what a tick does while an input is missing (web/src/lockstep-wait.ts). */
+  lockstepStep,
   measureCanvasHealth,
   digestFrame,
   createRomResumeAnswerer,
   disconnectDisposition,
   hasAttemptLeft,
   heldAsLateJoiner,
+  /** Who a page waits for before its match runs (web/src/start-group.ts, specs/start_group.qnt). */
+  startGroup: {
+    countedByStartGates,
+    leavesOut,
+    startsAlone,
+    takesLeftOut,
+    rejoinsLate,
+    startHasItsHost,
+    /** A start wait with a deadline, an Effect program (web/src/start-deadline.ts). */
+    startDeadline,
+  },
   meshHealTargets,
   normalizeAxis,
   peerFacts,
@@ -338,6 +356,8 @@ export const KNCore = {
   startLateJoinWait,
   /** The host's resync state, a chunk at a time (sync-send.ts). */
   syncSend: { mayHandChunk, sendPaced, transferStillFor },
+  /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
+  syncFollowUp: { changesWatchedFrame, followUpIsUnneeded },
   startRejoin,
   shouldResumeRomTransfer,
   /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */
@@ -375,6 +395,7 @@ export const KNCore = {
     connect,
     connectionNotices,
     joinPlan,
+    mode,
     gameStart,
     observe,
     remapWizard,
@@ -384,11 +405,9 @@ export const KNCore = {
     menus,
   },
   /**
-   * The streaming engine's decisions (web/static/netplay-streaming.js still
-   * makes them; `createObserver` compares), except the ones the engine asks:
-   * which offers a page that receives the stream takes (`signalGate`), which
-   * connection a signal belongs to (attempt.ts), and the host's deadline to
-   * offer again (`startReofferDeadlines`, reoffer.ts).
+   * The streaming engine's decisions: web/static/netplay-streaming.js asks
+   * these at each one and carries out the answer (the roster, signals, open
+   * channels, input, capture, the encoder, the host's deadline to offer again).
    */
   streaming: {
     ...streamingRoster,
@@ -397,7 +416,6 @@ export const KNCore = {
     ...streamingReoffer,
     ...streamingInput,
     ...streamingVideo,
-    createObserver: createStreamingObserver,
   },
   protocol: {
     decodeUsersUpdated,
@@ -409,7 +427,6 @@ export const KNCore = {
     checkServerMessage,
     checkPeerText,
     checkRelay,
-    createObserver: createProtocolObserver,
     createBoundary,
     takeServerMessage,
     takeAck,

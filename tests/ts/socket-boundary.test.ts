@@ -3,44 +3,16 @@ import { test } from 'node:test';
 import {
   checkServerMessage,
   createBoundary,
-  createProtocolObserver,
   DROP_LOG_LIMIT,
   takeAck,
   takeServerMessage,
-  type ProtocolReport,
   redactPath,
   type WirePayload,
-  REPORT_LIMIT,
 } from '../../web/src/socket-boundary.ts';
 import { KNCore } from '../../web/src/index.ts';
 import { UsersUpdated } from '../../web/src/protocol.ts';
 
 const token = { token: '1762992000.9f8e7d' };
-
-/** A socket that only knows how to hand events to `onAny` listeners, as Socket.IO does. */
-const fakeSocket = () => {
-  const listeners: Array<(event: string, data: WirePayload) => void> = [];
-  return {
-    onAny: (listener: (event: string, data: WirePayload) => void): void => {
-      listeners.push(listener);
-    },
-    receive: (event: string, data: WirePayload) => {
-      for (const listener of listeners) listener(event, data);
-    },
-  };
-};
-
-const collector = (ready: () => boolean = () => true) => {
-  const reports: ProtocolReport[] = [];
-  const observer = createProtocolObserver((report) => {
-    if (!ready()) return false;
-    reports.push(report);
-    return true;
-  });
-  return { reports, observer };
-};
-
-const microtasks = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 
 test('a message that matches its schema is not an issue', () => {
   assert.equal(checkServerMessage('upload-token', token), null);
@@ -90,98 +62,7 @@ test('relays and unknown events are not judged', () => {
   assert.equal(checkServerMessage('connect', undefined), null);
 });
 
-test('the observer reports a mismatch on an incoming event', async () => {
-  const { reports, observer } = collector();
-  const socket = fakeSocket();
-  observer.observe(socket);
-  socket.receive('upload-token', token);
-  socket.receive('game-ended', {});
-  await microtasks();
-  assert.equal(reports.length, 1);
-  assert.equal(reports[0]?.type, 'protocol-mismatch');
-  assert.equal(reports[0]?.message, 'game-ended');
-});
-
-test('the same mismatch is reported once, a different one again', () => {
-  const { reports, observer } = collector();
-  assert.equal(observer.check('game-ended', {}), false);
-  assert.equal(observer.check('game-ended', {}), false);
-  assert.equal(observer.check('game-ended', { matchId: 7 }), false);
-  assert.equal(observer.check('game-ended', { matchId: null }), true);
-  assert.equal(reports.length, 2);
-});
-
-test('an ack is checked under the name of the event it answers', () => {
-  const { reports, observer } = collector();
-  assert.equal(observer.checkAck('session-log', { lastSeq: 1, auditLastSeq: 0 }), true);
-  assert.equal(observer.checkAck('join-room', { players: {} }), false);
-  assert.equal(reports[0]?.message, 'join-room ack');
-});
-
-test('an observed socket holds its reports until the server sends an upload token', async () => {
-  // The sink is ready throughout, as a page with a token restored from storage would be.
-  const { reports, observer } = collector();
-  const socket = fakeSocket();
-  observer.observe(socket);
-  // The first users-updated arrives before the upload token client events need.
-  socket.receive('users-updated', { players: {} });
-  await microtasks();
-  assert.equal(reports.length, 0);
-  // A malformed token message is not a token.
-  socket.receive('upload-token', {});
-  await microtasks();
-  assert.equal(reports.length, 0);
-  socket.receive('upload-token', token);
-  // Socket.IO runs onAny listeners first; the page's handler stores the token after.
-  assert.equal(reports.length, 0);
-  await microtasks();
-  assert.deepEqual(
-    reports.map((report) => report.message),
-    ['users-updated', 'upload-token'],
-  );
-});
-
-test('reports also wait for a sink that cannot take them yet', () => {
-  let ready = false;
-  const { reports, observer } = collector(() => ready);
-  assert.equal(observer.check('game-ended', {}), false);
-  assert.equal(reports.length, 0);
-  ready = true;
-  observer.flush();
-  assert.equal(reports.length, 1);
-});
-
-test('a page sends a bounded number of reports', () => {
-  const { reports, observer } = collector();
-  for (let i = 0; i < REPORT_LIMIT * 3; i += 1)
-    observer.check('rom-sharing-updated', { romSharing: `no-${i}`, [`k${i}`]: i });
-  // Each of those is the same issue (wrong type at the same path): one report.
-  assert.equal(reports.length, 1);
-  const many = collector();
-  const wrongPayloads: WirePayload[] = [
-    null,
-    1,
-    'x',
-    [],
-    {},
-    { matchId: 1 },
-    { matchId: true },
-    { matchId: [] },
-    { matchId: {} },
-  ];
-  for (const event of ['game-ended', 'upload-token', 'reconnect-token', 'rom-sharing-updated', 'game-started']) {
-    for (const payload of wrongPayloads) many.observer.check(event, payload);
-  }
-  assert.ok(many.reports.length <= REPORT_LIMIT);
-  assert.ok(many.reports.length > 5);
-});
-
-test('KNCore exposes the observer to play.js', () => {
-  assert.equal(KNCore.protocol.createObserver, createProtocolObserver);
-  assert.equal(KNCore.protocol.checkServerMessage, checkServerMessage);
-});
-
-// ── deciding: handlers sit behind the boundary ───────────────────────────────
+// ── handlers sit behind the boundary ─────────────────────────────────────────
 
 const ROM_HASH = `S${'ab'.repeat(32)}`;
 const hostRom = {
@@ -376,7 +257,61 @@ test('a page logs a bounded number of dropped messages', () => {
   assert.ok(lines.length <= DROP_LOG_LIMIT);
 });
 
-test('KNCore gives play.js the boundary', () => {
+test("the engine's channel strings: what each channel carries is taken, anything else dropped", () => {
+  const { lines, boundary } = logging();
+  // As netplay-rollback.js builds them.
+  assert.equal(boundary.peerText('lockstep', 'rb-check:120:-5:77'), true);
+  assert.equal(boundary.peerText('lockstep', 'ready'), true);
+  assert.equal(boundary.peerText('lockstep', 'roster:900:0,1'), true);
+  assert.equal(boundary.peerText('sync-state', 'sync-start:900:12:1:0'), true);
+  assert.equal(boundary.peerText('sync-state', 'sync-answer-id:4'), true);
+  // A newer page's JSON message with a field this page does not know is still taken.
+  assert.equal(boundary.peerText('lockstep', JSON.stringify({ type: 'lockstep-ready', delay: 3, newer: true })), true);
+  assert.equal(lines.length, 0);
+
+  // A known kind off its pattern, again and again: dropped each time, logged once.
+  for (let i = 0; i < 5; i++) assert.equal(boundary.peerText('lockstep', `rb-check:zz-secret-${i}:1`), false);
+  // A longer string than the pattern: dropped (a new field travels as a message of its own).
+  assert.equal(boundary.peerText('lockstep', 'rb-check:1:2:3:4'), false);
+  // A kind this page does not know, and a JSON type it does not know.
+  assert.equal(boundary.peerText('lockstep', 'rb-future-kind:1'), false);
+  assert.equal(boundary.peerText('lockstep', JSON.stringify({ type: 'future-type' })), false);
+  // A field of the wrong type in a JSON message.
+  assert.equal(boundary.peerText('lockstep', JSON.stringify({ type: 'lockstep-ready', delay: 'zz-two' })), false);
+  assert.equal(boundary.peerText('lockstep', '{zz-not json'), false);
+  assert.equal(boundary.peerText('sync-state', 'sync-start:zz-frame'), false);
+  assert.equal(boundary.peerText('sync-state', JSON.stringify({ type: 'digest' })), false);
+
+  assert.deepEqual(
+    lines.map((line) => line.slice(0, line.indexOf(':'))),
+    [
+      '[protocol] dropped dc lockstep rb-check',
+      '[protocol] dropped dc lockstep (unknown)',
+      '[protocol] dropped dc lockstep (unknown type)',
+      '[protocol] dropped dc lockstep lockstep-ready',
+      '[protocol] dropped dc lockstep (json)',
+      '[protocol] dropped dc sync-state sync-start',
+      '[protocol] dropped dc sync-state (json)',
+    ],
+  );
+  // What was sent is never logged: not a value, not an unknown kind's name.
+  for (const line of lines) assert.ok(!/zz-|future/.test(line), line);
+});
+
+test('the session-log ack: decoded when it matches, null when absent or off its schema', () => {
+  const { lines, boundary } = logging();
+  assert.deepEqual(boundary.ack('session-log', { lastSeq: 40, auditLastSeq: 7 }), { lastSeq: 40, auditLastSeq: 7 });
+  // The server acks a flush it turned away with no data at all.
+  assert.equal(boundary.ack('session-log', undefined), null);
+  assert.equal(lines.length, 0);
+  assert.equal(boundary.ack('session-log', { lastSeq: '40', auditLastSeq: 7 }), null);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0] ?? '', /^\[protocol\] dropped session-log ack: .*lastSeq/);
+});
+
+test('KNCore gives play.js and the engine the boundary', () => {
   assert.equal(KNCore.protocol.createBoundary, createBoundary);
   assert.equal(KNCore.protocol.takeServerMessage, takeServerMessage);
+  assert.equal(KNCore.protocol.checkServerMessage, checkServerMessage);
+  assert.equal('createObserver' in KNCore.protocol, false);
 });

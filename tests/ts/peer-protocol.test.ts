@@ -2,12 +2,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { checkPeerJson, checkPeerText, checkRelay, textKind } from '../../web/src/peer-protocol.ts';
-import {
-  createProtocolObserver,
-  PEER_KINDS_MAX,
-  PEER_SAMPLE,
-  type ProtocolReport,
-} from '../../web/src/socket-boundary.ts';
 
 const ok = (channel: 'lockstep' | 'sync-state' | 'rom-transfer', text: string): void => {
   assert.equal(checkPeerText(channel, text).issue, null, text);
@@ -26,6 +20,17 @@ test('the bare control words match', () => {
   ok('lockstep', 'sync-request-full');
   bad('lockstep', 'ready:1');
   bad('lockstep', 'Ready');
+});
+
+test('left-out names the slot the host left out of the start (specs/start_group.qnt)', () => {
+  ok('lockstep', 'left-out:2');
+  ok('lockstep', 'left-out:3');
+  bad('lockstep', 'left-out:');
+  bad('lockstep', 'left-out:-1');
+  bad('lockstep', 'left-out:two');
+  bad('lockstep', 'left-out:1:2');
+  // A lockstep word only: the sync-state channel carries state.
+  bad('sync-state', 'left-out:2');
 });
 
 test('roster carries a frame and the slots in play', () => {
@@ -149,7 +154,8 @@ const issueOf = (event: string, data: Parameters<typeof checkRelay>[1]): string 
 
 test('data-message relays match by type', () => {
   assert.equal(issueOf('data-message', { type: 'mode-select', mode: 'streaming' }), null);
-  assert.notEqual(issueOf('data-message', { type: 'mode-select', mode: 'lockstep' }), null);
+  assert.equal(issueOf('data-message', { type: 'mode-select', mode: 'lockstep' }), null);
+  assert.notEqual(issueOf('data-message', { type: 'mode-select', mode: 'turbo' }), null);
   assert.equal(issueOf('data-message', { type: 'rom-accepted', sender: 'sid-guest' }), null);
   assert.equal(issueOf('data-message', { type: 'request-late-join', requesterSid: 'sid-guest' }), null);
   assert.equal(issueOf('data-message', { type: 'late-join-ready', senderSid: 'sid-guest' }), null);
@@ -238,50 +244,4 @@ test('checkPeerJson names the route and type', () => {
     kind: 'rom-transfer rom-complete',
     issue: null,
   });
-});
-
-// ── the observer ────────────────────────────────────────────────────────────
-
-const collector = () => {
-  const reports: ProtocolReport[] = [];
-  const observer = createProtocolObserver((report) => {
-    reports.push(report);
-    return true;
-  });
-  return { reports, observer };
-};
-
-test('the observer reports a peer mismatch once and checks relays on the socket', () => {
-  const { reports, observer } = collector();
-  observer.peerText('lockstep', 'rb-check:1:2:3');
-  observer.peerText('lockstep', 'rb-check:oops');
-  observer.peerText('lockstep', 'rb-check:oops');
-  assert.equal(reports.length, 1);
-  assert.equal(reports[0]?.message, 'dc lockstep rb-check');
-  assert.equal(observer.check('data-message', { type: 'mode-select', mode: 'turbo' }), false);
-  assert.equal(reports[1]?.message, 'data-message mode-select');
-  assert.equal(observer.check('webrtc-signal', { sender: 'a', target: 'b', candidate: null }), true);
-});
-
-test('only the first few messages of a kind are checked', () => {
-  const { reports, observer } = collector();
-  for (let frame = 0; frame < PEER_SAMPLE; frame += 1) observer.peerText('lockstep', `rb-check:${frame}:1:2`);
-  // Past the sample, a malformed one of the same kind is not looked at.
-  observer.peerText('lockstep', 'rb-check:broken');
-  assert.equal(reports.length, 0);
-  // Another kind still has its own sample.
-  observer.peerText('lockstep', 'rb-delay:broken');
-  assert.equal(reports.length, 1);
-});
-
-test('a flood of made-up kinds does not switch off the kinds already being checked', () => {
-  const { reports, observer } = collector();
-  observer.peerText('lockstep', 'rb-check:1:2:3');
-  for (let i = 0; i < PEER_KINDS_MAX + 50; i += 1) observer.peerText('lockstep', `junk${i}:x`);
-  // All the junk is one kind of mismatch: one report.
-  assert.equal(reports.length, 1);
-  // rb-check was in the table before the flood and still has sample left.
-  observer.peerText('lockstep', 'rb-check:broken');
-  assert.equal(reports.length, 2);
-  assert.equal(reports[1]?.message, 'dc lockstep rb-check');
 });

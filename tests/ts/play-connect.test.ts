@@ -216,7 +216,7 @@ test('a late joiner takes the same path the old branches took', () => {
       for (const hasRom of [true, false]) {
         for (const sharing of [true, false]) {
           for (const mismatch of [true, false]) {
-            for (const decision of ['accepted', 'declined', null]) {
+            for (const decision of ['accepted', null]) {
               assert.equal(
                 lateJoinPlan(isSpectator || mode === 'streaming', hasRom, sharing, mismatch, decision === 'accepted'),
                 oldLateJoin(isSpectator, mode, hasRom, sharing, mismatch, decision),
@@ -228,7 +228,7 @@ test('a late joiner takes the same path the old branches took', () => {
       }
     }
   }
-  assert.equal(compared, 96);
+  assert.equal(compared, 64);
 });
 
 // ── waiting on a peer ────────────────────────────────────────────────────────

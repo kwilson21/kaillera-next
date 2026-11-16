@@ -6,10 +6,17 @@ Uses the shared server_url fixture from conftest.py.
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
 
 import pytest
 import requests
+
+
+def _run_async(coro):
+    """asyncio.run off the main thread: with conftest loaded, pytest-playwright holds the main loop."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -93,7 +100,7 @@ def _post_chunked_body(app, path, cap):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             return await client.post(path, content=body_chunks())
 
-    response = asyncio.run(send_request())
+    response = _run_async(send_request())
     assert not any(name == b"content-length" for name, _ in request_headers)
     assert chunks_consumed == 2
     return response
@@ -127,7 +134,7 @@ def test_wake_event_rejects_oversized_content_length_without_reading():
 
     request = Request()
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(_read_limited_body(request, 4096))
+        _run_async(_read_limited_body(request, 4096))
 
     assert exc.value.status_code == 413
     assert request.stream_calls == 0
@@ -153,7 +160,7 @@ def test_wake_event_rejects_oversized_stream_without_reading_past_crossing_chunk
 
     request = Request()
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(_read_limited_body(request, 4096))
+        _run_async(_read_limited_body(request, 4096))
 
     assert exc.value.status_code == 413
     assert request.consumed == 2

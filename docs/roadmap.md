@@ -156,13 +156,14 @@ without the old code running beside it first.
   logic is meant to make (a fix the model shows, like those listed for the
   per-peer machine below) is asserted by the test and named, with its model
   scenario, in the PR; any other difference blocks the change.
-- Still observing, each to be switched to deciding that way (the old code
-  decides and the new reports a difference): the play page's moved decisions
-  (`play-disagree`), the engine's checks of the DataChannel strings peers
-  send (`protocol-mismatch`), the mesh rules (`mesh-disagree`), the
-  streaming rules (`streaming-disagree`). The resync request rules decide
-  and the per-peer machine is driven (below), so `tests/observer-reports.mjs`
-  counts no report type now. Once all of them decide, the observer plumbing
+- Still observing, to be switched to deciding that way (the old code
+  decides and the new reports a difference): the mesh rules
+  (`mesh-disagree`). The play page's moved decisions all decide (the ROM
+  receiver was the last; play.js sends no `play-disagree`), the streaming
+  engine calls its rules (no `streaming-disagree`), the engine drops a
+  DataChannel string off its schema (no `protocol-mismatch`), the resync
+  request rules decide and the per-peer machine is driven (below), so
+  `tests/observer-reports.mjs` counts no report type now. Once all of them decide, the observer plumbing
   (`createComparer`, `tests/observer-reports.mjs`) goes too.
 - Anything touching the tick loop, sync, input or the core needs
   `tests/rb-two-player.mjs` with `JITTER=20` to pass before merge.
@@ -171,6 +172,17 @@ without the old code running beside it first.
 - Every machine has a diagram generated from it, and the scenarios of the
   Quint models are drawn as sequence diagrams from the traces the model
   checker replays. `docs/netcode-diagrams.md` lists them all.
+
+**Not verified: waits for a third emulator.** The cloud container boots two
+emulators, not three. These paths are proved and modelled but no run reaches
+them yet; each needs `tests/rb-two-player.mjs` (or a 3–4 player successor)
+once a third can boot:
+- A follow-up to an unconfirmed resync answer that is needed
+  (`SYNC-FOLLOW-UP-NEEDED`, specs/sync_follow_up.qnt). In two players the
+  target guest's late inputs are settled once the state is handed over and
+  never fed, and pacing and the stale-input stall keep the host from taking
+  a state on predicted inputs that reach its frame, so only another player's
+  inputs can still change it. `SYNC_FOLLOW_UP=changed` is the mode to extend.
 
 **Stage 1: foundation [done]**
 Toolchain (TypeScript 7, esbuild, oxfmt, oxlint + anti-slop, Biome, antislop,
@@ -266,10 +278,17 @@ the decoded value, and a message off its schema is dropped and logged
 (`[protocol] dropped ...`), with no handler run on it. Messages peers author
 (DataChannel control strings and JSON, and the `data-message` /
 `webrtc-signal` / `rom-signal` relays) are described in
-`web/src/peer-protocol.ts`. The rollback engine still reads its DataChannel
-strings and the `session-log` ack raw and only reports a mismatch
-(`protocol-mismatch`, sampled: the first 16 of each kind, because they arrive
-on the tick path); that moves with Stage 5. The per-frame input packet is
+`web/src/peer-protocol.ts`. The rollback engine decodes its `lockstep` and
+`sync-state` channel strings and the `session-log` ack through a boundary of
+its own: every string is checked (a control string is one anchored pattern,
+cheaper than the handler's own parse), and one off its schema is dropped and
+logged in the sync log and on the console. It reported a mismatch
+(`protocol-mismatch`, sampled) until it decided. What a page drops when a
+newer one shares its match is in peer-protocol.ts: a JSON message may gain
+fields, a control string may not (a new field travels as a message of its
+own), and an unknown kind is dropped. `tests/rb-two-player.mjs` fails any
+run in which an engine dropped a real message, and `MALFORMED_PEER=1` sends
+malformed strings mid-battle. The per-frame input packet is
 `input-wire.ts`.
 
 `play.js` is moving to `web/src/play/*.ts` in slices, each read back through
@@ -279,17 +298,18 @@ room text (`room-text.ts`: HTML escaping, closed-room message, invite links,
 join/leave toasts), and the ROM library (`rom-library.ts`: IndexedDB storage
 with its version-1 upgrade, and the list markup; `play.js` keeps what loading
 a ROM does to the page), and input delay (`delay.ts`: the words beside the picker, and a
-player's delay preference, which `play.js` asks it for), and, observing, the control
+player's delay preference, which `play.js` asks it for), and the control
 remap wizard (`remap-wizard.ts`: the steps, what a captured button, stick or
-key does to the mapping, Back and Skip; `play.js`'s wizard is still in charge
-and each input is compared; whether an input is taken, ignored or rejected is
-`remap-step.ts`, proven with LemmaScript). Moved as they were, being page
+key does to the mapping, Back and Skip; `play.js` polls the pads and keys,
+hands each input to it and carries out the outcome; whether an input is
+taken, ignored or rejected is `remap-step.ts`, proven with LemmaScript). Moved as they were, being page
 effects with nothing to compare: the page's passing messages and small menus
 (`notices.ts`: toasts, the error card, the room-full banner; `menus.ts`: the
-invite menu, share or copy, the More menu). Observing: a guest receiving the
-host's ROM (`rom-transfer.ts`, decisions proved in `rom-transfer-step.ts`,
-modelled in `specs/rom_transfer.qnt`); `play.js`'s receiver is in charge and
-keeps the channel, the timers and the page. The host's sending side and the
+invite menu, share or copy, the More menu). A guest receiving the host's
+ROM: where the transfer stands and what it does next is `rom-transfer.ts`
+(decisions proved in `rom-transfer-step.ts`, modelled in
+`specs/rom_transfer.qnt`); `play.js`'s receiver moves it on every event and
+keeps the channel, the timers, the bytes and the page. The host's sending side and the
 WebRTC set-up are still `play.js`. What the room shows is `room-view.ts`
 (each player slot, the spectator line, the in-game info panel, and whether
 the host may start). Joining a room:
@@ -418,23 +438,44 @@ Slice 1, the peer mesh and signaling:
   left alone, not reported. The model shows why it has to be
   (`oldPageAnswersWithNoLabelTest`): a page that goes by the id drops an
   old page's answer, its own included, and the two never connect.
-- Next: the machine is wired in to decide, one rule at a time (the owner's
-  rule: what makes the netcode more robust is wired in), starting with who
-  offers from the health check (`heal`), then the differences below. In
-  each, the engine's decision reads the machine and its copy is deleted;
-  the old-against-new test asserts the intended difference, the PR names
-  its model scenario, and a two-player fault mode reaches the rule.
-- Not wired: spectators, a page that joined a match in play, a player held
-  as a late joiner, more than one machine per player on a page (a player
-  this page offered to before it had a machine is left to the engine), and
-  the machine's view of the health check's timing (it runs on the
-  engine's). Each is wired, or kept on the engine's path with a reason,
-  before the engine's last copy goes. The four properties are still
-  violated by the engine.
+- Deciding: who offers from the health check (`heal`). The engine carries
+  out the machine's commands (`decideHeal`): the lower slot resets its
+  entry and offers, the higher slot takes the dead channel for a drop it
+  has just noticed (the 45 s give-up armed) and waits for that offer
+  (specs/peer_connection.qnt, `peer_connection_heal_one_side`). The
+  health check now runs on C-rollback ticks too: before, a C tick returned
+  before reaching it, so a channel that died with no event left the player
+  a phantom for the rest of the match. It heals a phantom whose channel
+  does not read open (specs/mesh_heal.qnt, `aDeadChannelIsNeverForgotten`). During a
+  deploy an old higher slot still offers too, which is exactly today; the
+  model shows no pair of versions is worse than today.
+- Next: the machine is wired in to decide the rest, one rule at a time (the
+  owner's rule: what makes the netcode more robust is wired in), next
+  answering a reconnect offer arms the give-up (`deadline:giveUpAfter`,
+  ANSWERER_HAS_DEADLINE: with it `everyWaitHasADeadline` holds), then the
+  differences below. In each, the engine's decision reads the machine and
+  its copy is deleted; the old-against-new test asserts the intended
+  difference, the PR names its model scenario, and a two-player fault mode
+  reaches the rule.
+- Not wired, so the engine keeps its old two-sided health check for them:
+  - a page that joined a match in play, and a player held as a late joiner:
+    the late-join states join the machine in their own PR (the late-join
+    slice of the per-peer machine);
+  - a player whose page sends no attempt id (from before signals carried
+    one): kept on the engine's path for good, since the machine cannot tell
+    that page's attempts apart (`oldPageAnswersWithNoLabelTest`); it goes
+    when no such page can still be open;
+  - a player this page offered to before it had a machine: the machine is
+    made when the page loads, before its first offer, in its own PR;
+  - spectators: they have no rollback connection.
+  The machine's view of the health check's timing also stays the engine's
+  (every 300 frames). Each is wired, or kept on the engine's path with a
+  reason, before the engine's last copy goes.
 - Differences between the engine and the model's `fixed` rules, each a fix
   the wiring makes (none came up in the two-player and lifecycle runs,
   which reconnect at most once):
-  - the health check offers from the higher slot too (`heal`);
+  - the health check offers from the higher slot too (`heal`): done, the
+    machine decides it;
   - a page that answers a reconnect offer without having noticed the drop
     has no give-up (`deadline:giveUpAfter`, from the machine);
   - an answer or a candidate for an earlier attempt is handed to the
@@ -468,8 +509,7 @@ Slice 1, the peer mesh and signaling:
   `tests/observer-reports.mjs`). The
   first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
   attempt with no disagreement and no mismatch.
-- Next: decide, one rule at a time, by the machine, starting with who
-  offers from the health check.
+- Next: decide the next rule by the machine: answering arms the give-up.
 
 Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed
 as not modelled are now modelled.
@@ -631,20 +671,25 @@ Done so far:
   `ssb64-menu-autopilot.js` (#201) and `rollback-timeline.js` (#200). Of
   `demo.js` itself, these are in `web/src/demo` (#186): the options its
   address takes, the network dial, the HUD's text, the ROM it accepts and
-  the recorded menu script. What remains is the page's wiring: booting the
+  the recorded menu script; and its wiring (`wiring.ts`): booting the
   emulator, starting the engine, and connecting the fake peer and the
-  autopilot to it.
+  autopilot to it, with the input hook that plays player 1's script or a
+  recording. `demo.js` keeps what the page shows (the status line, the
+  buttons, the result card) and the progress of a recording and of the
+  autopilot. Each moved as it was, held by `tests/ts/demo-page.test.ts` to
+  everything the old script showed and handed the engine.
 - `netplay-streaming.js` (item 4): its decisions are typed functions in
-  `web/src/streaming` that run beside the engine and report
-  `streaming-disagree`. These cover the roster, the signals and the input
-  path (#183), and the video choices (#185). Two of them decide rather than
-  observe: which offers a page receiving the stream takes (`offer-gate.ts`,
-  #220), and which connection a signal belongs to, together with the host's
-  deadline to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
+  `web/src/streaming`, and the engine calls them; its own copies are gone.
+  These cover the roster, the signals and the input path (#183), and the
+  video choices (#185), which ran beside the engine and reported
+  `streaming-disagree` until the engine switched to them, with a real-ROM
+  streaming run (connect, input, a dropped guest, a reconnect); which
+  offers a page receiving the stream takes (`offer-gate.ts`, #220); and
+  which connection a signal belongs to, together with the host's deadline
+  to offer again (`attempt.ts`, `reoffer.ts`, #223, built to
   `specs/streaming_connection.qnt`).
-- Next: the engine calls the observed functions and its own copies are
-  deleted, one rule at a time, each with a real-ROM streaming run that
-  reaches it (connect, input, a dropped guest, a reconnect). Then move the demo page's wiring.
+- Next: Stage 6 is done once the demo page's wiring is on main. What
+  `demo.js` keeps is the page itself, and stays a page script.
 
 Not every page has `window.KNCore`, and some of these scripts run before it:
 
@@ -709,3 +754,17 @@ Staying plain JavaScript:
   All application queries are built this way; `db.query` and
   `db.execute_write` remain only for tests and one-off tooling that
   arrange data with hand-written SQL.
+
+## Noted, not scheduled
+
+- **The freeze check reads the canvas back once a second.** With images
+  allowed (the default), `checkFreeze` in `web/src/page/diagnostics.ts`
+  hashes the game canvas (`captureCanvasHash`, a WebGL `readPixels`) every
+  60 frames for its RENDER-STALL check, and `checkCanvasHealth` does the
+  same in the first 300 frames. Each is a GPU sync point on every player's
+  page. On a real GPU that is milliseconds, but it can be a hitch once a
+  second on a low-end or mobile device. In the cloud container's software GL
+  it takes seconds, which is why tests there load pages with
+  `?knperf=light`. A follow-up could check the canvas less often, or only
+  once frames stop changing by some other sign. It cannot be measured in the
+  container.

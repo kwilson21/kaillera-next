@@ -43,7 +43,7 @@ def test_rollback_stall_sites_have_wall_clock_action_markers():
     src = LOCKSTEP_JS.read_text()
     doc = INVARIANTS_DOC.read_text()
 
-    for marker in ("MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT"):
+    for marker in ("MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT", "LOCKSTEP-WAIT-TIMEOUT"):
         assert marker in src
         assert marker in doc
 
@@ -843,7 +843,7 @@ def test_only_its_own_answer_ends_a_resync_request():
     dispatch = dispatch[: dispatch.index("\n  };\n")]
     assert "requestId: r.requestId || 0," in dispatch
     assert "for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;" in dispatch
-    assert "pushSyncState(targetSid, false, { requestIds })" in dispatch
+    assert "pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] })" in dispatch
     recovery = src[src.index("push its state to the guest once it is final") :]
     recovery = recovery[: recovery.index("_settleInputsBefore(")]
     assert "requestId" not in recovery

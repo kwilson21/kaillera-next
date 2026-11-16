@@ -110,7 +110,7 @@ export const startButton = (
 
 /** What the engine reports about the match (`engine.getInfo()`). */
 export type EngineInfo = {
-  /** 'rollback', 'streaming', or the legacy 'lockstep'. */
+  /** 'rollback', 'lockstep' or 'streaming'. */
   readonly mode: string;
   readonly fps?: number | null | undefined;
   readonly ping?: number | null | undefined;
@@ -134,13 +134,26 @@ export type InfoPanel = { readonly header: string; readonly stats: string; reado
 const milliseconds = (value: number | null | undefined): string =>
   value !== null && value !== undefined ? `${Math.round(value)}ms` : '--';
 
+const resyncStats = (info: EngineInfo): string[] =>
+  info.syncEnabled && (info.resyncCount ?? 0) > 0 ? [`Resyncs: ${info.resyncCount}`] : [];
+
 const rollbackStats = (info: EngineInfo): string[] => [
   // With rollback the delay is hidden by prediction.
   info.rollback ? `Delay: ${info.frameDelay}f (feels 0f)` : `Delay: ${info.frameDelay}f`,
   `Players: ${info.playerCount}`,
   ...(info.rollback ? [`Rollback: ${info.rollback.rollbacks}/${info.rollback.predictions}`] : []),
-  ...(info.syncEnabled && (info.resyncCount ?? 0) > 0 ? [`Resyncs: ${info.resyncCount}`] : []),
+  ...resyncStats(info),
 ];
+
+// Lockstep predicts nothing: the delay is felt, and there are no rollbacks.
+const lockstepStats = (info: EngineInfo): string[] => [
+  `Delay: ${info.frameDelay}f`,
+  `Players: ${info.playerCount}`,
+  ...resyncStats(info),
+];
+
+const modeLabel = (mode: string): string =>
+  mode === 'streaming' ? 'Streaming' : mode === 'lockstep' ? 'Lockstep' : 'Rollback';
 
 const streamingStats = (info: EngineInfo): string[] => [
   ...(info.codec && info.codec !== '?' ? [info.codec] : []),
@@ -161,18 +174,16 @@ const streamingDetail = (info: EngineInfo): string[] => [
  */
 export const infoPanel = (info: EngineInfo | null, usesGamepad: boolean): InfoPanel => {
   if (info === null) return { header: '', stats: 'FPS: -- | Ping: --', peers: '' };
-  // Anything that is not streaming runs the rollback engine ('lockstep' is its old name).
+  // Anything that is not streaming runs the rollback engine, lockstep with
+  // its predictions off.
   const streaming = info.mode === 'streaming';
-  const stats = [
-    `FPS: ${info.fps || 0}`,
-    `Ping: ${milliseconds(info.ping)}`,
-    ...(streaming ? streamingStats(info) : rollbackStats(info)),
-  ];
+  const modeStats = streaming ? streamingStats : info.mode === 'lockstep' ? lockstepStats : rollbackStats;
+  const stats = [`FPS: ${info.fps || 0}`, `Ping: ${milliseconds(info.ping)}`, ...modeStats(info)];
   const peers = streaming
     ? streamingDetail(info)
     : (info.peers ?? []).map((peer) => `P${peer.slot + 1}: ${milliseconds(peer.rtt)}`);
   return {
-    header: `${streaming ? 'Streaming' : 'Rollback'} | ${usesGamepad ? 'Gamepad' : 'Keyboard'}`,
+    header: `${modeLabel(info.mode)} | ${usesGamepad ? 'Gamepad' : 'Keyboard'}`,
     stats: stats.join(' | '),
     peers: peers.join(' | '),
   };

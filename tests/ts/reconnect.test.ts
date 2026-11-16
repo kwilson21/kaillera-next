@@ -33,10 +33,9 @@ test('a guest waiting on an accepted transfer asks again', () => {
   assert.equal(shouldResumeRomTransfer({ ...stalled, transferState: 'paused' }), true);
 });
 
-test('nothing to resume for the host, an undecided or declined guest, or a loaded ROM', () => {
+test('nothing to resume for the host, a guest who has not taken the host’s ROM, or a loaded ROM', () => {
   assert.equal(shouldResumeRomTransfer({ ...stalled, isHost: true }), false);
   assert.equal(shouldResumeRomTransfer({ ...stalled, sharingDecision: null }), false);
-  assert.equal(shouldResumeRomTransfer({ ...stalled, sharingDecision: 'declined' }), false);
   assert.equal(shouldResumeRomTransfer({ ...stalled, hasRom: true }), false);
 });
 

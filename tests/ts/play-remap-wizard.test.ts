@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  comparable,
   customProfileFrom,
   DEFAULT_KEY_MAP,
   finishedProfile,
@@ -135,7 +134,7 @@ const oldWizard = (
     }
     return { step, saved, profile: out, keyMap: jsonCopy(keyMap) };
   };
-  /** What play.js hands the observer after each input (wizardShadowCompare). */
+  /** The wizard's working state, compared after every input as well as the result. */
   const view = () =>
     JSON.stringify({
       step,
@@ -173,7 +172,14 @@ const newWizard = (current: PadProfile | null, savedKeyMap: Record<number, numbe
     profile: jsonCopy(finishedProfile(state)),
     keyMap: jsonCopy(state.keyMap),
   });
-  const view = () => JSON.stringify(comparable(state));
+  const view = () =>
+    JSON.stringify({
+      step: state.step,
+      keyMap: state.keyMap,
+      buttons: state.profile?.buttons ?? null,
+      axisButtons: state.profile?.axisButtons ?? null,
+      axisCaptures: state.axisCaptures,
+    });
   return { apply, result, view };
 };
 
@@ -206,7 +212,7 @@ test('agrees with the code it replaced over random sessions', () => {
       old.apply(input);
       now.apply(input);
       assert.deepEqual(now.result(), old.result(), `seed ${seed}, input ${i}: ${JSON.stringify(input)}`);
-      // The observer in play.js compares these two strings: equal here means no report there.
+      // Mid-run too: a stick half captured, the C buttons as they stand.
       assert.equal(now.view(), old.view(), `seed ${seed}, input ${i}: ${JSON.stringify(input)}`);
       compared++;
     }

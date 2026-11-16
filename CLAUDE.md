@@ -40,6 +40,8 @@ V1 — Browser-based
     emulator and exchange inputs over WebRTC DataChannels; misprediction triggers
     bit-exact replay via the patched WASM core. Strict lockstep is the silent
     fallback path inside the same engine when the core does not export kn_pre_tick.
+  Lockstep mode: the same engine with nothing predicted; a frame runs only once
+    every player's input for it is here (a missing one is dropped at 5 s).
   Streaming mode: host runs the only emulator and streams video via WebRTC MediaStream.
   Server is idle once signaling completes (rollback) or relays save states for
   initial sync and late join.
@@ -91,7 +93,7 @@ kaillera-next/
 │       ├── netplay-rollback.js  # primary engine — GGPO-style C-level rollback (4P mesh)
 │       ├── rollback-shadow-worker.js # shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
 │       ├── netplay-lockstep.js  # deprecated compat shim (loads window.NetplayLockstep alias)
-│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are observed from web/src/streaming, except which offers a guest takes, which it asks web/src/streaming (`signalGate`)
+│       ├── netplay-streaming.js # streaming engine (host video → guests); its decisions are web/src/streaming's, which it calls
 │       ├── switch2-usb.js       # starts the WebUSB handshake that wakes the Switch 2 Pro Controller (window.Switch2USB) from web/src/page/switch2-usb.ts
 │       ├── controller-settings.js # starts the in-game controller settings panel (window.ControllerSettings) from web/src/page/controller-settings/
 │       ├── virtual-gamepad.js   # starts the on-screen touch controls (window.VirtualGamepad) from web/src/page/virtual-gamepad/
@@ -102,7 +104,7 @@ kaillera-next/
 │       ├── core-redirector.js   # redirect EJS core to patched WASM
 │       ├── ejs-loader.js        # EmulatorJS loader shim (booting + script setup hooks)
 │       ├── audio-worklet-processor.js  # AudioWorklet for lockstep audio
-│       ├── demo.js              # demo page orchestrator (emulator boot, engine start, fake peer + menu autopilot wiring); its options, network settings, HUD text and menu script are web/src/demo
+│       ├── demo.js              # demo page orchestrator: what the page shows, and a recording's and the autopilot's progress; its options, network settings, HUD text, menu script and wiring (emulator boot, engine start, fake peer + menu autopilot) are web/src/demo
 │       ├── fake-peer.js         # starts the demo page's synthetic P2 (window.KNFakePeer) from web/src/page/fake-peer.ts
 │       ├── ssb64-menu-autopilot.js # closed-loop menu driver for the demo and the two-player test (window.KNMenuAutopilot) from web/src/page/menu-autopilot.ts
 │       ├── rollback-timeline.js # demo page's live rollback-metrics HUD (window.KNRollbackTimeline) from web/src/page/rollback-timeline.ts
@@ -121,14 +123,14 @@ kaillera-next/
 │   │   ├── poll.ts              # looking again at intervals as Effect code: a bounded poll and a repeating one (emulator boot, gamepad hot-plug)
 │   │   ├── kn-state.ts          # cross-module shared state: the type and starting values of window.KNState, set by the bundle
 │   │   ├── protocol.gen.ts      # Effect Schemas generated from payloads.py by scripts/gen_protocol.py; never edited by hand
-│   │   ├── socket-boundary.ts   # decodes what the server and peers send the play page (protocol.gen.ts, peer-protocol.ts); drops what is off its schema
+│   │   ├── socket-boundary.ts   # decodes what the server and peers send the play page and the rollback engine (protocol.gen.ts, peer-protocol.ts); drops what is off its schema
 │   │   ├── peer-protocol.ts     # the one description of messages peers author (DataChannel strings/JSON, relayed Socket.IO events)
 │   │   ├── peer-connection.ts   # per-peer WebRTC connection machine, built to specs/peer_connection.qnt (`fixed`); driven from the engine (peer-driver.ts), being wired in to decide one rule at a time
 │   │   ├── peer-driver.ts       # hands the rollback engine's events to one peer-connection.ts machine per other player
 │   │   ├── attempt-id.ts        # the `attemptId` {page, attempt} every webrtc-signal carries: which connection attempt it belongs to
 │   │   ├── page/diagnostics.ts  # window.KNDiag: freeze, canvas-health and input diagnostics for the engines (was web/static/kn-diagnostics.js)
 │   │   ├── play/                # the play page's logic, moving out of web/static/play.js in slices (window.KNCore.play)
-│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming); observe.ts compares them with netplay-streaming.js and reports `streaming-disagree` (observing); offer-gate.ts decides, for the engine, that a guest or spectator takes an offer only from slot 0; attempt.ts decides which connection a signal belongs to and reoffer.ts is the host's deadline to offer again (specs/streaming_connection.qnt)
+│   │   ├── streaming/           # the streaming engine's decisions as typed functions (window.KNCore.streaming), which netplay-streaming.js calls: roster.ts, signal.ts, input.ts and video.ts; offer-gate.ts: a guest or spectator takes an offer only from slot 0; attempt.ts decides which connection a signal belongs to and reoffer.ts is the host's deadline to offer again (specs/streaming_connection.qnt)
 │   │   ├── page/                # the play and demo pages' own scripts, moving out of web/static one at a time (window.KNCore.page); each is started by a small caller left in web/static
 │   │   ├── site/                # what the play page shares with pages that load no core; no Effect, so kn-site.js stays small (storage.ts: window.KNStorage; index.ts: window.KNSite, set by both bundles, whose functions the callers in web/static start: version-guard.ts, version.ts, feedback.ts)
 │   │   ├── site-entry.ts        # kn-site.js bundle entry
@@ -181,7 +183,7 @@ All events go through the default Socket.IO namespace (`/`).
 | `leave-room`          | client→server      | `{}`                                                                                                                                      | Leave room                                                                                                                                                                                                                       |
 | `claim-slot`          | client→server      | `{slot}`                                                                                                                                  | Spectator → player                                                                                                                                                                                                               |
 | `release-slot`        | client→server      | `{}`                                                                                                                                      | Player → spectator ("Watch instead"), lobby only                                                                                                                                                                                 |
-| `start-game`          | client→server      | `{mode, resyncEnabled, romHash, gameId}`                                                                                                  | Host starts game (`mode`: `"rollback"` \| `"streaming"`; legacy `"lockstep"` coerced to `"rollback"`)                                                                                                                            |
+| `start-game`          | client→server      | `{mode, resyncEnabled, romHash, gameId}`                                                                                                  | Host starts game (`mode`: `"rollback"` \| `"lockstep"` \| `"streaming"`)                                                                                                                            |
 | `end-game`            | client→server      | `{}`                                                                                                                                      | Host ends game                                                                                                                                                                                                                   |
 | `match-joined`        | client→server      | `{matchId}`                                                                                                                               | A player who joined a match in play is now in it. Until then the server counts it as waiting, and ends a match only waiting players are left in                                                                                  |
 | `set-name`            | client→server      | `{name}`                                                                                                                                  | Update player display name                                                                                                                                                                                                       |
@@ -194,14 +196,14 @@ All events go through the default Socket.IO namespace (`/`).
 | `input`               | client→server→room | `{...}`                                                                                                                                   | Input relay (streaming mode, 64KB max)                                                                                                                                                                                           |
 | `rom-sharing-toggle`  | client→server      | `{enabled}`                                                                                                                               | Toggle host ROM sharing                                                                                                                                                                                                          |
 | `set-listed`          | client→server      | `{listed}`                                                                                                                                | Host lists the room on the front-page board (never with a password)                                                                                                                                                              |
-| `rom-ready`           | client→server      | `{ready, hash, name, size}`                                                                                                               | Player signals ROM loaded (hash/name/size establish or check ROM identity)                                                                                                                                                       |
+| `rom-ready`           | client→server      | `{ready, prompt, hash, name, size}`                                                                                                       | Player signals ROM loaded (hash/name/size establish or check ROM identity). `prompt` with `ready: false`: the page shows the ROM prompt (users-updated `romPrompt`)                                                              |
 | `input-type`          | client→server      | `{type}`                                                                                                                                  | Player reports input type (keyboard/gamepad)                                                                                                                                                                                     |
 | `device-type`         | client→server      | `{type}`                                                                                                                                  | Player reports device type                                                                                                                                                                                                       |
 | `session-log`         | client→server      | `{matchId, epoch, entries, summary, context, audit}`                                                                                      | Periodic sync log flush: only the log entries and input audit records (`audit: {epoch, entries}`) the server hasn't acked; acks `{lastSeq, auditLastSeq}`                                                                        |
 | `debug-sync`          | client→server      | `{...}`                                                                                                                                   | Upload sync diagnostic log                                                                                                                                                                                                       |
 | `debug-logs`          | client→server      | `{...}`                                                                                                                                   | Upload debug console log                                                                                                                                                                                                         |
 | `game-screenshot`     | client→server      | `{matchId, slot, frame, data}`                                                                                                            | Periodic gameplay screenshot (debug mode)                                                                                                                                                                                        |
-| `users-updated`       | server→room        | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}`                              | Room state broadcast                                                                                                                                                                                                             |
+| `users-updated`       | server→room        | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}`                              | Room state broadcast. Each player carries `romReady`, and `romPrompt` while its page shows the ROM prompt                                                                                                                                |
 | `upload-token`        | server→client      | `{token}`                                                                                                                                 | HMAC token for upload endpoints                                                                                                                                                                                                  |
 | `reconnect-token`     | server→client      | `{token}`                                                                                                                                 | HMAC token for session reconnection                                                                                                                                                                                              |
 | `rom-sharing-updated` | server→room        | `{romSharing}`                                                                                                                            | ROM sharing state changed                                                                                                                                                                                                        |
@@ -218,8 +220,9 @@ All events go through the default Socket.IO namespace (`/`).
   amortized restore on misprediction. Cross-platform determinism via SoftFloat FPU.
   Rollback runs on every screen, menus included; nothing in the engine's tick
   depends on the scene the game is showing. Strict lockstep is the path used
-  when the core does not export `kn_pre_tick` (or the C engine was disabled
-  after repeated throws).
+  when the core does not export `kn_pre_tick`. A throw out of the C engine's
+  tick is a WASM trap and ends the match on that page (`FATAL-CORE-ABORT`),
+  as any core trap does; nothing switches a page off rollback mid-match.
   Host-authoritative resync remains as fallback for reconnection and late join.
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
   video via WebRTC MediaStream. Guests send input back over DataChannel. The host
@@ -267,7 +270,10 @@ invariants doc before proposing any watchdog that _acts_ on stalls.
 - Only runs on the `main` branch
 - The same workflow then deploys: it calls Render's deploy hook
   (`RENDER_DEPLOY_HOOK_URL` secret) once per push to `main`, bump or not.
-  Render's own auto-deploy is off (`render.yaml`); see `deploy/render/README.md`
+  Render's own auto-deploy is off (`render.yaml`); see `deploy/render/README.md`.
+  Right after, it deploys the landing Worker from the same commit
+  (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` secrets); see
+  `deploy/static/README.md`
 - Version displayed in page footer (`web/static/version.json`), changelog in modal (`web/static/changelog.json`)
 - PRs are squash-merged; PR title becomes the commit message
 
@@ -353,8 +359,8 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   like the per-peer machine offering only from the lower slot), the
   old-against-new test asserts that difference and the PR names its model
   scenario; any other difference blocks the change. The modules that still observe (they send
-  `*-disagree` or `protocol-mismatch` reports) are being switched to deciding
-  the same way; don't add a new one.
+  `*-disagree` reports) are being switched to deciding the same way; don't
+  add a new one.
 - **Model and prove before you patch state logic.** This applies to plans
   as much as to code: a plan for anything involving state, ordering or
   reconnects names the model, the invariant and the diagram it will change
