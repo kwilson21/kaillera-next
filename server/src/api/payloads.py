@@ -159,7 +159,8 @@ class MatchJoinedPayload(BaseModel):
 
 
 class EndGamePayload(BaseModel):
-    pass
+    # Older clients omit this. New clients bind retries to the intended match.
+    matchId: str | None = Field(default=None, max_length=64)
 
 
 # ── set-mode ─────────────────────────────────────────────────────────────────

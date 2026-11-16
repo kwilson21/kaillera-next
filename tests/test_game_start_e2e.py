@@ -522,12 +522,16 @@ def test_a_start_reaching_a_page_with_no_rom_asks_for_one_and_joins_late(browser
     guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest", _RECORD_EVENTS)
     expect(host.locator("#player-list")).to_contain_text("Guest", timeout=10000)
     try:
-        # Harness step: the start the server took while the page's "no ROM"
-        # was on its way, with the host not sharing.
-        _start(guest, "m-no-rom")
+        _load_rom(host)
+        # Harness step: the server still counts the guest ready while its
+        # page has no ROM. Start through the real server so its later roster
+        # updates describe the same active match, not a contradictory lobby.
+        guest.evaluate("window.__test_socket.emit('rom-ready', { ready: true })")
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
         # Not booted: the page asks for a ROM, as a late joiner's does.
         prompt = guest.locator("#late-join-msg")
-        expect(prompt).to_contain_text("load a ROM to join", timeout=5000)
+        expect(prompt).to_contain_text("load test.z64 to join", timeout=5000)
         expect(guest.locator("#overlay")).to_be_visible()
         expect(guest.locator("#error-msg")).to_be_hidden()
         # A ROM dropped: the prompt goes and the page joins the game.

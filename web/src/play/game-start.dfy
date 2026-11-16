@@ -55,6 +55,17 @@ lemma handlesGameEnd_ensures(endedMatchId: string, lastHandledMatchId: string, l
 {
 }
 
+function endMatchesCurrent(ended: string, current: string): bool
+{
+  (((ended == "") || (current == "")) || (ended == current))
+}
+
+lemma endMatchesCurrent_ensures(ended: string, current: string)
+  ensures (endMatchesCurrent(ended, current) ==> (((ended == "") || (current == "")) || (ended == current)))
+  ensures ((((ended == "") || (current == "")) || (ended == current)) ==> endMatchesCurrent(ended, current))
+{
+}
+
 function gameEndedMessage(reason: Option<string>): string
 {
   if (match reason { case Some(i_value) => (i_value == "dropped") case None => false }) then
