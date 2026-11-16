@@ -859,7 +859,9 @@ def test_only_its_own_answer_ends_a_resync_request():
     host = host[: host.index("// JSON messages")]
     assert "if (_playerSlot === 0) syncRequestIdNext = _requestIdFrom(Number(e.data.substring(16)));" in host
     assert host.index("syncRequestIdNext = 0;") < host.index("rate-limited sync-request from")
-    assert "forceFull: isFull,\n              requestId," in host
+    assert "targetSid: remoteSid,\n              requestId," in host
+    # Every answer is full: the host keeps no delta base (sync_base).
+    assert "forceFull" not in src
     assert "pushSyncState(remoteSid, false, { requestIds: { [remoteSid]: requestId } });" in host
     assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
 
@@ -884,12 +886,12 @@ def test_only_its_own_answer_ends_a_resync_request():
     # before; the body is _sendSyncChunksTo, which reads the request id by sid.
     wrapper = src[src.index("const sendSyncChunks = async (") :]
     wrapper = wrapper[: wrapper.index("\n  };\n")]
-    assert "_sendSyncChunksTo(t, compressed, frame, isFull, isProactive, requestIds)" in wrapper
+    assert "_sendSyncChunksTo(t, compressed, frame, isProactive, requestIds)" in wrapper
     chunks = src[src.index("const _sendSyncChunksTo = async (") :]
     chunks = chunks[: chunks.index("\n  };\n")]
     assert chunks.index("if (answerFor) dc.send(`sync-answer-id:${answerFor}`);") < chunks.index("dc.send(header);")
     # The header an older guest parses is unchanged.
-    assert "`sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}:${isProactive ? '1' : '0'}`" in chunks
+    assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}`" in chunks
 
     # Guest: the number is for the next state on that channel only.
     sync_dc = src[src.index("const setupSyncDataChannel = (_remoteSid, ch) => {") :]

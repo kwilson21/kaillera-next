@@ -73,7 +73,10 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     count = count[: count.index("\n  };\n")]
     assert "window.KNCore.resyncRequest.overdueAskStep(" in count
     assert "_escalateLostInput(peer, step, now, oldest);" in count
-    assert "isHost ? !!_overduePushes[slot] : _resyncRequestInFlight" in count
+    # A push out, or a hole whose pushes ran out, holds the step (it says
+    # wait, not push to nothing).
+    assert "isHost ? _escalationHeld(slot, oldest) : _resyncRequestInFlight" in count
+    assert "isHost ? _escalationHeld(slot, frame) : _resyncRequestInFlight" in src
     escalate = src[
         src.index("const _escalateLostInput = (peer, step, now, hole) => {") :
     ]
@@ -84,7 +87,11 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     # Counted per hole (hole_counts), the decision proved.
     assert "window.KNCore.resyncRequest.escalationForHole(" in escalate
     assert "const counts = (_holePushCounts[slot] ??= {});" in escalate
-    assert "INPUT-ASK-PUSH-EXHAUSTED" in escalate
+    # Logged once, where a let-go leaves the hole at its limit.
+    assert (
+        "INPUT-ASK-PUSH-EXHAUSTED"
+        in src[src.index("const _checkOverduePushes = () => {") :][:6000]
+    )
     assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in escalate
     assert "const INPUT_ASK_OVERDUE_ASKS = 3;" in src
     assert "const INPUT_ASK_OVERDUE_MS = 1500;" in src
@@ -268,7 +275,12 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     assert "push.at !== null," in pushes
     # Let go on no progress, never a clock from the push's start (LET_GO
     # "progress"); a push let go leaves only its hole's count behind.
-    assert "now - Math.max(push.armedAt, _syncProgressAt)," in pushes
+    # The push's own guest's chain (CLOCK "chain"), from when it reached it.
+    assert (
+        "now - Math.max(push.armedAt, push.enqueued ? (_syncChainMovedAt[push.sid] ?? 0) : 0),"
+        in pushes
+    )
+    assert "_syncProgressAt" not in src
     assert "OVERDUE_PUSH_QUIET_MS," in pushes
     assert "OVERDUE_PUSH_BACKSTOP_MS" not in src
     assert "letGo: " not in src
@@ -287,19 +299,26 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     assert "window.KNCore.resyncRequest.transferReportApplies(" in report
     assert "_onEscalationTransfer(attempts, targetSid, true);" in src
     # Each guest's outcome as its own chain ends (PER_TARGET).
+    # Each target settles alone, a rejection included (allSettled per target).
+    send = src[src.index("const sendSyncChunks = async (") :]
+    send = send[: send.index("\n  };\n")]
     assert (
-        "return run.then((outcome) => {\n          _onEscalationTransfer(attempts, t.sid, outcome === 'sent');"
-        in src
+        "_syncLog(`sync send to ${t.sid} failed: ${err}`);\n              return 'failed';"
+        in send
     )
-    assert "escalation: [...(prev.escalation || []), ...attempts]," in src
-    # Progress: every chunk accepted, every state captured.
-    assert src.count("_syncProgressAt = performance.now();") == 3
+    assert "_onEscalationTransfer(attempts, t.sid, outcome === 'sent');" in send
+    # The chain moves when a transfer starts, has a chunk accepted, or ends.
+    assert src.count("_syncChainMovedAt[t.sid] = performance.now();") == 3
+    assert "else if (a.push.attempt === a) a.push.enqueued = true;" in send
     # A freeze of the host's page is credited to the push's clocks.
     credit = src[src.index("const _creditLocalFreeze = () => {") :]
     credit = credit[: credit.index("\n  };\n")]
     assert "push.armedAt = Math.min(now, push.armedAt + gap);" in credit
     assert "if (push.at !== null) push.at = Math.min(now, push.at + gap);" in credit
-    assert "_syncProgressAt = Math.min(now, _syncProgressAt + gap);" in credit
+    assert (
+        "for (const sid in _syncChainMovedAt) _syncChainMovedAt[sid] = Math.min(now, _syncChainMovedAt[sid] + gap);"
+        in credit
+    )
     # Recovered, a peer's holes start their count again.
     assert src.count("_forgetHolePushes(") == 3
     # P2: one per-slot clear for both callers (I2), one map reset for three.
@@ -333,7 +352,8 @@ def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
     ]
     # The host sends no deltas (sync_base): every state is full and no base
     # is kept for it.
-    assert "isFull = true;\n      toCompress = currentState;\n    }" in push[:12000]
+    assert "const toCompress = currentState;" in push[:12000]
+    assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}`" in src
     assert "_setLastSyncState(currentState.slice(), 'pushSync')" not in src
     assert "toCompress[i] = currentState[i] ^ _lastSyncState[i];" not in src
     stop = src[src.index("  const stop = () => {") :]

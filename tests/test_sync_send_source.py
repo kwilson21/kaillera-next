@@ -79,7 +79,7 @@ def test_a_queued_transfer_never_reaches_a_new_connection():
     capture = push.index("const targets = _syncTargetsFor(targetSid);")
     assert push.index("const frame = _frameNum;") < capture < push.index("await ")
     assert "_syncQueueGen[targetSid] || 0" in push[capture : push.index("await ")]
-    assert "sendSyncChunks(compressed, frame, isFull, targets, isProactive, requestIds, attempts)" in push
+    assert "sendSyncChunks(compressed, frame, targets, isProactive, requestIds, attempts)" in push
     assert "if (!_syncTargetCurrent(socketTarget)) {" in push
     targets_for = _block(src, "const _syncTargetsFor = (targetSid) => {")
     assert "epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0" in targets_for
@@ -135,11 +135,17 @@ def test_a_request_during_a_transfer_is_queued_not_dropped():
     src = ENGINE.read_text()
     start = src.index("const pushSyncState = async")
     head = src[start : src.index("const gm = window.EJS_emulator?.gameManager;", start)]
-    # Newest options kept; what the requests queued before carry goes with
-    # them: request numbers, guests to watch, escalation attempts.
-    assert "_queuedSyncPushes.set(" in head
-    assert "requestIds: { ...(prev.requestIds || {}), ...(options.requestIds || {}) }," in head
-    assert "watchFor: [...new Set([...(prev.watchFor || []), ...(options.watchFor || [])])]," in head
+    # Newest options kept (the newer dispatch's watches are current); the
+    # earlier requests' numbers go with it, and every caller that queued gets
+    # the run's result, not undefined.
+    assert "_queuedSyncPushes.set(key, entry);" in head
+    assert "? { ...options, requestIds: { ...(prev.options.requestIds || {}), ...(options.requestIds || {}) } }" in head
+    assert "watchFor: [...new Set(" not in head
+    assert "return new Promise((resolve) => entry.waiters.push(resolve));" in head
+    run = src[src.index("const _runQueuedSyncPush = () => {") :][:600]
+    assert "(result) => entry.waiters.forEach((w) => w(result))," in run
+    # An escalation push takes no lock and is never queued here.
+    assert "if (!escalation && (isProactive ? _proactivePushInFlight : _pushingSyncState)) {" in head
     assert "_runQueuedSyncPush();" in src[start:]
     # Per-peer state: resetPeerState drops the peer's queued push (I2), and
     # stop() all of them.
