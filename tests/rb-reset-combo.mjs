@@ -75,7 +75,8 @@ export async function checkPausedReset(pages, out) {
   // mnVSResultsCheckExit in the matching SSB64 decomp checks START_BUTTON,
   // not A: github.com/VetriTheRetri/ssb-decomp-re/blob/main/src/mn/mnvsmode/mnvsresults.c
   await host.screenshot({ path: `${out}/reset-results.png` });
-  await host.evaluate(() => document.activeElement?.blur());
+  // Keep the production focus restored to More; gameplay must resume
+  // without a manual blur or mouse click after closing the reset dialog.
   const resultsScenes = await Promise.all(
     pages.map((page) => page.evaluate(() => (window.NetplayRollback.readRdram32(0x800a4ad0) >>> 24) & 255)),
   );

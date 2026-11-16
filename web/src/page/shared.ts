@@ -223,12 +223,14 @@ export const createShared = () => {
   function ensureKeyTrackingListeners(): void {
     if (!_listenersAdded) {
       _keydownHandler = (e) => {
-        // Menu/dialog activation is UI input, not the ROM's Start/A binding.
+        // Modal/menu input stays in the UI. After closing, focus returns to
+        // More: consume its activation keys, but let gameplay keys resume.
         const target = e.target;
         if (
           typeof Element !== 'undefined' &&
           target instanceof Element &&
-          target.closest('#reset-combo-dialog, #more-wrapper, #more-dropdown')
+          (target.closest('#reset-combo-dialog, #more-dropdown') ||
+            (target.closest('#more-wrapper') && (e.key === 'Enter' || e.key === ' ')))
         )
           return;
         if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);

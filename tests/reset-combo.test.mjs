@@ -110,6 +110,17 @@ test('reset shortcut: iPhone layout, ownership, hold, keyboard and cancellation'
       await button.evaluate((el) => el.click());
       await page.keyboard.press('Escape');
       assert.equal(await input(), 1);
+      await page.waitForFunction(() => document.activeElement?.id === 'toolbar-more');
+      // Closing restores accessible focus to More, but must not swallow
+      // ordinary mapped gameplay keys. No manual blur is allowed here.
+      await page.keyboard.down('v');
+      assert.equal(await input(), 9, 'Start resumes while More retains focus');
+      await page.keyboard.up('v');
+      assert.equal(await input(), 1);
+      await page.keyboard.down('Enter');
+      assert.equal(await input(), 1, 'activating More must not leak Start into the ROM');
+      await page.keyboard.up('Enter');
+      await page.keyboard.press('Escape');
       await page.evaluate(() => window.testReset.open());
       await button.evaluate((el) => el.click());
       await page.evaluate(() => window.dispatchEvent(new Event('blur')));
