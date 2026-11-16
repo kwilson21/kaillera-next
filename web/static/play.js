@@ -537,9 +537,10 @@
         _romHash?.substring(0, 16) || _romSize,
       );
       // A ROM the player dropped before the host's was known: say why it goes
-      // (as at the drop, when the host's is known). A library match found
-      // next hides the banner again.
-      const dropped = _romDroppedName && ((_romHash && _knownRoms[_romHash]?.game) || _romDroppedName);
+      // (as at the drop, when the host's is known). Named by its file: until
+      // the drop is hashed, _romHash is the previous ROM's. A library match
+      // found next hides the banner again.
+      const dropped = _romDroppedName;
       clearLoadedRom();
       if (dropped) showRomMismatch(dropped);
       resetTransferForHostRomChange();

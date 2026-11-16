@@ -241,6 +241,9 @@ def test_a_rom_dropped_before_the_hosts_is_known_is_refused_with_a_word_once_it_
     try:
         guest.set_input_files("#rom-drop input[type=file]", OTHER_ROM)
         expect(guest.locator("#rom-status")).to_contain_text("other.z64", timeout=15000)
+        # Hashed before the host's ROM is known, so the drop's own check has
+        # passed it and only the host's arriving can refuse it.
+        guest.wait_for_function("() => !!window.KNState?.romHash", timeout=15000)
         expect(guest.locator("#rom-mismatch")).to_be_hidden()
         _load_rom(host)
         expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
