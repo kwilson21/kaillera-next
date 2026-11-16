@@ -490,7 +490,7 @@ A guest's page judging and announcing its ROM while a dropped file is still bein
 
 ### rightOverWrongTest
 
-The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Before, the old hash refused the right ROM, and its hash, landing after, said ready with no ROM.
+The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Before, the old hash refused the right ROM, and its hash, landing after, said ready with no ROM. Today the page waits for the new file's hash, which keeps it and says ready.
 
 ```mermaid
 sequenceDiagram
@@ -509,7 +509,7 @@ sequenceDiagram
 
 ### twoDropsTest
 
-Two drops, the second (the host's ROM) hashed first: the first's hash, landing late, is taken as the loaded ROM's. Before, it refused the host's ROM; judging by own hash alone, the page keeps the ROM but its own hash is gone, so it can never be announced again.
+Two drops, the second (the host's ROM) hashed first; the first's hash lands late. Before, that late hash was taken as the loaded ROM's and refused the host's ROM; judging by own hash alone, the page kept the ROM but lost its own hash, so it could never be announced again. Today the late hash changes nothing.
 
 ```mermaid
 sequenceDiagram
@@ -532,7 +532,7 @@ The same orderings today. While a load is being hashed the page waits (`pending`
 
 ### rightOverWrongTest
 
-The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Before, the old hash refused the right ROM, and its hash, landing after, said ready with no ROM.
+The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives before the new file is hashed. Before, the old hash refused the right ROM, and its hash, landing after, said ready with no ROM. Today the page waits for the new file's hash, which keeps it and says ready.
 
 ```mermaid
 sequenceDiagram
@@ -551,7 +551,7 @@ sequenceDiagram
 
 ### twoDropsTest
 
-Two drops, the second (the host's ROM) hashed first: the first's hash, landing late, is taken as the loaded ROM's. Before, it refused the host's ROM; judging by own hash alone, the page keeps the ROM but its own hash is gone, so it can never be announced again.
+Two drops, the second (the host's ROM) hashed first; the first's hash lands late. Before, that late hash was taken as the loaded ROM's and refused the host's ROM; judging by own hash alone, the page kept the ROM but lost its own hash, so it could never be announced again. Today the late hash changes nothing.
 
 ```mermaid
 sequenceDiagram

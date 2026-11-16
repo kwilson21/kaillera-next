@@ -561,7 +561,8 @@ module rom_identity {
 
   // The guest has a wrong ROM, drops the host's over it, and the host's ROM
   // arrives before the new file is hashed. Before, the old hash refused the
-  // right ROM, and its hash, landing after, said ready with no ROM.
+  // right ROM, and its hash, landing after, said ready with no ROM. Today the
+  // page waits for the new file's hash, which keeps it and says ready.
   run rightOverWrongTest =
     initWith(false, false)
       .then(drop("wrong"))
@@ -591,10 +592,11 @@ module rom_identity {
       .expect(loaded == "none")
       .expect(banner)
 
-  // Two drops, the second (the host's ROM) hashed first: the first's hash,
-  // landing late, is taken as the loaded ROM's. Before, it refused the host's
-  // ROM; judging by own hash alone, the page keeps the ROM but its own hash
-  // is gone, so it can never be announced again.
+  // Two drops, the second (the host's ROM) hashed first; the first's hash
+  // lands late. Before, that late hash was taken as the loaded ROM's and
+  // refused the host's ROM; judging by own hash alone, the page kept the ROM
+  // but lost its own hash, so it could never be announced again. Today the
+  // late hash changes nothing.
   run twoDropsTest =
     initWith(true, false)
       .then(hostArrives)
