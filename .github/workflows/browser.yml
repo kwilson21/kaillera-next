@@ -19,6 +19,12 @@ on:
       - 'package.json'
       - 'package-lock.json'
 
+# Initial runs for the same PR coalesce. Reruns, main pushes and merge
+# queues keep independent full verification.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.run_attempt == '1' && github.event.pull_request.number || github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
+
 permissions:
   contents: read
 

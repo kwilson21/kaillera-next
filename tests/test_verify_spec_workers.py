@@ -57,12 +57,19 @@ def test_original_plan_and_all_shards_preserve_every_check():
         ):
             expected.extend(verify.dataclasses.replace(check, invariant=name) for name in verify.CONJUNCTS)
         elif (check.spec, check.module, check.invariant, check.expect) == (
+            "specs/streaming_connection.qnt",
+            "streaming_connection_current",
+            "allHold",
+            "hold",
+        ):
+            expected.extend(verify.dataclasses.replace(check, invariant=n) for n in verify.STREAMING_CONJUNCTS)
+        elif (check.spec, check.module, check.invariant, check.expect) == (
             "specs/room_lifecycle.qnt",
             "room_current",
             "pagesAgreeWithServer",
             "hold",
         ):
-            expected.extend(verify.dataclasses.replace(check, invariant=n) for n in verify.ROOM_DIRECTIONS)
+            expected.extend(verify.dataclasses.replace(check, invariant=n) for n in verify.ROOM_PARTITIONED_DIRECTIONS)
         elif (check.spec, check.module, check.invariant, check.expect) == (
             "specs/room_lifecycle.qnt",
             "room_current",
@@ -75,7 +82,7 @@ def test_original_plan_and_all_shards_preserve_every_check():
     assert expanded == expected
     assert [c for c in expanded if c.expect == "violation"] == [c for c in original if c.expect == "violation"]
     timings = json.loads((ROOT / "scripts/verify-spec-times.json").read_text())["seconds"]
-    for slots in (1, 4, 16, 20):
+    for slots in (1, 4, 16, 20, 28):
         bins = verify.partition(expanded, slots, timings)
         assert all(bins)
         assert collections.Counter(c for batch in bins for c in batch) == collections.Counter(expanded)
@@ -250,7 +257,7 @@ def test_room_split_is_guarded_and_preserves_every_bound_and_negative():
         for n, property_name in enumerate(("pagesAgreeWithServer", "nobodyIsStrandedInADroppedMatch"))
     ]
     negatives = [verify.dataclasses.replace(c, expect="violation") for c in original]
-    expected = [verify.dataclasses.replace(original[0], invariant=p) for p in verify.ROOM_DIRECTIONS]
+    expected = [verify.dataclasses.replace(original[0], invariant=p) for p in verify.ROOM_PARTITIONED_DIRECTIONS]
     expected += [verify.dataclasses.replace(original[1], invariant=p) for p in verify.ROOM_NOT_STRANDED]
     assert verify.split_room_predicates([*original, *negatives], room_ast_fixture()) == [*expected, *negatives]
     for mutation in ("players", "iff", "listeners", "pattern", "instance", "override"):
@@ -368,3 +375,115 @@ def test_worker_cpu_budget_reaches_jvm(monkeypatch, tmp_path, cpus):
         verify.worker(0, [], Path("unused"), tmp_path, 1, cpus)
     assert f"-XX:ActiveProcessorCount={cpus}" in captured["env"]["JDK_JAVA_OPTIONS"]
     assert "-Xmx2g" in captured["env"]["JDK_JAVA_OPTIONS"]
+
+
+def streaming_ast_fixture():
+    return {
+        "errors": [],
+        "modules": [
+            {
+                "name": "streaming_connection",
+                "declarations": [
+                    {
+                        "kind": "def",
+                        "name": "allHold",
+                        "qualifier": "val",
+                        "expr": verify.app("and", *(verify.name(n) for n in verify.STREAMING_CONJUNCTS)),
+                    }
+                ],
+            },
+            {
+                "name": "streaming_connection_current",
+                "declarations": [
+                    {
+                        "kind": "instance",
+                        "protoName": "streaming_connection",
+                        "identityOverride": True,
+                        "overrides": [[{"name": n}, verify.literal(True)] for n in verify.STREAMING_OPTIONS],
+                    }
+                ],
+            },
+        ],
+    }
+
+
+def test_streaming_split_keeps_every_init_bound_and_negative():
+    for init, steps in (("init", 6), ("initLate", 5), ("newInit", 17)):
+        original = verify.Check(
+            "specs/streaming_connection.qnt", "streaming_connection_current", "allHold", init, steps, "hold", 200
+        )
+        negative = verify.dataclasses.replace(original, expect="violation")
+        expected = [verify.dataclasses.replace(original, invariant=n) for n in verify.STREAMING_CONJUNCTS]
+        assert verify.split_streaming_conjunction([original, negative], streaming_ast_fixture()) == [
+            *expected,
+            negative,
+        ]
+
+
+def test_streaming_guard_rejects_expression_and_inheritance_drift():
+    for mutation in (
+        "or",
+        "extra",
+        "missing",
+        "expression",
+        "qualifier",
+        "instance",
+        "override",
+        "extra_decl",
+        "errors",
+    ):
+        ast = streaming_ast_fixture()
+        definition = ast["modules"][0]["declarations"][0]
+        instance = ast["modules"][1]["declarations"][0]
+        if mutation == "or":
+            definition["expr"]["opcode"] = "or"
+        elif mutation == "extra":
+            definition["expr"]["args"].append(verify.name("newProperty"))
+        elif mutation == "missing":
+            definition["expr"]["args"].pop()
+        elif mutation == "expression":
+            definition["expr"]["args"][0] = verify.literal(True)
+        elif mutation == "qualifier":
+            definition["qualifier"] = "action"
+        elif mutation == "instance":
+            instance["protoName"] = "other"
+        elif mutation == "override":
+            instance["overrides"][0][1] = verify.literal(False)
+        elif mutation == "extra_decl":
+            ast["modules"][1]["declarations"].append(definition)
+        else:
+            ast["errors"] = ["parse error"]
+        with pytest.raises(ValueError):
+            verify.split_streaming_conjunction([], ast)
+
+
+def test_exhaustive_listener_partition_identity_without_domain_assumptions():
+    import itertools
+
+    # The covering predicates work for every listener, including unknown names.
+    for listener in ("host", "guest1", "guest2", "future-player", ""):
+        predicates = (listener == "host", listener == "guest1", listener != "host" and listener != "guest1")
+        assert sum(predicates) == 1
+        for page, status in itertools.product((False, True), repeat=2):
+            original = not page or status
+            assert all(not guard or original for guard in predicates) == original
+    # Even arbitrary Boolean guards cover the universe with their residual.
+    for a, b, proposition in itertools.product((False, True), repeat=3):
+        assert (
+            (not a or proposition) and (not b or proposition) and (not (not a and not b) or proposition)
+        ) == proposition
+    expected = tuple(
+        "listeners.forall(p => (" + p + ') implies ((page.get(p) == Lobby) implies (status == "lobby")))'
+        for p in ('p == "host"', 'p == "guest1"', 'p != "host" and p != "guest1"')
+    )
+    assert expected == verify.ROOM_FORWARD_PARTITIONS
+    assert (*expected, verify.ROOM_DIRECTIONS[1]) == verify.ROOM_PARTITIONED_DIRECTIONS
+
+
+def test_measured_weights_override_component_fallbacks():
+    component = verify.Check(
+        "specs/resync_inputs.qnt", "resync_inputs_current", verify.CONJUNCTS[0], "init", 6, "hold", 0
+    )
+    other = verify.dataclasses.replace(component, module="new_model", invariant="new_property", origin=1)
+    bins = verify.partition([component, other], 2, {component.key: 1, other.key: 50})
+    assert bins == [[other], [component]]
