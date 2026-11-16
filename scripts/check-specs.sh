@@ -7,7 +7,47 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SPEC=specs/room_lifecycle.qnt
-QUINT="npx quint"
+# Every invocation below belongs to exactly one shard. Split the run/test/
+# typecheck streams separately, so cheap typechecks do not displace expensive
+# simulations. New checks are included automatically, without a second list.
+# No arguments runs the entire suite, as before.
+shard=1
+shards=1
+list=false
+if [ "${1:-}" = --list ]; then
+  list=true
+  shift
+fi
+if [ "$#" -ne 0 ]; then
+  if [ "$#" -ne 3 ] || [ "$1" != --shard ] ||
+    ! [[ "$2" =~ ^[1-9][0-9]{0,2}$ && "$3" =~ ^[1-9][0-9]{0,2}$ ]] ||
+    [ "$2" -gt "$3" ] || [ "$3" -gt 256 ]; then
+    echo "usage: $0 [--list] [--shard N COUNT] (1 <= N <= COUNT <= 256)" >&2
+    exit 2
+  fi
+  shard=$2
+  shards=$3
+fi
+selected=0
+declare -A counts=()
+quint_check() {
+  local kind="$1" index="${counts[$1]:-0}"
+  counts[$kind]=$((index + 1))
+  if [ "$((index % shards + 1))" -ne "$shard" ]; then
+    return 0
+  fi
+  selected=$((selected + 1))
+  if "$list"; then
+    printf '%q ' "$@"
+    printf '\n'
+    return 0
+  fi
+  printf '== quint '; printf '%q ' "$@"; printf '\n'
+  local started=$SECONDS
+  npx --no-install quint "$@"
+  echo "== completed in $((SECONDS - started))s"
+}
+QUINT=quint_check
 
 $QUINT typecheck "$SPEC"
 
@@ -521,3 +561,9 @@ done
 # (ring_after_resync_save_only; oneFrameBackTest, twoFramesBackTest).
 $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend=typescript
+
+# An out-of-date matrix must not produce a green job that checked nothing.
+if [ "$selected" -eq 0 ]; then
+  echo "shard $shard of $shards selected no checks" >&2
+  exit 2
+fi

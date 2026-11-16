@@ -705,6 +705,13 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     ):
         assert cond in hole
     assert "now - _catchUpHoleSince >= CATCH_UP_HOLE_WAIT_MS" in loop
+    # Each wait is counted, the first logged when it begins.
+    wait = loop[loop.index("if (!_catchUpHoleSince) {") :]
+    wait = wait[: wait.index("if (now - _catchUpHoleSince")]
+    assert "_catchUpWaits++;" in wait
+    assert "if (_catchUpWaits === 1) _syncLog(`SYNC-CATCH-UP-WAIT f=${f} slot=${hole.slot} input=${key}`);" in wait
+    assert "_catchUpWaits = 0;" in start
+    assert "waits=${_catchUpWaits}" in end
     assert "_askForMissingInputs(hole," in loop
     assert "_catchUpHoleSince = 0;" in loop and "_catchUpHoleSince = 0;" in end
     assert re.search(r"const CATCH_UP_HOLE_WAIT_MS = \d+;", src)
@@ -712,14 +719,18 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
 
     # Each tick runs the next slice, after the queued inputs are fed and
     # before anything else steps the emulator.
-    tick_slice = src.index("if (_catchUpTo >= 0) {\n          const ranFrames = _catchUpSlice(tickMod);")
+    tick_slice = src.index(
+        "if (_catchUpTo >= 0) {\n          const catchUpFrom = _frameNum;\n          _catchUpSlice(tickMod);"
+    )
     assert src.rindex("_drainPendingCInputs(tickMod);", 0, tick_slice) > src.rindex("RB-INPUT-STALL f=", 0, tick_slice)
-    # A slice that runs frames spends no 60 Hz slot, as a rollback replay
-    # does not; one that runs none (it waits on a hole) spends it, so the
-    # tick does not spin (specs/catch_up_wait.qnt, aWaitingCatchUpDoesNotSpin).
+    # A slice that ran frames spends no 60 Hz slot, as a rollback replay does
+    # not. One that ran none, waiting for an input, spends it: marked
+    # replay-only, the pump would call it again and again for its whole
+    # budget every pump (a four-player run counted 102988 slices in a 3 s
+    # wait).
     after_slice = src[tick_slice : src.index("return;", tick_slice)]
-    assert "_tickReplayOnly = ranFrames > 0;" in after_slice
-    assert "return ran;" in sl
+    assert "if (_frameNum > catchUpFrom) _tickReplayOnly = true;" in after_slice
+    assert after_slice.count("_tickReplayOnly") == 1
     # Inputs it runs on stay until it reaches its target, and the peers'
     # inputs for the frame it goes back to are taken in meanwhile.
     assert "const keepThrough = Math.max(_frameNum, _catchUpTo) + DELAY_FRAMES;" in apply

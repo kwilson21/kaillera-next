@@ -5574,6 +5574,7 @@
   let _catchUpSlices = 0;
   let _catchUpSendsReliable = 0; // diagnostic: input packets sent per tick while catching up
   let _catchUpSendsUnreliable = 0;
+  let _catchUpWaits = 0; // holes it waited on
 
   // Legacy booleans — still the source of truth until fully migrated.
   // Each is set alongside _phase during the transition period.
@@ -16179,16 +16180,15 @@
         // A catch-up from a state behind this guest goes on: its next slice
         // is this tick's work (_startCatchUp).
         if (_catchUpTo >= 0) {
-          const ranFrames = _catchUpSlice(tickMod);
+          const catchUpFrom = _frameNum;
+          _catchUpSlice(tickMod);
           _markTickReturn('catch-up');
           // Old frames run again: the 60 Hz slot is not spent on them, as on
-          // a rollback replay. A slice that ran none (it waits on a hole)
-          // spends it: the next tick waits for the next slot instead of
-          // running at once, hundreds of thousands of times while the input
-          // is asked for (specs/catch_up_wait.qnt,
-          // aWaitingCatchUpDoesNotSpin). The wait keeps its deadline
-          // (CATCH_UP_HOLE_WAIT_MS, I1).
-          _tickReplayOnly = ranFrames > 0;
+          // a rollback replay. A slice that ran none, waiting for a player's
+          // input (CATCH_UP_HOLE_WAIT_MS), spends it: the pump looks again
+          // at the next slot instead of calling the slice back to back for
+          // its whole replay budget, every pump, until the input comes.
+          if (_frameNum > catchUpFrom) _tickReplayOnly = true;
           return;
         }
 
@@ -19131,6 +19131,7 @@
     _catchUpSlices = 0;
     _catchUpSendsReliable = 0;
     _catchUpSendsUnreliable = 0;
+    _catchUpWaits = 0;
     _setReplayFullHeadless(mod, true, 'catch-up');
     _setReplayRdpSkip(mod, true, 'catch-up');
     _setReplayAudioOutputSkip(mod, true, 'catch-up');
@@ -19145,7 +19146,8 @@
     _syncLog(
       `SYNC-CATCH-UP from=${_catchUpFrom} to=${_frameNum} of=${_catchUpTo} frames=${_frameNum - _catchUpFrom} ` +
         `ms=${(performance.now() - _catchUpStartedAt).toFixed(1)} workMs=${_catchUpWorkMs.toFixed(1)} ` +
-        `slices=${_catchUpSlices} sentReliable=${_catchUpSendsReliable} sentUnreliable=${_catchUpSendsUnreliable} ` +
+        `slices=${_catchUpSlices} waits=${_catchUpWaits} sentReliable=${_catchUpSendsReliable} ` +
+        `sentUnreliable=${_catchUpSendsUnreliable} ` +
         `dcBuffered=${Math.max(-1, ...Object.values(_peers).map((p) => p.dc?.bufferedAmount ?? -1))} ` +
         `transport=${_rbTransport}${stoppedAt ? ` stopped: ${stoppedAt}` : ''}`,
     );
@@ -19156,9 +19158,8 @@
 
   // Returns how many frames it ran: none while it waits on a hole.
   const _catchUpSlice = (mod) => {
-    if (_catchUpTo < 0) return 0;
+    if (_catchUpTo < 0) return;
     const t0 = performance.now();
-    const fromFrame = _frameNum;
     const remotePeers = [];
     for (const [sid, peer] of Object.entries(_peers)) {
       if (!Number.isInteger(peer.slot) || peer.slot === _playerSlot || _isPeerPendingLateJoin(sid, peer)) continue;
@@ -19188,7 +19189,12 @@
         );
         if (hole) {
           const now = performance.now();
-          if (!_catchUpHoleSince) _catchUpHoleSince = now;
+          if (!_catchUpHoleSince) {
+            _catchUpHoleSince = now;
+            _catchUpWaits++;
+            // The first wait is logged; the rest are counted (waits=).
+            if (_catchUpWaits === 1) _syncLog(`SYNC-CATCH-UP-WAIT f=${f} slot=${hole.slot} input=${key}`);
+          }
           if (now - _catchUpHoleSince >= CATCH_UP_HOLE_WAIT_MS) {
             stoppedAt = `slot ${hole.slot} input ${key} not here after ${CATCH_UP_HOLE_WAIT_MS}ms`;
           } else {
@@ -19230,9 +19236,7 @@
     }
     _catchUpWorkMs += performance.now() - t0;
     _catchUpSlices++;
-    const ran = Math.max(0, _frameNum - fromFrame);
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
-    return ran;
   };
 
   const applySyncState = (bytes, frame, fromProactive = false) => {
