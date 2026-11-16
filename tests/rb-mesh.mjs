@@ -32,6 +32,22 @@
  *   for the host and for the other guests. The run fails unless the guest
  *   caught up all the way to the frame it was on, and every page's hashes
  *   still match the host's.
+ * CATCH_UP_HOLE=1 (with CATCH_UP_MS): the catch-up needs an input that is not
+ *   there yet. First the guest in CATCH_UP_HOLE_SLOT (default 1) stops
+ *   ticking (NetplayRollback.pauseTick) until the catch-up guest drops it as
+ *   a phantom and runs on without it; then the catch-up guest asks, and the
+ *   stopped guest ticks again shortly before the held answer lands, far
+ *   behind. The frames the catch-up runs again need that guest's inputs for
+ *   frames it has not run: the catch-up asks for them and waits (up to the
+ *   engine's CATCH_UP_HOLE_WAIT_MS, 3000), then goes on or stops there, as
+ *   designed. The run fails unless the catch-up waited on that guest
+ *   (`SYNC-CATCH-UP-WAIT slot=<n>`, or it stopped on that guest's input), and
+ *   unless the wait cost about one slice per 60 Hz slot rather than a slice
+ *   back to back for the tick pump's whole budget: slices at most frames +
+ *   ms / 12 + 5. The stopped guest's own frames from its stop to the resync
+ *   that brings it back split from the host's by design (it ran them later,
+ *   on its own new inputs, where the others had predicted them) and are left
+ *   out of its compare, as tests/rb-two-player.mjs leaves out a frozen page's.
  *
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
@@ -64,6 +80,8 @@ const BATTLE_SECONDS = Number(process.env.BATTLE_SECONDS || 45);
 const MENU_TIMEOUT_S = Number(process.env.MENU_TIMEOUT_S || 1800);
 const CATCH_UP_MS = Number(process.env.CATCH_UP_MS || 0);
 const CATCH_UP_SLOT = Number(process.env.CATCH_UP_SLOT || 2);
+const CATCH_UP_HOLE = process.env.CATCH_UP_HOLE === '1';
+const CATCH_UP_HOLE_SLOT = Number(process.env.CATCH_UP_HOLE_SLOT || 1);
 const QUERY = process.env.KN_QUERY || '';
 const OUT = process.env.OUT || '/tmp/rb-mesh';
 const HEADLESS = process.env.HEADED !== '1';
@@ -93,6 +111,18 @@ if (CATCH_UP_MS > 0 && !(CATCH_UP_MS < RESYNC_REQUEST_TIMEOUT_MS)) {
 }
 if (CATCH_UP_MS > 0 && !(Number.isInteger(CATCH_UP_SLOT) && CATCH_UP_SLOT >= 1 && CATCH_UP_SLOT < PLAYERS)) {
   fail(`CATCH_UP_SLOT=${process.env.CATCH_UP_SLOT} invalid: a guest's slot, 1 to ${PLAYERS - 1}`);
+}
+if (CATCH_UP_HOLE && !(CATCH_UP_MS >= 3000)) fail('CATCH_UP_HOLE needs CATCH_UP_MS of 3000 or more');
+if (
+  CATCH_UP_HOLE &&
+  !(
+    Number.isInteger(CATCH_UP_HOLE_SLOT) &&
+    CATCH_UP_HOLE_SLOT >= 1 &&
+    CATCH_UP_HOLE_SLOT < PLAYERS &&
+    CATCH_UP_HOLE_SLOT !== CATCH_UP_SLOT
+  )
+) {
+  fail(`CATCH_UP_HOLE_SLOT=${process.env.CATCH_UP_HOLE_SLOT} invalid: a guest's slot other than CATCH_UP_SLOT`);
 }
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -296,16 +326,38 @@ const waitForLine = async (page, afterSeq, re, timeoutMs) => {
 
 // The battle, with the catch-up fault a third of the way in.
 const catchUp = { guestAt: null, seen: false };
+const hole = { pageAt: null, pausedAt: null, phantomSeen: false, resumedAt: null };
 const tBattle = Date.now();
 if (CATCH_UP_MS > 0) {
   await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
   const guest = pages[CATCH_UP_SLOT];
+  const holePage = pages[CATCH_UP_HOLE_SLOT];
+  if (CATCH_UP_HOLE) {
+    hole.pageAt = await lastSeq(holePage);
+    const guestAt = await lastSeq(guest);
+    hole.pausedAt = await holePage.evaluate(() => {
+      window.NetplayRollback.pauseTick();
+      return window.NetplayRollback.getHudCounters().currentFrame;
+    });
+    console.log(`CATCH_UP_HOLE: P${CATCH_UP_HOLE_SLOT + 1} stopped ticking at frame ${hole.pausedAt}`);
+    hole.phantomSeen = await waitForLine(guest, guestAt, new RegExp(`PEER-PHANTOM slot=${CATCH_UP_HOLE_SLOT} `), 30000);
+  }
   catchUp.guestAt = await lastSeq(guest);
   await host.evaluate((ms) => {
     window.__knHoldSyncAnswerMs = ms;
   }, CATCH_UP_MS);
   await guest.evaluate(() => window.dispatchEvent(new Event('online')));
   console.log(`CATCH_UP_MS: P${CATCH_UP_SLOT + 1} asked for a resync; the host's answer is held ${CATCH_UP_MS} ms`);
+  if (CATCH_UP_HOLE) {
+    // Ticking again shortly before the answer lands: seen again by then,
+    // and still far behind the frames the catch-up runs.
+    await host.waitForTimeout(CATCH_UP_MS - 1000);
+    hole.resumedAt = await holePage.evaluate(() => {
+      window.NetplayRollback.resumeTick();
+      return window.NetplayRollback.getHudCounters().currentFrame;
+    });
+    console.log(`CATCH_UP_HOLE: P${CATCH_UP_HOLE_SLOT + 1} ticks again from frame ${hole.resumedAt}`);
+  }
   catchUp.seen = await waitForLine(guest, catchUp.guestAt, /SYNC-CATCH-UP from=/, CATCH_UP_MS + CATCH_UP_RECOVER_MS);
   console.log(catchUp.seen ? 'CATCH_UP_MS: the guest caught up' : 'CATCH_UP_MS: the guest never logged SYNC-CATCH-UP');
 }
@@ -340,8 +392,12 @@ const catchUpsOf = (log, afterSeq = -1) =>
     .split('\n')
     .filter((line) => seqOf(line) > afterSeq)
     .flatMap((line) => {
-      const m = line.match(/SYNC-CATCH-UP from=(\d+) to=(\d+) of=(\d+) frames=(\d+) ms=([\d.]+)/);
-      return m ? [{ from: +m[1], to: +m[2], of: +m[3], frames: +m[4], ms: +m[5], stopped: /stopped:/.test(line) }] : [];
+      const m = line.match(
+        /SYNC-CATCH-UP from=(\d+) to=(\d+) of=(\d+) frames=(\d+) ms=([\d.]+) workMs=([\d.]+) slices=(\d+)(?: waits=(\d+))?(?: stopped: (.*))?/,
+      );
+      if (!m) return [];
+      const [from, to, of, frames, ms, workMs, slices] = m.slice(1, 8).map(Number);
+      return [{ from, to, of, frames, ms, workMs, slices, waits: Number(m[8] ?? 0), stopped: m[9] ?? null }];
     });
 
 // Frames as runs: [[from, to], ...], to keep summary.json short.
@@ -355,13 +411,25 @@ const spans = (frames) =>
       return out;
     }, []);
 
+// CATCH_UP_HOLE: the stopped guest's split, from its stop (less the hashes'
+// lag) to the frame of the first resync it applied after it.
+const holeSplit = (() => {
+  if (!CATCH_UP_HOLE || hole.pausedAt === null) return null;
+  const log = P[CATCH_UP_HOLE_SLOT].sync;
+  const line = log.split('\n').find((l) => seqOf(l) > hole.pageAt && /sync #\d+ applied \(frame \d+ -> \d+/.test(l));
+  const m = line?.match(/sync #\d+ applied \(frame \d+ -> (\d+)/);
+  return m ? { from: hole.pausedAt - HASH_LAG, to: Number(m[1]) } : null;
+})();
+
 const H = P[0];
 const pairs = P.slice(1).map((G, gi) => {
   const slot = gi + 1;
   const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
+  const split = slot === CATCH_UP_HOLE_SLOT ? holeSplit : null;
   let compared = 0;
   let battle = 0;
   let unrecorded = 0;
+  let leftOut = 0;
   const mismatches = { gameplay: [], gameState: [], fullState: 0 };
   for (const k of Object.keys(G.hashes)) {
     const f = +k;
@@ -371,6 +439,10 @@ const pairs = P.slice(1).map((G, gi) => {
     // 0: that page's engine no longer held the frame when it was recorded.
     if (h[0] === 0 || g[0] === 0) {
       unrecorded++;
+      continue;
+    }
+    if (split && f >= split.from && f < split.to) {
+      leftOut++;
       continue;
     }
     compared++;
@@ -383,6 +455,7 @@ const pairs = P.slice(1).map((G, gi) => {
     slot,
     compared,
     unrecorded,
+    leftOut,
     battleFramesCompared: battle,
     gameplayMismatches: mismatches.gameplay.length,
     gameplayMismatchFrames: spans(mismatches.gameplay),
@@ -416,8 +489,34 @@ const catchUpReport =
         tooOld: P[CATCH_UP_SLOT].sync.split('\n').filter((line) => /SYNC-TOO-OLD-DROPPED/.test(line)),
       }
     : null;
+// CATCH_UP_HOLE: the catch-up waited on the stopped guest's input
+// (SYNC-CATCH-UP-WAIT, or it stopped on it), and the wait cost about a slice
+// per 60 Hz slot.
+const holeReport = (() => {
+  if (!CATCH_UP_HOLE) return null;
+  const lines = P[CATCH_UP_SLOT].sync.split('\n').filter((line) => seqOf(line) > catchUp.guestAt);
+  const waitedOn = lines.filter((line) =>
+    new RegExp(`SYNC-CATCH-UP-WAIT f=\\d+ slot=${CATCH_UP_HOLE_SLOT} `).test(line),
+  );
+  const stoppedOn = catchUpReport.catchUps.find((c) => c.stopped?.startsWith(`slot ${CATCH_UP_HOLE_SLOT} input`));
+  const spin = catchUpReport.catchUps.filter((c) => c.slices > c.frames + c.ms / 12 + 5);
+  return {
+    slot: CATCH_UP_HOLE_SLOT,
+    pausedAt: hole.pausedAt,
+    phantomSeen: hole.phantomSeen,
+    resumedAt: hole.resumedAt,
+    split: holeSplit,
+    waitedOn: waitedOn.map((line) => line.split('\t').at(-1)),
+    stoppedOn: stoppedOn ?? null,
+    waited: waitedOn.length > 0 || !!stoppedOn,
+    spin,
+  };
+})();
 const catchUpFailed =
-  CATCH_UP_MS > 0 && !catchUpReport.catchUps.some((c) => c.frames > 0 && c.to === c.of && !c.stopped);
+  CATCH_UP_MS > 0 &&
+  (CATCH_UP_HOLE
+    ? !catchUp.seen || !holeReport.waited || holeReport.spin.length > 0 || !holeSplit
+    : !catchUpReport.catchUps.some((c) => c.frames > 0 && c.to === c.of && !c.stopped));
 
 // The battle has every page's player in it, each on the fighter its
 // autopilot picks (PORTRAIT_TARGETS in web/src/page/menu-autopilot.ts:
@@ -451,6 +550,7 @@ const summary = {
   phantoms,
   pairs,
   catchUp: catchUpReport,
+  hole: holeReport,
 };
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 2));
 console.log(JSON.stringify(summary, null, 2));
@@ -464,7 +564,7 @@ const failed =
   catchUpFailed;
 console.log(
   failed
-    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? '; the catch-up did not run all the way' : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}`
+    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}`
     : `PASS: all ${PLAYERS} fighters in the battle; every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
 );
 process.exit(failed ? 1 : 0);
