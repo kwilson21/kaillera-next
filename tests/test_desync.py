@@ -2,10 +2,11 @@
 
 Run: pytest tests/test_desync.py -v -s
 """
+import re
 import time
 from itertools import pairwise
 
-from netplay_steps import frame, silence_inputs, sync_log_lines, syncs_applied, wait_past_frame
+from netplay_steps import frame, silence_inputs, sync_log, sync_log_lines, syncs_applied, wait_past_frame
 from playwright.sync_api import expect
 
 
@@ -92,10 +93,16 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
     guest = browser.new_page()
 
     try:
-        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
+        # knperf=light: no canvas reads. The freeze check reads the canvas back
+        # every 60 frames (diagnostics.ts checkFreeze); in the container's
+        # software GL a readback takes seconds, and both pages parked at every
+        # 60th frame, which this test then measured as slow seconds.
+        # tickReturnTrace=1: TICK-STUCK lists the tick's last early returns,
+        # which say what a stuck page was waiting on (_stall_lines).
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback&knperf=light&tickReturnTrace=1")
         host.wait_for_selector("#overlay", timeout=10000)
 
-        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest&knperf=light&tickReturnTrace=1")
         guest.wait_for_selector("#overlay", timeout=10000)
 
         _load_rom(host, rom_path)
@@ -115,8 +122,12 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
                 page.evaluate("window.NetplayRollback.getHudCounters().delay") for page in (host, guest)
             )
 
+        # Past the boot and the first scenes, which load at their own pace.
+        for page in (host, guest):
+            wait_past_frame(page, 300, timeout_s=120)
+
         samples = []
-        for _ in range(5):
+        for _ in range(11):
             time.sleep(1)
             g1 = frame(guest)
             h = frame(host)
@@ -129,24 +140,99 @@ def test_lockstep_frame_pacing(browser, server_url, rom_path, start_game, room):
             )
 
         # How fast a page runs is the machine's: a headless emulator in the
-        # cloud container runs at 7-11 fps, a laptop's at 60, so a fixed count
-        # of frames (it was 100 in 4 s) tested the machine. What the netplay
-        # owes is that the pages go together (the lead check above) and that
-        # neither stalls: no second in which a page advanced far less than in
-        # a typical second of the same run. The page's own fps counter is no
-        # yardstick: it is this same advance, over a one-second window.
-        rates = []
+        # cloud container runs at 7-11 fps, a laptop's at 60, so a count of
+        # frames tests the machine, and so does a second with few frames:
+        # the container starves a page's main thread for a second now and
+        # then, and both pages slow under load or in a heavy scene. What the
+        # netplay owes is that the pages go together (the lead check above)
+        # and that neither waits on the other for long (I1). Whether a page
+        # waited, and on what, is in its own sync log, so the stall half
+        # reads that instead of a rate.
         for name, idx in (("Host", 0), ("Guest", 1)):
-            per_second = [b[idx] - a[idx] for a, b in pairwise(samples)]
-            typical = sorted(per_second)[len(per_second) // 2]
-            assert typical > 0, f"{name} did not advance: {per_second} frames per second"
-            assert min(per_second) >= typical / 4, f"{name} stalled for a second: {per_second} frames per second"
-            rates.append(per_second)
+            advanced = samples[-1][idx] - samples[0][idx]
+            assert advanced > 0, f"{name} did not advance over the window: {[s[idx] for s in samples]}"
+
+        # A stall in the window's last second reaches TICK-STUCK's 2 s
+        # before the logs are read.
+        time.sleep(3)
+        stalls = {}
+        for name, page, idx in (("Host", host, 0), ("Guest", guest, 1)):
+            log = sync_log(page)
+            # The log is a ring: one that rolled over past the window's start
+            # would hold no stall lines because it holds none of the window.
+            held_from = int(log.split("\t", 3)[2][2:]) if log else None
+            assert held_from is not None and held_from <= samples[0][idx], (
+                f"{name}'s sync log starts at f={held_from}, after the window's first frame {samples[0][idx]}"
+            )
+            lines = _stall_lines(log, samples[0][idx], samples[-1][idx])
+            if lines:
+                stalls[name] = lines
+        assert not stalls, "a page waited on its peer in the window:\n" + "\n".join(
+            f"  {name}: {line[:400]}" for name, lines in stalls.items() for line in lines
+        )
+        rates = [[b[idx] - a[idx] for a, b in pairwise(samples)] for idx in (0, 1)]
         print(f"\nFrame pacing OK: host {rates[0]}, guest {rates[1]} frames per second")
 
     finally:
         host.close()
         guest.close()
+
+
+# Tick early returns that wait on a peer (netplay-rollback.js _markTickReturn).
+_PEER_WAIT_MARKS = {
+    "skip:rb-input-stall",
+    "skip:rb-stall",
+    "skip:lockstep-wait",
+    "skip:legacy-menu-lockstep-stall",
+    "skip:legacy-input-stall-wait",
+    "skip:legacy-input-stall-resend",
+}
+_PEER_WAIT_CAUSES = {"input-stall", "rollback-stall"}
+_LOCKSTEP_WAITED = re.compile(r"\bwaitedMs=(\d+)")
+
+
+def _stall_lines(log, first_frame, last_frame):
+    """The lines of a page's sync log that say it waited on its peer for a
+    second or more, at a frame from `first_frame` to `last_frame`.
+
+    A sync log line is `seq, t, f=<frame>, message`, tab-separated; the frame
+    is the page's when the line was logged, and a page that waits does not
+    advance, so a wait that began in the window carries a frame in it.
+    No line gives the duration of a short input stall on the C rollback path
+    (RB-INPUT-STALL is logged as it begins, with stalledMs about 0), so the
+    shortest one this sees is TICK-STUCK's: 2 s without a frame.
+    - TICK-STUCK: the page went 2 s without a frame. It waited on its peer
+      when its cause says so or the tick's last early return was a wait;
+      otherwise its own main thread stopped (the machine), which its peer
+      sees as a wait of its own.
+    - RB-INPUT-STALL-TIMEOUT, PEER-PHANTOM: the peer was left out after 5 s.
+    - ROLLBACK-STALL: no frame from the peer for 3 s.
+    - LOCKSTEP-WAIT (over a second), INPUT-STALL hard-timeout: the lockstep
+      path, taken when the core has no rollback.
+    """
+    found = []
+    for line in log.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) < 4 or not parts[2].startswith("f="):
+            continue
+        f, msg = int(parts[2][2:]), parts[3]
+        if not first_frame <= f <= last_frame:
+            continue
+        if msg.startswith("TICK-STUCK"):
+            cause = re.search(r"\bcause=(\S+)", msg)
+            marks = re.search(r"\brecentMarks=\[([^\]]*)\]", msg)
+            last_mark = marks.group(1).split("|")[-1].split(":", 2)[-1] if marks and marks.group(1) else ""
+            if (cause and cause.group(1) in _PEER_WAIT_CAUSES) or last_mark in _PEER_WAIT_MARKS:
+                found.append(line)
+        elif msg.startswith(
+            ("RB-INPUT-STALL-TIMEOUT", "PEER-PHANTOM", "ROLLBACK-STALL start", "INPUT-STALL hard-timeout")
+        ):
+            found.append(line)
+        elif msg.startswith("LOCKSTEP-WAIT"):
+            waited = _LOCKSTEP_WAITED.search(msg)
+            if waited and int(waited.group(1)) >= 1000:
+                found.append(line)
+    return found
 
 
 def _load_rom(page, rom_path):

@@ -147,14 +147,20 @@ def test_privacy_notice_is_available_without_the_game_server():
             assert "script-src 'self'" in r[(path, "GET", "")]["csp"]
 
 
-def test_version_and_changelog_prefer_origin_and_fall_back_to_assets():
-    """Release metadata is current when Render is up and instant when down."""
+def test_version_and_changelog_only_ever_come_from_the_game_server():
+    """CI rewrites both files on every release and never redeploys the Worker,
+    so a copy in its assets names an old release: production's footer showed
+    v0.67.0 from the Worker while the game server had v0.69.3. They are
+    passed through like the API, napping or not."""
     r = _run(origin_up=True)
     assert _body(r, "/static/version.json") == "origin:/static/version.json og=https://game.example/card"
     assert _body(r, "/static/changelog.json") == "origin:/static/changelog.json og=https://game.example/card"
+    # With the game server napping they fail the way /list does, and the
+    # footer asks again (web/src/site/version.ts).
     down = _run(origin_up=False)
-    assert _body(down, "/static/version.json") == "asset:/static/version.json"
-    assert _body(down, "/static/changelog.json") == "asset:/static/changelog.json"
+    assert _body(down, "/list") == "error:napping"
+    assert _body(down, "/static/version.json") == "error:napping"
+    assert _body(down, "/static/changelog.json") == "error:napping"
 
 
 def test_everything_else_goes_to_the_game_server_untouched():
@@ -205,8 +211,8 @@ def test_build_lists_exactly_the_files_the_pages_load():
     assert (dist / "privacy.html").read_bytes() == (REPO / "web" / "privacy.html").read_bytes()
     assert (dist / "static" / "dist" / "kn-join.js").is_file()
     assert (dist / "static" / "og" / "home.png").is_file()  # the static pages' og:image
-    assert (dist / "static" / "version.json").is_file()
-    assert (dist / "static" / "changelog.json").is_file()
+    assert not (dist / "static" / "version.json").exists()
+    assert not (dist / "static" / "changelog.json").exists()
     assert not (dist / "static" / "play.js").exists()
     build_json = dist / "static" / "landing-build.json"
     assert build_json.is_file()
@@ -1140,14 +1146,8 @@ globalThis.fetch = async (req, init) => {
   if (url.pathname === '/list') {
     return new Response('list', { status: mode === 'cooldown-524' ? 524 : 200 });
   }
-  if (url.pathname === '/static/version.json') return hang(init);
   landingFetches++;
   if (landingFetches === 1 && mode.startsWith('cooldown-')) return hang(init);
-  if (mode === 'metadata-page') {
-    return new Promise((resolve) => setTimeout(() => resolve(new Response('origin:' + url.pathname, {
-      status: 200, headers: { 'Content-Type': 'text/plain' },
-    })), 1500));
-  }
   return new Response('origin:' + url.pathname, { status: 200, headers: { 'Content-Type': 'text/plain' } });
 };
 const env = { ORIGIN: 'https://game.example', ASSETS: assets };
@@ -1178,17 +1178,6 @@ if (mode === 'build-marker') {
   await get('/list');
   const result = await get('/static/dist/kn-landing.js');
   out = { ...result, landingFetches };
-} else if (mode === 'metadata-timeout') {
-  const started = Date.now();
-  const result = await get('/static/version.json');
-  out = { ...result, elapsed: Date.now() - started };
-} else if (mode === 'metadata-page') {
-  await get('/'); await settle();
-  await get('/static/version.json'); // times out on the metadata budget
-  const landingFetchesBeforePage = landingFetches;
-  const started = Date.now();
-  const result = await get('/');
-  out = { ...result, elapsed: Date.now() - started, pageFetches: landingFetches - landingFetchesBeforePage };
 }
 console.log(JSON.stringify(out));
 """
@@ -1232,19 +1221,6 @@ def test_only_non_5xx_proxy_responses_clear_landing_cooldown(status, expected_bo
     out = _run_edge_case(f"cooldown-{status}")
     assert out["body"] == expected_body
     assert out["landingFetches"] == expected_fetches
-
-
-def test_metadata_falls_back_to_assets_with_the_short_timeout():
-    out = _run_edge_case("metadata-timeout")
-    assert out["body"] == "asset:/static/version.json"
-    assert out["elapsed"] < 1500
-
-
-def test_metadata_timeout_does_not_suppress_a_viable_stale_page_fetch():
-    out = _run_edge_case("metadata-page")
-    assert out["body"] == "origin:/"
-    assert 1000 < out["elapsed"] < 2500
-    assert out["pageFetches"] == 1
 
 
 # ── Public-host rewrite in proxied HTML ──────────────────────────────────

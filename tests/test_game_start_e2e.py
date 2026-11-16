@@ -214,6 +214,10 @@ def test_a_rom_that_is_not_the_hosts_is_refused_and_the_start_keeps_the_offer_up
     try:
         _load_rom(host)
         _share_rom(host, guest)
+        # The refusal at the drop needs the host's ROM known first. A ROM
+        # dropped before it is taken, and cleared without a word once the
+        # host's arrives: CI's browser shard 3 dropped too soon once.
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
         guest.set_input_files("#rom-drop input[type=file]", OTHER_ROM)
         expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)

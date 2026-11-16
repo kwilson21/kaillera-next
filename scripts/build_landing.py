@@ -36,15 +36,13 @@ from src.landing_build import (  # noqa: E402
     referenced,
 )
 
-FALLBACK_METADATA = {"static/version.json", "static/changelog.json"}
-
 
 def main() -> None:
     # The pages load bundles from web/static/dist, which is build output.
     web_bundles.build()
     if DIST.exists():
         shutil.rmtree(DIST)
-    files: set[str] = set(EXTRA) | FALLBACK_METADATA
+    files: set[str] = set(EXTRA)
     for page in PAGES:
         html = (WEB / page).read_text()
         files |= referenced(html)
