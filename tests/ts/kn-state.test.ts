@@ -43,6 +43,8 @@ const dataOf = (state: PageState): Record<string, string> =>
 const BUILT_BY_THE_SCRIPT = {
   remapActive: 'false',
   touchInput: '{}',
+  // Added by the deliberate reset shortcut; inactive until explicitly held.
+  resetComboHeld: 'false',
   peers: '{}',
   frameNum: '0',
   delayAutoValue: '2',

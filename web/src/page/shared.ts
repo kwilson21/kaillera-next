@@ -9,6 +9,7 @@
  * Consumed by: netplay-rollback.js, netplay-streaming.js, play.js
  * Exposes: window.KNShared, window.KNEvent (installShared)
  */
+import { RESET_COMBO_MASK } from '../reset-combo.ts';
 import { startPolling, type Polling } from '../poll.ts';
 import { decodeInput, encodeInput, inputEqual, type WireInput } from '../input-wire.ts';
 import { classifyRunnerStep } from '../runner-step.ts';
@@ -222,6 +223,14 @@ export const createShared = () => {
   function ensureKeyTrackingListeners(): void {
     if (!_listenersAdded) {
       _keydownHandler = (e) => {
+        // Menu/dialog activation is UI input, not the ROM's Start/A binding.
+        const target = e.target;
+        if (
+          typeof Element !== 'undefined' &&
+          target instanceof Element &&
+          target.closest('#reset-combo-dialog, #more-wrapper, #more-dropdown')
+        )
+          return;
         if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);
         _recentlyPressedKeys.add(e['keyCode']);
       };
@@ -665,6 +674,17 @@ export const createShared = () => {
           if (idx === 23 && val > 0) input.cy = -N64_MAX; // C-Up
         }
       }
+    }
+
+    if (
+      state.resetComboHeld &&
+      state.gameOn() &&
+      state.slot !== null &&
+      state.slot >= 0 &&
+      !ejsMenuOpen &&
+      !state.remapActive
+    ) {
+      input.buttons |= RESET_COMBO_MASK;
     }
 
     input.lx = clampN64Axis(input.lx);

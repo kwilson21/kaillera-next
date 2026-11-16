@@ -68,6 +68,11 @@ jobs:
           npm run build
       - name: Install Chromium
         run: uv run --directory server --frozen --extra dev python -m playwright install --with-deps --only-shell chromium
+      - name: Reset shortcut DOM and touch regressions
+        if: matrix.shard == 1
+        run: |
+          npx playwright install --with-deps --only-shell chromium
+          node --test tests/reset-combo.test.mjs
       # Started here rather than by the tests' fixture, so its log is kept and
       # rate limiting is off in its own environment (ratelimit.py reads it at import).
       - name: Start the server

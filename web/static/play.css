@@ -1641,3 +1641,36 @@ a.more-option {
   display: block;
   text-decoration: none;
 }
+
+/* Reset shortcut is in More: existing touch controls keep their exact layout. */
+#reset-combo-dialog {
+  max-width: min(28rem, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  background: #161c24;
+  color: #f5f5f5;
+  border: 1px solid #637083;
+  border-radius: 12px;
+  padding: 20px;
+}
+#reset-combo-dialog::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+#reset-combo-dialog button {
+  min-height: 48px;
+  padding: 10px 16px;
+}
+#reset-combo-hold {
+  width: 100%;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#reset-combo-hold[aria-pressed='true'] {
+  background: #355b81;
+  color: white;
+}
+#reset-combo-status {
+  min-height: 2.5em;
+  font-size: 0.9rem;
+}
