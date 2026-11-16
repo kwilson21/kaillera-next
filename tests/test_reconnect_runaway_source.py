@@ -70,7 +70,7 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     escalate = src[src.index("const _escalateLostInput = (peer, step, now) => {") :]
     escalate = escalate[: escalate.index("\n  };\n")]
     # To every guest (escalation_peers), and only when a push can go out.
-    assert "pushSyncState(null, false);" in escalate
+    assert "pushSyncState(null, false, { full: true });" in escalate
     assert escalate.index("if (!_canPushSyncState()) {") < escalate.index(
         "_overduePushes[slot] = {"
     )
@@ -269,3 +269,19 @@ def test_the_push_deadline_runs_only_on_a_push_that_went_out_and_ends_on_a_recon
     assert "delete _resendLog[slot];" in reset
     resend = src[src.index("if (e.data.startsWith('resend:')) {") :][:1400]
     assert "if (resendNow - resendLog.at >= INPUT_OOR_LOG_EVERY_MS) {" in resend
+
+
+def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
+    src = _src()
+    pushes = src[src.index("const _checkOverduePushes = () => {") :]
+    pushes = pushes[: pushes.index("\n  };\n")]
+    assert "pushSyncState(null, false, { full: true });" in pushes
+    push = src[
+        src.index(
+            "const pushSyncState = async (targetSid, isProactive = false, options = {}) => {"
+        ) :
+    ]
+    assert "isFull = !!options.full || !_lastSyncState" in push[:12000]
+    stop = src[src.index("  const stop = () => {") :]
+    stop = stop[: stop.index("\n  };\n")]
+    assert "_predictedKnownCount = 0;" in stop

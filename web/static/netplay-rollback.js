@@ -5425,7 +5425,7 @@
       // others ran on this player's real input, or on the host's prediction,
       // and only one state for all brings every page onto the host's
       // (specs/ask_escalation.qnt escalation_peers).
-      pushSyncState(null, false);
+      pushSyncState(null, false, { full: true });
       return;
     }
     const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
@@ -5496,7 +5496,7 @@
         push.at = null;
         push.armedAt = now;
         _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${push.pushes}/${OVERDUE_MAX_PUSHES}`);
-        pushSyncState(null, false);
+        pushSyncState(null, false, { full: true });
       } else {
         // The guest is still on a state that may differ from the host's,
         // and nothing else will correct it: it is dropped through the
@@ -19126,7 +19126,11 @@
       // the host only receives a second sync-request after the first response has been
       // received and applied. So when the host computes a delta here, _lastSyncState
       // matches what the guest has already applied — no forced-full needed.
-      isFull = !_lastSyncState || _lastSyncState.length !== currentState.length;
+      // An escalation push is full (options.full): it goes to guests whose
+      // base this page cannot know (one was missing messages; in three or
+      // more players an earlier sync may have gone to one guest only), and a
+      // delta on a base of the same size would be applied without a word.
+      isFull = !!options.full || !_lastSyncState || _lastSyncState.length !== currentState.length;
       _syncLog(
         `pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`,
       );
@@ -19997,6 +20001,7 @@
     _lockstepWaitFrame = -1;
     _lockstepWaitStart = 0;
     _hudRollbackEvents = 0;
+    _predictedKnownCount = 0;
     _hudRollbackDepthSamples = [];
     _hudEventTimestamps = [];
     _rttSamples = [];
