@@ -48,6 +48,10 @@ export interface MenuRun {
    * read the same memory: no game frame has gone by between them.
    */
   readonly lookaheadP2?: number;
+  /** Players at the character select, each picking from its own controller: 2 (the default) to 4. */
+  readonly players?: 2 | 3 | 4;
+  /** P3's and P4's input delay; P2's by default. */
+  readonly delayOthers?: number;
 }
 
 /** A character-select slot of the simulated game. */
@@ -102,6 +106,8 @@ export const simulate = (create: (options: MenuAutopilotOptions) => MenuAutopilo
   const stageSelect = run.stageSelect ?? true;
   const maxFrames = run.maxFrames ?? 6000;
   const lookaheadP2 = run.lookaheadP2 ?? 0;
+  const players = run.players ?? 2;
+  const delays = [delayP1, delayP2, run.delayOthers ?? delayP2, run.delayOthers ?? delayP2].slice(0, players);
   const rand = rng(seed);
   const mem = new Map<number, number>();
   const w32 = (addr: number, v: number) => mem.set(addr >>> 0, v >>> 0);
@@ -142,7 +148,7 @@ export const simulate = (create: (options: MenuAutopilotOptions) => MenuAutopilo
     held: i,
     status: 0,
   });
-  const slots: readonly [SimSlot, SimSlot] = [newSlot(0), newSlot(1)];
+  const slots: readonly SimSlot[] = Array.from({ length: players }, (_, i) => newSlot(i));
   const puckPos = (s: SimSlot) => ({ x: s.cursor.x + 11, y: s.cursor.y - 14 });
   const puckFkind = (s: SimSlot): number => {
     const p = puckPos(s);
@@ -191,12 +197,12 @@ export const simulate = (create: (options: MenuAutopilotOptions) => MenuAutopilo
     read32: (addr) => mem.get(addr >>> 0) ?? 0,
     log: () => undefined,
     currentFrame: () => simFrame,
+    players,
   });
+  const actors = [pilot.p1, pilot.p2, pilot.p3, pilot.p4].slice(0, players);
   const NEUTRAL: SimInput = { buttons: 0, lx: 0, ly: 0 };
-  const sent1: SimInput[] = [];
-  const sent2: SimInput[] = [];
-  let prev1 = 0;
-  let prev2 = 0;
+  const sent: SimInput[][] = actors.map(() => []);
+  const prev: number[] = actors.map(() => 0);
   const trace: string[] = [];
 
   /** One slot's frame on the character select: move the cursor, then take an A press. */
@@ -221,21 +227,21 @@ export const simulate = (create: (options: MenuAutopilotOptions) => MenuAutopilo
     writeState();
     if (scene === SCENE.VS_BATTLE && loading === 0) return { ok: true, frame, slots, mapsSlot, trace, strayPresses };
     simFrame = frame;
-    sent1[frame] = pilot.p1(frame);
-    for (let f = sent2.length; f <= frame + lookaheadP2; f++) sent2[f] = pilot.p2(f);
+    actors.forEach((actor, i) => {
+      const out = sent[i] ?? [];
+      // P2 may be asked for frames ahead (lookaheadP2); the others for this one.
+      const ahead = i === 1 ? lookaheadP2 : 0;
+      for (let f = i === 1 ? out.length : frame; f <= frame + ahead; f++) out[f] = actor(f);
+    });
     // The input sent for a frame reaches the game an input delay later.
-    const in1 = sent1[frame - delayP1] ?? NEUTRAL;
-    const in2 = sent2[frame - delayP2] ?? NEUTRAL;
+    const ins = sent.map((out, i) => out[frame - (delays[i] ?? 0)] ?? NEUTRAL);
     // A dropped press: the game doesn't see this frame's buttons (e.g. it
     // landed inside a transition).
-    const btn1 = rand() < dropProb ? 0 : in1.buttons;
-    const btn2 = rand() < dropProb ? 0 : in2.buttons;
-    const tap1 = btn1 & ~prev1;
-    const tap2 = btn2 & ~prev2;
-    prev1 = btn1;
-    prev2 = btn2;
-    const anyTap = tap1 | tap2;
-    const anyHold = btn1 | btn2;
+    const btns = ins.map((inp) => (rand() < dropProb ? 0 : inp.buttons));
+    const taps = btns.map((b, i) => b & ~(prev[i] ?? 0));
+    btns.forEach((b, i) => (prev[i] = b));
+    const anyTap = taps.reduce((a, t) => a | t, 0);
+    const anyHold = btns.reduce((a, b) => a | b, 0);
 
     if (loading > 0) {
       if (--loading === 0) {
@@ -282,8 +288,7 @@ export const simulate = (create: (options: MenuAutopilotOptions) => MenuAutopilo
           if (--proceedWait === 0) goTo(stageSelect ? SCENE.MAPS : SCENE.VS_BATTLE);
           break;
         }
-        stepSlot(slots[0], in1, tap1, ready);
-        stepSlot(slots[1], in2, tap2, ready);
+        slots.forEach((slot, i) => stepSlot(slot, ins[i] ?? NEUTRAL, taps[i] ?? 0, ready));
         const readyCount = slots.filter((s) => s.selected).length;
         const noGrab = slots.every((s) => s.status !== 1);
         if (anyTap & BTN.START && tics > 60 && readyCount >= 2 && noGrab) {

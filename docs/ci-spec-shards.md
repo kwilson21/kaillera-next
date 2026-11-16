@@ -9,8 +9,10 @@ bash scripts/check-specs.sh --list
 bash scripts/check-specs.sh --list --shard 1 4
 ```
 
-Each of the typecheck, scenario-test and random-run streams is dealt round-robin
-independently. Every invocation occurs once. Adding a check to the script needs
+Each of the typecheck, scenario-test and random-run streams is dealt
+independently, reversing lane order each round (1, 2, 3, 4, 4, 3, 2, 1). This
+spreads adjacent expensive checks without a hand-maintained timing manifest.
+Every invocation occurs once. Adding a check to the script needs
 no parallel manifest. No model, variant, invariant, sample count, step bound or
 random seed is changed by sharding. Commands log their arguments and
 elapsed seconds, so a slow shard can be diagnosed without guessing.
@@ -50,3 +52,8 @@ bounded choices and counters at the existing bounded depths. A model that needs
 larger integers must use the reference evaluator; never silently narrow its
 values to make it pass. The scenario tests, including older broken variants,
 remain in every CI run.
+
+The runner invokes the installed, locked Quint CLI with Node directly rather
+than starting npm for every command. The executable, arguments and failure
+propagation are unchanged; if dependencies are missing, the check fails rather
+than downloading a replacement.

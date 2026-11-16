@@ -38,15 +38,25 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       KN_TEST_PORT: '27888'
+      UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: npm
+      # The large locked Python wheels took 37–48 s to download on the two
+      # slow runners in run 43789283470. Cache package downloads, not .venv;
+      # every job still checks and installs the frozen dependency set below.
+      - name: Cache locked Python packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.UV_CACHE_DIR }}
+          key: uv-0.13.8-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('server/uv.lock') }}
       # The pages need the bundles, which are build output and not in git.
       - name: Install locked dependencies and build the bundles
         run: |
-          python -m pip install uv
+          python -m pip install uv==0.13.8
           uv sync --directory server --frozen --extra dev
           npm ci --ignore-scripts
           npm run build

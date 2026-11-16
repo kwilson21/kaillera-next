@@ -407,7 +407,10 @@ test('the page global has what the old script exposed, with the same constants',
   assert.deepEqual(Object.keys(menuAutopilot).sort(), Object.keys(old).sort());
   assert.deepStrictEqual(SCENE, structuredClone(old.SCENE));
   assert.deepStrictEqual(BTN, structuredClone(old.BTN));
-  assert.deepStrictEqual([...PORTRAIT_TARGETS], structuredClone(old.PORTRAIT_TARGETS));
+  // P1's and P2's targets are the old script's; P3's and P4's were added for
+  // the four-player test (tests/rb-mesh.mjs) and have no old counterpart.
+  assert.deepStrictEqual(PORTRAIT_TARGETS.slice(0, 2), structuredClone(old.PORTRAIT_TARGETS));
+  assert.equal(PORTRAIT_TARGETS.length, 4);
   assert.equal(MAPS_TARGET_SLOT, old.MAPS_TARGET_SLOT);
   assert.equal(menuAutopilot.create, createMenuAutopilot);
 });
@@ -502,7 +505,7 @@ const taped = (create: Create) => {
         options.log?.(msg);
       },
     });
-    made = { p1: actor(-2, pilot.p1), p2: actor(-3, pilot.p2), failure: pilot.failure };
+    made = { p1: actor(-2, pilot.p1), p2: actor(-3, pilot.p2), p3: pilot.p3, p4: pilot.p4, failure: pilot.failure };
     return made;
   };
   return { create: wrapped, tape, logs, failure: (): string | null => made?.failure() ?? null };

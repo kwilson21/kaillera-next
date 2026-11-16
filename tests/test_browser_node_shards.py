@@ -86,3 +86,11 @@ def test_workflow_runs_the_plugin_when_it_changes_and_keeps_all_shards():
     assert "shard: [1, 2, 3, 4, 5, 6, 7, 8]" in workflow
     assert "--ci-shard-count ${{ strategy.job-total }}" in workflow
     assert "--browser chromium" in workflow
+
+
+def test_cached_dependencies_are_still_installed_from_the_lockfile():
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/browser.yml").read_text()
+    assert "hashFiles('server/uv.lock')" in workflow
+    assert "uv sync --directory server --frozen --extra dev" in workflow
+    assert "npm ci --ignore-scripts" in workflow
+    assert "cache: npm" in workflow

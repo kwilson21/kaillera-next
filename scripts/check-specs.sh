@@ -15,7 +15,9 @@ esac
 SPEC=specs/room_lifecycle.qnt
 # Every invocation below belongs to exactly one shard. Split the run/test/
 # typecheck streams separately, so cheap typechecks do not displace expensive
-# simulations. New checks are included automatically, without a second list.
+# simulations. Each round reverses direction to spread adjacent expensive
+# checks instead of repeatedly loading the same lanes. New checks are included
+# automatically, without a second list.
 # No arguments runs the entire suite, as before.
 shard=1
 shards=1
@@ -35,11 +37,23 @@ if [ "$#" -ne 0 ]; then
   shards=$3
 fi
 selected=0
-declare -A counts=()
+# Indexed arrays also work with the Bash 3 shipped on macOS.
+counts=(0 0 0)
 quint_check() {
-  local kind="$1" index="${counts[$1]:-0}"
+  local kind
+  case "$1" in
+    typecheck) kind=0 ;;
+    test) kind=1 ;;
+    run) kind=2 ;;
+    *) echo "unsupported Quint check kind: $1" >&2; exit 2 ;;
+  esac
+  local index="${counts[$kind]}"
   counts[$kind]=$((index + 1))
-  if [ "$((index % shards + 1))" -ne "$shard" ]; then
+  local position=$((index % (2 * shards)))
+  if [ "$position" -ge "$shards" ]; then
+    position=$((2 * shards - 1 - position))
+  fi
+  if [ "$((position + 1))" -ne "$shard" ]; then
     return 0
   fi
   selected=$((selected + 1))
@@ -50,7 +64,9 @@ quint_check() {
   fi
   printf '== quint '; printf '%q ' "$@"; printf '\n'
   local started=$SECONDS
-  npx --no-install quint "$@"
+  # Use the locked, installed CLI directly: spawning npm for every check
+  # adds startup work but contributes no verification. A missing CLI fails.
+  node node_modules/@informalsystems/quint/dist/src/cli.js "$@"
   echo "== completed in $((SECONDS - started))s"
 }
 QUINT=quint_check
