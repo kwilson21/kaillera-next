@@ -671,8 +671,9 @@ const ASK_UNANSWERED_ACKS = process.env.ASK_UNANSWERED_ACKS === '1';
 // (END_ON_RECONNECT): PEER-RECOVERED's resync recovers it, nobody is dropped.
 const ASK_UNANSWERED_ACK_LOST = process.env.ASK_UNANSWERED_ACK_LOST === '1';
 // RESYNC_OFF=1: the host starts the game with resync off (the room's
-// toggle). Only with ASK_UNANSWERED_STALL_MS: no escalation push can go out,
-// so none is armed and nobody is dropped; the hole stays with the stall path.
+// toggle). Only with ASK_UNANSWERED_STALL_MS: an escalation push's transfer
+// reports it not sent, so it is let go (INPUT-ASK-PUSH-NOT-SENT), nobody is
+// pushed again or dropped, and the hole stays with the stall path.
 // Nothing corrects the hole with resync off, so the pages may differ from
 // it on (as on main with the toggle off): frames are compared from the boot
 // sync up to the hole's first frame, and must match there.
@@ -4293,7 +4294,7 @@ const askUnansweredReport = (() => {
   };
 })();
 const askUnansweredFailed = RESYNC_OFF
-  ? // Resync off: no push goes out, none is armed, nobody is dropped.
+  ? // Resync off: every push is let go unsent; none is pushed again, settled or given up.
     ASK_UNANSWERED_STALL_MS > 0 &&
     !(
       askUnansweredReport &&

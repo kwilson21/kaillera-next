@@ -9,7 +9,8 @@ import {
   lateJoinLostHostStep,
   overdueAskStep,
   pushDeadlineStep,
-  nextEscalationPush,
+  escalationForHole,
+  transferReportApplies,
   resyncDeadlineStep,
   type DeadlineStep,
   type LostHostStep,
@@ -356,7 +357,7 @@ test("the host's push ends on the guest's acknowledgement, is pushed again at it
       o.handed ?? true,
       o.failed ?? false,
       o.sendingMs ?? 0,
-      60000,
+      30000,
       o.waited ?? 0,
       5000,
       o.pushes ?? 1,
@@ -371,20 +372,28 @@ test("the host's push ends on the guest's acknowledgement, is pushed again at it
   assert.equal(step({ waited: 5000, pushes: 3 }), 'giveUp', 'pushesAreBounded');
 });
 
-test('a push not handed over has no deadline: it is let go only when its own transfer fails or at the backstop', () => {
-  const step = (failed: boolean, sendingMs: number, waited: number) =>
-    pushDeadlineStep(true, false, false, false, failed, sendingMs, 60000, waited, 5000, 3, 3);
-  // Queued behind another transfer for 45 s, the push is still on its way
-  // (noLetGoOfAPushOnItsWay), and never pushed again or given up.
-  assert.equal(step(false, 45000, 45000), 'sending');
-  assert.equal(step(true, 100, 0), 'letGo', 'LET_GO_ON_OUTCOME');
-  assert.equal(step(false, 60000, 0), 'letGo', 'the backstop (I1)');
+test('a push not handed over has no deadline: it is let go only on its own failure or a chain that stopped', () => {
+  const step = (failed: boolean, quietMs: number) =>
+    pushDeadlineStep(true, false, false, false, failed, quietMs, 30000, 0, 5000, 3, 3);
+  // A transfer queued behind another for minutes, still accepting chunks, is
+  // on its way (noLetGoOfAPushOnItsWay): only quiet time counts.
+  assert.equal(step(false, 29999), 'sending');
+  assert.equal(step(true, 100), 'letGo', 'its own failure');
+  assert.equal(step(false, 30000), 'letGo', 'no chunk accepted for the limit (I1)');
 });
 
-test('a push let go keeps its count for the same hole; past the limit the hole is left to the stall path', () => {
-  assert.equal(nextEscalationPush(false, 2, 3), 1);
-  assert.equal(nextEscalationPush(true, 1, 3), 2);
-  assert.equal(nextEscalationPush(true, 2, 3), 3);
-  assert.equal(nextEscalationPush(true, 3, 3), 0, 'pushesAreBoundedPerHole');
-  for (let n = 0; n <= 5; n++) assert.ok(nextEscalationPush(true, n, 3) <= 3);
+test('pushes are counted per hole; past the limit the hole is left to the stall path', () => {
+  assert.equal(escalationForHole(true, 0, 3), 'wait', 'a push out holds every hole of that guest');
+  assert.equal(escalationForHole(false, 0, 3), 'push');
+  assert.equal(escalationForHole(false, 2, 3), 'push');
+  assert.equal(escalationForHole(false, 3, 3), 'exhausted', 'pushesAreBoundedPerHole');
+  assert.equal(escalationForHole(false, 4, 3), 'exhausted');
+});
+
+test("only the push's own latest attempt, for its guest, decides it, once", () => {
+  assert.equal(transferReportApplies(true, true, true, false), true);
+  assert.equal(transferReportApplies(false, true, true, false), false, 'a push no longer out');
+  assert.equal(transferReportApplies(true, false, true, false), false, 'an earlier attempt');
+  assert.equal(transferReportApplies(true, true, false, false), false, "another guest's outcome");
+  assert.equal(transferReportApplies(true, true, true, true), false, 'already decided');
 });

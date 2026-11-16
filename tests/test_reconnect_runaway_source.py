@@ -13,8 +13,9 @@ def _src() -> str:
 
 
 def _slot_clear(src):
-    clear = src[src.index("const _clearSlotInputState = (slot) => {") :]
-    return clear[: clear.index("\n  };\n")]
+    # The table _clearSlotInputState and _resetInputMaps both walk (I2).
+    table = src[src.index("const _slotInputMaps = () => [") :]
+    return table[: table.index("];")]
 
 
 def test_the_same_frames_input_goes_out_again_at_most_every_100_ms():
@@ -72,7 +73,7 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     count = count[: count.index("\n  };\n")]
     assert "window.KNCore.resyncRequest.overdueAskStep(" in count
     assert "_escalateLostInput(peer, step, now, oldest);" in count
-    assert "isHost ? _escalationBlocks(slot, oldest) : _resyncRequestInFlight" in count
+    assert "isHost ? !!_overduePushes[slot] : _resyncRequestInFlight" in count
     escalate = src[
         src.index("const _escalateLostInput = (peer, step, now, hole) => {") :
     ]
@@ -80,7 +81,9 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     # The first push goes to every guest (escalation_peers); the hole keeps
     # its count across a let-go (escalation_push COUNT_SURVIVES).
     assert "_sendEscalationPush(slot, push, null);" in escalate
-    assert "window.KNCore.resyncRequest.nextEscalationPush(" in escalate
+    # Counted per hole (hole_counts), the decision proved.
+    assert "window.KNCore.resyncRequest.escalationForHole(" in escalate
+    assert "const counts = (_holePushCounts[slot] ??= {});" in escalate
     assert "INPUT-ASK-PUSH-EXHAUSTED" in escalate
     assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in escalate
     assert "const INPUT_ASK_OVERDUE_ASKS = 3;" in src
@@ -111,8 +114,8 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     )
     # I2: per-peer state, dropped with the peer.
     clear = _slot_clear(src)
-    assert "delete _inputAskOverdue[slot];" in clear
-    assert "delete _overduePushes[slot];" in clear
+    assert "    _inputAskOverdue,\n" in clear
+    assert "    _overduePushes,\n" in clear
 
 
 def test_an_input_past_the_window_that_differs_escalates_like_an_overdue_ask():
@@ -138,7 +141,7 @@ def test_after_a_reconnect_reset_a_frame_waits_for_the_peers_first_input():
     src = _src()
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
-    assert "delete _awaitFirstInputAfterReset[slot];" in _slot_clear(src)
+    assert "    _awaitFirstInputAfterReset,\n" in _slot_clear(src)
     assert reset.index("mod._kn_rollback_slot_reset(slot)") < reset.index(
         "if (reason === 'reconnect') _awaitFirstInputAfterReset[slot] = true;"
     )
@@ -149,13 +152,10 @@ def test_after_a_reconnect_reset_a_frame_waits_for_the_peers_first_input():
     stall = stall[: stall.index("_checkPredictedKnown(rbInputPeers, rbApplyFrame);")]
     assert "_awaitingFirstInput(p.slot);" in stall
     assert "if (gapAtEdge || firstWait || adv >= stallThreshold) {" in stall
-    # Every reset of all peers' state clears it too (I2): three, besides
-    # the declaration.
+    # Every reset of all peers' state clears it too (I2): it is in the table
+    # _resetInputMaps walks.
     assert src.count("let _awaitFirstInputAfterReset = {};") == 1
-    assert (
-        "_awaitFirstInputAfterReset = {};"
-        in src[src.index("const _resetInputMaps = () => {") :][:600]
-    )
+    assert "    _awaitFirstInputAfterReset,\n" in _slot_clear(src)
 
 
 def test_every_frame_that_runs_is_checked_for_a_prediction_nothing_corrects():
@@ -190,10 +190,10 @@ def test_the_guest_always_acknowledges_a_state_and_the_host_records_it_apart():
     handler = src[src.index("if (e.data.startsWith('inputs-settled:')) {") :]
     handler = handler[: handler.index("return;")]
     assert "_inputSettledAckBefore[peer.slot] = Math.max(" in handler
-    assert "delete _inputSettledAckBefore[slot];" in _slot_clear(src)
+    assert "    _inputSettledAckBefore,\n" in _slot_clear(src)
     maps = src[src.index("const _resetInputMaps = () => {") :]
     maps = maps[: maps.index("\n  };\n")]
-    assert "_inputSettledAckBefore = {};" in maps
+    assert "    _inputSettledAckBefore,\n" in _slot_clear(src)
 
 
 def test_an_input_the_page_lacked_keeps_the_peer_live_a_repeat_does_not():
@@ -266,8 +266,12 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     pushes = pushes[: pushes.index("\n  };\n")]
     assert "!target || !!target.reconnecting || !!_peerPhantom[slot]," in pushes
     assert "push.at !== null," in pushes
-    assert "OVERDUE_PUSH_BACKSTOP_MS," in pushes
-    assert "if (push.letGo) continue;" in pushes
+    # Let go on no progress, never a clock from the push's start (LET_GO
+    # "progress"); a push let go leaves only its hole's count behind.
+    assert "now - Math.max(push.armedAt, _syncProgressAt)," in pushes
+    assert "OVERDUE_PUSH_QUIET_MS," in pushes
+    assert "OVERDUE_PUSH_BACKSTOP_MS" not in src
+    assert "letGo: " not in src
     assert "INPUT-ASK-PUSH-ENDED" in pushes
     assert "INPUT-ASK-PUSH-NOT-SENT" in pushes
     # The retry goes to the guest that did not answer only.
@@ -280,16 +284,24 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
         src.index("const _onEscalationTransfer = (attempts, sid, sent) => {") :
     ]
     report = report[: report.index("\n  };\n")]
-    assert "push.attempt !== a" in report
+    assert "window.KNCore.resyncRequest.transferReportApplies(" in report
     assert "_onEscalationTransfer(attempts, targetSid, true);" in src
-    assert "_onEscalationTransfer(attempts, t.sid, outcomes[i] === 'sent');" in src
+    # Each guest's outcome as its own chain ends (PER_TARGET).
+    assert (
+        "return run.then((outcome) => {\n          _onEscalationTransfer(attempts, t.sid, outcome === 'sent');"
+        in src
+    )
     assert "escalation: [...(prev.escalation || []), ...attempts]," in src
-    assert "full: !!(prev.full || options.full)," in src
+    # Progress: every chunk accepted, every state captured.
+    assert src.count("_syncProgressAt = performance.now();") == 3
     # A freeze of the host's page is credited to the push's clocks.
     credit = src[src.index("const _creditLocalFreeze = () => {") :]
     credit = credit[: credit.index("\n  };\n")]
     assert "push.armedAt = Math.min(now, push.armedAt + gap);" in credit
     assert "if (push.at !== null) push.at = Math.min(now, push.at + gap);" in credit
+    assert "_syncProgressAt = Math.min(now, _syncProgressAt + gap);" in credit
+    # Recovered, a peer's holes start their count again.
+    assert src.count("_forgetHolePushes(") == 3
     # P2: one per-slot clear for both callers (I2), one map reset for three.
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
@@ -299,24 +311,31 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     assert "_clearSlotInputState(slot);" in pending
     assert src.count("_resetInputMaps();") == 3
     clear = _slot_clear(src)
-    assert "delete _inputOorLog[slot];" in clear
-    assert "delete _resendLog[slot];" in clear
+    assert "    _inputOorLog,\n" in clear
+    assert "    _resendLog,\n" in clear
     resend = src[src.index("if (e.data.startsWith('resend:')) {") :][:1400]
     assert "if (resendNow - resendLog.at >= INPUT_OOR_LOG_EVERY_MS) {" in resend
+    assert "resendLog.lastAt = resendNow;" in resend
+    flush = src[src.index("const _flushResendLogs = () => {") :]
+    flush = flush[: flush.index("\n  };\n")]
+    assert "if (now - log.lastAt < INPUT_OOR_LOG_EVERY_MS) continue;" in flush
+    assert "Object.entries" not in flush
     assert "_checkOverduePushes();\n    _flushResendLogs();" in src
 
 
 def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
     src = _src()
-    assert (
-        "pushSyncState(targetSid, false, { full: true, escalation: [attempt] });" in src
-    )
+    assert "pushSyncState(targetSid, false, { escalation: [attempt] });" in src
     push = src[
         src.index(
             "const pushSyncState = async (targetSid, isProactive = false, options = {}) => {"
         ) :
     ]
-    assert "isFull = !!options.full || !_lastSyncState" in push[:12000]
+    # The host sends no deltas (sync_base): every state is full and no base
+    # is kept for it.
+    assert "isFull = true;\n      toCompress = currentState;\n    }" in push[:12000]
+    assert "_setLastSyncState(currentState.slice(), 'pushSync')" not in src
+    assert "toCompress[i] = currentState[i] ^ _lastSyncState[i];" not in src
     stop = src[src.index("  const stop = () => {") :]
     stop = stop[: stop.index("\n  };\n")]
     assert "_predictedKnownCount = 0;" in stop

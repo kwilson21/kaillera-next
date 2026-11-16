@@ -276,38 +276,40 @@ export function overdueAskStep(
  * The deadline on the host's push to a guest whose input went unanswered
  * (specs/ask_escalation.qnt push_deadline, specs/escalation_push.qnt; I1).
  *
- * A push is a transfer that takes time: it may wait behind another transfer
- * to that guest, and its deadline starts only when its own state is handed
- * over (MARK_BY_FRAME), never when an earlier one is. The guest's
- * `inputs-settled:` for a state from the first push on ends it (done); a
- * reconnect or a phantom ends it too, its own resync superseding the push
- * (ended). Until the hand-over it is `sending`; a transfer that ended
- * without handing the state over, or none within `backstopMs` (longer than a
- * transfer queued behind another), lets it go (LET_GO_ON_OUTCOME), not counted
- * against the guest. Handed over and unanswered by `timeoutMs`, the host
- * pushes again, up to `maxPushes`, then gives up and drops the player, who
- * rejoins onto the host's state (pushesAreBounded, everyAskEnds). The caller
- * credits a freeze of its page to both clocks (CREDIT_FREEZE).
+ * A push is a transfer that takes time and has no fixed length: it may wait
+ * behind another transfer to that guest, and a transfer runs as long as its
+ * chunks keep being accepted. Its deadline starts only when its own state is
+ * handed over (MARK_BY_FRAME). The guest's `inputs-settled:` for a state from
+ * the first push on ends it (done); a reconnect or a phantom ends it too, its
+ * own resync superseding the push (ended). Until the hand-over it is
+ * `sending`: a transfer that ended without handing the state over lets it go,
+ * and so does a guest's chain that accepted no chunk for `quietLimitMs`,
+ * longer than a transfer's own stall limit, so a live transfer always fails
+ * by itself first (LET_GO "progress"): never a clock from the push's start.
+ * Handed over and unanswered by `timeoutMs`, the host pushes again, up to
+ * `maxPushes`, then gives up and drops the player, who rejoins onto the host's
+ * state (pushesAreBounded, everyAskEnds). The caller credits a freeze of its
+ * page to the clocks (CREDIT_FREEZE).
  *
- * @param pushOut     a push is out (not let go)
- * @param guestAway   the guest is reconnecting, a phantom, or gone
- * @param settled     the guest acknowledged a state from the first push on
- * @param handedOver  this push's own state was handed over
- * @param sendFailed  this push's own transfer ended without handing it over
- * @param sendingMs   how long since this push was started
- * @param backstopMs  the longest a push may take to be handed over
- * @param waitedMs    how long since it was handed over
- * @param timeoutMs   the deadline after the hand-over
- * @param pushes      pushes sent for this input
- * @param maxPushes   the most pushes
+ * @param pushOut       a push is out
+ * @param guestAway     the guest is reconnecting, a phantom, or gone
+ * @param settled       the guest acknowledged a state from the first push on
+ * @param handedOver    this push's own state was handed over
+ * @param sendFailed    this push's own transfer ended without handing it over
+ * @param quietMs       since a chunk was last accepted on the guest's chain, or the push started
+ * @param quietLimitMs  the most that may pass with no chunk accepted
+ * @param waitedMs      how long since it was handed over
+ * @param timeoutMs     the deadline after the hand-over
+ * @param pushes        pushes sent for this hole
+ * @param maxPushes     the most pushes
  */
 export type PushDeadlineStep = 'noPush' | 'ended' | 'done' | 'sending' | 'letGo' | 'wait' | 'pushAgain' | 'giveUp';
 //@ requires pushes >= 1 && maxPushes >= 1
 //@ ensures !pushOut ==> \result === "noPush"
 //@ ensures pushOut && guestAway ==> \result === "ended"
 //@ ensures pushOut && !guestAway && settled ==> \result === "done"
-//@ ensures \result === "sending" <==> pushOut && !guestAway && !settled && !handedOver && !sendFailed && sendingMs < backstopMs
-//@ ensures \result === "letGo" <==> pushOut && !guestAway && !settled && !handedOver && (sendFailed || sendingMs >= backstopMs)
+//@ ensures \result === "sending" <==> pushOut && !guestAway && !settled && !handedOver && !sendFailed && quietMs < quietLimitMs
+//@ ensures \result === "letGo" <==> pushOut && !guestAway && !settled && !handedOver && (sendFailed || quietMs >= quietLimitMs)
 //@ ensures \result === "wait" <==> pushOut && !guestAway && !settled && handedOver && waitedMs < timeoutMs
 //@ ensures \result === "pushAgain" <==> pushOut && !guestAway && !settled && handedOver && waitedMs >= timeoutMs && pushes < maxPushes
 //@ ensures \result === "giveUp" <==> pushOut && !guestAway && !settled && handedOver && waitedMs >= timeoutMs && pushes >= maxPushes
@@ -317,8 +319,8 @@ export function pushDeadlineStep(
   settled: boolean,
   handedOver: boolean,
   sendFailed: boolean,
-  sendingMs: number,
-  backstopMs: number,
+  quietMs: number,
+  quietLimitMs: number,
   waitedMs: number,
   timeoutMs: number,
   pushes: number,
@@ -327,28 +329,50 @@ export function pushDeadlineStep(
   if (!pushOut) return 'noPush';
   if (guestAway) return 'ended';
   if (settled) return 'done';
-  if (!handedOver) return sendFailed || sendingMs >= backstopMs ? 'letGo' : 'sending';
+  if (!handedOver) return sendFailed || quietMs >= quietLimitMs ? 'letGo' : 'sending';
   if (waitedMs < timeoutMs) return 'wait';
   return pushes < maxPushes ? 'pushAgain' : 'giveUp';
 }
 
 /**
- * The number of the push an escalation starts (specs/escalation_push.qnt,
- * COUNT_SURVIVES). A push let go keeps its count for the same hole: escalated
- * again, the hole gets the next push, and past `maxPushes` none (0): it is
- * left to the stall path (its deadline, the phantom and its resync) instead
- * of being pushed for ever. A new hole starts at 1.
+ * What an overdue hole of a guest gets (specs/escalation_push.qnt,
+ * COUNT_SURVIVES and hole_counts). A push out for that guest holds every
+ * further escalation (it brings the guest onto the host's state). Pushes are
+ * counted per hole, a push let go included, so holes taking turns cannot
+ * reset each other's count: below `maxPushes` the hole is pushed, and past it
+ * it is left to the stall path (its deadline, the phantom and its resync)
+ * instead of being pushed for ever.
  *
- * @param sameHole     the last push let go for this guest was for this hole
- * @param pushesSoFar  the pushes that hole had
- * @param maxPushes    the most pushes
+ * @param pushOut     a push is out for this guest
+ * @param holePushes  pushes this hole has had
+ * @param maxPushes   the most pushes
  */
-//@ requires maxPushes >= 1 && pushesSoFar >= 0
-//@ ensures !sameHole ==> \result === 1
-//@ ensures sameHole && pushesSoFar < maxPushes ==> \result === pushesSoFar + 1
-//@ ensures sameHole && pushesSoFar >= maxPushes ==> \result === 0
-//@ ensures \result <= maxPushes
-export function nextEscalationPush(sameHole: boolean, pushesSoFar: number, maxPushes: number): number {
-  if (!sameHole) return 1;
-  return pushesSoFar < maxPushes ? pushesSoFar + 1 : 0;
+export type EscalationForHole = 'wait' | 'push' | 'exhausted';
+//@ requires maxPushes >= 1 && holePushes >= 0
+//@ ensures pushOut ==> \result === "wait"
+//@ ensures \result === "push" <==> !pushOut && holePushes < maxPushes
+//@ ensures \result === "exhausted" <==> !pushOut && holePushes >= maxPushes
+export function escalationForHole(pushOut: boolean, holePushes: number, maxPushes: number): EscalationForHole {
+  if (pushOut) return 'wait';
+  return holePushes < maxPushes ? 'push' : 'exhausted';
+}
+
+/**
+ * Whether a transfer's outcome is the push's (specs/escalation_push.qnt,
+ * MARK_BY_FRAME): only the push still out, its latest attempt, for the guest
+ * it is for, and only once.
+ *
+ * @param pushIsCurrent     the push is still the one out for its guest
+ * @param attemptIsCurrent  the transfer carried the push's latest attempt
+ * @param forThisGuest      the outcome is for the push's guest (or for every guest)
+ * @param decided           the attempt was already handed over or failed
+ */
+//@ ensures \result <==> pushIsCurrent && attemptIsCurrent && forThisGuest && !decided
+export function transferReportApplies(
+  pushIsCurrent: boolean,
+  attemptIsCurrent: boolean,
+  forThisGuest: boolean,
+  decided: boolean,
+): boolean {
+  return pushIsCurrent && attemptIsCurrent && forThisGuest && !decided;
 }

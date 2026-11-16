@@ -89,21 +89,23 @@ def test_the_kept_resend_is_per_peer_state_cleared_with_it():
     src = ENGINE_JS.read_text()
     # One per-slot clear, which resetPeerState and _markPendingLateJoinPeer
     # both call; one map reset for every input timeline.
+    table = src[src.index("const _slotInputMaps = () => [") :]
+    table = table[: table.index("];")]
+    assert "    _resendAtSwitch,\n" in table and "    _inputAskedAt,\n" in table
     slot_clear = src[src.index("const _clearSlotInputState = (slot) => {") :]
     slot_clear = slot_clear[: slot_clear.index("\n  };\n")]
-    assert "delete _resendAtSwitch[slot];" in slot_clear
-    assert src.count("delete _resendAtSwitch[slot];") == 1
+    assert "for (const map of _slotInputMaps()) delete map[slot];" in slot_clear
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
     assert "_clearSlotInputState(slot);" in reset
     maps = src[src.index("const _resetInputMaps = () => {") :]
     maps = maps[: maps.index("\n  };\n")]
-    assert "_resendAtSwitch = {};" in maps and "_inputAskedAt = {};" in maps
+    assert "for (const map of _slotInputMaps()) for (const slot in map) delete map[slot];" in maps
     clear = src[src.index("const _clearInputsForNewMatch = (reason) => {") :]
     clear = clear[: clear.index("\n  };\n")]
     assert "_resetInputMaps();" in clear
     # Every place the tables are cleared (the declarations aside) is the one reset.
-    assert src.count("_resendAtSwitch = {};") - src.count("let _resendAtSwitch = {};") == 1
+    assert src.count("_resendAtSwitch = {};") == src.count("let _resendAtSwitch = {};") == 1
     assert src.count("_resetInputMaps();") == 3
 
 

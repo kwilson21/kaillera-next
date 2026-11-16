@@ -1778,16 +1778,25 @@
   const INPUT_ASK_OVERDUE_MS = 1500;
   const OVERDUE_PUSH_TIMEOUT_MS = 5000;
   const OVERDUE_MAX_PUSHES = 3;
-  // The longest a push may take to be handed over before it is let go: longer
-  // than a transfer queued behind another (SYNC_SEND_STALL_MS a chunk, at most
-  // a few chunks waiting), so a push still on its way is never let go
-  // (specs/escalation_push.qnt, noLetGoOfAPushOnItsWay). I1's backstop for a
-  // transfer that never reports.
-  const OVERDUE_PUSH_BACKSTOP_MS = 60000;
+  // A push not handed over is let go when no state transfer has had a chunk
+  // accepted for this long (nor any been captured since it started): longer
+  // than a transfer's own stall limit (SYNC_SEND_STALL_MS), so a transfer
+  // still on its way always ends by itself first, however long it runs
+  // (specs/escalation_push.qnt, LET_GO "progress"). I1's limit for a
+  // transfer that never reports. Never a clock from the push's start.
+  const OVERDUE_PUSH_QUIET_MS = 30000;
   let _inputAskOverdue = {}; // slot -> { frame, asks, firstAt }
-  // slot -> { sid, hole, firstFrame, pushes, armedAt, at, failed, letGo,
-  // exhausted, attempt }. A push let go stays, for its count (COUNT_SURVIVES).
+  // slot -> the push out for that guest: { sid, hole, firstFrame, pushes,
+  // armedAt, at, failed, attempt }. One at a time per guest: it brings the
+  // guest onto the host's state, whatever hole it was for.
   let _overduePushes = {};
+  // slot -> { [hole frame]: pushes }: pushes counted per hole, a push let go
+  // included (COUNT_SURVIVES, hole_counts). Cleared with the peer (I2) and
+  // when it recovers: settled, reconnected, a phantom, PEER-RECOVERED.
+  let _holePushCounts = {};
+  // When a state transfer last had a chunk accepted, or a state was captured
+  // (performance.now()): the progress a push waiting on a transfer is judged by.
+  let _syncProgressAt = 0;
   // Per peer slot, the frames of the switch to the reliable input channel's
   // resend not sent yet: {from, upTo, ack} (_switchInputsToReliable). Cleared
   // with the peer's other input state (resetPeerState, I2) and with every
@@ -5369,7 +5378,7 @@
       now - track.firstAt,
       INPUT_ASK_OVERDUE_ASKS,
       INPUT_ASK_OVERDUE_MS,
-      isHost ? _escalationBlocks(slot, oldest) : _resyncRequestInFlight,
+      isHost ? !!_overduePushes[slot] : _resyncRequestInFlight,
     );
     if (step === 'wait') return;
     _syncLog(
@@ -5394,44 +5403,48 @@
       INPUT_ASK_OVERDUE_MS,
       INPUT_ASK_OVERDUE_ASKS,
       INPUT_ASK_OVERDUE_MS,
-      isHost ? _escalationBlocks(slot, frame) : _resyncRequestInFlight,
+      isHost ? !!_overduePushes[slot] : _resyncRequestInFlight,
     );
     _syncLog(`INPUT-PAST-WINDOW-MISMATCH f=${_frameNum} slot=${slot} frame=${frame} → ${step}`);
     if (step !== 'wait') _escalateLostInput(peer, step, now, frame);
   };
 
-  // A push out for this slot holds further escalations; so does a hole whose
-  // pushes ran out (left to the stall path). A push let go does not.
-  const _escalationBlocks = (slot, hole) => {
-    const push = _overduePushes[slot];
-    return !!push && (!push.letGo || (push.exhausted && push.hole === hole));
-  };
   // Send an escalation push: one attempt, which pushSyncState reports back
-  // when its own transfer ends (_onEscalationTransfer). The deadline starts
-  // then, not before (specs/escalation_push.qnt, MARK_BY_FRAME): a state
-  // taken earlier and handed over meanwhile does not count. Full: the guests
-  // it goes to may hold any base (one was missing messages; in three or more
-  // players an earlier sync may have gone to one guest only).
+  // when its own transfer to that guest ends (_onEscalationTransfer). The
+  // deadline starts then, not before (specs/escalation_push.qnt,
+  // MARK_BY_FRAME). Always a full state, and the host keeps no delta base
+  // (sync_base).
   const _sendEscalationPush = (slot, push, targetSid) => {
     const attempt = { slot, push };
     push.attempt = attempt;
     push.at = null;
     push.failed = false;
     push.armedAt = performance.now();
-    pushSyncState(targetSid, false, { full: true, escalation: [attempt] });
+    pushSyncState(targetSid, false, { escalation: [attempt] });
   };
   // How an escalation push's own transfer ended, for the guest `sid` (null:
-  // for every guest, it never got as far as one).
+  // for every guest, it never got as far as one). Whose it is:
+  // transferReportApplies (proved).
   const _onEscalationTransfer = (attempts, sid, sent) => {
     if (!attempts?.length) return;
     const now = performance.now();
     for (const a of attempts) {
       const push = a.push;
-      if (_overduePushes[a.slot] !== push || push.attempt !== a || push.at !== null || push.failed) continue;
-      if (sid !== null && sid !== push.sid) continue;
+      const applies = window.KNCore.resyncRequest.transferReportApplies(
+        _overduePushes[a.slot] === push,
+        push.attempt === a,
+        sid === null || sid === push.sid,
+        push.at !== null || push.failed,
+      );
+      if (!applies) continue;
       if (sent) push.at = now;
       else push.failed = true;
     }
+  };
+  // A peer recovered (settled, reconnected, a phantom, PEER-RECOVERED): its
+  // holes start their count again.
+  const _forgetHolePushes = (slot) => {
+    delete _holePushCounts[slot];
   };
 
   const _escalateLostInput = (peer, step, now, hole) => {
@@ -5439,40 +5452,40 @@
     if (step === 'push') {
       const sid = Object.keys(_peers).find((key) => _peers[key] === peer);
       if (!sid) return;
-      // A push let go for this hole keeps its count: the hole is pushed again
-      // only up to the limit, then left to the stall path (its deadline, the
-      // phantom and its resync), never pushed for ever
-      // (specs/escalation_push.qnt, COUNT_SURVIVES; nextEscalationPush).
-      const prev = _overduePushes[slot];
-      const sameHole = !!prev && prev.letGo && prev.sid === sid && prev.hole === hole;
-      const n = window.KNCore.resyncRequest.nextEscalationPush(
-        sameHole,
-        sameHole ? prev.pushes : 0,
-        OVERDUE_MAX_PUSHES,
-      );
-      if (n === 0) {
-        prev.exhausted = true;
-        _syncLog(
-          `INPUT-ASK-PUSH-EXHAUSTED f=${_frameNum} slot=${slot} hole=${hole} pushes=${prev.pushes}: left to the stall path`,
-        );
+      // Pushes are counted per hole, a push let go included: a hole is
+      // pushed up to the limit, then left to the stall path (its deadline,
+      // the phantom and its resync), never pushed for ever, and holes taking
+      // turns keep their own counts (specs/escalation_push.qnt hole_counts;
+      // escalationForHole).
+      const counts = (_holePushCounts[slot] ??= {});
+      const had = counts[hole] ?? 0;
+      const decision = window.KNCore.resyncRequest.escalationForHole(!!_overduePushes[slot], had, OVERDUE_MAX_PUSHES);
+      if (decision === 'wait') return;
+      if (decision === 'exhausted') {
+        // Logged once per hole.
+        if (had === OVERDUE_MAX_PUSHES) {
+          counts[hole] = had + 1;
+          _syncLog(
+            `INPUT-ASK-PUSH-EXHAUSTED f=${_frameNum} slot=${slot} hole=${hole} pushes=${had}: left to the stall path`,
+          );
+        }
         return;
       }
+      counts[hole] = had + 1;
       // The guest's acknowledgement of any state from the first push on
       // settles it (firstFrame, SETTLE_ON_FIRST).
       const push = {
         sid,
         hole,
-        firstFrame: sameHole ? prev.firstFrame : _frameNum,
-        pushes: n,
+        firstFrame: _frameNum,
+        pushes: had + 1,
         armedAt: now,
         at: null,
         failed: false,
-        letGo: false,
-        exhausted: false,
         attempt: null,
       };
       _overduePushes[slot] = push;
-      _syncLog(`INPUT-ASK-PUSH f=${_frameNum} slot=${slot} hole=${hole} push=${n}/${OVERDUE_MAX_PUSHES}`);
+      _syncLog(`INPUT-ASK-PUSH f=${_frameNum} slot=${slot} hole=${hole} push=${push.pushes}/${OVERDUE_MAX_PUSHES}`);
       // To every guest, not only this one: in three or four players the
       // others ran on this player's real input, or on the host's prediction,
       // and only one state for all brings every page onto the host's
@@ -5503,7 +5516,6 @@
     for (const key of Object.keys(_overduePushes)) {
       const push = _overduePushes[key];
       const slot = Number(key);
-      if (push.letGo) continue; // kept for its count only
       const target = _peers[push.sid];
       const step = window.KNCore.resyncRequest.pushDeadlineStep(
         true,
@@ -5511,8 +5523,8 @@
         (_inputSettledAckBefore[slot] ?? -1) >= push.firstFrame - DELAY_FRAMES,
         push.at !== null,
         push.failed,
-        now - push.armedAt,
-        OVERDUE_PUSH_BACKSTOP_MS,
+        now - Math.max(push.armedAt, _syncProgressAt),
+        OVERDUE_PUSH_QUIET_MS,
         push.at === null ? 0 : now - push.at,
         OVERDUE_PUSH_TIMEOUT_MS,
         push.pushes,
@@ -5528,22 +5540,26 @@
             `${!target ? 'no entry' : target.reconnecting ? 'reconnecting' : 'phantom'}, its own resync supersedes the push`,
         );
         delete _overduePushes[key];
+        _forgetHolePushes(slot);
       } else if (step === 'done') {
         _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${push.firstFrame} pushes=${push.pushes}`);
         delete _overduePushes[key];
+        _forgetHolePushes(slot);
       } else if (step === 'letGo') {
         // Never handed over: not counted against the guest, and the ask stays
         // with the stall path; escalated again, the hole keeps its count.
         _syncLog(
           `INPUT-ASK-PUSH-NOT-SENT f=${_frameNum} slot=${slot} push=${push.pushes}/${OVERDUE_MAX_PUSHES}: ` +
-            `${push.failed ? 'its transfer ended without handing the state over' : 'not handed over by the backstop'}; let go`,
+            `${push.failed ? 'its transfer ended without handing the state over' : 'no transfer made progress'}; let go`,
         );
-        push.letGo = true;
-        push.attempt = null;
+        // Its count stays with the hole (_holePushCounts).
+        delete _overduePushes[key];
       } else if (step === 'pushAgain') {
         // Only to this guest: the others took the first push, which was for
         // all (P2: a broadcast for each retry resyncs the whole room).
         push.pushes++;
+        const counts = (_holePushCounts[slot] ??= {});
+        counts[push.hole] = Math.max(counts[push.hole] ?? 0, push.pushes);
         _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${push.pushes}/${OVERDUE_MAX_PUSHES}`);
         _sendEscalationPush(slot, push, push.sid);
       } else {
@@ -5572,15 +5588,17 @@
   };
 
   // RESEND lines are throttled to one a second per peer, with the count they
-  // cover. The rest of a burst is logged once it has gone quiet.
+  // cover. The rest of a burst is logged once no ask has come for a second.
   const _flushResendLogs = () => {
-    const now = performance.now();
-    for (const [slot, log] of Object.entries(_resendLog)) {
-      if (log.count > 0 && now - log.at >= INPUT_OOR_LOG_EVERY_MS) {
-        _syncLog(`RESEND f=${_frameNum} slot=${slot} count=${log.count} (the rest of the last burst)`);
-        log.at = now;
-        log.count = 0;
-      }
+    let now = 0;
+    for (const slot in _resendLog) {
+      const log = _resendLog[slot];
+      if (log.count === 0) continue;
+      now ||= performance.now();
+      if (now - log.lastAt < INPUT_OOR_LOG_EVERY_MS) continue;
+      _syncLog(`RESEND f=${_frameNum} slot=${slot} count=${log.count} (the rest of the last burst)`);
+      log.at = now;
+      log.count = 0;
     }
   };
 
@@ -6008,41 +6026,39 @@
       !!_peerInputStarted[slot] ||
       _lastRemoteFramePerSlot[slot] !== undefined);
 
-  // A peer slot's input state: what was received, settled, asked for and
-  // pushed. Both a reconnect (resetPeerState) and a player held as a late
-  // joiner (_markPendingLateJoinPeer) start it clean (I2); each clears its
-  // own state besides.
+  // The input maps kept by peer slot that a peer's reset and a new input
+  // timeline both clear (I2): one table, walked by both. A new map goes here.
+  const _slotInputMaps = () => [
+    _inputSettledBefore,
+    _inputDroppedAheadUpTo,
+    _awaitFirstInputAfterReset,
+    _resendLog,
+    _inputSettledAckBefore,
+    _inputOorLog,
+    _inputAskedAt,
+    _inputAskOverdue,
+    _overduePushes,
+    _holePushCounts,
+    _resendAtSwitch,
+  ];
+  // A peer slot's input state. Both a reconnect (resetPeerState) and a player
+  // held as a late joiner (_markPendingLateJoinPeer) start it clean (I2); each
+  // clears its own state besides. The maps below are per-slot only: a new
+  // input timeline keeps or rebuilds them itself (_remoteInputs and
+  // _peerInputStarted by each site; the frame last heard and the late-join
+  // windows outlive a new match, which does not move a peer's frame).
   const _clearSlotInputState = (slot) => {
+    for (const map of _slotInputMaps()) delete map[slot];
     delete _remoteInputs[slot];
-    delete _inputSettledBefore[slot];
-    delete _inputDroppedAheadUpTo[slot];
-    delete _awaitFirstInputAfterReset[slot];
-    delete _inputSettledAckBefore[slot];
-    delete _inputOorLog[slot];
-    delete _resendLog[slot];
-    delete _inputAskedAt[slot];
-    delete _inputAskOverdue[slot];
-    delete _overduePushes[slot];
-    delete _resendAtSwitch[slot];
     delete _peerInputStarted[slot];
     delete _lastRemoteFramePerSlot[slot];
     delete _lateJoinActivatedAtFrame[slot];
     delete _lateJoinSeededInputFrames[slot];
   };
-  // The same maps for every slot, when the input timeline starts over (a new
-  // match, a fast-forward, stop). _remoteInputs, _localInputs and
-  // _peerInputStarted are each site's own.
+  // Every slot's entry in the table, when the input timeline starts over (a
+  // new match, a fast-forward, stop).
   const _resetInputMaps = () => {
-    _inputSettledBefore = {};
-    _inputDroppedAheadUpTo = {};
-    _awaitFirstInputAfterReset = {};
-    _resendLog = {};
-    _inputSettledAckBefore = {};
-    _inputOorLog = {};
-    _inputAskedAt = {};
-    _inputAskOverdue = {};
-    _overduePushes = {};
-    _resendAtSwitch = {};
+    for (const map of _slotInputMaps()) for (const slot in map) delete map[slot];
   };
 
   const _markPendingLateJoinPeer = (sid, slot, reason = '') => {
@@ -9471,6 +9487,7 @@
       if (_peerPhantom[peer.slot]) {
         _syncLog(`PEER-RECOVERED slot=${peer.slot} f=${recvFrame} — resuming normal pacing`);
         _peerPhantom[peer.slot] = false;
+        _forgetHolePushes(peer.slot);
         _consecutiveFabrications[peer.slot] = 0;
         window.dispatchEvent(new CustomEvent('kn-peer-recovered', { detail: { slot: peer.slot } }));
         if (_playerSlot !== 0 && peer.slot === 0 && _syncEnabled) {
@@ -9923,9 +9940,10 @@
           const localInput = _localInputs[resendFrame];
           // At most one line a second per peer (a stall asks every 500 ms
           // for every frame missing): the count says how many it covers.
-          const resendLog = (_resendLog[peer.slot] ??= { at: -Infinity, count: 0 });
+          const resendLog = (_resendLog[peer.slot] ??= { at: -Infinity, lastAt: 0, count: 0 });
           resendLog.count++;
           const resendNow = performance.now();
+          resendLog.lastAt = resendNow;
           if (resendNow - resendLog.at >= INPUT_OOR_LOG_EVERY_MS) {
             _syncLog(
               `RESEND f=${_frameNum} slot=${peer.slot} frame=${resendFrame} have=${localInput !== undefined} ` +
@@ -15683,6 +15701,7 @@
       push.armedAt = Math.min(now, push.armedAt + gap);
       if (push.at !== null) push.at = Math.min(now, push.at + gap);
     }
+    if (_syncProgressAt > 0) _syncProgressAt = Math.min(now, _syncProgressAt + gap);
     _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
   };
 
@@ -19072,8 +19091,9 @@
     // proactive push in progress never drops a sync-request from a reconnecting guest.
     if (isProactive ? _proactivePushInFlight : _pushingSyncState) {
       if (!isProactive) {
-        // Newest options kept, but a full state stays full, and the
-        // escalation attempts queued before go with it.
+        // Newest options kept, but what the requests queued before carry goes
+        // with them: the numbers of the requests the state answers, the
+        // guests to watch, and the escalation attempts.
         const key = targetSid || '';
         const prev = _queuedSyncPushes.get(key);
         _queuedSyncPushes.set(
@@ -19081,7 +19101,8 @@
           prev
             ? {
                 ...options,
-                full: !!(prev.full || options.full),
+                requestIds: { ...(prev.requestIds || {}), ...(options.requestIds || {}) },
+                watchFor: [...new Set([...(prev.watchFor || []), ...(options.watchFor || [])])],
                 escalation: [...(prev.escalation || []), ...attempts],
               }
             : options,
@@ -19146,6 +19167,7 @@
       }
       currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
       _syncLog(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
+      _syncProgressAt = performance.now();
       // Arm post-sync diagnostic burst on host too
       window._knPostSyncDiagFrames = 10;
 
@@ -19208,31 +19230,14 @@
       // Do NOT advance _lastSyncState — proactive pushes are independent of the
       // requested-sync delta chain.
     } else {
-      // Delta chain safety: with _resyncRequestInFlight (single in-flight) on the guest,
-      // the host only receives a second sync-request after the first response has been
-      // received and applied. So when the host computes a delta here, _lastSyncState
-      // matches what the guest has already applied — no forced-full needed.
-      // An escalation push is full (options.full): it goes to guests whose
-      // base this page cannot know (one was missing messages; in three or
-      // more players an earlier sync may have gone to one guest only), and a
-      // delta on a base of the same size would be applied without a word.
-      isFull = !!options.full || !_lastSyncState || _lastSyncState.length !== currentState.length;
-      _syncLog(
-        `pushSync: lastState=${_lastSyncState ? _lastSyncState.length : 'null'} current=${currentState.length} isFull=${isFull}`,
-      );
-      if (isFull) {
-        toCompress = currentState;
-      } else {
-        toCompress = new Uint8Array(currentState.length);
-        for (let i = 0; i < currentState.length; i++) {
-          toCompress[i] = currentState[i] ^ _lastSyncState[i];
-        }
-      }
-      // Update delta base for next explicit sync.
-      // Must .slice() because compressState() transfers the buffer to a Web Worker,
-      // which detaches the ArrayBuffer. Without the copy, _lastSyncState.length === 0
-      // on the next push and delta never fires.
-      _setLastSyncState(currentState.slice(), 'pushSync');
+      // Always full: the host sends no deltas (specs/escalation_push.qnt
+      // sync_base). It kept one delta base for every guest, and any state
+      // sent to one guest (an escalation push, the answer to one guest's
+      // request) moved it, so the next delta to another guest was applied,
+      // without a word, onto a base it never got. A guest still decodes a
+      // delta from an older host.
+      isFull = true;
+      toCompress = currentState;
     }
 
     // By target sid: the number of the request this state answers, if any.
@@ -19267,6 +19272,7 @@
             ...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {}),
           });
           _settleInputsBefore(_peers[targetSid].slot, frame);
+          _syncProgressAt = performance.now();
           _onEscalationTransfer(attempts, targetSid, true);
           _syncLog(
             `socket sync sent to slot=${_peers[targetSid].slot}: ${isFull ? 'full' : 'delta'} ` +
@@ -19340,13 +19346,22 @@
     requestIds = {},
     attempts = [],
   ) => {
+    // A guest the state is not for (held as a late joiner, gone): its
+    // escalation push does not go out.
+    const covered = new Set(targets.map((t) => t.sid));
+    for (const a of attempts) if (!covered.has(a.push.sid)) _onEscalationTransfer([a], a.push.sid, false);
     const outcomes = await Promise.all(
       targets.map((t) => {
         const run = (_syncSendChains[t.sid] ?? Promise.resolve()).then(() =>
           _sendSyncChunksTo(t, compressed, frame, isFull, isProactive, requestIds),
         );
         _syncSendChains[t.sid] = run.catch(() => {});
-        return run;
+        // Each guest's outcome as its own chain ends: one guest's slow link
+        // does not hold another's deadline (PER_TARGET).
+        return run.then((outcome) => {
+          _onEscalationTransfer(attempts, t.sid, outcome === 'sent');
+          return outcome;
+        });
       }),
     );
     _syncLog(
@@ -19356,12 +19371,7 @@
     targets.forEach((t, i) => {
       const w = _followUpWatches.get(t.sid);
       if (outcomes[i] === 'sent' && w && w.frame === frame) w.delivered = true;
-      _onEscalationTransfer(attempts, t.sid, outcomes[i] === 'sent');
     });
-    // A guest the state was not for (held as a late joiner, gone): its
-    // escalation push did not go out.
-    const covered = new Set(targets.map((t) => t.sid));
-    for (const a of attempts) if (!covered.has(a.push.sid)) _onEscalationTransfer([a], a.push.sid, false);
     return targets.filter((t, i) => outcomes[i] === 'skipped').map((t) => t.sid);
   };
   // Host: send compressed state/delta via DC in 64KB chunks, handed to the
@@ -19416,7 +19426,10 @@
       // again). A reconnect or the match ending stops it at once.
       const outcome = await window.KNCore.syncSend.sendPaced({
         count: numChunks,
-        send: (i) => dc.send(compressed.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, compressed.length))),
+        send: (i) => {
+          dc.send(compressed.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, compressed.length)));
+          _syncProgressAt = performance.now();
+        },
         buffered: () => dc.bufferedAmount,
         open: () => dc.readyState === 'open' && _syncTargetCurrent(t),
         lowWaterBytes: SYNC_SEND_LOW_WATER,

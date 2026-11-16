@@ -135,10 +135,11 @@ def test_a_request_during_a_transfer_is_queued_not_dropped():
     src = ENGINE.read_text()
     start = src.index("const pushSyncState = async")
     head = src[start : src.index("const gm = window.EJS_emulator?.gameManager;", start)]
-    # Newest options kept; a full state stays full and escalation attempts
-    # queued before go with it.
+    # Newest options kept; what the requests queued before carry goes with
+    # them: request numbers, guests to watch, escalation attempts.
     assert "_queuedSyncPushes.set(" in head
-    assert "full: !!(prev.full || options.full)," in head
+    assert "requestIds: { ...(prev.requestIds || {}), ...(options.requestIds || {}) }," in head
+    assert "watchFor: [...new Set([...(prev.watchFor || []), ...(options.watchFor || [])])]," in head
     assert "_runQueuedSyncPush();" in src[start:]
     # Per-peer state: resetPeerState drops the peer's queued push (I2), and
     # stop() all of them.
