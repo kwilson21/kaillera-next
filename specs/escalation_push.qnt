@@ -2,78 +2,88 @@
 //
 // The host's escalation push for one lost input, as a transfer that takes
 // time: _escalateLostInput, _checkOverduePushes and the state transfer
-// (pushSyncState, _sendSyncChunksTo) in web/static/netplay-rollback.js.
+// (pushSyncState, sendSyncChunks, _sendSyncChunksTo) in
+// web/static/netplay-rollback.js.
 //
 // specs/ask_escalation.qnt (push_deadline) makes a push instantaneous: it is
 // sent when it is armed, nothing else is being sent, and the host's clock
 // runs evenly. None of the three holds, and each hid a defect:
 //
 // - A push can be queued behind another transfer on the guest's channel (one
-//   transfer at a time per guest, _syncSendChains; each chunk may wait up to
-//   SYNC_SEND_STALL_MS = 15 s for room). The push was let go as "not sent" 5 s
-//   after it was armed, still on its way, and the count began again at 1 when
-//   the stall path escalated the same hole: pushes were never bounded and the
-//   give-up never came.
+//   transfer at a time per guest, _syncSendChains). A transfer has no fixed
+//   length: sendPaced fails it only when no chunk is accepted for
+//   SYNC_SEND_STALL_MS (15 s); while chunks go out it runs as long as the link
+//   takes. A push let go on a clock that ran from its start (5 s first, then a
+//   60 s backstop) could be let go while still on its way, and a push let go
+//   began its count again when the same hole was escalated: pushes were never
+//   bounded and the give-up never came.
+// - The outcome of a push to several guests was reported only once every
+//   guest's transfer had ended (Promise.all), so one guest's slow link held
+//   another's deadline: handed over, unreported, and let go meanwhile.
 // - A transfer taken before the escalation (an earlier frame) can be handed
 //   over after it. Any hand-over to that guest started the push's deadline,
 //   so time owed to the earlier transfer counted against this push.
-// - The host's page can freeze (a long task, the tab not painting while it is
-//   shown). The deadline's clock ran through the freeze, and a host that came
-//   back from 6 s pushed again or dropped a guest whose answer it had not yet
-//   handled. The peer-stale and resync-request clocks are credited for a
-//   freeze (_creditLocalFreeze); the push's were not.
+// - The host's page can freeze. The deadline's clock ran through the freeze,
+//   and a host that came back pushed again or dropped a guest whose answer it
+//   had not yet handled.
 //
-// COUNT_SURVIVES: a push let go keeps its count for the same hole; a further
-//   escalation of that hole pushes again only below MAX_PUSHES, and beyond it
-//   leaves the input to the stall path (its 5 s deadline, the phantom and
-//   PEER-RECOVERED's resync) rather than pushing for ever.
-// LET_GO_ON_OUTCOME: a push is let go when its own transfer ends without
-//   handing the state over, not on a timer that a queued transfer outlasts;
-//   a backstop B, longer than a transfer queued behind another, remains for
-//   a transfer that never reports (I1).
-// MARK_BY_FRAME: only a state taken at or after the push's first frame starts
-//   its deadline.
-// CREDIT_FREEZE: a freeze of the host's page is credited to the push's clocks,
-//   as to the others.
+// COUNT_SURVIVES: a push let go keeps its count for the same hole; past
+//   MAX_PUSHES the hole is left to the stall path (its 5 s deadline, the
+//   phantom and PEER-RECOVERED's resync). Holes taking turns: hole_counts below.
+// OUTCOME_REPORTED: a push whose own transfer fails is let go at once.
+// LET_GO: when a push not handed over is let go besides its own failure:
+//   "timer"    W after it was armed (before #286's second round);
+//   "backstop" B after it was armed (the second round);
+//   "progress" no chunk accepted on that guest's chain for N, longer than the
+//              transfer's own stall limit S, so a live transfer always fails
+//              by itself first (I1: N covers a transfer that never reports).
+// PER_TARGET: each guest's outcome is reported as its own chain ends.
+// MARK_BY_FRAME: only the push's own state starts its deadline.
+// CREDIT_FREEZE: a freeze of the host's page is credited to the push's clocks.
 //
 // Time is discrete. A page that runs handles what is due before more time
-// passes (its tick, its message handlers); a frozen page handles nothing.
-// What is modelled: one hole; the push and its pushes again; one other
-// transfer to the same guest that may be in flight; the guest's
-// acknowledgement; the host's freezes. Not modelled: the reconnect and the
-// phantom that end a push (specs/ask_escalation.qnt push_deadline), other
-// guests (escalation_peers), the stall path's own recovery
+// passes (its tick, its message handlers); a frozen page handles nothing and
+// sends nothing.
+// What is modelled: one hole; the push and its pushes again; the transfer
+// ahead of it on the guest's chain; another guest's transfer of the same
+// broadcast; the guest's acknowledgement; the host's freezes. Not modelled:
+// the reconnect and the phantom that end a push (specs/ask_escalation.qnt
+// push_deadline; the two equal 5 s deadlines are stated there), other guests'
+// states (escalation_peers, sync_base below), the stall path's own recovery
 // (specs/tick_deadlines.qnt).
 
 module escalation_push {
   const COUNT_SURVIVES: bool
-  const LET_GO_ON_OUTCOME: bool
+  const OUTCOME_REPORTED: bool
+  const LET_GO: str
+  const PER_TARGET: bool
   const MARK_BY_FRAME: bool
   const CREDIT_FREEZE: bool
 
   pure val MAX_PUSHES = 2
   pure val T = 2    // the push's deadline (OVERDUE_PUSH_TIMEOUT_MS)
-  pure val S = 2    // the longest one transfer runs before it ends, handed over or not
-  pure val W = 1    // the not-sent window before the fix: shorter than a transfer queued behind another
-  pure val B = 5    // the backstop after it: longer than one (2 * S)
+  pure val S = 2    // a transfer fails when no chunk is accepted for this long (SYNC_SEND_STALL_MS)
+  pure val W = 1    // the first round's not-sent window
+  pure val B = 4    // the second round's backstop from the push's start
+  pure val N = 3    // the third round's no-progress limit: longer than S
   pure val CAP = 6
 
   type Host = {
-    phase: str,          // idle | queued | sending | failed | out | letGo | exhausted | settled | dropped
-    earlier: bool,       // another transfer to this guest is in flight ahead of the push
-    earlierAge: int,
-    sendAge: int,        // how long the push's own transfer has run
+    phase: str,          // idle | queued | sending | failed | unreported | out | letGo | exhausted | settled | dropped
+    earlier: bool,       // another transfer to this guest is ahead of the push on its chain
+    otherChain: bool,    // another guest's transfer of this broadcast still runs
+    chainStall: int,     // since a chunk was last accepted on this guest's chain
     pushes: int,         // pushes counted for this hole
     issued: int,         // history: pushes issued for this hole
     started: bool,       // the deadline runs (push.at set)
     age: int,            // the deadline's clock
-    armedAge: int,       // the not-sent clock
+    armedAge: int,       // since the push was started
     delivered: bool,     // the current push was handed over
     everDelivered: bool,
     liveAge: int,        // time this page could have heard an answer since the hand-over
     frozen: bool,
-    ackPending: bool,    // the guest's acknowledgement arrived, not yet handled
-    ackInTime: bool,     // it arrived within the deadline's live time
+    ackPending: bool,
+    ackInTime: bool,
     acked: bool,
     letGoOnItsWay: bool,       // history
     earlyRetry: bool,          // history
@@ -83,71 +93,104 @@ module escalation_push {
   var h: Host
 
   pure def up(x: int): int = if (x >= CAP) CAP else x + 1
-  pure val WAITING = Set("queued", "sending", "failed")
-  pure val RUNNING = Set("queued", "sending", "failed", "out")
-  pure val LET_GO_AFTER = if (LET_GO_ON_OUTCOME) B else W
+  pure val WAITING = Set("queued", "sending", "failed", "unreported")
+  pure val ON_ITS_WAY = Set("queued", "sending", "unreported")
+  pure val RUNNING = Set("queued", "sending", "failed", "unreported", "out")
+
+  def chainActive: bool = h.earlier or h.phase == "sending"
+  def letGoDue: bool =
+    not(h.started) and WAITING.contains(h.phase) and (
+      if (LET_GO == "timer") h.armedAge >= W
+      else if (LET_GO == "backstop") h.armedAge >= B
+      else h.chainStall >= N
+    )
+
+  pure val start: Host = {
+    phase: "idle", earlier: false, otherChain: false, chainStall: 0, pushes: 0, issued: 0,
+    started: false, age: 0, armedAge: 0, delivered: false, everDelivered: false, liveAge: 0,
+    frozen: false, ackPending: false, ackInTime: false, acked: false,
+    letGoOnItsWay: false, earlyRetry: false, droppedUndelivered: false,
+  }
 
   action init = {
     nondet e = Set(false, true).oneOf()
-    h' = {
-      phase: "idle", earlier: e, earlierAge: 0, sendAge: 0, pushes: 0, issued: 0,
-      started: false, age: 0, armedAge: 0, delivered: false, everDelivered: false, liveAge: 0,
-      frozen: false, ackPending: false, ackInTime: false, acked: false,
-      letGoOnItsWay: false, earlyRetry: false, droppedUndelivered: false,
-    }
+    h' = { ...start, earlier: e }
   }
 
-  // A push for the hole goes onto the guest's chain: behind the transfer in
-  // flight, or straight out.
-  pure def push(x: Host): Host = {
+  // A push for the hole goes onto the guest's chain, behind the transfer in
+  // flight or straight out; a broadcast may have another guest's transfer.
+  def push(x: Host, other: bool): Host = {
     ...x,
     phase: if (x.earlier) "queued" else "sending",
-    sendAge: 0, issued: x.issued + 1, started: false, age: 0, armedAge: 0,
+    otherChain: other,
+    chainStall: if (x.earlier) x.chainStall else 0,
+    issued: x.issued + 1, started: false, age: 0, armedAge: 0,
     delivered: false, liveAge: 0,
   }
 
-  // The stall path's ask goes overdue: push (or, past the limit, leave it to
-  // the stall path).
   action escalate = all {
     not(h.frozen), Set("idle", "letGo").contains(h.phase), h.issued < CAP,
     if (COUNT_SURVIVES and h.pushes >= MAX_PUSHES)
       h' = { ...h, phase: "exhausted" }
-    else
-      h' = push({ ...h, pushes: if (COUNT_SURVIVES) h.pushes + 1 else 1 }),
-  }
-
-  // The transfer ahead of the push, taken at an earlier frame, is handed
-  // over. Before the fix any hand-over to the guest started the deadline.
-  action earlierDone = all {
-    not(h.frozen), h.earlier,
-    val marks = not(MARK_BY_FRAME) and not(h.started) and WAITING.contains(h.phase)
-    h' = {
-      ...h,
-      earlier: false, earlierAge: 0,
-      phase: if (h.phase == "queued") "sending" else h.phase,
-      sendAge: if (h.phase == "queued") 0 else h.sendAge,
-      started: h.started or marks,
-      age: if (marks) 0 else h.age,
+    else {
+      nondet other = Set(false, true).oneOf()
+      h' = push({ ...h, pushes: if (COUNT_SURVIVES) h.pushes + 1 else 1 }, other)
     },
   }
 
-  // The push's own transfer ends: handed over, or not (the channel closed,
-  // a chunk stalled, the capture failed).
+  // A chunk is accepted on the guest's chain.
+  action progress = all {
+    not(h.frozen), chainActive,
+    h' = { ...h, chainStall: 0 },
+  }
+
+  // The transfer ahead of the push ends: handed over at any time, failed when
+  // it made no progress for S. Before the fix a hand-over to the guest started
+  // the push's deadline.
+  action earlierEnds = all {
+    not(h.frozen), h.earlier,
+    nondet ok = Set(false, true).oneOf()
+    all {
+      ok or h.chainStall >= S,
+      val marks = ok and not(MARK_BY_FRAME) and not(h.started) and WAITING.contains(h.phase)
+      h' = {
+        ...h,
+        earlier: false,
+        chainStall: 0,
+        phase: if (h.phase == "queued") "sending" else h.phase,
+        started: h.started or marks,
+        age: if (marks) 0 else h.age,
+      },
+    },
+  }
+
+  // The push's own transfer ends: handed over (reported now, or once every
+  // guest's transfer has ended), or failed for want of progress.
   action sendDone = all {
     not(h.frozen), h.phase == "sending",
-    nondet ok = Set(false, true).oneOf()
-    h' = if (ok) {
-      ...h, phase: "out", delivered: true, everDelivered: true, liveAge: 0,
-      started: true, age: if (h.started) h.age else 0,
-    } else if (LET_GO_ON_OUTCOME) {
-      ...h, phase: "letGo",
-    } else {
-      ...h, phase: "failed",
+    val handed = { ...h, delivered: true, everDelivered: true, liveAge: 0, chainStall: 0 }
+    h' = if (PER_TARGET or not(h.otherChain))
+      { ...handed, phase: "out", started: true, age: if (h.started) h.age else 0 }
+    else
+      { ...handed, phase: "unreported" },
+  }
+  action sendFails = all {
+    not(h.frozen), h.phase == "sending", h.chainStall >= S,
+    h' = { ...h, phase: if (OUTCOME_REPORTED) "letGo" else "failed", chainStall: 0 },
+  }
+
+  // The other guest's transfer ends (it may run as long as its link takes).
+  action otherDone = all {
+    not(h.frozen), h.otherChain,
+    h' = {
+      ...h,
+      otherChain: false,
+      phase: if (h.phase == "unreported") "out" else h.phase,
+      started: h.started or h.phase == "unreported",
+      age: if (h.phase == "unreported" and not(h.started)) 0 else h.age,
     },
   }
 
-  // The guest acknowledges a state from the first push on (perhaps while
-  // this page is frozen); the page handles it when it runs.
   action guestAcks = all {
     h.everDelivered, not(h.ackPending), not(h.acked),
     h' = { ...h, ackPending: true, ackInTime: h.liveAge < T },
@@ -157,25 +200,22 @@ module escalation_push {
     h' = { ...h, ackPending: false, acked: true },
   }
 
-  // The deadline (pushDeadlineStep): settled, push again, or give up.
+  // The deadline (pushDeadlineStep): settled, push again (to this guest
+  // alone), or give up.
   action check = all {
     not(h.frozen), h.started, RUNNING.contains(h.phase),
     if (h.acked)
       h' = { ...h, phase: "settled" }
     else all {
       h.age >= T,
-      // Retried before the guest could have answered this push: not handed
-      // over, too little live time since, or its answer waiting unhandled.
       val early = not(h.delivered) or h.liveAge < T or (h.ackPending and h.ackInTime)
       if (h.pushes < MAX_PUSHES)
         h' = push({
           ...h,
           pushes: h.pushes + 1,
-          // The push still on its way stays ahead of the new one.
           earlier: h.earlier or h.phase == "sending",
-          earlierAge: if (h.earlier) h.earlierAge else h.sendAge,
           earlyRetry: h.earlyRetry or early,
-        })
+        }, false)
       else
         h' = {
           ...h,
@@ -186,59 +226,54 @@ module escalation_push {
     },
   }
 
-  // Not handed over by the window: let go (not counted against the guest).
+  // Not handed over (or not reported), by the rule in LET_GO: let go, not
+  // counted against the guest.
   action letGoTimer = all {
-    not(h.frozen), not(h.started), WAITING.contains(h.phase), h.armedAge >= LET_GO_AFTER,
+    not(h.frozen), letGoDue,
     h' = {
       ...h,
       phase: "letGo",
       earlier: h.earlier or h.phase == "sending",
-      earlierAge: if (h.earlier) h.earlierAge else h.sendAge,
-      letGoOnItsWay: h.letGoOnItsWay or h.phase == "queued" or h.phase == "sending",
+      letGoOnItsWay: h.letGoOnItsWay or ON_ITS_WAY.contains(h.phase),
     },
   }
 
   action freeze = all { not(h.frozen), h' = { ...h, frozen: true } }
   action unfreeze = all { h.frozen, h' = { ...h, frozen: false } }
 
-  // Time passes. The deadline's clocks run through a freeze unless it is
-  // credited; transfers and the time to hear an answer need a running page.
+  // Time passes. Credited, a freeze does not run the push's clocks; a frozen
+  // page sends nothing, so no chunk is accepted meanwhile either.
   action elapse = all {
     h.frozen or and {
       not(h.ackPending),
       not(h.started and RUNNING.contains(h.phase) and (h.acked or h.age >= T)),
-      not(h.phase == "sending" and h.sendAge >= S),
-      not(h.earlier and h.earlierAge >= S),
-      not(not(h.started) and WAITING.contains(h.phase) and h.armedAge >= LET_GO_AFTER),
+      not(chainActive and h.chainStall >= S),
+      not(letGoDue),
     },
     val counts = not(h.frozen) or not(CREDIT_FREEZE)
     h' = {
       ...h,
       age: if (h.started and counts) up(h.age) else h.age,
       armedAge: if (WAITING.contains(h.phase) and counts) up(h.armedAge) else h.armedAge,
+      chainStall: if (counts) up(h.chainStall) else h.chainStall,
       liveAge: if (h.delivered and not(h.frozen)) up(h.liveAge) else h.liveAge,
-      sendAge: if (h.phase == "sending" and not(h.frozen)) up(h.sendAge) else h.sendAge,
-      earlierAge: if (h.earlier and not(h.frozen)) up(h.earlierAge) else h.earlierAge,
     },
   }
 
   action stutter = all { h' = h }
 
   action step = any {
-    escalate, earlierDone, sendDone, guestAcks, handleAck, check, letGoTimer, freeze, unfreeze, elapse, stutter
+    escalate, progress, earlierEnds, sendDone, sendFails, otherDone, guestAcks, handleAck, check,
+    letGoTimer, freeze, unfreeze, elapse, stutter
   }
 
   // ── Properties ───────────────────────────────────────────────────────────
 
-  // At most MAX_PUSHES pushes for one hole, let-goes and further
-  // escalations included (pushesAreBounded, with the let-go modelled).
   val pushesAreBoundedPerHole = h.issued <= MAX_PUSHES
-  // A push is never let go while its transfer is still on its way.
+  // Never let go while its transfer (or the report of it) is still on its
+  // way: only its own failure ends it before the hand-over.
   val noLetGoOfAPushOnItsWay = not(h.letGoOnItsWay)
-  // Never a push again, or a drop, before the guest could have answered the
-  // push: handed over, the deadline's live time passed, its answer handled.
   val noRetryBeforeTheGuestCouldAnswer = not(h.earlyRetry)
-  // Never a drop when no push reached the guest.
   val noDropWithoutADeliveredPush = not(h.droppedUndelivered)
   val allHold = and {
     pushesAreBoundedPerHole, noLetGoOfAPushOnItsWay, noRetryBeforeTheGuestCouldAnswer, noDropWithoutADeliveredPush
@@ -246,24 +281,33 @@ module escalation_push {
 
   // ── Scenarios ────────────────────────────────────────────────────────────
 
-  pure val start: Host = {
-    phase: "idle", earlier: false, earlierAge: 0, sendAge: 0, pushes: 0, issued: 0,
-    started: false, age: 0, armedAge: 0, delivered: false, everDelivered: false, liveAge: 0,
-    frozen: false, ackPending: false, ackInTime: false, acked: false,
-    letGoOnItsWay: false, earlyRetry: false, droppedUndelivered: false,
-  }
   action from(x: Host): bool = h' = x
 
   // The push queued behind a transfer in flight.
   run queuedBehindTest =
     from({ ...start, earlier: true }).then(escalate).then(elapse)
       .expect(h.phase == "queued")
-      .then(if (LET_GO_ON_OUTCOME) earlierDone else letGoTimer)
-      .expect(noLetGoOfAPushOnItsWay == LET_GO_ON_OUTCOME)
+      .then(if (LET_GO == "timer") letGoTimer else earlierEnds)
+      .expect(noLetGoOfAPushOnItsWay == (LET_GO != "timer"))
+
+  // A transfer that keeps making progress past the backstop.
+  run progressingTest =
+    if (LET_GO == "timer") from(start) else
+    from({ ...start, phase: "sending", pushes: 1, issued: 1 })
+      .then(elapse).then(progress).then(elapse).then(progress).then(elapse).then(progress).then(elapse)
+      .expect(h.armedAge == 4 and h.chainStall == 1)
+      .then(if (LET_GO == "backstop") letGoTimer else sendDone)
+      .expect(noLetGoOfAPushOnItsWay == (LET_GO != "backstop"))
+
+  // Handed over while another guest's transfer of the broadcast goes on.
+  run slowOtherGuestTest =
+    from({ ...start, phase: "sending", otherChain: true, pushes: 1, issued: 1 })
+      .then(sendDone)
+      .expect(h.started == PER_TARGET)
 
   // The transfer ahead of the push is handed over after it was armed.
   run earlierMarksTest =
-    from({ ...start, earlier: true }).then(escalate).then(earlierDone)
+    from({ ...start, earlier: true }).then(escalate).then(earlierEnds)
       .expect(h.started == not(MARK_BY_FRAME))
 
   // Handed over, then the host freezes past the deadline while the guest
@@ -272,7 +316,6 @@ module escalation_push {
     from({ ...start, phase: "out", pushes: 1, issued: 1, started: true, delivered: true, everDelivered: true })
       .then(freeze).then(elapse).then(elapse).then(guestAcks).then(unfreeze)
       .expect((h.age >= T) == not(CREDIT_FREEZE))
-      // Uncredited, the deadline is due before the answer is handled.
       .then(if (CREDIT_FREEZE) handleAck else check)
       .expect(noRetryBeforeTheGuestCouldAnswer == CREDIT_FREEZE)
 
@@ -285,27 +328,193 @@ module escalation_push {
       .expect(pushesAreBoundedPerHole == COUNT_SURVIVES)
 }
 
-// Before this round: the count starts again, a push is let go on a timer,
-// any hand-over starts its deadline, a freeze counts against it.
+// Before #286's second round.
 module escalation_push_current {
-  import escalation_push(COUNT_SURVIVES = false, LET_GO_ON_OUTCOME = false, MARK_BY_FRAME = false, CREDIT_FREEZE = false).*
+  import escalation_push(COUNT_SURVIVES = false, OUTCOME_REPORTED = false, LET_GO = "timer", PER_TARGET = false,
+    MARK_BY_FRAME = false, CREDIT_FREEZE = false).*
+}
+// The second round (1169568): a 60 s backstop from the push's start, and a
+// broadcast reported once every guest's transfer has ended.
+module escalation_push_round_two {
+  import escalation_push(COUNT_SURVIVES = true, OUTCOME_REPORTED = true, LET_GO = "backstop", PER_TARGET = false,
+    MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
 }
 
 // Each fix alone left out: the property it is for is violated.
 module escalation_push_count_resets {
-  import escalation_push(COUNT_SURVIVES = false, LET_GO_ON_OUTCOME = true, MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
+  import escalation_push(COUNT_SURVIVES = false, OUTCOME_REPORTED = true, LET_GO = "progress", PER_TARGET = true,
+    MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
 }
 module escalation_push_timer_let_go {
-  import escalation_push(COUNT_SURVIVES = true, LET_GO_ON_OUTCOME = false, MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
+  import escalation_push(COUNT_SURVIVES = true, OUTCOME_REPORTED = true, LET_GO = "timer", PER_TARGET = true,
+    MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
+}
+module escalation_push_backstop {
+  import escalation_push(COUNT_SURVIVES = true, OUTCOME_REPORTED = true, LET_GO = "backstop", PER_TARGET = true,
+    MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
+}
+module escalation_push_reported_together {
+  import escalation_push(COUNT_SURVIVES = true, OUTCOME_REPORTED = true, LET_GO = "progress", PER_TARGET = false,
+    MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
 }
 module escalation_push_any_hand_over {
-  import escalation_push(COUNT_SURVIVES = true, LET_GO_ON_OUTCOME = true, MARK_BY_FRAME = false, CREDIT_FREEZE = true).*
+  import escalation_push(COUNT_SURVIVES = true, OUTCOME_REPORTED = true, LET_GO = "progress", PER_TARGET = true,
+    MARK_BY_FRAME = false, CREDIT_FREEZE = true).*
 }
 module escalation_push_no_credit {
-  import escalation_push(COUNT_SURVIVES = true, LET_GO_ON_OUTCOME = true, MARK_BY_FRAME = true, CREDIT_FREEZE = false).*
+  import escalation_push(COUNT_SURVIVES = true, OUTCOME_REPORTED = true, LET_GO = "progress", PER_TARGET = true,
+    MARK_BY_FRAME = true, CREDIT_FREEZE = false).*
 }
 
 // The fix.
 module escalation_push_fixed {
-  import escalation_push(COUNT_SURVIVES = true, LET_GO_ON_OUTCOME = true, MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
+  import escalation_push(COUNT_SURVIVES = true, OUTCOME_REPORTED = true, LET_GO = "progress", PER_TARGET = true,
+    MARK_BY_FRAME = true, CREDIT_FREEZE = true).*
+}
+
+// ── The host's delta base and a targeted state ─────────────────────────────
+//
+// The host kept one delta base (_lastSyncState) for every guest: a state it
+// sent as a delta was the XOR against it, and a guest applied the delta onto
+// its own base. That holds only while every guest holds the host's base. Any
+// state sent to one guest moves the host's base and leaves the others on the
+// old one: an escalation push to one guest, and equally the answer to one
+// guest's request. The next delta to another guest was applied, without a
+// word, onto a base it never got: the pages load different emulator memory.
+// Today every request a page sends is full and clears the base first, so this
+// needs an older page's `sync-request`.
+//
+// HOST_DELTAS:
+//   "any"         a delta whenever the host has a base (before);
+//   "escClears"   an escalation push is full and clears the base, but the
+//                 answer to one guest's request still moves it: not enough
+//                 (otherGuestAsksAfterAnAnswerTest);
+//   "none"        the host never sends a delta: every state is full, and no
+//                 guest's base matters.
+
+module sync_base {
+  const HOST_DELTAS: str
+
+  // States are numbered; 0 is "none".
+  var hostBase: int
+  var guestBase: int -> int     // guest (1, 2) -> its base
+  var fresh: int
+  var corrupt: bool             // history: a delta applied onto a base its guest never got
+
+  pure val GUESTS = Set(1, 2)
+  pure val MAX_STATE = 4
+
+  action init = all {
+    hostBase' = 0, guestBase' = GUESTS.mapBy(_ => 0), fresh' = 1, corrupt' = false,
+  }
+
+  // A coordinated sync to every guest.
+  action coordinated = all {
+    fresh <= MAX_STATE,
+    hostBase' = fresh, guestBase' = GUESTS.mapBy(_ => fresh), fresh' = fresh + 1, corrupt' = corrupt,
+  }
+
+  // An escalation push to one guest, full.
+  action targetedPushTo(g: int): bool = all {
+    fresh <= MAX_STATE,
+    guestBase' = guestBase.set(g, fresh),
+    hostBase' = if (HOST_DELTAS == "any") fresh else 0,
+    fresh' = fresh + 1, corrupt' = corrupt,
+  }
+
+  // One guest asks for a state and is answered alone: a delta when the host
+  // sends deltas and has a base.
+  action answerTo(g: int): bool = all {
+    fresh <= MAX_STATE,
+    corrupt' = (corrupt or (HOST_DELTAS != "none" and hostBase != 0 and guestBase.get(g) != hostBase)),
+    guestBase' = guestBase.set(g, fresh),
+    hostBase' = if (HOST_DELTAS == "none") 0 else fresh,
+    fresh' = fresh + 1,
+  }
+
+  action targetedPush = { nondet g = GUESTS.oneOf() targetedPushTo(g) }
+  action request = { nondet g = GUESTS.oneOf() answerTo(g) }
+  action stutter = all { hostBase' = hostBase, guestBase' = guestBase, fresh' = fresh, corrupt' = corrupt }
+  action step = any { coordinated, targetedPush, request, stutter }
+
+  val noDeltaOnAForeignBase = not(corrupt)
+
+  // Two guests, a targeted push to one, then the other's request.
+  run otherGuestAsksTest =
+    init.then(coordinated).then(targetedPushTo(1)).then(answerTo(2))
+      .expect(noDeltaOnAForeignBase == (HOST_DELTAS != "any"))
+
+  // Two guests, one answered alone, then the other's request.
+  run otherGuestAsksAfterAnAnswerTest =
+    init.then(coordinated).then(answerTo(1)).then(answerTo(2))
+      .expect(noDeltaOnAForeignBase == (HOST_DELTAS == "none"))
+}
+
+module sync_base_current {
+  import sync_base(HOST_DELTAS = "any").*
+}
+module sync_base_esc_clears {
+  import sync_base(HOST_DELTAS = "escClears").*
+}
+module sync_base_fixed {
+  import sync_base(HOST_DELTAS = "none").*
+}
+
+// ── Pushes counted per hole ─────────────────────────────────────────────────
+//
+// One record per slot held the count of the last hole pushed: two holes
+// escalated in turn (each push let go) each found the other's record, began
+// again at 1, and were pushed for ever; a hole whose pushes ran out was
+// overwritten by the next and pushed again.
+//
+// PER_HOLE: the count is kept per hole (a per-slot map by the hole's frame),
+//   cleared with the peer (I2) and when it recovers.
+
+module hole_counts {
+  const PER_HOLE: bool
+
+  pure val HOLES = Set(1, 2)
+  pure val MAX_PUSHES = 2
+  pure val CAP = 6
+
+  var counted: int -> int       // the count the page has for each hole
+  var lastHole: int             // the one record's hole (single record), 0 none
+  var issued: int -> int        // history: pushes issued per hole
+
+  action init = all {
+    counted' = HOLES.mapBy(_ => 0), lastHole' = 0, issued' = HOLES.mapBy(_ => 0),
+  }
+
+  // A hole's ask goes overdue; its push is let go (never handed over).
+  action escalateHole(hole: int): bool = {
+    val have = if (PER_HOLE) counted.get(hole) else if (lastHole == hole) counted.get(hole) else 0
+    all {
+      issued.get(hole) < CAP,
+      have < MAX_PUSHES,
+      counted' = if (PER_HOLE) counted.set(hole, have + 1)
+                 else HOLES.mapBy(x => if (x == hole) have + 1 else 0),
+      lastHole' = hole,
+      issued' = issued.set(hole, issued.get(hole) + 1),
+    }
+  }
+
+  action escalateAndLetGo = { nondet hole = HOLES.oneOf() escalateHole(hole) }
+  action stutter = all { counted' = counted, lastHole' = lastHole, issued' = issued }
+  action step = any { escalateAndLetGo, stutter }
+
+  val pushesAreBoundedForEveryHole = HOLES.forall(x => issued.get(x) <= MAX_PUSHES)
+
+  // Two holes in turn.
+  run alternatingHolesTest =
+    init.then(escalateHole(1)).then(escalateHole(2)).then(escalateHole(1)).then(escalateHole(2))
+      .expect(pushesAreBoundedForEveryHole)
+      .then(if (PER_HOLE) stutter else escalateHole(1))
+      .expect(pushesAreBoundedForEveryHole == PER_HOLE)
+}
+
+module hole_counts_one_record {
+  import hole_counts(PER_HOLE = false).*
+}
+module hole_counts_fixed {
+  import hole_counts(PER_HOLE = true).*
 }

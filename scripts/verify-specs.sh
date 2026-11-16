@@ -348,16 +348,28 @@ ask_escalation() {
 escalation_push() {
   local ESCP=specs/escalation_push.qnt
   verify "$ESCP" escalation_push_fixed allHold init 12
-  # Queued behind a transfer in flight, let go on the timer: 2 steps.
+  verify "$ESCP" sync_base_fixed noDeltaOnAForeignBase init 8
+  verify "$ESCP" hole_counts_fixed pushesAreBoundedForEveryHole init 10
+  # Queued behind a transfer in flight, let go on the first round's timer.
   expect_violation "$ESCP" escalation_push_current noLetGoOfAPushOnItsWay 3
   expect_violation "$ESCP" escalation_push_timer_let_go noLetGoOfAPushOnItsWay 6
+  # A transfer still making progress at the second round's backstop.
+  expect_violation "$ESCP" escalation_push_round_two noLetGoOfAPushOnItsWay 9
+  expect_violation "$ESCP" escalation_push_backstop noLetGoOfAPushOnItsWay 9
+  # Handed over, its report held by another guest's transfer, let go.
+  expect_violation "$ESCP" escalation_push_reported_together noLetGoOfAPushOnItsWay 7
   # The transfer ahead of the push handed over, the deadline due before the
-  # push is: 5 steps.
+  # push is.
   expect_violation "$ESCP" escalation_push_any_hand_over noRetryBeforeTheGuestCouldAnswer 5
-  # Handed over, the host frozen past the deadline: 7 steps.
+  # Handed over, the host frozen past the deadline.
   expect_violation "$ESCP" escalation_push_no_credit noRetryBeforeTheGuestCouldAnswer 7
-  # Two transfers fail for one hole and it is escalated a third time: 5 steps.
-  expect_violation "$ESCP" escalation_push_count_resets pushesAreBoundedPerHole 5
+  # Two transfers fail for one hole and it is escalated a third time.
+  expect_violation "$ESCP" escalation_push_count_resets pushesAreBoundedPerHole 10
+  # A state to one guest, then a delta to the other.
+  expect_violation "$ESCP" sync_base_current noDeltaOnAForeignBase 3
+  expect_violation "$ESCP" sync_base_esc_clears noDeltaOnAForeignBase 3
+  # Two holes in turn, one record between them.
+  expect_violation "$ESCP" hole_counts_one_record pushesAreBoundedForEveryHole 5
 }
 
 reconnect_inputs() {

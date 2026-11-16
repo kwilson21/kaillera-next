@@ -557,17 +557,23 @@ done
 # ── The escalation push as a transfer that takes time ────────────────────
 ESCP=specs/escalation_push.qnt
 $QUINT typecheck "$ESCP"
-# Before this round: the count starts again after a let-go, a queued push is
-# let go on a timer, any hand-over starts the deadline, a freeze counts
-# against it (escalation_push_current); each fix left out alone breaks the
-# property it is for (queuedBehindTest, earlierMarksTest, freezeTest,
-# failTwiceTest).
-for variant in escalation_push_current escalation_push_count_resets escalation_push_timer_let_go \
-  escalation_push_any_hand_over escalation_push_no_credit escalation_push_fixed; do
+# Before #286's second round, its second round, and the fix with each part
+# left out alone (queuedBehindTest, progressingTest, slowOtherGuestTest,
+# earlierMarksTest, freezeTest, failTwiceTest); the host's delta base with a
+# state sent to one guest (sync_base; otherGuestAsksTest); pushes counted per
+# hole (hole_counts; alternatingHolesTest).
+for variant in escalation_push_current escalation_push_round_two escalation_push_count_resets \
+  escalation_push_timer_let_go escalation_push_backstop escalation_push_reported_together \
+  escalation_push_any_hand_over escalation_push_no_credit escalation_push_fixed \
+  sync_base_current sync_base_esc_clears sync_base_fixed hole_counts_one_record hole_counts_fixed; do
   $QUINT test "$ESCP" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$ESCP" --main=escalation_push_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+$QUINT run "$ESCP" --main=sync_base_fixed --invariant=noDeltaOnAForeignBase \
+  --max-samples=5000 --max-steps=10 --backend="$BACKEND"
+$QUINT run "$ESCP" --main=hole_counts_fixed --invariant=pushesAreBoundedForEveryHole \
+  --max-samples=5000 --max-steps=15 --backend="$BACKEND"
 
 # ── After a reconnect, frames run before the peer's inputs ────────────────
 REC=specs/reconnect_inputs.qnt
