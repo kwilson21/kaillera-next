@@ -254,6 +254,66 @@ def test_a_rom_dropped_before_the_hosts_is_known_is_refused_with_a_word_once_it_
         guest.close()
 
 
+# Holds the page's file reads until the test lets them go: a dropped file is
+# the page's at once, and hashed only once its read is released.
+_HOLD_READS = """() => {
+    window.__heldReads = [];
+    const read = FileReader.prototype.readAsArrayBuffer;
+    FileReader.prototype.readAsArrayBuffer = function (blob) {
+        window.__heldReads.push(() => read.call(this, blob));
+    };
+}"""
+_RELEASE_READS = "() => { for (const go of window.__heldReads.splice(0)) go(); }"
+# Every `rom-ready` the page sends from now on.
+_RECORD_ROM_READY = """() => {
+    window.__romReady = [];
+    const socket = window.__test_socket;
+    const emit = socket.emit.bind(socket);
+    socket.emit = (event, ...args) => {
+        if (event === 'rom-ready') window.__romReady.push(args[0]);
+        return emit(event, ...args);
+    };
+}"""
+
+
+def test_the_hosts_rom_dropped_over_another_is_kept_when_the_hosts_arrives_before_its_hash(browser, server_url, room):
+    # specs/rom_identity.qnt, rightOverWrongTest. Until a dropped file is
+    # hashed, the page's hash is the previous ROM's. The host's ROM, dropped
+    # over another and still being hashed when the host's arrived, was
+    # refused by the other one's hash; its own hash, landing after, then said
+    # ready with no ROM. The two ROMs are the same size, so only the hash
+    # tells them apart.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _load_rom(guest, OTHER_ROM)
+        guest.wait_for_function("() => !!window.KNState?.romHash", timeout=15000)
+        guest.evaluate(_RECORD_ROM_READY)
+        guest.evaluate(_HOLD_READS)
+        _load_rom(guest, ROM)
+        _load_rom(host)
+        host.wait_for_function("() => !!window.KNState?.romHash", timeout=15000)
+        host_hash = host.evaluate("window.KNState.romHash")
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+        # The host's ROM is known and the drop is not hashed yet: the page
+        # keeps it, says nothing against it, and announces nothing.
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        assert guest.evaluate("window.__romReady") == []
+        guest.evaluate(_RELEASE_READS)
+        # Its own hash lands, is the host's, and is announced.
+        guest.wait_for_function("(h) => window.KNState.romHash === h", arg=host_hash, timeout=15000)
+        guest.wait_for_function(
+            "(h) => window.__romReady.some((m) => m.ready && m.hash === h)", arg=host_hash, timeout=10000
+        )
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        sent = guest.evaluate("window.__romReady")
+        assert all(m.get("ready") and m.get("hash") == host_hash for m in sent), sent
+    finally:
+        host.close()
+        guest.close()
+
+
 def test_a_player_who_took_the_hosts_rom_waits_for_it_in_the_lobby(browser, server_url, room):
     host, guest = _guest_in_a_room(browser, server_url, room)
     try:

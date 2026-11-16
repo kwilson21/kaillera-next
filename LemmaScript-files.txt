@@ -10,6 +10,7 @@ web/src/desync-fields.ts
 web/src/diagnostics.ts
 web/src/play/remap-step.ts
 web/src/play/rom-transfer-step.ts
+web/src/play/rom-identity.ts
 web/src/relay-sender.ts
 web/src/desync-confirm.ts
 web/src/desync-capture.ts

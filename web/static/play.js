@@ -166,6 +166,12 @@
   let _romBlob = null; // raw ROM Blob for re-creating blob URLs
   let _romBlobUrl = null;
   let _romHash = null; // SHA-256 hex of loaded ROM
+  // Each change of the loaded ROM (a drop, a library pick, the host's ROM, a
+  // clear) is a new load; _romHash is kept with the load it was computed for.
+  // A dropped file is loaded at once but hashed a moment later, and until
+  // then _romHash is the previous ROM's (specs/rom_identity.qnt).
+  let _romLoad = 0;
+  let _romHashLoad = 0;
   let _romName = null; // display name for the loaded ROM
   let _romSize = null; // byte size for the loaded ROM
   // The loaded ROM is one the player dropped themselves (its name), not a copy
@@ -464,6 +470,7 @@
     hostRomFromData,
     hostRomIdentityKey,
     romHashMismatch,
+    romIdentity,
     roomClosedMessage,
     rosterToasts,
   } = window.KNCore.play;
@@ -500,12 +507,19 @@
 
   const localRomLoaded = () => !!(_romBlob || _romBlobUrl);
 
-  const hostRomMismatch = () => {
-    if (!localRomLoaded()) return false;
-    if (romHashMismatch(_hostRomHash, _romHash)) return true;
-    if (_hostRomSize !== null && _romSize !== null && Number(_hostRomSize) !== Number(_romSize)) return true;
-    return false;
-  };
+  const romHashIsLoaded = () => romIdentity.hashIsTheLoadedRoms(_romHashLoad, _romLoad);
+
+  // The loaded ROM against the host's: `pending` while its own hash is not in
+  // (a size that is not the host's refuses it at once).
+  const romVerdictNow = () =>
+    romIdentity.romVerdict(
+      localRomLoaded(),
+      romHashIsLoaded(),
+      romHashMismatch(_hostRomHash, _romHash),
+      _hostRomSize !== null && _romSize !== null && Number(_hostRomSize) !== Number(_romSize),
+    );
+
+  const hostRomMismatch = () => romVerdictNow() === 'mismatch';
 
   const resetTransferForHostRomChange = () => {
     if (_romReceiver.phase !== 'idle' || _romReceiver.received > 0) {
@@ -2461,6 +2475,7 @@
     const displayName = _romReceiver.header?.name ?? 'rom.z64';
     const expectedHash = _romReceiver.header?.hash ?? null;
 
+    const load = ++_romLoad;
     _romBlob = blob;
     _romName = displayName;
     _romDroppedName = null;
@@ -2481,6 +2496,7 @@
     if (expectedHash) {
       discardHibernatedEmulatorForRomChange(expectedHash);
       _romHash = expectedHash;
+      _romHashLoad = load;
       _gameId = _gameIdFromHash(expectedHash);
       KNState.romHash = expectedHash;
       KNState.gameId = _gameId;
@@ -2489,15 +2505,21 @@
     } else {
       const reader = new FileReader();
       reader.onload = async () => {
+        let hash = null;
         try {
-          const hash = await hashArrayBuffer(reader.result);
-          discardHibernatedEmulatorForRomChange(hash);
-          _romHash = hash;
-          _gameId = _gameIdFromHash(_romHash);
-          KNState.romHash = _romHash;
-          KNState.gameId = _gameId;
-          window.EJS_gameID = _romHash;
+          hash = await hashArrayBuffer(reader.result);
         } catch (_) {}
+        // Another ROM was loaded or cleared meanwhile (specs/rom_identity.qnt).
+        if (!romIdentity.hashIsTheLoadedRoms(load, _romLoad)) return;
+        _romHashLoad = load;
+        _romHash = hash;
+        KNState.romHash = hash;
+        if (hash) {
+          discardHibernatedEmulatorForRomChange(hash);
+          _gameId = _gameIdFromHash(hash);
+          KNState.gameId = _gameId;
+          window.EJS_gameID = hash;
+        }
         afterRomTransferComplete(displayName);
       };
       reader.readAsArrayBuffer(blob);
@@ -2547,6 +2569,9 @@
   };
 
   const notifyRomReady = () => {
+    // Only with a ROM, and with that ROM's own hash: a drop being hashed is
+    // announced by its own hash when it lands (specs/rom_identity.qnt).
+    if (!romIdentity.announcesRom(localRomLoaded(), romHashIsLoaded())) return;
     if (socket?.connected) {
       socket.emit('rom-ready', {
         ready: true,
@@ -3081,6 +3106,7 @@
 
   const loadRomData = (file, displayName) => {
     hideRomMismatch();
+    const load = ++_romLoad;
     _romBlob = file;
     _romName = displayName;
     _romDroppedName = displayName;
@@ -3131,22 +3157,38 @@
     reader.onload = async () => {
       clearTimeout(_hashTimer);
       if (_hashTimedOut) return;
+      let hash = null;
       try {
-        const hash = await hashArrayBuffer(reader.result);
-        discardHibernatedEmulatorForRomChange(hash);
-        _romHash = hash;
-        _gameId = _gameIdFromHash(hash);
-        KNState.romHash = hash;
-        KNState.gameId = _gameId;
-        window.EJS_gameID = hash;
-        _safeSet('localStorage', 'kaillera-rom-hash', hash);
-        console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026 game_id: ${_gameId}`);
-        _announceGameId();
-        _renderRomStatus();
+        hash = await hashArrayBuffer(reader.result);
       } catch (err) {
         console.log('[play] hash failed:', err);
         KNEvent('compat', 'ROM hash compute failed', { error: String(err) });
         showToast('ROM hash failed — game may not work');
+      }
+      // The player dropped, picked or cleared another ROM meanwhile: this
+      // hash is not the loaded ROM's and changes nothing (specs/rom_identity.qnt).
+      if (!romIdentity.hashIsTheLoadedRoms(load, _romLoad)) return;
+      _romHashLoad = load;
+      if (hash) {
+        try {
+          discardHibernatedEmulatorForRomChange(hash);
+          _romHash = hash;
+          _gameId = _gameIdFromHash(hash);
+          KNState.romHash = hash;
+          KNState.gameId = _gameId;
+          window.EJS_gameID = hash;
+          _safeSet('localStorage', 'kaillera-rom-hash', hash);
+          console.log(`[play] ROM hash: ${hash.substring(0, 16)}\u2026 game_id: ${_gameId}`);
+          _announceGameId();
+          _renderRomStatus();
+        } catch (err) {
+          console.log('[play] taking the ROM hash failed:', err);
+        }
+      } else {
+        // No hash for this ROM: judged by its size, announced without one,
+        // never with the previous ROM's.
+        _romHash = null;
+        KNState.romHash = null;
       }
       // Guest ROM mismatch check: if the host's ROM hash is known and
       // this ROM doesn't match, reject it and prompt re-upload.
@@ -3187,6 +3229,7 @@
     _romBlob = null;
     _romBlobUrl = null;
     _romHash = null;
+    _romHashLoad = ++_romLoad;
     _romName = null;
     _romDroppedName = null;
     _romSize = null;
@@ -3235,6 +3278,7 @@
           return;
         }
         const blob = new Blob([val.blob]);
+        const load = ++_romLoad;
         _romBlob = blob;
         _romName = val.name;
         _romDroppedName = null;
@@ -3244,6 +3288,7 @@
         window.EJS_gameUrl = _romBlobUrl;
         discardHibernatedEmulatorForRomChange(hash);
         _romHash = hash;
+        _romHashLoad = load;
         _gameId = _gameIdFromHash(hash);
         KNState.romHash = hash;
         KNState.gameId = _gameId;
