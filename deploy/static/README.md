@@ -89,11 +89,11 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   scripts are `defer`red and one proxied script behind a napping server
   would hold up the waking screen. Everything else, WebSocket upgrades
   included, is passed to `ORIGIN`. That includes `static/version.json` and
-  `static/changelog.json`: CI rewrites them on every release and never
-  redeploys this Worker, so a copy here named an old release (the footer
-  showed v0.67.0 while v0.69 was live, whenever Render was napping). The
-  footer fetches the version without blocking the page and asks again while
-  the server wakes (`web/src/site/version.ts`).
+  `static/changelog.json`: CI rewrites them on every release, so a copy here
+  names an old release whenever this Worker is behind the game server (the
+  footer showed v0.67.0 while v0.69 was live, whenever Render was napping).
+  The footer fetches the version without blocking the page and asks again
+  while the server wakes (`web/src/site/version.ts`).
 - Proxied HTML keeps the public host: the game server builds absolute URLs
   (OG tags, links) from the `Host` header it was asked on, which through a
   proxied request is the origin's own hostname. `worker.js` rewrites
@@ -190,7 +190,29 @@ static host (Cloudflare Pages / Worker)   game server (Render)
   `tests/test_landing_build.py` checks `landing_build.py` against the
   repo's `web/` directory and that editing a landing file moves the id.
 
-**Redeploying**, after any change to the landing pages or `worker.js`:
+**Deploys.** `.github/workflows/version-bump.yml` deploys this Worker once
+per merge to `main`, right after it asks Render to deploy the same commit
+(deploy/render/README.md): `npm ci`, `build_landing.py`, `wrangler deploy`.
+Until Render's deploy finishes, the Worker sees its build id differ from the
+game server's and passes the pages through to it (see "Self-correcting"
+above). Before this step the Worker was redeployed by hand, and it fell
+behind: on 2026-11-15 it had last been deployed at v0.67.0 while `main` was
+at v0.69.3.
+
+Setup, once: GitHub → repo → **Settings → Secrets and variables → Actions**,
+two repository secrets:
+
+- `CLOUDFLARE_API_TOKEN`: a Cloudflare API token from the **Edit Cloudflare
+  Workers** template, limited to this account and the `thesuperhuman.us`
+  zone (it needs Workers Scripts: Edit and, for the route, Workers Routes:
+  Edit).
+- `CLOUDFLARE_ACCOUNT_ID`: the account's ID (`npx wrangler whoami` prints
+  it).
+
+Without them the workflow's run fails with a message saying so, after Render
+has been asked to deploy.
+
+**Redeploying by hand** (the same steps CI runs):
 
 ```sh
 git pull                                         # the same commit the server runs

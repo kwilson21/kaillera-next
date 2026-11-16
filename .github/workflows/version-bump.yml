@@ -39,10 +39,12 @@ jobs:
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # 24, as in the Dockerfile: wrangler, which deploys the landing Worker
+      # below, needs 22.12 or later.
       - uses: actions/setup-node@v7
         if: steps.newest.outputs.release == 'true'
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Configure git
         if: steps.newest.outputs.release == 'true'
@@ -90,3 +92,25 @@ jobs:
           fi
           curl --fail --silent --show-error --output /dev/null --retry 3 --request POST "$RENDER_DEPLOY_HOOK_URL"
           echo "Asked Render to deploy main at $(git rev-parse --short HEAD)."
+
+      # The landing Worker serves / and /join from its own copies of the
+      # landing pages (deploy/static/README.md). Deployed here, once per merge
+      # like Render and from the same tip of main, so its copies keep up with
+      # the game server's; it was last deployed by hand at v0.67.0
+      # while main reached v0.69.3. wrangler uploads only the files that
+      # changed. Until Render's deploy finishes, the Worker sees its build id
+      # differ from the game server's and passes the pages through to it.
+      - name: Deploy the landing Worker
+        if: steps.newest.outputs.release == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID is not set, so the landing Worker was not deployed. See deploy/static/README.md."
+            exit 1
+          fi
+          npm ci --ignore-scripts
+          python3 scripts/build_landing.py
+          npx wrangler deploy -c wrangler.landing.jsonc
+          echo "Deployed the landing Worker from main at $(git rev-parse --short HEAD)."
