@@ -72,6 +72,28 @@ const SPECS = [
       'again, also when the guest has not yet noticed that its old connection is gone: the new offer names a newer ' +
       'connection than the one the guest holds, so the guest replaces it.',
   },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_before',
+    hub: 'Guest',
+    runs: ['rightOverWrongTest', 'twoDropsTest'],
+    about:
+      "A guest's page judging and announcing its ROM while a dropped file is still being hashed, before the page " +
+      'kept each hash with the load it was computed for. `loaded` is the file the page holds, `hash` and ' +
+      "`hashLoad` are `_romHash` and the load it belongs to, `told` is what the server last heard. The host's " +
+      "ROM, dropped over a wrong one, is refused by the wrong one's hash, and its own hash, landing after, says " +
+      'ready with no ROM; a late hash refuses the ROM a newer drop brought.',
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_current',
+    hub: 'Guest',
+    runs: ['rightOverWrongTest', 'twoDropsTest'],
+    about:
+      "The same orderings today. While a load is being hashed the page waits (`pending`): the host's ROM " +
+      "arriving refuses nothing and nothing is announced, and the drop's own hash, once it lands, decides. A " +
+      'hash for a load the page no longer holds changes nothing.',
+  },
 ];
 
 const argument = (name) => {

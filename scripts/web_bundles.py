@@ -1,7 +1,7 @@
 """The TypeScript bundles in web/static/dist: build output, not in git.
 
-The demo and landing builds package files out of web/static, so they build
-the bundles first (the same `node scripts/build-web.mjs` the Docker image and
+The landing build packages files out of web/static, so it builds the
+bundles first (the same `node scripts/build-web.mjs` the Docker image and
 CI run). With package-lock.json the bytes are the same wherever this runs,
 which is what lets the landing Worker's build id match the server's
 (server/src/landing_build.py).

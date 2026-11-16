@@ -398,6 +398,30 @@ drop_is_final() {
   expect_violation "$DROP" drop_is_final_skip_everywhere guestLinksCanHeal 2
 }
 
+rom_identity() {
+  local ROM_IDENTITY=specs/rom_identity.qnt
+  verify "$ROM_IDENTITY" rom_identity_current allHold
+  # A wrong ROM hashed, the host's dropped over it, the host's ROM arrives:
+  # 4 steps (rightOverWrongTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_before aRightRomStays
+  # A drop, the host's ROM picked from the library, the drop's hash lands:
+  # 3 steps (pickWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_judge_only aSettledRomKeepsItsHash
+  # The host's ROM hashed and heard, the host's ROM known, a wrong one
+  # dropped, Start: 5 steps (startWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_no_retract aStartCountsOnlyTheLoadedRom
+  # The host sharing, its ROM known, a wrong one the same size dropped, Start,
+  # the start reaching the page: 4 steps (bootWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push neverBootsAWrongRom
+  # The host's ROM known, the host drops another, Start: 3 steps
+  # (hostStartsWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push theHostStartsOnItsOwnHash
+  # A drop whose hash fails: 2 steps (hashFailsTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push aSettledRomKeepsItsHash
+  # A rejoin while the drop is hashed is 7 steps, past the bound: its scenario
+  # (rejoinWhileHashingTest) checks it.
+}
+
 start_group() {
   local START_GROUP=specs/start_group.qnt
   verify "$START_GROUP" start_group_current allHold
@@ -478,7 +502,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
+  rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -489,7 +513,7 @@ SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
-  "peer_identity rom_transfer peer_connection rom_at_start catch_up_wait ask_escalation escalation_push" # ~8 min
+  "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs" # ~7.5 min
 )
 

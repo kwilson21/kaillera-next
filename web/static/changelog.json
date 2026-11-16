@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.11",
+    "date": "2026-11-16",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a guest judges and announces its ROM only by that ROM's own hash (#289)"
+      }
+    ]
+  },
+  {
     "version": "0.69.10",
     "date": "2026-11-16",
     "changes": [

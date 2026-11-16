@@ -28,7 +28,12 @@ _LIMITS: dict[str, tuple[int, float]] = {
     "rom-sharing-toggle": (5, 10),
     "set-listed": (5, 10),
     "match-joined": (5, 10),
-    "rom-ready": (10, 10),
+    # Players behind one IP (a household, carrier NAT), each: a guest's drop
+    # says "not ready" at once and "ready" when its hash lands
+    # (specs/rom_identity.qnt), the host's ROM arriving says it again, and a
+    # join, a rejoin or the ROM prompt says it once more. A refused one is not
+    # sent again, and the server would keep the previous word.
+    "rom-ready": (40, 10),
     "input-type": (5, 10),
     "device-type": (5, 10),
     "snapshot": (2, 1),
