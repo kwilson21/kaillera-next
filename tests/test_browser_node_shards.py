@@ -94,3 +94,10 @@ def test_cached_dependencies_are_still_installed_from_the_lockfile():
     assert "uv sync --directory server --frozen --extra dev" in workflow
     assert "npm ci --ignore-scripts" in workflow
     assert "cache: npm" in workflow
+
+
+def test_job_cache_path_does_not_require_runner_context():
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/browser.yml").read_text()
+    # GitHub does not allow runner context in jobs.<job_id>.env.
+    assert "UV_CACHE_DIR: /tmp/kaillera-uv-cache" in workflow
+    assert "UV_CACHE_DIR: ${{ runner." not in workflow
