@@ -748,8 +748,7 @@ Staying plain JavaScript:
   every merge put the committed file in conflict with every other open
   branch. It is now build output (`web/static/dist` is git-ignored): the
   Docker image builds it in a Node stage, CI builds it, and
-  `scripts/build_landing.py` / `scripts/build_demo.py` build it before
-  packaging. `package-lock.json` is committed so every build gives the same
+  `scripts/build_landing.py` builds it before packaging. `package-lock.json` is committed so every build gives the same
   bytes, which the landing build id depends on; CI's `image` job compares
   the image's bundles with a local build.
 - The database stays on Cloudflare D1 (SQLite locally). Queries are built with

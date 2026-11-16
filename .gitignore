@@ -80,7 +80,8 @@ web/webgpu-pivot-test/
 # Local gameplay test output (scripts/test-gameplay.sh)
 test-results/
 
-# Built static demo (scripts/build_demo.py)
+# The static demo build (scripts/build_demo.py, since removed) wrote here;
+# ignored so a copy left from an old build stays out of git.
 /dist/
 
 # Wrangler local dev state
