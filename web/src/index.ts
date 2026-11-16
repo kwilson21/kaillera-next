@@ -54,6 +54,7 @@ import * as remapWizard from './play/remap-wizard.ts';
 import * as romTransfer from './play/rom-transfer.ts';
 import * as roomView from './play/room-view.ts';
 import { newStoredRom, openRomLibrary, romLibraryHtml } from './play/rom-library.ts';
+import * as romIdentity from './play/rom-identity.ts';
 import { escapeHtml, inviteUrl, roomClosedMessage, rosterToasts } from './play/room-text.ts';
 import {
   formatRomSize,
@@ -109,12 +110,16 @@ import { heldAsLateJoiner } from './start-cohort.ts';
 import {
   countedByStartGates,
   leavesOut,
+  leavesOutUnreachable,
+  behindTheStart,
+  leftOutItself,
+  missedLoadDeadline,
   rejoinsLate,
   startHasItsHost,
   startsAlone,
   takesLeftOut,
 } from './start-group.ts';
-import { startDeadline } from './start-deadline.ts';
+import { sayUntilHeard, startDeadline } from './start-deadline.ts';
 import { installDesyncDetector } from './page/desync-detector.ts';
 import {
   LATE_JOIN_REPORT_AFTER_MS,
@@ -326,10 +331,15 @@ export const KNCore = {
     leavesOut,
     startsAlone,
     takesLeftOut,
+    leftOutItself,
+    leavesOutUnreachable,
+    behindTheStart,
+    missedLoadDeadline,
     rejoinsLate,
     startHasItsHost,
     /** A start wait with a deadline, an Effect program (web/src/start-deadline.ts). */
     startDeadline,
+    sayUntilHeard,
   },
   meshHealTargets,
   normalizeAxis,
@@ -388,6 +398,7 @@ export const KNCore = {
     hostRomIdentityKey,
     romFromArchive,
     romHashMismatch,
+    romIdentity,
     newStoredRom,
     openRomLibrary,
     romLibraryHtml,

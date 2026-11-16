@@ -24,8 +24,9 @@ a ROM and joins late once one is dropped, without being reported stranded.
 A player that does not answer the start's connections does not hold the
 host's start (specs/start_group.qnt): one at the ROM prompt says it has no
 ROM and the host starts without it at once; one that never answers is left
-out after the startup retries; and in a room of three the other guest hears
-whom the host left out and stops waiting for it. The host's gesture prompt is
+out after the startup retries; in a room of three the other guest hears
+whom the host left out and stops waiting for it; and a guest the host tells
+it is out (its load deadline, a harness step here) joins late. The host's gesture prompt is
 shown when its game sequence starts, before anything is booted, so these run
 without a ROM; the late join that follows is in tests/test_gesture_prompt.py.
 
@@ -226,6 +227,185 @@ def test_a_rom_that_is_not_the_hosts_is_refused_and_the_start_keeps_the_offer_up
         expect(guest.locator("#overlay")).to_be_visible()
         expect(guest.locator("#rom-sharing-prompt")).to_be_visible()
         expect(guest.locator("#error-msg")).to_be_hidden()
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_a_rom_dropped_before_the_hosts_is_known_is_refused_with_a_word_once_it_is(browser, server_url, room):
+    # The refusal at the drop needs the host's ROM known. One dropped before
+    # it is taken; when the host's arrives and does not match, it is cleared,
+    # and the player is told why, as at the drop. It used to vanish without a
+    # word: the clearing was meant for a copy the page chose itself.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        guest.set_input_files("#rom-drop input[type=file]", OTHER_ROM)
+        expect(guest.locator("#rom-status")).to_contain_text("other.z64", timeout=15000)
+        # Hashed before the host's ROM is known, so the drop's own check has
+        # passed it and only the host's arriving can refuse it.
+        guest.wait_for_function("() => !!window.KNState?.romHash", timeout=15000)
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        _load_rom(host)
+        expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
+        expect(guest.locator("#rom-mismatch")).to_contain_text("other.z64")
+        expect(guest.locator("#rom-status")).not_to_contain_text("other.z64")
+    finally:
+        host.close()
+        guest.close()
+
+
+# Holds the page's file reads until the test lets them go: a dropped file is
+# the page's at once, and hashed only once its read is released.
+_HOLD_READS = """() => {
+    window.__heldReads = [];
+    const read = FileReader.prototype.readAsArrayBuffer;
+    FileReader.prototype.readAsArrayBuffer = function (blob) {
+        window.__heldReads.push(() => read.call(this, blob));
+    };
+}"""
+_RELEASE_READS = "() => { for (const go of window.__heldReads.splice(0)) go(); }"
+# Every `rom-ready` the page sends from now on.
+_RECORD_ROM_READY = """() => {
+    window.__romReady = [];
+    const socket = window.__test_socket;
+    const emit = socket.emit.bind(socket);
+    socket.emit = (event, ...args) => {
+        if (event === 'rom-ready') window.__romReady.push(args[0]);
+        return emit(event, ...args);
+    };
+}"""
+
+
+def test_the_hosts_rom_dropped_over_another_is_kept_when_the_hosts_arrives_before_its_hash(browser, server_url, room):
+    # specs/rom_identity.qnt, rightOverWrongTest. Until a dropped file is
+    # hashed, the page's hash is the previous ROM's. The host's ROM, dropped
+    # over another and still being hashed when the host's arrived, was
+    # refused by the other one's hash; its own hash, landing after, then said
+    # ready with no ROM. The two ROMs are the same size, so only the hash
+    # tells them apart. The drop also says "not ready" at once
+    # (startWhileHashingTest).
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _load_rom(guest, OTHER_ROM)
+        guest.wait_for_function("() => !!window.KNState?.romHash", timeout=15000)
+        guest.evaluate(_RECORD_ROM_READY)
+        guest.evaluate(_HOLD_READS)
+        _load_rom(guest, ROM)
+        _load_rom(host)
+        host.wait_for_function("() => !!window.KNState?.romHash", timeout=15000)
+        host_hash = host.evaluate("window.KNState.romHash")
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+        # The host's ROM is known and the drop is not hashed yet: the page
+        # keeps it and says nothing against it. The drop told the server it
+        # is not ready, so a start now would not count it in on the other
+        # ROM's word, and nothing has said ready since.
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        assert guest.evaluate("window.__romReady") == [{"ready": False}]
+        guest.evaluate(_RELEASE_READS)
+        # Its own hash lands, is the host's, and is announced.
+        guest.wait_for_function("(h) => window.KNState.romHash === h", arg=host_hash, timeout=15000)
+        guest.wait_for_function(
+            "(h) => window.__romReady.some((m) => m.ready && m.hash === h)", arg=host_hash, timeout=10000
+        )
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        sent = guest.evaluate("window.__romReady")
+        assert all(m.get("hash") == host_hash for m in sent if m.get("ready")), sent
+    finally:
+        host.close()
+        guest.close()
+
+
+# Every read the page starts fails, as an unreadable file's does.
+_FAIL_READS = """() => {
+    FileReader.prototype.readAsArrayBuffer = function () {
+        setTimeout(() => this.onerror && this.onerror(new ProgressEvent('error')), 0);
+    };
+}"""
+
+
+def _start_while_the_guests_drop_is_hashed(host, guest, rom):
+    """The host shares its ROM, so the server starts without the guest's word;
+    the guest has just dropped `rom` and its read is held when the start
+    reaches it."""
+    _load_rom(host)
+    _share_rom(host, guest)
+    expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+    guest.evaluate(_HOLD_READS)
+    _load_rom(guest, rom)
+    expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+    host.click("#start-btn")
+    _in_match(guest)
+    # Not booted on a ROM whose hash is not in: the page waits for a ROM in
+    # the started game, as a late joiner does.
+    expect(guest.locator("#late-join-msg")).to_be_visible(timeout=5000)
+    expect(guest.locator("#overlay")).to_be_visible()
+    guest.evaluate(_RELEASE_READS)
+
+
+def test_a_start_reaching_a_rom_still_being_hashed_waits_for_the_hash_and_joins(browser, server_url, room):
+    # specs/rom_identity.qnt, bootWaitsThenJoinsTest.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _start_while_the_guests_drop_is_hashed(host, guest, ROM)
+        # The hash is the host's: the page joins the game.
+        expect(guest.locator("#late-join-msg")).to_have_count(0, timeout=15000)
+        expect(guest.locator("#overlay")).to_be_hidden(timeout=10000)
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_a_start_reaching_a_wrong_rom_still_being_hashed_never_boots_it(browser, server_url, room):
+    # specs/rom_identity.qnt, bootWhileHashingTest. The two ROMs are the same
+    # size, so only the hash tells them apart: booted at the start, the wrong
+    # one ran.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _start_while_the_guests_drop_is_hashed(host, guest, OTHER_ROM)
+        # The hash is not the host's: refused with a word, never booted.
+        expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
+        expect(guest.locator("#rom-status")).not_to_contain_text("other.z64")
+        expect(guest.locator("#overlay")).to_be_visible()
+        guest.wait_for_timeout(1000)
+        expect(guest.locator("#overlay")).to_be_visible()
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_the_hosts_start_waits_for_its_own_rom_to_be_hashed(browser, server_url, room):
+    # specs/rom_identity.qnt, hostStartsWhileHashingTest: a start while the
+    # host's new ROM is being hashed would carry the previous ROM's hash.
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    try:
+        start = host.locator("#start-btn")
+        _load_rom(host, OTHER_ROM)
+        expect(start).to_be_enabled(timeout=15000)
+        host.evaluate(_HOLD_READS)
+        _load_rom(host)
+        expect(start).to_be_disabled(timeout=5000)
+        expect(start).to_contain_text("Checking your ROM")
+        host.evaluate(_RELEASE_READS)
+        expect(start).to_be_enabled(timeout=15000)
+        expect(start).to_contain_text("Start Game")
+    finally:
+        host.close()
+
+
+def test_a_rom_that_cannot_be_read_is_not_kept(browser, server_url, room):
+    # specs/rom_identity.qnt, hashFailsTest: unread, its hash never lands, and
+    # it used to stay loaded, never said ready and never judged.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        guest.evaluate(_RECORD_ROM_READY)
+        guest.evaluate(_FAIL_READS)
+        guest.set_input_files("#rom-drop input[type=file]", ROM)
+        expect(guest.locator("#rom-status")).not_to_contain_text("test.z64", timeout=10000)
+        sent = guest.evaluate("window.__romReady")
+        assert sent and not any(m.get("ready") for m in sent), sent
     finally:
         host.close()
         guest.close()
@@ -498,17 +678,112 @@ def test_in_a_room_of_three_the_other_guest_hears_who_was_left_out(browser, serv
         deaf_slot = _slot(deaf)
         # The host's deadline on the silent player runs on past that, gives
         # up, and the host tells the guest, which stops waiting for it too.
-        # The deadline used to stop once the sequence had started.
+        # The deadline used to stop once the sequence had started. The
+        # guest's own deadline on that player gives up at about the same
+        # time and tells the host it cannot reach it: whichever comes first
+        # leaves it out.
         guest.wait_for_function(
             f"{_SYNC_LOG}.includes('START-LEFT-OUT slot={deaf_slot} reason=the host left it out')",
             timeout=45000,
         )
-        assert "reason=startup connect gave up" in host.evaluate(_SYNC_LOG)
-        assert "START-ALONE" not in host.evaluate(_SYNC_LOG)
+        log = host.evaluate(_SYNC_LOG)
+        assert "reason=startup connect gave up" in log or "reason=slot 1 cannot reach it" in log, log[-3000:]
+        assert "START-ALONE" not in log
     finally:
         host.close()
         guest.close()
         deaf.close()
+
+
+def test_a_guest_the_host_tells_it_is_out_joins_late(browser, server_url, room):
+    """A guest that answered and is then left out hears so on its channel, and joins late.
+
+    The host's load deadline leaves out a player that answered but has not
+    loaded, and tells it (`left-out:<its slot>`) on the channel it keeps open
+    for that. Nothing boots here, so the host's deadline never runs: the word
+    is sent from the host page's own channel (a harness step). The host's
+    deadline itself is in tests/test_gesture_prompt.py.
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    try:
+        _load_rom(host)
+        _load_rom(guest)
+        guest.evaluate(_RECORD_ENGINE_STARTS)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        guest_slot = _slot(guest)
+        sent = host.wait_for_function(
+            f"""() => {{
+                const peer = Object.values(window.KNState.peers || {{}}).find((p) => p.slot === {guest_slot});
+                if (!peer || !peer.dc || peer.dc.readyState !== 'open') return false;
+                peer.dc.send('left-out:{guest_slot}');
+                return true;
+            }}""",
+            timeout=45000,
+        )
+        assert sent
+        # The guest starts again as a late joiner (web/src/start-group.ts,
+        # leftOutItself), whose engine (a fresh sync log) offers to the host.
+        guest.wait_for_function("window.__engineStarts.length >= 2", timeout=10000)
+        assert guest.evaluate("window.__engineStarts") == [False, True]
+        guest.wait_for_function(f"{_SYNC_LOG}.includes('late-joiner always initiates')", timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
+# The page hears no WebRTC signal from one sender (a network between two
+# guests that never lets them through), and all the others.
+_DEAF_TO = """(sender) => {
+    const socket = window.__test_socket;
+    const deaf = (handler) => (data) => (data?.sender === sender ? undefined : handler(data));
+    const handlers = socket.listeners('webrtc-signal');
+    socket.off('webrtc-signal');
+    const on = socket.on.bind(socket);
+    for (const handler of handlers) on('webrtc-signal', deaf(handler));
+    socket.on = (event, handler) => on(event, event === 'webrtc-signal' ? deaf(handler) : handler);
+}"""
+
+
+def test_two_guests_that_cannot_reach_each_other_do_not_hold_the_start(browser, server_url, room):
+    """Two guests that each reach the host but not each other: the host decides who plays.
+
+    Each would wait for the other's emu-ready for ever, and neither may leave
+    the other out. The guest whose deadline gives up on the other tells the
+    host (`unreachable:<slot>`); the host leaves that one out and tells it, and
+    it joins late (specs/start_group.qnt, reportApart).
+    """
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
+    guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
+    other = _open(browser, f"{server_url}/play.html?room={room}&name=Other")
+    try:
+        for page in (host, guest, other):
+            _load_rom(page)
+        other.evaluate(_DEAF_TO, guest.evaluate("window.__test_socket.id"))
+        other.evaluate(_RECORD_ENGINE_STARTS)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        guest_slot = _slot(guest)
+        other_slot = _slot(other)
+        assert 0 < guest_slot < other_slot  # the guest offers to the other guest
+        # The guest gives up on the other guest after its retries and tells the host.
+        host.wait_for_function(
+            f"{_SYNC_LOG}.includes('reason=slot {guest_slot} cannot reach it')",
+            timeout=60000,
+        )
+        assert f"START-UNREACHABLE: told the host slot {other_slot}" in guest.evaluate(_SYNC_LOG)
+        guest.wait_for_function(
+            f"{_SYNC_LOG}.includes('START-LEFT-OUT slot={other_slot} reason=the host left it out')",
+            timeout=10000,
+        )
+        # The other guest hears it is out and joins late.
+        other.wait_for_function("window.__engineStarts.length >= 2", timeout=15000)
+        assert other.evaluate("window.__engineStarts") == [False, True]
+    finally:
+        host.close()
+        guest.close()
+        other.close()
 
 
 def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):

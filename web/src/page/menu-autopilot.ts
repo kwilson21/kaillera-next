@@ -1,9 +1,10 @@
 /**
- * Closed-loop menu driver for the rollback demo and the two-player test.
- * Moved from web/static/ssb64-menu-autopilot.js.
+ * Closed-loop menu driver for the rollback demo and the two- and
+ * four-player tests. Moved from web/static/ssb64-menu-autopilot.js.
  *
  * Gets SSB64 (NTSC-U 1.0) from power-on to a VS battle for P1 and the
- * synthetic P2 by reading the game's own menu state from RDRAM each frame
+ * other players (the demo's synthetic P2, or each test page's own slot, up
+ * to P4) by reading the game's own menu state from RDRAM each frame
  * and tapping the button that moves it toward the goal. A press the game
  * drops (menu still in its 10-tic input lockout, landed mid-transition,
  * etc.) is sent again on the next decision, so there is no frame-exact
@@ -68,7 +69,7 @@ const MODE_SELECT_VS = 1;
 const VSMODE_START = 0;
 /** nMNPlayersCursorStatusGrab */
 const CURSOR_GRAB = 1;
-const FKIND = { MARIO: 0, DONKEY: 2, NULL: 28 };
+const FKIND = { MARIO: 0, DONKEY: 2, SAMUS: 3, LINK: 5, NULL: 28 };
 /** Dream Land (mnMapsGetGroundKind). */
 export const MAPS_TARGET_SLOT = 6;
 
@@ -82,12 +83,14 @@ export interface PortraitTarget {
 /**
  * Where each player's puck goes. mnPlayersVSGetPuckFighterKind maps
  * (pos.x + 13, pos.y + 12) to a 45-px-wide cell; top row y+12 in (35, 79),
- * columns from x+13 = 25. Mario is column 1, DK column 2: both always
- * unlocked, unlike Luigi/Ness/Falcon/Jigglypuff.
+ * columns from x+13 = 25. Mario is column 1, DK column 2, Link column 3,
+ * Samus column 4: all always unlocked, unlike Luigi/Ness/Falcon/Jigglypuff.
  */
-export const PORTRAIT_TARGETS: readonly [PortraitTarget, PortraitTarget] = [
+export const PORTRAIT_TARGETS: readonly [PortraitTarget, PortraitTarget, PortraitTarget, PortraitTarget] = [
   { fkind: FKIND.MARIO, x: 25 + 45 * 1 + 22 - 13, y: 57 - 12 },
   { fkind: FKIND.DONKEY, x: 25 + 45 * 2 + 22 - 13, y: 57 - 12 },
+  { fkind: FKIND.LINK, x: 25 + 45 * 3 + 22 - 13, y: 57 - 12 },
+  { fkind: FKIND.SAMUS, x: 25 + 45 * 4 + 22 - 13, y: 57 - 12 },
 ];
 /** px from cell centre; cells are 45 x 43. */
 const AIM_TOLERANCE = 8;
@@ -248,12 +251,20 @@ export interface MenuAutopilotOptions {
    * game's.
    */
   readonly currentFrame?: (() => number) | null | undefined;
+  /**
+   * How many players pick a fighter before P1 presses Start: 2 (the
+   * default), 3 or 4. The game starts the battle once two have, so with
+   * more players P1 waits for every one of them, or the others are left out.
+   */
+  readonly players?: 2 | 3 | 4 | undefined;
 }
 
-/** The two players' input streams, and why the autopilot stopped (null while it has not). */
+/** The players' input streams, and why the autopilot stopped (null while it has not). */
 export interface MenuAutopilot {
   readonly p1: PilotActor;
   readonly p2: PilotActor;
+  readonly p3: PilotActor;
+  readonly p4: PilotActor;
   readonly failure: () => string | null;
 }
 
@@ -278,8 +289,8 @@ interface Steering {
   quietFrom: number;
 }
 
-/** The two slots the autopilot drives: P1 and the synthetic P2. */
-type PilotSlot = 0 | 1;
+/** The slots the autopilot drives: P1, and P2 to P4. */
+type PilotSlot = 0 | 1 | 2 | 3;
 
 /** A menu driver over one game's memory. */
 export const createMenuAutopilot = (options: MenuAutopilotOptions): MenuAutopilot => {
@@ -287,6 +298,7 @@ export const createMenuAutopilot = (options: MenuAutopilotOptions): MenuAutopilo
   const log = options.log ?? (() => undefined);
   const anyFighter = options.anyFighter ?? false;
   const currentFrame = options.currentFrame ?? null;
+  const players: readonly PilotSlot[] = ([0, 1, 2, 3] as const).slice(0, options.players ?? 2);
   let failed: string | null = null;
   let lastScene = -1;
   let sceneSince = 0;
@@ -346,7 +358,9 @@ export const createMenuAutopilot = (options: MenuAutopilotOptions): MenuAutopilo
     };
   };
 
-  const steer: readonly [Steering, Steering] = [
+  const steer: readonly [Steering, Steering, Steering, Steering] = [
+    { x: NaN, y: NaN, movedAt: 0, quietFrom: 0 },
+    { x: NaN, y: NaN, movedAt: 0, quietFrom: 0 },
     { x: NaN, y: NaN, movedAt: 0, quietFrom: 0 },
     { x: NaN, y: NaN, movedAt: 0, quietFrom: 0 },
   ];
@@ -390,9 +404,8 @@ export const createMenuAutopilot = (options: MenuAutopilotOptions): MenuAutopilo
     return sending(stickPulse(dx, dy));
   };
 
-  const cssBothPicked = (): boolean => {
-    const both: readonly PilotSlot[] = [0, 1];
-    for (const i of both) {
+  const cssAllPicked = (): boolean => {
+    for (const i of players) {
       const slot = readSlot(i);
       if (typeof slot === 'string' || !slot.fighterSelected || slot.cursorStatus === CURSOR_GRAB) return false;
     }
@@ -421,7 +434,7 @@ export const createMenuAutopilot = (options: MenuAutopilotOptions): MenuAutopilo
         return cur === VSMODE_START ? tap(BTN.A) : tap(BTN.UP);
       }
       case SCENE.PLAYERS_VS:
-        return cssBothPicked() ? tap(BTN.START) : cssPick(0, frame);
+        return cssAllPicked() ? tap(BTN.START) : cssPick(0, frame);
       case SCENE.MAPS: {
         if (anyFighter) return tap(BTN.A);
         // A word that cannot be read counts as slot 0.
@@ -448,16 +461,20 @@ export const createMenuAutopilot = (options: MenuAutopilotOptions): MenuAutopilo
     }
   };
 
-  // P2 only has a job on the character select; everywhere else it stays
-  // idle so it never fights P1 for menus that accept any controller.
-  const decideP2 = (frame: number): PilotAction => {
-    if (failed || observeScene(frame) !== SCENE.PLAYERS_VS) return idle(6);
-    return cssPick(1, frame);
-  };
+  // P2 to P4 only have a job on the character select; everywhere else they
+  // stay idle so they never fight P1 for menus that accept any controller.
+  const decideOther =
+    (i: PilotSlot) =>
+    (frame: number): PilotAction => {
+      if (failed || observeScene(frame) !== SCENE.PLAYERS_VS) return idle(6);
+      return cssPick(i, frame);
+    };
 
   return {
     p1: makeActor(decideP1),
-    p2: makeActor(decideP2),
+    p2: makeActor(decideOther(1)),
+    p3: makeActor(decideOther(2)),
+    p4: makeActor(decideOther(3)),
     failure: () => failed,
   };
 };

@@ -37,13 +37,23 @@ def test_rollback_guest_boot_is_deferred_until_gesture():
     assert cheats_idx > boot_idx
 
 
+def _take_rom_hash(source):
+    # Every load that knows its hash takes it through one helper
+    # (specs/rom_identity.qnt): the hash, the game id, the EJS identity and the
+    # hibernated core's check.
+    idx = source.find("const takeRomHash = (load, hash) =>")
+    assert idx != -1
+    return source[idx : idx + 600]
+
+
 def test_library_rom_updates_ejs_identity_for_next_boot():
     source = (REPO_ROOT / "web/static/play.js").read_text()
     load_idx = source.find("const loadRomFromLibrary =")
     assert load_idx != -1
     window = source[load_idx : load_idx + 1600]
 
-    assert "window.EJS_gameID = hash" in window
+    assert "takeRomHash(load, hash)" in window
+    assert "window.EJS_gameID = hash" in _take_rom_hash(source)
 
 
 def test_non_ssb64_boot_clears_stale_standard_cheats():
@@ -93,9 +103,7 @@ def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fal
     initial_idx = source.find("initial-sync-load", source.find("if (isKnSyncInitialState)"))
     assert initial_idx != -1
     initial_window = source[initial_idx : initial_idx + 1800]
-    remix_log_idx = initial_window.find(
-        "initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup"
-    )
+    remix_log_idx = initial_window.find("initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup")
     hidden_idx = initial_window.find("_restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load')")
     audio_idx = initial_window.find("_restoreAudioFifoState(readyMod, _guestStateAudioFifo, 'initial-sync-load')")
     cleanup_idx = initial_window.find("_postStateLoadCleanup(readyMod, 'initial-sync-load')")
@@ -151,9 +159,7 @@ def test_smash_remix_runtime_mismatch_uses_direct_host_title_kn_sync():
     assert "initial-sync-load: Remix kn-sync state loaded with hidden state + C cleanup" in source
     assert "_postStateLoadCleanup(mod, `${reason}:post-kn-sync`);" not in source
     assert "post-state cleanup applied" in source
-    assert (
-        "const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally;"
-    ) in source
+    assert ("const hasLocalKnSyncCapture = isKnSyncInitialState && _guestStateCapturedLocally;") in source
 
     # Host and guest now run the IDENTICAL restore stack from the same
     # `loadKnSyncStateAtStartBoundary` call — `hasLocalKnSyncCapture` only
@@ -230,11 +236,16 @@ def test_determinism_harness_has_setup_only_css_character_gate():
     assert "css_selected_flag" in source
     assert "setup gate OK" in source
 
-    scripted_idx = source.find("'scripted-post-nav',", source.find("const setupAlignment = await requireMatchSetupAligned("))
+    scripted_idx = source.find(
+        "'scripted-post-nav',", source.find("const setupAlignment = await requireMatchSetupAligned(")
+    )
     assert scripted_idx != -1
     scripted_window = source[scripted_idx : scripted_idx + 700]
     assert "if (SETUP_ONLY)" in scripted_window
-    assert "await finishSetupOnly(host, guest, hostBrowser, guestBrowser, 'scripted-post-nav', setupAlignment)" in scripted_window
+    assert (
+        "await finishSetupOnly(host, guest, hostBrowser, guestBrowser, 'scripted-post-nav', setupAlignment)"
+        in scripted_window
+    )
     assert "return;" in scripted_window
 
 
@@ -262,8 +273,11 @@ def test_same_rom_resumes_hibernated_core_and_rom_switch_discards_old_core():
     assert "if (!_hibernated) return" in helper_window
     assert "if (nextHash && _hibernatedRomHash === nextHash) return" in helper_window
     assert "destroyEmulator()" in helper_window
-    assert "discardHibernatedEmulatorForRomChange(expectedHash)" in source
-    assert "discardHibernatedEmulatorForRomChange(hash)" in source
+    # A ROM from the host (its hash known at once) and a hashed drop both
+    # discard a hibernated core for another ROM, through takeRomHash.
+    assert "takeRomHash(load, expectedHash)" in source
+    assert "takeRomHash(load, hash)" in source
+    assert "discardHibernatedEmulatorForRomChange(hash)" in _take_rom_hash(source)
     assert "discardHibernatedEmulatorForRomChange(null)" in source
 
     assert "const markSameRomEmulatorResume = (reason) => {" in source

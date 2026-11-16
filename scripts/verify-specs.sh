@@ -13,15 +13,27 @@
 #   verify-specs.sh               every group below, one after another
 #   verify-specs.sh --shard N     the groups of CI shard N (SHARDS below)
 #   verify-specs.sh --shards      how many shards there are
+#   verify-specs.sh --plan        print every command as tab-separated fields
 #   verify-specs.sh GROUP...      the named groups
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# The scheduler reads this same authoritative command list; there is no second
+# list of properties or expected counterexamples to keep in sync.
+PLAN=false
+if [ "${1:-}" = --plan ]; then
+  PLAN=true
+  shift
+fi
 STEPS="${STEPS:-6}"
 QUINT="npx quint"
 
 verify() { # spec module invariant [init [steps]]
   local init="${4:-init}" steps="${5:-$STEPS}"
+  if "$PLAN"; then
+    printf '%s\t%s\t%s\t%s\t%s\thold\n' "$1" "$2" "$3" "$init" "$steps"
+    return
+  fi
   echo "== $2 / $3${4:+ from $4} (every run up to $steps steps)"
   $QUINT verify "$1" --main="$2" --invariant="$3" --init="$init" --max-steps="$steps"
 }
@@ -30,6 +42,10 @@ verify() { # spec module invariant [init [steps]]
 # pass means nothing. Both older variants of the peer identity rule have a
 # counterexample within 6 steps.
 expect_violation() { # spec module invariant
+  if "$PLAN"; then
+    printf '%s\t%s\t%s\tinit\t%s\tviolation\n' "$1" "$2" "$3" "$STEPS"
+    return
+  fi
   echo "== $2 / $3 must be violated within $STEPS steps"
   local out status=0
   out="$($QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$STEPS" 2>&1)" || status=$?
@@ -286,25 +302,74 @@ rom_at_start() {
   expect_violation "$ROM_START" rom_at_start_no_rejoin serverKnowsTheRom
 }
 
+rom_identity() {
+  local ROM_IDENTITY=specs/rom_identity.qnt
+  verify "$ROM_IDENTITY" rom_identity_current allHold
+  # A wrong ROM hashed, the host's dropped over it, the host's ROM arrives:
+  # 4 steps (rightOverWrongTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_before aRightRomStays
+  # A drop, the host's ROM picked from the library, the drop's hash lands:
+  # 3 steps (pickWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_judge_only aSettledRomKeepsItsHash
+  # The host's ROM hashed and heard, the host's ROM known, a wrong one
+  # dropped, Start: 5 steps (startWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_no_retract aStartCountsOnlyTheLoadedRom
+  # The host sharing, its ROM known, a wrong one the same size dropped, Start,
+  # the start reaching the page: 4 steps (bootWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push neverBootsAWrongRom
+  # The host's ROM known, the host drops another, Start: 3 steps
+  # (hostStartsWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push theHostStartsOnItsOwnHash
+  # A drop whose hash fails: 2 steps (hashFailsTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push aSettledRomKeepsItsHash
+  # A rejoin while the drop is hashed is 7 steps, past the bound: its scenario
+  # (rejoinWhileHashingTest) checks it.
+}
+
 start_group() {
   local START_GROUP=specs/start_group.qnt
   verify "$START_GROUP" start_group_current allHold
   verify "$START_GROUP" start_group_deadline_only allHold
   # A room of two, the guest frozen, three deadlines: 4 steps (aFrozenGuestTest).
   expect_violation "$START_GROUP" start_group_before neverStuck
-  # A room of three, one guest answers, the other frozen: 2 steps
+  # A room of three, one guest answers and loads, the other frozen: 3 steps
   # (aThirdPlayerFrozenTest).
   expect_violation "$START_GROUP" start_group_give_up_only neverStuck
-  # The same, the frozen guest left out but the other guest not told: 5 steps.
-  expect_violation "$START_GROUP" start_group_untold neverStuck
+  # The same, the frozen guest left out but the other guest not told, and no
+  # load deadline (anOldGuestTest); or a sync that times out with no deadline
+  # to go on, 5 steps (aSyncTimesOutTest).
+  expect_violation "$START_GROUP" start_group_untold_no_load neverStuck
+  # With the load deadline the host's match runs beside a page that ignores
+  # `left-out:`.
+  verify "$START_GROUP" start_group_untold neverStuck
+  # But an old page can end in neither: its deadline went with a connection
+  # that failed, 5 steps (aGuestLosesTheHostTest), or it is left out at the
+  # load deadline and does not hear it (anOldGuestTest).
+  expect_violation "$START_GROUP" start_group_untold nobodyIsInNeither
   # A room of two, the guest slow, three deadlines: 4 steps (aSlowGuestTest).
   expect_violation "$START_GROUP" start_group_no_rejoin nobodyIsInNeither
   # The same, and the last attempt opens after the give-up: 5 steps (aLateOpenTest).
   expect_violation "$START_GROUP" start_group_open_after_give_up nobodyIsInNeither
   # The same, and the guest's side fails instead: 5 steps (aGuestLosesTheHostTest).
   expect_violation "$START_GROUP" start_group_deadline_with_the_connection nobodyIsInNeither
-  # A room of three, both answer, one is lost: 4 steps (aLostAfterTheSequenceTest).
+  # A room of three, both answer, one is lost (aLostAfterTheSequenceTest), or,
+  # with no load deadline, a sync that times out: 5 steps (aSyncTimesOutTest).
   expect_violation "$START_GROUP" start_group_lost_dropped neverStuck
+  # A room of three, the guests apart, both load and the host syncs: 6 steps
+  # (aPairApartTest); or a sync that times out, 5.
+  expect_violation "$START_GROUP" start_group_apart_unarbitrated neverStuck
+  # #277's first push: the guest loads, the host syncs, the sync times out,
+  # and the deadline, run once, finds nobody behind and does not go on with
+  # the start: 6 steps (aSyncTimesOutTest).
+  expect_violation "$START_GROUP" start_group_deadline_once neverStuck
+  # One deadline time for every player: the guest still taking the host's
+  # state in is cut, 5 steps (aSlowStateTest).
+  expect_violation "$START_GROUP" start_group_absolute_deadline aPlayerMakingProgressStays
+  # start_group_resync's counterexample (aReadyThenATimeoutTest: a guest says
+  # it is ready, the other is slow, the sync times out, the host syncs again)
+  # is 11 steps, past this bound: check-specs.sh runs that scenario. So is
+  # start_group_running_ignores_left_out's (aReadyCrossesTheCutTest: the
+  # guest's ready crosses the cut, its match runs, it hears it is out), 10.
 }
 
 mesh_heal() {
@@ -341,7 +406,7 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync start_group mesh_heal
+  rom_at_start rom_identity ring_after_resync start_group mesh_heal
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -352,7 +417,7 @@ SHARDS=(
   "room_lifecycle_start"                                          # ~7 min
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
-  "peer_identity rom_transfer peer_connection rom_at_start"       # ~6.5 min
+  "peer_identity rom_transfer peer_connection rom_at_start rom_identity" # ~7 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group" # ~7 min
 )
 

@@ -22,6 +22,13 @@ test('the bare control words match', () => {
   bad('lockstep', 'Ready');
 });
 
+test('unreachable names the slot a guest cannot reach (specs/start_group.qnt, reportApart)', () => {
+  ok('lockstep', 'unreachable:2');
+  bad('lockstep', 'unreachable:');
+  bad('lockstep', 'unreachable:-1');
+  bad('lockstep', 'unreachable:two');
+});
+
 test('left-out names the slot the host left out of the start (specs/start_group.qnt)', () => {
   ok('lockstep', 'left-out:2');
   ok('lockstep', 'left-out:3');

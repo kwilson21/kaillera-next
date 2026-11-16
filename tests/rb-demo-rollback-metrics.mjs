@@ -7,18 +7,20 @@
  *   - integrity events (R2-R5 in docs/netplay-invariants.md) from the
  *     console and the C engine log — these must stay at zero
  *
- *   KN_ROM=/path/rom.z64 [KN_BASE_URL=https://localhost:27888] [KN_SECONDS=45] \
+ *   KN_ROM=/path/rom.z64 [KN_BASE_URL=http://localhost:27888] [KN_SECONDS=45] \
  *     node tests/rb-demo-rollback-metrics.mjs
  *
- * Start the game server first; it serves the demo at /demo.html, as in
- * production. Headless without a GPU the game
+ * Run `npm ci && npm run build`, then `just serve` before measuring. Rebuild
+ * after every web/src change so the measurements use current bundles.
+ * The game server serves /demo.html, as in production. If local TLS is set up,
+ * set KN_BASE_URL=https://localhost:27888 explicitly. Headless without a GPU the game
  * runs well below 60 fps, so compare ratios between runs, not absolute
  * timings; on a real machine the tick timings are meaningful too.
  */
 import { chromium } from 'playwright';
 
 const ROM = process.env.KN_ROM;
-const BASE = process.env.KN_BASE_URL || 'https://localhost:27888';
+const BASE = process.env.KN_BASE_URL || 'http://localhost:27888';
 const SECONDS = Number(process.env.KN_SECONDS || 45);
 const EXTRA = process.env.KN_QUERY || '';
 const INTEGRITY = /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|RESTORE-FAILED/;
