@@ -10,6 +10,7 @@ on:
     paths:
       - '.github/workflows/browser.yml'
       - 'scripts/browser_shard.py'
+      - 'scripts/pytest_browser_shard.py'
       - 'scripts/build-web.mjs'
       - 'web/**'
       - 'server/**'
@@ -28,29 +29,39 @@ permissions:
 # ship: it takes it from KN_ROM and is skipped without it.
 jobs:
   browser:
-    name: browser (${{ matrix.shard }}/4)
+    name: browser (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       KN_TEST_PORT: '27888'
+      UV_CACHE_DIR: /tmp/kaillera-uv-cache
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: npm
+      # The large locked Python wheels took 37–48 s to download on the two
+      # slow runners in run 43789283470. Cache package downloads, not .venv;
+      # every job still checks and installs the frozen dependency set below.
+      - name: Cache locked Python packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.UV_CACHE_DIR }}
+          key: uv-0.13.8-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('server/uv.lock') }}
       # The pages need the bundles, which are build output and not in git.
       - name: Install locked dependencies and build the bundles
         run: |
-          python -m pip install uv
+          python -m pip install uv==0.13.8
           uv sync --directory server --frozen --extra dev
           npm ci --ignore-scripts
           npm run build
       - name: Install Chromium
-        run: uv run --directory server --frozen --extra dev python -m playwright install --with-deps chromium
+        run: uv run --directory server --frozen --extra dev python -m playwright install --with-deps --only-shell chromium
       # Started here rather than by the tests' fixture, so its log is kept and
       # rate limiting is off in its own environment (ratelimit.py reads it at import).
       - name: Start the server
@@ -67,11 +78,14 @@ jobs:
           exit 1
       - name: This shard's browser suites
         run: |
-          files=$(python scripts/browser_shard.py ${{ matrix.shard }} 4)
+          files=$(python scripts/browser_shard.py --all)
           echo "$files"
-          # pytest runs from server/ (its project), so the paths go up one.
-          uv run --directory server --frozen --extra dev pytest $(printf '../%s ' $files) \
-            --browser chromium -q -rs --durations=15
+          # Collect every browser test, then partition actual node IDs. This
+          # splits long files without editing tests or their production timers.
+          # pytest runs from server/; the plugin lives at the repository root.
+          PYTHONPATH="$GITHUB_WORKSPACE${PYTHONPATH:+:$PYTHONPATH}" uv run --directory server --frozen --extra dev pytest $(printf '../%s ' $files) \
+            --browser chromium -q -rs --durations=15 -p scripts.pytest_browser_shard \
+            --ci-shard-index ${{ matrix.shard }} --ci-shard-count ${{ strategy.job-total }}
       - name: Server log
         if: failure()
         run: tail -n 400 "$RUNNER_TEMP/server.log"

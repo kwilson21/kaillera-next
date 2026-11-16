@@ -13,15 +13,27 @@
 #   verify-specs.sh               every group below, one after another
 #   verify-specs.sh --shard N     the groups of CI shard N (SHARDS below)
 #   verify-specs.sh --shards      how many shards there are
+#   verify-specs.sh --plan        print every command as tab-separated fields
 #   verify-specs.sh GROUP...      the named groups
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# The scheduler reads this same authoritative command list; there is no second
+# list of properties or expected counterexamples to keep in sync.
+PLAN=false
+if [ "${1:-}" = --plan ]; then
+  PLAN=true
+  shift
+fi
 STEPS="${STEPS:-6}"
 QUINT="npx quint"
 
 verify() { # spec module invariant [init [steps]]
   local init="${4:-init}" steps="${5:-$STEPS}"
+  if "$PLAN"; then
+    printf '%s\t%s\t%s\t%s\t%s\thold\n' "$1" "$2" "$3" "$init" "$steps"
+    return
+  fi
   echo "== $2 / $3${4:+ from $4} (every run up to $steps steps)"
   $QUINT verify "$1" --main="$2" --invariant="$3" --init="$init" --max-steps="$steps"
 }
@@ -29,8 +41,13 @@ verify() { # spec module invariant [init [steps]]
 # The checker must be able to find the bugs these properties exist for, or a
 # pass means nothing. Both older variants of the peer identity rule have a
 # counterexample within 6 steps.
+# A counterexample deeper than STEPS gives its bound as a fourth argument.
 expect_violation() { # spec module invariant [steps]
   local steps="${4:-$STEPS}"
+  if "$PLAN"; then
+    printf '%s\t%s\t%s\tinit\t%s\tviolation\n' "$1" "$2" "$3" "$steps"
+    return
+  fi
   echo "== $2 / $3 must be violated within $steps steps"
   local out status=0
   out="$($QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$steps" 2>&1)" || status=$?
