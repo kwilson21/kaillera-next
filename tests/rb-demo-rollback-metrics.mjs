@@ -37,8 +37,9 @@ const launchOpts = process.env.CHROMIUM_PATH
     }
   : { args: ['--autoplay-policy=no-user-gesture-required'] };
 const browser = await chromium.launch(launchOpts);
-// The dev server's certificate is self-signed.
-const page = await browser.newPage({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 900 } });
+// Only loopback development servers may use a self-signed certificate.
+const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(BASE).hostname);
+const page = await browser.newPage({ ignoreHTTPSErrors: isLoopback, viewport: { width: 1280, height: 900 } });
 const consoleIntegrity = [];
 page.on('console', (m) => {
   if (INTEGRITY.test(m.text())) consoleIntegrity.push(m.text().slice(0, 300));
