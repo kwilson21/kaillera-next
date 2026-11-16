@@ -5,20 +5,22 @@ Its `--plan` mode prints the same helper calls without running them. The optimiz
 runner reads that plan, not a separately maintained test allowlist:
 
 ```sh
-python scripts/verify_specs.py --shard 1 --shards 4 --workers 4 --plan
-python scripts/verify_specs.py --shard 1 --shards 4 --workers 4
+python scripts/verify_specs.py --shard 1 --shards 8 --workers 2 --worker-cpus 2 --plan
+python scripts/verify_specs.py --shard 1 --shards 8 --workers 2 --worker-cpus 2
 ```
 
 Use Python 3.12 or newer (the runner uses `hashlib.file_digest` and the safe
 `tarfile` extraction filter); CI should select that version explicitly.
 
-Run all four shards for the full suite. Each shard has four independent Apalache
-JVMs, one per worker, capped at 2 GiB heap and one active processor apiece. On a
+Run all eight shards for the full suite. Each shard has two independent Apalache
+JVMs, one per worker, capped at 2 GiB heap and two active processors apiece. On a
 standard four-core Ubuntu runner this uses the existing machine's cores, not a
 paid larger runner. Each JVM stays up for its worker's checks; Quint's supported
 `--server-endpoint` connects successive checks to it. Owned server and client processes are reaped on
 normal completion, failure, timeout and cancellation. Checks do not share an
-Apalache server concurrently.
+Apalache server concurrently. `--worker-cpus` accepts 1–4 and defaults to 1;
+this controls JVM processor budgeting, not proof bounds. The runner logs detected
+CPU count and requested worker/CPU/heap budgets before starting verification.
 
 Every original property, model variant, initial condition and bound is retained.
 Expected counterexamples are still required. They pass only on Quint's exit 1

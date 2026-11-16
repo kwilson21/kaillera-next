@@ -588,6 +588,10 @@
     const dl = window.getDelayPreference ? window.getDelayPreference() : DEFAULT_DELAY_FRAMES;
     const caps = _localRollbackCaps();
     for (const p of Object.values(_peers)) {
+      // Not to a player left out of this start: its channel may be kept open
+      // so that it hears it is out, and a page from before `left-out:` would
+      // take this word and run a match of its own from frame 0.
+      if (_phase < PHASE_RUNNING && _leftOutOfStart.has(p.slot)) continue;
       if (p.dc && p.dc.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
         try {
           p.dc.send(JSON.stringify({ type: 'lockstep-ready', delay: dl, extraDelay: _extraInputDelay, caps }));
@@ -8219,7 +8223,9 @@
   const STARTUP_HOST_ANSWER_DEADLINE_MS = STARTUP_CONNECT_TIMEOUT_MS * (STARTUP_CONNECT_MAX_ATTEMPTS + 1);
   const STARTUP_HOST_AFTER_OFFER_MS = STARTUP_CONNECT_TIMEOUT_MS * 2;
   let _hostAnswerWait = null;
-  const _hostChannelOpen = () => Object.values(_peers).some((p) => p.slot === 0 && p.dc?.readyState === 'open');
+  // The host's peer whose channel is open, if any.
+  const _hostOpenPeer = () => Object.values(_peers).find((p) => p.slot === 0 && p.dc?.readyState === 'open');
+  const _hostChannelOpen = () => !!_hostOpenPeer();
   const _armHostAnswerDeadline = (deadlineMs, after) => {
     if (_playerSlot === 0 || _isSpectator || _lateJoin || _phase >= PHASE_RUNNING) return;
     if (_hostChannelOpen()) return;
@@ -8268,8 +8274,8 @@
 
   // The players this page's start waits for, as [key, peer]: every player
   // connection not held as a late joiner and not left out (start-group.ts,
-  // countedByStartGates). The emu-ready wait, the ready barrier and the
-  // host's "anyone left?" all ask this.
+  // countedByStartGates). The emu-ready wait, the ready barrier, the host's
+  // "anyone left?" and its load deadline all ask this.
   const _startGroupPeers = () =>
     Object.entries(_peers).filter(([key, p]) =>
       window.KNCore.startGroup.countedByStartGates(
@@ -8279,37 +8285,151 @@
       ),
     );
 
-  // Stop waiting for the player in `slot`: its connection closes and it is
-  // held as a late joiner, under each key this page knows it by.
-  const _dropFromStart = (slot, reason) => {
+  // When this page's engine started (the game start): a guest's word that it
+  // cannot reach another counts only once its own deadline could have given
+  // up (leavesOutUnreachable).
+  let _startedAt = 0;
+
+  // The host's load deadline measures each player from its last start step
+  // (specs/start_group.qnt, NO_PROGRESS): its channel opening, its
+  // emu-ready, its lockstep-ready (by slot), the deadline's arming, and the
+  // host's own readiness, which every player then waits on. Cleared with the
+  // peer (resetPeerState), at stop and when the match runs.
+  const _startSteps = new Map(); // slot -> performance.now()
+  let _startArmedAt = 0;
+  let _hostReadyAt = 0;
+  const _noteStartStep = (slot) => {
+    if (_playerSlot !== 0 || !_isValidPlayerSlot(slot) || _phase >= PHASE_RUNNING) return;
+    _startSteps.set(slot, performance.now());
+  };
+  const _clearStartSteps = () => {
+    _startSteps.clear();
+    _startArmedAt = 0;
+    _hostReadyAt = 0;
+  };
+
+  // Stop waiting for the player in `slot`: it is held as a late joiner, under
+  // each key this page knows it by. Its connection is closed, not only
+  // forgotten: an attempt still in its ICE checks would open after the
+  // give-up, and that player would wait on a channel to a page that no longer
+  // counts it (specs/start_group.qnt, GIVE_UP_CLOSES). Unless `close` is
+  // false: the host keeps the open channel of a player that answered, so that
+  // it hears it is out; its page's restart closes it.
+  const _dropFromStart = (slot, reason, { close = true } = {}) => {
     for (const [sid, peer] of Object.entries(_peers)) {
       if (peer.slot !== slot || peer.synthetic) continue;
-      hardDisconnectPeer(sid, { quiet: true });
-      // Closed, not only forgotten: an attempt still in its ICE checks would
-      // open after the give-up, and that player would wait on a channel to a
-      // page that no longer counts it (specs/start_group.qnt, GIVE_UP_CLOSES).
-      try {
-        peer.pc?.close();
-      } catch (_) {}
+      if (close) {
+        hardDisconnectPeer(sid, { quiet: true });
+        try {
+          peer.pc?.close();
+        } catch (_) {}
+      } else {
+        _keepOpenForTheWord(sid, slot);
+      }
       _markPendingLateJoinPeer(sid, slot, reason);
     }
     for (const [sid, info] of Object.entries(_knownPlayers)) {
       if (info?.slot === slot) _markPendingLateJoinPeer(sid, slot, reason);
     }
+    if (_startCohortSlots?.delete(slot)) _syncLog(`start cohort: slot ${slot} removed, it is left out`);
+  };
+
+  // A player the host left out keeps its channel open for the word
+  // (`left-out:`), and its page's restart closes it. A page that never
+  // restarts (a frozen tab, a page from before `left-out:`) would keep it open
+  // for the whole session, counted by pings, rosters and broadcasts: past
+  // LEFT_OUT_RESTART_MS the host closes it itself (I1), and the player stays
+  // held as a late joiner. The connections kept open, by socket id: each
+  // ends with its peer (resetPeerState, I2) and at stop.
+  const LEFT_OUT_RESTART_MS = 30000;
+  const _leftOutKeptOpen = new Map(); // sid -> startDeadline handle
+  const _endKeptOpen = (sid) => {
+    const wait = _leftOutKeptOpen.get(sid);
+    if (!wait) return;
+    _leftOutKeptOpen.delete(sid);
+    wait.cancel();
+  };
+  const _keepOpenForTheWord = (sid, slot) => {
+    if (_leftOutKeptOpen.has(sid)) return;
+    const wait = window.KNCore.startGroup.startDeadline({
+      deadlineMs: LEFT_OUT_RESTART_MS,
+      onDeadline: () => {
+        if (_leftOutKeptOpen.get(sid) !== wait) return;
+        _leftOutKeptOpen.delete(sid);
+        const peer = _peers[sid];
+        if (!peer) return;
+        _syncLog(`START-LEFT-OUT-CLOSED sid=${sid} slot=${slot}: its page did not restart in ${LEFT_OUT_RESTART_MS}ms`);
+        hardDisconnectPeer(sid, { quiet: true });
+        try {
+          peer.pc?.close();
+        } catch (_) {}
+        // Still held as a late joiner: the late join takes it if it comes back.
+        _markPendingLateJoinPeer(sid, slot, 'left out of the start');
+        for (const [knownSid, info] of Object.entries(_knownPlayers)) {
+          if (info?.slot === slot) _markPendingLateJoinPeer(knownSid, slot, 'left out of the start');
+        }
+      },
+    });
+    _leftOutKeptOpen.set(sid, wait);
+  };
+
+  // A guest that cannot reach another guest tells the host
+  // (`unreachable:<slot>`), and says it again every
+  // STARTUP_CONNECT_TIMEOUT_MS until the host has left that player out, the
+  // two can reach each other after all, or the match runs, at most
+  // UNREACHABLE_REPORTS times. The host takes the word only once its own
+  // give-up could have come (leavesOutUnreachable): a word said once, too
+  // soon (a failed connection retried at once, a host that started later),
+  // was lost, and both players were left out at the load deadline. Stopping
+  // the engine stops it, this page's own leave-out included (its restart).
+  const UNREACHABLE_REPORTS = 6;
+  const _unreachableReports = new Map(); // slot -> Polling
+  const _stopUnreachableReports = () => {
+    for (const report of _unreachableReports.values()) report.cancel();
+    _unreachableReports.clear();
+  };
+  const _reportUnreachable = (slot) => {
+    if (_unreachableReports.has(slot)) return;
+    const report = window.KNCore.startGroup.sayUntilHeard({
+      everyMs: STARTUP_CONNECT_TIMEOUT_MS,
+      times: UNREACHABLE_REPORTS,
+      heard: () =>
+        _phase >= PHASE_RUNNING ||
+        _leftOutOfStart.has(slot) ||
+        Object.values(_peers).some((p) => p.slot === slot && p.dc?.readyState === 'open'),
+      say: (n) => {
+        const host = _hostOpenPeer();
+        if (!host) return;
+        try {
+          host.dc.send(`unreachable:${slot}`);
+          _syncLog(`START-UNREACHABLE: told the host slot ${slot} cannot be reached (${n + 1}/${UNREACHABLE_REPORTS})`);
+        } catch (e) {
+          _syncLog(`START-UNREACHABLE: telling the host slot ${slot} cannot be reached failed: ${e}`);
+        }
+      },
+    });
+    _unreachableReports.set(slot, report);
+    void report.result.then(() => {
+      if (_unreachableReports.get(slot) === report) _unreachableReports.delete(slot);
+    });
   };
 
   // The host leaves a player out of the start. False when this page is not
-  // the host, the match already runs, or the player is in (its channel open)
-  // or already out.
-  const _leaveOutOfStart = (sid, reason) => {
+  // the host, the match already runs, the player is already out, or it
+  // answered (its channel open) and can play: `cannotPlay`, it missed the
+  // load deadline or another guest cannot reach it.
+  // `settle`: go on with the start now; false while leaving out several.
+  const _leaveOutOfStart = (sid, reason, { cannotPlay = false, settle = true } = {}) => {
     const rules = window.KNCore.startGroup;
     const peer = _peers[sid];
     const slot = peer?.slot ?? _knownPlayers[sid]?.slot;
+    const channelOpen = peer?.dc?.readyState === 'open';
     const leaves = rules.leavesOut(
       _playerSlot === 0 && !_isSpectator,
       _phase >= PHASE_RUNNING,
       _isValidPlayerSlot(slot) && slot !== _playerSlot && !peer?.synthetic,
-      peer?.dc?.readyState === 'open',
+      channelOpen,
+      cannotPlay,
       _leftOutOfStart.has(slot),
     );
     if (!leaves) return false;
@@ -8317,13 +8437,24 @@
     _syncLog(`START-LEFT-OUT sid=${sid} slot=${slot} reason=${reason}`);
     const name = _knownPlayers[sid]?.playerName || `P${slot + 1}`;
     _config?.onToast?.(`Starting without ${name} — they can join once ready`);
-    _dropFromStart(slot, reason);
+    // Every player hears it, the one left out included: a player that
+    // answered keeps its channel so the word reaches it, and joins late
+    // (web/src/start-group.ts, leftOutItself); its page's restart closes the
+    // channel. One whose channel never opened is closed now.
     for (const other of Object.values(_peers)) {
       if (other.dc?.readyState !== 'open') continue;
       try {
         other.dc.send(`left-out:${slot}`);
       } catch (_) {}
     }
+    _dropFromStart(slot, reason, { close: !channelOpen });
+    if (settle) _settleStartGroup();
+    return true;
+  };
+
+  // Go on with the start once the start group has changed.
+  const _settleStartGroup = () => {
+    const rules = window.KNCore.startGroup;
     const waitingFor = _startGroupPeers().length;
     if (rules.startsAlone(true, _phase >= PHASE_GAME_STARTED, waitingFor)) {
       // Nobody left to wait for: start alone, as with no other player.
@@ -8334,7 +8465,79 @@
       checkAllEmuReady();
       checkAllLockstepReady();
     }
-    return true;
+  };
+
+  // I1 deadline: the host's wait for its start group, from when the host has
+  // loaded its own emulator until its match runs (both the emu-ready wait and
+  // the ready barrier). Before it, a player that answered but never loaded (a
+  // core that crashed, a tab frozen after it connected, a page from before
+  // `left-out:` still waiting for a player the host left out) held the start
+  // for ever. Effect code (web/src/start-deadline.ts), armed again after each
+  // run until the match runs (specs/start_group.qnt, DEADLINE_LIVE). A run
+  // leaves out each player behind (behindTheStart) that has made no start
+  // step for a whole window (missedLoadDeadline, NO_PROGRESS): a player still
+  // loading, or still taking the host's state in, stays. Each player left out
+  // is told so and joins late. Then the run goes on with the start whether or
+  // not it left anyone out: a wait nothing else would look at again moves on
+  // here.
+  // Test-only: `&knStartLoadMs=` shortens the window so a browser test can
+  // see a run (as `knperf=light` and `screenshots=off` change what a page
+  // does for tests). It only shortens, and never below 5 s: a host can
+  // already leave players out, and this only brings that sooner.
+  const START_LOAD_DEADLINE_MS = (() => {
+    const DEFAULT_MS = 60000;
+    const asked = Number(_urlParams.get('knStartLoadMs'));
+    if (!_urlParams.has('knStartLoadMs') || !Number.isFinite(asked)) return DEFAULT_MS;
+    return Math.min(DEFAULT_MS, Math.max(5000, Math.floor(asked)));
+  })();
+  // The next run comes no sooner than this after the last.
+  const START_LOAD_RECHECK_MIN_MS = 1000;
+  let _startLoadWait = null;
+  const _armStartLoadDeadline = (deadlineMs = START_LOAD_DEADLINE_MS) => {
+    if (_startLoadWait || _isSpectator || _playerSlot !== 0 || _phase >= PHASE_RUNNING) return;
+    if (!_startArmedAt) _startArmedAt = performance.now();
+    const wait = window.KNCore.startGroup.startDeadline({
+      deadlineMs,
+      onDeadline: () => {
+        if (_startLoadWait !== wait) return;
+        _startLoadWait = null;
+        _onStartLoadDeadline();
+      },
+    });
+    _startLoadWait = wait;
+  };
+  // `loaded`: the match runs; otherwise the engine stopped.
+  const _endStartLoadWait = (loaded) => {
+    const wait = _startLoadWait;
+    _startLoadWait = null;
+    if (!wait) return;
+    if (loaded) wait.done();
+    else wait.cancel();
+  };
+  const _onStartLoadDeadline = () => {
+    if (_phase >= PHASE_RUNNING || _isSpectator || _playerSlot !== 0) return;
+    const rules = window.KNCore.startGroup;
+    const now = performance.now();
+    const hostReady = _phase >= PHASE_LOCKSTEP_READY;
+    const missed = [];
+    let nextDueMs = START_LOAD_DEADLINE_MS;
+    for (const [sid, p] of _startGroupPeers()) {
+      const behind = rules.behindTheStart(!!p.emuReady, hostReady, !!_lockstepReadyPeers[sid]);
+      const lastStep = Math.max(_startSteps.get(p.slot) ?? 0, _startArmedAt, _hostReadyAt);
+      const sinceStepMs = Math.max(0, Math.floor(now - lastStep));
+      if (rules.missedLoadDeadline(behind, sinceStepMs, START_LOAD_DEADLINE_MS)) missed.push(sid);
+      else if (behind) nextDueMs = Math.min(nextDueMs, START_LOAD_DEADLINE_MS - sinceStepMs);
+    }
+    _syncLog(
+      `START-LOAD-DEADLINE phase=${_phase} hostReady=${hostReady} ` +
+        `missed=[${missed.map((sid) => _peers[sid]?.slot).join(',')}] next=${Math.max(START_LOAD_RECHECK_MIN_MS, nextDueMs)}ms`,
+    );
+    for (const sid of missed) {
+      const reason = _peers[sid]?.emuReady ? 'it did not get ready in time' : 'it did not load in time';
+      _leaveOutOfStart(sid, reason, { cannotPlay: true, settle: false });
+    }
+    _settleStartGroup();
+    _armStartLoadDeadline(Math.max(START_LOAD_RECHECK_MIN_MS, nextDueMs));
   };
 
   const installPeerDataChannelHandlers = (remoteSid, peer) => {
@@ -8423,9 +8626,12 @@
         return;
       }
       // The host starts without that player, who can join late. A guest
-      // waits for the host's word (`left-out:`), which the host's own
-      // deadline on that player brings.
+      // never leaves anyone out itself: it tells the host it cannot reach
+      // that player (`unreachable:<slot>`), and the host, which may reach
+      // both, decides who plays (specs/start_group.qnt, reportApart). The
+      // guest waits for the host's word (`left-out:`).
       if (!_leaveOutOfStart(remoteSid, 'startup connect gave up')) {
+        if (_playerSlot !== 0) _reportUnreachable(peer.slot);
         setStatus('Peer connection stalled — waiting for the host');
       }
       return;
@@ -8990,6 +9196,7 @@
       peer.ready = true;
       clearStartupConnectWatchdog(peer);
       peer._startupConnectAttempt = 0;
+      _noteStartStep(peer.slot);
       if (peer.startupReconnecting) {
         peer.startupReconnecting = false;
         _syncLog(`startup reconnect complete sid=${remoteSid} slot=${peer.slot}`);
@@ -9159,6 +9366,7 @@
         }
         if (e.data === 'emu-ready') {
           peer.emuReady = true;
+          _noteStartStep(peer.slot);
           checkAllEmuReady();
         }
         // Pause and resume are the host's word alone: no other peer can hold
@@ -9187,13 +9395,63 @@
         if (e.data === 'late-join-ready') {
           finishLateJoinReady('DC', remoteSid);
         }
+        // A guest cannot reach another guest: the host leaves the one named
+        // out of the start (specs/start_group.qnt, reportApart). Only the
+        // host decides; the first word of a pair counts.
+        if (e.data.startsWith('unreachable:')) {
+          const slot = Number(e.data.slice('unreachable:'.length));
+          const startGroup = _startGroupPeers();
+          const inStart = new Set(startGroup.map(([, p]) => p.slot));
+          const named = startGroup.find(([, p]) => p.slot === slot && !p.synthetic);
+          const sinceStartMs = Math.max(0, Math.floor(performance.now() - _startedAt));
+          const leaves = window.KNCore.startGroup.leavesOutUnreachable(
+            _playerSlot === 0 && !_isSpectator,
+            _phase >= PHASE_RUNNING,
+            peer.slot ?? -1,
+            slot,
+            inStart.has(peer.slot),
+            inStart.has(slot),
+            sinceStartMs,
+            STARTUP_CONNECT_TIMEOUT_MS * STARTUP_CONNECT_MAX_ATTEMPTS,
+          );
+          if (leaves && named) {
+            _leaveOutOfStart(named[0], `slot ${peer.slot} cannot reach it`, { cannotPlay: true });
+          } else {
+            _syncLog(`unreachable:${slot} from slot ${peer.slot} not taken (${sinceStartMs}ms into the start)`);
+          }
+          return;
+        }
         // The host left a player out of the start (specs/start_group.qnt):
         // stop waiting for it; it joins late. Only the host's word counts.
         if (e.data.startsWith('left-out:')) {
           const slot = Number(e.data.slice('left-out:'.length));
+          const mySlot = _isSpectator ? -1 : (_playerSlot ?? -1);
+          // This page itself: it missed the host's load deadline, and joins
+          // late (as at its own deadline, armHostAnswerDeadline). Its match
+          // may run already: its lockstep-ready crossed the host's cut, and it
+          // had the host's own ready. While it has had no input from the
+          // host, which sends none to a player it left out, that match is its
+          // own: it joins late (specs/start_group.qnt, RUNNING_TAKES_LEFT_OUT).
+          const running = _phase >= PHASE_RUNNING;
+          if (
+            window.KNCore.startGroup.leftOutItself(
+              peer.slot ?? -1,
+              mySlot,
+              running,
+              slot,
+              _lateJoin,
+              !!_peerInputStarted[0],
+            )
+          ) {
+            _syncLog(
+              `START-REJOIN-LATE: the host left this page out of the start${running ? ' (its own match ran, with no input from the host)' : ''}: joining late`,
+            );
+            _config?.onLeftOutOfStart?.();
+            return;
+          }
           const takes = window.KNCore.startGroup.takesLeftOut(
             peer.slot ?? -1,
-            _isSpectator ? -1 : (_playerSlot ?? -1),
+            mySlot,
             _phase >= PHASE_RUNNING,
             slot,
             _leftOutOfStart.has(slot),
@@ -9615,6 +9873,7 @@
               peer.delayValue = msg.delay || 2;
               peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
               _lockstepReadyPeers[remoteSid] = true;
+              _noteStartStep(peer.slot);
               checkAllLockstepReady();
             } else if (msg.type === 'digest') {
               if (window.KNDesync) {
@@ -9837,6 +10096,10 @@
     _peerDriver()?.peerReset(slot, opts.sid ?? null);
     if (slot === null || slot === undefined) return;
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
+    // A player that comes back is measured from its next start step.
+    _startSteps.delete(slot);
+    // A channel kept open for a left-out player's word is gone.
+    if (opts.sid) _endKeptOpen(opts.sid);
     // A joiner that was being served is gone: the pause is not kept for it.
     // The resume broadcasts the roster, and the caller has yet to drop this
     // peer from `_peers`: done now, the roster would list the joiner as a
@@ -9964,7 +10227,9 @@
     if (_isPeerPendingLateJoin(remoteSid, peer)) {
       observeDisposition('hardDisconnect');
       _syncLog(`pending late-join peer ${remoteSid} disconnected before activation`);
-      hardDisconnectPeer(remoteSid);
+      // A player the host left out of the start whose page restarts to join
+      // late has not gone: nobody is told it dropped.
+      hardDisconnectPeer(remoteSid, { quiet: _leftOutKeptOpen.has(remoteSid) });
       return;
     }
 
@@ -10657,6 +10922,7 @@
 
       _phase = PHASE_EMU_READY;
       _checkStateTransition();
+      _armStartLoadDeadline();
       hookVirtualGamepad();
 
       // On mobile: hide EJS's built-in virtual gamepad and use our custom one.
@@ -10791,21 +11057,32 @@
     }
     // Guests without ROM hash: wait for save state via handleSaveStateMsg
 
-    // Timeout: if sync hasn't completed, reset sync state so a
+    // Timeout: on a guest, if sync hasn't completed, reset sync state so a
     // reconnecting peer can re-trigger the sync flow instead of getting stuck.
+    // The host's word (`left-out:`, its lockstep-ready) moves it on from there.
     // Capture _sessionId so the timer is invalidated if stop()/init() runs.
     const sid = _sessionId;
     const syncTimeoutMs = _isSmashRemix() ? INITIAL_SMASH_TITLE_TIMEOUT_MS + 30000 : 30000;
     setTimeout(() => {
       if (_coreFatalError) return;
       if (sid !== _sessionId) return; // stale timer from previous session
-      if (_phase !== PHASE_RUNNING && _phase >= PHASE_EMU_READY) {
-        setStatus('Sync timed out — waiting for reconnect...');
-        _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
-        _phase = PHASE_EMU_READY; // allow sync retry
-        _lockstepReadyPeers = {};
-        _startCohortSlots = null;
+      if (_phase === PHASE_RUNNING || _phase < PHASE_EMU_READY) return;
+      // One sync per start on the host (specs/start_group.qnt, ONE_SYNC). A
+      // page says lockstep-ready once and takes the first state it is sent:
+      // back at the emu-ready wait, the host's barrier waited for ever for a
+      // player that had said it (or, had the word been kept, that player
+      // started from the first state and the host from the second). A player
+      // still behind is the load deadline's to leave out; it joins late, from
+      // the running state.
+      if (_playerSlot === 0) {
+        _syncLog(`SYNC-TIMEOUT phase=${_phase}: one sync per start; the load deadline decides who is behind`);
+        return;
       }
+      setStatus('Sync timed out — waiting for reconnect...');
+      _config?.onToast?.('Sync stalled — waiting for peer to reconnect');
+      _phase = PHASE_EMU_READY; // allow sync retry
+      _lockstepReadyPeers = {};
+      _startCohortSlots = null;
     }, syncTimeoutMs);
   };
 
@@ -10822,6 +11099,8 @@
     if (_coreFatalError) return; // a dead core cannot enter the start sequence
     if (_phase < PHASE_LOCKSTEP_READY) return;
     if (_phase === PHASE_RUNNING) return;
+    // The host is ready: every player now waits on its state, a fresh window.
+    if (_playerSlot === 0 && !_hostReadyAt) _hostReadyAt = performance.now();
 
     // Check that at least 1 player peer is lockstep-ready
     // Not the players held as late joiners: they joined after the initial
@@ -11509,8 +11788,47 @@
       }
     } catch (err) {
       _syncLog(`failed to send initial state: ${err}`);
+      if (_playerSlot === 0) _retryHostState();
     }
   }
+
+  // The host's own starting state failed (its capture threw): no player has
+  // a state from it yet, so it captures again HOST_STATE_RETRY_MS later, at
+  // most HOST_STATE_ATTEMPTS in all, and then says it cannot start. With one
+  // sync per start nothing else would try again, and nobody is behind a host
+  // that is not ready itself: it sat at "Syncing..." for ever (I1). A state
+  // the host has but cannot get to its players (the relay stalls) is the load
+  // deadline's: it leaves them out, the host runs alone, and they join late.
+  const HOST_STATE_ATTEMPTS = 3;
+  const HOST_STATE_RETRY_MS = 2000;
+  let _hostStateFailures = 0;
+  let _hostStateRetry = null;
+  const _endHostStateRetry = () => {
+    _hostStateRetry?.cancel();
+    _hostStateRetry = null;
+    _hostStateFailures = 0;
+  };
+  const _retryHostState = () => {
+    if (_phase !== PHASE_SYNCING || _isSpectator) return;
+    _hostStateFailures++;
+    if (_hostStateFailures >= HOST_STATE_ATTEMPTS) {
+      _syncLog(`SYNC-HOST-STATE-FAILED after ${_hostStateFailures} attempts`);
+      setStatus('Could not prepare the starting state — reload to try again');
+      KNEvent('stall', 'The host could not prepare the starting state', { attempts: _hostStateFailures });
+      return;
+    }
+    _syncLog(`SYNC-HOST-STATE-RETRY ${_hostStateFailures + 1}/${HOST_STATE_ATTEMPTS} in ${HOST_STATE_RETRY_MS}ms`);
+    _hostStateRetry?.cancel();
+    const wait = window.KNCore.startGroup.startDeadline({
+      deadlineMs: HOST_STATE_RETRY_MS,
+      onDeadline: () => {
+        if (_hostStateRetry !== wait) return;
+        _hostStateRetry = null;
+        if (_phase === PHASE_SYNCING) sendInitialState();
+      },
+    });
+    _hostStateRetry = wait;
+  };
 
   const handleSaveStateMsg = async (msg) => {
     if (_isSpectator) return;
@@ -13411,6 +13729,9 @@
     if (_phase === PHASE_RUNNING) return;
     _phase = PHASE_RUNNING;
     _endHostAnswerDeadline(true);
+    _endStartLoadWait(true);
+    _endHostStateRetry();
+    _clearStartSteps();
     _peerDriver()?.matchStarted();
     window._knPreventRetroArchVisibilityPause = true;
     _checkStateTransition();
@@ -19100,6 +19421,7 @@
 
   const init = (config) => {
     _sessionId++; // invalidate stale timers from previous session
+    _startedAt = performance.now();
     _startWaitRttLogged = false;
     _clearStartWaitRttTimer();
     _resetInputAudit();
@@ -19300,7 +19622,12 @@
     _pendingLateJoinPeerSids.clear();
     _pendingLateJoinPeerSlots.clear();
     _leftOutOfStart.clear();
+    for (const sid of [..._leftOutKeptOpen.keys()]) _endKeptOpen(sid);
+    _stopUnreachableReports();
     _endHostAnswerDeadline(false);
+    _endStartLoadWait(false);
+    _endHostStateRetry();
+    _clearStartSteps();
     _startCohortSlots = null;
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;

@@ -139,6 +139,8 @@ def test_invalid_and_empty_shards_fail_before_starting_workers():
         ["--shard", "2"],
         ["--shards", "65"],
         ["--workers", "5"],
+        ["--worker-cpus", "0"],
+        ["--worker-cpus", "5"],
         ["--timeout", "0"],
         ["--shard", "64", "--shards", "64", "--workers", "4"],
     ):
@@ -350,3 +352,19 @@ def test_quint_uses_blocked_fallback_without_downloading(tmp_path):
     assert not verify.accepted(negative, result.returncode, result.stdout + result.stderr)
     assert "Unowned Apalache fallback is disabled" in result.stdout + result.stderr
     assert "Downloading Apalache" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("cpus", [1, 2, 4])
+def test_worker_cpu_budget_reaches_jvm(monkeypatch, tmp_path, cpus):
+    captured = {}
+
+    def launch(*args, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop before starting a real JVM")
+
+    monkeypatch.setattr(verify.subprocess, "Popen", launch)
+    verify.STOP.clear()
+    with pytest.raises(RuntimeError, match="stop before"):
+        verify.worker(0, [], Path("unused"), tmp_path, 1, cpus)
+    assert f"-XX:ActiveProcessorCount={cpus}" in captured["env"]["JDK_JAVA_OPTIONS"]
+    assert "-Xmx2g" in captured["env"]["JDK_JAVA_OPTIONS"]

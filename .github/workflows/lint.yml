@@ -107,7 +107,7 @@ jobs:
         run: test "$RESULT" = success
 
   # The same bounded properties and expected counterexamples, distributed
-  # over four isolated persistent Apalache workers per standard runner.
+  # over two isolated persistent Apalache workers per standard runner.
   # Exact AST-guarded logical partitions shorten the largest solver queries.
   spec-verify:
     runs-on: ubuntu-latest
@@ -115,7 +115,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -132,12 +132,16 @@ jobs:
         with:
           path: ~/.quint/apalache-dist-0.62.4/apalache.tgz
           key: apalache-0.62.4-${{ runner.os }}-8ac8488422c30
+      - name: Runner capacity
+        run: |
+          getconf _NPROCESSORS_ONLN
+          free -m
       # The archive digest is checked before every fresh extraction.
       - name: Verify every bounded property and expected counterexample
         env:
           JOB_INDEX: ${{ strategy.job-index }}
           JOB_TOTAL: ${{ strategy.job-total }}
-        run: python scripts/verify_specs.py --shard "$((JOB_INDEX + 1))" --shards "$JOB_TOTAL" --workers 4
+        run: python scripts/verify_specs.py --shard "$((JOB_INDEX + 1))" --shards "$JOB_TOTAL" --workers 2 --worker-cpus 2
 
   # Proofs for the files in LemmaScript-files.txt. `lsc check` regenerates the
   # Dafny from the annotated TypeScript and verifies it; the diff step fails

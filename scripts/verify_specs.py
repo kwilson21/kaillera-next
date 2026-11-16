@@ -370,7 +370,7 @@ def blocked_fallback_home(directory):
     return directory
 
 
-def worker(index, checks, executable, directory, timeout):
+def worker(index, checks, executable, directory, timeout, worker_cpus=1):
     if STOP.is_set():
         raise RuntimeError("verification cancelled")
     folder = directory / f"worker-{index}"
@@ -386,7 +386,9 @@ def worker(index, checks, executable, directory, timeout):
             start_new_session=True,
             env=dict(
                 os.environ,
-                JDK_JAVA_OPTIONS=(os.environ.get("JDK_JAVA_OPTIONS", "") + " -Xmx2g -XX:ActiveProcessorCount=1"),
+                JDK_JAVA_OPTIONS=(
+                    os.environ.get("JDK_JAVA_OPTIONS", "") + f" -Xmx2g -XX:ActiveProcessorCount={worker_cpus}"
+                ),
             ),
         )
         SERVERS.append(server)
@@ -485,6 +487,7 @@ def main(argv=None):
     parser.add_argument("--shard", type=int, default=1)
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--workers", type=int, choices=range(1, 5), default=2)
+    parser.add_argument("--worker-cpus", type=int, choices=range(1, 5), default=1)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--plan", action="store_true")
     args = parser.parse_args(argv)
@@ -499,6 +502,17 @@ def main(argv=None):
     if args.plan:
         print(json.dumps([[dataclasses.asdict(c) for c in batch] for batch in selected], indent=2))
         return 0
+    print(
+        json.dumps(
+            {
+                "runner_cpus": os.cpu_count(),
+                "workers": args.workers,
+                "cpus_per_worker": args.worker_cpus,
+                "heap_gib_per_worker": 2,
+            }
+        ),
+        flush=True,
+    )
     STOP.clear()
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
@@ -508,7 +522,8 @@ def main(argv=None):
     ):
         executable = fetch_apalache(Path(temp) / "distribution")
         futures = [
-            pool.submit(worker, n, batch, executable, Path(temp), args.timeout) for n, batch in enumerate(selected)
+            pool.submit(worker, n, batch, executable, Path(temp), args.timeout, args.worker_cpus)
+            for n, batch in enumerate(selected)
         ]
         failures = 0
         for future in futures:
