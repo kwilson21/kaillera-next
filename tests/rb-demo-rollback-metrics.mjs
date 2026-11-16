@@ -1,5 +1,5 @@
 /**
- * Rollback cost metrics for the static demo — for comparing engine or core
+ * Rollback cost metrics for the demo page — for comparing engine or core
  * changes on the same ROM. Boots the demo, lets the menu autopilot reach a
  * match, holds rollback ON (no auto-compare), then after N seconds reports:
  *   - rollbacks, average/max depth, failed (skipped) rollbacks
@@ -7,17 +7,18 @@
  *   - integrity events (R2-R5 in docs/netplay-invariants.md) from the
  *     console and the C engine log — these must stay at zero
  *
- *   KN_ROM=/path/rom.z64 [KN_BASE_URL=http://localhost:8787] [KN_SECONDS=45] \
+ *   KN_ROM=/path/rom.z64 [KN_BASE_URL=https://localhost:27888] [KN_SECONDS=45] \
  *     node tests/rb-demo-rollback-metrics.mjs
  *
- * Serve the demo first (`just demo-dev`). Headless without a GPU the game
+ * Start the game server first; it serves the demo at /demo.html, as in
+ * production. Headless without a GPU the game
  * runs well below 60 fps, so compare ratios between runs, not absolute
  * timings; on a real machine the tick timings are meaningful too.
  */
 import { chromium } from 'playwright';
 
 const ROM = process.env.KN_ROM;
-const BASE = process.env.KN_BASE_URL || 'http://localhost:8787';
+const BASE = process.env.KN_BASE_URL || 'https://localhost:27888';
 const SECONDS = Number(process.env.KN_SECONDS || 45);
 const EXTRA = process.env.KN_QUERY || '';
 const INTEGRITY = /REPLAY-NORUN|RB-INVARIANT-VIOLATION|FATAL-RING-STALE|RB-LIVE-MISMATCH|RESTORE-FAILED/;
@@ -34,13 +35,14 @@ const launchOpts = process.env.CHROMIUM_PATH
     }
   : { args: ['--autoplay-policy=no-user-gesture-required'] };
 const browser = await chromium.launch(launchOpts);
-const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+// The dev server's certificate is self-signed.
+const page = await browser.newPage({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 900 } });
 const consoleIntegrity = [];
 page.on('console', (m) => {
   if (INTEGRITY.test(m.text())) consoleIntegrity.push(m.text().slice(0, 300));
 });
 
-await page.goto(`${BASE}/?tickProfile=1&autoCompare=0${EXTRA}`);
+await page.goto(`${BASE}/demo.html?tickProfile=1&autoCompare=0${EXTRA}`);
 await page.locator('#rom-file').setInputFiles(ROM);
 await page.waitForSelector('#gesture-button', { state: 'visible', timeout: 60_000 });
 await page.evaluate(() => document.getElementById('gesture-button').click());

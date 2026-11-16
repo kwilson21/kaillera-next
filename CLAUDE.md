@@ -340,7 +340,7 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   `npm ci` once and `npm run build` after a fresh checkout and after changing
   `web/src`, before starting the server or any browser test (the server logs
   an error at startup when the core bundle is missing). Never commit them.
-  The Docker image, CI and the landing and demo builds build them from
+  The Docker image, CI and the landing build build them from
   `package-lock.json`, so the bytes are the same everywhere. Migration stages
   are in `docs/roadmap.md`. **New logic decides; nothing observes.** A change
   that moves a decision into `web/src` makes the page or engine call it and
