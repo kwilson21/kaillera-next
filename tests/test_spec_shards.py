@@ -21,7 +21,7 @@ def plan(*args):
 
 def test_shards_partition_every_command_once():
     full = collections.Counter(plan())
-    for count in [1, 2, 8, 17]:
+    for count in [1, 2, 4, 8, 17]:
         shards = [plan("--shard", n, count) for n in range(1, count + 1)]
         assert collections.Counter(command for shard in shards for command in shard) == full
         assert all(shards)
@@ -41,13 +41,13 @@ def test_invalid_shards_fail_closed():
         [1, 99999999999999999999999999999],
         [1, 8, "extra"],
     ]:
-        result = subprocess.run(["bash", str(SCRIPT), "--shard", *map(str, args)], capture_output=True)
+        result = subprocess.run(["bash", str(SCRIPT), "--shard", *map(str, args)], capture_output=True, check=False)
         assert result.returncode == 2
 
 
 def test_execution_matches_plan_and_propagates_failure():
     with tempfile.TemporaryDirectory() as temp:
-        runner = Path(temp) / "npx"
+        runner = Path(temp) / "node"
         runner.write_text(
             "#!/usr/bin/env python3\nimport json, os, sys\n"
             'with open(os.environ["COMMAND_LOG"], "a") as out:\n'
@@ -61,10 +61,12 @@ def test_execution_matches_plan_and_propagates_failure():
 
         subprocess.run(["bash", str(SCRIPT), "--shard", "3", "8"], env=env, capture_output=True, check=True)
         actual = [json.loads(line) for line in log.read_text().splitlines()]
-        assert actual == [["--no-install", "quint", *command] for command in plan("--shard", 3, 8)]
+        assert actual == [
+            ["node_modules/@informalsystems/quint/dist/src/cli.js", *command] for command in plan("--shard", 3, 8)
+        ]
         log.unlink()
         result = subprocess.run(
-            ["bash", str(SCRIPT), "--shard", "3", "8"], env=dict(env, FAIL="17"), capture_output=True
+            ["bash", str(SCRIPT), "--shard", "3", "8"], env=dict(env, FAIL="17"), capture_output=True, check=False
         )
         assert result.returncode == 17
         assert len(log.read_text().splitlines()) == 1
@@ -83,3 +85,60 @@ def test_workflow_preserves_stable_fail_closed_gate():
     assert "if: always()" in gate
     assert "RESULT: ${{ needs.spec-shard.result }}" in gate
     assert 'test "$RESULT" = success' in gate
+
+
+def test_native_and_reference_backends_have_identical_checks():
+    reference = plan()
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--list"],
+        env=dict(os.environ, QUINT_BACKEND="rust"),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    native = [tuple(shlex.split(line)) for line in result.stdout.splitlines()]
+    normalized = [tuple("--backend=typescript" if arg == "--backend=rust" else arg for arg in cmd) for cmd in native]
+    assert normalized == reference
+    assert all("--backend=rust" in cmd for cmd in native if cmd[0] in {"run", "test"})
+    rejected = subprocess.run(
+        ["bash", str(SCRIPT), "--list"], env=dict(os.environ, QUINT_BACKEND="unknown"), capture_output=True, check=False
+    )
+    assert rejected.returncode == 2
+
+
+def test_native_installer_fails_before_using_an_unverified_download():
+    installer = ROOT / "scripts/install-quint-evaluator.sh"
+    with tempfile.TemporaryDirectory() as temp:
+        directory = Path(temp)
+        for name, text in {
+            "node": "#!/bin/sh\necho v0.7.1\n",
+            "uname": '#!/bin/sh\nif [ "$1" = -s ]; then echo Linux; else echo x86_64; fi\n',
+            "curl": '#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done\nprintf tampered > "$2"\n',
+            "tar": '#!/bin/sh\ntouch "$QUINT_HOME/extracted"\n',
+        }.items():
+            tool = directory / name
+            tool.write_text(text)
+            tool.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(installer)],
+            env=dict(os.environ, PATH=f"{temp}:{os.environ['PATH']}", QUINT_HOME=temp),
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert not (directory / "extracted").exists()
+
+
+def test_serpentine_dealing_reverses_each_round_without_changing_command_order():
+    full = plan()
+    for count in [2, 4, 8]:
+        expected = [[] for _ in range(count)]
+        counters = collections.Counter()
+        for command in full:
+            index = counters[command[0]]
+            counters[command[0]] += 1
+            position = index % (2 * count)
+            if position >= count:
+                position = 2 * count - 1 - position
+            expected[position].append(command)
+        assert [plan("--shard", n, count) for n in range(1, count + 1)] == expected
