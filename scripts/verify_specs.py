@@ -41,11 +41,24 @@ CONJUNCTS = (
 )
 
 
+STREAMING_CONJUNCTS = (
+    "neverLeftWithNothingPending",
+    "staleSignalsAreNotApplied",
+    "receiversConnectOnlyToTheHost",
+    "neverReplacesALiveConnection",
+)
+STREAMING_OPTIONS = ("HOST_REOFFERS", "SIGNALS_NAME_CONNECTION", "CHECKS_SENDER")
+ROOM_FORWARD_PARTITIONS = tuple(
+    "listeners.forall(p => (" + predicate + ') implies ((page.get(p) == Lobby) implies (status == "lobby")))'
+    for predicate in ('p == "host"', 'p == "guest1"', 'p != "host" and p != "guest1"')
+)
+
 ROOM_PLAYERS = ("host", "guest1", "guest2")
 ROOM_DIRECTIONS = (
     'listeners.forall(p => (page.get(p) == Lobby) implies (status == "lobby"))',
     'listeners.forall(p => (status == "lobby") implies (page.get(p) == Lobby))',
 )
+ROOM_PARTITIONED_DIRECTIONS = (*ROOM_FORWARD_PARTITIONS, ROOM_DIRECTIONS[1])
 ROOM_NOT_STRANDED = tuple(
     f'match page.get("{player}") {{ | Stranded(_) => false | _ => true }}' for player in ROOM_PLAYERS
 )
@@ -195,6 +208,41 @@ def split_conjunction(checks, ast):
     return result
 
 
+def split_streaming_conjunction(checks, ast):
+    """The original positive allHold is exactly these four inherited conjuncts."""
+    if ast.get("errors"):
+        raise ValueError("Quint parser reported streaming-model errors")
+    modules = {m["name"]: m for m in ast["modules"]}
+    definitions = [d for d in modules["streaming_connection"]["declarations"] if d.get("name") == "allHold"]
+    if (
+        len(definitions) != 1
+        or definitions[0].get("kind") != "def"
+        or definitions[0].get("qualifier") != "val"
+        or without_ids(definitions[0].get("expr")) != app("and", *(name(n) for n in STREAMING_CONJUNCTS))
+    ):
+        raise ValueError("streaming_connection.allHold changed: revalidate its conjunction split")
+    expected_instance = {
+        "kind": "instance",
+        "protoName": "streaming_connection",
+        "identityOverride": True,
+        "overrides": [[{"name": option}, literal(True)] for option in STREAMING_OPTIONS],
+    }
+    if without_ids(modules["streaming_connection_current"]["declarations"]) != [expected_instance]:
+        raise ValueError("streaming_connection_current no longer inherits the same configured invariants")
+    result = []
+    for check in checks:
+        if (check.spec, check.module, check.invariant, check.expect) == (
+            "specs/streaming_connection.qnt",
+            "streaming_connection_current",
+            "allHold",
+            "hold",
+        ):
+            result.extend(dataclasses.replace(check, invariant=n) for n in STREAMING_CONJUNCTS)
+        else:
+            result.append(check)
+    return result
+
+
 def split_room_predicates(checks, ast):
     if ast.get("errors"):
         raise ValueError("Quint parser reported room-model errors")
@@ -218,7 +266,7 @@ def split_room_predicates(checks, ast):
         raise ValueError("room_current no longer inherits the same unmodified predicates")
     result = []
     replacements = {
-        "pagesAgreeWithServer": ROOM_DIRECTIONS,
+        "pagesAgreeWithServer": ROOM_PARTITIONED_DIRECTIONS,
         "nobodyIsStrandedInADroppedMatch": ROOM_NOT_STRANDED,
     }
     for check in checks:
@@ -237,7 +285,11 @@ def split_room_predicates(checks, ast):
 def load_plan():
     checks = shell_plan()
     with tempfile.TemporaryDirectory(prefix="quint-plan-") as directory:
-        for filename, split in (("resync_inputs", split_conjunction), ("room_lifecycle", split_room_predicates)):
+        for filename, split in (
+            ("resync_inputs", split_conjunction),
+            ("streaming_connection", split_streaming_conjunction),
+            ("room_lifecycle", split_room_predicates),
+        ):
             path = Path(directory) / f"{filename}.json"
             subprocess.run(
                 ["node", str(QUINT), "parse", f"specs/{filename}.qnt", "--out", str(path)],
@@ -258,6 +310,12 @@ def partition(checks, slots, durations):
     loads = [0.0] * slots
 
     def estimate(check):
+        if check.key in durations:
+            return float(durations[check.key])
+        if check.module == "streaming_connection_current" and check.invariant in STREAMING_CONJUNCTS:
+            return 70.0 if check.steps <= 5 else 90.0
+        if check.module == "room_current" and check.invariant in ROOM_FORWARD_PARTITIONS:
+            return 90.0
         if check.module == "resync_inputs_current" and check.invariant in CONJUNCTS:
             return 75.0
         if check.module == "room_current" and check.invariant in ROOM_DIRECTIONS:
@@ -386,9 +444,7 @@ def worker(index, checks, executable, directory, timeout, worker_cpus=1):
             start_new_session=True,
             env=dict(
                 os.environ,
-                JDK_JAVA_OPTIONS=(
-                    os.environ.get("JDK_JAVA_OPTIONS", "") + f" -Xmx2g -XX:ActiveProcessorCount={worker_cpus}"
-                ),
+                JVM_ARGS=(os.environ.get("JVM_ARGS", "") + f" -Xmx4g -XX:ActiveProcessorCount={worker_cpus}"),
             ),
         )
         SERVERS.append(server)
@@ -494,7 +550,8 @@ def main(argv=None):
     if not 1 <= args.shard <= args.shards <= 64 or args.timeout <= 0:
         parser.error("require 1 <= shard <= shards <= 64 and a positive timeout")
     plan = load_plan()
-    durations = json.loads((ROOT / "scripts/verify-spec-times.json").read_text())["seconds"]
+    timing_data = json.loads((ROOT / "scripts/verify-spec-times.json").read_text())
+    durations = {**timing_data.get("estimated_seconds", {}), **timing_data["seconds"]}
     bins = partition(plan, args.shards * args.workers, durations)
     selected = bins[(args.shard - 1) * args.workers : args.shard * args.workers]
     if not all(selected):
@@ -508,7 +565,7 @@ def main(argv=None):
                 "runner_cpus": os.cpu_count(),
                 "workers": args.workers,
                 "cpus_per_worker": args.worker_cpus,
-                "heap_gib_per_worker": 2,
+                "heap_gib_per_worker": 4,
             }
         ),
         flush=True,

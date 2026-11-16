@@ -79,7 +79,7 @@ def test_workflow_preserves_stable_fail_closed_gate():
     values = [int(n) for n in numbers.split(",")]
     assert values == list(range(1, len(values) + 1))
     assert "fail-fast: false" in shards
-    assert "npm run spec -- --shard ${{ matrix.shard }} ${{ strategy.job-total }}" in shards
+    assert "bash scripts/check-specs-pair.sh ${{ strategy.job-index }} ${{ strategy.job-total }}" in shards
     gate = workflow.split("\n  spec:\n", 1)[1].split("\n  spec-verify:", 1)[0]
     assert "needs: spec-shard" in gate
     assert "if: always()" in gate
