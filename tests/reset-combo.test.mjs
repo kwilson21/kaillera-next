@@ -136,6 +136,18 @@ test('reset shortcut: iPhone layout, ownership, hold, keyboard and cancellation'
           .dispatchEvent(new KeyboardEvent('keyup', { key: 'v', keyCode: 86, bubbles: true })),
       );
       assert.equal(await input(), 1);
+      await page.evaluate(() =>
+        document
+          .querySelector('#toolbar-info')
+          .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true })),
+      );
+      assert.equal(await input(), 9, 'hidden items must also preserve the default Enter/Start binding');
+      await page.evaluate(() =>
+        document
+          .querySelector('#toolbar-info')
+          .dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true })),
+      );
+      assert.equal(await input(), 1);
       await page.evaluate(() => window.testReset.open());
       await button.evaluate((el) => el.click());
       await page.evaluate(() => window.dispatchEvent(new Event('blur')));
