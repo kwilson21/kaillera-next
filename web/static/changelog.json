@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.13",
+    "date": "2026-11-17",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "accessible paused-game reset chord without moving controls (#292)"
+      }
+    ]
+  },
+  {
     "version": "0.69.12",
     "date": "2026-11-16",
     "changes": [
