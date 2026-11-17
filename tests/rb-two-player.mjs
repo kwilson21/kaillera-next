@@ -36,6 +36,9 @@
  *     [HEADED=1] [OUT=/tmp/two-player] [KN_DB=server DB_PATH, Node >= 22.13] node tests/rb-two-player.mjs
  *
  * Extra knobs, all off by default:
+ *   RESET_COMBO_CHECK=1  After battle evidence is collected, pause via Start
+ *     and hold the real mobile reset control; require both peers at character
+ *     select with the same running emulator and connected room.
  *   HOST_BROWSER=webkit / GUEST_BROWSER=webkit   Run that page in Playwright
  *     WebKit instead of Chromium (each defaults to Chromium independently,
  *     so either or both can be WebKit; the Chromium default args —
@@ -1629,7 +1632,22 @@ const install = async (p, role) => {
       const BTN = [0, 1, 6, 7]; // A, B, D-left, D-right (no START)
       const orig = window.KNShared.readLocalInput.bind(window.KNShared);
       window.KNShared.readLocalInput = (slot, keyMap, heldKeys) => {
-        orig(slot, keyMap, heldKeys);
+        const liveInput = orig(slot, keyMap, heldKeys);
+        if (window.__knResetLiveInput) {
+          const samples = (window.__knResetInputSamples ??= []);
+          const last = samples.at(-1);
+          const scene = (rb.readRdram32(0x800a4ad0) >>> 24) & 255;
+          if (
+            !last ||
+            last.buttons !== liveInput.buttons ||
+            last.scene !== scene ||
+            last.held !== window.KNState.resetComboHeld
+          ) {
+            if (samples.length >= 100) samples.shift();
+            samples.push({ frame: frameNow(), scene, buttons: liveInput.buttons, held: window.KNState.resetComboHeld });
+          }
+          return liveInput;
+        }
         const f = frameNow();
         const sc = (rb.readRdram32(0x800a4ad0) >>> 24) & 0xff;
         W.scene = sc;
@@ -3593,10 +3611,6 @@ if (linkReport) summary.link = linkReport;
 if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
 if (RESYNC_FAULT) summary[RESYNC_ONE_BACK ? 'resyncOneBack' : 'resyncSameFrame'] = resyncOneBackReport;
 if (unansweredSocketResyncReport) summary.unansweredSocketResync = unansweredSocketResyncReport;
-if (process.env.HOST_END_CHECK === '1') {
-  const { checkHostEnd } = await import('./rb-end-game.mjs');
-  summary.hostEnd = await checkHostEnd([host, guest], OUT);
-}
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
@@ -3618,6 +3632,24 @@ if (
       `${dropPeerReport.mismatchesExcluded} of them differing; ${dropPeerReport.integrityEventsExcluded} integrity ` +
       `reports and ${dropPeerReport.failedRollbacksExcluded} failed rollbacks.`,
   );
+// Keep the ordinary battle/hash report unchanged; this opt-in scenario runs last.
+let resetComboFailed = false;
+if (process.env.RESET_COMBO_CHECK === '1') {
+  const { checkPausedReset } = await import('./rb-reset-combo.mjs');
+  try {
+    summary.resetCombo = await checkPausedReset([host, guest], OUT);
+  } catch (error) {
+    resetComboFailed = true;
+    summary.resetCombo = { passed: false, error: String(error) };
+  }
+  fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
+  console.log('RESET_COMBO_CHECK:', JSON.stringify(summary.resetCombo));
+}
+if (process.env.HOST_END_CHECK === '1') {
+  const { checkHostEnd } = await import('./rb-end-game.mjs');
+  summary.hostEnd = await checkHostEnd([host, guest], OUT);
+  fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
+}
 // Close each distinct browser instance once (host and guest may share one,
 // e.g. the Chromium/Chromium default, or both resolve to the one WebKit
 // instance with HOST_BROWSER=webkit GUEST_BROWSER=webkit).
@@ -4014,6 +4046,7 @@ if (RESYNC_FAULT)
     JSON.stringify(resyncOneBackReport),
   );
 const failed =
+  resetComboFailed ||
   addressMapFailed ||
   resyncOneBackFailed ||
   linkFailed ||

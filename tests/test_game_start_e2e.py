@@ -523,6 +523,10 @@ def test_a_start_reaching_a_page_with_no_rom_asks_for_one_and_joins_late(browser
     expect(host.locator("#player-list")).to_contain_text("Guest", timeout=10000)
     try:
         _load_rom(host)
+        # The upload label precedes hashing/server readiness. Wait until the
+        # guest receives the authoritative identity before forging its ready
+        # race; otherwise the host's later identity update invalidates it.
+        expect(guest.locator("#host-rom-info")).to_contain_text("test.z64", timeout=10000)
         # Harness step: the server still counts the guest ready while its
         # page has no ROM. Start through the real server so its later roster
         # updates describe the same active match, not a contradictory lobby.

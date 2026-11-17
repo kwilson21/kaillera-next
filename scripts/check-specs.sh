@@ -570,6 +570,10 @@ done
 $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# Touch shortcut input ownership: release/cancel cannot clear real controls.
+$QUINT test specs/reset_combo.qnt --backend="$BACKEND"
+$QUINT run specs/reset_combo.qnt --invariant='otherInputPreserved and releasedMeansNoShortcut' --max-samples=1000 --max-steps=20 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

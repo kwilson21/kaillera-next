@@ -4026,6 +4026,8 @@
     }, 400);
   };
 
+  const resetCombo = window.KNCore.page.startResetCombo(window, KNState);
+
   const showToolbar = () => {
     const toolbar = document.getElementById('toolbar');
     if (toolbar) toolbar.classList.remove('hidden');
@@ -4033,11 +4035,14 @@
     const roomEl = document.getElementById('toolbar-room');
     if (roomEl) roomEl.textContent = roomCode;
 
+    const resetBtn = document.getElementById('toolbar-reset-combo');
+    if (resetBtn) resetBtn.style.display = isSpectator ? 'none' : '';
     const endBtn = document.getElementById('toolbar-end');
     if (endBtn) endBtn.style.display = isHost ? '' : 'none';
   };
 
   const hideToolbar = () => {
+    resetCombo.close();
     const toolbar = document.getElementById('toolbar');
     if (toolbar) toolbar.classList.add('hidden');
     hideInfoOverlay();
@@ -5063,6 +5068,11 @@
         closeMoreDropdown();
       });
     }
+
+    document.getElementById('toolbar-reset-combo')?.addEventListener('click', () => {
+      closeMoreDropdown();
+      resetCombo.open();
+    });
 
     // More (overflow) dropdown
     const toolbarMore = document.getElementById('toolbar-more');
