@@ -242,7 +242,10 @@ def test_a_player_dropped_in_the_match_comes_back_only_as_a_late_joiner():
     late = src[src.index("const handleLateJoinRequest = (msg) => {") :][:400]
     assert "_droppedThisMatch.delete" not in late
     serve = src[src.index("async function sendLateJoinState(remoteSid)") :]
-    assert serve.index("_markPendingLateJoinPeer(remoteSid") < serve.index("_droppedThisMatch.delete(remoteSid)")
+    assert "_droppedThisMatch.delete" not in serve
+    ready = src[src.index("  const finishLateJoinReady =") : src.index("  const _syntheticSidForSlot")]
+    assert ready.index("_lateJoinStateSent.get(senderSid)") < ready.index("_droppedThisMatch.delete(senderSid)")
+    assert ready.index("peer?.dc?.readyState !== 'open'") < ready.index("_droppedThisMatch.delete(senderSid)")
     # Cleared on a new match and on stop, besides the declaration.
     assert src.count("let _droppedThisMatch = new Set();") == 1
     assert src.count("_droppedThisMatch = new Set();") == 3

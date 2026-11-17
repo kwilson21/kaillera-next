@@ -615,13 +615,72 @@ test('source identity budget survives slot changes without charging a replacemen
     notices.push(n.attempt.sid),
   );
   for (let i = 0; i < 3; i++) {
-    manager.begin(1, i, [{ slot: 1, sid: 'a' }], 100, i * 1000, true);
+    manager.begin(1, i, [{ slot: 1, sid: 'a', playerId: 'player-a' }], 100, i * 1000, true);
     manager.reset(1);
   }
-  assert.equal(manager.begin(1, 4, [{ slot: 1, sid: 'replacement' }], 100, 4000, true).length, 1);
-  assert.equal(manager.begin(2, 4, [{ slot: 2, sid: 'a' }], 100, 4000, true).length, 0);
+  assert.equal(manager.begin(1, 4, [{ slot: 1, sid: 'replacement', playerId: 'player-b' }], 100, 4000, true).length, 1);
+  assert.equal(manager.begin(2, 4, [{ slot: 2, sid: 'a', playerId: 'player-a' }], 100, 4000, true).length, 0);
   assert.equal(notices.at(-1), 'a');
   manager.reset(2);
-  assert.equal(manager.begin(2, 5, [{ slot: 2, sid: 'a' }], 100, 5000, true).length, 0);
+  assert.equal(manager.begin(2, 5, [{ slot: 2, sid: 'a', playerId: 'player-a' }], 100, 5000, true).length, 0);
   assert.equal(notices.at(-1), 'a');
+});
+
+test('actual engine charges the roster player across socket rotation and ignores peer identity claims', () => {
+  const run = room();
+  run("_knownPlayers.a = {persistentId: 'authenticated-player'};");
+  let sid = 'a';
+  for (let i = 0; i < 3; i++) {
+    run(`_peers['${sid}'].persistentId = 'untrusted-claim-${i}';
+      _escalateLostInput(_peers['${sid}'], 'push', now, ${900 + i});
+      for (const attempt of sends.at(-1).options.escalation) {
+        _onEscalationTransfer([attempt], attempt.sid, true, 1000);
+        _recovery.acknowledge(attempt.slot, 997, attempt.wireId);
+      }
+      _recovery.reset(1);
+      _peers['rotated-${i}'] = _peers['${sid}']; delete _peers['${sid}'];
+      _knownPlayers['rotated-${i}'] = _knownPlayers['${sid}']; delete _knownPlayers['${sid}'];
+      now += 1500;`);
+    sid = `rotated-${i}`;
+  }
+  assert.equal(run('sends.length'), 3);
+  run(`_peers['${sid}'].persistentId = 'yet-another-untrusted-claim';
+    _escalateLostInput(_peers['${sid}'], 'push', now, 904);`);
+  assert.equal(run('sends.length'), 3);
+  assert.equal(run('JSON.stringify(drops)'), JSON.stringify([sid]));
+  assert.equal(run('!!_peers.b'), true);
+  // An unrelated authenticated replacement in the same slot is independent.
+  run(`_recovery.reset(1); _peers.replacement = {slot:1, persistentId:'authenticated-player'};
+    _knownPlayers.replacement = {persistentId:'different-player'};
+    _escalateLostInput(_peers.replacement, 'push', now, 905);`);
+  assert.equal(run('sends.length'), 4);
+  assert.equal(run('sends.at(-1).options.escalation.find(a => a.slot === 1).sid'), 'replacement');
+});
+
+test('unrecognized rotating socket keys cannot use peer claims to renew a slot budget', () => {
+  const run = room(1);
+  for (let i = 0; i < 3; i++) {
+    run(`_peers.a.persistentId = 'claim-${i}';
+      _escalateLostInput(_peers.a, 'push', now, ${900 + i});
+      const attempt${i} = sends.at(-1).options.escalation[0];
+      _onEscalationTransfer([attempt${i}], 'a', true, 1000);
+      _recovery.acknowledge(1, 997, attempt${i}.wireId); _recovery.reset(1); now += 1500;`);
+  }
+  run(
+    "_peers.rotated = _peers.a; delete _peers.a; _peers.rotated.persistentId = 'new-claim'; _escalateLostInput(_peers.rotated, 'push', now, 904);",
+  );
+  assert.equal(run('sends.length'), 3);
+  assert.equal(run('JSON.stringify(drops)'), '["rotated"]');
+});
+
+test('persistent player budget expires and match reset clears it across new socket keys', () => {
+  const manager = createRecoveryManager({ timeoutMs: 5000, quietMs: 20000, maxPushes: 3 }, () => {});
+  for (let i = 0; i < 3; i++) {
+    assert.equal(manager.begin(1, i, [{ slot: 1, sid: `socket-${i}`, playerId: 'p' }], 100, i * 1000, true).length, 1);
+    manager.reset(1);
+  }
+  assert.equal(manager.begin(1, 4, [{ slot: 1, sid: 'rotated', playerId: 'p' }], 100, 29999, true).length, 0);
+  assert.equal(manager.begin(1, 4, [{ slot: 1, sid: 'rotated', playerId: 'p' }], 100, 30000, true).length, 1);
+  manager.resetAll();
+  assert.equal(manager.begin(1, 5, [{ slot: 1, sid: 'next-match', playerId: 'p' }], 100, 30001, true).length, 1);
 });

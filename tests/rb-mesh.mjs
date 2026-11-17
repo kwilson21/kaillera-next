@@ -44,12 +44,23 @@
  *   still match the host's.
  * CATCH_UP_HOLE=1: hold one input frame from CATCH_UP_HOLE_SLOT only on
  *   the catch-up guest's receive path (reliable and rollback-input channels,
- *   including redundancy/resend carriers). Arm before asking for the state,
- *   then pin to the captured host snapshot frame. Other frames continue.
+ *   including redundancy/resend carriers). Isolated mode passes every other
+ *   record unchanged in value. CATCH_UP_HOLE_DELIVERY=burst explicitly retains
+ *   the original whole-packet burst experiment and its strict hash oracle.
+ *   TRACE_CATCH_UP_INPUTS=1 records bounded native writer inputs per snapshot.
+ *   Arm before asking for the state,
+ *   then pin to the first input consumed after the captured snapshot. Other
+ *   frames continue. CATCH_UP_HOLE_MODE=deep (default) pauses the source
+ *   until an observed phantom lets its missing input pass beyond the normal
+ *   prediction window; capture, pin, then resume source while the state is
+ *   held. A matched wait proves the source is no longer phantom at replay.
+ *   MODE=near retains the active-source near-window diagnostic, not valid
+ *   deep-wait evidence (the normal prediction limit prevents a deep hole).
  *   Release only after an actual SYNC-CATCH-UP-WAIT names this held input.
  *   Require real held packets, wait-before-release, completed catch-up, and
  *   strict hashes for every player including at least 60 post-recovery frames.
- *   No pause/phantom injection or hash exclusions are used.
+ *   The deliberate phantom period never grants a hash exclusion; all
+ *   transient and persistent divergence remains a failure.
  *
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
@@ -71,6 +82,8 @@ import fs from 'fs';
 import { fileURLToPath } from 'node:url';
 import { requireCurrentBundle } from './bundle-check.mjs';
 import { addNetworkInitScript } from './rb-page-network.mjs';
+import { catchUpHoleInput } from './directional-input-gate.mjs';
+import { installNativeInputObserver } from './native-input-observer.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -87,6 +100,10 @@ const MISSING_RECIPIENT_FAILURES = PERMANENT_RECIPIENT ? 3 : Number(process.env.
 const CATCH_UP_MS = Number(process.env.CATCH_UP_MS || 0);
 const CATCH_UP_SLOT = Number(process.env.CATCH_UP_SLOT || 2);
 const CATCH_UP_HOLE = process.env.CATCH_UP_HOLE === '1';
+const TRACE_CATCH_UP_INPUTS = process.env.TRACE_CATCH_UP_INPUTS === '1';
+const CATCH_UP_HOLE_DELIVERY = process.env.CATCH_UP_HOLE_DELIVERY || 'isolated';
+const CATCH_UP_HOLE_MODE = process.env.CATCH_UP_HOLE_MODE || 'deep';
+const DEEP_CATCH_UP_HOLE = CATCH_UP_HOLE && CATCH_UP_HOLE_MODE === 'deep';
 const CATCH_UP_HOLE_SLOT = Number(process.env.CATCH_UP_HOLE_SLOT || 1);
 const QUERY = process.env.KN_QUERY || '';
 const OUT = process.env.OUT || '/tmp/rb-mesh';
@@ -128,6 +145,8 @@ if (CATCH_UP_MS > 0 && !(CATCH_UP_MS < RESYNC_REQUEST_TIMEOUT_MS)) {
 if (CATCH_UP_MS > 0 && !(Number.isInteger(CATCH_UP_SLOT) && CATCH_UP_SLOT >= 1 && CATCH_UP_SLOT < PLAYERS)) {
   fail(`CATCH_UP_SLOT=${process.env.CATCH_UP_SLOT} invalid: a guest's slot, 1 to ${PLAYERS - 1}`);
 }
+if (!['isolated', 'burst'].includes(CATCH_UP_HOLE_DELIVERY)) fail('CATCH_UP_HOLE_DELIVERY must be isolated or burst');
+if (CATCH_UP_HOLE && !['deep', 'near'].includes(CATCH_UP_HOLE_MODE)) fail('CATCH_UP_HOLE_MODE must be deep or near');
 if (CATCH_UP_HOLE && !(CATCH_UP_MS >= 3000)) fail('CATCH_UP_HOLE needs CATCH_UP_MS of 3000 or more');
 if (
   CATCH_UP_HOLE &&
@@ -377,7 +396,18 @@ const missingRecipient = {
 };
 // The battle, with the catch-up fault a third of the way in.
 const catchUp = { guestAt: null, seen: false };
-const hole = { header: null, gate: null, evidence: null, recoveredFrame: null };
+const hole = {
+  mode: CATCH_UP_HOLE_MODE,
+  delivery: CATCH_UP_HOLE_DELIVERY,
+  header: null,
+  gate: null,
+  evidence: null,
+  recoveredFrame: null,
+  pausedAt: null,
+  phantomObserved: false,
+  resumedAt: null,
+  resumedSeq: null,
+};
 const tBattle = Date.now();
 if (MISSING_RECIPIENT) {
   await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
@@ -489,8 +519,37 @@ if (MISSING_RECIPIENT) {
 if (CATCH_UP_MS > 0) {
   await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
   const guest = pages[CATCH_UP_SLOT];
+  if (TRACE_CATCH_UP_INPUTS) {
+    await Promise.all(
+      pages.map((page) =>
+        page.evaluate(
+          `window.__knNativeInputObserver = (${installNativeInputObserver})(window.EJS_emulator.gameManager.Module, () => window.NetplayRollback.getHudCounters(), ${PLAYERS}, 2048, () => ({debug:window.NetplayRollback.getDebugState(), controlLog:(window.NetplayRollback.exportSyncLog()||'').split('\\n').filter(line=>/PHANTOM|RECOVERED|INPUTS-SETTLED|RESYNC-INPUTS|sync frame reset|SYNC-CATCH-UP/.test(line)).slice(-80)}))`,
+        ),
+      ),
+    );
+  }
+  if (DEEP_CATCH_UP_HOLE) {
+    const beforePause = await lastSeq(guest);
+    hole.pausedAt = await pages[CATCH_UP_HOLE_SLOT].evaluate(() => {
+      window.NetplayRollback.pauseTick();
+      return window.NetplayRollback.getHudCounters().currentFrame;
+    });
+    hole.phantomObserved = await waitForLine(
+      guest,
+      beforePause,
+      new RegExp(`PEER-PHANTOM slot=${CATCH_UP_HOLE_SLOT} `),
+      30000,
+    );
+    // This deliberate phantom period is what permits an input to become
+    // deeper than the normal seven-frame prediction limit. Nothing in the
+    // runtime/input history is changed and its divergent hashes stay counted.
+    if (hole.phantomObserved) await host.waitForTimeout(500);
+  }
   if (CATCH_UP_HOLE) {
-    await guest.evaluate((slot) => window.__knDirectionalInputGate.arm(slot), CATCH_UP_HOLE_SLOT);
+    await guest.evaluate(({ slot, mode }) => window.__knDirectionalInputGate.arm(slot, mode), {
+      slot: CATCH_UP_HOLE_SLOT,
+      mode: CATCH_UP_HOLE_DELIVERY,
+    });
     await host.evaluate((slot) => {
       window.__knWatchSyncTargetSlot = slot;
       window.__knWatchedSyncHeaders = [];
@@ -506,6 +565,8 @@ if (CATCH_UP_MS > 0) {
     try {
       await host.waitForFunction(() => window.__knWatchedSyncHeaders?.length > 0, null, { timeout: 10000 });
       hole.header = await host.evaluate(() => window.__knWatchedSyncHeaders[0]);
+      hole.delay = await guest.evaluate(() => window.NetplayRollback.getHudCounters().delay);
+      hole.heldInput = catchUpHoleInput(hole.header.frame, hole.delay, DEEP_CATCH_UP_HOLE);
       await guest.evaluate(
         ({ frame, slot, afterSeq }) => {
           window.__knDirectionalInputGate.pin(frame, frame + 1);
@@ -525,10 +586,17 @@ if (CATCH_UP_MS > 0) {
             }
           }, 10);
         },
-        { frame: hole.header.frame, slot: CATCH_UP_HOLE_SLOT, afterSeq: catchUp.guestAt },
+        { frame: hole.heldInput, slot: CATCH_UP_HOLE_SLOT, afterSeq: catchUp.guestAt },
       );
     } catch (error) {
       hole.invalidInjection = String(error);
+    }
+    if (DEEP_CATCH_UP_HOLE) {
+      hole.resumedSeq = await lastSeq(guest);
+      hole.resumedAt = await pages[CATCH_UP_HOLE_SLOT].evaluate(() => {
+        window.NetplayRollback.resumeTick();
+        return window.NetplayRollback.getHudCounters().currentFrame;
+      });
     }
   }
   catchUp.seen = await waitForLine(guest, catchUp.guestAt, /SYNC-CATCH-UP from=/, CATCH_UP_MS + CATCH_UP_RECOVER_MS);
@@ -547,6 +615,7 @@ const P = await Promise.all(
   pages.map(async (p) => ({
     sync: await syncLogOf(p),
     ...(await p.evaluate(() => ({
+      nativeInputs: window.__knNativeInputObserver?.export() ?? null,
       missingRecipientWire: window.__meshMissingRecipient ?? null,
       missingInputs: window.__meshMissingInputs ?? 0,
       hashes: { ...(window.__meshDroppedSnapshot?.hashes ?? {}), ...window.__mesh.hashes },
@@ -568,6 +637,7 @@ const P = await Promise.all(
 P.forEach((x, i) => {
   fs.writeFileSync(`${OUT}/p${i + 1}-sync.txt`, x.sync);
   fs.writeFileSync(`${OUT}/p${i + 1}-hashes.json`, JSON.stringify(x.hashes));
+  if (x.nativeInputs) fs.writeFileSync(`${OUT}/p${i + 1}-applied-inputs.json`, JSON.stringify(x.nativeInputs));
 });
 let hostEnd;
 if (process.env.HOST_END_CHECK === '1') {
@@ -694,9 +764,13 @@ const catchUpReport =
 const holeReport = CATCH_UP_HOLE
   ? {
       slot: CATCH_UP_HOLE_SLOT,
-      phantomDuringFault: P[CATCH_UP_SLOT].sync
+      phantomAfterResume: P[CATCH_UP_SLOT].sync
         .split('\n')
-        .some((line) => seqOf(line) > catchUp.guestAt && line.includes(`PEER-PHANTOM slot=${CATCH_UP_HOLE_SLOT} `)),
+        .some(
+          (line) =>
+            seqOf(line) > (hole.resumedSeq ?? catchUp.guestAt) &&
+            line.includes(`PEER-PHANTOM slot=${CATCH_UP_HOLE_SLOT} `),
+        ),
       ...hole,
       waited:
         !!hole.evidence?.line &&
@@ -712,7 +786,8 @@ const catchUpFailed =
   (CATCH_UP_HOLE
     ? !catchUp.seen ||
       !holeReport.waited ||
-      holeReport.phantomDuringFault ||
+      (DEEP_CATCH_UP_HOLE && !holeReport.phantomObserved) ||
+      holeReport.phantomAfterResume ||
       !holeReport.completed ||
       holeReport.spin.length > 0 ||
       pairs.some((p) => p.postRecoveryFramesCompared < MIN_BATTLE_FRAMES)

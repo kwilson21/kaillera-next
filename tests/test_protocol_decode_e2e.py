@@ -211,9 +211,10 @@ _MALFORMED = """async () => {
 def test_a_peer_string_off_its_schema_is_dropped_by_the_engine(browser, server_url, room):
     """A guest sends the host malformed DataChannel strings mid-match.
 
-    The host's engine drops each one before any handler reads it, logs the
-    first of each kind and reason once (sync log and console), never with what
-    was sent, and the match goes on: the host still ends it normally.
+    The host drops malformed lockstep strings at its schema boundary. State
+    traffic from a guest is rejected even earlier, by channel authority. A
+    malformed state header from the actual host reaches the guest's schema
+    boundary. Diagnostics never include payloads; the match still ends normally.
     """
     host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host")
     guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
@@ -229,6 +230,13 @@ def test_a_peer_string_off_its_schema_is_dropped_by_the_engine(browser, server_u
         )
         assert guest.evaluate(_MALFORMED) == {"lockstep": "open", "syncState": "open"}
         host.wait_for_function(
+            "() => (window.NetplayRollback.exportSyncLog() || '').includes('state header refused: from non-current host channel')",
+            timeout=10000,
+        )
+        # Schema rejection is tested on an authorized source, not a guest
+        # channel rejected by the stronger provenance boundary before parsing.
+        host.evaluate("Object.values(window.KNState.peers)[0].syncDc.send('sync-start:zz-frame')")
+        guest.wait_for_function(
             "() => (window.NetplayRollback.exportSyncLog() || '').includes('dropped dc sync-state')", timeout=10000
         )
 
@@ -237,7 +245,6 @@ def test_a_peer_string_off_its_schema_is_dropped_by_the_engine(browser, server_u
             "[protocol] dropped dc lockstep (unknown)",
             "[protocol] dropped dc lockstep lockstep-ready",
             "[protocol] dropped dc lockstep (json)",
-            "[protocol] dropped dc sync-state sync-start",
         ]
         dropped = _dropped(host)
         assert [line[: line.index(":")] for line in dropped] == expected, dropped
@@ -245,7 +252,12 @@ def test_a_peer_string_off_its_schema_is_dropped_by_the_engine(browser, server_u
         for line in dropped:
             assert line in sync_log
             assert "zz-" not in line and "future" not in line, line
-        assert _dropped(guest) == []
+        guest_dropped = _dropped(guest)
+        assert [line[: line.index(":")] for line in guest_dropped] == ["[protocol] dropped dc sync-state sync-start"]
+        guest_sync_log = guest.evaluate("window.NetplayRollback.exportSyncLog()")
+        for line in guest_dropped:
+            assert line in guest_sync_log
+            assert "zz-" not in line, line
 
         # The host's page is still in charge of its match.
         host.click("#toolbar-more")

@@ -252,7 +252,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
   let nextWireId = 0;
   const records = new Map<number, { snapshot: Snapshot; token: RecoveryAttempt }>();
   const counts = new Map<number, Map<number, number>>();
-  // Resource budget is source-scoped and deliberately survives ACKs and peer
+  // Resource budget is persistent-player-scoped and deliberately survives ACKs and peer
   // resets: a new hole is not permission for unlimited room-wide captures.
   // This conservative policy intentionally evicts a source on a fourth new
   // capture within 30s, even for unrelated holes; it is not a measured latency
@@ -303,7 +303,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
     begin: (
       sourceSlot: number,
       hole: number,
-      recipients: readonly { sid: string; slot: number }[],
+      recipients: readonly { sid: string; slot: number; playerId?: string }[],
       frame: number,
       now: number,
       enabled: boolean,
@@ -311,24 +311,28 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       if (!enabled || records.has(sourceSlot) || count(sourceSlot, hole) >= timing.maxPushes) return [];
       const source = recipients.find(({ slot }) => slot === sourceSlot);
       if (!source) return [];
+      // playerId comes only from the server roster adapter, not peer messages.
+      // A missing roster identity conservatively shares a slot budget: changing
+      // an unrecognized connection key must not buy more captures.
+      const sourceKey = source.playerId ? `player:${source.playerId}` : `unidentified-slot:${sourceSlot}`;
       // Expire inactive identities too, so connection churn cannot grow this map forever.
-      for (const [sid, times] of sourceCaptures) {
+      for (const [identity, times] of sourceCaptures) {
         if (times.every((at) => now - at >= SOURCE_CAPTURE_WINDOW_MS)) {
-          sourceCaptures.delete(sid);
-          budgetNotified.delete(sid);
+          sourceCaptures.delete(identity);
+          budgetNotified.delete(identity);
         }
       }
-      sourceBySlot.set(sourceSlot, source.sid);
-      const recent = (sourceCaptures.get(source.sid) ?? []).filter((at) => now - at < SOURCE_CAPTURE_WINDOW_MS);
-      sourceCaptures.set(source.sid, recent);
+      sourceBySlot.set(sourceSlot, sourceKey);
+      const recent = (sourceCaptures.get(sourceKey) ?? []).filter((at) => now - at < SOURCE_CAPTURE_WINDOW_MS);
+      sourceCaptures.set(sourceKey, recent);
       if (!sourceCaptureAllowed(recent.length, SOURCE_CAPTURE_LIMIT)) {
-        if (!budgetNotified.has(source.sid)) {
-          budgetNotified.add(source.sid);
+        if (!budgetNotified.has(sourceKey)) {
+          budgetNotified.add(sourceKey);
           Effect.runSync(
             Effect.sync(() =>
               issue({
                 type: 'budget-exhausted',
-                attempt: Object.freeze({ ...source, sequence: 0, wireId: 0 }),
+                attempt: Object.freeze({ sid: source.sid, slot: source.slot, sequence: 0, wireId: 0 }),
                 pushes: recent.length,
                 hole,
                 firstFrame: frame,
@@ -338,7 +342,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
         }
         return [];
       }
-      budgetNotified.delete(source.sid);
+      budgetNotified.delete(sourceKey);
       recent.push(now);
       const pushes = count(sourceSlot, hole) + 1;
       remember(sourceSlot, hole, pushes);
@@ -377,8 +381,8 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       for (const slot of records.keys()) send(slot, { type: 'freeze', gap, now });
     },
     reset: (slot: number): void => {
-      const sid = sourceBySlot.get(slot);
-      if (sid) budgetNotified.delete(sid);
+      const identity = sourceBySlot.get(slot);
+      if (identity) budgetNotified.delete(identity);
       sourceBySlot.delete(slot);
       send(slot, { type: 'stop' });
       records.delete(slot);

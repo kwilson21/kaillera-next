@@ -726,6 +726,18 @@ $QUINT typecheck specs/game_end.qnt
 $QUINT test specs/game_end.qnt --main=game_end_before --backend="$BACKEND"
 $QUINT test specs/game_end.qnt --main=game_end_fixed --backend="$BACKEND"
 
+$QUINT typecheck specs/late_join_drop_ready.qnt
+$QUINT test specs/late_join_drop_ready.qnt --main=late_join_drop_ready_before --backend="$BACKEND"
+$QUINT test specs/late_join_drop_ready.qnt --main=late_join_drop_ready_fixed --backend="$BACKEND"
+$QUINT run specs/late_join_drop_ready.qnt --main=late_join_drop_ready_fixed --invariant=noUnreadyMeshAdmission --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+# Touch shortcut input ownership: release/cancel cannot clear real controls.
+$QUINT test specs/reset_combo.qnt --backend="$BACKEND"
+$QUINT run specs/reset_combo.qnt --invariant='otherInputPreserved and releasedMeansNoShortcut' --max-samples=1000 --max-steps=20 --backend="$BACKEND"
+# Reconnecting sockets cannot reset the server-roster player's capture budget.
+$QUINT test specs/recovery_delivery.qnt --main=recovery_budget_identity_before --backend="$BACKEND"
+$QUINT test specs/recovery_delivery.qnt --main=recovery_budget_identity_fixed --backend="$BACKEND"
+$QUINT run specs/recovery_delivery.qnt --main=recovery_budget_identity_fixed --invariant=rotationCannotRenew --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

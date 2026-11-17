@@ -301,3 +301,32 @@ module recovery_source_budget {
 }
 module recovery_source_budget_before { import recovery_source_budget(FIXED = false).* }
 module recovery_source_budget_fixed { import recovery_source_budget(FIXED = true).* }
+
+// Connection keys rotate on reconnect, but the server roster's player identity
+// remains the owner of a match's capture budget. Wire claims do not select it.
+module recovery_budget_identity {
+  const PERSISTENT: bool
+  var captures: int
+  var used: int
+  var socket: int
+  var dropped: bool
+  action init = all { captures' = 0, used' = 0, socket' = 0, dropped' = false }
+  action captureAndAck = all {
+    not(dropped),
+    captures' = if (used < 3) captures + 1 else captures,
+    used' = if (used < 3) used + 1 else used,
+    dropped' = used >= 3, socket' = socket,
+  }
+  action reconnect = all {
+    socket < 3, socket' = socket + 1,
+    used' = if (PERSISTENT) used else 0,
+    captures' = captures, dropped' = dropped,
+  }
+  action idle = all { captures' = captures, used' = used, socket' = socket, dropped' = dropped }
+  action step = any { captureAndAck, reconnect, idle }
+  val rotationCannotRenew = captures <= 3
+  run rotatedSocketTest = init.then(captureAndAck).then(captureAndAck).then(captureAndAck)
+    .then(reconnect).then(captureAndAck).expect(rotationCannotRenew == PERSISTENT and dropped == PERSISTENT)
+}
+module recovery_budget_identity_before { import recovery_budget_identity(PERSISTENT = false).* }
+module recovery_budget_identity_fixed { import recovery_budget_identity(PERSISTENT = true).* }

@@ -526,7 +526,11 @@ def test_a_start_reaching_a_page_with_no_rom_asks_for_one_and_joins_late(browser
         # Harness step: the server still counts the guest ready while its
         # page has no ROM. Start through the real server so its later roster
         # updates describe the same active match, not a contradictory lobby.
-        guest.evaluate("window.__test_socket.emit('rom-ready', { ready: true })")
+        # Loaded status precedes the async hash. Its first server announcement
+        # invalidates non-host readiness, so establish the authoritative host
+        # identity before injecting this intentionally inconsistent guest state.
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM: test.z64", timeout=15000)
+        guest.evaluate("() => new Promise(resolve => window.__test_socket.emit('rom-ready', { ready: true }, resolve))")
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
         # Not booted: the page asks for a ROM, as a late joiner's does.
@@ -581,7 +585,11 @@ def test_a_guest_at_the_rom_prompt_does_not_hold_the_hosts_start(browser, server
         expect(host.locator("#player-list")).to_contain_text("Guest", timeout=10000)
         # Harness step: the server counts the guest ready though its page has
         # no ROM (a start taken while its "no ROM" was on its way).
-        guest.evaluate("window.__test_socket.emit('rom-ready', { ready: true })")
+        # Loaded status precedes the async hash. Its first server announcement
+        # invalidates non-host readiness, so establish the authoritative host
+        # identity before injecting this intentionally inconsistent guest state.
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM: test.z64", timeout=15000)
+        guest.evaluate("() => new Promise(resolve => window.__test_socket.emit('rom-ready', { ready: true }, resolve))")
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
         host.click("#start-btn")
         # The guest asks for the host's ROM, and says it has none.

@@ -5474,7 +5474,13 @@
   const _escalateLostInput = (peer, step, now, hole) => {
     const slot = peer.slot;
     if (step === 'push') {
-      const recipients = _syncTargetsFor(null).map(({ sid, peer: target }) => ({ sid, slot: target.slot }));
+      // Only the server roster supplies the budget identity. A peer's connection
+      // key changes on reconnect and peer-supplied fields cannot buy a new budget.
+      const recipients = _syncTargetsFor(null).map(({ sid, peer: target }) => ({
+        sid,
+        slot: target.slot,
+        playerId: _knownPlayers[sid]?.persistentId,
+      }));
       const attempts = _recovery.begin(slot, hole, recipients, _frameNum, now, _syncEnabled);
       if (!attempts.length) return;
       _syncLog(`INPUT-ASK-PUSH f=${_frameNum} slot=${slot} hole=${hole}`);
@@ -5809,6 +5815,7 @@
   // while its own serve is still the one on record
   // (specs/late_join_pause.qnt).
   const _lateJoinServing = new Map();
+  const _lateJoinStateSent = new Map(); // sid -> current emitted serve identity, not delivery proof
   let _lateJoinServeSeq = 0;
   const _pendingLateJoinReadySids = new Set(); // ready arrived before host DC opened
   const _pendingLateJoinPeerSids = new Set(); // running-phase players not active until late-join-ready
@@ -7957,6 +7964,21 @@
     if (_playerSlot === 0 && senderSid) {
       if (_lateJoinReadyHandled.has(senderSid)) return;
       const peer = _peers[senderSid];
+      // A relay emit is not delivery. Dropped players remain excluded until
+      // their authenticated ready follows a current emitted serve. Deferred
+      // socket readiness retains this evidence until the current DC opens.
+      if (_droppedThisMatch.has(senderSid)) {
+        const sent = _lateJoinStateSent.get(senderSid);
+        const serving = _lateJoinServing.get(senderSid);
+        if (
+          !sent ||
+          sent.epoch !== _syncQueueEpoch ||
+          sent.gen !== (_syncQueueGen[senderSid] || 0) ||
+          (sent.peer && sent.peer !== peer) ||
+          (serving !== sent.serveId && !_pendingLateJoinReadySids.has(senderSid))
+        )
+          return;
+      }
       if (peer?.dc?.readyState !== 'open') {
         if (_pendingLateJoinReadySids.has(senderSid)) return;
         _pendingLateJoinReadySids.add(senderSid);
@@ -7974,6 +7996,8 @@
         activate: true,
       });
       _lateJoinReadyHandled.add(senderSid);
+      _droppedThisMatch.delete(senderSid);
+      _lateJoinStateSent.delete(senderSid);
       _lateJoinServing.delete(senderSid);
       newlyHandled = true;
     }
@@ -9742,7 +9766,7 @@
           if (wasPausedForLateJoin) _config?.onToast?.('Player joined');
           _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
         }
-        if (e.data === 'late-join-ready') {
+        if (e.data === 'late-join-ready' && peer.dc === ch) {
           finishLateJoinReady('DC', remoteSid);
         }
         // A guest cannot reach another guest: the host leaves the one named
@@ -10531,6 +10555,10 @@
     // The resume broadcasts the roster, and the caller has yet to drop this
     // peer from `_peers`: done now, the roster would list the joiner as a
     // player for one message. It goes out once the caller has finished.
+    if (opts.sid) {
+      _lateJoinStateSent.delete(opts.sid);
+      _pendingLateJoinReadySids.delete(opts.sid);
+    }
     if (opts.sid && _lateJoinServing.delete(opts.sid) && _runSubstate === RUN_LATE_JOIN_PAUSE) {
       const leftSid = opts.sid;
       queueMicrotask(() => _endLateJoinPauseIfNoneServed(`${reason} for ${leftSid}`));
@@ -12390,6 +12418,7 @@
       const onServeDeadline = () => {
         if (_lateJoinServing.get(remoteSid) !== serveId) return;
         _lateJoinServing.delete(remoteSid);
+        _lateJoinStateSent.delete(remoteSid);
         const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
         _syncLog(
           `LATE-JOIN-TIMEOUT elapsed=${elapsed}ms joiner=${remoteSid} — ` +
@@ -12456,11 +12485,20 @@
       const saveRamBytes = _captureSaveRam(hMod);
 
       // Async compression is safe now — tick loop is frozen
+      const serveEpoch = _syncQueueEpoch;
+      const serveGen = _syncQueueGen[remoteSid] || 0;
+      const servePeer = _peers[remoteSid] || null;
+      _lateJoinStateSent.delete(remoteSid);
       const encoded = await compressAndEncode(bytes);
       const saveRam = saveRamBytes ? (await compressAndEncode(saveRamBytes)).data : null;
       // The serve was ended while the state was being compressed (its timer
       // fired, the joiner left, the match stopped): nothing to send.
-      if (_lateJoinServing.get(remoteSid) !== serveId) {
+      if (
+        _lateJoinServing.get(remoteSid) !== serveId ||
+        serveEpoch !== _syncQueueEpoch ||
+        serveGen !== (_syncQueueGen[remoteSid] || 0) ||
+        (servePeer && servePeer !== _peers[remoteSid])
+      ) {
         _syncLog(`late-join state for ${remoteSid} not sent: the serve ended while compressing`);
         return;
       }
@@ -12481,7 +12519,7 @@
         hiddenWords,
         audioFifo,
       });
-      _droppedThisMatch.delete(remoteSid);
+      _lateJoinStateSent.set(remoteSid, { serveId, epoch: serveEpoch, gen: serveGen, peer: servePeer });
     } catch (err) {
       _syncLog(`failed to send late-join state: ${err}`);
       _clearPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer failed');
@@ -20248,6 +20286,7 @@
     _isApplyingLateJoinState = false;
     _lateJoinReadyHandled.clear();
     _lateJoinServing.clear();
+    _lateJoinStateSent.clear();
     _lateJoinGuestPausedAt = 0;
     _lateJoinLostHost = false;
     _lateJoinLostHostAsks = 0;

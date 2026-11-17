@@ -346,6 +346,8 @@ ask_escalation() {
 }
 
 escalation_push() {
+  verify specs/late_join_drop_ready.qnt late_join_drop_ready_fixed noUnreadyMeshAdmission init 5
+  expect_violation specs/late_join_drop_ready.qnt late_join_drop_ready_before noUnreadyMeshAdmission 3
   verify specs/recovery_apply_boundary.qnt recovery_apply_boundary_fixed allHold init 4
   expect_violation specs/recovery_apply_boundary.qnt recovery_apply_boundary_before allHold 2
   verify specs/sync_channel_owner.qnt sync_channel_owner_fixed allHold init 6
@@ -361,6 +363,8 @@ escalation_push() {
   verify specs/input_placeholder.qnt input_placeholder_fixed allHold init 4
   expect_violation specs/input_placeholder.qnt input_placeholder_before allHold 2
   local DELIVERY=specs/recovery_delivery.qnt
+  verify "$DELIVERY" recovery_budget_identity_fixed rotationCannotRenew init 8
+  expect_violation "$DELIVERY" recovery_budget_identity_before rotationCannotRenew 5
   verify "$DELIVERY" recovery_source_budget_fixed allHold init 8
   expect_violation "$DELIVERY" recovery_source_budget_before capturesBoundedWithinWindow 4
   expect_violation "$DELIVERY" recovery_source_budget_before pendingWaitersBounded 2

@@ -9,6 +9,7 @@
  * Consumed by: netplay-rollback.js, netplay-streaming.js, play.js
  * Exposes: window.KNShared, window.KNEvent (installShared)
  */
+import { RESET_COMBO_MASK } from '../reset-combo.ts';
 import { startPolling, type Polling } from '../poll.ts';
 import { decodeInput, encodeInput, inputEqual, type WireInput } from '../input-wire.ts';
 import { classifyRunnerStep } from '../runner-step.ts';
@@ -222,6 +223,16 @@ export const createShared = () => {
   function ensureKeyTrackingListeners(): void {
     if (!_listenersAdded) {
       _keydownHandler = (e) => {
+        // Modal/menu input stays in the UI. After closing, focus returns to
+        // More: consume its activation keys, but let gameplay keys resume.
+        const target = e.target;
+        if (
+          typeof Element !== 'undefined' &&
+          target instanceof Element &&
+          (target.closest('#reset-combo-dialog[open], #more-dropdown:not(.hidden)') ||
+            (target.closest('#toolbar-more') && (e.key === 'Enter' || e.key === ' ')))
+        )
+          return;
         if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);
         _recentlyPressedKeys.add(e['keyCode']);
       };
@@ -665,6 +676,17 @@ export const createShared = () => {
           if (idx === 23 && val > 0) input.cy = -N64_MAX; // C-Up
         }
       }
+    }
+
+    if (
+      state.resetComboHeld &&
+      state.gameOn() &&
+      state.slot !== null &&
+      state.slot >= 0 &&
+      !ejsMenuOpen &&
+      !state.remapActive
+    ) {
+      input.buttons |= RESET_COMBO_MASK;
     }
 
     input.lx = clampN64Axis(input.lx);

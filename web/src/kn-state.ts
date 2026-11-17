@@ -36,6 +36,8 @@ export interface PageState {
   remapActive: boolean;
   /** Touch-control values by input index. The touch controls (page/virtual-gamepad/) write; the engine reads. */
   touchInput: Record<string, number>;
+  /** Separate input ownership: the reset shortcut never changes real held controls. */
+  resetComboHeld: boolean;
   /** The engine's peers by socket id. The engine writes; play.js and the desync detector read. */
   peers: Record<string, PeerView>;
   /** The engine's current frame. The engine writes; play.js shows it. */
@@ -75,6 +77,7 @@ export function initialKNState(storage: SafeStorage): PageState {
   return {
     remapActive: false,
     touchInput: {},
+    resetComboHeld: false,
     peers: {},
     frameNum: 0,
     delayAutoValue: 2,

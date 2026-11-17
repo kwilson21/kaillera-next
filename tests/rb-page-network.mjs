@@ -273,7 +273,9 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       }
       const ch = this;
       realOnmessage.set.call(this, function (e) {
-        const result = receiveGate.receive(ch, e.data, () => fn.call(this, e));
+        const result = receiveGate.receive(ch, e.data, (data) =>
+          fn.call(this, data === e.data ? e : new MessageEvent('message', { data })),
+        );
         if (ch.label === 'sync-state') afterSyncStateMessage(e.data);
         return result;
       });
