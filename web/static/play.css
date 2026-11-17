@@ -1674,3 +1674,34 @@ a.more-option {
   min-height: 2.5em;
   font-size: 0.9rem;
 }
+
+/* Contextual reset preview: fixed overlay never moves the native gamepad. */
+#contextual-reset {
+  position: fixed;
+  z-index: 110;
+  transform: translateX(-50%);
+  width: min(280px, calc(100vw - 32px));
+  padding: 8px 12px;
+  border: 1px solid #526875;
+  border-radius: 14px;
+  background: rgb(12 20 28 / 94%);
+  color: #f5f8fa;
+  text-align: center;
+}
+#contextual-reset[hidden] {
+  display: none;
+}
+#contextual-reset p {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+#contextual-reset button {
+  min-height: 48px;
+  width: 100%;
+  border-radius: 10px;
+  touch-action: none;
+}
+#contextual-reset button[aria-pressed='true'] {
+  background: #78dbb3;
+  color: #09231a;
+}
