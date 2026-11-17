@@ -229,7 +229,7 @@ export const createShared = () => {
         if (
           typeof Element !== 'undefined' &&
           target instanceof Element &&
-          (target.closest('#reset-combo-dialog, #more-dropdown') ||
+          (target.closest('#reset-combo-dialog[open], #more-dropdown:not(.hidden)') ||
             (target.closest('#more-wrapper') && (e.key === 'Enter' || e.key === ' ')))
         )
           return;

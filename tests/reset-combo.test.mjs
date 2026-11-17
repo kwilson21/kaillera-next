@@ -121,6 +121,21 @@ test('reset shortcut: iPhone layout, ownership, hold, keyboard and cancellation'
       assert.equal(await input(), 1, 'activating More must not leak Start into the ROM');
       await page.keyboard.up('Enter');
       await page.keyboard.press('Escape');
+      // Some browsers retain the closed menu item as a key-event target.
+      // A hidden menu must not suppress gameplay through that stale target.
+      await page.evaluate(() => {
+        window.KNCore.play.menus.closeMoreMenu();
+        document
+          .querySelector('#toolbar-info')
+          .dispatchEvent(new KeyboardEvent('keydown', { key: 'v', keyCode: 86, bubbles: true }));
+      });
+      assert.equal(await input(), 9, 'a closed menu item must not swallow Start');
+      await page.evaluate(() =>
+        document
+          .querySelector('#toolbar-info')
+          .dispatchEvent(new KeyboardEvent('keyup', { key: 'v', keyCode: 86, bubbles: true })),
+      );
+      assert.equal(await input(), 1);
       await page.evaluate(() => window.testReset.open());
       await button.evaluate((el) => el.click());
       await page.evaluate(() => window.dispatchEvent(new Event('blur')));
