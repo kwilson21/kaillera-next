@@ -72,7 +72,7 @@ jobs:
         if: matrix.shard == 1
         run: |
           npx playwright install --with-deps --only-shell chromium
-          node --test tests/reset-combo.test.mjs
+          node --test tests/reset-combo.test.mjs tests/contextual-reset.test.mjs
       # Started here rather than by the tests' fixture, so its log is kept and
       # rate limiting is off in its own environment (ratelimit.py reads it at import).
       - name: Start the server

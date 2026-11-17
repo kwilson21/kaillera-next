@@ -230,7 +230,7 @@ export const createShared = () => {
           typeof Element !== 'undefined' &&
           target instanceof Element &&
           (target.closest('#reset-combo-dialog[open], #more-dropdown:not(.hidden)') ||
-            (target.closest('#toolbar-more') && (e.key === 'Enter' || e.key === ' ')))
+            (target.closest('#toolbar-more, #contextual-reset:not([hidden])') && (e.key === 'Enter' || e.key === ' ')))
         )
           return;
         if (_activeHeldKeys) _activeHeldKeys.add(e['keyCode']);

@@ -583,3 +583,8 @@ fi
 $QUINT typecheck specs/game_end.qnt
 $QUINT test specs/game_end.qnt --main=game_end_before --backend="$BACKEND"
 $QUINT test specs/game_end.qnt --main=game_end_fixed --backend="$BACKEND"
+
+# Native paused-game helper: phase/owner changes always release and rearm.
+$QUINT test specs/contextual_reset.qnt --main=contextual_reset_before --backend="$BACKEND"
+$QUINT test specs/contextual_reset.qnt --main=contextual_reset_fixed --backend="$BACKEND"
+$QUINT run specs/contextual_reset.qnt --main=contextual_reset_fixed --invariant='safeHold and physicalPreserved' --max-samples=1000 --max-steps=30 --backend="$BACKEND"

@@ -1556,7 +1556,7 @@ const install = async (p, role) => {
   await p.addScriptTag({ url: `${URL}/static/ssb64-menu-autopilot.js` });
   await p.evaluate(
     (args) => {
-      const { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter } = args;
+      const { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter, twelveCb } = args;
       const W = (window.__tp = {
         role,
         hashes: {},
@@ -1656,7 +1656,60 @@ const install = async (p, role) => {
           // Space button presses by the input delay so a press lands (and the
           // closed loop sees it) before the next one; sticks pass through.
           const d = (rb.getHudCounters?.()?.delay ?? 2) + 6;
-          let inp = actor(f);
+          let inp;
+          if (twelveCb && sc === 9) {
+            const hook = rb.readRdram32(0x80133d9c);
+            const pc = (0x80000000 | ((hook & 0x03ffffff) << 2)) >>> 0;
+            const hi = rb.readRdram32(pc),
+              lo = rb.readRdram32(pc + 4);
+            if (
+              hook >>> 26 !== 3 ||
+              hi >>> 16 !== 0x3c0d ||
+              lo >>> 16 !== 0x35ad ||
+              rb.readRdram32(pc + 8) >>> 0 !== 0x8da80000
+            )
+              throw new Error('Unknown native Remix page flag instructions');
+            const page = rb.readRdram32((((hi & 65535) << 16) | (lo & 65535)) >>> 0);
+            const cursor = rb.readRdram32(0x80134948);
+            if (![0, 1].includes(page)) throw new Error('Unknown Remix menu page ' + page);
+            const wanted = page === 0 ? 4 : 0;
+            inp = {
+              buttons: role === 'host' && f % 60 < 8 ? (cursor === wanted ? 1 : 16) : 0,
+              lx: 0,
+              ly: 0,
+              cx: 0,
+              cy: 0,
+            };
+          } else if (twelveCb && sc === 16) {
+            const slot = role === 'host' ? 0 : 1;
+            const base = 0x8013ba88 + slot * 0xbc;
+            const selected = rb.readRdram32(base + 0x88) === 1;
+            const both = [0, 1].every((i) => rb.readRdram32(0x8013ba88 + i * 0xbc + 0x88) === 1);
+            inp = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+            if (both) {
+              if (role === 'host' && f % 60 < 8) inp.buttons = 8;
+            } else if (!selected) {
+              const puck = rb.readRdram32(base + 4),
+                obj = rb.readRdram32(puck + 0x74);
+              const float = (word) => {
+                const a = new DataView(new ArrayBuffer(4));
+                a.setUint32(0, word);
+                return a.getFloat32(0);
+              };
+              const x = float(rb.readRdram32(obj + 0x58)),
+                y = float(rb.readRdram32(obj + 0x5c));
+              if (x > -100 && x < 420 && y > -100 && y < 340) {
+                const dx = (slot === 0 ? 70 : 200) - x,
+                  dy = 50 - y;
+                if (Math.abs(dx) < 9 && Math.abs(dy) < 9) {
+                  if (f % 60 < 8) inp.buttons = 1;
+                } else if (f % 30 < 6) {
+                  inp.lx = Math.abs(dx) > 8 ? Math.sign(dx) * 35 : 0;
+                  inp.ly = Math.abs(dy) > 8 ? Math.sign(dy) * 35 : 0;
+                }
+              }
+            }
+          } else inp = actor(f);
           if (inp.buttons) {
             if (W.btnCool > f && W.btnHeld !== inp.buttons) inp = { ...inp, buttons: 0 };
             else {
@@ -1732,7 +1785,14 @@ const install = async (p, role) => {
         return r;
       };
     },
-    { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter: MENU_AUTOPILOT === 'any-fighter' },
+    {
+      role,
+      VISUAL_CHECK,
+      ADDRESS_MAP_CHECK,
+      ADDRESS_MAP_OF,
+      anyFighter: MENU_AUTOPILOT === 'any-fighter',
+      twelveCb: process.env.TWELVE_CB === '1',
+    },
   );
 };
 await install(host, 'host');

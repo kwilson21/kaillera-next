@@ -29,3 +29,5 @@ web/src/input-resend.ts
 web/src/start-group.ts
 
 web/src/reset-combo.ts
+
+web/src/contextual-reset-intent.ts
