@@ -1,3 +1,12 @@
+import * as captureLease from './capture-lease.ts';
+import * as rebaseState from './rebase-state.ts';
+import * as lateJoinRebase from './late-join-rebase.ts';
+import * as lateJoinCut from './late-join-cut.ts';
+import * as lateJoinAdmission from './late-join-admission.ts';
+import * as inputHistoryRepair from './input-history-repair.ts';
+import { admissionAt, mayRetryAdmission } from './repair-admission.ts';
+import * as inputBootstrap from './input-bootstrap.ts';
+import { createAuthoritativeRepair } from './authoritative-repair.ts';
 import { createRecoveryManager } from './recovery-delivery.ts';
 import { createRecoveryTransferPool } from './recovery-transfer.ts';
 /**
@@ -9,6 +18,7 @@ import { createEffectActor } from '@xstate/effect';
 import { initialTransition, transition } from 'xstate';
 import { addressMapFor } from './address-maps.ts';
 import { bootTimedOut } from './boot.ts';
+import * as coreBoot from './core-boot.ts';
 import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
@@ -299,6 +309,13 @@ export const createSession = (
 };
 
 export const KNCore = {
+  coreBoot,
+  lateJoinAdmission,
+  lateJoinCut,
+  lateJoinRebase,
+  rebaseState,
+  inputBootstrap,
+  inputHistoryRepair,
   analogScale,
   audioTransition,
   axisSign,
@@ -359,6 +376,8 @@ export const KNCore = {
   /** The per-peer machine, driven from the rollback engine's events (peer-driver.ts). */
   peerDriver: { createPeerDriver },
   /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */
+  captureLease,
+  authoritativeRepair: { createAuthoritativeRepair, admissionAt, mayRetryAdmission },
   recovery: { createRecoveryManager, createRecoveryTransferPool },
   resyncRequest: {
     answersAnOlderRequest,

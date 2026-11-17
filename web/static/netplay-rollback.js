@@ -433,6 +433,11 @@
   // Set when C refused a delay change mid-replay; the tick retries it.
   let _delayRetunePending = false;
   const _recomputeDelay = () => {
+    if (_captureLease) {
+      _delayRetunePending = true;
+      return;
+    }
+    if (_rebaseHeld() || _rebaseSelected) return;
     if (!_delayRetuneEnabled) return;
     const hasRollback = !!window.EJS_emulator?.gameManager?.Module?._kn_pre_tick;
     if (!hasRollback) return;
@@ -467,7 +472,9 @@
       if (cMod?._kn_set_delay_frames) {
         const accepted = cMod._kn_set_delay_frames(maxDelay);
         if (accepted !== maxDelay) {
-          _syncLog(`kn_set_delay_frames(${maxDelay}) returned ${accepted} (replay in flight, retrying next tick)`);
+          _syncLog(
+            `kn_set_delay_frames(${maxDelay}) returned ${accepted} (replay or unreconciled input history, retrying next tick)`,
+          );
           _delayRetunePending = true;
           return DELAY_FRAMES;
         }
@@ -561,7 +568,7 @@
     sendNextPing(peer); // completion (incl. broadcast + re-check) handled by _finishRttMeasurement
   };
 
-  const KN_INPUT_MODEL = 2;
+  const KN_INPUT_MODEL = 6;
   const _localRollbackCaps = () => {
     const mod = window.EJS_emulator?.gameManager?.Module;
     // Capability 2 = true rollback with every slot (local included) applied at
@@ -576,7 +583,9 @@
       // Which frame each peer applies its own input on. Tabs from before
       // this field applied local input `delay` frames earlier than their
       // peers did; they don't send it, so pairing with one is refused.
-      inputModel: KN_INPUT_MODEL,
+      inputModel: window.KNCore.inputBootstrap.supported(mod) ? KN_INPUT_MODEL : 2,
+      restartState: mod?._kn_get_restart_state_capability?.() ?? 0,
+      forwardCeiling: mod?._kn_get_forward_ceiling_capability?.() ?? 0,
       stateBackend,
       // Always true now. Tabs from before the Remix menu lockstep was
       // removed still refuse a peer that doesn't send it.
@@ -729,7 +738,11 @@
   //     reply roundtrip and the next-paint scheduling latency.
   // Use ?rollbackMode=2 (or the legacy ?workerCoproc=1) to opt into
   // Mode 2.
+  // Worker/shadow replay does not yet carry ownership epochs and the historical
+  // journal. It cannot be authoritative under inputModel3 until that ABI exists.
+  const INPUT_OWNER_WORKER_PROTOCOL_SUPPORTED = false;
   const RB_WORKER_COPROC = (() => {
+    if (!INPUT_OWNER_WORKER_PROTOCOL_SUPPORTED) return false;
     try {
       const raw = _urlParams.get('workerCoproc') ?? localStorage.getItem('kn-worker-coproc');
       if (raw === '1') return true;
@@ -1713,6 +1726,7 @@
     return false;
   })();
   const RB_SHADOW_EMU = (() => {
+    if (!INPUT_OWNER_WORKER_PROTOCOL_SUPPORTED) return false;
     try {
       const raw = _urlParams.get('shadowEmu') ?? localStorage.getItem('kn-shadow-emu');
       if (raw === '1') return true;
@@ -1799,6 +1813,9 @@
     (notice) => _handleRecoveryCommand(notice),
   );
   const _recoveryTransfers = window.KNCore.recovery.createRecoveryTransferPool();
+  // Retained through temporary roster gaps, bound to the actual connection,
+  // and populated only from server roster identities, never peer wire fields.
+  const _recoveryPlayerIds = new WeakMap();
   // sid -> when that guest's chain of state transfers last moved (a transfer
   // started, ended or had a chunk accepted): the progress an escalation push
   // waiting on it is judged by. Per-peer state: resetPeerState drops it.
@@ -1810,7 +1827,8 @@
   let _resendAtSwitch = {};
   // The oldest input from `slot` that can still be missing: nothing before
   // the rollback init or the last resync is waited for.
-  const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
+  const _inputFloor = (slot) =>
+    Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0, _membershipInputFloors[slot] ?? 0);
   // Test only (tests/rb-two-player.mjs PAST_WINDOW_FORCED): the edge stall
   // lets this one frame through, so a held input arrives past the rollback
   // window and INPUT-PAST-WINDOW-MISMATCH, which that stall guards in normal
@@ -1925,7 +1943,7 @@
       // Fed, a returning peer's backlog would be compared with what this page
       // predicted while it ran alone, dozens of frames too deep to roll back,
       // and counted as failed rollbacks the resync is about to make moot.
-      if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {
+      if (qi.epoch !== (_membershipInputEpochs[qi.slot] ?? 0) || qi.frame < _inputFloor(qi.slot)) {
         settledSkipped++;
         continue;
       }
@@ -3048,6 +3066,7 @@
                           localAtT.cy | 0,
                           -1,
                         );
+                        _checkInputHistory(tickMod);
                         if (preCu === 0) {
                           const applyFrameForInputs = applyFrame - DELAY_FRAMES;
                           if (RB_TRUE_ROLLBACK) {
@@ -3550,6 +3569,7 @@
   };
 
   const _shadowMaybeStart = (reason = 'unknown') => {
+    if (_rebaseHeld() || _rebaseSelected) return;
     if (!RB_SHADOW_EMU || _isSpectator || _rbShadowReady || _rbShadowBooting || _rbShadowFailed) return false;
     if (typeof Worker !== 'function') return false;
     if (typeof SharedArrayBuffer !== 'function' || !window.crossOriginIsolated) {
@@ -5198,8 +5218,41 @@
     return result;
   };
 
+  const _checkInputHistory = (mod) => {
+    if (!mod._kn_get_input_history_gap?.()) return;
+    const error = new Error('Historical owner input unavailable; stopped before replay');
+    _handleCoreFatal('input-history', error);
+    throw error;
+  };
+
+  const _restoreBootstrapHistory = (mod, words, frame) => {
+    // Read back native's merged provenance, not the stale in-flight packet.
+    const merged = window.KNCore.inputBootstrap.capture(mod, frame);
+    for (const { slot, floor, epoch, occupied, entries } of window.KNCore.inputBootstrap.history(merged)) {
+      _setInputOwner(slot, floor, epoch, true, occupied);
+      const inputs = slot === _playerSlot ? _localInputs : (_remoteInputs[slot] ??= {});
+      for (const { key, real, input } of entries) {
+        if (key < floor) {
+          delete inputs[key];
+          continue;
+        }
+        if (inputs[key] === KNShared.ZERO_INPUT) delete inputs[key];
+        if (real && inputs[key] === undefined) inputs[key] = input;
+      }
+    }
+  };
+
   const _feedCInput = (mod, slot, frame, input) => {
-    if (!mod?._kn_feed_input || !input || slot === null || slot === undefined || frame < 0) return false;
+    if (
+      !mod?._kn_feed_input ||
+      !input ||
+      slot === null ||
+      slot === undefined ||
+      frame < 0 ||
+      frame < (_membershipInputFloors[slot] ?? 0)
+    )
+      return false;
+    if (_useCRollback && input === KNShared.ZERO_INPUT) return false;
     _feedWatched(mod, slot, frame, () =>
       mod._kn_feed_input(
         Number(slot),
@@ -5269,7 +5322,7 @@
     const made = [];
     const own = [];
     if (_playerSlot !== null && _playerSlot !== undefined) {
-      for (let f = from; f < frame; f++) {
+      for (let f = Math.max(from, _membershipInputFloors[_playerSlot] ?? 0); f < frame; f++) {
         own.push(f);
         if (_localInputs[f] === undefined) {
           _localInputs[f] = KNShared.ZERO_INPUT;
@@ -5294,8 +5347,11 @@
         // Always, even with none of its own to resend: the host's
         // escalation push is answered by it (specs/ask_escalation.qnt).
         peer.dc.send(`inputs-settled:${from}`);
+        // Delivery ACK certifies this exact snapshot loaded/native-aligned,
+        // not convergence of future replay. Mixed history owes separate repair.
         if (peer.slot === 0 && recoveryId > 0) peer.dc.send(`recovery-settled:${from}:${recoveryId}`);
-        for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);
+
+        for (const f of own) peer.dc.send(_encodeOwnedInput(f, _localInputs[f]).buffer);
         const askedAt = (_inputAskedAt[peer.slot] ??= {});
         const askedNow = performance.now();
         for (let f = from; f < frame; f++) {
@@ -5375,6 +5431,7 @@
   // deadline asks again, _checkResyncRequestDeadline).
   const _countOverdueAsk = (peer, oldest, now) => {
     const slot = peer.slot;
+    if (['waiting', 'expired', 'received', 'unavailable'].includes(_historyRequests.get(slot)?.actor.state())) return;
     let track = _inputAskOverdue[slot];
     if (!track || track.frame !== oldest) track = _inputAskOverdue[slot] = { frame: oldest, asks: 0, firstAt: now };
     track.asks++;
@@ -5444,16 +5501,21 @@
       _syncLog(
         `INPUT-ASK-PUSH-ENDED f=${_frameNum} slot=${slot}: ${!target ? 'no entry' : target.reconnecting ? 'reconnecting' : 'phantom'}, its own resync supersedes the push`,
       );
-    } else if (type === 'budget-exhausted') {
+    } else if (type === 'budget-exhausted' || type === 'room-budget-exhausted') {
+      const roomBudget = type === 'room-budget-exhausted';
       _syncLog(
-        `INPUT-ASK-SOURCE-BUDGET f=${_frameNum} slot=${slot}: repeated new holes exhausted capture budget (used=${pushes} limit=3 windowMs=30000)`,
+        `INPUT-ASK-${roomBudget ? 'ROOM' : 'SOURCE'}-BUDGET f=${_frameNum} slot=${slot}: recovery capture budget exhausted (used=${pushes} limit=${roomBudget ? 9 : 3} windowMs=30000)`,
       );
-      KNEvent('desync', 'Repeated recovery requests exceeded the source capture budget', {
+      KNEvent('desync', 'Recovery requests exceeded the capture budget', {
         slot,
         hole,
-        kind: 'input-ask-source-budget',
+        kind: roomBudget ? 'input-ask-room-budget' : 'input-ask-source-budget',
       });
-      _config?.onToast?.(`P${slot + 1} repeatedly lost synchronization and was dropped`);
+      _config?.onToast?.(
+        roomBudget
+          ? `P${slot + 1} was dropped because this room reached its recovery limit`
+          : `P${slot + 1} repeatedly lost synchronization and was dropped`,
+      );
       hardDisconnectPeer(sid, { tell: 'desync' });
     } else if (type === 'drop') {
       _syncLog(
@@ -5479,7 +5541,7 @@
       const recipients = _syncTargetsFor(null).map(({ sid, peer: target }) => ({
         sid,
         slot: target.slot,
-        playerId: _knownPlayers[sid]?.persistentId,
+        playerId: _knownPlayers[sid]?.persistentId || _recoveryPlayerIds.get(target),
       }));
       const attempts = _recovery.begin(slot, hole, recipients, _frameNum, now, _syncEnabled);
       if (!attempts.length) return;
@@ -5585,7 +5647,7 @@
       while (kept.from <= kept.upTo) {
         const input = _localInputs[kept.from];
         if (input !== undefined) {
-          peer.dc.send(KNShared.encodeInput(kept.from, input, peer.lastFrameFromPeer ?? -1).buffer);
+          peer.dc.send(_encodeOwnedInput(kept.from, input, peer.lastFrameFromPeer ?? -1).buffer);
           count++;
         }
         kept.from++;
@@ -5652,6 +5714,8 @@
   const _heldKeys = new Set();
 
   const _syncRequestCooldowns = new Map();
+  const _syncRequestGenerations = new Map();
+  const _syncRequestNumbers = new Map();
   const _SYNC_REQUEST_COOLDOWN_MS = 5000;
 
   // Lockstep state
@@ -5759,6 +5823,117 @@
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
   let _rosterChangeFrame = -1; // frame when roster last changed — enables dense DIAG-INPUT logging
+  let _membershipInputFloors = {};
+  let _membershipInputEpochs = {};
+  let _membershipInputOccupied = {};
+  const _reservedInputOwners = new Set();
+  let _pendingInputBootstrap = null;
+  let _membershipSnapshotFloor = 0; // host frame of the latest actual membership change
+  const _rejectPreMembershipSnapshot = (frame) => {
+    if (frame == null || frame >= _membershipSnapshotFloor) return false;
+    _syncLog(`SYNC-MEMBERSHIP-STALE frame=${frame} floor=${_membershipSnapshotFloor}`);
+    if (_playerSlot !== 0) _oweAuthoritativeRepair(_membershipSnapshotFloor, 'snapshot before membership change');
+    return true;
+  };
+  const _ownershipFrame = () =>
+    window.KNCore.inputBootstrap.ownershipBoundary(
+      _frameNum,
+      window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() ?? 0,
+      _membershipSnapshotFloor,
+    );
+  const _inputOwnersWire = () =>
+    [0, 1, 2, 3]
+      .map(
+        (slot) =>
+          `${_membershipInputEpochs[slot] ?? 0}.${_membershipInputFloors[slot] ?? 0}.${(_membershipInputOccupied[slot] ?? (_reservedInputOwners.has(slot) || _activeRoster?.has(slot) || slot === _playerSlot)) ? 1 : 0}`,
+      )
+      .join(',');
+  const _setInputOwner = (slot, floor, epoch, nativeAligned = false, occupied = null) => {
+    if (occupied === null)
+      occupied = _reservedInputOwners.has(slot) || (_activeRoster?.has(slot) ?? slot === _playerSlot);
+    const changed = epoch !== (_membershipInputEpochs[slot] ?? 0);
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (_useCRollback && !nativeAligned) {
+      // Inputs accepted by JS before retirement still belong to the old owner.
+      // Drain while its identity is current, then native seals pending corrections.
+      if (changed && mod) _drainPendingCInputs(mod);
+      const ownerResult = mod?._kn_set_input_owner_occupied?.(slot, floor, epoch, occupied ? 1 : 0);
+      if (!ownerResult) {
+        _handleCoreFatal('input-membership', new Error('Native input owner refused'));
+        return false;
+      }
+      if (ownerResult === 2) {
+        if (!_syncEnabled) {
+          _handleCoreFatal('input-membership', new Error('Historical ownership repair is disabled'));
+          return false;
+        }
+        _oweAuthoritativeRepair(_frameNum, 'ownership cut outside replay history');
+      }
+    }
+    if (changed) {
+      if (slot === _playerSlot) _localInputs = {};
+      else _remoteInputs[slot] = {};
+      delete _lastKnownInput[slot];
+    }
+    _membershipInputFloors[slot] = floor;
+    _membershipInputEpochs[slot] = epoch;
+    _membershipInputOccupied[slot] = occupied;
+    return true;
+  };
+  const _noteMembershipChange = (previous, next, hostFrame, owners = null) => {
+    const changed =
+      !previous ||
+      previous.size !== next.size ||
+      [...previous].some((slot) => !next.has(slot)) ||
+      (owners &&
+        owners.some(
+          (owner, slot) =>
+            owner.epoch !== (_membershipInputEpochs[slot] ?? 0) || owner.occupied !== _membershipInputOccupied[slot],
+        ));
+    if (!changed) return true;
+    if (previous) _membershipSnapshotFloor = Math.max(_membershipSnapshotFloor, hostFrame);
+    if (_playerSlot === 0) {
+      for (const slot of new Set([...(previous ?? []), ...next])) {
+        if (!previous || previous.has(slot) === next.has(slot)) continue;
+        // A serve reserved its epoch before capture. Removing it from the
+        // playing roster during that serve must not invalidate its snapshot.
+        if (_reservedInputOwners.has(slot)) {
+          if (next.has(slot)) _reservedInputOwners.delete(slot);
+          continue;
+        }
+        if (!_setInputOwner(slot, hostFrame, (_membershipInputEpochs[slot] ?? 0) + 1, false, next.has(slot)))
+          return false;
+      }
+    } else if (owners) {
+      if (hostFrame > _frameNum && _useCRollback) {
+        if (!_syncEnabled) {
+          _handleCoreFatal(
+            'input-membership',
+            new Error('Ownership changed ahead of local timeline with repair disabled'),
+          );
+          return false;
+        }
+        _oweAuthoritativeRepair(hostFrame, 'ownership activation ahead of local timeline');
+      }
+      for (let slot = 0; slot < 4; slot++) {
+        if (!_setInputOwner(slot, owners[slot].floor, owners[slot].epoch, false, owners[slot].occupied)) return false;
+      }
+    }
+    if (_playerSlot === 0) {
+      // These actors refer to captures from the old membership. Cancel their
+      // logical ACK/drop obligation, not their physical reservation or the
+      // persistent player's rolling capture budget.
+      for (const attempt of _recovery.entries()) _recovery.reset(attempt.slot);
+      return true;
+    }
+    if (_pendingResyncState && _rejectPreMembershipSnapshot(_pendingResyncState.frame)) _pendingResyncState = null;
+    if (_catchUpTo >= 0 && _catchUpFrom < _membershipSnapshotFloor) {
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      _endCatchUp(mod, 'membership changed');
+      _oweAuthoritativeRepair(_membershipSnapshotFloor, 'membership changed during catch-up');
+    }
+    return true;
+  };
   let _lastControllerPresentMask = -1;
   let _lastControllerPresentMaskModule = null;
   const MENU_START_BARRIER_SETTLE_MS = 500;
@@ -5815,9 +5990,13 @@
   // while its own serve is still the one on record
   // (specs/late_join_pause.qnt).
   const _lateJoinServing = new Map();
+  const _lateJoinCommitted = new Map();
+  const _lateJoinExpired = new Map();
+  let _guestAdmission = null;
+  const _lateJoinAdmissions = new Map(); // original admission deadline survives pre-capture retries
   const _lateJoinStateSent = new Map(); // sid -> current emitted serve identity, not delivery proof
   let _lateJoinServeSeq = 0;
-  const _pendingLateJoinReadySids = new Set(); // ready arrived before host DC opened
+  const _pendingLateJoinReadySids = new Map(); // ready arrived before host DC opened
   const _pendingLateJoinPeerSids = new Set(); // running-phase players not active until late-join-ready
   const _pendingLateJoinPeerSlots = new Set(); // same gate, indexed by slot for non-host roster updates
   const LATE_JOIN_ACTIVATION_GRACE_FRAMES = 45; // let an activated joiner send first phase/input packets
@@ -5864,6 +6043,9 @@
   };
 
   const _seedLateJoinZeroInput = (slot, frame) => {
+    // Native rollback owns provisional history. A UI/menu placeholder is not
+    // an input received from this owner and must never become confirmed in C.
+    if (_useCRollback) return false;
     if (!_isValidPlayerSlot(slot) || slot === _playerSlot || frame < 0) return false;
     if (!_remoteInputs[slot]) _remoteInputs[slot] = {};
     if (_remoteInputs[slot][frame] !== undefined) return false;
@@ -5872,6 +6054,7 @@
     _lateJoinSeededInputFrames[slot].add(frame);
     if (_useCRollback) {
       _pendingCInputs.push({
+        epoch: _membershipInputEpochs[slot] ?? 0,
         slot,
         frame,
         buttons: 0,
@@ -5990,6 +6173,7 @@
   // Every slot's entry in the table, when the input timeline starts over (a
   // new match, a fast-forward, stop).
   const _resetInputMaps = () => {
+    _cancelHistoryTimeline();
     _recovery.resetAll();
     for (const map of _slotInputMaps()) for (const slot in map) delete map[slot];
   };
@@ -7022,6 +7206,57 @@
   // no longer sends anything (no page sends `sync-hash:`), and the guest
   // stayed desynced for the rest of the match (aResyncAskedForIsNotForgotten,
   // coordinatedAnswerLostTest).
+  const _authoritativeRepair = window.KNCore.authoritativeRepair.createAuthoritativeRepair();
+  let _mixedHistoryThrough = -1;
+  let _syncReceiveProgressAt = 0;
+  const _oweAuthoritativeRepair = (floor, reason) => {
+    if (_playerSlot === 0 || _phase !== PHASE_RUNNING || !_syncEnabled) return;
+    _authoritativeRepair.send({ type: 'owe', floor });
+    _syncLog(`AUTHORITATIVE-REPAIR-OWED floor=${floor} reason=${reason}`);
+  };
+  // Deferred until a later tick: applySyncState's tail clears ordinary owed
+  // flags, and its first catch-up slice can finish synchronously inside apply.
+  const _serviceAuthoritativeRepair = () => {
+    if (!_syncEnabled) {
+      _authoritativeRepair.send({ type: 'reset' });
+      return;
+    }
+    if (_playerSlot === 0 || _phase !== PHASE_RUNNING || _catchUpTo >= 0) return;
+    _authoritativeRepair.send({ type: 'progress', at: Math.max(_syncReceiveProgressAt, _syncDecodeStartedAt) });
+    _authoritativeRepair.send({ type: 'tick', now: performance.now() });
+    if (_authoritativeRepair.state() === 'failed') {
+      _handleCoreFatal('authoritative-repair', new Error('No authoritative state after three repair attempts'));
+      return;
+    }
+    if (!_authoritativeRepair.active()) return;
+    const floor = _authoritativeRepair.context().floor;
+    // A state already in flight can fulfill the obligation, but only if it
+    // does not replay this uncertain past again. Older ones cannot clear it.
+    if (_pendingResyncState && _pendingResyncState.frame < Math.max(floor, _frameNum)) {
+      _syncLog(`AUTHORITATIVE-REPAIR-STALE frame=${_pendingResyncState.frame} floor=${floor} live=${_frameNum}`);
+      _pendingResyncState = null;
+    }
+    if (_pendingResyncState || _authoritativeRepair.state() !== 'owed') return;
+    const target = Math.max(floor, _frameNum);
+    _authoritativeRepair.send({ type: 'request', target, now: performance.now() });
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    const dc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+    if (dc?.readyState === 'open') {
+      const requestId = _beginResyncRequest(target);
+      try {
+        _sendResyncRequest(dc, requestId, `sync-request-full-at:${target}`);
+      } catch (_) {
+        _resyncRequestInFlight = false;
+        _requestSocketFullResync('authoritative-repair');
+      }
+    } else {
+      // The socket host captures its current state; the same floor/live-frame
+      // guard rejects a behind response while this guest remains held.
+      _requestSocketFullResync('authoritative-repair');
+    }
+    _syncLog(`AUTHORITATIVE-REPAIR-REQUEST target=${target} attempt=${_authoritativeRepair.context().attempts}`);
+  };
   let _owedResync = false;
   let _owedResyncAsksAgain = 0;
   const RESYNC_MAX_ASKS_AGAIN = 2;
@@ -7057,6 +7292,7 @@
   // proved): wait, or let the request go and then hand a late joiner to its
   // lost-host step, ask again for an owed resync, stop asking, or nothing.
   const _checkResyncRequestDeadline = () => {
+    if (_authoritativeRepair.active()) return;
     if (!_resyncRequestInFlight) return;
     const now = performance.now();
     // An answer arriving or held, or a coordinated target, has its own deadline.
@@ -7722,7 +7958,7 @@
     if (msg.type === 'sync-request-full-socket') handleSocketSyncRequest(msg);
     if (msg.type === 'sync-state-socket') handleSocketSyncState(msg);
     if (msg.type === 'late-join-ready') {
-      finishLateJoinReady('Socket.IO', _peerKey(msg.senderSid) || null);
+      finishLateJoinReady('Socket.IO', _peerKey(msg.senderSid) || null, msg);
     }
   };
 
@@ -7791,8 +8027,17 @@
   const LATE_JOIN_WAIT_TIMEOUT_MS = 60000;
   let _lateJoinWait = null;
 
+  const _admissionMatch = () => _cachedMatchId || KNState.matchId;
   const _sendLateJoinRequest = () => {
-    socket.emit('data-message', { type: 'request-late-join', requesterSid: socket.id });
+    if (!_guestAdmission || _guestAdmission.phase === 'expired') return;
+    socket.emit('data-message', {
+      type: 'request-late-join',
+      requesterSid: socket.id,
+      inputModel: KN_INPUT_MODEL,
+      admissionId: _guestAdmission.admissionId,
+      admissionMatch: _guestAdmission.matchId,
+      loaded: _guestAdmission.receipt(),
+    });
   };
 
   // A player waiting to be let into a match says so on each of its own data
@@ -7832,6 +8077,8 @@
     _lateJoinLostHost = false;
     _lateJoinLostHostAsks = 0;
     _lateJoin = false;
+    _guestAdmission?.cancel();
+    _guestAdmission = null;
     _config?.onLateJoinAdmitted?.();
     for (const p of Object.values(_peers)) {
       if (p.dc && p.dc.readyState === 'open') {
@@ -7844,6 +8091,17 @@
   };
 
   const _beginLateJoinWait = () => {
+    const hostSid = Object.entries(_knownPlayers).find(([, p]) => p.slot === 0)?.[0];
+    _guestAdmission?.cancel();
+    _lateJoinWait?.cancel();
+    _isApplyingLateJoinState = false;
+    _guestAdmission = new window.KNCore.lateJoinAdmission.GuestAdmission({
+      admissionId: crypto.randomUUID().replaceAll('-', ''),
+      matchId: _admissionMatch(),
+      hostSid,
+      deadlineAt: performance.now() + LATE_JOIN_WAIT_TIMEOUT_MS,
+      now: () => performance.now(),
+    });
     _awaitingLateJoinState = true;
     _lateJoinLostHost = false;
     _lateJoinLostHostAsks = 0;
@@ -7860,6 +8118,7 @@
       _lateJoinWait = null;
       if (outcome === 'admitted') _joinTheStart('the host is not running yet');
       if (outcome !== 'timeout') return;
+      _guestAdmission?.cancel();
       // I1: the deadline has a recovery action: say so and stop waiting.
       // It does not guess that the host is not running. A running host sends
       // no input to a joiner that is still pending, so "no frames received"
@@ -7878,6 +8137,12 @@
   };
 
   const handleLateJoinRequest = (msg) => {
+    if (msg.inputModel !== KN_INPUT_MODEL) {
+      _syncLog('late-join request refused: admission protocol mismatch');
+      return;
+    }
+    if (!window.KNCore.lateJoinAdmission.validToken(msg.admissionId) || msg.admissionMatch !== _admissionMatch())
+      return;
     // Only host responds to late-join requests
     if (_playerSlot !== 0) return;
     if (_phase !== PHASE_RUNNING) {
@@ -7910,6 +8175,10 @@
     }
     const requesterSid = _peerKey(msg.requesterSid);
     if (!requesterSid) return;
+    if (msg.loaded && _resendLateJoinCommit(requesterSid, msg.loaded)) return;
+    if (_lateJoinExpired.get(requesterSid)?.has(msg.admissionId)) return;
+    const currentAdmission = _lateJoinAdmissions.get(requesterSid);
+    if (currentAdmission && currentAdmission.id !== msg.admissionId) return;
     const now = performance.now();
     const last = _lateJoinLastSentAt.get(requesterSid) || 0;
     if (now - last < _LATE_JOIN_COOLDOWN_MS) {
@@ -7925,7 +8194,1173 @@
     setStatus(`${name} is joining...`);
     _lateJoinReadyHandled.delete(requesterSid);
     _pendingLateJoinReadySids.delete(requesterSid);
-    sendLateJoinState(requesterSid);
+    sendLateJoinState(requesterSid, msg.admissionId);
+  };
+
+  // Whole-cohort restart is a new baseline, not a certificate for inactive
+  // history. This hold survives native shutdown/init and every async boundary.
+  let _rebaseHost = null;
+  let _rebaseParticipant = null;
+  let _rebasePulse = null;
+  let _rebaseSerial = 0;
+  let _rebaseLastServe = 0;
+  let _rebaseSelected = null;
+  const _rebaseHeld = () => !!_rebaseParticipant && _rebaseParticipant.machine.state() !== 'released';
+  const _rebasePolicy = () =>
+    _config?.disableStandardCheats === true ? 'off' : _isSmashRemix() ? 'remix' : 'standard';
+  const _rebaseNativeCapable = (mod) =>
+    mod?._kn_get_restart_state_capability?.() === 1 &&
+    mod?._kn_get_forward_ceiling_capability?.() === 1 &&
+    mod?._kn_get_true_rollback_capability?.() === 2 &&
+    [
+      '_kn_rollback_init',
+      '_kn_rollback_shutdown',
+      '_kn_set_frame',
+      '_kn_get_frame',
+      '_kn_get_delay_frames',
+      '_kn_get_finalized_frame',
+      '_kn_get_logical_head',
+      '_kn_set_forward_ceiling',
+      '_kn_get_forward_ceiling',
+      '_kn_set_input_owner_occupied',
+      '_kn_init_finality_base',
+    ].every((name) => typeof mod[name] === 'function');
+  const _rebaseOwners = () =>
+    [0, 1, 2, 3].map((slot) => ({
+      epoch: _membershipInputEpochs[slot] ?? 0,
+      floor: _membershipInputFloors[slot] ?? 0,
+      occupied:
+        _membershipInputOccupied[slot] ??
+        (_reservedInputOwners.has(slot) || _activeRoster?.has(slot) || slot === _playerSlot),
+    }));
+  const _rebaseCurrent = (part) =>
+    !!part &&
+    part === _rebaseParticipant &&
+    !part.failed &&
+    part.module === window.EJS_emulator?.gameManager?.Module &&
+    part.session === _sessionId &&
+    part.epoch === _syncQueueEpoch &&
+    part.identity.matchId === _admissionMatch() &&
+    part.identity.coreHash === window._knCoreHash &&
+    part.identity.romHash === _config?.romHash &&
+    part.policy === _rebasePolicy() &&
+    (part.applying ||
+      (_useCRollback ? 'rollback' : 'lockstep') === (part.installed ? part.manifest.mode : part.beforeMode)) &&
+    part.channels.every(([sid, peer, dc]) => _peers[sid] === peer && peer.dc === dc && dc.readyState === 'open');
+  // RELEASE retires the temporary frozen cohort. Native successors use their
+  // own certificates; stale initialization cannot replace this baseline.
+  const _rebaseBaselineCurrent = () =>
+    !_rebaseSelected ||
+    (_rebaseSelected.module === window.EJS_emulator?.gameManager?.Module &&
+      _rebaseSelected.session === _sessionId &&
+      _useCRollback &&
+      DELAY_FRAMES === _rebaseSelected.delay &&
+      _rebaseSelected.module._kn_get_delay_frames() === _rebaseSelected.delay &&
+      _rebaseSelected.module._kn_get_frame() >= _rebaseSelected.frame &&
+      _rebaseSelected.module._kn_get_logical_head() >= _rebaseSelected.frame &&
+      _rebaseSelected.coreHash === window._knCoreHash &&
+      _rebaseSelected.romHash === _config?.romHash &&
+      _rebaseSelected.policy === _rebasePolicy() &&
+      _rebaseOwners().every(
+        (owner, slot) =>
+          owner.epoch >= _rebaseSelected.owners[slot].epoch && owner.floor >= _rebaseSelected.owners[slot].floor,
+      ));
+  const _rebaseWire = (id) => ({
+    admissionId: id.admissionId,
+    admissionMatch: id.matchId,
+    serveSeq: id.serveSeq,
+    serveToken: id.serveToken,
+  });
+  const _rebaseSend = (sid, command) => {
+    if (sid === _signalSocket?.id) _receiveRebase(sid, command);
+    else if (_peers[sid]?.dc?.readyState === 'open') {
+      try {
+        _peers[sid].dc.send(JSON.stringify(command));
+      } catch (_) {}
+    }
+  };
+  const _rebaseReply = (part, command, kind) => {
+    if (!_rebaseCurrent(part)) return;
+    const mod = part.module;
+    const reply = {
+      ...command,
+      kind,
+      observedOwnersKey: window.KNCore.lateJoinRebase.ownersKey(_rebaseOwners()),
+      observedMode: _useCRollback ? 'rollback' : 'lockstep',
+      checkedLoadProfile: mod._kn_get_restart_state_capability(),
+      nativeRebase: _rebaseNativeCapable(mod),
+    };
+    if (kind === 'staged') reply.acceptedMode = command.manifest.mode;
+    if (part.digest) reply.validatedDigest = part.digest;
+    if (part.installed)
+      Object.assign(reply, {
+        appliedDigest: part.digest,
+        observedFrame: _frameNum,
+        observedGeneration: part.installedGeneration,
+      });
+    const hostSid = part.identity.members.find((member) => member.slot === 0)?.sid;
+    if (hostSid) _rebaseSend(hostSid, reply);
+  };
+  const _rebaseInvalidateWork = (part) => {
+    // Invalidate queued compression, state transfer and worker completions.
+    // The same admission keeps its original wall-clock deadline.
+    _syncQueueEpoch++;
+    part.epoch = _syncQueueEpoch;
+    if (_rebaseHost) _rebaseHost.admission.epoch = _syncQueueEpoch;
+    _pendingResyncState = null;
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    _scheduledSyncRequests = [];
+    _followUpWatches.clear();
+    _authoritativeRepair.send({ type: 'reset' });
+    _recovery.resetAll();
+    _cancelHistoryTimeline();
+    _clearPendingCInputs('rebase-generation');
+    _workerCoprocAbort('rebase-generation');
+    _shadowStop('rebase-generation');
+    _syncChunks = [];
+    _syncExpected = 0;
+    _syncChunkSessionId++;
+    _syncSendChains = {};
+    for (const entry of _queuedSyncPushes.values()) entry.resolve?.(null);
+    _queuedSyncPushes.clear();
+  };
+  const _rebaseCreateParticipant = (senderSid, command) => {
+    const id = command;
+    const own = id.members.find((member) => member.sid === _signalSocket?.id);
+    if (
+      !own ||
+      own.slot !== _playerSlot ||
+      command.serveSeq <= _rebaseLastServe ||
+      id.matchId !== _admissionMatch() ||
+      id.coreHash !== window._knCoreHash ||
+      id.romHash !== _config?.romHash ||
+      _wasmStepActive ||
+      _isApplyingLateJoinState ||
+      _cutHost ||
+      _captureLease ||
+      (_cutParticipant && _cutParticipant.phase !== 'released')
+    )
+      return null;
+    const joining = id.joinerSid === _signalSocket.id;
+    if (
+      (!joining && command.kind !== 'prepare' && !(command.kind === 'abort' && !command.applyIssued)) ||
+      (joining && command.kind !== 'stage')
+    )
+      return null;
+    if (
+      !joining &&
+      (id.delay !== DELAY_FRAMES ||
+        window.KNCore.lateJoinRebase.ownersKey(id.owners) !== window.KNCore.lateJoinRebase.ownersKey(_rebaseOwners()))
+    )
+      return null;
+    const channels = id.members
+      .filter((member) => member.sid !== _signalSocket.id && (joining || member.sid !== id.joinerSid))
+      .map((member) => [member.sid, _peers[member.sid], _peers[member.sid]?.dc]);
+    if (
+      channels.some(
+        ([sid, peer, dc]) =>
+          !peer || peer.slot !== id.members.find((m) => m.sid === sid)?.slot || dc?.readyState !== 'open',
+      )
+    )
+      return null;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    try {
+      window.KNCore.rebaseState.preflight(mod);
+    } catch (_) {
+      return null;
+    }
+    if (joining && _guestAdmission?.receive(_rebaseWire(id), senderSid, id.matchId) !== 'accept') return null;
+    const part = {
+      identity: structuredClone(id),
+      command,
+      manifest: command.manifest ?? null,
+      module: mod,
+      session: _sessionId,
+      channels,
+      policy: _rebasePolicy(),
+      joining,
+      machine: window.KNCore.lateJoinRebase.createRebaseParticipant(),
+      beforeMode: _useCRollback ? 'rollback' : 'lockstep',
+      beforeSubstate: _runSubstate,
+      installed: false,
+      installedGeneration: 0,
+      loading: false,
+      applying: false,
+      failed: false,
+      state: null,
+      digest: null,
+      epoch: _syncQueueEpoch,
+    };
+    _rebaseParticipant = part;
+    _rebaseLastServe = id.serveSeq;
+    enterManualMode();
+    if (!_manualMode || mod !== window.EJS_emulator?.gameManager?.Module) {
+      part.failed = true;
+      _handleCoreFatal('rebase-hold', new Error('Could not quiesce emulator'));
+      return null;
+    }
+    _rebaseInvalidateWork(part);
+    _ensureRebasePulse();
+    return part;
+  };
+  const _rebaseInstall = (part, command) => {
+    if (!_rebaseCurrent(part) || !part.state || part.applying || part.failed) return false;
+    const mod = part.module,
+      manifest = command.manifest;
+    if (manifest.mode !== 'rollback') return false;
+    const owners = window.KNCore.lateJoinRebase.expectedOwners(part.identity, manifest.frame, !!command.revoked);
+    if (part.installed) {
+      if (!command.revoked) return true;
+      // No frame has consumed the joining owner while this hold is live.
+      const owner = owners[command.joinerSlot];
+      if (!_setInputOwner(command.joinerSlot, owner.floor, owner.epoch, false, false)) return false;
+      _activeRoster.delete(command.joinerSlot);
+      _reservedInputOwners.delete(command.joinerSlot);
+      return window.KNCore.lateJoinRebase.ownersKey(_rebaseOwners()) === window.KNCore.lateJoinRebase.ownersKey(owners);
+    }
+    part.applying = true;
+    try {
+      // A failed physical attempt is terminal, never repeatedly initialized.
+      mod._kn_rollback_shutdown?.();
+      _useCRollback = false;
+      if (mod._kn_get_logical_head?.() >= 0) throw new Error('Native shutdown did not complete');
+      _protectLocalSaveFile(mod);
+      window.KNCore.rebaseState.restore(mod, part.state, () => _rebaseCurrent(part));
+      _rngSeed = part.settings.rngSeed;
+      _frameNum = manifest.frame;
+      KNState.frameNum = _frameNum;
+      DELAY_FRAMES = part.identity.delay;
+      _pendingInputBootstrap = null;
+      _localInputs = {};
+      _remoteInputs = {};
+      _resetInputMaps();
+      _rbLocalHistory.length = 0;
+      _extraDelayRaw.clear();
+      _peerInputStarted = {};
+      _lastRemoteFramePerSlot = {};
+      _peerPhantom = {};
+      _lateJoinActivatedAtFrame = {};
+      _lateJoinSeededInputFrames = {};
+      _lateJoinInputBootstrapUntilFrame = -1;
+      _reservedInputOwners.clear();
+      _activeRoster = new Set(
+        part.identity.members
+          .filter((member) => !(command.revoked && member.sid === command.joinerSid))
+          .map((member) => member.slot),
+      );
+      for (let slot = 0; slot < 4; slot++) {
+        const owner = owners[slot];
+        if (!_setInputOwner(slot, owner.floor, owner.epoch, true, owner.occupied))
+          throw new Error('Owner installation refused');
+      }
+      _membershipSnapshotFloor = manifest.frame;
+      _rosterChangeFrame = manifest.frame;
+      window._rbPendingInit = false;
+      window._rbPendingInitAt = 0;
+      _rbPendingInitCatchup = null;
+      window._rbHostInitFrame = undefined;
+      window._rbHostDelay = undefined;
+      _delayRetunePending = false;
+      _rebaseSelected = {
+        generation: part.identity.generation,
+        frame: manifest.frame,
+        mode: manifest.mode,
+        delay: DELAY_FRAMES,
+        module: mod,
+        session: _sessionId,
+        coreHash: part.identity.coreHash,
+        romHash: part.identity.romHash,
+        policy: part.policy,
+        owners: structuredClone(owners),
+      };
+      if (_phase !== PHASE_RUNNING) {
+        _lateJoin = true;
+        startLockstep(); // Initializes page plumbing; restart hold forbids its legacy auto-init.
+      }
+      if (manifest.mode === 'rollback') {
+        if (!_rebaseNativeCapable(mod) || typeof window._rbDoInit !== 'function')
+          throw new Error('Missing common native mode');
+        window._rbDoInit(DELAY_FRAMES, manifest.frame, part);
+        if (
+          !_useCRollback ||
+          mod._kn_get_logical_head() !== manifest.frame ||
+          mod._kn_get_frame() !== manifest.frame ||
+          mod._kn_get_finalized_frame() !== manifest.frame ||
+          mod._kn_get_delay_frames() !== DELAY_FRAMES ||
+          mod._kn_set_forward_ceiling(manifest.frame) !== 1 ||
+          mod._kn_get_forward_ceiling() !== manifest.frame
+        )
+          throw new Error('Fresh native baseline not installed');
+      } else if (_useCRollback || mod._kn_get_logical_head?.() >= 0) throw new Error('Lockstep mode not installed');
+      if (part.policy === 'off') KNShared.clearCheats(false);
+      else if (part.policy === 'standard') KNShared.applyStandardCheats(KNShared.SSB64_ONLINE_CHEATS);
+      recaptureManualRunner(mod, 'cohort-rebase');
+      _applyControllerPresentMask('cohort-rebase');
+      _releaseMenuStartBarrierAfterLateJoin();
+      window.KNCore.rebaseState.verify(mod, part.state, () => _rebaseCurrent(part));
+      if (
+        _coreFatalError ||
+        _phase !== PHASE_RUNNING ||
+        !_rebaseCurrent(part) ||
+        window.KNCore.lateJoinRebase.ownersKey(_rebaseOwners()) !== window.KNCore.lateJoinRebase.ownersKey(owners)
+      )
+        throw new Error('Restart installation changed');
+      part.installed = true;
+      part.installedGeneration = part.identity.generation;
+      if (part.joining && !_guestAdmission?.loaded(_rebaseWire(part.identity)))
+        throw new Error('Joiner admission expired');
+      return true;
+    } catch (error) {
+      part.failed = true;
+      _handleCoreFatal('rebase-install', error);
+      return false;
+    } finally {
+      part.applying = false;
+    }
+  };
+  const _rebaseDriveParticipant = () => {
+    const part = _rebaseParticipant;
+    if (!part || part.machine.state() === 'released' || !_rebaseCurrent(part)) return;
+    const command = part.command;
+    const phase = part.machine.state();
+    if (!['held', 'staged', 'applied'].includes(phase)) return;
+    if (command.kind === 'apply' && phase !== 'staged') return;
+    if (command.kind === 'apply' || (command.kind === 'abort' && command.applyIssued)) {
+      if (_rebaseInstall(part, command)) {
+        part.machine.accept(command.revoked ? 'revoked' : 'applied');
+        _rebaseReply(part, command, command.revoked ? 'aborted' : 'applied');
+      }
+    }
+  };
+  const _receiveRebase = (senderSid, command) => {
+    const api = window.KNCore.lateJoinRebase;
+    if (!api.validMessage(command)) return;
+    if (_playerSlot === 0 && !['prepare', 'stage', 'apply', 'abort', 'release'].includes(command.kind)) {
+      const host = _rebaseHost;
+      if (
+        host &&
+        (senderSid === _signalSocket?.id ||
+          host.channels.some(
+            ([sid, peer, dc]) =>
+              sid === senderSid && _peers[sid] === peer && peer.dc === dc && dc.readyState === 'open',
+          ))
+      )
+        host.coordinator.accept(senderSid, command, performance.now());
+      return;
+    }
+    if ((_playerSlot === 0 && senderSid !== _signalSocket?.id) || (_playerSlot !== 0 && _peers[senderSid]?.slot !== 0))
+      return;
+    let part = _rebaseParticipant;
+    if (part && !api.sameIdentity(part.identity, command)) {
+      if (part.machine.state() !== 'released') return;
+      part = null;
+    }
+    if (!part) part = _rebaseCreateParticipant(senderSid, command);
+    if (!part || !api.sameIdentity(part.identity, command) || !_rebaseCurrent(part)) return;
+    if (command.manifest) {
+      if (part.manifest && !api.sameManifest(part.manifest, command.manifest)) return;
+      part.manifest = structuredClone(command.manifest);
+    }
+    const receipt = part.machine.receipt(command.kind, !!command.applyIssued, !!command.revoked);
+    if (receipt) {
+      _rebaseReply(part, command, receipt);
+      return;
+    }
+    const phase = part.machine.state();
+    if (['released', 'cancelled', 'revoked'].includes(phase) && command.kind !== 'release') return;
+    if (command.kind === 'apply' && phase !== 'staged') return;
+    if (command.kind === 'abort' && !command.applyIssued && !['held', 'staged'].includes(phase)) return;
+    if (command.kind === 'release' && !['cancelled', 'revoked', 'applied'].includes(phase)) return;
+    part.command = command;
+    if (command.kind === 'prepare') _rebaseReply(part, command, 'prepared');
+    else if (command.kind === 'stage') {
+      if (part.state && part.machine.accept('staged')) _rebaseReply(part, command, 'staged');
+    } else if (command.kind === 'abort' && !command.applyIssued) {
+      if (part.machine.accept('cancelled')) _rebaseReply(part, command, 'aborted');
+    } else if (command.kind === 'release') {
+      const state = part.machine.state();
+      if (
+        !(state === 'cancelled' && !command.applyIssued) &&
+        !(state === 'applied' && !command.revoked) &&
+        !(state === 'revoked' && command.revoked)
+      )
+        return;
+      if (
+        command.applyIssued &&
+        (!part.installed ||
+          part.digest !== command.manifest.digest ||
+          _frameNum !== command.manifest.frame ||
+          window.KNCore.lateJoinRebase.ownersKey(_rebaseOwners()) !==
+            window.KNCore.lateJoinRebase.ownersKey(
+              api.expectedOwners(part.identity, command.manifest.frame, !!command.revoked),
+            ))
+      )
+        return;
+      if (
+        part.joining &&
+        (!command.applyIssued ||
+          command.revoked ||
+          !_guestAdmission?.acknowledge(_rebaseWire(command), senderSid, command.matchId))
+      )
+        return;
+      if (_useCRollback && part.installed && part.module._kn_set_forward_ceiling(-1) !== 1) return;
+      if (!part.machine.accept('released')) return;
+      _runSubstate = command.applyIssued ? RUN_NORMAL : part.beforeSubstate;
+      _lateJoinGuestPausedAt = 0;
+      if (part.joining) {
+        _awaitingLateJoinState = false;
+        _lateJoinWait?.stateArrived();
+        clearLateJoinReadyRetry();
+      }
+      _reservedInputOwners.clear();
+      if (command.applyIssued) {
+        for (const member of command.members)
+          if (!(command.revoked && member.sid === command.joinerSid)) {
+            _droppedThisMatch.delete(member.sid);
+            _clearPendingLateJoinPeer(member.sid, member.slot, 'rebase-release', { activate: false });
+          }
+        _resetPacingAfterLateJoin();
+      }
+      _rebaseReply(part, command, 'released');
+    } else _rebaseDriveParticipant();
+  };
+  const _rebaseDigest = async (bytes) =>
+    Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (value) =>
+      value.toString(16).padStart(2, '0'),
+    ).join('');
+  const _rebaseReceivePayload = async (senderSid, msg, localBytes = null) => {
+    const command = msg.rebase,
+      api = window.KNCore.lateJoinRebase;
+    if (!api.validMessage(command) || !command.manifest || !['stage', 'abort'].includes(command.kind)) return;
+    if ((_playerSlot === 0 && senderSid !== _signalSocket?.id) || (_playerSlot !== 0 && _peers[senderSid]?.slot !== 0))
+      return;
+    _receiveRebase(senderSid, command);
+    const part = _rebaseParticipant;
+    if (
+      !part ||
+      !api.sameIdentity(part.identity, command) ||
+      !part.manifest ||
+      !api.sameManifest(part.manifest, command.manifest) ||
+      !_rebaseCurrent(part) ||
+      part.loading ||
+      part.state ||
+      !['held', 'staged'].includes(part.machine.state())
+    )
+      return;
+    const currentPayload = () =>
+      _rebaseCurrent(part) &&
+      part.manifest &&
+      api.sameManifest(part.manifest, command.manifest) &&
+      ['held', 'staged'].includes(part.machine.state());
+    part.loading = true;
+    try {
+      const bytes = localBytes ?? (await decodeAndDecompress(msg.data));
+      if (!currentPayload()) return;
+      if ((await _rebaseDigest(bytes)) !== command.manifest.digest || !currentPayload())
+        throw new Error('Restart payload digest mismatch');
+      if (bytes.length < 4) throw new Error('Restart metadata missing');
+      const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true);
+      if (size > 16384 || size + 4 >= bytes.length) throw new Error('Restart metadata bounds');
+      const metadata = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + size)));
+      const expected = {
+        transactionId: command.transactionId,
+        generation: command.generation,
+        frame: command.manifest.frame,
+        mode: command.manifest.mode,
+        owners: command.manifest.owners,
+        delay: command.delay,
+        coreHash: command.coreHash,
+        romHash: command.romHash,
+        settings: metadata.settings,
+      };
+      if (
+        !metadata.settings ||
+        metadata.settings.policy !== part.policy ||
+        metadata.settings.trueRollback !== _localRollbackCaps().trueRollback ||
+        metadata.settings.stateBackend !== RB_ROLLBACK_STATE_BACKEND ||
+        !Number.isInteger(metadata.settings.rngSeed) ||
+        metadata.settings.rngSeed < 0 ||
+        metadata.settings.rngSeed > 0xffffffff
+      )
+        throw new Error('Restart settings mismatch');
+      if (JSON.stringify(metadata) !== JSON.stringify(expected)) throw new Error('Restart metadata changed');
+      const state = window.KNCore.rebaseState.unpack(bytes.subarray(4 + size));
+      window.KNCore.rebaseState.preflight(part.module);
+      if (command.manifest.mode === 'rollback' && !_rebaseNativeCapable(part.module))
+        throw new Error('Selected mode unavailable');
+      if (!currentPayload()) return;
+      if (!['held', 'staged'].includes(part.machine.state())) return;
+      part.settings = metadata.settings;
+      part.state = state;
+      part.digest = command.manifest.digest;
+      part.machine.accept('staged');
+      if (part.command.kind === 'stage') _rebaseReply(part, part.command, 'staged');
+      _rebaseDriveParticipant();
+    } catch (error) {
+      _syncLog(`restart staging rejected: ${error}`);
+    } finally {
+      part.loading = false;
+    }
+  };
+  const _rebaseCapture = async (host) => {
+    if (host.capturing || host.payload) return;
+    host.capturing = true;
+    const part = _rebaseParticipant;
+    try {
+      if (!_rebaseCurrent(part) || host !== _rebaseHost) throw new Error('Restart capture scope changed');
+      const gm = window.EJS_emulator.gameManager;
+      const state = window.KNCore.rebaseState.capture(part.module, gm.getState(), () => _rebaseCurrent(part));
+      if (
+        !host.coordinator.preparedReports().every((report) => report.nativeRebase) ||
+        _peers[host.sid]?.rollbackCaps?.restartState !== 1
+      )
+        throw new Error('Common native restart capability missing');
+      const mode = 'rollback';
+      const manifest = {
+        frame: _frameNum,
+        mode,
+        owners: window.KNCore.lateJoinRebase.expectedOwners(host.identity, _frameNum, false),
+      };
+      const metadata = {
+        transactionId: host.identity.transactionId,
+        generation: host.identity.generation,
+        frame: manifest.frame,
+        mode,
+        owners: manifest.owners,
+        delay: host.identity.delay,
+        coreHash: host.identity.coreHash,
+        romHash: host.identity.romHash,
+        settings: {
+          policy: part.policy,
+          trueRollback: _localRollbackCaps().trueRollback,
+          stateBackend: RB_ROLLBACK_STATE_BACKEND,
+          rngSeed: _rngSeed >>> 0,
+        },
+      };
+      const meta = new TextEncoder().encode(JSON.stringify(metadata));
+      const packed = window.KNCore.rebaseState.pack(state),
+        bytes = new Uint8Array(4 + meta.length + packed.length);
+      new DataView(bytes.buffer).setUint32(0, meta.length, true);
+      bytes.set(meta, 4);
+      bytes.set(packed, 4 + meta.length);
+      manifest.digest = await _rebaseDigest(bytes);
+      if (!_rebaseCurrent(part) || host !== _rebaseHost || host.coordinator.state() !== 'capture') return;
+      const encoded = await compressAndEncode(bytes.slice());
+      if (!_rebaseCurrent(part) || host !== _rebaseHost || host.coordinator.state() !== 'capture') return;
+      host.payload = { bytes, data: encoded.data };
+      if (!host.coordinator.stage(manifest, performance.now())) return;
+      _pumpRebase();
+    } catch (error) {
+      _syncLog(`restart capture failed: ${error}`);
+      host.coordinator.abort(performance.now());
+    } finally {
+      host.capturing = false;
+    }
+  };
+  const _pumpRebase = () => {
+    _rebaseDriveParticipant();
+    const host = _rebaseHost;
+    if (!host) return;
+    if (
+      host.session !== _sessionId ||
+      !host.channels.every(([sid, peer, dc]) => _peers[sid] === peer && peer.dc === dc && dc.readyState === 'open')
+    )
+      host.coordinator.abort(performance.now());
+    const command = host.coordinator.poll(performance.now());
+    if (command) for (const sid of host.coordinator.recipients()) _rebaseSend(sid, command);
+    if (host.coordinator.state() === 'capture') _rebaseCapture(host);
+    if (
+      command?.manifest &&
+      host.payload &&
+      (command.kind === 'stage' || command.kind === 'abort') &&
+      performance.now() - host.lastPayloadAt >= 1000
+    ) {
+      host.lastPayloadAt = performance.now();
+      const packet = {
+        type: 'late-join-state',
+        ..._rebaseWire(host.identity),
+        inputModel: KN_INPUT_MODEL,
+        targetSid: '',
+        toPlayers: true,
+        frame: command.manifest.frame,
+        data: host.payload.data,
+        effectiveDelay: host.identity.delay,
+        rebase: command,
+      };
+      _signalSocket.emit('data-message', packet);
+      _rebaseReceivePayload(_signalSocket.id, packet, host.payload.bytes);
+    }
+    if (host.coordinator.state() === 'held') host.coordinator.ready(performance.now());
+    if (host.coordinator.complete()) {
+      const aborted = host.coordinator.aborted();
+      _lateJoinServing.delete(host.sid);
+      _lateJoinStateSent.delete(host.sid);
+      _pendingLateJoinReadySids.delete(host.sid);
+      _lateJoinAdmissions.delete(host.sid);
+      if (aborted) {
+        const expired = _lateJoinExpired.get(host.sid) || new Set();
+        expired.add(host.admission.id);
+        if (expired.size > 128) expired.delete(expired.values().next().value);
+        _lateJoinExpired.set(host.sid, expired);
+      } else _lateJoinReadyHandled.add(host.sid);
+      _rebaseHost = null;
+      host.resolve(!aborted);
+    }
+  };
+  const _ensureRebasePulse = () => {
+    if (_rebasePulse) return;
+    const deadlineAt =
+      _rebaseHost?.admission.startedAt + LATE_JOIN_TIMEOUT_MS || performance.now() + LATE_JOIN_TIMEOUT_MS;
+    const starting = { cancel() {} };
+    _rebasePulse = starting;
+    const running = window.KNCore.lateJoinRebase.startRebaseHeartbeat({
+      now: () => performance.now(),
+      deadlineAt,
+      cleanupMs: 5000,
+      everyMs: 100,
+      tick: (now) => {
+        _pumpRebase();
+        if (!_rebaseHost && !_rebaseHeld()) {
+          _rebasePulse = null;
+          return false;
+        }
+        if (now >= deadlineAt + 5000) {
+          _rebasePulse = null;
+          _handleCoreFatal('rebase-cleanup', new Error('Cohort restart could not complete safely'));
+          return false;
+        }
+        return true;
+      },
+    });
+    if (_rebasePulse === starting) _rebasePulse = running;
+    else running.cancel();
+  };
+  const _beginRebase = (sid, admission, serveSeq, serveToken) => {
+    if (_rebaseHost || _rebaseHeld() || _cutHost || _useCRollback)
+      throw new Error('Restart not available in this scope');
+    window.KNCore.rebaseState.preflight(window.EJS_emulator?.gameManager?.Module);
+    const roster = _activeRoster ?? new Set([0]);
+    if (!_activeRoster && Object.entries(_peers).some(([id, peer]) => id !== sid && !_isPeerPendingLateJoin(id, peer)))
+      throw new Error('Unknown retained cohort');
+    const members = [
+      { sid: _signalSocket.id, slot: 0 },
+      ...Object.entries(_peers)
+        .filter(([id, peer]) => id === sid || roster.has(peer.slot))
+        .map(([id, peer]) => ({ sid: id, slot: peer.slot })),
+    ];
+    if (!members.some((m) => m.sid === sid) || members.length !== roster.size + 1)
+      throw new Error('Restart cohort incomplete');
+    const channels = members
+      .filter((member) => member.sid !== _signalSocket.id)
+      .map((member) => [member.sid, _peers[member.sid], _peers[member.sid]?.dc]);
+    if (channels.some(([, peer, dc]) => dc?.readyState !== 'open' || peer.rollbackCaps?.restartState !== 1))
+      throw new Error('Restart capability missing');
+    const identity = {
+      transactionId: crypto.randomUUID().replaceAll('-', ''),
+      admissionId: admission.id,
+      serveToken,
+      serveSeq,
+      matchId: admission.matchId,
+      joinerSid: sid,
+      joinerSlot: admission.slot,
+      generation: ++_rebaseSerial,
+      coreHash: window._knCoreHash,
+      romHash: _config?.romHash,
+      members,
+      owners: _rebaseOwners(),
+      delay: DELAY_FRAMES,
+      schedule: 'fresh-owner-epochs-v1',
+    };
+    return new Promise((resolve, reject) => {
+      _rebaseHost = {
+        identity,
+        sid,
+        admission,
+        session: _sessionId,
+        channels,
+        payload: null,
+        capturing: false,
+        lastPayloadAt: -Infinity,
+        resolve,
+        reject,
+        coordinator: window.KNCore.lateJoinRebase.createRebaseCoordinator({
+          ...identity,
+          deadlineAt: admission.startedAt + LATE_JOIN_TIMEOUT_MS,
+        }),
+      };
+      _ensureRebasePulse();
+      _pumpRebase();
+    });
+  };
+
+  // Shared-cut admission adapter. The typed coordinator owns phase/order;
+  // these effects bind its reports to current native state and DC identities.
+  let _cutHost = null;
+  let _cutParticipant = null;
+  let _cutPulse = null;
+  let _cutLastServe = 0;
+  let _captureLease = null;
+  const _releaseCaptureLease = (lease, reason) => {
+    if (!lease || _captureLease !== lease) return false;
+    clearTimeout(lease.timer);
+    let released = false;
+    let failure = null;
+    let report = null;
+    try {
+      report = _captureReport(lease.module);
+      // Never clear a ceiling installed by another owner. All admission and
+      // same-Module initialization paths exclude this lease until it releases.
+      if (report.ceiling === lease.cut) {
+        released = lease.module._kn_set_forward_ceiling(-1) === 1 && lease.module._kn_get_forward_ceiling() === -1;
+        if (!released) failure = new Error('Native capture ceiling release refused');
+      }
+    } catch (error) {
+      failure = error;
+    } finally {
+      _captureLease = null;
+      lease.finish?.(null);
+      lease.finish = null;
+    }
+    _syncLog(
+      `SYNC-CAPTURE-RELEASE ${JSON.stringify({
+        cut: lease.cut,
+        reason,
+        released,
+        durationMs: performance.now() - lease.startedAt,
+        report,
+      })}`,
+    );
+    if (failure) _handleCoreFatal('capture-release', failure);
+    return released;
+  };
+  const _captureReport = (mod) => ({
+    head: mod?._kn_get_logical_head?.(),
+    frame: mod?._kn_get_frame?.(),
+    finalized: mod?._kn_get_finalized_frame?.(),
+    replay: mod?._kn_get_replay_depth?.(),
+    pending: mod?._kn_peek_pending_rollback?.(),
+    ceiling: mod?._kn_get_forward_ceiling?.(),
+  });
+  const _captureScopeCurrent = (lease) =>
+    _captureLease === lease &&
+    _phase === PHASE_RUNNING &&
+    _syncEnabled &&
+    _useCRollback &&
+    !_coreFatalError &&
+    lease.module === window.EJS_emulator?.gameManager?.Module &&
+    lease.session === _sessionId &&
+    lease.epoch === _syncQueueEpoch &&
+    lease.match === _admissionMatch() &&
+    lease.owners === _inputOwnersWire() &&
+    lease.roster === [...(_activeRoster || [])].sort().join(',') &&
+    lease.delay === DELAY_FRAMES &&
+    lease.mode === _predictionsPaused &&
+    lease.policy === _rebasePolicy() &&
+    lease.core === window._knCoreHash &&
+    lease.rom === _config?.romHash &&
+    lease.channels.every(
+      ([sid, peer, dc, syncDc]) =>
+        _peers[sid] === peer && peer.dc === dc && peer.syncDc === syncDc && dc?.readyState === 'open',
+    );
+  const _acquireCaptureLease = (mod, minFrame) => {
+    if (
+      _cutHeld() ||
+      _cutHost ||
+      _rebaseHost ||
+      _pendingResyncState ||
+      _workerCoprocPending ||
+      _catchUpTo >= 0 ||
+      _reservedInputOwners.size ||
+      _wasmStepActive ||
+      mod?._kn_get_forward_ceiling_capability?.() !== 1
+    )
+      return Promise.resolve(null);
+    const initialReport = _captureReport(mod);
+    const decision = window.KNCore.captureLease.acquire(
+      initialReport,
+      minFrame,
+      performance.now(),
+      SYNC_COORD_TIMEOUT_MS,
+    );
+    if (!decision || mod._kn_set_forward_ceiling(decision.cut) !== 1) return Promise.resolve(null);
+    const lease = {
+      ...decision,
+      startedAt: performance.now(),
+      module: mod,
+      session: _sessionId,
+      epoch: _syncQueueEpoch,
+      match: _admissionMatch(),
+      owners: _inputOwnersWire(),
+      roster: [...(_activeRoster || [])].sort().join(','),
+      delay: DELAY_FRAMES,
+      mode: _predictionsPaused,
+      policy: _rebasePolicy(),
+      core: window._knCoreHash,
+      rom: _config?.romHash,
+      channels: Object.entries(_peers)
+        .filter(([, peer]) => _activeRoster?.has(peer.slot))
+        .map(([sid, peer]) => [sid, peer, peer.dc, peer.syncDc]),
+      timer: null,
+      finish: null,
+    };
+    _captureLease = lease;
+    _syncLog(`SYNC-CAPTURE-HOLD ${JSON.stringify({ cut: lease.cut, minFrame, report: initialReport })}`);
+    return new Promise((resolve) => {
+      lease.finish = resolve;
+      const poll = () => {
+        if (_captureLease !== lease) return;
+        try {
+          // Receipt and ordinary tick replay remain live while forward is held.
+          // In particular ask for authentic originals even below the horizon.
+          if (_captureScopeCurrent(lease)) _serviceHistoryRepair(mod);
+          const result = window.KNCore.captureLease.poll(
+            lease,
+            _captureReport(mod),
+            performance.now(),
+            _captureScopeCurrent(lease),
+          );
+          if (result === 'abort') return _releaseCaptureLease(lease, 'scope or deadline');
+          if (result === 'ready') {
+            lease.finish = null;
+            resolve(lease); // caller copies both state and bootstrap before release
+            return;
+          }
+          lease.timer = setTimeout(poll, 10);
+        } catch (_) {
+          _releaseCaptureLease(lease, 'native observation failed');
+        }
+      };
+      poll();
+    });
+  };
+  const _cutHeld = () =>
+    !!_captureLease || _rebaseHeld() || (!!_cutParticipant && _cutParticipant.phase !== 'released');
+  const _cutRosterKey = (joinerSlot) =>
+    [...(_activeRoster || [])]
+      .filter((slot) => slot !== joinerSlot)
+      .sort((a, b) => a - b)
+      .join(',');
+  const _cutNative = () => window.EJS_emulator?.gameManager?.Module;
+  const _cutReport = () => {
+    const mod = _cutNative();
+    return {
+      head: mod?._kn_get_frame?.(),
+      finalized: mod?._kn_get_finalized_frame?.(),
+      replay: mod?._kn_get_replay_depth?.(),
+      pending: mod?._kn_peek_pending_rollback?.(),
+    };
+  };
+  const _cutSend = (sid, message) => {
+    if (sid === _signalSocket?.id) _receiveCut(sid, message);
+    else {
+      const peer = _peers[sid];
+      if (peer?.dc?.readyState === 'open') {
+        try {
+          peer.dc.send(JSON.stringify(message));
+        } catch (_) {}
+      }
+    }
+  };
+  const _cutReply = (command, kind, extra = {}) => {
+    const reply = { ...command, kind, ..._cutReport(), ...extra };
+    const hostSid = _playerSlot === 0 ? _signalSocket?.id : Object.keys(_peers).find((sid) => _peers[sid].slot === 0);
+    if (hostSid) _cutSend(hostSid, reply);
+  };
+  const _cutOwnersAfter = (command, occupied) => {
+    const owners = command.ownersKey.split(',');
+    owners[command.joinerSlot] =
+      `${command.reservationEpoch + (occupied ? 0 : 1)}.${command.target}.${occupied ? 1 : 0}`;
+    return owners.join(',');
+  };
+  const _cutScopeCurrent = (part) => {
+    if (!part) return false;
+    const command = part.scope;
+    return (
+      part.module === _cutNative() &&
+      _useCRollback &&
+      DELAY_FRAMES === command.delay &&
+      _admissionMatch() === command.matchId &&
+      _cutRosterKey(command.joinerSlot) === command.rosterKey &&
+      part.peers.every(([sid, peer, dc]) => _peers[sid] === peer && peer.dc === dc && dc.readyState === 'open')
+    );
+  };
+  const _cutDriveParticipant = () => {
+    const part = _cutParticipant;
+    if (!part || part.phase === 'released' || part.phase === 'aborted') return;
+    if (!_cutScopeCurrent(part)) {
+      // A changed cohort cannot certify the original transaction. Do not
+      // release on timeout or guess which ownership mutation reached peers.
+      if (_cutHost) _cutHost.coordinator.abort(performance.now());
+      return;
+    }
+    const mod = part.module;
+    _drainPendingCInputs(mod);
+    _serviceHistoryRepair(mod);
+    if (part.command.kind === 'align' && window.KNCore.lateJoinCut.stableAt(_cutReport(), part.command.target)) {
+      part.machine.accept('aligned');
+      _cutReply(part.command, 'aligned');
+    }
+  };
+  const _receiveCut = (senderSid, command) => {
+    if (!window.KNCore.lateJoinCut.validCutMessage(command)) return;
+    if (_playerSlot === 0 && !['prepare', 'align', 'install', 'abort', 'release'].includes(command.kind)) {
+      const host = _cutHost;
+      if (!host || !host.channels.every(([sid, peer, dc]) => _peers[sid] === peer && peer.dc === dc)) return;
+      host.coordinator.accept(senderSid, command, performance.now());
+      return;
+    }
+    if ((_playerSlot === 0 && senderSid !== _signalSocket?.id) || (_playerSlot !== 0 && _peers[senderSid]?.slot !== 0))
+      return;
+    if (!command.members.includes(_signalSocket?.id)) return;
+    let part = _cutParticipant;
+    if (part && !window.KNCore.lateJoinCut.acceptsCommand(part.scope, command)) {
+      if (!['released', 'aborted'].includes(part.phase) || command.kind !== 'prepare') return;
+      part = null;
+    }
+    if (!part) {
+      if (
+        command.serveSeq <= _cutLastServe ||
+        (command.kind !== 'prepare' && !(command.kind === 'abort' && !command.installIssued))
+      )
+        return;
+      const mod = _cutNative();
+      if (
+        _pendingResyncState ||
+        _captureLease ||
+        _pushingSyncState ||
+        _workerCoprocPending ||
+        _catchUpTo > _frameNum ||
+        !_useCRollback ||
+        mod?._kn_get_forward_ceiling_capability?.() !== 1 ||
+        command.matchId !== _admissionMatch() ||
+        command.delay !== DELAY_FRAMES ||
+        command.ownersKey !== _inputOwnersWire() ||
+        command.rosterKey !== _cutRosterKey(command.joinerSlot)
+      )
+        return;
+      const peers = command.members
+        .filter((sid) => sid !== _signalSocket?.id)
+        .map((sid) => [sid, _peers[sid], _peers[sid]?.dc]);
+      if (peers.some(([, peer, dc]) => !peer || dc?.readyState !== 'open')) return;
+      const head = mod._kn_get_logical_head();
+      if (command.kind === 'prepare' && mod._kn_set_forward_ceiling(head) !== 1) return;
+      part = {
+        scope: command,
+        command,
+        module: mod,
+        peers,
+        machine: window.KNCore.lateJoinCut.createCutParticipant(),
+        get phase() {
+          return this.machine.state();
+        },
+        heldHead: head,
+      };
+      _cutParticipant = part;
+      _cutLastServe = command.serveSeq;
+      _ensureCutPulse();
+    }
+    if (!window.KNCore.lateJoinCut.acceptsCommand(part.scope, command)) return;
+    if (part.phase === 'released' || part.phase === 'aborted') {
+      const receipt = part.machine.receipt(command.kind, command.occupied);
+      if (receipt) _cutReply(command, receipt);
+      return;
+    }
+    if (!_cutScopeCurrent(part)) {
+      if (_cutHost) _cutHost.coordinator.abort(performance.now());
+      return;
+    }
+    const mod = part.module;
+    if (command.kind === 'prepare') {
+      _cutReply(command, 'prepared', { head: part.heldHead });
+    } else if (command.kind === 'align') {
+      if (part.phase !== 'prepared' && part.phase !== 'aligned') return;
+      if (_inputOwnersWire() !== command.ownersKey || mod._kn_set_forward_ceiling(command.target) !== 1) return;
+      part.command = command;
+      _cutDriveParticipant();
+    } else if (command.kind === 'install') {
+      if (part.phase === 'installed') {
+        _cutReply(command, 'installed');
+        return;
+      }
+      if (
+        part.phase !== 'aligned' ||
+        !window.KNCore.lateJoinCut.stableAt(_cutReport(), command.target) ||
+        _inputOwnersWire() !== command.ownersKey
+      )
+        return;
+      if (!_setInputOwner(command.joinerSlot, command.target, command.reservationEpoch, false, true)) return;
+      _reservedInputOwners.add(command.joinerSlot);
+      part.machine.accept('installed');
+      part.command = command;
+      _cutReply(command, 'installed');
+    } else if (command.kind === 'abort') {
+      if (command.installIssued) {
+        if (!window.KNCore.lateJoinCut.stableAt(_cutReport(), command.target)) return;
+        const owners = _inputOwnersWire();
+        if (
+          owners !== command.ownersKey &&
+          owners !== _cutOwnersAfter(command, true) &&
+          owners !== _cutOwnersAfter(command, false)
+        )
+          return;
+        if (!_setInputOwner(command.joinerSlot, command.target, command.reservationEpoch + 1, false, false)) return;
+        _reservedInputOwners.delete(command.joinerSlot);
+      } else if (part.phase === 'installed') return;
+      // Abort ACK certifies revocation, not permission to run. The host's
+      // subsequent release certificate is the only forward permission.
+      part.machine.accept('revoked');
+      part.command = command;
+      _cutReply(command, 'aborted');
+    } else if (command.kind === 'release') {
+      if (part.phase !== 'installed' && part.phase !== 'revoked') return;
+      if (command.installIssued && !window.KNCore.lateJoinCut.stableAt(_cutReport(), command.target)) return;
+      if (command.occupied !== (part.phase === 'installed')) return;
+      if (command.installIssued && _inputOwnersWire() !== _cutOwnersAfter(command, command.occupied)) return;
+      if (mod._kn_set_forward_ceiling(-1) !== 1) return;
+      _reservedInputOwners.delete(command.joinerSlot);
+      part.machine.accept('released');
+      part.command = command;
+      _runSubstate = RUN_NORMAL;
+      _lateJoinGuestPausedAt = 0;
+      _resetPacingAfterLateJoin();
+      _cutReply(command, 'released');
+    }
+  };
+  const _pumpCut = () => {
+    _cutDriveParticipant();
+    const host = _cutHost;
+    if (!host) return;
+    if (
+      performance.now() >= host.admission.startedAt + LATE_JOIN_TIMEOUT_MS ||
+      host.module !== _cutNative() ||
+      host.epoch !== _syncQueueEpoch ||
+      !host.channels.every(([sid, peer, dc]) => _peers[sid] === peer && peer.dc === dc && dc.readyState === 'open')
+    )
+      host.coordinator.abort(performance.now());
+    const command = host.coordinator.command();
+    if (command) for (const sid of host.members) _cutSend(sid, command);
+    const phase = host.coordinator.state();
+    if (phase === 'held' && !host.delivered) {
+      host.delivered = true;
+      host.admission.reservation = {
+        floor: host.coordinator.target(),
+        epoch: host.ownerEpoch,
+        serveId: host.serveId,
+        token: host.serveToken,
+        module: host.module,
+      };
+      host.resolve(host.coordinator.target());
+    }
+    if (host.coordinator.complete()) {
+      _cutHost = null;
+      _cutPulse?.cancel();
+      _cutPulse = null;
+      if (!host.delivered) host.reject(new Error('Shared-cut admission aborted'));
+      if (host.coordinator.aborted()) {
+        host.admission.cached = null;
+        host.admission.reservation = null;
+        _lateJoinServing.delete(host.sid);
+        _lateJoinStateSent.delete(host.sid);
+        _pendingLateJoinReadySids.delete(host.sid);
+        const expired = _lateJoinExpired.get(host.sid) || new Set();
+        expired.add(host.admission.id);
+        if (expired.size > 128) expired.delete(expired.values().next().value);
+        _lateJoinExpired.set(host.sid, expired);
+        _lateJoinAdmissions.delete(host.sid);
+        resumeLateJoinPause('shared-cut revoked', true);
+      }
+    }
+  };
+  const _ensureCutPulse = () => {
+    if (_cutPulse) return;
+    const deadlineAt = _cutHost?.admission.startedAt + LATE_JOIN_TIMEOUT_MS || performance.now() + LATE_JOIN_TIMEOUT_MS;
+    // Effect.runFork runs the first tick synchronously. Reserve the handle
+    // before local PREPARE re-enters this function through _pumpCut.
+    const starting = { cancel() {} };
+    _cutPulse = starting;
+    const running = window.KNCore.lateJoinCut.startCutHeartbeat({
+      now: () => performance.now(),
+      deadlineAt,
+      cleanupMs: 5000,
+      everyMs: 100,
+      tick: (now) => {
+        _pumpCut();
+        if (!_cutHost && !_cutHeld()) {
+          _cutPulse = null;
+          return false;
+        }
+        if (now >= deadlineAt + 5000) {
+          _cutPulse = null;
+          _handleCoreFatal('late-join-cut', new Error('Shared-cut cleanup could not be certified'));
+          return false;
+        }
+        return true;
+      },
+    });
+    if (_cutPulse === starting) _cutPulse = running;
+    else running.cancel();
+  };
+
+  const _beginSharedCut = (sid, admission, serveId, serveToken) => {
+    if (_cutHost) throw new Error('Another shared cut is active');
+    const mod = _cutNative();
+    if (
+      _pendingResyncState ||
+      _captureLease ||
+      _pushingSyncState ||
+      _workerCoprocPending ||
+      _catchUpTo > _frameNum ||
+      !_useCRollback ||
+      mod?._kn_get_forward_ceiling_capability?.() !== 1
+    )
+      throw new Error('Shared-cut admission requires the paired ceiling-capable rollback core');
+    const channels = Object.entries(_peers)
+      .filter(([id, peer]) => id !== sid && _activeRoster?.has(peer.slot))
+      .map(([id, peer]) => [id, peer, peer.dc]);
+    if (
+      channels.some(([, peer, dc]) => dc?.readyState !== 'open' || peer.rollbackCaps?.forwardCeiling !== 1) ||
+      channels.length + 1 !== (_activeRoster?.size ?? 0)
+    )
+      throw new Error('Shared-cut cohort is not fully connected');
+    const members = [_signalSocket.id, ...channels.map(([id]) => id)];
+    const ownerEpoch = (_membershipInputEpochs[admission.slot] ?? 0) + 1;
+    const scope = {
+      barrierId: crypto.randomUUID().replaceAll('-', ''),
+      admissionId: admission.id,
+      serveSeq: serveId,
+      matchId: admission.matchId,
+      joinerSid: sid,
+      joinerSlot: admission.slot,
+      ownerEpoch,
+      ownersKey: _inputOwnersWire(),
+      rosterKey: _cutRosterKey(admission.slot),
+      delay: DELAY_FRAMES,
+      mode: 'rollback',
+      members,
+      deadlineAt: admission.startedAt + LATE_JOIN_TIMEOUT_MS,
+      maxSkew: 120,
+    };
+    return new Promise((resolve, reject) => {
+      _cutHost = {
+        coordinator: window.KNCore.lateJoinCut.createCutCoordinator(scope),
+        sid,
+        admission,
+        serveId,
+        serveToken,
+        members,
+        channels,
+        module: mod,
+        epoch: _syncQueueEpoch,
+        ownerEpoch,
+        resolve,
+        reject,
+        delivered: false,
+        aborting: false,
+      };
+      _ensureCutPulse();
+      _pumpCut();
+    });
   };
 
   const resumeLateJoinPause = (source, includeRoster) => {
@@ -7947,31 +9382,127 @@
 
   // Host: end the pause once no joiner is being served any more. Peers that
   // are still paused are told; the roster goes out with it.
+  const _abortLateJoinAttempt = (sid, admission, reason) => {
+    if (_rebaseHost?.sid === sid && _rebaseHost.admission === admission) {
+      _rebaseHost.coordinator.abort(performance.now());
+      _pumpRebase();
+      return false;
+    }
+    if (_lateJoinAdmissions.get(sid) !== admission) return false;
+    if (_cutHost?.admission === admission) {
+      _cutHost.coordinator.abort(performance.now());
+      _pumpCut();
+      return false; // cleanup and release require the whole frozen cohort
+    }
+    const reserved = admission.reservation;
+    if (reserved) {
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      const current = {
+        frame: _useCRollback ? mod?._kn_get_frame?.() : _frameNum,
+        finalized: _useCRollback ? mod?._kn_get_finalized_frame?.() : _frameNum,
+        floor: _membershipInputFloors[admission.slot],
+        epoch: _membershipInputEpochs[admission.slot],
+        replay: _useCRollback ? mod?._kn_get_replay_depth?.() : 0,
+        pending: _useCRollback ? mod?._kn_peek_pending_rollback?.() : -1,
+      };
+      if (
+        mod !== reserved.module ||
+        _frameNum !== reserved.floor ||
+        !window.KNCore.lateJoinAdmission.canRevokeReservation(reserved, current)
+      ) {
+        _syncLog(`LATE-JOIN-REVOKE-UNAVAILABLE sid=${sid} reason=${reason}; keeping pause and unknown history`);
+        return false;
+      }
+      // No other capture may include this uncommitted owner. Increment the
+      // incarnation at the unchanged cut; never erase consumed unknown facts.
+      if (!_setInputOwner(admission.slot, reserved.floor, reserved.epoch + 1, false, false)) return false;
+      _reservedInputOwners.delete(admission.slot);
+      admission.reservation = null;
+    }
+    admission.cached = null;
+    _lateJoinServing.delete(sid);
+    _lateJoinStateSent.delete(sid);
+    _pendingLateJoinReadySids.delete(sid);
+    return true;
+  };
+
+  const _lateJoinLoadingCount = () => _lateJoinServing.size;
   const _endLateJoinPauseIfNoneServed = (source) => {
-    if (_lateJoinServing.size > 0) {
+    if (_lateJoinLoadingCount() > 0) {
       _syncLog(`late-join pause kept (${source}): ${_lateJoinServing.size} joiner(s) still loading`);
       return false;
     }
     return resumeLateJoinPause(source, true);
   };
 
-  const finishLateJoinReady = (source, senderSid = null) => {
+  const _resendLateJoinCommit = (sid, wire = null) => {
+    const receipt = _lateJoinCommitted.get(sid),
+      peer = _peers[sid];
+    if (
+      !receipt ||
+      !peer ||
+      receipt.matchId !== _admissionMatch() ||
+      receipt.epoch !== _syncQueueEpoch ||
+      receipt.slot !== peer.slot ||
+      !_activeRoster?.has(peer.slot) ||
+      receipt.ownerEpoch !== _membershipInputEpochs[peer.slot] ||
+      receipt.ownerFloor !== _membershipInputFloors[peer.slot] ||
+      !_membershipInputOccupied[peer.slot]
+    )
+      return false;
+    if (wire && !window.KNCore.lateJoinAdmission.sameWire(receipt, wire)) return false;
+    if (peer.dc?.readyState === 'open') {
+      _broadcastRoster();
+      try {
+        peer.dc.send(window.KNCore.lateJoinAdmission.control('late-join-committed', receipt));
+      } catch (err) {
+        _syncLog(`late-join commit ACK send failed: ${err}`);
+      }
+    }
+    return true;
+  };
+  const _acceptLateJoinCommit = (sid, wire) => {
+    if (!_guestAdmission || !wire || !_guestAdmission.acknowledge(wire, sid, _admissionMatch())) return;
+    _syncLog(`LATE-JOIN-COMMITTED seq=${wire.serveSeq}`);
+    _awaitingLateJoinState = false;
+    _lateJoinWait?.stateArrived();
+    clearLateJoinReadyRetry();
+  };
+
+  const finishLateJoinReady = (source, senderSid = null, wire = null) => {
     // A joiner's "ready" is for the host. Every other page stays paused
     // until the host says resume: the host may still be paused for another
     // joiner, and a page that ran on would leave it behind.
     if (_playerSlot !== 0) return;
     let newlyHandled = false;
     if (_playerSlot === 0 && senderSid) {
+      if (!wire || !window.KNCore.lateJoinAdmission.validWire(wire)) return;
+      if (_resendLateJoinCommit(senderSid, wire)) return;
       if (_lateJoinReadyHandled.has(senderSid)) return;
+      const pendingAdmission = _lateJoinAdmissions.get(senderSid);
+      if (!pendingAdmission || performance.now() >= pendingAdmission.startedAt + LATE_JOIN_TIMEOUT_MS) return;
       const peer = _peers[senderSid];
       // A relay emit is not delivery. Dropped players remain excluded until
       // their authenticated ready follows a current emitted serve. Deferred
       // socket readiness retains this evidence until the current DC opens.
-      if (_droppedThisMatch.has(senderSid)) {
+      {
+        // Every late-join READY requires its current emitted attempt token.
         const sent = _lateJoinStateSent.get(senderSid);
         const serving = _lateJoinServing.get(senderSid);
         if (
           !sent ||
+          !window.KNCore.lateJoinAdmission.sameWire(sent, wire) ||
+          !window.KNCore.lateJoinAdmission.acceptsReady(
+            { ...sent, match: sent.epoch, generation: sent.gen },
+            wire.serveToken,
+            {
+              match: _syncQueueEpoch,
+              generation: _syncQueueGen[senderSid] || 0,
+              sid: senderSid,
+              slot: peer?.slot ?? _knownPlayers[senderSid]?.slot,
+              serveId: serving,
+            },
+          ) ||
           sent.epoch !== _syncQueueEpoch ||
           sent.gen !== (_syncQueueGen[senderSid] || 0) ||
           (sent.peer && sent.peer !== peer) ||
@@ -7981,21 +9512,25 @@
       }
       if (peer?.dc?.readyState !== 'open') {
         if (_pendingLateJoinReadySids.has(senderSid)) return;
-        _pendingLateJoinReadySids.add(senderSid);
-        _lateJoinServing.delete(senderSid);
-        if (_lateJoinServing.size > 0) {
+        _pendingLateJoinReadySids.set(senderSid, wire);
+        // Keep the serve identity/deadline until DC admission finishes.
+        if (_lateJoinLoadingCount() > 0) {
           _syncLog(`late-join-ready via ${source}: DC not open for ${senderSid}; another joiner is still loading`);
           return;
         }
-        _syncLog(`late-join-ready via ${source}: DC not open for ${senderSid}; resuming existing players`);
-        resumeLateJoinPause(`${source} ready from ${senderSid}`, false);
+        _syncLog(`late-join-ready via ${source}: DC not open for ${senderSid}; reservation stays paused`);
         return;
       }
+      if (_cutHost?.admission === pendingAdmission && !_cutHost.coordinator.ready(performance.now())) return;
       _pendingLateJoinReadySids.delete(senderSid);
       _clearPendingLateJoinPeer(senderSid, peer?.slot ?? _knownPlayers[senderSid]?.slot, `ready via ${source}`, {
         activate: true,
       });
       _lateJoinReadyHandled.add(senderSid);
+      _lateJoinCommitted.set(senderSid, _lateJoinStateSent.get(senderSid));
+      const admission = _lateJoinAdmissions.get(senderSid);
+      if (admission) admission.cached = null;
+      _lateJoinAdmissions.delete(senderSid);
       _droppedThisMatch.delete(senderSid);
       _lateJoinStateSent.delete(senderSid);
       _lateJoinServing.delete(senderSid);
@@ -8003,7 +9538,7 @@
     }
 
     const name = senderSid ? _knownPlayers[senderSid]?.playerName || 'Player' : 'Player';
-    if (_runSubstate === RUN_LATE_JOIN_PAUSE && _playerSlot === 0 && _lateJoinServing.size > 0) {
+    if (_runSubstate === RUN_LATE_JOIN_PAUSE && _playerSlot === 0 && _lateJoinLoadingCount() > 0) {
       // Another joiner has yet to load the state captured for this pause.
       // Resuming now would leave it frames behind; its own "ready" or its
       // timer ends the pause.
@@ -8016,7 +9551,7 @@
           readyDc.send('late-join-pause');
         } catch (_) {}
       }
-      _syncLog(`late-join-ready (${source}) — ${_lateJoinServing.size} joiner(s) still loading, pause kept`);
+      _syncLog(`late-join-ready (${source}) — ${_lateJoinLoadingCount()} joiner(s) still loading, pause kept`);
       if (newlyHandled) _config?.onToast?.(`${name} joined`);
     } else if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
       resumeLateJoinPause(`joiner ready (via ${source})`, true);
@@ -8028,6 +9563,10 @@
       _broadcastRoster();
       _syncLog(`late-join-ready (${source}) — pacing reset + roster broadcast`);
       if (newlyHandled) _config?.onToast?.(`${name} joined`);
+    }
+    if (newlyHandled) {
+      _pumpCut();
+      _resendLateJoinCommit(senderSid);
     }
   };
 
@@ -8317,7 +9856,10 @@
   // to. It lives on the _peers entry, so it goes when the entry does.
   const _tagPeerIdentities = () => {
     for (const [key, info] of Object.entries(_knownPlayers)) {
-      if (_peers[key] && info.persistentId) _peers[key].persistentId = info.persistentId;
+      if (_peers[key] && info.persistentId) {
+        _peers[key].persistentId = info.persistentId;
+        _recoveryPlayerIds.set(_peers[key], info.persistentId);
+      }
     }
   };
 
@@ -9099,7 +10641,10 @@
     // Whose connection this is, when the roster already says (a connection
     // recreated by mesh heal or a late-join reconnect gets no roster update).
     const knownIdentity = _knownPlayers[remoteSid]?.persistentId;
-    if (knownIdentity) peer.persistentId = knownIdentity;
+    if (knownIdentity) {
+      peer.persistentId = knownIdentity;
+      _recoveryPlayerIds.set(peer, knownIdentity);
+    }
     _peers[remoteSid] = peer;
     KNState.peers = _peers;
 
@@ -9287,7 +10832,12 @@
   // Process a binary input packet from any DC (lockstep or rollback-input).
   // Shared by setupDataChannel (reliable DC) and setupRollbackInputDataChannel
   // (unordered DC, used when host broadcasts rb-transport:unreliable).
+  const _encodeOwnedInput = (...args) =>
+    window.KNCore.inputBootstrap.wrapInput(KNShared.encodeInput(...args), _membershipInputEpochs[_playerSlot] ?? 0);
+
   const _processInputPacket = (remoteSid, peer, data) => {
+    if (_rebaseSelected && !_rebaseBaselineCurrent()) return false;
+    if (_peers[remoteSid] !== peer) return false;
     if (peer.slot === null || peer.slot === undefined) return false; // spectators don't send input
     if (_isPeerPendingLateJoin(remoteSid, peer)) {
       if (!peer._pendingLateJoinInputDroppedLogged) {
@@ -9296,7 +10846,9 @@
       }
       return false;
     }
-    const decoded = KNShared.decodeInput(data);
+    const payload = window.KNCore.inputBootstrap.unwrapInput(data, _membershipInputEpochs[peer.slot] ?? 0);
+    if (!payload) return false;
+    const decoded = KNShared.decodeInput(payload);
     const recvFrame = decoded.frame;
     // Bounds-check the remote frame number. A malicious peer could send
     // frame=-999 or frame=_frameNum+1e6 to poison the rollback ring buffer
@@ -9410,6 +10962,7 @@
           (!existingRedundantInput || redundantPlaceholder || !_inputEq(existingRedundantInput, redundantInput))
         ) {
           _pendingCInputs.push({
+            epoch: _membershipInputEpochs[peer.slot] ?? 0,
             slot: peer.slot,
             frame: r.frame,
             buttons: r.buttons,
@@ -9425,6 +10978,7 @@
     // Queue for C-level rollback engine — drained at tick boundary
     if (_useCRollback && (!headerDuplicate || (headerWasSeeded && !_inputEq(existingHeaderInput, recvInput)))) {
       _pendingCInputs.push({
+        epoch: _membershipInputEpochs[peer.slot] ?? 0,
         slot: peer.slot,
         frame: recvFrame,
         buttons: recvInput.buttons,
@@ -9448,6 +11002,7 @@
       if (_peerPhantom[peer.slot]) {
         _syncLog(`PEER-RECOVERED slot=${peer.slot} f=${recvFrame} — resuming normal pacing`);
         _peerPhantom[peer.slot] = false;
+        _mixedHistoryThrough = Math.max(_mixedHistoryThrough, _frameNum);
         _forgetHolePushes(peer.slot);
         _consecutiveFabrications[peer.slot] = 0;
         window.dispatchEvent(new CustomEvent('kn-peer-recovered', { detail: { slot: peer.slot } }));
@@ -9534,11 +11089,11 @@
     ch.onerror = () => {};
     ch.onmessage = (e) => {
       const peer = _peers[remoteSid];
-      if (!peer) return;
+      if (!peer || peer.rbDc !== ch) return;
       if (
         e.data instanceof ArrayBuffer &&
-        e.data.byteLength >= 16 &&
-        e.data.byteLength <= 256 &&
+        e.data.byteLength >= 20 &&
+        e.data.byteLength <= 260 &&
         e.data.byteLength % 4 === 0
       ) {
         _processInputPacket(remoteSid, peer, e.data);
@@ -9684,11 +11239,11 @@
       if (_playerSlot === 0 && _activeRoster && !_isPeerPendingLateJoin(remoteSid, peer)) {
         const slots = [..._activeRoster].sort((a, b) => a - b);
         try {
-          ch.send(`roster:${_frameNum}:${slots.join(',')}`);
+          ch.send(`roster:${_ownershipFrame()}:${slots.join(',')}:${_inputOwnersWire()}`);
         } catch (_) {}
       }
       if (_playerSlot === 0 && _pendingLateJoinReadySids.has(remoteSid)) {
-        finishLateJoinReady('deferred DC open', remoteSid);
+        finishLateJoinReady('deferred DC open', remoteSid, _pendingLateJoinReadySids.get(remoteSid));
       }
       // Host: a player whose channel opens before the match runs hears whom
       // the host left out of the start, and stops waiting for them.
@@ -9699,6 +11254,7 @@
           } catch (_) {}
         }
       }
+      if (_playerSlot === 0) _resendLateJoinCommit(remoteSid);
       if (peer.slot === 0) {
         _endHostAnswerDeadline(true);
         _resyncAfterLostHost('host channel open');
@@ -9730,7 +11286,7 @@
 
     ch.onmessage = (e) => {
       const peer = _peers[remoteSid];
-      if (!peer) return;
+      if (!peer || peer.dc !== ch) return;
 
       // String messages: one off its schema goes no further.
       if (typeof e.data === 'string') {
@@ -9745,7 +11301,7 @@
         }
         // Pause and resume are the host's word alone: no other peer can hold
         // or release this page's game.
-        if (e.data === 'late-join-pause' && peer.slot === 0) {
+        if (e.data === 'late-join-pause' && peer.slot === 0 && !_cutHeld()) {
           _runSubstate = RUN_LATE_JOIN_PAUSE;
           // Stamped at every pause the host sends: it sends one per joiner
           // it starts serving, so the deadline runs from the latest.
@@ -9756,7 +11312,7 @@
         }
         if (e.data === 'join-the-start' && peer.slot === 0) handleJoinTheStart();
         if (e.data === 'late-joiner') handlePeerIsLateJoiner(remoteSid, peer);
-        if (e.data === 'late-join-resume' && peer.slot === 0) {
+        if (e.data === 'late-join-resume' && peer.slot === 0 && !_cutHeld()) {
           const wasPausedForLateJoin = _runSubstate === RUN_LATE_JOIN_PAUSE;
           if (wasPausedForLateJoin) _runSubstate = RUN_NORMAL;
           _lateJoinGuestPausedAt = 0;
@@ -9766,9 +11322,11 @@
           if (wasPausedForLateJoin) _config?.onToast?.('Player joined');
           _syncLog(`resumed by host after late-join sync at frame ${_frameNum}`);
         }
-        if (e.data === 'late-join-ready' && peer.dc === ch) {
-          finishLateJoinReady('DC', remoteSid);
+        if (e.data.startsWith('late-join-ready:') && peer.dc === ch) {
+          finishLateJoinReady('DC', remoteSid, window.KNCore.lateJoinAdmission.parseControl(e.data));
         }
+        if (e.data.startsWith('late-join-committed:') && peer.slot === 0 && peer.dc === ch)
+          _acceptLateJoinCommit(remoteSid, window.KNCore.lateJoinAdmission.parseControl(e.data));
         // A guest cannot reach another guest: the host leaves the one named
         // out of the start (specs/start_group.qnt, reportApart). Only the
         // host decides; the first word of a pair counts.
@@ -9844,10 +11402,43 @@
           return;
         }
         if (e.data.startsWith('roster:')) {
+          if (_rebaseHeld()) return;
           const parts = e.data.split(':');
           const rosterFrame = parseInt(parts[1], 10);
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
+          if (
+            peer.slot !== 0 ||
+            peer.dc !== ch ||
+            !Number.isSafeInteger(rosterFrame) ||
+            rosterFrame < _membershipSnapshotFloor ||
+            slots.some((slot) => !_isValidPlayerSlot(slot))
+          )
+            return;
+          const owners = window.KNCore.inputBootstrap.parseOwners(
+            parts[3],
+            rosterFrame,
+            [0, 1, 2, 3].map((slot) => ({
+              epoch: _membershipInputEpochs[slot] ?? 0,
+              floor: _membershipInputFloors[slot] ?? 0,
+              occupied: _membershipInputOccupied[slot],
+            })),
+          );
+          if (!owners) return;
+          if (
+            _rebaseSelected &&
+            owners.some(
+              (owner, slot) =>
+                owner.epoch < (_membershipInputEpochs[slot] ?? 0) ||
+                owner.floor < (_membershipInputFloors[slot] ?? 0) ||
+                (owner.epoch === (_membershipInputEpochs[slot] ?? 0) &&
+                  (owner.floor !== (_membershipInputFloors[slot] ?? 0) ||
+                    owner.occupied !== _membershipInputOccupied[slot])) ||
+                owner.occupied !== (slots.includes(slot) || _reservedInputOwners.has(slot)),
+            )
+          )
+            return;
           const previousRoster = _activeRoster ? new Set(_activeRoster) : null;
+          if (_noteMembershipChange(previousRoster, new Set(slots), rosterFrame, owners) === false) return;
           _clearPendingLateJoinRosterSlots(slots, 'host roster');
           _activeRoster = new Set(slots);
           _rosterChangeFrame = _frameNum;
@@ -9915,7 +11506,7 @@
           }
           if (localInput !== undefined) {
             try {
-              peer.dc.send(KNShared.encodeInput(resendFrame, localInput).buffer);
+              peer.dc.send(_encodeOwnedInput(resendFrame, localInput).buffer);
             } catch (_) {}
           }
           return;
@@ -10045,6 +11636,7 @@
         //      kept here only for the case where init somehow happened
         //      first (shouldn't happen for guests now).
         if (e.data.startsWith('rb-delay:')) {
+          if (_rebaseHeld() || _rebaseSelected) return;
           const hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);
           if (hostDelay > 0) {
             // Cache for guests that haven't reached the init code yet.
@@ -10080,6 +11672,7 @@
         // and exchanged input-frame numbers no longer correspond to the
         // same simulation point on both sides.
         if (e.data.startsWith('rb-init-frame:')) {
+          if (_rebaseHeld() || _rebaseSelected) return;
           const hostInitFrame = parseInt(e.data.split(':')[1], 10);
           if (Number.isFinite(hostInitFrame) && hostInitFrame >= 0) {
             window._rbHostInitFrame = hostInitFrame;
@@ -10234,21 +11827,58 @@
           // The number is for this request only, answered or not.
           const requestId = syncRequestIdNext;
           syncRequestIdNext = 0;
-          const now = Date.now();
+          if (requestId > 0) {
+            if (requestId <= (_syncRequestNumbers.get(remoteSid) || 0)) return;
+            _syncRequestNumbers.set(remoteSid, requestId);
+          }
+          const colonIdx = e.data.lastIndexOf(':');
+          const targetFrame =
+            e.data.includes('-at:') && colonIdx >= 0 ? parseInt(e.data.substring(colonIdx + 1), 10) : NaN;
+          const now = performance.now();
           const lastRequest = _syncRequestCooldowns.get(remoteSid) || 0;
           if (now - lastRequest < _SYNC_REQUEST_COOLDOWN_MS) {
             _syncLog(`rate-limited sync-request from ${remoteSid}`);
+            if (requestId > 0) {
+              _syncRequestGenerations.set(remoteSid, (_syncRequestGenerations.get(remoteSid) || 0) + 1);
+              // Keep only the newest numbered obligation, not an unbounded
+              // timer per request. Admission remains rate-limited below.
+              _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
+              const notBefore = window.KNCore.authoritativeRepair.admissionAt(
+                now,
+                lastRequest,
+                _SYNC_REQUEST_COOLDOWN_MS,
+              );
+              _scheduledSyncRequests.push({
+                targetFrame: Number.isFinite(targetFrame) ? targetFrame : _frameNum,
+                targetSid: remoteSid,
+                requestId,
+                notBefore,
+                admissions: 0,
+                deadlineAt: targetFrame > _frameNum ? notBefore + SYNC_COORD_TIMEOUT_MS : notBefore,
+              });
+            }
             return;
           }
           _syncRequestCooldowns.set(remoteSid, now);
+          _syncRequestGenerations.set(remoteSid, (_syncRequestGenerations.get(remoteSid) || 0) + 1);
+          // A newly admitted request supersedes any throttled older identity.
+          _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
           // Every answer is full, whichever form was asked for (an older
           // page may still send a plain `sync-request`).
           _syncLog(`received ${e.data} from ${remoteSid}`);
           // Coordinated: parse target frame and schedule capture there.
           // Immediate (no -at: suffix): push now — used for reconnect/visibility/network-change.
-          const colonIdx = e.data.lastIndexOf(':');
-          const targetFrame =
-            e.data.includes('-at:') && colonIdx >= 0 ? parseInt(e.data.substring(colonIdx + 1), 10) : NaN;
+          if (requestId > 0) {
+            _scheduledSyncRequests.push({
+              targetFrame: Number.isFinite(targetFrame) ? targetFrame : _frameNum,
+              targetSid: remoteSid,
+              requestId,
+              notBefore: now,
+              admissions: 0,
+              deadlineAt: targetFrame > _frameNum ? now + SYNC_COORD_TIMEOUT_MS : now,
+            });
+            return;
+          }
           if (!isNaN(targetFrame) && targetFrame > _frameNum) {
             // Replace any existing request from this guest so requests don't stack
             _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
@@ -10271,12 +11901,18 @@
         if (e.data.charAt(0) === '{') {
           try {
             const msg = JSON.parse(e.data);
-            if (msg.type === 'save-state' || msg.type === 'late-join-state') {
+            if (msg.type === 'late-join-rebase') {
+              _receiveRebase(remoteSid, msg);
+              return;
+            }
+            if (msg.type === 'late-join-cut') {
+              _receiveCut(remoteSid, msg);
+            } else if (msg.type === 'save-state' || msg.type === 'late-join-state') {
               // Emulator state is taken only from the host's own channel,
               // as on the relay: any other peer could push one otherwise.
               if (peer.slot !== 0) _syncLog(`${msg.type} on the channel of slot ${peer.slot} refused`);
               else if (msg.type === 'save-state') handleSaveStateMsg(msg);
-              else handleLateJoinState(msg);
+              else handleLateJoinState({ ...msg, senderSid: remoteSid });
             } else if (msg.type === 'delay-ping') {
               peer.dc.send(JSON.stringify({ type: 'delay-pong', ts: msg.ts }));
             } else if (msg.type === 'delay-pong') {
@@ -10305,13 +11941,266 @@
       //   All formats are int32-aligned, so byteLength % 4 === 0.
       if (
         e.data instanceof ArrayBuffer &&
-        e.data.byteLength >= 16 &&
-        e.data.byteLength <= 256 &&
+        e.data.byteLength >= 20 &&
+        e.data.byteLength <= 260 &&
         e.data.byteLength % 4 === 0
       ) {
         _processInputPacket(remoteSid, peer, e.data);
       }
     };
+  };
+
+  // Bounded source-only repair on the independent reliable state lane. The
+  // typed actor owns deadlines/admissions; this adapter binds live channels.
+  let _historyRequestId = 0;
+  const _historyRequests = new Map();
+  const _historySources = new Map();
+  const _historyMatch = () => _cachedMatchId || KNState.matchId;
+  const _historyWaiting = () =>
+    [..._historyRequests.values()].some((r) =>
+      ['waiting', 'expired', 'received', 'unavailable'].includes(r.actor.state()),
+    );
+  const _resetHistoryRepair = () => {
+    for (const r of _historyRequests.values()) r.actor.reset();
+    for (const r of _historySources.values()) r.source.reset();
+    _historyRequests.clear();
+    _historySources.clear();
+  };
+  const _cancelHistoryTimeline = () => {
+    for (const entry of _historyRequests.values()) {
+      try {
+        entry.channel.send(
+          window.KNCore.inputHistoryRepair.encodeHistoryPacket({ ...entry.actor.identity(), kind: 'ack' }),
+        );
+      } catch (_) {}
+      entry.actor.reset();
+    }
+    _historyRequests.clear();
+    for (const entry of _historySources.values()) entry.source.cancel();
+  };
+  const _historyCurrent = (sid, record) =>
+    record.session === _sessionId &&
+    record.match === _historyMatch() &&
+    _peers[sid] === record.peer &&
+    record.peer.syncDc === record.channel &&
+    record.peer.slot === record.peerSlot &&
+    record.peerEpoch === (_membershipInputEpochs[record.peerSlot] ?? 0);
+  const _handleHistoryPacket = (sid, channel, text) => {
+    const api = window.KNCore.inputHistoryRepair;
+    const packet = api.decodeHistoryPacket(text);
+    const peer = _peers[sid];
+    if (
+      !packet ||
+      !peer ||
+      !Number.isInteger(peer.slot) ||
+      peer.slot < 0 ||
+      peer.slot > 3 ||
+      peer.syncDc !== channel ||
+      _phase !== PHASE_RUNNING ||
+      packet.match !== _historyMatch() ||
+      _isPeerPendingLateJoin(sid, peer)
+    )
+      return;
+    const now = performance.now();
+    if (packet.kind === 'request' || packet.kind === 'ack') {
+      if (packet.fromSlot !== peer.slot || packet.fromEpoch !== (_membershipInputEpochs[peer.slot] ?? 0)) return;
+      if (
+        _membershipInputOccupied[_playerSlot] === false ||
+        packet.slot !== _playerSlot ||
+        packet.epoch !== (_membershipInputEpochs[_playerSlot] ?? 0) ||
+        packet.keys.some((key) => key < (_membershipInputFloors[_playerSlot] ?? 0))
+      )
+        return;
+      let entry = _historySources.get(sid);
+      if (!entry || !_historyCurrent(sid, entry) || entry.epoch !== packet.epoch) {
+        entry?.source.reset();
+        entry = {
+          peer,
+          channel,
+          session: _sessionId,
+          match: packet.match,
+          epoch: packet.epoch,
+          peerSlot: peer.slot,
+          peerEpoch: packet.fromEpoch,
+          source: api.createHistorySource(),
+        };
+        _historySources.set(sid, entry);
+      }
+      if (packet.kind === 'ack') {
+        entry.source.ack(packet);
+        return;
+      }
+      const response = entry.source.serve(packet, now, (key) => {
+        const value = _localInputs[key];
+        return value && value !== KNShared.ZERO_INPUT
+          ? [key, value.buttons, value.lx, value.ly, value.cx, value.cy]
+          : null;
+      });
+      if (response) {
+        try {
+          channel.send(api.encodeHistoryPacket(response));
+        } catch (_) {}
+      }
+      return;
+    }
+    const entry = _historyRequests.get(packet.slot);
+    if (
+      !entry ||
+      entry.sid !== sid ||
+      !_historyCurrent(sid, entry) ||
+      packet.fromSlot !== _playerSlot ||
+      packet.fromEpoch !== (_membershipInputEpochs[_playerSlot] ?? 0) ||
+      packet.slot !== peer.slot ||
+      packet.epoch !== (_membershipInputEpochs[packet.slot] ?? 0) ||
+      _membershipInputOccupied[packet.slot] === false ||
+      !api.matches(entry.actor.identity(), packet)
+    )
+      return;
+    if (packet.kind === 'pending') return; // owner may not have generated the requested key yet
+    if (packet.kind !== 'response') return;
+    // Reject conflicting immutable facts as a whole before any writes.
+    for (const [key, buttons, lx, ly, cx, cy] of packet.facts) {
+      const prior = _remoteInputs[packet.slot]?.[key];
+      if (prior && prior !== KNShared.ZERO_INPUT && !_inputEq(prior, { buttons, lx, ly, cx, cy })) return;
+    }
+    if (!entry.actor.accept(packet, packet.facts, now)) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    for (const [key, buttons, lx, ly, cx, cy] of packet.facts) {
+      const value = { buttons, lx, ly, cx, cy };
+      (_remoteInputs[packet.slot] ??= {})[key] = value;
+      _feedCInput(mod, packet.slot, key, value);
+    }
+    try {
+      channel.send(api.encodeHistoryPacket({ ...entry.actor.identity(), kind: 'ack' }));
+    } catch (_) {}
+    _syncLog(
+      `INPUT-HISTORY-RECEIVED slot=${packet.slot} epoch=${packet.epoch} keys=${packet.keys.join(',')} request=${packet.id}`,
+    );
+  };
+  const _serviceHistoryRepair = (mod) => {
+    if (!_useCRollback || _rbInitFrame < 0 || !mod?._kn_get_missing_input_facts) return;
+    // Draining precedes every stall, so the facts that release the barrier
+    // cannot be stranded behind that same barrier.
+    _drainPendingCInputs(mod);
+    const api = window.KNCore.inputHistoryRepair;
+    const now = performance.now();
+    for (const [slot, entry] of _historyRequests) {
+      if (
+        !_historyCurrent(entry.sid, entry) ||
+        entry.actor.identity().epoch !== (_membershipInputEpochs[slot] ?? 0) ||
+        entry.actor.identity().fromSlot !== _playerSlot ||
+        entry.actor.identity().fromEpoch !== (_membershipInputEpochs[_playerSlot] ?? 0)
+      ) {
+        entry.actor.reset();
+        _historyRequests.delete(slot);
+        continue;
+      }
+      if (entry.actor.poll(now)) {
+        try {
+          entry.channel.send(api.encodeHistoryPacket({ ...entry.actor.identity(), kind: 'request' }));
+        } catch (_) {}
+      }
+      if (['expired', 'unavailable'].includes(entry.actor.state()) && entry.failedLogged !== entry.actor.state()) {
+        entry.failedLogged = entry.actor.state();
+        _syncLog(
+          `INPUT-HISTORY-${entry.actor.state() === 'expired' ? 'EXPIRED' : 'UNAVAILABLE'} slot=${slot} request=${entry.actor.identity().id} — needs authoritative state`,
+        );
+      }
+    }
+    for (const [sid, entry] of _historySources) {
+      if (!_historyCurrent(sid, entry) || entry.epoch !== (_membershipInputEpochs[_playerSlot] ?? 0)) {
+        entry.source.reset();
+        _historySources.delete(sid);
+      } else {
+        entry.source.expire(now);
+        const response = entry.source.poll(now, (key) => {
+          const value = _localInputs[key];
+          return value && value !== KNShared.ZERO_INPUT
+            ? [key, value.buttons, value.lx, value.ly, value.cx, value.cy]
+            : null;
+        });
+        if (response) {
+          try {
+            entry.channel.send(api.encodeHistoryPacket(response));
+          } catch (_) {}
+        }
+      }
+    }
+    const prefix = mod._kn_get_finalized_frame?.() ?? -1;
+    if (prefix < 0) return;
+    const atHorizon = mod._kn_get_frame() - prefix >= mod._kn_get_history_repair_limit();
+    const ptr = mod._malloc(384);
+    if (!ptr) return;
+    let facts;
+    try {
+      const count = mod._kn_get_missing_input_facts(ptr, 96);
+      if (count < 0 || count > 32) return;
+      facts = Array.from(mod.HEAP32.subarray(ptr >> 2, (ptr >> 2) + count * 3));
+    } finally {
+      mod._free(ptr);
+    }
+    const groups = new Map();
+    for (let at = 0; at < facts.length; at += 3) {
+      const [slot, epoch, key] = facts.slice(at, at + 3);
+      if (!groups.has(slot)) groups.set(slot, { epoch, keys: [] });
+      groups.get(slot).keys.push(key);
+    }
+    // Ordinary input traffic may resolve a request before its repair reply.
+    // Cancel only after native says none of its original keys remain missing;
+    // a completed old obligation must not block a later gap in the same epoch.
+    for (const [slot, entry] of _historyRequests) {
+      const remaining = groups.get(slot)?.keys || [];
+      if (entry.actor.identity().keys.some((key) => remaining.includes(key))) continue;
+      try {
+        entry.channel.send(api.encodeHistoryPacket({ ...entry.actor.identity(), kind: 'ack' }));
+      } catch (_) {}
+      entry.actor.reset();
+      _historyRequests.delete(slot);
+    }
+    if (!atHorizon && !_captureLease) return;
+    for (const [slot, { epoch, keys }] of groups) {
+      const existing = _historyRequests.get(slot);
+      if (existing && keys.every((key) => existing.actor.identity().keys.includes(key))) {
+        if (existing.actor.state() === 'received') existing.actor.unavailable();
+        continue;
+      }
+      if (['waiting', 'expired', 'unavailable'].includes(existing?.actor.state())) continue;
+      const found = Object.entries(_peers).find(
+        ([sid, p]) => p.slot === slot && p.syncDc?.readyState === 'open' && !_isPeerPendingLateJoin(sid, p),
+      );
+      if (!found || slot === _playerSlot || epoch !== (_membershipInputEpochs[slot] ?? 0)) continue;
+      const [sid, peer] = found;
+      const identity = {
+        match: _historyMatch(),
+        id: ++_historyRequestId,
+        slot,
+        epoch,
+        fromSlot: _playerSlot,
+        fromEpoch: _membershipInputEpochs[_playerSlot] ?? 0,
+        keys,
+      };
+      if (!api.validIdentity(identity)) continue;
+      const actor = api.createInputHistoryRepair(identity, now);
+      const entry = {
+        sid,
+        peer,
+        channel: peer.syncDc,
+        session: _sessionId,
+        match: identity.match,
+        peerSlot: peer.slot,
+        peerEpoch: epoch,
+        actor,
+      };
+      _historyRequests.set(slot, entry);
+      if (actor.poll(now)) {
+        try {
+          peer.syncDc.send(api.encodeHistoryPacket({ ...identity, kind: 'request' }));
+        } catch (_) {}
+      }
+      _syncLog(
+        `INPUT-HISTORY-REQUEST slot=${slot} epoch=${epoch} keys=${keys.join(',')} prefix=${prefix} request=${identity.id}`,
+      );
+    }
   };
 
   // -- Sync-state data channel -----------------------------------------------
@@ -10339,6 +12228,10 @@
     let syncAnswerIdNext = 0;
     let recoveryIdNext = 0;
     ch.onmessage = (e) => {
+      if (typeof e.data === 'string' && e.data.startsWith('input-history:')) {
+        if (_peerBoundary().peerText('sync-state', e.data)) _handleHistoryPacket(_remoteSid, ch, e.data);
+        return;
+      }
       // Check every message, including binary chunks and answer ids. A
       // replaced host channel is stale even though its peer still has slot 0.
       if (!ownsAssembly()) {
@@ -10450,6 +12343,7 @@
       if (e.data instanceof ArrayBuffer) {
         if (_syncExpected > 0) {
           _syncChunks.push(new Uint8Array(e.data));
+          _syncReceiveProgressAt = performance.now();
           const now = performance.now();
           if (
             _syncChunks.length === 1 ||
@@ -10546,7 +12440,13 @@
   const resetPeerState = (slot, reason, opts = {}) => {
     _peerDriver()?.peerReset(slot, opts.sid ?? null);
     if (slot === null || slot === undefined) return;
-    _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
+    const pendingAdmission = opts.sid ? _lateJoinAdmissions.get(opts.sid) : null;
+    if (pendingAdmission) {
+      if (!_abortLateJoinAttempt(opts.sid, pendingAdmission, `peer reset: ${reason}`)) return;
+      // Same authenticated player can retry, but transport churn never renews
+      // its admission deadline or makes it roster-eligible.
+      queueMicrotask(() => _endLateJoinPauseIfNoneServed(`pending admission reset: ${reason}`));
+    } else _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A player that comes back is measured from its next start step.
     _startSteps.delete(slot);
     // A channel kept open for a left-out player's word is gone.
@@ -10558,12 +12458,19 @@
     if (opts.sid) {
       _lateJoinStateSent.delete(opts.sid);
       _pendingLateJoinReadySids.delete(opts.sid);
+      _lateJoinReadyHandled.delete(opts.sid);
     }
     if (opts.sid && _lateJoinServing.delete(opts.sid) && _runSubstate === RUN_LATE_JOIN_PAUSE) {
       const leftSid = opts.sid;
       queueMicrotask(() => _endLateJoinPauseIfNoneServed(`${reason} for ${leftSid}`));
     }
 
+    // Transport loss does not authorize a new input incarnation. Preserve all
+    // accepted input facts until the host's authoritative epoch transition.
+    if (_useCRollback) {
+      const mod = window.EJS_emulator?.gameManager?.Module;
+      if (mod?._kn_set_input_owner) _drainPendingCInputs(mod);
+    }
     // Slot-indexed globals
     _clearSlotInputState(slot);
     delete _peerLastAdvanceTime[slot];
@@ -10588,6 +12495,8 @@
       if (_pendingCInputs[i].slot === slot) _pendingCInputs.splice(i, 1);
     }
     if (opts.sid) {
+      _syncRequestGenerations.delete(opts.sid);
+      _syncRequestNumbers.delete(opts.sid);
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
       _followUpWatches.delete(opts.sid);
       _queuedSyncPushes.get(opts.sid)?.resolve?.(null);
@@ -10607,12 +12516,12 @@
     // new peer fills the slot.
     clearPeerStallTimers();
 
-    // C-side: clear the rollback engine's per-slot state. Without this,
-    // slot_active stays sticky once kn_feed_input has ever seen the
-    // slot, polluting prediction and stats across roster changes.
+    // Old cores had only transport-scoped reset. inputModel3 retires native
+    // history only through host epochs (including a vacancy), after sealing
+    // accepted corrections; clearing it here would destroy that evidence.
     if (_useCRollback) {
       const mod = window.EJS_emulator?.gameManager?.Module;
-      if (mod?._kn_rollback_slot_reset) mod._kn_rollback_slot_reset(slot);
+      if (!mod?._kn_set_input_owner && mod?._kn_rollback_slot_reset) mod._kn_rollback_slot_reset(slot);
     }
 
     // The same peer goes on after a reconnect: its inputs are waited for
@@ -11606,6 +13515,11 @@
     if (readyCount < playerPeerSids.length) return;
 
     const localCaps = _localRollbackCaps();
+    if (localCaps.inputModel !== KN_INPUT_MODEL) {
+      setStatus('Core update required -- reload before joining');
+      _config?.onToast?.('Core update required -- reload before joining');
+      return;
+    }
     for (const sid of playerPeerSids) {
       const p = _peers[sid];
       if (p?.synthetic === true) continue;
@@ -12344,6 +14258,8 @@
       }
     }
     const slots = [...slotSet].sort((a, b) => a - b);
+    const rosterFrame = _ownershipFrame();
+    if (_noteMembershipChange(_activeRoster, slotSet, rosterFrame) === false) return;
     _activeRoster = slotSet;
     _rosterChangeFrame = _frameNum;
     _applyControllerPresentMask('broadcast-roster');
@@ -12354,7 +14270,7 @@
       rbMod._kn_set_num_players(rb_numPlayers);
       _syncLog(`C-ROLLBACK num_players updated to ${rb_numPlayers}`);
     }
-    const msg = `roster:${_frameNum}:${slots.join(',')}`;
+    const msg = `roster:${rosterFrame}:${slots.join(',')}:${_inputOwnersWire()}`;
     _syncLog(`ROSTER broadcast: frame=${_frameNum} slots=[${slots.join(',')}]`);
     for (const [sid, p] of Object.entries(_peers)) {
       if (_isPeerPendingLateJoin(sid, p)) continue;
@@ -12366,7 +14282,10 @@
     }
   };
 
-  async function sendLateJoinState(remoteSid) {
+  async function sendLateJoinState(remoteSid, admissionId) {
+    if (_rebaseHost) return;
+    if (!window.KNCore.lateJoinAdmission.validToken(admissionId) || _lateJoinExpired.get(remoteSid)?.has(admissionId))
+      return;
     // Look up slot from _peers first, fall back to _knownPlayers.
     // The peer's WebRTC connection may have failed/disconnected (removed
     // from _peers by handlePeerDisconnect), but the player is still in the
@@ -12387,67 +14306,87 @@
     // A repeated request for a joiner already being served (its state was
     // lost, or is still being compressed) is the same serve: it keeps the
     // deadline of the first, or each repeat would push the pause back.
-    const servedAs = _lateJoinServing.get(remoteSid);
-    const serveId = servedAs ?? ++_lateJoinServeSeq;
-
-    const gm = window.EJS_emulator?.gameManager;
-    if (!gm) {
-      _syncLog(`sendLateJoinState: gameManager not ready`);
-      _clearPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer unavailable');
+    // This deadline belongs to admission, not one capture attempt. Refusing
+    // an unfinalized capture must let existing players settle without making
+    // the uninitialized joiner eligible for the next roster broadcast.
+    let admission = _lateJoinAdmissions.get(remoteSid);
+    if (admission && (admission.epoch !== _syncQueueEpoch || admission.slot !== peerSlot)) {
+      if (!_abortLateJoinAttempt(remoteSid, admission, 'admission identity replaced')) return;
+      _lateJoinAdmissions.delete(remoteSid);
+      admission = null;
+    }
+    if (!admission) {
+      admission = {
+        id: admissionId,
+        matchId: _admissionMatch(),
+        epoch: _syncQueueEpoch,
+        sid: remoteSid,
+        slot: peerSlot,
+        startedAt: performance.now(),
+        reservation: null,
+      };
+      _lateJoinAdmissions.set(remoteSid, admission);
+      const ownAdmission = admission;
+      setTimeout(() => {
+        if (_lateJoinAdmissions.get(remoteSid) !== ownAdmission || ownAdmission.epoch !== _syncQueueEpoch) return;
+        if (!_abortLateJoinAttempt(remoteSid, ownAdmission, 'admission deadline')) return;
+        _lateJoinAdmissions.delete(remoteSid);
+        const expired = _lateJoinExpired.get(remoteSid) || new Set();
+        expired.add(ownAdmission.id);
+        if (expired.size > 128) expired.delete(expired.values().next().value);
+        _lateJoinExpired.set(remoteSid, expired);
+        _syncLog(`LATE-JOIN-ADMISSION-TIMEOUT joiner=${remoteSid}`);
+        // The lifetime spans transport replacement but never a different
+        // authenticated slot. No old deadline can remove a new slot owner.
+        const currentPeer = _peers[remoteSid];
+        if (currentPeer?.slot === peerSlot) hardDisconnectPeer(remoteSid);
+        else {
+          const reused = Object.entries(_peers).some(
+            ([sid, p]) => sid !== remoteSid && p.slot === peerSlot && _isPeerPendingLateJoin(sid, p),
+          );
+          _clearPendingLateJoinPeer(remoteSid, reused ? null : peerSlot, 'admission expired without peer');
+        }
+        _endLateJoinPauseIfNoneServed(`admission timeout for ${remoteSid}`);
+      }, LATE_JOIN_TIMEOUT_MS);
+    }
+    if (admission.id !== admissionId || performance.now() >= admission.startedAt + LATE_JOIN_TIMEOUT_MS) return;
+    if (admission.cached && _lateJoinServing.has(remoteSid)) {
+      const sent = _lateJoinStateSent.get(remoteSid);
+      if (sent && sent.gen === (_syncQueueGen[remoteSid] || 0) && (!sent.peer || sent.peer === _peers[remoteSid]))
+        _signalSocket.emit('data-message', admission.cached);
       return;
     }
-
+    if (_lateJoinServing.size > 0 || _reservedInputOwners.size > 0) {
+      _syncLog(`late-join capture queued behind current admission: ${remoteSid}`);
+      return;
+    }
+    const servedAs = _lateJoinServing.get(remoteSid);
+    const serveId = servedAs ?? ++_lateJoinServeSeq;
+    const gm = window.EJS_emulator?.gameManager;
+    if (!gm) {
+      _syncLog(`sendLateJoinState: gameManager not ready; admission remains pending`);
+      return;
+    }
+    const serveToken = crypto.randomUUID().replaceAll('-', '');
     try {
-      // Pause lockstep FIRST — freeze all players before capturing state
-      // so no frames advance during the async compression below. Without
-      // this, the tick loop can run N frames between getState() and the
-      // moment we read _frameNum, causing the late joiner to load state
-      // from frame X but think they're at frame X+N (cursor desync).
-      _runSubstate = RUN_LATE_JOIN_PAUSE;
-      if (servedAs === undefined || _lateJoinPausedAt === 0) _lateJoinPausedAt = performance.now();
-      _syncLog(`pausing for late-join at frame ${_frameNum}`);
-      // I1 (MF5): the pause has a wall-clock deadline from the moment it
-      // begins, not from when the state has been compressed: a worker that
-      // never answers would otherwise leave the host paused. If the joiner's
-      // "ready" does not come (its DC died mid-transfer, its worker hung),
-      // resume and hard-disconnect it so it retries from a clean slate.
-      // The timer acts only on its own serve: by the time it fires this
-      // joiner may be playing and the pause may be for someone else.
       _lateJoinServing.set(remoteSid, serveId);
-      const armTimer = servedAs === undefined;
-      const onServeDeadline = () => {
-        if (_lateJoinServing.get(remoteSid) !== serveId) return;
-        _lateJoinServing.delete(remoteSid);
-        _lateJoinStateSent.delete(remoteSid);
-        const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
-        _syncLog(
-          `LATE-JOIN-TIMEOUT elapsed=${elapsed}ms joiner=${remoteSid} — ` +
-            `resuming without joiner, hard-disconnecting so they can retry`,
-        );
-        // Force the joiner out so it retries fresh. If the peer object is
-        // already gone, only the pending mark is left to clear.
-        if (_peers[remoteSid]) {
-          hardDisconnectPeer(remoteSid);
-        } else {
-          _clearPendingLateJoinPeer(remoteSid, peerSlot, 'late-join timeout');
-        }
-        _endLateJoinPauseIfNoneServed(`timeout for ${remoteSid}`);
-      };
-      if (armTimer) setTimeout(onServeDeadline, LATE_JOIN_TIMEOUT_MS);
-      for (const [sid, p] of Object.entries(_peers)) {
-        // The pause is for existing players while the host captures a stable
-        // state. The joiner is not part of the running timeline yet; pausing
-        // it can leave its freshly-loaded loop stuck in RUN_LATE_JOIN_PAUSE.
-        if (sid === remoteSid) continue;
-        if (p.dc?.readyState === 'open') {
-          try {
-            p.dc.send('late-join-pause');
-          } catch (_) {}
-        }
+      if (!_useCRollback) {
+        await _beginRebase(remoteSid, admission, serveId, serveToken);
+        return;
       }
-
-      // Capture state + frame number + RNG atomically while paused
-      const capturedFrame = _frameNum;
+      const capturedFrame = await _beginSharedCut(remoteSid, admission, serveId, serveToken);
+      if (
+        _lateJoinAdmissions.get(remoteSid) !== admission ||
+        performance.now() >= admission.startedAt + LATE_JOIN_TIMEOUT_MS ||
+        !_cutHost ||
+        _cutHost.coordinator.state() !== 'held' ||
+        gm.Module !== _cutHost.module
+      )
+        throw new Error('Shared-cut scope ended before capture');
+      _runSubstate = RUN_LATE_JOIN_PAUSE;
+      _lateJoinPausedAt = performance.now();
+      if (_frameNum !== capturedFrame || !window.KNCore.lateJoinCut.stableAt(_cutReport(), capturedFrame))
+        throw new Error('Shared-cut capture is no longer stable');
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
 
@@ -12489,15 +14428,24 @@
       const serveGen = _syncQueueGen[remoteSid] || 0;
       const servePeer = _peers[remoteSid] || null;
       _lateJoinStateSent.delete(remoteSid);
-      const encoded = await compressAndEncode(bytes);
+      const capturedDelay = DELAY_FRAMES;
+      const inputWords = _useCRollback ? window.KNCore.inputBootstrap.capture(hMod, capturedFrame) : null;
+      const envelope = window.KNCore.inputBootstrap.pack(bytes, inputWords, capturedFrame);
+      const encoded = await compressAndEncode(envelope);
       const saveRam = saveRamBytes ? (await compressAndEncode(saveRamBytes)).data : null;
       // The serve was ended while the state was being compressed (its timer
       // fired, the joiner left, the match stopped): nothing to send.
       if (
+        performance.now() >= admission.startedAt + LATE_JOIN_TIMEOUT_MS ||
+        _lateJoinAdmissions.get(remoteSid) !== admission ||
         _lateJoinServing.get(remoteSid) !== serveId ||
         serveEpoch !== _syncQueueEpoch ||
         serveGen !== (_syncQueueGen[remoteSid] || 0) ||
-        (servePeer && servePeer !== _peers[remoteSid])
+        (servePeer && servePeer !== _peers[remoteSid]) ||
+        _cutHost?.admission !== admission ||
+        _cutHost.coordinator.state() !== 'held' ||
+        gm.Module !== _cutHost.module ||
+        !_cutScopeCurrent(_cutParticipant)
       ) {
         _syncLog(`late-join state for ${remoteSid} not sent: the serve ended while compressing`);
         return;
@@ -12507,24 +14455,47 @@
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${capturedFrame}`,
       );
 
-      _signalSocket.emit('data-message', {
+      const stateMessage = {
         type: 'late-join-state',
+        admissionId: admission.id,
+        admissionMatch: admission.matchId,
+        serveSeq: serveId,
+        serveToken,
+        inputModel: KN_INPUT_MODEL,
         targetSid: remoteSid,
         frame: capturedFrame,
         data: encoded.data,
-        effectiveDelay: DELAY_FRAMES,
+        effectiveDelay: capturedDelay,
         rbTransport: _rbTransport,
         rngValues,
         saveRam,
         hiddenWords,
         audioFifo,
+      };
+      admission.cached = stateMessage;
+      _signalSocket.emit('data-message', stateMessage);
+      _lateJoinStateSent.set(remoteSid, {
+        serveId,
+        epoch: serveEpoch,
+        gen: serveGen,
+        peer: servePeer,
+        token: serveToken,
+        admissionId: admission.id,
+        serveSeq: serveId,
+        serveToken,
+        matchId: admission.matchId,
+        ownerEpoch: _membershipInputEpochs[peerSlot],
+        ownerFloor: _membershipInputFloors[peerSlot],
+        sid: remoteSid,
+        slot: peerSlot,
       });
-      _lateJoinStateSent.set(remoteSid, { serveId, epoch: serveEpoch, gen: serveGen, peer: servePeer });
     } catch (err) {
       _syncLog(`failed to send late-join state: ${err}`);
-      _clearPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer failed');
-      if (_lateJoinServing.get(remoteSid) === serveId) _lateJoinServing.delete(remoteSid);
-      _endLateJoinPauseIfNoneServed(`state transfer to ${remoteSid} failed`);
+      if (_lateJoinServing.get(remoteSid) !== serveId || _lateJoinAdmissions.get(remoteSid) !== admission) return;
+      if (!_abortLateJoinAttempt(remoteSid, admission, 'capture failed')) return;
+      // Keep pending exclusion. Clearing it here admitted the joiner before
+      // it had a snapshot, consumed unknown input, then blocked every retry.
+      _endLateJoinPauseIfNoneServed(`pre-reservation capture for ${remoteSid} deferred`);
     }
   }
 
@@ -12535,6 +14506,10 @@
   // request has the resync request's own deadline (I1), which calls this
   // again; after LATE_JOIN_LOST_HOST_MAX_ASKS unanswered asks it gives up.
   const _resyncAfterLostHost = (source) => {
+    if (_guestAdmission?.holdsForward()) {
+      _sendLateJoinRequest();
+      return;
+    }
     // The step is lateJoinLostHostStep (web/src/resync-request.ts, proved).
     const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
     const step = window.KNCore.resyncRequest.lateJoinLostHostStep(
@@ -12590,10 +14565,35 @@
     }
   };
 
+  const _sendGuestLateJoinReady = (wire) => {
+    for (const p of Object.values(_peers)) {
+      if (p.slot === 0 && p.dc?.readyState === 'open') {
+        try {
+          p.dc.send(window.KNCore.lateJoinAdmission.control('late-join-ready', wire));
+        } catch (_) {}
+      }
+    }
+    socket.emit('data-message', {
+      type: 'late-join-ready',
+      senderSid: socket.id,
+      admissionId: wire.admissionId,
+      serveSeq: wire.serveSeq,
+      serveToken: wire.serveToken,
+    });
+  };
+
   const handleLateJoinState = async (msg) => {
+    if (msg.rebase) {
+      await _rebaseReceivePayload(msg.senderSid, msg);
+      return;
+    }
     if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
+    if (msg.inputModel !== KN_INPUT_MODEL || !window.KNCore.lateJoinAdmission.validToken(msg.serveToken)) {
+      _syncLog('late-join state refused: admission protocol/token mismatch');
+      return;
+    }
     if (_isSpectator) return;
-    if (_phase === PHASE_RUNNING) return; // already running, ignore duplicate
+    if (_phase === PHASE_RUNNING && !_guestAdmission?.holdsForward()) return;
     // Reject duplicate state packets while a load is in-flight: the body
     // awaits decompress + multiple HEAPU8 writes, and a concurrent second
     // pass would race those writes and corrupt joiner memory.
@@ -12601,11 +14601,24 @@
       _syncLog('ignoring duplicate late-join state — already applying');
       return;
     }
+    const gate = _guestAdmission;
+    const decision = gate?.receive(msg, msg.senderSid, _admissionMatch());
+    if (decision === 'duplicate') {
+      _sendGuestLateJoinReady(msg);
+      return;
+    }
+    if (decision !== 'accept') {
+      _syncLog('late-join snapshot outside current admission/order');
+      return;
+    }
+    const loadSession = _sessionId;
+    const currentLoad = () =>
+      gate === _guestAdmission && loadSession === _sessionId && gate.owns(msg) && gate.phase === 'loading';
     _isApplyingLateJoinState = true;
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
     _awaitingLateJoinState = false;
-    _lateJoinWait?.stateArrived();
+    // The original Effect deadline remains live until COMMITTED, not just load.
     // Ensure the loading overlay is up — the EJS canvas may already be
     // painting boot frames (N64 logo) and we don't want the joiner to see
     // them between now and the state restore that follows below.
@@ -12635,12 +14648,23 @@
         _syncLog(`WORKER-STALL late-join decompress failed: ${_workerErr.message}`);
         return;
       }
+      if (!currentLoad()) return;
       const gm = window.EJS_emulator?.gameManager;
       if (!gm) {
         _syncLog('gameManager not ready');
         return;
       }
 
+      const inputEnvelope = window.KNCore.inputBootstrap.unpack(bytes, msg.frame);
+      window.KNCore.inputBootstrap.preflight(gm.Module, inputEnvelope.words, msg.frame, true);
+      if (inputEnvelope.words && inputEnvelope.words[3] !== Number(msg.effectiveDelay))
+        throw new Error('Late-join snapshot delay mismatch');
+      bytes = inputEnvelope.state;
+
+      // Write SAVE_RAM before enterManualMode so boot frame reads host's EEPROM
+      const mod = gm.Module;
+      const saveRam = await _decodeSaveRam(msg);
+      if (!currentLoad() || window.EJS_emulator?.gameManager?.Module !== mod) return;
       if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null) {
         const parsedDelay = parseInt(msg.effectiveDelay, 10);
         const roomDelay = gm.Module?._kn_pre_tick && parsedDelay > 0 ? clampRollbackDelay(parsedDelay) : parsedDelay;
@@ -12648,9 +14672,6 @@
         _syncLog(`late-join: using room delay ${DELAY_FRAMES}`);
       }
 
-      // Write SAVE_RAM before enterManualMode so boot frame reads host's EEPROM
-      const mod = gm.Module;
-      const saveRam = await _decodeSaveRam(msg);
       _writeSaveRam(mod, saveRam, 'late-join-state');
 
       // Bounds-check the late-join blob before writing into WASM memory.
@@ -12739,16 +14760,19 @@
       // Start at host's current frame (host is paused at msg.frame)
       _frameNum = msg.frame;
       for (let f = Math.max(0, msg.frame - DELAY_FRAMES); f <= msg.frame + DELAY_FRAMES; f++) {
-        if (!_localInputs[f]) _localInputs[f] = KNShared.ZERO_INPUT;
+        if (!inputEnvelope.words && !_localInputs[f]) _localInputs[f] = KNShared.ZERO_INPUT;
         for (const p of Object.values(_peers)) {
           if (p.slot !== null && p.slot !== undefined) {
             if (!_remoteInputs[p.slot]) _remoteInputs[p.slot] = {};
-            if (!_remoteInputs[p.slot][f]) _remoteInputs[p.slot][f] = KNShared.ZERO_INPUT;
+            if (!inputEnvelope.words && !_remoteInputs[p.slot][f]) _remoteInputs[p.slot][f] = KNShared.ZERO_INPUT;
           }
         }
       }
 
       _syncLog(`late-join loaded at frame ${msg.frame}`);
+      // The authenticated initial late-join snapshot establishes this page's
+      // membership baseline without going through incremental resync rejection.
+      _membershipSnapshotFloor = Math.max(_membershipSnapshotFloor, msg.frame);
       _activeRoster = new Set(
         Object.values(_knownPlayers)
           .map((info) => info?.slot)
@@ -12778,7 +14802,20 @@
         _rbTransport = msg.rbTransport === 'unreliable' ? 'unreliable' : 'reliable';
       }
 
-      startLockstep();
+      _pendingInputBootstrap = inputEnvelope.words ? { words: inputEnvelope.words, frame: msg.frame } : null;
+      if (_phase === PHASE_RUNNING && mod?._kn_rollback_init && DELAY_FRAMES > 0) {
+        if (typeof window._rbDoInit !== 'function') throw new Error('Replacement admission lacks rollback initializer');
+        window._rbDoInit(DELAY_FRAMES, msg.frame);
+      } else startLockstep();
+      if (_coreFatalError || _phase !== PHASE_RUNNING) throw new Error('Admission core did not start');
+      if (
+        inputEnvelope.words &&
+        (_pendingInputBootstrap ||
+          !_useCRollback ||
+          mod._kn_get_frame() !== msg.frame ||
+          mod._kn_get_finalized_frame() !== msg.frame)
+      )
+        throw new Error('Replacement admission bootstrap was not initialized');
       if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
         _syncLog('late-join: clearing self pause after state load');
         _runSubstate = RUN_NORMAL;
@@ -12820,21 +14857,21 @@
       // Tell host to resume — send via BOTH DC and Socket.IO for reliable
       // delivery. Retry briefly because CSS late-join can race with peer DC
       // replacement/opening; the host side is idempotent per senderSid.
+      if (!currentLoad() || !gate.loaded(msg)) return;
       const sendLateJoinReady = () => {
-        for (const p of Object.values(_peers)) {
-          if (p.dc?.readyState === 'open') {
-            try {
-              p.dc.send('late-join-ready');
-            } catch (_) {}
-          }
-        }
-        socket.emit('data-message', { type: 'late-join-ready', senderSid: socket.id });
+        if (gate === _guestAdmission && gate.phase === 'loaded' && gate.owns(msg)) _sendGuestLateJoinReady(msg);
       };
       clearLateJoinReadyRetry();
       sendLateJoinReady();
       let readyAttempts = 1;
       _lateJoinReadyRetryTimer = setInterval(() => {
-        if (_phase !== PHASE_RUNNING || readyAttempts >= 20) {
+        if (
+          _phase !== PHASE_RUNNING ||
+          gate !== _guestAdmission ||
+          gate.phase !== 'loaded' ||
+          !gate.owns(msg) ||
+          readyAttempts >= 20
+        ) {
           clearLateJoinReadyRetry();
           return;
         }
@@ -12846,7 +14883,8 @@
     } catch (err) {
       _syncLog(`failed to handle state: ${err}`);
     } finally {
-      _isApplyingLateJoinState = false;
+      gate.failed(msg);
+      if (gate === _guestAdmission && loadSession === _sessionId) _isApplyingLateJoinState = false;
     }
   };
 
@@ -13498,6 +15536,7 @@
   };
 
   const stepOneFrame = () => {
+    if (_rebaseHeld() || (_rebaseSelected && !_rebaseBaselineCurrent())) return false;
     if (!_pendingRunner) {
       // Try to recapture immediately. If we wait for the pointerdown retry
       // chain to find this (75/250/750/1500ms), the lockstep tick has
@@ -13883,6 +15922,7 @@
       localInput.cy,
       frameAdvForC,
     );
+    _checkInputHistory(tickMod);
     _refreshRunnerAfterRollbackRestore(tickMod);
     _frameNum = tickMod._kn_get_frame();
     KNState.frameNum = _frameNum;
@@ -13951,6 +15991,7 @@
   };
 
   const _runStepOneFrame = (branch) => {
+    if (_rebaseHeld() || (_rebaseSelected && !_rebaseBaselineCurrent())) return false;
     _inDeterministicStep = true;
     try {
       const stepped = stepOneFrame();
@@ -14175,7 +16216,7 @@
     for (const peer of activePeers) {
       try {
         const ackFrame = peer.lastFrameFromPeer ?? -1;
-        peer.dc.send(KNShared.encodeInput(_frameNum, localInput, ackFrame, null).buffer);
+        peer.dc.send(_encodeOwnedInput(_frameNum, localInput, ackFrame, null).buffer);
         _rbTransportPacketsSent++;
         sent++;
         if (!peer.lastAckAdvanceTime) peer.lastAckAdvanceTime = now;
@@ -14193,6 +16234,7 @@
   };
 
   const _requestRollbackInit = (delay, initFrame, source) => {
+    if (_rebaseHeld() || _rebaseSelected) return;
     if (!window._rbDoInit) return false;
     const effectiveDelay = clampRollbackDelay(delay, ROLLBACK_MIN_DELAY_FRAMES);
     const targetFrame = Number.isFinite(initFrame) && initFrame >= 0 ? initFrame : _frameNum;
@@ -14321,10 +16363,16 @@
     }
 
     // Only reset frame counter if not a late join (late join sets _frameNum before calling)
-    if (_frameNum === 0) {
+    if (_frameNum === 0 && !_lateJoin) {
       // Fresh match (late join sets _frameNum first). Input buffers were already cleared on entering LOCKSTEP_READY;
       // a peer that started first may have sent frames 0+.
       _activeRoster = null;
+      _membershipSnapshotFloor = 0;
+      _membershipInputFloors = {};
+      _membershipInputEpochs = {};
+      _membershipInputOccupied = {};
+      _reservedInputOwners.clear();
+      _pendingInputBootstrap = null;
       _pendingLateJoinPeerSids.clear();
       _pendingLateJoinPeerSlots.clear();
       // Players left out of this start stay held as late joiners: the late
@@ -14426,7 +16474,15 @@
       // before initializing — initializing first with locally-computed delay
       // and then "updating DELAY_FRAMES" later only fixes the JS-side
       // variable, not the C engine's internal delay.
-      const doRollbackInit = (effectiveDelay, initFrameOverride = null) => {
+      const initSession = _sessionId;
+      const doRollbackInit = (effectiveDelay, initFrameOverride = null, restartPart = null) => {
+        if (_captureLease) return; // no same-Module incarnation change during certified capture
+        if (initSession !== _sessionId || detMod !== window.EJS_emulator?.gameManager?.Module) return;
+        if (
+          (_rebaseHeld() || _rebaseSelected) &&
+          (restartPart !== _rebaseParticipant || !restartPart?.applying || !_rebaseCurrent(restartPart))
+        )
+          return;
         if (!detMod?._kn_rollback_init) {
           _useCRollback = false;
           return;
@@ -14497,6 +16553,34 @@
         if (!_rbInputPtr && detMod._malloc) _rbInputPtr = detMod._malloc(20);
         _useCRollback = true;
         _rbInitFrame = initFrame;
+        const importedCertifiedBase = !!_pendingInputBootstrap;
+        if (_pendingInputBootstrap) {
+          const bootstrap = _pendingInputBootstrap;
+          if (bootstrap.frame !== initFrame) {
+            _handleCoreFatal('input-bootstrap', new Error('Deferred bootstrap frame changed'));
+            return;
+          }
+          window.KNCore.inputBootstrap.apply(detMod, bootstrap.words, initFrame);
+          _restoreBootstrapHistory(detMod, bootstrap.words, initFrame);
+          _pendingInputBootstrap = null;
+        }
+        for (const [slot, floor] of Object.entries(_membershipInputFloors)) {
+          if (!detMod._kn_set_input_owner?.(Number(slot), floor, _membershipInputEpochs[slot] ?? 0)) {
+            _handleCoreFatal('input-membership', new Error('Native input membership floor refused'));
+            return;
+          }
+        }
+        if (!importedCertifiedBase) {
+          const roster = new Set(_activeRoster ?? [_playerSlot, ...getInputPeers().map((p) => p.slot)]);
+          const mask = [0, 1, 2, 3].reduce((bits, slot) => {
+            const occupied = _membershipInputOccupied[slot] ?? (_reservedInputOwners.has(slot) || roster.has(slot));
+            return occupied ? bits | (1 << slot) : bits;
+          }, 0);
+          if (detMod._kn_init_finality_base?.(initFrame, mask) !== 1) {
+            _handleCoreFatal('input-finality', new Error('Explicit synchronized input base refused'));
+            return;
+          }
+        }
         _rbConvergedLogged = false;
         // T3: explicit mode marker so the server-side log analyzer knows
         // which netplay mode captured the input audit payload.
@@ -14539,7 +16623,7 @@
         // are no-op here because their _peers map is keyed by remote slot
         // and doesn't include the host (the only guest→guest broadcast in
         // this codebase is the rb-blocks per-block hash exchange).
-        if (_playerSlot === 0) {
+        if (_playerSlot === 0 && !restartPart) {
           for (const p of Object.values(_peers)) {
             if (p.dc?.readyState === 'open') {
               try {
@@ -14582,7 +16666,7 @@
           _syncLog(`C-ROLLBACK non-tainted RDRAM preservation configured`);
         }
         // Input dedup can hide pre-init frames from C; init is its only chance to see them.
-        _backfillCInputsFromJs(detMod, 'rollback-init');
+        if (!restartPart) _backfillCInputsFromJs(detMod, 'rollback-init');
 
         // kn_rollback_init mallocs ringSize × stateSize (~208MB) + an 8MB
         // rdram-preserve buffer. On Smash Remix, this consistently grows
@@ -14630,7 +16714,9 @@
         }
       };
 
-      if (detMod?._kn_rollback_init && DELAY_FRAMES > 0) {
+      if (_rebaseHeld() || _rebaseSelected) {
+        // Restart initializes explicitly while its independent hold stays live.
+      } else if (detMod?._kn_rollback_init && DELAY_FRAMES > 0) {
         tryInitRollback();
       } else {
         if (DELAY_FRAMES <= 0 && detMod?._kn_rollback_init) {
@@ -14920,6 +17006,7 @@
     // Only the lockstep fallback fast-forwards and requests a full resync.
     let _backgroundAt = 0;
     const _requestLifecycleFullResync = (reason) => {
+      if (_rebaseHeld()) return;
       if (_useCRollback) {
         _syncLog(`${reason}: rollback mode — no fast-forward/resync (behind=${_lastRemoteFrame - _frameNum})`);
         return;
@@ -15176,6 +17263,8 @@
   };
 
   const stopSync = () => {
+    _releaseCaptureLease(_captureLease, 'stop sync');
+    _resetHistoryRepair();
     _phase = PHASE_STOPPED;
     _endCatchUp(window.EJS_emulator?.gameManager?.Module ?? {}, 'the match stopped');
     // Every connection is about to close; each machine is told, and its per-match state goes.
@@ -15196,6 +17285,8 @@
     _lateJoinLostHostAsks = 0;
     _lastAppliedSyncHostFrame = -1;
     _lastAppliedRecoveryId = 0;
+    _authoritativeRepair.send({ type: 'reset' });
+    _mixedHistoryThrough = -1;
     _resetStrictMenuResends();
     _clearStrictMenuWait();
 
@@ -15526,8 +17617,16 @@
   // dispatched NOW at the current frame instead. This closes the
   // coord-sync-unreachable deadlock class (spec §MF3, audit §A3/§B1).
   const _dispatchScheduledSyncs = (isConfirmed) => {
-    if (_playerSlot !== 0 || _scheduledSyncRequests.length === 0 || _pushingSyncState) return;
+    if (
+      _cutHeld() ||
+      _playerSlot !== 0 ||
+      _scheduledSyncRequests.length === 0 ||
+      _pushingSyncState ||
+      _reservedInputOwners.size > 0
+    )
+      return;
     const confirmed = isConfirmed();
+    if (!confirmed && _historyWaiting()) return; // repair wait is not a failed capture
     const _coordNow = performance.now();
     const pastDeadline = (r) => r.deadlineAt && _coordNow > r.deadlineAt;
     // A request whose target has no open channel stays queued: sending now
@@ -15546,7 +17645,10 @@
     // nothing while the follow-up's own target is a phantom.
     const confirmedFor = (r) => confirmed && !(r.followUp && _peerPhantom[_peers[r.targetSid]?.slot]);
     const ready = _scheduledSyncRequests.filter(
-      (r) => ((confirmedFor(r) && r.targetFrame <= _frameNum) || pastDeadline(r)) && reachable(r),
+      (r) =>
+        (!r.notBefore || _coordNow >= r.notBefore) &&
+        ((confirmedFor(r) && r.targetFrame <= _frameNum) || pastDeadline(r)) &&
+        reachable(r),
     );
     // A follow-up whose frame is now confirmed goes out only if an input at
     // or before the frame of the state already sent differed from its
@@ -15574,34 +17676,59 @@
       if (_followUpWatches.get(r.targetSid) === r.watch) _followUpWatches.delete(r.targetSid);
     }
     if (unchanged.length > 0) _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !unchanged.includes(r));
-    const due = ready.filter((r) => !unchanged.includes(r));
+    let due = ready.filter((r) => !unchanged.includes(r));
     if (due.length === 0) return;
     for (const r of due) {
+      _syncRequestCooldowns.set(r.targetSid, _coordNow);
+      r.admissions = (r.admissions || 0) + 1;
       if (r.targetFrame > _frameNum || !confirmed) {
         _syncLog(
           `COORD-SYNC-TIMEOUT target=${r.targetFrame} f=${_frameNum} confirmed=${confirmed} ` +
             `elapsed=${Math.round(_coordNow - (r.deadlineAt - SYNC_COORD_TIMEOUT_MS))}ms — ` +
-            `dispatching at current frame instead`,
+            `attempting certified capture without relaxing requested frame`,
         );
       }
     }
     _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !due.includes(r));
     // Broadcast if multiple guests need sync simultaneously (all at same lockstep frame)
-    const targetSid = due.length === 1 ? due[0].targetSid : null;
+    let targetSid = due.length === 1 ? due[0].targetSid : null;
     _syncLog(
       `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
     );
-    const requeue = (r, followUp, watch) =>
+    const requeue = (r, followUp, watch, denied = false) => {
+      if (denied && !window.KNCore.authoritativeRepair.mayRetryAdmission(r.admissions)) {
+        _syncLog(`sync capture admissions exhausted for ${r.targetSid} request=${r.requestId}`);
+        return;
+      }
+      const notBefore = window.KNCore.authoritativeRepair.admissionAt(
+        performance.now(),
+        _syncRequestCooldowns.get(r.targetSid) || 0,
+        _SYNC_REQUEST_COOLDOWN_MS,
+      );
       _scheduledSyncRequests.push({
-        targetFrame: _frameNum,
+        notBefore,
+        admissions: denied ? r.admissions : 0,
+        targetFrame: denied ? r.targetFrame : _frameNum,
         targetSid: r.targetSid,
         followUp,
         // Still the answer to the request the first one was for.
         requestId: r.requestId || 0,
-        deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+        // A denied future-target capture retains its own reachable-frame window
+        // after admission opens, rather than expiring during the cooldown.
+        deadlineAt:
+          denied && r.targetFrame > _frameNum && notBefore !== undefined
+            ? notBefore + SYNC_COORD_TIMEOUT_MS
+            : performance.now() + SYNC_COORD_TIMEOUT_MS,
         // What became of the state it follows (null: send regardless).
         watch: watch ?? null,
       });
+    };
+    // One unreachable floor must not consume another recipient's capture budget.
+    // Its failed admission remains owed, with the same bounded retry policy.
+    for (const r of due.filter((r) => r.targetFrame > _frameNum)) requeue(r, r.followUp || 0, null, true);
+    due = due.filter((r) => r.targetFrame <= _frameNum);
+    if (due.length === 0) return;
+    targetSid = due.length === 1 ? due[0].targetSid : null;
     // Confirmation skips phantom peers, so a state sent while a target is a
     // phantom is not confirmed for that target.
     const unconfirmedFor = new Set(
@@ -15609,23 +17736,29 @@
     );
     const epoch = _syncQueueEpoch;
     const gens = due.map((r) => _syncQueueGen[r.targetSid] || 0);
+    const requests = due.map((r) => _syncRequestGenerations.get(r.targetSid) || 0);
     // Each guest numbers its own requests: one number per target. A sync the
     // host scheduled for its own reasons has none.
     const requestIds = {};
     for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;
-    pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] }).then((skipped) => {
+    pushSyncState(targetSid, false, {
+      requestIds,
+      watchFor: [...unconfirmedFor],
+      minFrame: Math.max(...due.map((r) => r.targetFrame)),
+    }).then((skipped) => {
       due.forEach((r, i) => {
         // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
         if (!_peers[r.targetSid] || epoch !== _syncQueueEpoch || gens[i] !== (_syncQueueGen[r.targetSid] || 0)) return;
         // The guest asked again while this push was in flight; its newer
         // request replaces this one.
+        if (requests[i] !== (_syncRequestGenerations.get(r.targetSid) || 0)) return;
         if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
         if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so
           // it goes out when reachable.
           _syncLog(`coord sync re-queued: send to ${r.targetSid} did not go out`);
-          requeue(r, r.followUp || 0, null);
+          requeue(r, r.followUp || 0, null, true);
         } else if (unconfirmedFor.has(r.targetSid)) {
           // A state sent unconfirmed can still change here through a later
           // rollback, leaving the guest on a state the host no longer has.
@@ -15649,6 +17782,10 @@
   // one could still trigger a rollback). Used by the host's sync dispatch and
   // by the GAMEPLAY→MENU C-rollback shutdown.
   const _liveStateConfirmed = (mod) => {
+    if (_useCRollback) {
+      _drainPendingCInputs(mod);
+      return mod?._kn_get_finalized_frame?.() === _frameNum;
+    }
     if (mod?._kn_get_replay_depth?.() > 0) return false;
     if ((mod?._kn_peek_pending_rollback?.() ?? -1) >= 0) return false;
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
@@ -15715,11 +17852,17 @@
     // The escalation push's clocks: the guest's answer could not be handled
     // while this page stood still (specs/escalation_push.qnt, CREDIT_FREEZE).
     _recovery.freeze(gap, now);
+    _authoritativeRepair.send({ type: 'freeze', gap });
     for (const sid in _syncChainMovedAt) _syncChainMovedAt[sid] = Math.min(now, _syncChainMovedAt[sid] + gap);
     _syncLog(`LOCAL-FREEZE f=${_frameNum} gap=${Math.round(gap)}ms — peer staleness clocks credited`);
   };
 
   const tick = () => {
+    if (_rebaseHeld()) return;
+    if (_rebaseSelected && !_rebaseBaselineCurrent()) {
+      _handleCoreFatal('rebase-scope', new Error('Certified restart scope changed'));
+      return;
+    }
     _tickEnteredCount = (_tickEnteredCount || 0) + 1;
     _tickReplayOnly = false;
     _chk('enter');
@@ -15730,8 +17873,9 @@
     }
     _chk('post-phase');
     _creditLocalFreeze();
-    _checkResyncRequestDeadline();
-    _checkOverduePushes();
+    _serviceHistoryRepair(window.EJS_emulator?.gameManager?.Module);
+    if (!_cutHeld()) _checkResyncRequestDeadline();
+    if (!_cutHeld() && !_historyWaiting() && _reservedInputOwners.size === 0) _checkOverduePushes();
     _flushResendLogs();
     // Deadline-only pass: a tick that stalls returns before the per-frame
     // dispatch below, and a stall can outlast SYNC_COORD_TIMEOUT_MS. Never
@@ -15748,7 +17892,7 @@
     // _lateJoinPaused or document.hidden (both are legitimate
     // pauses). See docs/netplay-invariants.md.
     const _tickNow = performance.now();
-    if (_runSubstate !== RUN_LATE_JOIN_PAUSE && !(typeof document !== 'undefined' && document.hidden)) {
+    if (!_cutHeld() && _runSubstate !== RUN_LATE_JOIN_PAUSE && !(typeof document !== 'undefined' && document.hidden)) {
       if (_frameNum !== _tickStuckLastFrame) {
         _tickStuckLastFrame = _frameNum;
         _tickStuckLastAdvanceAt = _tickNow;
@@ -15766,7 +17910,23 @@
       }
     }
 
-    if (_runSubstate === RUN_LATE_JOIN_PAUSE) {
+    _cutDriveParticipant();
+    if (_cutHeld()) {
+      const mod = _cutNative();
+      if (
+        mod?._kn_get_frame?.() >= mod?._kn_get_forward_ceiling?.() &&
+        !(mod?._kn_get_replay_depth?.() > 0) &&
+        (mod?._kn_peek_pending_rollback?.() ?? -1) < 0
+      ) {
+        _markTickReturn('skip:late-join-cut');
+        return;
+      }
+    }
+    if (_guestAdmission?.holdsForward()) {
+      _markTickReturn('skip:late-join-uncommitted');
+      return;
+    }
+    if (_runSubstate === RUN_LATE_JOIN_PAUSE && !_cutHeld()) {
       const guestPausedMs = _playerSlot !== 0 && _lateJoinGuestPausedAt > 0 ? _tickNow - _lateJoinGuestPausedAt : 0;
       if (guestPausedMs <= LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS) {
         _markTickReturn('skip:late-join-pause');
@@ -15862,6 +18022,39 @@
       }
     }
 
+    _serviceAuthoritativeRepair();
+    if (_coreFatalError) return;
+    // A repair state is authoritative at or ahead of this held timeline.
+    // Apply forward directly, rather than advance on uncertain inputs to it.
+    if (
+      _authoritativeRepair.active() &&
+      _pendingResyncState &&
+      _pendingResyncState.frame >= Math.max(_frameNum, _authoritativeRepair.context().floor) &&
+      !_replayBlocksSyncApply()
+    ) {
+      const pending = _pendingResyncState;
+      _pendingResyncState = null;
+      _syncTargetFrame = -1;
+      _syncTargetDeadlineAt = 0;
+      applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId, pending.inputBootstrap);
+    }
+    // The repair actor owns request/deadline/retry; this hold is derived from
+    // authoritative ownership, not a second unbounded timer or hidden grace.
+    if (_useCRollback) {
+      const ownerMod = window.EJS_emulator?.gameManager?.Module;
+      if (
+        (Object.values(_membershipInputFloors).some((floor) => floor > _frameNum) &&
+          !(ownerMod?._kn_get_replay_depth?.() > 0)) ||
+        ownerMod?._kn_get_input_history_gap?.()
+      ) {
+        if (!_authoritativeRepair.active()) {
+          _handleCoreFatal('input-membership', new Error('Ownership history unavailable without a repair obligation'));
+          return;
+        }
+        _markTickReturn('skip:ownership-snapshot');
+        return;
+      }
+    }
     // Async resync: apply buffered state at clean frame boundary.
     // Coordinated injection: hold state until _syncTargetFrame so host and guest
     // both reach that frame before the state is applied — snap = 0.
@@ -15953,7 +18146,13 @@
           if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
-          applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId);
+          applySyncState(
+            pending.bytes,
+            pending.frame,
+            pending.fromProactive,
+            pending.recoveryId,
+            pending.inputBootstrap,
+          );
         } else if (_runSubstate !== RUN_AWAITING_RESYNC) {
           // Reached target frame but state not here yet — stall until it arrives
           _runSubstate = RUN_AWAITING_RESYNC;
@@ -15984,7 +18183,7 @@
       } else {
         _pendingResyncState = null;
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId);
+        applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId, pending.inputBootstrap);
       }
     }
 
@@ -16016,7 +18215,7 @@
     //
     // Skipped outside rollback mode (lockstep handles missing input via
     // its own mechanism) and during warmup.
-    if (_useCRollback && !menuStartBarrierPending && _frameNum >= FRAME_PACING_WARMUP) {
+    if (!_cutHeld() && _useCRollback && !menuStartBarrierPending && _frameNum >= FRAME_PACING_WARMUP) {
       const nowStall = performance.now();
       const stallPeers = getInputPeers();
       const stallApplyFrame = _frameNum - DELAY_FRAMES;
@@ -16070,7 +18269,7 @@
     // ── Frame pacing (GGPO-style frame advantage cap) ────────────────────
     // Prevents the faster machine from outrunning the slower one's input stream.
     // Skip during warmup — connection is still stabilizing.
-    if (!menuStartBarrierPending && _frameNum >= FRAME_PACING_WARMUP) {
+    if (!_cutHeld() && !menuStartBarrierPending && _frameNum >= FRAME_PACING_WARMUP) {
       const inputPeersForPacing = getInputPeers();
       if (inputPeersForPacing.length > 0) {
         // Detect phantom peers — those that haven't advanced for PEER_DEAD_MS
@@ -16371,7 +18570,7 @@
         if (needsRedundancy && redundantTail === null) {
           redundantTail = _rbLocalHistory.slice(0, _rbLocalHistory.length - 1);
         }
-        const peerBuf = KNShared.encodeInput(
+        const peerBuf = _encodeOwnedInput(
           _frameNum,
           localInput,
           ackFrame,
@@ -16443,6 +18642,8 @@
     _chk('post-input-send');
 
     // ── Pacing gate: skip frame advance but inputs were sent above ──────
+    if (_authoritativeRepair.active() && _catchUpTo < 0 && _frameNum >= _authoritativeRepair.context().target)
+      _skipFrameAdvance = true;
     if (_skipFrameAdvance) {
       _markTickReturn(
         _runSubstate === RUN_RB_STALL ? 'skip:rb-stall' : _runSubstate === RUN_PACING ? 'skip:pacing' : 'skip:other',
@@ -16584,8 +18785,12 @@
         }
         // The mesh health check, which the JS lockstep path below runs too:
         // a C tick returns before reaching it (specs/mesh_heal.qnt).
-        _meshHealthTick();
-        if (rbApplyFrame >= 0) {
+        if (!_cutHeld()) _meshHealthTick();
+        if (
+          rbApplyFrame >= 0 &&
+          !(tickMod._kn_get_replay_depth?.() > 0) &&
+          (tickMod._kn_peek_pending_rollback?.() ?? -1) < 0
+        ) {
           // Stall only when too far ahead for rollback to help
           const rbInputPeers = getInputPeers();
           // Prediction window. A remote input X that turns out mispredicted
@@ -16847,6 +19052,7 @@
         if (
           _rbAboutToFire &&
           RB_WORKER_COPROC_DEFERRED &&
+          !_cutHeld() &&
           RB_WORKER_COPROC &&
           !_workerCoprocAborted &&
           _rbShadowReady &&
@@ -16950,6 +19156,7 @@
           preTickLocalInput.cy,
           _frameAdvForC,
         );
+        _checkInputHistory(tickMod);
         // A return of 3 is the C engine's pacing gate: it leaves before it
         // stores this page's own input for the frame, records what it applied
         // or saves the frame's state. With every peer a phantom there is
@@ -16971,6 +19178,7 @@
             preTickLocalInput.cy,
             -1,
           );
+          _checkInputHistory(tickMod);
         }
         _chk('cr:post-pretick');
         _refreshRunnerAfterRollbackRestore(tickMod);
@@ -17104,6 +19312,19 @@
         }
         if (_rbReplayLogged && catchingUp !== 2) _finishCReplay(tickMod);
 
+        if (catchingUp < 0) {
+          _handleCoreFatal('pre-tick', new Error('Native frame authorization failed'));
+          return;
+        }
+        if (catchingUp === 5) {
+          _markTickReturn('skip:late-join-cut-native');
+          return;
+        }
+        if (catchingUp === 4) {
+          _serviceHistoryRepair(tickMod);
+          _markTickReturn('skip:input-history');
+          return;
+        }
         if (catchingUp === 3) {
           // Check if all peers are phantom — if so, ignore C-level throttle
           // to prevent permanent freeze when the only peer has disconnected.
@@ -17165,6 +19386,7 @@
             typeof tickMod._kn_restore_hidden_state_impl === 'function' &&
             typeof tickMod._kn_hle_restore_from === 'function';
           if (
+            !_cutHeld() &&
             RB_WORKER_COPROC &&
             !_workerCoprocAborted &&
             _rbShadowReady &&
@@ -19111,6 +21333,7 @@
       _syncLog(`escalation push not sent: ${why}`);
       _onEscalationTransfer(recipients, null, false);
     };
+    if (_cutHeld() || _reservedInputOwners.size > 0) return notSent('late-join reservation is uncommitted');
     if (_coreFatalError) return notSent('the core is dead'); // a dead host core cannot provide resync state
     // Host: capture state, compress, and send.
     if (_playerSlot !== 0 || !_syncEnabled) return notSent(_syncEnabled ? 'not the host' : 'resync is off');
@@ -19169,9 +21392,35 @@
           release();
           return null;
         }
+        let captureLease = null;
         try {
+          if (_reservedInputOwners.size > 0) return null;
           let currentState;
-          const frame = _frameNum;
+          let frame = _frameNum;
+          if (Number.isFinite(options.minFrame) && frame < options.minFrame) {
+            notSent('requested frame has not been reached', attempts);
+            return null;
+          }
+          if (_useCRollback) {
+            _drainPendingCInputs(gm.Module);
+            if (gm.Module?._kn_get_finalized_frame?.() !== frame) {
+              captureLease = await _acquireCaptureLease(
+                gm.Module,
+                Number.isFinite(options.minFrame) ? options.minFrame : 0,
+              );
+              if (
+                !captureLease ||
+                !_captureScopeCurrent(captureLease) ||
+                window.KNCore.captureLease.poll(captureLease, _captureReport(gm.Module), performance.now(), true) !==
+                  'ready'
+              ) {
+                _syncLog(`SYNC-CAPTURE-UNAVAILABLE f=${frame}: causal input prefix not final`);
+                notSent('causal input prefix not final', attempts);
+                return null;
+              }
+              frame = captureLease.cut;
+            }
+          }
           // Taken now: a guest it goes to unconfirmed is watched from here, before
           // compression, since an input that differs while it compresses changes
           // this frame as much as one after the send (specs/sync_follow_up.qnt).
@@ -19267,7 +21516,15 @@
           // moved it, so the next delta to another guest was applied, without a
           // word, onto a base it never got. A guest still decodes a delta from an
           // older host.
-          const toCompress = currentState;
+          const inputWords = _useCRollback ? window.KNCore.inputBootstrap.capture(gm.Module, frame) : null;
+          const toCompress = window.KNCore.inputBootstrap.pack(currentState, inputWords, frame);
+          // No asynchronous work occurs between certification and these copies.
+          // Compression and network pacing must not hold local gameplay.
+          if (captureLease && !_releaseCaptureLease(captureLease, 'copied')) {
+            notSent('capture ceiling release failed', attempts);
+            return null;
+          }
+          captureLease = null;
 
           // By target sid: the number of the request this state answers, if any.
           const requestIds = (!isProactive && options.requestIds) || {};
@@ -19330,6 +21587,7 @@
           notSent(`capture/compress failed: ${err}`, attempts);
           return null;
         } finally {
+          _releaseCaptureLease(captureLease, 'capture finished');
           release();
         }
       },
@@ -19549,6 +21807,7 @@
     answerFor = 0,
     recoveryId = 0,
   }) {
+    if (_rejectPreMembershipSnapshot(frame)) return;
     // Recheck after async legacy XOR too: a newer recovery can finish while
     // an older ordinary/socket payload is still decoding. A strictly newer
     // ordinary frame remains useful; equal/older frames cannot erase its ACK.
@@ -19562,6 +21821,7 @@
     if (supersededRecovery()) return;
     // Regions patch: decompress directly, buffer for apply — no delta chain.
     if (isRegions) {
+      if (_useCRollback) throw new Error('Active rollback requires snapshot input provenance');
       if (_endsResyncRequest(answerFor)) _resyncRequestInFlight = false;
       if (frame < _lastAppliedSyncHostFrame || (frame === _lastAppliedSyncHostFrame && !recoveryId)) {
         _syncLog(`regions sync discarded: stale frame=${frame} <= lastApplied=${_lastAppliedSyncHostFrame}`);
@@ -19607,7 +21867,10 @@
       fullBytes = xorResult.data;
     }
 
-    if (supersededRecovery()) return;
+    if (supersededRecovery() || _rejectPreMembershipSnapshot(frame)) return;
+    const inputEnvelope = window.KNCore.inputBootstrap.unpack(fullBytes, frame);
+    window.KNCore.inputBootstrap.preflight(window.EJS_emulator?.gameManager?.Module, inputEnvelope.words, frame);
+    fullBytes = inputEnvelope.state;
 
     if (isProactive) {
       // Proactive push: buffer for instant resync, don't apply yet.
@@ -19634,7 +21897,7 @@
         return;
       }
       if (_keepsAwaitedAnswer(answerFor, frame)) return;
-      _pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };
+      _pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId, inputBootstrap: inputEnvelope.words };
       _syncLog(
         `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +
           `answerFor=${answerFor} newest=${_resyncRequestId} endsRequest=${endsRequest})`,
@@ -19767,6 +22030,7 @@
         `dcBuffered=${Math.max(-1, ...Object.values(_peers).map((p) => p.dc?.bufferedAmount ?? -1))} ` +
         `transport=${_rbTransport}${stoppedAt ? ` stopped: ${stoppedAt}` : ''}`,
     );
+    if (_catchUpWaits > 0) _oweAuthoritativeRepair(_frameNum, 'catch-up waited on non-canonical history');
     _catchUpTo = -1;
     _catchUpFrom = -1;
     _catchUpHoleSince = 0;
@@ -19829,6 +22093,7 @@
       // ran: kn_pre_tick has no rollback to start, and anything else is
       // logged and left to normal ticks.
       const step = mod._kn_pre_tick(own.buttons, own.lx, own.ly, own.cx, own.cy, -1);
+      _checkInputHistory(mod);
       if (step !== 0) {
         stoppedAt = `kn_pre_tick returned ${step}`;
         break;
@@ -19855,7 +22120,9 @@
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
   };
 
-  const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {
+  const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, inputBootstrap = null) => {
+    if (_cutHeld()) return; // no unrelated snapshot may replace the held native cut
+    if (_rejectPreMembershipSnapshot(frame)) return;
     if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return;
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
@@ -19865,6 +22132,23 @@
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
     const frameBeforeApply = _frameNum;
+    if (!window.KNCore.inputBootstrap.coherentMode(inputBootstrap, _useCRollback, DELAY_FRAMES)) {
+      _syncLog(`SYNC-INPUT-DELAY-STALE frame=${frame} snapshot=${inputBootstrap?.[3]} current=${DELAY_FRAMES}`);
+      _oweAuthoritativeRepair(frameBeforeApply, 'snapshot input delay changed');
+      return;
+    }
+    try {
+      window.KNCore.inputBootstrap.preflight(gm.Module, inputBootstrap, frame);
+    } catch (error) {
+      _handleCoreFatal('input-bootstrap', error);
+      return;
+    }
+    if (_authoritativeRepair.active() && frame < Math.max(frameBeforeApply, _authoritativeRepair.context().floor))
+      return;
+    // Local and host recovery frames need not coincide. Until a later
+    // non-backward authoritative state, any rewind can revisit that split.
+    const crossedRecovery = frame < frameBeforeApply && _mixedHistoryThrough >= 0;
+    if (crossedRecovery) _oweAuthoritativeRepair(frameBeforeApply, 'backward state crossed recovered-peer history');
 
     if (_hasKnSync) {
       // C-level write: copy into WASM buffer, call kn_sync_write
@@ -20008,8 +22292,24 @@
       _syncLog(`loadState: ${Math.round(bytes.length / 1024)}KB, ${(lt1 - lt0).toFixed(1)}ms`);
     }
 
+    if (inputBootstrap) {
+      try {
+        window.KNCore.inputBootstrap.apply(gm.Module, inputBootstrap, frame);
+        _restoreBootstrapHistory(gm.Module, inputBootstrap, frame);
+      } catch (error) {
+        _handleCoreFatal('input-bootstrap', error);
+        return;
+      }
+    }
     const timelineAligned = frame != null && _frameNum === frame;
     if (timelineAligned) {
+      if (_authoritativeRepair.active() && frame >= frameBeforeApply) {
+        _authoritativeRepair.send({ type: 'applied', frame, liveFrame: frameBeforeApply, aligned: true });
+        if (!_authoritativeRepair.active()) {
+          _mixedHistoryThrough = -1;
+          _syncLog(`AUTHORITATIVE-REPAIR-ALIGNED frame=${frame}`);
+        }
+      }
       _lastAppliedRecoveryId = Math.max(_lastAppliedRecoveryId, recoveryId);
       _settleInputsAtResync(gm.Module, frame, recoveryId);
     }
@@ -20084,7 +22384,7 @@
     _shadowScheduleResync('sync-apply');
     if (now - _lastResyncToastTime > 5000) {
       _lastResyncToastTime = now;
-      _config?.onSyncStatus?.('Desync corrected');
+      _config?.onSyncStatus?.(_authoritativeRepair.active() ? 'Restoring synchronized state' : 'Desync corrected');
     }
   };
 
@@ -20093,6 +22393,9 @@
   let _config = null;
 
   const init = (config) => {
+    // Only explicit engine match boundaries renew capture admission budgets.
+    _recovery.resetMatch();
+    _resetHistoryRepair();
     _sessionId++; // invalidate stale timers from previous session
     _startedAt = performance.now();
     _startWaitRttLogged = false;
@@ -20165,6 +22468,17 @@
   };
 
   const stop = () => {
+    _releaseCaptureLease(_captureLease, 'stop');
+    _rebasePulse?.cancel();
+    _rebasePulse = null;
+    _rebaseHost?.resolve(false);
+    _rebaseHost = null;
+    _rebaseParticipant = null;
+    _rebaseSelected = null;
+    _rebaseLastServe = 0;
+    _rebaseSerial = 0;
+    window._rbDoInit = undefined;
+    _resetHistoryRepair();
     _droppedThisMatch = new Set();
     _droppedByHost = false;
     // Before the final log flush, so its log line reaches the server.
@@ -20258,11 +22572,18 @@
     _manualMode = false;
     _pendingRunner = null;
 
-    // Reset lockstep state
+    // Reset lockstep state and the completed match's capture budget.
+    _recovery.resetMatch();
     _remoteInputs = {};
     _resetInputMaps();
     _peerInputStarted = {};
     _activeRoster = null;
+    _membershipSnapshotFloor = 0;
+    _membershipInputFloors = {};
+    _membershipInputEpochs = {};
+    _membershipInputOccupied = {};
+    _reservedInputOwners.clear();
+    _pendingInputBootstrap = null;
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
     _menuStartBarrierReleased = false;
@@ -20286,6 +22607,18 @@
     _isApplyingLateJoinState = false;
     _lateJoinReadyHandled.clear();
     _lateJoinServing.clear();
+    _cutPulse?.cancel();
+    _cutPulse = null;
+    _cutHost?.reject(new Error('Shared-cut match ended'));
+    _cutHost = null;
+    _cutParticipant = null;
+    _cutLastServe = 0;
+    _cutNative()?._kn_set_forward_ceiling?.(-1);
+    _lateJoinAdmissions.clear();
+    _lateJoinCommitted.clear();
+    _lateJoinExpired.clear();
+    _guestAdmission?.cancel();
+    _guestAdmission = null;
     _lateJoinStateSent.clear();
     _lateJoinGuestPausedAt = 0;
     _lateJoinLostHost = false;
@@ -20358,8 +22691,13 @@
     _syncTargetFrame = -1;
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
+    _syncRequestGenerations.clear();
+    _syncRequestNumbers.clear();
     _followUpWatches.clear();
     _syncQueueEpoch++;
+    _authoritativeRepair.send({ type: 'reset' });
+    _mixedHistoryThrough = -1;
+    _syncReceiveProgressAt = 0;
     // Each transfer still on a chain sees the new epoch and stops.
     _syncSendChains = {};
     _syncChainMovedAt = {};
@@ -20568,7 +22906,10 @@
         cy: input?.cy ?? 0,
       };
       const sid = _syntheticSidForSlot(peer.slot);
-      const packet = KNShared.encodeInput(inputFrame, syntheticInput, ackFrame, redundantFrames).buffer;
+      const packet = window.KNCore.inputBootstrap.wrapInput(
+        KNShared.encodeInput(inputFrame, syntheticInput, ackFrame, redundantFrames),
+        _membershipInputEpochs[peer.slot] ?? 0,
+      ).buffer;
       // The fake-peer scheduler must keep inputFrame near _frameNum so the
       // real seam's OOR guard accepts it and the C engine sees normal packets.
       const injected = _processInputPacket(sid, peer, packet);
@@ -20578,6 +22919,8 @@
     setPredictionsPaused: (on) => {
       const next = !!on;
       const changed = _predictionsPaused !== next;
+      if (changed && _captureLease && !_releaseCaptureLease(_captureLease, 'prediction mode changed'))
+        return _predictionsPaused;
       if (changed) _syncLog(`predictions ${next ? 'paused' : 'resumed'}`);
       _predictionsPaused = next;
       // Re-tune delay using the new mode's formula. Lockstep needs the
