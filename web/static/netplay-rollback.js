@@ -12560,7 +12560,42 @@
   // Keep Ready and local sends independent; only this guest's native step
   // waits, and ordinary resends supply a specific gap behind a later packet.
   let _lateJoinOriginalWait = null;
-  const _beginLateJoinOriginalWait = (msg, mod) => {
+  // Separate provenance, not a change to the startup kind (which also
+  // controls the menu barrier). This guest loaded the *running* host; only
+  // the directly validated original-input handoff can retire the generic
+  // JIT startup correction, never a missing bridge or a separate resync.
+  /** @type {{epoch: number, ownSid: string, mod: object, sources: Array<{slot: number, sid: string, peer: object, gen: number}>, progress: import('../src/late-join-input-bridge.ts').LateJoinBootProgress} | null} */
+  let _lateJoinBootContinuation = null;
+  const _currentLateJoinBootContinuation = (mod) => {
+    const c = _lateJoinBootContinuation;
+    if (!c) return null;
+    if (
+      c.epoch !== _syncQueueEpoch ||
+      c.ownSid !== socket?.id ||
+      c.mod !== mod ||
+      !_useCRollback ||
+      RB_WORKER_COPROC ||
+      _isSmashRemix() ||
+      _lateJoinLostHost ||
+      _activeRoster?.size !== c.sources.length + 1 ||
+      !_activeRoster.has(_playerSlot) ||
+      c.sources.some(
+        ({ slot, sid, peer, gen }) =>
+          !_activeRoster.has(slot) || _peers[sid] !== peer || peer.slot !== slot || (_syncQueueGen[sid] || 0) !== gen,
+      )
+    ) {
+      _lateJoinBootContinuation = null;
+      return null;
+    }
+    return c;
+  };
+  const _takeLateJoinBootContinuation = (mod) => {
+    const proven = _currentLateJoinBootContinuation(mod)?.progress === 'validated';
+    _lateJoinBootContinuation = null;
+    return proven;
+  };
+  const _beginLateJoinOriginalWait = (msg, mod, bridgePeers) => {
+    _lateJoinBootContinuation = null;
     if (!mod?._kn_pre_tick || RB_WORKER_COPROC || _isSmashRemix() || !Object.hasOwn(msg, 'inputBridge')) return null;
     const sources = window.KNCore.decodeLateJoinInputBridge(msg.inputBridge, msg.frame, DELAY_FRAMES, _playerSlot);
     const slots = new Map(sources.map(({ slot, sid }) => [slot, sid]));
@@ -12572,6 +12607,25 @@
       slots,
       failed: false,
     };
+    const sid = socket?.id;
+    // With only one original, this is the 2P path. Preserve its existing
+    // behavior. Capture the identities from arrival, not a later reconnect.
+    if (msg.frame > 0 && slots.size >= 2 && sid && bridgePeers && !window._knBootSyncDone) {
+      const originals = [...slots].map(([slot, sourceSid]) => ({
+        slot,
+        sid: sourceSid,
+        ...bridgePeers.get(sourceSid),
+      }));
+      if (originals.every(({ slot, peer }) => peer?.slot === slot && !peer.synthetic)) {
+        _lateJoinBootContinuation = {
+          epoch: _syncQueueEpoch,
+          ownSid: sid,
+          mod,
+          sources: originals,
+          progress: { next: _lateJoinOriginalWait.from, through: _lateJoinOriginalWait.through },
+        };
+      }
+    }
     return slots;
   };
 
@@ -12579,7 +12633,19 @@
     const wait = _lateJoinOriginalWait;
     if (!wait) return false;
     const apply = _frameNum - DELAY_FRAMES;
+    const boot = _lateJoinBootContinuation;
+    const noteBootProgress = () => {
+      const current = _currentLateJoinBootContinuation(window.EJS_emulator?.gameManager?.Module);
+      if (!current) return;
+      const progress = window.KNCore.lateJoinBootProgress(current.progress, apply);
+      if (progress === null) _lateJoinBootContinuation = null;
+      else current.progress = progress;
+    };
     if (apply > wait.through && wait.slots.size) {
+      // The native cursor must also have traversed the interval. Do not
+      // validate a jump caused by a resync or a non-native fallback.
+      if (!wait.failed && boot?.mod._kn_get_frame?.() === _frameNum) noteBootProgress();
+      else _lateJoinBootContinuation = null;
       _lateJoinOriginalWait = null;
       return false;
     }
@@ -12589,19 +12655,28 @@
       let missing = false;
       for (const [slot, sid] of wait.slots) {
         const inactive = _lateJoinInputWindows.get(slot);
-        if (inactive && apply >= inactive.absentSince && (inactive.first === null || apply < inactive.first)) continue;
+        if (inactive && apply >= inactive.absentSince && (inactive.first === null || apply < inactive.first)) {
+          // Proven inactive frames are safe to skip for play, but not proof
+          // of an uninterrupted handoff from the original active cohort.
+          _lateJoinBootContinuation = null;
+          continue;
+        }
         const peer = _peers[sid];
         const input = _remoteInputs[slot]?.[apply];
         if (peer?.slot === slot && input !== undefined && input !== KNShared.ZERO_INPUT) continue;
         missing = true;
         if (peer?.slot === slot) _askForMissingInputs(peer, apply, apply);
       }
-      if (!missing) return false;
+      if (!missing) {
+        if (_lateJoinBootContinuation) noteBootProgress();
+        return false;
+      }
       if (performance.now() < wait.deadline) return true;
     }
     // Do not release a missing input at the deadline or auto-rejoin in a
     // loop. Established players already got Ready; the guest can reload.
     wait.failed = true;
+    _lateJoinBootContinuation = null;
     _syncLog(`LATE-JOIN-INPUT-FAILED frame=${_frameNum} apply=${apply} sources=${wait.slots.size}`);
     const message = 'Could not sync the other players’ inputs. Reload to rejoin the match.';
     setStatus(message);
@@ -12615,6 +12690,7 @@
   };
 
   const _finishLateJoinOriginalWaitAtSync = (frame) => {
+    _lateJoinBootContinuation = null; // a separate native state is not continuation of the first handoff
     // A validated, aligned native state settles input IDs strictly before
     // frame - delay; later IDs cannot be skipped even after a successful load.
     if (_lateJoinOriginalWait && frame - DELAY_FRAMES > _lateJoinOriginalWait.through) _lateJoinOriginalWait = null;
@@ -13006,7 +13082,7 @@
 
       // Start at host's current frame (host is paused at msg.frame)
       _frameNum = msg.frame;
-      const originalSlots = _beginLateJoinOriginalWait(msg, mod);
+      const originalSlots = _beginLateJoinOriginalWait(msg, mod, bridgeEpoch === _syncQueueEpoch ? bridgePeers : null);
       if (bridgePeers && bridgeEpoch === _syncQueueEpoch && mod?._kn_pre_tick) {
         _restoreLateJoinInputBridge(msg, bridgePeers);
       }
@@ -14391,6 +14467,7 @@
   const _clearInputsForNewMatch = (reason) => {
     _droppedThisMatch = new Set();
     if (_frameNum !== 0) return; // late join keeps its buffers
+    _lateJoinBootContinuation = null;
     // Runs before this peer sends lockstep-ready: a peer can start as soon as it sees it, and its first inputs
     // (frame 0+) must survive until startLockstep().
     // Demo synthetic peers inject their inputs once and never resend, so keep theirs.
@@ -15684,6 +15761,7 @@
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};
     _lateJoinOriginalWait = null;
+    _lateJoinBootContinuation = null;
     // Free C-level sync buffers
     if (_syncBufPtr && _hasKnSync) {
       const modStop = window.EJS_emulator?.gameManager?.Module;
@@ -16819,7 +16897,10 @@
         // push can rewind the guest after menus have begun and create an input stall.
         if (_bootDoneForSync && !window._knBootSyncDone) {
           window._knBootSyncDone = true;
-          if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
+          const continuedLiveHost = _takeLateJoinBootContinuation(tickMod);
+          if (_syncEnabled && _playerSlot !== 0 && continuedLiveHost) {
+            _syncLog('BOOT-SYNC skipped: verified live late-join handoff');
+          } else if (_syncEnabled && _playerSlot !== 0 && _lockstepStartStateKind !== 'kn-sync') {
             const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
             if (_resyncRequestInFlight) {
               // The request that is out brings a host state. Asked over, its
@@ -20750,6 +20831,7 @@
     }
 
     const timelineAligned = frame != null && _frameNum === frame;
+    if (!timelineAligned || !_hasKnSync || !gm.Module?._kn_set_frame) _lateJoinBootContinuation = null;
     if (timelineAligned) {
       _lastAppliedRecoveryId = Math.max(_lastAppliedRecoveryId, recoveryId);
       _settleInputsAtResync(gm.Module, frame, recoveryId);

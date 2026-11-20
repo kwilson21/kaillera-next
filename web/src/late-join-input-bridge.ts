@@ -98,3 +98,16 @@ export function decodeLateJoinInputBridge(
   }
   return result;
 }
+
+// Only this uninterrupted boot-specific proof may skip the legacy JIT boot
+// correction. A repeated pacing tick proves nothing new; a cursor jump
+// cannot stand in for observing all the real original inputs.
+export type LateJoinBootProgress = { next: number; through: number } | 'validated';
+
+export function lateJoinBootProgress(progress: LateJoinBootProgress, apply: number): LateJoinBootProgress | null {
+  if (progress === 'validated') return progress;
+  if (apply > progress.next) return null;
+  if (apply < progress.next) return progress;
+  if (apply > progress.through) return 'validated';
+  return { next: apply + 1, through: progress.through };
+}

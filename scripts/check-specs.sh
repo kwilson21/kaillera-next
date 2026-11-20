@@ -764,6 +764,12 @@ $QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap
 $QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --backend="$BACKEND"
 $QUINT run specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --invariant=neverAdvanceOnMissing --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
+BOOT_CONTINUATION=specs/late_join_boot_continuation.qnt
+$QUINT typecheck "$BOOT_CONTINUATION"
+$QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_before --backend="$BACKEND"
+$QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --backend="$BACKEND"
+$QUINT run "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --invariant=noGenericBootAfterValidatedHandoff --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

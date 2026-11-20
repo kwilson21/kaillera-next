@@ -83,7 +83,7 @@ function setupJoin(msg: LateJoinStateFixture, replaceSource = false, direct = fa
     const RB_WORKER_COPROC=false,_isSmashRemix=()=>false,LATE_JOIN_TIMEOUT_MS=15000,KN_MAX_VISIBLE_ROLLBACK_DEPTH=7;
     const _lateJoinInputWindows=new Map();
     const _lastRemoteFramePerSlot={1:H+1},_inputDroppedAheadUpTo={},_inputAskedAt={};
-    let now=1;
+    let now=1; const socket={id:'joiner'};
     const performance={now:()=>now},_inputFloor=()=>0,_countOverdueAsk=()=>{};
     const setStatus=(status)=>statuses.push(status),_config={};
     const queueMicrotask=(fn)=>queued.push(fn),stop=()=>{};

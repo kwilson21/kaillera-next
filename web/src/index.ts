@@ -24,7 +24,11 @@ import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
 import { catchUpStep, tooOldStep } from './catch-up.ts';
 import { framesToSendAgain } from './input-resend.ts';
-import { collectLateJoinInputBridge, decodeLateJoinInputBridge } from './late-join-input-bridge.ts';
+import {
+  collectLateJoinInputBridge,
+  decodeLateJoinInputBridge,
+  lateJoinBootProgress,
+} from './late-join-input-bridge.ts';
 import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import {
@@ -315,6 +319,7 @@ export const KNCore = {
   framesToAskFor,
   framesToSendAgain,
   collectLateJoinInputBridge,
+  lateJoinBootProgress,
   decodeLateJoinInputBridge,
   checkRelayed,
   createConnectTracker,
