@@ -8,9 +8,15 @@ const read = (worker = false) => {
   const start = source.indexOf('  // Host roster input ownership.');
   const end = source.indexOf('  // The oldest input from', start);
   assert.ok(start >= 0 && end > start, 'host admission adapter is installed');
+  // Priming feeds the native core through the production follow-up watch.
+  // No snapshot is being watched in this fixture; it records the exact feeds.
+  const watchStart = source.indexOf('  const _followUpWatches = new Map();');
+  const watchEnd = source.indexOf('  const _feedCInput =', watchStart);
+  assert.ok(watchStart >= 0 && watchEnd > watchStart, 'production input watch is installed');
   const writes = [];
   const api = vm.runInNewContext(
-    source.slice(start, end) +
+    source.slice(watchStart, watchEnd) +
+      source.slice(start, end) +
       '\n({ update: _recordHostInputRoster, floor: _admissionInputFloor, prime: _primeLateJoinInactiveInput, reset: _clearLateJoinInputRoster, late: _waitingForHostAdmission, open: _observeLateJoinDcOpen })',
     {
       RB_WORKER_COPROC: worker,
