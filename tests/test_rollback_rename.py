@@ -71,10 +71,11 @@ def test_play_js_reads_every_mode_through_one_rule():
 def test_core_redirector_loads_patched_core_for_rollback_mode():
     """The patched WASM core is required for the rollback engine. Pre-rename
     code only enabled the redirector when mode === 'lockstep', which would
-    silently degrade on ?mode=rollback. The new gate inverts the logic and
-    only skips the redirector for streaming."""
+    silently degrade on ?mode=rollback. Streaming also uses the bundled
+    archive, without announcing rollback or worker mode."""
     src = CORE_REDIRECTOR.read_text()
-    assert "if (mode === 'streaming') {" in src
+    assert "streaming = gameMode === 'streaming';" in src
+    assert "window._kn_usePatchedCore = true;" in src
 
 
 def test_engine_names_its_mode_in_one_place():
