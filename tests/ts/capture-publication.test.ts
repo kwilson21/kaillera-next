@@ -31,7 +31,8 @@ function room() {
     const _syncSendChains={}, _syncChainMovedAt={}, _peerPhantom={}, _knownPlayers={};
     const _peers={a:{slot:1},b:{slot:2},c:{slot:3}}, _syncQueueGen={a:3,b:4,c:5};
     const performance={now:()=>now}, _syncLog=()=>{};
-    const _syncBufPtr=1, _syncBufSize=8, reads=[], shipments=[], outcomes=[];
+    const _syncBufPtr=1, _syncBufSize=8, reads=[], shipments=[], outcomes=[], bootEmits=[];
+    const socket={emit:(event, data)=>bootEmits.push({event,data})};
     let compressGate=Promise.resolve(), allowCompression;
     const waitForSmashTitleState=()=>new Promise(()=>{});
     const compressState=async (bytes)=>{ await compressGate; return bytes };
@@ -55,6 +56,7 @@ function room() {
     const _getTop=()=>_syncTargetsFor(null).map(t=>({id:t.sid,slot:t.peer.slot,generation:t.gen}));
     const observe=()=>({activeOwners:_getTop(),allRequiredInputsConfirmed:true,initialFailedRollbacks:0});
     const _scheduledSyncRequests=[{targetSid:'a',targetFrame:1000,deadlineAt:1,requestId:4}];
+    ${fn('_emitSaveStateToPlayers')}
     ${fn('_runQueuedSyncPush')}
     ${fn('_openCapturePublication')}
     ${fn('_deferMatchCapture')}
@@ -182,4 +184,13 @@ test('another current recipient cannot stand in as the genuine incident input ow
   const run = room();
   assert.equal(run('open(1)'), undefined);
   assert.equal(run('_recovery.publication.holding()'), false);
+});
+
+test('cached frame-zero sender cannot publish during a running capture incident', () => {
+  const run = room();
+  run("_emitSaveStateToPlayers({type:'save-state',frame:0})");
+  assert.equal(run('bootEmits.length'), 1);
+  assert.ok(run('open()'));
+  run("_emitSaveStateToPlayers({type:'save-state',frame:0})");
+  assert.equal(run('bootEmits.length'), 1);
 });

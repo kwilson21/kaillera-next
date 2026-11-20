@@ -7400,6 +7400,8 @@
   // (handleSaveStateMsg), and it carries the host's save RAM. The server fans
   // it out (toPlayers), so the host uploads it once whatever the player count.
   const _emitSaveStateToPlayers = (msg) => {
+    // Cached boot sends can await compression after their startup check.
+    if (typeof _recovery !== 'undefined' && _recovery.publication?.holding()) return;
     socket.emit('data-message', { ...msg, toPlayers: true });
   };
   // The sidecar is gzipped: RETRO_MEMORY_SAVE_RAM is every save type at once
