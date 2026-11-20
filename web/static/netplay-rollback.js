@@ -12469,8 +12469,9 @@
   };
 
   const _snapshotLateJoinBridgeSources = (joiningSid) => {
-    if (!_useCRollback || RB_WORKER_COPROC || _isSmashRemix() || !_activeRoster || !_signalSocket?.id) return null;
-    const own = { slot: _playerSlot, sid: _signalSocket.id, peer: null, history: _localInputs };
+    const ownSid = socket?.id; // The targeted signaling wrapper only forwards emits.
+    if (!_useCRollback || RB_WORKER_COPROC || _isSmashRemix() || !_activeRoster || !ownSid) return null;
+    const own = { slot: _playerSlot, sid: ownSid, peer: null, history: _localInputs };
     const originals = [own];
     for (const [sid, peer] of Object.entries(_peers)) {
       const { slot } = peer;
@@ -12499,7 +12500,7 @@
               (_syncQueueGen[sid] || 0) === gen &&
               _activeRoster?.has(slot) &&
               _remoteInputs[slot] === history
-            : _signalSocket?.id === sid && _localInputs === history,
+            : socket?.id === sid && _localInputs === history,
         )
         .map(({ slot, sid, history }) => ({
           slot,

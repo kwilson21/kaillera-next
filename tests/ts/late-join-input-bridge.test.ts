@@ -27,38 +27,40 @@ const zero = Object.freeze({ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 });
 const H = 1046;
 const api = { collectLateJoinInputBridge, decodeLateJoinInputBridge };
 
-async function send(replaceSource: boolean, mode: 'normal' | 'worker' | 'remix' = 'normal') {
+async function send(replaceSource: boolean, mode: 'normal' | 'worker' | 'remix' = 'normal', reconnectHost = false) {
   const c = vm.createContext({ H, zero, real, api, mode });
   vm.runInContext(
     `
     const KNShared={ZERO_INPUT:zero};
     const peer={slot:1}, joining={slot:2};
-    const _peers={guest:peer,join:joining},_knownPlayers={},_activeRoster=new Set([0,1,2]);
+    const _peers={guest:peer,join:joining},_knownPlayers={join:{socketId:'join-current'}},_activeRoster=new Set([0,1,2]);
     const _lateJoinServing=new Map(),_lateJoinStateSent=new Map(),_pendingLateJoinReadySids=new Set();
     let _lateJoinServeSeq=0,_lateJoinPausedAt=0,_runSubstate=0,_syncQueueEpoch=1;
     const _syncQueueGen={},RUN_LATE_JOIN_PAUSE=1,LATE_JOIN_TIMEOUT_MS=15000,_frameNum=H,_playerSlot=0,DELAY_FRAMES=3,_rbTransport='reliable';
     const _useCRollback=true,RB_WORKER_COPROC=mode==='worker',_isSmashRemix=()=>mode==='remix';
-    const _localInputs={},_remoteInputs={1:{[H-1]:real,[H-2]:zero},2:{[H]:real}};
+    const _localInputs={[H-1]:real},_remoteInputs={1:{[H-1]:real,[H-2]:zero},2:{[H]:real}};
     const _isValidPlayerSlot=(n)=>Number.isInteger(n)&&n>=0&&n<4,_isPeerPendingLateJoin=()=>false;
     const _syncLog=()=>{},_markPendingLateJoinPeer=()=>{},_clearPendingLateJoinPeer=()=>{},_endLateJoinPauseIfNoneServed=()=>{};
     const _captureHiddenStateWords=()=>null,_captureAudioFifoState=()=>null,_captureSaveRam=()=>null;
-    const _signalSocket={id:'host',emit(_kind,data){globalThis.emitted=data}};
+    const socket={id:'host',emit(_kind,data){globalThis.emitted=data}};
+    ${part('  const _currentSid =', '  const _evictPeer =')}
     const performance={now:()=>1},setTimeout=()=>{};
     const window={KNCore:api,EJS_emulator:{gameManager:{getState:()=>new Uint8Array([1]),Module:{}}}};
     let compression; const compressAndEncode=()=>new Promise(resolve=>compression=resolve);
     ${funcs}
     ${part('  async function sendLateJoinState(remoteSid)', '  // Joiner: a full resync')}
     globalThis.send=()=>sendLateJoinState('join');
-    globalThis.finish=(replace)=>{
+    globalThis.finish=(replace,reconnect)=>{
       for(let f=H;f<=H+5;f++) _remoteInputs[1][f]=real;
       if(replace) _syncQueueGen.guest=1;
+      if(reconnect) socket.id='host-reconnected';
       compression({data:'state',rawSize:1,compressedSize:1});
     };
   `,
     c,
   );
   const pending = c.send();
-  c.finish(replaceSource);
+  c.finish(replaceSource, reconnectHost);
   await pending;
   return c.emitted;
 }
@@ -102,6 +104,8 @@ test('late join feeds the original guest’s real H..H+5 after confirmed packets
     install(msg),
     Array.from({ length: 6 }, (_, i) => [H + i, 70]),
   );
+  assert.equal(msg.targetSid, 'join-current');
+  assert.ok(msg.inputBridge.some(({ slot, sid }: { slot: number; sid: string }) => slot === 0 && sid === 'host'));
   const guest = msg.inputBridge.find(({ slot }: { slot: number }) => slot === 1);
   assert.equal(
     guest.frames.some(([frame]: [number]) => frame === H - 2),
@@ -124,6 +128,14 @@ test('do not use replaced source generations or override a direct real input', a
   assert.equal(
     install(changedWhileCapturing).some(([, value]: [number, number]) => value === 70),
     false,
+  );
+});
+
+test('a host Socket.IO id change during capture omits only that local source', async () => {
+  const msg = await send(false, 'normal', true);
+  assert.deepEqual(
+    Array.from(msg.inputBridge, ({ sid }: { sid: string }) => sid),
+    ['guest'],
   );
 });
 
