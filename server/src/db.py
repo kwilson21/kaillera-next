@@ -16,7 +16,21 @@ import os
 import time
 from pathlib import Path
 
-from sqlalchemy import ColumnElement, Executable, Select, and_, case, delete, func, insert, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Executable,
+    Integer,
+    Select,
+    and_,
+    case,
+    cast,
+    delete,
+    func,
+    insert,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -761,6 +775,66 @@ async def get_screenshots(match_id: str) -> list[dict]:
         .where(Screenshot.match_id == match_id)
         .order_by(Screenshot.slot, Screenshot.frame)
     )
+
+
+# Use the same nearest-300 rounding as the admin comparison player. Window
+# boundaries lie between comparison buckets, never between two peers' frames.
+_SCREENSHOT_BUCKET = 300
+_SCREENSHOT_WINDOW = 8 * _SCREENSHOT_BUCKET
+_SCREENSHOT_HALF_BUCKET = _SCREENSHOT_BUCKET // 2
+
+
+async def get_screenshot_window(match_id: str, frame: int) -> dict:
+    """One bounded comparison window; one deterministic shot per slot/bucket."""
+    shots = Screenshot.__table__
+    filters = (shots.c.match_id == match_id, shots.c.slot.between(0, 3), shots.c.frame >= 0)
+    # Walk actual recordings, so arbitrary gaps between captures don't force
+    # the browser through empty windows. MIN/MAX can use the frame index.
+    base = (frame + _SCREENSHOT_HALF_BUCKET) // _SCREENSHOT_WINDOW * _SCREENSHOT_WINDOW
+    first = max(0, base - _SCREENSHOT_HALF_BUCKET)
+    end = base + _SCREENSHOT_WINDOW - _SCREENSHOT_HALF_BUCKET
+    bounds = (
+        await fetch(
+            select(
+                select(func.max(shots.c.frame))
+                .where(*filters, shots.c.frame < first)
+                .scalar_subquery()
+                .label("previous_frame"),
+                select(func.min(shots.c.frame))
+                .where(*filters, shots.c.frame >= end)
+                .scalar_subquery()
+                .label("next_frame"),
+            )
+        )
+    )[0]
+    bucket = cast((shots.c.frame + _SCREENSHOT_HALF_BUCKET).self_group().op("/")(_SCREENSHOT_BUCKET), Integer)
+    ranked = (
+        select(
+            shots.c.id,
+            func.row_number()
+            .over(
+                partition_by=(shots.c.slot, bucket),
+                order_by=(shots.c.frame.desc(), shots.c.id.desc()),
+            )
+            .label("rank"),
+        )
+        .where(*filters, shots.c.frame >= first, shots.c.frame < end)
+        .subquery()
+    )
+    screenshots = await fetch(
+        select(
+            shots.c.id,
+            shots.c.match_id,
+            shots.c.slot,
+            shots.c.frame,
+            func.coalesce(shots.c.size, func.length(shots.c.data)).label("size"),
+            shots.c.created_at,
+        )
+        .join(ranked, shots.c.id == ranked.c.id)
+        .where(ranked.c.rank == 1)
+        .order_by(shots.c.slot, shots.c.frame, shots.c.id)
+    )
+    return {"screenshots": screenshots, "start_frame": first, "end_frame": end - 1, **bounds}
 
 
 async def read_screenshot(row: dict) -> bytes | None:

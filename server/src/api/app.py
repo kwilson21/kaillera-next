@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import ColumnElement, Select, or_, select
@@ -1496,6 +1496,31 @@ def create_app(lifespan=None) -> FastAPI:
 
         return {"total": total, "entries": entries}
 
+    @app.get("/admin/api/session-logs/{log_id}/summary")
+    async def admin_session_log_summary(log_id: int, _auth: None = Depends(_require_admin)) -> dict:
+        """Metadata only; do not select the legacy raw log or load any chunks."""
+        rows = await db.fetch(
+            select(
+                SessionLog.id,
+                SessionLog.match_id,
+                SessionLog.room,
+                SessionLog.slot,
+                SessionLog.player_name,
+                SessionLog.mode,
+                SessionLog.summary,
+                SessionLog.ended_by,
+                SessionLog.created_at,
+                SessionLog.updated_at,
+            ).where(SessionLog.id == log_id)
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Session log not found")
+        entry = rows[0]
+        if isinstance(entry.get("summary"), str):
+            with contextlib.suppress(json.JSONDecodeError):
+                entry["summary"] = json.loads(entry["summary"])
+        return entry
+
     @app.get("/admin/api/session-logs/{log_id}")
     async def admin_session_log_detail(request: Request, log_id: int, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
@@ -1940,6 +1965,14 @@ def create_app(lifespan=None) -> FastAPI:
 
     # ── Screenshot routes ──────────────────────────────────────────────────
 
+    @app.get("/admin/api/screenshots/{match_id}/window")
+    async def admin_screenshot_window(
+        match_id: str,
+        frame: int = Query(default=0, ge=0, le=2**53 - 1),
+        _auth: None = Depends(_require_admin),
+    ) -> dict:
+        return {"matchId": match_id, **await db.get_screenshot_window(match_id, frame)}
+
     @app.get("/admin/api/screenshots/{match_id}")
     async def admin_screenshots_list(request: Request, match_id: str, _auth: None = Depends(_require_admin)) -> dict:
         """List all screenshots for a given match (metadata only, no blobs)."""
@@ -1952,7 +1985,21 @@ def create_app(lifespan=None) -> FastAPI:
         match_id = request.query_params.get("match_id", "")
         if not match_id:
             raise HTTPException(status_code=400, detail="match_id required")
-        rows = await db.fetch(_desync_verdicts(match_id).add_columns(DesyncEvent.match_id))
+        verdicts = _desync_verdicts(match_id)
+        compact = request.query_params.get("compact") == "true"
+        if compact:
+            verdicts = verdicts.with_only_columns(
+                DesyncEvent.frame, DesyncEvent.vision_equal, DesyncEvent.vision_confidence
+            )
+        else:
+            verdicts = verdicts.add_columns(DesyncEvent.match_id)
+        rows = await db.fetch(verdicts)
+        if compact:
+            # DB fetches return raw SQLite 0/1, not SQLAlchemy-coerced
+            # booleans. Keep unknown separate from a genuine mismatch.
+            for row in rows:
+                equal = row["vision_equal"]
+                row["vision_equal"] = bool(equal) if equal in (0, 1) else None
         return {
             "match_id": match_id,
             "events": rows,

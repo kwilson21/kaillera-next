@@ -77,18 +77,13 @@
       // the tab containers, so it would otherwise linger from a previous tab.
       const viewer = document.getElementById('log-viewer');
       if (viewer && !viewer.classList.contains('hidden')) {
+        resetViewer();
         viewer.classList.add('hidden');
       }
     });
   });
 
   // -- Stats -----------------------------------------------------------------
-
-  const formatBytes = (bytes) => {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  };
 
   const loadStats = async () => {
     const res = await fetch('/admin/api/stats', { headers: headers() });
@@ -233,94 +228,260 @@
     if (old) old.remove();
   };
 
-  const viewSessionLog = async (id) => {
+  let sessionView = null;
+  let auditRequest = null;
+
+  const clearCaptureRange = (view) => {
+    const range = view.range;
+    if (!range) return;
+    view.range = null;
+    range.controller.abort();
+    range.observer?.disconnect();
+    for (const url of range.urls) URL.revokeObjectURL(url);
+    pumpScreenshotQueue();
+  };
+
+  const resetViewer = () => {
+    auditRequest?.abort();
+    auditRequest = null;
+    if (sessionView) {
+      sessionView.controller.abort();
+      clearCaptureRange(sessionView);
+      sessionView = null;
+    }
     cleanupComparison();
+    $('#viewer-extras').innerHTML = '';
+    $('#captures-content').innerHTML = '';
+    $('#viewer-captures').classList.add('hidden');
+    $('#viewer-download').classList.add('hidden');
+    $('#viewer-copy').textContent = 'Copy';
+  };
+
+  const fetchAdmin = async (path, signal) => {
+    const res = await fetch(path, { headers: headers(), signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res;
+  };
+
+  const viewSessionLog = async (id) => {
+    resetViewer();
+    const view = { id, controller: new AbortController(), data: null, events: [], verdicts: [], range: null };
+    sessionView = view;
     const viewer = $('#log-viewer');
     const content = $('#viewer-content');
-    const extras = $('#viewer-extras');
-    const title = $('#viewer-title');
-    const meta = $('#viewer-meta');
-    title.textContent = `Session Log #${id}`;
-    meta.innerHTML = '';
-    if (extras) extras.innerHTML = '';
-    content.textContent = 'Loading...';
+    const signal = view.controller.signal;
+    $('#viewer-title').textContent = `Session Log #${id}`;
+    $('#viewer-meta').textContent = '';
+    content.textContent = 'Loading summary…';
     viewer.classList.remove('hidden');
+    viewer.scrollIntoView({ block: 'start' });
 
-    const res = await fetch(`/admin/api/session-logs/${id}`, { headers: headers() });
-    if (!res.ok) {
-      content.textContent = 'Error loading log';
-      return;
-    }
-    const data = await res.json();
-    content.textContent = JSON.stringify(data, null, 2);
-
-    // Load the unified session view: horizontal overview strip (events +
-    // screenshots anchored on a common time axis) + session header summary
-    // + vertical detail timeline. Screenshots are fetched in parallel with
-    // the timeline so the horizontal overview can include them inline.
-    // See project_session_timeline_vision for the direction.
-    if (extras && (data.match_id || data.room)) {
-      const [tl, ssData, dvData] = await Promise.all([
-        fetchSessionTimeline(data.match_id, data.room),
-        data.match_id
-          ? fetch(`/admin/api/screenshots/${data.match_id}`, { headers: headers() })
-              .then((r) => (r.ok ? r.json() : { screenshots: [] }))
-              .catch(() => ({ screenshots: [] }))
-          : Promise.resolve({ screenshots: [] }),
-        data.match_id
-          ? fetch(`/admin/api/desync-events?match_id=${encodeURIComponent(data.match_id)}`, { headers: headers() })
-              .then((r) => (r.ok ? r.json() : { events: [] }))
-              .catch(() => ({ events: [] }))
-          : Promise.resolve({ events: [] }),
-      ]);
-      const screenshots = ssData.screenshots || [];
-      const desyncEvents = dvData.events || [];
-      if (tl?._error) {
-        extras.innerHTML = `<p style="color:#e89; margin:12px 0">Failed to load session timeline: ${escapeHtml(tl._error)}. If the endpoint is missing, the dev server may need a restart.</p>`;
-        _currentSessionContext = { data, events: [], screenshots: [], desyncEvents: [] };
-      } else if (tl?.events?.length || screenshots.length) {
-        const events = tl?.events || [];
-        extras.innerHTML =
-          renderHorizontalTimeline(events, screenshots, desyncEvents) +
-          renderSessionHeader(events) +
-          renderEventTimeline(events);
-        _currentSessionContext = { data, events, screenshots, desyncEvents };
-      } else {
-        extras.innerHTML = `<p class="dim" style="margin:12px 0">No timeline events recorded for this session (session may predate funnel telemetry).</p>`;
-        _currentSessionContext = { data, events: [], screenshots: [], desyncEvents: [] };
+    try {
+      const res = await fetchAdmin(`/admin/api/session-logs/${encodeURIComponent(id)}/summary`, signal);
+      const data = await res.json();
+      if (sessionView !== view) return;
+      view.data = data;
+      $('#viewer-meta').textContent = [data.room, data.player_name, data.mode].filter(Boolean).join(' · ');
+      content.textContent = JSON.stringify(data, null, 2);
+      $('#viewer-copy').textContent = 'Copy summary';
+      const download = $('#viewer-download');
+      download.disabled = false;
+      download.classList.remove('hidden');
+      if (data.match_id) {
+        $('#viewer-captures').classList.remove('hidden');
+        $('#captures-show').textContent = 'Show screenshots';
+        $('#captures-show').classList.remove('hidden');
+        $('#captures-prev').classList.add('hidden');
+        $('#captures-next').classList.add('hidden');
+        $('#captures-status').textContent = '';
+        $('#capture-seek').value = '';
       }
-    }
 
-    // The new horizontal Session overview (rendered in #viewer-extras above)
-    // shows screenshots inline with events on a single time axis, replacing
-    // the old per-slot grid that used to live here. We still render the
-    // side-by-side comparison player below the JSON dump because frame-by-
-    // frame visual diff is genuinely useful for desync diagnosis.
-    if (data.match_id) {
-      const ssRes = await fetch(`/admin/api/screenshots/${data.match_id}`, { headers: headers() });
-      if (ssRes.ok) {
-        const ssData = await ssRes.json();
-        if (ssData.screenshots?.length) {
-          const bySlot = {};
-          for (const ss of ssData.screenshots) {
-            (bySlot[ss.slot] ??= []).push(ss);
+      const extras = $('#viewer-extras');
+      if (!data.match_id && !data.room) return;
+      const timeline = document.createElement('div');
+      timeline.textContent = 'Loading timeline…';
+      const verdicts = document.createElement('div');
+      extras.append(verdicts, timeline);
+      // These are independent: a timeline failure cannot block verdicts,
+      // raw download, screenshots or the summary already on screen.
+      void fetchSessionTimeline(data.match_id, data.room, signal)
+        .then((tl) => {
+          if (sessionView !== view) return;
+          if (tl._error) throw new Error(tl._error);
+          view.events = tl.events || [];
+          if (!view.events.length) timeline.textContent = 'No timeline events recorded.';
+          else
+            timeline.innerHTML =
+              renderHorizontalTimeline(view.events, []) +
+              renderSessionHeader(view.events) +
+              renderEventTimeline(view.events);
+        })
+        .catch(() => {
+          if (sessionView === view) timeline.textContent = 'Could not load the session timeline.';
+        });
+      if (data.match_id) {
+        void fetchAdmin(`/admin/api/desync-events?compact=true&match_id=${encodeURIComponent(data.match_id)}`, signal)
+          .then((result) => result.json())
+          .then((body) => {
+            if (sessionView !== view) return;
+            view.verdicts = body.events || [];
+            verdicts.innerHTML = renderVerdictBanner(view.verdicts);
+            view.range?.repaintVerdicts?.();
+          })
+          .catch(() => {
+            if (sessionView === view) verdicts.textContent = 'Could not load vision verdicts.';
+          });
+      }
+    } catch {
+      if (sessionView === view) content.textContent = 'Could not load the session summary.';
+    }
+  };
+
+  // Bound real network requests across both the thumbnail strip and comparison
+  // canvas. Within one range the two views share each capture's bytes.
+  const screenshotQueue = [];
+  let activeScreenshots = 0;
+  const pumpScreenshotQueue = () => {
+    while (screenshotQueue.length && activeScreenshots < 4) {
+      const { range, id, finish } = screenshotQueue.shift();
+      if (range.controller.signal.aborted) {
+        finish(null);
+        continue;
+      }
+      activeScreenshots++;
+      void fetchAdmin(`/admin/api/screenshots/img/${encodeURIComponent(id)}`, range.controller.signal)
+        .then((res) => res.blob())
+        .then((blob) => {
+          if (range.controller.signal.aborted) return null;
+          const url = URL.createObjectURL(blob);
+          range.urls.add(url);
+          return url;
+        })
+        .then(finish, () => finish(null))
+        .finally(() => {
+          activeScreenshots--;
+          pumpScreenshotQueue();
+        });
+    }
+  };
+
+  const captureURL = (range, id) => {
+    if (!range.images.has(id)) {
+      range.images.set(
+        id,
+        new Promise((finish) => {
+          screenshotQueue.push({ range, id, finish });
+          pumpScreenshotQueue();
+        }),
+      );
+    }
+    return range.images.get(id);
+  };
+
+  const loadCaptureRange = async (view, frame) => {
+    if (sessionView !== view || !view.data?.match_id) return;
+    clearCaptureRange(view);
+    cleanupComparison();
+    const range = { controller: new AbortController(), images: new Map(), urls: new Set() };
+    view.range = range;
+    const status = $('#captures-status');
+    const host = $('#captures-content');
+    const show = $('#captures-show');
+    const prev = $('#captures-prev');
+    const next = $('#captures-next');
+    host.innerHTML = '';
+    show.classList.add('hidden');
+    $('#capture-seek').value = String(frame);
+    prev.classList.add('hidden');
+    next.classList.add('hidden');
+    status.textContent = 'Loading captures…';
+    try {
+      const res = await fetchAdmin(
+        `/admin/api/screenshots/${encodeURIComponent(view.data.match_id)}/window?frame=${frame}`,
+        range.controller.signal,
+      );
+      const data = await res.json();
+      if (view.range !== range) return;
+      range.previous = data.previous_frame;
+      range.next = data.next_frame;
+      prev.classList.toggle('hidden', range.previous == null);
+      next.classList.toggle('hidden', range.next == null);
+      const shots = data.screenshots || [];
+      status.textContent = shots.length
+        ? `Frames ${data.start_frame}–${data.end_frame}`
+        : 'No screenshots in this range.';
+      if (!shots.length) return;
+
+      const bySlot = {};
+      for (const item of shots) (bySlot[item.slot] ??= []).push(item);
+      const slots = Object.keys(bySlot).sort((a, b) => a - b);
+      host.innerHTML =
+        renderHorizontalTimeline([], shots) + `<div id="screenshot-section">${buildComparisonPlayer(slots)}</div>`;
+      const loadThumb = (img) => {
+        void captureURL(range, img.dataset.captureId).then((url) => {
+          if (view.range !== range) return;
+          if (!url) {
+            img.replaceWith(document.createTextNode('Image unavailable'));
+            return;
           }
-          const slotKeys = Object.keys(bySlot).sort((a, b) => a - b);
-          if (slotKeys.length >= 2) {
-            const playerEvents = _currentSessionContext?.desyncEvents || [];
-            const html =
-              '<div id="screenshot-section" style="margin-top:16px">' +
-              buildComparisonPlayer(bySlot, slotKeys) +
-              '</div>';
-            content.insertAdjacentHTML('afterend', html);
-            initComparisonPlayer(bySlot, slotKeys, playerEvents);
+          img.src = url;
+          img.closest('a').href = url;
+        });
+      };
+      const allThumbs = host.querySelectorAll('[data-capture-id]');
+      if (typeof IntersectionObserver === 'function') {
+        range.observer = new IntersectionObserver((entries, observer) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            observer.unobserve(entry.target);
+            loadThumb(entry.target);
+          }
+        });
+        for (const thumb of allThumbs) range.observer.observe(thumb);
+      } else {
+        for (const thumb of allThumbs) loadThumb(thumb);
+      }
+      range.repaintVerdicts = () => {
+        const imageVerdicts = indexVerdicts(view.verdicts);
+        for (const thumb of host.querySelectorAll('[data-capture-id]')) {
+          const parent = thumb.closest('.tl-thumb-wrap');
+          const badge = parent.querySelector('.vision-dot');
+          const verdict = imageVerdicts.get(Number(thumb.dataset.bucket));
+          badge.hidden = !verdict;
+          thumb.style.borderColor = isDesyncEvent(verdict) ? '#e74c3c' : slotColor(Number(thumb.dataset.slot));
+          if (verdict) {
+            badge.title = formatVerdictLabel(verdict);
+            badge.className = `vision-dot ${isDesyncEvent(verdict) ? 'desync' : verdict.vision_equal === true ? 'clean' : 'unknown'}`;
           }
         }
-      }
+      };
+      range.repaintVerdicts();
+      initComparisonPlayer(bySlot, slots, view, range);
+    } catch {
+      if (view.range !== range) return;
+      status.textContent = 'Could not load screenshots.';
+      show.textContent = 'Retry screenshots';
+      show.classList.remove('hidden');
+      range.retry = frame;
     }
-
-    viewer.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
+
+  $('#captures-seek').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const frame = Number($('#capture-seek').value);
+    if (sessionView && Number.isSafeInteger(frame) && frame >= 0) void loadCaptureRange(sessionView, frame);
+  });
+
+  $('#captures-show').addEventListener('click', () => {
+    if (sessionView) void loadCaptureRange(sessionView, sessionView.range?.retry ?? 0);
+  });
+  $('#captures-prev').addEventListener('click', () => {
+    if (sessionView?.range?.previous != null) void loadCaptureRange(sessionView, sessionView.range.previous);
+  });
+  $('#captures-next').addEventListener('click', () => {
+    if (sessionView?.range?.next != null) void loadCaptureRange(sessionView, sessionView.range.next);
+  });
 
   // -- Screenshot Comparison Player ------------------------------------------
 
@@ -351,7 +512,16 @@
     return 'vision unknown';
   };
 
-  const buildComparisonPlayer = (bySlot, slotKeys) => {
+  const indexVerdicts = (events) => {
+    const lookup = new Map();
+    for (const event of events) {
+      const bucket = Math.round(event.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
+      lookup.set(bucket, pickWorstEvent([lookup.get(bucket), event].filter(Boolean)));
+    }
+    return lookup;
+  };
+
+  const buildComparisonPlayer = (slotKeys) => {
     const W = 160,
       H = 120,
       GAP = 4,
@@ -360,9 +530,6 @@
     const rows = Math.ceil(slotKeys.length / cols);
     const cw = W * cols + GAP * (cols - 1);
     const ch = H * rows + GAP * (rows - 1);
-    const labels = slotKeys
-      .map((s) => `<span style="color:#64748b;font-size:11px;flex:1;text-align:center">P${s}</span>`)
-      .join('');
     // For 2x2, show top row labels above canvas, bottom row below
     const topLabels = slotKeys
       .slice(0, cols)
@@ -393,7 +560,7 @@
       </div>`;
   };
 
-  const initComparisonPlayer = (bySlot, slotKeys, desyncEvents = []) => {
+  const initComparisonPlayer = (bySlot, slotKeys, view, range) => {
     const W = 160,
       H = 120,
       GAP = 4;
@@ -430,18 +597,6 @@
 
     if (!frames.length) return;
 
-    // Build verdict lookup by frame bucket — collapse multiple events per
-    // bucket to the worst-severity verdict (NEQ > unknown > equal).
-    const eventsByBucket = {};
-    for (const e of desyncEvents) {
-      const bucket = Math.round(e.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
-      (eventsByBucket[bucket] ??= []).push(e);
-    }
-    const compLookup = {};
-    for (const [bucket, list] of Object.entries(eventsByBucket)) {
-      compLookup[bucket] = pickWorstEvent(list);
-    }
-
     const canvas = document.getElementById('comp-canvas');
     const ctx = canvas.getContext('2d');
     const scrub = document.getElementById('comp-scrub');
@@ -461,7 +616,8 @@
       slotKeys,
       cols,
       rows,
-      imageCache: new Map(),
+      verdictSource: null,
+      verdicts: new Map(),
     };
 
     // Capture the comparison state in a local so async image callbacks can
@@ -474,7 +630,11 @@
       _compState.index = idx;
       scrub.value = String(idx);
       const entry = frames[idx];
-      const comp = compLookup[entry.frame];
+      if (ownState.verdictSource !== view.verdicts) {
+        ownState.verdictSource = view.verdicts;
+        ownState.verdicts = indexVerdicts(view.verdicts);
+      }
+      const comp = ownState.verdicts.get(entry.frame);
       const verdictText = comp ? ` · ${formatVerdictLabel(comp)}${isDesyncEvent(comp) ? ' ⚠ DESYNC' : ''}` : '';
       label.textContent = `f${entry.frame} (${idx + 1}/${frames.length})${verdictText}`;
       label.style.color = isDesyncEvent(comp) ? '#e74c3c' : '#64748b';
@@ -490,38 +650,33 @@
         if (!ss) return;
         const x = col * (W + GAP);
         const y = row * (H + GAP);
-        const key = ss.id;
-        if (ownState.imageCache.has(key)) {
-          ctx.drawImage(ownState.imageCache.get(key), x, y, W, H);
-          return;
-        }
-        const img = new Image();
-        img.onload = () => {
-          if (_compState !== ownState) return;
-          ownState.imageCache.set(key, img);
-          if (ownState.index === idx) ctx.drawImage(img, x, y, W, H);
-        };
-        img.src = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
+        void captureURL(range, String(ss.id)).then((url) => {
+          if (_compState !== ownState || ownState.index !== idx) return;
+          const unavailable = () => {
+            if (_compState !== ownState || ownState.index !== idx) return;
+            ctx.fillStyle = '#aaa';
+            ctx.fillText('Image unavailable', x + 8, y + 20);
+          };
+          if (!url) {
+            unavailable();
+            return;
+          }
+          const img = new Image();
+          img.onload = () => {
+            if (_compState === ownState && ownState.index === idx) ctx.drawImage(img, x, y, W, H);
+          };
+          img.onerror = unavailable;
+          img.src = url;
+        });
       };
 
-      slotKeys.forEach((slot, i) => {
-        drawCell(entry.slots[slot], i % cols, Math.floor(i / cols));
-      });
+      slotKeys.forEach((slot, i) => drawCell(entry.slots[slot], i % cols, Math.floor(i / cols)));
+    };
 
-      // Preload next 3 frames
-      for (let i = idx + 1; i < Math.min(idx + 4, frames.length); i++) {
-        for (const slot of slotKeys) {
-          const ss = frames[i].slots[slot];
-          if (ss && !ownState.imageCache.has(ss.id)) {
-            const pre = new Image();
-            pre.onload = () => {
-              if (_compState !== ownState) return;
-              ownState.imageCache.set(ss.id, pre);
-            };
-            pre.src = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
-          }
-        }
-      }
+    const repaint = range.repaintVerdicts;
+    range.repaintVerdicts = () => {
+      repaint();
+      drawFrame(ownState.index);
     };
 
     const step = (delta) => {
@@ -731,6 +886,7 @@
     const fb = currentFeedback.find((f) => String(f.id) === id);
     if (!fb) return;
     // Show full feedback in the viewer
+    resetViewer();
     const viewer = $('#log-viewer');
     $('#viewer-title').textContent = `Feedback #${fb.id} — ${fb.category}`;
     $('#viewer-meta').innerHTML = fb.email ? `<span class="meta-tag">${escapeHtml(fb.email)}</span>` : '';
@@ -781,10 +937,6 @@
   // session. Everything with a timestamp (events now; screenshots, input
   // audit, feedback, sync log in future iterations) hangs off the same
   // timeline. See memory/project_session_timeline_vision.md.
-
-  // Cached context of the last viewSessionLog render, used by the Copy button
-  // to serialize everything visible into a single shareable text blob.
-  let _currentSessionContext = null;
 
   // Event type categories — used for colorization only, not for structural
   // decisions. The timeline is the source of truth; these are presentation.
@@ -838,11 +990,11 @@
     return ev.slot != null && ev.slot !== -1 ? ev.slot : null;
   };
 
-  const fetchSessionTimeline = async (matchId, room) => {
+  const fetchSessionTimeline = async (matchId, room, signal) => {
     const params = new URLSearchParams();
     if (matchId) params.set('match_id', matchId);
     if (room) params.set('room', room);
-    const res = await fetch(`/admin/api/session-timeline?${params}`, { headers: headers() });
+    const res = await fetch(`/admin/api/session-timeline?${params}`, { headers: headers(), signal });
     if (!res.ok) {
       return { _error: `HTTP ${res.status}: ${res.statusText || 'request failed'}` };
     }
@@ -930,7 +1082,7 @@
 
   // Choose tick interval so ticks land roughly every 200-300px on screen,
   // regardless of session length. Multiplied with px/sec to get pixel spacing.
-  const pickTickIntervalSec = (spanSec, pxPerSec) => {
+  const pickTickIntervalSec = (pxPerSec) => {
     // Aim for ticks every ~250 px
     const idealSec = 250 / pxPerSec;
     // Snap to a clean human-readable interval
@@ -941,28 +1093,42 @@
     return clean[clean.length - 1];
   };
 
-  const renderHorizontalTimeline = (events, screenshots, desyncEvents = []) => {
-    if (!events.length && !screenshots.length) return '';
+  const renderVerdictBanner = (desyncEvents) => {
+    const desyncVerdicts = desyncEvents.filter((e) => e.vision_equal === false);
+    const equalVerdicts = desyncEvents.filter((e) => e.vision_equal === true);
+    const unknownVerdicts = desyncEvents.filter((e) => e.vision_equal === null || e.vision_equal === undefined);
+    const totalVerdicts = desyncEvents.length;
+    const highConfDesyncs = desyncVerdicts.filter((e) => e.vision_confidence === 'high').length;
 
-    // Build a lookup: frame bucket → worst vision verdict for quick dot
-    // rendering. Multiple events per bucket collapse to the most severe.
-    const eventsByBucket = {};
-    for (const e of desyncEvents) {
-      const bucket = Math.round(e.frame / 300) * 300;
-      (eventsByBucket[bucket] ??= []).push(e);
-    }
-    const compByFrame = {};
-    for (const [bucket, list] of Object.entries(eventsByBucket)) {
-      compByFrame[bucket] = pickWorstEvent(list);
-    }
+    const confSummary = highConfDesyncs > 0 ? `${highConfDesyncs} high-confidence` : 'none high-confidence';
+    return desyncVerdicts.length
+      ? `<div style="background:#3b1111; border:1px solid #e74c3c; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
+          <span style="color:#e74c3c; font-weight:bold">VISION DESYNC DETECTED</span>
+          <span style="color:#ccc"> — ${desyncVerdicts.length} of ${totalVerdicts} vision verdict${totalVerdicts === 1 ? '' : 's'} flagged NEQ (${confSummary}).
+          ${equalVerdicts.length} equal · ${unknownVerdicts.length} unknown</span>
+        </div>`
+      : equalVerdicts.length
+        ? `<div style="background:#0f2b1a; border:1px solid #2ecc71; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
+            <span style="color:#2ecc71; font-weight:bold">VISION IN SYNC</span>
+            <span style="color:#ccc"> — ${totalVerdicts} vision verdict${totalVerdicts === 1 ? '' : 's'}, none flagged${unknownVerdicts.length ? ` (${unknownVerdicts.length} unknown)` : ''}</span>
+          </div>`
+        : totalVerdicts
+          ? '<p class="dim">Vision verdicts are unverified.</p>'
+          : '';
+  };
+
+  const renderHorizontalTimeline = (events, screenshots) => {
+    if (!events.length && !screenshots.length) return '';
 
     // Compute the session time span from both events and screenshots so the
     // bar always spans the full session.
     const allTs = [];
     for (const ev of events) allTs.push(new Date(ev.created_at + 'Z').getTime());
     for (const ss of screenshots) allTs.push(new Date(ss.created_at + 'Z').getTime());
-    const minTs = Math.min(...allTs);
-    const maxTs = Math.max(...allTs);
+    const validTs = allTs.filter(Number.isFinite);
+    if (!validTs.length) return '';
+    const minTs = Math.min(...validTs);
+    const maxTs = Math.max(...validTs);
     const span = Math.max(maxTs - minTs, 1);
     const spanSec = span / 1000;
 
@@ -971,11 +1137,9 @@
 
     // Linear time→pixel mapping. Every timestamp has a deterministic x
     // position independent of any other event.
-    const contentWidth = Math.max(
-      1200,
-      Math.ceil(spanSec * TIMELINE_PX_PER_SEC) + TIMELINE_PAD_LEFT + TIMELINE_PAD_RIGHT,
-    );
-    const posLeft = (ts) => TIMELINE_PAD_LEFT + ((ts - minTs) / 1000) * TIMELINE_PX_PER_SEC;
+    const pxPerSec = Math.min(TIMELINE_PX_PER_SEC, 60_000 / spanSec);
+    const contentWidth = Math.max(1200, Math.ceil(spanSec * pxPerSec) + TIMELINE_PAD_LEFT + TIMELINE_PAD_RIGHT);
+    const posLeft = (ts) => TIMELINE_PAD_LEFT + ((ts - minTs) / 1000) * pxPerSec;
 
     // Group screenshots by slot so each player gets their own stacked row.
     const bySlot = {};
@@ -992,60 +1156,30 @@
     // that centered thumbs had at the start of the timeline.
     // Slot labels are 0-indexed (P0, P1, P2, P3) to match the rest of the
     // admin UI (session log table, comparison player).
-    //
-    // Dedup: pre-fix sessions sometimes captured the same logical frame
-    // twice (off-by-1 frame numbers, same slot). Collapse adjacent shots
-    // within 2 seconds of each other in the same slot so they don't render
-    // on top of each other. New sessions don't have this issue.
-    const DEDUP_WINDOW_MS = 2000;
     const screenshotRows = slotKeys
       .map((slot) => {
-        const sortedShots = bySlot[slot].sort(
-          (a, b) => new Date(a.created_at + 'Z').getTime() - new Date(b.created_at + 'Z').getTime(),
-        );
-        const shots = [];
-        let lastTs = -Infinity;
-        for (const s of sortedShots) {
-          const ts = new Date(s.created_at + 'Z').getTime();
-          if (ts - lastTs >= DEDUP_WINDOW_MS) {
-            shots.push(s);
-            lastTs = ts;
-          }
-        }
+        // The server already chooses one capture per rounded slot/frame bucket.
+        const shots = bySlot[slot];
         const border = slotColor(slot);
         const thumbs = shots
           .map((ss) => {
             const ts = new Date(ss.created_at + 'Z').getTime();
             const left = posLeft(ts);
-            const url = `/admin/api/screenshots/img/${ss.id}?key=${encodeURIComponent(adminKey)}`;
             const relLabel = formatRelTime(ts - minTs);
-            const frameBucket = Math.round(ss.frame / 300) * 300;
-            const comp = compByFrame[frameBucket];
-            const verdictLabel = comp ? ` · ${formatVerdictLabel(comp)}` : '';
-            const title = `P${slot} · frame ${ss.frame} · ${relLabel}${verdictLabel}`;
-            const dotClass = isDesyncEvent(comp)
-              ? 'desync'
-              : comp?.vision_equal === true
-                ? 'clean'
-                : comp
-                  ? 'unknown'
-                  : '';
-            const dotHtml = comp
-              ? `<div class="vision-dot ${dotClass}" title="${escapeHtml(formatVerdictLabel(comp))}${isDesyncEvent(comp) ? ' — DESYNC' : ''}"></div>`
-              : '';
+            const frameBucket = Math.round(ss.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
+            const title = `P${slot} · frame ${ss.frame} · ${relLabel}`;
             return `<div
               class="tl-thumb-wrap"
               data-ts="${ts}"
               title="${escapeHtml(title)}"
               style="position:absolute; left:${left}px; top:4px; z-index:2"
             >
-              <img
-                src="${url}"
-                style="display:block; height:${THUMB_HEIGHT}px; border:2px solid ${isDesyncEvent(comp) ? '#e74c3c' : border}; border-radius:4px; cursor:pointer"
-                onclick="window.open('${url}','_blank')"
-              />
-              <div style="font-size:10px; color:#888; margin-top:2px; text-align:left; font-variant-numeric:tabular-nums; max-width:${Math.round((THUMB_HEIGHT * 4) / 3)}px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">f${escapeHtml(String(ss.frame))}</div>
-              ${dotHtml}
+              <a target="_blank" rel="noopener">
+                <img data-capture-id="${escapeHtml(String(ss.id))}" data-bucket="${frameBucket}" data-slot="${slot}" alt="${escapeHtml(title)}"
+                  style="display:block; width:${Math.round((THUMB_HEIGHT * 4) / 3)}px; height:${THUMB_HEIGHT}px; object-fit:contain; border:2px solid ${border}; border-radius:4px; cursor:pointer" />
+              </a>
+              <div style="font-size:10px; color:#888; margin-top:2px; text-align:left; font-variant-numeric:tabular-nums">f${escapeHtml(String(ss.frame))}</div>
+              <div class="vision-dot" hidden></div>
             </div>`;
           })
           .join('');
@@ -1135,9 +1269,11 @@
     // linearly-mapped x position. Events and screenshots land between ticks
     // at their actual time positions — exactly like a DAW ruler. Interval
     // is chosen to land roughly every ~250 px on screen.
-    const TICK_INTERVAL_SEC = pickTickIntervalSec(spanSec, TIMELINE_PX_PER_SEC);
+    const TICK_INTERVAL_SEC = pickTickIntervalSec(pxPerSec);
     const ticks = [];
-    const tickIntervalMs = TICK_INTERVAL_SEC * 1000;
+    // A sparse legacy match can have timestamps hours apart even in one
+    // frame range. Keep the ruler bounded for that case too.
+    const tickIntervalMs = Math.max(TICK_INTERVAL_SEC * 1000, Math.ceil(span / 120 / 1000) * 1000);
     // Start at tick 0 (minTs itself, i.e. T+0) and emit every interval up
     // to and including the end of the session.
     for (let i = 0; i * tickIntervalMs <= span; i++) {
@@ -1180,35 +1316,15 @@
 
     const eventCount = events.length;
     const ssCount = screenshots.length;
-    const desyncVerdicts = desyncEvents.filter((e) => e.vision_equal === false);
-    const equalVerdicts = desyncEvents.filter((e) => e.vision_equal === true);
-    const unknownVerdicts = desyncEvents.filter((e) => e.vision_equal === null || e.vision_equal === undefined);
-    const totalVerdicts = desyncEvents.length;
-    const highConfDesyncs = desyncVerdicts.filter((e) => e.vision_confidence === 'high').length;
     const viewportWidth = window.innerWidth || 1200;
     const scrollNote = contentWidth > viewportWidth - 100 ? ' (scroll horizontally →)' : '';
 
-    const confSummary = highConfDesyncs > 0 ? `${highConfDesyncs} high-confidence` : 'none high-confidence';
-    const desyncBanner = desyncVerdicts.length
-      ? `<div style="background:#3b1111; border:1px solid #e74c3c; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
-          <span style="color:#e74c3c; font-weight:bold">VISION DESYNC DETECTED</span>
-          <span style="color:#ccc"> — ${desyncVerdicts.length} of ${totalVerdicts} vision verdict${totalVerdicts === 1 ? '' : 's'} flagged NEQ (${confSummary}).
-          ${equalVerdicts.length} equal · ${unknownVerdicts.length} unknown</span>
-        </div>`
-      : totalVerdicts
-        ? `<div style="background:#0f2b1a; border:1px solid #2ecc71; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
-            <span style="color:#2ecc71; font-weight:bold">VISION IN SYNC</span>
-            <span style="color:#ccc"> — ${totalVerdicts} vision verdict${totalVerdicts === 1 ? '' : 's'}, none flagged${unknownVerdicts.length ? ` (${unknownVerdicts.length} unknown)` : ''}</span>
-          </div>`
-        : '';
-
     return `<div style="background:#0f0f1e; border:1px solid #2a2a40; border-radius:6px; padding:16px; margin:12px 0">
-      <div style="font-weight:bold; margin-bottom:6px; font-size:14px">Session overview</div>
-      ${desyncBanner}
+      <div style="font-weight:bold; margin-bottom:6px; font-size:14px">${screenshots.length ? 'Capture timeline' : 'Session overview'}</div>
       <div class="dim" style="font-size:12px; margin-bottom:12px">
         ${escapeHtml(String(eventCount))} event${eventCount === 1 ? '' : 's'} ·
         ${escapeHtml(String(ssCount))} screenshot${ssCount === 1 ? '' : 's'} across ${escapeHtml(String(slotKeys.length))} slot${slotKeys.length === 1 ? '' : 's'} ·
-        click a marker to jump to its row below${scrollNote}
+        ${events.length ? 'click a marker to jump to its row below' : 'expand an image to see its exact capture'}${scrollNote}
       </div>
 
       <div style="overflow-x:auto; overflow-y:hidden; padding-bottom:8px; border:1px solid #1a1a2e; border-radius:4px; background:#07070f">
@@ -1304,14 +1420,9 @@
     </div>`;
   };
 
-  // Serialize the currently viewed session into a single plain-text blob
-  // suitable for pasting to Claude or elsewhere. Captures the session header
-  // summary, the full chronological timeline, a screenshot manifest, and
-  // the raw session_logs JSON at the end.
-  const serializeSessionForCopy = () => {
-    const ctx = _currentSessionContext;
-    if (!ctx) return null;
-    const { data, events, screenshots } = ctx;
+  // Copy only the lightweight summary and events, never the raw log.
+  const serializeSessionForCopy = (view) => {
+    const { data, events } = view;
 
     const lines = [];
     lines.push(`=== SESSION LOG #${data.id} ===`);
@@ -1362,19 +1473,8 @@
       }
     }
 
-    if (screenshots.length) {
-      lines.push('');
-      lines.push('=== SCREENSHOTS ===');
-      const bySlot = {};
-      for (const ss of screenshots) (bySlot[ss.slot ?? 0] ??= []).push(ss);
-      for (const slot of Object.keys(bySlot).sort((a, b) => a - b)) {
-        const frames = bySlot[slot].map((s) => s.frame).sort((a, b) => a - b);
-        lines.push(`P${slot}: ${frames.length} screenshots (frames ${frames[0]}–${frames[frames.length - 1]})`);
-      }
-    }
-
     lines.push('');
-    lines.push('=== RAW SESSION DATA ===');
+    lines.push('=== SUMMARY DATA ===');
     lines.push(JSON.stringify(data, null, 2));
 
     return lines.join('\n');
@@ -1388,37 +1488,59 @@
     e.stopPropagation();
     const matchId = link.dataset.matchId;
     if (!matchId) return;
-    cleanupComparison();
+    resetViewer();
+    const controller = new AbortController();
+    auditRequest = controller;
     const viewer = $('#log-viewer');
     $('#viewer-title').textContent = `Input Audit — ${matchId.substring(0, 12)}`;
     $('#viewer-meta').innerHTML = '';
     $('#viewer-content').textContent = 'Loading...';
     viewer.classList.remove('hidden');
-    const res = await fetch(`/admin/api/input-audit/${encodeURIComponent(matchId)}`, { headers: headers() });
-    if (!res.ok) {
-      $('#viewer-content').textContent = `Error loading input audit: ${res.status}`;
-      return;
+    viewer.scrollIntoView({ block: 'start' });
+    try {
+      const res = await fetchAdmin(`/admin/api/input-audit/${encodeURIComponent(matchId)}`, controller.signal);
+      const data = await res.json();
+      if (auditRequest === controller) $('#viewer-content').textContent = JSON.stringify(data, null, 2);
+    } catch {
+      if (auditRequest === controller) $('#viewer-content').textContent = 'Could not load input audit.';
     }
-    const data = await res.json();
-    $('#viewer-content').textContent = JSON.stringify(data, null, 2);
-    viewer.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
 
   // -- Viewer ----------------------------------------------------------------
 
   $('#viewer-close').addEventListener('click', () => {
-    cleanupComparison();
+    resetViewer();
     $('#log-viewer').classList.add('hidden');
   });
 
   $('#viewer-copy').addEventListener('click', async () => {
-    // Prefer the rich serialization when we have session context. Falls back
-    // to the raw viewer content for other kinds of logs (feedback, etc.)
-    // that don't populate _currentSessionContext.
-    const serialized = serializeSessionForCopy();
-    const content = serialized || $('#viewer-content').textContent;
-    if (content && (await copyText(content))) {
-      showToast(serialized ? 'Session copied (timeline + events + data)' : 'Log copied');
+    const content = sessionView?.data ? serializeSessionForCopy(sessionView) : $('#viewer-content').textContent;
+    if (content && (await copyText(content))) showToast('Copied');
+  });
+
+  $('#viewer-download').addEventListener('click', async () => {
+    const view = sessionView;
+    if (!view?.data) return;
+    const button = $('#viewer-download');
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      const res = await fetchAdmin(
+        `/admin/api/session-logs/${encodeURIComponent(view.id)}/export`,
+        view.controller.signal,
+      );
+      const blob = await res.blob();
+      if (sessionView !== view) return;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `session-${view.id}.jsonl`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      if (sessionView === view) showToast('Could not download the raw log');
+    } finally {
+      if (sessionView === view) button.disabled = false;
     }
   });
 
@@ -1483,6 +1605,7 @@
     const id = card.dataset.eventId;
     const evt = currentClientEvents.find((ev) => String(ev.id) === id);
     if (!evt) return;
+    resetViewer();
     $('#log-viewer').classList.remove('hidden');
     $('#viewer-title').textContent = `Event #${id} — ${evt.type}`;
     $('#viewer-meta').innerHTML = '';

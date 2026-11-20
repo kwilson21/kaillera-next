@@ -312,3 +312,97 @@ def test_admin_session_logs_mode_filter_takes_only_that_mode(audit_client, monke
     sql = str(count.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
     assert f"session_logs.mode = '{mode}'" in sql
     assert " IN (" not in sql
+
+
+def test_admin_session_summary_selects_only_metadata(audit_client, monkeypatch):
+    import src.db as db
+
+    http, fetch = audit_client
+    fetch.return_value = [{"id": 42, "summary": '{"duration_sec":3600}', "room": "short"}]
+    chunks = AsyncMock(side_effect=AssertionError("summary must not read any log chunks"))
+    monkeypatch.setattr(db, "get_full_log_entries", chunks)
+    assert http.get("/admin/api/session-logs/42/summary").status_code == 401
+    fetch.assert_not_awaited()
+    key = {"X-Admin-Key": "k"}
+    resp = http.get("/admin/api/session-logs/42/summary", headers=key)
+    assert resp.status_code == 200
+    assert resp.json() == {"id": 42, "summary": {"duration_sec": 3600}, "room": "short"}
+    fetch.assert_awaited_once()
+    sql = str(fetch.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "log_data" not in sql
+    assert "context" not in sql
+    assert "session_logs.id = 42" in sql
+    chunks.assert_not_awaited()
+    fetch.return_value = []
+    assert http.get("/admin/api/session-logs/42/summary", headers=key).status_code == 404
+
+
+def test_admin_capture_window_requires_header_and_bounds_frame(audit_client, monkeypatch):
+    import src.db as db
+
+    http, _ = audit_client
+    get_window = AsyncMock(return_value={"screenshots": [], "next_frame": None})
+    monkeypatch.setattr(db, "get_screenshot_window", get_window)
+    path = "/admin/api/screenshots/m1/window"
+    assert http.get(path).status_code == 401
+    key = {"X-Admin-Key": "k"}
+    assert http.get(f"{path}?frame=-1", headers=key).status_code == 422
+    assert http.get(f"{path}?frame=9007199254740992", headers=key).status_code == 422
+    get_window.assert_not_awaited()
+    resp = http.get(f"{path}?frame=2250", headers=key)
+    assert resp.status_code == 200
+    assert resp.json() == {"matchId": "m1", "screenshots": [], "next_frame": None}
+    get_window.assert_awaited_once_with("m1", 2250)
+
+
+def test_admin_legacy_detail_and_explicit_export_still_bundle_raw_data(audit_client, monkeypatch):
+    import src.db as db
+
+    http, fetch = audit_client
+    fetch.side_effect = lambda statement: (
+        [{"id": 42, "match_id": "m1", "slot": 1, "log_data": '[{"msg":"older"}]'}]
+        if "session_logs.id" in str(statement)
+        else []
+    )
+    chunks = AsyncMock(return_value=[{"msg": "older"}, {"msg": "chunk"}])
+    monkeypatch.setattr(db, "get_full_log_entries", chunks)
+    path = "/admin/api/session-logs/42"
+    key = {"X-Admin-Key": "k"}
+    resp = http.get(path, headers=key)
+    assert resp.status_code == 200
+    assert resp.json()["log_data"] == [{"msg": "older"}, {"msg": "chunk"}]
+    assert resp.json()["client_events"] == []
+    assert resp.json()["desync_events"] == []
+    assert http.get(f"{path}/export").status_code == 401
+    resp = http.get(f"{path}/export", headers=key)
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"] == 'attachment; filename="session-42.jsonl"'
+    assert resp.headers["x-entry-count"] == "2"
+    assert '"_kind": "meta"' in resp.text.splitlines()[0]
+    assert '"msg":"chunk"' in resp.text.splitlines()[2]
+    assert chunks.await_count == 2
+
+
+def test_admin_compact_verdicts_keep_outcomes_without_replay_or_payload_blobs(audit_client):
+    http, fetch = audit_client
+    fetch.return_value = [
+        {"frame": 10, "vision_equal": 0, "vision_confidence": "high"},
+        {"frame": 11, "vision_equal": None, "vision_confidence": None},
+        {"frame": 12, "vision_equal": 1, "vision_confidence": "medium"},
+    ]
+    key = {"X-Admin-Key": "k"}
+    resp = http.get("/admin/api/desync-events?match_id=m1&compact=true", headers=key)
+    assert resp.status_code == 200
+    outcomes = [row["vision_equal"] for row in resp.json()["events"]]
+    assert outcomes[0] is False
+    assert outcomes[1] is None
+    assert outcomes[2] is True
+    sql = str(fetch.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "desync_events.vision_equal" in sql
+    assert "desync_events.vision_confidence" in sql
+    assert "vision_verdict_json" not in sql
+    assert "replay_meta_json" not in sql
+    assert http.get("/admin/api/desync-events?match_id=m1", headers=key).status_code == 200
+    legacy_sql = str(fetch.await_args.args[0])
+    assert "vision_verdict_json" in legacy_sql
+    assert "replay_meta_json" in legacy_sql

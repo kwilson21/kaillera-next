@@ -292,8 +292,9 @@ tbody tr {
 }
 .viewer-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
-  flex-shrink: 0;
 }
 
 .viewer-meta {
@@ -475,4 +476,23 @@ tbody tr {
     max-width: 100%;
     width: 100%;
   }
+}
+
+#viewer-captures {
+  padding: 16px;
+}
+
+#captures-seek {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px;
+}
+
+#capture-seek {
+  width: 9ch;
+}
+
+#captures-content {
+  overflow-x: auto;
 }
