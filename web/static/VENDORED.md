@@ -25,7 +25,10 @@ Last updated: 2026-11-02
 - **Version:** 4.2.3 (also recorded in `ejs/version.json`)
 - **Source:** kaillera-next fork of https://github.com/EmulatorJS/EmulatorJS
 - **Notes:** patched core redirector logic lives in `core-redirector.js`; the EJS bundle
-  itself is upstream + minor patches.
+  itself is upstream + minor patches. The local-core policy removes the upstream
+  CDN retry from `downloadGameCore`: a missing bundled core fails visibly without
+  starting an incompatible core or caching the failed response. Regression coverage:
+  `tests/test_external_core_fallback.py`.
 
 ### `ejs/cores/mupen64plus_next_libretro.{js,wasm}` + `mupen64plus_next-wasm.data`
 - **Version:** built locally by `build/build.sh` — see "Build sources" below for pinned SHAs
