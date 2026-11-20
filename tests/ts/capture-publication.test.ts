@@ -4,6 +4,12 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 import { createRecoveryManager } from '../../web/src/recovery-delivery.ts';
 import { createRecoveryTransferPool } from '../../web/src/recovery-transfer.ts';
+import { createOwnerProofRelay } from '../../web/src/owner-proof-relay.ts';
+import {
+  openProof as openOwnerInputProof,
+  captureAllowed as ownerInputCaptureAllowed,
+} from '../../web/src/owner-proof.ts';
+import { checkRelayed } from '../../web/src/relay.ts';
 
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 function part(from: string, to: string): string {
@@ -19,20 +25,35 @@ function fn(name: string) {
 }
 
 function room() {
-  const context = vm.createContext({ createRecoveryManager, createRecoveryTransferPool, Uint8Array, queueMicrotask });
+  const context = vm.createContext({
+    createRecoveryManager,
+    createRecoveryTransferPool,
+    createOwnerProofRelay,
+    openOwnerInputProof,
+    ownerInputCaptureAllowed,
+    checkRelayed,
+    Uint8Array,
+    queueMicrotask,
+    crypto: { randomUUID: () => 'long-enough-opaque-token' },
+  });
   vm.runInContext(
     `
     let now=1, _frameNum=1076, nativeFrame=1076, depth=0, pending=-1, failures=0;
     let _syncQueueEpoch=9, _pushingSyncState=false, _proactivePushInFlight=false;
-    const PHASE_RUNNING=5, RUN_LATE_JOIN_PAUSE=1, _phase=5, _runSubstate=0, _playerSlot=0;
-    const _useCRollback=true, _hasKnSync=true, RB_WORKER_COPROC=false, _isSmashRemix=()=>false;
+    const PHASE_RUNNING=5, RUN_LATE_JOIN_PAUSE=1, _phase=5, _runSubstate=0; let _playerSlot=0;
+    const _useCRollback=true, _hasKnSync=true, _isSpectator=false, _demoMode=false, _catchUpTo=-1;
+    let RB_WORKER_COPROC=false;
+    const _isSmashRemix=()=>false, _activeRoster=new Set([0,1,2,3]), KNState={matchId:'running-match'};
+    const _isPeerPendingLateJoin=()=>false, _peerConnectionLive=()=>true, INPUT_PAST_WINDOW_FRAMES=240;
+    const KN_MAX_VISIBLE_ROLLBACK_DEPTH=7, OVERDUE_PUSH_QUIET_MS=20000;
     const _syncEnabled=true, _coreFatalError=false, DELAY_FRAMES=3, SYNC_COORD_TIMEOUT_MS=3000;
     const _lateJoinServing=new Map(), _queuedSyncPushes=new Map(), _followUpWatches=new Map();
-    const _syncSendChains={}, _syncChainMovedAt={}, _peerPhantom={}, _knownPlayers={};
+    const _syncSendChains={}, _syncChainMovedAt={}, _peerPhantom={};
+    const _knownPlayers={a:{socketId:'actual-p2'},b:{socketId:'actual-p3'},c:{socketId:'actual-p4'}};
     const _peers={a:{slot:1},b:{slot:2},c:{slot:3}}, _syncQueueGen={a:3,b:4,c:5};
     const performance={now:()=>now}, _syncLog=()=>{};
     const _syncBufPtr=1, _syncBufSize=8, reads=[], shipments=[], outcomes=[], bootEmits=[];
-    const socket={emit:(event, data)=>bootEmits.push({event,data})};
+    const socket={connected:true,id:'actual-host',emit:(event, data)=>bootEmits.push({event,data})};
     let compressGate=Promise.resolve(), allowCompression;
     const waitForSmashTitleState=()=>new Promise(()=>{});
     const compressState=async (bytes)=>{ await compressGate; return bytes };
@@ -44,7 +65,19 @@ function room() {
       _kn_get_failed_rollbacks:()=>failures,
       _kn_sync_read(){ reads.push(nativeFrame); this.HEAPU8[1]=nativeFrame%256; this.HEAPU8[2]=99; return 2; },
     };
-    const window={EJS_emulator:{gameManager:{Module:mod,getState(){throw Error('late or raw state escaped');}}}};
+    const window={
+      KNCore:{checkRelayed,recovery:{createOwnerProofRelay,openOwnerInputProof,ownerInputCaptureAllowed}},
+      EJS_emulator:{gameManager:{Module:mod,getState(){throw Error('late or raw state escaped');}}},
+    };
+    const _localInputs={}, _remoteInputs={1:{},2:{},3:{}}, nativeFed=[], _inputFloor=()=>1066;
+    const KNShared={ZERO_INPUT:{},encodeInput:(f,input)=>({buffer:{f,input}})};
+    const _missingConsumedInputs=()=>[...Array(7)].map((_,i)=>i+1066)
+      .filter(f=>!_remoteInputs[1][f]).slice(0,1).map(frame=>({peer:_peers.a,frame}));
+    for (const f of [1067,1068,1069,1070,1071,1072]) _remoteInputs[1][f]={buttons:0,lx:0,ly:0,cx:0,cy:0};
+    const _processInputPacket=(sid,peer,{f,input})=>{_remoteInputs[peer.slot][f]=input; nativeFed.push(f); return true};
+    const _drainPendingCInputs=()=>{if(nativeFed.length && pending<0 && !drained){ pending=1069; drained=true; }};
+    let drained=false;
+    const _liveStateConfirmed=()=>!_missingConsumedInputs().length;
     const ensureSyncBuffer=()=>{};
     const _recovery=createRecoveryManager({timeoutMs:5000,quietMs:20000,maxPushes:3},()=>{});
     const _recoveryTransfers=createRecoveryTransferPool();
@@ -62,6 +95,9 @@ function room() {
     ${fn('_deferMatchCapture')}
     ${part('  const _ownedCaptureScope =', '  const _sealAndPublishCapture =')}
     ${fn('_sealAndPublishCapture')}
+    ${part('  // Experimental fault-only owner path.', '  const _ownedCaptureScope =')}
+    ${fn('onDataMessage')}
+    ${fn('_escalateLostInput')}
     ${fn('pushSyncState')}
     ${fn('sendSyncChunks')}
     ${fn('_checkOverduePushes')}
@@ -192,5 +228,83 @@ test('cached frame-zero sender cannot publish during a running capture incident'
   assert.equal(run('bootEmits.length'), 1);
   assert.ok(run('open()'));
   run("_emitSaveStateToPlayers({type:'save-state',frame:0})");
+  assert.equal(run('bootEmits.length'), 1);
+});
+
+test('genuine overdue emits to current stamped owner; partial proof neither feeds nor seals until idle at F', async () => {
+  const run = room();
+  run("_escalateLostInput(_peers.a, 'push', now, 1066, true);");
+  assert.equal(run("bootEmits.filter(x=>x.data.type==='recovery-input-proof-request').length"), 1);
+  const request = JSON.parse(run('JSON.stringify(bootEmits.at(-1).data)'));
+  assert.equal(request.targetSid, 'actual-p2');
+  assert.deepEqual(request.ids, [1066, 1073]);
+  const send = (samples: readonly [number, readonly number[]][], sid = 'actual-p2') =>
+    run(
+      `onDataMessage(${JSON.stringify({
+        type: 'recovery-input-proof-reply',
+        token: request.token,
+        targetSid: 'actual-host',
+        samples,
+        knFrom: { sid, slot: 1, owner: false },
+      })})`,
+    );
+  send(
+    [
+      [1066, [0, 0, 0, 0, 0]],
+      [1073, [2, 0, 0, 0, 0]],
+    ],
+    'a',
+  );
+  assert.equal(run('_ownerRepair.proof.accepted.size'), 0);
+  send([[1066, [0, 0, 0, 0, 0]]]);
+  assert.equal(run('_serviceOwnerRepair(mod)'), 'hold');
+  assert.equal(run('nativeFed.length'), 0);
+  send([[1073, [2, 0, 0, 0, 0]]]);
+  assert.equal(run('_serviceOwnerRepair(mod)'), 'replay');
+  assert.equal(run('nativeFed.length'), 2);
+  assert.deepEqual(JSON.parse(run('summary()')).reads, []);
+  run('depth=1; nativeFrame=1069; _frameNum=1069;');
+  assert.equal(run('_serviceOwnerRepair(mod)'), 'replay');
+  run('depth=0; pending=-1; nativeFrame=1076; _frameNum=1076;');
+  assert.equal(run('_serviceOwnerRepair(mod)'), 'hold');
+  await flush();
+  const out = JSON.parse(run('summary()'));
+  assert.deepEqual(out.reads, [1076]);
+  assert.equal(out.shipments.length, 3);
+  assert.ok(out.shipments.every((x: { frame: number }) => x.frame === 1076));
+});
+
+test('absent owner reply expires into the legacy attempt without sealing; 2p/worker never request proof', async () => {
+  const expired = room();
+  expired(
+    "_escalateLostInput(_peers.a, 'push', now, 1066, true); now=1001; _checkOverduePushes(); _serviceOwnerRepair(mod)",
+  );
+  await flush();
+  assert.equal(expired('_ownerRepair'), null);
+  assert.deepEqual(JSON.parse(expired('summary()')).reads, [1076]); // legacy capture
+  for (const setup of ['RB_WORKER_COPROC=true', '_activeRoster.delete(2); _activeRoster.delete(3)']) {
+    const run = room();
+    run(`${setup}; _escalateLostInput(_peers.a, 'push', now, 1066, true)`);
+    await flush();
+    assert.equal(run('bootEmits.length'), 0);
+    assert.equal(run('_ownerRepair'), null);
+    assert.deepEqual(JSON.parse(run('summary()')).reads, [1076]);
+  }
+});
+
+test('guest replies only with inputs recorded at their exact frame/current SID, not placeholder or reused identity', () => {
+  const run = room();
+  run(`
+    _playerSlot=1; _peers.a.slot=0; _knownPlayers.a.socketId='actual-host'; socket.id='actual-p2';
+    const authored={buttons:2,lx:0,ly:0,cx:0,cy:0};
+    _localInputs[1066]=authored; _recordAuthoredOwnerInput(1066,authored);
+    _localInputs[1067]=authored; _localInputs[1068]=KNShared.ZERO_INPUT;
+    const request={type:'recovery-input-proof-request',targetSid:'actual-p2',token:'long-enough-opaque-token',
+      ids:[1066,1067,1068],knFrom:{sid:'actual-host',slot:0,owner:true}};
+    onDataMessage(request);
+  `);
+  const sent = JSON.parse(run('JSON.stringify(bootEmits.at(-1).data)'));
+  assert.deepEqual(sent.samples, [[1066, [2, 0, 0, 0, 0]]]);
+  run("socket.id='rotated-p2'; onDataMessage({...request,targetSid:socket.id});");
   assert.equal(run('bootEmits.length'), 1);
 });

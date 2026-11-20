@@ -5446,7 +5446,7 @@
         `ms=${Math.round(now - track.firstAt)} → ${step}`,
     );
     delete _inputAskOverdue[slot];
-    _escalateLostInput(peer, step, now, oldest);
+    _escalateLostInput(peer, step, now, oldest, true);
   };
 
   // A real input from `slot` that came past the rollback window and differs
@@ -5525,7 +5525,7 @@
     }
   };
 
-  const _escalateLostInput = (peer, step, now, hole) => {
+  const _escalateLostInput = (peer, step, now, hole, atOverdue = false) => {
     const slot = peer.slot;
     if (step === 'push') {
       // Only the server roster supplies the budget identity. A peer's connection
@@ -5539,6 +5539,10 @@
       const attempts = _recovery.begin(slot, hole, recipients, _frameNum, now, _syncEnabled);
       if (!attempts.length) return;
       _syncLog(`INPUT-ASK-PUSH f=${_frameNum} slot=${slot} hole=${hole}`);
+      if (atOverdue && typeof _startOwnerRepair === 'function') {
+        if (_startOwnerRepair(peer, hole, attempts, now)) return;
+        if (_normalOwnerMode()) _syncLog(`OWNER-INPUT-PROOF-FALLBACK unverified reason=ineligible f=${_frameNum}`);
+      }
       pushSyncState(null, false, { escalation: attempts });
       return;
     }
@@ -6047,6 +6051,8 @@
   // new match, a fast-forward, stop).
   const _resetInputMaps = () => {
     _recovery.resetAll();
+    if (typeof _ownerRepair !== 'undefined') _ownerRepair = null;
+    if (typeof _authoredOwnerInputs !== 'undefined') _authoredOwnerInputs.clear();
     for (const map of _slotInputMaps()) for (const slot in map) delete map[slot];
   };
 
@@ -7761,6 +7767,10 @@
 
   const onDataMessage = (msg) => {
     if (!msg?.type) return;
+    if (msg.type === 'recovery-input-proof-request' || msg.type === 'recovery-input-proof-reply') {
+      if (window.KNCore?.recovery?.createOwnerProofRelay) _readOwnerPacket(msg);
+      return;
+    }
     // Any member of the room, spectators included, can write to the server's
     // relay, so nothing a message says about itself is believed. The server
     // stamps the true sender (KNCore.checkRelayed, web/src/relay.ts): a
@@ -16564,6 +16574,14 @@
             ),
           ),
         );
+    let recordAuthorOnSend =
+      !hadLocalInputForFrame &&
+      _playerSlot !== 0 &&
+      !menuStartBarrier.suppressInput &&
+      !suppressLateJoinBootstrapInput &&
+      !suppressEjsPausedInput &&
+      !suppressResumeGuardInput &&
+      _extraInputDelay === 0;
     if (!hadLocalInputForFrame) {
       _localInputs[_frameNum] = localInput;
       _auditRecordLocal(_frameNum, localInput);
@@ -16652,6 +16670,10 @@
         ).buffer;
         if (inputDc?.readyState === 'open') {
           inputDc.send(peerBuf);
+          if (recordAuthorOnSend) {
+            _recordAuthoredOwnerInput(_frameNum, localInput);
+            recordAuthorOnSend = false;
+          }
           peer._knInputSend = { dc: inputDc, frame: _frameNum, at: nowSend };
           _rbTransportPacketsSent++;
           if (_catchUpTo >= 0) {
@@ -16720,8 +16742,13 @@
       return;
     }
 
+    const ownerGate = _ownerRepair ? _serviceOwnerRepair(window.EJS_emulator?.gameManager?.Module) : 'pass';
+    if (ownerGate === 'hold') {
+      _markTickReturn('skip:owner-proof');
+      return;
+    }
     // ── Pacing gate: skip frame advance but inputs were sent above ──────
-    if (_skipFrameAdvance) {
+    if (_skipFrameAdvance && ownerGate !== 'replay') {
       _markTickReturn(
         _runSubstate === RUN_RB_STALL ? 'skip:rb-stall' : _runSubstate === RUN_PACING ? 'skip:pacing' : 'skip:other',
       );
@@ -16863,7 +16890,7 @@
         // The mesh health check, which the JS lockstep path below runs too:
         // a C tick returns before reaching it (specs/mesh_heal.qnt).
         _meshHealthTick();
-        if (rbApplyFrame >= 0) {
+        if (rbApplyFrame >= 0 && ownerGate !== 'replay') {
           // Stall only when too far ahead for rollback to help
           const rbInputPeers = getInputPeers();
           // Prediction window. A remote input X that turns out mispredicted
@@ -16959,7 +16986,7 @@
           _checkPredictedKnown(rbInputPeers, rbApplyFrame);
         }
 
-        if (_delayRetunePending && !(tickMod._kn_get_replay_depth?.() > 0)) _recomputeDelay();
+        if (ownerGate !== 'replay' && _delayRetunePending && !(tickMod._kn_get_replay_depth?.() > 0)) _recomputeDelay();
 
         // ── Drain queued remote inputs into C engine ──────────────────────
         _drainPendingCInputs(tickMod);
@@ -17645,7 +17672,10 @@
           // or (after sustained safe operation) increment the cap for
           // the next rollback.
           _observeReplayTick(performance.now() - burstStart);
-          if (replayDone || (tickMod._kn_get_replay_depth?.() ?? 0) <= 0) _finishCReplay(tickMod);
+          if (replayDone || (tickMod._kn_get_replay_depth?.() ?? 0) <= 0) {
+            _finishCReplay(tickMod);
+            if (_ownerRepair) _serviceOwnerRepair(tickMod);
+          }
           // Overlay
           if (_frameNum % 15 === 0) {
             const dbg = document.getElementById('np-debug');
@@ -17670,6 +17700,12 @@
           return;
         }
 
+        if (_ownerRepair) {
+          // A native call which did not replay is never permission to step
+          // while the incident still owns this boundary.
+          _markTickReturn('skip:owner-proof-fence');
+          return;
+        }
         const applyFrame = _frameNum - DELAY_FRAMES;
         // Diagnostic: compare C ring input with JS _remoteInputs every 60 frames
         if (_frameNum % 60 === 0 && applyFrame >= 0) {
@@ -19423,6 +19459,303 @@
       },
       now,
     );
+  };
+
+  // Experimental fault-only owner path. Existing recovery owns retries.
+  let _ownerRepair = null;
+  // Generated, unsuppressed live inputs only. Identity + frame prevent a
+  // reused input object, resync placeholder, or replaced slot proving a frame.
+  const _authoredOwnerInputs = new Map();
+  const _normalOwnerMode = () =>
+    _phase === PHASE_RUNNING &&
+    _useCRollback &&
+    _hasKnSync &&
+    !RB_WORKER_COPROC &&
+    !_isSmashRemix() &&
+    !_isSpectator &&
+    !_demoMode &&
+    _activeRoster?.size >= 3 &&
+    _activeRoster.size <= 4;
+  const _ownerTuple = (i) => [i.buttons, i.lx, i.ly, i.cx, i.cy];
+  const _recordAuthoredOwnerInput = (frame, input) => {
+    if (_playerSlot === 0 || !_normalOwnerMode() || !socket?.id) return;
+    _authoredOwnerInputs.set(frame, {
+      epoch: _syncQueueEpoch,
+      sid: socket.id,
+      slot: _playerSlot,
+      input,
+      value: _ownerTuple(input),
+    });
+    if (_authoredOwnerInputs.size > INPUT_PAST_WINDOW_FRAMES)
+      _authoredOwnerInputs.delete(_authoredOwnerInputs.keys().next().value);
+  };
+  const _ownerSession = () => {
+    if (!_normalOwnerMode() || !socket?.id || !KNState.matchId) return null;
+    const member = (slot, peerKey, sid, gen) => ({
+      identity: { match: KNState.matchId, epoch: _syncQueueEpoch, slot, sid, gen },
+      peerKey,
+      active: true,
+      original: true,
+    });
+    if (!_activeRoster.has(_playerSlot)) return null;
+    const self = member(_playerSlot, socket.id, socket.id, 0);
+    const members = [self];
+    for (const [key, peer] of Object.entries(_peers)) {
+      if (
+        !_activeRoster.has(peer.slot) ||
+        _isPeerPendingLateJoin(key, peer) ||
+        peer._intentionalLeave ||
+        peer.synthetic ||
+        peer.reconnecting ||
+        _peerPhantom[peer.slot] ||
+        !_peerConnectionLive(peer)
+      )
+        continue;
+      const sid = _knownPlayers[key]?.socketId;
+      if (sid) members.push(member(peer.slot, key, sid, _syncQueueGen[key] || 0));
+    }
+    if (members.length !== _activeRoster.size || new Set(members.map((m) => m.identity.slot)).size !== members.length)
+      return null;
+    return { running: true, mode: 'normal-native', self, members };
+  };
+  const _ownerRelay = () =>
+    window.KNCore.recovery.createOwnerProofRelay({
+      socket: () => socket,
+      transport: { emit: (event, msg) => socket.emit(event, msg) },
+      session: _ownerSession,
+      checkRelayed: window.KNCore.checkRelayed,
+      now: () => performance.now(),
+      getProof: (token) => (_ownerRepair?.proof.token === token ? _ownerRepair.proof : undefined),
+      getAuthoredInput: (id) => {
+        const r = _authoredOwnerInputs.get(id);
+        return r &&
+          r.epoch === _syncQueueEpoch &&
+          r.sid === socket?.id &&
+          r.slot === _playerSlot &&
+          r.input === _localInputs[id]
+          ? { authored: true, value: r.value }
+          : undefined;
+      },
+      confirmed: (owner) => {
+        const result = new Map();
+        for (const f of _ownerRepair?.proof.missing || []) {
+          const i = _remoteInputs[owner.identity.slot]?.[f];
+          if (i && i !== KNShared.ZERO_INPUT) result.set(f, _ownerTuple(i));
+        }
+        return result;
+      },
+    });
+  const _currentOwnerRepairMember = (record, view) =>
+    view?.members.find((m) => {
+      const owner = record.proof.owner;
+      const local = m.identity;
+      return (
+        m.peerKey === record.peerKey &&
+        owner.sid === local.sid &&
+        owner.gen === local.gen &&
+        owner.match === local.match &&
+        owner.epoch === local.epoch &&
+        owner.slot === local.slot
+      );
+    });
+  const _ownerTopology = (view) =>
+    view.members
+      .filter((m) => m.identity.slot !== 0)
+      .map((m) => ({ slot: m.identity.slot, id: m.peerKey, generation: m.identity.gen }));
+  const _readOwnerPacket = (raw) => {
+    const result = _ownerRelay().onMessage(raw);
+    if (result?.kind !== 'accepted' || !_ownerRepair || _ownerRepair.fed || result.epoch !== _syncQueueEpoch) return;
+    _ownerRepair.proof = result.next;
+  };
+  const _startOwnerRepair = (peer, oldest, attempts, now) => {
+    if (
+      _ownerRepair ||
+      _catchUpTo >= 0 ||
+      !globalThis.crypto?.randomUUID ||
+      !_normalOwnerMode() ||
+      !window.KNCore?.recovery?.openOwnerInputProof
+    )
+      return false;
+    const view = _ownerSession();
+    const owner = view?.members.find((m) => m.identity.slot === peer.slot && _peers[m.peerKey] === peer);
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const failed = mod?._kn_get_failed_rollbacks?.();
+    if (
+      !owner ||
+      !Number.isSafeInteger(failed) ||
+      failed < 0 ||
+      mod._kn_get_frame?.() !== _frameNum ||
+      mod._kn_get_replay_depth?.() !== 0 ||
+      mod._kn_peek_pending_rollback?.() !== -1
+    )
+      return false;
+    const upper = _frameNum - DELAY_FRAMES;
+    const lower = Math.max(0, upper - KN_MAX_VISIBLE_ROLLBACK_DEPTH);
+    if (oldest < lower || oldest > upper) return false;
+    const ids = [];
+    for (const { peer: p, frame } of _missingConsumedInputs()) {
+      if (p !== peer || frame < lower) return false;
+    }
+    for (let f = Math.max(lower, _inputFloor(peer.slot)); f <= upper; f++) {
+      const input = _remoteInputs[peer.slot]?.[f];
+      if (!input || input === KNShared.ZERO_INPUT) ids.push(f);
+    }
+    if (!ids.includes(oldest)) return false;
+    const proof = window.KNCore.recovery.openOwnerInputProof({
+      owner: owner.identity,
+      token: globalThis.crypto.randomUUID(),
+      frame: _frameNum,
+      delay: DELAY_FRAMES,
+      cap: KN_MAX_VISIBLE_ROLLBACK_DEPTH,
+      missing: ids,
+      now,
+      ttl: 1000,
+    });
+    if (!proof) return false;
+    const topology = _ownerTopology(view);
+    const recipients = topology.filter((p) => attempts.some((a) => a.sid === p.id && a.slot === p.slot));
+    const publication = _openCapturePublication(
+      {
+        capture: {
+          epoch: _syncQueueEpoch,
+          frame: _frameNum,
+          deadline: now + 1000,
+          deliveryDeadline: now + OVERDUE_PUSH_QUIET_MS,
+          maxBytes: 24 * 1024 * 1024,
+          owner: { id: owner.peerKey, generation: owner.identity.gen },
+          recipients,
+        },
+        owners: topology.filter((p) => p.id === owner.peerKey),
+        topology,
+      },
+      attempts,
+      now,
+    );
+    if (!publication) return false;
+    _ownerRepair = { proof, publication, attempts, peerKey: owner.peerKey, failed, mod, fed: false };
+    if (!_ownerRelay().sendRequest(proof)) {
+      _ownerRepair = null;
+      _recovery.publication.cancelActive(_syncQueueEpoch, now);
+      return false;
+    }
+    _syncLog(`OWNER-INPUT-PROOF-HOLD f=${_frameNum} slot=${peer.slot} ids=${ids.length}`);
+    return true;
+  };
+  const _fallbackOwnerRepair = (record, reason) => {
+    if (_ownerRepair !== record) return;
+    _ownerRepair = null;
+    _recovery.publication.cancelActive(_syncQueueEpoch, performance.now());
+    _syncLog(`OWNER-INPUT-PROOF-FALLBACK unverified reason=${reason} f=${_frameNum}`);
+    const attempts = record.attempts.filter((a) => _recovery.current(a));
+    if (attempts.length && record.proof.owner.epoch === _syncQueueEpoch)
+      pushSyncState(null, false, { escalation: attempts });
+  };
+
+  // Called after normal local input sends. Only an already armed incident
+  // enters here: waiting suppresses forward simulation, not networking.
+  const _serviceOwnerRepair = (mod) => {
+    const r = _ownerRepair;
+    if (!r) return 'pass';
+    const now = performance.now();
+    const view = _ownerSession();
+    const owner = _currentOwnerRepairMember(r, view);
+    const depth = mod?._kn_get_replay_depth?.() ?? 0;
+    const pending = (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
+    const replaying = depth > 0 || pending;
+    if (
+      !owner ||
+      r.mod !== mod ||
+      !_recovery.ownsPublication(r.publication, r.attempts) ||
+      now >= r.proof.deadline ||
+      !_recovery.publication.holding()
+    ) {
+      // The established fallback must not take its snapshot halfway through
+      // native replay. Never call the sealed path after its deadline.
+      if (r.fed && r.mod === mod && replaying) return 'replay';
+      _fallbackOwnerRepair(r, 'expired or changed capture scope');
+      return 'hold';
+    }
+    if (!r.fed) {
+      if (
+        now >= r.proof.deadline ||
+        mod._kn_get_frame() !== r.proof.frame ||
+        _frameNum !== r.proof.frame ||
+        replaying
+      ) {
+        _fallbackOwnerRepair(r, 'proof not ready at the retained frame');
+        return 'hold';
+      }
+      if (r.proof.accepted.size < r.proof.missing.size) return 'hold';
+      const peer = _peers[r.peerKey];
+      const slot = peer?.slot;
+      const feed = [];
+      for (const [f, v] of r.proof.accepted) {
+        if (f < _inputFloor(slot)) {
+          _fallbackOwnerRepair(r, 'input floor changed');
+          return 'hold';
+        }
+        const current = _remoteInputs[slot]?.[f];
+        if (current && current !== KNShared.ZERO_INPUT) {
+          if (_ownerTuple(current).some((n, i) => n !== v[i])) {
+            _fallbackOwnerRepair(r, 'conflicting current owner receipt');
+            return 'hold';
+          }
+        } else feed.push([f, v]);
+      }
+      r.fed = true;
+      for (const [f, [buttons, lx, ly, cx, cy]] of feed) {
+        if (!_processInputPacket(r.peerKey, peer, KNShared.encodeInput(f, { buttons, lx, ly, cx, cy }).buffer)) {
+          _fallbackOwnerRepair(r, 'normal input path refused proof');
+          return 'hold';
+        }
+      }
+      _recovery.publication.owner(
+        r.publication,
+        {
+          epoch: _syncQueueEpoch,
+          complete: true,
+          currentOwner: { id: r.peerKey, slot, generation: owner.identity.gen },
+        },
+        now,
+      );
+    }
+    // A live replay must consume newly queued inputs through the ordinary
+    // native feeder. Completion later uses the existing replay-done hook.
+    _drainPendingCInputs(mod);
+    if ((mod._kn_get_replay_depth?.() ?? 0) > 0 || (mod._kn_peek_pending_rollback?.() ?? -1) >= 0) return 'replay';
+    const observe = () => {
+      const active = _ownerSession();
+      const current = _currentOwnerRepairMember(r, active);
+      const failed = mod._kn_get_failed_rollbacks();
+      const stillAgrees = [...r.proof.accepted].every(([id, value]) => {
+        const input = _remoteInputs[r.proof.owner.slot]?.[id];
+        return input && input !== KNShared.ZERO_INPUT && _ownerTuple(input).every((n, i) => n === value[i]);
+      });
+      return {
+        activeOwners: active ? _ownerTopology(active) : [],
+        allRequiredInputsConfirmed:
+          !!current &&
+          stillAgrees &&
+          _liveStateConfirmed(mod) &&
+          window.KNCore.recovery.ownerInputCaptureAllowed(r.proof, current.identity, performance.now(), {
+            frame: mod._kn_get_frame(),
+            pendingRollback: mod._kn_peek_pending_rollback() >= 0,
+            replayDepth: mod._kn_get_replay_depth(),
+            failedRollbacks: failed,
+            initialFailures: r.failed,
+            confirmedConsumedInputs: true,
+          }),
+        initialFailedRollbacks: r.failed,
+      };
+    };
+    const result = _sealAndPublishCapture(r.publication, observe, r.attempts);
+    if (!result) {
+      _fallbackOwnerRepair(r, 'native replay could not prove a same-frame snapshot');
+      return 'hold';
+    }
+    _ownerRepair = null;
+    _syncLog(`OWNER-INPUT-PROOF-SEALED f=${r.proof.frame} slot=${r.proof.owner.slot}`);
+    return 'hold'; // existing next tick is first forward step
   };
 
   const _ownedCaptureScope = (target) => ({

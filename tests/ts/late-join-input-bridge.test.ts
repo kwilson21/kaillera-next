@@ -104,6 +104,7 @@ function setupJoin(msg: LateJoinStateFixture, replaceSource = false, direct = fa
     ${part('  const _backfillCInputsFromJs =', '  // Guest: a resync has')}
     _backfillCInputsFromJs(mod,'rollback-init');
     ${part('  const RB_INPUT_ASK_EVERY_MS =', '  // One more ask for the oldest frame')}
+    const _ownerRepair=null;
     const runOne = () => {
       ticks.push('local send');
       ${src.includes('    if (_waitForLateJoinOriginalInput())') ? part('    if (_waitForLateJoinOriginalInput())', '    // ── Pacing gate') : ''}

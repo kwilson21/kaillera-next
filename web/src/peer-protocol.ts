@@ -29,6 +29,7 @@
 import { Result, Schema } from 'effect';
 import { GameMode, RenegotiateRequest } from './protocol.ts';
 import { issueFinder, type WirePayload } from './wire.ts';
+import { decodeOwnerProof, OWNER_PROOF_REPLY, OWNER_PROOF_REQUEST } from './owner-proof-wire.ts';
 
 // ── control strings ─────────────────────────────────────────────────────────
 
@@ -252,6 +253,8 @@ const typeOf = (message: WirePayload): string | null => {
 export const checkPeerJson = (route: JsonRoute, message: WirePayload): PeerVerdict => {
   const type = typeOf(message);
   if (type === null) return { kind: `${route} (no type)`, issue: 'Expected an object with a string "type"' };
+  if (route === 'data-message' && (type === OWNER_PROOF_REQUEST || type === OWNER_PROOF_REPLY))
+    return { kind: `${route} ${type}`, issue: decodeOwnerProof(message) ? null : 'Invalid bounded owner proof' };
   const find = jsonFinders.get(`${route} ${type}`);
   // The type came off the wire: it names the report only when it is a known one.
   if (find === undefined) return { kind: `${route} (unknown type)`, issue: 'Unknown message type' };

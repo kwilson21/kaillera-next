@@ -1,3 +1,5 @@
+import { createOwnerProofRelay } from './owner-proof-relay.ts';
+import { openProof as openOwnerInputProof, captureAllowed as ownerInputCaptureAllowed } from './owner-proof.ts';
 import { createRecoveryManager } from './recovery-delivery.ts';
 import { createRecoveryTransferPool } from './recovery-transfer.ts';
 /**
@@ -363,7 +365,13 @@ export const KNCore = {
   /** The per-peer machine, driven from the rollback engine's events (peer-driver.ts). */
   peerDriver: { createPeerDriver },
   /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */
-  recovery: { createRecoveryManager, createRecoveryTransferPool },
+  recovery: {
+    createRecoveryManager,
+    createRecoveryTransferPool,
+    createOwnerProofRelay,
+    openOwnerInputProof,
+    ownerInputCaptureAllowed,
+  },
   resyncRequest: {
     answersAnOlderRequest,
     endsRequest,
