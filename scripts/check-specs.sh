@@ -730,6 +730,11 @@ $QUINT typecheck specs/late_join_drop_ready.qnt
 $QUINT test specs/late_join_drop_ready.qnt --main=late_join_drop_ready_before --backend="$BACKEND"
 $QUINT test specs/late_join_drop_ready.qnt --main=late_join_drop_ready_fixed --backend="$BACKEND"
 $QUINT run specs/late_join_drop_ready.qnt --main=late_join_drop_ready_fixed --invariant=noUnreadyMeshAdmission --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+# Host roster input-ownership window in front of the delayed apply frame.
+$QUINT typecheck specs/late_join_input_admission.qnt
+$QUINT test specs/late_join_input_admission.qnt --main=late_join_input_admission_before --backend="$BACKEND"
+$QUINT test specs/late_join_input_admission.qnt --main=late_join_input_admission_fixed --backend="$BACKEND"
+
 # Touch shortcut input ownership: release/cancel cannot clear real controls.
 $QUINT test specs/reset_combo.qnt --backend="$BACKEND"
 $QUINT run specs/reset_combo.qnt --invariant='otherInputPreserved and releasedMeansNoShortcut' --max-samples=1000 --max-steps=20 --backend="$BACKEND"

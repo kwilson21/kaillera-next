@@ -1808,9 +1808,58 @@
   // with the peer's other input state (resetPeerState, I2) and with every
   // input timeline.
   let _resendAtSwitch = {};
+  // Host roster input ownership. A late generation cannot supply input IDs
+  // before the host's admission frame, even on an established page behind it.
+  let _lastInputRoster = null;
+  let _lastInputRosterFrame = -1;
+  const _lateJoinInputWindows = new Map();
+  const _clearLateJoinInputRoster = () => {
+    _lastInputRoster = null;
+    _lastInputRosterFrame = -1;
+    _lateJoinInputWindows.clear();
+  };
+  const _recordHostInputRoster = (frame, slots) => {
+    if (!Number.isSafeInteger(frame) || frame < 0 || frame < _lastInputRosterFrame) return false;
+    const roster = new Set(slots);
+    for (let slot = 0; slot < 4; slot++) {
+      if (!roster.has(slot) && (!_lastInputRoster || _lastInputRoster.has(slot))) {
+        _lateJoinInputWindows.set(slot, { absentSince: frame, first: null, connected: false, primed: false });
+      } else if (roster.has(slot) && _lastInputRoster && !_lastInputRoster.has(slot)) {
+        const record = _lateJoinInputWindows.get(slot);
+        if (record) {
+          record.first = frame;
+          _syncLog(`LATE-JOIN-INPUT-FLOOR slot=${slot} first=${frame} absentSince=${record.absentSince}`);
+        }
+      }
+    }
+    _lastInputRoster = roster;
+    _lastInputRosterFrame = frame;
+    return true;
+  };
+  const _admissionInputFloor = (slot) => _lateJoinInputWindows.get(slot)?.first ?? 0;
+  const _waitingForHostAdmission = (slot) => _lateJoinInputWindows.get(slot)?.first === null;
+  const _observeLateJoinDcOpen = (slot) => {
+    const record = _lateJoinInputWindows.get(slot);
+    if (!record || (record.first !== null && record.connected)) return false;
+    record.connected = true;
+    return true;
+  };
+  const _primeLateJoinInactiveInput = (mod, slot) => {
+    const record = _lateJoinInputWindows.get(slot);
+    if (!record || record.first === null || record.primed || slot === _playerSlot) return;
+    record.primed = true;
+    const lookback = _rbRollbackMax + DELAY_FRAMES;
+    if (_frameNum - lookback >= record.first) return;
+    const start = Math.max(record.absentSince, record.first - lookback);
+    // Without an explicit value the existing C core can predict backward
+    // from the first rejoined input. Only prime IDs for an absent slot.
+    for (let id = start; id < record.first; id++) mod._kn_feed_input(slot, id, 0, 0, 0, 0, 0);
+    if (start < record.first) _syncLog(`LATE-JOIN-INACTIVE-INPUT slot=${slot} frames=${start}..${record.first - 1}`);
+  };
   // The oldest input from `slot` that can still be missing: nothing before
   // the rollback init or the last resync is waited for.
-  const _inputFloor = (slot) => Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0);
+  const _inputFloor = (slot) =>
+    Math.max(0, _rbInitFrame - DELAY_FRAMES, _inputSettledBefore[slot] ?? 0, _admissionInputFloor(slot));
   // Test only (tests/rb-two-player.mjs PAST_WINDOW_FORCED): the edge stall
   // lets this one frame through, so a held input arrives past the rollback
   // window and INPUT-PAST-WINDOW-MISMATCH, which that stall guards in normal
@@ -1925,10 +1974,11 @@
       // Fed, a returning peer's backlog would be compared with what this page
       // predicted while it ran alone, dozens of frames too deep to roll back,
       // and counted as failed rollbacks the resync is about to make moot.
-      if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {
+      if (qi.frame < Math.max(_inputSettledBefore[qi.slot] ?? 0, _admissionInputFloor(qi.slot))) {
         settledSkipped++;
         continue;
       }
+      _primeLateJoinInactiveInput(tickMod, qi.slot);
       _feedWatched(tickMod, qi.slot, qi.frame, () =>
         tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy),
       );
@@ -5234,7 +5284,9 @@
         // Past _frameNum a ZERO_INPUT is a late-join placeholder, not a received input. Fed as
         // real, a different real input arriving later would overwrite it without a rollback.
         // (Placeholders at or before _frameNum are fed, as before.)
-        if (!input || (frame > _frameNum && input === KNShared.ZERO_INPUT)) continue;
+        if (!input || frame < _admissionInputFloor(slot) || (frame > _frameNum && input === KNShared.ZERO_INPUT))
+          continue;
+        _primeLateJoinInactiveInput(mod, slot);
         if (_feedCInput(mod, slot, frame, input)) {
           remoteFed++;
           fedThrough = Math.max(fedThrough, frame);
@@ -9304,6 +9356,7 @@
     }
     const decoded = KNShared.decodeInput(data);
     const recvFrame = decoded.frame;
+    if (recvFrame < _admissionInputFloor(peer.slot)) return false;
     // Bounds-check the remote frame number. A malicious peer could send
     // frame=-999 or frame=_frameNum+1e6 to poison the rollback ring buffer
     // or trigger massive memory churn in the input maps. Legitimate frames
@@ -9394,7 +9447,7 @@
     // error-correction sense.
     if (decoded.redundant && decoded.redundant.length > 0) {
       for (const r of decoded.redundant) {
-        if (r.frame < 0) continue;
+        if (r.frame < _admissionInputFloor(peer.slot)) continue;
         const redundantInput = {
           buttons: r.buttons,
           lx: r.lx,
@@ -9598,6 +9651,19 @@
         startSpectatorStreamForPeer(remoteSid);
       }
 
+      // Opening a late joiner's channel is not an in-place reconnect.
+      // The host's pending serve remains until the normal admission path.
+      const lateJoinDc =
+        _phase === PHASE_RUNNING &&
+        !_lateJoin &&
+        _isValidPlayerSlot(peer.slot) &&
+        (_observeLateJoinDcOpen(peer.slot) || _isPeerPendingLateJoin(remoteSid, peer));
+      if (lateJoinDc && peer.reconnecting) {
+        if (peer._reconnectTimeout) clearTimeout(peer._reconnectTimeout);
+        peer._reconnectTimeout = null;
+        peer.reconnecting = false;
+        _config?.onReconnecting?.(remoteSid, false);
+      }
       // If this is a reconnect, clear reconnecting state and resync
       if (peer.reconnecting) {
         if (peer._reconnectTimeout) {
@@ -9850,15 +9916,27 @@
           return;
         }
         if (e.data.startsWith('roster:')) {
+          if (peer.slot !== 0 || peer.dc !== ch) return;
           const parts = e.data.split(':');
           const rosterFrame = parseInt(parts[1], 10);
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
+          if (!_recordHostInputRoster(rosterFrame, slots)) return;
           const previousRoster = _activeRoster ? new Set(_activeRoster) : null;
+          if (previousRoster) {
+            for (const slot of previousRoster) {
+              if (slot === _playerSlot || slots.includes(slot) || !_waitingForHostAdmission(slot)) continue;
+              const [sid, departing] = _peerEntryForSlot(slot) || [];
+              resetPeerState(slot, 'host roster removed', { peer: departing, sid });
+            }
+          }
           _clearPendingLateJoinRosterSlots(slots, 'host roster');
           _activeRoster = new Set(slots);
           _rosterChangeFrame = _frameNum;
           _applyControllerPresentMask('roster');
           const addedSlots = slots.filter((slot) => _isValidPlayerSlot(slot) && !previousRoster?.has(slot));
+          for (const slot of addedSlots) {
+            if (slot !== _playerSlot && _admissionInputFloor(slot) > 0) _awaitFirstInputAfterReset[slot] = true;
+          }
           if (_phase === PHASE_RUNNING && addedSlots.length > 0) {
             _startLateJoinInputBootstrap('roster added slot', addedSlots);
           }
@@ -10571,7 +10649,9 @@
       queueMicrotask(() => _endLateJoinPauseIfNoneServed(`${reason} for ${leftSid}`));
     }
 
-    // Slot-indexed globals
+    // Slot-indexed globals. A transport reset does not change host admission.
+    const inputWindow = _lateJoinInputWindows.get(slot);
+    if (inputWindow) inputWindow.primed = false;
     _clearSlotInputState(slot);
     delete _peerLastAdvanceTime[slot];
     delete _peerPhantom[slot];
@@ -10960,7 +11040,13 @@
         if (p.slot === null || p.slot === undefined) continue;
         if (_isPeerPendingLateJoin(sid, p)) continue;
         if (!_activeRoster.has(p.slot)) continue;
-        if (_isLateJoinActivationGrace(p.slot) && !_peerInputStarted[p.slot]) continue;
+        const admission = _admissionInputFloor(p.slot);
+        if (
+          _isLateJoinActivationGrace(p.slot) &&
+          !_peerInputStarted[p.slot] &&
+          (admission === 0 || _frameNum - DELAY_FRAMES < admission)
+        )
+          continue;
         const existing = bySlot.get(p.slot);
         if (!existing || (p.dc?.readyState === 'open' && existing.dc?.readyState !== 'open')) {
           bySlot.set(p.slot, p);
@@ -12351,6 +12437,12 @@
       }
     }
     const slots = [...slotSet].sort((a, b) => a - b);
+    _recordHostInputRoster(_frameNum, slots);
+    for (const slot of slots) {
+      if (slot !== _playerSlot && !_activeRoster?.has(slot) && _admissionInputFloor(slot) > 0) {
+        _awaitFirstInputAfterReset[slot] = true;
+      }
+    }
     _activeRoster = slotSet;
     _rosterChangeFrame = _frameNum;
     _applyControllerPresentMask('broadcast-roster');
@@ -14411,6 +14503,7 @@
       // Fresh match (late join sets _frameNum first). Input buffers were already cleared on entering LOCKSTEP_READY;
       // a peer that started first may have sent frames 0+.
       _activeRoster = null;
+      _clearLateJoinInputRoster();
       _pendingLateJoinPeerSids.clear();
       _pendingLateJoinPeerSlots.clear();
       // Players left out of this start stay held as late joiners: the late
@@ -14545,6 +14638,7 @@
           );
         }
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        for (const record of _lateJoinInputWindows.values()) record.primed = false;
         // The desync detector reports a frame only once it is this far
         // behind the newest one: the engine never replays further back.
         window.KNDesync?.setConfirmWindow?.(rollbackMax);
@@ -16107,7 +16201,7 @@
       const stallPeers = getInputPeers();
       const stallApplyFrame = _frameNum - DELAY_FRAMES;
       for (const p of stallPeers) {
-        if (_peerPhantom[p.slot]) continue;
+        if (_peerPhantom[p.slot] || stallApplyFrame < _admissionInputFloor(p.slot)) continue;
         const last = _peerLastAdvanceTime[p.slot];
         if (last === undefined) continue;
         const stale = nowStall - last;
@@ -16162,6 +16256,7 @@
         // Detect phantom peers — those that haven't advanced for PEER_DEAD_MS
         const nowPacing = performance.now();
         for (const p of inputPeersForPacing) {
+          if (_frameNum - DELAY_FRAMES < _admissionInputFloor(p.slot)) continue;
           if (!_peerPhantom[p.slot] && _peerLastAdvanceTime[p.slot] !== undefined) {
             if (nowPacing - _peerLastAdvanceTime[p.slot] >= PEER_DEAD_MS) {
               _peerPhantom[p.slot] = true;
@@ -16177,7 +16272,7 @@
         let minRemoteFrame = Infinity;
         let activePacingPeers = 0;
         for (const p of inputPeersForPacing) {
-          if (_peerPhantom[p.slot]) continue; // skip dead peers
+          if (_peerPhantom[p.slot] || _frameNum - DELAY_FRAMES < _admissionInputFloor(p.slot)) continue;
           const rf = _lastRemoteFramePerSlot[p.slot] ?? -1;
           if (rf < minRemoteFrame) minRemoteFrame = rf;
           activePacingPeers++;
@@ -16289,7 +16384,7 @@
               // Find the peer holding minRemoteFrame and force-phantom it
               let slowestSlot = -1;
               for (const p of inputPeersForPacing) {
-                if (_peerPhantom[p.slot]) continue;
+                if (_peerPhantom[p.slot] || _frameNum - DELAY_FRAMES < _admissionInputFloor(p.slot)) continue;
                 const rf = _lastRemoteFramePerSlot[p.slot] ?? -1;
                 if (rf === minRemoteFrame) {
                   slowestSlot = p.slot;
@@ -16694,6 +16789,7 @@
           const stallThreshold = _rbInputStallThreshold();
           for (const p of rbInputPeers) {
             if (_peerPhantom[p.slot]) continue;
+            if (rbApplyFrame < _admissionInputFloor(p.slot)) continue;
             const peerFrame = _lastRemoteFramePerSlot[p.slot] ?? -1;
             const windowEdge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
             // Apply frames before init - delay ran in lockstep on the legacy
@@ -18505,6 +18601,7 @@
       const _missingSlots = [];
       for (let j = 0; j < inputPeers.length; j++) {
         const pSlot = inputPeers[j].slot;
+        if (applyFrame < _admissionInputFloor(pSlot)) continue;
         if (!_remoteInputs[pSlot] || _remoteInputs[pSlot][applyFrame] === undefined) {
           allArrived = false;
           _missingSlots.push(pSlot);
@@ -20389,6 +20486,7 @@
     _endHostStateRetry();
     _clearStartSteps();
     _startCohortSlots = null;
+    _clearLateJoinInputRoster();
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};
