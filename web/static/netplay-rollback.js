@@ -1854,7 +1854,11 @@
     const start = Math.max(record.absentSince, record.first - lookback);
     // Without an explicit value the existing C core can predict backward
     // from the first rejoined input. Only prime IDs for an absent slot.
-    for (let id = start; id < record.first; id++) mod._kn_feed_input(slot, id, 0, 0, 0, 0, 0);
+    for (let id = start; id < record.first; id++) {
+      // Still observe a correction to a state already sent. Unlike a live
+      // input, this does not clear the first-input wait or escalate a miss.
+      _feedWatchedFrame(mod, slot, id, () => mod._kn_feed_input(slot, id, 0, 0, 0, 0, 0));
+    }
     if (start < record.first) _syncLog(`LATE-JOIN-INACTIVE-INPUT slot=${slot} frames=${start}..${record.first - 1}`);
   };
   // The oldest input from `slot` that can still be missing: nothing before

@@ -207,7 +207,7 @@ def test_resync_settles_the_inputs_before_its_frame():
         "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
     )
     assert re.search(
-        r"if \(timelineAligned\) \{\s*_lastAppliedRecoveryId = Math.max\(_lastAppliedRecoveryId, recoveryId\);\s*_settleInputsAtResync\(gm.Module, frame, recoveryId\);\s*\}",
+        r"if \(timelineAligned\) \{\s*_lastAppliedRecoveryId = Math.max\(_lastAppliedRecoveryId, recoveryId\);\s*_settleInputsAtResync\(gm.Module, frame, recoveryId\);",
         src[apply_idx:],
     )
 
@@ -466,6 +466,8 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
     helper_start = src.index("const INPUT_PAST_WINDOW_FRAMES =")
     helper_end = src.index("// -- Audio (delegated", helper_start)
     helpers = src[helper_start:helper_end]
+    roster_start = src.index("  let _lastInputRoster =")
+    roster = src[roster_start : src.index("  // The oldest input", roster_start)]
     script = textwrap.dedent(
         f"""
         const calls = [];
@@ -473,6 +475,7 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         const DELAY_FRAMES = 3;
         const _frameNum = 900;
         const _playerSlot = 0;
+        const RB_WORKER_COPROC = false;
         const _localInputs = {{}};
         const _remoteInputs = {{ 1: {{}} }};
         const _syncLog = () => {{}};
@@ -486,8 +489,14 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         _remoteInputs[1][920] = KNShared.ZERO_INPUT;
         _remoteInputs[1][963] = {{ buttons: 963, lx: 0, ly: 0, cx: 0, cy: 0 }};
         _remoteInputs[1][964] = {{ buttons: 964, lx: 0, ly: 0, cx: 0, cy: 0 }};
-        eval({json.dumps(helpers)} + "\\n_backfillCInputsFromJs(mod, 'rollback-init');");
-        process.stdout.write(JSON.stringify(calls.map((call) => [call[0], call[1]])));
+        eval({json.dumps(helpers)} + {json.dumps(roster)} + `
+          _backfillCInputsFromJs(mod, 'rollback-init');
+          const ordinary = calls.splice(0);
+          _recordHostInputRoster(894, [0, 2]);
+          _recordHostInputRoster(900, [0, 1, 2]);
+          _backfillCInputsFromJs(mod, 'rollback-init');
+          process.stdout.write(JSON.stringify([ordinary, calls]));
+        `);
         """
     )
     result = subprocess.run(
@@ -498,8 +507,13 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         timeout=10,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    fed = json.loads(result.stdout)
-    assert fed == [[1, frame] for frame in range(889, 911)] + [[1, 963]]
+    ordinary, admitted = json.loads(result.stdout)
+    assert [call[:2] for call in ordinary] == [[1, frame] for frame in range(889, 911)] + [[1, 963]]
+    assert admitted == (
+        [[1, frame, 0, 0, 0, 0, 0] for frame in range(894, 900)]
+        + [[1, frame, frame, 0, 0, 0, 0] for frame in range(900, 911)]
+        + [[1, 963, 963, 0, 0, 0, 0]]
+    )
 
     assert "_backfillCInputsFromJs(detMod, 'rollback-init');" in src
     input_guard_start = src.index("const _processInputPacket =")
@@ -560,7 +574,7 @@ def test_a_settled_input_is_not_fed_to_the_engine():
     src = LOCKSTEP_JS.read_text()
     drain = src[src.index("const _drainPendingCInputs = (tickMod) => {") :]
     drain = drain[: drain.index("\n  };\n")]
-    skip = drain.index("if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {")
+    skip = drain.index("if (qi.frame < Math.max(_inputSettledBefore[qi.slot] ?? 0, _admissionInputFloor(qi.slot))) {")
     assert skip < drain.index("tickMod._kn_feed_input(qi.slot, qi.frame,")
     # The host settles the guest's backlog when it schedules the recovery
     # resync: that state is for this frame or a later one. A guest does not:

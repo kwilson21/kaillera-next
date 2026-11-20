@@ -76,10 +76,13 @@ def test_a_queued_transfer_never_reaches_a_new_connection():
     src = ENGINE.read_text()
     push = src[src.index("const pushSyncState = async (") :]
     # The targets and their connections are taken with the state, before any await.
-    capture = push.index("const targets = _syncTargetsFor(targetSid);")
-    assert push.index("const frame = _frameNum;") < capture < push.index("await ")
-    assert "_syncQueueGen[targetSid] || 0" in push[capture : push.index("await ")]
-    assert "sendSyncChunks(compressed, frame, targets, isProactive, requestIds, attempts)" in push
+    capture = push.index("const available = _syncTargetsFor(targetSid);")
+    copy = push.index("mod._kn_sync_read(")
+    first_await = push.index("await ")
+    assert push.index("const frame = capturedPublication?.frame ?? _frameNum;") < capture
+    assert capture < copy < first_await
+    assert "_syncQueueGen[targetSid] || 0" in push[capture:copy]
+    assert "sendSyncChunks(compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver)" in push
     assert "if (!_syncTargetCurrent(socketTarget)) {" in push
     targets_for = _block(src, "const _syncTargetsFor = (targetSid) => {")
     assert "epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0" in targets_for

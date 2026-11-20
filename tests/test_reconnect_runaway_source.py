@@ -72,13 +72,13 @@ def test_an_overdue_ask_is_decided_by_the_proved_rule_and_ends_in_a_resync():
     count = src[src.index("const _countOverdueAsk = (peer, oldest, now) => {") :]
     count = count[: count.index("\n  };\n")]
     assert "window.KNCore.resyncRequest.overdueAskStep(" in count
-    assert "_escalateLostInput(peer, step, now, oldest);" in count
+    assert "_escalateLostInput(peer, step, now, oldest, true);" in count
     # A push out, or a hole whose pushes ran out, holds the step (it says
     # wait, not push to nothing).
     assert "isHost ? _escalationHeld(slot, oldest) : _resyncRequestInFlight" in count
     assert "isHost ? _escalationHeld(slot, frame) : _resyncRequestInFlight" in src
     escalate = src[
-        src.index("const _escalateLostInput = (peer, step, now, hole) => {") :
+        src.index("const _escalateLostInput = (peer, step, now, hole, atOverdue = false) => {") :
     ]
     escalate = escalate[: escalate.index("\n  };\n")]
     # The first push goes to every guest (escalation_peers); the hole keeps

@@ -10,6 +10,7 @@ import {
   captureAllowed as ownerInputCaptureAllowed,
 } from '../../web/src/owner-proof.ts';
 import { checkRelayed } from '../../web/src/relay.ts';
+import * as syncSend from '../../web/src/sync-send.ts';
 
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 function part(from: string, to: string): string {
@@ -24,11 +25,12 @@ function fn(name: string) {
   return source.slice(start, source.indexOf('\n  };', start) + 5);
 }
 
-function room() {
+function room(realTransfer = false) {
   const context = vm.createContext({
     createRecoveryManager,
     createRecoveryTransferPool,
     createOwnerProofRelay,
+    syncSend,
     openOwnerInputProof,
     ownerInputCaptureAllowed,
     checkRelayed,
@@ -66,7 +68,7 @@ function room() {
       _kn_sync_read(){ reads.push(nativeFrame); this.HEAPU8[1]=nativeFrame%256; this.HEAPU8[2]=99; return 2; },
     };
     const window={
-      KNCore:{checkRelayed,recovery:{createOwnerProofRelay,openOwnerInputProof,ownerInputCaptureAllowed}},
+      KNCore:{checkRelayed,syncSend,recovery:{createOwnerProofRelay,openOwnerInputProof,ownerInputCaptureAllowed}},
       EJS_emulator:{gameManager:{Module:mod,getState(){throw Error('late or raw state escaped');}}},
     };
     const _localInputs={}, _remoteInputs={1:{},2:{},3:{}}, nativeFed=[], _inputFloor=()=>1066;
@@ -81,10 +83,23 @@ function room() {
     const ensureSyncBuffer=()=>{};
     const _recovery=createRecoveryManager({timeoutMs:5000,quietMs:20000,maxPushes:3},()=>{});
     const _recoveryTransfers=createRecoveryTransferPool();
+    const headerWrites=[], settled=[];
+    const stateChannel=(name)=>({readyState:'open', bufferedAmount:0, send(msg){
+      headerWrites.push([name, typeof msg==='string' ? msg : [...msg]]);
+    }});
+    const _settleInputsBefore=(slot,frame)=>settled.push([slot,frame]);
+    const SYNC_SEND_LOW_WATER=64000, SYNC_SEND_POLL_MS=1, SYNC_SEND_STALL_MS=1000;
+    const getActivePeers=()=>Object.values(_peers);
+    ${
+      realTransfer
+        ? part('  const _syncTargetsFor =', '  // One state transfer at a time') + fn('_sendSyncChunksTo')
+        : `
     const _syncTargetsFor=(sid)=>Object.entries(_peers).filter(([id])=>!sid||id===sid)
       .map(([id,peer])=>({sid:id,peer,epoch:_syncQueueEpoch,gen:_syncQueueGen[id]}));
     const _syncTargetCurrent=(t)=>t.epoch===_syncQueueEpoch && t.peer===_peers[t.sid] && t.gen===_syncQueueGen[t.sid];
     const _sendSyncChunksTo=async (t,bytes,frame)=>{shipments.push({sid:t.sid,frame,bytes:[...bytes]}); return 'sent'};
+    `
+    }
     const _onEscalationTransfer=(attempts,sid,sent,frame)=>outcomes.push([attempts.length,sid,sent,frame]);
     const _getTop=()=>_syncTargetsFor(null).map(t=>({id:t.sid,slot:t.peer.slot,generation:t.gen}));
     const observe=()=>({activeOwners:_getTop(),allRequiredInputsConfirmed:true,initialFailedRollbacks:0});
@@ -129,6 +144,46 @@ test('normal push does not enter a publication hold or change the captured frame
   const out = JSON.parse(run('summary()'));
   assert.deepEqual(out.reads, [1076]);
   assert.deepEqual(out.shipments, [{ sid: 'a', frame: 1076, bytes: [52, 99] }]);
+});
+
+test('ordinary state snapshots keep the frame and old recipient identity across both async queues', async () => {
+  for (const wait of ['compression', 'channel-chain'] as const) {
+    const run = room(true);
+    run(`
+      let resumeChain;
+      _knownPlayers.a.socketId='old-socket';
+      _peers.a.syncDc=stateChannel('old');
+      _peers.b.syncDc=stateChannel('healthy');
+      ${
+        wait === 'compression'
+          ? 'compressGate=new Promise(resolve=>{allowCompression=resolve});'
+          : '_syncSendChains.a=new Promise(resolve=>{resumeChain=resolve});'
+      }
+      const pendingBroadcast=pushSyncState(null,false,{requestIds:{a:71,b:72}});
+    `);
+    // The frame and the capture are from before we can enter either await.
+    assert.deepEqual(JSON.parse(run('summary()')).reads, [1076]);
+    await flush();
+    run(`
+      _frameNum=1077; nativeFrame=1077; _syncQueueGen.a++;
+      _peers.a={slot:1,syncDc:stateChannel('replacement')};
+      _knownPlayers.a.socketId='new-socket';
+      mod.HEAPU8[1]=222;
+      ${wait === 'compression' ? 'allowCompression();' : 'resumeChain();'}
+    `);
+    await run('pendingBroadcast');
+    assert.deepEqual(
+      JSON.parse(run('JSON.stringify(headerWrites)')),
+      [
+        ['healthy', 'sync-answer-id:72'],
+        ['healthy', 'sync-recovery-id:0'],
+        ['healthy', 'sync-start:1076:1:1:0'],
+        ['healthy', [52, 99]],
+      ],
+      wait,
+    );
+    assert.deepEqual(JSON.parse(run('JSON.stringify(settled)')), [[2, 1076]], wait);
+  }
 });
 
 test('armed incident blocks direct, deadline-driven and separate late-join reads; expiry releases eligible work', async () => {

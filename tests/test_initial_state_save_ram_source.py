@@ -17,10 +17,14 @@ def _body(name: str) -> str:
 
 
 def test_every_initial_save_state_carries_save_ram():
-    for start in [i for i in range(len(SRC)) if SRC.startswith("_emitSaveStateToPlayers({", i)]:
+    sends = [i for i in range(len(SRC)) if SRC.startswith("_emitSaveStateToPlayers({", i)]
+    assert sends
+    for start in sends:
         message = SRC[start : SRC.index("});", start)]
         assert "saveRam," in message
-    assert "_emitSaveStateToPlayers = (msg) => {\n    socket.emit('data-message', { ...msg, toPlayers: true });" in SRC
+    start = SRC.index("const _emitSaveStateToPlayers = (msg) => {")
+    emit = SRC[start : SRC.index("\n  };\n", start)]
+    assert "socket.emit('data-message', { ...msg, toPlayers: true });" in emit
 
 
 def test_cached_guest_waits_for_the_host_save_state():
