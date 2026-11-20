@@ -738,6 +738,12 @@ $QUINT test specs/recovery_delivery.qnt --main=recovery_budget_identity_before -
 $QUINT test specs/recovery_delivery.qnt --main=recovery_budget_identity_fixed --backend="$BACKEND"
 $QUINT run specs/recovery_delivery.qnt --main=recovery_budget_identity_fixed --invariant=rotationCannotRenew --max-samples=10000 --max-steps=20 --backend="$BACKEND"
 
+# Review orderings: repeated serves, deferred readiness, roster gaps and identity churn.
+$QUINT typecheck specs/recovery_review.qnt
+$QUINT test specs/recovery_review.qnt --main=recovery_review_before --backend="$BACKEND"
+$QUINT test specs/recovery_review.qnt --main=recovery_review_fixed --backend="$BACKEND"
+$QUINT run specs/recovery_review.qnt --main=recovery_review_fixed --invariant=allHold --max-samples=10000 --max-steps=30 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

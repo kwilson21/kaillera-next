@@ -684,3 +684,55 @@ test('persistent player budget expires and match reset clears it across new sock
   manager.resetAll();
   assert.equal(manager.begin(1, 5, [{ slot: 1, sid: 'next-match', playerId: 'p' }], 100, 30001, true).length, 1);
 });
+
+test('roster omission on the same authenticated connection cannot renew capture budget', () => {
+  const run = room(1);
+  run("_knownPlayers.a={persistentId:'player-a'}");
+  for (let i = 0; i < 3; i++) {
+    run(`_escalateLostInput(_peers.a,'push',now,${900 + i});`);
+    run(`const attempt${i}=sends.at(-1).options.escalation[0];
+      _onEscalationTransfer([attempt${i}], 'a', true, 1000);
+      _recovery.acknowledge(1,997,attempt${i}.wireId);`);
+  }
+  run("delete _knownPlayers.a; _escalateLostInput(_peers.a,'push',now,904)");
+  assert.equal(run('sends.length'), 3);
+  assert.equal(run('JSON.stringify(drops)'), '["a"]');
+});
+
+test('client identity churn cannot exceed the room capture window; expiry and match reset release it', () => {
+  const notices: string[] = [];
+  const manager = createRecoveryManager({ timeoutMs: 5000, quietMs: 20000, maxPushes: 3 }, (n) =>
+    notices.push(n.attempt.sid),
+  );
+  for (let i = 0; i < 9; i++) {
+    assert.equal(
+      manager.begin(1, i, [{ slot: 1, sid: `socket-${i}`, playerId: `player-${i}` }], 100, i * 1000, true).length,
+      1,
+    );
+    manager.reset(1);
+  }
+  assert.equal(manager.begin(1, 10, [{ slot: 1, sid: 'fresh', playerId: 'fresh' }], 100, 9000, true).length, 0);
+  assert.deepEqual(notices, ['fresh']);
+  manager.reset(1);
+  assert.equal(manager.begin(1, 11, [{ slot: 1, sid: 'fresh', playerId: 'fresh' }], 100, 30000, true).length, 1);
+  manager.reset(1);
+  manager.resetAll();
+  assert.equal(manager.begin(1, 12, [{ slot: 1, sid: 'fresh', playerId: 'fresh' }], 100, 30001, true).length, 1);
+});
+
+test('room cap stops actual capture and compression before a fresh identity can broadcast', async () => {
+  const run = room(1, true);
+  for (let i = 0; i < 9; i++) {
+    run(`_knownPlayers.a={persistentId:'identity-${i}'};
+      _escalateLostInput(_peers.a,'push',now,${900 + i});`);
+    await flush();
+    run("pendingTransports.at(-1).resolve('sent')");
+    await flush();
+    run('_recovery.reset(1)');
+  }
+  assert.equal(run('compressions'), 9);
+  run("_knownPlayers.a={persistentId:'fresh'};_escalateLostInput(_peers.a,'push',now,999)");
+  await flush();
+  assert.equal(run('compressions'), 9);
+  assert.equal(run('JSON.stringify(drops)'), '["a"]');
+});

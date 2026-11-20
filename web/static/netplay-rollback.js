@@ -5432,7 +5432,7 @@
   const _escalationHeld = (slot, hole) => _recovery.held(slot, hole, _syncEnabled);
   const _forgetHolePushes = (slot) => _recovery.forgetHistory(slot);
 
-  const _handleRecoveryCommand = ({ type, attempt, pushes, hole, firstFrame }) => {
+  const _handleRecoveryCommand = ({ type, attempt, pushes, hole, firstFrame, budget }) => {
     const { slot, sid } = attempt;
     if (type === 'retry') {
       _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${pushes}/${OVERDUE_MAX_PUSHES}`);
@@ -5446,14 +5446,15 @@
       );
     } else if (type === 'budget-exhausted') {
       _syncLog(
-        `INPUT-ASK-SOURCE-BUDGET f=${_frameNum} slot=${slot}: repeated new holes exhausted capture budget (used=${pushes} limit=3 windowMs=30000)`,
+        `INPUT-ASK-SOURCE-BUDGET f=${_frameNum} slot=${slot}: ${budget.scope} capture budget exhausted (used=${budget.used} limit=${budget.limit} windowMs=30000)`,
       );
-      KNEvent('desync', 'Repeated recovery requests exceeded the source capture budget', {
+      KNEvent('desync', 'Recovery requests exceeded the capture budget', {
+        budget,
         slot,
         hole,
         kind: 'input-ask-source-budget',
       });
-      _config?.onToast?.(`P${slot + 1} repeatedly lost synchronization and was dropped`);
+      _config?.onToast?.(`P${slot + 1} could not recover within the capture budget and was dropped`);
       hardDisconnectPeer(sid, { tell: 'desync' });
     } else if (type === 'drop') {
       _syncLog(
@@ -5479,6 +5480,7 @@
       const recipients = _syncTargetsFor(null).map(({ sid, peer: target }) => ({
         sid,
         slot: target.slot,
+        connection: target,
         playerId: _knownPlayers[sid]?.persistentId,
       }));
       const attempts = _recovery.begin(slot, hole, recipients, _frameNum, now, _syncEnabled);
@@ -7945,10 +7947,10 @@
     return true;
   };
 
-  // Host: end the pause once no joiner is being served any more. Peers that
-  // are still paused are told; the roster goes out with it.
+  // Host: end the pause once every remaining serve has reported readiness.
+  // Deferred DC-open serves keep their deadlines without holding the room.
   const _endLateJoinPauseIfNoneServed = (source) => {
-    if (_lateJoinServing.size > 0) {
+    if ([..._lateJoinServing.keys()].some((sid) => !_pendingLateJoinReadySids.has(sid))) {
       _syncLog(`late-join pause kept (${source}): ${_lateJoinServing.size} joiner(s) still loading`);
       return false;
     }
@@ -7982,8 +7984,8 @@
       if (peer?.dc?.readyState !== 'open') {
         if (_pendingLateJoinReadySids.has(senderSid)) return;
         _pendingLateJoinReadySids.add(senderSid);
-        _lateJoinServing.delete(senderSid);
-        if (_lateJoinServing.size > 0) {
+        // Keep this serve (and its timer) until the current DC opens.
+        if ([..._lateJoinServing.keys()].some((sid) => !_pendingLateJoinReadySids.has(sid))) {
           _syncLog(`late-join-ready via ${source}: DC not open for ${senderSid}; another joiner is still loading`);
           return;
         }
@@ -8003,7 +8005,11 @@
     }
 
     const name = senderSid ? _knownPlayers[senderSid]?.playerName || 'Player' : 'Player';
-    if (_runSubstate === RUN_LATE_JOIN_PAUSE && _playerSlot === 0 && _lateJoinServing.size > 0) {
+    if (
+      _runSubstate === RUN_LATE_JOIN_PAUSE &&
+      _playerSlot === 0 &&
+      [..._lateJoinServing.keys()].some((sid) => !_pendingLateJoinReadySids.has(sid))
+    ) {
       // Another joiner has yet to load the state captured for this pause.
       // Resuming now would leave it frames behind; its own "ready" or its
       // timer ends the pause.
@@ -10556,6 +10562,7 @@
     // peer from `_peers`: done now, the roster would list the joiner as a
     // player for one message. It goes out once the caller has finished.
     if (opts.sid) {
+      _lateJoinReadyHandled.delete(opts.sid);
       _lateJoinStateSent.delete(opts.sid);
       _pendingLateJoinReadySids.delete(opts.sid);
     }
@@ -12419,6 +12426,7 @@
         if (_lateJoinServing.get(remoteSid) !== serveId) return;
         _lateJoinServing.delete(remoteSid);
         _lateJoinStateSent.delete(remoteSid);
+        _pendingLateJoinReadySids.delete(remoteSid);
         const elapsed = Math.round(performance.now() - _lateJoinPausedAt);
         _syncLog(
           `LATE-JOIN-TIMEOUT elapsed=${elapsed}ms joiner=${remoteSid} — ` +

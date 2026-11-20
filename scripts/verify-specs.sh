@@ -362,6 +362,11 @@ escalation_push() {
   expect_violation "$LIFECYCLE" recovery_lifecycle_before unusableChannelDoesNotCapture 2
   verify specs/input_placeholder.qnt input_placeholder_fixed allHold init 4
   expect_violation specs/input_placeholder.qnt input_placeholder_before allHold 2
+  verify specs/recovery_review.qnt recovery_review_fixed allHold init 14
+  expect_violation specs/recovery_review.qnt recovery_review_before rosterGapCannotRenew 5
+  expect_violation specs/recovery_review.qnt recovery_review_before readinessHasDeadline 1
+  expect_violation specs/recovery_review.qnt recovery_review_before repeatedReadyWorks 6
+  expect_violation specs/recovery_review.qnt recovery_review_before roomCapturesBounded 13
   local DELIVERY=specs/recovery_delivery.qnt
   verify "$DELIVERY" recovery_budget_identity_fixed rotationCannotRenew init 8
   expect_violation "$DELIVERY" recovery_budget_identity_before rotationCannotRenew 5

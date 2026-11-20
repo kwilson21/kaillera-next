@@ -237,6 +237,7 @@ export interface RecoveryNotice {
   readonly pushes: number;
   readonly hole: number;
   readonly firstFrame: number;
+  readonly budget?: { readonly scope: 'source' | 'room'; readonly used: number; readonly limit: number };
 }
 export interface RecoveryTiming {
   readonly timeoutMs: number;
@@ -259,10 +260,17 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
   // threshold. A match reset clears it. Three admissions allow a trailing-hole follow-up
   // without allowing a fresh 8 MiB capture every 1.5 seconds indefinitely.
   const sourceCaptures = new Map<string, number[]>();
+  // Roster snapshots may omit a live RTC connection during signaling reconnect.
+  // Only the adapter's server-roster identity is cached, never a peer claim.
+  let connectionIdentities = new WeakMap<object, string>();
+  let roomCaptures: number[] = [];
   const budgetNotified = new Set<string>();
   const sourceBySlot = new Map<number, string>();
   const SOURCE_CAPTURE_WINDOW_MS = 30000;
   const SOURCE_CAPTURE_LIMIT = 3;
+  // Three possible guests, each with three admissions. This shared rolling
+  // ceiling survives leave/rejoin and client-selected persistentId rotation.
+  const ROOM_CAPTURE_LIMIT = 9;
   const count = (slot: number, hole: number) => counts.get(slot)?.get(hole) ?? 0;
   const remember = (slot: number, hole: number, pushes: number) => {
     let history = counts.get(slot);
@@ -303,7 +311,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
     begin: (
       sourceSlot: number,
       hole: number,
-      recipients: readonly { sid: string; slot: number; playerId?: string }[],
+      recipients: readonly { sid: string; slot: number; playerId?: string; connection?: object }[],
       frame: number,
       now: number,
       enabled: boolean,
@@ -314,7 +322,9 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       // playerId comes only from the server roster adapter, not peer messages.
       // A missing roster identity conservatively shares a slot budget: changing
       // an unrecognized connection key must not buy more captures.
-      const sourceKey = source.playerId ? `player:${source.playerId}` : `unidentified-slot:${sourceSlot}`;
+      if (source.connection && source.playerId) connectionIdentities.set(source.connection, source.playerId);
+      const playerId = source.playerId ?? (source.connection && connectionIdentities.get(source.connection));
+      const sourceKey = playerId ? `player:${playerId}` : `unidentified-slot:${sourceSlot}`;
       // Expire inactive identities too, so connection churn cannot grow this map forever.
       for (const [identity, times] of sourceCaptures) {
         if (times.every((at) => now - at >= SOURCE_CAPTURE_WINDOW_MS)) {
@@ -325,13 +335,20 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       sourceBySlot.set(sourceSlot, sourceKey);
       const recent = (sourceCaptures.get(sourceKey) ?? []).filter((at) => now - at < SOURCE_CAPTURE_WINDOW_MS);
       sourceCaptures.set(sourceKey, recent);
-      if (!sourceCaptureAllowed(recent.length, SOURCE_CAPTURE_LIMIT)) {
+      roomCaptures = roomCaptures.filter((at) => now - at < SOURCE_CAPTURE_WINDOW_MS);
+      if (
+        !sourceCaptureAllowed(recent.length, SOURCE_CAPTURE_LIMIT) ||
+        !sourceCaptureAllowed(roomCaptures.length, ROOM_CAPTURE_LIMIT)
+      ) {
         if (!budgetNotified.has(sourceKey)) {
           budgetNotified.add(sourceKey);
           Effect.runSync(
             Effect.sync(() =>
               issue({
                 type: 'budget-exhausted',
+                budget: !sourceCaptureAllowed(recent.length, SOURCE_CAPTURE_LIMIT)
+                  ? { scope: 'source', used: recent.length, limit: SOURCE_CAPTURE_LIMIT }
+                  : { scope: 'room', used: roomCaptures.length, limit: ROOM_CAPTURE_LIMIT },
                 attempt: Object.freeze({ sid: source.sid, slot: source.slot, sequence: 0, wireId: 0 }),
                 pushes: recent.length,
                 hole,
@@ -344,6 +361,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       }
       budgetNotified.delete(sourceKey);
       recent.push(now);
+      roomCaptures.push(now);
       const pushes = count(sourceSlot, hole) + 1;
       remember(sourceSlot, hole, pushes);
       // Another recipient may still be delivering an earlier broadcast. Do not
@@ -393,6 +411,8 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       records.clear();
       counts.clear();
       sourceCaptures.clear();
+      connectionIdentities = new WeakMap();
+      roomCaptures = [];
       sourceBySlot.clear();
       budgetNotified.clear();
     },
