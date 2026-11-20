@@ -3533,6 +3533,20 @@
         engine?.dumpLogs?.();
         showError("The emulator crashed and can't continue. Reload the page to rejoin the match.");
       },
+      onLateJoinInputFailed: (message) => {
+        coreFatal = true; // stop the generic connection timeout from replacing this error
+        _sessionStopLateJoinPoll();
+        // A failed admitted guest must vacate its server slot, not just close
+        // its data channels. release-slot is lobby-only; this is the same
+        // guest-only leave-room event as the Leave button, without navigation.
+        const connection = socket;
+        connection?.io?.reconnection(false);
+        if (connection?.connected) connection.timeout(2000).emit('leave-room', {}, () => connection.disconnect());
+        else connection?.disconnect();
+        engine?.stop();
+        engine = null;
+        showError(message);
+      },
       onSyncStatus: showSyncStatus,
       onReconnecting: (sid, isReconnecting) => {
         const overlay = document.getElementById('reconnect-overlay');

@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { framesToAskFor } from '../../web/src/input-ask.ts';
 import { collectLateJoinInputBridge, decodeLateJoinInputBridge } from '../../web/src/late-join-input-bridge.ts';
 
 const file = new URL('../../web/static/netplay-rollback.js', import.meta.url);
@@ -25,7 +26,7 @@ const funcs = src.includes('  const _snapshotLateJoinBridgeSources =')
 const real = Object.freeze({ buttons: 0, lx: 0, ly: 70, cx: 0, cy: 0 });
 const zero = Object.freeze({ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 });
 const H = 1046;
-const api = { collectLateJoinInputBridge, decodeLateJoinInputBridge };
+const api = { collectLateJoinInputBridge, decodeLateJoinInputBridge, framesToAskFor };
 
 async function send(replaceSource: boolean, mode: 'normal' | 'worker' | 'remix' = 'normal', reconnectHost = false) {
   const c = vm.createContext({ H, zero, real, api, mode });
@@ -67,15 +68,26 @@ async function send(replaceSource: boolean, mode: 'normal' | 'worker' | 'remix' 
 
 type LateJoinStateFixture = { frame: number; inputBridge?: import('../../web/src/wire.ts').WirePayload };
 
-function install(msg: LateJoinStateFixture, replaceSource = false, direct = false) {
-  const c = vm.createContext({ msg, zero, real, H, api, replaceSource, direct });
+function setupJoin(msg: LateJoinStateFixture, replaceSource = false, direct = false, ownSlot = 2) {
+  const c = vm.createContext({ msg, zero, real, H, api, replaceSource, direct, ownSlot });
   vm.runInContext(
     `
     const KNShared={ZERO_INPUT:zero},window={KNCore:api};
-    const original={slot:1}, _peers={guest:original},_syncQueueGen={guest:0};
-    const bridgePeers=new Map([['guest',{peer:original,gen:0}]]);
-    const _syncQueueEpoch=0,bridgeEpoch=0,DELAY_FRAMES=3,_playerSlot=2, _rbRollbackMax=22;
-    const _remoteInputs={1:direct?{[H]:{...real,ly:-70}}:{}},_localInputs={};
+    const resends=[], statuses=[], queued=[], ticks=[];
+    const host={slot:0,dc:{readyState:'open',send(){}}};
+    const original={slot:1,dc:{readyState:'open',send(msg){resends.push(msg)}}};
+    const _peers={host,guest:original,extra:{slot:2}},_syncQueueGen={guest:0};
+    const bridgePeers=new Map([['host',{peer:host,gen:0}],['guest',{peer:original,gen:0}]]);
+    const _syncQueueEpoch=0,bridgeEpoch=0,DELAY_FRAMES=3,_playerSlot=ownSlot,_rbRollbackMax=22;
+    const _remoteInputs={0:{[H]:{...zero}},1:direct?{[H]:{...real,ly:-70}}:{}},_localInputs={};
+    const RB_WORKER_COPROC=false,_isSmashRemix=()=>false,LATE_JOIN_TIMEOUT_MS=15000,KN_MAX_VISIBLE_ROLLBACK_DEPTH=7;
+    const _lateJoinInputWindows=new Map();
+    const _lastRemoteFramePerSlot={1:H+1},_inputDroppedAheadUpTo={},_inputAskedAt={};
+    let now=1;
+    const performance={now:()=>now},_inputFloor=()=>0,_countOverdueAsk=()=>{};
+    const setStatus=(status)=>statuses.push(status),_config={};
+    const queueMicrotask=(fn)=>queued.push(fn),stop=()=>{};
+    const _markTickReturn=(reason)=>ticks.push(reason);
     let _frameNum=-1;
     if(replaceSource) _syncQueueGen.guest++;
     const fed=[],_syncLog=()=>{},_consumeLateJoinSeededInput=()=>false;
@@ -91,12 +103,55 @@ function install(msg: LateJoinStateFixture, replaceSource = false, direct = fals
     ${part("      // Start at host's current frame", '      _syncLog(`late-join loaded at frame')}
     ${part('  const _backfillCInputsFromJs =', '  // Guest: a resync has')}
     _backfillCInputsFromJs(mod,'rollback-init');
-    globalThis.result=JSON.stringify(fed);
+    ${part('  const RB_INPUT_ASK_EVERY_MS =', '  // One more ask for the oldest frame')}
+    const runOne = () => {
+      ticks.push('local send');
+      ${src.includes('    if (_waitForLateJoinOriginalInput())') ? part('    if (_waitForLateJoinOriginalInput())', '    // ── Pacing gate') : ''}
+      ticks.push('native step');
+    };
+    globalThis.read=()=>JSON.stringify({fed, resends, ticks, statuses, stopCount:queued.length, waiting:!!_lateJoinOriginalWait});
+    globalThis.sync=(frame)=>_finishLateJoinOriginalWaitAtSync(frame);
+    globalThis.at=(actualNow, apply, realNeutral)=> {
+      _frameNum=apply+DELAY_FRAMES;
+      now=actualNow;
+      if(realNeutral) _remoteInputs[1][apply]={...zero};
+      runOne();
+    };
   `,
     c,
   );
-  return JSON.parse(c.result);
+  return {
+    read: () => JSON.parse(c.read()),
+    sync: (frame: number) => c.sync(frame),
+    tick: (now: number, apply: number, realNeutral = false) => c.at(now, apply, realNeutral),
+  };
 }
+
+function install(msg: LateJoinStateFixture, replaceSource = false, direct = false) {
+  return setupJoin(msg, replaceSource, direct).read().fed;
+}
+
+test('an existing player’s absent input H is not backfilled as confirmed neutral', async () => {
+  const msg = await send(false);
+  const withHole = {
+    ...msg,
+    inputBridge: msg.inputBridge.map((source: { slot: number; frames: [number][] }) =>
+      source.slot === 1 ? { ...source, frames: source.frames.filter(([frame]) => frame !== H) } : source,
+    ),
+  };
+  const join = setupJoin(withHole, false, false, 3);
+  assert.deepEqual(
+    join.read().fed.filter(([f]: [number]) => f === H),
+    [],
+  );
+  join.tick(50, H);
+  assert.deepEqual(join.read().resends, [`resend:${H}`]);
+  assert.deepEqual(join.read().ticks, ['local send', 'skip:late-join-original-input']);
+  join.tick(80, H);
+  assert.deepEqual(join.read().resends, [`resend:${H}`]);
+  join.tick(100, H, true);
+  assert.deepEqual(join.read().ticks.slice(-2), ['local send', 'native step']);
+});
 
 test('late join feeds the original guest’s real H..H+5 after confirmed packets arrive during compression', async () => {
   const msg = await send(false);
@@ -131,11 +186,14 @@ test('do not use replaced source generations or override a direct real input', a
   );
 });
 
-test('a host Socket.IO id change during capture omits only that local source', async () => {
+test('a host Socket.IO id change during capture keeps ownership but omits that source’s samples', async () => {
   const msg = await send(false, 'normal', true);
   assert.deepEqual(
-    Array.from(msg.inputBridge, ({ sid }: { sid: string }) => sid),
-    ['guest'],
+    Array.from(msg.inputBridge, ({ sid, frames }: { sid: string; frames: unknown[] }) => [sid, frames.length]),
+    [
+      ['host', 0],
+      ['guest', 7],
+    ],
   );
 });
 
@@ -149,6 +207,88 @@ test('old and malformed bridge fields preserve addressable savestate handling wi
     install(malformed).some(([, value]: [number, number]) => value === 70),
     false,
   );
+});
+
+test('missing legacy bridge keeps old behavior; malformed new bridge blocks and ends only once', async () => {
+  const legacy = setupJoin({ frame: H });
+  legacy.tick(1, H);
+  assert.deepEqual(legacy.read().ticks, ['local send', 'native step']);
+  const malformed = setupJoin({ frame: H, inputBridge: [] });
+  malformed.tick(1, H);
+  malformed.tick(1000, H);
+  assert.equal(malformed.read().ticks.includes('native step'), false);
+  assert.equal(malformed.read().stopCount, 1);
+  assert.equal(malformed.read().statuses.length, 1);
+});
+
+test('an unanswered original-input resend ends the local hold without stepping', () => {
+  const join = setupJoin({
+    frame: H,
+    inputBridge: [
+      { slot: 0, sid: 'host', frames: [] },
+      { slot: 1, sid: 'guest', frames: [] },
+    ],
+  });
+  join.tick(100, H);
+  join.tick(15002, H);
+  join.tick(15003, H);
+  assert.equal(join.read().ticks.includes('native step'), false);
+  assert.equal(join.read().stopCount, 1);
+});
+
+test('authoritative state clears the bootstrap only once it contains the final guarded input', () => {
+  const sidecar = [{ slot: 0, sid: 'host', frames: [] }];
+  const join = setupJoin({ frame: H, inputBridge: sidecar });
+  join.sync(H + 13);
+  assert.equal(join.read().waiting, true);
+  join.sync(H + 14);
+  assert.equal(join.read().waiting, false);
+});
+
+type LeaveRoomPayload = Record<string, never>;
+
+test('a bootstrap failure leaves only this player’s signaling slot, without reconnecting', () => {
+  const play = readFileSync(new URL('../../web/static/play.js', import.meta.url), 'utf8');
+  const from = play.indexOf('      onLateJoinInputFailed:');
+  const to = play.indexOf('      onSyncStatus:', from);
+  assert.ok(from >= 0 && to > from);
+  const events: string[] = [];
+  let ack: (() => void) | undefined;
+  const c = vm.createContext({
+    events,
+    _sessionStopLateJoinPoll: () => events.push('stop poll'),
+    showError: (msg: string) => events.push(msg),
+    socket: {
+      connected: true,
+      io: { reconnection: (enabled: boolean) => events.push(`reconnect:${enabled}`) },
+      timeout: (ms: number) => ({
+        emit: (event: 'leave-room', data: LeaveRoomPayload, cb: () => void) => {
+          assert.equal(Object.keys(data).length, 0);
+          events.push(`${event}:${ms}`);
+          ack = cb;
+        },
+      }),
+      disconnect: () => events.push('disconnect'),
+    },
+  });
+  vm.runInContext(
+    `
+    let coreFatal=false,engine={stop(){events.push('stop local engine')}};
+    ({${play.slice(from, to)}}).onLateJoinInputFailed('reload to rejoin');
+    if (!coreFatal || engine !== null) throw Error('local failure did not stop the engine');
+  `,
+    c,
+  );
+  assert.deepEqual(events, [
+    'stop poll',
+    'reconnect:false',
+    'leave-room:2000',
+    'stop local engine',
+    'reload to rejoin',
+  ]);
+  assert.ok(ack);
+  ack();
+  assert.equal(events.at(-1), 'disconnect');
 });
 
 test('worker and Remix late-joins send the same savestate shape as before', async () => {

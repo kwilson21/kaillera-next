@@ -759,6 +759,11 @@ $QUINT test specs/late_join_input_bridge.qnt --main=late_join_input_bridge_befor
 $QUINT test specs/late_join_input_bridge.qnt --main=late_join_input_bridge_fixed --backend="$BACKEND"
 $QUINT run specs/late_join_input_bridge.qnt --main=late_join_input_bridge_fixed --invariant='separateReadyFromBridge and snapshotGenerationOnly and noConfirmedPlaceholder' --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
+# A new guest can answer Ready but may not play with an original input missing.
+$QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_before --backend="$BACKEND"
+$QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --backend="$BACKEND"
+$QUINT run specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --invariant=neverAdvanceOnMissing --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2
