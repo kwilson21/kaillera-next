@@ -22,11 +22,18 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_DIR="${SCRIPT_DIR}/src"
 OUT_DIR="${SCRIPT_DIR}/output"
 PATCHES_DIR="${SCRIPT_DIR}/patches"
+# Required security patch: never silently build an unpatched core.
+IS_VIEWER_PATCH="${PATCHES_DIR}/mupen64plus-is-viewer-bounds.patch"
+if [ ! -f "${IS_VIEWER_PATCH}" ]; then
+    echo "FATAL: missing required IS Viewer bounds patch" >&2
+    exit 1
+fi
 # Field-granular hash registry (kn_hash_registry.c). On by default: the
 # desync detector (web/src/page/desync-detector.ts REQUIRED_EXPORTS) disables
 # itself without these exports. Set KN_ENABLE_HASH_REGISTRY=0 for a core
 # without them.
 KN_ENABLE_HASH_REGISTRY="${KN_ENABLE_HASH_REGISTRY:-1}"
+
 KN_DISABLE_WASM_SIMD="${KN_DISABLE_WASM_SIMD:-0}"
 KN_DISABLE_GLIDEN64_VEC4="${KN_DISABLE_GLIDEN64_VEC4:-1}"
 KN_DISABLE_GLIDEN64_SIMD="${KN_DISABLE_GLIDEN64_SIMD:-1}"
@@ -289,6 +296,13 @@ if [ -d "${PATCHES_DIR}" ]; then
     # deterministic-timing.patch handles features_cpu.c and profile.c (excluded main.c).
     cd "${SRC_DIR}/mupen64plus-libretro-nx"
     git checkout -- . 2>/dev/null || true
+
+    # CVE-2025-9688; reset above makes repeated builds apply from clean source.
+    git apply --check "${IS_VIEWER_PATCH}" && git apply "${IS_VIEWER_PATCH}" || {
+        echo "FATAL: IS Viewer bounds patch failed" >&2
+        exit 1
+    }
+    echo "    Applied IS Viewer integer-overflow bounds fix"
 
     if [ -f "${PATCHES_DIR}/mupen64plus-kn-all.patch" ]; then
         git apply "${PATCHES_DIR}/mupen64plus-kn-all.patch" && \
