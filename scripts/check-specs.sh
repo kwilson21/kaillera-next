@@ -744,6 +744,11 @@ $QUINT test specs/recovery_review.qnt --main=recovery_review_before --backend="$
 $QUINT test specs/recovery_review.qnt --main=recovery_review_fixed --backend="$BACKEND"
 $QUINT run specs/recovery_review.qnt --main=recovery_review_fixed --invariant=allHold --max-samples=10000 --max-steps=30 --backend="$BACKEND"
 
+# Native paused-game helper: phase/owner changes always release and rearm.
+$QUINT test specs/contextual_reset.qnt --main=contextual_reset_before --backend="$BACKEND"
+$QUINT test specs/contextual_reset.qnt --main=contextual_reset_fixed --backend="$BACKEND"
+$QUINT run specs/contextual_reset.qnt --main=contextual_reset_fixed --invariant='safeHold and physicalPreserved' --max-samples=1000 --max-steps=30 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

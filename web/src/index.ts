@@ -40,6 +40,7 @@ import { rollbackTimeline } from './page/rollback-timeline.ts';
 import { startSwitch2Usb } from './page/switch2-usb.ts';
 import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
+import { startContextualReset } from './page/contextual-reset.ts';
 import { startResetCombo } from './page/reset-combo.ts';
 import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
@@ -399,6 +400,7 @@ export const KNCore = {
     startVisionClient,
     startVirtualGamepad,
     startResetCombo,
+    startContextualReset,
     startFakePeer,
   },
   /** What these pages share with the front page; the same object is `window.KNSite` on both. */

@@ -4028,7 +4028,13 @@
     }, 400);
   };
 
-  const resetCombo = window.KNCore.page.startResetCombo(window, KNState);
+  // Local preview replaces the menu affordance, not the existing gamepad layout.
+  const resetCombo = window.KNCore.page.startContextualReset(
+    window,
+    KNState,
+    (address) => engine?.readRdram32?.(address) ?? null,
+  );
+  document.querySelector('#toolbar-reset-combo')?.setAttribute('hidden', '');
 
   const showToolbar = () => {
     const toolbar = document.getElementById('toolbar');
@@ -5073,7 +5079,7 @@
 
     document.getElementById('toolbar-reset-combo')?.addEventListener('click', () => {
       closeMoreDropdown();
-      resetCombo.open();
+      resetCombo.refresh();
     });
 
     // More (overflow) dropdown
