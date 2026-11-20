@@ -1819,6 +1819,7 @@
     _lateJoinInputWindows.clear();
   };
   const _recordHostInputRoster = (frame, slots) => {
+    if (RB_WORKER_COPROC) return true;
     if (!Number.isSafeInteger(frame) || frame < 0 || frame < _lastInputRosterFrame) return false;
     const roster = new Set(slots);
     for (let slot = 0; slot < 4; slot++) {
@@ -9356,7 +9357,8 @@
     }
     const decoded = KNShared.decodeInput(data);
     const recvFrame = decoded.frame;
-    if (recvFrame < _admissionInputFloor(peer.slot)) return false;
+    const admissionFloor = _admissionInputFloor(peer.slot);
+    if (admissionFloor > 0 && recvFrame < admissionFloor) return false;
     // Bounds-check the remote frame number. A malicious peer could send
     // frame=-999 or frame=_frameNum+1e6 to poison the rollback ring buffer
     // or trigger massive memory churn in the input maps. Legitimate frames
@@ -9447,7 +9449,7 @@
     // error-correction sense.
     if (decoded.redundant && decoded.redundant.length > 0) {
       for (const r of decoded.redundant) {
-        if (r.frame < _admissionInputFloor(peer.slot)) continue;
+        if (r.frame < admissionFloor) continue;
         const redundantInput = {
           buttons: r.buttons,
           lx: r.lx,
@@ -9654,6 +9656,7 @@
       // Opening a late joiner's channel is not an in-place reconnect.
       // The host's pending serve remains until the normal admission path.
       const lateJoinDc =
+        !RB_WORKER_COPROC &&
         _phase === PHASE_RUNNING &&
         !_lateJoin &&
         _isValidPlayerSlot(peer.slot) &&
@@ -9916,7 +9919,7 @@
           return;
         }
         if (e.data.startsWith('roster:')) {
-          if (peer.slot !== 0 || peer.dc !== ch) return;
+          if (!RB_WORKER_COPROC && (peer.slot !== 0 || peer.dc !== ch)) return;
           const parts = e.data.split(':');
           const rosterFrame = parseInt(parts[1], 10);
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];

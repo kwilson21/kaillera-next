@@ -77,6 +77,7 @@ function install(msg: LateJoinStateFixture, replaceSource = false, direct = fals
     let _frameNum=-1;
     if(replaceSource) _syncQueueGen.guest++;
     const fed=[],_syncLog=()=>{},_consumeLateJoinSeededInput=()=>false;
+    const _admissionInputFloor=()=>0,_primeLateJoinInactiveInput=()=>{};
     const INPUT_PAST_WINDOW_FRAMES=240,INPUT_FUTURE_MARGIN_FRAMES=16;
     const mod={_kn_feed_input(){},_kn_pre_tick(){}};
     const _feedCInput=(module,slot,f,input)=>{

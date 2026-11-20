@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('../web/static/netplay-rollback.js', import.meta.url), 'utf8');
-const read = () => {
+const read = (worker = false) => {
   const start = source.indexOf('  // Host roster input ownership.');
   const end = source.indexOf('  // The oldest input from', start);
   assert.ok(start >= 0 && end > start, 'host admission adapter is installed');
@@ -13,6 +13,7 @@ const read = () => {
     source.slice(start, end) +
       '\n({ update: _recordHostInputRoster, floor: _admissionInputFloor, prime: _primeLateJoinInactiveInput, reset: _clearLateJoinInputRoster, late: _waitingForHostAdmission, open: _observeLateJoinDcOpen })',
     {
+      RB_WORKER_COPROC: worker,
       _playerSlot: 1,
       _frameNum: 1362,
       DELAY_FRAMES: 3,
@@ -83,4 +84,16 @@ test('a late DC can open on either side of roster admission, but an admitted act
     assert.equal(m.late(3), true);
     assert.equal(m.open(3), true);
   }
+});
+
+test('the experimental rollback worker retains its previous roster and input ownership behavior', () => {
+  const m = read(true);
+  m.update(0, [0, 1, 2, 3]);
+  m.update(1344, [0, 1, 2]);
+  assert.equal(m.late(3), false);
+  assert.equal(m.open(3), false);
+  m.update(1363, [0, 1, 2, 3]);
+  assert.equal(m.floor(3), 0);
+  m.prime(m.mod, 3);
+  assert.deepEqual(m.writes, []);
 });
