@@ -133,17 +133,20 @@ def test_the_pause_belongs_to_the_joiners_being_served():
     assert "if (_runSubstate === RUN_LATE_JOIN_PAUSE) {\n          const elapsed" not in serve
     # A serve ended while compressing sends nothing.
     assert serve.index("await compressAndEncode(bytes)") < serve.index(
-        "if (_lateJoinServing.get(remoteSid) !== serveId) {"
+        "_lateJoinServing.get(remoteSid) !== serveId ||"
     )
 
     ready = src[src.index("const finishLateJoinReady = (source, senderSid = null) => {") :]
     ready = ready[: ready.index("const _syntheticSidForSlot")]
     assert "_lateJoinServing.delete(senderSid);" in ready
-    assert "_runSubstate === RUN_LATE_JOIN_PAUSE && _playerSlot === 0 && _lateJoinServing.size > 0" in ready
+    # Deferred readiness retains a serve deadline, but only a joiner that has
+    # not loaded yet holds the room pause (runtime tests cover both orderings).
+    assert "_runSubstate === RUN_LATE_JOIN_PAUSE &&" in ready
+    assert "[..._lateJoinServing.keys()].some((sid) => !_pendingLateJoinReadySids.has(sid))" in ready
 
     helper = src[src.index("const _endLateJoinPauseIfNoneServed = (source) => {") :]
     helper = helper[: helper.index("\n  };\n")]
-    assert "if (_lateJoinServing.size > 0) {" in helper
+    assert "[..._lateJoinServing.keys()].some((sid) => !_pendingLateJoinReadySids.has(sid))" in helper
     assert "return resumeLateJoinPause(source, true);" in helper
 
     # I2: a joiner that is gone is no longer served, and the match stop clears the lot.
@@ -302,7 +305,11 @@ def test_a_lost_host_resync_that_goes_unanswered_is_asked_again_up_to_a_bound():
     )
 
     # Cleared when a host state is applied.
-    apply = src[src.index("const applySyncState = (bytes, frame, fromProactive = false) => {") :]
+    apply = src[
+        src.index(
+            "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
+        ) :
+    ]
     apply = apply[: apply.index("\n  };\n")]
     assert apply.index("_lastAppliedSyncHostFrame = frame;") < apply.index("_lateJoinLostHost = false;")
 

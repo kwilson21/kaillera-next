@@ -7,6 +7,12 @@ import {
   isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  overdueAskStep,
+  pushDeadlineStep,
+  escalationForHole,
+  transferReportApplies,
+  acknowledgesDeliveredPush,
+  missedDeliveryStep,
   resyncDeadlineStep,
   type DeadlineStep,
   type LostHostStep,
@@ -310,4 +316,115 @@ test('the engine calls each proved rule and keeps no copy of its own', () => {
 test('the module is listed for the proofs', () => {
   const listed = readFileSync(new URL('../../LemmaScript-files.txt', import.meta.url), 'utf8').split('\n');
   assert.ok(listed.some((line) => line.trim().split(/\s+/)[0] === 'web/src/resync-request.ts'));
+});
+
+// specs/ask_escalation.qnt: an ask never answered ends in a resync.
+test('an unanswered ask waits below either threshold, then the host pushes and a guest asks', () => {
+  const MIN_ASKS = 3;
+  const MIN_AGE_MS = 1500;
+  assert.equal(overdueAskStep(true, 2, 5000, MIN_ASKS, MIN_AGE_MS, false), 'wait', 'too few asks');
+  assert.equal(overdueAskStep(true, 3, 1499, MIN_ASKS, MIN_AGE_MS, false), 'wait', 'too soon');
+  assert.equal(overdueAskStep(true, 3, 1500, MIN_ASKS, MIN_AGE_MS, false), 'push');
+  assert.equal(overdueAskStep(false, 3, 1500, MIN_ASKS, MIN_AGE_MS, false), 'ask');
+  assert.equal(overdueAskStep(true, 9, 9000, MIN_ASKS, MIN_AGE_MS, true), 'wait', 'a resync is out already');
+});
+
+test('a slow answer is never taken for a lost one: one ask, or less than 1.5 s, always waits', () => {
+  for (const isHost of [true, false])
+    for (let asks = 0; asks <= 6; asks++)
+      for (const age of [0, 170, 500, 1000, 1499, 1500, 3000]) {
+        const step = overdueAskStep(isHost, asks, age, 3, 1500, false);
+        if (asks < 3 || age < 1500) assert.equal(step, 'wait');
+        else assert.equal(step, isHost ? 'push' : 'ask');
+      }
+});
+
+test("the host's push ends on the guest's acknowledgement, is pushed again at its deadline, then given up", () => {
+  // (pushOut, guestAway, settled, handedOver, sendFailed, sendingMs, backstopMs, waitedMs, timeoutMs, pushes, maxPushes)
+  type Case = {
+    pushOut?: boolean;
+    away?: boolean;
+    settled?: boolean;
+    handed?: boolean;
+    failed?: boolean;
+    sendingMs?: number;
+    waited?: number;
+    pushes?: number;
+  };
+  const step = (o: Case) =>
+    pushDeadlineStep(
+      o.pushOut ?? true,
+      o.away ?? false,
+      o.settled ?? false,
+      o.handed ?? true,
+      o.failed ?? false,
+      o.sendingMs ?? 0,
+      30000,
+      o.waited ?? 0,
+      5000,
+      o.pushes ?? 1,
+      3,
+    );
+  assert.equal(step({ pushOut: false, away: true, settled: true }), 'noPush');
+  assert.equal(step({ away: true, settled: true, waited: 9999, pushes: 3 }), 'ended', 'END_ON_RECONNECT');
+  assert.equal(step({ settled: true, handed: false }), 'done', 'SETTLE_ON_FIRST, even before the hand-over');
+  assert.equal(step({ waited: 4999 }), 'wait');
+  assert.equal(step({ waited: 5000 }), 'pushAgain');
+  assert.equal(step({ waited: 5000, pushes: 2 }), 'pushAgain');
+  assert.equal(step({ waited: 5000, pushes: 3 }), 'giveUp', 'pushesAreBounded');
+});
+
+test('a push not handed over has no deadline: it is let go only on its own failure or a chain that stopped', () => {
+  const step = (failed: boolean, quietMs: number) =>
+    pushDeadlineStep(true, false, false, false, failed, quietMs, 30000, 0, 5000, 3, 3);
+  // A transfer queued behind another for minutes, still accepting chunks, is
+  // on its way (noLetGoOfAPushOnItsWay): only quiet time counts.
+  assert.equal(step(false, 29999), 'sending');
+  assert.equal(step(true, 100), 'letGo', 'its own failure');
+  assert.equal(step(false, 30000), 'letGo', 'no chunk accepted for the limit (I1)');
+});
+
+test('pushes are counted per hole; past the limit the hole is left to the stall path', () => {
+  assert.equal(escalationForHole(true, 0, 3), 'wait', 'a push out holds every hole of that guest');
+  assert.equal(escalationForHole(false, 0, 3), 'push');
+  assert.equal(escalationForHole(false, 2, 3), 'push');
+  assert.equal(escalationForHole(false, 3, 3), 'exhausted', 'pushesAreBoundedPerHole');
+  assert.equal(escalationForHole(false, 4, 3), 'exhausted');
+});
+
+test("only the push's own latest attempt, for its guest, decides it, once", () => {
+  assert.equal(transferReportApplies(true, true, true, false), true);
+  assert.equal(transferReportApplies(false, true, true, false), false, 'a push no longer out');
+  assert.equal(transferReportApplies(true, false, true, false), false, 'an earlier attempt');
+  assert.equal(transferReportApplies(true, true, false, false), false, "another guest's outcome");
+  assert.equal(transferReportApplies(true, true, true, true), false, 'already decided');
+});
+
+test('only an acknowledgement of this delivered recovery state settles its recipient', () => {
+  for (const handedOver of BOOLS) {
+    for (const delivered of FRAMES) {
+      for (const ack of FRAMES) {
+        assert.equal(
+          acknowledgesDeliveredPush(handedOver, delivered, ack),
+          handedOver && delivered >= 0 && ack === delivered,
+        );
+      }
+    }
+  }
+  // Before the patch a stale/future high-water mark acknowledged a new push.
+  assert.equal(acknowledgesDeliveredPush(false, 100, 100), false);
+  assert.equal(acknowledgesDeliveredPush(true, 100, 101), false);
+});
+
+test('a missed recipient is retried after backoff and never forgotten as settled', () => {
+  for (const failed of BOOLS) {
+    for (const age of [0, 4999, 5000, 5001, 20000]) {
+      for (const pushes of [1, 2, 3, 4]) {
+        assert.equal(
+          missedDeliveryStep(failed, age, 5000, pushes, 3),
+          failed && age < 5000 ? 'wait' : pushes < 3 ? 'pushAgain' : 'giveUp',
+        );
+      }
+    }
+  }
 });

@@ -234,3 +234,184 @@ export function resyncDeadlineStep(
   if (asksAgain >= maxAsksAgain) return 'stopAsking';
   return 'askAgain';
 }
+
+/**
+ * What a page does about an ask for a missing input that has gone
+ * unanswered (specs/ask_escalation.qnt; I1).
+ *
+ * A page missing a peer's input asks for it every 500 ms and predicts it
+ * meanwhile. If the answer never comes, it predicted that input for the rest
+ * of the match while the peer ran on its real value. After `minAsks` asks
+ * and `minAgeMs` since the first, it is a resync instead: the host pushes its
+ * state to that guest unasked; a guest asks for a coordinated resync. Below
+ * either threshold it waits: an answer comes in under 170 ms in good runs and
+ * asks go out every 500 ms, so a slow answer is never taken for a lost one
+ * (noEarlyEscalation). Nothing is done while a resync is already out.
+ *
+ * @param isHost         this page is the host
+ * @param asksSent       asks sent for the missing input
+ * @param firstAskAgeMs  how long since the first of them
+ * @param minAsks        the asks before a resync
+ * @param minAgeMs       the time since the first ask before a resync
+ * @param resyncOut      a push or a coordinated request is out already
+ */
+export type OverdueAskStep = 'wait' | 'push' | 'ask';
+//@ requires minAsks >= 1 && minAgeMs >= 0
+//@ ensures (resyncOut || asksSent < minAsks || firstAskAgeMs < minAgeMs) ==> \result === "wait"
+//@ ensures \result === "push" <==> !resyncOut && asksSent >= minAsks && firstAskAgeMs >= minAgeMs && isHost
+//@ ensures \result === "ask" <==> !resyncOut && asksSent >= minAsks && firstAskAgeMs >= minAgeMs && !isHost
+export function overdueAskStep(
+  isHost: boolean,
+  asksSent: number,
+  firstAskAgeMs: number,
+  minAsks: number,
+  minAgeMs: number,
+  resyncOut: boolean,
+): OverdueAskStep {
+  if (resyncOut || asksSent < minAsks || firstAskAgeMs < minAgeMs) return 'wait';
+  return isHost ? 'push' : 'ask';
+}
+
+/**
+ * The deadline on the host's push to a guest whose input went unanswered
+ * (specs/ask_escalation.qnt push_deadline, specs/escalation_push.qnt; I1).
+ *
+ * A push is a transfer that takes time and has no fixed length: it may wait
+ * behind another transfer to that guest, and a transfer runs as long as its
+ * chunks keep being accepted. Its deadline starts only when its own state is
+ * handed over (MARK_BY_FRAME). The guest's `inputs-settled:` for a state from
+ * the first push on ends it (done); a reconnect or a phantom ends it too, its
+ * own resync superseding the push (ended). Until the hand-over it is
+ * `sending`: a transfer that ended without handing the state over lets it go,
+ * and so does a guest's chain that accepted no chunk for `quietLimitMs`,
+ * longer than a transfer's own stall limit, so a live transfer always fails
+ * by itself first (LET_GO "progress"): never a clock from the push's start.
+ * Handed over and unanswered by `timeoutMs`, the host pushes again, up to
+ * `maxPushes`, then gives up and drops the player, who rejoins onto the host's
+ * state (pushesAreBounded, everyAskEnds). The caller credits a freeze of its
+ * page to the clocks (CREDIT_FREEZE).
+ *
+ * @param pushOut       a push is out
+ * @param guestAway     the guest is reconnecting, a phantom, or gone
+ * @param settled       the guest acknowledged a state from the first push on
+ * @param handedOver    this push's own state was handed over
+ * @param sendFailed    this push's own transfer ended without handing it over
+ * @param quietMs       since a chunk was last accepted on the guest's chain, or the push started
+ * @param quietLimitMs  the most that may pass with no chunk accepted
+ * @param waitedMs      how long since it was handed over
+ * @param timeoutMs     the deadline after the hand-over
+ * @param pushes        pushes sent for this hole
+ * @param maxPushes     the most pushes
+ */
+export type PushDeadlineStep = 'noPush' | 'ended' | 'done' | 'sending' | 'letGo' | 'wait' | 'pushAgain' | 'giveUp';
+//@ requires pushes >= 1 && maxPushes >= 1
+//@ ensures !pushOut ==> \result === "noPush"
+//@ ensures pushOut && guestAway ==> \result === "ended"
+//@ ensures pushOut && !guestAway && settled ==> \result === "done"
+//@ ensures \result === "sending" <==> pushOut && !guestAway && !settled && !handedOver && !sendFailed && quietMs < quietLimitMs
+//@ ensures \result === "letGo" <==> pushOut && !guestAway && !settled && !handedOver && (sendFailed || quietMs >= quietLimitMs)
+//@ ensures \result === "wait" <==> pushOut && !guestAway && !settled && handedOver && waitedMs < timeoutMs
+//@ ensures \result === "pushAgain" <==> pushOut && !guestAway && !settled && handedOver && waitedMs >= timeoutMs && pushes < maxPushes
+//@ ensures \result === "giveUp" <==> pushOut && !guestAway && !settled && handedOver && waitedMs >= timeoutMs && pushes >= maxPushes
+export function pushDeadlineStep(
+  pushOut: boolean,
+  guestAway: boolean,
+  settled: boolean,
+  handedOver: boolean,
+  sendFailed: boolean,
+  quietMs: number,
+  quietLimitMs: number,
+  waitedMs: number,
+  timeoutMs: number,
+  pushes: number,
+  maxPushes: number,
+): PushDeadlineStep {
+  if (!pushOut) return 'noPush';
+  if (guestAway) return 'ended';
+  if (settled) return 'done';
+  if (!handedOver) return sendFailed || quietMs >= quietLimitMs ? 'letGo' : 'sending';
+  if (waitedMs < timeoutMs) return 'wait';
+  return pushes < maxPushes ? 'pushAgain' : 'giveUp';
+}
+
+/**
+ * What an overdue hole of a guest gets (specs/escalation_push.qnt,
+ * COUNT_SURVIVES and hole_counts). A push out for that guest holds every
+ * further escalation (it brings the guest onto the host's state). Pushes are
+ * counted per hole, a push let go included, so holes taking turns cannot
+ * reset each other's count: below `maxPushes` the hole is pushed, and past it
+ * it is left to the stall path (its deadline, the phantom and its resync)
+ * instead of being pushed for ever.
+ *
+ * @param pushOut     a push is out for this guest
+ * @param holePushes  pushes this hole has had
+ * @param maxPushes   the most pushes
+ */
+export type EscalationForHole = 'wait' | 'push' | 'exhausted';
+//@ requires maxPushes >= 1 && holePushes >= 0
+//@ ensures pushOut ==> \result === "wait"
+//@ ensures \result === "push" <==> !pushOut && holePushes < maxPushes
+//@ ensures \result === "exhausted" <==> !pushOut && holePushes >= maxPushes
+export function escalationForHole(pushOut: boolean, holePushes: number, maxPushes: number): EscalationForHole {
+  if (pushOut) return 'wait';
+  return holePushes < maxPushes ? 'push' : 'exhausted';
+}
+
+/**
+ * Whether a transfer's outcome is the push's (specs/escalation_push.qnt,
+ * MARK_BY_FRAME): only the push still out, its latest attempt, for the guest
+ * it is for, and only once.
+ *
+ * @param pushIsCurrent     the push is still the one out for its guest
+ * @param attemptIsCurrent  the transfer carried the push's latest attempt
+ * @param forThisGuest      the outcome is for the push's guest (or for every guest)
+ * @param decided           the attempt was already handed over or failed
+ */
+//@ ensures \result <==> pushIsCurrent && attemptIsCurrent && forThisGuest && !decided
+export function transferReportApplies(
+  pushIsCurrent: boolean,
+  attemptIsCurrent: boolean,
+  forThisGuest: boolean,
+  decided: boolean,
+): boolean {
+  return pushIsCurrent && attemptIsCurrent && forThisGuest && !decided;
+}
+
+/** Only a fresh acknowledgement of this delivered push may settle it.
+ * Pre-delivery high-water marks cannot acknowledge a future transfer.
+ * specs/recovery_delivery.qnt prematureAckTest.
+ */
+//@ ensures \result <==> handedOver && deliveredBefore >= 0 && acknowledgedBefore === deliveredBefore
+export function acknowledgesDeliveredPush(
+  handedOver: boolean,
+  deliveredBefore: number,
+  acknowledgedBefore: number,
+): boolean {
+  return handedOver && deliveredBefore >= 0 && acknowledgedBefore === deliveredBefore;
+}
+
+/** A missing hand-over remains owed, with bounded retries and backoff.
+ * Call only after pushDeadlineStep returns letGo. */
+export type MissedDeliveryStep = 'wait' | 'pushAgain' | 'giveUp';
+//@ requires pushes >= 1 && maxPushes >= 1
+//@ ensures failed && failedForMs < backoffMs ==> \result === "wait"
+//@ ensures \result === "pushAgain" <==> !(failed && failedForMs < backoffMs) && pushes < maxPushes
+//@ ensures \result === "giveUp" <==> !(failed && failedForMs < backoffMs) && pushes >= maxPushes
+export function missedDeliveryStep(
+  failed: boolean,
+  failedForMs: number,
+  backoffMs: number,
+  pushes: number,
+  maxPushes: number,
+): MissedDeliveryStep {
+  if (failed && failedForMs < backoffMs) return 'wait';
+  return pushes < maxPushes ? 'pushAgain' : 'giveUp';
+}
+
+/** Cumulative per-source capture admission, independent of per-hole ACKs.
+ * A rejection triggers source-only eviction rather than indefinite prediction. */
+//@ ensures \result === (used < limit)
+//@ ensures used >= limit ==> !\result
+export function sourceCaptureAllowed(used: number, limit: number): boolean {
+  return used < limit;
+}

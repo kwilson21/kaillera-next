@@ -56,6 +56,7 @@ const _setLastSyncState = (...args) => calls.setLastSyncState.push(args);
 const _beginLifecycleResyncGuard = (...args) => calls.guards.push(args);
 const _requestSocketFullResync = (...args) => {{ calls.socket.push(args); return true; }};
 const _syncLog = (message) => calls.logs.push(message);
+const _resetInputMaps = () => {{}};
 eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
 const rollback = {{ frame: _frameNum, inputs: _remoteInputs, localInputs: _localInputs, calls: JSON.parse(JSON.stringify(calls)) }};
 
