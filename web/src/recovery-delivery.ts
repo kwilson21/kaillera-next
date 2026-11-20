@@ -4,6 +4,9 @@
  * timers that could drop a guest immediately after the host tab freezes. */
 import { Context, Effect, Option, Schema } from 'effect';
 import { setupEffect } from '@xstate/effect';
+import { createCapturePublication } from './capture-publication.ts';
+import type { IncidentPlan } from './capture-incident.ts';
+import type { CaptureToken } from './capture-reservation.ts';
 import { initialTransition, transition, type EventFrom } from 'xstate';
 import {
   acknowledgesDeliveredPush,
@@ -251,6 +254,10 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
   type Snapshot = ReturnType<typeof initialTransition<typeof recoveryMachine>>[0];
   // Never reset across matches/reconnects: an old ACK cannot name a new attempt.
   let nextWireId = 0;
+  const publication = createCapturePublication();
+  const publicationAttempts = new WeakMap<CaptureToken, ReadonlySet<RecoveryAttempt>>();
+  // Only the original opened attempt belongs to a new publication fence.
+  const originalSource = new WeakMap<RecoveryAttempt, number>();
   const records = new Map<number, { snapshot: Snapshot; token: RecoveryAttempt }>();
   const counts = new Map<number, Map<number, number>>();
   // Resource budget is persistent-player-scoped and deliberately survives ACKs and peer
@@ -306,6 +313,37 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
     for (const notice of notices) Effect.runSync(Effect.sync(() => issue(notice)));
   };
   return {
+    publication,
+    openPublication(plan: IncidentPlan, attempts: readonly RecoveryAttempt[], now: number): CaptureToken | undefined {
+      const initiating = plan.capture.recipients.find((p) => p.id === plan.capture.owner.id);
+      if (
+        !initiating ||
+        plan.capture.deadline - now > 1500 ||
+        attempts.length < 1 ||
+        attempts.length !== plan.capture.recipients.length ||
+        new Set(attempts).size !== attempts.length ||
+        !attempts.every(
+          (a) =>
+            records.get(a.slot)?.token === a &&
+            records.get(a.slot)?.snapshot.context.firstFrame === plan.capture.frame &&
+            originalSource.get(a) === initiating.slot &&
+            plan.capture.recipients.some(({ slot, id }) => slot === a.slot && id === a.sid),
+        )
+      )
+        return undefined;
+      const token = publication.open(plan, now);
+      if (token) publicationAttempts.set(token, new Set(attempts));
+      return token;
+    },
+    ownsPublication(token: CaptureToken, attempts: readonly RecoveryAttempt[]): boolean {
+      const opened = publicationAttempts.get(token);
+      return (
+        !!opened &&
+        attempts.length === opened.size &&
+        new Set(attempts).size === attempts.length &&
+        attempts.every((a) => opened.has(a) && records.get(a.slot)?.token === a)
+      );
+    },
     held: (slot: number, hole: number, enabled = true): boolean =>
       !enabled || records.has(slot) || count(slot, hole) >= timing.maxPushes,
     begin: (
@@ -379,6 +417,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
           ...timing,
         });
         const token = Object.freeze({ sid, slot, sequence: 1, wireId: ++nextWireId });
+        originalSource.set(token, sourceSlot);
         records.set(slot, { snapshot, token });
         return [token];
       });
@@ -407,6 +446,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       counts.delete(slot);
     },
     resetAll: (): void => {
+      publication.discard();
       for (const slot of records.keys()) send(slot, { type: 'stop' });
       records.clear();
       counts.clear();

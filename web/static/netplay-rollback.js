@@ -5560,6 +5560,7 @@
   const _checkOverduePushes = () => {
     if (_playerSlot !== 0) return;
     const now = performance.now();
+    if (_recovery.publication?.holding()) _recovery.publication.tick(_syncQueueEpoch, now);
     for (const attempt of _recovery.entries()) {
       const target = _peers[attempt.sid];
       _recovery.event(attempt, {
@@ -12295,14 +12296,20 @@
   async function sendInitialState() {
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) return;
+    const publication = typeof _recovery === 'undefined' ? undefined : _recovery.publication;
+    const releaseBootRead = publication?.enterBootRead();
+    if (publication && !releaseBootRead) return;
     try {
       await waitForSmashTitleState(gm);
+      // A stale pre-match task must not read live running-match state.
+      if (typeof _recovery !== 'undefined' && _recovery.publication?.holding()) return;
       const captured = _captureInitialStateBytes(gm);
       const bytes = captured.bytes;
       // Copy before compressAndEncode — worker transfer detaches the buffer
       const cacheBytes = new Uint8Array(bytes);
       const encoded = await compressAndEncode(bytes);
       const saveRam = await _encodeSaveRam(gm.Module);
+      if (typeof _recovery !== 'undefined' && _recovery.publication?.holding()) return;
       _syncLog(
         `sending initial state via Socket.IO (${captured.kind}, ${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip` +
           `${saveRam ? `, save RAM ${Math.round(saveRam.length / 1024)}KB` : ', no save RAM'})`,
@@ -12355,6 +12362,8 @@
       if (err?.name === 'AbortError') return;
       _syncLog(`failed to send initial state: ${err}`);
       if (_playerSlot === 0) _retryHostState();
+    } finally {
+      releaseBootRead?.();
     }
   }
 
@@ -12614,6 +12623,8 @@
       );
       return;
     }
+    if (typeof _recovery !== 'undefined' && _recovery.publication?.holding())
+      return _deferMatchCapture('late:' + peerSlot, remoteSid, () => sendLateJoinState(remoteSid));
     _markPendingLateJoinPeer(remoteSid, peerSlot, 'state transfer');
     // Keep the drop marker through capture/compression: failed serves must
     // never let mesh healing activate a guest that has not loaded state.
@@ -15779,7 +15790,13 @@
   // dispatched NOW at the current frame instead. This closes the
   // coord-sync-unreachable deadlock class (spec §MF3, audit §A3/§B1).
   const _dispatchScheduledSyncs = (isConfirmed) => {
-    if (_playerSlot !== 0 || _scheduledSyncRequests.length === 0 || _pushingSyncState) return;
+    if (
+      _playerSlot !== 0 ||
+      _scheduledSyncRequests.length === 0 ||
+      _pushingSyncState ||
+      (typeof _recovery !== 'undefined' && _recovery.publication?.holding())
+    )
+      return;
     const confirmed = isConfirmed();
     const _coordNow = performance.now();
     const pastDeadline = (r) => r.deadlineAt && _coordNow > r.deadlineAt;
@@ -19361,6 +19378,92 @@
     _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
   };
 
+  // Internal opt-in seam; the owner wire and forward-tick path do not
+  // invoke this yet. Never overlap a native capture which already started.
+  const _openCapturePublication = (plan, attempts, now) => {
+    if (
+      !_useCRollback ||
+      !_hasKnSync ||
+      RB_WORKER_COPROC ||
+      _isSmashRemix() ||
+      _playerSlot !== 0 ||
+      _phase !== PHASE_RUNNING ||
+      _runSubstate === RUN_LATE_JOIN_PAUSE ||
+      _lateJoinServing.size ||
+      _pushingSyncState ||
+      _proactivePushInFlight ||
+      _recoveryTransfers.size() ||
+      plan.capture.epoch !== _syncQueueEpoch ||
+      plan.capture.frame !== _frameNum
+    )
+      return;
+    return _recovery.openPublication(plan, attempts, now);
+  };
+
+  const _deferMatchCapture = (key, sid, run) => {
+    const epoch = _syncQueueEpoch;
+    const gen = _syncQueueGen[sid] || 0;
+    const peer = _peers[sid];
+    const socketId = _knownPlayers[sid]?.socketId;
+    const now = performance.now();
+    return _recovery.publication.defer(
+      {
+        key,
+        epoch,
+        deadline: now + SYNC_COORD_TIMEOUT_MS,
+        run: () =>
+          epoch === _syncQueueEpoch &&
+          performance.now() < now + SYNC_COORD_TIMEOUT_MS &&
+          (!sid ||
+            (gen === (_syncQueueGen[sid] || 0) && peer === _peers[sid] && socketId === _knownPlayers[sid]?.socketId))
+            ? run()
+            : Promise.resolve(null),
+      },
+      now,
+    );
+  };
+
+  const _ownedCaptureScope = (target) => ({
+    epoch: _syncQueueEpoch,
+    recipient: { slot: target.peer.slot, id: target.sid, generation: target.gen },
+  });
+
+  const _sealAndPublishCapture = (token, observe, attempts) => {
+    if (!_recovery.ownsPublication(token, attempts)) return null;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._kn_sync_read || !mod._kn_get_frame || !mod._kn_get_replay_depth || !mod._kn_peek_pending_rollback)
+      return null;
+    const nativeFence = () => {
+      const evidence = observe();
+      return {
+        ...evidence,
+        epoch: _syncQueueEpoch,
+        jsFrame: _frameNum,
+        nativeFrame: mod._kn_get_frame(),
+        replayDepth: mod._kn_get_replay_depth(),
+        pendingRollback: mod._kn_peek_pending_rollback() >= 0,
+        failedRollbacks: mod._kn_get_failed_rollbacks?.() ?? -1,
+        allRequiredInputsConfirmed:
+          evidence.allRequiredInputsConfirmed && window.EJS_emulator?.gameManager?.Module === mod,
+      };
+    };
+    const sealed = _recovery.publication.seal(
+      token,
+      () => performance.now(),
+      nativeFence,
+      () => {
+        ensureSyncBuffer();
+        if (!_syncBufPtr || _syncBufSize <= 0) return new Uint8Array();
+        const written = mod._kn_sync_read(_syncBufPtr, _syncBufSize);
+        return written > 0 && written <= _syncBufSize
+          ? new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, written)
+          : new Uint8Array();
+      },
+    );
+    if (!sealed) return null;
+    return pushSyncState(null, false, { escalation: attempts, capturedPublication: token });
+  };
+
   // Resolves to the sids a DC send skipped (closed channel), [] when sent,
   // or null when no state went out at all.
   const pushSyncState = async (targetSid, isProactive = false, options = {}) => {
@@ -19380,6 +19483,22 @@
     // follows (specs/escalation_push.qnt, CLOCK "chain"). Each chain sends one
     // transfer at a time, so nothing interleaves.
     const escalation = attempts.length > 0;
+    const capturedPublication = options.capturedPublication;
+    if (
+      capturedPublication &&
+      (!escalation ||
+        targetSid ||
+        options.transport === 'socket' ||
+        !_recovery.ownsPublication(capturedPublication, attempts))
+    )
+      return null; // No unrelated recovery attempt is failed by an invalid lease.
+    const deferIfHeld = () => {
+      if (escalation) return notSent('another capture owns the match boundary');
+      if (isProactive) return null;
+      const key = targetSid ? _peers[targetSid]?.slot : 'room';
+      return _deferMatchCapture(key, targetSid, () => pushSyncState(targetSid, isProactive, options));
+    };
+    if (!capturedPublication && _recovery.publication?.holding()) return deferIfHeld();
     // Proactive and explicit syncs use separate in-flight guards so that a
     // proactive push in progress never drops a sync-request from a reconnecting guest.
     if (!escalation && (isProactive ? _proactivePushInFlight : _pushingSyncState)) {
@@ -19424,6 +19543,11 @@
             _runQueuedSyncPush();
           }
         };
+        // Async Effect admission may finish after a fault acquired the fence.
+        if (!capturedPublication && _recovery.publication?.holding()) {
+          release();
+          return deferIfHeld();
+        }
         const gm = window.EJS_emulator?.gameManager;
         if (!gm) {
           notSent('no emulator', attempts);
@@ -19432,7 +19556,12 @@
         }
         try {
           let currentState;
-          const frame = _frameNum;
+          const frame = capturedPublication?.frame ?? _frameNum;
+          const mayDeliver = capturedPublication
+            ? (t) =>
+                _syncTargetCurrent(t) &&
+                _recovery.publication.hasFor(capturedPublication, _ownedCaptureScope(t), performance.now())
+            : undefined;
           // Taken now: a guest it goes to unconfirmed is watched from here, before
           // compression, since an input that differs while it compresses changes
           // this frame as much as one after the send (specs/sync_follow_up.qnt).
@@ -19452,12 +19581,19 @@
           }
           // Who this state is for, on the connections they are on now: a reconnect
           // while it is compressed or queued drops it for that guest.
-          const targets = _syncTargetsFor(targetSid);
+          const available = _syncTargetsFor(targetSid);
+          const targets = mayDeliver ? available.filter(mayDeliver) : available;
           const socketTarget = targetSid
             ? { sid: targetSid, peer: _peers[targetSid], epoch: _syncQueueEpoch, gen: _syncQueueGen[targetSid] || 0 }
             : null;
 
-          if (_hasKnSync) {
+          if (capturedPublication) {
+            const target = targets[0];
+            currentState =
+              target &&
+              _recovery.publication.bytesFor(capturedPublication, _ownedCaptureScope(target), performance.now());
+            if (!currentState) return notSent('verified capture expired or lost its recipients', attempts);
+          } else if (_hasKnSync) {
             // C-level: read state directly from g_dev — no getState(), no memory growth
             ensureSyncBuffer();
             const mod = gm.Module;
@@ -19583,7 +19719,7 @@
             const compressed = await compressState(toCompress);
             const sizeKB = Math.round(compressed.length / 1024);
             _syncLog(`full state: ${sizeKB}KB compressed`);
-            return await sendSyncChunks(compressed, frame, targets, isProactive, requestIds, attempts);
+            return await sendSyncChunks(compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver);
           }
           return [];
         } catch (err) {
@@ -19623,7 +19759,15 @@
   // congested never holds up another's transfer (a broadcast to several).
   // Resolves to the sids of targets that were skipped because their channel
   // wasn't open. The chains are _syncSendChains, by sid.
-  const sendSyncChunks = async (compressed, frame, targets, isProactive = false, requestIds = {}, attempts = []) => {
+  const sendSyncChunks = async (
+    compressed,
+    frame,
+    targets,
+    isProactive = false,
+    requestIds = {},
+    attempts = [],
+    mayDeliver,
+  ) => {
     // A guest the state is not for (held as a late joiner, gone): its
     // escalation push does not go out. The others reach their guest's chain
     // now: from here their clock follows that chain (CLOCK "chain").
@@ -19641,6 +19785,7 @@
           // Recheck at execution, not just enqueue: reset/toggle-off may have
           // cancelled this actor while the previous transfer held the chain.
           if (attempts.length && !attempts.some((a) => a.sid === t.sid && _recovery.current(a))) return 'skipped';
+          if (mayDeliver && !mayDeliver(t)) return 'skipped';
           // Once a transfer starts, drain its framing; cancellation invalidates
           // its actor outcome, not the physically in-flight channel operation.
           return _sendSyncChunksTo(
