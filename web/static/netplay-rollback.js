@@ -12373,6 +12373,70 @@
     }
   };
 
+  const _snapshotLateJoinBridgeSources = (joiningSid) => {
+    if (!_useCRollback || RB_WORKER_COPROC || _isSmashRemix() || !_activeRoster || !_signalSocket?.id) return null;
+    const own = { slot: _playerSlot, sid: _signalSocket.id, peer: null, history: _localInputs };
+    const originals = [own];
+    for (const [sid, peer] of Object.entries(_peers)) {
+      const { slot } = peer;
+      if (
+        sid === joiningSid ||
+        peer.synthetic ||
+        peer._intentionalLeave ||
+        !_isValidPlayerSlot(slot) ||
+        !_activeRoster.has(slot) ||
+        _isPeerPendingLateJoin(sid, peer)
+      )
+        continue;
+      originals.push({ slot, sid, peer, gen: _syncQueueGen[sid] || 0, history: _remoteInputs[slot] });
+    }
+    return originals;
+  };
+
+  const _readLateJoinBridge = (frame, delay, sources) =>
+    window.KNCore.collectLateJoinInputBridge(
+      frame,
+      delay,
+      sources
+        .filter(({ slot, sid, peer, gen, history }) =>
+          peer
+            ? _peers[sid] === peer &&
+              (_syncQueueGen[sid] || 0) === gen &&
+              _activeRoster?.has(slot) &&
+              _remoteInputs[slot] === history
+            : _signalSocket?.id === sid && _localInputs === history,
+        )
+        .map(({ slot, sid, history }) => ({
+          slot,
+          sid,
+          confirmed: (f) => (history?.[f] === KNShared.ZERO_INPUT ? undefined : history?.[f]),
+        })),
+    );
+
+  const _restoreLateJoinInputBridge = (msg, peersAtArrival) => {
+    const sources = window.KNCore.decodeLateJoinInputBridge(msg.inputBridge, msg.frame, DELAY_FRAMES, _playerSlot);
+    let restored = 0;
+    for (const { slot, sid, frames } of sources) {
+      const saved = peersAtArrival.get(sid);
+      if (
+        !saved ||
+        _peers[sid] !== saved.peer ||
+        (_syncQueueGen[sid] || 0) !== saved.gen ||
+        saved.peer.slot !== slot ||
+        saved.peer.synthetic
+      )
+        continue;
+      const history = (_remoteInputs[slot] ??= {});
+      for (const [f, buttons, lx, ly, cx, cy] of frames) {
+        if (history[f] !== undefined && history[f] !== KNShared.ZERO_INPUT) continue;
+        history[f] = { buttons, lx, ly, cx, cy };
+        _consumeLateJoinSeededInput(slot, f);
+        restored++;
+      }
+    }
+    if (restored) _syncLog(`late-join input bridge: restored ${restored} confirmed inputs at f=${msg.frame}`);
+  };
+
   async function sendLateJoinState(remoteSid) {
     // Look up slot from _peers first, fall back to _knownPlayers.
     // The peer's WebRTC connection may have failed/disconnected (removed
@@ -12456,6 +12520,7 @@
 
       // Capture state + frame number + RNG atomically while paused
       const capturedFrame = _frameNum;
+      const bridgeSources = _useCRollback ? _snapshotLateJoinBridgeSources(remoteSid) : null;
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
 
@@ -12515,7 +12580,7 @@
         `sending late-join state to ${remoteSid} (${Math.round(encoded.rawSize / 1024)}KB raw -> ${Math.round(encoded.compressedSize / 1024)}KB gzip) frame: ${capturedFrame}`,
       );
 
-      _signalSocket.emit('data-message', {
+      const message = {
         type: 'late-join-state',
         targetSid: remoteSid,
         frame: capturedFrame,
@@ -12526,7 +12591,12 @@
         saveRam,
         hiddenWords,
         audioFifo,
-      });
+      };
+      // Original peers can advance briefly before receiving the pause.
+      // Their real input may arrive while compression runs; pair it
+      // only with the same roster/connection generation captured above.
+      if (bridgeSources) message.inputBridge = _readLateJoinBridge(capturedFrame, DELAY_FRAMES, bridgeSources);
+      _signalSocket.emit('data-message', message);
       _lateJoinStateSent.set(remoteSid, { serveId, epoch: serveEpoch, gen: serveGen, peer: servePeer });
     } catch (err) {
       _syncLog(`failed to send late-join state: ${err}`);
@@ -12610,6 +12680,11 @@
       return;
     }
     _isApplyingLateJoinState = true;
+    const bridgeEpoch = _syncQueueEpoch;
+    const bridgePeers =
+      Array.isArray(msg.inputBridge) && !RB_WORKER_COPROC && !_isSmashRemix()
+        ? new Map(Object.entries(_peers).map(([sid, peer]) => [sid, { peer, gen: _syncQueueGen[sid] || 0 }]))
+        : null;
 
     _syncLog(`received late-join state for frame ${msg.frame}`);
     _awaitingLateJoinState = false;
@@ -12746,6 +12821,9 @@
 
       // Start at host's current frame (host is paused at msg.frame)
       _frameNum = msg.frame;
+      if (bridgePeers && bridgeEpoch === _syncQueueEpoch && mod?._kn_pre_tick) {
+        _restoreLateJoinInputBridge(msg, bridgePeers);
+      }
       for (let f = Math.max(0, msg.frame - DELAY_FRAMES); f <= msg.frame + DELAY_FRAMES; f++) {
         if (!_localInputs[f]) _localInputs[f] = KNShared.ZERO_INPUT;
         for (const p of Object.values(_peers)) {

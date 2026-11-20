@@ -749,6 +749,11 @@ $QUINT test specs/contextual_reset.qnt --main=contextual_reset_before --backend=
 $QUINT test specs/contextual_reset.qnt --main=contextual_reset_fixed --backend="$BACKEND"
 $QUINT run specs/contextual_reset.qnt --main=contextual_reset_fixed --invariant='safeHold and physicalPreserved' --max-samples=1000 --max-steps=30 --backend="$BACKEND"
 
+# A late join seeds only the original peers' same-generation confirmed input.
+$QUINT test specs/late_join_input_bridge.qnt --main=late_join_input_bridge_before --backend="$BACKEND"
+$QUINT test specs/late_join_input_bridge.qnt --main=late_join_input_bridge_fixed --backend="$BACKEND"
+$QUINT run specs/late_join_input_bridge.qnt --main=late_join_input_bridge_fixed --invariant='separateReadyFromBridge and snapshotGenerationOnly and noConfirmedPlaceholder' --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

@@ -22,6 +22,7 @@ import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
 import { catchUpStep, tooOldStep } from './catch-up.ts';
 import { framesToSendAgain } from './input-resend.ts';
+import { collectLateJoinInputBridge, decodeLateJoinInputBridge } from './late-join-input-bridge.ts';
 import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import {
@@ -311,6 +312,8 @@ export const KNCore = {
   catchUp: { catchUpStep, tooOldStep },
   framesToAskFor,
   framesToSendAgain,
+  collectLateJoinInputBridge,
+  decodeLateJoinInputBridge,
   checkRelayed,
   createConnectTracker,
   /** The per-peer connection machine (peer-connection.ts). The engine drives it, through `peerDriver`. */

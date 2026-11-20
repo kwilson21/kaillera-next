@@ -172,6 +172,7 @@ const LateJoinState = Schema.Struct({
   saveRam: Schema.optional(Schema.NullOr(Encoded)),
   hiddenWords: Sidecar,
   audioFifo: Sidecar,
+  inputBridge: Sidecar,
 });
 
 const SyncStateSocket = Schema.Struct({
