@@ -4,6 +4,7 @@ NOT the emulator/ROM prompt.
 Run: pytest tests/test_watch_link.py -v
 """
 
+import pytest
 from playwright.sync_api import expect
 
 
@@ -76,7 +77,9 @@ def test_watch_link_midgame_no_rom_prompt(browser, server_url):
 
         # Verify the engine was initialized as spectator (not as a player)
         is_spectator = spectator.evaluate("window._isSpectator")
-        assert is_spectator is True, f"Expected spectator mode, got _isSpectator={is_spectator}"
+        assert is_spectator is True, (
+            f"Expected spectator mode, got _isSpectator={is_spectator}"
+        )
 
         # Verify no emulator was booted (no EJS_emulator global)
         has_emulator = spectator.evaluate(
@@ -88,6 +91,103 @@ def test_watch_link_midgame_no_rom_prompt(browser, server_url):
         host.close()
         guest.close()
         spectator.close()
+
+
+@pytest.mark.parametrize("relay_available", [True, False])
+def test_watch_link_waits_for_relay_before_answering(
+    browser, server_url, relay_available
+):
+    """Watchers wait for authenticated TURN rather than answering with only STUN."""
+    host, guest, watcher = [browser.new_page() for _ in range(3)]
+    room = "WATCH04" if relay_available else "WATCH05"
+    delayed_ice = []
+    turn_url = "turn:127.0.0.1:3478"
+    watcher.route("**/ice-servers?token=*", lambda route: delayed_ice.append(route))
+    watcher.add_init_script("""
+        window.__watchOffers = new Set();
+        window.__watchAnswers = [];
+        Object.defineProperty(window, 'io', {
+            configurable: true,
+            set(nativeIo) {
+                Object.defineProperty(window, 'io', {
+                    configurable: true,
+                    value(...options) {
+                        const socket = nativeIo(...options);
+                        socket.onAny((event, signal) => {
+                            if (event === 'webrtc-signal' && signal?.offer) window.__watchOffers.add(signal.sender);
+                        });
+                        return socket;
+                    },
+                });
+            },
+        });
+        const NativePeerConnection = window.RTCPeerConnection;
+        window.RTCPeerConnection = class extends NativePeerConnection {
+            setLocalDescription(description) {
+                if (description?.type === 'answer') {
+                    const { iceServers, iceTransportPolicy } = this.getConfiguration();
+                    window.__watchAnswers.push({
+                        iceTransportPolicy,
+                        urls: iceServers.flatMap((server) => server.urls),
+                    });
+                }
+                return super.setLocalDescription(description);
+            }
+        };
+    """)
+
+    try:
+        host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
+        guest.goto(f"{server_url}/play.html?room={room}&name=Guest")
+        for player in (host, guest):
+            expect(player.locator("#overlay")).to_be_visible(timeout=10000)
+            _mark_rom_ready(player)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        _start_game_via_socket(host)
+        for player in (host, guest):
+            expect(player.locator("#toolbar")).to_be_visible(timeout=10000)
+            player.wait_for_function(
+                "Object.values(window.KNState?.peers || {}).some((p) => p.dc?.readyState === 'open')",
+                timeout=10000,
+            )
+            player.evaluate(
+                "window.__watchPlayerChannel = Object.values(window.KNState.peers)"
+                ".find((p) => p.dc?.readyState === 'open').dc"
+            )
+
+        watcher.goto(f"{server_url}/play.html?room={room}&name=Watcher&spectate=1")
+        watcher.wait_for_function(
+            "window._isSpectator && window.__watchOffers.size === 2", timeout=10000
+        )
+        assert delayed_ice, "expected the authenticated ICE request to be held"
+        stun = {"urls": "stun:127.0.0.1:3478"}
+        turn = {"urls": turn_url, "username": "fixture", "credential": "fixture"}
+        for route in delayed_ice:
+            route.fulfill(json=[stun, turn] if relay_available else [stun])
+
+        if relay_available:
+            watcher.wait_for_function(
+                "window.__watchAnswers.length === 2", timeout=10000
+            )
+            for answer in watcher.evaluate("window.__watchAnswers"):
+                assert answer["iceTransportPolicy"] == "relay"
+                assert turn_url in answer["urls"]
+        else:
+            expect(watcher.locator("#error-msg")).to_contain_text(
+                "private spectator connection is unavailable"
+            )
+            assert watcher.evaluate("window.__watchAnswers.length") == 0
+        assert watcher.evaluate("!window.EJS_emulator")
+
+        for player in (host, guest):
+            assert player.evaluate(
+                "Object.values(window.KNState.peers)"
+                ".some((p) => p.dc === window.__watchPlayerChannel && p.dc.readyState === 'open')"
+            )
+    finally:
+        watcher.close()
+        guest.close()
+        host.close()
 
 
 def test_watch_link_pregame_no_rom_needed(browser, server_url):

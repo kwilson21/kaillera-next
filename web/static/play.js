@@ -453,6 +453,7 @@
   const _uploadTokenKey = _urlRoomCode ? `kn-upload-token:${_urlRoomCode}` : '';
   let _uploadToken = (_uploadTokenKey && _safeGet('localStorage', _uploadTokenKey)) || '';
   KNState.uploadToken = _uploadToken;
+  let _roomIceServers = Promise.resolve([]);
 
   const _persistentId =
     _safeGet('sessionStorage', 'kn-player-id') ||
@@ -790,12 +791,20 @@
         try {
           if (_uploadTokenKey) _safeSet('localStorage', _uploadTokenKey, _uploadToken);
         } catch (_) {}
-        fetch(`/ice-servers?token=${encodeURIComponent(_uploadToken)}&room=${encodeURIComponent(roomCode || '')}`)
-          .then((r) => r.json())
-          .then((s) => {
-            window._iceServers = s;
+        const abort = new AbortController();
+        const deadline = setTimeout(() => abort.abort(), 8000);
+        const pending = fetch(
+          `/ice-servers?token=${encodeURIComponent(_uploadToken)}&room=${encodeURIComponent(roomCode || '')}`,
+          { signal: abort.signal },
+        )
+          .then((r) => (r.ok ? r.json() : []))
+          .then((servers) => {
+            if (_roomIceServers === pending && Array.isArray(servers)) window._iceServers = servers;
+            return servers;
           })
-          .catch(() => {});
+          .catch(() => [])
+          .finally(() => clearTimeout(deadline));
+        _roomIceServers = pending;
       }),
     );
     socket.on(
@@ -3494,6 +3503,7 @@
     const resyncEnabled = _gameResyncEnabled;
 
     const lateJoin = _isLateJoin();
+    let spectatorRelayUnavailable = false;
     engine = Engine;
     engine.init({
       socket,
@@ -3509,6 +3519,14 @@
       romHash: _romHash ?? null,
       gameId: _gameId ?? null,
       uploadToken: _uploadToken,
+      roomIceServers: () => _roomIceServers,
+      onSpectatorRelayUnavailable: () => {
+        if (spectatorRelayUnavailable) return;
+        spectatorRelayUnavailable = true;
+        dismissGameLoading();
+        KNEvent('webrtc-fail', 'Spectator relay unavailable', { stage: 'spectator-relay' });
+        showError('The private spectator connection is unavailable. Try reloading the watch link.');
+      },
       isMobile: _isMobile,
       onStatus: (msg) => {
         // Show in toolbar (visible during gameplay) and overlay (visible pre-game)
@@ -3610,7 +3628,7 @@
     // NAT traversal failure (state=failed), peer never started (state=new),
     // or signaling stalled (no peers in KNState at all).
     setTimeout(() => {
-      if (coreFatal) return;
+      if (coreFatal || spectatorRelayUnavailable) return;
       const loadingEl = document.getElementById('game-loading');
       if (loadingEl && !loadingEl.classList.contains('hidden') && isGameRunning()) {
         const text = document.getElementById('game-loading-text');
