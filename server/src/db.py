@@ -763,6 +763,51 @@ async def get_screenshots(match_id: str) -> list[dict]:
     )
 
 
+async def get_screenshot_frame(match_id: str, frame: int | None) -> dict:
+    """Return captures at one exact frame and locations of its neighbors."""
+    shot = Screenshot
+    slots = range(4)
+
+    def seek(slot: int, column: str, *, anchor: int | None = None, before: bool = False):
+        query = select(shot.frame).where(shot.match_id == match_id, shot.slot == slot, shot.frame >= 0)
+        if anchor is not None:
+            query = query.where(shot.frame < anchor if before else shot.frame > anchor)
+        # Each seek uses the existing (match_id, slot, frame) index; no full
+        # match scan or additional D1 migration is needed.
+        return query.order_by(shot.frame.desc() if before else shot.frame).limit(1).scalar_subquery().label(column)
+
+    starts = (await fetch(select(*(seek(slot, f"first_{slot}") for slot in slots))))[0]
+    recorded_slots = [slot for slot in slots if starts[f"first_{slot}"] is not None]
+    if frame is None and recorded_slots:
+        frame = min(starts[f"first_{slot}"] for slot in recorded_slots)
+    if frame is None or not recorded_slots:
+        return {"frame": frame, "previous_frame": None, "next_frame": None, "slots": [], "screenshots": []}
+
+    bounds = (
+        await fetch(
+            select(
+                *(seek(slot, f"previous_{slot}", anchor=frame, before=True) for slot in recorded_slots),
+                *(seek(slot, f"next_{slot}", anchor=frame) for slot in recorded_slots),
+            )
+        )
+    )[0]
+    previous = [bounds[f"previous_{slot}"] for slot in recorded_slots if bounds[f"previous_{slot}"] is not None]
+    following = [bounds[f"next_{slot}"] for slot in recorded_slots if bounds[f"next_{slot}"] is not None]
+    captures = await fetch(
+        select(shot.slot, shot.frame, func.max(shot.id).label("id"))
+        .where(shot.match_id == match_id, shot.slot.in_(recorded_slots), shot.frame == frame)
+        .group_by(shot.slot, shot.frame)
+        .order_by(shot.slot)
+    )
+    return {
+        "frame": frame,
+        "previous_frame": max(previous, default=None),
+        "next_frame": min(following, default=None),
+        "slots": recorded_slots,
+        "screenshots": captures,
+    }
+
+
 async def read_screenshot(row: dict) -> bytes | None:
     """Bytes for a screenshots row: from the blob store, or `data` for rows
     written before migration 0003."""
