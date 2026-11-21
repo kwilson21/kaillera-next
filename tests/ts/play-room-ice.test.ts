@@ -64,3 +64,51 @@ test('a slower authorized response cannot replace a newer relay or escape a clos
   assert.deepEqual(await cache.ready('another'), []);
   assert.deepEqual(published, [NEXT, STUN]);
 });
+
+test('a first offer waits for the room-authorized refresh to begin', async () => {
+  const cache = createRoomIceCache();
+  const hostOffer = cache.ready('room');
+  const guestOffer = cache.ready('room');
+  await cache.refresh('room', Promise.resolve(RELAY), ignore);
+  assert.deepEqual(await hostOffer, RELAY);
+  assert.deepEqual(await guestOffer, RELAY);
+  assert.equal(hostOffer, guestOffer);
+});
+
+test('an older in-flight authorized relay still works if a newer request fails', async () => {
+  const cache = createRoomIceCache();
+  const old = deferredIce();
+  const older = cache.refresh('room', old.promise, ignore);
+  const waiting = cache.ready('room');
+  await cache.refresh('room', Promise.reject(new Error('offline')), ignore);
+  old.resolve(RELAY);
+  await older;
+  assert.deepEqual(await waiting, RELAY);
+  assert.deepEqual(await cache.ready('room'), RELAY);
+});
+
+test('a reconnect expects a new refresh even after a previous terminal STUN-only response', async () => {
+  const cache = createRoomIceCache();
+  await cache.refresh('room', Promise.resolve(STUN), ignore);
+  assert.deepEqual(await cache.ready('room'), []);
+  cache.begin('room');
+  const waiting = cache.ready('room');
+  await cache.refresh('room', Promise.resolve(RELAY), ignore);
+  assert.deepEqual(await waiting, RELAY);
+});
+
+test('a readiness window is shared, bounded, and invalidated by a room reset', async () => {
+  const cache = createRoomIceCache(Date.now, 5);
+  const timedOut = cache.ready('room');
+  assert.equal(cache.ready('room'), timedOut);
+  assert.deepEqual(await timedOut, []);
+  const pending = deferredIce();
+  const refresh = cache.refresh('room', pending.promise, ignore);
+  const waiting = cache.ready('room');
+  cache.clear();
+  assert.deepEqual(await waiting, []);
+  await cache.refresh('another', Promise.resolve(STUN), ignore);
+  pending.resolve(RELAY);
+  await refresh;
+  assert.deepEqual(await cache.ready('another'), []);
+});

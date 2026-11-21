@@ -753,6 +753,7 @@
     });
     const _connects = window.KNCore?.createConnectTracker() ?? null;
     socket.on('connect', () => {
+      _roomIce.begin(roomCode);
       // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
       // on the socket, so 'connect' is the event that fires here.
       _session?.socketUp();
