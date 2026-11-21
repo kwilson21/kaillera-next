@@ -53,7 +53,7 @@ const buildRtcConfig = (iceServers: RTCIceServer[]): RTCConfiguration => {
 
 // The public ICE response can arrive before the room-authorized response.
 export const configureSpectatorRelay = (pc: RTCPeerConnection, iceServers: RTCIceServer[]): boolean => {
-  const isTurnUrl = (url: unknown): boolean => typeof url === 'string' && /^turns?:/i.test(url);
+  const isTurnUrl = (url: string): boolean => typeof url === 'string' && /^turns?:/i.test(url);
   if (
     !Array.isArray(iceServers) ||
     !iceServers.some((server) => (Array.isArray(server?.urls) ? server.urls : [server?.urls]).some(isTurnUrl))
