@@ -25,7 +25,10 @@ Last updated: 2026-11-02
 - **Version:** 4.2.3 (also recorded in `ejs/version.json`)
 - **Source:** kaillera-next fork of https://github.com/EmulatorJS/EmulatorJS
 - **Notes:** patched core redirector logic lives in `core-redirector.js`; the EJS bundle
-  itself is upstream + minor patches.
+  itself is upstream + minor patches. In `downloadGameCore`, a missing local
+  download ends with an error (no CDN retry); streaming N64 cache entries use
+  the bundled archive hash supplied by the redirector, or skip caching when
+  that hash is unavailable.
 
 ### `ejs/cores/mupen64plus_next_libretro.{js,wasm}` + `mupen64plus_next-wasm.data`
 - **Version:** built locally by `build/build.sh` — see "Build sources" below for pinned SHAs

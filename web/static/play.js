@@ -2958,13 +2958,14 @@
       };
       document.body.appendChild(script);
     };
-    if (window._knCoreReady) {
-      // BF5: race _knCoreReady against a 15s timeout so boot doesn't hang
+    const coreReady = window._knPrepareN64Core?.(mode) ?? window._knCoreReady;
+    if (coreReady) {
+      // BF5: race core readiness against a 15s timeout so boot doesn't hang
       // forever if /api/core-info fetch never resolves.
       const coreTimeout = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Core load timeout (15s)')), 15000),
       );
-      Promise.race([window._knCoreReady, coreTimeout]).then(injectLoader, (err) => {
+      Promise.race([coreReady, coreTimeout]).then(injectLoader, (err) => {
         console.warn(`[play] core-ready: ${err.message} — proceeding without cache clear`);
         injectLoader();
       });

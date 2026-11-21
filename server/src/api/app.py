@@ -283,6 +283,7 @@ class SecurityHeadersMiddleware:
 
         # Extract the request path for cache-control decisions.
         path: str = scope.get("path", "/")
+        query: bytes = scope.get("query_string", b"")
 
         async def send_with_headers(message: dict) -> None:
             if message["type"] == "http.response.start":
@@ -293,7 +294,7 @@ class SecurityHeadersMiddleware:
                     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
-                    (b"cache-control", self._cache_control(path).encode()),
+                    (b"cache-control", self._cache_control(path, query, message["status"]).encode()),
                 ]
                 # COOP/COEP breaks OG image fetches by crawlers. The front page
                 # doesn't need cross-origin isolation (only the game does), and
@@ -306,13 +307,19 @@ class SecurityHeadersMiddleware:
 
         await self.app(scope, receive, send_with_headers)
 
-    def _cache_control(self, path: str) -> str:
+    def _cache_control(self, path: str, query: bytes = b"", status: int = 200) -> str:
         if not self._allow_cache:
             return "no-store, no-cache, must-revalidate, max-age=0"
         # WASM core + data — content-addressed via /api/core-info?h=<hash>,
         # so the URL itself changes when the file changes. Safe to cache for
         # a year (browsers + Cloudflare both treat ?h=… as part of the cache
         # key, so a new file = new URL = guaranteed cache miss).
+        if path == f"/{_CORE_RELATIVE_PATH}" or path.startswith("/static/ejs/cores/reports/"):
+            # Never pin a missing file for a year during a deployment.
+            if status >= 400:
+                return "no-store"
+            if not re.fullmatch(rb"h=[0-9a-f]{16}", query):
+                return "no-cache"
         if path.startswith("/static/ejs/cores/"):
             return "public, max-age=31536000, immutable"
         # JS/CSS — always revalidate via ETag (304 if unchanged)
