@@ -26,7 +26,14 @@ def test_match_summary_and_exact_screenshots_under_strict_csp(page, server_url):
         elif url.path.endswith("/session-timeline"):
             route.fulfill(status=500)
         elif url.path.endswith("/desync-events"):
-            route.fulfill(json={"events": [{"frame": 300, "vision_equal": False, "vision_confidence": "high"}]})
+            route.fulfill(
+                json={
+                    "match_id": "sandbox",
+                    "events": [
+                        {"frame": 299, "captured_frame": 300, "capture_slots": [0, 1], "vision_equal": False},
+                    ],
+                }
+            )
         elif url.path.endswith("/frame"):
             if url.query == "frame=300":
                 route.fulfill(
@@ -62,6 +69,7 @@ def test_match_summary_and_exact_screenshots_under_strict_csp(page, server_url):
     assert "img-src 'self' data:;" in policy
     page.get_by_role("row").filter(has_text="Synthetic").click()
     expect(page.locator("#viewer-content")).to_contain_text("Synthetic")
+    expect(page.get_by_text("Desync not verified.")).to_be_visible()
     expect(page.get_by_text("Could not load the session timeline.")).to_be_visible()
     assert not any("/screenshots/" in path or path.endswith("/export") for path, _ in requests)
 
@@ -73,7 +81,7 @@ def test_match_summary_and_exact_screenshots_under_strict_csp(page, server_url):
 
     page.get_by_role("button", name="Next capture").click()
     expect(page.get_by_text("Frame 300 · 2 of 3 captured players")).to_be_visible()
-    expect(page.get_by_text("Vision flagged a mismatch at this frame.")).to_be_visible()
+    expect(page.get_by_text("A separate vision comparison flagged a mismatch in captures tagged frame 300.")).to_be_visible()
     expect(page.get_by_text("Stored screenshot is missing.", exact=True)).to_be_visible()
     expect(page.get_by_text("No exact capture at this frame.", exact=True)).to_be_visible()
     screenshot = page.get_by_role("img", name="Player 0 at frame 300")

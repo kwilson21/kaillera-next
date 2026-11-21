@@ -124,7 +124,10 @@ test('row opens a summary immediately and never fetches raw log or screenshots u
     if (path.endsWith('/summary')) return summary.response;
     if (path.includes('/session-timeline')) return error;
     if (path.includes('/desync-events'))
-      return json({ events: [{ frame: 300, vision_equal: false, vision_confidence: 'high' }] });
+      return json({
+        match_id: 'match',
+        events: [{ frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: false }],
+      });
     if (path.endsWith('/export')) return { ok: true, blob: async () => 'raw-jsonl' };
     throw new Error('unexpected request');
   });
@@ -140,7 +143,7 @@ test('row opens a summary immediately and never fetches raw log or screenshots u
   assert.match(get('#viewer-content').textContent, /duration_sec/);
   const [verdicts, timeline] = get('#viewer-extras').children;
   assert.match(timeline.textContent, /could not load/i);
-  assert.match(verdicts.innerHTML, /VISION DESYNC DETECTED/);
+  assert.equal(verdicts.textContent, 'Desync not verified.');
   assert.equal(requests.length, 3);
   await get('#viewer-download').click();
   assert.equal(requests.at(-1).path, '/admin/api/session-logs/42/export');
@@ -171,7 +174,16 @@ test('only selected exact-frame images load with no URL key; each slot reports i
   const { get, open, requests } = boot((path) => {
     if (path.endsWith('/summary')) return json({ id: 13, match_id: 'm' });
     if (path.includes('/session-timeline')) return error;
-    if (path.includes('/desync-events')) return json({ events: [{ frame: 299, vision_equal: false }] });
+    if (path.includes('/desync-events'))
+      return json({
+        match_id: 'm',
+        events: [
+          { frame: 300, vision_equal: false },
+          { frame: 210, captured_frame: 300, capture_slots: [0, 0], vision_equal: false },
+          { frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: null },
+          { frame: 209, captured_frame: 299, capture_slots: [0, 1], vision_equal: false },
+        ],
+      });
     if (path.endsWith('/frame'))
       return json({
         frame: 300,
@@ -207,6 +219,46 @@ test('only selected exact-frame images load with no URL key; each slot reports i
   assert.ok(paths.every(({ path, init }) => !path.includes('key=') && init.headers['X-Admin-Key'] === 'fixture-key'));
 });
 
+test('a qualified verdict received before opening screenshots follows only its captured frame', async () => {
+  const { get, open } = boot((path) => {
+    if (path.endsWith('/summary')) return json({ id: 14, match_id: 'm' });
+    if (path.includes('/session-timeline')) return error;
+    if (path.includes('/desync-events'))
+      return json({
+        match_id: 'm',
+        events: [{ frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: false }],
+      });
+    if (path.includes('/screenshots/m/frame')) {
+      const frame = path.endsWith('frame=300') ? 300 : 210;
+      return json({
+        frame,
+        next_frame: frame === 210 ? 300 : null,
+        slots: [0, 1],
+        screenshots: [
+          { id: 1, slot: 0, frame },
+          { id: 2, slot: 1, frame },
+        ],
+      });
+    }
+    if (path.includes('/img/')) return { ok: true, blob: async () => 'jpeg' };
+    throw new Error('unexpected request');
+  });
+  open('14');
+  await tick();
+  assert.equal(get('#viewer-extras').children[0].textContent, 'Desync not verified.');
+  assert.equal(get('#captures-verdict').textContent, '');
+  assert.equal(get('#capture-controls').classList.contains('hidden'), true);
+  get('#captures-show').click();
+  await tick();
+  assert.equal(get('#captures-verdict').textContent, '');
+  get('#captures-next').click();
+  await tick();
+  assert.equal(
+    get('#captures-verdict').textContent,
+    'A separate vision comparison flagged a mismatch in captures tagged frame 300.',
+  );
+});
+
 test('seeking, reopening another match, and closing cancel outdated frame or image responses', async () => {
   const first = pending();
   const image = pending();
@@ -215,7 +267,7 @@ test('seeking, reopening another match, and closing cancel outdated frame or ima
     if (path.includes('/30/summary')) return json({ id: 30, match_id: 'm' });
     if (path.includes('/31/summary')) return json({ id: 31, match_id: 'm2' });
     if (path.includes('/session-timeline')) return error;
-    if (path.includes('/desync-events')) return json({ events: [] });
+    if (path.includes('/desync-events')) return json({ match_id: path.split('match_id=')[1], events: [] });
     if (path.endsWith('/m/frame')) return first.response;
     if (path.endsWith('frame=2400'))
       return json({
@@ -266,4 +318,56 @@ test('seeking, reopening another match, and closing cancel outdated frame or ima
   await tick();
   assert.equal(get('#captures-content').children.length, 0);
   assert.ok(!requests.some(({ path }) => path.endsWith('/img/8')));
+});
+
+test('desync lookup distinguishes absent, unverified, wrong-match, and failed results', async () => {
+  const { get } = boot((path) => {
+    if (path.endsWith('match_id=empty')) return json({ match_id: 'empty', events: [] });
+    if (path.endsWith('match_id=recorded'))
+      return json({
+        match_id: 'recorded',
+        events: [
+          { frame: 300, field: 'ft_buffer', vision_equal: false },
+          { frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: null },
+          { frame: 210, captured_frame: 300, capture_slots: [0, 0], vision_equal: true },
+        ],
+        count: 3,
+      });
+    if (path.endsWith('match_id=wrong')) return json({ match_id: 'other', events: [] });
+    if (path.endsWith('match_id=fail')) return error;
+    if (path.endsWith('match_id=valid'))
+      return json({
+        match_id: 'valid',
+        events: [{ frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: false }],
+      });
+    throw new Error('unexpected request');
+  });
+  const lookup = async (matchId) => {
+    get('#desync-match-id').value = matchId;
+    await get('#desync-load-btn').click();
+    return get('#no-desync-events').textContent;
+  };
+  assert.equal(await lookup('empty'), 'No desync events recorded for this match.');
+  assert.equal(await lookup('recorded'), 'No captures could be verified for this match.');
+  assert.equal(get('#desync-event-list').innerHTML, '');
+  assert.equal(await lookup('wrong'), 'Could not verify desync results for this match.');
+  assert.equal(await lookup('fail'), 'Could not load desync results.');
+  await lookup('valid');
+  assert.match(get('#desync-event-list').innerHTML, /mismatch flagged in captures tagged frame 300/);
+  assert.equal(get('#no-desync-events').classList.contains('hidden'), true);
+});
+
+test('an older desync lookup cannot replace the newer result', async () => {
+  const old = pending();
+  const { get, requests } = boot((path) =>
+    path.endsWith('match_id=old') ? old.response : json({ match_id: 'new', events: [] }),
+  );
+  get('#desync-match-id').value = 'old';
+  const started = get('#desync-load-btn').click();
+  get('#desync-match-id').value = 'new';
+  await get('#desync-load-btn').click();
+  assert.equal(requests[0].init.signal.aborted, true);
+  old.reply(json({ match_id: 'old', events: [{ frame: 10, vision_equal: false }] }));
+  await started;
+  assert.equal(get('#no-desync-events').textContent, 'No desync events recorded for this match.');
 });
