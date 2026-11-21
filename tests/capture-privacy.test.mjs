@@ -29,7 +29,7 @@ function harness({
   const logs = [];
   const storage = new Map(saved === null ? [] : [[key, saved]]);
   const controls = Object.fromEntries(
-    ['opt-diagnostic-images', 'toolbar-diagnostic-images', 'diagnostic-images-status'].map((id) => [
+    ['opt-diagnostic-images', 'toolbar-diagnostic-images', 'diagnostic-images-status', 'opt-listed'].map((id) => [
       id,
       {
         handlers: {},
@@ -43,6 +43,7 @@ function harness({
       },
     ]),
   );
+  const jpegEncodes = [];
   const blobCallbacks = [];
   const bufferCallbacks = [];
   const pixels = new Uint8Array(32 * 24 * 4);
@@ -62,8 +63,9 @@ function harness({
             },
           }
         : null,
-    toDataURL() {
+    toDataURL(type, quality) {
       counts.encodes++;
+      jpegEncodes.push({ width: this.width, height: this.height, type, quality });
       return `data:image/jpeg;base64,${'x'.repeat(120)}`;
     },
     toBlob(cb) {
@@ -98,7 +100,7 @@ function harness({
       }
     },
     Uint8Array,
-    KNState: { slot: 0, boardFrame: false },
+    KNState: { slot: 0, isLocalHost: false },
     KNAudio: { ctx: { state: 'running' } },
     location: { search },
     localStorage: { getItem: (key) => storage.get(key) ?? null },
@@ -143,7 +145,7 @@ function harness({
   }
   context.KNDiag.init({
     getFrame: () => frame,
-    getSlot: () => 0,
+    getSlot: () => context.KNState.slot,
     sendScreenshot: () => counts.uploads++,
     log: (message) => logs.push(message),
   });
@@ -153,6 +155,8 @@ function harness({
     logs,
     storage,
     controls,
+    canvas,
+    jpegEncodes,
     blobCallbacks,
     bufferCallbacks,
     setFrame: (value) => (frame = value),
@@ -193,6 +197,47 @@ test('enabled paths capture periodic, solid-pale and desync images', async () =>
   assert.equal(h.counts.fetches, 1);
 });
 
+test('periodic archive captures use equal 320x240 JPEGs for listed and unlisted players', () => {
+  for (const [slot, isLocalHost, listed] of [
+    [0, true, true],
+    [1, false, true],
+    [0, true, false],
+    [1, false, false],
+  ]) {
+    const h = harness();
+    Object.assign(h.context.KNState, { slot, isLocalHost });
+    h.controls['opt-listed'].checked = listed;
+    h.setFrame(300);
+    h.context.KNDiag.captureAndSendScreenshot();
+    h.context.KNDiag.captureAndSendScreenshot();
+    assert.deepEqual(h.jpegEncodes, [{ width: 320, height: 240, type: 'image/jpeg', quality: 0.6 }]);
+    assert.equal(h.counts.uploads, 1);
+    assert.equal(h.controls['opt-listed'].checked, listed);
+  }
+});
+
+test('a small cropped source is not upscaled and the export canvas follows source size', () => {
+  const h = harness();
+  for (const [frame, width, height] of [
+    [300, 640, 360],
+    [600, 320, 180],
+    [900, 320, 240],
+  ]) {
+    h.setFrame(frame);
+    Object.assign(h.canvas, { width, height });
+    h.context.KNDiag.captureAndSendScreenshot();
+  }
+  assert.deepEqual(
+    h.jpegEncodes.map(({ width, height }) => [width, height]),
+    [
+      [320, 240],
+      [240, 180],
+      [320, 240],
+    ],
+  );
+  assert.equal(h.counts.uploads, 3);
+});
+
 test('both periodic engine paths consult live policy instead of a startup snapshot', () => {
   const engine = read('static/netplay-rollback.js');
   const declaration = engine.match(/const _knScreenshots = .*;/)[0];
@@ -208,7 +253,7 @@ test('both periodic engine paths consult live policy instead of a startup snapsh
 
 test('repeated toggles apply immediately, reset image dedup state, preserve listing consent and persist', () => {
   const h = harness();
-  h.context.KNState.boardFrame = true;
+  h.controls['opt-listed'].checked = true;
   for (let i = 1; i <= 3; i++) {
     h.context.KNCapture.setEnabled(false);
     h.context.KNDiag.captureAndSendScreenshot();
@@ -220,7 +265,7 @@ test('repeated toggles apply immediately, reset image dedup state, preserve list
     assert.equal(h.counts.uploads, i);
     assert.equal(h.controls['opt-diagnostic-images'].checked, true);
   }
-  assert.equal(h.context.KNState.boardFrame, true);
+  assert.equal(h.controls['opt-listed'].checked, true);
   h.context.KNCapture.setEnabled(false);
   assert.equal(h.storage.get(key), 'off');
   assert.equal(harness({ saved: h.storage.get(key) }).context.KNCapture.allowed(), false);
