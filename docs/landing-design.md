@@ -2367,8 +2367,9 @@ inherit the same variables.
   only while the tab is visible.
 - Screenshots WebP ≤ 60 KB with dimensions set; the photo ≤ 120 KB; videos
   never load until clicked (poster + click → iframe).
-- Polling: `/list` every 10 s visible, 30 s hidden, stop after 10 minutes
-  idle until the next interaction.
+- Polling: `/list` every 10 s while visible, even without input. A hidden
+  tab polls every 30 s until idle for 10 minutes, then stops. Returning to the
+  visible tab or restoring it from browser history refreshes the board.
 - The waking-state visualizer is the same inline JS as `/lag-test.html`,
   no extra download.
 

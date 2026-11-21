@@ -9,7 +9,7 @@ import type { BoardRoom } from './wire.ts';
 /** How often the board asks while the tab is visible, and while it is not. */
 export const POLL_MS = 10000;
 export const POLL_HIDDEN_MS = 30000;
-/** With nothing pressed, scrolled or touched for this long, the board stops asking (§7.7). */
+/** An untouched board stops asking after this long only while hidden (§7.7). */
 export const IDLE_STOP_MS = 10 * 60 * 1000;
 /** The numbers are asked for on one poll in this many: about once a minute. */
 export const STATS_EVERY = 6;
@@ -26,8 +26,9 @@ export const plural = (n: number, one: string, many: string): string => `${n} ${
 /** How long until the next poll. */
 export const pollDelay = (hidden: boolean): number => (hidden ? POLL_HIDDEN_MS : POLL_MS);
 
-/** The visitor has been away from the page long enough to stop polling. */
-export const isIdle = (now: number, lastInteraction: number): boolean => now - lastInteraction > IDLE_STOP_MS;
+/** A visible board keeps updating even when the visitor is only watching. */
+export const stopsPollingForIdle = (hidden: boolean, now: number, lastInteraction: number): boolean =>
+  hidden && now - lastInteraction > IDLE_STOP_MS;
 
 /** This poll (the `pollCount`th since polling last started) also asks for the numbers. */
 export const asksForStats = (pollCount: number): boolean => pollCount % STATS_EVERY === 0;
@@ -42,7 +43,7 @@ export const stateAfterFailedList = (state: BoardState): BoardState =>
 
 /** The tab came back: a board on screen is refreshed at once. */
 export const refreshesOnReturn = (hidden: boolean, state: BoardState): boolean =>
-  !hidden && (state === 'live' || state === 'empty');
+  !hidden && state !== 'loading' && state !== 'waking';
 
 /** The Create button's words: it waits while the server wakes. */
 export const createText = (state: BoardState): string =>
