@@ -12,7 +12,6 @@ import {
   featuredWhy,
   frameUrl,
   hash,
-  isIdle,
   isStaleFrame,
   isVideoId,
   liveText,
@@ -27,6 +26,7 @@ import {
   savedVisitor,
   stateAfterFailedList,
   statusText,
+  stopsPollingForIdle,
   stickPose,
   stillAt,
   weekText,
@@ -368,6 +368,9 @@ test('a long run of boards drawn at random stays the same, focus and all', async
         }
         const links = page.document.querySelectorAll('#st-live a');
         links[random(links.length + 1)]?.focus();
+        // This parity sequence models a visitor using the board. A different
+        // test asserts the deliberate change for an untouched visible page.
+        if (poll % 30 === 0) page.fireWindow('keydown');
       });
     }
   }
@@ -487,36 +490,89 @@ test('the numbers are asked for on the first poll and every sixth, and again rig
   }
 });
 
-test('the board stops asking after ten idle minutes and starts again on a touch', async () => {
+test('a visible board updates listed rooms after ten untouched minutes', async () => {
   const site = new Site();
   const pair = await loaded(site);
-  await pair.step('ten minutes with nobody there', (page) => page.advance(IDLE_STOP_MS));
-  const polls = asked(pair.next, '/list');
-  assert.equal(polls, 1 + IDLE_STOP_MS / POLL_MS);
-  await pair.step('one more poll, the last', (page) => page.advance(POLL_MS));
-  assert.equal(asked(pair.next, '/list'), polls + 1);
-  await pair.step('then nothing', (page) => page.advance(5 * IDLE_STOP_MS));
-  assert.equal(asked(pair.next, '/list'), polls + 1);
-  let expected = polls + 1;
-  for (const event of ['pointerdown', 'keydown', 'scroll', 'touchstart']) {
-    await pair.step(`${event} starts it again, with the numbers`, (page) => page.fireWindow(event));
-    expected += 1;
-    assert.equal(asked(pair.next, '/list'), expected);
-    await pair.step('and it runs out again', (page) => page.advance(IDLE_STOP_MS + POLL_MS));
-    expected += IDLE_STOP_MS / POLL_MS + 1;
-    assert.equal(asked(pair.next, '/list'), expected);
-    await pair.step('quiet', (page) => page.advance(IDLE_STOP_MS));
-    assert.equal(asked(pair.next, '/list'), expected);
-  }
-  await pair.step('a touch starts it', (page) => page.fireWindow('scroll'));
-  const stats = asked(pair.next, '/api/stats/public');
-  await pair.step('a touch while polling only moves the idle clock', async (page) => {
-    page.fireWindow('scroll');
-    await page.settle();
-    page.fireWindow('scroll');
+  await pair.step('a fresh visible page polls normally', (page) => page.advance(POLL_MS));
+  assert.equal(asked(pair.next, '/list'), 2);
+
+  // Intentional difference from the original script: only it goes dormant
+  // while visible, so this sequence compares the outcomes rather than parity.
+  for (const page of [pair.old, pair.next]) await page.advance(IDLE_STOP_MS + POLL_MS);
+  assert.equal(boardState(pair.next), 'empty');
+  site.rooms(row('NEW', { player_count: 1 }));
+  for (const page of [pair.old, pair.next]) await page.advance(POLL_MS);
+  assert.equal(boardState(pair.old), 'empty');
+  assert.equal(boardState(pair.next), 'live');
+  assert.equal(find(pair.next, '.room[data-code="NEW"] .cnt').textContent, '1/4');
+
+  site.rooms(playing('NEW', 1, { player_count: 2 }));
+  await pair.next.advance(POLL_MS);
+  assert.equal(find(pair.next, '.room[data-code="NEW"] .cnt').textContent, '2/4');
+  assert.equal(pair.next.el('featured').attrs.get('data-code'), 'NEW');
+
+  site.list = 'fail';
+  await pair.next.advance(POLL_MS);
+  assert.equal(boardState(pair.next), 'live');
+  assert.equal(find(pair.next, '.room[data-code="NEW"] .cnt').textContent, '2/4');
+
+  // The authoritative listing removes the join code when a room is unlisted.
+  site.rooms(row('NEW', { listed: false, room_code: null }), row('OTHER'));
+  await pair.next.advance(POLL_MS);
+  assert.deepEqual(
+    pair.next.el('rooms').children.map((el) => el.attrs.get('data-code')),
+    ['OTHER'],
+  );
+  site.rooms();
+  await pair.next.advance(POLL_MS);
+  assert.equal(boardState(pair.next), 'empty');
+});
+
+test('an idle hidden board stops polling, then catches up once on return', async () => {
+  const site = new Site();
+  const pair = await loaded(site);
+  await pair.step('the tab is hidden', (page) => {
+    page.document.hidden = true;
+    page.document.fire('visibilitychange');
   });
-  assert.equal(asked(pair.next, '/api/stats/public'), stats);
-  assert.equal(asked(pair.next, '/list'), expected + 1);
+  await pair.step('the idle timer runs out', (page) => page.advance(IDLE_STOP_MS + POLL_HIDDEN_MS));
+  const polls = asked(pair.next, '/list');
+  assert.ok(polls > 2);
+  await pair.step('the hidden timer stays dormant', (page) => page.advance(5 * IDLE_STOP_MS));
+  assert.equal(asked(pair.next, '/list'), polls);
+
+  site.rooms(row('NEW'));
+  await pair.step('the tab is visible again', (page) => {
+    page.document.hidden = false;
+    page.document.fire('visibilitychange');
+  });
+  assert.equal(boardState(pair.next), 'live');
+  assert.equal(asked(pair.next, '/list'), polls + 1);
+  await pair.step('no duplicate timer', (page) => page.advance(POLL_MS - 1));
+  assert.equal(asked(pair.next, '/list'), polls + 1);
+  await pair.step('visible cadence resumes', (page) => page.advance(1));
+  assert.equal(asked(pair.next, '/list'), polls + 2);
+});
+
+test('returning to an idle hidden board retries a previous list failure', async () => {
+  const site = new Site();
+  site.list = 'fail';
+  const pair = await loaded(site);
+  assert.equal(boardState(pair.next), 'error');
+  await pair.step('hidden until polling stops', async (page) => {
+    page.document.hidden = true;
+    page.document.fire('visibilitychange');
+    await page.advance(IDLE_STOP_MS + POLL_HIDDEN_MS);
+  });
+
+  site.rooms(row('BACK'));
+  for (const page of [pair.old, pair.next]) {
+    page.document.hidden = false;
+    page.document.fire('visibilitychange');
+    await page.settle();
+  }
+  assert.equal(boardState(pair.old), 'error');
+  assert.equal(boardState(pair.next), 'live');
 });
 
 test('a list the server does not answer: an error before there is a board, the board after', async () => {
@@ -729,10 +785,16 @@ test('Create, and the code field: a typed code, a pasted link, nothing at all', 
     page.fireWindow('pageshow', { persisted: false }),
   );
   assert.equal(pair.next.el('create-btn').attrs.has('disabled'), true);
-  await pair.step('back from the room page: the buttons work again', (page) =>
-    page.fireWindow('pageshow', { persisted: true }),
-  );
-  for (const id of ['create-btn', 'join-btn', 'watch-btn']) assert.equal(pair.next.el(id).attrs.has('disabled'), false);
+  const polls = asked(pair.next, '/list');
+  site.rooms(row('BACK'));
+  for (const page of [pair.old, pair.next]) {
+    page.fireWindow('pageshow', { persisted: true });
+    await page.settle();
+    for (const id of ['create-btn', 'join-btn', 'watch-btn']) assert.equal(page.el(id).attrs.has('disabled'), false);
+  }
+  assert.equal(asked(pair.old, '/list'), polls, 'the original script shows the saved snapshot');
+  assert.equal(asked(pair.next, '/list'), polls + 1);
+  assert.equal(boardState(pair.next), 'live');
 });
 
 test('HELLO in the code field answers HELLOD00D, closed by a click or a key', async () => {
@@ -1065,8 +1127,9 @@ test('frames: only a match in play has one, and one over 30 s old is stale', () 
 test('when the board asks', () => {
   assert.equal(pollDelay(false), 10000);
   assert.equal(pollDelay(true), 30000);
-  assert.equal(isIdle(IDLE_STOP_MS, 0), false);
-  assert.equal(isIdle(IDLE_STOP_MS + 1, 0), true);
+  assert.equal(stopsPollingForIdle(true, IDLE_STOP_MS, 0), false);
+  assert.equal(stopsPollingForIdle(true, IDLE_STOP_MS + 1, 0), true);
+  assert.equal(stopsPollingForIdle(false, 2 * IDLE_STOP_MS, 0), false);
   assert.deepEqual([0, 1, 5, 6, 7, 12].map(asksForStats), [true, false, false, true, false, true]);
   assert.equal(stateAfterFailedList('loading'), 'error');
   assert.equal(stateAfterFailedList('waking'), 'error');
@@ -1074,7 +1137,8 @@ test('when the board asks', () => {
   assert.equal(refreshesOnReturn(false, 'live'), true);
   assert.equal(refreshesOnReturn(false, 'empty'), true);
   assert.equal(refreshesOnReturn(true, 'live'), false);
-  for (const state of ['loading', 'waking', 'error'] as const) assert.equal(refreshesOnReturn(false, state), false);
+  assert.equal(refreshesOnReturn(false, 'error'), true);
+  for (const state of ['loading', 'waking'] as const) assert.equal(refreshesOnReturn(false, state), false);
 });
 
 test('the words around the board', () => {
