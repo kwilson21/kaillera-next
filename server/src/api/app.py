@@ -1986,6 +1986,30 @@ def create_app(lifespan=None) -> FastAPI:
         screenshots = await db.get_screenshots(match_id)
         return {"matchId": match_id, "screenshots": screenshots}
 
+    def _vision_capture_evidence(row: dict) -> tuple[int | None, list[int]]:
+        # Vision compares the first two submitted pictures, not the suspected
+        # frame. Historical rows and postmortems may not have exact frame tags.
+        # These are client-reported labels, not authenticated player identities.
+        try:
+            peers = json.loads(row.pop("capture_evidence") or "null")
+        except (TypeError, ValueError):
+            return None, []
+        if not isinstance(peers, list) or len(peers) < 2 or not all(isinstance(p, dict) for p in peers[:2]):
+            return None, []
+        first, second = peers[:2]
+        frame = first.get("captured_frame")
+        slots = [first.get("slot"), second.get("slot")]
+        if (
+            type(frame) is not int
+            or frame < row["frame"]
+            or type(second.get("captured_frame")) is not int
+            or second["captured_frame"] != frame
+            or any(type(slot) is not int or not 0 <= slot < 4 for slot in slots)
+            or slots[0] == slots[1]
+        ):
+            return None, []
+        return frame, slots
+
     @app.get("/admin/api/desync-events")
     async def admin_desync_events(request: Request, _auth: None = Depends(_require_admin)) -> dict:
         """List vision-validated desync events for a match."""
@@ -2000,13 +2024,14 @@ def create_app(lifespan=None) -> FastAPI:
             )
         else:
             verdicts = verdicts.add_columns(DesyncEvent.match_id)
+        verdicts = verdicts.add_columns(DesyncEvent.hashes_json.label("capture_evidence"))
         rows = await db.fetch(verdicts)
-        if compact:
-            # DB fetches return raw SQLite 0/1, not SQLAlchemy-coerced
-            # booleans. Keep unknown separate from a genuine mismatch.
-            for row in rows:
-                equal = row["vision_equal"]
-                row["vision_equal"] = bool(equal) if equal in (0, 1) else None
+        for row in rows:
+            row["captured_frame"], row["capture_slots"] = _vision_capture_evidence(row)
+        # DB fetches return raw SQLite 0/1 rather than SQLAlchemy-coerced booleans.
+        for row in rows:
+            equal = row["vision_equal"]
+            row["vision_equal"] = bool(equal) if equal in (0, 1) else None
         return {
             "match_id": match_id,
             "events": rows,

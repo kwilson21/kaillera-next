@@ -124,7 +124,10 @@ test('row opens a summary immediately and never fetches raw log or screenshots u
     if (path.endsWith('/summary')) return summary.response;
     if (path.includes('/session-timeline')) return error;
     if (path.includes('/desync-events'))
-      return json({ events: [{ frame: 300, vision_equal: false, vision_confidence: 'high' }] });
+      return json({
+        match_id: 'match',
+        events: [{ frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: false }],
+      });
     if (path.endsWith('/export')) return { ok: true, blob: async () => 'raw-jsonl' };
     throw new Error('unexpected request');
   });
@@ -140,7 +143,7 @@ test('row opens a summary immediately and never fetches raw log or screenshots u
   assert.match(get('#viewer-content').textContent, /duration_sec/);
   const [verdicts, timeline] = get('#viewer-extras').children;
   assert.match(timeline.textContent, /could not load/i);
-  assert.match(verdicts.innerHTML, /VISION DESYNC DETECTED/);
+  assert.equal(verdicts.textContent, 'Desync not verified.');
   assert.equal(requests.length, 3);
   await get('#viewer-download').click();
   assert.equal(requests.at(-1).path, '/admin/api/session-logs/42/export');
@@ -171,7 +174,16 @@ test('only selected exact-frame images load with no URL key; each slot reports i
   const { get, open, requests } = boot((path) => {
     if (path.endsWith('/summary')) return json({ id: 13, match_id: 'm' });
     if (path.includes('/session-timeline')) return error;
-    if (path.includes('/desync-events')) return json({ events: [{ frame: 299, vision_equal: false }] });
+    if (path.includes('/desync-events'))
+      return json({
+        match_id: 'm',
+        events: [
+          { frame: 300, vision_equal: false },
+          { frame: 210, captured_frame: 300, capture_slots: [0, 0], vision_equal: false },
+          { frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: null },
+          { frame: 209, captured_frame: 299, capture_slots: [0, 1], vision_equal: false },
+        ],
+      });
     if (path.endsWith('/frame'))
       return json({
         frame: 300,
@@ -207,6 +219,43 @@ test('only selected exact-frame images load with no URL key; each slot reports i
   assert.ok(paths.every(({ path, init }) => !path.includes('key=') && init.headers['X-Admin-Key'] === 'fixture-key'));
 });
 
+test('a vision result follows the captured frame, not the earlier suspect frame', async () => {
+  const { get, open } = boot((path) => {
+    if (path.endsWith('/summary')) return json({ id: 14, match_id: 'm' });
+    if (path.includes('/session-timeline')) return error;
+    if (path.includes('/desync-events'))
+      return json({
+        match_id: 'm',
+        events: [{ frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: false }],
+      });
+    if (path.includes('/screenshots/m/frame')) {
+      const frame = path.endsWith('frame=300') ? 300 : 210;
+      return json({
+        frame,
+        next_frame: frame === 210 ? 300 : null,
+        slots: [0, 1],
+        screenshots: [
+          { id: 1, slot: 0, frame },
+          { id: 2, slot: 1, frame },
+        ],
+      });
+    }
+    if (path.includes('/img/')) return { ok: true, blob: async () => 'jpeg' };
+    throw new Error('unexpected request');
+  });
+  open('14');
+  await tick();
+  get('#captures-show').click();
+  await tick();
+  assert.equal(get('#captures-verdict').textContent, '');
+  get('#captures-next').click();
+  await tick();
+  assert.equal(
+    get('#captures-verdict').textContent,
+    'A separate vision comparison flagged a mismatch in captures tagged frame 300.',
+  );
+});
+
 test('seeking, reopening another match, and closing cancel outdated frame or image responses', async () => {
   const first = pending();
   const image = pending();
@@ -215,7 +264,7 @@ test('seeking, reopening another match, and closing cancel outdated frame or ima
     if (path.includes('/30/summary')) return json({ id: 30, match_id: 'm' });
     if (path.includes('/31/summary')) return json({ id: 31, match_id: 'm2' });
     if (path.includes('/session-timeline')) return error;
-    if (path.includes('/desync-events')) return json({ events: [] });
+    if (path.includes('/desync-events')) return json({ match_id: path.split('match_id=')[1], events: [] });
     if (path.endsWith('/m/frame')) return first.response;
     if (path.endsWith('frame=2400'))
       return json({

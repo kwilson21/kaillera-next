@@ -184,7 +184,7 @@
                 s.reconnects ? `${s.reconnects} reconnect${s.reconnects > 1 ? 's' : ''}` : '',
               ]
                 .filter(Boolean)
-                .join(', ') || 'clean';
+                .join(', ') || 'No issues recorded';
             const endedColor = { 'game-end': '#2ecc71', disconnect: '#e74c3c', leave: '#f39c12' }[l.ended_by] || '#888';
             return `<tr data-session-log-id="${escapeHtml(String(l.id))}">
             <td>P${escapeHtml(String(l.slot ?? '?'))}</td>
@@ -201,14 +201,10 @@
           matchId && matchId !== 'unknown'
             ? `<a href="#" class="input-audit-link" data-match-id="${escapeHtml(matchId)}" title="View raw input audit JSON">input audit</a>`
             : '';
-        const vdc = logs.find((l) => l.visual_desync_count)?.visual_desync_count || 0;
-        const desyncBadge = vdc
-          ? `<span style="background:#e74c3c;color:#fff;font-size:11px;font-weight:bold;padding:2px 8px;border-radius:3px;margin-left:8px;animation:pulse-red 1.5s infinite">VISUAL DESYNC &times;${vdc}</span>`
-          : '';
         return `<div class="room-group">
         <div class="room-header">
           <div class="room-info">
-            <span class="room-code">${escapeHtml(room)}</span>${desyncBadge}
+            <span class="room-code">${escapeHtml(room)}</span>
             <span class="room-meta">${logs.length} player${logs.length > 1 ? 's' : ''} &middot; ${escapeHtml(String(logs[0].mode || 'unknown'))}${auditLink ? ' &middot; ' + auditLink : ''}</span>
           </div>
         </div>
@@ -289,6 +285,7 @@
       const timeline = document.createElement('div');
       timeline.textContent = 'Loading timeline…';
       const verdicts = document.createElement('div');
+      if (data.match_id) verdicts.textContent = 'Desync not verified.';
       extras.append(verdicts, timeline);
       // These are independent: a timeline failure cannot block verdicts,
       // raw download, screenshots or the summary already on screen.
@@ -312,8 +309,8 @@
           .then((result) => result.json())
           .then((body) => {
             if (sessionView !== view) return;
-            view.verdicts = body.events || [];
-            verdicts.innerHTML = renderVerdictBanner(view.verdicts);
+            if (body.match_id !== data.match_id) throw new Error('Verdicts returned for another match');
+            view.verdicts = (body.events || []).filter(hasVisionCaptureEvidence);
             paintCaptureVerdict(view);
           })
           .catch(() => {
@@ -327,13 +324,28 @@
 
   // -- Screenshot Comparison -------------------------------------------------
 
+  const hasVisionCaptureEvidence = (event) =>
+    typeof event.vision_equal === 'boolean' &&
+    Number.isSafeInteger(event.captured_frame) &&
+    Number.isSafeInteger(event.frame) &&
+    event.captured_frame >= event.frame &&
+    Array.isArray(event.capture_slots) &&
+    event.capture_slots.length === 2 &&
+    event.capture_slots[0] !== event.capture_slots[1] &&
+    event.capture_slots.every((slot) => Number.isInteger(slot) && slot >= 0 && slot < 4);
+
   const paintCaptureVerdict = (view) => {
     const frame = view.capture?.frame;
-    const rows = frame == null ? [] : view.verdicts.filter((event) => event.frame === frame);
+    const rows = view.verdicts.filter(
+      (event) => event.captured_frame === frame && event.capture_slots.every((slot) => view.capture.slots?.has(slot)),
+    );
     let label = '';
-    if (rows.some((event) => event.vision_equal === false)) label = 'Vision flagged a mismatch at this frame.';
-    else if (rows.some((event) => event.vision_equal === true)) label = 'Vision found no mismatch at this frame.';
-    else if (rows.length) label = 'Vision did not verify this frame.';
+    // The model saw different uploads; do not present its result as a
+    // verification of the archived files on screen or of the whole match.
+    if (rows.some((event) => event.vision_equal === false))
+      label = `A separate vision comparison flagged a mismatch in captures tagged frame ${frame}.`;
+    else if (rows.some((event) => event.vision_equal === true))
+      label = `A separate vision comparison found no mismatch in captures tagged frame ${frame}.`;
     $('#captures-verdict').textContent = label;
   };
 
@@ -407,6 +419,7 @@
       prev.disabled = capture.previous == null;
       next.disabled = capture.next == null;
       $('#capture-seek').value = capture.frame == null ? '' : String(capture.frame);
+      capture.slots = new Set(data.screenshots.filter((shot) => shot.frame === capture.frame).map((shot) => shot.slot));
       paintCaptureVerdict(view);
       if (!data.slots.length) {
         status.textContent = 'No screenshots recorded for this match.';
@@ -822,30 +835,6 @@
     return clean[clean.length - 1];
   };
 
-  const renderVerdictBanner = (desyncEvents) => {
-    const desyncVerdicts = desyncEvents.filter((e) => e.vision_equal === false);
-    const equalVerdicts = desyncEvents.filter((e) => e.vision_equal === true);
-    const unknownVerdicts = desyncEvents.filter((e) => e.vision_equal === null || e.vision_equal === undefined);
-    const totalVerdicts = desyncEvents.length;
-    const highConfDesyncs = desyncVerdicts.filter((e) => e.vision_confidence === 'high').length;
-
-    const confSummary = highConfDesyncs > 0 ? `${highConfDesyncs} high-confidence` : 'none high-confidence';
-    return desyncVerdicts.length
-      ? `<div style="background:#3b1111; border:1px solid #e74c3c; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
-          <span style="color:#e74c3c; font-weight:bold">VISION DESYNC DETECTED</span>
-          <span style="color:#ccc"> — ${desyncVerdicts.length} of ${totalVerdicts} vision verdict${totalVerdicts === 1 ? '' : 's'} flagged NEQ (${confSummary}).
-          ${equalVerdicts.length} equal · ${unknownVerdicts.length} unknown</span>
-        </div>`
-      : equalVerdicts.length
-        ? `<div style="background:#0f2b1a; border:1px solid #2ecc71; border-radius:4px; padding:8px 12px; margin-bottom:12px; font-size:13px">
-            <span style="color:#2ecc71; font-weight:bold">VISION IN SYNC</span>
-            <span style="color:#ccc"> — ${totalVerdicts} vision verdict${totalVerdicts === 1 ? '' : 's'}, none flagged${unknownVerdicts.length ? ` (${unknownVerdicts.length} unknown)` : ''}</span>
-          </div>`
-        : totalVerdicts
-          ? '<p class="dim">Vision verdicts are unverified.</p>'
-          : '';
-  };
-
   const renderHorizontalTimeline = (events) => {
     if (!events.length) return '';
 
@@ -1219,18 +1208,17 @@
     const body = await res.json();
     const list = $('#desync-event-list');
     const empty = $('#no-desync-events');
-    if (!body.events || body.events.length === 0) {
+    const resultRows = body.match_id === matchId ? (body.events || []).filter(hasVisionCaptureEvidence) : [];
+    if (!resultRows.length) {
       list.innerHTML = '';
       empty?.classList.remove('hidden');
       return;
     }
     empty?.classList.add('hidden');
-    list.innerHTML = body.events
+    list.innerHTML = resultRows
       .map((e) => {
-        const equal = e.vision_equal === null || e.vision_equal === undefined ? '?' : e.vision_equal ? 'eq' : 'NEQ';
-        const conf = e.vision_confidence ?? '?';
-        const slot = e.slot ?? '-';
-        return `<li style="padding:4px 8px; border-bottom:1px solid #222">f=${escapeHtml(String(e.frame))} ${escapeHtml(e.field)}[${escapeHtml(String(slot))}] ${escapeHtml(e.trigger)} vision=${escapeHtml(equal)}/${escapeHtml(conf)}</li>`;
+        const summary = e.vision_equal ? 'no mismatch found' : 'mismatch flagged';
+        return `<li>Separate vision comparison: ${summary} in captures tagged frame ${escapeHtml(String(e.captured_frame))}.</li>`;
       })
       .join('');
   };

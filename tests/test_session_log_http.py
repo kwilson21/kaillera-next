@@ -385,18 +385,42 @@ def test_admin_legacy_detail_and_explicit_export_still_bundle_raw_data(audit_cli
 
 def test_admin_compact_verdicts_keep_outcomes_without_replay_or_payload_blobs(audit_client):
     http, fetch = audit_client
-    fetch.return_value = [
-        {"frame": 10, "vision_equal": 0, "vision_confidence": "high"},
-        {"frame": 11, "vision_equal": None, "vision_confidence": None},
-        {"frame": 12, "vision_equal": 1, "vision_confidence": "medium"},
-    ]
+    def rows():
+        return [
+            {
+                "frame": 10,
+                "vision_equal": 0,
+                "vision_confidence": "high",
+                "capture_evidence": '[{"slot":0,"captured_frame":100},{"slot":1,"captured_frame":100}]',
+            },
+            {"frame": 11, "vision_equal": None, "vision_confidence": None, "capture_evidence": None},
+            {
+                "frame": 12,
+                "vision_equal": 1,
+                "vision_confidence": "medium",
+                "capture_evidence": '[{"slot":0,"captured_frame":102},{"slot":1,"captured_frame":103}]',
+            },
+            {
+                "frame": 13,
+                "vision_equal": 0,
+                "vision_confidence": "high",
+                "capture_evidence": '[{"slot":0,"captured_frame":103},{"slot":0,"captured_frame":103}]',
+            },
+        ]
+
+    fetch.side_effect = lambda *_args: rows()
     key = {"X-Admin-Key": "k"}
     resp = http.get("/admin/api/desync-events?match_id=m1&compact=true", headers=key)
     assert resp.status_code == 200
-    outcomes = [row["vision_equal"] for row in resp.json()["events"]]
-    assert outcomes[0] is False
-    assert outcomes[1] is None
-    assert outcomes[2] is True
+    events = resp.json()["events"]
+    assert [row["vision_equal"] for row in events] == [False, None, True, False]
+    assert [(row["captured_frame"], row["capture_slots"]) for row in events] == [
+        (100, [0, 1]),
+        (None, []),
+        (None, []),
+        (None, []),
+    ]
+    assert all("capture_evidence" not in row for row in events)
     sql = str(fetch.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
     assert "desync_events.vision_equal" in sql
     assert "desync_events.vision_confidence" in sql
