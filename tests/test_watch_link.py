@@ -169,6 +169,22 @@ def test_watch_link_waits_for_relay_before_answering(
             watcher.wait_for_function(
                 "window.__watchAnswers.length === 2", timeout=10000
             )
+            # Rejoin the same room over a new Socket.IO connection. Its fresh
+            # authenticated ICE request fails, but the original relay is valid.
+            old_sid = watcher.evaluate("window.__test_socket.id")
+            with watcher.expect_request("**/ice-servers?token=*", timeout=10000):
+                watcher.evaluate("window.__test_socket.io.engine.close()")
+            watcher.wait_for_function(
+                "(oldSid) => window.__test_socket.connected && window.__test_socket.id !== oldSid",
+                arg=old_sid,
+                timeout=10000,
+            )
+            assert len(delayed_ice) >= 2
+            delayed_ice[-1].fulfill(status=503)
+            watcher.wait_for_function(
+                "window.__watchAnswers.length === 4", timeout=10000
+            )
+            assert watcher.locator("#error-msg").is_hidden()
             for answer in watcher.evaluate("window.__watchAnswers"):
                 assert answer["iceTransportPolicy"] == "relay"
                 assert turn_url in answer["urls"]

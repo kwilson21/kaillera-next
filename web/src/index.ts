@@ -57,6 +57,7 @@ import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
 import * as gameStart from './play/game-start.ts';
 import * as joinPlan from './play/join-plan.ts';
+import { createRoomIceCache } from './play/room-ice.ts';
 import * as mode from './play/mode.ts';
 import * as menus from './play/menus.ts';
 import * as notices from './play/notices.ts';
@@ -441,6 +442,7 @@ export const KNCore = {
     connect,
     connectionNotices,
     joinPlan,
+    createRoomIceCache,
     mode,
     gameStart,
     observe,

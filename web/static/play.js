@@ -453,7 +453,7 @@
   const _uploadTokenKey = _urlRoomCode ? `kn-upload-token:${_urlRoomCode}` : '';
   let _uploadToken = (_uploadTokenKey && _safeGet('localStorage', _uploadTokenKey)) || '';
   KNState.uploadToken = _uploadToken;
-  let _roomIceServers = Promise.resolve([]);
+  const _roomIce = window.KNCore.play.createRoomIceCache();
 
   const _persistentId =
     _safeGet('sessionStorage', 'kn-player-id') ||
@@ -798,13 +798,10 @@
           { signal: abort.signal },
         )
           .then((r) => (r.ok ? r.json() : []))
-          .then((servers) => {
-            if (_roomIceServers === pending && Array.isArray(servers)) window._iceServers = servers;
-            return servers;
-          })
-          .catch(() => [])
           .finally(() => clearTimeout(deadline));
-        _roomIceServers = pending;
+        _roomIce.refresh(roomCode, pending, (servers) => {
+          window._iceServers = servers;
+        });
       }),
     );
     socket.on(
@@ -1653,6 +1650,7 @@
   };
 
   const onRoomClosed = (data) => {
+    _roomIce.clear();
     _endGameRequest?.cancel();
     _endGameRequest = null;
     _sessionStopLateJoinPoll();
@@ -3519,7 +3517,7 @@
       romHash: _romHash ?? null,
       gameId: _gameId ?? null,
       uploadToken: _uploadToken,
-      roomIceServers: () => _roomIceServers,
+      roomIceServers: () => _roomIce.ready(roomCode),
       onSpectatorRelayUnavailable: () => {
         if (spectatorRelayUnavailable) return;
         spectatorRelayUnavailable = true;
@@ -3768,6 +3766,7 @@
   };
 
   const leaveGame = () => {
+    _roomIce.clear();
     _endGameRequest?.cancel();
     _endGameRequest = null;
     // Notify peers this is intentional (prevents reconnect attempt)
