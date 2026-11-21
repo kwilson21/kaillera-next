@@ -1197,30 +1197,44 @@
 
   // -- Desync Events ---------------------------------------------------------
 
+  let desyncLookup = null;
   const loadDesyncEvents = async () => {
     const matchId = ($('#desync-match-id')?.value || '').trim();
     if (!matchId) return;
-    const res = await fetch(`/admin/api/desync-events?match_id=${encodeURIComponent(matchId)}`, { headers: headers() });
-    if (!res.ok) {
-      showToast(`Load failed: ${res.status}`);
-      return;
-    }
-    const body = await res.json();
+    desyncLookup?.abort();
+    const lookup = new AbortController();
+    desyncLookup = lookup;
     const list = $('#desync-event-list');
     const empty = $('#no-desync-events');
-    const resultRows = body.match_id === matchId ? (body.events || []).filter(hasVisionCaptureEvidence) : [];
-    if (!resultRows.length) {
-      list.innerHTML = '';
-      empty?.classList.remove('hidden');
-      return;
+    list.innerHTML = '';
+    empty.textContent = 'Loading desync results…';
+    empty.classList.remove('hidden');
+
+    try {
+      const res = await fetchAdmin(`/admin/api/desync-events?match_id=${encodeURIComponent(matchId)}`, lookup.signal);
+      const body = await res.json();
+      if (desyncLookup !== lookup) return;
+      if (body.match_id !== matchId || !Array.isArray(body.events)) {
+        empty.textContent = 'Could not verify desync results for this match.';
+        return;
+      }
+      const resultRows = body.events.filter(hasVisionCaptureEvidence);
+      if (!resultRows.length) {
+        empty.textContent = body.events.length
+          ? 'No captures could be verified for this match.'
+          : 'No desync events recorded for this match.';
+        return;
+      }
+      empty.classList.add('hidden');
+      list.innerHTML = resultRows
+        .map((e) => {
+          const summary = e.vision_equal ? 'no mismatch found' : 'mismatch flagged';
+          return `<li>Separate vision comparison: ${summary} in captures tagged frame ${escapeHtml(String(e.captured_frame))}.</li>`;
+        })
+        .join('');
+    } catch {
+      if (desyncLookup === lookup) empty.textContent = 'Could not load desync results.';
     }
-    empty?.classList.add('hidden');
-    list.innerHTML = resultRows
-      .map((e) => {
-        const summary = e.vision_equal ? 'no mismatch found' : 'mismatch flagged';
-        return `<li>Separate vision comparison: ${summary} in captures tagged frame ${escapeHtml(String(e.captured_frame))}.</li>`;
-      })
-      .join('');
   };
 
   $('#desync-load-btn')?.addEventListener('click', loadDesyncEvents);

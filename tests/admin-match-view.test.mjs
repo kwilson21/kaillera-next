@@ -316,3 +316,55 @@ test('seeking, reopening another match, and closing cancel outdated frame or ima
   assert.equal(get('#captures-content').children.length, 0);
   assert.ok(!requests.some(({ path }) => path.endsWith('/img/8')));
 });
+
+test('desync lookup distinguishes absent, unverified, wrong-match, and failed results', async () => {
+  const { get } = boot((path) => {
+    if (path.endsWith('match_id=empty')) return json({ match_id: 'empty', events: [] });
+    if (path.endsWith('match_id=recorded'))
+      return json({
+        match_id: 'recorded',
+        events: [
+          { frame: 300, field: 'ft_buffer', vision_equal: false },
+          { frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: null },
+          { frame: 210, captured_frame: 300, capture_slots: [0, 0], vision_equal: true },
+        ],
+        count: 3,
+      });
+    if (path.endsWith('match_id=wrong')) return json({ match_id: 'other', events: [] });
+    if (path.endsWith('match_id=fail')) return error;
+    if (path.endsWith('match_id=valid'))
+      return json({
+        match_id: 'valid',
+        events: [{ frame: 210, captured_frame: 300, capture_slots: [0, 1], vision_equal: false }],
+      });
+    throw new Error('unexpected request');
+  });
+  const lookup = async (matchId) => {
+    get('#desync-match-id').value = matchId;
+    await get('#desync-load-btn').click();
+    return get('#no-desync-events').textContent;
+  };
+  assert.equal(await lookup('empty'), 'No desync events recorded for this match.');
+  assert.equal(await lookup('recorded'), 'No captures could be verified for this match.');
+  assert.equal(get('#desync-event-list').innerHTML, '');
+  assert.equal(await lookup('wrong'), 'Could not verify desync results for this match.');
+  assert.equal(await lookup('fail'), 'Could not load desync results.');
+  await lookup('valid');
+  assert.match(get('#desync-event-list').innerHTML, /mismatch flagged in captures tagged frame 300/);
+  assert.equal(get('#no-desync-events').classList.contains('hidden'), true);
+});
+
+test('an older desync lookup cannot replace the newer result', async () => {
+  const old = pending();
+  const { get, requests } = boot((path) =>
+    path.endsWith('match_id=old') ? old.response : json({ match_id: 'new', events: [] }),
+  );
+  get('#desync-match-id').value = 'old';
+  const started = get('#desync-load-btn').click();
+  get('#desync-match-id').value = 'new';
+  await get('#desync-load-btn').click();
+  assert.equal(requests[0].init.signal.aborted, true);
+  old.reply(json({ match_id: 'old', events: [{ frame: 10, vision_equal: false }] }));
+  await started;
+  assert.equal(get('#no-desync-events').textContent, 'No desync events recorded for this match.');
+});
