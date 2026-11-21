@@ -441,23 +441,6 @@ tbody tr {
   }
 }
 
-.vision-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin: 2px auto 0;
-}
-.vision-dot.desync {
-  background: #e74c3c;
-  box-shadow: 0 0 4px #e74c3c;
-}
-.vision-dot.clean {
-  background: #2ecc71;
-}
-.vision-dot.unknown {
-  background: #888;
-}
-
 @media (max-width: 599px) {
   .log-header {
     align-items: stretch;
@@ -494,5 +477,20 @@ tbody tr {
 }
 
 #captures-content {
-  overflow-x: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 8px;
+}
+
+.capture-player {
+  padding: 8px;
+  border: 1px solid #2a2a40;
+  border-radius: 6px;
+}
+
+.capture-player img {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
 }

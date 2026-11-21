@@ -221,24 +221,12 @@
       .join('');
   };
 
-  const cleanupComparison = () => {
-    if (_compState?.timer) clearInterval(_compState.timer);
-    _compState = null;
-    const old = document.getElementById('screenshot-section');
-    if (old) old.remove();
-  };
-
   let sessionView = null;
   let auditRequest = null;
 
-  const clearCaptureRange = (view) => {
-    const range = view.range;
-    if (!range) return;
-    view.range = null;
-    range.controller.abort();
-    range.observer?.disconnect();
-    for (const url of range.urls) URL.revokeObjectURL(url);
-    pumpScreenshotQueue();
+  const clearCaptureFrame = (view) => {
+    view.capture?.controller.abort();
+    view.capture = null;
   };
 
   const resetViewer = () => {
@@ -246,12 +234,11 @@
     auditRequest = null;
     if (sessionView) {
       sessionView.controller.abort();
-      clearCaptureRange(sessionView);
+      clearCaptureFrame(sessionView);
       sessionView = null;
     }
-    cleanupComparison();
     $('#viewer-extras').innerHTML = '';
-    $('#captures-content').innerHTML = '';
+    $('#captures-content').replaceChildren();
     $('#viewer-captures').classList.add('hidden');
     $('#viewer-download').classList.add('hidden');
     $('#viewer-copy').textContent = 'Copy';
@@ -265,7 +252,7 @@
 
   const viewSessionLog = async (id) => {
     resetViewer();
-    const view = { id, controller: new AbortController(), data: null, events: [], verdicts: [], range: null };
+    const view = { id, controller: new AbortController(), data: null, events: [], verdicts: [], capture: null };
     sessionView = view;
     const viewer = $('#log-viewer');
     const content = $('#viewer-content');
@@ -289,10 +276,10 @@
       download.classList.remove('hidden');
       if (data.match_id) {
         $('#viewer-captures').classList.remove('hidden');
-        $('#captures-show').textContent = 'Show screenshots';
+        $('#captures-show').textContent = 'Compare screenshots';
         $('#captures-show').classList.remove('hidden');
-        $('#captures-prev').classList.add('hidden');
-        $('#captures-next').classList.add('hidden');
+        $('#capture-controls').classList.add('hidden');
+        $('#captures-verdict').textContent = '';
         $('#captures-status').textContent = '';
         $('#capture-seek').value = '';
       }
@@ -313,7 +300,7 @@
           if (!view.events.length) timeline.textContent = 'No timeline events recorded.';
           else
             timeline.innerHTML =
-              renderHorizontalTimeline(view.events, []) +
+              renderHorizontalTimeline(view.events) +
               renderSessionHeader(view.events) +
               renderEventTimeline(view.events);
         })
@@ -327,7 +314,7 @@
             if (sessionView !== view) return;
             view.verdicts = body.events || [];
             verdicts.innerHTML = renderVerdictBanner(view.verdicts);
-            view.range?.repaintVerdicts?.();
+            paintCaptureVerdict(view);
           })
           .catch(() => {
             if (sessionView === view) verdicts.textContent = 'Could not load vision verdicts.';
@@ -338,377 +325,133 @@
     }
   };
 
-  // Bound real network requests across both the thumbnail strip and comparison
-  // canvas. Within one range the two views share each capture's bytes.
-  const screenshotQueue = [];
-  let activeScreenshots = 0;
-  const pumpScreenshotQueue = () => {
-    while (screenshotQueue.length && activeScreenshots < 4) {
-      const { range, id, finish } = screenshotQueue.shift();
-      if (range.controller.signal.aborted) {
-        finish(null);
-        continue;
+  // -- Screenshot Comparison -------------------------------------------------
+
+  const paintCaptureVerdict = (view) => {
+    const frame = view.capture?.frame;
+    const rows = frame == null ? [] : view.verdicts.filter((event) => event.frame === frame);
+    let label = '';
+    if (rows.some((event) => event.vision_equal === false)) label = 'Vision flagged a mismatch at this frame.';
+    else if (rows.some((event) => event.vision_equal === true)) label = 'Vision found no mismatch at this frame.';
+    else if (rows.length) label = 'Vision did not verify this frame.';
+    $('#captures-verdict').textContent = label;
+  };
+
+  const imageDataUrl = (blob) =>
+    new Promise((resolve, reject) => {
+      // The strict admin CSP allows data images, not blob images. Normalize
+      // to JPEG instead of trusting a content type or widening the CSP.
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(new Blob([blob], { type: 'image/jpeg' }));
+    });
+
+  const loadCaptureImage = async (view, capture, shot, body, slot) => {
+    const current = () => sessionView === view && view.capture === capture;
+    try {
+      const res = await fetch(`/admin/api/screenshots/img/${encodeURIComponent(shot.id)}`, {
+        headers: headers(),
+        signal: capture.controller.signal,
+      });
+      if (!current()) return;
+      if (res.status === 404) {
+        body.textContent = 'Stored screenshot is missing.';
+        return;
       }
-      activeScreenshots++;
-      void fetchAdmin(`/admin/api/screenshots/img/${encodeURIComponent(id)}`, range.controller.signal)
-        .then((res) => res.blob())
-        .then((blob) => {
-          if (range.controller.signal.aborted) return null;
-          const url = URL.createObjectURL(blob);
-          range.urls.add(url);
-          return url;
-        })
-        .then(finish, () => finish(null))
-        .finally(() => {
-          activeScreenshots--;
-          pumpScreenshotQueue();
-        });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const src = await imageDataUrl(await res.blob());
+      if (!current()) return;
+      const image = document.createElement('img');
+      image.alt = `Player ${slot} at frame ${capture.frame}`;
+      image.onload = () => {
+        if (current()) body.replaceChildren(image);
+      };
+      image.onerror = () => {
+        if (current()) body.textContent = 'Could not decode the screenshot.';
+      };
+      image.src = src;
+    } catch {
+      if (current()) body.textContent = 'Could not load the screenshot.';
     }
   };
 
-  const captureURL = (range, id) => {
-    if (!range.images.has(id)) {
-      range.images.set(
-        id,
-        new Promise((finish) => {
-          screenshotQueue.push({ range, id, finish });
-          pumpScreenshotQueue();
-        }),
-      );
-    }
-    return range.images.get(id);
-  };
-
-  const loadCaptureRange = async (view, frame) => {
+  const loadCaptureFrame = async (view, frame) => {
     if (sessionView !== view || !view.data?.match_id) return;
-    clearCaptureRange(view);
-    cleanupComparison();
-    const range = { controller: new AbortController(), images: new Map(), urls: new Set() };
-    view.range = range;
+    clearCaptureFrame(view);
+    const capture = { controller: new AbortController(), requested: frame };
+    view.capture = capture;
     const status = $('#captures-status');
     const host = $('#captures-content');
     const show = $('#captures-show');
     const prev = $('#captures-prev');
     const next = $('#captures-next');
-    host.innerHTML = '';
+    host.replaceChildren();
     show.classList.add('hidden');
-    $('#capture-seek').value = String(frame);
-    prev.classList.add('hidden');
-    next.classList.add('hidden');
-    status.textContent = 'Loading captures…';
+    $('#capture-controls').classList.remove('hidden');
+    prev.disabled = true;
+    next.disabled = true;
+    $('#captures-verdict').textContent = '';
+    status.textContent = 'Loading screenshots…';
     try {
+      const params = frame == null ? '' : `?frame=${frame}`;
       const res = await fetchAdmin(
-        `/admin/api/screenshots/${encodeURIComponent(view.data.match_id)}/window?frame=${frame}`,
-        range.controller.signal,
+        `/admin/api/screenshots/${encodeURIComponent(view.data.match_id)}/frame${params}`,
+        capture.controller.signal,
       );
       const data = await res.json();
-      if (view.range !== range) return;
-      range.previous = data.previous_frame;
-      range.next = data.next_frame;
-      prev.classList.toggle('hidden', range.previous == null);
-      next.classList.toggle('hidden', range.next == null);
-      const shots = data.screenshots || [];
-      status.textContent = shots.length
-        ? `Frames ${data.start_frame}–${data.end_frame}`
-        : 'No screenshots in this range.';
-      if (!shots.length) return;
-
-      const bySlot = {};
-      for (const item of shots) (bySlot[item.slot] ??= []).push(item);
-      const slots = Object.keys(bySlot).sort((a, b) => a - b);
-      host.innerHTML =
-        renderHorizontalTimeline([], shots) + `<div id="screenshot-section">${buildComparisonPlayer(slots)}</div>`;
-      const loadThumb = (img) => {
-        void captureURL(range, img.dataset.captureId).then((url) => {
-          if (view.range !== range) return;
-          if (!url) {
-            img.replaceWith(document.createTextNode('Image unavailable'));
-            return;
-          }
-          img.src = url;
-          img.closest('a').href = url;
-        });
-      };
-      const allThumbs = host.querySelectorAll('[data-capture-id]');
-      if (typeof IntersectionObserver === 'function') {
-        range.observer = new IntersectionObserver((entries, observer) => {
-          for (const entry of entries) {
-            if (!entry.isIntersecting) continue;
-            observer.unobserve(entry.target);
-            loadThumb(entry.target);
-          }
-        });
-        for (const thumb of allThumbs) range.observer.observe(thumb);
-      } else {
-        for (const thumb of allThumbs) loadThumb(thumb);
+      if (sessionView !== view || view.capture !== capture) return;
+      capture.frame = data.frame;
+      capture.previous = data.previous_frame;
+      capture.next = data.next_frame;
+      prev.disabled = capture.previous == null;
+      next.disabled = capture.next == null;
+      $('#capture-seek').value = capture.frame == null ? '' : String(capture.frame);
+      paintCaptureVerdict(view);
+      if (!data.slots.length) {
+        status.textContent = 'No screenshots recorded for this match.';
+        return;
       }
-      range.repaintVerdicts = () => {
-        const imageVerdicts = indexVerdicts(view.verdicts);
-        for (const thumb of host.querySelectorAll('[data-capture-id]')) {
-          const parent = thumb.closest('.tl-thumb-wrap');
-          const badge = parent.querySelector('.vision-dot');
-          const verdict = imageVerdicts.get(Number(thumb.dataset.bucket));
-          badge.hidden = !verdict;
-          thumb.style.borderColor = isDesyncEvent(verdict) ? '#e74c3c' : slotColor(Number(thumb.dataset.slot));
-          if (verdict) {
-            badge.title = formatVerdictLabel(verdict);
-            badge.className = `vision-dot ${isDesyncEvent(verdict) ? 'desync' : verdict.vision_equal === true ? 'clean' : 'unknown'}`;
-          }
-        }
-      };
-      range.repaintVerdicts();
-      initComparisonPlayer(bySlot, slots, view, range);
+      const bySlot = new Map(data.screenshots.map((shot) => [shot.slot, shot]));
+      status.textContent = bySlot.size
+        ? `Frame ${capture.frame} · ${bySlot.size} of ${data.slots.length} captured players`
+        : `No exact screenshots at frame ${capture.frame}. Use Previous or Next to see captured frames.`;
+      if (!bySlot.size) return;
+      for (const slot of data.slots) {
+        const panel = document.createElement('div');
+        panel.className = 'capture-player';
+        const label = document.createElement('h5');
+        label.textContent = `Player ${slot}`;
+        const body = document.createElement('div');
+        const shot = bySlot.get(slot);
+        body.textContent = shot ? 'Loading image…' : 'No exact capture at this frame.';
+        panel.append(label, body);
+        host.append(panel);
+        if (shot) void loadCaptureImage(view, capture, shot, body, slot);
+      }
     } catch {
-      if (view.range !== range) return;
-      status.textContent = 'Could not load screenshots.';
+      if (sessionView !== view || view.capture !== capture) return;
+      status.textContent = 'Could not load screenshot metadata.';
       show.textContent = 'Retry screenshots';
       show.classList.remove('hidden');
-      range.retry = frame;
     }
   };
 
   $('#captures-seek').addEventListener('submit', (event) => {
     event.preventDefault();
     const frame = Number($('#capture-seek').value);
-    if (sessionView && Number.isSafeInteger(frame) && frame >= 0) void loadCaptureRange(sessionView, frame);
+    if (sessionView && Number.isSafeInteger(frame) && frame >= 0) void loadCaptureFrame(sessionView, frame);
   });
 
   $('#captures-show').addEventListener('click', () => {
-    if (sessionView) void loadCaptureRange(sessionView, sessionView.range?.retry ?? 0);
+    if (sessionView) void loadCaptureFrame(sessionView, sessionView.capture?.requested);
   });
   $('#captures-prev').addEventListener('click', () => {
-    if (sessionView?.range?.previous != null) void loadCaptureRange(sessionView, sessionView.range.previous);
+    if (sessionView?.capture?.previous != null) void loadCaptureFrame(sessionView, sessionView.capture.previous);
   });
   $('#captures-next').addEventListener('click', () => {
-    if (sessionView?.range?.next != null) void loadCaptureRange(sessionView, sessionView.range.next);
+    if (sessionView?.capture?.next != null) void loadCaptureFrame(sessionView, sessionView.capture.next);
   });
-
-  // -- Screenshot Comparison Player ------------------------------------------
-
-  let _compState = null; // { frames, index, playing, timer, canvas, ctx, slotKeys, cols, rows }
-  const SCREENSHOT_BUCKET = 300; // must match SCREENSHOT_INTERVAL in lockstep
-
-  // Pick the most-severe vision verdict from a list of desync_events sharing
-  // a frame bucket. Severity order: NEQ > unknown > equal. NEQ at higher
-  // confidence beats NEQ at lower confidence. Returns null for empty input.
-  const _confidenceRank = (c) => (c === 'high' ? 3 : c === 'medium' ? 2 : c === 'low' ? 1 : 0);
-  const _verdictSeverity = (e) => {
-    if (e.vision_equal === false) return 200 + _confidenceRank(e.vision_confidence);
-    if (e.vision_equal === null || e.vision_equal === undefined) return 100;
-    return _confidenceRank(e.vision_confidence); // equal=true: 0–3
-  };
-  const pickWorstEvent = (eventsForFrame) => {
-    if (!eventsForFrame?.length) return null;
-    return eventsForFrame.reduce(
-      (worst, e) => (worst == null || _verdictSeverity(e) > _verdictSeverity(worst) ? e : worst),
-      null,
-    );
-  };
-  const isDesyncEvent = (e) => e?.vision_equal === false;
-  const formatVerdictLabel = (e) => {
-    if (!e) return '';
-    if (e.vision_equal === false) return `vision NEQ (${e.vision_confidence ?? '?'})`;
-    if (e.vision_equal === true) return `vision eq (${e.vision_confidence ?? '?'})`;
-    return 'vision unknown';
-  };
-
-  const indexVerdicts = (events) => {
-    const lookup = new Map();
-    for (const event of events) {
-      const bucket = Math.round(event.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
-      lookup.set(bucket, pickWorstEvent([lookup.get(bucket), event].filter(Boolean)));
-    }
-    return lookup;
-  };
-
-  const buildComparisonPlayer = (slotKeys) => {
-    const W = 160,
-      H = 120,
-      GAP = 4,
-      SCALE = 2;
-    const cols = slotKeys.length <= 2 ? slotKeys.length : 2;
-    const rows = Math.ceil(slotKeys.length / cols);
-    const cw = W * cols + GAP * (cols - 1);
-    const ch = H * rows + GAP * (rows - 1);
-    // For 2x2, show top row labels above canvas, bottom row below
-    const topLabels = slotKeys
-      .slice(0, cols)
-      .map((s) => `<span style="color:#64748b;font-size:11px;flex:1;text-align:center">P${s}</span>`)
-      .join('');
-    const bottomLabels =
-      rows > 1
-        ? slotKeys
-            .slice(cols)
-            .map((s) => `<span style="color:#64748b;font-size:11px;flex:1;text-align:center">P${s}</span>`)
-            .join('')
-        : '';
-    return `
-      <div style="margin-top:16px">
-        <h4 style="color:#94a3b8;margin-bottom:8px">Player Comparison (${slotKeys.map((s) => 'P' + s).join(' / ')})</h4>
-        <div style="background:#0a0a0a;border-radius:6px;padding:12px;display:inline-block">
-          <div style="display:flex;gap:${GAP}px;margin-bottom:4px">${topLabels}</div>
-          <canvas id="comp-canvas" width="${cw}" height="${ch}" style="width:${cw * SCALE}px;height:${ch * SCALE}px;border-radius:4px;image-rendering:pixelated;background:#000"></canvas>
-          ${bottomLabels ? `<div style="display:flex;gap:${GAP}px;margin-top:4px">${bottomLabels}</div>` : ''}
-          <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
-            <button id="comp-prev" title="Previous frame" style="padding:4px 8px;cursor:pointer">&lt;</button>
-            <button id="comp-play" title="Play/Pause" style="padding:4px 10px;cursor:pointer">Play</button>
-            <button id="comp-next" title="Next frame" style="padding:4px 8px;cursor:pointer">&gt;</button>
-            <input id="comp-scrub" type="range" min="0" max="0" value="0" style="flex:1;cursor:pointer">
-            <span id="comp-frame-label" style="color:#64748b;font-size:11px;min-width:80px;text-align:right">f0 / 0</span>
-          </div>
-        </div>
-      </div>`;
-  };
-
-  const initComparisonPlayer = (bySlot, slotKeys, view, range) => {
-    const W = 160,
-      H = 120,
-      GAP = 4;
-    const cols = slotKeys.length <= 2 ? slotKeys.length : 2;
-    const rows = Math.ceil(slotKeys.length / cols);
-
-    // Bucket screenshots by nearest SCREENSHOT_BUCKET to align frames across
-    // players (frame numbers drift by +/-1 between peers in lockstep)
-    const bucketMaps = {}; // slot -> Map(bucket -> screenshot)
-    for (const slot of slotKeys) {
-      const bm = new Map();
-      for (const ss of bySlot[slot] || []) {
-        const bucket = Math.round(ss.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
-        bm.set(bucket, ss);
-      }
-      bucketMaps[slot] = bm;
-    }
-
-    // Collect all unique buckets, sorted
-    const allBuckets = new Set();
-    for (const bm of Object.values(bucketMaps)) {
-      for (const b of bm.keys()) allBuckets.add(b);
-    }
-    const sortedBuckets = [...allBuckets].sort((a, b) => a - b);
-
-    // Build frame entries: one per bucket, with a screenshot per slot (or null)
-    const frames = sortedBuckets.map((bucket) => {
-      const slots = {};
-      for (const slot of slotKeys) {
-        slots[slot] = bucketMaps[slot].get(bucket) || null;
-      }
-      return { frame: bucket, slots };
-    });
-
-    if (!frames.length) return;
-
-    const canvas = document.getElementById('comp-canvas');
-    const ctx = canvas.getContext('2d');
-    const scrub = document.getElementById('comp-scrub');
-    const label = document.getElementById('comp-frame-label');
-    const playBtn = document.getElementById('comp-play');
-    const prevBtn = document.getElementById('comp-prev');
-    const nextBtn = document.getElementById('comp-next');
-
-    scrub.max = String(frames.length - 1);
-    _compState = {
-      frames,
-      index: 0,
-      playing: false,
-      timer: null,
-      canvas,
-      ctx,
-      slotKeys,
-      cols,
-      rows,
-      verdictSource: null,
-      verdicts: new Map(),
-    };
-
-    // Capture the comparison state in a local so async image callbacks can
-    // detect post-cleanup or post-switch races and bail safely.
-    const ownState = _compState;
-
-    const drawFrame = (idx) => {
-      if (idx < 0 || idx >= frames.length) return;
-      if (_compState !== ownState) return;
-      _compState.index = idx;
-      scrub.value = String(idx);
-      const entry = frames[idx];
-      if (ownState.verdictSource !== view.verdicts) {
-        ownState.verdictSource = view.verdicts;
-        ownState.verdicts = indexVerdicts(view.verdicts);
-      }
-      const comp = ownState.verdicts.get(entry.frame);
-      const verdictText = comp ? ` · ${formatVerdictLabel(comp)}${isDesyncEvent(comp) ? ' ⚠ DESYNC' : ''}` : '';
-      label.textContent = `f${entry.frame} (${idx + 1}/${frames.length})${verdictText}`;
-      label.style.color = isDesyncEvent(comp) ? '#e74c3c' : '#64748b';
-
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      // Grid separators
-      ctx.fillStyle = '#333';
-      for (let c = 1; c < cols; c++) ctx.fillRect(c * W + (c - 1) * GAP, 0, GAP, canvas.height);
-      for (let r = 1; r < rows; r++) ctx.fillRect(0, r * H + (r - 1) * GAP, canvas.width, GAP);
-
-      const drawCell = (ss, col, row) => {
-        if (!ss) return;
-        const x = col * (W + GAP);
-        const y = row * (H + GAP);
-        void captureURL(range, String(ss.id)).then((url) => {
-          if (_compState !== ownState || ownState.index !== idx) return;
-          const unavailable = () => {
-            if (_compState !== ownState || ownState.index !== idx) return;
-            ctx.fillStyle = '#aaa';
-            ctx.fillText('Image unavailable', x + 8, y + 20);
-          };
-          if (!url) {
-            unavailable();
-            return;
-          }
-          const img = new Image();
-          img.onload = () => {
-            if (_compState === ownState && ownState.index === idx) ctx.drawImage(img, x, y, W, H);
-          };
-          img.onerror = unavailable;
-          img.src = url;
-        });
-      };
-
-      slotKeys.forEach((slot, i) => drawCell(entry.slots[slot], i % cols, Math.floor(i / cols)));
-    };
-
-    const repaint = range.repaintVerdicts;
-    range.repaintVerdicts = () => {
-      repaint();
-      drawFrame(ownState.index);
-    };
-
-    const step = (delta) => {
-      const next = _compState.index + delta;
-      if (next >= 0 && next < frames.length) drawFrame(next);
-      else if (_compState.playing) {
-        _compState.playing = false;
-        clearInterval(_compState.timer);
-        _compState.timer = null;
-        playBtn.textContent = 'Play';
-      }
-    };
-
-    playBtn.addEventListener('click', () => {
-      if (_compState.playing) {
-        _compState.playing = false;
-        clearInterval(_compState.timer);
-        _compState.timer = null;
-        playBtn.textContent = 'Play';
-      } else {
-        if (_compState.index >= frames.length - 1) _compState.index = -1;
-        _compState.playing = true;
-        playBtn.textContent = 'Pause';
-        _compState.timer = setInterval(() => step(1), 200);
-      }
-    });
-    prevBtn.addEventListener('click', () => step(-1));
-    nextBtn.addEventListener('click', () => step(1));
-    scrub.addEventListener('input', () => drawFrame(parseInt(scrub.value, 10)));
-
-    drawFrame(0);
-  };
 
   // -- Client Events ---------------------------------------------------------
 
@@ -1054,26 +797,12 @@
     </div>`;
   };
 
-  // Horizontal overview timeline — DAW-style. Linear time scale: gridlines
-  // are at fixed uniform intervals (every N seconds), and events/screenshots
-  // land at their actual time positions relative to the grid. The pixel/sec
-  // scale is adaptive: short sessions get a generous scale so events spread
-  // out, long sessions get a compact scale so total scroll distance stays
-  // manageable. Tuned so screenshots (taken every 5s) don't overlap.
-  // Left pad needs to clear the sticky slot label badge (~36px wide + 8px
-  // gutter on each side ≈ 60px). 80px gives the first thumbnail extra
-  // breathing room so it isn't visually crowded by the badge.
+  // Keep the event overview, separate from on-demand screenshot comparison.
   const TIMELINE_PAD_LEFT = 80;
   const TIMELINE_PAD_RIGHT = 120;
-  const THUMB_HEIGHT = 100;
   const MARKER_SIZE = 14;
 
-  // Choose px/sec by total session duration.
-  // Constraint: screenshots come every 5 seconds and thumbs are ~133px wide.
-  // To have a visible gap (~50px) between adjacent thumbs we need at least
-  // (133+50)/5 = 37 px/sec. The floor below ensures thumbs always have
-  // breathing room regardless of session duration. Long sessions just have
-  // longer total scroll distance — that's the honest tradeoff.
+  // Keep short sessions legible without an outsize span for older logs.
   const pickPxPerSec = (spanSec) => {
     if (spanSec < 30) return 100;
     if (spanSec < 120) return 60;
@@ -1117,14 +846,12 @@
           : '';
   };
 
-  const renderHorizontalTimeline = (events, screenshots) => {
-    if (!events.length && !screenshots.length) return '';
+  const renderHorizontalTimeline = (events) => {
+    if (!events.length) return '';
 
-    // Compute the session time span from both events and screenshots so the
-    // bar always spans the full session.
+    // Scale markers to the recorded event times.
     const allTs = [];
     for (const ev of events) allTs.push(new Date(ev.created_at + 'Z').getTime());
-    for (const ss of screenshots) allTs.push(new Date(ss.created_at + 'Z').getTime());
     const validTs = allTs.filter(Number.isFinite);
     if (!validTs.length) return '';
     const minTs = Math.min(...validTs);
@@ -1140,55 +867,6 @@
     const pxPerSec = Math.min(TIMELINE_PX_PER_SEC, 60_000 / spanSec);
     const contentWidth = Math.max(1200, Math.ceil(spanSec * pxPerSec) + TIMELINE_PAD_LEFT + TIMELINE_PAD_RIGHT);
     const posLeft = (ts) => TIMELINE_PAD_LEFT + ((ts - minTs) / 1000) * pxPerSec;
-
-    // Group screenshots by slot so each player gets their own stacked row.
-    const bySlot = {};
-    for (const ss of screenshots) {
-      (bySlot[ss.slot ?? 0] ??= []).push(ss);
-    }
-    const slotKeys = Object.keys(bySlot)
-      .map((s) => Number(s))
-      .sort((a, b) => a - b);
-
-    // Render one screenshot row per slot. Thumbnails are LEFT-aligned at
-    // their timestamp (the left edge of the image = the moment the shot was
-    // taken) — intuitive to read, and avoids the negative-left truncation
-    // that centered thumbs had at the start of the timeline.
-    // Slot labels are 0-indexed (P0, P1, P2, P3) to match the rest of the
-    // admin UI (session log table, comparison player).
-    const screenshotRows = slotKeys
-      .map((slot) => {
-        // The server already chooses one capture per rounded slot/frame bucket.
-        const shots = bySlot[slot];
-        const border = slotColor(slot);
-        const thumbs = shots
-          .map((ss) => {
-            const ts = new Date(ss.created_at + 'Z').getTime();
-            const left = posLeft(ts);
-            const relLabel = formatRelTime(ts - minTs);
-            const frameBucket = Math.round(ss.frame / SCREENSHOT_BUCKET) * SCREENSHOT_BUCKET;
-            const title = `P${slot} · frame ${ss.frame} · ${relLabel}`;
-            return `<div
-              class="tl-thumb-wrap"
-              data-ts="${ts}"
-              title="${escapeHtml(title)}"
-              style="position:absolute; left:${left}px; top:4px; z-index:2"
-            >
-              <a target="_blank" rel="noopener">
-                <img data-capture-id="${escapeHtml(String(ss.id))}" data-bucket="${frameBucket}" data-slot="${slot}" alt="${escapeHtml(title)}"
-                  style="display:block; width:${Math.round((THUMB_HEIGHT * 4) / 3)}px; height:${THUMB_HEIGHT}px; object-fit:contain; border:2px solid ${border}; border-radius:4px; cursor:pointer" />
-              </a>
-              <div style="font-size:10px; color:#888; margin-top:2px; text-align:left; font-variant-numeric:tabular-nums">f${escapeHtml(String(ss.frame))}</div>
-              <div class="vision-dot" hidden></div>
-            </div>`;
-          })
-          .join('');
-        return `<div style="position:relative; height:${THUMB_HEIGHT + 24}px; margin-bottom:8px">
-          <div style="position:sticky; left:8px; z-index:4; display:inline-block; padding:3px 12px; background:${border}; color:#000; font-weight:bold; font-size:12px; border-radius:3px">P${slot}</div>
-          ${thumbs}
-        </div>`;
-      })
-      .join('');
 
     // Event markers — circles centered on the axis line. Timestamps are
     // carried by the tick labels below, so markers stay visually clean
@@ -1217,20 +895,8 @@
       })
       .join('');
 
-    // DAW-style ruler with major+minor ticks. Shows elapsed time and, when
-    // frame correlation is available, the inferred frame number. Tick marks
-    // are distributed across "real time" segments (non-compressed stretches);
-    // compressed gap regions show a single labeled band instead of ticks.
-    //
-    // Frame correlation: use the screenshots' actual frame numbers as the
-    // ground truth. For each pair of adjacent screenshot observations we
-    // know (ts, frame), and can linearly interpolate frame-at-time in
-    // between. Falls back to the emulator_booted event (frames=1) + 60fps
-    // if no screenshots exist. If neither, ruler only shows time.
-    const frameAnchors = []; // { ts, frame } sorted by ts
-    for (const ss of screenshots) {
-      frameAnchors.push({ ts: new Date(ss.created_at + 'Z').getTime(), frame: ss.frame });
-    }
+    // Use frame labels only when the event stream can anchor them.
+    const frameAnchors = [];
     for (const ev of events) {
       if (ev.type === 'emulator_booted' && typeof ev.meta?.frames === 'number') {
         frameAnchors.push({ ts: new Date(ev.created_at + 'Z').getTime(), frame: ev.meta.frames });
@@ -1315,23 +981,19 @@
       .join('');
 
     const eventCount = events.length;
-    const ssCount = screenshots.length;
     const viewportWidth = window.innerWidth || 1200;
     const scrollNote = contentWidth > viewportWidth - 100 ? ' (scroll horizontally →)' : '';
 
     return `<div style="background:#0f0f1e; border:1px solid #2a2a40; border-radius:6px; padding:16px; margin:12px 0">
-      <div style="font-weight:bold; margin-bottom:6px; font-size:14px">${screenshots.length ? 'Capture timeline' : 'Session overview'}</div>
+      <div style="font-weight:bold; margin-bottom:6px; font-size:14px">Session overview</div>
       <div class="dim" style="font-size:12px; margin-bottom:12px">
         ${escapeHtml(String(eventCount))} event${eventCount === 1 ? '' : 's'} ·
-        ${escapeHtml(String(ssCount))} screenshot${ssCount === 1 ? '' : 's'} across ${escapeHtml(String(slotKeys.length))} slot${slotKeys.length === 1 ? '' : 's'} ·
-        ${events.length ? 'click a marker to jump to its row below' : 'expand an image to see its exact capture'}${scrollNote}
+        click a marker to jump to its row below${scrollNote}
       </div>
 
       <div style="overflow-x:auto; overflow-y:hidden; padding-bottom:8px; border:1px solid #1a1a2e; border-radius:4px; background:#07070f">
         <div style="position:relative; width:${contentWidth}px; min-width:100%">
           ${gridlines}
-
-          ${screenshotRows}
 
           <div style="position:relative; height:${MARKER_BAR_HEIGHT}px; margin-top:8px; background:#131326; border-top:1px solid #2a2a40; border-bottom:1px solid #2a2a40">
             <div style="position:absolute; left:0; right:0; top:${AXIS_Y}px; height:2px; background:#2a2a40"></div>

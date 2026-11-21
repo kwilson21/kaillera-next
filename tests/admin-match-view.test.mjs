@@ -6,17 +6,7 @@ import vm from 'node:vm';
 const controller = readFileSync(new URL('../web/static/admin.js', import.meta.url), 'utf8');
 const template = readFileSync(new URL('../web/admin.html', import.meta.url), 'utf8');
 const domIds = new Set([...template.matchAll(/\bid="([\w-]+)"/g)].map((match) => match[1]));
-const renderedIds = new Set([
-  'comp-canvas',
-  'comp-scrub',
-  'comp-frame-label',
-  'comp-play',
-  'comp-prev',
-  'comp-next',
-  'screenshot-section',
-  'tl-scroll-container',
-  'toast',
-]);
+const renderedIds = new Set(['tl-scroll-container', 'toast']);
 
 test('all static dashboard control IDs resolve against the real HTML or an explicit dynamic render', () => {
   const selectors = controller.matchAll(/(?:\$\('#|getElementById\(')([\w-]+)'/g);
@@ -48,11 +38,7 @@ class Element {
   };
   textContent = '';
   innerHTML = '';
-  style = {};
   dataset = {};
-  parent = null;
-  badge = null;
-  altReplacement = null;
   disabled = false;
   scrolls = 0;
   addEventListener(name, fn) {
@@ -67,33 +53,9 @@ class Element {
   append(...children) {
     this.children.push(...children);
   }
-  getContext() {
-    return { fillRect() {}, fillText() {}, drawImage() {} };
-  }
-  remove() {}
-  replaceWith(node) {
-    this.altReplacement = node;
-  }
-  closest() {
-    return this.parent;
-  }
-  querySelector() {
-    return this.badge;
-  }
-  querySelectorAll() {
-    if (this.lastHtml !== this.innerHTML) {
-      this.lastHtml = this.innerHTML;
-      this.thumbs = [...this.innerHTML.matchAll(/data-capture-id="(\d+)" data-bucket="(\d+)" data-slot="(\d+)"/g)].map(
-        ([, id, bucket, slot]) => {
-          const img = new Element();
-          img.dataset = { captureId: id, bucket, slot };
-          img.parent = new Element();
-          img.parent.badge = new Element();
-          return img;
-        },
-      );
-    }
-    return this.thumbs || [];
+  replaceChildren(...children) {
+    this.textContent = '';
+    this.children = children;
   }
 }
 
@@ -101,8 +63,6 @@ const boot = (respond) => {
   const ui = new Map();
   const requests = [];
   const downloads = [];
-  const observed = [];
-  const blobs = [];
   const get = (id) => {
     if (id.startsWith('#')) assert.ok(domIds.has(id.slice(1)) || renderedIds.has(id.slice(1)), `unknown element ${id}`);
     if (!ui.has(id)) ui.set(id, new Element());
@@ -113,18 +73,24 @@ const boot = (respond) => {
     Map,
     URLSearchParams,
     URL: {
-      createObjectURL: () => `blob:screenshot/${blobs.push('pending')}`,
-      revokeObjectURL: (url) => blobs.push(url),
+      createObjectURL: () => 'blob:download',
+      revokeObjectURL: () => {},
     },
     KNStorage: { get: () => 'fixture-key' },
     document: {
       querySelector: get,
       querySelectorAll: () => [],
       getElementById: (id) => get(`#${id}`),
-      createTextNode: (value) => value,
       createElement: (tag) => {
         const element = new Element();
         if (tag === 'a') element.click = () => downloads.push([element.href, element.download]);
+        if (tag === 'img')
+          Object.defineProperty(element, 'src', {
+            set(value) {
+              element.dataUrl = value;
+              element.onload?.();
+            },
+          });
         return element;
       },
     },
@@ -135,40 +101,22 @@ const boot = (respond) => {
       return Promise.resolve(respond(path));
     },
     navigator: { clipboard: { writeText: async () => {} } },
-    Image: Element,
-    IntersectionObserver: class {
-      constructor(callback) {
-        this.visible = (elements) =>
-          callback(
-            elements.map((target) => ({ target, isIntersecting: true })),
-            this,
-          );
-        observed.push(this);
-      }
-      observe() {}
-      unobserve() {}
-      disconnect() {
-        this.disconnected = true;
+    Blob,
+    FileReader: class {
+      readAsDataURL(blob) {
+        assert.equal(blob.type, 'image/jpeg');
+        this.result = 'data:image/jpeg;base64,fixture';
+        this.onload();
       }
     },
-    setInterval,
-    clearInterval,
     setTimeout: (fn) => fn(),
   });
   const open = (id) =>
     get('#session-log-list').click({
       closest: (selector) => (selector.startsWith('tr') ? { dataset: { sessionLogId: id } } : null),
     });
-  return { get, open, requests, downloads, observed, blobs };
+  return { get, open, requests, downloads };
 };
-
-const shotsFor = (min) =>
-  Array.from({ length: 32 }, (_, i) => ({
-    id: min + i,
-    slot: i % 4,
-    frame: Math.floor(i / 4) * 300 + 300,
-    created_at: new Date(Date.UTC(2026, 10, 20, 0, 0, Math.floor(i / 4) * 5)).toISOString().slice(0, -1),
-  }));
 
 test('row opens a summary immediately and never fetches raw log or screenshots until requested', async () => {
   const summary = pending();
@@ -219,19 +167,26 @@ test('cancels old views and never lets an old response overwrite the latest or c
   assert.equal(get('#log-viewer').classList.contains('hidden'), true);
 });
 
-test('capture range shares image reads between comparison and thumbnails, caps inflight reads, and aborts on close', async () => {
-  const reads = [];
-  const { get, open, requests, observed, blobs } = boot((path) => {
+test('only selected exact-frame images load with no URL key; each slot reports its own status', async () => {
+  const { get, open, requests } = boot((path) => {
     if (path.endsWith('/summary')) return json({ id: 13, match_id: 'm' });
     if (path.includes('/session-timeline')) return error;
-    if (path.includes('/desync-events')) return json({ events: [] });
-    if (path.includes('/window?'))
-      return json({ screenshots: shotsFor(1), start_frame: 0, end_frame: 2249, next_frame: 2250 });
-    if (path.includes('/img/')) {
-      const request = pending();
-      reads.push(request);
-      return request.response;
-    }
+    if (path.includes('/desync-events')) return json({ events: [{ frame: 299, vision_equal: false }] });
+    if (path.endsWith('/frame'))
+      return json({
+        frame: 300,
+        previous_frame: 299,
+        next_frame: 600,
+        slots: [0, 1, 2, 3],
+        screenshots: [
+          { id: 1, slot: 0, frame: 300 },
+          { id: 2, slot: 1, frame: 300 },
+          { id: 3, slot: 2, frame: 300 },
+        ],
+      });
+    if (path.endsWith('/img/1')) return { ok: true, blob: async () => 'jpeg' };
+    if (path.endsWith('/img/2')) return { ok: false, status: 404 };
+    if (path.endsWith('/img/3')) return error;
     throw new Error('unexpected request');
   });
   open('13');
@@ -240,45 +195,44 @@ test('capture range shares image reads between comparison and thumbnails, caps i
   get('#captures-show').click();
   await tick();
   const host = get('#captures-content');
-  assert.equal(host.querySelectorAll().length, 32);
-  const firstRange = host.querySelectorAll();
-  assert.ok(!host.innerHTML.includes('src='));
-  assert.equal(requests.filter(({ path }) => path.includes('/window?')).length, 1);
-  assert.equal(requests.filter(({ path }) => path.includes('/img/')).length, 4);
-  observed[0].visible(firstRange);
-  assert.equal(reads.length, 4);
-  reads[0].reply(error);
-  reads[1].reply({ ok: true, blob: async () => 'jpeg' });
-  await tick();
-  assert.equal(firstRange[0].altReplacement, 'Image unavailable');
-  assert.match(firstRange.find((image) => image.dataset.captureId === '2').src, /^blob:/);
-  assert.equal(reads.length, 6);
+  assert.equal(host.children.length, 4);
+  const [p0, p1, p2, p3] = host.children.map((slot) => slot.children[1]);
+  assert.equal(p0.children[0].dataUrl, 'data:image/jpeg;base64,fixture');
+  assert.equal(p1.textContent, 'Stored screenshot is missing.');
+  assert.equal(p2.textContent, 'Could not load the screenshot.');
+  assert.equal(p3.textContent, 'No exact capture at this frame.');
+  assert.equal(get('#captures-verdict').textContent, ''); // not inherited from nearby f299
   const paths = requests.filter(({ path }) => path.includes('/img/'));
-  assert.equal(new Set(paths.map(({ path }) => path)).size, 6);
+  assert.equal(paths.length, 3);
   assert.ok(paths.every(({ path, init }) => !path.includes('key=') && init.headers['X-Admin-Key'] === 'fixture-key'));
-  get('#viewer-close').click();
-  assert.equal(observed[0].disconnected, true);
-  assert.ok(paths.every(({ init }) => init.signal.aborted));
-  assert.ok(blobs.some((entry) => entry.startsWith('blob:')));
-  for (const request of reads.slice(2)) request.reply({ ok: true, blob: async () => 'jpeg' });
-  await tick();
-  assert.equal(reads.length, 6);
-  assert.equal(host.innerHTML, '');
 });
 
-test('seeking again discards a slow range, and earlier/later follows server captures across gaps', async () => {
-  const slow = pending();
+test('seeking, reopening another match, and closing cancel outdated frame or image responses', async () => {
+  const first = pending();
+  const image = pending();
+  const second = pending();
   const { get, open, requests } = boot((path) => {
-    if (path.endsWith('/summary')) return json({ id: 30, match_id: 'm' });
+    if (path.includes('/30/summary')) return json({ id: 30, match_id: 'm' });
+    if (path.includes('/31/summary')) return json({ id: 31, match_id: 'm2' });
     if (path.includes('/session-timeline')) return error;
     if (path.includes('/desync-events')) return json({ events: [] });
-    if (path.endsWith('frame=0')) return slow.response;
-    if (path.endsWith('frame=2400')) {
-      return json({ screenshots: [], previous_frame: 1800, next_frame: 15000, start_frame: 2250, end_frame: 4649 });
-    }
-    if (path.endsWith('frame=15000')) {
-      return json({ screenshots: [], previous_frame: 1800, start_frame: 14250, end_frame: 16649 });
-    }
+    if (path.endsWith('/m/frame')) return first.response;
+    if (path.endsWith('frame=2400'))
+      return json({
+        frame: 2400,
+        slots: [0],
+        screenshots: [],
+        previous_frame: 1800,
+        next_frame: 15000,
+      });
+    if (path.endsWith('frame=15000'))
+      return json({
+        frame: 15000,
+        slots: [0],
+        screenshots: [{ id: 1, slot: 0, frame: 15000 }],
+      });
+    if (path.endsWith('/img/1')) return image.response;
+    if (path.endsWith('/m2/frame')) return second.response;
     throw new Error('unexpected request');
   });
   open('30');
@@ -289,13 +243,27 @@ test('seeking again discards a slow range, and earlier/later follows server capt
   get('#captures-seek').events.get('submit')({ preventDefault() {} });
   assert.equal(initial.init.signal.aborted, true);
   await tick();
-  assert.equal(get('#captures-next').classList.contains('hidden'), false);
+  assert.match(get('#captures-status').textContent, /No exact screenshots at frame 2400/);
+  assert.equal(get('#captures-next').disabled, false);
+
   get('#captures-next').click();
   await tick();
-  assert.match(requests.at(-1).path, /frame=15000$/);
-  assert.equal(get('#captures-next').classList.contains('hidden'), true);
-  slow.reply(json({ screenshots: shotsFor(1), start_frame: 0, end_frame: 2249 }));
+  assert.equal(get('#captures-next').disabled, true);
+  assert.ok(requests.some(({ path }) => path.endsWith('frame=15000')));
+  const prevImage = requests.at(-1);
+  assert.match(prevImage.path, /img\/1$/);
+  open('31');
+  assert.equal(prevImage.init.signal.aborted, true);
   await tick();
-  assert.equal(get('#captures-content').innerHTML, '');
-  assert.ok(requests.every(({ path }) => !path.includes('/img/')));
+  get('#captures-show').click();
+  const secondFrame = requests.at(-1);
+  get('#viewer-close').click();
+  assert.equal(secondFrame.init.signal.aborted, true);
+  const stale = json({ frame: 299, slots: [0], screenshots: [{ id: 8, slot: 0, frame: 299 }] });
+  first.reply(stale);
+  second.reply(stale);
+  image.reply({ ok: true, blob: async () => 'jpeg' });
+  await tick();
+  assert.equal(get('#captures-content').children.length, 0);
+  assert.ok(!requests.some(({ path }) => path.endsWith('/img/8')));
 });

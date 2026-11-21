@@ -275,45 +275,45 @@ def test_live_vision_compares_only_pictures_of_one_frame(tmp_path, monkeypatch):
     assert len(calls) == 1
 
 @pytest.mark.parametrize("d1", [False, True], ids=["sqlite", "d1"])
-def test_admin_capture_window_is_bounded_and_seeks_across_gaps(tmp_path, d1):
+def test_admin_capture_returns_only_exact_frame_and_indexed_neighbors(tmp_path, d1):
     async def scenario():
         db = await _open(tmp_path, d1=d1)
         try:
-            # 960 screenshots: 2 slots, 4 per group, 120 comparison groups.
-            # Gaps between peer frames must not split a rounded group.
+            # 960 captures plus a legacy off-by-one frame, a duplicate and
+            # a large gap. The response is one exact frame, never a bucket.
             await db.execute_write(
                 "WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<959)"
                 " INSERT INTO screenshots (match_id, slot, frame, size)"
-                " SELECT 'long', i%2, (i/8)*300 + 160 + (i%8), 10 FROM n",
+                " SELECT 'long', i%4, (1+i/4)*300, 10 FROM n",
                 (),
             )
             await db.execute_write(
                 "INSERT INTO screenshots (match_id, slot, frame, size)"
-                " VALUES ('long', 2, 2249, 10), ('long', 3, 2250, 10),"
-                " ('long', 2, 2251, 10), ('long', 3, 1000000, 10), ('other', 2, 400000, 10)",
+                " VALUES ('long', 0, 299, 10), ('long', 0, 300, 12),"
+                " ('long', 3, 1000000, 10), ('other', 2, 400000, 10)",
                 (),
             )
-            initial = await db.get_screenshot_window("long", 0)
-            assert initial["start_frame"] == 0
-            assert initial["end_frame"] == 2249
-            assert initial["previous_frame"] is None
-            assert initial["next_frame"] == 2250
-            assert (2, 2249) in {(s["slot"], s["frame"]) for s in initial["screenshots"]}
-            current = await db.get_screenshot_window("long", initial["next_frame"])
-            assert current["previous_frame"] == 2249
-            assert {(s["slot"], s["frame"]) for s in current["screenshots"]} >= {(2, 2251), (3, 2250)}
-            assert max(s["frame"] for s in current["screenshots"] if s["slot"] == 0 and s["frame"] < 2550) == 2266
-            windows = [initial]
-            while current["next_frame"] is not None:
-                windows.append(current)
-                current = await db.get_screenshot_window("long", current["next_frame"])
-            windows.append(current)
-            assert len(windows) == 17
-            assert max(len(window["screenshots"]) for window in windows) <= 32
-            assert [s["frame"] for s in current["screenshots"]] == [1000000]
-            assert current["previous_frame"] < 400000
-            assert await db.get_screenshots("long")  # existing metadata still supported
-            assert len(await db.get_screenshots("long")) == 964
+            first = await db.get_screenshot_frame("long", None)
+            assert first["frame"] == 299
+            assert first["previous_frame"] is None
+            assert first["next_frame"] == 300
+            assert first["slots"] == [0, 1, 2, 3]
+            assert [(row["slot"], row["frame"]) for row in first["screenshots"]] == [(0, 299)]
+            at_300 = await db.get_screenshot_frame("long", 300)
+            assert at_300["previous_frame"] == 299
+            assert at_300["next_frame"] == 600
+            assert [r["slot"] for r in at_300["screenshots"]] == [0, 1, 2, 3]
+            assert {r["frame"] for r in at_300["screenshots"]} == {300}
+            assert at_300["screenshots"][0]["id"] == 962  # latest duplicate, same exact frame
+            gap = await db.get_screenshot_frame("long", 400000)
+            assert gap["frame"] == 400000
+            assert gap["previous_frame"] == 72000 and gap["next_frame"] == 1000000
+            assert gap["screenshots"] == []
+            last = await db.get_screenshot_frame("long", 1000000)
+            assert len(last["screenshots"]) == 1
+            assert last["next_frame"] is None
+            assert (await db.get_screenshot_frame("empty", None))["frame"] is None
+            assert len(await db.get_screenshots("long")) == 963  # existing metadata contract
         finally:
             await db.close_db()
 

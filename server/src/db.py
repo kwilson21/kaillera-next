@@ -16,21 +16,7 @@ import os
 import time
 from pathlib import Path
 
-from sqlalchemy import (
-    ColumnElement,
-    Executable,
-    Integer,
-    Select,
-    and_,
-    case,
-    cast,
-    delete,
-    func,
-    insert,
-    or_,
-    select,
-    update,
-)
+from sqlalchemy import ColumnElement, Executable, Select, and_, case, delete, func, insert, or_, select, update
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -777,64 +763,49 @@ async def get_screenshots(match_id: str) -> list[dict]:
     )
 
 
-# Use the same nearest-300 rounding as the admin comparison player. Window
-# boundaries lie between comparison buckets, never between two peers' frames.
-_SCREENSHOT_BUCKET = 300
-_SCREENSHOT_WINDOW = 8 * _SCREENSHOT_BUCKET
-_SCREENSHOT_HALF_BUCKET = _SCREENSHOT_BUCKET // 2
+async def get_screenshot_frame(match_id: str, frame: int | None) -> dict:
+    """Return captures at one exact frame and locations of its neighbors."""
+    shot = Screenshot
+    slots = range(4)
 
+    def seek(slot: int, column: str, *, anchor: int | None = None, before: bool = False):
+        query = select(shot.frame).where(shot.match_id == match_id, shot.slot == slot, shot.frame >= 0)
+        if anchor is not None:
+            query = query.where(shot.frame < anchor if before else shot.frame > anchor)
+        # Each seek uses the existing (match_id, slot, frame) index; no full
+        # match scan or additional D1 migration is needed.
+        return query.order_by(shot.frame.desc() if before else shot.frame).limit(1).scalar_subquery().label(column)
 
-async def get_screenshot_window(match_id: str, frame: int) -> dict:
-    """One bounded comparison window; one deterministic shot per slot/bucket."""
-    shots = Screenshot.__table__
-    filters = (shots.c.match_id == match_id, shots.c.slot.between(0, 3), shots.c.frame >= 0)
-    # Walk actual recordings, so arbitrary gaps between captures don't force
-    # the browser through empty windows. MIN/MAX can use the frame index.
-    base = (frame + _SCREENSHOT_HALF_BUCKET) // _SCREENSHOT_WINDOW * _SCREENSHOT_WINDOW
-    first = max(0, base - _SCREENSHOT_HALF_BUCKET)
-    end = base + _SCREENSHOT_WINDOW - _SCREENSHOT_HALF_BUCKET
+    starts = (await fetch(select(*(seek(slot, f"first_{slot}") for slot in slots))))[0]
+    recorded_slots = [slot for slot in slots if starts[f"first_{slot}"] is not None]
+    if frame is None and recorded_slots:
+        frame = min(starts[f"first_{slot}"] for slot in recorded_slots)
+    if frame is None or not recorded_slots:
+        return {"frame": frame, "previous_frame": None, "next_frame": None, "slots": [], "screenshots": []}
+
     bounds = (
         await fetch(
             select(
-                select(func.max(shots.c.frame))
-                .where(*filters, shots.c.frame < first)
-                .scalar_subquery()
-                .label("previous_frame"),
-                select(func.min(shots.c.frame))
-                .where(*filters, shots.c.frame >= end)
-                .scalar_subquery()
-                .label("next_frame"),
+                *(seek(slot, f"previous_{slot}", anchor=frame, before=True) for slot in recorded_slots),
+                *(seek(slot, f"next_{slot}", anchor=frame) for slot in recorded_slots),
             )
         )
     )[0]
-    bucket = cast((shots.c.frame + _SCREENSHOT_HALF_BUCKET).self_group().op("/")(_SCREENSHOT_BUCKET), Integer)
-    ranked = (
-        select(
-            shots.c.id,
-            func.row_number()
-            .over(
-                partition_by=(shots.c.slot, bucket),
-                order_by=(shots.c.frame.desc(), shots.c.id.desc()),
-            )
-            .label("rank"),
-        )
-        .where(*filters, shots.c.frame >= first, shots.c.frame < end)
-        .subquery()
+    previous = [bounds[f"previous_{slot}"] for slot in recorded_slots if bounds[f"previous_{slot}"] is not None]
+    following = [bounds[f"next_{slot}"] for slot in recorded_slots if bounds[f"next_{slot}"] is not None]
+    captures = await fetch(
+        select(shot.slot, shot.frame, func.max(shot.id).label("id"))
+        .where(shot.match_id == match_id, shot.slot.in_(recorded_slots), shot.frame == frame)
+        .group_by(shot.slot, shot.frame)
+        .order_by(shot.slot)
     )
-    screenshots = await fetch(
-        select(
-            shots.c.id,
-            shots.c.match_id,
-            shots.c.slot,
-            shots.c.frame,
-            func.coalesce(shots.c.size, func.length(shots.c.data)).label("size"),
-            shots.c.created_at,
-        )
-        .join(ranked, shots.c.id == ranked.c.id)
-        .where(ranked.c.rank == 1)
-        .order_by(shots.c.slot, shots.c.frame, shots.c.id)
-    )
-    return {"screenshots": screenshots, "start_frame": first, "end_frame": end - 1, **bounds}
+    return {
+        "frame": frame,
+        "previous_frame": max(previous, default=None),
+        "next_frame": min(following, default=None),
+        "slots": recorded_slots,
+        "screenshots": captures,
+    }
 
 
 async def read_screenshot(row: dict) -> bytes | None:

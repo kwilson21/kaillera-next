@@ -337,22 +337,22 @@ def test_admin_session_summary_selects_only_metadata(audit_client, monkeypatch):
     assert http.get("/admin/api/session-logs/42/summary", headers=key).status_code == 404
 
 
-def test_admin_capture_window_requires_header_and_bounds_frame(audit_client, monkeypatch):
+def test_admin_capture_frame_requires_header_and_bounds_frame(audit_client, monkeypatch):
     import src.db as db
 
     http, _ = audit_client
-    get_window = AsyncMock(return_value={"screenshots": [], "next_frame": None})
-    monkeypatch.setattr(db, "get_screenshot_window", get_window)
-    path = "/admin/api/screenshots/m1/window"
+    get_frame = AsyncMock(return_value={"screenshots": [], "next_frame": None})
+    monkeypatch.setattr(db, "get_screenshot_frame", get_frame)
+    path = "/admin/api/screenshots/m1/frame"
     assert http.get(path).status_code == 401
     key = {"X-Admin-Key": "k"}
     assert http.get(f"{path}?frame=-1", headers=key).status_code == 422
     assert http.get(f"{path}?frame=9007199254740992", headers=key).status_code == 422
-    get_window.assert_not_awaited()
+    get_frame.assert_not_awaited()
     resp = http.get(f"{path}?frame=2250", headers=key)
     assert resp.status_code == 200
     assert resp.json() == {"matchId": "m1", "screenshots": [], "next_frame": None}
-    get_window.assert_awaited_once_with("m1", 2250)
+    get_frame.assert_awaited_once_with("m1", 2250)
 
 
 def test_admin_legacy_detail_and_explicit_export_still_bundle_raw_data(audit_client, monkeypatch):

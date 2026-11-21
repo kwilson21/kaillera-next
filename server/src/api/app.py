@@ -1965,13 +1965,13 @@ def create_app(lifespan=None) -> FastAPI:
 
     # ── Screenshot routes ──────────────────────────────────────────────────
 
-    @app.get("/admin/api/screenshots/{match_id}/window")
-    async def admin_screenshot_window(
+    @app.get("/admin/api/screenshots/{match_id}/frame")
+    async def admin_screenshot_frame(
         match_id: str,
-        frame: int = Query(default=0, ge=0, le=2**53 - 1),
+        frame: int | None = Query(default=None, ge=0, le=2**53 - 1),
         _auth: None = Depends(_require_admin),
     ) -> dict:
-        return {"matchId": match_id, **await db.get_screenshot_window(match_id, frame)}
+        return {"matchId": match_id, **await db.get_screenshot_frame(match_id, frame)}
 
     @app.get("/admin/api/screenshots/{match_id}")
     async def admin_screenshots_list(request: Request, match_id: str, _auth: None = Depends(_require_admin)) -> dict:

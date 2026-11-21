@@ -117,20 +117,23 @@
           </div>
         </div>
         <pre id="viewer-content"></pre>
-        <div id="viewer-extras"></div>
         <div id="viewer-captures" class="hidden">
-          <h4>Screenshots</h4>
-          <button id="captures-show">Show screenshots</button>
-          <button id="captures-prev" class="hidden">Earlier captures</button>
-          <button id="captures-next" class="hidden">Later captures</button>
-          <form id="captures-seek">
-            <label for="capture-seek">Find frame</label>
-            <input id="capture-seek" type="number" min="0" max="9007199254740991" step="1" required />
-            <button type="submit">Go</button>
-          </form>
-          <span id="captures-status" role="status"></span>
+          <h4>Screenshot comparison</h4>
+          <button id="captures-show">Compare screenshots</button>
+          <div id="capture-controls" class="hidden">
+            <button id="captures-prev">Previous capture</button>
+            <button id="captures-next">Next capture</button>
+            <form id="captures-seek">
+              <label for="capture-seek">Find frame</label>
+              <input id="capture-seek" type="number" min="0" max="9007199254740991" step="1" required />
+              <button type="submit">Go</button>
+            </form>
+          </div>
+          <p id="captures-status" role="status"></p>
+          <p id="captures-verdict"></p>
           <div id="captures-content"></div>
         </div>
+        <div id="viewer-extras"></div>
       </div>
     </div>
 
