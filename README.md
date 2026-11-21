@@ -8,9 +8,12 @@ kaillera-next is a browser-based netplay platform built on [EmulatorJS](https://
 
 1. One player creates a room and shares the invite link
 2. Others join by clicking the link or entering the room code
-3. Everyone drops their ROM file (drag-and-drop, cached in IndexedDB)
-   — or the host shares their ROM via P2P transfer
+3. Players whose browsers run the emulator bring their own compatible game file.
+   The browser can cache the file locally in IndexedDB. Spectators do not need a game file.
 4. Host picks a netplay mode and starts the game
+
+The public Kaillera Next service does not host, distribute, or link to ROMs.
+Peer-to-peer ROM transfer between players is disabled on the public service.
 
 ### Netplay modes
 
@@ -316,7 +319,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `ICE_SERVERS` | — | Legacy static ICE server config (JSON) |
 | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare Realtime TURN credentials for `/ice-servers` |
 | `PER_IP_SPECTATOR_CAP` | `3` | Max spectator slots one IP can hold in a room |
-| `ROM_SHARING_ENABLED` | `true` | Enable host ROM P2P sharing |
+| `ROM_SHARING_ENABLED` | `true` | Server option for peer-to-peer ROM transfer. The public deployment sets this to `false`. |
 | `GAME_IMAGES_ENABLED` | `true` | Read by `og.py` but not currently wired to anything — OG-card game images are always on |
 | `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` | — | Enable the Claude desync-vision endpoint (`DESYNC_VISION_ENABLED=1`) |
 | `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
