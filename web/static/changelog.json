@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.15",
+    "date": "2026-11-21",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "open matches without loading raw logs and screenshots (#295)"
+      }
+    ]
+  },
+  {
     "version": "0.69.14",
     "date": "2026-11-20",
     "changes": [
