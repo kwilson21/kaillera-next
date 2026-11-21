@@ -219,7 +219,7 @@ test('only selected exact-frame images load with no URL key; each slot reports i
   assert.ok(paths.every(({ path, init }) => !path.includes('key=') && init.headers['X-Admin-Key'] === 'fixture-key'));
 });
 
-test('a vision result follows the captured frame, not the earlier suspect frame', async () => {
+test('a qualified verdict received before opening screenshots follows only its captured frame', async () => {
   const { get, open } = boot((path) => {
     if (path.endsWith('/summary')) return json({ id: 14, match_id: 'm' });
     if (path.includes('/session-timeline')) return error;
@@ -245,6 +245,9 @@ test('a vision result follows the captured frame, not the earlier suspect frame'
   });
   open('14');
   await tick();
+  assert.equal(get('#viewer-extras').children[0].textContent, 'Desync not verified.');
+  assert.equal(get('#captures-verdict').textContent, '');
+  assert.equal(get('#capture-controls').classList.contains('hidden'), true);
   get('#captures-show').click();
   await tick();
   assert.equal(get('#captures-verdict').textContent, '');

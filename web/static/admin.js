@@ -335,9 +335,11 @@
     event.capture_slots.every((slot) => Number.isInteger(slot) && slot >= 0 && slot < 4);
 
   const paintCaptureVerdict = (view) => {
-    const frame = view.capture?.frame;
+    const capture = view.capture;
+    if (!capture || capture.frame == null || !capture.slots) return;
+    const { frame, slots } = capture;
     const rows = view.verdicts.filter(
-      (event) => event.captured_frame === frame && event.capture_slots.every((slot) => view.capture.slots?.has(slot)),
+      (event) => event.captured_frame === frame && event.capture_slots.every((slot) => slots.has(slot)),
     );
     let label = '';
     // The model saw different uploads; do not present its result as a
