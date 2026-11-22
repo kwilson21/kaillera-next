@@ -550,6 +550,9 @@ engine_start() {
   expect_violation "$START" engine_start_before armsWithTheHostsDelay
   # engine_start_stop_only's counterexample needs a close, an open and the
   # whole wait (9 steps): check-specs.sh's random runs find it.
+  # A friend joins a solo match with no bridge window at 0: start alone, arm,
+  # join late (3 steps; lateJoinIntoSoloTest).
+  expect_violation "$START" engine_start_no_zero_bridge aGuestStopsOnlyWhenTheHostIsUnreachable
 }
 
 # Every group, in the order a local run takes them.
