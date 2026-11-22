@@ -66,6 +66,9 @@ _DEFAULT_PARQUET_DIR = os.path.join("data", "parquet")
 # ended match reliably sees metrics on a second attempt.
 SWEEP_INTERVAL_SEC = 60
 
+# Rows per Polars frame built from the merged entries (see _write_parquet).
+_FRAME_SLICE_ROWS = 10_000
+
 
 def _parquet_dir() -> Path:
     p = Path(os.environ.get("PARQUET_DIR", _DEFAULT_PARQUET_DIR))
@@ -243,8 +246,15 @@ def _write_parquet(match_id: str, merged_entries: list[dict], created_at: str | 
 
     # Polars is strict about schema mismatches across rows; use
     # infer_schema_length=None so it scans every row to find the widest
-    # type. Small cost compared to JSON parsing.
-    df = pl.DataFrame(merged_entries, infer_schema_length=None, strict=False)
+    # type, and a relaxed concat to widen across slices. Built a slice at a
+    # time because building a frame from Python objects holds the GIL: one
+    # build over a long match's entries would stall the event loop even
+    # from the worker thread this runs in.
+    frames = [
+        pl.DataFrame(merged_entries[i : i + _FRAME_SLICE_ROWS], infer_schema_length=None, strict=False)
+        for i in range(0, len(merged_entries), _FRAME_SLICE_ROWS)
+    ]
+    df = pl.concat(frames, how="diagonal_relaxed")
     df.write_parquet(out_path, compression="zstd", compression_level=3)
 
     try:
@@ -259,18 +269,35 @@ def _write_parquet(match_id: str, merged_entries: list[dict], created_at: str | 
 
 async def _merge_entries(session_rows: list[dict]) -> list[dict]:
     """Flatten all peers' log entries (legacy log_data + chunks) into one list,
-    stamping per-row metadata."""
+    stamping per-row metadata. One peer's log is held at a time, and stamped
+    in a worker thread."""
     merged: list[dict] = []
     for r in session_rows:
         log_data = await db.get_full_log_entries(r.get("match_id"), r.get("slot"), r.get("log_data"))
-        stamp = {
-            "session_id": r.get("id"),
-            "match_id": r.get("match_id"),
-            "slot": r.get("slot"),
-            "player_name": r.get("player_name"),
-        }
-        merged.extend({**stamp, **entry} for entry in log_data if isinstance(entry, dict))
+        merged.extend(await asyncio.to_thread(_stamped, r, log_data))
     return merged
+
+
+def _stamped(session_row: dict, log_data: list) -> list[dict]:
+    stamp = {
+        "session_id": session_row.get("id"),
+        "match_id": session_row.get("match_id"),
+        "slot": session_row.get("slot"),
+        "player_name": session_row.get("player_name"),
+    }
+    return [{**stamp, **entry} for entry in log_data if isinstance(entry, dict)]
+
+
+def _process_match(
+    match_id: str, session_rows: list[dict], merged: list[dict], created_at: str | None
+) -> tuple[MatchMetrics, list[dict]]:
+    """Write the Parquet file and compute the metrics and retention flags.
+    Seconds of CPU for a long match on a small instance, so rotate_match runs
+    it in a worker thread, off the event loop."""
+    parquet_result = _write_parquet(match_id, merged, created_at)
+    parquet_path, parquet_bytes = parquet_result if parquet_result else (None, None)
+    metrics = _compute_metrics(match_id, session_rows, merged, parquet_path, parquet_bytes)
+    return metrics, retention.classify_entries(merged)
 
 
 async def rotate_match(match_id: str) -> MatchMetrics | None:
@@ -289,13 +316,9 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
     # Earliest created_at across peers determines the partition month.
     created_at = min((r.get("created_at") or "") for r in rows) or None
 
-    parquet_result = _write_parquet(match_id, merged, created_at)
-    parquet_path, parquet_bytes = parquet_result if parquet_result else (None, None)
-
-    metrics = _compute_metrics(match_id, rows, merged, parquet_path, parquet_bytes)
+    metrics, reasons = await asyncio.to_thread(_process_match, match_id, rows, merged, created_at)
     await _upsert_metrics(metrics)
 
-    reasons = retention.classify_entries(merged)
     if reasons:
         try:
             # Matches from before registration existed have no row yet.
@@ -310,7 +333,7 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
         metrics.peer_count,
         metrics.entry_count,
         metrics.mismatch_count,
-        f"{parquet_bytes} bytes" if parquet_bytes else "skipped",
+        f"{metrics.parquet_bytes} bytes" if metrics.parquet_bytes else "skipped",
     )
     return metrics
 

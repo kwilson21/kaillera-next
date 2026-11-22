@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from sqlalchemy import ColumnElement, Executable, Select, and_, case, delete, func, insert, or_, select, update
@@ -456,53 +457,95 @@ def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> 
     return delete(SessionLogChunk).where(*_chunks_of(match_id, slot, kind), SessionLogChunk.id.not_in(fits))
 
 
+# Chunks read per query when a stored log is assembled or streamed: at most
+# 16 x _SESSION_LOG_CHUNK_MAX (8 MB) of JSON text in memory at once.
+_CHUNK_PAGE_ROWS = 16
+
+
+def _entry_list(text: str | None) -> list:
+    """The entries a stored JSON array holds; a missing, malformed or non-list value holds none."""
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _page_entries(texts: list[str]) -> list:
+    return [entry for text in texts for entry in _entry_list(text)]
+
+
+async def parse_log_data(log_data_str: str | None) -> list:
+    """A session's legacy `log_data` blob as a list of entries, parsed in a worker thread."""
+    return await asyncio.to_thread(_entry_list, log_data_str) if log_data_str else []
+
+
+async def iter_chunk_entries(
+    match_id: str, slot: int | None, kind: str = "log", *, through_id: int | None = None
+) -> AsyncIterator[list]:
+    """One player's stored chunks of one kind, oldest first, as lists of entries.
+
+    Reads a page of chunks per query and parses each page in a worker thread,
+    so a long log never holds the event loop for long (see the admin export
+    in api/app.py). `through_id` stops at that chunk id.
+    """
+    after = 0
+    while True:
+        page = select(SessionLogChunk.id, SessionLogChunk.entries).where(
+            *_chunks_of(match_id, slot, kind), SessionLogChunk.id > after
+        )
+        if through_id is not None:
+            page = page.where(SessionLogChunk.id <= through_id)
+        rows = await fetch(page.order_by(SessionLogChunk.id).limit(_CHUNK_PAGE_ROWS))
+        if not rows:
+            return
+        after = rows[-1]["id"]
+        yield await asyncio.to_thread(_page_entries, [r["entries"] for r in rows])
+        if len(rows) < _CHUNK_PAGE_ROWS:
+            return
+
+
+async def count_log_entries(match_id: str, slot: int | None) -> tuple[int, int]:
+    """How many entries one player's stored log chunks hold, and the id of the newest one.
+
+    SQLite counts them, so nothing is parsed here. A chunk that isn't valid
+    JSON counts none, as it holds none for iter_chunk_entries. Reading
+    `through_id=` the returned id streams exactly the chunks counted, even
+    while a live match appends more.
+    """
+    entries = SessionLogChunk.entries
+    length = case((func.json_valid(entries), func.json_array_length(entries)), else_=0)
+    rows = await fetch(
+        select(
+            func.coalesce(func.sum(length), 0).label("n"),
+            func.coalesce(func.max(SessionLogChunk.id), 0).label("through"),
+        ).where(*_chunks_of(match_id, slot, "log"))
+    )
+    return (int(rows[0]["n"]), int(rows[0]["through"])) if rows else (0, 0)
+
+
 async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: str | None) -> list[dict]:
     """Assemble a session's full entry list: legacy `log_data` (if any) plus
     every `session_log_chunks` row for (match_id, slot), in insertion order.
 
-    Used anywhere that used to just `json.loads(log_data)` — admin detail,
-    export, and match_rotation — so their response/output shapes are
-    unchanged even though storage moved to append-only chunks.
+    Used by the admin detail endpoint and match_rotation, so their output
+    shapes are unchanged even though storage moved to append-only chunks.
+    The parsing runs in worker threads (iter_chunk_entries); the export
+    endpoint streams the same entries a page at a time instead.
     """
-    entries: list = []
-    if log_data_str:
-        try:
-            legacy = json.loads(log_data_str)
-        except (json.JSONDecodeError, TypeError):
-            legacy = []
-        if isinstance(legacy, list):
-            entries.extend(legacy)
-
+    entries = await parse_log_data(log_data_str)
     if _backend is None:
         return entries
-
-    rows = await fetch(_chunk_entries(match_id, slot, "log"))
-    for r in rows:
-        try:
-            chunk = json.loads(r["entries"])
-        except (json.JSONDecodeError, TypeError):
-            chunk = []
-        if isinstance(chunk, list):
-            entries.extend(chunk)
+    async for page in iter_chunk_entries(match_id, slot):
+        entries.extend(page)
     return entries
-
-
-def _chunk_entries(match_id: str, slot: int | None, kind: str) -> Executable:
-    """One player's stored chunks of one kind, oldest first."""
-    return select(SessionLogChunk.entries).where(*_chunks_of(match_id, slot, kind)).order_by(SessionLogChunk.id)
 
 
 async def get_input_audit(match_id: str, slot: int | None) -> list[dict]:
     """Every input audit record stored for (match_id, slot), oldest first."""
-    rows = await fetch(_chunk_entries(match_id, slot, "audit"))
     records: list = []
-    for r in rows:
-        try:
-            chunk = json.loads(r["entries"])
-        except (json.JSONDecodeError, TypeError):
-            chunk = []
-        if isinstance(chunk, list):
-            records.extend(chunk)
+    async for page in iter_chunk_entries(match_id, slot, "audit"):
+        records.extend(page)
     return records
 
 
