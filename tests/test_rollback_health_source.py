@@ -99,23 +99,140 @@ def test_rollback_delay_inputs_are_clamped_to_engine_window():
         "const _delayCeiling = () => (_predictionsPaused ? LOCKSTEP_MAX_DELAY_FRAMES : ROLLBACK_MAX_DELAY_FRAMES);"
         in src
     )
-    assert "const hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);" in src
+    # The host's delay as it comes: 0 stays 0 (a solo match and a friend who
+    # joins it), anything else is clamped as the host's own was.
+    assert "return n === 0 ? 0 : clampRollbackDelay(n);" in src
+    assert "const hostDelay = _hostDelayFrom(e.data.split(':')[1]);" in src
     assert "if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);" in src
-    assert "window._rbHostDelay = clampRollbackDelay(msg.effectiveDelay);" in src
-    assert (
-        "const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);"
-        in src
-    )
+    assert "const lateJoinDelay = _hostDelayFrom(msg.effectiveDelay);" in src
 
 
-def test_solo_delay_does_not_initialize_rollback():
+def test_every_page_arms_the_c_engine_solo_included():
+    """specs/engine_start.qnt everyFrameRunsOnTheCEngine: a delay of 0 arms too."""
     src = LOCKSTEP_JS.read_text()
 
     assert "const soloMode = playerPeerSids.length === 0;" in src
-    assert "ownDelay = 0;" in src
     assert "if (hasRollback && !soloMode) ownDelay = clampRollbackDelay(ownDelay);" in src
-    assert "if (detMod?._kn_rollback_init && DELAY_FRAMES > 0)" in src
-    assert "C-ROLLBACK disabled for zero-delay solo play" in src
+    assert "DELAY_FRAMES > 0" not in src[src.index("const tryInitRollback = () => {") :][:4000]
+    assert "C-ROLLBACK disabled for zero-delay solo play" not in src
+    # A core without the C engine stops at the start instead of running unarmed.
+    assert "_stopAtStart('core', { missing: missingExports });" in src
+    # A page that has not armed holds; it never steps on another path.
+    hold_idx = src.index("_markTickReturn('skip:not-armed');")
+    c_branch_idx = src.index("// ── C-level rollback path")
+    assert hold_idx < c_branch_idx
+
+
+def test_only_the_host_sets_the_start():
+    """A waiting guest arms with `rb-delay:` and stops on an `rb-init-frame:`
+    other than its own frame, so another player's would let it stop any
+    guest's start: both are the host's word only, as rb-transport is."""
+    src = LOCKSTEP_JS.read_text()
+
+    for kind, sets in (("rb-delay", "window._rbHostDelay = hostDelay;"), ("rb-init-frame", "window._rbHostInitFrame = hostInitFrame;")):
+        handler = src[src.index(f"if (e.data.startsWith('{kind}:')) {{") :]
+        handler = handler[: handler.index("\n        }\n")]
+        guard = handler.index("if (_peers[remoteSid]?.slot !== 0) {")
+        assert guard < handler.index(sets), kind
+        assert "return;" in handler[guard : handler.index(sets)], kind
+
+
+def test_a_trap_while_arming_ends_the_match():
+    """Arming clears the wait before kn_rollback_init runs; a trap there left
+    the page neither armed nor waiting, held at skip:not-armed with no message
+    and no deadline (I1). It ends the match as any core trap does."""
+    src = LOCKSTEP_JS.read_text()
+
+    guest = src[src.index("const _guestStart = (source) => {") :]
+    guest = guest[: guest.index("\n  };\n")]
+    arm = guest.index("window._rbDoInit(")
+    assert guest.rindex("try {", 0, arm) < arm < guest.index("_handleCoreFatal('rollback-init', e);")
+    host = src[src.index("const tryInitRollback = () => {") :]
+    host = host[: host.index("\n      };\n")]
+    init = host.index("doRollbackInit(DELAY_FRAMES);")
+    assert host.rindex("try {", 0, init) < init < host.index("_handleCoreFatal('rollback-init', e);")
+    # Not reached; if it were, it ends the match rather than holding.
+    hold = src[src.index("_markTickReturn('skip:not-armed');") :][:200]
+    assert "_handleCoreFatal('not-armed'" in hold
+
+
+def test_a_stopped_start_keeps_its_message():
+    """A later start on a page whose start stopped (a late join) showed "The
+    emulator crashed" in place of why it stopped."""
+    src = LOCKSTEP_JS.read_text()
+
+    stop = src[src.index("const _stopAtStart = (reason, detail = {}) => {") :]
+    stop = stop[: stop.index("\n  };\n")]
+    assert "_coreFatalMessage = message;" in stop
+    start = src[src.index("const startLockstep = () => {") :][:600]
+    assert "_notifyCoreFatal(_coreFatalMessage);" in start
+
+
+def test_a_joiner_stops_on_a_host_whose_delay_of_0_is_the_old_path():
+    """A host from before every page armed (kept through a deploy, a solo match
+    at delay 0 on the old JS path) does not say cEngine; a joiner armed on the
+    C engine beside it would run another engine. It stops and says so."""
+    src = LOCKSTEP_JS.read_text()
+
+    send = src[src.index("async function sendLateJoinState(remoteSid) {") :]
+    assert "cEngine: _useCRollback," in send[: send.index("inputBridge")]
+    load = src[src.index("const lateJoinDelay = _hostDelayFrom(msg.effectiveDelay);") :][:900]
+    gate = load.index("if (lateJoinDelay === 0 && msg.cEngine !== true) {")
+    assert gate < load.index("_stopAtStart('old-host'") < load.index("window._rbHostDelay = lateJoinDelay;")
+    assert "'old-host':" in src
+
+
+def test_the_first_player_into_a_match_at_0_moves_it_to_a_match_delay():
+    """specs/engine_start.qnt, REARM_AT_JOIN: the host arms again at the frame
+    of the state it sends, with KNCore.delayAtJoin's delay, before the bridge
+    is read, and its own inputs for H..H+delay-1 are neutral (fresh objects,
+    so the bridge carries them to the joiner as made)."""
+    src = LOCKSTEP_JS.read_text()
+
+    send = src[src.index("async function sendLateJoinState(remoteSid) {") :]
+    capture = send.index("const capturedFrame = _frameNum;")
+    rearm = send.index("_rearmForFirstPlayer(remoteSid, capturedFrame);")
+    bridge = send.index("_snapshotLateJoinBridgeSources(remoteSid)")
+    assert capture < rearm < bridge
+    assert "if (DELAY_FRAMES === 0 && _useCRollback) {" in send[capture:rearm]
+
+    fn = src[src.index("const _rearmForFirstPlayer = (remoteSid, frame) => {") :]
+    fn = fn[: fn.index("\n  };\n")]
+    assert "window.KNCore.delayAtJoin(DELAY_FRAMES, own, offered, clampRollbackDelay(DEFAULT_DELAY_FRAMES))" in fn
+    zeros = fn.index("_localInputs[f] = { ...KNShared.ZERO_INPUT };")
+    assert zeros < fn.index("DELAY_FRAMES = delay;") < fn.index("window._rbDoInit(delay, frame, 'first player joined');")
+    # Only alone and with no replay running.
+    assert "if (others.length || replayDepth > 0 || !window._rbDoInit) {" in fn
+
+    # The joiner offers the delay it measured to the host.
+    request = src[src.index("const _sendLateJoinRequest = () => {") :][:700]
+    assert "_delayFromRttSamples(samples, _delayIsLockstep())" in request
+    assert "_lateJoinOfferedDelay.set(" in src
+    # I2: the offer is per joiner and goes with the rest of its state.
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "_lateJoinOfferedDelay.delete(opts.sid);" in reset
+
+
+def test_the_arm_log_says_where_the_frame_came_from():
+    src = LOCKSTEP_JS.read_text()
+
+    assert "(host-authoritative)" not in src
+    assert "host start frame (${source})" in src
+    assert "own frame at the deadline (${source})" in src
+
+
+def test_the_c_engine_sends_the_funnel_milestone():
+    """milestone_reached (the admin timeline's "actually played" mark) was sent
+    only from the old path's tail of tick(); every frame now runs on the C
+    engine, whose branch always returns, so it is sent there."""
+    src = LOCKSTEP_JS.read_text()
+
+    assert src.count("KNEvent('milestone_reached'") == 1
+    milestone_idx = src.index("KNEvent('milestone_reached'")
+    c_branch_idx = src.index("// ── C-level rollback path")
+    c_end_idx = src.index("_markTickReturn('end:c-rollback');")
+    assert c_branch_idx < milestone_idx < c_end_idx
 
 
 
@@ -288,37 +405,45 @@ def test_pending_rollback_init_keeps_reliable_input_stream_alive():
     pending_idx = src.index("if (window._rbPendingInit) {")
     pending_src = src[pending_idx : src.index("if (_syncTargetFrame > 0", pending_idx)]
     send_idx = pending_src.index("_sendPendingRollbackInitInput();")
-    deadline_idx = pending_src.index("if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS)")
-    assert send_idx < deadline_idx
+    decide_idx = pending_src.index("if (!_guestStart('tick')) {")
+    assert send_idx < decide_idx
 
 
-def test_host_authoritative_rb_init_catches_guest_state_up_before_init():
+def test_a_guest_arms_on_the_rule_and_never_with_its_own_delay():
+    """specs/engine_start.qnt: the guest arms with the host's delay at its own
+    frame, or stops and says so; there is no catch-up and no own-delay fallback."""
     src = LOCKSTEP_JS.read_text()
 
-    assert "let _rbPendingInitCatchup = null;" in src
-    assert "const _requestRollbackInit = (delay, initFrame, source) => {" in src
-    assert "targetFrame > _frameNum" in src
-    assert "_rbPendingInitCatchup = { delay: effectiveDelay, initFrame: targetFrame, source };" in src
-    assert "RB-INIT-CATCHUP armed source=${source}" in src
-    assert "RB-INIT-CATCHUP complete source=${source}" in src
+    guest_idx = src.index("const _guestStart = (source) => {")
+    guest_src = src[guest_idx : src.index("const startLockstep = () => {", guest_idx)]
+    assert "window.KNCore.guestStartStep(heardDelay, heardStart, _frameNum, waitedMs, RB_INIT_TIMEOUT_MS)" in guest_src
+    assert "window._rbDoInit(\n          heardDelay,\n          _frameNum," in guest_src
+    assert "_stopAtStart('no-host'" in guest_src and "_stopAtStart('start-frame'" in guest_src
+    for gone in ("_rbPendingInitCatchup", "RB-INIT-CATCHUP", "RB-INIT-TIMEOUT", "_rbFallbackDelay"):
+        assert gone not in src
 
-    request_idx = src.index("const _requestRollbackInit = (delay, initFrame, source) => {")
-    request_src = src[request_idx : src.index("const startLockstep = () => {", request_idx)]
-    arm_idx = request_src.index("targetFrame > _frameNum")
-    direct_idx = request_src.index("window._rbDoInit(effectiveDelay, alignedFrame);")
-    assert arm_idx < direct_idx
+    # The host sends its delay and start frame together, when it arms and on
+    # every channel to a guest that opens.
+    send_idx = src.index("const _sendHostStart = (dc) => {")
+    send_src = src[send_idx : src.index("};", send_idx)]
+    assert send_src.index("rb-delay:") < send_src.index("rb-init-frame:")
+    assert "_sendHostStart(p.dc);" in src  # when it arms
+    assert "_sendHostStart(ch);" in src  # on every channel that opens
 
-    pending_idx = src.index("if (window._rbPendingInit) {")
-    pending_src = src[pending_idx : src.index("if (_syncTargetFrame > 0", pending_idx)]
-    catchup_idx = pending_src.index("if (_rbPendingInitCatchup) {")
-    timeout_idx = pending_src.index("if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS)")
-    fallthrough_idx = pending_src.index("Fall through to the JS lockstep path")
-    assert catchup_idx < timeout_idx
-    assert catchup_idx < fallthrough_idx < timeout_idx
 
-    assert "_requestRollbackInit(hostDelay, window._rbHostInitFrame, 'rb-delay');" in src
-    assert "_requestRollbackInit(window._rbHostDelay, hostInitFrame, 'rb-init-frame');" in src
-    assert "_requestRollbackInit(window._rbHostDelay, window._rbHostInitFrame, 'try-init');" in src
+def test_a_rollback_never_reaches_back_before_a_players_first_input():
+    """A late input rolls back only a frame its player's input was predicted
+    for, and a slot is predicted only once its first input has been fed. So
+    no rollback targets a frame from before a player joined, and a page that
+    played alone needs its ring only from the join on (specs/engine_start.qnt:
+    solo play runs on the C engine; skipping its saves is a follow-up that
+    relies on this)."""
+    c_src = ROLLBACK_C.read_text()
+    feed = c_src[c_src.index("int kn_feed_input(") : c_src.index("int kn_pre_tick(")]
+    assert "slot_active[slot] = 1;" in feed
+    assert "if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {" in feed
+    pre_tick = c_src[c_src.index("int kn_pre_tick(") :]
+    assert "if (!rb.slot_active[s]) continue;" in pre_tick
 
 
 def test_failed_frame_step_does_not_advance_bookkeeping():

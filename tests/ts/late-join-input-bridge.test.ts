@@ -68,8 +68,8 @@ async function send(replaceSource: boolean, mode: 'normal' | 'worker' | 'remix' 
 
 type LateJoinStateFixture = { frame: number; inputBridge?: import('../../web/src/wire.ts').WirePayload };
 
-function setupJoin(msg: LateJoinStateFixture, replaceSource = false, direct = false, ownSlot = 2) {
-  const c = vm.createContext({ msg, zero, real, H, api, replaceSource, direct, ownSlot });
+function setupJoin(msg: LateJoinStateFixture, replaceSource = false, direct = false, ownSlot = 2, delay = 3) {
+  const c = vm.createContext({ msg, zero, real, H, api, replaceSource, direct, ownSlot, delay });
   vm.runInContext(
     `
     const KNShared={ZERO_INPUT:zero},window={KNCore:api};
@@ -78,7 +78,7 @@ function setupJoin(msg: LateJoinStateFixture, replaceSource = false, direct = fa
     const original={slot:1,dc:{readyState:'open',send(msg){resends.push(msg)}}};
     const _peers={host,guest:original,extra:{slot:2}},_syncQueueGen={guest:0};
     const bridgePeers=new Map([['host',{peer:host,gen:0}],['guest',{peer:original,gen:0}]]);
-    const _syncQueueEpoch=0,bridgeEpoch=0,DELAY_FRAMES=3,_playerSlot=ownSlot,_rbRollbackMax=22;
+    const _syncQueueEpoch=0,bridgeEpoch=0,DELAY_FRAMES=delay,_playerSlot=ownSlot,_rbRollbackMax=22;
     const _remoteInputs={0:{[H]:{...zero}},1:direct?{[H]:{...real,ly:-70}}:{}},_localInputs={};
     const RB_WORKER_COPROC=false,_isSmashRemix=()=>false,LATE_JOIN_TIMEOUT_MS=15000,KN_MAX_VISIBLE_ROLLBACK_DEPTH=7;
     const _lateJoinInputWindows=new Map();
@@ -220,6 +220,40 @@ test('missing legacy bridge keeps old behavior; malformed new bridge blocks and 
   assert.equal(malformed.read().ticks.includes('native step'), false);
   assert.equal(malformed.read().stopCount, 1);
   assert.equal(malformed.read().statuses.length, 1);
+});
+
+// specs/engine_start.qnt, lateJoinIntoSoloTest (engine_start_no_zero_bridge
+// against engine_start_current): alone in a room the match runs on the C
+// engine at a delay of 0, and a friend who joins it joins at 0. The window was
+// defined only for a delay of 1 or more, so a solo host sent no source and
+// the joiner, with none to wait for, failed its input wait as it arrived.
+test('a delay of 0 has a bridge window: a friend joining a solo match waits for the host', () => {
+  const host = { slot: 0, sid: 'host', confirmed: (f: number) => (f === H + 2 ? real : undefined) };
+  const bridge = collectLateJoinInputBridge(H, 0, [host]);
+  assert.deepEqual(bridge, [{ slot: 0, sid: 'host', frames: [[H + 2, 0, 0, 70, 0, 0]] }]);
+  // The window at 0 is H..H+7: nothing before the state's frame.
+  const every = collectLateJoinInputBridge(H, 0, [{ slot: 0, sid: 'host', confirmed: () => real }]);
+  assert.deepEqual(
+    every.flatMap(({ frames }) => frames.map(([f]) => f)),
+    [0, 1, 2, 3, 4, 5, 6, 7].map((d) => H + d),
+  );
+  assert.deepEqual(decodeLateJoinInputBridge(bridge, H, 0, 2), bridge);
+  assert.deepEqual(
+    decodeLateJoinInputBridge([{ slot: 0, sid: 'host', frames: [[H - 1, 0, 0, 0, 0, 0]] }], H, 0, 2),
+    [],
+  );
+  // Still no window below 0.
+  assert.deepEqual(collectLateJoinInputBridge(H, -1, [host]), []);
+  // The joiner waits for the host's live inputs from H on and steps once it has them.
+  const join = setupJoin({ frame: H, inputBridge: [{ slot: 0, sid: 'host', frames: [] }] }, false, false, 2, 0);
+  join.tick(1, H);
+  assert.deepEqual(join.read().ticks, ['local send', 'native step']);
+  assert.equal(join.read().stopCount, 0);
+  // What the solo host sent before (no source) still blocks and ends once.
+  const before = setupJoin({ frame: H, inputBridge: [] }, false, false, 2, 0);
+  before.tick(1, H);
+  assert.equal(before.read().ticks.includes('native step'), false);
+  assert.equal(before.read().stopCount, 1);
 });
 
 test('an unanswered original-input resend ends the local hold without stepping', () => {

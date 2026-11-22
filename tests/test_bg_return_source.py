@@ -36,6 +36,7 @@ def test_background_return_skips_resync_only_while_c_rollback_is_active():
     fn = fn[: fn.rfind("};") + 2]
     script = f"""
 const calls = {{ setLastSyncState: [], guards: [], socket: [], logs: [] }};
+const window = {{ _rbPendingInit: false }};
 let _useCRollback = true;
 let _frameNum = 100;
 let _lastRemoteFrame = 400;
@@ -67,7 +68,18 @@ _remoteInputs = {{ 0: {{ 100: {{ buttons: 1 }} }} }};
 _localInputs = {{ 100: {{ buttons: 2 }} }};
 calls.setLastSyncState.length = calls.guards.length = calls.socket.length = calls.logs.length = 0;
 eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
-process.stdout.write(JSON.stringify({{ rollback, lockstep: {{ frame: _frameNum, inputs: _remoteInputs, localInputs: _localInputs, calls }} }}));
+const lockstep = {{ frame: _frameNum, inputs: _remoteInputs, localInputs: _localInputs, calls: JSON.parse(JSON.stringify(calls)) }};
+
+// Waiting to arm: nothing moves (specs/engine_start.qnt, tabReturnWhileWaitingTest).
+window._rbPendingInit = true;
+_frameNum = 0;
+KNState.frameNum = 0;
+_lastRemoteFrame = 40;
+_remoteInputs = {{ 0: {{ 0: {{ buttons: 1 }} }} }};
+_localInputs = {{ 0: {{ buttons: 2 }} }};
+calls.setLastSyncState.length = calls.guards.length = calls.socket.length = calls.logs.length = 0;
+eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
+process.stdout.write(JSON.stringify({{ rollback, lockstep, waiting: {{ frame: _frameNum, knFrame: KNState.frameNum, inputs: _remoteInputs, localInputs: _localInputs, calls }} }}));
 """
     result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr + result.stdout
@@ -89,3 +101,13 @@ process.stdout.write(JSON.stringify({{ rollback, lockstep: {{ frame: _frameNum, 
     assert lockstep["localInputs"] == {"104": {"buttons": 0}, "105": {"buttons": 0}}
     assert lockstep["calls"]["guards"] == [["bg-return"]]
     assert lockstep["calls"]["socket"] == [["bg-return"]]
+
+    waiting = output["waiting"]
+    assert waiting["frame"] == 0
+    assert waiting["knFrame"] == 0
+    assert waiting["inputs"] == {"0": {"0": {"buttons": 1}}}
+    assert waiting["localInputs"] == {"0": {"buttons": 2}}
+    assert waiting["calls"]["setLastSyncState"] == []
+    assert waiting["calls"]["guards"] == []
+    assert waiting["calls"]["socket"] == []
+    assert waiting["calls"]["logs"] == ["bg-return: waiting to arm — no fast-forward/resync (f=0)"]

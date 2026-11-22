@@ -431,6 +431,30 @@ const scenarios = {
       failures.push(`the machine reported a stranded joiner after only ${waitedMs} ms`);
     if (stranded > 1) failures.push(`the machine reported the same stranded joiner ${stranded} times`);
     if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
+    // The host ran alone at a delay of 0; its first player moves the match to
+    // a match delay at the join frame, on both pages (specs/engine_start.qnt,
+    // REARM_AT_JOIN), and the two stay in step: the engine's own hash check
+    // after the join matches.
+    const logOf = (player) => player.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+    await waitUntil(async () => /RB-CHECK f=\d+ (?:MATCH|MISMATCH)/.test(await logOf(guest)), 120000);
+    const [hostLog, guestLog] = [await logOf(host), await logOf(guest)];
+    const atJoin = hostLog.match(/DELAY-AT-JOIN 0 -> (\d+) f=(\d+)/);
+    const guestArm = guestLog.match(/C-ROLLBACK init: max=\d+ delay=(\d+)/);
+    const checks = (log, kind) => (log.match(new RegExp(`RB-CHECK f=\\d+ ${kind}`, 'g')) || []).length;
+    const delayAtJoin = {
+      host: atJoin ? Number(atJoin[1]) : null,
+      frame: atJoin ? Number(atJoin[2]) : null,
+      guest: guestArm ? Number(guestArm[1]) : null,
+      matches: checks(guestLog, 'MATCH') + checks(hostLog, 'MATCH'),
+      mismatches: checks(guestLog, 'MISMATCH') + checks(hostLog, 'MISMATCH'),
+    };
+    log.push({ delayAtJoin });
+    console.log(`  delay at the join: ${JSON.stringify(delayAtJoin)}`);
+    if (!(delayAtJoin.host > 0)) failures.push('the host did not move the match above a delay of 0 at the join');
+    if (delayAtJoin.guest !== delayAtJoin.host)
+      failures.push('the joiner did not arm with the delay the host moved to');
+    if (delayAtJoin.matches === 0) failures.push('no hash check after the join');
+    if (delayAtJoin.mismatches > 0) failures.push('a hash check after the join mismatched');
     await checkpoint(
       'after late join',
       [
