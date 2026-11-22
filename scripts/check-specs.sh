@@ -694,6 +694,16 @@ $QUINT run "$DELIVERY" --main=recovery_followup_fixed --invariant=allHold --max-
 # broadcast settles on its earlier state (skippedThenAckedTest).
 $QUINT run "$DELIVERY" --main=recovery_skipped_fixed --invariant=allHold --max-samples=10000 --max-steps=12 --backend="$BACKEND"
 
+# A phantom's recovery in 3+ players: every guest ends on the host's settled
+# values. VIOLATED on phantom_settle_current (settledPredictionSplitsTest):
+# only the phantom was resynced.
+PHANTOM=specs/phantom_settle.qnt
+$QUINT typecheck "$PHANTOM"
+for variant in phantom_settle_current phantom_settle_send_settled phantom_settle_fixed; do
+  $QUINT test "$PHANTOM" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$PHANTOM" --main=phantom_settle_fixed --invariant=allHold --max-samples=10000 --max-steps=12 --backend="$BACKEND"
+
 # Only the current host channel may mutate incoming state assembly.
 $QUINT typecheck specs/sync_channel_owner.qnt
 for variant in sync_channel_owner_before sync_channel_owner_fixed; do

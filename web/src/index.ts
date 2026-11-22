@@ -80,6 +80,7 @@ import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from '
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
 import { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded } from './sync-follow-up.ts';
+import { resyncedOnRecovery, scheduleRecoveryResyncs } from './recovery-resync.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
 import { newPageId, readAttemptId } from './attempt-id.ts';
@@ -401,6 +402,8 @@ export const KNCore = {
   syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
   /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
   syncFollowUp: { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded },
+  /** Who the host resyncs when a phantom is heard from again (recovery-resync.ts). */
+  recoveryResync: { resyncedOnRecovery, scheduleRecoveryResyncs },
   startRejoin,
   shouldResumeRomTransfer,
   /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */

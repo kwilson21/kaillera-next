@@ -39,6 +39,24 @@
  *   (INPUT-ASK-PUSH-FOLLOWUP), that settles (`kind=follow-up`), nobody is
  *   dropped, and every guest's hashes match the host's, at least 60 frames
  *   of them after recovery.
+ * PHANTOM_SETTLE=1 (PLAYERS=3|4): a guest made a phantom by the host only
+ *   (specs/phantom_settle.qnt). A third of the way in, P2's input is held
+ *   neutral for 3 s, then a button goes down and every input packet P2 sends
+ *   the host is dropped for PHANTOM_SETTLE_MS (default 7000, past the host's
+ *   5 s phantom deadline) while the other guests still get them. When P2's
+ *   inputs reach the host again it settles P2's inputs from before then as
+ *   its predictions; the other guests rolled back to P2's real ones. Fails
+ *   unless the host made P2 a phantom and recovered it, resynced every other
+ *   guest too (`full sync also scheduled for slot(s)`), each of them applied
+ *   a host state after, nobody was dropped, and every guest's hashes match the
+ *   host's, at least 60 frames of them after recovery. With
+ *   PHANTOM_SETTLE_LATE=1, P2's input packets to the other guests are held
+ *   too, from the drop until each of them has applied its host state after
+ *   the recovery, then sent in order: P2's real inputs from before the
+ *   recovery reach them only after their resync. Also fails unless each of
+ *   them skipped some as settled (`C-INPUT-SETTLED-SKIP`) and its engine
+ *   rolled back to none of P2's inputs from before its state's settled point
+ *   (`[C] MISPREDICTION slot=1 f=<n>` with n below `settledBefore`).
  * MISSING_RECIPIENT_PERMANENT=1 (PLAYERS=4): fail every transfer on the
  *   original target channel; require three attempts, notified removal, normal
  *   late rejoin and clean post-rejoin hashes. Full historical oracle stays strict.
@@ -110,6 +128,9 @@ const MISSING_RECIPIENT_SLOT = Number(process.env.MISSING_RECIPIENT_SLOT || PLAY
 const PERMANENT_RECIPIENT = process.env.MISSING_RECIPIENT_PERMANENT === '1';
 const MISSING_RECIPIENT_FAILURES = PERMANENT_RECIPIENT ? 3 : Number(process.env.MISSING_RECIPIENT_FAILURES || 1);
 const FOLLOW_UP_RECIPIENT = process.env.FOLLOW_UP_RECIPIENT === '1';
+const PHANTOM_SETTLE = process.env.PHANTOM_SETTLE === '1';
+const PHANTOM_SETTLE_MS = Number(process.env.PHANTOM_SETTLE_MS || 7000);
+const PHANTOM_SETTLE_LATE = process.env.PHANTOM_SETTLE_LATE === '1';
 const FOLLOW_UP_SLOT = PLAYERS - 1;
 const CATCH_UP_MS = Number(process.env.CATCH_UP_MS || 0);
 const CATCH_UP_SLOT = Number(process.env.CATCH_UP_SLOT || 2);
@@ -153,6 +174,8 @@ if (
     !(PERMANENT_RECIPIENT ? PLAYERS === 4 : [1, 2].includes(MISSING_RECIPIENT_FAILURES)))
 )
   fail('MISSING_RECIPIENT requires no catch-up fault, target slot 2..PLAYERS-1, and 1 or 2 failures');
+if (PHANTOM_SETTLE && (MISSING_RECIPIENT || FOLLOW_UP_RECIPIENT || CATCH_UP_MS > 0))
+  fail('PHANTOM_SETTLE is a run of its own (no other battle fault)');
 if (FOLLOW_UP_RECIPIENT && (MISSING_RECIPIENT || CATCH_UP_MS > 0))
   fail('FOLLOW_UP_RECIPIENT is a run of its own (no MISSING_RECIPIENT or catch-up fault)');
 if (CATCH_UP_MS > 0 && !(CATCH_UP_MS < RESYNC_REQUEST_TIMEOUT_MS)) {
@@ -310,6 +333,8 @@ const install = async (p, slot) => {
           return inp;
         }
         if (W.inBattleAt < 0) W.inBattleAt = f;
+        // PHANTOM_SETTLE: the test sets this page's input itself for a while.
+        if (window.__knInputOverride) return window.__knInputOverride(f);
         if (f >= until) {
           const r = Math.random();
           held = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
@@ -420,6 +445,20 @@ const followUpRecipient = {
   followUp: false,
   followUpSettled: false,
   recoveredFrame: null,
+};
+// PHANTOM_SETTLE=1: P2's inputs to the host only are dropped long enough to make it a phantom there.
+const phantomSettle = {
+  hostAt: null,
+  guestsAt: null,
+  dropped: 0,
+  recovered: false,
+  recoveredFrame: null,
+  // PHANTOM_SETTLE_LATE: per other guest, whether it applied a state before
+  // its held packets were sent, and how many were held.
+  appliedBeforeRelease: {},
+  // Where each page's sync log stood when the host recovered P2.
+  guestsRecoveredAt: null,
+  held: {},
 };
 // The battle, with the catch-up fault a third of the way in.
 const catchUp = { guestAt: null, seen: false };
@@ -541,6 +580,101 @@ if (MISSING_RECIPIENT) {
   missingRecipient.recoveredFrame = await host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
   // Keep observing after settlement: transient success followed by another
   // retry/drop is not recovery. At least 60 later hash frames are required.
+  await host.waitForTimeout(20000);
+}
+if (PHANTOM_SETTLE) {
+  await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
+  const ps = phantomSettle;
+  const NEUTRAL = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+  // Fixed, so every page predicts it: neutral.
+  await pages[1].evaluate((n) => {
+    window.__knInputOverride = () => n;
+  }, NEUTRAL);
+  await host.waitForTimeout(3000);
+  ps.hostAt = await lastSeq(host);
+  ps.guestsAt = await Promise.all(pages.map((p) => lastSeq(p)));
+  // A button down; what P2 sends the host is dropped, what it sends the
+  // other guests goes through.
+  await pages[1].evaluate(
+    ({ n, late }) => {
+      const peers = Object.values(window.KNState?.peers ?? {});
+      const peer = peers.find((p) => p.slot === 0);
+      if (peer?.dc?.readyState !== 'open') throw new Error('P2 host channel is not open');
+      window.__meshDropToHost = true;
+      window.__meshDroppedToHost = 0;
+      for (const dc of new Set([peer.dc, peer.rbDc].filter(Boolean))) {
+        const send = dc.send;
+        dc.send = function (data) {
+          if (window.__meshDropToHost && data instanceof ArrayBuffer) {
+            window.__meshDroppedToHost++;
+            return;
+          }
+          return send.call(this, data);
+        };
+      }
+      // PHANTOM_SETTLE_LATE: P2's input packets to each other guest wait,
+      // in order, until the harness releases that guest.
+      window.__meshHeld = {};
+      window.__meshRelease = (slot) => {
+        const q = window.__meshHeld[slot];
+        if (!q) return 0;
+        q.released = true;
+        for (const [dc, send, data] of q.items) if (dc.readyState === 'open') send.call(dc, data);
+        return q.items.length;
+      };
+      if (late) {
+        for (const other of peers.filter((p) => p.slot >= 2)) {
+          const q = (window.__meshHeld[other.slot] = { released: false, items: [] });
+          for (const dc of new Set([other.dc, other.rbDc].filter(Boolean))) {
+            const send = dc.send;
+            dc.send = function (data) {
+              if (!q.released && data instanceof ArrayBuffer) {
+                q.items.push([this, send, data]);
+                return;
+              }
+              return send.call(this, data);
+            };
+          }
+        }
+      }
+      window.__knInputOverride = () => ({ ...n, buttons: 1 });
+    },
+    { n: NEUTRAL, late: PHANTOM_SETTLE_LATE },
+  );
+  await host.waitForTimeout(PHANTOM_SETTLE_MS);
+  ps.dropped = await pages[1].evaluate((n) => {
+    window.__meshDropToHost = false;
+    window.__knInputOverride = () => n;
+    return window.__meshDroppedToHost;
+  }, NEUTRAL);
+  ps.recovered = await waitForLine(host, ps.hostAt, /PEER-RECOVERED slot=1 /, 20000);
+  ps.recoveredFrame = await host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+  ps.guestsRecoveredAt = await Promise.all(pages.map((p) => lastSeq(p)));
+  console.log(
+    `PHANTOM_SETTLE: ${ps.dropped} input packet(s) to the host dropped; recovered ${ps.recovered} at f=${ps.recoveredFrame}`,
+  );
+  await pages[1].evaluate(() => {
+    window.__knInputOverride = null;
+  });
+  if (PHANTOM_SETTLE_LATE) {
+    // Each other guest gets P2's held inputs only once it holds the host's
+    // state from after the recovery (or after 30 s, which the checks fail).
+    await Promise.all(
+      Array.from({ length: PLAYERS - 2 }, (_, i) => i + 2).map(async (slot) => {
+        ps.appliedBeforeRelease[slot] = await waitForLine(
+          pages[slot],
+          ps.guestsRecoveredAt[slot],
+          /sync #\d+ applied/,
+          30000,
+        );
+        ps.held[slot] = await pages[1].evaluate((s) => window.__meshRelease(s), slot);
+        console.log(
+          `PHANTOM_SETTLE_LATE: P${slot + 1} applied a state first: ${ps.appliedBeforeRelease[slot]}; ` +
+            `${ps.held[slot]} held packet(s) from P2 sent`,
+        );
+      }),
+    );
+  }
   await host.waitForTimeout(20000);
 }
 if (FOLLOW_UP_RECIPIENT) {
@@ -803,6 +937,7 @@ const pairs = P.slice(1).map((G, gi) => {
     if (
       (MISSING_RECIPIENT && f > missingRecipient.recoveredFrame) ||
       (FOLLOW_UP_RECIPIENT && followUpRecipient.recoveredFrame !== null && f > followUpRecipient.recoveredFrame) ||
+      (PHANTOM_SETTLE && phantomSettle.recoveredFrame !== null && f > phantomSettle.recoveredFrame) ||
       (CATCH_UP_HOLE && hole.recoveredFrame !== null && f > hole.recoveredFrame)
     )
       postRecovery++;
@@ -1087,6 +1222,61 @@ const permanentProblems = !PERMANENT_RECIPIENT
         : []),
     ];
 const missingProblems = PERMANENT_RECIPIENT ? permanentProblems : transientMissingProblems;
+const phantomLines = PHANTOM_SETTLE ? H.sync.split('\n').filter((line) => seqOf(line) > phantomSettle.hostAt) : [];
+const otherGuests = Array.from({ length: PLAYERS - 2 }, (_, i) => i + 2);
+// PHANTOM_SETTLE_LATE: P2's real inputs from before the recovery reached this
+// guest after its resync. From the first state it applied after the fault,
+// none of P2's inputs below that state's settled point may be fed to its
+// engine: some were skipped as settled, and no rollback went to one.
+const lateRealProblems = (slot) => {
+  const lines = P[slot].sync.split('\n').filter((l) => seqOf(l) > phantomSettle.guestsRecoveredAt[slot]);
+  const applied = lines.findIndex((l) => /sync #\d+ applied/.test(l));
+  if (!phantomSettle.appliedBeforeRelease[slot] || applied < 0)
+    return [`P${slot + 1} got P2's held inputs before applying a host state`];
+  if (!(phantomSettle.held[slot] > 0)) return [`no packet from P2 to P${slot + 1} was held`];
+  const after = lines.slice(applied);
+  const settled = after.map((l) => /RESYNC-INPUTS f=\d+ settledBefore=(\d+)/.exec(l)).find(Boolean);
+  if (!settled) return [`P${slot + 1} logged no RESYNC-INPUTS after its state`];
+  const floor = Number(settled[1]);
+  const deep = after.filter((l) => {
+    const m = /\[C\] MISPREDICTION slot=1 f=(\d+) /.exec(l);
+    return m && Number(m[1]) < floor;
+  });
+  return [
+    ...(!after.some((l) => /C-INPUT-SETTLED-SKIP /.test(l)) ? [`P${slot + 1} skipped none of P2's late inputs`] : []),
+    ...(deep.length ? [`P${slot + 1} rolled back to P2's input below ${floor}: ${deep[0].split('\t').at(-1)}`] : []),
+  ];
+};
+const phantomSettleProblems = !PHANTOM_SETTLE
+  ? []
+  : [
+      ...(!(phantomSettle.dropped > 0) ? ["P2's inputs to the host were not dropped"] : []),
+      // The split needs P2's real input to differ from the host's prediction
+      // (its last input before the drop, neutral): the button went down.
+      ...(!P[1].sync
+        .split('\n')
+        .some((l) => seqOf(l) > phantomSettle.guestsAt[1] && /LOCAL-INPUT slot=1 f=\d+ b=1 lx=0 ly=0 /.test(l))
+        ? ["P2's button never went down (the input override did not take)"]
+        : []),
+      ...(!phantomLines.some((l) => /PEER-PHANTOM slot=1 /.test(l)) ? ['the host never made P2 a phantom'] : []),
+      ...(!phantomSettle.recovered ? ['the host never recovered P2'] : []),
+      ...(!phantomLines.some((l) => /full sync also scheduled for slot\(s\) /.test(l))
+        ? ["the host did not resync the other guests on P2's recovery"]
+        : []),
+      ...otherGuests.flatMap((slot) =>
+        P[slot].sync
+          .split('\n')
+          .filter((l) => seqOf(l) > phantomSettle.guestsAt[slot])
+          .some((l) => /sync #\d+ applied/.test(l))
+          ? []
+          : [`P${slot + 1} applied no host state after P2's recovery`],
+      ),
+      ...(phantomLines.some((l) => /INPUT-ASK-PUSH-GAVEUP|hardDisconnect/.test(l)) ? ['a peer was dropped'] : []),
+      ...(pairs.some((p) => p.postRecoveryFramesCompared < MIN_BATTLE_FRAMES)
+        ? ['insufficient post-recovery hash comparisons']
+        : []),
+      ...(PHANTOM_SETTLE_LATE ? otherGuests.flatMap(lateRealProblems) : []),
+    ];
 const followUpLines = FOLLOW_UP_RECIPIENT
   ? H.sync.split('\n').filter((line) => seqOf(line) > followUpRecipient.hostAt)
   : [];
@@ -1153,6 +1343,7 @@ const summary = {
     problems: missingProblems,
   },
   followUpRecipient: FOLLOW_UP_RECIPIENT ? { ...followUpRecipient, problems: followUpProblems } : undefined,
+  phantomSettle: PHANTOM_SETTLE ? { ...phantomSettle, problems: phantomSettleProblems } : undefined,
   room,
   players: PLAYERS,
   latencyMs: LAT,
@@ -1176,6 +1367,7 @@ console.log(JSON.stringify(summary, null, 2));
 const failed =
   missingProblems.length > 0 ||
   followUpProblems.length > 0 ||
+  phantomSettleProblems.length > 0 ||
   P.some((x) => x.inBattleAt < 0) ||
   fighterProblems.length > 0 ||
   pairs.some(

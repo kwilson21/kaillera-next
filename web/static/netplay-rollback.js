@@ -9575,18 +9575,36 @@
           // so the two timelines have split. The host is authoritative:
           // push its state to the guest once it is final (the guest's real
           // inputs have caught up), or at the I1 deadline.
-          _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
-          _scheduledSyncRequests.push({
-            targetFrame: _frameNum,
-            targetSid: remoteSid,
-            deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
-          });
+          // Every player guest takes the host's state, this one and the
+          // others, one request each (web/src/recovery-resync.ts): settled
+          // below, this guest's inputs before this frame are the host's
+          // predictions for good, and another guest may have taken its real
+          // ones in, within its own window, and rolled back to them. It would
+          // hold one value where the host holds another, and nothing would
+          // correct it (specs/phantom_settle.qnt, RESYNC_ALL). A guest still
+          // being admitted late gets its late-join state instead.
+          const scheduled = window.KNCore.recoveryResync.scheduleRecoveryResyncs(
+            _scheduledSyncRequests,
+            Object.entries(_peers).map(([sid, p]) => ({
+              sid,
+              slot: sid !== remoteSid && _isPeerPendingLateJoin(sid, p) ? null : p.slot,
+            })),
+            remoteSid,
+            _frameNum,
+            performance.now() + SYNC_COORD_TIMEOUT_MS,
+          );
+          _scheduledSyncRequests = scheduled.queue;
           // That state will be for this frame or a later one, so the
           // guest's inputs from before this frame minus the delay are
           // settled by it already. (Only the host can say so here: a guest
           // may be taken back to an earlier frame and still need them.)
           _settleInputsBefore(peer.slot, _frameNum);
           _syncLog(`peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum}`);
+          if (scheduled.others.length > 0)
+            _syncLog(
+              `peer-recovery resync: slot=${peer.slot}'s inputs settled, full sync also scheduled for slot(s) ` +
+                `${scheduled.others.join(',')} at f=${_frameNum}`,
+            );
         }
       }
     }

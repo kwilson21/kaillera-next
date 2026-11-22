@@ -299,3 +299,37 @@ def test_the_direct_request_goes_through_the_watched_answer():
     handler = handler[: handler.index("// JSON messages")]
     assert "_answerDirectSyncRequest(remoteSid, requestId);" in handler
     assert "pushSyncState(" not in handler
+
+
+def test_a_phantoms_recovery_resyncs_every_other_guest_too():
+    # specs/phantom_settle.qnt RESYNC_ALL: the host settles the phantom's
+    # inputs before the recovery frame; another guest may hold its real ones.
+    src = LOCKSTEP_JS.read_text()
+    branch = src[src.index("push its state to the guest once it is final") :]
+    branch = branch[: branch.index("return true;")]
+    assert "_settleInputsBefore(peer.slot, _frameNum);" in branch
+    # One request per player guest, the recovered one and the others
+    # (web/src/recovery-resync.ts; tests/ts/recovery-resync.test.ts).
+    assert "window.KNCore.recoveryResync.scheduleRecoveryResyncs(" in branch
+    assert "_scheduledSyncRequests = scheduled.queue;" in branch
+    assert "full sync also scheduled for slot(s)" in branch
+
+
+def test_a_resynced_guest_never_feeds_a_settled_input():
+    # specs/phantom_settle.qnt aSettledGuestStaysSettled: once a guest has
+    # applied the host's state at F, a peer's real input from before F - delay
+    # that reaches it late is never fed to its engine, so it cannot roll back
+    # to it (rb_rollback_target would land in the ring's pre-resync saves).
+    src = LOCKSTEP_JS.read_text()
+    settle = src[src.index("const _settleInputsAtResync = (mod, frame, recoveryId = 0) => {") :]
+    settle = settle[: settle.index("\n  };\n")]
+    # Every peer's inputs, not only the host's.
+    assert "for (const [sid, peer] of Object.entries(_peers)) {" in settle
+    assert "_settleInputsBefore(peer.slot, frame);" in settle
+    drain = src[src.index("const _drainPendingCInputs = (tickMod) => {") :]
+    drain = drain[: drain.index("\n  };\n")]
+    skip = drain.index(
+        "if (qi.frame < Math.max(_inputSettledBefore[qi.slot] ?? 0, _admissionInputFloor(qi.slot))) {"
+    )
+    assert skip < drain.index("tickMod._kn_feed_input(")
+    assert "C-INPUT-SETTLED-SKIP" in drain

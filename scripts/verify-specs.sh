@@ -369,6 +369,10 @@ escalation_push() {
   expect_violation specs/recovery_review.qnt recovery_review_before readinessHasDeadline 1
   expect_violation specs/recovery_review.qnt recovery_review_before repeatedReadyWorks 6
   expect_violation specs/recovery_review.qnt recovery_review_before roomCapturesBounded 13
+  # A phantom's real input reaches another guest, the host settles its
+  # prediction and resyncs only the phantom: 2 steps.
+  verify specs/phantom_settle.qnt phantom_settle_fixed allHold init 8
+  expect_violation specs/phantom_settle.qnt phantom_settle_current othersEndOnTheHostsValues 2
   local DELIVERY=specs/recovery_delivery.qnt
   verify "$DELIVERY" recovery_budget_identity_fixed rotationCannotRenew init 8
   expect_violation "$DELIVERY" recovery_budget_identity_before rotationCannotRenew 5
