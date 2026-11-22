@@ -947,6 +947,7 @@ def create_app(lifespan=None) -> FastAPI:
                 "size": room.rom_size,
                 "gameId": room.game_id,
                 "game_id": room.game_id,
+                "changing": room.rom_changing,
             },
             "rom_sharing": room.rom_sharing,
             "mode": room.mode,

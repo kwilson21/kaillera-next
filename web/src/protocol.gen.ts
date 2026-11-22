@@ -111,6 +111,7 @@ export type SetListedPayload = typeof SetListedPayload.Type;
 export const RomReadyPayload = Schema.Struct({
   ready: Schema.optional(Schema.Boolean),
   prompt: Schema.optional(Schema.Boolean),
+  pending: Schema.optional(Schema.Boolean),
   hash: Schema.optional(Schema.NullOr(Schema.String)),
   name: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(128)))),
   size: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 536870912 })))),
@@ -171,6 +172,7 @@ export const HostRom = Schema.Struct({
   size: Schema.NullOr(Schema.Int),
   gameId: Schema.String,
   game_id: Schema.String,
+  changing: Schema.optional(Schema.Boolean),
 });
 export type HostRom = typeof HostRom.Type;
 

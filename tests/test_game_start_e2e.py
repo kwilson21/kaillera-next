@@ -301,7 +301,9 @@ def test_the_hosts_rom_dropped_over_another_is_kept_when_the_hosts_arrives_befor
         # ROM's word, and nothing has said ready since.
         expect(guest.locator("#rom-status")).to_contain_text("test.z64")
         expect(guest.locator("#rom-mismatch")).to_be_hidden()
-        assert guest.evaluate("window.__romReady") == [{"ready": False}]
+        sent = guest.evaluate("window.__romReady")
+        assert sent[0] == {"ready": False, "pending": True}, sent
+        assert not any(m.get("ready") for m in sent), sent
         guest.evaluate(_RELEASE_READS)
         # Its own hash lands, is the host's, and is announced.
         guest.wait_for_function("(h) => window.KNState.romHash === h", arg=host_hash, timeout=15000)
@@ -312,6 +314,121 @@ def test_the_hosts_rom_dropped_over_another_is_kept_when_the_hosts_arrives_befor
         expect(guest.locator("#rom-mismatch")).to_be_hidden()
         sent = guest.evaluate("window.__romReady")
         assert all(m.get("hash") == host_hash for m in sent if m.get("ready")), sent
+    finally:
+        host.close()
+        guest.close()
+
+
+# Whether the page ever shows "Your ROM doesn't match", from now on.
+_WATCH_REFUSAL = """() => {
+    window.__refusedShown = false;
+    const el = document.getElementById('rom-mismatch');
+    new MutationObserver(() => {
+        if (!el.hidden) window.__refusedShown = true;
+    }).observe(el, { attributes: true, attributeFilter: ['hidden'] });
+}"""
+# Every users-updated the page hears from now on: the last one is the room.
+_RECORD_ROOM = """() => {
+    window.__test_socket.on('users-updated', (data) => { window.__room = data; });
+}"""
+_COUNTED_READY = """() => {
+    const me = Object.values(window.__room?.players ?? {}).find((p) => p.socketId === window.__test_socket.id);
+    return me?.romReady === true;
+}"""
+
+
+def _heard_everything_from(host, guest, name):
+    """Wait until what the host's page has sent so far has reached the guest's
+    page (which records the room with _RECORD_ROOM): the server takes one
+    socket's events in order and tells the room in that order, so the guest
+    hearing the host's new name has heard all before it."""
+    host.evaluate("(n) => window.__test_socket.emit('set-name', { name: n })", name)
+    guest.wait_for_function(
+        "(n) => Object.values(window.__room?.players ?? {}).some((p) => p.playerName === n)", arg=name, timeout=10000
+    )
+
+
+def test_a_guest_holding_the_rom_the_host_changes_to_is_never_refused(browser, server_url, room):
+    # specs/rom_identity.qnt, hostChangesToTheGuestsRomTest. The host has
+    # other.z64 and drops test.z64. Until the host's new ROM was hashed the
+    # room named other.z64, and the guest's test.z64, dropped and hashed in
+    # that moment, was refused against it. The two are the same size, so only
+    # the hash tells them apart. The host's drop now says its ROM is
+    # changing: the room names none, the guest keeps its ROM and says
+    # nothing, and the host's hash, landing, finds the guest's is the host's.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _load_rom(host, OTHER_ROM)
+        host.wait_for_function("() => !!window.KNState?.romHash", timeout=15000)
+        old_hash = host.evaluate("window.KNState.romHash")
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+        guest.evaluate(_RECORD_ROOM)
+        guest.evaluate(_RECORD_ROM_READY)
+        guest.evaluate(_WATCH_REFUSAL)
+        host.evaluate(_HOLD_READS)
+        _load_rom(host)
+        # Whatever the host's drop told the room, the guest has heard; then
+        # it drops the host's new ROM, and its hash lands while the host's is
+        # held.
+        _heard_everything_from(host, guest, "Host 2")
+        guest.set_input_files("#rom-drop input[type=file]", ROM)
+        guest.wait_for_function(
+            "(old) => window.__refusedShown || (!!window.KNState.romHash && window.KNState.romHash !== old)",
+            arg=old_hash,
+            timeout=15000,
+        )
+        assert not guest.evaluate("window.__refusedShown"), "the host's new ROM was refused against its previous one"
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host is loading a ROM")
+        new_hash = guest.evaluate("window.KNState.romHash")
+        # Nothing said ready while the room names no ROM.
+        sent = guest.evaluate("window.__romReady")
+        assert not any(m.get("ready") for m in sent), sent
+        host.evaluate(_RELEASE_READS)
+        host.wait_for_function("(h) => window.KNState.romHash === h", arg=new_hash, timeout=15000)
+        # The room names the host's new ROM: the guest's is it, and is said ready.
+        guest.wait_for_function(
+            "(h) => window.__romReady.some((m) => m.ready && m.hash === h)", arg=new_hash, timeout=10000
+        )
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:")
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        assert not guest.evaluate("window.__refusedShown")
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        sent = guest.evaluate("window.__romReady")
+        assert all(m.get("hash") == new_hash for m in sent if m.get("ready")), sent
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_a_guest_holding_the_rom_the_host_changes_from_is_not_counted_ready_meanwhile(browser, server_url, room):
+    # specs/rom_identity.qnt, hostChangesAwayFromTheGuestsRomTest. The guest
+    # holds the host's ROM and the server counts it ready; the host drops
+    # another. While the host's new ROM was hashed the room named the
+    # previous one and kept counting the guest ready on it. Now the server
+    # drops the guest's word at the host's drop, the guest keeps its ROM
+    # without judging it, and the host's hash, landing, refuses it.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        guest.evaluate(_RECORD_ROOM)
+        _load_rom(host, OTHER_ROM)
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+        _load_rom(guest, OTHER_ROM)
+        guest.wait_for_function(_COUNTED_READY, timeout=10000)
+        guest.evaluate(_RECORD_ROM_READY)
+        host.evaluate(_HOLD_READS)
+        _load_rom(host)
+        # The server no longer counts the guest ready on the host's previous ROM.
+        guest.wait_for_function(f"() => !({_COUNTED_READY})()", timeout=10000)
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host is loading a ROM")
+        expect(guest.locator("#rom-status")).to_contain_text("other.z64")
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        assert not any(m.get("ready") for m in guest.evaluate("window.__romReady"))
+        host.evaluate(_RELEASE_READS)
+        # The host's new ROM is not the guest's: refused with a word.
+        expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
+        expect(guest.locator("#rom-status")).not_to_contain_text("other.z64")
+        assert not guest.evaluate(_COUNTED_READY)
     finally:
         host.close()
         guest.close()

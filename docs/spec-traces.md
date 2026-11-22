@@ -529,15 +529,15 @@ The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives 
 sequenceDiagram
   participant Guest
   Guest->>Guest: drop("wrong")
-  Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong
+  Note over Guest: hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong<br/>loadedIsDrop = true
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: hashing = {}<br/>toldFor = 1<br/>hashLoad = 1<br/>hash = wrong<br/>told = wrong
+  Note over Guest: hashing = {}<br/>toldFor = 1<br/>hashLoad = 1<br/>told = wrong<br/>hash = wrong
   Guest->>Guest: drop("right")
   Note over Guest: hashing = {(2, right)}<br/>load = 2<br/>loaded = right
   Guest->>Guest: hostArrives
-  Note over Guest: hostKnown = true<br/>loadedIsDrop = false<br/>load = 3<br/>loaded = none<br/>banner = true<br/>clearedRight = true<br/>toldFor = 3<br/>hashLoad = 3<br/>hash = none<br/>told = none
+  Note over Guest: load = 3<br/>loaded = none<br/>banner = true<br/>clearedRight = true<br/>toldFor = 3<br/>hashLoad = 3<br/>told = none<br/>hash = none<br/>loadedIsDrop = false<br/>roomRom = right
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hashing = {}<br/>banner = false<br/>toldFor = 2<br/>hashLoad = 2<br/>toldStale = true<br/>hash = right<br/>told = right
+  Note over Guest: hashing = {}<br/>banner = false<br/>toldFor = 2<br/>hashLoad = 2<br/>toldStale = true<br/>told = right<br/>hash = right
 ```
 
 ### twoDropsTest
@@ -548,15 +548,15 @@ Two drops, the second (the host's ROM) hashed first; the first's hash lands late
 sequenceDiagram
   participant Guest
   Guest->>Guest: hostArrives
-  Note over Guest: hostKnown = true
+  Note over Guest: roomRom = right
   Guest->>Guest: drop("wrong")
-  Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong
+  Note over Guest: hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong<br/>loadedIsDrop = true
   Guest->>Guest: drop("right")
   Note over Guest: hashing = {(1, wrong), (2, right)}<br/>load = 2<br/>loaded = right
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hashing = {(1, wrong)}<br/>toldFor = 2<br/>hashLoad = 2<br/>hash = right<br/>told = right
+  Note over Guest: hashing = {(1, wrong)}<br/>toldFor = 2<br/>hashLoad = 2<br/>told = right<br/>hash = right
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: loadedIsDrop = false<br/>hashing = {}<br/>load = 3<br/>loaded = none<br/>banner = true<br/>clearedRight = true<br/>toldFor = 3<br/>hashLoad = 3<br/>hash = none<br/>told = none
+  Note over Guest: hashing = {}<br/>load = 3<br/>loaded = none<br/>banner = true<br/>clearedRight = true<br/>toldFor = 3<br/>hashLoad = 3<br/>told = none<br/>hash = none<br/>loadedIsDrop = false
 ```
 
 ## `specs/rom_identity.qnt` (`rom_identity_current`)
@@ -571,13 +571,13 @@ The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives 
 sequenceDiagram
   participant Guest
   Guest->>Guest: drop("wrong")
-  Note over Guest: load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true<br/>toldFor = 1<br/>loaded = wrong
+  Note over Guest: loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true<br/>toldFor = 1
   Guest->>Guest: hashLands(1, "wrong")
   Note over Guest: hashing = {}<br/>hash = wrong<br/>told = wrong<br/>hashLoad = 1
   Guest->>Guest: drop("right")
-  Note over Guest: load = 2<br/>hashing = {(2, right)}<br/>told = none<br/>toldFor = 2<br/>loaded = right
+  Note over Guest: loaded = right<br/>load = 2<br/>hashing = {(2, right)}<br/>told = none<br/>toldFor = 2
   Guest->>Guest: hostArrives
-  Note over Guest: hostKnown = true
+  Note over Guest: roomRom = right
   Guest->>Guest: hashLands(2, "right")
   Note over Guest: hashing = {}<br/>hash = right<br/>told = right<br/>hashLoad = 2
 ```
@@ -590,13 +590,99 @@ Two drops, the second (the host's ROM) hashed first; the first's hash lands late
 sequenceDiagram
   participant Guest
   Guest->>Guest: hostArrives
-  Note over Guest: hostKnown = true
+  Note over Guest: roomRom = right
   Guest->>Guest: drop("wrong")
-  Note over Guest: load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true<br/>toldFor = 1<br/>loaded = wrong
+  Note over Guest: loaded = wrong<br/>load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true<br/>toldFor = 1
   Guest->>Guest: drop("right")
-  Note over Guest: load = 2<br/>hashing = {(1, wrong), (2, right)}<br/>toldFor = 2<br/>loaded = right
+  Note over Guest: loaded = right<br/>load = 2<br/>hashing = {(1, wrong), (2, right)}<br/>toldFor = 2
   Guest->>Guest: hashLands(2, "right")
   Note over Guest: hashing = {(1, wrong)}<br/>hash = right<br/>told = right<br/>hashLoad = 2
   Guest->>Guest: hashLands(1, "wrong")
   Note over Guest: hashing = {}
+```
+
+## `specs/rom_identity.qnt` (`rom_identity_host_silent`)
+
+The host changing its ROM while the host's drop said nothing (#289). `roomRom` is the host's ROM as the room names it and the guest has heard; the names follow the host, so `"right"` is always the ROM the host holds. Until the host's new ROM is hashed the room names its previous one (`"wrong"`): the guest's ROM that is the host's new one is refused against it, and a guest holding the previous one is still counted ready on it.
+
+### hostChangesToTheGuestsRomTest
+
+The host's ROM is known, and the host drops another: the one the guest is about to drop (the guest's "wrong" is "right" from here on). The guest drops it, and its hash lands before the host's. With the host's drop unsaid, the room still names the host's previous ROM, and the guest's ROM, the host's new one, is refused against it. Today the room's ROM is changing: the guest's page waits, and the host's hash, landing, finds the guest's ROM is the host's and it is announced.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: hostDrops(true)
+  Note over Guest: hostHashing = true<br/>roomRom = wrong
+  Guest->>Guest: drop("right")
+  Note over Guest: load = 1<br/>hashing = {(1, right)}<br/>loadedIsDrop = true<br/>toldFor = 1<br/>loaded = right
+  Guest->>Guest: hashLands(1, "right")
+  Note over Guest: load = 2<br/>hashing = {}<br/>loadedIsDrop = false<br/>hashLoad = 2<br/>toldFor = 2<br/>clearedRight = true<br/>banner = true<br/>loaded = none
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>roomRom = right
+```
+
+### hostChangesAwayFromTheGuestsRomTest
+
+The guest holds the host's ROM, and the server has heard so; the host drops another, one the guest has never held. With the host's drop unsaid, the room names the host's previous ROM while the new one is hashed: the server still counts the guest ready on it, and the page says so again at the next room change. Today the server drops the guest's word at once and the page waits. Either way the host's hash, landing, drops the guest's word and refuses its ROM.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: drop("right")
+  Note over Guest: load = 1<br/>hashing = {(1, right)}<br/>loadedIsDrop = true<br/>toldFor = 1<br/>loaded = right
+  Guest->>Guest: hashLands(1, "right")
+  Note over Guest: hashing = {}<br/>hash = right<br/>told = right<br/>hashLoad = 1
+  Guest->>Guest: hostDrops(false)
+  Note over Guest: hostHashing = true<br/>roomRom = wrong<br/>hash = wrong<br/>told = wrong<br/>loaded = wrong
+  Guest->>Guest: roomUpdate
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>load = 2<br/>loadedIsDrop = false<br/>roomRom = right<br/>hash = none<br/>told = none<br/>hashLoad = 2<br/>toldFor = 2<br/>banner = true<br/>loaded = none
+```
+
+## `specs/rom_identity.qnt` (`rom_identity_current`)
+
+The same orderings today. The host's drop says its ROM is being hashed: the room names none (`changing`) and drops every guest's word, the guest's page judges nothing and says nothing, and the host's hash, once it is the room's, decides.
+
+### hostChangesToTheGuestsRomTest
+
+The host's ROM is known, and the host drops another: the one the guest is about to drop (the guest's "wrong" is "right" from here on). The guest drops it, and its hash lands before the host's. With the host's drop unsaid, the room still names the host's previous ROM, and the guest's ROM, the host's new one, is refused against it. Today the room's ROM is changing: the guest's page waits, and the host's hash, landing, finds the guest's ROM is the host's and it is announced.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: hostDrops(true)
+  Note over Guest: hostHashing = true<br/>roomRom = changing
+  Guest->>Guest: drop("right")
+  Note over Guest: loaded = right<br/>load = 1<br/>hashing = {(1, right)}<br/>loadedIsDrop = true<br/>toldFor = 1
+  Guest->>Guest: hashLands(1, "right")
+  Note over Guest: hashing = {}<br/>hash = right<br/>hashLoad = 1
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>roomRom = right<br/>told = right
+```
+
+### hostChangesAwayFromTheGuestsRomTest
+
+The guest holds the host's ROM, and the server has heard so; the host drops another, one the guest has never held. With the host's drop unsaid, the room names the host's previous ROM while the new one is hashed: the server still counts the guest ready on it, and the page says so again at the next room change. Today the server drops the guest's word at once and the page waits. Either way the host's hash, landing, drops the guest's word and refuses its ROM.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: drop("right")
+  Note over Guest: loaded = right<br/>load = 1<br/>hashing = {(1, right)}<br/>loadedIsDrop = true<br/>toldFor = 1
+  Guest->>Guest: hashLands(1, "right")
+  Note over Guest: hashing = {}<br/>hash = right<br/>told = right<br/>hashLoad = 1
+  Guest->>Guest: hostDrops(false)
+  Note over Guest: loaded = wrong<br/>hostHashing = true<br/>roomRom = changing<br/>hash = wrong<br/>told = none
+  Guest->>Guest: roomUpdate
+  Guest->>Guest: hostHashLands
+  Note over Guest: loaded = none<br/>hostHashing = false<br/>load = 2<br/>loadedIsDrop = false<br/>roomRom = right<br/>hash = none<br/>hashLoad = 2<br/>toldFor = 2<br/>banner = true
 ```

@@ -4,12 +4,17 @@
  * `window.KNCore.play`.
  */
 
-/** The host's ROM as the room knows it. Any part may be unknown. */
+/**
+ * The host's ROM as the room knows it. Any part may be unknown. `changing`:
+ * the host has dropped a new ROM whose hash the room does not have yet, so
+ * it names none (specs/rom_identity.qnt).
+ */
 export type HostRom = {
   readonly hash: string | null;
   readonly name: string | null;
   readonly size: number | null;
   readonly gameId: string | null;
+  readonly changing: boolean;
 };
 
 type NestedHostRom = {
@@ -18,6 +23,7 @@ type NestedHostRom = {
   readonly size?: number | string | null;
   readonly gameId?: string | null;
   readonly game_id?: string | null;
+  readonly changing?: boolean | null;
 };
 
 /**
@@ -46,6 +52,7 @@ export const hostRomFromData = (data: HostRomSource | null | undefined): HostRom
     name: data?.romName ?? data?.rom_name ?? hostRom.name ?? null,
     size: size === null ? null : Number(size),
     gameId: data?.gameId ?? data?.game_id ?? hostRom.gameId ?? hostRom.game_id ?? null,
+    changing: hostRom.changing === true,
   };
 };
 

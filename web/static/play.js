@@ -183,6 +183,9 @@
   let _hostRomHash = null; // host's ROM hash for late-join verification
   let _hostRomName = null; // host's current ROM display name
   let _hostRomSize = null; // host's current ROM byte size
+  // The room names no host ROM because the host's new one is being hashed
+  // (hostRom.changing): the server's word, like the three above.
+  let _hostRomChanging = false;
   let _hostRomIdentityResolved = false; // true once join-room/REST has reported host ROM (or confirmed there is none)
   let _pendingRomAutoload = null; // {lastHash, savedRom, drop, statusEl} — guest autoload deferred until host ROM is known
   let _pendingRomAutoloadTimer = null;
@@ -493,7 +496,7 @@
     const name = hostRomDisplayName();
     if (!name) {
       el.style.display = '';
-      el.textContent = 'Waiting for host to load a ROM';
+      el.textContent = _hostRomChanging ? 'Host is loading a ROM…' : 'Waiting for host to load a ROM';
       el.className = 'host-rom-info pending';
       return;
     }
@@ -509,11 +512,17 @@
 
   const romHashIsLoaded = () => romIdentity.hashIsTheLoadedRoms(_romHashLoad, _romLoad);
 
+  // The host's ROM is changing, as a guest sees it: the host's own page judges
+  // its ROM against no one's.
+  const hostRomChanging = () => !isHost && _hostRomChanging;
+
   // The loaded ROM against the host's: `pending` while its own hash is not in
-  // (a size that is not the host's refuses it at once).
+  // (a size that is not the host's refuses it at once), and while the host's
+  // ROM is changing (specs/rom_identity.qnt, hostChangesToTheGuestsRomTest).
   const romVerdictNow = () =>
     romIdentity.romVerdict(
       localRomLoaded(),
+      hostRomChanging(),
       romHashIsLoaded(),
       romHashMismatch(_hostRomHash, _romHash),
       _hostRomSize !== null && _romSize !== null && Number(_hostRomSize) !== Number(_romSize),
@@ -567,10 +576,14 @@
     discardHibernatedEmulatorForRomChange(hash);
   };
 
+  // `hasNext`: the room names a host ROM. While the host's is changing it
+  // names none: the page keeps its ROM, judges it against nothing and says it
+  // is not ready, and the host's new hash, once the room's, decides.
   const handleHostRomChanged = (hadPrevious, hasNext, toastOnChange) => {
     if (isHost) return;
     if (hadPrevious && toastOnChange) {
-      showToast(hasNext ? 'Host selected a different ROM' : 'Host cleared their ROM');
+      if (_hostRomChanging) showToast('Host is changing their ROM');
+      else showToast(hasNext ? 'Host selected a different ROM' : 'Host cleared their ROM');
     }
     if (!hasNext) {
       resetTransferForHostRomChange();
@@ -607,12 +620,14 @@
       return false;
     }
     const prevKey = hostRomIdentityKey(_hostRomHash, _hostRomName, _hostRomSize);
+    const wasChanging = _hostRomChanging;
     const next = hostRomFromData(data);
     const nextKey = hostRomIdentityKey(next.hash, next.name, Number.isFinite(next.size) ? next.size : null);
 
     _hostRomHash = next.hash || null;
     _hostRomName = next.name || null;
     _hostRomSize = Number.isFinite(next.size) ? next.size : null;
+    _hostRomChanging = next.changing;
     _hostRomIdentityResolved = true;
     // Flush any deferred autoload now that we know what the host has.
     if (_flushPendingRomAutoload) _flushPendingRomAutoload('host-rom-resolved');
@@ -631,7 +646,7 @@
     }
 
     updateHostRomInfo();
-    if (prevKey !== nextKey) {
+    if (prevKey !== nextKey || wasChanging !== _hostRomChanging) {
       handleHostRomChanged(!!prevKey, !!nextKey, toastOnChange);
       return true;
     }
@@ -2607,16 +2622,21 @@
   // clearedWhileDownTest).
   // A ROM still being hashed is said as none too: its own hash says ready when
   // it lands, and a drop made while the socket was down told the server
-  // nothing (specs/rom_identity.qnt, rejoinWhileHashingTest).
+  // nothing (specs/rom_identity.qnt, rejoinWhileHashingTest). The host's
+  // says it is pending, so the room names none meanwhile.
   const tellRomAfterRejoin = () => {
-    if (romIdentity.announcesRom(localRomLoaded(), romHashIsLoaded())) notifyRomReady();
-    else if (socket?.connected) socket.emit('rom-ready', { ready: false });
+    if (romIdentity.announcesRom(localRomLoaded(), romHashIsLoaded(), hostRomChanging())) notifyRomReady();
+    else if (socket?.connected) {
+      const pending = localRomLoaded() && !romHashIsLoaded();
+      socket.emit('rom-ready', pending ? { ready: false, pending: true } : { ready: false });
+    }
   };
 
   const notifyRomReady = () => {
     // Only with a ROM, and with that ROM's own hash: a drop being hashed is
-    // announced by its own hash when it lands (specs/rom_identity.qnt).
-    if (!romIdentity.announcesRom(localRomLoaded(), romHashIsLoaded())) return;
+    // announced by its own hash when it lands. Not a guest's while the host's
+    // ROM is changing: the host's new hash decides (specs/rom_identity.qnt).
+    if (!romIdentity.announcesRom(localRomLoaded(), romHashIsLoaded(), hostRomChanging())) return;
     if (socket?.connected) {
       socket.emit('rom-ready', {
         ready: true,
@@ -3154,10 +3174,13 @@
     hideRomMismatch();
     const load = ++_romLoad;
     // Until this file is hashed the server still holds the previous ROM's
-    // word: a start in that moment would count a guest ready with that ROM.
-    // Its own hash says ready when it lands (specs/rom_identity.qnt). Not the
-    // host: its "not ready" clears the room's ROM for every guest.
-    if (!isHost && socket?.connected) socket.emit('rom-ready', { ready: false });
+    // word: a start in that moment would count a guest ready with that ROM,
+    // and every guest would judge theirs against the host's previous one. So
+    // the page says at once that its ROM is being hashed: a guest is not
+    // ready, and the host's room names no ROM. Its own hash says ready when
+    // it lands (specs/rom_identity.qnt, DROP_SAYS_NOT_READY and
+    // HOST_DROP_SAYS_CHANGING).
+    if (socket?.connected) socket.emit('rom-ready', { ready: false, pending: true });
     _romBlob = file;
     _romName = displayName;
     _romDroppedName = displayName;
