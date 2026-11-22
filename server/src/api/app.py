@@ -1636,7 +1636,9 @@ def create_app(lifespan=None) -> FastAPI:
         # serialized in worker threads. Done in one piece on the event loop,
         # a 19-minute match's export kept /health from answering for 5 s and
         # Render restarted the server. SQLite counts the chunks' entries for
-        # the meta line and header; the stream reads exactly those chunks.
+        # the meta line and header, and the stream reads no chunk added after
+        # the count. For a live log at its size cap, the count can exceed
+        # what is streamed: the cap may delete counted chunks meanwhile.
         match_id, slot = entry.get("match_id"), entry.get("slot")
         legacy = await db.parse_log_data(entry.get("log_data"))
         stored, through_id = await db.count_log_entries(match_id, slot)

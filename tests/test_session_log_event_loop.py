@@ -221,3 +221,49 @@ def test_export_streams_only_the_chunks_it_counted(app_db):
     assert counted == len(streamed) == 2
     assert [e["msg"] for e in everything] == ["a", "b", "late"]
     assert nothing == (0, 0)
+
+
+# ── Rotation off the loop keeps what rotation did on it ─────────────────────
+
+
+def test_parquet_types_a_mixed_nested_column_as_one_build_would(app_db, monkeypatch):
+    """A field that is a number in one slice and an object in another is
+    typed as one build over every entry types it (the number becomes null),
+    not wrapped into a struct by the slices' concat."""
+    import polars as pl
+    from src import match_rotation
+
+    monkeypatch.setattr(match_rotation, "_FRAME_SLICE_ROWS", 2)
+    entries = [{"f": 1, "v": 0}, {"f": 2, "v": 7}, {"f": 3, "v": {"x": 1}}, {"f": 4, "v": {}}]
+    frame = match_rotation._entries_frame(pl, entries)
+    whole = pl.DataFrame(entries, infer_schema_length=None, strict=False)
+    assert frame.schema == whole.schema
+    assert frame.to_dicts() == whole.to_dicts()
+    assert frame["v"].to_list()[:2] == [None, None]
+
+    scalars = [{"f": 1, "t": 1}, {"f": 2, "t": 2}, {"f": 3, "t": 2.5}, {"f": 4, "t": "s"}, {"f": 5}]
+    frame = match_rotation._entries_frame(pl, scalars)
+    assert frame.to_dicts() == pl.DataFrame(scalars, infer_schema_length=None, strict=False).to_dicts()
+
+
+def test_metrics_are_stored_even_when_the_classifier_raises(app_db):
+    """The sweeper skips a match once its metrics row exists, so a log the
+    classifier can't read must not leave the match to be rotated every minute."""
+
+    async def scenario():
+        from src import match_rotation
+
+        db = await app_db()
+        try:
+            base = {"match_id": "m1", "room": "ROOM1", "slot": 0, "epoch": "e"}
+            # The first frame isn't a number, so comparing the second with it raises.
+            entries = [{"seq": 0, "f": "bad", "msg": "TICK-STUCK f=?"}, {"seq": 1, "f": 5, "msg": "TICK-STUCK f=5"}]
+            await db.append_session_flush({**base, "entries": entries})
+            await db.set_session_ended("m1", None, "game-end")
+            with pytest.raises(TypeError):
+                await match_rotation.rotate_match("m1")
+            return await db.query("SELECT entry_count FROM match_metrics WHERE match_id = 'm1'", ())
+        finally:
+            await db.close_db()
+
+    assert run_async(scenario()) == [{"entry_count": 2}]

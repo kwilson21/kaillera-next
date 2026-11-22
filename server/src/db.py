@@ -510,8 +510,9 @@ async def count_log_entries(match_id: str, slot: int | None) -> tuple[int, int]:
 
     SQLite counts them, so nothing is parsed here. A chunk that isn't valid
     JSON counts none, as it holds none for iter_chunk_entries. Reading
-    `through_id=` the returned id streams exactly the chunks counted, even
-    while a live match appends more.
+    `through_id=` the returned id leaves out chunks a live match appends
+    afterwards. It can't bring back chunks the size cap deletes meanwhile
+    (a live log near 12 MB), so a stream can hold fewer entries than counted.
     """
     entries = SessionLogChunk.entries
     length = case((func.json_valid(entries), func.json_array_length(entries)), else_=0)

@@ -244,24 +244,39 @@ def _write_parquet(match_id: str, merged_entries: list[dict], created_at: str | 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{match_id}.zstd.parquet"
 
-    # Polars is strict about schema mismatches across rows; use
-    # infer_schema_length=None so it scans every row to find the widest
-    # type, and a relaxed concat to widen across slices. Built a slice at a
-    # time because building a frame from Python objects holds the GIL: one
-    # build over a long match's entries would stall the event loop even
-    # from the worker thread this runs in.
-    frames = [
-        pl.DataFrame(merged_entries[i : i + _FRAME_SLICE_ROWS], infer_schema_length=None, strict=False)
-        for i in range(0, len(merged_entries), _FRAME_SLICE_ROWS)
-    ]
-    df = pl.concat(frames, how="diagonal_relaxed")
-    df.write_parquet(out_path, compression="zstd", compression_level=3)
+    _entries_frame(pl, merged_entries).write_parquet(out_path, compression="zstd", compression_level=3)
 
     try:
         size = out_path.stat().st_size
     except OSError:
         size = 0
     return out_path, size
+
+
+def _entries_frame(pl, entries: list[dict]):
+    """The merged entries as one Polars frame (`pl`, imported lazily), typed as one build over all of them would type it.
+
+    infer_schema_length=None scans every row for the widest type. The frame
+    is built a slice at a time because building one from Python objects
+    holds the GIL: one build over a long match would stall the event loop
+    even from the worker thread this runs in. A relaxed concat widens scalar
+    types across slices exactly as the single build does, but not a column
+    that is nested (an object or a list) in one slice and something else in
+    another: the concat would wrap a number into a struct, or fail on an
+    empty one. Such a log is built in one piece instead.
+    """
+    frames = [
+        pl.DataFrame(entries[i : i + _FRAME_SLICE_ROWS], infer_schema_length=None, strict=False)
+        for i in range(0, len(entries), _FRAME_SLICE_ROWS)
+    ]
+    dtypes: dict[str, set] = {}
+    for frame in frames:
+        for name, dtype in frame.schema.items():
+            if dtype != pl.Null:
+                dtypes.setdefault(name, set()).add(dtype)
+    if any(len(seen) > 1 and any(d.is_nested() for d in seen) for seen in dtypes.values()):
+        return pl.DataFrame(entries, infer_schema_length=None, strict=False)
+    return pl.concat(frames, how="diagonal_relaxed")
 
 
 # ── Core rotation logic ──────────────────────────────────────────────────────
@@ -288,16 +303,13 @@ def _stamped(session_row: dict, log_data: list) -> list[dict]:
     return [{**stamp, **entry} for entry in log_data if isinstance(entry, dict)]
 
 
-def _process_match(
-    match_id: str, session_rows: list[dict], merged: list[dict], created_at: str | None
-) -> tuple[MatchMetrics, list[dict]]:
-    """Write the Parquet file and compute the metrics and retention flags.
-    Seconds of CPU for a long match on a small instance, so rotate_match runs
-    it in a worker thread, off the event loop."""
+def _process_match(match_id: str, session_rows: list[dict], merged: list[dict], created_at: str | None) -> MatchMetrics:
+    """Write the Parquet file and compute the metrics. Seconds of CPU for a
+    long match on a small instance, so rotate_match runs it in a worker
+    thread, off the event loop, as it does the retention classifier."""
     parquet_result = _write_parquet(match_id, merged, created_at)
     parquet_path, parquet_bytes = parquet_result if parquet_result else (None, None)
-    metrics = _compute_metrics(match_id, session_rows, merged, parquet_path, parquet_bytes)
-    return metrics, retention.classify_entries(merged)
+    return _compute_metrics(match_id, session_rows, merged, parquet_path, parquet_bytes)
 
 
 async def rotate_match(match_id: str) -> MatchMetrics | None:
@@ -316,9 +328,12 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
     # Earliest created_at across peers determines the partition month.
     created_at = min((r.get("created_at") or "") for r in rows) or None
 
-    metrics, reasons = await asyncio.to_thread(_process_match, match_id, rows, merged, created_at)
+    metrics = await asyncio.to_thread(_process_match, match_id, rows, merged, created_at)
+    # Stored before the classifier runs: if it raises on a malformed log, the
+    # metrics row still keeps the sweeper from rotating this match again.
     await _upsert_metrics(metrics)
 
+    reasons = await asyncio.to_thread(retention.classify_entries, merged)
     if reasons:
         try:
             # Matches from before registration existed have no row yet.
