@@ -892,10 +892,14 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert "targetSid: remoteSid,\n              requestId," in host
     # Every answer is full: the host keeps no delta base (sync_base).
     assert "forceFull" not in src
-    assert (
-        "pushSyncState(remoteSid, false, { waitForResult: false, requestIds: { [remoteSid]: requestId } });"
-        in host
-    )
+    # A direct request is answered by the watched answer, which numbers each
+    # state it sends with the request it answers (specs/sync_follow_up.qnt).
+    assert "_answerDirectSyncRequest(remoteSid, requestId);" in host
+    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId) => {") :]
+    direct = direct[: direct.index("\n  };\n")]
+    assert "const requestIds = { [sid]: requestId };" in direct
+    assert "pushSyncState(sid, false, { waitForResult: false, requestIds });" in direct
+    assert "pushSyncState(sid, false, { requestIds, watchFor: [sid] })" in direct
     assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
 
     # A scheduled capture, its follow-ups and re-queues keep the number; a
