@@ -231,7 +231,10 @@
  *     page is told (`DROPPED-BY-HOST`) and joins again late onto the host's
  *     state (`late-join loaded`), no mesh heal adds it back, no late input
  *     follows on the host, and the frames from the late join's state match
- *     (specs/drop_is_final.qnt). With ASK_UNANSWERED_ACK_LOST=1 the guest
+ *     (specs/drop_is_final.qnt). The host's own 5 s stall deadline can make
+ *     the guest a phantom before the push limit; that route passes too when
+ *     the phantom ends the push (`INPUT-ASK-PUSH-ENDED … phantom`),
+ *     `PEER-RECOVERED` resyncs and nobody is dropped. With ASK_UNANSWERED_ACK_LOST=1 the guest
  *     applies each push but drops its `recovery-settled:` and
  *     `inputs-settled:` for n ms: fails
  *     unless the push ends on the phantom the host's stall makes
@@ -382,6 +385,15 @@
  *     opened again, and it armed with the host's delay and never stopped.
  *     Reported as `startLost`. Both START knobs are refused with every
  *     other fault knob.
+ *   START_HIDDEN=1   START_LOST, and while the guest waits its tab is hidden
+ *     and shown again (`visibilitychange`, as HIDE_GUEST_MS) after the host
+ *     has run frames. The lifecycle return used to move a waiting page's
+ *     frame forward to the last remote frame it had seen, so the host's
+ *     start frame was not its own and it stopped (START-FAIL start-frame;
+ *     specs/engine_start.qnt, tabReturnWhileWaitingTest). Fails unless the
+ *     START_LOST checks pass, the guest's tab came back, and its log shows
+ *     the return left its frame alone (`waiting to arm — no
+ *     fast-forward/resync`) and no fast-forward.
  *   RESYNC_ONE_BACK=1   A resync that lands exactly one frame behind the
  *     guest's counter (specs/ring_after_resync.qnt). A third of the way into
  *     the battle the guest's tick is paused (the engine's own pauseTick, as
@@ -489,6 +501,16 @@
  *     the host from answering on predicted inputs that reach that frame
  *     (docs/roadmap.md, Not verified). Either way the guest must go on
  *     making frames. Frames are compared as with FREEZE_HOST_MS.
+ *     `direct` reaches the direct request instead (a `sync-request-full`
+ *     with no frame, answered at once): the guest's input is held neutral,
+ *     then a button is held down while its input packets are held for
+ *     800 ms and go out together at its end; 250 ms in the guest sends its
+ *     BOOT-SYNC request, which the ordered channel keeps right behind them. The host takes in the differing
+ *     inputs (a rollback owed for its next tick) and answers the request
+ *     before that tick: an unconfirmed state a3 (ASK_UNANSWERED_ACKS on
+ *     3cdb9ff) left the guest on for good. Fails unless the host watches it,
+ *     SYNC-FOLLOW-UP-NEEDED is logged, the follow-up goes out after it and
+ *     the guest applies both, tried up to 3 times until the need is seen.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -679,7 +701,8 @@ const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const MALFORMED_PEER = process.env.MALFORMED_PEER === '1';
 const START_SILENT = process.env.START_SILENT === '1';
-const START_LOST = process.env.START_LOST === '1';
+const START_HIDDEN = process.env.START_HIDDEN === '1';
+const START_LOST = process.env.START_LOST === '1' || START_HIDDEN;
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 // CATCH_UP_HOLE_MS: with DROP_PEER_MS, how long the host drops its input
 // packets on the reconnected channel from its first one.
@@ -771,8 +794,8 @@ const UNANSWERED_LETGO_FREEZE_MS = 7000;
 // (`delay re-tuned` in the sync log says what it chose).
 const FORCE_DELAY = process.env.FORCE_DELAY ? Number(process.env.FORCE_DELAY) : null;
 const SYNC_FOLLOW_UP = process.env.SYNC_FOLLOW_UP || '';
-if (!['', 'same', 'changed'].includes(SYNC_FOLLOW_UP)) {
-  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same or changed`);
+if (!['', 'same', 'changed', 'direct'].includes(SYNC_FOLLOW_UP)) {
+  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same, changed or direct`);
   process.exit(1);
 }
 // SYNC_FOLLOW_UP freezes the host as letgo does, and how long the guest's
@@ -781,6 +804,10 @@ const SYNC_FOLLOW_UP_FREEZE_MS = 7000;
 // How long each of the guest's input packets is held after the freeze, so the
 // host answers on predicted inputs.
 const SYNC_FOLLOW_UP_HOLD_MS = 2000;
+// SYNC_FOLLOW_UP=direct: how long the guest's input packets (a button held)
+// are held, and how far into that its direct request goes out behind them.
+const SYNC_FOLLOW_UP_DIRECT_HOLD_MS = 800;
+const SYNC_FOLLOW_UP_DIRECT_ASK_MS = 250;
 // Whether the host's deadline finds its frame confirmed is a race with its own
 // stall; an attempt whose answer goes out confirmed is tried again.
 const SYNC_FOLLOW_UP_ATTEMPTS = 3;
@@ -1710,7 +1737,7 @@ const setSignalingDown = async (page, down) => {
 const host = await mkPage(hostBrowser, 'host');
 const guest = await mkPage(guestBrowser, 'guest', {
   throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : HIDE_GUEST_MS && !HIDE_GUEST_FROZEN ? 1 : 0,
-  hidden: HIDE_GUEST_MS > 0,
+  hidden: HIDE_GUEST_MS > 0 || START_HIDDEN,
   suspendAudio: SUSPEND_GUEST_AUDIO,
   resyncOneBack: RESYNC_FAULT !== null,
 });
@@ -1865,6 +1892,25 @@ if (START_LOST) {
     window.__knDropStart = false;
     return window.__knDroppedStart;
   });
+  if (START_HIDDEN) {
+    // The host has run and its inputs have reached the guest; then the
+    // guest's tab is hidden and shown again while it still waits. Kept short:
+    // the host drops a guest whose inputs stay away 5 s, and the guest arms
+    // only once its channel is back. The page acts on a return after 500 ms
+    // or more in the background.
+    await host.waitForTimeout(500);
+    await guest.evaluate(() => {
+      window.__knHidden = true;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await host.waitForTimeout(700);
+    await guest.evaluate(() => {
+      window.__knHidden = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    startLostReport.hiddenAndShown = true;
+    console.log("START_HIDDEN: the waiting guest's tab was hidden and shown again");
+  }
   startLostReport.closed = await guest.evaluate(() => {
     const hostPeer = Object.values(window.KNState.peers).find((q) => q?.slot === 0);
     if (!hostPeer?.dc || hostPeer.dc.readyState !== 'open') return false;
@@ -2572,6 +2618,74 @@ if (inBattle) {
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (SYNC_FOLLOW_UP === 'direct') {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    const NEUTRAL = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+    while (!syncFollowUp.watched && syncFollowUp.attempts < SYNC_FOLLOW_UP_ATTEMPTS) {
+      syncFollowUp.attempts++;
+      // Fixed, so the host predicts it: neutral.
+      await guest.evaluate((n) => {
+        window.__knInputOverride = () => n;
+      }, NEUTRAL);
+      await guest.waitForTimeout(3000);
+      [syncFollowUp.hostAt, syncFollowUp.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+      // A button down while its packets are held: the host runs those frames
+      // on its prediction (neutral) and takes them in late. The request goes
+      // on the host's `lockstep` channel; with the reliable input transport
+      // (rb-transport adopted=reliable, these runs) the inputs are on that
+      // channel too, so it arrives right behind them. On the unreliable
+      // transport the inputs go on `rollback-input` and nothing orders the
+      // request after them: the attempt may not reach the condition, and the
+      // run then fails as not exercised rather than passing.
+      await guest.evaluate(
+        ({ ms, n }) => {
+          window.__knHoldInputsUntil = performance.now() + ms;
+          window.__knInputOverride = () => ({ ...n, buttons: 1 });
+        },
+        { ms: SYNC_FOLLOW_UP_DIRECT_HOLD_MS, n: NEUTRAL },
+      );
+      await guest.waitForTimeout(SYNC_FOLLOW_UP_DIRECT_ASK_MS);
+      // The engine's own BOOT-SYNC: a numbered `sync-request-full` on the
+      // host's channel at its next tick.
+      await guest.evaluate(() => {
+        window._knBootSyncDone = false;
+      });
+      const asked = await waitForLine(guest, syncFollowUp.guestAt.seq, /BOOT-SYNC: guest requesting/, 5000);
+      // Inputs from here go out as usual; those held still go out together.
+      await guest.evaluate(() => {
+        window.__knHoldInputsUntil = 0;
+      });
+      console.log(
+        `SYNC_FOLLOW_UP=direct: attempt ${syncFollowUp.attempts}: BOOT-SYNC ${asked ? 'logged' : 'not logged'}`,
+      );
+      await host.waitForTimeout(8000);
+      syncFollowUp.watched = linesAfter(await syncLogOf(host), syncFollowUp.hostAt.seq).some((l) =>
+        /SYNC-FOLLOW-UP-NEEDED /.test(l),
+      );
+      await guest.evaluate((n) => {
+        window.__knInputOverride = () => n;
+      }, NEUTRAL);
+      console.log(
+        `SYNC_FOLLOW_UP=direct: ${syncFollowUp.watched ? 'a prediction the answer was taken on differed' : 'no differing prediction seen; trying again'}`,
+      );
+      if (!syncFollowUp.watched) await guest.waitForTimeout(5000);
+    }
+    await guest.waitForTimeout(12000);
+    await guest.evaluate(() => {
+      window.__knInputOverride = null;
+    });
+    syncFollowUp.hostEnd = await lastLogLine(host);
+    const guestFrame = () => guest.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+    const frameAt = await guestFrame();
+    await guest.waitForTimeout(5000);
+    syncFollowUp.framesAfter = (await guestFrame()) - frameAt;
+    console.log(
+      `SYNC_FOLLOW_UP=direct: done (${Date.now() - started} ms, ${syncFollowUp.attempts} attempt(s)); ` +
+        `the guest made ${syncFollowUp.framesAfter} frames in the next 5 s`,
+    );
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (SYNC_FOLLOW_UP) {
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
@@ -2769,7 +2883,7 @@ if (inBattle) {
       RESYNC_OFF
         ? /RB-INPUT-STALL-TIMEOUT .*slot=1 |PEER-PHANTOM slot=1 lastAdvance=[\d.]+ staleSec=5\./
         : ASK_UNANSWERED_ACKS
-          ? /INPUT-ASK-PUSH-GAVEUP/
+          ? /INPUT-ASK-PUSH-GAVEUP|INPUT-ASK-PUSH-ENDED .*phantom/
           : ASK_UNANSWERED_ACK_LOST
             ? /INPUT-ASK-PUSH-ENDED/
             : /INPUT-ASK-PUSH-SETTLED/,
@@ -4265,6 +4379,13 @@ if (START_LOST) {
     // the guest can only have armed from the ones sent when its channel opened.
     stopped: /START-FAIL/.test(G.sync),
   });
+  if (START_HIDDEN) {
+    Object.assign(startLostReport, {
+      returned: /tab visible \(was background/.test(G.sync),
+      keptFrame: /bg-return: waiting to arm — no fast-forward\/resync/.test(G.sync),
+      fastForward: /fast-forward: /.test(G.sync),
+    });
+  }
   summary.startLost = startLostReport;
 }
 if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
@@ -4562,7 +4683,11 @@ const askUnansweredReport = (() => {
   // After a drop, the health check may offer to the player again: each
   // drop and heal is counted, so a cycle that does not end shows.
   const heals = hostLines.filter((l) => /MESH-HEAL f=.* slot=1/.test(l));
+  // Which way the push ended (ASK_UNANSWERED_ACKS takes either): the push
+  // limit and a drop, or the host's stall making the guest a phantom.
+  const route = gaveUp.length > 0 ? 'gaveUp' : endedOnPhantom.length > 0 ? 'phantom' : 'none';
   return {
+    route,
     baselineWithoutResync: RESYNC_OFF
       ? resyncOffEvidence({
           lines: hostLines,
@@ -4624,17 +4749,24 @@ const askUnansweredFailed = RESYNC_OFF
           askUnansweredReport.gaveUp.length === 0 &&
           askUnansweredReport.hardDisconnected.length === 0
         : ASK_UNANSWERED_ACKS
-          ? // Every push unanswered: pushed again to the limit, then the player dropped.
-            askUnansweredReport.statesDropped > 0 &&
-            askUnansweredReport.pushes.length >= 2 &&
-            askUnansweredReport.gaveUp.length > 0 &&
-            askUnansweredReport.hardDisconnected.length > 0 &&
-            askUnansweredReport.droppedByHost.length > 0 &&
-            // It joined again late, onto the host's state; frames are compared
-            // from there (FREEZE_LIKE).
-            askUnansweredReport.lateJoined.length > 0 &&
-            askUnansweredReport.heals === 0 &&
-            askUnansweredReport.pastWindowAfterDrop === 0
+          ? askUnansweredReport.statesDropped > 0 &&
+            (askUnansweredReport.endedOnPhantom.length > 0
+              ? // The host's own 5 s stall deadline can make the guest a phantom
+                // before the push limit: the phantom ends the push and its own
+                // resync recovers the guest, nobody dropped (as ACK_LOST).
+                askUnansweredReport.recovered > 0 &&
+                askUnansweredReport.gaveUp.length === 0 &&
+                askUnansweredReport.hardDisconnected.length === 0
+              : // Every push unanswered: pushed again to the limit, then the player dropped.
+                askUnansweredReport.pushes.length >= 2 &&
+                askUnansweredReport.gaveUp.length > 0 &&
+                askUnansweredReport.hardDisconnected.length > 0 &&
+                askUnansweredReport.droppedByHost.length > 0 &&
+                // It joined again late, onto the host's state; frames are compared
+                // from there (FREEZE_LIKE).
+                askUnansweredReport.lateJoined.length > 0 &&
+                askUnansweredReport.heals === 0 &&
+                askUnansweredReport.pastWindowAfterDrop === 0)
           : askUnansweredReport.settled.length > 0 &&
             askUnansweredReport.gaveUp.length === 0 &&
             // The difference from main: no stall waits out its deadline.
@@ -4844,7 +4976,12 @@ const syncFollowUpReport = (() => {
     return i < 0 ? -1 : from + i;
   };
   const line = (lines, i) => (i < 0 ? null : lines[i]);
-  const recoveryAsk = at(guestLines, /peer-recovery resync: sent sync-request-full-at:/);
+  const recoveryAsk = at(
+    guestLines,
+    SYNC_FOLLOW_UP === 'direct'
+      ? /BOOT-SYNC: guest requesting host state/
+      : /peer-recovery resync: sent sync-request-full-at:/,
+  );
   const watch = at(hostLines, /SYNC-FOLLOW-UP-WATCH /);
   const after = (re) => (watch < 0 ? -1 : at(hostLines, re, watch));
   const needed = after(/SYNC-FOLLOW-UP-NEEDED /);
@@ -4860,7 +4997,13 @@ const syncFollowUpReport = (() => {
     ticking &&
     (SYNC_FOLLOW_UP === 'same'
       ? needed < 0 && skipped > watch && followUpDispatch < 0 && applied.length >= 1
-      : needed > watch && followUpDispatch > needed && skipped < 0 && applied.length >= 2);
+      : needed > watch &&
+        followUpDispatch > needed &&
+        // The follow-up itself is not skipped. With `direct` a follow-up sent
+        // at its deadline, still unconfirmed, is watched in turn, and its own
+        // follow-up may rightly be skipped after it.
+        (skipped < 0 || (SYNC_FOLLOW_UP === 'direct' && skipped > followUpDispatch)) &&
+        applied.length >= 2);
   return {
     mode: SYNC_FOLLOW_UP,
     attempts: syncFollowUp.attempts,
@@ -4967,7 +5110,12 @@ const startLostFailed =
     startLostReport.closed &&
     startLostReport.armLine &&
     startLostReport.armedWithHostDelay &&
-    !startLostReport.stopped
+    !startLostReport.stopped &&
+    (!START_HIDDEN ||
+      (startLostReport.hiddenAndShown &&
+        startLostReport.returned &&
+        startLostReport.keptFrame &&
+        !startLostReport.fastForward))
   );
 if (START_LOST)
   console.log(

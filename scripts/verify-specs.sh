@@ -296,6 +296,8 @@ sync_follow_up() {
   # while the state is compressed, recorded from the send only: 5 steps.
   expect_violation "$FOLLOW" sync_follow_up_current aFollowUpCarriesANewState
   expect_violation "$FOLLOW" sync_follow_up_from_send theGuestEndsOnTheHostsState
+  # A direct answer taken unconfirmed, final, then the input differs: 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_direct_unwatched theGuestEndsOnTheHostsState 5
 }
 
 rom_at_start() {
@@ -377,6 +379,8 @@ escalation_push() {
   expect_violation "$DELIVERY" recovery_partial_before freeRecipientProceeds 2
   verify "$DELIVERY" recovery_followup_fixed allHold init 10
   expect_violation "$DELIVERY" recovery_followup_before healthySourceIsNeverBlocked 3
+  verify "$DELIVERY" recovery_skipped_fixed allHold init 10
+  expect_violation "$DELIVERY" recovery_skipped_current settledCoversNewestHole 2
   verify "$DELIVERY" recovery_actor_enabled allHold init 10
   verify "$DELIVERY" recovery_actor_disabled allHold init 10
   verify "$DELIVERY" recovery_delivery_fixed allHold init 10
@@ -543,7 +547,11 @@ ring_after_resync() {
 engine_start() {
   local START=specs/engine_start.qnt
   verify "$START" engine_start_current allHold
-  verify "$START" engine_start_before theHostsStartIsWhereTheGuestIs
+  # A tab that comes back while its page waits moves the page's frame:
+  # start, GO, lose the delay, reopen, arm, a frame, the return, the start
+  # frame (8 steps; tabReturnWhileWaitingTest).
+  expect_violation "$START" engine_start_before theHostsStartIsWhereTheGuestIs 8
+  expect_violation "$START" engine_start_jump_on_return aGuestStopsOnlyWhenTheHostIsUnreachable 8
   # A solo match: start, arm, one frame (3 steps; soloTest).
   expect_violation "$START" engine_start_before everyFrameRunsOnTheCEngine
   # A guest that hears nothing: start, three ticks, the deadline (5 steps).
@@ -553,6 +561,9 @@ engine_start() {
   # A friend joins a solo match with no bridge window at 0: start alone, arm,
   # join late (3 steps; lateJoinIntoSoloTest).
   expect_violation "$START" engine_start_no_zero_bridge aGuestStopsOnlyWhenTheHostIsUnreachable
+  # A friend joins a solo match and plays at 0: start alone, arm, join late
+  # (3 steps; lateJoinIntoSoloTest).
+  expect_violation "$START" engine_start_no_rearm aJoinedMatchRunsAboveZero
 }
 
 # Every group, in the order a local run takes them.

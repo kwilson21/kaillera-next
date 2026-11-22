@@ -27,6 +27,18 @@
  *   recipient settlement, bounded target
  *   retry/settlement, no drop, and 60 later matching frames. No hash exclusions
  *   are added: the ordinary all-frame gameplay/game-state oracle still applies.
+ *   A follow-up push the host owes the target (INPUT-ASK-PUSH-FOLLOWUP: a
+ *   later broadcast skipped it while it still owed this one) adds one
+ *   transfer to the bound, and must settle (`kind=follow-up`).
+ * FOLLOW_UP_RECIPIENT=1 (PLAYERS=3|4): the host's follow-up to a recipient a
+ *   later broadcast skipped (specs/recovery_delivery.qnt, recovery_skipped).
+ *   P2 loses two input ranges 12 frames apart, so two holes are broadcast in
+ *   quick succession; the last guest holds its recovery acknowledgements
+ *   (`recovery-settled:`) until the second broadcast has gone out without it,
+ *   then sends them. Fails unless the host pushes it a follow-up
+ *   (INPUT-ASK-PUSH-FOLLOWUP), that settles (`kind=follow-up`), nobody is
+ *   dropped, and every guest's hashes match the host's, at least 60 frames
+ *   of them after recovery.
  * MISSING_RECIPIENT_PERMANENT=1 (PLAYERS=4): fail every transfer on the
  *   original target channel; require three attempts, notified removal, normal
  *   late rejoin and clean post-rejoin hashes. Full historical oracle stays strict.
@@ -97,6 +109,8 @@ const MISSING_RECIPIENT = process.env.MISSING_RECIPIENT === '1';
 const MISSING_RECIPIENT_SLOT = Number(process.env.MISSING_RECIPIENT_SLOT || PLAYERS - 1);
 const PERMANENT_RECIPIENT = process.env.MISSING_RECIPIENT_PERMANENT === '1';
 const MISSING_RECIPIENT_FAILURES = PERMANENT_RECIPIENT ? 3 : Number(process.env.MISSING_RECIPIENT_FAILURES || 1);
+const FOLLOW_UP_RECIPIENT = process.env.FOLLOW_UP_RECIPIENT === '1';
+const FOLLOW_UP_SLOT = PLAYERS - 1;
 const CATCH_UP_MS = Number(process.env.CATCH_UP_MS || 0);
 const CATCH_UP_SLOT = Number(process.env.CATCH_UP_SLOT || 2);
 const CATCH_UP_HOLE = process.env.CATCH_UP_HOLE === '1';
@@ -139,6 +153,8 @@ if (
     !(PERMANENT_RECIPIENT ? PLAYERS === 4 : [1, 2].includes(MISSING_RECIPIENT_FAILURES)))
 )
   fail('MISSING_RECIPIENT requires no catch-up fault, target slot 2..PLAYERS-1, and 1 or 2 failures');
+if (FOLLOW_UP_RECIPIENT && (MISSING_RECIPIENT || CATCH_UP_MS > 0))
+  fail('FOLLOW_UP_RECIPIENT is a run of its own (no MISSING_RECIPIENT or catch-up fault)');
 if (CATCH_UP_MS > 0 && !(CATCH_UP_MS < RESYNC_REQUEST_TIMEOUT_MS)) {
   fail(`CATCH_UP_MS must be shorter than the guest's request deadline (${RESYNC_REQUEST_TIMEOUT_MS})`);
 }
@@ -394,6 +410,17 @@ const missingRecipient = {
     ? { gaveUp: false, notified: null, lateJoinedAt: null, framesAtDrop: null, framesAfterJoin: null }
     : null,
 };
+// FOLLOW_UP_RECIPIENT=1: two holes from P2; the last guest's acks held across the second.
+const followUpRecipient = {
+  hostAt: null,
+  ranges: null,
+  firstSettled: false,
+  secondBroadcast: false,
+  released: 0,
+  followUp: false,
+  followUpSettled: false,
+  recoveredFrame: null,
+};
 // The battle, with the catch-up fault a third of the way in.
 const catchUp = { guestAt: null, seen: false };
 const hole = {
@@ -514,6 +541,86 @@ if (MISSING_RECIPIENT) {
   missingRecipient.recoveredFrame = await host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
   // Keep observing after settlement: transient success followed by another
   // retry/drop is not recovery. At least 60 later hash frames are required.
+  await host.waitForTimeout(20000);
+}
+if (FOLLOW_UP_RECIPIENT) {
+  await host.waitForTimeout((BATTLE_SECONDS * 1000) / 3);
+  const f = followUpRecipient;
+  f.hostAt = await lastSeq(host);
+  // The last guest holds every recovery acknowledgement it sends the host.
+  await pages[FOLLOW_UP_SLOT].evaluate(() => {
+    const peer = Object.values(window.KNState?.peers ?? {}).find((p) => p.slot === 0);
+    if (peer?.dc?.readyState !== 'open') throw new Error('target host channel is not open');
+    window.__meshHeldAcks = [];
+    window.__meshHoldAcks = true;
+    for (const dc of new Set([peer.dc, peer.syncDc].filter(Boolean))) {
+      const send = dc.send;
+      dc.send = function (data) {
+        if (window.__meshHoldAcks && typeof data === 'string' && data.startsWith('recovery-settled:')) {
+          window.__meshHeldAcks.push(() => send.call(this, data));
+          return;
+        }
+        return send.call(this, data);
+      };
+    }
+    window.__meshReleaseAcks = () => {
+      window.__meshHoldAcks = false;
+      const held = window.__meshHeldAcks.splice(0);
+      for (const sendHeld of held) sendHeld();
+      return held.length;
+    };
+  });
+  // P2 loses two ranges, 12 frames apart: two holes in quick succession.
+  f.ranges = await pages[1].evaluate(() => {
+    const frame = window.NetplayRollback.getHudCounters().currentFrame;
+    const ranges = [
+      [frame + 20, frame + 26],
+      [frame + 38, frame + 44],
+    ];
+    const peer = Object.values(window.KNState?.peers ?? {}).find((p) => p.slot === 0);
+    if (peer?.dc?.readyState !== 'open') throw new Error('P2 host channel is not open');
+    window.__meshMissingInputs = 0;
+    for (const dc of new Set([peer.dc, peer.rbDc].filter(Boolean))) {
+      const send = dc.send;
+      dc.send = function (data) {
+        if (data instanceof ArrayBuffer && data.byteLength >= 4) {
+          const fr = new Int32Array(data, 0, 1)[0];
+          if (ranges.some(([a, b]) => fr >= a && fr < b)) {
+            window.__meshMissingInputs++;
+            return;
+          }
+        }
+        return send.call(this, data);
+      };
+    }
+    return ranges;
+  });
+  const inRange = (r) => `(${Array.from({ length: r[1] - r[0] }, (_, i) => r[0] + i).join('|')})`;
+  f.firstSettled = await waitForLine(host, f.hostAt, /INPUT-ASK-PUSH-SETTLED .*slot=1 /, 60000);
+  f.secondBroadcast = await waitForLine(
+    host,
+    f.hostAt,
+    new RegExp(`INPUT-ASK-PUSH f=\\d+ slot=1 hole=${inRange(f.ranges[1])}\\b`),
+    30000,
+  );
+  f.released = await pages[FOLLOW_UP_SLOT].evaluate(() => window.__meshReleaseAcks());
+  console.log(
+    `FOLLOW_UP_RECIPIENT: first settled ${f.firstSettled}, second broadcast ${f.secondBroadcast}, ` +
+      `${f.released} held acknowledgement(s) released`,
+  );
+  f.followUp = await waitForLine(
+    host,
+    f.hostAt,
+    new RegExp(`INPUT-ASK-PUSH-FOLLOWUP .*slot=${FOLLOW_UP_SLOT} `),
+    15000,
+  );
+  f.followUpSettled = await waitForLine(
+    host,
+    f.hostAt,
+    new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${FOLLOW_UP_SLOT} .*kind=follow-up`),
+    30000,
+  );
+  f.recoveredFrame = await host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
   await host.waitForTimeout(20000);
 }
 if (CATCH_UP_MS > 0) {
@@ -695,6 +802,7 @@ const pairs = P.slice(1).map((G, gi) => {
     compared++;
     if (
       (MISSING_RECIPIENT && f > missingRecipient.recoveredFrame) ||
+      (FOLLOW_UP_RECIPIENT && followUpRecipient.recoveredFrame !== null && f > followUpRecipient.recoveredFrame) ||
       (CATCH_UP_HOLE && hole.recoveredFrame !== null && f > hole.recoveredFrame)
     )
       postRecovery++;
@@ -817,8 +925,9 @@ const missingRetries = missingLines.filter((line) =>
   new RegExp(`INPUT-ASK-PUSH-AGAIN .*slot=${MISSING_RECIPIENT_SLOT} `).test(line),
 );
 const p2SettledIndex = missingLines.findIndex((line) => /INPUT-ASK-PUSH-SETTLED .*slot=1 /.test(line));
-const targetSettledIndex = missingLines.findIndex((line) =>
-  new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} `).test(line),
+const targetSettledIndex = missingLines.findIndex(
+  (line) =>
+    new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} `).test(line) && !/kind=follow-up/.test(line),
 );
 const targetRetryIndex = missingLines.findIndex((line) =>
   new RegExp(`INPUT-ASK-PUSH-AGAIN .*slot=${MISSING_RECIPIENT_SLOT} `).test(line),
@@ -848,7 +957,16 @@ const targetRetryEvents = missingLines.flatMap((line, index) => {
   const m = line.match(new RegExp(`INPUT-ASK-PUSH-AGAIN f=(\\d+) slot=${MISSING_RECIPIENT_SLOT} push=(\\d+)/`));
   return m ? [{ frame: Number(m[1]), attempt: Number(m[2]), index }] : [];
 });
+// A follow-up the host owes the target (a later broadcast skipped it) is one
+// more transfer, settled under its own tag.
+const targetFollowUps = missingLines.filter((line) =>
+  new RegExp(`INPUT-ASK-PUSH-FOLLOWUP .*slot=${MISSING_RECIPIENT_SLOT} `).test(line),
+);
+const targetFollowUpSettled = missingLines.some((line) =>
+  new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} .*kind=follow-up`).test(line),
+);
 const correlatedTargetSettled = missingLines.findIndex((line) => {
+  if (/kind=follow-up/.test(line)) return false;
   const m = line.match(
     new RegExp(`INPUT-ASK-PUSH-SETTLED .*slot=${MISSING_RECIPIENT_SLOT} frame=(\\d+) pushes=(\\d+)`),
   );
@@ -885,10 +1003,12 @@ const transientMissingProblems = !MISSING_RECIPIENT
         : []),
       ...(!(
         H.missingRecipientWire?.headers.length >= MISSING_RECIPIENT_FAILURES + 1 &&
-        H.missingRecipientWire.headers.length <= 3
+        H.missingRecipientWire.headers.length <= 3 + Math.min(targetFollowUps.length, 1)
       )
         ? ['target transfer attempts were absent or unbounded']
         : []),
+      ...(targetFollowUps.length > 1 ? ['more than one follow-up pushed to the target'] : []),
+      ...(targetFollowUps.length === 1 && !targetFollowUpSettled ? ["the target's follow-up did not settle"] : []),
       ...(!(missingRetries.length >= MISSING_RECIPIENT_FAILURES && missingRetries.length <= 2)
         ? ['target retry count outside 1..2']
         : []),
@@ -967,6 +1087,27 @@ const permanentProblems = !PERMANENT_RECIPIENT
         : []),
     ];
 const missingProblems = PERMANENT_RECIPIENT ? permanentProblems : transientMissingProblems;
+const followUpLines = FOLLOW_UP_RECIPIENT
+  ? H.sync.split('\n').filter((line) => seqOf(line) > followUpRecipient.hostAt)
+  : [];
+const followUpProblems = !FOLLOW_UP_RECIPIENT
+  ? []
+  : [
+      ...(!(P[1].missingInputs > 0) ? ['P2 input fault did not fire'] : []),
+      ...(!followUpRecipient.firstSettled ? ["P2's first hole did not settle"] : []),
+      ...(!followUpRecipient.secondBroadcast ? ['the second hole was not broadcast'] : []),
+      ...(!(followUpRecipient.released > 0) ? ['the target had no acknowledgement held across it'] : []),
+      ...(!followUpRecipient.followUp ? ['no follow-up pushed to the target (INPUT-ASK-PUSH-FOLLOWUP)'] : []),
+      ...(!followUpRecipient.followUpSettled ? ["the target's follow-up did not settle"] : []),
+      ...(followUpLines.some((line) =>
+        /INPUT-ASK-PUSH-GAVEUP|INPUT-ASK-PUSH-FOLLOWUP-BUDGET|PEER-PHANTOM|hardDisconnect/.test(line),
+      )
+        ? ['a peer was dropped, went phantom, or the follow-up was left for budget']
+        : []),
+      ...(pairs.some((p) => p.postRecoveryFramesCompared < MIN_BATTLE_FRAMES)
+        ? ['insufficient post-recovery hash comparisons']
+        : []),
+    ];
 
 // Secondary recovery result, not an exemption from the original hash oracle.
 // The lower boundary is the first deliberately lost input frame, recorded
@@ -1011,6 +1152,7 @@ const summary = {
     correlatedPush: correlatedPush ?? null,
     problems: missingProblems,
   },
+  followUpRecipient: FOLLOW_UP_RECIPIENT ? { ...followUpRecipient, problems: followUpProblems } : undefined,
   room,
   players: PLAYERS,
   latencyMs: LAT,
@@ -1033,6 +1175,7 @@ console.log(JSON.stringify(summary, null, 2));
 
 const failed =
   missingProblems.length > 0 ||
+  followUpProblems.length > 0 ||
   P.some((x) => x.inBattleAt < 0) ||
   fighterProblems.length > 0 ||
   pairs.some(

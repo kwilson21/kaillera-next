@@ -39,6 +39,7 @@ def test_background_return_never_fast_forwards_or_resyncs():
     assert "_useCRollback" not in fn
     script = f"""
 const logs = [];
+const window = {{ _rbPendingInit: false }};
 let _frameNum = 100;
 let _lastRemoteFrame = 400;
 let _remoteInputs = {{ 0: {{ 100: {{ buttons: 1 }} }} }};
@@ -46,14 +47,33 @@ let _localInputs = {{ 100: {{ buttons: 2 }} }};
 const KNState = {{ frameNum: 100 }};
 const _syncLog = (message) => logs.push(message);
 eval({json.dumps(fn)} + "\\n_noteLifecycleReturn('bg-return');");
-process.stdout.write(JSON.stringify({{ frame: _frameNum, knFrame: KNState.frameNum, inputs: _remoteInputs, localInputs: _localInputs, logs }}));
+const armed = {{ frame: _frameNum, knFrame: KNState.frameNum, inputs: _remoteInputs, localInputs: _localInputs, logs: logs.splice(0) }};
+
+window._rbPendingInit = true;
+_frameNum = 0;
+KNState.frameNum = 0;
+_lastRemoteFrame = 40;
+_remoteInputs = {{ 0: {{ 0: {{ buttons: 1 }} }} }};
+_localInputs = {{ 0: {{ buttons: 2 }} }};
+eval({json.dumps(fn)} + "\\n_noteLifecycleReturn('bg-return');");
+process.stdout.write(JSON.stringify({{ armed, waiting: {{ frame: _frameNum, knFrame: KNState.frameNum, inputs: _remoteInputs, localInputs: _localInputs, logs }} }}));
 """
     result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr + result.stdout
     output = json.loads(result.stdout)
 
-    assert output["frame"] == 100
-    assert output["knFrame"] == 100
-    assert output["inputs"] == {"0": {"100": {"buttons": 1}}}
-    assert output["localInputs"] == {"100": {"buttons": 2}}
-    assert output["logs"] == ["bg-return: rollback mode — no fast-forward/resync (behind=300)"]
+    armed = output["armed"]
+    assert armed["frame"] == 100
+    assert armed["knFrame"] == 100
+    assert armed["inputs"] == {"0": {"100": {"buttons": 1}}}
+    assert armed["localInputs"] == {"100": {"buttons": 2}}
+    assert armed["logs"] == ["bg-return: rollback mode — no fast-forward/resync (behind=300)"]
+
+    # Waiting to arm: nothing moves either (specs/engine_start.qnt,
+    # tabReturnWhileWaitingTest), and the log says which case it was.
+    waiting = output["waiting"]
+    assert waiting["frame"] == 0
+    assert waiting["knFrame"] == 0
+    assert waiting["inputs"] == {"0": {"0": {"buttons": 1}}}
+    assert waiting["localInputs"] == {"0": {"buttons": 2}}
+    assert waiting["logs"] == ["bg-return: waiting to arm — no fast-forward/resync (f=0)"]

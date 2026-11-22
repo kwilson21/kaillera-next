@@ -26,7 +26,7 @@ local-state branches (`if (!_running) return;`) are not stalls.
 
 | Stall | Constant | Action | Event | Spec |
 |-------|----------|----------|-------|------|
-| `_rbPendingInit` (guest holds until it has the host's `rb-delay:` and `rb-init-frame:`; the armed host sends both again on every channel that opens) | `RB_INIT_TIMEOUT_MS = 10000` | With the host's delay, arm with it at the page's own frame; with none, stop and say so. Never arm with the page's own delay (`KNCore.guestStartStep`, specs/engine_start.qnt) | `RB-INIT-NO-START-FRAME`, `START-FAIL reason=no-host` | §MF2 |
+| `_rbPendingInit` (guest holds until it has the host's `rb-delay:` and `rb-init-frame:`, taken from the host only; the armed host sends both again on every channel that opens; a tab that comes back while the page waits leaves its frame alone) | `RB_INIT_TIMEOUT_MS = 10000` | With the host's delay, arm with it at the page's own frame; with none, stop and say so. Never arm with the page's own delay (`KNCore.guestStartStep`, specs/engine_start.qnt). A trap while arming ends the match (`FATAL-CORE-ABORT branch=rollback-init`); a tick with the engine neither armed nor waiting is not reached, and would end it too (`branch=not-armed`) | `RB-INIT-NO-START-FRAME`, `START-FAIL reason=no-host`, `bg-return: waiting to arm` | §MF2 |
 | `_syncTargetFrame` (guest holds state for coordinated frame-boundary apply; also a non-coordinated state 1-2 frames ahead of the guest, `sync held`) | `SYNC_COORD_TIMEOUT_MS = 3000` | Drop target, apply pending state at current frame (non-coord branch) | `COORD-SYNC-TIMEOUT` | §MF3 |
 | `_scheduledSyncRequests` entries (host captures state at scheduled target frame; in rollback mode also waits until its state is confirmed — no replay pending, every live peer's consumed input real) | `SYNC_COORD_TIMEOUT_MS = 3000` | Dispatch request at current frame | `COORD-SYNC-TIMEOUT` | §MF3 |
 | RB-INPUT-STALL (rollback gameplay input missing beyond budget). An input from before the last resync's frame minus the delay is never waited for (`_inputFloor`): the state both pages loaded holds its effect, and a guest moved forward by the resync never made it | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer, release rollback input stall | `RB-INPUT-STALL-TIMEOUT` | rollback health audit 2026-04-27; specs/resync_inputs.qnt `noWaitForAnInputThatCannotArrive` |
@@ -392,16 +392,33 @@ backs off for 5 seconds, then retries that guest, up to three attempts; exhausti
 uses the explicit drop/late-rejoin path, never a successful-health report. The existing
 per-guest no-progress and page-freeze credit rules remain in effect.
 
-Only an `inputs-settled:` received **after** this attempt was delivered, naming its
-exact state frame minus delay, settles it. A stored high-water mark does not. A
-slot's transfer reservation survives a reset, timeout, or early acknowledgement
-until the asynchronous transfer actually settles, bounding escalation buffers to
-one transfer per player slot. New holes coalesce while any recipient remains owed.
+Only a `recovery-settled:<frame>:<id>` received **after** this attempt was
+delivered, naming this attempt's id and its exact state frame minus delay,
+settles it. The legacy `inputs-settled:` updates input history only and settles
+nothing. A stored high-water mark does not. A slot's transfer reservation
+survives a reset, timeout, or early acknowledgement until the asynchronous
+transfer actually settles, bounding escalation buffers to one transfer per
+player slot.
+
+A new hole coalesces only while its own source is still owed a recovery. A
+later hole from a settled source is broadcast to the recipients that are free;
+a recipient still owed the earlier broadcast is skipped, keeps its own attempt
+and retry budget, and is owed the newer state: a retry captures afresh and
+covers it, and if the earlier attempt settles instead, the host pushes that
+recipient one fresh state (`INPUT-ASK-PUSH-FOLLOWUP`), unless the state it
+settled on was itself taken at or after the newer broadcast's frame
+(`INPUT-ASK-PUSH-FOLLOWUP-COVERED`). Without that push, with 3+ players, the
+skipped guest would stay on a state from before the newer hole while the
+others adopt it. The follow-up is a capture charged to the room's capture
+budget (not the source's, whose exhaustion drops the source); once that is
+spent it is left to the guest's own resync (`INPUT-ASK-PUSH-FOLLOWUP-BUDGET`).
+Its settlement is logged `kind=follow-up`.
 
 State chunks use the dedicated sync channel only: the primary input channel cannot
 parse them. A rate-limited late-join request retains the dropped marker; the marker
 is removed only after the accepted join is held outside the active roster.
 
-Model: `specs/recovery_delivery.qnt`, before/fixed variants and capacity model.
+Model: `specs/recovery_delivery.qnt`, before/fixed variants, capacity model and
+`recovery_skipped` (the follow-up owed to a skipped recipient).
 Engine-handler regressions: `tests/ts/recovery-delivery.test.ts`.
 These add no session-machine states and do not alter its generated diagram.

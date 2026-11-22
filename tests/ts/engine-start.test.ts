@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { guestStartStep, type StartStep } from '../../web/src/engine-start.ts';
+import { delayAtJoin, guestStartStep, type StartStep } from '../../web/src/engine-start.ts';
 
 const DEADLINE = 10_000;
 const OWN_DELAY = 3; // what the guest worked out for itself
@@ -77,9 +77,11 @@ test('old against new: equal everywhere but the differences specs/engine_start.q
           const at = JSON.stringify({ heardDelay, heardStart, ownFrame, waited, step, old });
           if (heardStart >= 0 && heardStart !== ownFrame) {
             // theHostsStartIsWhereTheGuestIs: no page runs a frame before it
-            // arms, so this never happens. Before, the guest waited for the
-            // delay, then stepped to a later frame on the old path or armed
-            // at its own; now it stops at once, whatever else it has.
+            // arms, and a waiting page's frame no longer moves when its tab
+            // comes back (tabReturnWhileWaitingTest), so this does not
+            // happen. Before, the guest waited for the delay, then stepped to
+            // a later frame on the old path or armed at its own; now it stops
+            // at once, whatever else it has.
             assert.equal(step, 'stopFrame', at);
             note('another start frame');
           } else if (heardDelay === 0) {
@@ -112,4 +114,42 @@ test('old against new: equal everywhere but the differences specs/engine_start.q
     'at the deadline',
     'no delay by the deadline',
   ]);
+});
+
+// ── The delay once a player joins (specs/engine_start.qnt, REARM_AT_JOIN) ──
+
+const DEFAULT = 2;
+
+test('a match at 0 moves to the larger measured delay when its first player joins', () => {
+  assert.equal(delayAtJoin(0, 3, 0, DEFAULT), 3);
+  assert.equal(delayAtJoin(0, 0, 4, DEFAULT), 4);
+  assert.equal(delayAtJoin(0, 3, 5, DEFAULT), 5);
+  assert.equal(delayAtJoin(0, 6, 5, DEFAULT), 6);
+  // Nothing measured yet: the default, never 0.
+  assert.equal(delayAtJoin(0, 0, 0, DEFAULT), DEFAULT);
+});
+
+test('a match already above 0 keeps its delay for a later joiner', () => {
+  const measured: [number, number][] = [
+    [0, 0],
+    [9, 9],
+    [1, 12],
+  ];
+  for (const [own, offered] of measured) assert.equal(delayAtJoin(4, own, offered, DEFAULT), 4);
+});
+
+// Before, nothing changed the delay: the friend played at 0 for the rest of
+// the match (engine_start_no_rearm, lateJoinIntoSoloTest). The one
+// difference, asserted: a match at 0 never stays at 0 once a player joins.
+test('old against new: only a match at 0 changes, and it leaves 0', () => {
+  const old = (hostDelay: number) => hostDelay;
+  for (const hostDelay of [0, 1, 4, 9]) {
+    for (const own of [0, 2, 5]) {
+      for (const offered of [0, 3, 7]) {
+        const now = delayAtJoin(hostDelay, own, offered, DEFAULT);
+        if (hostDelay > 0) assert.equal(now, old(hostDelay));
+        else assert.ok(now > 0 && now >= own && now >= offered);
+      }
+    }
+  }
 });

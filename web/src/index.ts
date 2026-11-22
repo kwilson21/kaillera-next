@@ -15,7 +15,7 @@ import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { lockstepStep } from './lockstep-wait.ts';
-import { guestStartStep } from './engine-start.ts';
+import { delayAtJoin, guestStartStep } from './engine-start.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
@@ -80,7 +80,7 @@ import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
-import { changesWatchedFrame, followUpIsUnneeded } from './sync-follow-up.ts';
+import { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded } from './sync-follow-up.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
 import { newPageId, readAttemptId } from './attempt-id.ts';
@@ -342,6 +342,8 @@ export const KNCore = {
   lockstepStep,
   /** What a guest does while it waits for the host's delay and start frame (web/src/engine-start.ts, specs/engine_start.qnt). */
   guestStartStep,
+  /** The delay a match runs at once a player joins it: its first player moves a match at 0 to a match delay (web/src/engine-start.ts). */
+  delayAtJoin,
   measureCanvasHealth,
   digestFrame,
   createRomResumeAnswerer,
@@ -403,7 +405,7 @@ export const KNCore = {
   /** The host's resync state, a chunk at a time (sync-send.ts). */
   syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
   /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
-  syncFollowUp: { changesWatchedFrame, followUpIsUnneeded },
+  syncFollowUp: { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded },
   startRejoin,
   shouldResumeRomTransfer,
   /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */

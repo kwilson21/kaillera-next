@@ -5428,13 +5428,33 @@
   const _escalationHeld = (slot, hole) => _recovery.held(slot, hole, _syncEnabled);
   const _forgetHolePushes = (slot) => _recovery.forgetHistory(slot);
 
-  const _handleRecoveryCommand = ({ type, attempt, pushes, hole, firstFrame, budget }) => {
+  const _handleRecoveryCommand = ({ type, attempt, pushes, hole, firstFrame, budget, deliveredBefore, followUp }) => {
     const { slot, sid } = attempt;
     if (type === 'retry') {
       _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${pushes}/${OVERDUE_MAX_PUSHES}`);
       pushSyncState(sid, false, { escalation: [attempt] });
     } else if (type === 'settled') {
-      _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${firstFrame} pushes=${pushes}`);
+      // The frame of the state it settled on (deliveredBefore is that minus delay).
+      const settledFrame = deliveredBefore >= 0 ? deliveredBefore + DELAY_FRAMES : -1;
+      _syncLog(
+        `INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${firstFrame} pushes=${pushes}` +
+          (followUp ? ` kind=follow-up state=${settledFrame}` : ''),
+      );
+      // A later broadcast skipped this guest while it still owed this one:
+      // unless the state it just settled on was taken at or after that
+      // broadcast's frame, it is from before that hole. Push it afresh.
+      const next = _recovery.followUp(attempt, performance.now(), settledFrame);
+      if (next.kind === 'push') {
+        _syncLog(`INPUT-ASK-PUSH-FOLLOWUP f=${_frameNum} slot=${slot} id=${next.attempt.wireId}`);
+        pushSyncState(sid, false, { escalation: [next.attempt] });
+      } else if (next.kind === 'covered') {
+        _syncLog(`INPUT-ASK-PUSH-FOLLOWUP-COVERED f=${_frameNum} slot=${slot} state=${next.frame}`);
+      } else if (next.kind === 'budget') {
+        _syncLog(
+          `INPUT-ASK-PUSH-FOLLOWUP-BUDGET f=${_frameNum} slot=${slot}: room capture budget spent ` +
+            `(used=${next.used} limit=${next.limit}); left to its own resync`,
+        );
+      }
     } else if (type === 'ended') {
       const target = _peers[sid];
       _syncLog(
@@ -6308,6 +6328,7 @@
   let _isApplyingLateJoinState = false; // re-entrancy guard for handleLateJoinState (rejects dup state packets mid-load)
   let _tickInterval = null; // setInterval handle for tick scheduler pump
   let _coreFatalError = false; // set once the WASM core traps; the page must reload to play again
+  let _coreFatalMessage; // the message a stopped start showed; a later start shows it again
   let _externalTickPaused = false; // demo/UI pause: gates the tick callback without tearing down state
   let _tickNextAt = 0;
   const TICK_TARGET_MS = 1000 / 60;
@@ -7770,6 +7791,7 @@
   // resync interval; a real reconnect after disconnect already starts fresh.
   const _LATE_JOIN_COOLDOWN_MS = 8000;
   const _lateJoinLastSentAt = new Map(); // requesterSid -> ms timestamp
+  const _lateJoinOfferedDelay = new Map(); // requesterSid -> the joiner's measured delay, 0 if none
 
   // The joiner's wait for an answer to its state request, as an Effect
   // program (web/src/late-join-wait.ts): repeated request, deadline, and a
@@ -7780,7 +7802,16 @@
   let _lateJoinWait = null;
 
   const _sendLateJoinRequest = () => {
-    socket.emit('data-message', { type: 'request-late-join', requesterSid: socket.id });
+    // The delay this page measured to the host: a match the host ran alone
+    // at 0 moves to the larger of the two at the join (delayAtJoin).
+    const hostPeer = Object.values(_peers).find((p) => p?.slot === 0);
+    const samples = hostPeer?.rttSamples?.length ? hostPeer.rttSamples : hostPeer?._rttSamples;
+    const delay = samples?.length ? _delayFromRttSamples(samples, _delayIsLockstep()) : null;
+    socket.emit('data-message', {
+      type: 'request-late-join',
+      requesterSid: socket.id,
+      ...(delay ? { delay } : {}),
+    });
   };
 
   // A player waiting to be let into a match says so on each of its own data
@@ -7907,6 +7938,10 @@
       return;
     }
     _lateJoinLastSentAt.set(requesterSid, now);
+    _lateJoinOfferedDelay.set(
+      requesterSid,
+      Number.isInteger(msg.delay) && msg.delay > 0 ? clampRollbackDelay(msg.delay) : 0,
+    );
     _syncLog(`received late-join request from ${requesterSid}`);
     const name = _knownPlayers[requesterSid]?.playerName || 'A player';
     _config?.onToast?.(`${name} is joining...`);
@@ -10077,6 +10112,13 @@
         //      kept here only for the case where init somehow happened
         //      first (shouldn't happen for guests now).
         if (e.data.startsWith('rb-delay:')) {
+          // Only the host's word: a waiting guest arms with it, or stops on a
+          // start frame other than its own, so another player's would let it
+          // stop any guest's start (the same rule as rb-transport).
+          if (_peers[remoteSid]?.slot !== 0) {
+            _syncLog(`rb-delay: from slot=${_peers[remoteSid]?.slot ?? 'unknown'} ignored — not the host`);
+            return;
+          }
           const hostDelay = _hostDelayFrom(e.data.split(':')[1]);
           if (hostDelay >= 0) {
             window._rbHostDelay = hostDelay;
@@ -10100,6 +10142,10 @@
         // and exchanged input-frame numbers no longer correspond to the
         // same simulation point on both sides.
         if (e.data.startsWith('rb-init-frame:')) {
+          if (_peers[remoteSid]?.slot !== 0) {
+            _syncLog(`rb-init-frame: from slot=${_peers[remoteSid]?.slot ?? 'unknown'} ignored — not the host`);
+            return;
+          }
           const hostInitFrame = parseInt(e.data.split(':')[1], 10);
           if (Number.isFinite(hostInitFrame) && hostInitFrame >= 0) {
             window._rbHostInitFrame = hostInitFrame;
@@ -10236,7 +10282,7 @@
             });
             _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
           } else {
-            pushSyncState(remoteSid, false, { waitForResult: false, requestIds: { [remoteSid]: requestId } });
+            _answerDirectSyncRequest(remoteSid, requestId);
           }
         }
         // JSON messages
@@ -10530,6 +10576,7 @@
       _lateJoinReadyHandled.delete(opts.sid);
       _lateJoinStateSent.delete(opts.sid);
       _pendingLateJoinReadySids.delete(opts.sid);
+      _lateJoinOfferedDelay.delete(opts.sid);
     }
     if (opts.sid && _lateJoinServing.delete(opts.sid) && _runSubstate === RUN_LATE_JOIN_PAUSE) {
       const leftSid = opts.sid;
@@ -12564,6 +12611,39 @@
     if (_lateJoinOriginalWait && frame - DELAY_FRAMES > _lateJoinOriginalWait.through) _lateJoinOriginalWait = null;
   };
 
+  // The first player into a match the host ran alone at a delay of 0: at the
+  // frame of the state it sends (H), the host arms its C engine again with
+  // the delay this join negotiates, and the joiner arms with it from the
+  // state (specs/engine_start.qnt, REARM_AT_JOIN). Alone, the host made no
+  // rollback and runs no replay, and the joiner's slot was inactive, so
+  // nothing reaches back before H (noRollbackBeforeTheRearm). The host made
+  // no input for H..H+delay-1 (at 0 each input applied at the frame it was
+  // made): they are neutral here, and the bridge gives the joiner the same.
+  const _rearmForFirstPlayer = (remoteSid, frame) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const others = _activeRoster ? [..._activeRoster].filter((slot) => slot !== _playerSlot) : [];
+    const replayDepth = mod?._kn_get_replay_depth?.() ?? 0;
+    if (others.length || replayDepth > 0 || !window._rbDoInit) {
+      _syncLog(`DELAY-AT-JOIN skipped f=${frame}: others=[${others.join(',')}] replayDepth=${replayDepth}`);
+      return;
+    }
+    const peer = _peers[remoteSid];
+    const samples = peer?.rttSamples?.length ? peer.rttSamples : peer?._rttSamples;
+    const own = (samples?.length && _delayFromRttSamples(samples, _delayIsLockstep())) || 0;
+    const offered = _lateJoinOfferedDelay.get(remoteSid) || 0;
+    const delay = window.KNCore.delayAtJoin(DELAY_FRAMES, own, offered, clampRollbackDelay(DEFAULT_DELAY_FRAMES));
+    if (delay === DELAY_FRAMES) return;
+    for (let f = frame; f < frame + delay; f++) _localInputs[f] = { ...KNShared.ZERO_INPUT };
+    const prev = DELAY_FRAMES;
+    DELAY_FRAMES = delay;
+    window._rbDoInit(delay, frame, 'first player joined');
+    window.showEffectiveDelay?.(delay, delay);
+    _syncLog(
+      `DELAY-AT-JOIN ${prev} -> ${delay} f=${frame} joiner=${remoteSid} own=${own} offered=${offered} ` +
+        `samples=${samples?.length ?? 0} — armed again for the first player`,
+    );
+  };
+
   async function sendLateJoinState(remoteSid) {
     // Look up slot from _peers first, fall back to _knownPlayers.
     // The peer's WebRTC connection may have failed/disconnected (removed
@@ -12649,6 +12729,14 @@
 
       // Capture state + frame number + RNG atomically while paused
       const capturedFrame = _frameNum;
+      if (DELAY_FRAMES === 0 && _useCRollback) {
+        try {
+          _rearmForFirstPlayer(remoteSid, capturedFrame);
+        } catch (e) {
+          _handleCoreFatal('rollback-init', e);
+          return;
+        }
+      }
       const bridgeSources = _useCRollback ? _snapshotLateJoinBridgeSources(remoteSid) : null;
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
@@ -12715,6 +12803,9 @@
         frame: capturedFrame,
         data: encoded.data,
         effectiveDelay: DELAY_FRAMES,
+        // This page runs every frame on the C engine, at a delay of 0 too.
+        // A host from before that ran a delay of 0 on the old JS path.
+        cEngine: _useCRollback,
         rbTransport: _rbTransport,
         rngValues,
         saveRam,
@@ -12981,6 +13072,13 @@
       // Without this, startLockstep sets _rbPendingInit=true and the
       // tick loop is completely gated, causing a black screen.
       const lateJoinDelay = _hostDelayFrom(msg.effectiveDelay);
+      // A host from before every page armed the C engine ran a delay of 0 on
+      // the old JS path (a solo match it kept through a deploy). Armed here,
+      // the two pages would run different engines; stop and say so.
+      if (lateJoinDelay === 0 && msg.cEngine !== true) {
+        _stopAtStart('old-host', { effectiveDelay: 0 });
+        return;
+      }
       if (lateJoinDelay >= 0) window._rbHostDelay = lateJoinDelay;
       // The joiner's _frameNum was set to msg.frame above. Set the
       // matching host init frame so tryInitRollback fires immediately
@@ -14084,6 +14182,8 @@
   // trapped (specs/engine_start.qnt).
   const START_FAIL_MESSAGES = {
     core: "This page's emulator can't run online play. Reload the page to rejoin the match.",
+    'old-host':
+      "The match couldn't start: the host is on an older version of the site. Ask them to reload the page, then rejoin.",
     'no-host': "The match couldn't start: no word from the host. Reload the page to rejoin the match.",
     'start-frame':
       "The match couldn't start: this page and the host disagree on where it begins. Reload the page to rejoin the match.",
@@ -14093,6 +14193,8 @@
     // As after a trap: only a reload starts this page again.
     _coreFatalError = true;
     const message = START_FAIL_MESSAGES[reason] || START_FAIL_MESSAGES['no-host'];
+    // A later start on this page (a late join) shows this again, not a crash.
+    _coreFatalMessage = message;
     _syncLog(`START-FAIL reason=${reason} f=${_frameNum} ${JSON.stringify(detail)}`);
     KNEvent('start-fail', `match could not start (${reason})`, { reason, frame: _frameNum, ...detail });
     _phase = PHASE_STOPPED;
@@ -14386,7 +14488,18 @@
           `RB-INIT-NO-START-FRAME source=${source} — armed with the host's delay=${heardDelay} at f=${_frameNum}`,
         );
       }
-      window._rbDoInit(heardDelay, _frameNum);
+      // A trap while arming leaves the page neither armed nor waiting: it
+      // ends the match as any core trap does, never a silent hold.
+      try {
+        window._rbDoInit(
+          heardDelay,
+          _frameNum,
+          heardStart >= 0 ? `host start frame (${source})` : `own frame at the deadline (${source})`,
+        );
+      } catch (e) {
+        _handleCoreFatal('rollback-init', e);
+        return false;
+      }
       return true;
     }
     if (step === 'stopFrame') {
@@ -14401,7 +14514,7 @@
     // Late join and reconnect cannot resume a dead core.
     if (_coreFatalError) {
       _syncLog('FATAL-CORE-ABORT start blocked — core is dead, reload required');
-      _notifyCoreFatal();
+      _notifyCoreFatal(_coreFatalMessage);
       return;
     }
     if (_phase === PHASE_RUNNING) return;
@@ -14598,7 +14711,7 @@
       // before initializing — initializing first with locally-computed delay
       // and then "updating DELAY_FRAMES" later only fixes the JS-side
       // variable, not the C engine's internal delay.
-      const doRollbackInit = (effectiveDelay, initFrameOverride = null) => {
+      const doRollbackInit = (effectiveDelay, initFrameOverride = null, initSource = null) => {
         if (!detMod?._kn_rollback_init) {
           _stopAtStart('core', { missing: ['_kn_rollback_init'] });
           return;
@@ -14656,8 +14769,7 @@
           // startLockstep has checked the core has _kn_set_frame.
           detMod._kn_set_frame(initFrame);
           _syncLog(
-            `C-ROLLBACK init: set C frame to ${initFrame}` +
-              (initFrameOverride != null ? ` (host-authoritative)` : ` (local)`),
+            `C-ROLLBACK init: set C frame to ${initFrame} (${initSource ?? (initFrameOverride != null ? 'given' : 'local')})`,
           );
         }
         rb_numPlayers = numPlayers;
@@ -14769,8 +14881,13 @@
       const tryInitRollback = () => {
         if (_playerSlot === 0) {
           // Host: init immediately at local frame; doRollbackInit broadcasts
-          // rb-init-frame inside so guests can match.
-          doRollbackInit(DELAY_FRAMES);
+          // rb-init-frame inside so guests can match. A trap here ends the
+          // match, as on a guest (_guestStart).
+          try {
+            doRollbackInit(DELAY_FRAMES);
+          } catch (e) {
+            _handleCoreFatal('rollback-init', e);
+          }
         } else {
           // I1 (MF2): the guest holds from here, and tick() asks
           // KNCore.guestStartStep each frame until it arms or stops.
@@ -15072,6 +15189,12 @@
     // (#69 item 3 is out of scope).
     let _backgroundAt = 0;
     const _noteLifecycleReturn = (reason) => {
+      // Waiting to arm: the page has run no frame, and its frame must stay
+      // the host's start (specs/engine_start.qnt, tabReturnWhileWaitingTest).
+      if (window._rbPendingInit) {
+        _syncLog(`${reason}: waiting to arm — no fast-forward/resync (f=${_frameNum})`);
+        return;
+      }
       _syncLog(`${reason}: rollback mode — no fast-forward/resync (behind=${_lastRemoteFrame - _frameNum})`);
     };
 
@@ -15744,6 +15867,51 @@
     });
   };
   const SYNC_FOLLOW_UP_MAX = 3;
+
+  // A direct request (`sync-request-full`, no target frame: the guest's
+  // BOOT-SYNC after a late join, a reconnect, a visibility or network change)
+  // is answered at once, at the frame the host has reached. A state taken
+  // there while an input it consumed was still predicted (a peer's, a
+  // phantom's) can change through a later rollback, so every direct answer is
+  // watched and followed up like a coordinated answer. Whether it was
+  // confirmed is decided by _dispatchScheduledSyncs once the state was
+  // actually taken (a push queued behind another is taken later), not here:
+  // the follow-up is skipped when the frame is confirmed with no phantom, the
+  // state was delivered and no prediction differed; otherwise it is sent once
+  // confirmed or at its deadline, within SYNC_FOLLOW_UP_MAX. Unwatched, such
+  // an answer was final, and a late joiner played on split for the rest of
+  // the match (specs/sync_follow_up.qnt, DIRECT_WATCHED).
+  const _answerDirectSyncRequest = (sid, requestId) => {
+    const requestIds = { [sid]: requestId };
+    const epoch = _syncQueueEpoch;
+    const gen = _syncQueueGen[sid] || 0;
+    Promise.resolve(pushSyncState(sid, false, { requestIds, watchFor: [sid] })).then((skipped) => {
+      // Still the guest it was sent to: not gone, reset (reconnect) or a
+      // match stopped since (those are resetPeerState's job).
+      const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
+      const sent = skipped != null && !skipped.includes(sid);
+      // A newer request from this guest replaces the follow-up.
+      const replaced = _scheduledSyncRequests.some((q) => q.targetSid === sid);
+      const targetPhantom = !!_peerPhantom[_peers[sid]?.slot];
+      const rules = window.KNCore.syncFollowUp;
+      if (!rules.directFollowUpDue(current, sent, replaced, targetPhantom)) {
+        // Not sent: the guest asks again, and the watch follows nothing.
+        if (rules.directWatchIsStale(current, sent, replaced)) _followUpWatches.delete(sid);
+        if (current && sent && targetPhantom)
+          _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid}: a phantom, its recovery resyncs it`);
+        return;
+      }
+      _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}: answered, follow-up scheduled`);
+      _scheduledSyncRequests.push({
+        targetFrame: _frameNum,
+        targetSid: sid,
+        followUp: 1,
+        requestId: requestId || 0,
+        deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+        watch: _followUpWatches.get(sid) ?? null,
+      });
+    });
+  };
 
   // True when this peer's live state at the start of _frameNum is final: no
   // replay in flight or pending, and every input it consumed is real. Frames
@@ -16471,9 +16639,13 @@
     _chk('post-skip-gate');
 
     // Every frame runs on the C engine (specs/engine_start.qnt,
-    // everyFrameRunsOnTheCEngine). A page that has not armed it holds.
+    // everyFrameRunsOnTheCEngine). A page that is waiting to arm returned
+    // above (skip:rb-pending-init, with its deadline), and one whose arming
+    // trapped has stopped, so this is not reached; if it were, holding would
+    // be a stall with no deadline (I1), so it ends the match instead.
     if (!_useCRollback) {
       _markTickReturn('skip:not-armed');
+      _handleCoreFatal('not-armed', new Error('a tick with the C engine neither armed nor waiting'));
       return;
     }
 

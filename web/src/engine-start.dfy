@@ -6,25 +6,53 @@ function guestStartStep(heardDelay: int, heardStart: int, ownFrame: int, waitedM
   requires (ownFrame >= 0)
   requires (deadlineMs >= 0)
 {
-  if ((heardDelay >= 0) && (heardStart >= 0)) then
-    if (heardStart == ownFrame) then
+  if ((heardStart >= 0) && (heardStart != ownFrame)) then
+    StartStep.stopFrame
+  else
+    if ((heardDelay >= 0) && (heardStart >= 0)) then
       StartStep.arm
     else
-      StartStep.stopFrame
-  else
-    if (waitedMs >= deadlineMs) then
-      StartStep.stopNoHost
-    else
-      StartStep.wait
+      if (waitedMs >= deadlineMs) then
+        if (heardDelay >= 0) then
+          StartStep.arm
+        else
+          StartStep.stopNoHost
+      else
+        StartStep.wait
 }
 
 lemma guestStartStep_ensures(heardDelay: int, heardStart: int, ownFrame: int, waitedMs: int, deadlineMs: int)
   requires (ownFrame >= 0)
   requires (deadlineMs >= 0)
+  ensures ((heardStart >= 0) ==> (heardStart != ownFrame) ==> guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).stopFrame?)
   ensures ((heardDelay >= 0) ==> (heardStart == ownFrame) ==> guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).arm?)
-  ensures (guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).arm? ==> ((heardDelay >= 0) && (heardStart == ownFrame)))
-  ensures ((heardDelay >= 0) ==> (heardStart >= 0) ==> (heardStart != ownFrame) ==> guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).stopFrame?)
-  ensures (((heardDelay < 0) || (heardStart < 0)) ==> (waitedMs >= deadlineMs) ==> guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).stopNoHost?)
-  ensures (((heardDelay < 0) || (heardStart < 0)) ==> (waitedMs < deadlineMs) ==> guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).wait?)
+  ensures ((heardDelay >= 0) ==> (heardStart < 0) ==> (waitedMs >= deadlineMs) ==> guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).arm?)
+  ensures (guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).arm? ==> ((heardDelay >= 0) && ((heardStart == ownFrame) || ((heardStart < 0) && (waitedMs >= deadlineMs)))))
+  ensures ((heardDelay < 0) ==> ((heardStart < 0) || (heardStart == ownFrame)) ==> (waitedMs >= deadlineMs) ==> guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).stopNoHost?)
+  ensures (guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).wait? ==> (waitedMs < deadlineMs))
+{
+}
+
+function delayAtJoin(hostDelay: int, own: int, offered: int, fallback: int): int
+  requires (fallback > 0)
+{
+  if (hostDelay > 0) then
+    hostDelay
+  else
+    if ((own > 0) || (offered > 0)) then
+      if (own >= offered) then
+        own
+      else
+        offered
+    else
+      fallback
+}
+
+lemma delayAtJoin_ensures(hostDelay: int, own: int, offered: int, fallback: int)
+  requires (fallback > 0)
+  ensures ((hostDelay > 0) ==> (delayAtJoin(hostDelay, own, offered, fallback) == hostDelay))
+  ensures ((hostDelay <= 0) ==> (delayAtJoin(hostDelay, own, offered, fallback) > 0))
+  ensures ((hostDelay <= 0) ==> ((own > 0) || (offered > 0)) ==> ((delayAtJoin(hostDelay, own, offered, fallback) >= own) && (delayAtJoin(hostDelay, own, offered, fallback) >= offered)))
+  ensures ((hostDelay <= 0) ==> (own <= 0) ==> (offered <= 0) ==> (delayAtJoin(hostDelay, own, offered, fallback) == fallback))
 {
 }
