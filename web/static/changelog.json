@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.18",
+    "date": "2026-11-22",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "every page arms the C engine before it runs a frame (engine_start.qnt) (#304)"
+      }
+    ]
+  },
+  {
     "version": "0.69.17",
     "date": "2026-11-22",
     "changes": [

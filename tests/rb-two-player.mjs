@@ -365,6 +365,35 @@
  *     gone after that, so the run ends there: no hash compare. Reported as
  *     `cRollbackTrap` in summary.json. The other fault knobs are refused
  *     with it.
+ *   START_SILENT=1   The host's delay and start frame (`rb-delay:`,
+ *     `rb-init-frame:`) never reach the guest: the host's page drops them as
+ *     it sends them, every time (specs/engine_start.qnt). A guest runs no
+ *     frame until it arms its C engine with the host's delay, and one that
+ *     has none by the deadline (RB_INIT_TIMEOUT_MS) stops and says so; it
+ *     used to arm with its own delay (RB-INIT-TIMEOUT). The run fails unless
+ *     the guest logged START-FAIL reason=no-host, showed the message, never
+ *     armed and ran no frame, and the host dropped it (PEER-PHANTOM) and
+ *     kept advancing. The guest never plays, so the run ends there: no
+ *     battle and no hash compare. Reported as `startSilent`.
+ *   START_LOST=1   The host's first delay and start frame are lost (dropped
+ *     as the host sends them) and the guest's channel to the host closes
+ *     while it waits for them. The armed host sends both again on every
+ *     channel that opens (specs/engine_start.qnt, HOST_SENDS_BOTH): the
+ *     guest arms with the host's delay when the channel is back, and the
+ *     match is played and compared as any other. The run fails unless the
+ *     host dropped them, the guest waited, its channel was closed and
+ *     opened again, and it armed with the host's delay and never stopped.
+ *     Reported as `startLost`. Both START knobs are refused with every
+ *     other fault knob.
+ *   START_HIDDEN=1   START_LOST, and while the guest waits its tab is hidden
+ *     and shown again (`visibilitychange`, as HIDE_GUEST_MS) after the host
+ *     has run frames. The lifecycle return used to move a waiting page's
+ *     frame forward to the last remote frame it had seen, so the host's
+ *     start frame was not its own and it stopped (START-FAIL start-frame;
+ *     specs/engine_start.qnt, tabReturnWhileWaitingTest). Fails unless the
+ *     START_LOST checks pass, the guest's tab came back, and its log shows
+ *     the return left its frame alone (`waiting to arm — no
+ *     fast-forward/resync`) and no fast-forward.
  *   RESYNC_ONE_BACK=1   A resync that lands exactly one frame behind the
  *     guest's counter (specs/ring_after_resync.qnt). A third of the way into
  *     the battle the guest's tick is paused (the engine's own pauseTick, as
@@ -683,6 +712,9 @@ const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
 const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const MALFORMED_PEER = process.env.MALFORMED_PEER === '1';
+const START_SILENT = process.env.START_SILENT === '1';
+const START_HIDDEN = process.env.START_HIDDEN === '1';
+const START_LOST = process.env.START_LOST === '1' || START_HIDDEN;
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 // CATCH_UP_HOLE_MS: with DROP_PEER_MS, how long the host drops its input
 // packets on the reconnected channel from its first one.
@@ -1151,6 +1183,8 @@ if (
     SYNC_FOLLOW_UP ||
     MALFORMED_PEER ||
     HEAL_BOTH_SIDES ||
+    START_SILENT ||
+    START_LOST ||
     CATCH_UP_HOLE_MS > 0 ||
     ASK_UNANSWERED_STALL_MS > 0 ||
     ROLLBACK_AT_EDGE ||
@@ -1158,6 +1192,35 @@ if (
     CATCH_UP_MS > 0)
 ) {
   console.log('C_ROLLBACK_TRAP is mutually exclusive with the other fault knobs');
+  process.exit(1);
+}
+if (
+  (START_SILENT || START_LOST) &&
+  ((START_SILENT && START_LOST) ||
+    FREEZE_MS > 0 ||
+    THROTTLE_GUEST ||
+    HIDE_GUEST_MS > 0 ||
+    CLICK_DURING_BATTLE ||
+    DROP_SIGNALING_MS > 0 ||
+    DROP_PEER_MS > 0 ||
+    DELAY_SYNC_ANSWER_MS > 0 ||
+    LINK_KBPS > 0 ||
+    LOSE_INPUTS_BEFORE_FALLBACK ||
+    DOUBLE_RESYNC_ASK ||
+    UNANSWERED_SOCKET_RESYNC ||
+    RESYNC_FAULT ||
+    DESYNC_GUEST ||
+    SYNC_FOLLOW_UP ||
+    MALFORMED_PEER ||
+    HEAL_BOTH_SIDES ||
+    C_ROLLBACK_TRAP ||
+    CATCH_UP_HOLE_MS > 0 ||
+    ASK_UNANSWERED_STALL_MS > 0 ||
+    ROLLBACK_AT_EDGE ||
+    PAST_WINDOW_FORCED ||
+    CATCH_UP_MS > 0)
+) {
+  console.log('START_SILENT and START_LOST are mutually exclusive with each other and the other fault knobs');
   process.exit(1);
 }
 // The held answer, then its catch-up.
@@ -1694,7 +1757,7 @@ const setSignalingDown = async (page, down) => {
 const host = await mkPage(hostBrowser, 'host');
 const guest = await mkPage(guestBrowser, 'guest', {
   throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : HIDE_GUEST_MS && !HIDE_GUEST_FROZEN ? 1 : 0,
-  hidden: HIDE_GUEST_MS > 0,
+  hidden: HIDE_GUEST_MS > 0 || START_HIDDEN,
   suspendAudio: SUSPEND_GUEST_AUDIO,
   resyncOneBack: RESYNC_FAULT !== null,
 });
@@ -1743,6 +1806,26 @@ if (FORCE_DELAY !== null) {
   }
   console.log(`FORCE_DELAY: both pages pick ${FORCE_DELAY}`);
 }
+// START_SILENT / START_LOST: the host's page drops its delay and start
+// frame as it sends them, for good or until the guest's channel is closed.
+if (START_SILENT || START_LOST) {
+  await host.evaluate(() => {
+    const send = RTCDataChannel.prototype.send;
+    window.__knDropStart = true;
+    window.__knDroppedStart = 0;
+    RTCDataChannel.prototype.send = function (data) {
+      if (
+        window.__knDropStart &&
+        typeof data === 'string' &&
+        (data.startsWith('rb-delay:') || data.startsWith('rb-init-frame:'))
+      ) {
+        window.__knDroppedStart++;
+        return;
+      }
+      return send.call(this, data);
+    };
+  });
+}
 if (RESYNC_OFF) {
   await host.evaluate(() => {
     const box = document.getElementById('opt-resync');
@@ -1752,6 +1835,113 @@ if (RESYNC_OFF) {
   console.log('RESYNC_OFF: the host starts with resync off');
 }
 await host.click('#start-btn');
+const guestLog = () => guest.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+const hostLog = () => host.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+const tapGesturePrompts = async () => {
+  for (const p of [host, guest]) {
+    if (await p.locator('#gesture-prompt:not(.hidden)').count()) {
+      await p
+        .locator('#gesture-prompt')
+        .click({ force: true })
+        .catch(() => {});
+    }
+  }
+};
+const startFrameOf = (p) => p.evaluate(() => window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0);
+if (START_SILENT) {
+  const report = { failLine: null };
+  const t = Date.now();
+  while (Date.now() - t < 45000 && !report.failLine) {
+    await tapGesturePrompts();
+    report.failLine = (await guestLog()).split('\n').find((l) => /START-FAIL reason=no-host/.test(l)) || null;
+    if (!report.failLine) await host.waitForTimeout(500);
+  }
+  report.dropped = await host.evaluate(() => window.__knDroppedStart);
+  report.error = await guest.evaluate(() => {
+    const el = document.getElementById('error-msg');
+    return el && !el.classList.contains('hidden') ? el.textContent.trim() : null;
+  });
+  // The host drops the stopped guest at the input deadline and plays on.
+  const tHost = Date.now();
+  while (Date.now() - tHost < 30000 && !/PEER-PHANTOM slot=1/.test(await hostLog())) await host.waitForTimeout(500);
+  const [g0, h0] = await Promise.all([startFrameOf(guest), startFrameOf(host)]);
+  await host.waitForTimeout(5000);
+  const [g1, h1] = await Promise.all([startFrameOf(guest), startFrameOf(host)]);
+  const [hostSync, guestSync] = await Promise.all([hostLog(), guestLog()]);
+  fs.writeFileSync(`${OUT}/host-sync.txt`, hostSync);
+  fs.writeFileSync(`${OUT}/guest-sync.txt`, guestSync);
+  Object.assign(report, {
+    hostDropped: /PEER-PHANTOM slot=1/.test(hostSync),
+    guestArmed: /C-ROLLBACK init: max=/.test(guestSync),
+    guestFrame: g1,
+    guestFramesAfter: g1 - g0,
+    hostFramesAfter: h1 - h0,
+  });
+  const startSilentFailed = !(
+    report.failLine &&
+    report.dropped >= 2 &&
+    /no word from the host/i.test(report.error || '') &&
+    !report.guestArmed &&
+    report.guestFrame === 0 &&
+    report.guestFramesAfter === 0 &&
+    report.hostDropped &&
+    report.hostFramesAfter > 0
+  );
+  fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify({ mode: MODE, startSilent: report }, null, 1));
+  console.log(
+    startSilentFailed
+      ? 'START_SILENT: the guest did not stop and say so, or the host did not play on:'
+      : 'START_SILENT: the guest stopped and said so; the host dropped it and played on:',
+    JSON.stringify(report),
+  );
+  for (const b of new Set([hostBrowser, guestBrowser])) await b.close();
+  process.exit(startSilentFailed ? 1 : 0);
+}
+// START_LOST: once the guest waits, close its channel to the host and let the
+// host's sends through; the host sends both again when the channel opens.
+const startLostReport = START_LOST ? { waited: false, closed: false } : null;
+if (START_LOST) {
+  const t = Date.now();
+  while (Date.now() - t < 45000 && !startLostReport.waited) {
+    await tapGesturePrompts();
+    startLostReport.waited = /C-ROLLBACK deferred: waiting for host/.test(await guestLog());
+    if (!startLostReport.waited) await host.waitForTimeout(500);
+  }
+  await host.waitForTimeout(1500);
+  startLostReport.dropped = await host.evaluate(() => {
+    window.__knDropStart = false;
+    return window.__knDroppedStart;
+  });
+  if (START_HIDDEN) {
+    // The host has run and its inputs have reached the guest; then the
+    // guest's tab is hidden and shown again while it still waits. Kept short:
+    // the host drops a guest whose inputs stay away 5 s, and the guest arms
+    // only once its channel is back. The page acts on a return after 500 ms
+    // or more in the background.
+    await host.waitForTimeout(500);
+    await guest.evaluate(() => {
+      window.__knHidden = true;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await host.waitForTimeout(700);
+    await guest.evaluate(() => {
+      window.__knHidden = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    startLostReport.hiddenAndShown = true;
+    console.log("START_HIDDEN: the waiting guest's tab was hidden and shown again");
+  }
+  startLostReport.closed = await guest.evaluate(() => {
+    const hostPeer = Object.values(window.KNState.peers).find((q) => q?.slot === 0);
+    if (!hostPeer?.dc || hostPeer.dc.readyState !== 'open') return false;
+    hostPeer.dc.close();
+    return true;
+  });
+  startLostReport.closedAt = Date.now();
+  console.log(
+    `START_LOST: the host's start messages were dropped (${startLostReport.dropped}); guest channel closed: ${startLostReport.closed}`,
+  );
+}
 
 // Dismiss the tap-to-start prompt on whichever page shows it. Tracks how
 // many times the guest's prompt was found visible and clicked — with
@@ -4262,6 +4452,26 @@ const summary = {
   ...(VISUAL_CHECK ? { visualCheck } : {}),
 };
 if (dropPeerReport) summary.dropPeer = dropPeerReport;
+if (START_LOST) {
+  const armDelayOf = (log) => (log.match(/C-ROLLBACK init: max=\d+ delay=(\d+)/) || [])[1];
+  const armLine = G.sync.split('\n').find((l) => /C-ROLLBACK init: max=/.test(l)) || '';
+  Object.assign(startLostReport, {
+    armLine,
+    hostDelay: armDelayOf(H.sync),
+    armedWithHostDelay: !!armDelayOf(H.sync) && armDelayOf(G.sync) === armDelayOf(H.sync),
+    // Every start message the host sent before the close was dropped, so
+    // the guest can only have armed from the ones sent when its channel opened.
+    stopped: /START-FAIL/.test(G.sync),
+  });
+  if (START_HIDDEN) {
+    Object.assign(startLostReport, {
+      returned: /tab visible \(was background/.test(G.sync),
+      keptFrame: /bg-return: waiting to arm — no fast-forward\/resync/.test(G.sync),
+      fastForward: /fast-forward: /.test(G.sync),
+    });
+  }
+  summary.startLost = startLostReport;
+}
 if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
 if (catchUpReport) summary.catchUp = catchUpReport;
 if (LOSE_INPUTS_BEFORE_FALLBACK) summary.loseBeforeFallback = loseBeforeFallbackReport;
@@ -4982,6 +5192,28 @@ if (RESYNC_FAULT)
         : 'RESYNC_SAME_FRAME: the resync landed on a frame kn_pre_tick had saved and not run:',
     JSON.stringify(resyncOneBackReport),
   );
+const startLostFailed =
+  START_LOST &&
+  !(
+    startLostReport.dropped >= 2 &&
+    startLostReport.waited &&
+    startLostReport.closed &&
+    startLostReport.armLine &&
+    startLostReport.armedWithHostDelay &&
+    !startLostReport.stopped &&
+    (!START_HIDDEN ||
+      (startLostReport.hiddenAndShown &&
+        startLostReport.returned &&
+        startLostReport.keptFrame &&
+        !startLostReport.fastForward))
+  );
+if (START_LOST)
+  console.log(
+    startLostFailed
+      ? "START_LOST: the guest did not arm with the host's delay after its channel came back:"
+      : 'START_LOST: the host sent its delay and start frame again on the new channel and the guest armed with them:',
+    JSON.stringify(startLostReport),
+  );
 // Every mode: no frame run on a prediction of an input the peer is known to
 // have made, or one C did not record (specs/reconnect_inputs.qnt).
 const predictedKnownFailed = (H.predictedKnown || 0) + (G.predictedKnown || 0) > 0;
@@ -4994,6 +5226,7 @@ console.log(
   }),
 );
 const failed =
+  startLostFailed ||
   predictedKnownFailed ||
   resetComboFailed ||
   addressMapFailed ||
