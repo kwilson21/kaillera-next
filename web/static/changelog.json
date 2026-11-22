@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.17",
+    "date": "2026-11-22",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "push a fresh state to a guest a follow-up recovery skipped (#306)"
+      }
+    ]
+  },
+  {
     "version": "0.69.16",
     "date": "2026-11-22",
     "changes": [
