@@ -175,3 +175,127 @@ def test_the_misprediction_buffer_does_not_outlive_its_module():
         "if (_mispredBufPtr && _mispredBufMod === stopMod) stopMod._free(_mispredBufPtr);"
         in stop
     )
+
+
+def _answer_direct(
+    *, confirmed, phantom=False, result="[]", c_rollback=True, reset=False
+):
+    """Run the engine's _answerDirectSyncRequest with a stub push that resolves
+    to `result` (the skipped sids, or null when nothing went out); return the
+    push options and the follow-ups it scheduled."""
+    src = LOCKSTEP_JS.read_text()
+    start = src.index("  const _answerDirectSyncRequest = (sid, requestId) => {")
+    helper = src[start : src.index("\n  };\n", start) + 5]
+    script = textwrap.dedent(
+        f"""
+        const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        globalThis.window = {{
+          EJS_emulator: {{ gameManager: {{ Module: {{}} }} }},
+          KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }},
+        }};
+        const _syncLog = () => {{}};
+        const _useCRollback = {json.dumps(c_rollback)};
+        const _liveStateConfirmed = () => {json.dumps(confirmed)};
+        const _peers = {{ g: {{ slot: 1 }} }};
+        const _peerPhantom = {{ 1: {json.dumps(phantom)} }};
+        let _syncQueueEpoch = 1;
+        const _syncQueueGen = {{}};
+        const _scheduledSyncRequests = [];
+        const _followUpWatches = new Map();
+        let _frameNum = 1986;
+        const SYNC_COORD_TIMEOUT_MS = 3000;
+        const pushes = [];
+        const pushSyncState = (sid, proactive, options) => {{
+          pushes.push({{ sid, proactive, options }});
+          for (const w of options.watchFor || []) _followUpWatches.set(w, {{ frame: _frameNum }});
+          return Promise.resolve({result});
+        }};
+        eval({json.dumps(helper)} + `
+          _answerDirectSyncRequest('g', 7);
+          if ({json.dumps(reset)}) _syncQueueEpoch++;
+          _frameNum = 1990;
+          setTimeout(() => process.stdout.write(JSON.stringify({{
+            pushes, scheduled: _scheduledSyncRequests, watches: [..._followUpWatches.keys()],
+          }})), 0);
+        `);
+        """
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    return json.loads(result.stdout)
+
+
+def test_a_direct_answer_taken_unconfirmed_is_watched_and_followed_up():
+    out = _answer_direct(confirmed=False)
+    assert out["pushes"] == [
+        {
+            "sid": "g",
+            "proactive": False,
+            "options": {"requestIds": {"g": 7}, "watchFor": ["g"]},
+        }
+    ]
+    [follow] = out["scheduled"]
+    assert (
+        follow["targetSid"] == "g"
+        and follow["followUp"] == 1
+        and follow["requestId"] == 7
+    )
+    # Due at the frame reached when the answer went out, with its watch.
+    assert follow["targetFrame"] == 1990 and follow["watch"] == {"frame": 1986}
+
+
+def test_a_direct_answer_to_a_phantom_is_left_to_its_recovery():
+    # A phantom's recovery replaces any request queued for it with its own
+    # resync; followed up meanwhile it would get a full state every deadline.
+    out = _answer_direct(confirmed=True, phantom=True)
+    assert out["pushes"][0]["options"]["watchFor"] == ["g"]
+    assert out["scheduled"] == []
+
+
+def test_a_direct_answer_is_watched_however_confirmed_it_looks_when_asked():
+    # Confirmation is the dispatcher's to judge once the state was taken (a
+    # push queued behind another is taken later), with any phantom peer making
+    # it unconfirmed; the answer is always watched and its follow-up queued.
+    for c_rollback, confirmed in ((True, True), (False, False)):
+        out = _answer_direct(confirmed=confirmed, c_rollback=c_rollback)
+        assert out["pushes"] == [
+            {
+                "sid": "g",
+                "proactive": False,
+                "options": {"requestIds": {"g": 7}, "watchFor": ["g"]},
+            }
+        ]
+        assert len(out["scheduled"]) == 1
+
+
+def test_the_dispatcher_skips_a_follow_up_only_with_no_phantom_peer():
+    src = LOCKSTEP_JS.read_text()
+    dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
+    dispatch = dispatch[: dispatch.index("\n  };\n")]
+    assert "const anyPhantom = Object.values(_peerPhantom).some(Boolean);" in dispatch
+    assert "confirmedFor(r) && !anyPhantom," in dispatch
+
+
+def test_a_direct_answer_not_sent_or_reset_since_schedules_nothing():
+    for result in ("null", '["g"]'):
+        out = _answer_direct(confirmed=False, result=result)
+        # Not sent: its watch follows nothing and is dropped.
+        assert out["scheduled"] == [] and out["watches"] == []
+    out = _answer_direct(confirmed=False, reset=True)
+    # Reset since: the watch is resetPeerState's to drop, not this answer's.
+    assert out["scheduled"] == [] and out["watches"] == ["g"]
+
+
+def test_the_direct_request_goes_through_the_watched_answer():
+    src = LOCKSTEP_JS.read_text()
+    handler = src[src.index("// Immediate (no -at: suffix): push now") :]
+    handler = handler[: handler.index("// JSON messages")]
+    assert "_answerDirectSyncRequest(remoteSid, requestId);" in handler
+    assert "pushSyncState(" not in handler

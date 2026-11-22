@@ -10368,7 +10368,7 @@
             });
             _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
           } else {
-            pushSyncState(remoteSid, false, { waitForResult: false, requestIds: { [remoteSid]: requestId } });
+            _answerDirectSyncRequest(remoteSid, requestId);
           }
         }
         // JSON messages
@@ -16003,6 +16003,51 @@
     });
   };
   const SYNC_FOLLOW_UP_MAX = 3;
+
+  // A direct request (`sync-request-full`, no target frame: the guest's
+  // BOOT-SYNC after a late join, a reconnect, a visibility or network change)
+  // is answered at once, at the frame the host has reached. A state taken
+  // there while an input it consumed was still predicted (a peer's, a
+  // phantom's) can change through a later rollback, so every direct answer is
+  // watched and followed up like a coordinated answer. Whether it was
+  // confirmed is decided by _dispatchScheduledSyncs once the state was
+  // actually taken (a push queued behind another is taken later), not here:
+  // the follow-up is skipped when the frame is confirmed with no phantom, the
+  // state was delivered and no prediction differed; otherwise it is sent once
+  // confirmed or at its deadline, within SYNC_FOLLOW_UP_MAX. Unwatched, such
+  // an answer was final, and a late joiner played on split for the rest of
+  // the match (specs/sync_follow_up.qnt, DIRECT_WATCHED).
+  const _answerDirectSyncRequest = (sid, requestId) => {
+    const requestIds = { [sid]: requestId };
+    const epoch = _syncQueueEpoch;
+    const gen = _syncQueueGen[sid] || 0;
+    Promise.resolve(pushSyncState(sid, false, { requestIds, watchFor: [sid] })).then((skipped) => {
+      // Still the guest it was sent to: not gone, reset (reconnect) or a
+      // match stopped since (those are resetPeerState's job).
+      const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
+      const sent = skipped != null && !skipped.includes(sid);
+      // A newer request from this guest replaces the follow-up.
+      const replaced = _scheduledSyncRequests.some((q) => q.targetSid === sid);
+      const targetPhantom = !!_peerPhantom[_peers[sid]?.slot];
+      const rules = window.KNCore.syncFollowUp;
+      if (!rules.directFollowUpDue(current, sent, replaced, targetPhantom)) {
+        // Not sent: the guest asks again, and the watch follows nothing.
+        if (rules.directWatchIsStale(current, sent, replaced)) _followUpWatches.delete(sid);
+        if (current && sent && targetPhantom)
+          _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid}: a phantom, its recovery resyncs it`);
+        return;
+      }
+      _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}: answered, follow-up scheduled`);
+      _scheduledSyncRequests.push({
+        targetFrame: _frameNum,
+        targetSid: sid,
+        followUp: 1,
+        requestId: requestId || 0,
+        deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+        watch: _followUpWatches.get(sid) ?? null,
+      });
+    });
+  };
 
   // True when this peer's live state at the start of _frameNum is final: no
   // replay in flight or pending, and every input it consumed is real. Frames
