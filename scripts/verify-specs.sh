@@ -543,7 +543,11 @@ ring_after_resync() {
 engine_start() {
   local START=specs/engine_start.qnt
   verify "$START" engine_start_current allHold
-  verify "$START" engine_start_before theHostsStartIsWhereTheGuestIs
+  # A tab that comes back while its page waits moves the page's frame:
+  # start, GO, lose the delay, reopen, arm, a frame, the return, the start
+  # frame (8 steps; tabReturnWhileWaitingTest).
+  expect_violation "$START" engine_start_before theHostsStartIsWhereTheGuestIs 8
+  expect_violation "$START" engine_start_jump_on_return aGuestStopsOnlyWhenTheHostIsUnreachable 8
   # A solo match: start, arm, one frame (3 steps; soloTest).
   expect_violation "$START" engine_start_before everyFrameRunsOnTheCEngine
   # A guest that hears nothing: start, three ticks, the deadline (5 steps).

@@ -8,8 +8,9 @@
  * The guest arms only with the host's delay, at the frame it is on, and never
  * when the host gave it another frame. specs/engine_start.qnt models the
  * handshake (`armsWithTheHostsDelay`, `theHostsStartIsWhereTheGuestIs`):
- * since no page runs a frame before it arms, the host's start frame is always
- * the guest's own, so `stopFrame` is a loud failure for a case that does not
+ * since no page runs a frame before it arms, and a waiting page keeps its
+ * frame when its tab comes back, the host's start frame is always the
+ * guest's own, so `stopFrame` is a loud failure for a case that does not
  * happen, not a path a match takes. A guest that has no delay from the host
  * by the deadline stops and says so; it never arms with a delay of its own
  * (`aGuestStopsOnlyWhenTheHostIsUnreachable`: the armed host sends both again

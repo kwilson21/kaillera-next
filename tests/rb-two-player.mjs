@@ -382,6 +382,15 @@
  *     opened again, and it armed with the host's delay and never stopped.
  *     Reported as `startLost`. Both START knobs are refused with every
  *     other fault knob.
+ *   START_HIDDEN=1   START_LOST, and while the guest waits its tab is hidden
+ *     and shown again (`visibilitychange`, as HIDE_GUEST_MS) after the host
+ *     has run frames. The lifecycle return used to move a waiting page's
+ *     frame forward to the last remote frame it had seen, so the host's
+ *     start frame was not its own and it stopped (START-FAIL start-frame;
+ *     specs/engine_start.qnt, tabReturnWhileWaitingTest). Fails unless the
+ *     START_LOST checks pass, the guest's tab came back, and its log shows
+ *     the return left its frame alone (`waiting to arm — no
+ *     fast-forward/resync`) and no fast-forward.
  *   RESYNC_ONE_BACK=1   A resync that lands exactly one frame behind the
  *     guest's counter (specs/ring_after_resync.qnt). A third of the way into
  *     the battle the guest's tick is paused (the engine's own pauseTick, as
@@ -679,7 +688,8 @@ const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
 const DESYNC_GUEST = process.env.DESYNC_GUEST === '1';
 const MALFORMED_PEER = process.env.MALFORMED_PEER === '1';
 const START_SILENT = process.env.START_SILENT === '1';
-const START_LOST = process.env.START_LOST === '1';
+const START_HIDDEN = process.env.START_HIDDEN === '1';
+const START_LOST = process.env.START_LOST === '1' || START_HIDDEN;
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
 // CATCH_UP_HOLE_MS: with DROP_PEER_MS, how long the host drops its input
 // packets on the reconnected channel from its first one.
@@ -1710,7 +1720,7 @@ const setSignalingDown = async (page, down) => {
 const host = await mkPage(hostBrowser, 'host');
 const guest = await mkPage(guestBrowser, 'guest', {
   throttleHz: THROTTLE_GUEST ? THROTTLE_GUEST_HZ : HIDE_GUEST_MS && !HIDE_GUEST_FROZEN ? 1 : 0,
-  hidden: HIDE_GUEST_MS > 0,
+  hidden: HIDE_GUEST_MS > 0 || START_HIDDEN,
   suspendAudio: SUSPEND_GUEST_AUDIO,
   resyncOneBack: RESYNC_FAULT !== null,
 });
@@ -1865,6 +1875,25 @@ if (START_LOST) {
     window.__knDropStart = false;
     return window.__knDroppedStart;
   });
+  if (START_HIDDEN) {
+    // The host has run and its inputs have reached the guest; then the
+    // guest's tab is hidden and shown again while it still waits. Kept short:
+    // the host drops a guest whose inputs stay away 5 s, and the guest arms
+    // only once its channel is back. The page acts on a return after 500 ms
+    // or more in the background.
+    await host.waitForTimeout(500);
+    await guest.evaluate(() => {
+      window.__knHidden = true;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await host.waitForTimeout(700);
+    await guest.evaluate(() => {
+      window.__knHidden = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    startLostReport.hiddenAndShown = true;
+    console.log("START_HIDDEN: the waiting guest's tab was hidden and shown again");
+  }
   startLostReport.closed = await guest.evaluate(() => {
     const hostPeer = Object.values(window.KNState.peers).find((q) => q?.slot === 0);
     if (!hostPeer?.dc || hostPeer.dc.readyState !== 'open') return false;
@@ -4266,6 +4295,13 @@ if (START_LOST) {
     // the guest can only have armed from the ones sent when its channel opened.
     stopped: /START-FAIL/.test(G.sync),
   });
+  if (START_HIDDEN) {
+    Object.assign(startLostReport, {
+      returned: /tab visible \(was background/.test(G.sync),
+      keptFrame: /bg-return: waiting to arm — no fast-forward\/resync/.test(G.sync),
+      fastForward: /fast-forward: /.test(G.sync),
+    });
+  }
   summary.startLost = startLostReport;
 }
 if (delaySyncAnswerReport) summary.delaySyncAnswer = delaySyncAnswerReport;
@@ -4968,7 +5004,12 @@ const startLostFailed =
     startLostReport.closed &&
     startLostReport.armLine &&
     startLostReport.armedWithHostDelay &&
-    !startLostReport.stopped
+    !startLostReport.stopped &&
+    (!START_HIDDEN ||
+      (startLostReport.hiddenAndShown &&
+        startLostReport.returned &&
+        startLostReport.keptFrame &&
+        !startLostReport.fastForward))
   );
 if (START_LOST)
   console.log(

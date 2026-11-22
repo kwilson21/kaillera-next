@@ -168,6 +168,8 @@ const LateJoinState = Schema.Struct({
   frame: Schema.Number,
   data: Encoded,
   effectiveDelay: Schema.optional(Schema.Number),
+  // The host runs every frame on the C engine, a delay of 0 included.
+  cEngine: Schema.optional(Schema.Boolean),
   rbTransport: Schema.optional(Schema.String),
   rngValues: Sidecar,
   saveRam: Schema.optional(Schema.NullOr(Encoded)),

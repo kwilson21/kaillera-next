@@ -204,6 +204,10 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
     saveRam: 'H4sI',
   };
   assert.equal(issueOf('data-message', lateJoin), null);
+  // The host says its C engine runs (a delay of 0 included); a host from
+  // before sends nothing, and the field is the schema's, so not anything goes.
+  assert.equal(issueOf('data-message', { ...lateJoin, effectiveDelay: 0, cEngine: true }), null);
+  assert.notEqual(issueOf('data-message', { ...lateJoin, cEngine: 'yes' }), null);
   const syncState = {
     type: 'sync-state-socket',
     targetSid: 'g',

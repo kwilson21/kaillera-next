@@ -77,9 +77,11 @@ test('old against new: equal everywhere but the differences specs/engine_start.q
           const at = JSON.stringify({ heardDelay, heardStart, ownFrame, waited, step, old });
           if (heardStart >= 0 && heardStart !== ownFrame) {
             // theHostsStartIsWhereTheGuestIs: no page runs a frame before it
-            // arms, so this never happens. Before, the guest waited for the
-            // delay, then stepped to a later frame on the old path or armed
-            // at its own; now it stops at once, whatever else it has.
+            // arms, and a waiting page's frame no longer moves when its tab
+            // comes back (tabReturnWhileWaitingTest), so this does not
+            // happen. Before, the guest waited for the delay, then stepped to
+            // a later frame on the old path or armed at its own; now it stops
+            // at once, whatever else it has.
             assert.equal(step, 'stopFrame', at);
             note('another start frame');
           } else if (heardDelay === 0) {

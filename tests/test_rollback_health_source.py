@@ -123,6 +123,73 @@ def test_every_page_arms_the_c_engine_solo_included():
     assert hold_idx < c_branch_idx
 
 
+def test_only_the_host_sets_the_start():
+    """A waiting guest arms with `rb-delay:` and stops on an `rb-init-frame:`
+    other than its own frame, so another player's would let it stop any
+    guest's start: both are the host's word only, as rb-transport is."""
+    src = LOCKSTEP_JS.read_text()
+
+    for kind, sets in (("rb-delay", "window._rbHostDelay = hostDelay;"), ("rb-init-frame", "window._rbHostInitFrame = hostInitFrame;")):
+        handler = src[src.index(f"if (e.data.startsWith('{kind}:')) {{") :]
+        handler = handler[: handler.index("\n        }\n")]
+        guard = handler.index("if (_peers[remoteSid]?.slot !== 0) {")
+        assert guard < handler.index(sets), kind
+        assert "return;" in handler[guard : handler.index(sets)], kind
+
+
+def test_a_trap_while_arming_ends_the_match():
+    """Arming clears the wait before kn_rollback_init runs; a trap there left
+    the page neither armed nor waiting, held at skip:not-armed with no message
+    and no deadline (I1). It ends the match as any core trap does."""
+    src = LOCKSTEP_JS.read_text()
+
+    guest = src[src.index("const _guestStart = (source) => {") :]
+    guest = guest[: guest.index("\n  };\n")]
+    arm = guest.index("window._rbDoInit(")
+    assert guest.rindex("try {", 0, arm) < arm < guest.index("_handleCoreFatal('rollback-init', e);")
+    host = src[src.index("const tryInitRollback = () => {") :]
+    host = host[: host.index("\n      };\n")]
+    init = host.index("doRollbackInit(DELAY_FRAMES);")
+    assert host.rindex("try {", 0, init) < init < host.index("_handleCoreFatal('rollback-init', e);")
+    # Not reached; if it were, it ends the match rather than holding.
+    hold = src[src.index("_markTickReturn('skip:not-armed');") :][:200]
+    assert "_handleCoreFatal('not-armed'" in hold
+
+
+def test_a_stopped_start_keeps_its_message():
+    """A later start on a page whose start stopped (a late join) showed "The
+    emulator crashed" in place of why it stopped."""
+    src = LOCKSTEP_JS.read_text()
+
+    stop = src[src.index("const _stopAtStart = (reason, detail = {}) => {") :]
+    stop = stop[: stop.index("\n  };\n")]
+    assert "_coreFatalMessage = message;" in stop
+    start = src[src.index("const startLockstep = () => {") :][:600]
+    assert "_notifyCoreFatal(_coreFatalMessage);" in start
+
+
+def test_a_joiner_stops_on_a_host_whose_delay_of_0_is_the_old_path():
+    """A host from before every page armed (kept through a deploy, a solo match
+    at delay 0 on the old JS path) does not say cEngine; a joiner armed on the
+    C engine beside it would run another engine. It stops and says so."""
+    src = LOCKSTEP_JS.read_text()
+
+    send = src[src.index("async function sendLateJoinState(remoteSid) {") :]
+    assert "cEngine: _useCRollback," in send[: send.index("inputBridge")]
+    load = src[src.index("const lateJoinDelay = _hostDelayFrom(msg.effectiveDelay);") :][:900]
+    gate = load.index("if (lateJoinDelay === 0 && msg.cEngine !== true) {")
+    assert gate < load.index("_stopAtStart('old-host'") < load.index("window._rbHostDelay = lateJoinDelay;")
+    assert "'old-host':" in src
+
+
+def test_the_arm_log_says_where_the_frame_came_from():
+    src = LOCKSTEP_JS.read_text()
+
+    assert "(host-authoritative)" not in src
+    assert "host start frame (${source})" in src
+    assert "own frame at the deadline (${source})" in src
+
+
 def test_the_c_engine_sends_the_funnel_milestone():
     """milestone_reached (the admin timeline's "actually played" mark) was sent
     only from the old path's tail of tick(); every frame now runs on the C
@@ -318,7 +385,7 @@ def test_a_guest_arms_on_the_rule_and_never_with_its_own_delay():
     guest_idx = src.index("const _guestStart = (source) => {")
     guest_src = src[guest_idx : src.index("const startLockstep = () => {", guest_idx)]
     assert "window.KNCore.guestStartStep(heardDelay, heardStart, _frameNum, waitedMs, RB_INIT_TIMEOUT_MS)" in guest_src
-    assert "window._rbDoInit(heardDelay, _frameNum);" in guest_src
+    assert "window._rbDoInit(\n          heardDelay,\n          _frameNum," in guest_src
     assert "_stopAtStart('no-host'" in guest_src and "_stopAtStart('start-frame'" in guest_src
     for gone in ("_rbPendingInitCatchup", "RB-INIT-CATCHUP", "RB-INIT-TIMEOUT", "_rbFallbackDelay"):
         assert gone not in src

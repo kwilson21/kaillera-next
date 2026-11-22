@@ -6392,6 +6392,7 @@
   let _isApplyingLateJoinState = false; // re-entrancy guard for handleLateJoinState (rejects dup state packets mid-load)
   let _tickInterval = null; // setInterval handle for tick scheduler pump
   let _coreFatalError = false; // set once the WASM core traps; the page must reload to play again
+  let _coreFatalMessage; // the message a stopped start showed; a later start shows it again
   let _externalTickPaused = false; // demo/UI pause: gates the tick callback without tearing down state
   let _tickNextAt = 0;
   const TICK_TARGET_MS = 1000 / 60;
@@ -10168,6 +10169,13 @@
         //      kept here only for the case where init somehow happened
         //      first (shouldn't happen for guests now).
         if (e.data.startsWith('rb-delay:')) {
+          // Only the host's word: a waiting guest arms with it, or stops on a
+          // start frame other than its own, so another player's would let it
+          // stop any guest's start (the same rule as rb-transport).
+          if (_peers[remoteSid]?.slot !== 0) {
+            _syncLog(`rb-delay: from slot=${_peers[remoteSid]?.slot ?? 'unknown'} ignored — not the host`);
+            return;
+          }
           const hostDelay = _hostDelayFrom(e.data.split(':')[1]);
           if (hostDelay >= 0) {
             window._rbHostDelay = hostDelay;
@@ -10191,6 +10199,10 @@
         // and exchanged input-frame numbers no longer correspond to the
         // same simulation point on both sides.
         if (e.data.startsWith('rb-init-frame:')) {
+          if (_peers[remoteSid]?.slot !== 0) {
+            _syncLog(`rb-init-frame: from slot=${_peers[remoteSid]?.slot ?? 'unknown'} ignored — not the host`);
+            return;
+          }
           const hostInitFrame = parseInt(e.data.split(':')[1], 10);
           if (Number.isFinite(hostInitFrame) && hostInitFrame >= 0) {
             window._rbHostInitFrame = hostInitFrame;
@@ -12848,6 +12860,9 @@
         frame: capturedFrame,
         data: encoded.data,
         effectiveDelay: DELAY_FRAMES,
+        // This page runs every frame on the C engine, at a delay of 0 too.
+        // A host from before that ran a delay of 0 on the old JS path.
+        cEngine: _useCRollback,
         rbTransport: _rbTransport,
         rngValues,
         saveRam,
@@ -13115,6 +13130,13 @@
       // Without this, startLockstep sets _rbPendingInit=true and the
       // tick loop is completely gated, causing a black screen.
       const lateJoinDelay = _hostDelayFrom(msg.effectiveDelay);
+      // A host from before every page armed the C engine ran a delay of 0 on
+      // the old JS path (a solo match it kept through a deploy). Armed here,
+      // the two pages would run different engines; stop and say so.
+      if (lateJoinDelay === 0 && msg.cEngine !== true) {
+        _stopAtStart('old-host', { effectiveDelay: 0 });
+        return;
+      }
       if (lateJoinDelay >= 0) window._rbHostDelay = lateJoinDelay;
       // The joiner's _frameNum was set to msg.frame above. Set the
       // matching host init frame so tryInitRollback fires immediately
@@ -14306,6 +14328,8 @@
   // trapped (specs/engine_start.qnt).
   const START_FAIL_MESSAGES = {
     core: "This page's emulator can't run online play. Reload the page to rejoin the match.",
+    'old-host':
+      "The match couldn't start: the host is on an older version of the site. Ask them to reload the page, then rejoin.",
     'no-host': "The match couldn't start: no word from the host. Reload the page to rejoin the match.",
     'start-frame':
       "The match couldn't start: this page and the host disagree on where it begins. Reload the page to rejoin the match.",
@@ -14315,6 +14339,8 @@
     // As after a trap: only a reload starts this page again.
     _coreFatalError = true;
     const message = START_FAIL_MESSAGES[reason] || START_FAIL_MESSAGES['no-host'];
+    // A later start on this page (a late join) shows this again, not a crash.
+    _coreFatalMessage = message;
     _syncLog(`START-FAIL reason=${reason} f=${_frameNum} ${JSON.stringify(detail)}`);
     KNEvent('start-fail', `match could not start (${reason})`, { reason, frame: _frameNum, ...detail });
     _phase = PHASE_STOPPED;
@@ -14613,7 +14639,18 @@
           `RB-INIT-NO-START-FRAME source=${source} — armed with the host's delay=${heardDelay} at f=${_frameNum}`,
         );
       }
-      window._rbDoInit(heardDelay, _frameNum);
+      // A trap while arming leaves the page neither armed nor waiting: it
+      // ends the match as any core trap does, never a silent hold.
+      try {
+        window._rbDoInit(
+          heardDelay,
+          _frameNum,
+          heardStart >= 0 ? `host start frame (${source})` : `own frame at the deadline (${source})`,
+        );
+      } catch (e) {
+        _handleCoreFatal('rollback-init', e);
+        return false;
+      }
       return true;
     }
     if (step === 'stopFrame') {
@@ -14628,7 +14665,7 @@
     // Late join and reconnect cannot resume a dead core.
     if (_coreFatalError) {
       _syncLog('FATAL-CORE-ABORT start blocked — core is dead, reload required');
-      _notifyCoreFatal();
+      _notifyCoreFatal(_coreFatalMessage);
       return;
     }
     if (_phase === PHASE_RUNNING) return;
@@ -14843,7 +14880,7 @@
       // before initializing — initializing first with locally-computed delay
       // and then "updating DELAY_FRAMES" later only fixes the JS-side
       // variable, not the C engine's internal delay.
-      const doRollbackInit = (effectiveDelay, initFrameOverride = null) => {
+      const doRollbackInit = (effectiveDelay, initFrameOverride = null, initSource = null) => {
         if (!detMod?._kn_rollback_init) {
           _stopAtStart('core', { missing: ['_kn_rollback_init'] });
           return;
@@ -14901,8 +14938,7 @@
           // startLockstep has checked the core has _kn_set_frame.
           detMod._kn_set_frame(initFrame);
           _syncLog(
-            `C-ROLLBACK init: set C frame to ${initFrame}` +
-              (initFrameOverride != null ? ` (host-authoritative)` : ` (local)`),
+            `C-ROLLBACK init: set C frame to ${initFrame} (${initSource ?? (initFrameOverride != null ? 'given' : 'local')})`,
           );
         }
         rb_numPlayers = numPlayers;
@@ -15014,8 +15050,13 @@
       const tryInitRollback = () => {
         if (_playerSlot === 0) {
           // Host: init immediately at local frame; doRollbackInit broadcasts
-          // rb-init-frame inside so guests can match.
-          doRollbackInit(DELAY_FRAMES);
+          // rb-init-frame inside so guests can match. A trap here ends the
+          // match, as on a guest (_guestStart).
+          try {
+            doRollbackInit(DELAY_FRAMES);
+          } catch (e) {
+            _handleCoreFatal('rollback-init', e);
+          }
         } else {
           // I1 (MF2): the guest holds from here, and tick() asks
           // KNCore.guestStartStep each frame until it arms or stops.
@@ -15320,6 +15361,14 @@
     const _requestLifecycleFullResync = (reason) => {
       if (_useCRollback) {
         _syncLog(`${reason}: rollback mode — no fast-forward/resync (behind=${_lastRemoteFrame - _frameNum})`);
+        return;
+      }
+      // Waiting to arm: the page has run no frame, so there is nothing to
+      // catch up, and moving its frame would leave it on a frame other than
+      // the host's start, which stops it (specs/engine_start.qnt,
+      // tabReturnWhileWaitingTest).
+      if (window._rbPendingInit) {
+        _syncLog(`${reason}: waiting to arm — no fast-forward/resync (f=${_frameNum})`);
         return;
       }
 
@@ -16814,9 +16863,13 @@
     _chk('post-skip-gate');
 
     // Every frame runs on the C engine (specs/engine_start.qnt,
-    // everyFrameRunsOnTheCEngine). A page that has not armed it holds.
+    // everyFrameRunsOnTheCEngine). A page that is waiting to arm returned
+    // above (skip:rb-pending-init, with its deadline), and one whose arming
+    // trapped has stopped, so this is not reached; if it were, holding would
+    // be a stall with no deadline (I1), so it ends the match instead.
     if (!_useCRollback) {
       _markTickReturn('skip:not-armed');
+      _handleCoreFatal('not-armed', new Error('a tick with the C engine neither armed nor waiting'));
       return;
     }
 
