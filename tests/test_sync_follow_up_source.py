@@ -251,17 +251,28 @@ def test_a_direct_answer_to_a_phantom_is_unconfirmed_for_it():
     assert len(out["scheduled"]) == 1
 
 
-def test_a_confirmed_direct_answer_is_final():
+def test_a_direct_answer_is_watched_however_confirmed_it_looks_when_asked():
+    # Confirmation is the dispatcher's to judge once the state was taken (a
+    # push queued behind another is taken later), with any phantom peer making
+    # it unconfirmed; the answer is always watched and its follow-up queued.
     for c_rollback, confirmed in ((True, True), (False, False)):
         out = _answer_direct(confirmed=confirmed, c_rollback=c_rollback)
         assert out["pushes"] == [
             {
                 "sid": "g",
                 "proactive": False,
-                "options": {"waitForResult": False, "requestIds": {"g": 7}},
+                "options": {"requestIds": {"g": 7}, "watchFor": ["g"]},
             }
         ]
-        assert out["scheduled"] == []
+        assert len(out["scheduled"]) == 1
+
+
+def test_the_dispatcher_skips_a_follow_up_only_with_no_phantom_peer():
+    src = LOCKSTEP_JS.read_text()
+    dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
+    dispatch = dispatch[: dispatch.index("\n  };\n")]
+    assert "const anyPhantom = Object.values(_peerPhantom).some(Boolean);" in dispatch
+    assert "confirmedFor(r) && !anyPhantom," in dispatch
 
 
 def test_a_direct_answer_not_sent_or_reset_since_schedules_nothing():

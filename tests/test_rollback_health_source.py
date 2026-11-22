@@ -898,7 +898,6 @@ def test_only_its_own_answer_ends_a_resync_request():
     direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId) => {") :]
     direct = direct[: direct.index("\n  };\n")]
     assert "const requestIds = { [sid]: requestId };" in direct
-    assert "pushSyncState(sid, false, { waitForResult: false, requestIds });" in direct
     assert "pushSyncState(sid, false, { requestIds, watchFor: [sid] })" in direct
     assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
 

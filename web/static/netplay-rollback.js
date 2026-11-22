@@ -16007,21 +16007,18 @@
   // A direct request (`sync-request-full`, no target frame: the guest's
   // BOOT-SYNC after a late join, a reconnect, a visibility or network change)
   // is answered at once, at the frame the host has reached. A state taken
-  // there while an input it consumed was still predicted can change through a
-  // later rollback, so it is watched and followed up like a coordinated
-  // answer: the follow-up goes through _dispatchScheduledSyncs, sent once
-  // confirmed only if a prediction differed, or at its deadline, within
-  // SYNC_FOLLOW_UP_MAX. Unwatched, such an answer was final, and a late
-  // joiner played on split for the rest of the match
-  // (specs/sync_follow_up.qnt, DIRECT_WATCHED).
+  // there while an input it consumed was still predicted (a peer's, a
+  // phantom's) can change through a later rollback, so every direct answer is
+  // watched and followed up like a coordinated answer. Whether it was
+  // confirmed is decided by _dispatchScheduledSyncs once the state was
+  // actually taken (a push queued behind another is taken later), not here:
+  // the follow-up is skipped when the frame is confirmed with no phantom, the
+  // state was delivered and no prediction differed; otherwise it is sent once
+  // confirmed or at its deadline, within SYNC_FOLLOW_UP_MAX. Unwatched, such
+  // an answer was final, and a late joiner played on split for the rest of
+  // the match (specs/sync_follow_up.qnt, DIRECT_WATCHED).
   const _answerDirectSyncRequest = (sid, requestId) => {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    const unconfirmed = (_useCRollback && !_liveStateConfirmed(mod)) || !!_peerPhantom[_peers[sid]?.slot];
     const requestIds = { [sid]: requestId };
-    if (!unconfirmed) {
-      pushSyncState(sid, false, { waitForResult: false, requestIds });
-      return;
-    }
     const epoch = _syncQueueEpoch;
     const gen = _syncQueueGen[sid] || 0;
     Promise.resolve(pushSyncState(sid, false, { requestIds, watchFor: [sid] })).then((skipped) => {
@@ -16031,9 +16028,7 @@
       if (skipped == null || skipped.includes(sid)) return;
       // A newer request from this guest replaces the follow-up.
       if (_scheduledSyncRequests.some((q) => q.targetSid === sid)) return;
-      _syncLog(
-        `SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}: answered unconfirmed, follow-up scheduled`,
-      );
+      _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}: answered, follow-up scheduled`);
       _scheduledSyncRequests.push({
         targetFrame: _frameNum,
         targetSid: sid,
