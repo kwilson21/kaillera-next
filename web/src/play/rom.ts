@@ -43,14 +43,18 @@ export type HostRomSource = {
   readonly hostRom?: NestedHostRom | null;
 };
 
-/** The host's ROM out of any of those payloads; the flat camelCase key wins. */
+/**
+ * The host's ROM out of any of those payloads; the flat camelCase key wins.
+ * An empty hash or name is none, and so is a size that is not a number.
+ */
 export const hostRomFromData = (data: HostRomSource | null | undefined): HostRom => {
   const hostRom: NestedHostRom = data?.hostRom ?? {};
   const size = data?.romSize ?? data?.rom_size ?? hostRom.size ?? null;
+  const bytes = size === null ? null : Number(size);
   return {
-    hash: data?.romHash ?? data?.rom_hash ?? hostRom.hash ?? null,
-    name: data?.romName ?? data?.rom_name ?? hostRom.name ?? null,
-    size: size === null ? null : Number(size),
+    hash: (data?.romHash ?? data?.rom_hash ?? hostRom.hash ?? null) || null,
+    name: (data?.romName ?? data?.rom_name ?? hostRom.name ?? null) || null,
+    size: bytes !== null && Number.isFinite(bytes) ? bytes : null,
     gameId: data?.gameId ?? data?.game_id ?? hostRom.gameId ?? hostRom.game_id ?? null,
     changing: hostRom.changing === true,
   };
@@ -58,11 +62,13 @@ export const hostRomFromData = (data: HostRomSource | null | undefined): HostRom
 
 /**
  * One string that changes when the host's ROM does: by hash when there is
- * one, by name and size before the hash is known, empty for no ROM at all.
+ * one, by name and size before the hash is known, empty for no ROM at all
+ * (and before the room has said, `null`).
  */
-export const hostRomIdentityKey = (hash: string | null, name: string | null, size: number | null): string => {
-  if (hash) return `h:${hash}:${size ?? ''}`;
-  if (name || size !== null) return `n:${name || ''}:${size ?? ''}`;
+export const hostRomIdentityKey = (rom: Pick<HostRom, 'hash' | 'name' | 'size'> | null): string => {
+  if (!rom) return '';
+  if (rom.hash) return `h:${rom.hash}:${rom.size ?? ''}`;
+  if (rom.name || rom.size !== null) return `n:${rom.name || ''}:${rom.size ?? ''}`;
   return '';
 };
 

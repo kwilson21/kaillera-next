@@ -180,13 +180,10 @@
   // swapped quietly.
   let _romDroppedName = null;
   let _gameId = null; // derived from ROM hash via known_roms table
-  let _hostRomHash = null; // host's ROM hash for late-join verification
-  let _hostRomName = null; // host's current ROM display name
-  let _hostRomSize = null; // host's current ROM byte size
-  // The room names no host ROM because the host's new one is being hashed
-  // (hostRom.changing): the server's word, like the three above.
-  let _hostRomChanging = false;
-  let _hostRomIdentityResolved = false; // true once join-room/REST has reported host ROM (or confirmed there is none)
+  // The host's ROM as the room last reported it ({hash, name, size, gameId,
+  // changing}: hostRomFromData), replaced whole at each report. null until
+  // join-room or the REST lookup has reported it (or that there is none).
+  let _hostRom = null;
   let _pendingRomAutoload = null; // {lastHash, savedRom, drop, statusEl} — guest autoload deferred until host ROM is known
   let _pendingRomAutoloadTimer = null;
   let _hibernated = false; // true when emulator is hibernated between games
@@ -479,9 +476,10 @@
   } = window.KNCore.play;
 
   const hostRomDisplayName = () => {
-    if (_hostRomHash && _knownRoms[_hostRomHash]?.game) return _knownRoms[_hostRomHash].game;
-    if (_hostRomName) return _hostRomName;
-    if (_hostRomHash) return `Unknown ROM (${_hostRomHash.substring(1, 9)})`;
+    const hash = _hostRom?.hash;
+    if (hash && _knownRoms[hash]?.game) return _knownRoms[hash].game;
+    if (_hostRom?.name) return _hostRom.name;
+    if (hash) return `Unknown ROM (${hash.substring(1, 9)})`;
     return '';
   };
 
@@ -496,12 +494,12 @@
     const name = hostRomDisplayName();
     if (!name) {
       el.style.display = '';
-      el.textContent = _hostRomChanging ? 'Host is loading a ROM…' : 'Waiting for host to load a ROM';
+      el.textContent = _hostRom?.changing ? 'Host is loading a ROM…' : 'Waiting for host to load a ROM';
       el.className = 'host-rom-info pending';
       return;
     }
     const bits = [`Host ROM: ${name}`];
-    const size = formatRomSize(_hostRomSize);
+    const size = formatRomSize(_hostRom?.size);
     if (size) bits.push(size);
     el.style.display = '';
     el.textContent = bits.join(' | ');
@@ -514,19 +512,21 @@
 
   // The host's ROM is changing, as a guest sees it: the host's own page judges
   // its ROM against no one's.
-  const hostRomChanging = () => !isHost && _hostRomChanging;
+  const hostRomChanging = () => !isHost && !!_hostRom?.changing;
 
   // The loaded ROM against the host's: `pending` while its own hash is not in
   // (a size that is not the host's refuses it at once), and while the host's
   // ROM is changing (specs/rom_identity.qnt, hostChangesToTheGuestsRomTest).
-  const romVerdictNow = () =>
-    romIdentity.romVerdict(
+  const romVerdictNow = () => {
+    const hostSize = _hostRom?.size ?? null;
+    return romIdentity.romVerdict(
       localRomLoaded(),
       hostRomChanging(),
       romHashIsLoaded(),
-      romHashMismatch(_hostRomHash, _romHash),
-      _hostRomSize !== null && _romSize !== null && Number(_hostRomSize) !== Number(_romSize),
+      romHashMismatch(_hostRom?.hash, _romHash),
+      hostSize !== null && _romSize !== null && hostSize !== Number(_romSize),
     );
+  };
 
   const hostRomMismatch = () => romVerdictNow() === 'mismatch';
 
@@ -548,7 +548,7 @@
     clearLoadedRom();
     if (droppedName) showRomMismatch(droppedName);
     resetTransferForHostRomChange();
-    if (_hostRomHash) autoMatchRom(_hostRomHash);
+    if (_hostRom?.hash) autoMatchRom(_hostRom.hash);
     updateRomSharingUI();
   };
 
@@ -582,7 +582,7 @@
   const handleHostRomChanged = (hadPrevious, hasNext, toastOnChange) => {
     if (isHost) return;
     if (hadPrevious && toastOnChange) {
-      if (_hostRomChanging) showToast('Host is changing their ROM');
+      if (_hostRom?.changing) showToast('Host is changing their ROM');
       else showToast(hasNext ? 'Host selected a different ROM' : 'Host cleared their ROM');
     }
     if (!hasNext) {
@@ -596,7 +596,7 @@
       console.warn(
         '[play] host ROM mismatch - clearing our ROM',
         'host:',
-        _hostRomHash?.substring(0, 16) || _hostRomSize,
+        _hostRom?.hash?.substring(0, 16) || _hostRom?.size,
         'ours:',
         _romHash?.substring(0, 16) || _romSize,
       );
@@ -619,25 +619,20 @@
       updateHostRomInfo();
       return false;
     }
-    const prevKey = hostRomIdentityKey(_hostRomHash, _hostRomName, _hostRomSize);
-    const wasChanging = _hostRomChanging;
-    const next = hostRomFromData(data);
-    const nextKey = hostRomIdentityKey(next.hash, next.name, Number.isFinite(next.size) ? next.size : null);
-
-    _hostRomHash = next.hash || null;
-    _hostRomName = next.name || null;
-    _hostRomSize = Number.isFinite(next.size) ? next.size : null;
-    _hostRomChanging = next.changing;
-    _hostRomIdentityResolved = true;
+    const prev = _hostRom;
+    _hostRom = hostRomFromData(data);
+    const prevKey = hostRomIdentityKey(prev);
+    const nextKey = hostRomIdentityKey(_hostRom);
     // Flush any deferred autoload now that we know what the host has.
     if (_flushPendingRomAutoload) _flushPendingRomAutoload('host-rom-resolved');
-    _takeRoomGameId(next.gameId);
+    _takeRoomGameId(_hostRom.gameId);
+    const hostHash = _hostRom.hash;
     const cachedHash = _safeGet('localStorage', 'kaillera-rom-hash');
-    if (!localRomLoaded() && _hostRomHash && cachedHash && romHashMismatch(_hostRomHash, cachedHash)) {
+    if (!localRomLoaded() && hostHash && cachedHash && romHashMismatch(hostHash, cachedHash)) {
       console.warn(
         '[play] cached ROM mismatch - clearing before autoload',
         'host:',
-        _hostRomHash.substring(0, 16),
+        hostHash.substring(0, 16),
         'cached:',
         cachedHash.substring(0, 16),
       );
@@ -646,7 +641,7 @@
     }
 
     updateHostRomInfo();
-    if (prevKey !== nextKey || wasChanging !== _hostRomChanging) {
+    if (prevKey !== nextKey || !!prev?.changing !== _hostRom.changing) {
       handleHostRomChanged(!!prevKey, !!nextKey, toastOnChange);
       return true;
     }
@@ -1178,7 +1173,7 @@
             sharing: !!roomData.rom_sharing,
             hasRom: !!(_romBlob || _romBlobUrl),
             romHash: _romHash?.substring(0, 12),
-            hostHash: (_hostRomHash ?? '').substring(0, 12),
+            hostHash: (_hostRom?.hash ?? '').substring(0, 12),
           });
           // If ROM was already loaded from cache, notify server immediately.
           // Skip for guests if host's ROM hash is known and doesn't match —
@@ -1212,7 +1207,7 @@
               sharing: !!roomData.rom_sharing,
               hasRom: !!(_romBlob || _romBlobUrl),
               romHash: _romHash?.substring(0, 12),
-              hostHash: (_hostRomHash ?? '').substring(0, 12),
+              hostHash: (_hostRom?.hash ?? '').substring(0, 12),
             });
             console.log(
               `[play] mid-game join: isSpectator=${isSpectator}, mode=${mode}, player_count=${roomData.player_count}, max_players=${roomData.max_players}`,
@@ -3072,7 +3067,7 @@
       if (_pendingRomAutoload) runRomAutoload(trigger);
     };
     if (lastHash) {
-      if (!isHost && !_hostRomIdentityResolved) {
+      if (!isHost && !_hostRom) {
         _pendingRomAutoload = { lastHash, savedRom, drop, statusEl };
         if (statusEl && savedRom) statusEl.textContent = `Waiting for host ROM info before loading ${savedRom}…`;
         // Failsafe: if no host info ever arrives, fall back to autoload after
@@ -3099,11 +3094,12 @@
         clearTimeout(_pendingRomAutoloadTimer);
         _pendingRomAutoloadTimer = null;
       }
-      if (!isHost && _hostRomHash && romHashMismatch(_hostRomHash, ctx.lastHash)) {
+      const hostHash = _hostRom?.hash ?? null;
+      if (!isHost && hostHash && romHashMismatch(hostHash, ctx.lastHash)) {
         console.warn(
           '[play] cached ROM mismatch - skipping autoload',
           'host:',
-          _hostRomHash.substring(0, 16),
+          hostHash.substring(0, 16),
           'cached:',
           ctx.lastHash.substring(0, 16),
           'trigger:',
@@ -3112,7 +3108,7 @@
         // Try to load the host's hash from IDB (autoMatchRom) instead. Don't
         // emit rom-ready:false yet — we may still find a matching ROM.
         if (ctx.statusEl) ctx.statusEl.textContent = `Cached ROM doesn't match host — looking for match…`;
-        autoMatchRom(_hostRomHash);
+        autoMatchRom(hostHash);
         return;
       }
       crumb('rom-autoload-start', { hash: ctx.lastHash.substring(0, 12), trigger });
@@ -3122,8 +3118,8 @@
           name,
           trigger,
           pendingLateJoin: _isPendingLateJoin(),
-          hostHash: _hostRomHash?.substring(0, 12),
-          match: !_hostRomHash || !romHashMismatch(_hostRomHash, ctx.lastHash),
+          hostHash: hostHash?.substring(0, 12),
+          match: !hostHash || !romHashMismatch(hostHash, ctx.lastHash),
         });
         if (ok) {
           ctx.drop.classList.add('loaded');
@@ -3256,14 +3252,15 @@
         console.log('[play] showing the ROM hash failed:', err);
       }
       if (isHost && lastUsersData?.players) updateStartButton(lastUsersData.players);
-      // Guest ROM mismatch check: if the host's ROM hash is known and
-      // this ROM doesn't match, reject it and prompt re-upload.
-      if (!isHost && (_hostRomHash || _hostRomSize !== null) && hostRomMismatch()) {
+      // Guest ROM mismatch check: this ROM is not the host's (the verdict
+      // says so only once the host's hash or size is known), so it is
+      // refused and the player asked for another.
+      if (!isHost && hostRomMismatch()) {
         console.log(
           '[play] ROM mismatch — guest hash:',
           hash.substring(0, 16),
           'host hash:',
-          _hostRomHash?.substring(0, 16),
+          _hostRom?.hash?.substring(0, 16),
         );
         refuseRom(_knownRoms[hash]?.game || displayName);
         return;
@@ -3399,7 +3396,7 @@
         container.innerHTML = window.KNCore.play.romLibraryHtml(entries, {
           isHost,
           activeHash: _romHash,
-          hostHash: _hostRomHash,
+          hostHash: _hostRom?.hash ?? null,
         });
 
         for (const item of container.querySelectorAll('.rom-library-item')) {
@@ -3846,7 +3843,7 @@
   const dismissLateJoinPrompt = () => {
     crumb('dismiss-late-join', {
       romHash: _romHash?.substring(0, 12),
-      hostHash: _hostRomHash?.substring(0, 12),
+      hostHash: _hostRom?.hash?.substring(0, 12),
       sharingEnabled: _romSharingEnabled,
       sharingDecision: _romSharingDecision,
     });
