@@ -241,7 +241,19 @@ export interface RecoveryNotice {
   readonly hole: number;
   readonly firstFrame: number;
   readonly budget?: { readonly scope: 'source' | 'room'; readonly used: number; readonly limit: number };
+  /** The frame minus delay of the state the attempt delivered (-1: none). */
+  readonly deliveredBefore?: number;
+  /** The attempt is a follow-up (RecoveryManager.followUp), not a broadcast's. */
+  readonly followUp?: boolean;
 }
+/** What becomes of a settled recipient a later broadcast skipped. */
+export type FollowUpOutcome =
+  | { readonly kind: 'none' }
+  /** The state it settled on was taken at or after that broadcast's frame. */
+  | { readonly kind: 'covered'; readonly frame: number }
+  /** The room's capture budget is spent: left to the guest's own resync. */
+  | { readonly kind: 'budget'; readonly used: number; readonly limit: number }
+  | { readonly kind: 'push'; readonly attempt: RecoveryAttempt };
 export interface RecoveryTiming {
   readonly timeoutMs: number;
   readonly quietMs: number;
@@ -258,7 +270,7 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
   const publicationAttempts = new WeakMap<CaptureToken, ReadonlySet<RecoveryAttempt>>();
   // Only the original opened attempt belongs to a new publication fence.
   const originalSource = new WeakMap<RecoveryAttempt, number>();
-  const records = new Map<number, { snapshot: Snapshot; token: RecoveryAttempt }>();
+  const records = new Map<number, { snapshot: Snapshot; token: RecoveryAttempt; followUp?: boolean }>();
   // Recipients a later broadcast skipped because they were still owed an
   // earlier one. Settling that earlier state would leave them before the newer
   // hole: they are owed one fresh push (followUp). specs/recovery_delivery.qnt
@@ -309,13 +321,21 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       const effect = Option.getOrUndefined(decodeIssue(raw));
       if (!effect) continue;
       const type = effect.args[0].command.type;
-      const { pushes, hole, firstFrame } = next.context;
+      const { pushes, hole, firstFrame, deliveredBefore } = next.context;
       if (type === 'retry') remember(slot, hole, pushes);
       if (type === 'settled' || type === 'ended') counts.delete(slot);
       // A retry captures the current state, which already covers any later
       // hole; an ended or dropped recipient is owed nothing more.
       if (type !== 'settled') owedFollowUp.delete(slot);
-      notices.push({ type, attempt: record.token, pushes, hole, firstFrame });
+      notices.push({
+        type,
+        attempt: record.token,
+        pushes,
+        hole,
+        firstFrame,
+        deliveredBefore,
+        ...(record.followUp ? { followUp: true } : {}),
+      });
     }
     if (next.status === 'done') records.delete(slot);
     for (const notice of notices) Effect.runSync(Effect.sync(() => issue(notice)));
@@ -434,13 +454,24 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
         return [token];
       });
     },
-    /** After `attempt` settles: a fresh attempt for the same recipient when a
-     * later broadcast skipped it, else undefined. The caller pushes it a newly
-     * captured state, so the recipient does not stay on the earlier one. */
-    followUp: (attempt: RecoveryAttempt, now: number): RecoveryAttempt | undefined => {
+    /** After `attempt` settles on the state taken at `settledFrame` (-1:
+     * unknown): a fresh attempt for the same recipient when a later broadcast
+     * skipped it and that state is from before the broadcast's frame. The
+     * caller pushes it a newly captured state, so the recipient does not stay
+     * on the earlier one. A follow-up is a capture like a broadcast's and is
+     * charged to the room's capture budget; once that is spent it is left to
+     * the guest's own resync. It is not charged to the source's budget, whose
+     * exhaustion drops the source: another guest's slow acknowledgement must
+     * not cost a healthy source its place. */
+    followUp: (attempt: RecoveryAttempt, now: number, settledFrame = -1): FollowUpOutcome => {
       const owed = owedFollowUp.get(attempt.slot);
       owedFollowUp.delete(attempt.slot);
-      if (!owed || records.has(attempt.slot)) return undefined;
+      if (!owed || records.has(attempt.slot)) return { kind: 'none' };
+      if (settledFrame >= owed.firstFrame) return { kind: 'covered', frame: settledFrame };
+      roomCaptures = roomCaptures.filter((at) => now - at < SOURCE_CAPTURE_WINDOW_MS);
+      if (!sourceCaptureAllowed(roomCaptures.length, ROOM_CAPTURE_LIMIT))
+        return { kind: 'budget', used: roomCaptures.length, limit: ROOM_CAPTURE_LIMIT };
+      roomCaptures.push(now);
       const [snapshot] = initialTransition(recoveryMachine, {
         sid: attempt.sid,
         slot: attempt.slot,
@@ -451,8 +482,8 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
         ...timing,
       });
       const token = Object.freeze({ sid: attempt.sid, slot: attempt.slot, sequence: 1, wireId: ++nextWireId });
-      records.set(attempt.slot, { snapshot, token });
-      return token;
+      records.set(attempt.slot, { snapshot, token, followUp: true });
+      return { kind: 'push', attempt: token };
     },
     current: (attempt: RecoveryAttempt): boolean => records.get(attempt.slot)?.token === attempt,
     entries: (): readonly RecoveryAttempt[] => [...records.values()].map((record) => record.token),

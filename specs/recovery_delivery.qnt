@@ -229,59 +229,109 @@ module recovery_followup_fixed { import recovery_followup(PER_SOURCE = true).* }
 // it settles on a state from before the follow-up hole, while the host and
 // the other guests adopt the newer one: with 3+ players, a guest holding the
 // source's real input for that hole plays on split from the host's
-// prediction. A skipped recipient must end covered by a state captured at or
-// after the newest hole (a retry captures afresh, as does a follow-up push
-// started when its old attempt settles), or be dropped.
+// prediction. A skipped recipient must end on a state captured at or after
+// the newest hole (its own attempt's state when that was captured after it,
+// as a retry's is, or a follow-up push started when its old attempt
+// settles), or be dropped, or end (reconnect or phantom) into its own resync,
+// or be left visibly when the room's capture budget is spent.
+//
+// Covered is set when B applies a state, not when an attempt starts: each
+// attempt carries whether its state was captured after hole 2.
 module recovery_skipped {
   const FOLLOW_UP: bool
-  var bPending: bool    // B has a live attempt
-  var bCovered: bool    // B's attempt carries a state captured at or after hole 2
-  var hole2: bool       // the source's follow-up hole has been broadcast
+  // Captures the room may still make (ROOM_CAPTURE_LIMIT, bounded for the model).
+  pure val ROOM_CAPTURES = 2
+  var bPending: bool       // B has a live attempt
+  var bAfterHole: bool     // B's live attempt carries a state captured at or after hole 2
+  var bCovered: bool       // the state B applied was captured at or after hole 2
+  var hole2: bool          // the source's follow-up hole has been broadcast
   var bDropped: bool
-  var followUps: int    // fresh pushes started for B on settling
-  action init = all {
-    bPending' = true, bCovered' = false, hole2' = false, bDropped' = false, followUps' = 0,
+  var bEnded: bool         // reconnect or phantom: its own resync is owed
+  var bOwnResync: bool     // that resync not yet applied
+  var bLeft: bool          // a follow-up left for want of budget (logged)
+  var followUps: int       // fresh pushes started for B on settling
+  var captures: int        // captures the room made (broadcast + follow-ups)
+  action initWith(after: bool): bool = all {
+    bPending' = true, bAfterHole' = after, bCovered' = false, hole2' = false,
+    bDropped' = false, bEnded' = false, bOwnResync' = false, bLeft' = false,
+    followUps' = 0, captures' = 0,
   }
-  // Free recipients get the new broadcast; a busy B is skipped.
+  action init = initWith(false)
+  // Free recipients get the new broadcast (a capture); a busy B is skipped.
   action newHole = all {
-    not(hole2), not(bDropped), hole2' = true,
-    bCovered' = not(bPending), bPending' = true,
-    bDropped' = bDropped, followUps' = followUps,
+    not(hole2), not(bDropped), not(bEnded), captures < ROOM_CAPTURES,
+    hole2' = true, captures' = captures + 1,
+    bAfterHole' = if (bPending) bAfterHole else true, bPending' = true,
+    bCovered' = bCovered, bDropped' = bDropped, bEnded' = bEnded, bOwnResync' = bOwnResync,
+    bLeft' = bLeft, followUps' = followUps,
   }
-  // A retry captures the current state, which is after any hole broadcast so far.
+  // A retry captures the current state, after any hole broadcast so far.
   action retryB = all {
-    bPending, bCovered' = (bCovered or hole2),
-    bPending' = bPending, hole2' = hole2, bDropped' = bDropped, followUps' = followUps,
+    bPending, bAfterHole' = (bAfterHole or hole2),
+    bPending' = bPending, bCovered' = bCovered, hole2' = hole2, bDropped' = bDropped,
+    bEnded' = bEnded, bOwnResync' = bOwnResync, bLeft' = bLeft, followUps' = followUps, captures' = captures,
   }
+  // B applies and acknowledges its attempt's state. Owed a follow-up when
+  // skipped and that state is from before hole 2: pushed if the room can
+  // still capture, else left visibly.
   action ackB = all {
     bPending,
-    val owed = FOLLOW_UP and hole2 and not(bCovered)
+    val owed = FOLLOW_UP and hole2 and not(bAfterHole)
+    val push = owed and captures < ROOM_CAPTURES
     all {
-      bPending' = owed,
-      bCovered' = (bCovered or owed),
-      followUps' = if (owed) followUps + 1 else followUps,
+      bCovered' = bAfterHole,
+      bPending' = push,
+      bAfterHole' = if (push) true else bAfterHole,
+      followUps' = if (push) followUps + 1 else followUps,
+      captures' = if (push) captures + 1 else captures,
+      bLeft' = (bLeft or (owed and not(push))),
     },
-    hole2' = hole2, bDropped' = bDropped,
+    hole2' = hole2, bDropped' = bDropped, bEnded' = bEnded, bOwnResync' = bOwnResync,
   }
   action dropB = all {
     bPending, bPending' = false, bDropped' = true,
-    bCovered' = bCovered, hole2' = hole2, followUps' = followUps,
+    bAfterHole' = bAfterHole, bCovered' = bCovered, hole2' = hole2, bEnded' = bEnded,
+    bOwnResync' = bOwnResync, bLeft' = bLeft, followUps' = followUps, captures' = captures,
+  }
+  // Reconnect or phantom: the attempt ends; the guest's own resync follows.
+  action endB = all {
+    bPending, bPending' = false, bEnded' = true, bOwnResync' = true,
+    bAfterHole' = bAfterHole, bCovered' = bCovered, hole2' = hole2, bDropped' = bDropped,
+    bLeft' = bLeft, followUps' = followUps, captures' = captures,
+  }
+  // Its own resync is the host's current state: after any hole so far.
+  action ownResyncApplied = all {
+    bOwnResync, bOwnResync' = false, bCovered' = true,
+    bPending' = bPending, bAfterHole' = bAfterHole, hole2' = hole2, bDropped' = bDropped,
+    bEnded' = bEnded, bLeft' = bLeft, followUps' = followUps, captures' = captures,
   }
   action finished = all {
-    bPending' = bPending, bCovered' = bCovered, hole2' = hole2, bDropped' = bDropped, followUps' = followUps,
+    bPending' = bPending, bAfterHole' = bAfterHole, bCovered' = bCovered, hole2' = hole2,
+    bDropped' = bDropped, bEnded' = bEnded, bOwnResync' = bOwnResync, bLeft' = bLeft,
+    followUps' = followUps, captures' = captures,
   }
-  action step = any { newHole, retryB, ackB, dropB, finished }
-  val settledCoversNewestHole = (hole2 and not(bPending) and not(bDropped)) implies bCovered
+  action step = any { newHole, retryB, ackB, dropB, endB, ownResyncApplied, finished }
+  // Once B is settled (no attempt, no own resync pending), it is on a state
+  // after hole 2, unless dropped or left visibly for want of budget.
+  val settledCoversNewestHole =
+    (hole2 and not(bPending) and not(bOwnResync) and not(bDropped) and not(bLeft)) implies bCovered
   val followUpsBounded = followUps <= 1
-  val allHold = settledCoversNewestHole and followUpsBounded
+  val capturesBounded = captures <= ROOM_CAPTURES
+  val allHold = settledCoversNewestHole and followUpsBounded and capturesBounded
   run skippedThenAckedTest = init.then(newHole).then(ackB)
     .expect(settledCoversNewestHole == FOLLOW_UP)
   run followUpSettlesTest = init.then(newHole).then(ackB).then(if (FOLLOW_UP) ackB else finished)
-    .expect(FOLLOW_UP implies (not(bPending) and bCovered and followUps == 1))
+    .expect(FOLLOW_UP implies (not(bPending) and bCovered and followUps == 1 and captures == 2))
   run retryCoversTest = init.then(newHole).then(retryB).then(ackB)
+    .expect(not(bPending) and bCovered and followUps == 0)
+  run capturedAfterTest = initWith(true).then(newHole).then(ackB)
     .expect(not(bPending) and bCovered and followUps == 0)
   run freeRecipientTest = init.then(ackB).then(newHole).then(ackB)
     .expect(not(bPending) and bCovered and followUps == 0)
+  run endedIsResyncedTest = init.then(newHole).then(endB)
+    .expect(bOwnResync and not(bCovered))
+    .then(ownResyncApplied)
+    .expect(bCovered and allHold)
 }
 module recovery_skipped_current { import recovery_skipped(FOLLOW_UP = false).* }
 module recovery_skipped_fixed { import recovery_skipped(FOLLOW_UP = true).* }

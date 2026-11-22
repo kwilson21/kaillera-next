@@ -5489,19 +5489,32 @@
   const _escalationHeld = (slot, hole) => _recovery.held(slot, hole, _syncEnabled);
   const _forgetHolePushes = (slot) => _recovery.forgetHistory(slot);
 
-  const _handleRecoveryCommand = ({ type, attempt, pushes, hole, firstFrame, budget }) => {
+  const _handleRecoveryCommand = ({ type, attempt, pushes, hole, firstFrame, budget, deliveredBefore, followUp }) => {
     const { slot, sid } = attempt;
     if (type === 'retry') {
       _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${pushes}/${OVERDUE_MAX_PUSHES}`);
       pushSyncState(sid, false, { escalation: [attempt] });
     } else if (type === 'settled') {
-      _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${firstFrame} pushes=${pushes}`);
-      // A later broadcast skipped this guest while it still owed this one: the
-      // state it just settled on is from before that hole. Push it afresh.
-      const next = _recovery.followUp(attempt, performance.now());
-      if (next) {
-        _syncLog(`INPUT-ASK-PUSH-FOLLOWUP f=${_frameNum} slot=${slot} id=${next.wireId}`);
-        pushSyncState(sid, false, { escalation: [next] });
+      // The frame of the state it settled on (deliveredBefore is that minus delay).
+      const settledFrame = deliveredBefore >= 0 ? deliveredBefore + DELAY_FRAMES : -1;
+      _syncLog(
+        `INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${firstFrame} pushes=${pushes}` +
+          (followUp ? ` kind=follow-up state=${settledFrame}` : ''),
+      );
+      // A later broadcast skipped this guest while it still owed this one:
+      // unless the state it just settled on was taken at or after that
+      // broadcast's frame, it is from before that hole. Push it afresh.
+      const next = _recovery.followUp(attempt, performance.now(), settledFrame);
+      if (next.kind === 'push') {
+        _syncLog(`INPUT-ASK-PUSH-FOLLOWUP f=${_frameNum} slot=${slot} id=${next.attempt.wireId}`);
+        pushSyncState(sid, false, { escalation: [next.attempt] });
+      } else if (next.kind === 'covered') {
+        _syncLog(`INPUT-ASK-PUSH-FOLLOWUP-COVERED f=${_frameNum} slot=${slot} state=${next.frame}`);
+      } else if (next.kind === 'budget') {
+        _syncLog(
+          `INPUT-ASK-PUSH-FOLLOWUP-BUDGET f=${_frameNum} slot=${slot}: room capture budget spent ` +
+            `(used=${next.used} limit=${next.limit}); left to its own resync`,
+        );
       }
     } else if (type === 'ended') {
       const target = _peers[sid];

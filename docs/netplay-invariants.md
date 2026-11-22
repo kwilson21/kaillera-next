@@ -416,9 +416,14 @@ later hole from a settled source is broadcast to the recipients that are free;
 a recipient still owed the earlier broadcast is skipped, keeps its own attempt
 and retry budget, and is owed the newer state: a retry captures afresh and
 covers it, and if the earlier attempt settles instead, the host pushes that
-recipient one fresh state (`INPUT-ASK-PUSH-FOLLOWUP`). Without that push, with
-3+ players, the skipped guest would stay on a state from before the newer hole
-while the others adopt it.
+recipient one fresh state (`INPUT-ASK-PUSH-FOLLOWUP`), unless the state it
+settled on was itself taken at or after the newer broadcast's frame
+(`INPUT-ASK-PUSH-FOLLOWUP-COVERED`). Without that push, with 3+ players, the
+skipped guest would stay on a state from before the newer hole while the
+others adopt it. The follow-up is a capture charged to the room's capture
+budget (not the source's, whose exhaustion drops the source); once that is
+spent it is left to the guest's own resync (`INPUT-ASK-PUSH-FOLLOWUP-BUDGET`).
+Its settlement is logged `kind=follow-up`.
 
 State chunks use the dedicated sync channel only: the primary input channel cannot
 parse them. A rate-limited late-join request retains the dropped marker; the marker
