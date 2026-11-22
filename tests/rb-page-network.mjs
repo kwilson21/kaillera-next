@@ -114,6 +114,12 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   // 0, every input packet (binary, on `lockstep` or `rollback-input`) is held
   // that long. A channel never reorders, so what follows waits behind it.
   window.__knHoldInputsMs = 0;
+  // SYNC_FOLLOW_UP=direct (the guest page): while performance.now() is before
+  // window.__knHoldInputsUntil, every input packet (binary, on `lockstep` or
+  // `rollback-input`) is held until then, so all of them go out together at
+  // that moment; what the page sends after them on the same channel (its
+  // resync request) follows them in the same burst.
+  window.__knHoldInputsUntil = 0;
   // CATCH_UP_HOLE_MS (the host page): once window.__knDropInputsAfterOpenMs
   // is above 0, a channel whose first input packet goes out after that drops
   // every input packet (binary, on `lockstep` or `rollback-input`) from its
@@ -413,6 +419,12 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       data instanceof ArrayBuffer
     )
       hold = Math.max(hold, window.__knHoldInputsMs);
+    if (
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer &&
+      performance.now() < window.__knHoldInputsUntil
+    )
+      hold = Math.max(hold, window.__knHoldInputsUntil - performance.now());
     net.send(ch, data, bytesOf(data), hold, performance.now());
     arm(ch.pumped);
   };
