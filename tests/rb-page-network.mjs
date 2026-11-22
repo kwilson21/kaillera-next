@@ -134,8 +134,10 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   // and asks for them, and the asks are never answered.
   window.__knDropInputFrom = -1;
   window.__knDropInputTo = -1;
-  // ASK_UNANSWERED_ACKS: until __knDropSettledUntil, the page's
-  // `inputs-settled:` (its acknowledgement of a pushed state) is dropped too.
+  // ASK_UNANSWERED_ACK_LOST: until __knDropSettledUntil, the page's
+  // acknowledgements of a pushed state are dropped too: `recovery-settled:`
+  // (the one that settles a recovery) and `inputs-settled:` (which tells the
+  // host not to wait for the frames the state skipped).
   window.__knDropSettledUntil = 0;
   window.__knSettledDropped = 0;
   // ASK_UNANSWERED_ACKS (the host page): until __knDropSyncStateUntil, and only
@@ -364,7 +366,7 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
     if (
       performance.now() < window.__knDropSettledUntil &&
       typeof data === 'string' &&
-      data.startsWith('inputs-settled:')
+      (data.startsWith('recovery-settled:') || data.startsWith('inputs-settled:'))
     ) {
       window.__knSettledDropped++;
       return;

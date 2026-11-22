@@ -232,7 +232,8 @@
  *     state (`late-join loaded`), no mesh heal adds it back, no late input
  *     follows on the host, and the frames from the late join's state match
  *     (specs/drop_is_final.qnt). With ASK_UNANSWERED_ACK_LOST=1 the guest
- *     applies each push but drops its `inputs-settled:` for n ms: fails
+ *     applies each push but drops its `recovery-settled:` and
+ *     `inputs-settled:` for n ms: fails
  *     unless the push ends on the phantom the host's stall makes
  *     (`INPUT-ASK-PUSH-ENDED … phantom`), `PEER-RECOVERED` resyncs, nobody
  *     is given up on or dropped, and the frames from the last resync match.
@@ -572,11 +573,13 @@
  *     number, a kind no page knows, lockstep-ready JSON whose delay is not a
  *     number, and text that is not JSON; on `sync-state`, a sync-start
  *     header that is not one; and the guest also sends a sync-start that IS
- *     on its schema, which the host must refuse as a state header from a
- *     page that is not the host (one `state header refused` line on the
- *     host, none on the guest). Read raw, rb-delay and sync-start would have
- *     set the delay and the state transfer's frame to NaN. Each engine must
- *     drop them before any handler reads them
+ *     on its schema. The host must refuse both: its guest's sync-state
+ *     channel is not the current host's, and that gate runs before the
+ *     schema, so the host logs two `state header refused: from non-current
+ *     host channel` lines and no `[protocol] dropped dc sync-state
+ *     sync-start`; the guest refuses nothing. Read raw, rb-delay and
+ *     sync-start would have set the delay and the state transfer's frame to
+ *     NaN. Each engine must drop them before any handler reads them
  *     (KNCore.protocol.createBoundary): the run fails unless each page's sync
  *     log has exactly the expected `[protocol] dropped` lines (in any order:
  *     the two channels are not ordered against each other), all after the
@@ -691,7 +694,8 @@ const ASK_UNANSWERED_RECOVER_MS = 30000;
 // deadlines, about 17 s).
 const ASK_UNANSWERED_ACKS = process.env.ASK_UNANSWERED_ACKS === '1';
 // ASK_UNANSWERED_ACK_LOST=1: the guest gets each push and applies it, but its
-// acknowledgement is dropped. That message also tells the host not to wait
+// acknowledgements (`recovery-settled:` and `inputs-settled:`) are dropped.
+// The latter also tells the host not to wait
 // for the frames the state skipped, so the host stalls on them, its 5 s stall
 // deadline makes the guest a phantom, and the phantom ends the push
 // (END_ON_RECONNECT): PEER-RECOVERED's resync recovers it, nobody is dropped.
@@ -2219,6 +2223,11 @@ const MALFORMED_STRINGS = {
   // guest sends it, and the host must refuse it (`state header refused`).
   guestSyncState: ['sync-start:1:1:1:0'],
 };
+// What the host refuses: both of the guest's sync-start headers, the
+// malformed one included, at the channel gate (not the current host's
+// sync-state channel), which runs before the schema.
+const MALFORMED_HOST_REFUSED = 2;
+const MALFORMED_HOST_REFUSED_BY = 'state header refused: from non-current host channel';
 // The `[protocol] dropped <kind>` each receiving page must log, once each, in any order.
 const MALFORMED_DROPS = [
   'dc lockstep rb-check',
@@ -2229,6 +2238,9 @@ const MALFORMED_DROPS = [
   'dc lockstep (json)',
   'dc sync-state sync-start',
 ];
+// The host never reaches the schema with a sync-state string from its guest
+// (MALFORMED_HOST_REFUSED_BY), so it drops all but that one.
+const MALFORMED_HOST_DROPS = MALFORMED_DROPS.filter((kind) => kind !== 'dc sync-state sync-start');
 const malformedPeer = { hostAt: null, guestAt: null, sent: [false, false], frameLater: [0, 0] };
 const MALFORMED_FRAMES_AFTER = 30;
 // LOSE_INPUTS_BEFORE_FALLBACK: where each page's sync log stood when the drops began.
@@ -3509,10 +3521,11 @@ const peerDropped = { host: droppedIn(H.sync), guest: droppedIn(G.sync) };
 // was sent and without logging what it was, and went on playing.
 const malformedPeerReport = (() => {
   if (!MALFORMED_PEER) return null;
-  const side = (log, at, frameAfter, refusedExpected) => {
+  const side = (log, at, frameAfter, refusedExpected, refusedBy, dropsExpected) => {
     const refused = log
       .split('\n')
       .filter((line) => (at ? seqOf(line) > at.seq : false) && line.includes('state header refused'));
+    const refusedOther = refused.filter((line) => !line.includes(refusedBy)).length;
     const lines = log.split('\n').filter((line) => line.includes('[protocol] dropped'));
     const after = at ? lines.filter((line) => seqOf(line) > at.seq) : [];
     const kinds = droppedIn(after.join('\n'));
@@ -3526,20 +3539,30 @@ const malformedPeerReport = (() => {
       valuesLogged,
       framesAfter,
       refused: refused.length,
+      refusedOther,
       passed:
         !!at &&
         refused.length === refusedExpected &&
+        refusedOther === 0 &&
         lines.length === after.length &&
         // In any order: the sync-state channel is not ordered against lockstep.
-        JSON.stringify([...kinds].sort()) === JSON.stringify([...MALFORMED_DROPS].sort()) &&
+        JSON.stringify([...kinds].sort()) === JSON.stringify([...dropsExpected].sort()) &&
         valuesLogged === 0 &&
         framesAfter >= MALFORMED_FRAMES_AFTER,
     };
   };
-  // The host refuses the guest's state header; the guest refuses nothing
-  // (the host's malformed one is dropped by the schema before the guard).
-  const host = side(H.sync, malformedPeer.hostAt, malformedPeer.frameLater[0], 1);
-  const guest = side(G.sync, malformedPeer.guestAt, malformedPeer.frameLater[1], 0);
+  // The host refuses both of the guest's state headers at its channel gate;
+  // the guest refuses nothing (the host's malformed one is dropped by the
+  // schema, on the current host's channel).
+  const host = side(
+    H.sync,
+    malformedPeer.hostAt,
+    malformedPeer.frameLater[0],
+    MALFORMED_HOST_REFUSED,
+    MALFORMED_HOST_REFUSED_BY,
+    MALFORMED_HOST_DROPS,
+  );
+  const guest = side(G.sync, malformedPeer.guestAt, malformedPeer.frameLater[1], 0, '', MALFORMED_DROPS);
   return {
     sent: malformedPeer.sent,
     host,
