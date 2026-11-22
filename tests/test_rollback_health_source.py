@@ -895,19 +895,20 @@ def test_only_its_own_answer_ends_a_resync_request():
     # A direct request is answered by the watched answer, which numbers each
     # state it sends with the request it answers (specs/sync_follow_up.qnt).
     assert "_answerDirectSyncRequest(remoteSid, requestId);" in host
-    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId) => {") :]
+    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId, via = {}) => {") :]
     direct = direct[: direct.index("\n  };\n")]
     assert "const requestIds = { [sid]: requestId };" in direct
-    assert "pushSyncState(sid, false, { requestIds, watchFor: [sid] })" in direct
-    assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
+    assert "const options = { requestIds, watchFor: [sid]," in direct
+    assert "pushSyncState(sid, false, options)" in direct
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {" in src
 
     # A scheduled capture, its follow-ups and re-queues keep the number; a
     # sync the host schedules for its own reasons has none.
     dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
     dispatch = dispatch[: dispatch.index("\n  };\n")]
     assert "requestId: r.requestId || 0," in dispatch
-    assert "for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;" in dispatch
-    assert "pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] })" in dispatch
+    assert "for (const r of group) if (r.requestId) ids[r.targetSid] = r.requestId;" in dispatch
+    assert "pushSyncState(targetSid, false, { requestIds: requestIdsOf(group), watchFor, ...extra })" in dispatch
     recovery = src[src.index("push its state to the guest once it is final") :]
     recovery = recovery[: recovery.index("_settleInputsBefore(")]
     assert "requestId" not in recovery

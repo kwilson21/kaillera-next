@@ -178,13 +178,22 @@ def test_the_misprediction_buffer_does_not_outlive_its_module():
 
 
 def _answer_direct(
-    *, confirmed, phantom=False, result="[]", c_rollback=True, reset=False
+    *,
+    confirmed,
+    phantom=False,
+    result="[]",
+    c_rollback=True,
+    reset=False,
+    via=None,
+    queued=None,
 ):
     """Run the engine's _answerDirectSyncRequest with a stub push that resolves
     to `result` (the skipped sids, or null when nothing went out); return the
     push options and the follow-ups it scheduled."""
     src = LOCKSTEP_JS.read_text()
-    start = src.index("  const _answerDirectSyncRequest = (sid, requestId) => {")
+    start = src.index(
+        "  const _answerDirectSyncRequest = (sid, requestId, via = {}) => {"
+    )
     helper = src[start : src.index("\n  };\n", start) + 5]
     script = textwrap.dedent(
         f"""
@@ -200,7 +209,7 @@ def _answer_direct(
         const _peerPhantom = {{ 1: {json.dumps(phantom)} }};
         let _syncQueueEpoch = 1;
         const _syncQueueGen = {{}};
-        const _scheduledSyncRequests = [];
+        let _scheduledSyncRequests = {json.dumps(queued or [])};
         const _followUpWatches = new Map();
         let _frameNum = 1986;
         const SYNC_COORD_TIMEOUT_MS = 3000;
@@ -211,7 +220,7 @@ def _answer_direct(
           return Promise.resolve({result});
         }};
         eval({json.dumps(helper)} + `
-          _answerDirectSyncRequest('g', 7);
+          _answerDirectSyncRequest('g', 7, {json.dumps(via or {})});
           if ({json.dumps(reset)}) _syncQueueEpoch++;
           _frameNum = 1990;
           setTimeout(() => process.stdout.write(JSON.stringify({{
@@ -299,3 +308,63 @@ def test_the_direct_request_goes_through_the_watched_answer():
     handler = handler[: handler.index("// JSON messages")]
     assert "_answerDirectSyncRequest(remoteSid, requestId);" in handler
     assert "pushSyncState(" not in handler
+
+
+def test_a_socket_request_is_answered_and_followed_up_over_the_socket():
+    out = _answer_direct(
+        confirmed=False, via={"transport": "socket", "reason": "bg-return"}
+    )
+    assert out["pushes"] == [
+        {
+            "sid": "g",
+            "proactive": False,
+            "options": {
+                "requestIds": {"g": 7},
+                "watchFor": ["g"],
+                "transport": "socket",
+                "reason": "bg-return",
+            },
+        }
+    ]
+    [follow] = out["scheduled"]
+    assert follow["transport"] == "socket" and follow["followUp"] == 1
+
+
+def test_a_socket_follow_up_is_dispatched_over_the_socket_and_a_socket_send_is_delivered():
+    src = LOCKSTEP_JS.read_text()
+    dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
+    dispatch = dispatch[: dispatch.index("\n  };\n")]
+    # Reachable over the socket while the guest is known; one push each.
+    assert "r.transport === 'socket' ? !!p && !!_signalSocket" in dispatch
+    assert (
+        "for (const r of viaSocket) push([r], r.targetSid, { transport: 'socket', reason: 'socket-follow-up' });"
+        in dispatch
+    )
+    assert "...(r.transport ? { transport: r.transport } : {})," in dispatch
+    # A socket send records the state delivered, so an unchanged follow-up is skipped.
+    push = src[src.index("const pushSyncState = async (") :]
+    push = push[: push.index("socket sync too large")]
+    assert "if (watch && watch.frame === frame) watch.delivered = true;" in push
+
+
+def test_a_new_direct_answer_supersedes_a_queued_follow_up_to_the_same_guest():
+    # Asked again over the socket after its data-channel answer stalled: the
+    # earlier follow-up is dropped and this answer gets its own, over the socket.
+    old = {"targetFrame": 1980, "targetSid": "g", "followUp": 1, "requestId": 6}
+    other = {"targetFrame": 1980, "targetSid": "h", "followUp": 1, "requestId": 2}
+    out = _answer_direct(
+        confirmed=False, via={"transport": "socket"}, queued=[old, other]
+    )
+    assert out["scheduled"][0] == other
+    [new] = out["scheduled"][1:]
+    assert (
+        new["targetSid"] == "g"
+        and new["followUp"] == 1
+        and new["transport"] == "socket"
+    )
+    # A coordinated request from it still queued answers it: no follow-up added.
+    coord = {"targetFrame": 1990, "targetSid": "g", "requestId": 5}
+    out = _answer_direct(
+        confirmed=False, via={"transport": "socket"}, queued=[old, coord]
+    )
+    assert out["scheduled"] == [coord]
