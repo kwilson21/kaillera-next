@@ -76,10 +76,13 @@ def test_a_queued_transfer_never_reaches_a_new_connection():
     src = ENGINE.read_text()
     push = src[src.index("const pushSyncState = async (") :]
     # The targets and their connections are taken with the state, before any await.
-    capture = push.index("const targets = _syncTargetsFor(targetSid);")
-    assert push.index("const frame = _frameNum;") < capture < push.index("await ")
-    assert "_syncQueueGen[targetSid] || 0" in push[capture : push.index("await ")]
-    assert "sendSyncChunks(compressed, frame, isFull, targets, isProactive, requestIds)" in push
+    capture = push.index("const available = _syncTargetsFor(targetSid);")
+    copy = push.index("mod._kn_sync_read(")
+    first_await = push.index("await ")
+    assert push.index("const frame = capturedPublication?.frame ?? _frameNum;") < capture
+    assert capture < copy < first_await
+    assert "_syncQueueGen[targetSid] || 0" in push[capture:copy]
+    assert "sendSyncChunks(compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver)" in push
     assert "if (!_syncTargetCurrent(socketTarget)) {" in push
     targets_for = _block(src, "const _syncTargetsFor = (targetSid) => {")
     assert "epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0" in targets_for
@@ -135,7 +138,25 @@ def test_a_request_during_a_transfer_is_queued_not_dropped():
     src = ENGINE.read_text()
     start = src.index("const pushSyncState = async")
     head = src[start : src.index("const gm = window.EJS_emulator?.gameManager;", start)]
-    assert "_queuedSyncPushes.set(targetSid || '', options);" in head
+    # Newest options kept (the newer dispatch's watches are current); the
+    # earlier requests' numbers go with it. Coordinated callers share one
+    # completion; unbounded wire duplicates do not retain waiters.
+    assert "_queuedSyncPushes.set(key, entry);" in head
+    assert "? { ...options, requestIds: { ...(prev.options.requestIds || {}), ...(options.requestIds || {}) } }" in head
+    assert "watchFor: [...new Set(" not in head
+    assert (
+        "entry.promise = new Promise((resolve) => (entry.resolve = resolve));" in head
+    )
+    assert "return options.waitForResult === false ? null : prev.promise;" in head
+    assert "return options.waitForResult === false ? null : entry.promise;" in head
+    assert "entry.waiters" not in head
+    assert head.index("_queuedSyncPushes.set(key, entry);") < head.index(
+        "_recoveryTransfers.run("
+    )
+    run = src[src.index("const _runQueuedSyncPush = () => {") :][:600]
+    assert "(result) => entry.resolve?.(result)," in run
+    # An escalation push takes no lock and is never queued here.
+    assert "if (!escalation && (isProactive ? _proactivePushInFlight : _pushingSyncState)) {" in head
     assert "_runQueuedSyncPush();" in src[start:]
     # Per-peer state: resetPeerState drops the peer's queued push (I2), and
     # stop() all of them.

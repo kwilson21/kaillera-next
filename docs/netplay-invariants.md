@@ -40,9 +40,11 @@ recovered.
 | MENU-LOCKSTEP stall (lockstep path only, when the C rollback engine is not running: a controllable Smash Remix menu's input is missing) | `MAX_STALL_MS`, repeat per missing slot every `RESEND_TIMEOUT_MS` | Keep waiting, show the waiting overlay after 5s, and resend missing input request; never fabricate menu input | `MENU-LOCKSTEP-WAIT` / `MENU-LOCKSTEP resend-request` | rollback health audit 2026-04-27, corrected 2026-04-30 |
 | RB-INPUT-STALL (rollback gameplay input missing beyond budget). An input from before the last resync's frame minus the delay is never waited for (`_inputFloor`): the state both pages loaded holds its effect, and a guest moved forward by the resync never made it | `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom blocking peer, release rollback input stall | `RB-INPUT-STALL-TIMEOUT` | rollback health audit 2026-04-27; specs/resync_inputs.qnt `noWaitForAnInputThatCannotArrive` |
 | LOCKSTEP-WAIT (lockstep mode, and the demo's paused predictions: the input of a player for the frame about to run is missing; nothing is predicted). The rule is `lockstepStep` (`web/src/lockstep-wait.ts`, proved); the wait's start is credited for the page's own freeze like the others that drop a player | `MAX_STALL_MS` to ask again, `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` to give up | A hole (an input the player has made, as a later one arrived or was dropped) is asked for at once, as the rollback input stall does (`RB-INPUT-ASK`); any input still missing is asked for again at the first deadline; at the second the player is dropped (phantom) and the frame runs without it; the two resync when it is heard from again | `LOCKSTEP-WAIT` / `LOCKSTEP-WAIT-TIMEOUT` | specs/tick_deadlines.qnt `everyWaitHasADeadline`; specs/resync_inputs.qnt ASK_FOR_MISSING |
+| RB-INPUT-STALL after a reconnect reset (`resetPeerState(slot, 'reconnect')`): the C slot is inactive and the page no longer knows the frame last heard from the peer, so a frame run on its missing input would record no prediction, and nothing would correct it (the CATCH_UP_HOLE split at 1344). A frame at or above the floor that lacks the peer's input waits until one input at or above the floor has been taken in (`_awaitFirstInputAfterReset`, cleared when C is fed) | the same `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom the peer, as the stall above; `PEER-RECOVERED` then resyncs | `RB-INPUT-STALL … (first input since the reconnect)`; every two-player run fails on `PREDICTED-KNOWN` | specs/reconnect_inputs.qnt `theHostNeverPredictsAFrameThePeerHasMade` |
 | Pending sync state held while a rollback replay is in flight (C refuses `kn_set_frame` mid-replay) | `SYNC_APPLY_REPLAY_WAIT_MS = 1000` | Drop the replay (`kn_clear_replay_state`) and load the state | `SYNC-APPLY-DEFERRED` | two-browser test 2026-09-24 |
 | Pending sync state held while a catch-up runs (`_catchUpTo >= 0`) | `MAX_CATCH_UP_FRAMES` ticks: each slice runs a frame or ends the catch-up | Apply it once the catch-up ends | `SYNC-CATCH-UP` | specs/resync_flow.qnt `theGuestIsNeverRewound` |
-| Catch-up waiting on a peer's input deeper than the rollback window (asked for with `resend:`) | `CATCH_UP_HOLE_WAIT_MS = 3000` | End the catch-up; normal ticks play the rest (and stall and ask there as usual) | `SYNC-CATCH-UP ... stopped: slot N input K not here after 3000ms` | Codex review of #261 |
+| Catch-up waiting on a peer's input deeper than the rollback window (asked for with `resend:`) | `CATCH_UP_HOLE_WAIT_MS = 3000`; a slice that waits spends the tick's 60 Hz slot, so the wait is one slice a slot, not a spin (before: 59k-397k slices, each resending the frame's input, which buried the ask on the reliable channel for ~50 s) | End the catch-up; normal ticks play the rest (and stall and ask there as usual) | `SYNC-CATCH-UP ... stopped: slot N input K not here after 3000ms` | Codex review of #261; specs/catch_up_wait.qnt `aWaitingCatchUpDoesNotSpin`, `theAskIsNotBuried` |
+| An ask for a missing input (`resend:<frame>`, every 500 ms, `RB-INPUT-ASK`) that is never answered, or a real input past the rollback window that differs from its prediction (C's `DEEP-MISPREDICT-SKIP`: it cannot be rolled back). Not a tick-loop return: the page predicts that input and runs on, split from the peer | `INPUT_ASK_OVERDUE_ASKS = 3` asks and `INPUT_ASK_OVERDUE_MS = 1500` since the first (`overdueAskStep`, `web/src/resync-request.ts`, proved); a late mismatch is overdue at once | Resync onto the host's state: the host pushes it to that guest (`pushSyncState(sid, false)`), a guest sends an owed `sync-request-full` (its own deadline, `_resyncRequestInFlight` below) | `INPUT-ASK-OVERDUE`, `INPUT-PAST-WINDOW-MISMATCH` | specs/ask_escalation.qnt `everyAskEnds`, `noEarlyEscalation`; `ASK_UNANSWERED_STALL_MS`; the late mismatch only through `PAST_WINDOW_FORCED`, a test-only step past the edge stall that guards it in normal play (`ROLLBACK_AT_EDGE` checks the deepest rollback that stall allows) |
 | `_lateJoinPaused` (host pauses tick loop while late-joiners load state). The pause belongs to the joiners being served (`_lateJoinServing`): it ends when none is left | `LATE_JOIN_TIMEOUT_MS = 15000` per joiner, armed when its pause begins (before the state is compressed); a repeated request for the same joiner keeps it | `hardDisconnectPeer()` that joiner; resume and broadcast the roster once no joiner is still being served. A timer acts only on its own serve, so it never disconnects a joiner who has since joined | `LATE-JOIN-TIMEOUT` | §MF5; specs/late_join_pause.qnt `holdToday` |
 | Late-join pause on a page that is not the host (`late-join-pause` from the host). Only the host's word pauses or resumes it; a joiner's `late-join-ready` does not | `LATE_JOIN_GUEST_PAUSE_TIMEOUT_MS = 20000` from the host's latest pause message (checked in the tick loop; longer than the host's per-joiner deadline) | Resume and reset pacing | `LATE-JOIN-GUEST-PAUSE-TIMEOUT` | specs/late_join_pause.qnt `guestPauseHasADeadline`, `guestResumesOnTheHostsWord` |
 | Joiner waiting for an answer to its state request (`_awaitingLateJoinState`). The request is repeated every `LATE_JOIN_WAIT_RETRY_MS = 5000`; the wait is an Effect program (`web/src/late-join-wait.ts`) | `LATE_JOIN_WAIT_TIMEOUT_MS = 60000` | Report `late-join-timeout` and tell the player to reload. No guess is made about the host: a running host sends no input to a pending joiner, so silence does not mean it is still waiting. A host that is not running yet answers each request with `join-the-start` on the joiner's own data channel, and the joiner then loads as a starter (`emu-ready`) | `LATE-JOIN-WAIT-TIMEOUT` | specs/room_lifecycle.qnt `joinersAreNotLeftWaitingAtTheStart` |
@@ -50,8 +52,8 @@ recovered.
 | `_awaitingResync` (guest waiting for state after coord stall) | 3000ms | Resume without corrected state (known livelock, see SF5) | (timeout log only) | spec SF5 |
 | `_resyncRequestInFlight` (guest: a resync request is out, so no other is sent; only the state that carries the request's number ends it, or any state from a host that does not number its answers). Not a stall of the tick loop: the game runs on, but no new request can go out. Checked at the top of each tick, after the local-freeze credit (the page's own freeze does not count against the request), and only while no answer is arriving, held, or waited for at a target frame (those have their own rows), and none is being decoded: a decode holds it off for at most `SYNC_DECODE_GRACE_MS = 10000` from the newest decode's start | `RESYNC_REQUEST_TIMEOUT_MS = 8000` | Clear the flag so the next detected desync can ask again. The host drops a request inside its 5 s rate limit without answering. A "now" request (reconnect, network change, tab shown again, missing delta base, socket fallback, boot sync, input stall) owes a resync until a host state is applied: the deadline asks again, at most `RESYNC_MAX_ASKS_AGAIN = 2` times, then gives up visibly. The late joiner's lost-host resync goes first, with its own bound | `RESYNC-REQUEST-TIMEOUT`, `RESYNC-REASK`, `RESYNC-REASK-GIVEUP` (client event `resync-reask-giveup`) | specs/resync_flow.qnt `aRequestCanAlwaysEnd`, `onlyItsAnswerEndsARequest`; specs/resync_reask.qnt `anOwedResyncIsNotForgotten`, `theDecodedAnswerIsNotCut`, `asksAgainAreBounded` |
 | `_runSubstate === RUN_PACING` (pacing throttle skipping frame advance) | `PACING_THROTTLE_TIMEOUT_MS = 5000`; shifted forward by a local freeze like the staleness clocks below (specs/tick_deadlines.qnt) | Force-phantom slowest peer, release pacing. With every peer a phantom the advantage is 0 and the frame goes through `kn_pre_tick`'s forward path (never run on its pacing return, which stores no input and saves no state; specs/resync_inputs.qnt `aPageAppliesWhatItSent`) | `PACING-THROTTLE-TIMEOUT` | match f0566d95 |
-| Peer staleness (`ROLLBACK-STALL`, `PEER-PHANTOM`) | `ROLLBACK_STALL_MS = 3000`, `PEER_DEAD_MS = 5000`; clocks shifted forward by any gap ≥ `LOCAL_FREEZE_CREDIT_MS = 1000` between our own ticks (not while the tab is hidden, where 1 Hz ticks are normal) | Freeze sim, then phantom the peer. A local freeze doesn't count against the peer; a peer still quiet after we resume times out on the normal schedule | `ROLLBACK-STALL start` / `PEER-PHANTOM` / `LOCAL-FREEZE` | two-browser test 2026-09-24 |
-| A channel that dies in a match with no event (no `onclose`, no connection-state change): it reads closed and nothing arrives on it. Not a tick-loop return: the sim stalls and the player becomes a phantom (`Peer staleness` above), then the match runs on | the mesh health check, every 300 frames, on C-rollback ticks and on the JS lockstep path (`_meshHealthCheck`, once per frame); the first after the phantom at `PEER_DEAD_MS = 5000` (frames are frozen from `ROLLBACK_STALL_MS` until then) | Heal: the lower slot resets the entry through `resetPeerState(slot, 'mesh-heal')` (I2), and offers. A lower slot that is not the host takes the entry for a drop instead (`_handlePeerDisconnect`: reconnecting, the 45 s give-up armed) and offers through `attemptReconnect`, with its attempt deadline and retries; on open it resyncs from the host. The higher slot waits (next row). A phantom is healed too when its channel does not read open. On the guest the reconnected channel's open handler runs `resetPeerState(slot, 'reconnect')` before its one resync request, so `PEER-RECOVERED` cannot ask again | `MESH-HEAL`, then `MESH-HEAL-WAIT` on the higher slot | specs/mesh_heal.qnt (`aDeadChannelIsNeverForgotten`, `atMostOneResyncPerReconnect`; violated by `mesh_heal_current`, `mesh_heal_c_tick_only`, `mesh_heal_no_reset_on_open`) |
+| Peer staleness (`ROLLBACK-STALL`, `PEER-PHANTOM`). The clock restarts on an input this page did not hold, a new highest frame or one below it (a peer catching up re-sends the frames it runs again), never on a resend of one it holds (specs/tick_deadlines.qnt `peer_staleness`: `aCatchingUpPeerIsNotStale`, `aRepeatingPeerStillGoesStale`) | `ROLLBACK_STALL_MS = 3000`, `PEER_DEAD_MS = 5000`; clocks shifted forward by any gap ≥ `LOCAL_FREEZE_CREDIT_MS = 1000` between our own ticks (not while the tab is hidden, where 1 Hz ticks are normal) | Freeze sim, then phantom the peer. A local freeze doesn't count against the peer; a peer still quiet after we resume times out on the normal schedule | `ROLLBACK-STALL start` / `PEER-PHANTOM` / `LOCAL-FREEZE` | two-browser test 2026-09-24 |
+| A channel that dies in a match with no event (no `onclose`, no connection-state change): it reads closed and nothing arrives on it. Not a tick-loop return: the sim stalls and the player becomes a phantom (`Peer staleness` above), then the match runs on | the mesh health check, every 300 frames, on C-rollback ticks and on the JS lockstep path (`_meshHealthCheck`, once per frame); the first after the phantom at `PEER_DEAD_MS = 5000` (frames are frozen from `ROLLBACK_STALL_MS` until then) | Heal: the lower slot resets the entry through `resetPeerState(slot, 'mesh-heal')` (I2), and offers. A lower slot that is not the host takes the entry for a drop instead (`_handlePeerDisconnect`: reconnecting, the 45 s give-up armed) and offers through `attemptReconnect`, with its attempt deadline and retries; on open it resyncs from the host. The higher slot waits (next row). A phantom is healed too when its channel does not read open. On both pages the reconnected channel's open handler runs `resetPeerState(slot, 'reconnect')` (the host's too, since the reconnect-runaway fix), on the guest before its one resync request, so `PEER-RECOVERED` cannot ask again | `MESH-HEAL`, then `MESH-HEAL-WAIT` on the higher slot | specs/mesh_heal.qnt (`aDeadChannelIsNeverForgotten`, `atMostOneResyncPerReconnect`; violated by `mesh_heal_current`, `mesh_heal_c_tick_only`, `mesh_heal_no_reset_on_open`) |
 | The higher slot waiting for the lower slot's reconnect offer after its mesh health check found no open channel (the per-peer machine decides `heal`: only the lower slot offers; the higher slot takes the dead channel for a drop it has just noticed, `_handlePeerDisconnect`). Not a tick-loop return: the match runs on without that player | the reconnect give-up, `45000` ms, armed by `_handlePeerDisconnect` | `hardDisconnectPeer()` that player, as for any drop nobody reconnected | `MESH-HEAL-WAIT`, then `hard-disconnect` | specs/peer_connection.qnt `peer_connection_heal_one_side`, `higherHealsThenGivesUpTest` |
 | Host handing a resync state to the `sync-state` channel (not a tick-loop stall: the host keeps running, but no other state goes out to that guest until this one has; each guest has a chain of its own, so one guest's congested link never holds another's transfer). Each 64 KB chunk waits until less than `SYNC_SEND_LOW_WATER` (four chunks, 256 KB) is still buffered in the channel, so the host's inputs, which share the connection, never queue behind more than that; handed a whole state at once (2.9 MB in a two-player run) they sat unsent for seconds and the guest phantomed a host that was sending, then got its inputs 83 frames deep | `SYNC_SEND_STALL_MS = 15000` per chunk (polled every `SYNC_SEND_POLL_MS = 5`; the wait is an Effect program, `web/src/sync-send.ts`) | Give the transfer up; the guest's chunk timeout (`SYNC_CHUNK_TIMEOUT_MS`, 3 s without a chunk: restarted by each chunk, so a slow transfer that is still arriving is not given up) and request deadline ask again. The guest's inputs are settled for the state only once every chunk is handed over, so a transfer given up leaves none settled; a transfer queued before the guest reconnected is dropped (`_syncQueueGen`, I2) | `SYNC-SEND-STALLED` | specs/tick_deadlines.qnt `input_link` (`noInputArrivesDeeperThanTheCap`, `aSendingHostIsNotDropped`, `aTransferQueuedBeforeAResetNeverReachesTheNewConnection`, `inputsAreSettledOnlyForADeliveredState`, `aTransferMakingProgressIsNotAbandoned`, `noChunkForATransferTheGuestDropped`) |
 | Menu-start barrier (Smash Remix: suppress input until all peers confirm controllable scene) | `MENU_START_BARRIER_SETTLE_MS = 500` (via `_menuStartReleaseAt = nowMs + MENU_START_BARRIER_SETTLE_MS`) | Set `_menuStartBarrierReleased = true`, release barrier | `MENU-BARRIER released` | commit 2 (feat(rollback): menu-start barrier) |
@@ -69,6 +71,15 @@ per-peer state cleanup. Every disconnect, reconnect, and phantom-clear
 path routes through it. `stop()` (whole-match teardown) is a deliberately
 separate path that discards all peer state at once instead.
 
+The slot's input maps are one table, `_slotInputMaps()`: `_clearSlotInputState(slot)`
+(which `resetPeerState` and `_markPendingLateJoinPeer` both call) deletes the
+slot from each, and `_resetInputMaps()` (the one call a new match, a
+fast-forward and `stop()` make) empties each. A new map goes in the table
+once. The few maps cleared per slot only (`_remoteInputs`,
+`_peerInputStarted`, `_lastRemoteFramePerSlot`, the late-join windows) are
+listed in `_clearSlotInputState` with why a new input timeline keeps or
+rebuilds them itself.
+
 ### Fields cleared
 
 **Slot-indexed globals** (keyed by player slot 0-3):
@@ -84,6 +95,24 @@ separate path that discards all peer state at once instead.
 - `_auditLastRemote[slot]` — last audited remote input
 - `_lateJoinActivatedAtFrame[slot]` — post-activation grace window
 - `_lateJoinSeededInputFrames[slot]` — seeded late-join input frames
+- `_inputDroppedAheadUpTo[slot]` — furthest frame dropped as too far ahead
+- `_inputAskedAt[slot]` — when each missing input was last asked for
+- `_inputAskOverdue[slot]` — asks counted toward escalation (specs/ask_escalation.qnt)
+- `_overduePushes[slot]` — the host's escalation push out for that guest and its deadline
+- `_holePushCounts[slot]` — pushes per hole, kept across a let-go; also cleared when the peer recovers
+- `_syncChainMovedAt[sid]` — when that guest's chain of state transfers last moved (dropped with `_syncSendChains[sid]`)
+- `_inputSettledAckBefore[slot]` — the frame before which the guest said
+  (`inputs-settled:`) it applied a state: the answer to that push
+- `_inputOorLog[slot]`, `_resendLog[slot]` — the throttles on the
+  `INPUT-OOR` and `RESEND` log lines
+
+`_droppedThisMatch` (the host's record of players it dropped in the running
+match, by `_peerKey`) is match state, not peer state: it outlives the dropped peer by
+design, so the mesh check cannot add it back. It is cleared on a new match,
+on `stop()`, and for a player when it asks to join late.
+- `_awaitFirstInputAfterReset[slot]` — cleared, then set again by a
+  `reconnect` reset: frames wait for that peer's first input
+  (specs/reconnect_inputs.qnt)
 
 **Per-peer-object ack state** (on `_peers[sid]`):
 
@@ -109,7 +138,7 @@ dropping `_remoteInputs[slot]` or phase history.
 |-----------|---------------|
 | `hardDisconnectPeer` (host path) | `hard-disconnect` |
 | `hardDisconnectPeer` (non-host, roster-gated) | `hard-disconnect-non-host` |
-| Reconnect resync (after DC close + rebuild) | `reconnect` |
+| Reconnect resync (after DC close + rebuild), on the host and on the guest | `reconnect` |
 | Stale peer evicted when roster shows a new sid for its slot | `zombie-eviction` |
 | Late-join peer replaced by a reconnect | `late-join-reconnect-replace` |
 | Mesh-heal re-adds a peer missing from the roster | `mesh-heal` |
@@ -317,7 +346,7 @@ never corrected and the peers split.
   (`_askForMissingInputs`) and waited on up to `CATCH_UP_HOLE_WAIT_MS`; run
   unseen on a prediction it could not be rolled back once the input came.
   Past that wait normal ticks play the rest.
-- The slice spends no 60 Hz slot (`_tickReplayOnly`, as a rollback replay),
+- A slice that runs frames spends no 60 Hz slot (`_tickReplayOnly`, as a rollback replay); one that waits on a hole spends it (specs/catch_up_wait.qnt),
   the inputs it runs on are kept until it reaches its target, and the peers'
   inputs for the frame it goes back to are taken in while it runs (their
   range check is against that frame).
@@ -364,3 +393,26 @@ lockstep takes over"). The cleared replay was a rollback dropped on this
 page only, so its state split from the others'; and turning rollback off on
 one page, with the others still predicting, is the mixed protocol the
 engine's init warns diverges. Nothing reported either to the players.
+
+## Recovery delivery obligations (#286 review follow-up)
+
+An overdue-input recovery broadcasts one authoritative state to all active guests.
+Each recipient retains its own delivered-state acknowledgement and retry obligation:
+one guest answering cannot settle a guest whose transfer failed. A missing delivery
+backs off for 5 seconds, then retries that guest, up to three attempts; exhaustion
+uses the explicit drop/late-rejoin path, never a successful-health report. The existing
+per-guest no-progress and page-freeze credit rules remain in effect.
+
+Only an `inputs-settled:` received **after** this attempt was delivered, naming its
+exact state frame minus delay, settles it. A stored high-water mark does not. A
+slot's transfer reservation survives a reset, timeout, or early acknowledgement
+until the asynchronous transfer actually settles, bounding escalation buffers to
+one transfer per player slot. New holes coalesce while any recipient remains owed.
+
+State chunks use the dedicated sync channel only: the primary input channel cannot
+parse them. A rate-limited late-join request retains the dropped marker; the marker
+is removed only after the accepted join is held outside the active roster.
+
+Model: `specs/recovery_delivery.qnt`, before/fixed variants and capacity model.
+Engine-handler regressions: `tests/ts/recovery-delivery.test.ts`.
+These add no session-machine states and do not alter its generated diagram.

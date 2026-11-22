@@ -5,6 +5,7 @@ misprediction count moves when a fed input differs from what it predicted.
 """
 
 import json
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -13,17 +14,24 @@ ROOT = Path(__file__).resolve().parent.parent
 LOCKSTEP_JS = ROOT / "web" / "static" / "netplay-rollback.js"
 
 
-def _feed(watches, inputs):
+def _feed(watches, inputs, *, prime_inactive=False):
     """Feed `inputs` ([slot, frame, differs]) through _feedCInput with the
     given watches ({sid: frame}); return each watch's `changed`."""
     src = LOCKSTEP_JS.read_text()
     start = src.index("const INPUT_PAST_WINDOW_FRAMES =")
-    helpers = src[start : src.index("// -- Audio (delegated", start)]
+    helpers = src[start : src.index("  const _backfillCInputsFromJs =", start)]
+    roster_start = src.index("  let _lastInputRoster =")
+    roster = src[roster_start : src.index("  // The oldest input", roster_start)]
     script = textwrap.dedent(
         f"""
         const {{ changesWatchedFrame, followUpIsUnneeded }} = await import('./web/src/sync-follow-up.ts');
         globalThis.window = {{ KNCore: {{ syncFollowUp: {{ changesWatchedFrame, followUpIsUnneeded }} }} }};
         const _syncLog = () => {{}};
+        const _awaitFirstInputAfterReset = {{1: true}};
+        const _playerSlot = 0, _frameNum = 100, _rbRollbackMax = 7, DELAY_FRAMES = 3;
+        const RB_WORKER_COPROC = false;
+        const native = [], escalations = [];
+        const _onPastWindowMismatch = (slot, frame) => escalations.push([slot, frame]);
         const KNShared = {{ ZERO_INPUT: {{ buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 }} }};
         const heap = new Int32Array(64);
         let mispredictions = 0;
@@ -32,17 +40,30 @@ def _feed(watches, inputs):
           HEAP32: heap,
           _malloc: () => 16,
           _kn_get_mispred_breakdown: (ptr) => {{ heap[ptr >> 2] = mispredictions; return 3; }},
-          _kn_feed_input: () => {{ if (differsNext) mispredictions++; }},
+          _kn_get_failed_rollbacks: () => mispredictions,
+          _kn_feed_input: (...input) => {{
+            native.push(input);
+            if (differsNext) mispredictions++;
+          }},
         }};
-        eval({json.dumps(helpers)} + `
+        eval({json.dumps(helpers)} + {json.dumps(roster)} + `
           for (const [sid, frame] of Object.entries({json.dumps(watches)}))
             _followUpWatches.set(sid, {{ frame, changed: false }});
           for (const [slot, frame, differs] of {json.dumps(inputs)}) {{
             differsNext = differs;
             _feedCInput(mod, slot, frame, KNShared.ZERO_INPUT);
           }}
-          process.stdout.write(JSON.stringify(Object.fromEntries(
-            [..._followUpWatches].map(([sid, w]) => [sid, w.changed]))));
+          if ({json.dumps(prime_inactive)}) {{
+            _recordHostInputRoster(97, [0]);
+            _recordHostInputRoster(100, [0, 1]);
+            differsNext = true;
+            _primeLateJoinInactiveInput(mod, 1);
+            _primeLateJoinInactiveInput(mod, 1);
+          }}
+          const watched = Object.fromEntries([..._followUpWatches].map(([sid, w]) => [sid, w.changed]));
+          process.stdout.write(JSON.stringify({json.dumps(prime_inactive)}
+            ? {{ watched, native, escalations, stillAwaiting: _awaitFirstInputAfterReset[1] }}
+            : watched));
         `);
         """
     )
@@ -93,7 +114,7 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
         in push
     )
     # A watch superseded by a newer state is marked changed: its follow-up goes out.
-    assert "w.changed = true;\n        _followUpWatches.delete(sid);" in push
+    assert re.search(r"w\.changed = true;\s+_followUpWatches\.delete\(sid\);", push)
     # I2: a reset or the match ending drops the watches.
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
@@ -101,16 +122,27 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
     assert "_followUpWatches.clear();" in src
 
 
+def test_confirmed_absence_priming_notifies_the_watch_without_claiming_a_real_input():
+    result = _feed({"old": 96, "affected": 97, "later": 99}, [], prime_inactive=True)
+    assert result == {
+        "watched": {"old": False, "affected": True, "later": True},
+        "native": [[1, frame, 0, 0, 0, 0, 0] for frame in range(97, 100)],
+        "escalations": [],
+        "stillAwaiting": True,
+    }
+
+
 def test_every_input_the_page_feeds_goes_through_the_watch():
-    # The harness above drives _feedCInput; the drain of queued inputs is the
-    # other live site. Both must go through the same wrapper, so no input
-    # reaches C unseen by the watch.
+    # Live inputs use the full wrapper. Proven inactive priming uses only
+    # its underlying watch. Every direct feed must be inside one of the
+    # wrappers; changing the number of sites alone cannot bless a bypass.
     src = LOCKSTEP_JS.read_text()
-    calls = [i for i in range(len(src)) if src.startswith("._kn_feed_input(", i)]
-    assert len(calls) == 2, calls
-    for i in calls:
-        before = src[max(0, i - 200) : i]
-        assert "_feedWatched(" in before, src[max(0, i - 200) : i + 40]
+    direct = re.findall(r"\b\w+\._kn_feed_input\(", src)
+    watched = re.findall(
+        r"_feedWatched(?:Frame)?\([^,]+,\s*[^,]+,\s*[^,]+,\s*\(\) =>\s*(\w+\._kn_feed_input\()",
+        src,
+    )
+    assert direct and direct == watched
 
 
 def test_a_follow_up_is_skipped_only_for_a_delivered_state_with_no_phantom():

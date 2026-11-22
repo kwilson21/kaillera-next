@@ -41,21 +41,23 @@ verify() { # spec module invariant [init [steps]]
 # The checker must be able to find the bugs these properties exist for, or a
 # pass means nothing. Both older variants of the peer identity rule have a
 # counterexample within 6 steps.
-expect_violation() { # spec module invariant
+# A counterexample deeper than STEPS gives its bound as a fourth argument.
+expect_violation() { # spec module invariant [steps]
+  local steps="${4:-$STEPS}"
   if "$PLAN"; then
-    printf '%s\t%s\t%s\tinit\t%s\tviolation\n' "$1" "$2" "$3" "$STEPS"
+    printf '%s\t%s\t%s\tinit\t%s\tviolation\n' "$1" "$2" "$3" "$steps"
     return
   fi
-  echo "== $2 / $3 must be violated within $STEPS steps"
+  echo "== $2 / $3 must be violated within $steps steps"
   local out status=0
-  out="$($QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$STEPS" 2>&1)" || status=$?
+  out="$($QUINT verify "$1" --main="$2" --invariant="$3" --max-steps="$steps" 2>&1)" || status=$?
   # Only a reported counterexample counts. A crash, a timeout or a
   # translation error also exits non-zero and must not pass for one.
   if [ "$status" -ne 0 ] && grep -q '\[violation\]' <<<"$out"; then
     return 0
   fi
   echo "$out" | tail -40 >&2
-  echo "expected a counterexample for $3 in $2 (exit $status)" >&2
+  echo "expected a counterexample for $3 in $2 within $steps steps (exit $status)" >&2
   exit 1
 }
 
@@ -207,6 +209,12 @@ tick_deadlines() {
   expect_violation "$TICK" tick_deadlines_before ownFreezeIsNotHeldAgainstAPeer
   verify "$TICK" tick_deadlines_current everyWaitHasADeadline
   expect_violation "$TICK" tick_deadlines_before_lockstep_mode everyWaitHasADeadline
+  verify "$TICK" peer_staleness_current allHold init 14
+  # A live peer catching up below its highest frame: five ticks, the clock
+  # never restarted (catchingUpTest).
+  expect_violation "$TICK" peer_staleness_before aCatchingUpPeerIsNotStale 10
+  # A stuck peer's resend restarts the clock: 2 steps (repeatingTest).
+  expect_violation "$TICK" peer_staleness_any_input aRepeatingPeerStillGoesStale 3
   verify "$TICK" input_link_paced allHold
   # Two chunks ahead of the inputs, two seconds, the deadline, a second: 5 steps.
   expect_violation "$TICK" input_link_burst allHold
@@ -302,6 +310,161 @@ rom_at_start() {
   expect_violation "$ROM_START" rom_at_start_no_rejoin serverKnowsTheRom
 }
 
+catch_up_wait() {
+  local WAIT=specs/catch_up_wait.qnt
+  verify "$WAIT" catch_up_wait_fixed allHold init 12
+  # A waiting catch-up ticks twice in one slot and sends the frame again:
+  # 2 steps; six spinning ticks then the ask, buried: 7 steps
+  # (spinThenAskTest carries that one).
+  expect_violation "$WAIT" catch_up_wait_current aWaitingCatchUpDoesNotSpin
+  expect_violation "$WAIT" catch_up_wait_current reliableResendsAreSpaced
+  expect_violation "$WAIT" catch_up_wait_yield_only reliableResendsAreSpaced
+  expect_violation "$WAIT" catch_up_wait_resend_limited_only aWaitingCatchUpDoesNotSpin
+}
+
+ask_escalation() {
+  local ESC=specs/ask_escalation.qnt
+  verify "$ESC" ask_escalation_fixed_host allHold init 14
+  verify "$ESC" ask_escalation_fixed_guest allHold init 14
+  # Three asks (the threshold), the answer lost for good, the asks run out,
+  # nothing more happens: the page predicts the input for the rest of the
+  # match (lostForGoodTest): 8 steps.
+  expect_violation "$ESC" ask_escalation_current everyAskEnds 8
+  # The push escalated to, its acknowledgement lost, and no deadline on it
+  # (pushAckLostTest): 8 steps.
+  expect_violation "$ESC" ask_escalation_push_once everyAskEnds 8
+  verify "$ESC" push_deadline_current allHold init 10
+  verify "$ESC" push_deadline_current_resync_off allHold init 10
+  # Resync off: armed, three deadlines, dropped with nothing sent: 4 steps.
+  expect_violation "$ESC" push_deadline_before_resync_off noDropWithoutASentPush 6
+  # A push, a reconnect, three deadlines: 5 steps.
+  expect_violation "$ESC" push_deadline_before noDropDuringAReconnect 6
+  # A push acknowledged, then pushed again past it to the give-up: 6 steps.
+  expect_violation "$ESC" push_deadline_before noDropAfterAnAcknowledgement 7
+  verify "$ESC" escalation_peers_all everyPeerOnTheHostState init 3
+  expect_violation "$ESC" escalation_peers_one everyPeerOnTheHostState 2
+}
+
+escalation_push() {
+  verify specs/late_join_drop_ready.qnt late_join_drop_ready_fixed noUnreadyMeshAdmission init 5
+  expect_violation specs/late_join_drop_ready.qnt late_join_drop_ready_before noUnreadyMeshAdmission 3
+  verify specs/recovery_apply_boundary.qnt recovery_apply_boundary_fixed allHold init 4
+  expect_violation specs/recovery_apply_boundary.qnt recovery_apply_boundary_before allHold 2
+  verify specs/sync_channel_owner.qnt sync_channel_owner_fixed allHold init 6
+  expect_violation specs/sync_channel_owner.qnt sync_channel_owner_before allHold 2
+  local ACK=specs/recovery_ack.qnt
+  verify "$ACK" recovery_ack_fixed exactAttemptOnly init 5
+  expect_violation "$ACK" recovery_ack_before exactAttemptOnly 2
+  local LIFECYCLE=specs/recovery_lifecycle.qnt
+  verify "$LIFECYCLE" recovery_lifecycle_fixed allHold init 5
+  expect_violation "$LIFECYCLE" recovery_lifecycle_before stoppedWorkSettles 2
+  expect_violation "$LIFECYCLE" recovery_lifecycle_before failedJoinStaysGated 2
+  expect_violation "$LIFECYCLE" recovery_lifecycle_before unusableChannelDoesNotCapture 2
+  verify specs/input_placeholder.qnt input_placeholder_fixed allHold init 4
+  expect_violation specs/input_placeholder.qnt input_placeholder_before allHold 2
+  verify specs/recovery_review.qnt recovery_review_fixed allHold init 14
+  expect_violation specs/recovery_review.qnt recovery_review_before rosterGapCannotRenew 5
+  expect_violation specs/recovery_review.qnt recovery_review_before readinessHasDeadline 1
+  expect_violation specs/recovery_review.qnt recovery_review_before repeatedReadyWorks 6
+  expect_violation specs/recovery_review.qnt recovery_review_before roomCapturesBounded 13
+  local DELIVERY=specs/recovery_delivery.qnt
+  verify "$DELIVERY" recovery_budget_identity_fixed rotationCannotRenew init 8
+  expect_violation "$DELIVERY" recovery_budget_identity_before rotationCannotRenew 5
+  verify "$DELIVERY" recovery_source_budget_fixed allHold init 8
+  expect_violation "$DELIVERY" recovery_source_budget_before capturesBoundedWithinWindow 4
+  expect_violation "$DELIVERY" recovery_source_budget_before pendingWaitersBounded 2
+  verify "$DELIVERY" recovery_partial_fixed allHold init 3
+  expect_violation "$DELIVERY" recovery_partial_before freeRecipientProceeds 2
+  verify "$DELIVERY" recovery_followup_fixed allHold init 10
+  expect_violation "$DELIVERY" recovery_followup_before healthySourceIsNeverBlocked 3
+  verify "$DELIVERY" recovery_actor_enabled allHold init 10
+  verify "$DELIVERY" recovery_actor_disabled allHold init 10
+  verify "$DELIVERY" recovery_delivery_fixed allHold init 10
+  verify "$DELIVERY" recovery_capacity_fixed atMostOneTransferPerSlot init 10
+  verify "$DELIVERY" recovery_reservation_fixed otherGuestsDoNotBlockRetry init 5
+  verify "$DELIVERY" recovery_reservation_fixed oldCleanupNeverReleasesRetry init 5
+  expect_violation "$DELIVERY" recovery_reservation_together otherGuestsDoNotBlockRetry 3
+  expect_violation "$DELIVERY" recovery_reservation_unowned oldCleanupNeverReleasesRetry 4
+  expect_violation "$DELIVERY" recovery_capacity_before atMostOneTransferPerSlot 4
+  expect_violation "$DELIVERY" recovery_delivery_before onlyDeliveredStatesAreAcknowledged 2
+  expect_violation "$DELIVERY" recovery_delivery_before everyUnsettledGuestRemainsPending 3
+  expect_violation "$DELIVERY" recovery_delivery_before aRateLimitedJoinNeverHealsOutsideRoster 3
+  local ESCP=specs/escalation_push.qnt
+  verify "$ESCP" escalation_push_fixed allHold init 12
+  verify "$ESCP" sync_base_fixed noDeltaOnAForeignBase init 8
+  verify "$ESCP" hole_counts_fixed pushesAreBoundedForEveryHole init 10
+  # Queued behind a transfer in flight, let go on the first round's timer.
+  expect_violation "$ESCP" escalation_push_current noLetGoOfAPushOnItsWay 3
+  expect_violation "$ESCP" escalation_push_timer_let_go noLetGoOfAPushOnItsWay 6
+  # A transfer still making progress at the second round's backstop.
+  expect_violation "$ESCP" escalation_push_round_two noLetGoOfAPushOnItsWay 9
+  expect_violation "$ESCP" escalation_push_backstop noLetGoOfAPushOnItsWay 9
+  # The third round's global, chunks-only clock: a silent transfer kept alive
+  # by another guest's syncs; a transfer ahead failing at its own limit not
+  # counted as the chain moving.
+  expect_violation "$ESCP" escalation_push_round_three aLostPushIsLetGo 7
+  expect_violation "$ESCP" escalation_push_round_three noLetGoOfAPushOnItsWay 7
+  # Handed over, its report held by another guest's transfer, let go.
+  expect_violation "$ESCP" escalation_push_reported_together noLetGoOfAPushOnItsWay 7
+  # The transfer ahead of the push handed over, the deadline due before the
+  # push is.
+  expect_violation "$ESCP" escalation_push_any_hand_over noRetryBeforeTheGuestCouldAnswer 5
+  # Handed over, the host frozen past the deadline.
+  expect_violation "$ESCP" escalation_push_no_credit noRetryBeforeTheGuestCouldAnswer 7
+  # Two transfers fail for one hole and it is escalated a third time.
+  expect_violation "$ESCP" escalation_push_count_resets pushesAreBoundedPerHole 10
+  # A state to one guest, then a delta to the other.
+  expect_violation "$ESCP" sync_base_current noDeltaOnAForeignBase 3
+  expect_violation "$ESCP" sync_base_esc_clears noDeltaOnAForeignBase 3
+  # Two holes in turn, one record between them.
+  expect_violation "$ESCP" hole_counts_one_record pushesAreBoundedForEveryHole 5
+}
+
+reconnect_inputs() {
+  local REC=specs/reconnect_inputs.qnt
+  verify "$REC" reconnect_inputs_fixed allHold init 12
+  # Right after the reset, one frame run on the peer's missing input with
+  # the C slot inactive (runBeforeFirstInputTest): 1 step.
+  expect_violation "$REC" reconnect_inputs_current theHostNeverPredictsAFrameThePeerHasMade 2
+}
+
+drop_is_final() {
+  local DROP=specs/drop_is_final.qnt
+  verify "$DROP" drop_is_final_fixed allHold init 10
+  # A give-up, then the health check adds the player back outside the
+  # roster: 2 steps (desyncThenHealTest).
+  expect_violation "$DROP" drop_is_final_before aDroppedPlayerComesBackOnlyAsALateJoiner 3
+  # #286 as first written: both pages give up on a dead link, the guest
+  # plays on alone (reconnectGiveUpTest): 2 steps; a guest that dropped
+  # another guest blocks that link (guestGuestTest): 1 step.
+  expect_violation "$DROP" drop_is_final_skip_everywhere aPageThatLostTheHostDoesNotPlayAlone 3
+  expect_violation "$DROP" drop_is_final_skip_everywhere guestLinksCanHeal 2
+}
+
+rom_identity() {
+  local ROM_IDENTITY=specs/rom_identity.qnt
+  verify "$ROM_IDENTITY" rom_identity_current allHold
+  # A wrong ROM hashed, the host's dropped over it, the host's ROM arrives:
+  # 4 steps (rightOverWrongTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_before aRightRomStays
+  # A drop, the host's ROM picked from the library, the drop's hash lands:
+  # 3 steps (pickWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_judge_only aSettledRomKeepsItsHash
+  # The host's ROM hashed and heard, the host's ROM known, a wrong one
+  # dropped, Start: 5 steps (startWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_no_retract aStartCountsOnlyTheLoadedRom
+  # The host sharing, its ROM known, a wrong one the same size dropped, Start,
+  # the start reaching the page: 4 steps (bootWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push neverBootsAWrongRom
+  # The host's ROM known, the host drops another, Start: 3 steps
+  # (hostStartsWhileHashingTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push theHostStartsOnItsOwnHash
+  # A drop whose hash fails: 2 steps (hashFailsTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push aSettledRomKeepsItsHash
+  # A rejoin while the drop is hashed is 7 steps, past the bound: its scenario
+  # (rejoinWhileHashingTest) checks it.
+}
+
 start_group() {
   local START_GROUP=specs/start_group.qnt
   verify "$START_GROUP" start_group_current allHold
@@ -394,7 +557,8 @@ SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
-  rom_at_start ring_after_resync start_group mesh_heal engine_start
+  rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
+  engine_start
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -402,11 +566,11 @@ SPEC_GROUPS=(
 # whole set took 32 minutes in one job. A group added above goes in a shard
 # here; the check below fails until it does.
 SHARDS=(
-  "room_lifecycle_start"                                          # ~7 min
+  "room_lifecycle_start engine_start"                             # ~7 min + engine_start (~30 s)
   "room_lifecycle_drops"                                          # ~8 min
-  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal" # ~7 min
-  "peer_identity rom_transfer peer_connection rom_at_start engine_start" # ~6.5 min + engine_start
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group" # ~7 min
+  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
+  "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs" # ~7.5 min
 )
 
 # Each group is in exactly one shard, and each shard names only groups.

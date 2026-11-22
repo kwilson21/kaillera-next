@@ -26,7 +26,7 @@ automatically on all clients when netplay starts -- no host configuration requir
 - `800A4D24 0000` -- Items Off
 - `810BA9F1 0000+800BA9F3 0000` -- No Wind
 
-**Files:** `web/static/netplay-rollback.js`. No server changes.
+**Files:** `web/src/page/shared.ts`. No server changes.
 
 ---
 
@@ -74,12 +74,16 @@ via `gameManager.loadState()`, then syncs at next delay boundary.
 
 **Detection (star topology, host-authoritative):** Two hashing paths:
 1. C-level (patched core): `_kn_sync_hash()` hashes game-specific RDRAM regions directly
-   in C. Per-region checksums via `_kn_sync_hash_regions` for targeted desync diagnosis.
+   in C. `_kn_rdram_block_hashes` hashes the first 256 bytes of each 64KB block for targeted desync diagnosis.
 2. JS fallback: FNV-1a hash of RDRAM via direct HEAPU8 access, falling back to
    `getState()` serialization.
 
-Host broadcasts `sync-hash:frame:hash:cycleMs` every ~120 frames (~2s). Guests compare
-their own hash — mismatch triggers resync.
+The legacy periodic `sync-hash` broadcast is disabled — AI DMA determinism + SoftFloat FPU
+make steady-state gameplay deterministic. (In C rollback mode, a separate RB-CHECK
+gameplay-hash exchange still runs every 300 frames, but a mismatch is logged as a bug to fix,
+not auto-resynced — see Rollback Integrity in docs/netplay-invariants.md.) This resync path is
+triggered by reconnect, network-change, input-stall, boot-correction, peer-recovery, explicit
+sync-request paths, and (lockstep-fallback only) mobile lifecycle returns.
 
 **Resync (host-authoritative):** Desynced client sends `sync-request` -> host exports state
 via `_kn_sync_read()` (C-level) or `getState()` (JS fallback), compresses and sends via
@@ -510,6 +514,37 @@ Slice 1, the peer mesh and signaling:
   first run (`DROP_PEER_MS=12000`, `JITTER=20`) reconnected on the second
   attempt with no disagreement and no mismatch.
 - Next: decide the next rule by the machine: answering arms the give-up.
+- Done: the reconnect runaway (`DROP_PEER_MS=12000`, 1 run in 4 on main:
+  host 3112 frames, guest 1915). A catch-up waiting on a hole spun, and each
+  spin resent the frame's input on the reliable channel, ahead of the ask
+  for the hole. Modelled in `specs/catch_up_wait.qnt`: a waiting slice spends
+  its 60 Hz slot, and the reliable channel resends a frame at most every
+  100 ms. An ask that is never answered, or a late input past the rollback
+  window that differs, escalates to a resync with a deadline and, last, a
+  drop (`specs/ask_escalation.qnt`). The host's open handler resets the peer
+  (I2), and only the host's channel may send a state header. That reset
+  left the C slot inactive while the page ran on the peer's missing inputs,
+  recording no prediction (a split at 1344 in a CATCH_UP_HOLE run): after a
+  reconnect reset a frame now waits for the peer's first input
+  (`specs/reconnect_inputs.qnt`), and every two-player run fails on a frame
+  run on a prediction nothing corrects (`PREDICTED-KNOWN`). Driven by
+  `CATCH_UP_HOLE_MS`, `ASK_UNANSWERED_STALL_MS` (`ASK_UNANSWERED_ACKS`), `ASK_UNANSWERED_PHANTOM`, `ROLLBACK_AT_EDGE` and `PAST_WINDOW_FORCED`.
+- Next, the receiver side the 100 ms resend masks: a page far behind drops
+  a peer's inputs as too far ahead (`INPUT-OOR`) even on the reliable
+  channel. #235 remembers them (`_inputDroppedAheadUpTo`) and asks for them
+  when the page stalls on them, but not when a resync moves the page's
+  frame past them: in a send-once build the guest dropped the host's
+  1901+ at 1810, a resync took it from 1827 to 1910, it never asked, and
+  the pages split at about 1914 (`HEAL_BOTH_SIDES`). Only the sender's
+  resend brings them back. Modelled first: after a resync's frame jump, the
+  frames dropped as ahead at or above the new floor are asked for; then a
+  reliable-channel send can go out once.
+- Next, one push per hole: the host escalates when the oldest missing input
+  goes overdue and pushes at its own frame, so a hole that reaches past
+  that push's floor is predicted until a second push (`ASK_UNANSWERED_STALL_MS`:
+  about 7 frames of differing play between two pushes, then one snap to
+  the host). Push once, at the edge of the newest missing input asked for,
+  modelled first in `specs/ask_escalation.qnt`.
 
 Late join, ahead of its slice: two gaps `specs/late_join_pause.qnt` listed
 as not modelled are now modelled.
@@ -744,8 +779,7 @@ Staying plain JavaScript:
   every merge put the committed file in conflict with every other open
   branch. It is now build output (`web/static/dist` is git-ignored): the
   Docker image builds it in a Node stage, CI builds it, and
-  `scripts/build_landing.py` / `scripts/build_demo.py` build it before
-  packaging. `package-lock.json` is committed so every build gives the same
+  `scripts/build_landing.py` builds it before packaging. `package-lock.json` is committed so every build gives the same
   bytes, which the landing build id depends on; CI's `image` job compares
   the image's bundles with a local build.
 - The database stays on Cloudflare D1 (SQLite locally). Queries are built with

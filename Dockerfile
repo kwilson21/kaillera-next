@@ -10,7 +10,7 @@ COPY scripts/build-web.mjs scripts/build-web.mjs
 COPY web/src web/src
 RUN node scripts/build-web.mjs
 
-FROM python:3.13.16-slim-bookworm
+FROM python:3.13.18-slim-bookworm
 
 # Prevent .pyc files and enable unbuffered output for logging
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -23,7 +23,7 @@ WORKDIR /app
 # build if the lock is out of date with pyproject.toml). Resolving from
 # pyproject.toml alone picked up whatever was newest on build day.
 COPY server/pyproject.toml server/uv.lock server/
-RUN pip install --no-cache-dir uv==0.13.1 \
+RUN pip install --no-cache-dir uv==0.13.7 \
     && uv export --quiet --project server --locked --no-dev --no-emit-project --no-hashes -o /tmp/requirements.txt \
     && pip install --no-cache-dir -r /tmp/requirements.txt \
     && pip uninstall -y uv && rm /tmp/requirements.txt

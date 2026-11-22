@@ -11,6 +11,10 @@
  * Checks, printed as JSON and written to OUT/summary.json:
  *   - gameplay hash of every finalized frame (12 frames behind the head,
  *     past the rollback window) is identical on both peers
+ *   - no frame run on a prediction nothing corrects: one at the rollback
+ *     window's edge whose input the peer is known to have made, or one run
+ *     right after a reconnect reset, before C records predictions for that
+ *     peer again (PREDICTED-KNOWN, specs/reconnect_inputs.qnt)
  *   - no failed rollbacks or integrity events (R2-R5 and fatal WASM traps
  *     in docs/netplay-invariants.md) in either peer's engine or sync log
  *   - no rollback input-stall timeouts below frame 300 on either peer
@@ -36,6 +40,9 @@
  *     [HEADED=1] [OUT=/tmp/two-player] [KN_DB=server DB_PATH, Node >= 22.13] node tests/rb-two-player.mjs
  *
  * Extra knobs, all off by default:
+ *   RESET_COMBO_CHECK=1  After battle evidence is collected, pause via Start
+ *     and hold the real mobile reset control; require both peers at character
+ *     select with the same running emulator and connected room.
  *   HOST_BROWSER=webkit / GUEST_BROWSER=webkit   Run that page in Playwright
  *     WebKit instead of Chromium (each defaults to Chromium independently,
  *     so either or both can be WebKit; the Chromium default args —
@@ -192,6 +199,71 @@
  *     (phantomForeverTest); before the per-peer machine decided `heal` the
  *     guest offered too and the two offers crossed (crossedHealOffersTest).
  *     Frames are compared as with FREEZE_HOST_MS. Needs BATTLE_SECONDS >= 165.
+ *   CATCH_UP_HOLE_MS=<n>   With DROP_PEER_MS: the host drops its input
+ *     packets on the reconnected channel from that channel's first one until
+ *     n ms after it sends the state, so the guest's catch-up after the
+ *     reconnect waits on a hole (specs/catch_up_wait.qnt). The host's ticks
+ *     pause for the first 8 s of the drop, so the guest is ahead of that
+ *     state and does catch up from it. Fails if the
+ *     catch-up stopped on the hole or the pages end more than 300 frames
+ *     apart (the runaway). On main it fails: the waiting catch-up spun and
+ *     sent a reliable input packet per slice, burying its asks.
+ *   ASK_UNANSWERED_STALL_MS=<n>   A third of the way into the battle the guest
+ *     drops its input packets for eight frames just ahead of it, for good
+ *     (resends included), while later frames go through: the host learns
+ *     they were made, asks for them, and is never answered
+ *     (specs/ask_escalation.qnt). The hole stalls the host. On main the
+ *     stall's own deadline recovers it (RB-INPUT-STALL-TIMEOUT at 5 s, the
+ *     guest a phantom, then PEER-RECOVERED and a resync), so the match does
+ *     not split there; the difference asserted is how: fails unless the
+ *     host's ask goes overdue (`INPUT-ASK-OVERDUE … → push`), it pushes its
+ *     state, the guest's inputs-settled answers it (`INPUT-ASK-PUSH-SETTLED`),
+ *     no stall reaches its 5 s deadline (`RB-INPUT-STALL-TIMEOUT`) and the
+ *     host's frame never stands still for 5 s, with no give-up. A hole that
+ *     straddles the first push is predicted until the next push, then both
+ *     pages are on the host's state: frames are compared from the last state
+ *     the guest applied, which must be at or after the last push. With ASK_UNANSWERED_ACKS=1
+ *     (ASK_UNANSWERED_STALL_MS >= 20000) the host's pushed states never reach the guest for
+ *     n ms (until it gives up), so no push is applied or acknowledged and the guest plays
+ *     on: fails unless the host pushes again to the
+ *     limit, gives up (`INPUT-ASK-PUSH-GAVEUP`) and drops the player
+ *     (`peer hard-disconnected`) rather than playing on split, the guest's
+ *     page is told (`DROPPED-BY-HOST`) and joins again late onto the host's
+ *     state (`late-join loaded`), no mesh heal adds it back, no late input
+ *     follows on the host, and the frames from the late join's state match
+ *     (specs/drop_is_final.qnt). With ASK_UNANSWERED_ACK_LOST=1 the guest
+ *     applies each push but drops its `inputs-settled:` for n ms: fails
+ *     unless the push ends on the phantom the host's stall makes
+ *     (`INPUT-ASK-PUSH-ENDED … phantom`), `PEER-RECOVERED` resyncs, nobody
+ *     is given up on or dropped, and the frames from the last resync match.
+ *   ASK_UNANSWERED_PHANTOM=1   With HEAL_BOTH_SIDES=1: once the heal's checks
+ *     are done (its 15 s after the reconnect's resync), the guest drops its
+ *     input for one frame just ahead of it, for good: #272's shape. #272's
+ *     split (the host still holding the guest as a phantom after the heal,
+ *     so the hole was never stalled on) is gone on main: the heal resets the
+ *     peer (mesh-heal), and main recovers the hole by its 5 s stall
+ *     deadline. Fails unless the input was dropped, the host's ask
+ *     escalated and its push was acknowledged (INPUT-ASK-PUSH-SETTLED), no
+ *     stall timed out, and the frames after the guest's last applied state
+ *     match.
+ *   ROLLBACK_AT_EDGE=1   A third of the way into the battle the host's
+ *     input is held at nothing for a second and set to a button for frame F
+ *     alone, so the guest predicts F wrong (C predicts from the newest input
+ *     it has). The guest page holds the
+ *     host's input for F (as a packet and inside any later packet's
+ *     redundancy) until the guest stalls at its rollback window's edge for
+ *     F (depth 7, the deepest C rolls back), then takes it in. Fails unless C
+ *     rolled F back at depth 5 or more, with no DEEP-MISPREDICT-SKIP or
+ *     FAILED-ROLLBACK, and the frames match: the deepest correctable
+ *     misprediction, on main as on the fix.
+ *   PAST_WINDOW_FORCED=1   As ROLLBACK_AT_EDGE, but a test-only switch
+ *     (window.__test_runPastEdgeFor) lets the guest run past the edge stall
+ *     for F, and the input is taken in three frames past the window: a
+ *     misprediction too deep to roll back (C's DEEP-MISPREDICT-SKIP). The
+ *     edge stall guards this in normal play; only this forced step reaches
+ *     it. On main (with the switch alone) nothing corrects it. Fails unless
+ *     the C log has the skip, the guest logged INPUT-PAST-WINDOW-MISMATCH, a
+ *     state was applied after it, and the frames after that state match.
  *   DROP_PEER_MS=<n>   A third of the way into the battle, the guest's page
  *     closes its RTCPeerConnection to the host (pc.close() on the engine's
  *     peer entry for slot 0, KNState.peers), and the WebRTC signaling between
@@ -499,7 +571,10 @@
  *     `lockstep`, rb-check, rb-delay and roster with a field that is not a
  *     number, a kind no page knows, lockstep-ready JSON whose delay is not a
  *     number, and text that is not JSON; on `sync-state`, a sync-start
- *     header that is not one. Read raw, rb-delay and sync-start would have
+ *     header that is not one; and the guest also sends a sync-start that IS
+ *     on its schema, which the host must refuse as a state header from a
+ *     page that is not the host (one `state header refused` line on the
+ *     host, none on the guest). Read raw, rb-delay and sync-start would have
  *     set the delay and the state transfer's frame to NaN. Each engine must
  *     drop them before any handler reads them
  *     (KNCore.protocol.createBoundary): the run fails unless each page's sync
@@ -546,6 +621,7 @@
  * emulators headless on one machine run slowly and measure noisy RTTs, so
  * compare runs with each other; HEADED=1 on a real machine is closer to play.
  */
+import { resyncOffEvidence } from './resync-off-evidence.mjs';
 import { chromium, webkit } from 'playwright';
 import fs from 'fs';
 import {
@@ -602,6 +678,64 @@ const MALFORMED_PEER = process.env.MALFORMED_PEER === '1';
 const START_SILENT = process.env.START_SILENT === '1';
 const START_LOST = process.env.START_LOST === '1';
 const DROP_PEER_MS = Number(process.env.DROP_PEER_MS || 0);
+// CATCH_UP_HOLE_MS: with DROP_PEER_MS, how long the host drops its input
+// packets on the reconnected channel from its first one.
+const CATCH_UP_HOLE_MS = Number(process.env.CATCH_UP_HOLE_MS || 0);
+// ASK_UNANSWERED_STALL_MS: how long the guest drops its input packets, a third of
+// the way into the battle, so the host's asks for them go unanswered.
+const ASK_UNANSWERED_STALL_MS = Number(process.env.ASK_UNANSWERED_STALL_MS || 0);
+const ASK_UNANSWERED_RECOVER_MS = 30000;
+// ASK_UNANSWERED_ACKS=1: the host's pushed states never reach the guest, so
+// every push goes unanswered while the guest plays on, and the host drops the
+// player (needs a window longer than the escalation and three 5 s push
+// deadlines, about 17 s).
+const ASK_UNANSWERED_ACKS = process.env.ASK_UNANSWERED_ACKS === '1';
+// ASK_UNANSWERED_ACK_LOST=1: the guest gets each push and applies it, but its
+// acknowledgement is dropped. That message also tells the host not to wait
+// for the frames the state skipped, so the host stalls on them, its 5 s stall
+// deadline makes the guest a phantom, and the phantom ends the push
+// (END_ON_RECONNECT): PEER-RECOVERED's resync recovers it, nobody is dropped.
+const ASK_UNANSWERED_ACK_LOST = process.env.ASK_UNANSWERED_ACK_LOST === '1';
+// RESYNC_OFF=1: the host starts the game with resync off (the room's
+// toggle). Only with ASK_UNANSWERED_STALL_MS: no recovery actor is started,
+// nobody is pushed again or dropped, and the hole stays with the stall path.
+// Nothing corrects the hole with resync off, so the pages may differ from
+// it on (as on main with the toggle off): frames are compared from the boot
+// sync up to the hole's first frame, and must match there.
+const RESYNC_OFF = process.env.RESYNC_OFF === '1';
+if (RESYNC_OFF && !(ASK_UNANSWERED_STALL_MS > 0)) {
+  console.log('RESYNC_OFF needs ASK_UNANSWERED_STALL_MS (the hash checks end at its hole)');
+  process.exit(1);
+}
+if ((ASK_UNANSWERED_ACKS || ASK_UNANSWERED_ACK_LOST) && !(ASK_UNANSWERED_STALL_MS >= 20000)) {
+  console.log('ASK_UNANSWERED_ACKS and ASK_UNANSWERED_ACK_LOST need ASK_UNANSWERED_STALL_MS >= 20000');
+  process.exit(1);
+}
+if (ASK_UNANSWERED_ACKS && ASK_UNANSWERED_ACK_LOST) {
+  console.log('ASK_UNANSWERED_ACKS and ASK_UNANSWERED_ACK_LOST are separate runs');
+  process.exit(1);
+}
+const askUnanswered = {
+  hostAt: null,
+  guestAt: null,
+  dropped: 0,
+  range: null,
+  freezeMs: 0,
+  droppedByHost: null,
+  lateJoinedAt: null,
+  statesDropped: 0,
+};
+// ASK_UNANSWERED_ACKS: how long the dropped guest may take to join again late
+// (a gesture tap, the state, the boot).
+const ASK_LATE_JOIN_MS = 90000;
+const askPhantom = { hostAt: null, guestAt: null, range: null, dropped: 0, armed: false };
+const pastWindow = { hostAt: null, guestAt: null, frame: null, held: 0, releasedAt: null, released: false };
+if (CATCH_UP_HOLE_MS > 0 && !(DROP_PEER_MS > 0)) {
+  console.log('CATCH_UP_HOLE_MS needs DROP_PEER_MS');
+  process.exit(1);
+}
+// A host this many frames ahead of the guest at the end has run away from it.
+const RUNAWAY_FRAMES = 300;
 const DELAY_SYNC_ANSWER_MS = Number(process.env.DELAY_SYNC_ANSWER_MS || 0);
 const DELAY_SYNC_ANSWER_AT = process.env.DELAY_SYNC_ANSWER_AT || 'battle';
 if (!['battle', 'boot'].includes(DELAY_SYNC_ANSWER_AT)) {
@@ -659,7 +793,44 @@ const HEAL_AFTER_BOUNDARY_WITHIN = 40;
 const HEAL_RECOVER_MS = 90000;
 // After the first state the guest applies, how long a second one is looked for.
 const HEAL_SECOND_STATE_MS = 15000;
-const FREEZE_LIKE = FREEZE_MS > 0 || UNANSWERED_VARIANT === 'letgo' || SYNC_FOLLOW_UP !== '' || HEAL_BOTH_SIDES;
+// ASK_UNANSWERED_PHANTOM: with HEAL_BOTH_SIDES, one frame dropped for good after the heal.
+const ASK_UNANSWERED_PHANTOM = process.env.ASK_UNANSWERED_PHANTOM === '1';
+if (ASK_UNANSWERED_PHANTOM && !HEAL_BOTH_SIDES) {
+  console.log('ASK_UNANSWERED_PHANTOM needs HEAL_BOTH_SIDES=1');
+  process.exit(1);
+}
+// After the drop, how long the host's asks, a stall and a resync may take.
+const ASK_PHANTOM_RECOVER_MS = 30000;
+// ROLLBACK_AT_EDGE / PAST_WINDOW_FORCED: one real host input held until the
+// guest is at (or, forced, past) its rollback window's edge.
+const ROLLBACK_AT_EDGE = process.env.ROLLBACK_AT_EDGE === '1';
+const PAST_WINDOW_FORCED = process.env.PAST_WINDOW_FORCED === '1';
+const PAST_WINDOW_INPUT = ROLLBACK_AT_EDGE || PAST_WINDOW_FORCED;
+const PAST_KNOB = ROLLBACK_AT_EDGE ? 'ROLLBACK_AT_EDGE' : 'PAST_WINDOW_FORCED';
+if (ROLLBACK_AT_EDGE && PAST_WINDOW_FORCED) {
+  console.log('ROLLBACK_AT_EDGE and PAST_WINDOW_FORCED are mutually exclusive');
+  process.exit(1);
+}
+// The engine's visible rollback cap (KN_MAX_VISIBLE_ROLLBACK_DEPTH). Input F
+// is applied at frame F + delay: the edge stall holds the guest at depth 7;
+// forced past it, the input is let go at depth 10.
+const ROLLBACK_CAP = 7;
+const PAST_WINDOW_FORCED_DEPTH = ROLLBACK_CAP + 3;
+const PAST_WINDOW_RECOVER_MS = 30000;
+// Main's rollback input-stall deadline (MAX_STALL_MS + RESEND_TIMEOUT_MS).
+const STALL_DEADLINE_MS = 5000;
+const FREEZE_LIKE =
+  FREEZE_MS > 0 ||
+  UNANSWERED_VARIANT === 'letgo' ||
+  SYNC_FOLLOW_UP !== '' ||
+  HEAL_BOTH_SIDES ||
+  PAST_WINDOW_FORCED ||
+  // The stall shape recovers by the host's state: a hole that straddles the
+  // first push is predicted until the next one, then both are on the host's
+  // state. Compared from the last state the guest applied.
+  // ACKS: the guest is dropped and joins again late; compared from the
+  // late join's state.
+  ASK_UNANSWERED_STALL_MS > 0;
 // The guest's own deadline on a resync request (netplay-rollback.js).
 const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 // The server's database (its DB_PATH), to count the observers' client events in.
@@ -881,6 +1052,19 @@ if (
   process.exit(1);
 }
 if (
+  PAST_WINDOW_INPUT &&
+  (HEAL_BOTH_SIDES ||
+    DROP_PEER_MS > 0 ||
+    FREEZE_MS > 0 ||
+    RESYNC_FAULT ||
+    SYNC_FOLLOW_UP ||
+    ASK_UNANSWERED_STALL_MS > 0 ||
+    CATCH_UP_MS > 0)
+) {
+  console.log(`${PAST_KNOB} is mutually exclusive with the other fault knobs`);
+  process.exit(1);
+}
+if (
   UNANSWERED_SOCKET_RESYNC &&
   (FREEZE_MS > 0 ||
     THROTTLE_GUEST ||
@@ -950,6 +1134,10 @@ if (
     HEAL_BOTH_SIDES ||
     START_SILENT ||
     START_LOST ||
+    CATCH_UP_HOLE_MS > 0 ||
+    ASK_UNANSWERED_STALL_MS > 0 ||
+    ROLLBACK_AT_EDGE ||
+    PAST_WINDOW_FORCED ||
     CATCH_UP_MS > 0)
 ) {
   console.log('C_ROLLBACK_TRAP is mutually exclusive with the other fault knobs');
@@ -975,6 +1163,10 @@ if (
     MALFORMED_PEER ||
     HEAL_BOTH_SIDES ||
     C_ROLLBACK_TRAP ||
+    CATCH_UP_HOLE_MS > 0 ||
+    ASK_UNANSWERED_STALL_MS > 0 ||
+    ROLLBACK_AT_EDGE ||
+    PAST_WINDOW_FORCED ||
     CATCH_UP_MS > 0)
 ) {
   console.log('START_SILENT and START_LOST are mutually exclusive with each other and the other fault knobs');
@@ -1583,6 +1775,14 @@ if (START_SILENT || START_LOST) {
     };
   });
 }
+if (RESYNC_OFF) {
+  await host.evaluate(() => {
+    const box = document.getElementById('opt-resync');
+    if (!box) throw new Error('Missing resync toggle');
+    box.checked = false;
+  });
+  console.log('RESYNC_OFF: the host starts with resync off');
+}
 await host.click('#start-btn');
 const guestLog = () => guest.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
 const hostLog = () => host.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
@@ -1710,7 +1910,7 @@ const install = async (p, role) => {
   await p.addScriptTag({ url: `${URL}/static/ssb64-menu-autopilot.js` });
   await p.evaluate(
     (args) => {
-      const { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter } = args;
+      const { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter, twelveCb } = args;
       const W = (window.__tp = {
         role,
         hashes: {},
@@ -1786,7 +1986,22 @@ const install = async (p, role) => {
       const BTN = [0, 1, 6, 7]; // A, B, D-left, D-right (no START)
       const orig = window.KNShared.readLocalInput.bind(window.KNShared);
       window.KNShared.readLocalInput = (slot, keyMap, heldKeys) => {
-        orig(slot, keyMap, heldKeys);
+        const liveInput = orig(slot, keyMap, heldKeys);
+        if (window.__knResetLiveInput) {
+          const samples = (window.__knResetInputSamples ??= []);
+          const last = samples.at(-1);
+          const scene = (rb.readRdram32(0x800a4ad0) >>> 24) & 255;
+          if (
+            !last ||
+            last.buttons !== liveInput.buttons ||
+            last.scene !== scene ||
+            last.held !== window.KNState.resetComboHeld
+          ) {
+            if (samples.length >= 100) samples.shift();
+            samples.push({ frame: frameNow(), scene, buttons: liveInput.buttons, held: window.KNState.resetComboHeld });
+          }
+          return liveInput;
+        }
         const f = frameNow();
         const sc = (rb.readRdram32(0x800a4ad0) >>> 24) & 0xff;
         W.scene = sc;
@@ -1795,7 +2010,60 @@ const install = async (p, role) => {
           // Space button presses by the input delay so a press lands (and the
           // closed loop sees it) before the next one; sticks pass through.
           const d = (rb.getHudCounters?.()?.delay ?? 2) + 6;
-          let inp = actor(f);
+          let inp;
+          if (twelveCb && sc === 9) {
+            const hook = rb.readRdram32(0x80133d9c);
+            const pc = (0x80000000 | ((hook & 0x03ffffff) << 2)) >>> 0;
+            const hi = rb.readRdram32(pc),
+              lo = rb.readRdram32(pc + 4);
+            if (
+              hook >>> 26 !== 3 ||
+              hi >>> 16 !== 0x3c0d ||
+              lo >>> 16 !== 0x35ad ||
+              rb.readRdram32(pc + 8) >>> 0 !== 0x8da80000
+            )
+              throw new Error('Unknown native Remix page flag instructions');
+            const page = rb.readRdram32((((hi & 65535) << 16) | (lo & 65535)) >>> 0);
+            const cursor = rb.readRdram32(0x80134948);
+            if (![0, 1].includes(page)) throw new Error('Unknown Remix menu page ' + page);
+            const wanted = page === 0 ? 4 : 0;
+            inp = {
+              buttons: role === 'host' && f % 60 < 8 ? (cursor === wanted ? 1 : 16) : 0,
+              lx: 0,
+              ly: 0,
+              cx: 0,
+              cy: 0,
+            };
+          } else if (twelveCb && sc === 16) {
+            const slot = role === 'host' ? 0 : 1;
+            const base = 0x8013ba88 + slot * 0xbc;
+            const selected = rb.readRdram32(base + 0x88) === 1;
+            const both = [0, 1].every((i) => rb.readRdram32(0x8013ba88 + i * 0xbc + 0x88) === 1);
+            inp = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+            if (both) {
+              if (role === 'host' && f % 60 < 8) inp.buttons = 8;
+            } else if (!selected) {
+              const puck = rb.readRdram32(base + 4),
+                obj = rb.readRdram32(puck + 0x74);
+              const float = (word) => {
+                const a = new DataView(new ArrayBuffer(4));
+                a.setUint32(0, word);
+                return a.getFloat32(0);
+              };
+              const x = float(rb.readRdram32(obj + 0x58)),
+                y = float(rb.readRdram32(obj + 0x5c));
+              if (x > -100 && x < 420 && y > -100 && y < 340) {
+                const dx = (slot === 0 ? 70 : 200) - x,
+                  dy = 50 - y;
+                if (Math.abs(dx) < 9 && Math.abs(dy) < 9) {
+                  if (f % 60 < 8) inp.buttons = 1;
+                } else if (f % 30 < 6) {
+                  inp.lx = Math.abs(dx) > 8 ? Math.sign(dx) * 35 : 0;
+                  inp.ly = Math.abs(dy) > 8 ? Math.sign(dy) * 35 : 0;
+                }
+              }
+            }
+          } else inp = actor(f);
           if (inp.buttons) {
             if (W.btnCool > f && W.btnHeld !== inp.buttons) inp = { ...inp, buttons: 0 };
             else {
@@ -1871,7 +2139,14 @@ const install = async (p, role) => {
         return r;
       };
     },
-    { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter: MENU_AUTOPILOT === 'any-fighter' },
+    {
+      role,
+      VISUAL_CHECK,
+      ADDRESS_MAP_CHECK,
+      ADDRESS_MAP_OF,
+      anyFighter: MENU_AUTOPILOT === 'any-fighter',
+      twelveCb: process.env.TWELVE_CB === '1',
+    },
   );
 };
 await install(host, 'host');
@@ -1915,7 +2190,7 @@ let desyncGuestAt = -1; // DESYNC_GUEST: the guest's frame when its stock count 
 let throttleFlipped = null; // null until the 15s mark; then whether the flip Promise.all resolved or rejected
 // DROP_PEER_MS / DELAY_SYNC_ANSWER_MS: where each page's sync log stood when
 // the fault began ({seq, frame} of its last line), and what the test saw.
-const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null };
+const dropPeer = { hostAt: null, guestAt: null, hostFrame: 0, closed: null, holeDropped: [] };
 // HEAL_BOTH_SIDES: where the logs stood, what was silenced, and the frames after.
 const healBoth = {
   hostAt: null,
@@ -1940,6 +2215,9 @@ const MALFORMED_STRINGS = {
     '{zz-not json',
   ],
   syncState: ['sync-start:zz-frame:1:1:0'],
+  // On its schema, but a state header from a page that is not the host: the
+  // guest sends it, and the host must refuse it (`state header refused`).
+  guestSyncState: ['sync-start:1:1:1:0'],
 };
 // The `[protocol] dropped <kind>` each receiving page must log, once each, in any order.
 const MALFORMED_DROPS = [
@@ -2180,6 +2458,19 @@ if (inBattle) {
       `HEAL_BOTH_SIDES: guest resynced after the reconnect: ${healBoth.recovered} (${Date.now() - started} ms); ` +
         `${healBoth.framesAfter} frames in the next 5 s`,
     );
+    if (ASK_UNANSWERED_PHANTOM && healBoth.recovered) {
+      [askPhantom.hostAt, askPhantom.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+      askPhantom.range = await guest.evaluate(() => {
+        const frame = window.NetplayRollback.getHudCounters().currentFrame;
+        window.__knDropInputFrom = frame + 20;
+        window.__knDropInputTo = frame + 21;
+        return [window.__knDropInputFrom, window.__knDropInputTo];
+      });
+      askPhantom.armed = true;
+      console.log(`ASK_UNANSWERED_PHANTOM: the guest drops its input for frame ${askPhantom.range[0]} for good`);
+      await guest.waitForTimeout(ASK_PHANTOM_RECOVER_MS);
+      askPhantom.dropped = await guest.evaluate(() => window.__knInputsDroppedUntil);
+    }
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (DROP_PEER_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -2188,6 +2479,17 @@ if (inBattle) {
     [dropPeer.hostAt, dropPeer.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
     const frameNow = () => window.NetplayRollback.getHudCounters().currentFrame;
     dropPeer.hostFrame = await host.evaluate(frameNow);
+    if (CATCH_UP_HOLE_MS > 0) {
+      await host.evaluate((ms) => {
+        window.__knDropInputsAfterOpenMs = ms;
+        window.__knDropArmedAt = performance.now();
+        // The host's ticks pause while the connection is down, so the guest
+        // (which marks it a phantom and runs on) is ahead of the state it is
+        // sent at the reconnect, and catches up from it.
+        window.NetplayRollback.pauseTick();
+        setTimeout(() => window.NetplayRollback.resumeTick(), 8000);
+      }, CATCH_UP_HOLE_MS);
+    }
     peerSignalBlock.until = Date.now() + DROP_PEER_MS;
     dropPeer.closed = await guest.evaluate(() => {
       const frame = window.NetplayRollback.getHudCounters().currentFrame;
@@ -2208,6 +2510,8 @@ if (inBattle) {
     );
     console.log(`DROP_PEER_MS: guest resynced after the reconnect: ${reconnected} (${Date.now() - started} ms)`);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+    if (CATCH_UP_HOLE_MS > 0)
+      dropPeer.holeDropped = await host.evaluate(() => window.__knInputsDroppedAfterOpen.slice());
   } else if (delayBootSyncAnswer) {
     // The boot sync's answer was held from the start; by the battle the
     // guest has normally timed out, asked again and been answered.
@@ -2331,6 +2635,171 @@ if (inBattle) {
       `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: done (${Date.now() - started} ms, ${syncFollowUp.attempts} attempt(s)); ` +
         `the guest made ${syncFollowUp.framesAfter} frames in the next 5 s`,
     );
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (PAST_WINDOW_INPUT) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [pastWindow.hostAt, pastWindow.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    // F is a second or so ahead of the host: its input is nothing up to F
+    // and a button from F, so the guest's prediction for F (the last input
+    // it has, nothing) is wrong.
+    pastWindow.frame = await host.evaluate(() => {
+      const F = window.NetplayRollback.getHudCounters().currentFrame + 30;
+      // The button on F alone: C predicts from the newest input it has, so
+      // F differs from both its neighbours and the guest predicts it wrong.
+      window.__knInputOverride = (f) =>
+        f === F ? { buttons: 1, lx: 0, ly: 0, cx: 0, cy: 0 } : { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+      return F;
+    });
+    // The guest takes in nothing for F, as a packet or inside a later
+    // packet's redundancy; the packet itself is kept to hand over later.
+    await guest.evaluate((F) => {
+      const shared = window.KNShared;
+      const decode = shared.decodeInput;
+      window.__knHeldInput = { frame: F, held: 0, packet: null, decode };
+      shared.decodeInput = (data) => {
+        const d = decode(data);
+        const hold = window.__knHeldInput;
+        if (!hold || hold.frame < 0 || !d) return d;
+        if (d.frame === hold.frame) {
+          hold.held++;
+          if (!hold.packet) hold.packet = data.slice(0);
+          return { ...d, frame: NaN };
+        }
+        if (d.redundant?.some((r) => r.frame === hold.frame)) {
+          hold.held++;
+          return { ...d, redundant: d.redundant.filter((r) => r.frame !== hold.frame) };
+        }
+        return d;
+      };
+    }, pastWindow.frame);
+    console.log(`${PAST_KNOB}: the host presses a button from frame ${pastWindow.frame}; the guest holds it`);
+    // Forced: the edge stall lets F through (test-only switch).
+    if (PAST_WINDOW_FORCED)
+      await guest.evaluate((F) => {
+        window.__test_runPastEdgeFor = F;
+      }, pastWindow.frame);
+    // Release at the edge (the guest stalls there) or, forced, past it.
+    const depth = PAST_WINDOW_FORCED ? PAST_WINDOW_FORCED_DEPTH : ROLLBACK_CAP;
+    const until = Date.now() + 60000;
+    while (Date.now() < until) {
+      const hud = await guest.evaluate(() => window.NetplayRollback.getHudCounters());
+      if (hud.currentFrame >= pastWindow.frame + (hud.delay ?? 0) + depth) break;
+      await guest.waitForTimeout(20);
+    }
+    // At the edge, let the stall take hold before the input comes.
+    if (ROLLBACK_AT_EDGE) await guest.waitForTimeout(500);
+    await host.evaluate(() => {
+      window.__knInputOverride = null;
+    });
+    const release = await guest.evaluate(() => {
+      const hold = window.__knHeldInput;
+      const frame = window.NetplayRollback.getHudCounters().currentFrame;
+      hold.frame = -1;
+      window.KNShared.decodeInput = hold.decode;
+      window.__test_runPastEdgeFor = undefined;
+      // Hand the held packet to the channel it would have come in on.
+      const host = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
+      if (hold.packet && host?.dc?.onmessage) host.dc.onmessage({ data: hold.packet });
+      return { frame, held: hold.held, delivered: !!(hold.packet && host?.dc?.onmessage) };
+    });
+    pastWindow.held = release.held;
+    pastWindow.releasedAt = release.frame;
+    pastWindow.released = release.delivered;
+    console.log(`${PAST_KNOB}: let go at guest frame ${release.frame}:`, JSON.stringify(release));
+    if (PAST_WINDOW_FORCED)
+      await waitForLine(guest, pastWindow.guestAt.seq, /sync #\d+ applied/, PAST_WINDOW_RECOVER_MS);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (ASK_UNANSWERED_STALL_MS > 0) {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    [askUnanswered.hostAt, askUnanswered.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+    askUnanswered.range = await guest.evaluate(
+      ([ms, acksToo]) => {
+        // A range just ahead of the guest's frame: dropped for good.
+        const frame = window.NetplayRollback.getHudCounters().currentFrame;
+        window.__knDropInputFrom = frame + 20;
+        window.__knDropInputTo = frame + 28;
+        if (acksToo) window.__knDropSettledUntil = performance.now() + ms;
+        return [window.__knDropInputFrom, window.__knDropInputTo];
+      },
+      [ASK_UNANSWERED_STALL_MS, ASK_UNANSWERED_ACK_LOST],
+    );
+    if (ASK_UNANSWERED_ACKS)
+      await host.evaluate((ms) => {
+        window.__knDropSyncStateUntil = performance.now() + ms;
+      }, ASK_UNANSWERED_STALL_MS);
+    console.log(
+      `ASK_UNANSWERED_STALL_MS: the guest drops its inputs for frames ${askUnanswered.range[0]}..${askUnanswered.range[1] - 1} for good` +
+        (ASK_UNANSWERED_ACKS ? `, and the host's states never reach it for ${ASK_UNANSWERED_STALL_MS} ms` : '') +
+        (ASK_UNANSWERED_ACK_LOST ? `, and its acknowledgements for ${ASK_UNANSWERED_STALL_MS} ms` : ''),
+    );
+    // The longest the host's frame stood still while this ran (sampled).
+    let sampling = true;
+    const sampler = (async () => {
+      const hostFrame = () => host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+      let lastFrame = await hostFrame();
+      let lastAt = Date.now();
+      while (sampling) {
+        await host.waitForTimeout(200);
+        const f = await hostFrame().catch(() => lastFrame);
+        if (f !== lastFrame) {
+          lastFrame = f;
+          lastAt = Date.now();
+        } else askUnanswered.freezeMs = Math.max(askUnanswered.freezeMs, Date.now() - lastAt);
+      }
+    })();
+    const settled = await waitForLine(
+      host,
+      askUnanswered.hostAt.seq,
+      RESYNC_OFF
+        ? /RB-INPUT-STALL-TIMEOUT .*slot=1 |PEER-PHANTOM slot=1 lastAdvance=[\d.]+ staleSec=5\./
+        : ASK_UNANSWERED_ACKS
+          ? /INPUT-ASK-PUSH-GAVEUP/
+          : ASK_UNANSWERED_ACK_LOST
+            ? /INPUT-ASK-PUSH-ENDED/
+            : /INPUT-ASK-PUSH-SETTLED/,
+      ASK_UNANSWERED_STALL_MS + ASK_UNANSWERED_RECOVER_MS,
+    );
+    // A stall on main ends at its 5 s deadline; keep sampling past that.
+    await host.waitForTimeout(STALL_DEADLINE_MS + 2000);
+    sampling = false;
+    await sampler;
+    askUnanswered.dropped = await guest.evaluate(() => window.__knInputsDroppedUntil);
+    if (ASK_UNANSWERED_ACKS) askUnanswered.statesDropped = await host.evaluate(() => window.__knSyncStateDropped);
+    console.log(`ASK_UNANSWERED_STALL_MS: the push ended as the mode expects: ${settled} (${Date.now() - started} ms)`);
+    if (ASK_UNANSWERED_ACKS && settled) {
+      // The guest is told it was dropped and joins again late by itself
+      // (specs/drop_is_final.qnt). Its engine starts over (and its sync log
+      // with it), so the drop is read from its client events. The player
+      // taps the page's gesture prompt as at the start; the input and hash
+      // driver goes on the new engine once the late join has loaded.
+      const told = Date.now() + 15000;
+      while (Date.now() < told && !askUnanswered.droppedByHost) {
+        askUnanswered.droppedByHost = await guest
+          .evaluate(() => (window.__knEvents ?? []).find((e) => e.meta?.kind === 'dropped-by-host') ?? null)
+          .catch(() => null);
+        if (!askUnanswered.droppedByHost) await guest.waitForTimeout(200);
+      }
+      const joined = Date.now() + ASK_LATE_JOIN_MS;
+      while (Date.now() < joined && !askUnanswered.lateJoinedAt) {
+        if (await guest.locator('#gesture-prompt:not(.hidden)').count())
+          await guest
+            .locator('#gesture-prompt')
+            .click({ force: true })
+            .catch(() => {});
+        const log = await guest.evaluate(() => window.NetplayRollback?.exportSyncLog?.() ?? '').catch(() => '');
+        const m = log.match(/late-join loaded at frame (\d+)/);
+        if (m) askUnanswered.lateJoinedAt = +m[1];
+        else await guest.waitForTimeout(500);
+      }
+      if (askUnanswered.lateJoinedAt !== null) await install(guest, 'guest');
+      console.log(
+        `ASK_UNANSWERED_ACKS: told: ${!!askUnanswered.droppedByHost}; joined again late at frame ${askUnanswered.lateJoinedAt}`,
+      );
+    }
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (CATCH_UP_MS > 0) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -2689,14 +3158,18 @@ if (inBattle) {
     [malformedPeer.hostAt, malformedPeer.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
     // Each page sends the other, on its real channels, what no handler may read.
     malformedPeer.sent = await Promise.all(
-      [host, guest].map((p) =>
-        p.evaluate((strings) => {
-          const peer = Object.values(window.KNState.peers).find((q) => q?.dc?.readyState === 'open');
-          if (!peer || peer.syncDc?.readyState !== 'open') return false;
-          for (const text of strings.lockstep) peer.dc.send(text);
-          for (const text of strings.syncState) peer.syncDc.send(text);
-          return true;
-        }, MALFORMED_STRINGS),
+      [host, guest].map((p, i) =>
+        p.evaluate(
+          ([strings, isGuest]) => {
+            const peer = Object.values(window.KNState.peers).find((q) => q?.dc?.readyState === 'open');
+            if (!peer || peer.syncDc?.readyState !== 'open') return false;
+            for (const text of strings.lockstep) peer.dc.send(text);
+            for (const text of strings.syncState) peer.syncDc.send(text);
+            if (isGuest) for (const text of strings.guestSyncState) peer.syncDc.send(text);
+            return true;
+          },
+          [MALFORMED_STRINGS, i === 1],
+        ),
       ),
     );
     console.log(`MALFORMED_PEER: strings off their schema sent (host, guest): ${malformedPeer.sent}`);
@@ -2755,6 +3228,8 @@ const collect = (p, VISUAL_CHECK) =>
       link: window.__knLink ?? null,
       rollbacks: m._kn_get_rollback_count?.(),
       failed: m._kn_get_failed_rollbacks?.(),
+      // Frames run on a prediction nothing will correct (PREDICTED-KNOWN).
+      predictedKnown: window.NetplayRollback.getHudCounters?.()?.predictedKnown ?? null,
       // 64 KB RDRAM blocks kn_game_state_hash leaves out (of 128).
       taintedBlocks: m._kn_get_tainted_block_count?.() ?? null,
       mapRom: window.__tp.mapRom,
@@ -2811,7 +3286,11 @@ fs.writeFileSync(
 // before the guest's applied BOOT-SYNC are excluded the same way — never
 // widen this to a same-engine run, where a boot-window mismatch is real.
 const crossEngine = hostBrowser !== guestBrowser;
-const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => +m[1]);
+// Each state the guest took: a resync, or a late join's state (a page the
+// host dropped joins again late, specs/drop_is_final.qnt).
+const resyncs = [...G.sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)|late-join loaded at frame (\d+)/g)].map(
+  (m) => +(m[1] ?? m[2]),
+);
 const bootSyncFrame = crossEngine && resyncs.length ? resyncs[0] : 0;
 // RESYNC_ONE_BACK / RESYNC_SAME_FRAME: the guest's frame reset after it
 // paused (none for the same frame) and the resync it applied. The compare
@@ -2840,15 +3319,19 @@ const resyncFaultLanded =
         faultResyncApplied?.frame === faultTarget &&
         faultResyncApplied?.counter === faultTarget
       : false;
-const recoveredAt = RESYNC_FAULT
-  ? resyncFaultLanded
-    ? faultTarget
-    : Infinity
-  : FREEZE_LIKE
-    ? resyncs.length
-      ? resyncs[resyncs.length - 1]
+const recoveredAt = RESYNC_OFF
+  ? bootSyncFrame
+  : RESYNC_FAULT
+    ? resyncFaultLanded
+      ? faultTarget
       : Infinity
-    : bootSyncFrame;
+    : FREEZE_LIKE
+      ? resyncs.length
+        ? resyncs[resyncs.length - 1]
+        : Infinity
+      : bootSyncFrame;
+// RESYNC_OFF: the last frame compared is the one before the hole.
+const compareUntil = RESYNC_OFF && askUnanswered.range ? askUnanswered.range[0] : Infinity;
 let both = 0,
   gpMis = 0,
   fullMis = 0,
@@ -3026,7 +3509,10 @@ const peerDropped = { host: droppedIn(H.sync), guest: droppedIn(G.sync) };
 // was sent and without logging what it was, and went on playing.
 const malformedPeerReport = (() => {
   if (!MALFORMED_PEER) return null;
-  const side = (log, at, frameAfter) => {
+  const side = (log, at, frameAfter, refusedExpected) => {
+    const refused = log
+      .split('\n')
+      .filter((line) => (at ? seqOf(line) > at.seq : false) && line.includes('state header refused'));
     const lines = log.split('\n').filter((line) => line.includes('[protocol] dropped'));
     const after = at ? lines.filter((line) => seqOf(line) > at.seq) : [];
     const kinds = droppedIn(after.join('\n'));
@@ -3039,8 +3525,10 @@ const malformedPeerReport = (() => {
       before: lines.length - after.length,
       valuesLogged,
       framesAfter,
+      refused: refused.length,
       passed:
         !!at &&
+        refused.length === refusedExpected &&
         lines.length === after.length &&
         // In any order: the sync-state channel is not ordered against lockstep.
         JSON.stringify([...kinds].sort()) === JSON.stringify([...MALFORMED_DROPS].sort()) &&
@@ -3048,8 +3536,10 @@ const malformedPeerReport = (() => {
         framesAfter >= MALFORMED_FRAMES_AFTER,
     };
   };
-  const host = side(H.sync, malformedPeer.hostAt, malformedPeer.frameLater[0]);
-  const guest = side(G.sync, malformedPeer.guestAt, malformedPeer.frameLater[1]);
+  // The host refuses the guest's state header; the guest refuses nothing
+  // (the host's malformed one is dropped by the schema before the guard).
+  const host = side(H.sync, malformedPeer.hostAt, malformedPeer.frameLater[0], 1);
+  const guest = side(G.sync, malformedPeer.guestAt, malformedPeer.frameLater[1], 0);
   return {
     sent: malformedPeer.sent,
     host,
@@ -3223,7 +3713,7 @@ const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
 for (const f of Object.keys(H.hashes)) {
   const a = H.hashes[f],
     b = G.hashes[f];
-  if (!b || !a[0] || !b[0] || +f < recoveredAt) continue;
+  if (!b || !a[0] || !b[0] || +f < recoveredAt || +f >= compareUntil) continue;
   if (inFrozenRecovery(dropWindows, +f)) {
     dropPeerReport.framesExcluded++;
     if (a[0] !== b[0] || a[2] !== b[2]) dropPeerReport.mismatchesExcluded++;
@@ -3334,7 +3824,7 @@ const schedulerCounters = { host: lastTickPerf(H.sync), guest: lastTickPerf(G.sy
 // Finalized battle frames both peers could have hashed (hashing trails the
 // head by 12 frames); coverage below 80% means the comparison proves little.
 const spanFrom = Math.max(battleFrom, recoveredAt);
-const battleSpan = battleFrom > 0 ? Math.min(H.frame, G.frame) - 12 - spanFrom + 1 : 0;
+const battleSpan = battleFrom > 0 ? Math.min(Math.min(H.frame, G.frame) - 12, compareUntil - 1) - spanFrom + 1 : 0;
 const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
 
 // Visual check: decode both peers' downscaled canvas captures and diff
@@ -3385,7 +3875,7 @@ if (VISUAL_CHECK) {
   let windowFramesExcluded = 0;
   for (const [f, hb] of hMap) {
     const gb = gMap.get(f);
-    if (!gb || f < recoveredAt) continue;
+    if (!gb || f < recoveredAt || f >= compareUntil) continue;
     // The proven windows the hash compare leaves out (a frozen-page recovery,
     // a DROP_PEER_MS reconnect): the peers' pictures differ there by design too.
     if (inFrozenRecovery([...recoveries, ...dropWindows], f)) {
@@ -3718,6 +4208,7 @@ const summary = {
   frames: { host: H.frame, guest: G.frame, battleStart: [H.inBattleAt, G.inBattleAt] },
   rollbacks: { host: H.rollbacks, guest: G.rollbacks },
   failedRollbacks: { host: H.failed, guest: G.failed },
+  predictedKnown: { host: H.predictedKnown, guest: G.predictedKnown },
   engineDelay: { host: delayOf(H.sync), guest: delayOf(G.sync) },
   integrityEvents: { host: bad(H.clog) + bad(H.sync), guest: bad(G.clog) + bad(G.sync) },
   bootInputStallTimeouts: { host: bootInputStallTimeoutsOf(H.sync), guest: bootInputStallTimeoutsOf(G.sync) },
@@ -3784,6 +4275,24 @@ if (
       `${dropPeerReport.mismatchesExcluded} of them differing; ${dropPeerReport.integrityEventsExcluded} integrity ` +
       `reports and ${dropPeerReport.failedRollbacksExcluded} failed rollbacks.`,
   );
+// Keep the ordinary battle/hash report unchanged; this opt-in scenario runs last.
+let resetComboFailed = false;
+if (process.env.RESET_COMBO_CHECK === '1') {
+  const { checkPausedReset } = await import('./rb-reset-combo.mjs');
+  try {
+    summary.resetCombo = await checkPausedReset([host, guest], OUT);
+  } catch (error) {
+    resetComboFailed = true;
+    summary.resetCombo = { passed: false, error: String(error) };
+  }
+  fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
+  console.log('RESET_COMBO_CHECK:', JSON.stringify(summary.resetCombo));
+}
+if (process.env.HOST_END_CHECK === '1') {
+  const { checkHostEnd } = await import('./rb-end-game.mjs');
+  summary.hostEnd = await checkHostEnd([host, guest], OUT);
+  fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
+}
 // Close each distinct browser instance once (host and guest may share one,
 // e.g. the Chromium/Chromium default, or both resolve to the one WebKit
 // instance with HOST_BROWSER=webkit GUEST_BROWSER=webkit).
@@ -3809,7 +4318,7 @@ const integrityAfterRecovery = (log, marker) => {
         // (myF=), as cIntegrityAfterRecovery reads the same line below.
         const named = l.includes('[C] ') ? l.match(/myF=(\d+)/) : null;
         const f = named ? +named[1] : +(l.split('\t')[2] || '').replace('f=', '');
-        return f >= recoveredAt + 30 && count(l, INTEGRITY) > 0;
+        return f >= recoveredAt + 30 && f < compareUntil && count(l, INTEGRITY) > 0;
       }).length;
 };
 // The C debug log has no frame column; its entries name the frame they
@@ -3825,7 +4334,7 @@ const cIntegrityAfterRecovery = (clog, marker) => {
   return lines.slice(from + 1).filter((l) => {
     if (count(l, INTEGRITY) === 0) return false;
     const m = l.match(/myF=(\d+)/) || l.match(/\bf=(\d+)/);
-    return !m || +m[1] >= recoveredAt + 30;
+    return !m || (+m[1] >= recoveredAt + 30 && +m[1] < compareUntil);
   }).length;
 };
 const postRecoveryIntegrity =
@@ -3998,6 +4507,255 @@ if (dropPeerReport) {
       ? 'DROP_PEER_MS: no signaling dropped, no retry, or the reconnect is not all in the logs:'
       : 'DROP_PEER_MS: reconnected:',
     JSON.stringify(dropPeerReport),
+  );
+}
+// CATCH_UP_HOLE_MS: the host's inputs were dropped on the reconnected
+// channel, the guest's catch-up after the reconnect did not stop on a
+// missing input, and the host did not run away from the guest
+// (specs/catch_up_wait.qnt).
+const catchUpHoleReport = (() => {
+  if (!(CATCH_UP_HOLE_MS > 0) || !dropPeer.guestAt) return null;
+  const dropped = dropPeer.holeDropped;
+  const guestLines = linesAfter(G.sync, dropPeer.guestAt.seq);
+  const catchUps = guestLines.filter((l) => /SYNC-CATCH-UP from=/.test(l));
+  const stoppedOnHole = catchUps.filter((l) => /stopped: slot \d+ input \d+ not here/.test(l));
+  return { dropped: dropped.length, droppedFrames: dropped.slice(0, 8), catchUps, stoppedOnHole };
+})();
+const finalGap = Math.abs(H.frame - G.frame);
+// ASK_UNANSWERED_STALL_MS: the host's asks went overdue, it pushed its state to
+// the guest, and the guest's inputs-settled answered the push
+// (specs/ask_escalation.qnt).
+const askUnansweredReport = (() => {
+  if (!(ASK_UNANSWERED_STALL_MS > 0) || !askUnanswered.hostAt) return null;
+  const hostLines = linesAfter(H.sync, askUnanswered.hostAt.seq);
+  const overdue = hostLines.filter((l) => /INPUT-ASK-OVERDUE .*→ push/.test(l));
+  const settled = hostLines.filter((l) => /INPUT-ASK-PUSH-SETTLED/.test(l));
+  const gaveUp = hostLines.filter((l) => /INPUT-ASK-PUSH-GAVEUP/.test(l));
+  const hardDisconnected = hostLines.filter((l) => /peer hard-disconnected: .* slot: 1/.test(l));
+  const pushes = hostLines.filter((l) => /INPUT-ASK-PUSH-AGAIN/.test(l));
+  const endedOnPhantom = hostLines.filter((l) => /INPUT-ASK-PUSH-ENDED .*phantom/.test(l));
+  const recovered = hostLines.filter((l) => /PEER-RECOVERED slot=1/.test(l));
+  // Main's recovery for a stalled hole; the escalation should come first.
+  const stallTimeouts = hostLines.filter((l) => /RB-INPUT-STALL-TIMEOUT/.test(l));
+  // After a drop, the health check may offer to the player again: each
+  // drop and heal is counted, so a cycle that does not end shows.
+  const heals = hostLines.filter((l) => /MESH-HEAL f=.* slot=1/.test(l));
+  return {
+    baselineWithoutResync: RESYNC_OFF
+      ? resyncOffEvidence({
+          lines: hostLines,
+          range: askUnanswered.range,
+          dropped: askUnanswered.dropped,
+          lastFrame: H.frame,
+        })
+      : null,
+    range: askUnanswered.range,
+    dropped: askUnanswered.dropped,
+    overdue,
+    settled,
+    pushes,
+    gaveUp,
+    hardDisconnected,
+    heals: heals.length,
+    stallTimeouts,
+    notSent: hostLines.filter((l) => /INPUT-ASK-PUSH-NOT-SENT/.test(l)).length,
+    endedOnPhantom,
+    recovered: recovered.length,
+    statesDropped: askUnanswered.statesDropped,
+    // ACKS: the drop is final (specs/drop_is_final.qnt): the guest's page
+    // was told and ended its match, and nothing on the host followed it.
+    droppedByHost: askUnanswered.droppedByHost ? [askUnanswered.droppedByHost] : [],
+    lateJoined: askUnanswered.lateJoinedAt === null ? [] : [askUnanswered.lateJoinedAt],
+    pastWindowAfterDrop: gaveUp.length
+      ? linesAfter(H.sync, seqOf(gaveUp[0])).filter((l) => /INPUT-PAST-WINDOW-MISMATCH/.test(l)).length
+      : null,
+    freezeMs: askUnanswered.freezeMs,
+    lastPushFrame: Math.max(-1, ...settled.map((l) => +(l.match(/ frame=(\d+)/) || [])[1] || -1)),
+    comparedFrom: recoveredAt,
+  };
+})();
+if (RESYNC_OFF) fs.writeFileSync(`${OUT}/resync-off-evidence.json`, JSON.stringify(askUnansweredReport, null, 2));
+const askUnansweredFailed = RESYNC_OFF
+  ? // Resync off: the injected hole takes the normal stall path, never recovery.
+    ASK_UNANSWERED_STALL_MS > 0 &&
+    !(
+      askUnansweredReport &&
+      askUnansweredReport.dropped > 0 &&
+      askUnansweredReport.baselineWithoutResync?.passed === true &&
+      askUnansweredReport.notSent === 0 &&
+      askUnansweredReport.overdue.length === 0 &&
+      askUnansweredReport.settled.length === 0 &&
+      askUnansweredReport.pushes.length === 0 &&
+      askUnansweredReport.gaveUp.length === 0 &&
+      askUnansweredReport.hardDisconnected.length === 0
+    )
+  : ASK_UNANSWERED_STALL_MS > 0 &&
+    !(
+      askUnansweredReport &&
+      askUnansweredReport.dropped > 0 &&
+      askUnansweredReport.overdue.length > 0 &&
+      (ASK_UNANSWERED_ACK_LOST
+        ? // The phantom the host's stall makes ends the push; its own resync
+          // recovers the guest, and nobody is dropped.
+          askUnansweredReport.endedOnPhantom.length > 0 &&
+          askUnansweredReport.recovered > 0 &&
+          askUnansweredReport.gaveUp.length === 0 &&
+          askUnansweredReport.hardDisconnected.length === 0
+        : ASK_UNANSWERED_ACKS
+          ? // Every push unanswered: pushed again to the limit, then the player dropped.
+            askUnansweredReport.statesDropped > 0 &&
+            askUnansweredReport.pushes.length >= 2 &&
+            askUnansweredReport.gaveUp.length > 0 &&
+            askUnansweredReport.hardDisconnected.length > 0 &&
+            askUnansweredReport.droppedByHost.length > 0 &&
+            // It joined again late, onto the host's state; frames are compared
+            // from there (FREEZE_LIKE).
+            askUnansweredReport.lateJoined.length > 0 &&
+            askUnansweredReport.heals === 0 &&
+            askUnansweredReport.pastWindowAfterDrop === 0
+          : askUnansweredReport.settled.length > 0 &&
+            askUnansweredReport.gaveUp.length === 0 &&
+            // The difference from main: no stall waits out its deadline.
+            askUnansweredReport.stallTimeouts.length === 0 &&
+            askUnansweredReport.freezeMs < STALL_DEADLINE_MS &&
+            // The frames compared start at or after the last push's frame.
+            recoveredAt >= askUnansweredReport.lastPushFrame)
+    );
+if (ASK_UNANSWERED_STALL_MS > 0) {
+  console.log(
+    askUnansweredFailed
+      ? 'ASK_UNANSWERED_STALL_MS: no input dropped, no overdue push, the push not acknowledged, or a stall waited out its deadline:'
+      : 'ASK_UNANSWERED_STALL_MS: the overdue ask ended in a pushed state the guest applied:',
+    JSON.stringify(askUnansweredReport),
+  );
+}
+// Hash mismatches from a frame on (both pages' finalized frames).
+const mismatchesFrom = (from) =>
+  Object.keys(H.hashes).filter((f) => {
+    const a = H.hashes[f],
+      b = G.hashes[f];
+    return +f >= from && b && a[0] && b[0] && (a[0] !== b[0] || a[2] !== b[2]);
+  }).length;
+// ASK_UNANSWERED_PHANTOM: the input dropped, the host asked for it, and the
+// frames after the guest's last state match (FREEZE_LIKE compares from it).
+const askPhantomReport = (() => {
+  if (!ASK_UNANSWERED_PHANTOM) return null;
+  if (!askPhantom.armed) return { armed: false };
+  const hostLines = linesAfter(H.sync, askPhantom.hostAt.seq);
+  const frame = askPhantom.range[0];
+  const asked = hostLines.filter((l) => {
+    const m = l.match(/RB-INPUT-ASK .*frames=(\d+)\.\.(\d+)/);
+    return m && +m[1] <= frame && frame <= +m[2];
+  });
+  return {
+    armed: true,
+    frame,
+    dropped: askPhantom.dropped,
+    asked: asked.length,
+    stalled: hostLines.filter((l) => /RB-INPUT-STALL f=/.test(l)).length,
+    overdue: hostLines.filter((l) => /INPUT-ASK-OVERDUE/.test(l)),
+    settled: hostLines.filter((l) => /INPUT-ASK-PUSH-SETTLED/.test(l)),
+    stallTimeouts: hostLines.filter((l) => /RB-INPUT-STALL-TIMEOUT/.test(l)).length,
+    mismatchesFromFrame: mismatchesFrom(frame),
+    comparedFrom: recoveredAt,
+  };
+})();
+const askPhantomFailed =
+  ASK_UNANSWERED_PHANTOM &&
+  !(
+    askPhantomReport?.armed &&
+    askPhantomReport.dropped > 0 &&
+    // The difference from main, whose stall deadline recovers the hole:
+    // the ask escalates, the push is acknowledged, no stall times out.
+    askPhantomReport.settled.length > 0 &&
+    askPhantomReport.stallTimeouts === 0 &&
+    gpMis === 0 &&
+    gsMis === 0 &&
+    recoveredAt > askPhantomReport.frame
+  );
+if (ASK_UNANSWERED_PHANTOM)
+  console.log(
+    askPhantomFailed
+      ? 'ASK_UNANSWERED_PHANTOM: not dropped, no acknowledged push, a stall timed out, or the frames after the last state differ:'
+      : 'ASK_UNANSWERED_PHANTOM: the hole ended in a state both pages agree on:',
+    JSON.stringify(askPhantomReport),
+  );
+// ROLLBACK_AT_EDGE: C rolled the held input back at the window's edge.
+// PAST_WINDOW_FORCED: it came past the window and different (C's
+// DEEP-MISPREDICT-SKIP), the guest escalated, and a state applied after it
+// left the pages agreeing.
+const pastWindowReport = (() => {
+  if (!PAST_WINDOW_INPUT || !pastWindow.guestAt) return null;
+  const guestLines = linesAfter(G.sync, pastWindow.guestAt.seq);
+  const F = pastWindow.frame;
+  const skipped = G.clog
+    .split('\n')
+    .filter((l) => new RegExp(`(DEEP-MISPREDICT-SKIP|FAILED-ROLLBACK) slot=0 f=${F} `).test(l));
+  const rolledBack = G.clog
+    .split('\n')
+    .map((l) => l.match(new RegExp(`MISPREDICTION slot=0 f=${F} .*depth=(\\d+)`)))
+    .filter(Boolean)
+    .map((m) => +m[1]);
+  return {
+    rolledBackDepth: rolledBack.length ? Math.max(...rolledBack) : null,
+    frame: F,
+    held: pastWindow.held,
+    releasedAt: pastWindow.releasedAt,
+    released: pastWindow.released,
+    skipped,
+    mismatch: guestLines.filter((l) => /INPUT-PAST-WINDOW-MISMATCH/.test(l)),
+    overdueAsk: guestLines.filter((l) => /INPUT-ASK-OVERDUE/.test(l)),
+    applied: guestLines.filter((l) => /sync #\d+ applied/.test(l)).length,
+    mismatchesFromFrame: mismatchesFrom(F),
+    comparedFrom: recoveredAt,
+  };
+})();
+const pastWindowFailed = ROLLBACK_AT_EDGE
+  ? !(
+      pastWindowReport &&
+      pastWindowReport.released &&
+      pastWindowReport.rolledBackDepth >= 5 &&
+      pastWindowReport.skipped.length === 0 &&
+      gpMis === 0 &&
+      gsMis === 0
+    )
+  : PAST_WINDOW_FORCED &&
+    !(
+      pastWindowReport &&
+      pastWindowReport.released &&
+      pastWindowReport.skipped.length > 0 &&
+      pastWindowReport.mismatch.length > 0 &&
+      pastWindowReport.applied > 0 &&
+      recoveredAt > pastWindowReport.frame &&
+      gpMis === 0 &&
+      gsMis === 0
+    );
+if (PAST_WINDOW_INPUT)
+  console.log(
+    pastWindowFailed
+      ? ROLLBACK_AT_EDGE
+        ? 'ROLLBACK_AT_EDGE: not rolled back at the edge, skipped, or the frames differ:'
+        : 'PAST_WINDOW_FORCED: not held past the window, not escalated, or the frames after the state differ:'
+      : ROLLBACK_AT_EDGE
+        ? 'ROLLBACK_AT_EDGE: rolled back at the edge and the frames match:'
+        : 'PAST_WINDOW_FORCED: the late input escalated to a state both pages agree on:',
+    JSON.stringify(pastWindowReport),
+  );
+const catchUpHoleFailed =
+  CATCH_UP_HOLE_MS > 0 &&
+  !(
+    catchUpHoleReport &&
+    catchUpHoleReport.dropped > 0 &&
+    catchUpHoleReport.catchUps.length > 0 &&
+    catchUpHoleReport.stoppedOnHole.length === 0 &&
+    finalGap < RUNAWAY_FRAMES
+  );
+if (CATCH_UP_HOLE_MS > 0) {
+  console.log(
+    catchUpHoleFailed
+      ? 'CATCH_UP_HOLE_MS: no input dropped, the catch-up stopped on a hole, or the host ran away:'
+      : 'CATCH_UP_HOLE_MS: the catch-up filled its hole and the pages stayed together:',
+    JSON.stringify({ ...catchUpHoleReport, finalGap }),
   );
 }
 // DELAY_SYNC_ANSWER_MS: the late answer must have been late, and handled.
@@ -4196,12 +4954,29 @@ if (START_LOST)
       : 'START_LOST: the host sent its delay and start frame again on the new channel and the guest armed with them:',
     JSON.stringify(startLostReport),
   );
+// Every mode: no frame run on a prediction of an input the peer is known to
+// have made, or one C did not record (specs/reconnect_inputs.qnt).
+const predictedKnownFailed = (H.predictedKnown || 0) + (G.predictedKnown || 0) > 0;
+console.log(
+  predictedKnownFailed ? 'PREDICTED-KNOWN: frames run on a prediction nothing corrects:' : 'PREDICTED-KNOWN: none:',
+  JSON.stringify({
+    host: H.predictedKnown,
+    guest: G.predictedKnown,
+    lines: [...H.sync.split('\n'), ...G.sync.split('\n')].filter((l) => l.includes('PREDICTED-KNOWN')).slice(0, 6),
+  }),
+);
 const failed =
   startLostFailed ||
+  predictedKnownFailed ||
+  resetComboFailed ||
   addressMapFailed ||
   resyncOneBackFailed ||
   linkFailed ||
   dropPeerFailed ||
+  catchUpHoleFailed ||
+  askUnansweredFailed ||
+  askPhantomFailed ||
+  pastWindowFailed ||
   healBothFailed ||
   delaySyncAnswerFailed ||
   catchUpFailed ||

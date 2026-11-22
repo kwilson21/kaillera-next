@@ -253,3 +253,33 @@ test('checkPeerJson names the route and type', () => {
     issue: null,
   });
 });
+
+test('inputs-settled carries the frame alone, whether or not inputs follow it', () => {
+  // _settleInputsAtResync sends it after every state the guest applies, with
+  // its own inputs (if any) as separate binary packets: the host's
+  // escalation push is answered by it (specs/ask_escalation.qnt).
+  ok('lockstep', 'inputs-settled:1168');
+  // `from` is Math.max(0, frame - DELAY_FRAMES): a state at the first frames.
+  ok('lockstep', 'inputs-settled:0');
+  bad('lockstep', 'inputs-settled:');
+  bad('lockstep', 'inputs-settled:NaN');
+});
+
+test('dropped names why the host dropped the player', () => {
+  ok('lockstep', 'dropped:desync');
+  ok('lockstep', 'dropped:host');
+  bad('lockstep', 'dropped:');
+  bad('lockstep', 'dropped:anything');
+  bad('lockstep', 'dropped');
+});
+
+test('recovery attempt metadata is separate from legacy headers and rejects malformed IDs', () => {
+  ok('sync-state', 'sync-recovery-id:17');
+  ok('sync-state', 'sync-start:1000:2:1:0');
+  ok('lockstep', 'recovery-settled:997:17');
+  ok('lockstep', 'inputs-settled:997');
+  for (const id of ['-1', '1.5', 'NaN', '1x', '', '1:2']) {
+    bad('sync-state', `sync-recovery-id:${id}`);
+    bad('lockstep', `recovery-settled:997:${id}`);
+  }
+});

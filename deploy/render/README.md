@@ -127,8 +127,8 @@ a bug report about it.
 
 1. In Render: service → **Settings → Custom Domains → Add**
    `kaillera-next.thesuperhuman.us`.
-2. If the hostname is still the demo Worker's custom domain, detach it first
-   (Workers & Pages → `kaillera-next` → Settings → Domains & Routes).
+2. If the hostname is still a Worker's custom domain, detach it first
+   (Workers & Pages → that Worker → Settings → Domains & Routes).
 3. Create the record, DNS-only at first so Render can issue its certificate:
    ```sh
    python deploy/vps/deploy.py dns --target render --render-host <name>.onrender.com

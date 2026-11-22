@@ -22,3 +22,9 @@ export function mayHandChunk(buffered: number, lowWater: number): boolean {
 export function transferStillFor(queuedEpoch: number, queuedGen: number, epoch: number, gen: number): boolean {
   return queuedEpoch === epoch && queuedGen === gen;
 }
+
+/** Only the authenticated host's current channel owns incoming state assembly. */
+//@ ensures \result === (slot === 0 && currentChannel)
+export function mayReceiveState(slot: number, currentChannel: boolean): boolean {
+  return slot === 0 && currentChannel;
+}

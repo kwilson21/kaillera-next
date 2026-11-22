@@ -43,6 +43,8 @@ const dataOf = (state: PageState): Record<string, string> =>
 const BUILT_BY_THE_SCRIPT = {
   remapActive: 'false',
   touchInput: '{}',
+  // Added by the deliberate reset shortcut; inactive until explicitly held.
+  resetComboHeld: 'false',
   peers: '{}',
   frameNum: '0',
   delayAutoValue: '2',
@@ -54,7 +56,6 @@ const BUILT_BY_THE_SCRIPT = {
   sessionStats: '{"reconnects":0,"desyncs":0,"stalls":0}',
   matchId: 'null',
   isLocalHost: 'false',
-  boardFrame: 'false',
   DEFAULT_ICE_SERVERS: '[{"urls":"stun:stun.cloudflare.com:3478"}]',
 } satisfies Record<string, string>;
 

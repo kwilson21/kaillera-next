@@ -35,6 +35,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import html as html_lib
 import json
 import logging
 import os
@@ -45,7 +46,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import ColumnElement, Select, or_, select
@@ -285,6 +286,7 @@ class SecurityHeadersMiddleware:
 
         # Extract the request path for cache-control decisions.
         path: str = scope.get("path", "/")
+        query: bytes = scope.get("query_string", b"")
 
         async def send_with_headers(message: dict) -> None:
             if message["type"] == "http.response.start":
@@ -295,7 +297,7 @@ class SecurityHeadersMiddleware:
                     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
-                    (b"cache-control", self._cache_control(path).encode()),
+                    (b"cache-control", self._cache_control(path, query, message["status"]).encode()),
                 ]
                 # COOP/COEP breaks OG image fetches by crawlers. The front page
                 # doesn't need cross-origin isolation (only the game does), and
@@ -308,13 +310,19 @@ class SecurityHeadersMiddleware:
 
         await self.app(scope, receive, send_with_headers)
 
-    def _cache_control(self, path: str) -> str:
+    def _cache_control(self, path: str, query: bytes = b"", status: int = 200) -> str:
         if not self._allow_cache:
             return "no-store, no-cache, must-revalidate, max-age=0"
         # WASM core + data — content-addressed via /api/core-info?h=<hash>,
         # so the URL itself changes when the file changes. Safe to cache for
         # a year (browsers + Cloudflare both treat ?h=… as part of the cache
         # key, so a new file = new URL = guaranteed cache miss).
+        if path == f"/{_CORE_RELATIVE_PATH}" or path.startswith("/static/ejs/cores/reports/"):
+            # Never pin a missing file for a year during a deployment.
+            if status >= 400:
+                return "no-store"
+            if not re.fullmatch(rb"h=[0-9a-f]{16}", query):
+                return "no-cache"
         if path.startswith("/static/ejs/cores/"):
             return "public, max-age=31536000, immutable"
         # JS/CSS — always revalidate via ETag (304 if unchanged)
@@ -707,9 +715,8 @@ class ErrorPageMiddleware:
                     await send({"type": "http.response.body", "body": body})
                     return
                 await send(message)
-            elif message["type"] == "http.response.body":
-                if not intercepted:
-                    await send(message)
+            elif message["type"] == "http.response.body" and not intercepted:
+                await send(message)
 
         await self.app(scope, receive, capture_send)
 
@@ -1499,6 +1506,31 @@ def create_app(lifespan=None) -> FastAPI:
 
         return {"total": total, "entries": entries}
 
+    @app.get("/admin/api/session-logs/{log_id}/summary")
+    async def admin_session_log_summary(log_id: int, _auth: None = Depends(_require_admin)) -> dict:
+        """Metadata only; do not select the legacy raw log or load any chunks."""
+        rows = await db.fetch(
+            select(
+                SessionLog.id,
+                SessionLog.match_id,
+                SessionLog.room,
+                SessionLog.slot,
+                SessionLog.player_name,
+                SessionLog.mode,
+                SessionLog.summary,
+                SessionLog.ended_by,
+                SessionLog.created_at,
+                SessionLog.updated_at,
+            ).where(SessionLog.id == log_id)
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Session log not found")
+        entry = rows[0]
+        if isinstance(entry.get("summary"), str):
+            with contextlib.suppress(json.JSONDecodeError):
+                entry["summary"] = json.loads(entry["summary"])
+        return entry
+
     @app.get("/admin/api/session-logs/{log_id}")
     async def admin_session_log_detail(request: Request, log_id: int, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
@@ -1943,11 +1975,43 @@ def create_app(lifespan=None) -> FastAPI:
 
     # ── Screenshot routes ──────────────────────────────────────────────────
 
+    @app.get("/admin/api/screenshots/{match_id}/frame")
+    async def admin_screenshot_frame(
+        match_id: str,
+        frame: int | None = Query(default=None, ge=0, le=2**53 - 1),
+        _auth: None = Depends(_require_admin),
+    ) -> dict:
+        return {"matchId": match_id, **await db.get_screenshot_frame(match_id, frame)}
+
     @app.get("/admin/api/screenshots/{match_id}")
     async def admin_screenshots_list(request: Request, match_id: str, _auth: None = Depends(_require_admin)) -> dict:
         """List all screenshots for a given match (metadata only, no blobs)."""
         screenshots = await db.get_screenshots(match_id)
         return {"matchId": match_id, "screenshots": screenshots}
+
+    def _vision_capture_evidence(row: dict) -> tuple[int | None, list[int]]:
+        # Vision compares the first two submitted pictures, not the suspected
+        # frame. Historical rows and postmortems may not have exact frame tags.
+        # These are client-reported labels, not authenticated player identities.
+        try:
+            peers = json.loads(row.pop("capture_evidence") or "null")
+        except (TypeError, ValueError):
+            return None, []
+        if not isinstance(peers, list) or len(peers) < 2 or not all(isinstance(p, dict) for p in peers[:2]):
+            return None, []
+        first, second = peers[:2]
+        frame = first.get("captured_frame")
+        slots = [first.get("slot"), second.get("slot")]
+        if (
+            type(frame) is not int
+            or frame < row["frame"]
+            or type(second.get("captured_frame")) is not int
+            or second["captured_frame"] != frame
+            or any(type(slot) is not int or not 0 <= slot < 4 for slot in slots)
+            or slots[0] == slots[1]
+        ):
+            return None, []
+        return frame, slots
 
     @app.get("/admin/api/desync-events")
     async def admin_desync_events(request: Request, _auth: None = Depends(_require_admin)) -> dict:
@@ -1955,7 +2019,22 @@ def create_app(lifespan=None) -> FastAPI:
         match_id = request.query_params.get("match_id", "")
         if not match_id:
             raise HTTPException(status_code=400, detail="match_id required")
-        rows = await db.fetch(_desync_verdicts(match_id).add_columns(DesyncEvent.match_id))
+        verdicts = _desync_verdicts(match_id)
+        compact = request.query_params.get("compact") == "true"
+        if compact:
+            verdicts = verdicts.with_only_columns(
+                DesyncEvent.frame, DesyncEvent.vision_equal, DesyncEvent.vision_confidence
+            )
+        else:
+            verdicts = verdicts.add_columns(DesyncEvent.match_id)
+        verdicts = verdicts.add_columns(DesyncEvent.hashes_json.label("capture_evidence"))
+        rows = await db.fetch(verdicts)
+        for row in rows:
+            row["captured_frame"], row["capture_slots"] = _vision_capture_evidence(row)
+        # DB fetches return raw SQLite 0/1 rather than SQLAlchemy-coerced booleans.
+        for row in rows:
+            equal = row["vision_equal"]
+            row["vision_equal"] = bool(equal) if equal in (0, 1) else None
         return {
             "match_id": match_id,
             "events": rows,
@@ -2070,6 +2149,7 @@ def create_app(lifespan=None) -> FastAPI:
         host = _validated_host(request)
         tags = build_og_tags(host)
         html = inject_og_tags(_get_index_html(), tags)
+        html = html.replace("https://__KN_HOST__/", f"https://{html_lib.escape(host, quote=True)}/")
         return Response(content=html, media_type="text/html")
 
     # ── Vision desync verdict endpoint ────────────────────────────────────

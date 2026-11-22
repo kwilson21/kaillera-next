@@ -164,6 +164,29 @@ done
 $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── A guest's ROM: judged and announced by its own hash ──────────────────────
+ROM_IDENTITY=specs/rom_identity.qnt
+$QUINT typecheck "$ROM_IDENTITY"
+for variant in rom_identity_before rom_identity_judge_only rom_identity_no_retract rom_identity_first_push \
+  rom_identity_current; do
+  $QUINT test "$ROM_IDENTITY" --main="$variant" --backend="$BACKEND"
+done
+# Today: a page never announces a hash that is not its ROM's, never clears
+# the host's ROM, once nothing is being hashed holds the host's ROM (or
+# none) with its own hash, a start never counts it ready on the previous
+# ROM's word, it never boots a ROM that is not the host's, and the host never
+# starts on its previous hash. VIOLATED while every check read `_romHash`
+# whatever load it was for (rom_identity_before; rightOverWrongTest), while a
+# late hash was still taken as the loaded ROM's (rom_identity_judge_only;
+# twoDropsTest), while a drop left the server holding the previous ROM's word
+# (rom_identity_no_retract; startWhileHashingTest), and in #289 as first
+# pushed, which booted a ROM still being hashed, let the host start on its
+# previous hash, left a failed hash pending for good and a rejoin with the
+# previous ROM's word (rom_identity_first_push; bootWhileHashingTest,
+# hostStartsWhileHashingTest, hashFailsTest, rejoinWhileHashingTest).
+$QUINT run "$ROM_IDENTITY" --main=rom_identity_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # ── A game start: who a page waits for before its match runs ─────────────────
 START_GROUP=specs/start_group.qnt
 $QUINT typecheck "$START_GROUP"
@@ -389,6 +412,13 @@ $QUINT run "$TICK" --main=tick_deadlines_current --invariant=ownFreezeIsNotHeldA
 # lockstep wait had one (tick_deadlines_before_lockstep_mode).
 $QUINT run "$TICK" --main=tick_deadlines_current --invariant=everyWaitHasADeadline \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# The peer-stale clock: a peer catching up is not stale, a peer that only
+# repeats itself still is (peer_staleness_before; peer_staleness_any_input).
+for variant in peer_staleness_before peer_staleness_any_input peer_staleness_current; do
+  $QUINT test "$TICK" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$TICK" --main=peer_staleness_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 # A state transfer and the host's inputs behind it on one connection.
 for variant in input_link_burst input_link_paced_unguarded input_link_paced_whole_deadline input_link_paced; do
   $QUINT test "$TICK" --main="$variant" --backend="$BACKEND"
@@ -505,6 +535,96 @@ done
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── A catch-up waiting on a hole after a reconnect ────────────────────────
+WAIT=specs/catch_up_wait.qnt
+$QUINT typecheck "$WAIT"
+for variant in catch_up_wait_current catch_up_wait_yield_only catch_up_wait_resend_limited_only catch_up_wait_fixed; do
+  $QUINT test "$WAIT" --main="$variant" --backend="$BACKEND"
+done
+# Today a catch-up waiting on a missing input spins (each tick replay-only,
+# run again at once) and every tick sends the same frame's input on the
+# reliable channel, burying the ask for the hole (catch_up_wait_current;
+# spinThenAskTest). Yielding alone still sends the same frame every slot; limiting
+# the resend alone still spins.
+$QUINT run "$WAIT" --main=catch_up_wait_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=30 --backend="$BACKEND"
+
+# ── An ask for a missing input that is never answered ────────────────────
+ESC=specs/ask_escalation.qnt
+$QUINT typecheck "$ESC"
+for variant in ask_escalation_current ask_escalation_push_once ask_escalation_fixed_host ask_escalation_fixed_guest; do
+  $QUINT test "$ESC" --main="$variant" --backend="$BACKEND"
+done
+# The push's deadline in detail (push_deadline_before: armed on a push that
+# never went out, run on through a reconnect, unsettled by a late
+# acknowledgement) and whom the state reaches in three players
+# (escalation_peers_one).
+for variant in push_deadline_before push_deadline_before_resync_off push_deadline_current \
+  push_deadline_current_resync_off escalation_peers_one escalation_peers_all; do
+  $QUINT test "$ESC" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$ESC" --main=push_deadline_current --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+$QUINT run "$ESC" --main=push_deadline_current_resync_off --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+$QUINT run "$ESC" --main=escalation_peers_all --invariant=everyPeerOnTheHostState \
+  --max-samples=2000 --max-steps=5 --backend="$BACKEND"
+# Today an ask never answered is predicted for the rest of the match
+# (ask_escalation_current; lostForGoodTest); a push with no deadline ends at
+# its lost acknowledgement (ask_escalation_push_once; pushAckLostTest).
+for variant in ask_escalation_fixed_host ask_escalation_fixed_guest; do
+  $QUINT run "$ESC" --main="$variant" --invariant=allHold \
+    --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+done
+
+# ── The escalation push as a transfer that takes time ────────────────────
+ESCP=specs/escalation_push.qnt
+$QUINT typecheck "$ESCP"
+# Before #286's second round, its second and third rounds, and the fix with
+# each part left out alone (queuedBehindTest, progressingTest, twoAheadTest,
+# lostReportTest, slowOtherGuestTest,
+# earlierMarksTest, freezeTest, failTwiceTest); the host's delta base with a
+# state sent to one guest (sync_base; otherGuestAsksTest); pushes counted per
+# hole (hole_counts; alternatingHolesTest).
+for variant in escalation_push_current escalation_push_round_two escalation_push_round_three \
+  escalation_push_count_resets \
+  escalation_push_timer_let_go escalation_push_backstop escalation_push_reported_together \
+  escalation_push_any_hand_over escalation_push_no_credit escalation_push_fixed \
+  sync_base_current sync_base_esc_clears sync_base_fixed hole_counts_one_record hole_counts_fixed; do
+  $QUINT test "$ESCP" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$ESCP" --main=escalation_push_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+$QUINT run "$ESCP" --main=sync_base_fixed --invariant=noDeltaOnAForeignBase \
+  --max-samples=5000 --max-steps=10 --backend="$BACKEND"
+$QUINT run "$ESCP" --main=hole_counts_fixed --invariant=pushesAreBoundedForEveryHole \
+  --max-samples=5000 --max-steps=15 --backend="$BACKEND"
+
+# ── After a reconnect, frames run before the peer's inputs ────────────────
+REC=specs/reconnect_inputs.qnt
+$QUINT typecheck "$REC"
+for variant in reconnect_inputs_current reconnect_inputs_fixed; do
+  $QUINT test "$REC" --main="$variant" --backend="$BACKEND"
+done
+# Today the reset leaves the C slot inactive and the page runs frames on the
+# peer's missing input, recording no prediction (reconnect_inputs_current;
+# runBeforeFirstInputTest).
+$QUINT run "$REC" --main=reconnect_inputs_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# ── A player dropped in a running match comes back only late ──────────────
+DROP=specs/drop_is_final.qnt
+$QUINT typecheck "$DROP"
+for variant in drop_is_final_before drop_is_final_skip_everywhere drop_is_final_fixed; do
+  $QUINT test "$DROP" --main="$variant" --backend="$BACKEND"
+done
+# Before #286 the mesh check added a dropped player back outside the roster
+# (drop_is_final_before; desyncThenHealTest); #286 as first written left a
+# guest that gave up on its host playing alone and blocked guest links
+# (drop_is_final_skip_everywhere).
+$QUINT run "$DROP" --main=drop_is_final_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+
 # ── A channel that dies in a match with no event ───────────────────────────
 MESH=specs/mesh_heal.qnt
 $QUINT typecheck "$MESH"
@@ -551,7 +671,7 @@ $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
 START=specs/engine_start.qnt
 $QUINT typecheck "$START"
 for variant in engine_start_before engine_start_stop_only engine_start_current; do
-  $QUINT test "$START" --main="$variant" --backend=typescript
+  $QUINT test "$START" --main="$variant" --backend="$BACKEND"
 done
 # Today: every frame of a match runs on the C engine, a guest arms with the
 # host's delay on the frame the host gave it, and stops only when it cannot
@@ -565,9 +685,113 @@ done
 # The host's start frame is the guest's own in every variant, which is why
 # RB-INIT-CATCHUP and the overshoot went (theHostsStartIsWhereTheGuestIs).
 $QUINT run "$START" --main=engine_start_current --invariant=allHold \
-  --max-samples=20000 --max-steps=25 --backend=typescript
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 $QUINT run "$START" --main=engine_start_before --invariant=theHostsStartIsWhereTheGuestIs \
-  --max-samples=20000 --max-steps=25 --backend=typescript
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# Recovery broadcast obligations and untrusted acknowledgement ordering.
+DELIVERY=specs/recovery_delivery.qnt
+$QUINT typecheck "$DELIVERY"
+for variant in recovery_source_budget_before recovery_source_budget_fixed recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed recovery_actor_enabled recovery_actor_disabled recovery_followup_before recovery_followup_fixed recovery_partial_before recovery_partial_fixed; do
+  $QUINT test "$DELIVERY" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$DELIVERY" --main=recovery_delivery_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+
+$QUINT run "$DELIVERY" --main=recovery_capacity_fixed --invariant=atMostOneTransferPerSlot \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
+
+$QUINT run "$DELIVERY" --main=recovery_reservation_fixed --invariant=allHold \
+  --max-samples=10000 --max-steps=6 --backend="$BACKEND"
+
+for variant in recovery_actor_enabled recovery_actor_disabled; do
+  $QUINT run "$DELIVERY" --main="$variant" --invariant=allHold \
+    --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+done
+
+$QUINT run "$DELIVERY" --main=recovery_followup_fixed --invariant=allHold --max-samples=10000 --max-steps=15 --backend="$BACKEND"
+
+# Only the current host channel may mutate incoming state assembly.
+$QUINT typecheck specs/sync_channel_owner.qnt
+for variant in sync_channel_owner_before sync_channel_owner_fixed; do
+  $QUINT test specs/sync_channel_owner.qnt --main="$variant" --backend="$BACKEND"
+done
+$QUINT run specs/sync_channel_owner.qnt --main=sync_channel_owner_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+LIFECYCLE=specs/recovery_lifecycle.qnt
+$QUINT typecheck "$LIFECYCLE"
+for variant in recovery_lifecycle_before recovery_lifecycle_fixed; do
+  $QUINT test "$LIFECYCLE" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$LIFECYCLE" --main=recovery_lifecycle_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+
+# Neutral JS placeholders must not suppress the first real native input.
+$QUINT typecheck specs/input_placeholder.qnt
+$QUINT test specs/input_placeholder.qnt --main=input_placeholder_before --backend="$BACKEND"
+$QUINT test specs/input_placeholder.qnt --main=input_placeholder_fixed --backend="$BACKEND"
+$QUINT run specs/input_placeholder.qnt --main=input_placeholder_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+ACK=specs/recovery_ack.qnt
+$QUINT typecheck "$ACK"
+for variant in recovery_ack_before recovery_ack_fixed; do
+  $QUINT test "$ACK" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$ACK" --main=recovery_ack_fixed --invariant=exactAttemptOnly --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+
+# Recovery state application retains ordering and requires native alignment.
+$QUINT typecheck specs/recovery_apply_boundary.qnt
+$QUINT test specs/recovery_apply_boundary.qnt --main=recovery_apply_boundary_before --backend="$BACKEND"
+$QUINT test specs/recovery_apply_boundary.qnt --main=recovery_apply_boundary_fixed --backend="$BACKEND"
+$QUINT run specs/recovery_apply_boundary.qnt --main=recovery_apply_boundary_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+
+$QUINT run specs/recovery_delivery.qnt --main=recovery_source_budget_fixed --invariant=allHold --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
+$QUINT typecheck specs/game_end.qnt
+$QUINT test specs/game_end.qnt --main=game_end_before --backend="$BACKEND"
+$QUINT test specs/game_end.qnt --main=game_end_fixed --backend="$BACKEND"
+
+$QUINT typecheck specs/late_join_drop_ready.qnt
+$QUINT test specs/late_join_drop_ready.qnt --main=late_join_drop_ready_before --backend="$BACKEND"
+$QUINT test specs/late_join_drop_ready.qnt --main=late_join_drop_ready_fixed --backend="$BACKEND"
+$QUINT run specs/late_join_drop_ready.qnt --main=late_join_drop_ready_fixed --invariant=noUnreadyMeshAdmission --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+# Host roster input-ownership window in front of the delayed apply frame.
+$QUINT typecheck specs/late_join_input_admission.qnt
+$QUINT test specs/late_join_input_admission.qnt --main=late_join_input_admission_before --backend="$BACKEND"
+$QUINT test specs/late_join_input_admission.qnt --main=late_join_input_admission_fixed --backend="$BACKEND"
+
+# Touch shortcut input ownership: release/cancel cannot clear real controls.
+$QUINT test specs/reset_combo.qnt --backend="$BACKEND"
+$QUINT run specs/reset_combo.qnt --invariant='otherInputPreserved and releasedMeansNoShortcut' --max-samples=1000 --max-steps=20 --backend="$BACKEND"
+# Reconnecting sockets cannot reset the server-roster player's capture budget.
+$QUINT test specs/recovery_delivery.qnt --main=recovery_budget_identity_before --backend="$BACKEND"
+$QUINT test specs/recovery_delivery.qnt --main=recovery_budget_identity_fixed --backend="$BACKEND"
+$QUINT run specs/recovery_delivery.qnt --main=recovery_budget_identity_fixed --invariant=rotationCannotRenew --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
+# Review orderings: repeated serves, deferred readiness, roster gaps and identity churn.
+$QUINT typecheck specs/recovery_review.qnt
+$QUINT test specs/recovery_review.qnt --main=recovery_review_before --backend="$BACKEND"
+$QUINT test specs/recovery_review.qnt --main=recovery_review_fixed --backend="$BACKEND"
+$QUINT run specs/recovery_review.qnt --main=recovery_review_fixed --invariant=allHold --max-samples=10000 --max-steps=30 --backend="$BACKEND"
+
+# Native paused-game helper: phase/owner changes always release and rearm.
+$QUINT test specs/contextual_reset.qnt --main=contextual_reset_before --backend="$BACKEND"
+$QUINT test specs/contextual_reset.qnt --main=contextual_reset_fixed --backend="$BACKEND"
+$QUINT run specs/contextual_reset.qnt --main=contextual_reset_fixed --invariant='safeHold and physicalPreserved' --max-samples=1000 --max-steps=30 --backend="$BACKEND"
+
+# A late join seeds only the original peers' same-generation confirmed input.
+$QUINT test specs/late_join_input_bridge.qnt --main=late_join_input_bridge_before --backend="$BACKEND"
+$QUINT test specs/late_join_input_bridge.qnt --main=late_join_input_bridge_fixed --backend="$BACKEND"
+$QUINT run specs/late_join_input_bridge.qnt --main=late_join_input_bridge_fixed --invariant='separateReadyFromBridge and snapshotGenerationOnly and noConfirmedPlaceholder' --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
+# A new guest can answer Ready but may not play with an original input missing.
+$QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_before --backend="$BACKEND"
+$QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --backend="$BACKEND"
+$QUINT run specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --invariant=neverAdvanceOnMissing --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
+BOOT_CONTINUATION=specs/late_join_boot_continuation.qnt
+$QUINT typecheck "$BOOT_CONTINUATION"
+$QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_before --backend="$BACKEND"
+$QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --backend="$BACKEND"
+$QUINT run "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --invariant=noGenericBootAfterValidatedHandoff --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

@@ -181,14 +181,16 @@ def test_resync_settles_the_inputs_before_its_frame():
     # earlier may have been dropped by a peer as out of range:
     # specs/resync_inputs.qnt, resync_inputs_only_new), and asks for the
     # peers' it lacks.
-    settle_idx = src.index("const _settleInputsAtResync = (mod, frame) => {")
+    settle_idx = src.index(
+        "const _settleInputsAtResync = (mod, frame, recoveryId = 0) => {"
+    )
     settle_src = src[settle_idx : src.index("\n  };\n", settle_idx)]
     for snippet in (
         "const from = Math.max(0, frame - DELAY_FRAMES);",
         "_localInputs[f] = KNShared.ZERO_INPUT;",
         "_feedCInput(mod, _playerSlot, f, _localInputs[f]);",
         "_settleInputsBefore(peer.slot, frame);",
-        "if (own.length) peer.dc.send(`inputs-settled:${from}`);",
+        "peer.dc.send(`inputs-settled:${from}`);",
         "for (const f of own) peer.dc.send(KNShared.encodeInput(f, _localInputs[f]).buffer);",
         "peer.dc.send(`resend:${f}`);",
     ):
@@ -203,9 +205,16 @@ def test_resync_settles_the_inputs_before_its_frame():
 
     # A new match starts a new input timeline.
     clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
-    assert "_inputSettledBefore = {};" in src[clear_idx : src.index("\n  };\n", clear_idx)]
-    apply_idx = src.index("const applySyncState = (bytes, frame, fromProactive = false) => {")
-    assert "if (timelineAligned) _settleInputsAtResync(gm.Module, frame);" in src[apply_idx:]
+    assert "_resetInputMaps();" in src[clear_idx : src.index("\n  };\n", clear_idx)]
+    table_idx = src.index("const _slotInputMaps = () => [")
+    assert "    _inputSettledBefore,\n" in src[table_idx : src.index("];", table_idx)]
+    apply_idx = src.index(
+        "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
+    )
+    assert re.search(
+        r"if \(timelineAligned\) \{\s*_lastAppliedRecoveryId = Math.max\(_lastAppliedRecoveryId, recoveryId\);\s*_settleInputsAtResync\(gm.Module, frame, recoveryId\);",
+        src[apply_idx:],
+    )
 
     # Host: settles the guest's inputs when the state goes out, on both routes:
     # over a DataChannel once every chunk is handed over (the per-guest
@@ -216,7 +225,9 @@ def test_resync_settles_the_inputs_before_its_frame():
 
     # I2: the floor is per-peer state.
     reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
-    assert "delete _inputSettledBefore[slot];" in src[reset_idx : src.index("\n  };\n", reset_idx)]
+    assert "_clearSlotInputState(slot);" in src[reset_idx : src.index("\n  };\n", reset_idx)]
+    table_idx = src.index("const _slotInputMaps = () => [")
+    assert "    _inputSettledBefore,\n" in src[table_idx : src.index("];", table_idx)]
 
 
 def test_a_stalled_page_asks_for_the_inputs_it_dropped():
@@ -226,7 +237,7 @@ def test_a_stalled_page_asks_for_the_inputs_it_dropped():
     # frames are KNCore.framesToAskFor (web/src/input-ask.ts, proved).
     src = LOCKSTEP_JS.read_text()
 
-    oor_idx = src.index("_syncLog(`INPUT-OOR slot=")
+    oor_idx = src.index("`INPUT-OOR slot=")
     oor_src = src[oor_idx : src.index("return false;", oor_idx)]
     assert "_inputDroppedAheadUpTo[peer.slot] = Math.max(" in oor_src
 
@@ -249,11 +260,17 @@ def test_a_stalled_page_asks_for_the_inputs_it_dropped():
     # I2: both tables are per-peer state, and go with every input timeline.
     reset_idx = src.index("const resetPeerState = (slot, reason, opts = {}) => {")
     reset_src = src[reset_idx : src.index("\n  };\n", reset_idx)]
-    assert "delete _inputDroppedAheadUpTo[slot];" in reset_src
-    assert "delete _inputAskedAt[slot];" in reset_src
+    assert "_clearSlotInputState(slot);" in reset_src
+    table_idx = src.index("const _slotInputMaps = () => [")
+    table_src = src[table_idx : src.index("];", table_idx)]
+    assert "    _inputDroppedAheadUpTo,\n" in table_src
+    assert "    _inputAskedAt,\n" in table_src
     clear_idx = src.index("const _clearInputsForNewMatch = (reason) => {")
     clear_src = src[clear_idx : src.index("\n  };\n", clear_idx)]
-    assert "_inputDroppedAheadUpTo = {};" in clear_src and "_inputAskedAt = {};" in clear_src
+    assert "_resetInputMaps();" in clear_src
+    maps_idx = src.index("const _resetInputMaps = () => {")
+    maps_src = src[maps_idx : src.index("\n  };\n", maps_idx)]
+    assert "for (const map of _slotInputMaps())" in maps_src
 
 
 def test_pending_rollback_init_keeps_reliable_input_stream_alive():
@@ -462,6 +479,8 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
     helper_start = src.index("const INPUT_PAST_WINDOW_FRAMES =")
     helper_end = src.index("// -- Audio (delegated", helper_start)
     helpers = src[helper_start:helper_end]
+    roster_start = src.index("  let _lastInputRoster =")
+    roster = src[roster_start : src.index("  // The oldest input", roster_start)]
     script = textwrap.dedent(
         f"""
         const calls = [];
@@ -469,9 +488,11 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         const DELAY_FRAMES = 3;
         const _frameNum = 900;
         const _playerSlot = 0;
+        const RB_WORKER_COPROC = false;
         const _localInputs = {{}};
         const _remoteInputs = {{ 1: {{}} }};
         const _syncLog = () => {{}};
+        const _awaitFirstInputAfterReset = {{}};
         const KNShared = {{ ZERO_INPUT: Object.freeze({{buttons:0,lx:0,ly:0,cx:0,cy:0}}) }};
         const mod = {{ _kn_feed_input: (...args) => calls.push(args) }};
         for (let frame = 890; frame <= 910; frame++) {{
@@ -481,8 +502,14 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         _remoteInputs[1][920] = KNShared.ZERO_INPUT;
         _remoteInputs[1][963] = {{ buttons: 963, lx: 0, ly: 0, cx: 0, cy: 0 }};
         _remoteInputs[1][964] = {{ buttons: 964, lx: 0, ly: 0, cx: 0, cy: 0 }};
-        eval({json.dumps(helpers)} + "\\n_backfillCInputsFromJs(mod, 'rollback-init');");
-        process.stdout.write(JSON.stringify(calls.map((call) => [call[0], call[1]])));
+        eval({json.dumps(helpers)} + {json.dumps(roster)} + `
+          _backfillCInputsFromJs(mod, 'rollback-init');
+          const ordinary = calls.splice(0);
+          _recordHostInputRoster(894, [0, 2]);
+          _recordHostInputRoster(900, [0, 1, 2]);
+          _backfillCInputsFromJs(mod, 'rollback-init');
+          process.stdout.write(JSON.stringify([ordinary, calls]));
+        `);
         """
     )
     result = subprocess.run(
@@ -493,8 +520,13 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         timeout=10,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    fed = json.loads(result.stdout)
-    assert fed == [[1, frame] for frame in range(889, 911)] + [[1, 963]]
+    ordinary, admitted = json.loads(result.stdout)
+    assert [call[:2] for call in ordinary] == [[1, frame] for frame in range(889, 911)] + [[1, 963]]
+    assert admitted == (
+        [[1, frame, 0, 0, 0, 0, 0] for frame in range(894, 900)]
+        + [[1, frame, frame, 0, 0, 0, 0] for frame in range(900, 911)]
+        + [[1, 963, 963, 0, 0, 0, 0]]
+    )
 
     assert "_backfillCInputsFromJs(detMod, 'rollback-init');" in src
     input_guard_start = src.index("const _processInputPacket =")
@@ -555,7 +587,7 @@ def test_a_settled_input_is_not_fed_to_the_engine():
     src = LOCKSTEP_JS.read_text()
     drain = src[src.index("const _drainPendingCInputs = (tickMod) => {") :]
     drain = drain[: drain.index("\n  };\n")]
-    skip = drain.index("if (qi.frame < (_inputSettledBefore[qi.slot] ?? 0)) {")
+    skip = drain.index("if (qi.frame < Math.max(_inputSettledBefore[qi.slot] ?? 0, _admissionInputFloor(qi.slot))) {")
     assert skip < drain.index("tickMod._kn_feed_input(qi.slot, qi.frame,")
     # The host settles the guest's backlog when it schedules the recovery
     # resync: that state is for this frame or a later one. A guest does not:
@@ -585,7 +617,9 @@ def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
     # No resync path drops the cached inputs: only a new match, a stop, and
     # the fast-forward at lockstep start do (and the declaration).
     assert src.count("_localInputs = {};") == 4
-    settle = src[src.index("const _settleInputsAtResync = (mod, frame) => {") :]
+    settle = src[
+        src.index("const _settleInputsAtResync = (mod, frame, recoveryId = 0) => {") :
+    ]
     settle = settle[: settle.index("\n  };\n")]
     assert "delete _localInputs" not in settle and "_localInputs = {}" not in settle
 
@@ -658,13 +692,17 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
     assert "if (then === 'askAgain') _askAgainForOwedResync();" in tick_refuse
     assert "else if (then === 'stopAsking') _stopAskingForOwedResync(" in tick_refuse
 
-    apply = src[src.index("const applySyncState = (bytes, frame, fromProactive = false) => {") :]
+    apply = src[
+        src.index(
+            "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
+        ) :
+    ]
     apply = apply[: apply.index("\n  };\n")]
     assert "const frameBeforeApply = _frameNum;" in apply
     catch = apply.index("window.KNCore.catchUp.catchUpStep(frame, frameBeforeApply, MAX_CATCH_UP_FRAMES) === 'catchUp'")
     # Inputs are settled at the state's frame first, and purged only after the
     # catch-up's first slice has run on them.
-    assert apply.index("_settleInputsAtResync(gm.Module, frame);") < catch
+    assert apply.index("_settleInputsAtResync(gm.Module, frame, recoveryId);") < catch
     assert catch < apply.index("_startCatchUp(gm.Module, frame, frameBeforeApply);")
     assert apply.index("_startCatchUp(gm.Module, frame, frameBeforeApply);") < apply.index(
         "for (const [slot, inputs] of Object.entries(_remoteInputs)) {"
@@ -777,15 +815,16 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Eleven sites ask: one over Socket.IO, ten on a DataChannel (the
+    # Twelve sites ask: one over Socket.IO, eleven on a DataChannel (the
     # seventh is a late joiner that lost its channel to the host,
     # specs/late_join_pause.qnt; the eighth the deadline asking again for an
-    # owed "now" resync, specs/resync_reask.qnt; the last two the boot sync
-    # and the input stall's, specs/resync_flow.qnt EVERY_REQUEST_NUMBERED).
+    # owed "now" resync, specs/resync_reask.qnt; then the boot sync and the
+    # input stall's, specs/resync_flow.qnt EVERY_REQUEST_NUMBERED; the last a
+    # guest's ask for a missing input gone overdue, specs/ask_escalation.qnt).
     # The two that name a target frame give it to the request, which keeps
     # it after the target's deadline (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 11
-    assert src.count("_beginResyncRequest()") == 7
+    assert src.count("_beginResyncRequest(") == 12
+    assert src.count("_beginResyncRequest()") == 8
     assert src.count("_beginResyncRequest(-1, true)") == 1
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
@@ -802,8 +841,8 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 10
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 8
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 11
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 9
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
     # Never sent bare. The boot sync and the input stall's request were, and
     # their unnumbered answers were applied wherever they found the guest,
@@ -851,7 +890,10 @@ def test_only_its_own_answer_ends_a_resync_request():
     # which asks again at once.
     assert handle.count("_resyncRequestInFlight = false;") == 4
     assert "_resyncRequestInFlight = false; // allow fresh request" in handle
-    assert "_pendingResyncState = { bytes: fullBytes, frame, answerFor };" in handle
+    assert (
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };"
+        in handle
+    )
     assert "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };" in handle
 
     # Host: the number comes just ahead of the request and is for that
@@ -860,8 +902,13 @@ def test_only_its_own_answer_ends_a_resync_request():
     host = host[: host.index("// JSON messages")]
     assert "if (_playerSlot === 0) syncRequestIdNext = _requestIdFrom(Number(e.data.substring(16)));" in host
     assert host.index("syncRequestIdNext = 0;") < host.index("rate-limited sync-request from")
-    assert "forceFull: isFull,\n              requestId," in host
-    assert "pushSyncState(remoteSid, false, { requestIds: { [remoteSid]: requestId } });" in host
+    assert "targetSid: remoteSid,\n              requestId," in host
+    # Every answer is full: the host keeps no delta base (sync_base).
+    assert "forceFull" not in src
+    assert (
+        "pushSyncState(remoteSid, false, { waitForResult: false, requestIds: { [remoteSid]: requestId } });"
+        in host
+    )
     assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
 
     # A scheduled capture, its follow-ups and re-queues keep the number; a
@@ -885,12 +932,15 @@ def test_only_its_own_answer_ends_a_resync_request():
     # before; the body is _sendSyncChunksTo, which reads the request id by sid.
     wrapper = src[src.index("const sendSyncChunks = async (") :]
     wrapper = wrapper[: wrapper.index("\n  };\n")]
-    assert "_sendSyncChunksTo(t, compressed, frame, isFull, isProactive, requestIds)" in wrapper
+    assert re.search(
+        r"_sendSyncChunksTo\(\s*t,\s*compressed,\s*frame,\s*isProactive,\s*requestIds,\s*attempts.find\(\(a\) => a.sid === t.sid\)\?\.wireId \?\? 0,\s*\)",
+        wrapper,
+    )
     chunks = src[src.index("const _sendSyncChunksTo = async (") :]
     chunks = chunks[: chunks.index("\n  };\n")]
     assert chunks.index("if (answerFor) dc.send(`sync-answer-id:${answerFor}`);") < chunks.index("dc.send(header);")
     # The header an older guest parses is unchanged.
-    assert "`sync-start:${frame}:${numChunks}:${isFull ? '1' : '0'}:${isProactive ? '1' : '0'}`" in chunks
+    assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}`" in chunks
 
     # Guest: the number is for the next state on that channel only.
     sync_dc = src[src.index("const setupSyncDataChannel = (_remoteSid, ch) => {") :]
@@ -954,10 +1004,14 @@ def test_a_late_answer_does_not_replace_the_awaited_one():
     assert keep.index("const keeps = ") < keep.index("if (!keeps) return false;") < keep.index("SYNC-LATE-ANSWER-IGNORED")
     assert "SYNC-LATE-ANSWER-IGNORED" in keep
     payload = src[src.index("async function _handleDecodedSyncPayload({") :]
-    payload = payload[: payload.index("const handleSyncChunksComplete = async () => {")]
+    payload = payload[
+        : payload.index(
+            "const handleSyncChunksComplete = async (ownsAssembly = () => true) => {"
+        )
+    ]
     for pending in (
         "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };",
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor };",
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };",
     ):
         at = payload.index(pending)
         assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 200
@@ -968,7 +1022,11 @@ def test_a_stale_late_answer_keeps_the_lifecycle_guard():
     # request does not end it. The guard keeps its own 15 s timeout (I1).
     src = LOCKSTEP_JS.read_text()
     payload = src[src.index("async function _handleDecodedSyncPayload({") :]
-    payload = payload[: payload.index("const handleSyncChunksComplete = async () => {")]
+    payload = payload[
+        : payload.index(
+            "const handleSyncChunksComplete = async (ownsAssembly = () => true) => {"
+        )
+    ]
     assert "if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('regions sync stale');" in payload
     assert "if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('explicit sync stale');" in payload
     assert payload.count("_clearLifecycleResyncGuard(") == 2

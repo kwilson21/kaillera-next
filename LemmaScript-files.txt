@@ -10,6 +10,7 @@ web/src/desync-fields.ts
 web/src/diagnostics.ts
 web/src/play/remap-step.ts
 web/src/play/rom-transfer-step.ts
+web/src/play/rom-identity.ts
 web/src/relay-sender.ts
 web/src/desync-confirm.ts
 web/src/desync-capture.ts
@@ -27,3 +28,7 @@ web/src/catch-up.ts
 web/src/input-resend.ts
 web/src/start-group.ts
 web/src/engine-start.ts
+
+web/src/reset-combo.ts
+
+web/src/contextual-reset-intent.ts

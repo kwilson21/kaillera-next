@@ -39,7 +39,6 @@ Server → Room broadcasts:
   users-updated    — room state (players, spectators, owner)
   game-started     — game started with mode and settings
   game-ended       — game ended, back to lobby
-  room-closed      — room force-closed (host left, server shutdown)
   rom-sharing-updated — ROM sharing toggle state changed
 
 Room list is exposed via a FastAPI REST endpoint: GET /list?game_id=...
@@ -1289,6 +1288,9 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     session_id, room = result
     if room.owner != sid:
         return "Only the host can end the game"
+    # A delayed retry from the previous match must not end a rematch.
+    if payload.matchId is not None and room.match_id != payload.matchId:
+        return None
     await _end_match(session_id, room, "game-end")
     return None
 

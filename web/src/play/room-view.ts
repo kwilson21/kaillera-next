@@ -86,15 +86,20 @@ export type StartButton = { readonly disabled: boolean; readonly label: string }
 /**
  * `mode` is the one selected. A streamed game needs a second person and no
  * ROMs but the host's. A rollback game needs every player's ROM, unless the
- * host is sharing theirs.
+ * host is sharing theirs. `ownRomHashed`: the host's own ROM's hash is in; a
+ * ROM it has just dropped is still being hashed, and a start then would send
+ * the server the previous ROM's hash (specs/rom_identity.qnt,
+ * hostStartsWhileHashingTest).
  */
 export const startButton = (
   playerCount: number,
   readyCount: number,
   mode: string,
   romSharing: boolean,
+  ownRomHashed: boolean,
 ): StartButton => {
   if (playerCount < 1) return { disabled: true, label: 'Start Game' };
+  if (!ownRomHashed) return { disabled: true, label: 'Checking your ROM…' };
   if (mode === 'streaming') {
     return playerCount < 2
       ? { disabled: true, label: 'Start Game (need 2+)' }

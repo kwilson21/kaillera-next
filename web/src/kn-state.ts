@@ -36,6 +36,8 @@ export interface PageState {
   remapActive: boolean;
   /** Touch-control values by input index. The touch controls (page/virtual-gamepad/) write; the engine reads. */
   touchInput: Record<string, number>;
+  /** Separate input ownership: the reset shortcut never changes real held controls. */
+  resetComboHeld: boolean;
   /** The engine's peers by socket id. The engine writes; play.js and the desync detector read. */
   peers: Record<string, PeerView>;
   /** The engine's current frame. The engine writes; play.js shows it. */
@@ -58,8 +60,6 @@ export interface PageState {
   matchId: string | null;
   /** This page is the room's host. play.js writes; the desync detector reads. */
   isLocalHost: boolean;
-  /** The host of a listed room: larger screenshots. play.js writes; the diagnostics (page/diagnostics.ts) read. */
-  boardFrame: boolean;
   /** Whether a game is on, asked of the session machine. play.js sets it; version-guard.js reads it before reloading. */
   gameOn: () => boolean;
 
@@ -75,6 +75,7 @@ export function initialKNState(storage: SafeStorage): PageState {
   return {
     remapActive: false,
     touchInput: {},
+    resetComboHeld: false,
     peers: {},
     frameNum: 0,
     delayAutoValue: 2,
@@ -86,7 +87,6 @@ export function initialKNState(storage: SafeStorage): PageState {
     sessionStats: { reconnects: 0, desyncs: 0, stalls: 0 },
     matchId: null,
     isLocalHost: false,
-    boardFrame: false,
     gameOn: () => false,
 
     DEFAULT_ICE_SERVERS: [{ urls: 'stun:stun.cloudflare.com:3478' }],

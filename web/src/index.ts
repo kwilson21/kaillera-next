@@ -1,3 +1,7 @@
+import { createOwnerProofRelay } from './owner-proof-relay.ts';
+import { openProof as openOwnerInputProof, captureAllowed as ownerInputCaptureAllowed } from './owner-proof.ts';
+import { createRecoveryManager } from './recovery-delivery.ts';
+import { createRecoveryTransferPool } from './recovery-transfer.ts';
 /**
  * Entry point of the TypeScript core, bundled to web/static/dist/kn-core.js
  * and exposed to the plain-script pages as `window.KNCore`.
@@ -21,6 +25,11 @@ import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
 import { catchUpStep, tooOldStep } from './catch-up.ts';
 import { framesToSendAgain } from './input-resend.ts';
+import {
+  collectLateJoinInputBridge,
+  decodeLateJoinInputBridge,
+  lateJoinBootProgress,
+} from './late-join-input-bridge.ts';
 import { digestFrame } from './desync-confirm.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import {
@@ -39,6 +48,8 @@ import { rollbackTimeline } from './page/rollback-timeline.ts';
 import { startSwitch2Usb } from './page/switch2-usb.ts';
 import { startControllerSettings } from './page/controller-settings/panel.ts';
 import { startVisionClient } from './page/vision-client.ts';
+import { startContextualReset } from './page/contextual-reset.ts';
+import { startResetCombo } from './page/reset-combo.ts';
 import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
@@ -55,6 +66,7 @@ import * as remapWizard from './play/remap-wizard.ts';
 import * as romTransfer from './play/rom-transfer.ts';
 import * as roomView from './play/room-view.ts';
 import { newStoredRom, openRomLibrary, romLibraryHtml } from './play/rom-library.ts';
+import * as romIdentity from './play/rom-identity.ts';
 import { escapeHtml, inviteUrl, roomClosedMessage, rosterToasts } from './play/room-text.ts';
 import {
   formatRomSize,
@@ -67,7 +79,7 @@ import {
 import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
-import { mayHandChunk, sendPaced, transferStillFor } from './sync-send.ts';
+import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
 import { changesWatchedFrame, followUpIsUnneeded } from './sync-follow-up.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
@@ -91,6 +103,12 @@ import {
   isLateAnswerBehind,
   keepsAwaitedAnswer,
   lateJoinLostHostStep,
+  overdueAskStep,
+  pushDeadlineStep,
+  escalationForHole,
+  transferReportApplies,
+  acknowledgesDeliveredPush,
+  missedDeliveryStep,
   resyncDeadlineStep,
 } from './resync-request.ts';
 import { meshHealTargets } from './roster.ts';
@@ -301,6 +319,9 @@ export const KNCore = {
   catchUp: { catchUpStep, tooOldStep },
   framesToAskFor,
   framesToSendAgain,
+  collectLateJoinInputBridge,
+  lateJoinBootProgress,
+  decodeLateJoinInputBridge,
   checkRelayed,
   createConnectTracker,
   /** The per-peer connection machine (peer-connection.ts). The engine drives it, through `peerDriver`. */
@@ -352,12 +373,25 @@ export const KNCore = {
   /** The per-peer machine, driven from the rollback engine's events (peer-driver.ts). */
   peerDriver: { createPeerDriver },
   /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */
+  recovery: {
+    createRecoveryManager,
+    createRecoveryTransferPool,
+    createOwnerProofRelay,
+    openOwnerInputProof,
+    ownerInputCaptureAllowed,
+  },
   resyncRequest: {
     answersAnOlderRequest,
     endsRequest,
     isLateAnswerBehind,
     keepsAwaitedAnswer,
     lateJoinLostHostStep,
+    overdueAskStep,
+    pushDeadlineStep,
+    escalationForHole,
+    transferReportApplies,
+    acknowledgesDeliveredPush,
+    missedDeliveryStep,
     resyncDeadlineStep,
   },
   rosterKey,
@@ -367,7 +401,7 @@ export const KNCore = {
   staleHoldersOf,
   startLateJoinWait,
   /** The host's resync state, a chunk at a time (sync-send.ts). */
-  syncSend: { mayHandChunk, sendPaced, transferStillFor },
+  syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
   /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
   syncFollowUp: { changesWatchedFrame, followUpIsUnneeded },
   startRejoin,
@@ -384,6 +418,8 @@ export const KNCore = {
     startControllerSettings,
     startVisionClient,
     startVirtualGamepad,
+    startResetCombo,
+    startContextualReset,
     startFakePeer,
   },
   /** What these pages share with the front page; the same object is `window.KNSite` on both. */
@@ -400,6 +436,7 @@ export const KNCore = {
     hostRomIdentityKey,
     romFromArchive,
     romHashMismatch,
+    romIdentity,
     newStoredRom,
     openRomLibrary,
     romLibraryHtml,

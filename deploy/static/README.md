@@ -36,8 +36,7 @@ kaillera-next.thesuperhuman.us
   `/api/stats/public` directly. No CORS, no second domain to explain.
 - Invite links stay on the domain people already know:
   `https://kaillera-next.thesuperhuman.us/join?room=CODE`.
-- Reuses what's already here: `wrangler.jsonc` deploys the static demo as
-  a Worker with assets today, and the domain is already on Cloudflare
+- Reuses what's already here: the domain is already on Cloudflare
   (`deploy/vps/deploy.py dns`).
 - Link previews for `/join`: crawlers fetch it while the host's server is
   awake (the host just created the room). The Worker asks the game
@@ -46,7 +45,7 @@ kaillera-next.thesuperhuman.us
 
 **What the owner changed** (done, in this order):
 1. Added a `routes` entry for the hostname to a landing Worker (a new
-   `wrangler.landing.jsonc`, so the demo Worker stays as it is). Its
+   `wrangler.landing.jsonc`). Its
    `assets.run_worker_first` is `true`, so the Worker decides every
    request itself (which paths come from its own static assets, which are
    proxied) rather than Cloudflare's asset layer deciding first.
@@ -178,8 +177,8 @@ static host (Cloudflare Pages / Worker)   game server (Render)
 - `scripts/build_landing.py` copies the pages and exactly the files they
   reference into `dist-landing/` (git-ignored), and fails if `worker.js`
   doesn't list one of them (`landing-build.json` included).
-- `wrangler.landing.jsonc` is a separate Worker (`kaillera-next-landing`),
-  so the demo Worker in `wrangler.jsonc` is untouched. `workers_dev` is off
+- `wrangler.landing.jsonc` defines the Worker (`kaillera-next-landing`).
+  `workers_dev` is off
   and `routes` binds `kaillera-next.thesuperhuman.us/*` (live since
   2026-09-26). `html_handling` is `none`: the Worker maps `/` and `/join`
   to their files itself, and Cloudflare's default would answer those files

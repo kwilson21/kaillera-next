@@ -21,7 +21,6 @@ import {
   featuredRoom,
   featuredWhy,
   frameUrl,
-  isIdle,
   isStaleFrame,
   isVideoId,
   liveText,
@@ -36,6 +35,7 @@ import {
   savedVisitor,
   stateAfterFailedList,
   statusText,
+  stopsPollingForIdle,
   stickPose,
   stillAt,
   weekText,
@@ -415,8 +415,8 @@ export const startFrontPage = (host: FrontHost): void => {
 
   const schedule = (): void => {
     host.clearTimeout(pollTimer);
-    if (isIdle(host.Date.now(), lastInteraction)) {
-      idleStopped = true; // stop until the next interaction (§7.7)
+    if (stopsPollingForIdle(doc.hidden, host.Date.now(), lastInteraction)) {
+      idleStopped = true; // stop until the tab returns or the visitor interacts (§7.7)
       return;
     }
     pollTimer = host.setTimeout(() => void refresh(false), pollDelay(doc.hidden));
@@ -477,13 +477,14 @@ export const startFrontPage = (host: FrontHost): void => {
   for (const ev of ['pointerdown', 'keydown', 'scroll', 'touchstart']) {
     host.addEventListener(ev, interacted, { passive: true });
   }
-  doc.addEventListener('visibilitychange', () => {
-    if (refreshesOnReturn(doc.hidden, state)) {
-      lastInteraction = host.Date.now();
-      idleStopped = false;
-      void refresh(true);
-    }
-  });
+  const resumeBoard = (): void => {
+    if (!refreshesOnReturn(doc.hidden, state)) return;
+    lastInteraction = host.Date.now();
+    idleStopped = false;
+    host.clearTimeout(pollTimer);
+    void refresh(true);
+  };
+  doc.addEventListener('visibilitychange', resumeBoard);
 
   let clockTimer = 0;
 
@@ -541,9 +542,12 @@ export const startFrontPage = (host: FrontHost): void => {
   };
 
   // Back from the room page (bfcache): the button we disabled on the way
-  // out comes back disabled; give the page its current state again.
+  // out comes back disabled, and the board may show the snapshot from before
+  // the visitor left. Restore the controls and request the current rooms.
   host.addEventListener('pageshow', (e) => {
-    if (e.persisted) setState(state);
+    if (!e.persisted) return;
+    setState(state);
+    resumeBoard();
   });
 
   const createBtn = $<HTMLButtonElement>('create-btn');

@@ -4,6 +4,14 @@ datatype LostHostStep = idle | waitForChannel | inFlight | giveUp | ask
 
 datatype DeadlineStep = noRequest | wait | lostHost | askAgain | stopAsking | letGo
 
+datatype OverdueAskStep = ask | wait | push
+
+datatype PushDeadlineStep = giveUp | wait | letGo | noPush | ended | done | sending | pushAgain
+
+datatype EscalationForHole = wait | push | exhausted
+
+datatype MissedDeliveryStep = giveUp | wait | pushAgain
+
 function endsRequest(answerFor: int, newest: int, hostNumbers: bool): bool
 {
   if (answerFor > 0) then
@@ -140,5 +148,144 @@ lemma resyncDeadlineStep_ensures(requestOut: bool, answerComing: bool, decoding:
   ensures (resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).stopAsking? ==> ((owed && !(lostHostOwed)) && (asksAgain >= maxAsksAgain)))
   ensures (resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).letGo? ==> (!(owed) && !(lostHostOwed)))
   ensures (requestOut ==> !(answerComing) ==> !((decoding && (decodingForMs < graceMs))) ==> (waitedMs >= timeoutMs) ==> ((!resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).wait?) && (!resyncDeadlineStep(requestOut, answerComing, decoding, decodingForMs, graceMs, waitedMs, timeoutMs, lostHostOwed, owed, asksAgain, maxAsksAgain).noRequest?)))
+{
+}
+
+function overdueAskStep(isHost: bool, asksSent: int, firstAskAgeMs: int, minAsks: int, minAgeMs: int, resyncOut: bool): OverdueAskStep
+  requires (minAsks >= 1)
+  requires (minAgeMs >= 0)
+{
+  if ((resyncOut || (asksSent < minAsks)) || (firstAskAgeMs < minAgeMs)) then
+    OverdueAskStep.wait
+  else
+    if isHost then
+      OverdueAskStep.push
+    else
+      OverdueAskStep.ask
+}
+
+lemma overdueAskStep_ensures(isHost: bool, asksSent: int, firstAskAgeMs: int, minAsks: int, minAgeMs: int, resyncOut: bool)
+  requires (minAsks >= 1)
+  requires (minAgeMs >= 0)
+  ensures (((resyncOut || (asksSent < minAsks)) || (firstAskAgeMs < minAgeMs)) ==> overdueAskStep(isHost, asksSent, firstAskAgeMs, minAsks, minAgeMs, resyncOut).wait?)
+  ensures (overdueAskStep(isHost, asksSent, firstAskAgeMs, minAsks, minAgeMs, resyncOut).push? <==> (((!(resyncOut) && (asksSent >= minAsks)) && (firstAskAgeMs >= minAgeMs)) && isHost))
+  ensures (overdueAskStep(isHost, asksSent, firstAskAgeMs, minAsks, minAgeMs, resyncOut).ask? <==> (((!(resyncOut) && (asksSent >= minAsks)) && (firstAskAgeMs >= minAgeMs)) && !(isHost)))
+{
+}
+
+function pushDeadlineStep(pushOut: bool, guestAway: bool, settled: bool, handedOver: bool, sendFailed: bool, quietMs: int, quietLimitMs: int, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int): PushDeadlineStep
+  requires (pushes >= 1)
+  requires (maxPushes >= 1)
+{
+  if !(pushOut) then
+    PushDeadlineStep.noPush
+  else
+    if guestAway then
+      PushDeadlineStep.ended
+    else
+      if settled then
+        PushDeadlineStep.done
+      else
+        if !(handedOver) then
+          if (sendFailed || (quietMs >= quietLimitMs)) then
+            PushDeadlineStep.letGo
+          else
+            PushDeadlineStep.sending
+        else
+          if (waitedMs < timeoutMs) then
+            PushDeadlineStep.wait
+          else
+            if (pushes < maxPushes) then
+              PushDeadlineStep.pushAgain
+            else
+              PushDeadlineStep.giveUp
+}
+
+lemma pushDeadlineStep_ensures(pushOut: bool, guestAway: bool, settled: bool, handedOver: bool, sendFailed: bool, quietMs: int, quietLimitMs: int, waitedMs: int, timeoutMs: int, pushes: int, maxPushes: int)
+  requires (pushes >= 1)
+  requires (maxPushes >= 1)
+  ensures (!(pushOut) ==> pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, quietMs, quietLimitMs, waitedMs, timeoutMs, pushes, maxPushes).noPush?)
+  ensures (pushOut ==> guestAway ==> pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, quietMs, quietLimitMs, waitedMs, timeoutMs, pushes, maxPushes).ended?)
+  ensures (pushOut ==> !(guestAway) ==> settled ==> pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, quietMs, quietLimitMs, waitedMs, timeoutMs, pushes, maxPushes).done?)
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, quietMs, quietLimitMs, waitedMs, timeoutMs, pushes, maxPushes).sending? <==> (((((pushOut && !(guestAway)) && !(settled)) && !(handedOver)) && !(sendFailed)) && (quietMs < quietLimitMs)))
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, quietMs, quietLimitMs, waitedMs, timeoutMs, pushes, maxPushes).letGo? <==> ((((pushOut && !(guestAway)) && !(settled)) && !(handedOver)) && (sendFailed || (quietMs >= quietLimitMs))))
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, quietMs, quietLimitMs, waitedMs, timeoutMs, pushes, maxPushes).wait? <==> ((((pushOut && !(guestAway)) && !(settled)) && handedOver) && (waitedMs < timeoutMs)))
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, quietMs, quietLimitMs, waitedMs, timeoutMs, pushes, maxPushes).pushAgain? <==> (((((pushOut && !(guestAway)) && !(settled)) && handedOver) && (waitedMs >= timeoutMs)) && (pushes < maxPushes)))
+  ensures (pushDeadlineStep(pushOut, guestAway, settled, handedOver, sendFailed, quietMs, quietLimitMs, waitedMs, timeoutMs, pushes, maxPushes).giveUp? <==> (((((pushOut && !(guestAway)) && !(settled)) && handedOver) && (waitedMs >= timeoutMs)) && (pushes >= maxPushes)))
+{
+}
+
+function escalationForHole(pushOut: bool, holePushes: int, maxPushes: int): EscalationForHole
+  requires (maxPushes >= 1)
+  requires (holePushes >= 0)
+{
+  if pushOut then
+    EscalationForHole.wait
+  else
+    if (holePushes < maxPushes) then
+      EscalationForHole.push
+    else
+      EscalationForHole.exhausted
+}
+
+lemma escalationForHole_ensures(pushOut: bool, holePushes: int, maxPushes: int)
+  requires (maxPushes >= 1)
+  requires (holePushes >= 0)
+  ensures (pushOut ==> escalationForHole(pushOut, holePushes, maxPushes).wait?)
+  ensures (escalationForHole(pushOut, holePushes, maxPushes).push? <==> (!(pushOut) && (holePushes < maxPushes)))
+  ensures (escalationForHole(pushOut, holePushes, maxPushes).exhausted? <==> (!(pushOut) && (holePushes >= maxPushes)))
+{
+}
+
+function transferReportApplies(pushIsCurrent: bool, attemptIsCurrent: bool, forThisGuest: bool, decided: bool): bool
+{
+  (((pushIsCurrent && attemptIsCurrent) && forThisGuest) && !(decided))
+}
+
+lemma transferReportApplies_ensures(pushIsCurrent: bool, attemptIsCurrent: bool, forThisGuest: bool, decided: bool)
+  ensures (transferReportApplies(pushIsCurrent, attemptIsCurrent, forThisGuest, decided) <==> (((pushIsCurrent && attemptIsCurrent) && forThisGuest) && !(decided)))
+{
+}
+
+function acknowledgesDeliveredPush(handedOver: bool, deliveredBefore: int, acknowledgedBefore: int): bool
+{
+  ((handedOver && (deliveredBefore >= 0)) && (acknowledgedBefore == deliveredBefore))
+}
+
+lemma acknowledgesDeliveredPush_ensures(handedOver: bool, deliveredBefore: int, acknowledgedBefore: int)
+  ensures (acknowledgesDeliveredPush(handedOver, deliveredBefore, acknowledgedBefore) <==> ((handedOver && (deliveredBefore >= 0)) && (acknowledgedBefore == deliveredBefore)))
+{
+}
+
+function missedDeliveryStep(failed: bool, failedForMs: int, backoffMs: int, pushes: int, maxPushes: int): MissedDeliveryStep
+  requires (pushes >= 1)
+  requires (maxPushes >= 1)
+{
+  if (failed && (failedForMs < backoffMs)) then
+    MissedDeliveryStep.wait
+  else
+    if (pushes < maxPushes) then
+      MissedDeliveryStep.pushAgain
+    else
+      MissedDeliveryStep.giveUp
+}
+
+lemma missedDeliveryStep_ensures(failed: bool, failedForMs: int, backoffMs: int, pushes: int, maxPushes: int)
+  requires (pushes >= 1)
+  requires (maxPushes >= 1)
+  ensures (failed ==> (failedForMs < backoffMs) ==> missedDeliveryStep(failed, failedForMs, backoffMs, pushes, maxPushes).wait?)
+  ensures (missedDeliveryStep(failed, failedForMs, backoffMs, pushes, maxPushes).pushAgain? <==> (!((failed && (failedForMs < backoffMs))) && (pushes < maxPushes)))
+  ensures (missedDeliveryStep(failed, failedForMs, backoffMs, pushes, maxPushes).giveUp? <==> (!((failed && (failedForMs < backoffMs))) && (pushes >= maxPushes)))
+{
+}
+
+function sourceCaptureAllowed(used: int, limit: int): bool
+{
+  (used < limit)
+}
+
+lemma sourceCaptureAllowed_ensures(used: int, limit: int)
+  ensures (sourceCaptureAllowed(used, limit) == (used < limit))
+  ensures ((used >= limit) ==> !(sourceCaptureAllowed(used, limit)))
 {
 }
