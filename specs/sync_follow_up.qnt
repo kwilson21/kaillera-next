@@ -76,6 +76,12 @@
 // in another way, with the same hazard. Three things decide whether its
 // follow-up works:
 //
+// Whether a direct or socket answer was confirmed is the truth at its take
+// (confirmedAtTake). The page watches every such answer and lets the
+// dispatcher decide once it has gone out (followUpIsUnneeded): its state can
+// be taken later than the request is read (queued behind another push), so
+// a decision made when the request arrives is not the one modelled.
+//
 // SOCKET_WATCHED: the socket answer is watched and followed up like a
 //   direct one. Without it (today), it is final however unconfirmed.
 //

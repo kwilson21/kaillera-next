@@ -5207,6 +5207,8 @@
   // that state and whether an input at or before it has since differed from
   // its prediction (specs/sync_follow_up.qnt). Set as the state is taken.
   const _followUpWatches = new Map(); // sid -> {frame, changed}
+  // Host: per guest, the newest direct answer's token (_answerDirectSyncRequest).
+  const _directAnswerNewest = new Map(); // sid -> the newest direct answer's token; resetPeerState clears it
   // The buffer belongs to the module that allocated it: EmulatorJS can
   // replace the module between matches, and stopSync drops it with the
   // other scratch buffers.
@@ -10699,6 +10701,7 @@
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
       _followUpWatches.delete(opts.sid);
+      _directAnswerNewest.delete(opts.sid);
       _queuedSyncPushes.get(opts.sid)?.resolve?.(null);
       _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
@@ -16003,10 +16006,15 @@
         if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
         if (overSocket && (skipped == null || skipped.includes(r.targetSid))) {
           // Not sent over the socket (a state too large for it falls back to
-          // a channel that is down): not put back, which would retry it
-          // every deadline for as long as the channel stays down. The
-          // guest's own request deadline asks again.
-          _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; the guest asks again`);
+          // a channel that is down). The guest already has the answer, so no
+          // request deadline of its own asks again: put it back, counted
+          // against SYNC_FOLLOW_UP_MAX so a channel that stays down cannot
+          // retry it for good (I1).
+          const n = (r.followUp || 0) + 1;
+          if (n <= SYNC_FOLLOW_UP_MAX) {
+            _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; re-queued (${n})`);
+            requeue(r, n, null);
+          } else _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; follow-ups exhausted`);
         } else if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so
@@ -16045,19 +16053,34 @@
   // (SOCKET_WATCHED, SOCKET_FOLLOW_UP_BY_SOCKET). Its answer replaces any
   // request of this guest still queued: held for a channel that is down,
   // such a request would stand in for the follow-up and never go out.
+  //
+  // Every answer is watched, not only one that looks unconfirmed when the
+  // request comes in: its state can be taken later (queued behind another
+  // push), and confirmation ignores a phantom other than the requester. The
+  // dispatcher decides once the state has gone out: a follow-up of a state
+  // delivered, unchanged and confirmed with no phantom is skipped
+  // (followUpIsUnneeded). Lockstep frames are final when run.
+  //
+  // Requests from one guest that arrive while a push is in flight share one
+  // queued push (_queuedSyncPushes keeps the newest's number); only the
+  // newest answer's completion schedules the follow-up
+  // (_directAnswerNewest), so it carries that number.
   const _answerDirectSyncRequest = (sid, requestId, socket = null) => {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    const unconfirmed = (_useCRollback && !_liveStateConfirmed(mod)) || !!_peerPhantom[_peers[sid]?.slot];
     const requestIds = { [sid]: requestId };
     const via = socket ? { transport: 'socket', reason: socket.reason } : {};
     if (socket) _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== sid);
-    if (!unconfirmed) {
+    if (!_useCRollback) {
       pushSyncState(sid, false, { ...via, waitForResult: false, requestIds });
       return;
     }
+    const token = {};
+    _directAnswerNewest.set(sid, token);
     const epoch = _syncQueueEpoch;
     const gen = _syncQueueGen[sid] || 0;
     Promise.resolve(pushSyncState(sid, false, { ...via, requestIds, watchFor: [sid] })).then((skipped) => {
+      // A newer direct answer to this guest owns the follow-up.
+      if (_directAnswerNewest.get(sid) !== token) return;
+      _directAnswerNewest.delete(sid);
       // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
       if (!_peers[sid] || epoch !== _syncQueueEpoch || gen !== (_syncQueueGen[sid] || 0)) return;
       // Not sent: nothing to follow up; the guest asks again.
@@ -16066,7 +16089,7 @@
       if (_scheduledSyncRequests.some((q) => q.targetSid === sid)) return;
       _syncLog(
         `SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}${socket ? ' over the socket' : ''}: ` +
-          'answered unconfirmed, follow-up scheduled',
+          'answered, follow-up scheduled',
       );
       _scheduledSyncRequests.push({
         targetFrame: _frameNum,
@@ -21269,6 +21292,7 @@
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
     _followUpWatches.clear();
+    _directAnswerNewest.clear();
     _syncQueueEpoch++;
     // Each transfer still on a chain sees the new epoch and stops.
     _syncSendChains = {};
