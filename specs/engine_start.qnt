@@ -102,7 +102,13 @@ module engine_start {
   pure val DEADLINE = 3
   pure val MAX_FRAME = 3
 
-  type Msg = DelayIs(int) | StartsAt(int)
+  // A message from the host: its delay (rb-delay:) or its start frame
+  // (rb-init-frame:). A record, not a variant: `deliver` reads the head of the
+  // queue, which Apalache evaluates even where the queue is empty, and it
+  // cannot match a variant on that head ("non-existing variant option").
+  type Msg = { isDelay: bool, n: int }
+  pure def delayIs(n: int): Msg = { isDelay: true, n: n }
+  pure def startsAt(n: int): Msg = { isDelay: false, n: n }
   type Guest = NotIn | Waiting | Armed | RunsUnarmed | Stopped
 
   var started: bool         // the host's match has begun
@@ -151,7 +157,7 @@ module engine_start {
 
   // What the host sends when it arms, or when a channel opens while armed.
   def onArm(start: int): List[Msg] =
-    if (HOST_SENDS_BOTH) [DelayIs(hostDelay), StartsAt(start)] else [StartsAt(start)]
+    if (HOST_SENDS_BOTH) [delayIs(hostDelay), startsAt(start)] else [startsAt(start)]
 
   // The host and a guest start together. The guest holds for the host.
   action startTogether = all {
@@ -176,7 +182,7 @@ module engine_start {
   action hostGo = all {
     started, not(alone), not(delaySent),
     delaySent' = true,
-    toGuest' = if (open) toGuest.append(DelayIs(hostDelay)) else toGuest,
+    toGuest' = if (open) toGuest.append(delayIs(hostDelay)) else toGuest,
     started' = started, alone' = alone, hostDelay' = hostDelay, hostRunning' = hostRunning,
     hostArmed' = hostArmed, hostStart' = hostStart, hostFrame' = hostFrame,
     guestSame, open' = open, historySame,
@@ -241,8 +247,8 @@ module engine_start {
   action deliver = all {
     open, toGuest.length() > 0, guest != NotIn,
     val m = toGuest.head()
-    val d = match m { | DelayIs(x) => x | StartsAt(_) => heardDelay }
-    val s = match m { | DelayIs(_) => heardStart | StartsAt(x) => x }
+    val d = if (m.isDelay) m.n else heardDelay
+    val s = if (m.isDelay) heardStart else m.n
     // Told a start frame other than its own: the rule stops it (stopFrame);
     // before, it armed where it was once it had the delay (the overshoot).
     val otherFrame = guest == Waiting and s >= 0 and s != guestFrame
