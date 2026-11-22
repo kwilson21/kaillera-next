@@ -379,6 +379,8 @@ escalation_push() {
   expect_violation "$DELIVERY" recovery_partial_before freeRecipientProceeds 2
   verify "$DELIVERY" recovery_followup_fixed allHold init 10
   expect_violation "$DELIVERY" recovery_followup_before healthySourceIsNeverBlocked 3
+  verify "$DELIVERY" recovery_skipped_fixed allHold init 10
+  expect_violation "$DELIVERY" recovery_skipped_current settledCoversNewestHole 2
   verify "$DELIVERY" recovery_actor_enabled allHold init 10
   verify "$DELIVERY" recovery_actor_disabled allHold init 10
   verify "$DELIVERY" recovery_delivery_fixed allHold init 10

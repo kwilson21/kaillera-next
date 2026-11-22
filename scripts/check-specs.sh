@@ -701,7 +701,7 @@ $QUINT run "$START" --main=engine_start_current --invariant=allHold \
 # Recovery broadcast obligations and untrusted acknowledgement ordering.
 DELIVERY=specs/recovery_delivery.qnt
 $QUINT typecheck "$DELIVERY"
-for variant in recovery_source_budget_before recovery_source_budget_fixed recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed recovery_actor_enabled recovery_actor_disabled recovery_followup_before recovery_followup_fixed recovery_partial_before recovery_partial_fixed; do
+for variant in recovery_source_budget_before recovery_source_budget_fixed recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed recovery_actor_enabled recovery_actor_disabled recovery_followup_before recovery_followup_fixed recovery_skipped_current recovery_skipped_fixed recovery_partial_before recovery_partial_fixed; do
   $QUINT test "$DELIVERY" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$DELIVERY" --main=recovery_delivery_fixed --invariant=allHold \
@@ -719,6 +719,9 @@ for variant in recovery_actor_enabled recovery_actor_disabled; do
 done
 
 $QUINT run "$DELIVERY" --main=recovery_followup_fixed --invariant=allHold --max-samples=10000 --max-steps=15 --backend="$BACKEND"
+# VIOLATED on recovery_skipped_current: a recipient skipped by a follow-up
+# broadcast settles on its earlier state (skippedThenAckedTest).
+$QUINT run "$DELIVERY" --main=recovery_skipped_fixed --invariant=allHold --max-samples=10000 --max-steps=12 --backend="$BACKEND"
 
 # Only the current host channel may mutate incoming state assembly.
 $QUINT typecheck specs/sync_channel_owner.qnt
