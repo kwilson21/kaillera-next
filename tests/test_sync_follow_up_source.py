@@ -188,7 +188,11 @@ def _answer_direct(
     helper = src[start : src.index("\n  };\n", start) + 5]
     script = textwrap.dedent(
         f"""
-        globalThis.window = {{ EJS_emulator: {{ gameManager: {{ Module: {{}} }} }} }};
+        const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        globalThis.window = {{
+          EJS_emulator: {{ gameManager: {{ Module: {{}} }} }},
+          KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }},
+        }};
         const _syncLog = () => {{}};
         const _useCRollback = {json.dumps(c_rollback)};
         const _liveStateConfirmed = () => {json.dumps(confirmed)};
@@ -210,7 +214,9 @@ def _answer_direct(
           _answerDirectSyncRequest('g', 7);
           if ({json.dumps(reset)}) _syncQueueEpoch++;
           _frameNum = 1990;
-          setTimeout(() => process.stdout.write(JSON.stringify({{ pushes, scheduled: _scheduledSyncRequests }})), 0);
+          setTimeout(() => process.stdout.write(JSON.stringify({{
+            pushes, scheduled: _scheduledSyncRequests, watches: [..._followUpWatches.keys()],
+          }})), 0);
         `);
         """
     )
@@ -245,10 +251,12 @@ def test_a_direct_answer_taken_unconfirmed_is_watched_and_followed_up():
     assert follow["targetFrame"] == 1990 and follow["watch"] == {"frame": 1986}
 
 
-def test_a_direct_answer_to_a_phantom_is_unconfirmed_for_it():
+def test_a_direct_answer_to_a_phantom_is_left_to_its_recovery():
+    # A phantom's recovery replaces any request queued for it with its own
+    # resync; followed up meanwhile it would get a full state every deadline.
     out = _answer_direct(confirmed=True, phantom=True)
     assert out["pushes"][0]["options"]["watchFor"] == ["g"]
-    assert len(out["scheduled"]) == 1
+    assert out["scheduled"] == []
 
 
 def test_a_direct_answer_is_watched_however_confirmed_it_looks_when_asked():
@@ -276,9 +284,13 @@ def test_the_dispatcher_skips_a_follow_up_only_with_no_phantom_peer():
 
 
 def test_a_direct_answer_not_sent_or_reset_since_schedules_nothing():
-    assert _answer_direct(confirmed=False, result="null")["scheduled"] == []
-    assert _answer_direct(confirmed=False, result='["g"]')["scheduled"] == []
-    assert _answer_direct(confirmed=False, reset=True)["scheduled"] == []
+    for result in ("null", '["g"]'):
+        out = _answer_direct(confirmed=False, result=result)
+        # Not sent: its watch follows nothing and is dropped.
+        assert out["scheduled"] == [] and out["watches"] == []
+    out = _answer_direct(confirmed=False, reset=True)
+    # Reset since: the watch is resetPeerState's to drop, not this answer's.
+    assert out["scheduled"] == [] and out["watches"] == ["g"]
 
 
 def test_the_direct_request_goes_through_the_watched_answer():

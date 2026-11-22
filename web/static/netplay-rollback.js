@@ -16022,12 +16022,21 @@
     const epoch = _syncQueueEpoch;
     const gen = _syncQueueGen[sid] || 0;
     Promise.resolve(pushSyncState(sid, false, { requestIds, watchFor: [sid] })).then((skipped) => {
-      // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
-      if (!_peers[sid] || epoch !== _syncQueueEpoch || gen !== (_syncQueueGen[sid] || 0)) return;
-      // Not sent: nothing to follow up; the guest asks again.
-      if (skipped == null || skipped.includes(sid)) return;
+      // Still the guest it was sent to: not gone, reset (reconnect) or a
+      // match stopped since (those are resetPeerState's job).
+      const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
+      const sent = skipped != null && !skipped.includes(sid);
       // A newer request from this guest replaces the follow-up.
-      if (_scheduledSyncRequests.some((q) => q.targetSid === sid)) return;
+      const replaced = _scheduledSyncRequests.some((q) => q.targetSid === sid);
+      const targetPhantom = !!_peerPhantom[_peers[sid]?.slot];
+      const rules = window.KNCore.syncFollowUp;
+      if (!rules.directFollowUpDue(current, sent, replaced, targetPhantom)) {
+        // Not sent: the guest asks again, and the watch follows nothing.
+        if (rules.directWatchIsStale(current, sent, replaced)) _followUpWatches.delete(sid);
+        if (current && sent && targetPhantom)
+          _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid}: a phantom, its recovery resyncs it`);
+        return;
+      }
       _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}: answered, follow-up scheduled`);
       _scheduledSyncRequests.push({
         targetFrame: _frameNum,

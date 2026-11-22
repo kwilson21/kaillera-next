@@ -2442,8 +2442,13 @@ if (inBattle) {
       await guest.waitForTimeout(3000);
       [syncFollowUp.hostAt, syncFollowUp.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
       // A button down while its packets are held: the host runs those frames
-      // on its prediction (neutral) and takes them in late, together with
-      // the request queued behind them.
+      // on its prediction (neutral) and takes them in late. The request goes
+      // on the host's `lockstep` channel; with the reliable input transport
+      // (rb-transport adopted=reliable, these runs) the inputs are on that
+      // channel too, so it arrives right behind them. On the unreliable
+      // transport the inputs go on `rollback-input` and nothing orders the
+      // request after them: the attempt may not reach the condition, and the
+      // run then fails as not exercised rather than passing.
       await guest.evaluate(
         ({ ms, n }) => {
           window.__knHoldInputsUntil = performance.now() + ms;
@@ -2457,12 +2462,7 @@ if (inBattle) {
       await guest.evaluate(() => {
         window._knBootSyncDone = false;
       });
-      const asked = await waitForLine(
-        guest,
-        syncFollowUp.guestAt.seq,
-        /BOOT-SYNC: guest requesting|BOOT-SYNC skipped/,
-        5000,
-      );
+      const asked = await waitForLine(guest, syncFollowUp.guestAt.seq, /BOOT-SYNC: guest requesting/, 5000);
       // Inputs from here go out as usual; those held still go out together.
       await guest.evaluate(() => {
         window.__knHoldInputsUntil = 0;
@@ -4474,7 +4474,11 @@ const askUnansweredReport = (() => {
   // After a drop, the health check may offer to the player again: each
   // drop and heal is counted, so a cycle that does not end shows.
   const heals = hostLines.filter((l) => /MESH-HEAL f=.* slot=1/.test(l));
+  // Which way the push ended (ASK_UNANSWERED_ACKS takes either): the push
+  // limit and a drop, or the host's stall making the guest a phantom.
+  const route = gaveUp.length > 0 ? 'gaveUp' : endedOnPhantom.length > 0 ? 'phantom' : 'none';
   return {
+    route,
     baselineWithoutResync: RESYNC_OFF
       ? resyncOffEvidence({
           lines: hostLines,

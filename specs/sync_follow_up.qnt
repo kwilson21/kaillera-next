@@ -48,6 +48,9 @@
 // or sent, is applied the same way as the answer. More than one guest, a channel
 // closing (resetPeerState drops the request, I2), and the rollback itself
 // (only whether the host's state at F changed).
+// A direct answer to a guest that is a
+// phantom gets no follow-up: its recovery replaces any request queued for it
+// with its own resync (directFollowUpDue in web/src/sync-follow-up.ts).
 //
 // SKIP_UNCHANGED: a follow-up whose frame is confirmed is sent only if an
 //   input at or before F differed from its prediction after the state was
