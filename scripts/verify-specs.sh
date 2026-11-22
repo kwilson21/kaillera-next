@@ -296,6 +296,8 @@ sync_follow_up() {
   # while the state is compressed, recorded from the send only: 5 steps.
   expect_violation "$FOLLOW" sync_follow_up_current aFollowUpCarriesANewState
   expect_violation "$FOLLOW" sync_follow_up_from_send theGuestEndsOnTheHostsState
+  # A direct answer taken unconfirmed, final, then the input differs: 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_direct_unwatched theGuestEndsOnTheHostsState 5
 }
 
 rom_at_start() {

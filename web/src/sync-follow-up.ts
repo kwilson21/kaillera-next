@@ -35,3 +35,29 @@ export function changesWatchedFrame(inputFrame: number, watchFrame: number, befo
 export function followUpIsUnneeded(followUp: number, watched: boolean, changed: boolean, confirmed: boolean): boolean {
   return followUp > 0 && watched && !changed && confirmed;
 }
+
+/**
+ * Whether a direct resync answer (a `sync-request-full` with no frame,
+ * answered at once) gets a follow-up. Every direct answer is watched: whether
+ * its frame was confirmed is judged once the state was actually taken, by
+ * followUpIsUnneeded. It is followed up when its guest is still the one it
+ * was sent to (`current`: same connection and match), the state went out to
+ * it (`sent`), no newer request from it is queued (`replaced`), and it is not
+ * a phantom (`targetPhantom`): a phantom's recovery replaces any request
+ * queued for it with its own resync, so following up meanwhile would only
+ * send it full states at every deadline.
+ */
+//@ ensures \result === (current && sent && !replaced && !targetPhantom)
+export function directFollowUpDue(current: boolean, sent: boolean, replaced: boolean, targetPhantom: boolean): boolean {
+  return current && sent && !replaced && !targetPhantom;
+}
+
+/**
+ * Whether a direct answer's watch is dropped: it was not sent to its guest
+ * while that guest is still the one it was for and no newer request from it
+ * is queued. Its watch then follows no state that went out.
+ */
+//@ ensures \result === (current && !sent && !replaced)
+export function directWatchIsStale(current: boolean, sent: boolean, replaced: boolean): boolean {
+  return current && !sent && !replaced;
+}

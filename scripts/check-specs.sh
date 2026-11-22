@@ -523,7 +523,7 @@ $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
 # ── The follow-up to an answer sent unconfirmed ────────────────────────────
 FOLLOW=specs/sync_follow_up.qnt
 $QUINT typecheck "$FOLLOW"
-for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_fixed; do
+for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_direct_unwatched sync_follow_up_fixed; do
   $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
 done
 # With the fix: a follow-up goes out only for a state an input changed after
@@ -532,6 +532,8 @@ done
 # (sync_follow_up_current; unchangedFollowUpTest); recording the change from
 # the send only misses one made while the state is compressed
 # (sync_follow_up_from_send; mispredictWhileCompressingTest).
+# A direct request's answer (BOOT-SYNC, reconnect) was never followed up
+# (sync_follow_up_direct_unwatched; directUnconfirmedAnswerTest).
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
