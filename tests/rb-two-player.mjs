@@ -472,6 +472,16 @@
  *     the host from answering on predicted inputs that reach that frame
  *     (docs/roadmap.md, Not verified). Either way the guest must go on
  *     making frames. Frames are compared as with FREEZE_HOST_MS.
+ *     `direct` reaches the direct request instead (a `sync-request-full`
+ *     with no frame, answered at once): the guest's input is held neutral,
+ *     then a button is held down while its input packets are held for
+ *     800 ms and go out together at its end; 250 ms in the guest sends its
+ *     BOOT-SYNC request, which the ordered channel keeps right behind them. The host takes in the differing
+ *     inputs (a rollback owed for its next tick) and answers the request
+ *     before that tick: an unconfirmed state a3 (ASK_UNANSWERED_ACKS on
+ *     3cdb9ff) left the guest on for good. Fails unless the host watches it,
+ *     SYNC-FOLLOW-UP-NEEDED is logged, the follow-up goes out after it and
+ *     the guest applies both, tried up to 3 times until the need is seen.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -752,8 +762,8 @@ const UNANSWERED_LETGO_FREEZE_MS = 7000;
 // (`delay re-tuned` in the sync log says what it chose).
 const FORCE_DELAY = process.env.FORCE_DELAY ? Number(process.env.FORCE_DELAY) : null;
 const SYNC_FOLLOW_UP = process.env.SYNC_FOLLOW_UP || '';
-if (!['', 'same', 'changed'].includes(SYNC_FOLLOW_UP)) {
-  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same or changed`);
+if (!['', 'same', 'changed', 'direct'].includes(SYNC_FOLLOW_UP)) {
+  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same, changed or direct`);
   process.exit(1);
 }
 // SYNC_FOLLOW_UP freezes the host as letgo does, and how long the guest's
@@ -762,6 +772,10 @@ const SYNC_FOLLOW_UP_FREEZE_MS = 7000;
 // How long each of the guest's input packets is held after the freeze, so the
 // host answers on predicted inputs.
 const SYNC_FOLLOW_UP_HOLD_MS = 2000;
+// SYNC_FOLLOW_UP=direct: how long the guest's input packets (a button held)
+// are held, and how far into that its direct request goes out behind them.
+const SYNC_FOLLOW_UP_DIRECT_HOLD_MS = 800;
+const SYNC_FOLLOW_UP_DIRECT_ASK_MS = 250;
 // Whether the host's deadline finds its frame confirmed is a race with its own
 // stall; an attempt whose answer goes out confirmed is tried again.
 const SYNC_FOLLOW_UP_ATTEMPTS = 3;
@@ -2413,6 +2427,74 @@ if (inBattle) {
       console.log('DELAY_SYNC_ANSWER_MS: the guest never logged RESYNC-REQUEST-TIMEOUT');
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
+    await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
+  } else if (SYNC_FOLLOW_UP === 'direct') {
+    const before = (BATTLE_SECONDS * 1000) / 3;
+    await host.waitForTimeout(before);
+    const started = Date.now();
+    const NEUTRAL = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+    while (!syncFollowUp.watched && syncFollowUp.attempts < SYNC_FOLLOW_UP_ATTEMPTS) {
+      syncFollowUp.attempts++;
+      // Fixed, so the host predicts it: neutral.
+      await guest.evaluate((n) => {
+        window.__knInputOverride = () => n;
+      }, NEUTRAL);
+      await guest.waitForTimeout(3000);
+      [syncFollowUp.hostAt, syncFollowUp.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
+      // A button down while its packets are held: the host runs those frames
+      // on its prediction (neutral) and takes them in late, together with
+      // the request queued behind them.
+      await guest.evaluate(
+        ({ ms, n }) => {
+          window.__knHoldInputsUntil = performance.now() + ms;
+          window.__knInputOverride = () => ({ ...n, buttons: 1 });
+        },
+        { ms: SYNC_FOLLOW_UP_DIRECT_HOLD_MS, n: NEUTRAL },
+      );
+      await guest.waitForTimeout(SYNC_FOLLOW_UP_DIRECT_ASK_MS);
+      // The engine's own BOOT-SYNC: a numbered `sync-request-full` on the
+      // host's channel at its next tick.
+      await guest.evaluate(() => {
+        window._knBootSyncDone = false;
+      });
+      const asked = await waitForLine(
+        guest,
+        syncFollowUp.guestAt.seq,
+        /BOOT-SYNC: guest requesting|BOOT-SYNC skipped/,
+        5000,
+      );
+      // Inputs from here go out as usual; those held still go out together.
+      await guest.evaluate(() => {
+        window.__knHoldInputsUntil = 0;
+      });
+      console.log(
+        `SYNC_FOLLOW_UP=direct: attempt ${syncFollowUp.attempts}: BOOT-SYNC ${asked ? 'logged' : 'not logged'}`,
+      );
+      await host.waitForTimeout(8000);
+      syncFollowUp.watched = linesAfter(await syncLogOf(host), syncFollowUp.hostAt.seq).some((l) =>
+        /SYNC-FOLLOW-UP-NEEDED /.test(l),
+      );
+      await guest.evaluate((n) => {
+        window.__knInputOverride = () => n;
+      }, NEUTRAL);
+      console.log(
+        `SYNC_FOLLOW_UP=direct: ${syncFollowUp.watched ? 'a prediction the answer was taken on differed' : 'no differing prediction seen; trying again'}`,
+      );
+      if (!syncFollowUp.watched) await guest.waitForTimeout(5000);
+    }
+    await guest.waitForTimeout(12000);
+    await guest.evaluate(() => {
+      window.__knInputOverride = null;
+    });
+    syncFollowUp.hostEnd = await lastLogLine(host);
+    const guestFrame = () => guest.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+    const frameAt = await guestFrame();
+    await guest.waitForTimeout(5000);
+    syncFollowUp.framesAfter = (await guestFrame()) - frameAt;
+    console.log(
+      `SYNC_FOLLOW_UP=direct: done (${Date.now() - started} ms, ${syncFollowUp.attempts} attempt(s)); ` +
+        `the guest made ${syncFollowUp.framesAfter} frames in the next 5 s`,
+    );
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
   } else if (SYNC_FOLLOW_UP) {
     const before = (BATTLE_SECONDS * 1000) / 3;
@@ -4681,7 +4763,12 @@ const syncFollowUpReport = (() => {
     return i < 0 ? -1 : from + i;
   };
   const line = (lines, i) => (i < 0 ? null : lines[i]);
-  const recoveryAsk = at(guestLines, /peer-recovery resync: sent sync-request-full-at:/);
+  const recoveryAsk = at(
+    guestLines,
+    SYNC_FOLLOW_UP === 'direct'
+      ? /BOOT-SYNC: guest requesting host state/
+      : /peer-recovery resync: sent sync-request-full-at:/,
+  );
   const watch = at(hostLines, /SYNC-FOLLOW-UP-WATCH /);
   const after = (re) => (watch < 0 ? -1 : at(hostLines, re, watch));
   const needed = after(/SYNC-FOLLOW-UP-NEEDED /);
@@ -4697,7 +4784,13 @@ const syncFollowUpReport = (() => {
     ticking &&
     (SYNC_FOLLOW_UP === 'same'
       ? needed < 0 && skipped > watch && followUpDispatch < 0 && applied.length >= 1
-      : needed > watch && followUpDispatch > needed && skipped < 0 && applied.length >= 2);
+      : needed > watch &&
+        followUpDispatch > needed &&
+        // The follow-up itself is not skipped. With `direct` a follow-up sent
+        // at its deadline, still unconfirmed, is watched in turn, and its own
+        // follow-up may rightly be skipped after it.
+        (skipped < 0 || (SYNC_FOLLOW_UP === 'direct' && skipped > followUpDispatch)) &&
+        applied.length >= 2);
   return {
     mode: SYNC_FOLLOW_UP,
     attempts: syncFollowUp.attempts,
