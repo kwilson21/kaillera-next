@@ -443,6 +443,7 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `RENDER_EXTERNAL_URL`, `RENDER`: Render.com-provided external URL / platform flag; feed CORS origin and trusted-proxy behavior
 - `GIT_VERSION` (default `""`): build-time git SHA/tag exposed by the server
 - `ICE_SERVERS`: legacy static JSON ICE server list, used before Cloudflare TURN is checked
+- `ICE_SERVERS_TTL_SECONDS`: shortest guaranteed remaining lifetime of opaque TURN credentials in `ICE_SERVERS` (1–86400 seconds; default 86400 for static credentials, invalid settings fall back to 1800). Dated TURN usernames can lower this lifetime.
 - `TURN_SECRET`, `TURN_SERVERS` (default `""`): HMAC time-limited TURN credential fallback when Cloudflare TURN isn't configured
 - `BUDGET_AUTO_FLAGGED_BYTES` (default 200 MiB): byte budget for auto-flagged match blob retention
 - `PARQUET_DIR` (default `data/parquet`): output dir for rolled-up match-log Parquet files

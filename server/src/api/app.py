@@ -876,9 +876,14 @@ def create_app(lifespan=None) -> FastAPI:
         legacy = os.environ.get("ICE_SERVERS")
         if legacy:
             try:
-                return json.loads(legacy)
+                servers = json.loads(legacy)
             except json.JSONDecodeError:
                 log.warning("ICE_SERVERS env var contains invalid JSON")
+            else:
+                ttl = turn.legacy_relay_ttl(servers)
+                if ttl is not None:
+                    response.headers["X-KN-Relay-Ttl"] = str(ttl)
+                return servers
 
         # Cloudflare Realtime TURN (managed): short-lived generated credentials.
         # If Cloudflare can't supply any, fall through to the HMAC TURN path.

@@ -238,7 +238,35 @@ def test_managed_relay_lifetime_only_in_authenticated_response(monkeypatch):
     monkeypatch.setenv("ICE_SERVERS", json.dumps([relay]))
     legacy = client.get("/ice-servers", params=room_request)
     assert legacy.json() == [relay]
-    assert "x-kn-relay-ttl" not in legacy.headers
+    assert legacy.headers["x-kn-relay-ttl"] == "86400"
+
+
+@pytest.mark.parametrize(
+    "configured, username, expected",
+    [
+        (None, "opaque", 86400),
+        ("7200", "opaque", 7200),
+        ("not-an-integer", "opaque", 1800),
+        ("86401", "opaque", 1800),
+        ("-1", "opaque", 1800),
+        ("7200", "1700002500:lease", 2499),
+        ("7200", "1700000100:lease", 99),
+        ("7200", "1700000000:expired", 1),
+    ],
+)
+def test_legacy_relay_lifetime_is_bounded(monkeypatch, configured, username, expected):
+    monkeypatch.setattr(turn, "time", SimpleNamespace(time=lambda: 1700000000.5))
+    if configured is None:
+        monkeypatch.delenv("ICE_SERVERS_TTL_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("ICE_SERVERS_TTL_SECONDS", configured)
+    assert turn.legacy_relay_ttl([{"urls": "stun:example.test"}]) is None
+    relay = {
+        "urls": ["turns:example.test:443"],
+        "username": username,
+        "credential": "fixture",
+    }
+    assert turn.legacy_relay_ttl([relay]) == expected
 
 
 # ── ROM sharing off switch (server side) ─────────────────────────────────────

@@ -2,6 +2,7 @@ const LEGACY_RELAY_AGE_MS = 30 * 60 * 1000;
 const MAX_RELAY_TTL_SECONDS = 24 * 60 * 60;
 const EXPIRY_MARGIN_MS = 10_000;
 const READINESS_TIMEOUT_MS = 8000;
+const RETRY_BACKOFF_MS = 15_000;
 
 const hasTurnUrl = (server: RTCIceServer): boolean => {
   const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
@@ -25,6 +26,34 @@ interface RoomIceResponse {
   relayTtlSeconds: number;
 }
 
+interface RoomIceRetry {
+  load: () => Promise<RoomIceResponse> | null;
+  publish: (servers: RTCIceServer[]) => void;
+}
+
+/** Read expiry for scheduling only. The HTTP endpoint still verifies the signature. */
+export const canRetryRoomIce = (room: string, token: string, now = Date.now()): boolean => {
+  const encoded = /^([A-Za-z0-9_-]+)\.[a-f0-9]{64}$/.exec(token)?.[1];
+  if (!encoded) return false;
+  try {
+    const payload: unknown = JSON.parse(atob(encoded.replace(/-/g, '+').replace(/_/g, '/')));
+    return (
+      typeof payload === 'object' &&
+      payload !== null &&
+      'k' in payload &&
+      payload.k === 'upload' &&
+      'room' in payload &&
+      payload.room === room &&
+      'exp' in payload &&
+      typeof payload.exp === 'number' &&
+      Number.isSafeInteger(payload.exp) &&
+      payload.exp * 1000 > now + READINESS_TIMEOUT_MS + EXPIRY_MARGIN_MS
+    );
+  } catch {
+    return false;
+  }
+};
+
 interface RoomIce {
   room: string;
   relay: SavedRelay | null;
@@ -33,6 +62,8 @@ interface RoomIce {
   requestId: number;
   wait: RoomIceWait | null;
   timedOut: boolean;
+  retryable: boolean;
+  retryAfter: number;
 }
 
 const relayExpiry = (servers: RTCIceServer[], startedAt: number, relayTtlSeconds = 0): number => {
@@ -73,7 +104,17 @@ export const createRoomIceCache = (now: () => number = Date.now, waitMs = READIN
   const scopeFor = (room: string): RoomIce => {
     if (active?.room === room) return active;
     clear();
-    active = { room, relay: null, awaitingRefresh: true, pending: 0, requestId: 0, wait: null, timedOut: false };
+    active = {
+      room,
+      relay: null,
+      awaitingRefresh: true,
+      pending: 0,
+      requestId: 0,
+      wait: null,
+      timedOut: false,
+      retryable: false,
+      retryAfter: 0,
+    };
     return active;
   };
 
@@ -112,6 +153,7 @@ export const createRoomIceCache = (now: () => number = Date.now, waitMs = READIN
         }
         // A valid older request may rescue a failed newer one, but cannot
         // replace a newer valid relay or publish the older request's STUN list.
+        if (requestId === scope.requestId) scope.retryable = result === null;
         if (accepted || requestId === scope.requestId) {
           const latest = selected?.servers ?? servers;
           if (latest.length > 0) publish(latest);
@@ -122,11 +164,18 @@ export const createRoomIceCache = (now: () => number = Date.now, waitMs = READIN
       });
   };
 
-  const ready = (room: string): Promise<RTCIceServer[]> => {
+  const ready = (room: string, retry?: RoomIceRetry): Promise<RTCIceServer[]> => {
     if (active && active.room !== room) return Promise.resolve([]);
     const scope = scopeFor(room);
     const selected = usable(scope);
     if (selected) return Promise.resolve(selected.servers);
+    if (retry && scope.retryable && !scope.awaitingRefresh && scope.pending === 0 && scope.retryAfter <= now()) {
+      const request = retry.load();
+      if (request) {
+        scope.retryAfter = now() + RETRY_BACKOFF_MS;
+        void refresh(room, request, retry.publish);
+      }
+    }
     if (scope.timedOut || (!scope.awaitingRefresh && scope.pending === 0)) return Promise.resolve([]);
     if (scope.wait) return scope.wait.result;
 

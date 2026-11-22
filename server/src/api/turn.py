@@ -27,6 +27,7 @@ _API = "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/genera
 TTL_SECONDS = 24 * 60 * 60
 CACHE_SECONDS = TTL_SECONDS // 2
 MIN_REMAINING_SECONDS = TTL_SECONDS - CACHE_SECONDS
+LEGACY_UNKNOWN_TTL_SECONDS = 30 * 60
 FAILURE_BACKOFF_SECONDS = 60
 
 _cache: tuple[str, float, list[dict]] | None = None  # (config key, expires_at, servers)
@@ -60,6 +61,40 @@ def _usable(servers: object) -> list[dict]:
         if urls:
             out.append({"urls": urls, "username": s["username"], "credential": s["credential"]})
     return out
+
+
+def legacy_relay_ttl(servers: object) -> int | None:
+    """Use the configured validity for static relays, capped by dated usernames."""
+    if not isinstance(servers, list):
+        return None
+    relays = []
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        urls = server.get("urls")
+        urls = [urls] if isinstance(urls, str) else urls
+        if isinstance(urls, list) and any(
+            isinstance(url, str) and url.lower().startswith(("turn:", "turns:")) for url in urls
+        ):
+            relays.append(server)
+    if not relays:
+        return None
+    try:
+        ttl = int(os.environ.get("ICE_SERVERS_TTL_SECONDS", TTL_SECONDS))
+    except ValueError:
+        ttl = 0
+    if not 1 <= ttl <= TTL_SECONDS:
+        log.warning("ICE_SERVERS_TTL_SECONDS must be an integer between 1 and 86400")
+        ttl = LEGACY_UNKNOWN_TTL_SECONDS
+    next_second = int(time.time()) + 1
+    for server in relays:
+        username = server.get("username")
+        if isinstance(username, str):
+            timestamp, delimiter, _ = username.partition(":")
+            if delimiter and len(timestamp) == 10 and timestamp.isascii() and timestamp.isdigit():
+                ttl = min(ttl, int(timestamp) - next_second)
+    # A 1-second lease is already too short for the watcher's safety margin.
+    return max(1, ttl)
 
 
 def _config_key() -> str:

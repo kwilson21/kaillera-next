@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createRoomIceCache } from '../../web/src/play/room-ice.ts';
+import { canRetryRoomIce, createRoomIceCache } from '../../web/src/play/room-ice.ts';
 
 const STUN = [{ urls: 'stun:stun.example.test' }];
 const RELAY = [{ urls: 'turn:relay.example.test', username: 'fixture', credential: 'fixture' }];
@@ -138,4 +138,96 @@ test('authorized relay survives 30 minutes and expires at the relative deadline 
   assert.deepEqual(await cache.ready('room'), []);
   assert.deepEqual(await cache.ready('room'), []);
   assert.deepEqual(requests, ['authorized']);
+});
+
+test('only an appropriately scoped unexpired upload token schedules a retry', () => {
+  const now = 1_700_000_000_000;
+  const token = (k: string, room: string, exp: number) =>
+    btoa(JSON.stringify({ k, room, exp })).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_') +
+    '.' +
+    'a'.repeat(64);
+  assert.equal(canRetryRoomIce('room', token('upload', 'room', now / 1000 + 300), now), true);
+  assert.equal(canRetryRoomIce('room', token('reconnect', 'room', now / 1000 + 300), now), false);
+  assert.equal(canRetryRoomIce('room', token('upload', 'other', now / 1000 + 300), now), false);
+  assert.equal(canRetryRoomIce('room', token('upload', 'room', now / 1000 + 18), now), false);
+  assert.equal(canRetryRoomIce('room', token('upload', 'room', now / 1000 - 1), now), false);
+  assert.equal(canRetryRoomIce('room', 'malformed', now), false);
+});
+
+test('a later offer retries an abort, concurrent offers share it, and failures back off', async () => {
+  let now = 1_700_000_000_000;
+  const cache = createRoomIceCache(() => now);
+  const first = deferredIce();
+  const recovery = deferredIce();
+  const calls: number[] = [];
+  const retry = {
+    load: () => {
+      calls.push(now);
+      return calls.length === 1 ? Promise.reject(new DOMException('aborted', 'AbortError')) : recovery.promise;
+    },
+    publish: ignore,
+  };
+
+  const started = cache.refresh(
+    'room',
+    first.promise.then(() => {
+      throw new DOMException('aborted', 'AbortError');
+    }),
+    ignore,
+  );
+  const initialOffer = cache.ready('room', retry);
+  first.resolve([]);
+  await started;
+  assert.deepEqual(await initialOffer, []);
+  assert.deepEqual(calls, []);
+
+  const a = cache.ready('room', retry);
+  assert.equal(cache.ready('room', retry), a);
+  assert.deepEqual(await a, []);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(await cache.ready('room', retry), []);
+  assert.equal(calls.length, 1);
+
+  now += 15_000;
+  const offeredAgain = cache.ready('room', retry);
+  assert.equal(cache.ready('room', retry), offeredAgain);
+  recovery.resolve(RELAY);
+  assert.deepEqual(await offeredAgain, RELAY);
+  assert.equal(calls.length, 2);
+});
+
+test('STUN-only and expired managed leases do not trigger lookups', async () => {
+  let now = 1_700_000_000_000;
+  const cache = createRoomIceCache(() => now);
+  const retry = {
+    load: () => {
+      throw new Error('no retry expected');
+    },
+    publish: ignore,
+  };
+  await cache.refresh('room', Promise.resolve(reply(STUN)), ignore);
+  assert.deepEqual(await cache.ready('room', retry), []);
+  await cache.refresh('room', Promise.resolve(reply(RELAY, 20)), ignore);
+  now += 20_000;
+  assert.deepEqual(await cache.ready('room', retry), []);
+});
+
+test('a retried offer waits only for the bounded readiness window', async () => {
+  const cache = createRoomIceCache(Date.now, 5);
+  await cache.refresh('room', Promise.reject(new Error('offline')), ignore);
+  const pending = deferredIce();
+  let requests = 0;
+  const retry = {
+    load: () => {
+      requests++;
+      return pending.promise;
+    },
+    publish: ignore,
+  };
+  const a = cache.ready('room', retry);
+  assert.equal(cache.ready('room', retry), a);
+  assert.deepEqual(await a, []);
+  assert.deepEqual(await cache.ready('room', retry), []);
+  assert.equal(requests, 1);
+  pending.resolve(RELAY);
 });
