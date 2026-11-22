@@ -6,13 +6,14 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { resyncedOnRecovery, scheduleRecoveryResyncs } from '../../web/src/recovery-resync.ts';
+import { scheduleRecoveryResyncs } from '../../web/src/recovery-resync.ts';
+import { recoveryResyncSlots } from '../../web/src/recovery-resync-slots.ts';
 
 const FOUR = [
-  { sid: 'host', slot: 0 },
-  { sid: 'p2', slot: 1 },
-  { sid: 'p3', slot: 2 },
-  { sid: 'p4', slot: 3 },
+  { sid: 'host', slot: 0, pendingLateJoin: false },
+  { sid: 'p2', slot: 1, pendingLateJoin: false },
+  { sid: 'p3', slot: 2, pendingLateJoin: false },
+  { sid: 'p4', slot: 3, pendingLateJoin: false },
 ];
 // The page's _peers holds everyone but the host itself.
 const PEERS = FOUR.slice(1);
@@ -22,10 +23,19 @@ const perSid = (queue: { targetSid: string }[]) => {
   return n;
 };
 
-test('only player guests are resynced', () => {
-  assert.equal(resyncedOnRecovery(0), false, 'the host');
-  for (const slot of [1, 2, 3]) assert.equal(resyncedOnRecovery(slot), true);
-  for (const slot of [null, undefined, -1, 4, 1.5, Number.NaN]) assert.equal(resyncedOnRecovery(slot), false);
+test('the slots resynced: every player guest, the recovered one included, never the host', () => {
+  assert.deepEqual(recoveryResyncSlots([0, 1, 2, 3], 1, []), [1, 2, 3]);
+  assert.deepEqual(recoveryResyncSlots([0, 1], 1, []), [1], 'two players: the guest alone');
+  assert.deepEqual(recoveryResyncSlots([-1, 4, 0, 2], 2, []), [2], 'no slot outside 1..3');
+});
+
+test('a guest being admitted late is left out, unless it is the one recovered', () => {
+  assert.deepEqual(recoveryResyncSlots([1, 2, 3], 1, [3]), [1, 2]);
+  assert.deepEqual(recoveryResyncSlots([1, 2, 3], 3, [3]), [1, 2, 3]);
+});
+
+test('each slot once, however often it is listed', () => {
+  assert.deepEqual(recoveryResyncSlots([2, 1, 2, 1, 3], 1, []), [2, 1, 3]);
 });
 
 test('a recovery resyncs the recovered guest and every other player guest, once each', () => {
@@ -39,7 +49,7 @@ test('a recovery resyncs the recovered guest and every other player guest, once 
 });
 
 test('a spectator or a peer with no slot is not resynced', () => {
-  const peers = [...PEERS.slice(0, 2), { sid: 'spec', slot: null }];
+  const peers = [...PEERS.slice(0, 2), { sid: 'spec', slot: null, pendingLateJoin: false }];
   const { queue, others } = scheduleRecoveryResyncs([], peers, 'p2', 1000, 5);
   assert.deepEqual(
     queue.map((r) => r.targetSid),
@@ -69,10 +79,25 @@ test('requests already queued for a guest are replaced, others are kept', () => 
 });
 
 test('a two-player match resyncs the guest alone', () => {
-  const { queue, others } = scheduleRecoveryResyncs([], [{ sid: 'p2', slot: 1 }], 'p2', 1000, 5);
+  const { queue, others } = scheduleRecoveryResyncs(
+    [],
+    [{ sid: 'p2', slot: 1, pendingLateJoin: false }],
+    'p2',
+    1000,
+    5,
+  );
   assert.deepEqual(
     queue.map((r) => r.targetSid),
     ['p2'],
   );
   assert.deepEqual(others, []);
+});
+
+test('a late joiner still being admitted keeps its queued request and is not resynced', () => {
+  const peers = [PEERS[0]!, PEERS[1]!, { sid: 'p4', slot: 3, pendingLateJoin: true }];
+  const queued = [{ targetFrame: 990, targetSid: 'p4', deadlineAt: 1 }];
+  const { queue, others } = scheduleRecoveryResyncs(queued, peers, 'p2', 1000, 5);
+  assert.deepEqual(perSid(queue), { p2: 1, p3: 1, p4: 1 });
+  assert.equal(queue.find((r) => r.targetSid === 'p4')?.targetFrame, 990);
+  assert.deepEqual(others, [2]);
 });

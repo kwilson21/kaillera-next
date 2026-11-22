@@ -23,6 +23,7 @@ web/src/lockstep-wait.ts
 web/src/play/game-start.ts
 web/src/sync-chunk-room.ts
 web/src/sync-follow-up.ts
+web/src/recovery-resync-slots.ts
 web/src/input-ask.ts
 web/src/catch-up.ts
 web/src/input-resend.ts

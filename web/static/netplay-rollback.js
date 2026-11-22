@@ -9587,7 +9587,8 @@
             _scheduledSyncRequests,
             Object.entries(_peers).map(([sid, p]) => ({
               sid,
-              slot: sid !== remoteSid && _isPeerPendingLateJoin(sid, p) ? null : p.slot,
+              slot: p.slot,
+              pendingLateJoin: _isPeerPendingLateJoin(sid, p),
             })),
             remoteSid,
             _frameNum,
