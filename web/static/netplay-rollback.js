@@ -18728,6 +18728,13 @@
         if (_knScreenshots() && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
           _diag.captureAndSendScreenshot();
         }
+        // P0-1 funnel: fire milestone_reached once when the player reaches
+        // ~30 seconds of sustained gameplay (frame 1800 at 60fps). This is the
+        // "actually played, not just loaded" signal for the reliability funnel.
+        if (!_funnelMilestoneSent && _frameNum >= 1800) {
+          _funnelMilestoneSent = true;
+          KNEvent('milestone_reached', '', { frame: 1800 });
+        }
         _markTickReturn('end:c-rollback');
         return;
       } catch (eCR) {
@@ -19121,14 +19128,6 @@
     KNState.frameNum = _frameNum;
     if (window.KNDesync) KNDesync.tick(_frameNum);
     _markTickReturn('advance:legacy');
-
-    // P0-1 funnel: fire milestone_reached once when the player reaches
-    // ~30 seconds of sustained gameplay (frame 1800 at 60fps). This is the
-    // "actually played, not just loaded" signal for the reliability funnel.
-    if (!_funnelMilestoneSent && _frameNum >= 1800) {
-      _funnelMilestoneSent = true;
-      KNEvent('milestone_reached', '', { frame: 1800 });
-    }
 
     _dispatchScheduledSyncs(() => true);
 

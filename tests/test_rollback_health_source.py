@@ -123,6 +123,19 @@ def test_every_page_arms_the_c_engine_solo_included():
     assert hold_idx < c_branch_idx
 
 
+def test_the_c_engine_sends_the_funnel_milestone():
+    """milestone_reached (the admin timeline's "actually played" mark) was sent
+    only from the old path's tail of tick(); every frame now runs on the C
+    engine, whose branch always returns, so it is sent there."""
+    src = LOCKSTEP_JS.read_text()
+
+    assert src.count("KNEvent('milestone_reached'") == 1
+    milestone_idx = src.index("KNEvent('milestone_reached'")
+    c_branch_idx = src.index("// ── C-level rollback path")
+    c_end_idx = src.index("_markTickReturn('end:c-rollback');")
+    assert c_branch_idx < milestone_idx < c_end_idx
+
+
 
 def test_resync_state_load_clears_pending_c_inputs():
     src = LOCKSTEP_JS.read_text()
