@@ -183,9 +183,6 @@ _PEER_WAIT_MARKS = {
     "skip:rb-input-stall",
     "skip:rb-stall",
     "skip:lockstep-wait",
-    "skip:legacy-menu-lockstep-stall",
-    "skip:legacy-input-stall-wait",
-    "skip:legacy-input-stall-resend",
 }
 _PEER_WAIT_CAUSES = {"input-stall", "rollback-stall"}
 _LOCKSTEP_WAITED = re.compile(r"\bwaitedMs=(\d+)")
@@ -207,8 +204,7 @@ def _stall_lines(log, first_frame, last_frame):
       sees as a wait of its own.
     - RB-INPUT-STALL-TIMEOUT, PEER-PHANTOM: the peer was left out after 5 s.
     - ROLLBACK-STALL: no frame from the peer for 3 s.
-    - LOCKSTEP-WAIT (over a second), INPUT-STALL hard-timeout: the lockstep
-      path, taken when the core has no rollback.
+    - LOCKSTEP-WAIT (over a second): lockstep mode, which predicts nothing.
     """
     found = []
     for line in log.splitlines():
@@ -225,7 +221,7 @@ def _stall_lines(log, first_frame, last_frame):
             if (cause and cause.group(1) in _PEER_WAIT_CAUSES) or last_mark in _PEER_WAIT_MARKS:
                 found.append(line)
         elif msg.startswith(
-            ("RB-INPUT-STALL-TIMEOUT", "PEER-PHANTOM", "ROLLBACK-STALL start", "INPUT-STALL hard-timeout")
+            ("RB-INPUT-STALL-TIMEOUT", "PEER-PHANTOM", "ROLLBACK-STALL start")
         ):
             found.append(line)
         elif msg.startswith("LOCKSTEP-WAIT"):

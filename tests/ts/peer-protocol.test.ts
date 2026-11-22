@@ -57,7 +57,6 @@ test('menu and phase messages carry integers', () => {
   ok('lockstep', 'rb-delay:3');
   ok('lockstep', 'rb-delay:0'); // a solo match a friend joins runs at 0
   ok('lockstep', 'rb-init-frame:0');
-  ok('lockstep', 'fpu-trace:600:-1234567:42');
   ok('lockstep', 'sync-request-full-at:980');
   // The number of the request that follows it.
   ok('lockstep', 'sync-request-id:3');
