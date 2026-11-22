@@ -15870,10 +15870,15 @@
         if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
         if (overSocket && (skipped == null || skipped.includes(r.targetSid))) {
           // Not sent over the socket (a state too large for it falls back to
-          // a channel that is down): not put back, which would retry it
-          // every deadline for as long as the channel stays down. The
-          // guest's own request deadline asks again.
-          _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; the guest asks again`);
+          // a channel that is down). The guest already has the answer, so no
+          // request deadline of its own asks again: put it back, counted
+          // against SYNC_FOLLOW_UP_MAX so a channel that stays down cannot
+          // retry it for good (I1).
+          const n = (r.followUp || 0) + 1;
+          if (n <= SYNC_FOLLOW_UP_MAX) {
+            _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; re-queued (${n})`);
+            requeue(r, n, null);
+          } else _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; follow-ups exhausted`);
         } else if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so

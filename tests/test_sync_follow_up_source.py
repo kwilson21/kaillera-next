@@ -186,11 +186,15 @@ def _answer_direct(
     reset=False,
     socket=None,
     queued=(),
+    calls=None,
 ):
     """Run the engine's _answerDirectSyncRequest with a stub push that resolves
     to `result` (the skipped sids, or null when nothing went out); return the
     push options and the follow-ups it scheduled. `socket`: the request came
-    over the socket ({reason}); `queued`: requests already scheduled."""
+    over the socket ({reason}); `queued`: requests already scheduled; `calls`:
+    several requests ([requestId, socket]) answered by one shared push, as
+    _queuedSyncPushes coalesces them (default: request 7 alone)."""
+    calls = calls or [[7, socket]]
     src = LOCKSTEP_JS.read_text()
     start = src.index("  const _answerDirectSyncRequest = (sid, requestId, socket = null) => {")
     helper = src[start : src.index("\n  };\n", start) + 5]
@@ -210,16 +214,18 @@ def _answer_direct(
         const _syncQueueGen = {{}};
         let _scheduledSyncRequests = {json.dumps(list(queued))};
         const _followUpWatches = new Map();
+        const _directAnswerNewest = new Map();
         let _frameNum = 1986;
         const SYNC_COORD_TIMEOUT_MS = 3000;
         const pushes = [];
+        const shared = Promise.resolve({result});
         const pushSyncState = (sid, proactive, options) => {{
           pushes.push({{ sid, proactive, options }});
           for (const w of options.watchFor || []) _followUpWatches.set(w, {{ frame: _frameNum }});
-          return Promise.resolve({result});
+          return shared;
         }};
         eval({json.dumps(helper)} + `
-          _answerDirectSyncRequest('g', 7, {json.dumps(socket)});
+          for (const [id, socket] of {json.dumps(calls)}) _answerDirectSyncRequest('g', id, socket);
           if ({json.dumps(reset)}) _syncQueueEpoch++;
           _frameNum = 1990;
           setTimeout(() => process.stdout.write(JSON.stringify({{
@@ -291,6 +297,16 @@ def test_the_dispatcher_skips_a_follow_up_only_with_no_phantom_peer():
     assert "confirmedFor(r) && !anyPhantom," in dispatch
 
 
+def test_only_the_newest_of_coalesced_answers_schedules_the_follow_up():
+    # Two requests from one guest share one queued push, which carries the
+    # newer number; the follow-up must carry it too.
+    out = _answer_direct(confirmed=False, calls=[[7, {"reason": "a"}], [8, {"reason": "b"}]])
+    [follow] = out["scheduled"]
+    assert follow["requestId"] == 8 and follow["transport"] == "socket"
+    out = _answer_direct(confirmed=False, calls=[[7, None], [8, None]])
+    assert [f["requestId"] for f in out["scheduled"]] == [8]
+
+
 def test_a_direct_answer_not_sent_or_reset_since_schedules_nothing():
     for result in ("null", '["g"]'):
         out = _answer_direct(confirmed=False, result=result)
@@ -333,14 +349,21 @@ def test_a_channel_answer_schedules_its_follow_up_on_the_channel():
     assert follow["transport"] == "channel"
 
 
-def test_a_confirmed_socket_answer_is_final_and_goes_over_the_socket():
+def test_a_socket_answer_that_looks_confirmed_is_watched_over_the_socket():
     out = _answer_direct(confirmed=True, socket={"reason": "delta-base-missing"})
     assert out["pushes"][0]["options"] == {
         "transport": "socket",
         "reason": "delta-base-missing",
-        "waitForResult": False,
         "requestIds": {"g": 7},
+        "watchFor": ["g"],
     }
+    [follow] = out["scheduled"]
+    assert follow["transport"] == "socket"
+
+
+def test_a_socket_answer_to_a_phantom_is_left_to_its_recovery():
+    out = _answer_direct(confirmed=False, phantom=True, socket={"reason": "visibility"})
+    assert out["pushes"][0]["options"]["transport"] == "socket"
     assert out["scheduled"] == []
 
 
@@ -504,7 +527,8 @@ def test_a_socket_follow_up_sent_unconfirmed_is_requeued_over_the_socket():
     assert out["queued"] == [{"sid": "g", "transport": "socket", "followUp": 2}]
 
 
-def test_a_socket_follow_up_that_did_not_go_out_is_not_retried():
+def test_a_socket_follow_up_that_did_not_go_out_is_retried_within_the_bound():
+    # The guest already has the answer: no deadline of its own asks again.
     for result in ("null", '["g"]'):
         out = _dispatch(
             [_req("g", "socket", overdue=True)],
@@ -512,8 +536,12 @@ def test_a_socket_follow_up_that_did_not_go_out_is_not_retried():
             dc_open={"g": False},
             result=result,
         )
+        assert out["queued"] == [{"sid": "g", "transport": "socket", "followUp": 2}]
+        last = _req("g", "socket", overdue=True)
+        last["followUp"] = 3
+        out = _dispatch([last], confirmed=False, dc_open={"g": False}, result=result)
         assert out["queued"] == []
-        assert any("the guest asks again" in line for line in out["logs"])
+        assert any("follow-ups exhausted" in line for line in out["logs"])
     # A channel one is put back as before.
     out = _dispatch([_req("g", "channel")], confirmed=True, dc_open={"g": True}, result="null")
     assert out["queued"] == [{"sid": "g", "transport": "channel", "followUp": 1}]
