@@ -49,7 +49,10 @@
  *   unless the host made P2 a phantom and recovered it, resynced every other
  *   guest too (`full sync also scheduled for slot(s)`), each of them applied
  *   a host state after, nobody was dropped, and every guest's hashes match the
- *   host's, at least 60 frames of them after recovery. With
+ *   host's outside its window (from the drop to the first host state it
+ *   applies after the recovery, where the host runs on its prediction of P2
+ *   and the guests on P2's real input), at least 60 frames of them after
+ *   recovery. With
  *   PHANTOM_SETTLE_LATE=1, P2's input packets to the other guests are held
  *   too, from the drop until each of them has applied its host state after
  *   the recovery, then sent in order: P2's real inputs from before the
@@ -458,6 +461,8 @@ const phantomSettle = {
   appliedBeforeRelease: {},
   // Where each page's sync log stood when the host recovered P2.
   guestsRecoveredAt: null,
+  // The host's frame when P2's packets to it began to be dropped.
+  faultFrame: null,
   held: {},
 };
 // The battle, with the catch-up fault a third of the way in.
@@ -641,6 +646,7 @@ if (PHANTOM_SETTLE) {
     },
     { n: NEUTRAL, late: PHANTOM_SETTLE_LATE },
   );
+  ps.faultFrame = await host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
   await host.waitForTimeout(PHANTOM_SETTLE_MS);
   ps.dropped = await pages[1].evaluate((n) => {
     window.__meshDropToHost = false;
@@ -912,6 +918,21 @@ const spans = (frames) =>
     }, []);
 
 const H = P[0];
+// PHANTOM_SETTLE: from the drop until a guest applies the host's state after
+// P2's recovery, the host runs on its prediction of P2 and the guests on P2's
+// real input, so their frames differ by design. Mismatches there are counted
+// (recoveryMismatches.during) and not failed; any before or after fail. A
+// guest given no state after the recovery (main) has its window end at the
+// recovery, so the split it keeps fails.
+const phantomWindowOf = (slot) => {
+  if (!PHANTOM_SETTLE || phantomSettle.faultFrame === null || phantomSettle.recoveredFrame === null) return null;
+  const applied = P[slot].sync
+    .split('\n')
+    .filter((l) => seqOf(l) > (phantomSettle.guestsRecoveredAt?.[slot] ?? Infinity))
+    .map((l) => /sync #\d+ applied \(frame \d+ -> (\d+)/.exec(l))
+    .find(Boolean);
+  return [phantomSettle.faultFrame, applied ? Number(applied[1]) : phantomSettle.recoveredFrame];
+};
 const pairs = P.slice(1).map((G, gi) => {
   const slot = gi + 1;
   const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
@@ -923,6 +944,7 @@ const pairs = P.slice(1).map((G, gi) => {
   let unrecorded = 0;
   let leftOut = 0;
   const mismatches = { gameplay: [], gameState: [], fullState: 0 };
+  const phantomWindow = phantomWindowOf(slot);
   for (const k of Object.keys(G.hashes)) {
     const f = +k;
     const h = H.hashes[k];
@@ -950,6 +972,12 @@ const pairs = P.slice(1).map((G, gi) => {
           f < missingRecipient.range[0] ? 'before' : f > missingRecipient.recoveredFrame ? 'after' : 'during';
         recoveryMismatches[phase]++;
       }
+    }
+    if (phantomWindow) {
+      const differs = h[0] !== g[0] || (h[1] !== 0 && g[1] !== 0 && h[1] !== g[1]);
+      const phase = f < phantomWindow[0] ? 'before' : f > phantomWindow[1] ? 'after' : 'during';
+      if (differs) recoveryMismatches[phase]++;
+      if (phase === 'during') continue;
     }
     if (h[0] !== g[0]) mismatches.gameplay.push(f);
     if (h[1] !== 0 && g[1] !== 0 && h[1] !== g[1]) mismatches.gameState.push(f);
@@ -979,6 +1007,7 @@ const pairs = P.slice(1).map((G, gi) => {
     gameStateMismatchFrames: spans(mismatches.gameState),
     fullStateMismatches: mismatches.fullState,
     catchUps: catchUpsOf(G.sync),
+    phantomWindow,
   };
 });
 
@@ -1235,8 +1264,12 @@ const lateRealProblems = (slot) => {
     return [`P${slot + 1} got P2's held inputs before applying a host state`];
   if (!(phantomSettle.held[slot] > 0)) return [`no packet from P2 to P${slot + 1} was held`];
   const after = lines.slice(applied);
-  const settled = after.map((l) => /RESYNC-INPUTS f=\d+ settledBefore=(\d+)/.exec(l)).find(Boolean);
-  if (!settled) return [`P${slot + 1} logged no RESYNC-INPUTS after its state`];
+  // The page logs RESYNC-INPUTS as it settles, just before `sync #N applied`.
+  const settled = lines
+    .slice(0, applied + 1)
+    .map((l) => /RESYNC-INPUTS f=\d+ settledBefore=(\d+)/.exec(l))
+    .findLast(Boolean);
+  if (!settled) return [`P${slot + 1} logged no RESYNC-INPUTS with its state`];
   const floor = Number(settled[1]);
   const deep = after.filter((l) => {
     const m = /\[C\] MISPREDICTION slot=1 f=(\d+) /.exec(l);
