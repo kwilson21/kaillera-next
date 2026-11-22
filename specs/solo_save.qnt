@@ -22,13 +22,16 @@
 // in a match (at a delay of 0 since PR A) pays for one every frame.
 //
 // The gate: kn_pre_tick skips the save while no slot but the page's own is
-// active. The sparse save mode (knDiag.setDeltaSaveSparse) writes only the
-// blocks that differ from a baseline, the last state saved; a restore takes
-// every other block from the copies filed before it. That is right while the
-// baseline is the copy of the frame before the one saved
-// (specs/ring_after_resync.qnt, everyCopyIsWhole). After a skipped stretch
-// the baseline is older than that, so a skipped save forgets it and the
-// first save after the stretch is whole, as after kn_set_frame.
+// active. The sparse save mode (knDiag.setDeltaSaveSparse, off by default)
+// writes only the blocks that differ from a baseline, the last state saved;
+// a restore takes every other block from the copies filed before it.
+// specs/ring_after_resync.qnt's condition for such a copy (everyCopyIsWhole)
+// is that the baseline is the copy of the frame before the one saved. After
+// a skipped stretch it is older than that. The restore's walk back through
+// the ring may well rebuild that copy right, since the diff is taken against
+// the baseline's own contents, but nothing checks that it does. So a skipped
+// save forgets the baseline and the first save after the stretch is whole,
+// as after kn_set_frame. In the default (full) mode nothing reads it.
 //
 // What the ring holds is compared with what it holds today (`everyFrame`:
 // every frame since the last kn_rollback_init). The gate must not lose a

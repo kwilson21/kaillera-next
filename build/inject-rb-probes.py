@@ -398,23 +398,18 @@ PROBE_PATCHES = [
         "        KN_RB_PROBE(71);\n"
         "        return 2; /* 2 = JS should step the emulator for a replay frame */\n",
     ),
-    # Normal-tick save (line 1090) + return 0 at end of kn_pre_tick.
+    # Normal-tick save (made while another slot is active) + return 0 at end
+    # of kn_pre_tick.
     (
-        "        {\n"
-        "            int save_idx = rb.frame % rb.ring_size;\n"
         "            if (rb.last_save_frame != rb.frame) {\n"
         "                rb_save_slot(save_idx, rb.frame, 1);\n"
-        "            }\n"
-        "        }\n",
+        "            }\n",
 
-        "        {\n"
-        "            int save_idx = rb.frame % rb.ring_size;\n"
         "            if (rb.last_save_frame != rb.frame) {\n"
         "                KN_RB_PROBE_SLOT(60, save_idx);\n"
         "                rb_save_slot(save_idx, rb.frame, 1);\n"
         "                KN_RB_PROBE_SLOT(61, save_idx);\n"
-        "            }\n"
-        "        }\n",
+        "            }\n",
     ),
     (
         "    return 0; /* 0 = normal tick, JS should do stepOneFrame */\n"
