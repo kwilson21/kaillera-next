@@ -854,7 +854,7 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=503, detail="landing build id unavailable") from None
 
     @app.get("/ice-servers")
-    async def ice_servers(request: Request) -> list:
+    async def ice_servers(request: Request, response: Response) -> list:
         if not check_ip(_client_ip(request), "ice-servers"):
             raise HTTPException(status_code=429, detail="Rate limited")
 
@@ -871,6 +871,7 @@ def create_app(lifespan=None) -> FastAPI:
         if not token or not room_id or room_id not in rooms or not verify_upload_token(room_id, token):
             return stun_servers
 
+        response.headers["Cache-Control"] = "private, no-store"
         # Check for legacy static ICE_SERVERS (backwards compatible)
         legacy = os.environ.get("ICE_SERVERS")
         if legacy:
@@ -884,6 +885,7 @@ def create_app(lifespan=None) -> FastAPI:
         if turn.configured():
             cf_turn = await turn.ice_servers()
             if cf_turn:
+                response.headers["X-KN-Relay-Ttl"] = str(turn.MIN_REMAINING_SECONDS)
                 return stun_servers + cf_turn
 
         # Generate HMAC time-limited TURN credentials
@@ -893,7 +895,7 @@ def create_app(lifespan=None) -> FastAPI:
             return stun_servers
 
         # Credentials expire in 24 hours (username = expiry:random_id)
-        expiry = int(time.time()) + 86400
+        expiry = int(time.time()) + turn.TTL_SECONDS
         username = f"{expiry}:{room_id}"
         mac = hmac.new(turn_secret.encode(), username.encode(), hashlib.sha1)
         credential = base64.b64encode(mac.digest()).decode()
@@ -911,6 +913,8 @@ def create_app(lifespan=None) -> FastAPI:
                     }
                 )
 
+        if any(entry["urls"].startswith(("turn:", "turns:")) for entry in turn_entries):
+            response.headers["X-KN-Relay-Ttl"] = str(turn.TTL_SECONDS - 1)
         return stun_servers + turn_entries
 
     @app.get("/room/{room_id}")

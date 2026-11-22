@@ -93,19 +93,23 @@ def test_watch_link_midgame_no_rom_prompt(browser, server_url):
         spectator.close()
 
 
+@pytest.mark.parametrize("mode", ["rollback", "lockstep"])
 @pytest.mark.parametrize("relay_available", [True, False])
 def test_watch_link_waits_for_relay_before_answering(
-    browser, server_url, relay_available
+    browser, server_url, mode, relay_available
 ):
     """Watchers wait for authenticated TURN rather than answering with only STUN."""
     host, guest, watcher = [browser.new_page() for _ in range(3)]
-    room = "WATCH04" if relay_available else "WATCH05"
+    room = f"WATCH{mode[0].upper()}{int(relay_available)}"
     delayed_ice = []
     turn_url = "turn:127.0.0.1:3478"
     watcher.route("**/ice-servers?token=*", lambda route: delayed_ice.append(route))
     watcher.add_init_script("""
         window.__watchOffers = new Set();
         window.__watchAnswers = [];
+        const now = Date.now.bind(Date);
+        window.__watchClockOffset = 0;
+        Date.now = () => now() + window.__watchClockOffset;
         Object.defineProperty(window, 'io', {
             configurable: true,
             set(nativeIo) {
@@ -143,7 +147,7 @@ def test_watch_link_waits_for_relay_before_answering(
             expect(player.locator("#overlay")).to_be_visible(timeout=10000)
             _mark_rom_ready(player)
         expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
-        _start_game_via_socket(host)
+        _start_game_via_socket(host, mode)
         for player in (host, guest):
             expect(player.locator("#toolbar")).to_be_visible(timeout=10000)
             player.wait_for_function(
@@ -163,14 +167,19 @@ def test_watch_link_waits_for_relay_before_answering(
         stun = {"urls": "stun:127.0.0.1:3478"}
         turn = {"urls": turn_url, "username": "fixture", "credential": "fixture"}
         for route in delayed_ice:
-            route.fulfill(json=[stun, turn] if relay_available else [stun])
+            route.fulfill(
+                json=[stun, turn] if relay_available else [stun],
+                headers={"X-KN-Relay-Ttl": "43200"} if relay_available else {},
+            )
 
         if relay_available:
             watcher.wait_for_function(
                 "window.__watchAnswers.length === 2", timeout=10000
             )
-            # Rejoin the same room over a new Socket.IO connection. Its fresh
-            # authenticated ICE request fails, but the original relay is valid.
+            # Rejoin after the old 30-minute cap. The new request fails,
+            # but the first response guaranteed the relay for 12 hours.
+            watcher.evaluate("window.__watchClockOffset = 31 * 60 * 1000")
+            assert len(delayed_ice) == 1
             old_sid = watcher.evaluate("window.__test_socket.id")
             with watcher.expect_request("**/ice-servers?token=*", timeout=10000):
                 watcher.evaluate("window.__test_socket.io.engine.close()")

@@ -798,7 +798,10 @@
           `/ice-servers?token=${encodeURIComponent(_uploadToken)}&room=${encodeURIComponent(roomCode || '')}`,
           { signal: abort.signal },
         )
-          .then((r) => (r.ok ? r.json() : []))
+          .then(async (r) => ({
+            servers: r.ok ? await r.json() : [],
+            relayTtlSeconds: r.ok ? Number(r.headers.get('X-KN-Relay-Ttl')) : 0,
+          }))
           .finally(() => clearTimeout(deadline));
         _roomIce.refresh(roomCode, pending, (servers) => {
           window._iceServers = servers;

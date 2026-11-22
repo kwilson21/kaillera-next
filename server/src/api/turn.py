@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 
 _API = "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate-ice-servers"
 TTL_SECONDS = 24 * 60 * 60
+CACHE_SECONDS = TTL_SECONDS // 2
+MIN_REMAINING_SECONDS = TTL_SECONDS - CACHE_SECONDS
 FAILURE_BACKOFF_SECONDS = 60
 
 _cache: tuple[str, float, list[dict]] | None = None  # (config key, expires_at, servers)
@@ -77,11 +79,11 @@ async def ice_servers(client: httpx.AsyncClient | None = None) -> list[dict]:
     if not configured():
         return []
     key = _config_key()
-    hit = _cached(key, time.time())
+    hit = _cached(key, time.monotonic())
     if hit is not None:
         return hit
     async with _lock:
-        now = time.time()
+        now = time.monotonic()
         hit = _cached(key, now)
         if hit is not None:
             return hit
@@ -101,7 +103,7 @@ async def ice_servers(client: httpx.AsyncClient | None = None) -> list[dict]:
         except (httpx.HTTPError, ValueError, AttributeError) as e:
             # Never log the response body or headers: they carry credentials.
             log.warning("Cloudflare TURN credentials unavailable: %s", type(e).__name__)
-        ttl = TTL_SECONDS / 2 if servers else FAILURE_BACKOFF_SECONDS
+        ttl = CACHE_SECONDS if servers else FAILURE_BACKOFF_SECONDS
         _cache = (key, now + ttl, servers)
         return servers
 

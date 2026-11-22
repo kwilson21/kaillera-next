@@ -1,4 +1,5 @@
-const MAX_RELAY_AGE_MS = 30 * 60 * 1000;
+const LEGACY_RELAY_AGE_MS = 30 * 60 * 1000;
+const MAX_RELAY_TTL_SECONDS = 24 * 60 * 60;
 const EXPIRY_MARGIN_MS = 10_000;
 const READINESS_TIMEOUT_MS = 8000;
 
@@ -19,6 +20,11 @@ interface RoomIceWait {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface RoomIceResponse {
+  servers: RTCIceServer[];
+  relayTtlSeconds: number;
+}
+
 interface RoomIce {
   room: string;
   relay: SavedRelay | null;
@@ -29,10 +35,13 @@ interface RoomIce {
   timedOut: boolean;
 }
 
-const relayExpiry = (servers: RTCIceServer[], startedAt: number): number => {
-  // Our 24-hour generated credentials are served only in the first half of
-  // their lifetime. Admin-configured static lists also stay bounded in memory.
-  let expiresAt = startedAt + MAX_RELAY_AGE_MS;
+const relayExpiry = (servers: RTCIceServer[], startedAt: number, relayTtlSeconds = 0): number => {
+  // A relative TTL measured from request start accounts for delivery time
+  // without relying on the client and server clocks being synchronized.
+  if (Number.isInteger(relayTtlSeconds) && relayTtlSeconds > 0 && relayTtlSeconds <= MAX_RELAY_TTL_SECONDS) {
+    return startedAt + relayTtlSeconds * 1000 - EXPIRY_MARGIN_MS;
+  }
+  let expiresAt = startedAt + LEGACY_RELAY_AGE_MS;
   for (const server of servers) {
     if (!hasTurnUrl(server) || typeof server.username !== 'string') continue;
     const expiry = /^([0-9]{10}):/.exec(server.username);
@@ -76,7 +85,7 @@ export const createRoomIceCache = (now: () => number = Date.now, waitMs = READIN
 
   const refresh = (
     room: string,
-    request: Promise<RTCIceServer[]>,
+    request: Promise<RoomIceResponse>,
     publish: (servers: RTCIceServer[]) => void,
   ): Promise<void> => {
     const scope = scopeFor(room);
@@ -86,15 +95,15 @@ export const createRoomIceCache = (now: () => number = Date.now, waitMs = READIN
     const requestId = ++scope.requestId;
     const startedAt = now();
     return request
-      .catch(() => [])
+      .catch(() => null)
       .then((result) => {
         if (active !== scope) return;
         scope.pending--;
-        const servers = Array.isArray(result) ? result : [];
+        const servers = Array.isArray(result?.servers) ? result.servers : [];
         let selected = usable(scope);
         let accepted = false;
         if (servers.some(hasTurnUrl)) {
-          const expiresAt = relayExpiry(servers, startedAt);
+          const expiresAt = relayExpiry(servers, startedAt, result?.relayTtlSeconds);
           if (expiresAt > now() && (!selected || requestId >= selected.requestId)) {
             selected = { servers, expiresAt, requestId };
             scope.relay = selected;
