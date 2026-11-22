@@ -262,7 +262,9 @@ def test_lockstep_background_return_requests_full_sync_and_guards_input_until_ap
     assert "const _requestLifecycleFullResync = (reason) => {" in source
     assert "type: 'sync-request-full-socket'" in source
     assert "type: 'sync-state-socket'" in source
-    assert "pushSyncState(requesterSid, false, {\n      transport: 'socket'," in source
+    # The socket request is answered over the socket, watched and followed up
+    # (specs/sync_follow_up.qnt, SOCKET_WATCHED).
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {\n      transport: 'socket'," in source
     assert "`${reason}: sent socket sync-request-full to host`" in source
     assert "_sendResyncRequest(hostPeer.dc, _beginResyncRequest(), 'sync-request-full');" in source
     assert "sent sync-request-full to host over DC fallback" in source

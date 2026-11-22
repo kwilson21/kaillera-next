@@ -892,11 +892,13 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert "targetSid: remoteSid,\n              requestId," in host
     # Every answer is full: the host keeps no delta base (sync_base).
     assert "forceFull" not in src
-    assert (
-        "pushSyncState(remoteSid, false, { waitForResult: false, requestIds: { [remoteSid]: requestId } });"
-        in host
-    )
-    assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
+    # A direct request, on the channel or the socket, is answered with its
+    # number through the watched answer (specs/sync_follow_up.qnt).
+    assert "_answerDirectSyncRequest(remoteSid, requestId);" in host
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {" in src
+    answer = src[src.index("const _answerDirectSyncRequest = (sid, requestId, socket = null) => {") :]
+    answer = answer[: answer.index("\n  };\n")]
+    assert "const requestIds = { [sid]: requestId };" in answer
 
     # A scheduled capture, its follow-ups and re-queues keep the number; a
     # sync the host schedules for its own reasons has none.
@@ -904,7 +906,8 @@ def test_only_its_own_answer_ends_a_resync_request():
     dispatch = dispatch[: dispatch.index("\n  };\n")]
     assert "requestId: r.requestId || 0," in dispatch
     assert "for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;" in dispatch
-    assert "pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] })" in dispatch
+    assert "const options = { requestIds, watchFor: [...unconfirmedFor] };" in dispatch
+    assert "Promise.resolve(pushSyncState(targetSid, false, options))" in dispatch
     recovery = src[src.index("push its state to the guest once it is final") :]
     recovery = recovery[: recovery.index("_settleInputsBefore(")]
     assert "requestId" not in recovery

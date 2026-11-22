@@ -298,6 +298,13 @@ sync_follow_up() {
   expect_violation "$FOLLOW" sync_follow_up_from_send theGuestEndsOnTheHostsState
   # A direct answer taken unconfirmed, final, then the input differs: 5 steps.
   expect_violation "$FOLLOW" sync_follow_up_direct_unwatched theGuestEndsOnTheHostsState 5
+  # The same for a socket request (its own handler): 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_socket_unwatched theGuestEndsOnTheHostsState 5
+  # Watched, its follow-up held for a channel that is down: 3 steps.
+  expect_violation "$FOLLOW" sync_follow_up_socket_over_channel aWatchedAnswerCanBeFollowedUp 3
+  # The socket send never marks its state delivered, and the input arrives
+  # as predicted: the follow-up goes out anyway, 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_socket_undelivered aFollowUpCarriesANewState 5
 }
 
 rom_at_start() {
