@@ -670,7 +670,7 @@ $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
 # ── How a page's C engine starts ───────────────────────────────────────────
 START=specs/engine_start.qnt
 $QUINT typecheck "$START"
-for variant in engine_start_before engine_start_stop_only engine_start_current; do
+for variant in engine_start_before engine_start_stop_only engine_start_no_zero_bridge engine_start_current; do
   $QUINT test "$START" --main="$variant" --backend="$BACKEND"
 done
 # Today: every frame of a match runs on the C engine, a guest arms with the
@@ -682,6 +682,9 @@ done
 # own delay (engine_start_before; lostDelayTest). Stopping at the deadline
 # without the host sending the delay and start frame again on every open
 # stops a guest the host could reach (engine_start_stop_only; lostDelayTest).
+# So does arming at 0 with the late join's input bridge defined only for a
+# delay of 1 or more: a friend joining a solo match fails its input wait as
+# it arrives (engine_start_no_zero_bridge; lateJoinIntoSoloTest).
 # The host's start frame is the guest's own in every variant, which is why
 # RB-INIT-CATCHUP and the overshoot went (theHostsStartIsWhereTheGuestIs).
 $QUINT run "$START" --main=engine_start_current --invariant=allHold \

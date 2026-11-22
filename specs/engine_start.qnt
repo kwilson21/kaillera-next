@@ -57,6 +57,15 @@
 //   that has the delay arms with it at its own frame, which is the host's
 //   start (theHostsStartIsWhereTheGuestIs), as before.
 //   false = before: with no delay heard, it armed with its own.
+// BRIDGE_AT_ZERO_DELAY: the late join's input bridge (#286) has a window at
+//   a delay of 0 too: the host lists itself as the source of the inputs
+//   around the state's frame, and the joiner waits for them (with that wait's
+//   own deadline) as it does at any delay. false = the bridge's window was
+//   defined only for a delay of 1 or more: at 0 the host sent no source, and
+//   a joiner with no source to wait for failed its input wait at once
+//   (LATE-JOIN-INPUT-FAILED) and left the match, though the host had just
+//   sent it the state. Only a page that arms at 0 meets it: a friend joining
+//   a solo match.
 //
 // The deadline is checked in the tick loop, after the page has taken in what
 // arrived, so it too waits for nothing to be in flight. A host that arms
@@ -66,6 +75,7 @@ module engine_start {
   const ARM_AT_ZERO_DELAY: bool
   const HOST_SENDS_BOTH: bool
   const STOP_AT_THE_DEADLINE: bool
+  const BRIDGE_AT_ZERO_DELAY: bool
 
   pure val MATCH_DELAY = 2 // the delay the host negotiates with a guest in
   pure val OWN_DELAY = 3   // what the guest worked out for itself
@@ -176,14 +186,23 @@ module engine_start {
   // The guest joins the match late: a friend joining a solo match, or a
   // player the host left out of the start. The host's state tells it the
   // frame and the delay; it starts where the state is.
+  // A joiner that arms at a delay its input bridge has no window for finds
+  // no source to wait for and stops at once, though the host has just sent
+  // it the state.
   action lateJoin = all {
     alone, hostRunning, guest == NotIn,
-    guest' = if (canArm(hostDelay)) Armed else RunsUnarmed,
-    guestFrame' = hostFrame, heardDelay' = hostDelay, heardStart' = hostFrame,
-    armDelay' = if (canArm(hostDelay)) hostDelay else -1,
-    armFrame' = if (canArm(hostDelay)) hostFrame else -1,
-    waited' = 0,
-    hostSame, open' = open, toGuest' = toGuest, historySame,
+    val armed = canArm(hostDelay)
+    val bridgeFails = armed and hostDelay == 0 and not(BRIDGE_AT_ZERO_DELAY)
+    all {
+      guest' = if (bridgeFails) Stopped else if (armed) Armed else RunsUnarmed,
+      guestFrame' = hostFrame, heardDelay' = hostDelay, heardStart' = hostFrame,
+      armDelay' = if (armed and not(bridgeFails)) hostDelay else -1,
+      armFrame' = if (armed and not(bridgeFails)) hostFrame else -1,
+      waited' = 0,
+      hostSame, open' = open, toGuest' = toGuest,
+      ranUnarmed' = ranUnarmed,
+      stoppedReachable' = (stoppedReachable or (bridgeFails and hostArmed)),
+    },
   }
 
   // A guest arms once it has the delay and the start frame. Before, a delay
@@ -277,7 +296,9 @@ module engine_start {
 
   // A guest stops only when it cannot reach the armed host. Violated when
   // the host sends each message once: a channel that closes and opens again
-  // has lost them for good.
+  // has lost them for good. Violated too when the late join's input bridge
+  // has no window at a delay of 0: a friend joining a solo match stops as it
+  // arrives (engine_start_no_zero_bridge; lateJoinIntoSoloTest).
   val aGuestStopsOnlyWhenTheHostIsUnreachable = not(stoppedReachable)
 
   val allHold = and {
@@ -299,14 +320,24 @@ module engine_start {
       .expect(hostArmed == ARM_AT_ZERO_DELAY)
 
   // A friend joins the solo match late and plays on the delay it runs at.
+  // Without a bridge window at 0, it stops as it arrives.
   run lateJoinIntoSoloTest =
-    init.then(startAlone).then(hostStarts).then(hostStep).then(lateJoin).then(guestStep)
-      .expect(guest == (if (ARM_AT_ZERO_DELAY) Armed else RunsUnarmed))
-      .expect(ARM_AT_ZERO_DELAY implies (armDelay == SOLO_DELAY and armFrame == 1))
+    init.then(startAlone).then(hostStarts).then(hostStep).then(lateJoin).then(guestStepIfRunning)
+      .expect(
+        guest == (
+          if (not(ARM_AT_ZERO_DELAY)) RunsUnarmed
+          else if (BRIDGE_AT_ZERO_DELAY) Armed
+          else Stopped
+        )
+      )
+      .expect((ARM_AT_ZERO_DELAY and BRIDGE_AT_ZERO_DELAY) implies (armDelay == SOLO_DELAY and armFrame == 1))
+      .expect(stoppedReachable == (ARM_AT_ZERO_DELAY and not(BRIDGE_AT_ZERO_DELAY)))
 
   action unchangedAll = all { hostSame, guestSame, open' = open, toGuest' = toGuest, historySame }
   action deliverIfAny = if (open and toGuest.length() > 0 and guest != NotIn) deliver else unchangedAll
   action tickIfWaiting = if (guest == Waiting and waited < DEADLINE) tick else unchangedAll
+  action guestStepIfRunning =
+    if ((guest == Armed or guest == RunsUnarmed) and guestFrame < MAX_FRAME) guestStep else unchangedAll
   action deadlineIfDue =
     if (guest == Waiting and waited == DEADLINE and (not(open) or toGuest.length() == 0)) deadline else unchangedAll
 
@@ -377,7 +408,8 @@ module engine_start {
 // message once, and a guest that heard nothing by the deadline armed anyway.
 module engine_start_before {
   import engine_start(
-    ARM_AT_ZERO_DELAY = false, HOST_SENDS_BOTH = false, STOP_AT_THE_DEADLINE = false
+    ARM_AT_ZERO_DELAY = false, HOST_SENDS_BOTH = false, STOP_AT_THE_DEADLINE = false,
+    BRIDGE_AT_ZERO_DELAY = false
   ).*
 }
 
@@ -385,15 +417,28 @@ module engine_start_before {
 // again stops though the host is there, because nothing is sent again.
 module engine_start_stop_only {
   import engine_start(
-    ARM_AT_ZERO_DELAY = true, HOST_SENDS_BOTH = false, STOP_AT_THE_DEADLINE = true
+    ARM_AT_ZERO_DELAY = true, HOST_SENDS_BOTH = false, STOP_AT_THE_DEADLINE = true,
+    BRIDGE_AT_ZERO_DELAY = true
+  ).*
+}
+
+// Arming at 0 with the late join's input bridge defined only for a delay of
+// 1 or more (#286): a friend who joins a solo match has no source to wait
+// for, fails its input wait at once and leaves, though the host is there.
+module engine_start_no_zero_bridge {
+  import engine_start(
+    ARM_AT_ZERO_DELAY = true, HOST_SENDS_BOTH = true, STOP_AT_THE_DEADLINE = true,
+    BRIDGE_AT_ZERO_DELAY = false
   ).*
 }
 
 // Today: every page arms, at a delay of 0 too; the armed host sends the
 // delay and its start frame together, when it arms and on every channel that
-// opens; a guest that has heard nothing by the deadline stops and says so.
+// opens; a guest that has heard nothing by the deadline stops and says so;
+// the late join's input bridge has a window at a delay of 0 as at any other.
 module engine_start_current {
   import engine_start(
-    ARM_AT_ZERO_DELAY = true, HOST_SENDS_BOTH = true, STOP_AT_THE_DEADLINE = true
+    ARM_AT_ZERO_DELAY = true, HOST_SENDS_BOTH = true, STOP_AT_THE_DEADLINE = true,
+    BRIDGE_AT_ZERO_DELAY = true
   ).*
 }
