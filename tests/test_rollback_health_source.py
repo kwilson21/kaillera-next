@@ -208,6 +208,10 @@ def test_the_first_player_into_a_match_at_0_moves_it_to_a_match_delay():
     request = src[src.index("const _sendLateJoinRequest = () => {") :][:700]
     assert "_delayFromRttSamples(samples, _delayIsLockstep())" in request
     assert "_lateJoinOfferedDelay.set(" in src
+    # I2: the offer is per joiner and goes with the rest of its state.
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "_lateJoinOfferedDelay.delete(opts.sid);" in reset
 
 
 def test_the_arm_log_says_where_the_frame_came_from():

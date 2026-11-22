@@ -10706,6 +10706,7 @@
       _lateJoinReadyHandled.delete(opts.sid);
       _lateJoinStateSent.delete(opts.sid);
       _pendingLateJoinReadySids.delete(opts.sid);
+      _lateJoinOfferedDelay.delete(opts.sid);
     }
     if (opts.sid && _lateJoinServing.delete(opts.sid) && _runSubstate === RUN_LATE_JOIN_PAUSE) {
       const leftSid = opts.sid;
