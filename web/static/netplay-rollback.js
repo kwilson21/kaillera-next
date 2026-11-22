@@ -5146,6 +5146,8 @@
   // that state and whether an input at or before it has since differed from
   // its prediction (specs/sync_follow_up.qnt). Set as the state is taken.
   const _followUpWatches = new Map(); // sid -> {frame, changed}
+  // Host: per guest, the newest direct answer's token (_answerDirectSyncRequest).
+  const _directAnswerNewest = new Map(); // sid -> token; resetPeerState clears it
   // The buffer belongs to the module that allocated it: EmulatorJS can
   // replace the module between matches, and stopSync drops it with the
   // other scratch buffers.
@@ -7743,11 +7745,11 @@
       return;
     }
     _syncLog(`received socket sync-request-full from ${requesterSid} reason=${msg.reason || 'unknown'}`);
-    pushSyncState(requesterSid, false, {
+    // Answered at once, watched and followed up over the socket like a
+    // direct request on the channel (specs/sync_follow_up.qnt, SOCKET_WATCHED).
+    _answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {
       transport: 'socket',
-      waitForResult: false,
       reason: msg.reason || 'socket-request',
-      requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) },
     });
   };
 
@@ -9508,6 +9510,7 @@
           _scheduledSyncRequests.push({
             targetFrame: _frameNum,
             targetSid: remoteSid,
+            transport: 'channel',
             deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
           });
           // That state will be for this frame or a later one, so the
@@ -10278,6 +10281,7 @@
               targetFrame,
               targetSid: remoteSid,
               requestId,
+              transport: 'channel',
               deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
             });
             _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
@@ -10610,6 +10614,7 @@
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
       _followUpWatches.delete(opts.sid);
+      _directAnswerNewest.delete(opts.sid);
       _queuedSyncPushes.get(opts.sid)?.resolve?.(null);
       _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
@@ -15761,9 +15766,13 @@
     // A request whose target has no open channel stays queued: sending now
     // would be skipped and the request lost. It goes out once the channel
     // opens, or resetPeerState drops it when that peer disconnects (I2).
+    // One that goes over the socket (`transport: 'socket'`, the follow-up of
+    // a socket answer) needs only the peer: the guest asked over the socket
+    // because its channel was down, and held for it the follow-up could wait
+    // for good (specs/sync_follow_up.qnt, SOCKET_FOLLOW_UP_BY_SOCKET).
     const reachable = (r) => {
       const p = _peers[r.targetSid];
-      const ok = p?.syncDc?.readyState === 'open';
+      const ok = r.transport === 'socket' ? !!p : p?.syncDc?.readyState === 'open';
       if (!ok && !r.unreachableLogged) {
         r.unreachableLogged = true;
         _syncLog(`coord sync held: target ${r.targetSid} has no open channel`);
@@ -15802,8 +15811,14 @@
       if (_followUpWatches.get(r.targetSid) === r.watch) _followUpWatches.delete(r.targetSid);
     }
     if (unchanged.length > 0) _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !unchanged.includes(r));
-    const due = ready.filter((r) => !unchanged.includes(r));
+    // Channel requests go out together (a broadcast when several are due). A
+    // socket one goes to its own guest alone; with channel requests due too,
+    // it waits for a later tick (one push at a time, _pushingSyncState).
+    const dueNow = ready.filter((r) => !unchanged.includes(r));
+    const viaChannel = dueNow.filter((r) => r.transport !== 'socket');
+    const due = viaChannel.length > 0 ? viaChannel : dueNow.slice(0, 1);
     if (due.length === 0) return;
+    const overSocket = due[0].transport === 'socket';
     for (const r of due) {
       if (r.targetFrame > _frameNum || !confirmed) {
         _syncLog(
@@ -15817,15 +15832,18 @@
     // Broadcast if multiple guests need sync simultaneously (all at same lockstep frame)
     const targetSid = due.length === 1 ? due[0].targetSid : null;
     _syncLog(
-      `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
+      `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}` +
+        `${targetSid === null ? ' (broadcast)' : ''}${overSocket ? ' over the socket' : ''}`,
     );
     const requeue = (r, followUp, watch) =>
       _scheduledSyncRequests.push({
         targetFrame: _frameNum,
         targetSid: r.targetSid,
         followUp,
-        // Still the answer to the request the first one was for.
+        // Still the answer to the request the first one was for, on the
+        // transport it came by.
         requestId: r.requestId || 0,
+        transport: r.transport || 'channel',
         deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
         // What became of the state it follows (null: send regardless).
         watch: watch ?? null,
@@ -15841,14 +15859,22 @@
     // host scheduled for its own reasons has none.
     const requestIds = {};
     for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;
-    pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] }).then((skipped) => {
+    const options = { requestIds, watchFor: [...unconfirmedFor] };
+    if (overSocket) Object.assign(options, { transport: 'socket', reason: 'sync-follow-up' });
+    Promise.resolve(pushSyncState(targetSid, false, options)).then((skipped) => {
       due.forEach((r, i) => {
         // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
         if (!_peers[r.targetSid] || epoch !== _syncQueueEpoch || gens[i] !== (_syncQueueGen[r.targetSid] || 0)) return;
         // The guest asked again while this push was in flight; its newer
         // request replaces this one.
         if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
-        if (skipped === null || skipped?.includes(r.targetSid)) {
+        if (overSocket && (skipped == null || skipped.includes(r.targetSid))) {
+          // Not sent over the socket (a state too large for it falls back to
+          // a channel that is down): not put back, which would retry it
+          // every deadline for as long as the channel stays down. The
+          // guest's own request deadline asks again.
+          _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; the guest asks again`);
+        } else if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so
           // it goes out when reachable.
@@ -15881,11 +15907,31 @@
   // confirmed or at its deadline, within SYNC_FOLLOW_UP_MAX. Unwatched, such
   // an answer was final, and a late joiner played on split for the rest of
   // the match (specs/sync_follow_up.qnt, DIRECT_WATCHED).
-  const _answerDirectSyncRequest = (sid, requestId) => {
+  //
+  // A request that came over the socket (handleSocketSyncRequest: the
+  // guest's lifecycle return, a chunk timeout, a missing delta base,
+  // RESYNC-REASK) is answered and followed up over the socket (`socket`:
+  // {reason}), since the guest's channel may be down (SOCKET_WATCHED,
+  // SOCKET_FOLLOW_UP_BY_SOCKET). Its answer replaces any request of this
+  // guest still queued: held for a channel that is down, such a request
+  // would stand in for the follow-up and never go out.
+  //
+  // Requests from one guest that arrive while a push is in flight share one
+  // queued push (_queuedSyncPushes keeps the newest's number); only the
+  // newest answer's completion decides the follow-up (_directAnswerNewest),
+  // so it carries that number.
+  const _answerDirectSyncRequest = (sid, requestId, socket = null) => {
     const requestIds = { [sid]: requestId };
+    const via = socket ? { transport: 'socket', reason: socket.reason } : {};
+    if (socket) _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== sid);
+    const token = {};
+    _directAnswerNewest.set(sid, token);
     const epoch = _syncQueueEpoch;
     const gen = _syncQueueGen[sid] || 0;
-    Promise.resolve(pushSyncState(sid, false, { requestIds, watchFor: [sid] })).then((skipped) => {
+    Promise.resolve(pushSyncState(sid, false, { ...via, requestIds, watchFor: [sid] })).then((skipped) => {
+      // A newer direct answer to this guest owns the follow-up.
+      if (_directAnswerNewest.get(sid) !== token) return;
+      _directAnswerNewest.delete(sid);
       // Still the guest it was sent to: not gone, reset (reconnect) or a
       // match stopped since (those are resetPeerState's job).
       const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
@@ -15901,12 +15947,16 @@
           _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid}: a phantom, its recovery resyncs it`);
         return;
       }
-      _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}: answered, follow-up scheduled`);
+      _syncLog(
+        `SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}${socket ? ' over the socket' : ''}: ` +
+          'answered, follow-up scheduled',
+      );
       _scheduledSyncRequests.push({
         targetFrame: _frameNum,
         targetSid: sid,
         followUp: 1,
         requestId: requestId || 0,
+        transport: socket ? 'socket' : 'channel',
         deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
         watch: _followUpWatches.get(sid) ?? null,
       });
@@ -19532,6 +19582,11 @@
               });
               _settleInputsBefore(_peers[targetSid].slot, frame);
               _onEscalationTransfer(attempts, targetSid, true, frame);
+              // Handed over whole, as sendSyncChunks marks a channel transfer:
+              // a follow-up of it may now be found unneeded
+              // (specs/sync_follow_up.qnt, SOCKET_MARKS_DELIVERED).
+              const w = _followUpWatches.get(targetSid);
+              if (w && w.frame === frame) w.delivered = true;
               _syncLog(
                 `socket sync sent to slot=${_peers[targetSid].slot}: full ` +
                   `${wireKB}KB gzip (${b64KB}KB b64) frame=${frame}`,
@@ -20598,6 +20653,7 @@
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
     _followUpWatches.clear();
+    _directAnswerNewest.clear();
     _syncQueueEpoch++;
     // Each transfer still on a chain sees the new epoch and stops.
     _syncSendChains = {};

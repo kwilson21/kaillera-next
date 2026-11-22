@@ -263,7 +263,9 @@ def test_socket_full_sync_guards_input_until_apply():
     assert "_lifecycleResyncStartedAt + LIFECYCLE_RESYNC_INPUT_GUARD_MS" in source
     assert "type: 'sync-request-full-socket'" in source
     assert "type: 'sync-state-socket'" in source
-    assert "pushSyncState(requesterSid, false, {\n      transport: 'socket'," in source
+    # The socket request is answered over the socket, watched and followed up
+    # (specs/sync_follow_up.qnt, SOCKET_WATCHED).
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {\n      transport: 'socket'," in source
     assert "`${reason}: sent socket sync-request-full to host`" in source
     assert "_sendResyncRequest(hostPeer.dc, _beginResyncRequest(), 'sync-request-full');" in source
     assert "_noteLifecycleReturn('bg-return')" in source

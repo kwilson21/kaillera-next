@@ -178,13 +178,21 @@ def test_the_misprediction_buffer_does_not_outlive_its_module():
 
 
 def _answer_direct(
-    *, confirmed, phantom=False, result="[]", c_rollback=True, reset=False
+    *,
+    confirmed,
+    phantom=False,
+    result="[]",
+    c_rollback=True,
+    reset=False,
+    socket=None,
+    queued=(),
 ):
     """Run the engine's _answerDirectSyncRequest with a stub push that resolves
     to `result` (the skipped sids, or null when nothing went out); return the
-    push options and the follow-ups it scheduled."""
+    push options and the follow-ups it scheduled. `socket`: the request came
+    over the socket ({reason}); `queued`: requests already scheduled."""
     src = LOCKSTEP_JS.read_text()
-    start = src.index("  const _answerDirectSyncRequest = (sid, requestId) => {")
+    start = src.index("  const _answerDirectSyncRequest = (sid, requestId, socket = null) => {")
     helper = src[start : src.index("\n  };\n", start) + 5]
     script = textwrap.dedent(
         f"""
@@ -200,7 +208,7 @@ def _answer_direct(
         const _peerPhantom = {{ 1: {json.dumps(phantom)} }};
         let _syncQueueEpoch = 1;
         const _syncQueueGen = {{}};
-        const _scheduledSyncRequests = [];
+        let _scheduledSyncRequests = {json.dumps(list(queued))};
         const _followUpWatches = new Map();
         let _frameNum = 1986;
         const SYNC_COORD_TIMEOUT_MS = 3000;
@@ -211,7 +219,7 @@ def _answer_direct(
           return Promise.resolve({result});
         }};
         eval({json.dumps(helper)} + `
-          _answerDirectSyncRequest('g', 7);
+          _answerDirectSyncRequest('g', 7, {json.dumps(socket)});
           if ({json.dumps(reset)}) _syncQueueEpoch++;
           _frameNum = 1990;
           setTimeout(() => process.stdout.write(JSON.stringify({{
@@ -299,3 +307,224 @@ def test_the_direct_request_goes_through_the_watched_answer():
     handler = handler[: handler.index("// JSON messages")]
     assert "_answerDirectSyncRequest(remoteSid, requestId);" in handler
     assert "pushSyncState(" not in handler
+
+
+def test_a_socket_answer_taken_unconfirmed_is_watched_and_followed_up_over_the_socket():
+    out = _answer_direct(confirmed=False, socket={"reason": "visibility"})
+    assert out["pushes"] == [
+        {
+            "sid": "g",
+            "proactive": False,
+            "options": {
+                "transport": "socket",
+                "reason": "visibility",
+                "requestIds": {"g": 7},
+                "watchFor": ["g"],
+            },
+        }
+    ]
+    [follow] = out["scheduled"]
+    assert follow["transport"] == "socket" and follow["followUp"] == 1
+    assert follow["requestId"] == 7 and follow["watch"] == {"frame": 1986}
+
+
+def test_a_channel_answer_schedules_its_follow_up_on_the_channel():
+    [follow] = _answer_direct(confirmed=False)["scheduled"]
+    assert follow["transport"] == "channel"
+
+
+def test_a_confirmed_socket_answer_is_final_and_goes_over_the_socket():
+    out = _answer_direct(confirmed=True, socket={"reason": "delta-base-missing"})
+    assert out["pushes"][0]["options"] == {
+        "transport": "socket",
+        "reason": "delta-base-missing",
+        "waitForResult": False,
+        "requestIds": {"g": 7},
+    }
+    assert out["scheduled"] == []
+
+
+def test_a_socket_answer_replaces_the_guests_queued_requests():
+    # A request held for the guest's closed channel would stand in for the
+    # follow-up ("a newer request replaces it") and never go out.
+    held = {"targetSid": "g", "targetFrame": 1990, "transport": "channel"}
+    other = {"targetSid": "h", "targetFrame": 1990, "transport": "channel"}
+    out = _answer_direct(confirmed=False, socket={"reason": "visibility"}, queued=(held, other))
+    assert [r["targetSid"] for r in out["scheduled"]] == ["h", "g"]
+    assert out["scheduled"][1]["transport"] == "socket"
+    # A request on the channel leaves them be, as before.
+    out = _answer_direct(confirmed=False, queued=(held,))
+    assert out["scheduled"] == [held]
+
+
+def test_the_socket_request_goes_through_the_watched_answer():
+    src = LOCKSTEP_JS.read_text()
+    handler = src[src.index("const handleSocketSyncRequest = (msg) => {") :]
+    handler = handler[: handler.index("\n  };\n")]
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {" in handler
+    assert "transport: 'socket'," in handler
+    assert "pushSyncState(" not in handler
+
+
+def test_a_state_sent_whole_over_the_socket_marks_its_watch_delivered():
+    src = LOCKSTEP_JS.read_text()
+    push = src[src.index("const pushSyncState = async (") :]
+    push = push[push.index("if (options.transport === 'socket') {") :]
+    sent = push[: push.index("socket sync too large")]
+    assert re.search(
+        r"_signalSocket\.emit\('data-message', \{\s+type: 'sync-state-socket'.*"
+        r"const w = _followUpWatches\.get\(targetSid\);\s+"
+        r"if \(w && w\.frame === frame\) w\.delivered = true;",
+        sent,
+        re.DOTALL,
+    )
+
+
+def _dispatch(requests, *, confirmed, dc_open, result="[]", watches=None):
+    """Run the engine's _dispatchScheduledSyncs once with `requests` queued,
+    the peers' channels open or not (`dc_open`: {sid: bool}) and a stub push
+    resolving to `result`; return the pushes, what stays queued and the log."""
+    src = LOCKSTEP_JS.read_text()
+    start = src.index("  const _dispatchScheduledSyncs = (isConfirmed) => {")
+    helper = src[start : src.index("\n  };\n", start) + 5]
+    script = textwrap.dedent(
+        f"""
+        const {{ changesWatchedFrame, followUpIsUnneeded }} = await import('./web/src/sync-follow-up.ts');
+        globalThis.window = {{ KNCore: {{ syncFollowUp: {{ changesWatchedFrame, followUpIsUnneeded }} }} }};
+        const logs = [];
+        const _syncLog = (l) => logs.push(l);
+        const _playerSlot = 0;
+        let _pushingSyncState = false;
+        const _frameNum = 2000;
+        const _peers = {{}};
+        let slot = 1;
+        for (const [sid, open] of Object.entries({json.dumps(dc_open)}))
+          _peers[sid] = {{ slot: slot++, syncDc: {{ readyState: open ? 'open' : 'closed' }} }};
+        const _peerPhantom = {{}};
+        const _followUpWatches = new Map(Object.entries({json.dumps(watches or {})}));
+        const SYNC_COORD_TIMEOUT_MS = 3000;
+        const SYNC_FOLLOW_UP_MAX = 3;
+        let _syncQueueEpoch = 1;
+        const _syncQueueGen = {{}};
+        let _scheduledSyncRequests = {json.dumps(requests)}.map((r) => ({{
+          ...r,
+          watch: r.watch ? _followUpWatches.get(r.targetSid) ?? null : null,
+        }}));
+        const pushes = [];
+        const pushSyncState = (sid, proactive, options) => {{
+          pushes.push({{ sid, options }});
+          return Promise.resolve({result});
+        }};
+        eval({json.dumps(helper)} + `
+          _dispatchScheduledSyncs(() => {json.dumps(confirmed)});
+          setTimeout(() => process.stdout.write(JSON.stringify({{
+            pushes,
+            queued: _scheduledSyncRequests.map((r) => ({{ sid: r.targetSid, transport: r.transport, followUp: r.followUp || 0 }})),
+            logs,
+          }})), 0);
+        `);
+        """
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    return json.loads(result.stdout)
+
+
+def _req(sid, transport, *, watch=False, overdue=False):
+    """A queued follow-up for frame 1990; `overdue`: its deadline has passed."""
+    return {
+        "targetSid": sid,
+        "targetFrame": 1990,
+        "followUp": 1,
+        "requestId": 7,
+        "transport": transport,
+        "deadlineAt": 1 if overdue else 10**12,
+        "watch": watch,
+    }
+
+
+def test_a_socket_follow_up_goes_out_over_the_socket_with_the_channel_down():
+    out = _dispatch([_req("g", "socket")], confirmed=True, dc_open={"g": False})
+    assert out["pushes"] == [
+        {
+            "sid": "g",
+            "options": {
+                "requestIds": {"g": 7},
+                "watchFor": [],
+                "transport": "socket",
+                "reason": "sync-follow-up",
+            },
+        }
+    ]
+    assert out["queued"] == []
+
+
+def test_a_channel_follow_up_is_held_while_the_channel_is_down():
+    out = _dispatch([_req("g", "channel")], confirmed=True, dc_open={"g": False})
+    assert out["pushes"] == []
+    assert out["queued"] == [{"sid": "g", "transport": "channel", "followUp": 1}]
+    # An entry with no transport (from before it was recorded) is the channel's.
+    legacy = _req("g", "channel")
+    del legacy["transport"]
+    assert _dispatch([legacy], confirmed=True, dc_open={"g": False})["pushes"] == []
+
+
+def test_socket_follow_ups_go_one_target_at_a_time_after_the_channels():
+    out = _dispatch(
+        [_req("a", "socket"), _req("b", "channel"), _req("c", "socket"), _req("d", "channel")],
+        confirmed=True,
+        dc_open={"a": True, "b": True, "c": True, "d": True},
+    )
+    # The channel ones together (a broadcast), the socket ones left queued.
+    assert [p["sid"] for p in out["pushes"]] == [None]
+    assert sorted(out["pushes"][0]["options"]["requestIds"]) == ["b", "d"]
+    assert "transport" not in out["pushes"][0]["options"]
+    assert [q["sid"] for q in out["queued"]] == ["a", "c"]
+    # With only socket ones due: the first, alone, over the socket.
+    out = _dispatch(
+        [_req("a", "socket"), _req("c", "socket")],
+        confirmed=True,
+        dc_open={"a": True, "c": True},
+    )
+    assert [p["sid"] for p in out["pushes"]] == ["a"]
+    assert out["pushes"][0]["options"]["transport"] == "socket"
+    assert [q["sid"] for q in out["queued"]] == ["c"]
+
+
+def test_a_socket_follow_up_sent_unconfirmed_is_requeued_over_the_socket():
+    out = _dispatch([_req("g", "socket", overdue=True)], confirmed=False, dc_open={"g": False})
+    assert out["pushes"][0]["options"]["watchFor"] == ["g"]
+    assert out["queued"] == [{"sid": "g", "transport": "socket", "followUp": 2}]
+
+
+def test_a_socket_follow_up_that_did_not_go_out_is_not_retried():
+    for result in ("null", '["g"]'):
+        out = _dispatch(
+            [_req("g", "socket", overdue=True)],
+            confirmed=False,
+            dc_open={"g": False},
+            result=result,
+        )
+        assert out["queued"] == []
+        assert any("the guest asks again" in line for line in out["logs"])
+    # A channel one is put back as before.
+    out = _dispatch([_req("g", "channel")], confirmed=True, dc_open={"g": True}, result="null")
+    assert out["queued"] == [{"sid": "g", "transport": "channel", "followUp": 1}]
+
+
+def test_a_socket_follow_up_of_a_delivered_unchanged_state_is_skipped():
+    watch = {"g": {"frame": 1990, "changed": False, "delivered": True}}
+    out = _dispatch([_req("g", "socket", watch=True)], confirmed=True, dc_open={"g": False}, watches=watch)
+    assert out["pushes"] == [] and out["queued"] == []
+    assert any("SYNC-FOLLOW-UP-SKIPPED" in line for line in out["logs"])
+    # Not marked delivered (the socket send before this change): it goes out regardless.
+    watch["g"]["delivered"] = False
+    out = _dispatch([_req("g", "socket", watch=True)], confirmed=True, dc_open={"g": False}, watches=watch)
+    assert [p["sid"] for p in out["pushes"]] == ["g"]

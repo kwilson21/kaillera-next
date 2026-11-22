@@ -1024,14 +1024,15 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert "targetSid: remoteSid,\n              requestId," in host
     # Every answer is full: the host keeps no delta base (sync_base).
     assert "forceFull" not in src
-    # A direct request is answered by the watched answer, which numbers each
-    # state it sends with the request it answers (specs/sync_follow_up.qnt).
+    # A direct request, on the channel or the socket, is answered by the
+    # watched answer, which numbers each state it sends with the request it
+    # answers (specs/sync_follow_up.qnt).
     assert "_answerDirectSyncRequest(remoteSid, requestId);" in host
-    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId) => {") :]
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {" in src
+    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId, socket = null) => {") :]
     direct = direct[: direct.index("\n  };\n")]
     assert "const requestIds = { [sid]: requestId };" in direct
-    assert "pushSyncState(sid, false, { requestIds, watchFor: [sid] })" in direct
-    assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
+    assert "pushSyncState(sid, false, { ...via, requestIds, watchFor: [sid] })" in direct
 
     # A scheduled capture, its follow-ups and re-queues keep the number; a
     # sync the host schedules for its own reasons has none.
@@ -1039,7 +1040,8 @@ def test_only_its_own_answer_ends_a_resync_request():
     dispatch = dispatch[: dispatch.index("\n  };\n")]
     assert "requestId: r.requestId || 0," in dispatch
     assert "for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;" in dispatch
-    assert "pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] })" in dispatch
+    assert "const options = { requestIds, watchFor: [...unconfirmedFor] };" in dispatch
+    assert "Promise.resolve(pushSyncState(targetSid, false, options))" in dispatch
     recovery = src[src.index("push its state to the guest once it is final") :]
     recovery = recovery[: recovery.index("_settleInputsBefore(")]
     assert "requestId" not in recovery
