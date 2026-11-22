@@ -259,6 +259,11 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
   // Only the original opened attempt belongs to a new publication fence.
   const originalSource = new WeakMap<RecoveryAttempt, number>();
   const records = new Map<number, { snapshot: Snapshot; token: RecoveryAttempt }>();
+  // Recipients a later broadcast skipped because they were still owed an
+  // earlier one. Settling that earlier state would leave them before the newer
+  // hole: they are owed one fresh push (followUp). specs/recovery_delivery.qnt
+  // recovery_skipped.
+  const owedFollowUp = new Map<number, { hole: number; firstFrame: number; pushes: number }>();
   const counts = new Map<number, Map<number, number>>();
   // Resource budget is persistent-player-scoped and deliberately survives ACKs and peer
   // resets: a new hole is not permission for unlimited room-wide captures.
@@ -307,6 +312,9 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       const { pushes, hole, firstFrame } = next.context;
       if (type === 'retry') remember(slot, hole, pushes);
       if (type === 'settled' || type === 'ended') counts.delete(slot);
+      // A retry captures the current state, which already covers any later
+      // hole; an ended or dropped recipient is owed nothing more.
+      if (type !== 'settled') owedFollowUp.delete(slot);
       notices.push({ type, attempt: record.token, pushes, hole, firstFrame });
     }
     if (next.status === 'done') records.delete(slot);
@@ -406,7 +414,11 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       // overwrite its token or reset its retry budget; recover only free slots.
       // A settled source's trailing hole must not wait on that unrelated link.
       return recipients.flatMap(({ sid, slot }) => {
-        if (records.has(slot)) return [];
+        if (records.has(slot)) {
+          owedFollowUp.set(slot, { hole, firstFrame: frame, pushes });
+          return [];
+        }
+        owedFollowUp.delete(slot);
         const [snapshot] = initialTransition(recoveryMachine, {
           sid,
           slot,
@@ -421,6 +433,26 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
         records.set(slot, { snapshot, token });
         return [token];
       });
+    },
+    /** After `attempt` settles: a fresh attempt for the same recipient when a
+     * later broadcast skipped it, else undefined. The caller pushes it a newly
+     * captured state, so the recipient does not stay on the earlier one. */
+    followUp: (attempt: RecoveryAttempt, now: number): RecoveryAttempt | undefined => {
+      const owed = owedFollowUp.get(attempt.slot);
+      owedFollowUp.delete(attempt.slot);
+      if (!owed || records.has(attempt.slot)) return undefined;
+      const [snapshot] = initialTransition(recoveryMachine, {
+        sid: attempt.sid,
+        slot: attempt.slot,
+        hole: owed.hole,
+        firstFrame: owed.firstFrame,
+        now,
+        pushes: owed.pushes,
+        ...timing,
+      });
+      const token = Object.freeze({ sid: attempt.sid, slot: attempt.slot, sequence: 1, wireId: ++nextWireId });
+      records.set(attempt.slot, { snapshot, token });
+      return token;
     },
     current: (attempt: RecoveryAttempt): boolean => records.get(attempt.slot)?.token === attempt,
     entries: (): readonly RecoveryAttempt[] => [...records.values()].map((record) => record.token),
@@ -444,12 +476,14 @@ export const createRecoveryManager = (timing: RecoveryTiming, issue: (notice: Re
       send(slot, { type: 'stop' });
       records.delete(slot);
       counts.delete(slot);
+      owedFollowUp.delete(slot);
     },
     resetAll: (): void => {
       publication.discard();
       for (const slot of records.keys()) send(slot, { type: 'stop' });
       records.clear();
       counts.clear();
+      owedFollowUp.clear();
       sourceCaptures.clear();
       connectionIdentities = new WeakMap();
       roomCaptures = [];

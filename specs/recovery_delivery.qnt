@@ -224,6 +224,68 @@ module recovery_followup {
 module recovery_followup_before { import recovery_followup(PER_SOURCE = false).* }
 module recovery_followup_fixed { import recovery_followup(PER_SOURCE = true).* }
 
+// A recipient still owed an earlier hole is skipped by the follow-up
+// broadcast (recovery_followup). If it then acknowledges the earlier state,
+// it settles on a state from before the follow-up hole, while the host and
+// the other guests adopt the newer one: with 3+ players, a guest holding the
+// source's real input for that hole plays on split from the host's
+// prediction. A skipped recipient must end covered by a state captured at or
+// after the newest hole (a retry captures afresh, as does a follow-up push
+// started when its old attempt settles), or be dropped.
+module recovery_skipped {
+  const FOLLOW_UP: bool
+  var bPending: bool    // B has a live attempt
+  var bCovered: bool    // B's attempt carries a state captured at or after hole 2
+  var hole2: bool       // the source's follow-up hole has been broadcast
+  var bDropped: bool
+  var followUps: int    // fresh pushes started for B on settling
+  action init = all {
+    bPending' = true, bCovered' = false, hole2' = false, bDropped' = false, followUps' = 0,
+  }
+  // Free recipients get the new broadcast; a busy B is skipped.
+  action newHole = all {
+    not(hole2), not(bDropped), hole2' = true,
+    bCovered' = not(bPending), bPending' = true,
+    bDropped' = bDropped, followUps' = followUps,
+  }
+  // A retry captures the current state, which is after any hole broadcast so far.
+  action retryB = all {
+    bPending, bCovered' = (bCovered or hole2),
+    bPending' = bPending, hole2' = hole2, bDropped' = bDropped, followUps' = followUps,
+  }
+  action ackB = all {
+    bPending,
+    val owed = FOLLOW_UP and hole2 and not(bCovered)
+    all {
+      bPending' = owed,
+      bCovered' = (bCovered or owed),
+      followUps' = if (owed) followUps + 1 else followUps,
+    },
+    hole2' = hole2, bDropped' = bDropped,
+  }
+  action dropB = all {
+    bPending, bPending' = false, bDropped' = true,
+    bCovered' = bCovered, hole2' = hole2, followUps' = followUps,
+  }
+  action finished = all {
+    bPending' = bPending, bCovered' = bCovered, hole2' = hole2, bDropped' = bDropped, followUps' = followUps,
+  }
+  action step = any { newHole, retryB, ackB, dropB, finished }
+  val settledCoversNewestHole = (hole2 and not(bPending) and not(bDropped)) implies bCovered
+  val followUpsBounded = followUps <= 1
+  val allHold = settledCoversNewestHole and followUpsBounded
+  run skippedThenAckedTest = init.then(newHole).then(ackB)
+    .expect(settledCoversNewestHole == FOLLOW_UP)
+  run followUpSettlesTest = init.then(newHole).then(ackB).then(if (FOLLOW_UP) ackB else finished)
+    .expect(FOLLOW_UP implies (not(bPending) and bCovered and followUps == 1))
+  run retryCoversTest = init.then(newHole).then(retryB).then(ackB)
+    .expect(not(bPending) and bCovered and followUps == 0)
+  run freeRecipientTest = init.then(ackB).then(newHole).then(ackB)
+    .expect(not(bPending) and bCovered and followUps == 0)
+}
+module recovery_skipped_current { import recovery_skipped(FOLLOW_UP = false).* }
+module recovery_skipped_fixed { import recovery_skipped(FOLLOW_UP = true).* }
+
 // Logical reset does not cancel the old physical B transfer. A new broadcast
 // partitions permits instead of rejecting A merely because B remains busy.
 module recovery_partial_admission {

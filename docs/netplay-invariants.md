@@ -403,16 +403,28 @@ backs off for 5 seconds, then retries that guest, up to three attempts; exhausti
 uses the explicit drop/late-rejoin path, never a successful-health report. The existing
 per-guest no-progress and page-freeze credit rules remain in effect.
 
-Only an `inputs-settled:` received **after** this attempt was delivered, naming its
-exact state frame minus delay, settles it. A stored high-water mark does not. A
-slot's transfer reservation survives a reset, timeout, or early acknowledgement
-until the asynchronous transfer actually settles, bounding escalation buffers to
-one transfer per player slot. New holes coalesce while any recipient remains owed.
+Only a `recovery-settled:<frame>:<id>` received **after** this attempt was
+delivered, naming this attempt's id and its exact state frame minus delay,
+settles it. The legacy `inputs-settled:` updates input history only and settles
+nothing. A stored high-water mark does not. A slot's transfer reservation
+survives a reset, timeout, or early acknowledgement until the asynchronous
+transfer actually settles, bounding escalation buffers to one transfer per
+player slot.
+
+A new hole coalesces only while its own source is still owed a recovery. A
+later hole from a settled source is broadcast to the recipients that are free;
+a recipient still owed the earlier broadcast is skipped, keeps its own attempt
+and retry budget, and is owed the newer state: a retry captures afresh and
+covers it, and if the earlier attempt settles instead, the host pushes that
+recipient one fresh state (`INPUT-ASK-PUSH-FOLLOWUP`). Without that push, with
+3+ players, the skipped guest would stay on a state from before the newer hole
+while the others adopt it.
 
 State chunks use the dedicated sync channel only: the primary input channel cannot
 parse them. A rate-limited late-join request retains the dropped marker; the marker
 is removed only after the accepted join is held outside the active roster.
 
-Model: `specs/recovery_delivery.qnt`, before/fixed variants and capacity model.
+Model: `specs/recovery_delivery.qnt`, before/fixed variants, capacity model and
+`recovery_skipped` (the follow-up owed to a skipped recipient).
 Engine-handler regressions: `tests/ts/recovery-delivery.test.ts`.
 These add no session-machine states and do not alter its generated diagram.

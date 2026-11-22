@@ -5496,6 +5496,13 @@
       pushSyncState(sid, false, { escalation: [attempt] });
     } else if (type === 'settled') {
       _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${firstFrame} pushes=${pushes}`);
+      // A later broadcast skipped this guest while it still owed this one: the
+      // state it just settled on is from before that hole. Push it afresh.
+      const next = _recovery.followUp(attempt, performance.now());
+      if (next) {
+        _syncLog(`INPUT-ASK-PUSH-FOLLOWUP f=${_frameNum} slot=${slot} id=${next.wireId}`);
+        pushSyncState(sid, false, { escalation: [next] });
+      }
     } else if (type === 'ended') {
       const target = _peers[sid];
       _syncLog(
