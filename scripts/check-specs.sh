@@ -672,7 +672,7 @@ $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
 # ── How a page's C engine starts ───────────────────────────────────────────
 START=specs/engine_start.qnt
 $QUINT typecheck "$START"
-for variant in engine_start_before engine_start_stop_only engine_start_jump_on_return engine_start_no_zero_bridge engine_start_current; do
+for variant in engine_start_before engine_start_stop_only engine_start_jump_on_return engine_start_no_zero_bridge engine_start_no_rearm engine_start_current; do
   $QUINT test "$START" --main="$variant" --backend="$BACKEND"
 done
 # Today: every frame of a match runs on the C engine, a guest arms with the
@@ -692,6 +692,9 @@ done
 # tabReturnWhileWaitingTest). That jump was the only way the host's start
 # frame differed from the guest's own (theHostsStartIsWhereTheGuestIs,
 # VIOLATED before), which is why RB-INIT-CATCHUP and the overshoot went.
+# A match a friend joined runs at a match delay, and no rollback reaches
+# back before the frame the host armed at again (aJoinedMatchRunsAboveZero,
+# VIOLATED without the re-arm: engine_start_no_rearm; noRollbackBeforeTheRearm).
 $QUINT run "$START" --main=engine_start_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

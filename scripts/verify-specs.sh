@@ -559,6 +559,9 @@ engine_start() {
   # A friend joins a solo match with no bridge window at 0: start alone, arm,
   # join late (3 steps; lateJoinIntoSoloTest).
   expect_violation "$START" engine_start_no_zero_bridge aGuestStopsOnlyWhenTheHostIsUnreachable
+  # A friend joins a solo match and plays at 0: start alone, arm, join late
+  # (3 steps; lateJoinIntoSoloTest).
+  expect_violation "$START" engine_start_no_rearm aJoinedMatchRunsAboveZero
 }
 
 # Every group, in the order a local run takes them.
