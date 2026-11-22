@@ -368,3 +368,64 @@ def test_a_new_direct_answer_supersedes_a_queued_follow_up_to_the_same_guest():
         confirmed=False, via={"transport": "socket"}, queued=[old, coord]
     )
     assert out["scheduled"] == [coord]
+
+
+def _socket_request(src_text):
+    """Run the engine's own handleSocketSyncRequest (and the helpers it calls)
+    on a socket request from guest g, with a push stub that sends; return the
+    push options and the follow-ups queued (sync_follow_up.qnt,
+    socketUnconfirmedAnswerTest)."""
+    start = src_text.index("  const handleSocketSyncRequest = (msg) => {")
+    handler = src_text[start : src_text.index("\n  };\n", start) + 5]
+    start = src_text.index("  const _answerDirectSyncRequest = (")
+    helper = src_text[start : src_text.index("\n  };\n", start) + 5]
+    script = textwrap.dedent(
+        f"""
+        const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        globalThis.window = {{ KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }} }};
+        const _syncLog = () => {{}};
+        const _playerSlot = 0, PHASE_RUNNING = 'running', _phase = 'running';
+        const _peers = {{ g: {{ slot: 1 }} }};
+        const _peerKey = (s) => s;
+        const _requestIdFrom = (n) => Number(n) || 0;
+        const _peerPhantom = {{}};
+        let _syncQueueEpoch = 1;
+        const _syncQueueGen = {{}};
+        let _scheduledSyncRequests = [];
+        const _followUpWatches = new Map();
+        let _frameNum = 1986;
+        const SYNC_COORD_TIMEOUT_MS = 3000;
+        const pushes = [];
+        const pushSyncState = (sid, proactive, options) => {{
+          pushes.push(options);
+          for (const w of options.watchFor || []) _followUpWatches.set(w, {{ frame: _frameNum }});
+          return Promise.resolve([]);
+        }};
+        eval({json.dumps(helper)} + {json.dumps(handler)} + `
+          handleSocketSyncRequest({{ requesterSid: 'g', requestId: 4, reason: 'sync-chunk-timeout' }});
+          setTimeout(() => process.stdout.write(JSON.stringify({{ pushes, scheduled: _scheduledSyncRequests }})), 0);
+        `);
+        """
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    return json.loads(result.stdout)
+
+
+def test_a_socket_request_answered_unconfirmed_is_followed_up_over_the_socket():
+    # Today's handler pushed with no watch and queued nothing: the guest kept
+    # whatever state was taken, however unconfirmed.
+    out = _socket_request(LOCKSTEP_JS.read_text())
+    [push] = out["pushes"]
+    assert push["watchFor"] == ["g"] and push["transport"] == "socket"
+    assert push["requestIds"] == {"g": 4}
+    [follow] = out["scheduled"]
+    assert follow["targetSid"] == "g" and follow["followUp"] == 1
+    assert follow["transport"] == "socket" and follow["requestId"] == 4
