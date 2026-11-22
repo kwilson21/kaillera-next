@@ -7857,6 +7857,7 @@
   // resync interval; a real reconnect after disconnect already starts fresh.
   const _LATE_JOIN_COOLDOWN_MS = 8000;
   const _lateJoinLastSentAt = new Map(); // requesterSid -> ms timestamp
+  const _lateJoinOfferedDelay = new Map(); // requesterSid -> the joiner's measured delay, 0 if none
 
   // The joiner's wait for an answer to its state request, as an Effect
   // program (web/src/late-join-wait.ts): repeated request, deadline, and a
@@ -7867,7 +7868,16 @@
   let _lateJoinWait = null;
 
   const _sendLateJoinRequest = () => {
-    socket.emit('data-message', { type: 'request-late-join', requesterSid: socket.id });
+    // The delay this page measured to the host: a match the host ran alone
+    // at 0 moves to the larger of the two at the join (delayAtJoin).
+    const hostPeer = Object.values(_peers).find((p) => p?.slot === 0);
+    const samples = hostPeer?.rttSamples?.length ? hostPeer.rttSamples : hostPeer?._rttSamples;
+    const delay = samples?.length ? _delayFromRttSamples(samples, _delayIsLockstep()) : null;
+    socket.emit('data-message', {
+      type: 'request-late-join',
+      requesterSid: socket.id,
+      ...(delay ? { delay } : {}),
+    });
   };
 
   // A player waiting to be let into a match says so on each of its own data
@@ -7994,6 +8004,10 @@
       return;
     }
     _lateJoinLastSentAt.set(requesterSid, now);
+    _lateJoinOfferedDelay.set(
+      requesterSid,
+      Number.isInteger(msg.delay) && msg.delay > 0 ? clampRollbackDelay(msg.delay) : 0,
+    );
     _syncLog(`received late-join request from ${requesterSid}`);
     const name = _knownPlayers[requesterSid]?.playerName || 'A player';
     _config?.onToast?.(`${name} is joining...`);
@@ -12709,6 +12723,39 @@
     if (_lateJoinOriginalWait && frame - DELAY_FRAMES > _lateJoinOriginalWait.through) _lateJoinOriginalWait = null;
   };
 
+  // The first player into a match the host ran alone at a delay of 0: at the
+  // frame of the state it sends (H), the host arms its C engine again with
+  // the delay this join negotiates, and the joiner arms with it from the
+  // state (specs/engine_start.qnt, REARM_AT_JOIN). Alone, the host made no
+  // rollback and runs no replay, and the joiner's slot was inactive, so
+  // nothing reaches back before H (noRollbackBeforeTheRearm). The host made
+  // no input for H..H+delay-1 (at 0 each input applied at the frame it was
+  // made): they are neutral here, and the bridge gives the joiner the same.
+  const _rearmForFirstPlayer = (remoteSid, frame) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const others = _activeRoster ? [..._activeRoster].filter((slot) => slot !== _playerSlot) : [];
+    const replayDepth = mod?._kn_get_replay_depth?.() ?? 0;
+    if (others.length || replayDepth > 0 || !window._rbDoInit) {
+      _syncLog(`DELAY-AT-JOIN skipped f=${frame}: others=[${others.join(',')}] replayDepth=${replayDepth}`);
+      return;
+    }
+    const peer = _peers[remoteSid];
+    const samples = peer?.rttSamples?.length ? peer.rttSamples : peer?._rttSamples;
+    const own = (samples?.length && _delayFromRttSamples(samples, _delayIsLockstep())) || 0;
+    const offered = _lateJoinOfferedDelay.get(remoteSid) || 0;
+    const delay = window.KNCore.delayAtJoin(DELAY_FRAMES, own, offered, clampRollbackDelay(DEFAULT_DELAY_FRAMES));
+    if (delay === DELAY_FRAMES) return;
+    for (let f = frame; f < frame + delay; f++) _localInputs[f] = { ...KNShared.ZERO_INPUT };
+    const prev = DELAY_FRAMES;
+    DELAY_FRAMES = delay;
+    window._rbDoInit(delay, frame, 'first player joined');
+    window.showEffectiveDelay?.(delay, delay);
+    _syncLog(
+      `DELAY-AT-JOIN ${prev} -> ${delay} f=${frame} joiner=${remoteSid} own=${own} offered=${offered} ` +
+        `samples=${samples?.length ?? 0} — armed again for the first player`,
+    );
+  };
+
   async function sendLateJoinState(remoteSid) {
     // Look up slot from _peers first, fall back to _knownPlayers.
     // The peer's WebRTC connection may have failed/disconnected (removed
@@ -12794,6 +12841,14 @@
 
       // Capture state + frame number + RNG atomically while paused
       const capturedFrame = _frameNum;
+      if (DELAY_FRAMES === 0 && _useCRollback) {
+        try {
+          _rearmForFirstPlayer(remoteSid, capturedFrame);
+        } catch (e) {
+          _handleCoreFatal('rollback-init', e);
+          return;
+        }
+      }
       const bridgeSources = _useCRollback ? _snapshotLateJoinBridgeSources(remoteSid) : null;
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);

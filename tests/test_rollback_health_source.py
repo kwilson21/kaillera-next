@@ -182,6 +182,34 @@ def test_a_joiner_stops_on_a_host_whose_delay_of_0_is_the_old_path():
     assert "'old-host':" in src
 
 
+def test_the_first_player_into_a_match_at_0_moves_it_to_a_match_delay():
+    """specs/engine_start.qnt, REARM_AT_JOIN: the host arms again at the frame
+    of the state it sends, with KNCore.delayAtJoin's delay, before the bridge
+    is read, and its own inputs for H..H+delay-1 are neutral (fresh objects,
+    so the bridge carries them to the joiner as made)."""
+    src = LOCKSTEP_JS.read_text()
+
+    send = src[src.index("async function sendLateJoinState(remoteSid) {") :]
+    capture = send.index("const capturedFrame = _frameNum;")
+    rearm = send.index("_rearmForFirstPlayer(remoteSid, capturedFrame);")
+    bridge = send.index("_snapshotLateJoinBridgeSources(remoteSid)")
+    assert capture < rearm < bridge
+    assert "if (DELAY_FRAMES === 0 && _useCRollback) {" in send[capture:rearm]
+
+    fn = src[src.index("const _rearmForFirstPlayer = (remoteSid, frame) => {") :]
+    fn = fn[: fn.index("\n  };\n")]
+    assert "window.KNCore.delayAtJoin(DELAY_FRAMES, own, offered, clampRollbackDelay(DEFAULT_DELAY_FRAMES))" in fn
+    zeros = fn.index("_localInputs[f] = { ...KNShared.ZERO_INPUT };")
+    assert zeros < fn.index("DELAY_FRAMES = delay;") < fn.index("window._rbDoInit(delay, frame, 'first player joined');")
+    # Only alone and with no replay running.
+    assert "if (others.length || replayDepth > 0 || !window._rbDoInit) {" in fn
+
+    # The joiner offers the delay it measured to the host.
+    request = src[src.index("const _sendLateJoinRequest = () => {") :][:700]
+    assert "_delayFromRttSamples(samples, _delayIsLockstep())" in request
+    assert "_lateJoinOfferedDelay.set(" in src
+
+
 def test_the_arm_log_says_where_the_frame_came_from():
     src = LOCKSTEP_JS.read_text()
 

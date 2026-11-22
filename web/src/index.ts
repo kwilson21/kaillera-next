@@ -15,7 +15,7 @@ import { demo } from './demo/index.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { lockstepStep } from './lockstep-wait.ts';
-import { guestStartStep } from './engine-start.ts';
+import { delayAtJoin, guestStartStep } from './engine-start.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
@@ -342,6 +342,8 @@ export const KNCore = {
   lockstepStep,
   /** What a guest does while it waits for the host's delay and start frame (web/src/engine-start.ts, specs/engine_start.qnt). */
   guestStartStep,
+  /** The delay a match runs at once a player joins it: its first player moves a match at 0 to a match delay (web/src/engine-start.ts). */
+  delayAtJoin,
   measureCanvasHealth,
   digestFrame,
   createRomResumeAnswerer,

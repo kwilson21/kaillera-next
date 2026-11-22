@@ -60,3 +60,30 @@ export function guestStartStep(
   }
   return 'wait';
 }
+
+/**
+ * The delay a match runs at once a player joins it. Alone in a room the
+ * match runs at 0; its first player moves it to a match delay at the join
+ * frame (specs/engine_start.qnt, REARM_AT_JOIN): the larger of what the host
+ * and the joiner measured on their new channel, as at a normal start, or the
+ * default when neither has a measurement. A match already above 0 keeps its
+ * delay, as for any later joiner.
+ *
+ * @param hostDelay  the delay the match runs at now
+ * @param own        the host's delay from its RTT samples to the joiner, 0 if none
+ * @param offered    the joiner's delay from its samples to the host, 0 if none
+ * @param fallback   the default delay
+ */
+//@ requires fallback > 0
+//@ ensures hostDelay > 0 ==> \result === hostDelay
+//@ ensures hostDelay <= 0 ==> \result > 0
+//@ ensures hostDelay <= 0 && (own > 0 || offered > 0) ==> \result >= own && \result >= offered
+//@ ensures hostDelay <= 0 && own <= 0 && offered <= 0 ==> \result === fallback
+export function delayAtJoin(hostDelay: number, own: number, offered: number, fallback: number): number {
+  if (hostDelay > 0) return hostDelay;
+  if (own > 0 || offered > 0) {
+    if (own >= offered) return own;
+    return offered;
+  }
+  return fallback;
+}

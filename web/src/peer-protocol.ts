@@ -214,7 +214,8 @@ const JSON_MESSAGES = {
     'rom-accepted': Schema.Struct({ sender: Schema.String }),
     'save-state': SaveState,
     'late-join-state': LateJoinState,
-    'request-late-join': Schema.Struct({ requesterSid: Schema.String }),
+    // delay: the joiner's delay from its RTT samples to the host, for a match at 0 its join moves to a match delay.
+    'request-late-join': Schema.Struct({ requesterSid: Schema.String, delay: Schema.optional(Schema.Number) }),
     'sync-request-full-socket': Schema.Struct({
       targetSid: Schema.String,
       requesterSid: Schema.String,

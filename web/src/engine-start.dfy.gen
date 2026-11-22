@@ -32,3 +32,27 @@ lemma guestStartStep_ensures(heardDelay: int, heardStart: int, ownFrame: int, wa
   ensures (guestStartStep(heardDelay, heardStart, ownFrame, waitedMs, deadlineMs).wait? ==> (waitedMs < deadlineMs))
 {
 }
+
+function delayAtJoin(hostDelay: int, own: int, offered: int, fallback: int): int
+  requires (fallback > 0)
+{
+  if (hostDelay > 0) then
+    hostDelay
+  else
+    if ((own > 0) || (offered > 0)) then
+      if (own >= offered) then
+        own
+      else
+        offered
+    else
+      fallback
+}
+
+lemma delayAtJoin_ensures(hostDelay: int, own: int, offered: int, fallback: int)
+  requires (fallback > 0)
+  ensures ((hostDelay > 0) ==> (delayAtJoin(hostDelay, own, offered, fallback) == hostDelay))
+  ensures ((hostDelay <= 0) ==> (delayAtJoin(hostDelay, own, offered, fallback) > 0))
+  ensures ((hostDelay <= 0) ==> ((own > 0) || (offered > 0)) ==> ((delayAtJoin(hostDelay, own, offered, fallback) >= own) && (delayAtJoin(hostDelay, own, offered, fallback) >= offered)))
+  ensures ((hostDelay <= 0) ==> (own <= 0) ==> (offered <= 0) ==> (delayAtJoin(hostDelay, own, offered, fallback) == fallback))
+{
+}
