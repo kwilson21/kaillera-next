@@ -8206,7 +8206,7 @@
   // (specs/mesh_heal.qnt, aDeadChannelIsNeverForgotten). Once per frame: a
   // frozen sim ticks on the same frame.
   let _lastMeshHealthFrame = -1;
-  // Called on every tick of either branch. Any frame that is not a check's
+  // Called on every tick. Any frame that is not a check's
   // forgets the last one, so a new match or a resync that goes back past a
   // checked frame checks it again.
   const _meshHealthTick = () => {
