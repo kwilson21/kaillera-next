@@ -231,7 +231,10 @@
  *     page is told (`DROPPED-BY-HOST`) and joins again late onto the host's
  *     state (`late-join loaded`), no mesh heal adds it back, no late input
  *     follows on the host, and the frames from the late join's state match
- *     (specs/drop_is_final.qnt). With ASK_UNANSWERED_ACK_LOST=1 the guest
+ *     (specs/drop_is_final.qnt). The host's own 5 s stall deadline can make
+ *     the guest a phantom before the push limit; that route passes too when
+ *     the phantom ends the push (`INPUT-ASK-PUSH-ENDED … phantom`),
+ *     `PEER-RECOVERED` resyncs and nobody is dropped. With ASK_UNANSWERED_ACK_LOST=1 the guest
  *     applies each push but drops its `recovery-settled:` and
  *     `inputs-settled:` for n ms: fails
  *     unless the push ends on the phantom the host's stall makes
@@ -2608,7 +2611,7 @@ if (inBattle) {
       RESYNC_OFF
         ? /RB-INPUT-STALL-TIMEOUT .*slot=1 |PEER-PHANTOM slot=1 lastAdvance=[\d.]+ staleSec=5\./
         : ASK_UNANSWERED_ACKS
-          ? /INPUT-ASK-PUSH-GAVEUP/
+          ? /INPUT-ASK-PUSH-GAVEUP|INPUT-ASK-PUSH-ENDED .*phantom/
           : ASK_UNANSWERED_ACK_LOST
             ? /INPUT-ASK-PUSH-ENDED/
             : /INPUT-ASK-PUSH-SETTLED/,
@@ -4451,17 +4454,24 @@ const askUnansweredFailed = RESYNC_OFF
           askUnansweredReport.gaveUp.length === 0 &&
           askUnansweredReport.hardDisconnected.length === 0
         : ASK_UNANSWERED_ACKS
-          ? // Every push unanswered: pushed again to the limit, then the player dropped.
-            askUnansweredReport.statesDropped > 0 &&
-            askUnansweredReport.pushes.length >= 2 &&
-            askUnansweredReport.gaveUp.length > 0 &&
-            askUnansweredReport.hardDisconnected.length > 0 &&
-            askUnansweredReport.droppedByHost.length > 0 &&
-            // It joined again late, onto the host's state; frames are compared
-            // from there (FREEZE_LIKE).
-            askUnansweredReport.lateJoined.length > 0 &&
-            askUnansweredReport.heals === 0 &&
-            askUnansweredReport.pastWindowAfterDrop === 0
+          ? askUnansweredReport.statesDropped > 0 &&
+            (askUnansweredReport.endedOnPhantom.length > 0
+              ? // The host's own 5 s stall deadline can make the guest a phantom
+                // before the push limit: the phantom ends the push and its own
+                // resync recovers the guest, nobody dropped (as ACK_LOST).
+                askUnansweredReport.recovered > 0 &&
+                askUnansweredReport.gaveUp.length === 0 &&
+                askUnansweredReport.hardDisconnected.length === 0
+              : // Every push unanswered: pushed again to the limit, then the player dropped.
+                askUnansweredReport.pushes.length >= 2 &&
+                askUnansweredReport.gaveUp.length > 0 &&
+                askUnansweredReport.hardDisconnected.length > 0 &&
+                askUnansweredReport.droppedByHost.length > 0 &&
+                // It joined again late, onto the host's state; frames are compared
+                // from there (FREEZE_LIKE).
+                askUnansweredReport.lateJoined.length > 0 &&
+                askUnansweredReport.heals === 0 &&
+                askUnansweredReport.pastWindowAfterDrop === 0)
           : askUnansweredReport.settled.length > 0 &&
             askUnansweredReport.gaveUp.length === 0 &&
             // The difference from main: no stall waits out its deadline.

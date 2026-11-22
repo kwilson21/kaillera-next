@@ -56,10 +56,21 @@
 // FLAG_FROM_TAKEN: that difference is recorded from the moment the state is
 //   taken. Without it, from the send only: a misprediction while the state
 //   is being compressed is missed.
+//
+// DIRECT_WATCHED: a direct request (`sync-request-full`, no target frame:
+//   the guest's BOOT-SYNC after a late join, reconnect, visibility and
+//   network change) is answered at once at the frame the host has reached,
+//   and is watched and followed up like a coordinated answer. Without it
+//   (today), the direct answer is final however unconfirmed: a late joiner
+//   whose BOOT-SYNC was answered while the host still predicted its input,
+//   with that prediction wrong, played on split for the rest of the match
+//   (ASK_UNANSWERED_ACKS on 3cdb9ff, 2026-11: taken at 1986 with the host
+//   confirmed to 1972; MISPREDICTION slot=1 f=1977 replayed 47 ms later).
 
 module sync_follow_up {
   const SKIP_UNCHANGED: bool
   const FLAG_FROM_TAKEN: bool
+  const DIRECT_WATCHED: bool
 
   pure val FOLLOW_UP_MAX = 3
   // Inputs at or before the frame that may still be predicted (bound for the model).
@@ -78,17 +89,20 @@ module sync_follow_up {
   var guestRight: bool    // the last state sent is the host's state at its frame now
   var wasted: bool        // a follow-up went out for a frame that had not changed
   var gaveUp: bool        // follow-ups exhausted with the frame unconfirmed
+  var direct: bool        // the request had no target frame (answered at once)
 
-  action initWith(p: int): bool = all {
+  action initWith(p: int, d: bool): bool = all {
     phase' = "idle",
     pending' = p,
+    direct' = d,
     changed' = false, flagged' = false, confirmedAtTake' = false,
     inFlight' = 0, followUps' = 0, guestRight' = false, wasted' = false, gaveUp' = false,
   }
 
   action init = {
     nondet p = 0.to(MAX_PENDING).oneOf()
-    initWith(p)
+    nondet d = oneOf(Set(true, false))
+    initWith(p, d)
   }
 
   // The request is answered: the state at F is taken (kn_sync_read). From
@@ -100,7 +114,7 @@ module sync_follow_up {
     changed' = false, flagged' = false,
     confirmedAtTake' = pending == 0,
     pending' = pending, inFlight' = inFlight, followUps' = followUps, guestRight' = guestRight,
-    wasted' = wasted, gaveUp' = gaveUp,
+    wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
   }
 
   // Compressed and handed to the channel.
@@ -110,22 +124,23 @@ module sync_follow_up {
     inFlight' = inFlight + 1,
     guestRight' = not(changed),
     pending' = pending, changed' = changed, flagged' = flagged, confirmedAtTake' = confirmedAtTake,
-    followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp,
+    followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
   }
 
   // The last chunk leaves the channel. Unconfirmed: a follow-up is scheduled.
   action drained = all {
     phase == "sending",
     inFlight' = inFlight - 1,
-    phase' = if (confirmedAtTake) "done" else "waiting",
+    // A direct answer is followed up only when DIRECT_WATCHED.
+    phase' = if (confirmedAtTake or (direct and not(DIRECT_WATCHED))) "done" else "waiting",
     pending' = pending, changed' = changed, flagged' = flagged, confirmedAtTake' = confirmedAtTake,
-    followUps' = followUps, guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp,
+    followUps' = followUps, guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
   }
 
   // A predicted input at or before F arrives, as predicted or not.
   action inputArrives(differs: bool): bool = all {
+    // Inputs keep arriving whatever became of the answer.
     pending > 0,
-    phase != "done",
     pending' = pending - 1,
     val after = phase != "idle"
     val records = if (FLAG_FROM_TAKEN) after else phase == "sending" or phase == "waiting"
@@ -136,7 +151,7 @@ module sync_follow_up {
       guestRight' = (guestRight and not(differs and after)),
     },
     phase' = phase, confirmedAtTake' = confirmedAtTake, inFlight' = inFlight,
-    followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp,
+    followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
   }
 
   // F is confirmed and the follow-up is due: sent fresh (confirmed now, so
@@ -156,7 +171,7 @@ module sync_follow_up {
       changed' = if (sends) false else changed,
       flagged' = if (sends) false else flagged,
     },
-    pending' = pending, gaveUp' = gaveUp,
+    pending' = pending, gaveUp' = gaveUp, direct' = direct,
   }
 
   // The follow-up's deadline with F still unconfirmed: a fresh state is
@@ -176,13 +191,13 @@ module sync_follow_up {
       changed' = changed, flagged' = flagged, confirmedAtTake' = confirmedAtTake,
       gaveUp' = true,
     },
-    pending' = pending, inFlight' = inFlight, guestRight' = guestRight, wasted' = wasted,
+    pending' = pending, inFlight' = inFlight, guestRight' = guestRight, wasted' = wasted, direct' = direct,
   }
 
   action nothingHappens = all {
     phase' = phase, pending' = pending, changed' = changed, flagged' = flagged,
     confirmedAtTake' = confirmedAtTake, inFlight' = inFlight, followUps' = followUps,
-    guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp,
+    guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
   }
 
   action step = any {
@@ -218,7 +233,7 @@ module sync_follow_up {
   // One input still predicted when the state is taken; it arrives as
   // predicted. Today a second full state goes out; fixed, none.
   run unchangedFollowUpTest =
-    initWith(1)
+    initWith(1, false)
       .then(take).then(send).then(drained)
       .expect(phase == "waiting")
       .then(inputArrives(false))
@@ -229,7 +244,7 @@ module sync_follow_up {
   // The input arrives and differs after the send: the follow-up goes out
   // and carries the host's new state.
   run changedFollowUpTest =
-    initWith(1)
+    initWith(1, false)
       .then(take).then(send).then(drained)
       .then(inputArrives(true))
       .expect(not(guestRight))
@@ -242,7 +257,7 @@ module sync_follow_up {
   // Recorded from the send only, the follow-up is skipped and the guest is
   // left on a state the host no longer has.
   run mispredictWhileCompressingTest =
-    initWith(1)
+    initWith(1, false)
       .then(take)
       .then(inputArrives(true))
       .then(send).then(drained)
@@ -251,14 +266,32 @@ module sync_follow_up {
 
   // Confirmed when taken: answered once, no follow-up.
   run confirmedAnswerTest =
-    initWith(0)
+    initWith(0, false)
+      .then(take).then(send).then(drained)
+      .expect(phase == "done" and followUps == 0 and guestRight and allHold)
+
+  // A direct request (BOOT-SYNC after a late join) answered while an input
+  // was still predicted; the input differs after the answer went out. Today
+  // the answer is final and the guest stays on a state the host no longer
+  // has; watched, it is followed up with the host's state.
+  run directUnconfirmedAnswerTest =
+    initWith(1, true)
+      .then(take).then(send).then(drained)
+      .expect(phase == (if (DIRECT_WATCHED) "waiting" else "done"))
+      .then(inputArrives(true))
+      .then(if (DIRECT_WATCHED) followUpConfirmed.then(drained) else nothingHappens)
+      .expect(theGuestEndsOnTheHostsState == DIRECT_WATCHED)
+
+  // A direct request answered confirmed needs no follow-up either way.
+  run directConfirmedAnswerTest =
+    initWith(0, true)
       .then(take).then(send).then(drained)
       .expect(phase == "done" and followUps == 0 and guestRight and allHold)
 
   // Still unconfirmed at every deadline: fresh states up to the bound, then
   // given up visibly.
   run unconfirmedToTheBoundTest =
-    initWith(1)
+    initWith(1, false)
       .then(take).then(send).then(drained)
       .then(followUpDeadline).then(send).then(drained)
       .then(followUpDeadline).then(send).then(drained)
@@ -270,15 +303,21 @@ module sync_follow_up {
 
 // Today: every unconfirmed answer is followed up.
 module sync_follow_up_current {
-  import sync_follow_up(SKIP_UNCHANGED = false, FLAG_FROM_TAKEN = true).*
+  import sync_follow_up(SKIP_UNCHANGED = false, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true).*
 }
 
 // Skipping an unchanged follow-up, the difference recorded from the send only.
 module sync_follow_up_from_send {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = false).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = false, DIRECT_WATCHED = true).*
+}
+
+// Today: coordinated answers are followed up only when changed, but a direct
+// answer is never followed up (directUnconfirmedAnswerTest).
+module sync_follow_up_direct_unwatched {
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = false).*
 }
 
 // The fix.
 module sync_follow_up_fixed {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true).*
 }
