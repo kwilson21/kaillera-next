@@ -10227,7 +10227,9 @@
           const checkFrame = parseInt(e.data.slice(firstColon + 1, secondColon), 10);
           const peerBlocksHex = e.data.slice(secondColon + 1);
           if (!window._rbPendingBlocks) window._rbPendingBlocks = {};
-          window._rbPendingBlocks[checkFrame] = peerBlocksHex;
+          // Keyed by frame and sender: with three or four players each peer
+          // sends a snapshot of the same frame.
+          window._rbPendingBlocks[`${checkFrame}:${peer.slot}`] = peerBlocksHex;
           return;
         }
         if (e.data.startsWith('rb-subhash:')) {
@@ -10240,7 +10242,7 @@
             const subRi = parseInt(parts[2], 10);
             const subCsv = parts.slice(3).join(':');
             if (!window._rbPendingSubHashes) window._rbPendingSubHashes = {};
-            window._rbPendingSubHashes[`${subFrame}:${subRi}`] = subCsv;
+            window._rbPendingSubHashes[`${subFrame}:${subRi}:${peer.slot}`] = subCsv;
           }
           return;
         }
@@ -10256,7 +10258,7 @@
           const checkFrame = parseInt(e.data.slice(firstColon + 1, secondColon), 10);
           const peerRegionsCsv = e.data.slice(secondColon + 1);
           if (!window._rbPendingRegions) window._rbPendingRegions = {};
-          window._rbPendingRegions[checkFrame] = peerRegionsCsv;
+          window._rbPendingRegions[`${checkFrame}:${peer.slot}`] = peerRegionsCsv;
           return;
         }
         // Host-authoritative delay for rollback mode.
@@ -14995,8 +14997,10 @@
         // P4: reset the failed_rollbacks baseline at init so any increase
         // during the match is detected fresh.
         _rbLastFailedRollbacks = 0;
-        // Reset C debug log drain pointer so the new match starts fresh.
-        _cDebugLogLastLen = 0;
+        // A core from before _kn_get_debug_log_dropped restarts its log in
+        // kn_rollback_init, so the new log is read from its start. A current
+        // core's log runs on across inits and its offset only grows.
+        if (!detMod._kn_get_debug_log_dropped) _cDebugLogDrainedTo = 0;
         // Reset divergence diagnostics state
         _rbLastGoodFrame = -1;
         _rbBisectActive = false;
@@ -18294,7 +18298,7 @@
                 // — no temporal skew. If peer hasn't arrived yet, the diff
                 // will run when the message comes in (see rb-blocks handler).
                 if (_knDeepDiagnostics) {
-                  const peerBlocksHex = window._rbPendingBlocks?.[fStr];
+                  const peerBlocksHex = window._rbPendingBlocks?.[`${fStr}:${outcome.slot}`];
                   const localSnap = window._rbLocalBlocks?.[f];
                   const localTaint = window._rbLocalTaint?.[f];
                   if (peerBlocksHex && localSnap && localTaint) {
@@ -18353,7 +18357,7 @@
                   // exactly which 1/32-of-state slice diverged so we can map
                   // the divergence to a subsystem and decide whether to taint
                   // or fix it at the C level.
-                  const peerRegionsCsv = window._rbPendingRegions?.[fStr];
+                  const peerRegionsCsv = window._rbPendingRegions?.[`${fStr}:${outcome.slot}`];
                   const localRegionsCsv = window._rbLocalRegions?.[f];
                   if (peerRegionsCsv && localRegionsCsv) {
                     const peerRegions = peerRegionsCsv.split(',');
@@ -18464,7 +18468,7 @@
                                 // Compare against peer sub-hashes if we have them
                                 // — usually we don't yet on first detection, but
                                 // the peer's response will correlate post-mortem.
-                                const peerSubCsv = window._rbPendingSubHashes?.[key];
+                                const peerSubCsv = window._rbPendingSubHashes?.[`${key}:${outcome.slot}`];
                                 const divergingSubs = [];
                                 if (peerSubCsv) {
                                   const peerSubHashes = peerSubCsv.split(',');
@@ -18523,8 +18527,8 @@
                   }
                 }
               }
-              if (window._rbPendingBlocks) delete window._rbPendingBlocks[fStr];
-              if (window._rbPendingRegions) delete window._rbPendingRegions[fStr];
+              if (window._rbPendingBlocks) delete window._rbPendingBlocks[`${fStr}:${outcome.slot}`];
+              if (window._rbPendingRegions) delete window._rbPendingRegions[`${fStr}:${outcome.slot}`];
             }
           }
         }

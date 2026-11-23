@@ -1188,3 +1188,12 @@ def test_a_chunk_timeout_is_scoped_to_the_request_its_transfer_answers():
     assert "_resyncRequestInFlight" not in branch and "_requestSocketFullResync" not in branch
     assert older < header.index("_resyncRequestInFlight = false;")
     assert older < header.index("_requestSocketFullResync('sync-chunk-timeout');")
+
+
+def test_the_c_log_drain_offset_is_reset_under_its_own_name():
+    """The drain offset was renamed and doRollbackInit kept assigning the old
+    name: in strict mode that throws, and the match stops as it starts."""
+    src = (ROOT / "web" / "static" / "netplay-rollback.js").read_text()
+    assert "_cDebugLogLastLen" not in src
+    assert "let _cDebugLogDrainedTo = 0;" in src
+    assert "if (!detMod._kn_get_debug_log_dropped) _cDebugLogDrainedTo = 0;" in src
