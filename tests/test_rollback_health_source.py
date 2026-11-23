@@ -755,6 +755,42 @@ def test_a_recovery_resyncs_every_guest():
     assert "if (!asked && _requestSocketFullResync('peer-recovery')) {" in ask
 
 
+def test_a_reconnected_guests_resync_goes_to_every_guest():
+    # specs/recovery_bystander.qnt, hostAndBystanderAgree (recovery_bystander_fixed;
+    # reconnectBystanderTest): a channel that died and was healed resets the
+    # host's entry (no PEER-RECOVERED follows), and the reconnected guest asks
+    # for a resync. How the host answers is the proved rule
+    # (web/src/recovery-resync.ts, syncRequestAnswer): the first request after
+    # the reset goes to every guest, with one frame and one deadline so the
+    # requests fall due together.
+    src = LOCKSTEP_JS.read_text()
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert (
+        "if (_playerSlot === 0 && (reason === 'reconnect' || reason === 'mesh-heal')) _reconnectedSids.add(opts.sid);\n"
+        "      else _reconnectedSids.delete(opts.sid);"
+    ) in reset
+    host = src[src.index("if (e.data.startsWith('sync-request-id:')) {") :]
+    host = host[: host.index("// JSON messages")]
+    assert (
+        "window.KNCore.recoveryResync.syncRequestAnswer(\n"
+        "            _reconnectedSids.has(remoteSid),\n"
+        "            !isNaN(targetFrame) && targetFrame > _frameNum,\n"
+        "          );\n"
+        "          _reconnectedSids.delete(remoteSid);"
+    ) in host
+    # Rate limited before the rule: the mark stays for the next request.
+    assert host.index("rate-limited sync-request from") < host.index("syncRequestAnswer(")
+    guests = host[host.index("if (answer === 'resync-guests') {") :]
+    guests = guests[: guests.index("} else if (answer === 'scheduled') {")]
+    assert "_scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: remoteSid, requestId, deadlineAt });" in guests
+    assert "_syncTargetsFor(null)" in guests
+    assert "_scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });" in guests
+    assert guests.count("deadlineAt") == 3
+    # A new match forgets every mark.
+    assert src.count("\n    _reconnectedSids = new Set();") == 2
+
+
 def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
     # specs/resync_inputs.qnt (aPageAppliesWhatItSent, the keys it leaves
     # out): a resync that takes the guest back puts it on frames whose inputs

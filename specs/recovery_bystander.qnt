@@ -65,6 +65,31 @@
 // that hears again from any player it held as a phantom asks the host for a
 // resync, as it already does when that player is the host (ASK_ON_RECOVERY).
 //
+// The reconnect path splits the same way (RECONNECT_BROADCAST). The channel
+// between the host and the mover dies while the mover's channel to the
+// bystander stays up: the host stops hearing the mover, stalls, drops it as a
+// phantom and runs its frames on predictions; the bystander runs them on the
+// mover's real inputs, which never reach the host (the channel they were on
+// is gone). The channel is healed (_meshHealthTick, specs/mesh_heal.qnt; or
+// its close event and attemptReconnect): the host resets its entry for the
+// mover (resetPeerState: the phantom flag goes, so no PEER-RECOVERED follows
+// and recoveryStep never runs), and the mover, whose entry was reconnecting,
+// asks the host for an immediate resync from the channel's open handler
+// (`sync-request-full`). Before the fix the host answered the mover alone
+// (_answerDirectSyncRequest). The mover loads the host's state and tells the
+// bystander where its inputs start again (`inputs-settled:`); the bystander
+// settles them and keeps what it ran, the mover's real inputs, where the host
+// ran predictions: hostAndBystanderAgree VIOLATED
+// (recovery_bystander_reconnect_before; reconnectBystanderTest). Nothing on
+// the bystander can notice: it never predicted those inputs, so none of them
+// differs from a prediction, and it never held the mover as a phantom.
+//
+// The fix (RECONNECT_BROADCAST): the host's answer to the first resync
+// request from a player whose channel it reset for a reconnect goes to every
+// guest, as one capture (web/src/recovery-resync.ts, syncRequestAnswer:
+// `resync-guests`), as the PEER-RECOVERED resync does; its follow-ups go
+// wherever it went.
+//
 // What is modelled: the host, the mover and one bystander; the mover's
 // inputs (keyed by the frame they were made on, applied DELAY frames later,
 // each 0 or 1), on their way to each page in any order, possibly lost
@@ -79,14 +104,21 @@
 // frame, delivered in order) and their follow-ups; the bystander's resync
 // request and the host's answer; each page's escalation on a late input past
 // its window that differs from its prediction; the mover's `inputs-settled:`
-// and the inputs it sends again when it lands a state.
+// and the inputs it sends again when it lands a state; the channel between
+// the host and the mover dying once (the mover's inputs on it lost, none
+// sent on it, no state landing over it) and healed: the host's reset of the
+// mover's entry (it forgets the mover's inputs and any state it owed or was
+// sending it), the mover's immediate request, and the host's answer.
 //
 // Not modelled: the host's and the bystander's own inputs (the mover always
 // has them: it never holds them as phantoms, and never asks for a resync of
 // its own); more than one bystander; the follow-ups' bound
 // (SYNC_FOLLOW_UP_MAX) and every deadline (the host takes a state when it
-// likes: confirmed, or at its deadline); a reconnect (resetPeerState) and the
-// mesh health check (specs/mesh_heal.qnt); a dispatch that leaves out a
+// likes: confirmed, or at its deadline); who heals the channel and how
+// (specs/mesh_heal.qnt, specs/peer_connection.qnt); the mover's own view of
+// the host while the channel is down (it holds the host's inputs, as
+// everywhere here: on the real page it predicts the host too, and the host's
+// state replaces that); a channel to the bystander dying; a dispatch that leaves out a
 // guest it owes (an unreachable channel). The mover's inputs that are never
 // made (moved over by a resync) are settled everywhere by `inputs-settled:`
 // (specs/resync_mesh.qnt).
@@ -98,10 +130,14 @@
 //   from any player it held as a phantom. false = before the fix: only from
 //   the host.
 // LOSSY: inputs can be lost on the way.
+// RECONNECT_BROADCAST: the host's answer to the first resync request after it
+//   reset a reconnected player's entry goes to every guest. false = before
+//   the fix: to the player that asked alone.
 module recovery_bystander {
   const BROADCAST: bool
   const ASK_ON_RECOVERY: bool
   const LOSSY: bool
+  const RECONNECT_BROADCAST: bool
 
   pure val DELAY = 1
   pure val CAP = 2
@@ -141,6 +177,9 @@ module recovery_bystander {
   var queue: str -> List[State]  // states on their way to each guest, in order
   var asked: bool                // the bystander's request, not answered yet
   var waiting: bool              // the bystander has a request in flight
+  var linkDown: bool             // the channel between the host and the mover is dead
+  var linkDied: bool             // it has died (once)
+  var reconnectAsked: bool       // the mover's request after the heal, not answered yet
 
   // ── what a page runs on ────────────────────────────────────────────────
 
@@ -203,10 +242,14 @@ module recovery_bystander {
     wire' = PAGES.mapBy(_ => Set()),
     owed' = Set(), watch' = GUESTS.mapBy(_ => -1), queue' = GUESTS.mapBy(_ => List()),
     asked' = false, waiting' = false,
+    linkDown' = false, linkDied' = false, reconnectAsked' = false,
   }
 
-  action keepHostSide = all { owed' = owed, watch' = watch, queue' = queue, asked' = asked, waiting' = waiting }
-  action keepMover = all { mFrame' = mFrame, made' = made, frozen' = frozen, froze' = froze }
+  action keepHostSide = all {
+    owed' = owed, watch' = watch, queue' = queue, asked' = asked, waiting' = waiting, reconnectAsked' = reconnectAsked,
+  }
+  action keepLink = all { linkDown' = linkDown, linkDied' = linkDied }
+  action keepMover = all { mFrame' = mFrame, made' = made, frozen' = frozen, froze' = froze, keepLink }
 
   // A page runs a frame: it paces the other page, and stalls at the window
   // edge on the mover unless it holds it as a phantom.
@@ -237,21 +280,23 @@ module recovery_bystander {
     mFrame - DELAY - CAP < pg.get("bystander").frame,
     mFrame' = mFrame + 1,
     made' = if (made.keys().contains(mFrame)) made else made.put(mFrame, v),
-    wire' = PAGES.mapBy(n => wire.get(n).union(Set(Input(mFrame)))),
-    frozen' = frozen, froze' = froze,
+    // Nothing goes on a dead channel.
+    wire' = PAGES.mapBy(n =>
+      if (n == "host" and linkDown) wire.get(n) else wire.get(n).union(Set(Input(mFrame)))),
+    frozen' = frozen, froze' = froze, keepLink,
     pg' = pg, keepHostSide,
   }
 
   action moverFreeze = all {
     not(froze),
     frozen' = true, froze' = true,
-    mFrame' = mFrame, made' = made, pg' = pg, wire' = wire, keepHostSide,
+    mFrame' = mFrame, made' = made, keepLink, pg' = pg, wire' = wire, keepHostSide,
   }
 
   action moverResume = all {
     frozen,
     frozen' = false,
-    froze' = froze, mFrame' = mFrame, made' = made, pg' = pg, wire' = wire, keepHostSide,
+    froze' = froze, mFrame' = mFrame, made' = made, keepLink, pg' = pg, wire' = wire, keepHostSide,
   }
 
   // The guests a host's state goes to: its follow-ups go wherever the state
@@ -286,7 +331,7 @@ module recovery_bystander {
         .union(followUpsFor(r.changed)),
       asked' = (asked or bystanderAsks),
       waiting' = (waiting or bystanderAsks),
-      watch' = watch, queue' = queue, keepMover,
+      watch' = watch, queue' = queue, reconnectAsked' = reconnectAsked, keepMover,
     }
   }
 
@@ -311,6 +356,7 @@ module recovery_bystander {
     val p = pg.get(name)
     all {
       not(p.phantom),
+      not(name == "host" and linkDown),
       made.keys().contains(k),
       k <= p.newest,
       k >= p.floor,
@@ -334,7 +380,7 @@ module recovery_bystander {
     queue' = GUESTS.mapBy(g => if (owed.contains(g)) queue.get(g).append(capture) else queue.get(g)),
     watch' = GUESTS.mapBy(g => if (owed.contains(g)) capture.frame else watch.get(g)),
     owed' = Set(),
-    asked' = asked, waiting' = waiting,
+    asked' = asked, waiting' = waiting, reconnectAsked' = reconnectAsked,
     pg' = pg, wire' = wire, keepMover,
   }
 
@@ -344,7 +390,7 @@ module recovery_bystander {
     asked' = false,
     queue' = queue.set("bystander", queue.get("bystander").append(capture)),
     watch' = watch.set("bystander", capture.frame),
-    owed' = owed, waiting' = waiting,
+    owed' = owed, waiting' = waiting, reconnectAsked' = reconnectAsked,
     pg' = pg, wire' = wire, keepMover,
   }
 
@@ -357,7 +403,7 @@ module recovery_bystander {
       queue' = queue.set("bystander", queue.get("bystander").tail()),
       pg' = pg.set("bystander", { ...p, frame: s.frame, used: s.snap, pred: Set(), floor: max(p.floor, s.frame - DELAY) }),
       waiting' = false,
-      owed' = owed, watch' = watch, asked' = asked,
+      owed' = owed, watch' = watch, asked' = asked, reconnectAsked' = reconnectAsked,
       wire' = wire, keepMover,
     }
   }
@@ -377,15 +423,63 @@ module recovery_bystander {
       mFrame' = s.frame,
       made' = resent.fold(made, (m, k) => if (m.keys().contains(k)) m else m.put(k, 0)),
       wire' = PAGES.mapBy(n => wire.get(n).union(Set(Settled(from))).union(resent.map(k => Input(k)))),
-      frozen' = frozen, froze' = froze,
-      owed' = owed, watch' = watch, asked' = asked, waiting' = waiting,
+      frozen' = frozen, froze' = froze, keepLink,
+      owed' = owed, watch' = watch, asked' = asked, waiting' = waiting, reconnectAsked' = reconnectAsked,
       pg' = pg,
     }
   }
   action moverLands = all {
     not(frozen),
+    not(linkDown),
     queue.get("mover").length() > 0,
     moverLoads(queue.get("mover").head()),
+  }
+
+  // The channel between the host and the mover dies: what was on its way to
+  // the host on it is lost, and nothing more goes on it. The mover's channel
+  // to the bystander stays up.
+  action linkDies = all {
+    not(linkDied),
+    linkDown' = true, linkDied' = true,
+    wire' = wire.set("host", Set()),
+    mFrame' = mFrame, made' = made, frozen' = frozen, froze' = froze,
+    pg' = pg, keepHostSide,
+  }
+
+  // The channel is healed. The host resets its entry for the mover
+  // (resetPeerState): the phantom flag, the inputs it holds for it and its
+  // newest frame go, and so does any state it owed or was sending it (the
+  // scheduled requests for that player and its transfer chain). The mover's
+  // entry was reconnecting: its channel's open handler asks the host for a
+  // resync at once (`sync-request-full`).
+  action heal = {
+    val h = pg.get("host")
+    all {
+      linkDown,
+      linkDown' = false, linkDied' = linkDied,
+      pg' = pg.set("host", { ...h, phantom: false, got: Set(), newest: -1 }),
+      owed' = owed.exclude(Set("mover")),
+      queue' = queue.set("mover", List()),
+      watch' = watch.set("mover", -1),
+      reconnectAsked' = true,
+      asked' = asked, waiting' = waiting,
+      wire' = wire, mFrame' = mFrame, made' = made, frozen' = frozen, froze' = froze,
+    }
+  }
+
+  val RECONNECT_TARGETS = if (RECONNECT_BROADCAST) GUESTS else Set("mover")
+
+  // The host answers the mover's request with its state now: to the mover
+  // alone (_answerDirectSyncRequest), or (RECONNECT_BROADCAST) one capture to
+  // every guest.
+  action hostAnswerReconnect = all {
+    reconnectAsked,
+    reconnectAsked' = false,
+    queue' = GUESTS.mapBy(g =>
+      if (RECONNECT_TARGETS.contains(g)) queue.get(g).append(capture) else queue.get(g)),
+    watch' = GUESTS.mapBy(g => if (RECONNECT_TARGETS.contains(g)) capture.frame else watch.get(g)),
+    owed' = owed, asked' = asked, waiting' = waiting,
+    pg' = pg, wire' = wire, keepMover,
   }
 
   // Nothing happens (a scenario step that only some variants take).
@@ -410,6 +504,9 @@ module recovery_bystander {
     hostAnswer,
     bystanderLands,
     moverLands,
+    linkDies,
+    heal,
+    hostAnswerReconnect,
   }
 
   // ── properties ─────────────────────────────────────────────────────────
@@ -434,6 +531,7 @@ module recovery_bystander {
       queue.get("bystander").length() > 0,
       asked,
       waiting,
+      reconnectAsked,
       and {
         wire.get("bystander").contains(Input(k)), k >= b.floor, b.pred.contains(k),
         getOr(made, k, -1) != getOr(b.used, k, -1),
@@ -545,6 +643,48 @@ module recovery_bystander {
       .then(settledAndResent)
       .expect(hostAndBystanderAgree == BROADCAST)
 
+  // The reconnect path. As in onlyTheHostDroppedItTest the host stops
+  // hearing the mover while the bystander hears it all along, but because
+  // the channel between them dies: the mover's inputs from 2 on are lost on
+  // it, never resent. The host drops the mover, runs its frames on
+  // predictions (neutral) to frame 8, and the bystander runs them on the
+  // mover's real inputs (walking). The channel is healed: the host resets its
+  // entry (no PEER-RECOVERED follows) and the mover asks for a resync. The
+  // host answers it; the mover lands the state at 8 and tells both pages its
+  // inputs start again at 7. The bystander settles them, and keeps what it
+  // ran, unless the answer went to it too (RECONNECT_BROADCAST). The ordering
+  // tests/rb-mesh.mjs RECOVERY_BYSTANDER=1 RECOVERY_MODE=reconnect drives on
+  // the real ROM.
+  run reconnectBystanderTest =
+    init
+      .then(moverTick(0)).then(moverTick(0))
+      .then(deliverInput("host", 0)).then(deliverInput("host", 1))
+      .then(deliverInput("bystander", 0)).then(deliverInput("bystander", 1))
+      .then(3.reps(_ => tick("host").then(tick("bystander"))))
+      .then(linkDies)
+      .then(moverTick(1)).then(moverTick(1)).then(moverTick(1))
+      .expect(wire.get("host") == Set())
+      .then(deliverInput("bystander", 2)).then(deliverInput("bystander", 3)).then(deliverInput("bystander", 4))
+      .then(2.reps(_ => tick("host").then(tick("bystander"))))
+      .expect(blocked(pg.get("host")) and not(blocked(pg.get("bystander"))))
+      .then(markPhantom("host"))
+      .then(tick("host")).then(tick("bystander"))
+      .then(moverTick(1)).then(deliverInput("bystander", 5))
+      .then(tick("host")).then(tick("bystander"))
+      .then(moverTick(1)).then(deliverInput("bystander", 6))
+      .then(tick("host")).then(tick("bystander"))
+      .expect(pg.get("host").frame == 8 and pg.get("bystander").frame == 8)
+      .then(heal)
+      .expect(not(pg.get("host").phantom) and reconnectAsked and owed == Set())
+      .then(hostAnswerReconnect)
+      .expect(queue.get("bystander").length() == (if (RECONNECT_BROADCAST) 1 else 0))
+      .then(moverLands)
+      .then(if (RECONNECT_BROADCAST) bystanderLands else idle)
+      .then(settledAndResent)
+      .expect(getOr(pg.get("host").used, 4, -1) == 0)
+      .expect(getOr(pg.get("bystander").used, 4, -1) == (if (RECONNECT_BROADCAST) 0 else 1))
+      .expect(hostAndBystanderAgree == RECONNECT_BROADCAST)
+
   // The same, but an input past the bystander's window differs (input 4):
   // the bystander escalates, asks for a resync, and lands the host's state.
   // Before the fix its only way back, and the one random inputs nearly
@@ -609,21 +749,28 @@ module recovery_bystander {
 // Before the fix: the host's PEER-RECOVERED resync went to the mover alone,
 // and a guest asked for one only when it heard from the host again.
 module recovery_bystander_before {
-  import recovery_bystander(BROADCAST = false, ASK_ON_RECOVERY = false, LOSSY = true).*
+  import recovery_bystander(BROADCAST = false, ASK_ON_RECOVERY = false, LOSSY = true, RECONNECT_BROADCAST = false).*
+}
+
+// PR #318's fix, before the reconnect fix: the host's answer to the
+// reconnected player's resync request went to that player alone
+// (reconnectBystanderTest).
+module recovery_bystander_reconnect_before {
+  import recovery_bystander(BROADCAST = true, ASK_ON_RECOVERY = true, LOSSY = true, RECONNECT_BROADCAST = false).*
 }
 
 // The resync goes to every guest, but a bystander that still held the mover
 // as a phantom asks for nothing when it hears from it again.
 module recovery_bystander_broadcast_only {
-  import recovery_bystander(BROADCAST = true, ASK_ON_RECOVERY = false, LOSSY = true).*
+  import recovery_bystander(BROADCAST = true, ASK_ON_RECOVERY = false, LOSSY = true, RECONNECT_BROADCAST = true).*
 }
 
 // The broadcast alone, with no input ever lost: enough.
 module recovery_bystander_broadcast_lossless {
-  import recovery_bystander(BROADCAST = true, ASK_ON_RECOVERY = false, LOSSY = false).*
+  import recovery_bystander(BROADCAST = true, ASK_ON_RECOVERY = false, LOSSY = false, RECONNECT_BROADCAST = true).*
 }
 
-// The fix (web/src/recovery-resync.ts).
+// The fix (web/src/recovery-resync.ts: recoveryStep, syncRequestAnswer).
 module recovery_bystander_fixed {
-  import recovery_bystander(BROADCAST = true, ASK_ON_RECOVERY = true, LOSSY = true).*
+  import recovery_bystander(BROADCAST = true, ASK_ON_RECOVERY = true, LOSSY = true, RECONNECT_BROADCAST = true).*
 }

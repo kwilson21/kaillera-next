@@ -2,6 +2,8 @@
 
 datatype RecoveryStep = nothing | resync_guests | ask_at | ask
 
+datatype SyncRequestAnswer = resync_guests | scheduled | direct
+
 function recoveryStep(isHost: bool, recoveredIsHost: bool, resyncEnabled: bool, requestOut: bool): RecoveryStep
 {
   if !(resyncEnabled) then
@@ -27,5 +29,23 @@ lemma recoveryStep_ensures(isHost: bool, recoveredIsHost: bool, resyncEnabled: b
   ensures (resyncEnabled ==> !(isHost) ==> !(recoveredIsHost) ==> !(requestOut) ==> recoveryStep(isHost, recoveredIsHost, resyncEnabled, requestOut).ask?)
   ensures (recoveryStep(isHost, recoveredIsHost, resyncEnabled, requestOut).resync_guests? ==> isHost)
   ensures ((recoveryStep(isHost, recoveredIsHost, resyncEnabled, requestOut).ask_at? || recoveryStep(isHost, recoveredIsHost, resyncEnabled, requestOut).ask?) ==> !(isHost))
+{
+}
+
+function syncRequestAnswer(reconnected: bool, targetAhead: bool): SyncRequestAnswer
+{
+  if reconnected then
+    SyncRequestAnswer.resync_guests
+  else
+    if targetAhead then
+      SyncRequestAnswer.scheduled
+    else
+      SyncRequestAnswer.direct
+}
+
+lemma syncRequestAnswer_ensures(reconnected: bool, targetAhead: bool)
+  ensures (reconnected ==> syncRequestAnswer(reconnected, targetAhead).resync_guests?)
+  ensures (!(reconnected) ==> targetAhead ==> syncRequestAnswer(reconnected, targetAhead).scheduled?)
+  ensures (!(reconnected) ==> !(targetAhead) ==> syncRequestAnswer(reconnected, targetAhead).direct?)
 {
 }

@@ -1744,6 +1744,11 @@
   // id: the mesh health check does not add them back; they come back only
   // as late joiners (specs/drop_is_final.qnt).
   let _droppedThisMatch = new Set();
+  // Host: guests whose entry it reset for a reconnect (resetPeerState,
+  // 'reconnect' or 'mesh-heal') whose next resync request it has not
+  // answered yet, by id. That answer goes to every guest
+  // (web/src/recovery-resync.ts, syncRequestAnswer).
+  let _reconnectedSids = new Set();
   // This page was dropped by the host and is joining again late.
   let _droppedByHost = false;
   // INPUT-OOR is logged at most once a second per slot, with how many were
@@ -10327,7 +10332,36 @@
           const colonIdx = e.data.lastIndexOf(':');
           const targetFrame =
             e.data.includes('-at:') && colonIdx >= 0 ? parseInt(e.data.substring(colonIdx + 1), 10) : NaN;
-          if (!isNaN(targetFrame) && targetFrame > _frameNum) {
+          // Which answer is web/src/recovery-resync.ts (proved;
+          // specs/recovery_bystander.qnt, recovery_bystander_fixed).
+          const answer = window.KNCore.recoveryResync.syncRequestAnswer(
+            _reconnectedSids.has(remoteSid),
+            !isNaN(targetFrame) && targetFrame > _frameNum,
+          );
+          _reconnectedSids.delete(remoteSid);
+          if (answer === 'resync-guests') {
+            // The first request from a guest whose channel was reconnected.
+            // While it was dead this page ran that guest's frames on
+            // predictions and every other guest ran them on its real inputs,
+            // which never reach this page (no PEER-RECOVERED follows the
+            // reset). As for PEER-RECOVERED, every guest gets the state: the
+            // requests share their frame and deadline, so one capture goes to
+            // all of them, at once or when confirmed, and its follow-ups go
+            // wherever it went. The asking guest's carries its request number;
+            // another guest's own request already queued stays, to be answered.
+            const deadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+            _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
+            _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: remoteSid, requestId, deadlineAt });
+            const others = _syncTargetsFor(null)
+              .map((t) => t.sid)
+              .filter((sid) => sid !== remoteSid && !_scheduledSyncRequests.some((r) => r.targetSid === sid));
+            for (const sid of others)
+              _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });
+            _syncLog(
+              `reconnect resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum} ` +
+                `guests=${[remoteSid, ...others].map((sid) => _peers[sid]?.slot ?? '?').join(',')}`,
+            );
+          } else if (answer === 'scheduled') {
             // Replace any existing request from this guest so requests don't stack
             _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
             // I1 (MF3): record wall-clock deadline so the drain
@@ -10612,6 +10646,8 @@
    *     _syncQueueGen so an in-flight push can't requeue for it, and a
    *     state transfer queued or running for it is dropped)
    *   - _syncSendChains (by sid): that peer's chain of state transfers
+   *   - _reconnectedSids (by sid; host): added on a reconnect ('reconnect',
+   *     'mesh-heal'), dropped on any other reset
    *
    * @param {number} slot - player slot to clear (0-3)
    * @param {string} reason - short human-readable reason for the reset;
@@ -10681,6 +10717,12 @@
       _syncQueueGen[opts.sid] = (_syncQueueGen[opts.sid] || 0) + 1;
       delete _syncSendChains[opts.sid];
       delete _syncChainMovedAt[opts.sid];
+      // The host's next answer to a guest it reset for a reconnect goes to
+      // every guest: it ran that guest's frames on predictions while the
+      // channel was dead, and the others on its real inputs
+      // (specs/recovery_bystander.qnt, reconnectBystanderTest).
+      if (_playerSlot === 0 && (reason === 'reconnect' || reason === 'mesh-heal')) _reconnectedSids.add(opts.sid);
+      else _reconnectedSids.delete(opts.sid);
     }
 
     // Stall tracking — if we were stalled waiting on this slot's apply
@@ -14429,6 +14471,7 @@
 
   const _clearInputsForNewMatch = (reason) => {
     _droppedThisMatch = new Set();
+    _reconnectedSids = new Set();
     if (_frameNum !== 0) return; // late join keeps its buffers
     _lateJoinBootContinuation = null;
     // Runs before this peer sends lockstep-ready: a peer can start as soon as it sees it, and its first inputs
@@ -20548,6 +20591,7 @@
 
   const stop = () => {
     _droppedThisMatch = new Set();
+    _reconnectedSids = new Set();
     _droppedByHost = false;
     // Before the final log flush, so its log line reaches the server.
     _clearHostInitialStateWait();

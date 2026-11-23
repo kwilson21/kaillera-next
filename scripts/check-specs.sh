@@ -487,8 +487,8 @@ $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
 # up having run its frames on the same inputs.
 BYSTANDER=specs/recovery_bystander.qnt
 $QUINT typecheck "$BYSTANDER"
-for variant in recovery_bystander_before recovery_bystander_broadcast_only \
-  recovery_bystander_broadcast_lossless recovery_bystander_fixed; do
+for variant in recovery_bystander_before recovery_bystander_reconnect_before \
+  recovery_bystander_broadcast_only recovery_bystander_broadcast_lossless recovery_bystander_fixed; do
   $QUINT test "$BYSTANDER" --main="$variant" --backend="$BACKEND"
 done
 # Fixed: the host's PEER-RECOVERED resync goes to every guest, and a guest
@@ -499,7 +499,11 @@ done
 # bystanderAppliesWhatTheHostSettledTest; tests/rb-mesh.mjs
 # RECOVERY_BYSTANDER=1 drives the first on the real ROM). With
 # inputs lost, VIOLATED too while only the host was heard from again
-# (recovery_bystander_broadcast_only; bystanderStillPhantomTest). 150 steps:
+# (recovery_bystander_broadcast_only; bystanderStillPhantomTest). And on the
+# reconnect path: VIOLATED while the host answered the reconnected guest's
+# resync request to that guest alone (recovery_bystander_reconnect_before;
+# reconnectBystanderTest; tests/rb-mesh.mjs RECOVERY_BYSTANDER=1
+# RECOVERY_MODE=reconnect drives it on the real ROM). 150 steps:
 # most runs play the model to its end (LAST frames, nothing on the way).
 $QUINT run "$BYSTANDER" --main=recovery_bystander_fixed --invariant=allHold \
   --max-samples=3000 --max-steps=150 --backend="$BACKEND"

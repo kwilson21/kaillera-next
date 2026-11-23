@@ -1,6 +1,8 @@
 /**
  * What a page does when it hears again from a player it held as a phantom
- * (PEER-RECOVERED in web/static/netplay-rollback.js's input handler).
+ * (PEER-RECOVERED in web/static/netplay-rollback.js's input handler), and how
+ * the host answers a guest that asks for a resync after its channel was
+ * reconnected (syncRequestAnswer, below).
  *
  * While a page holds a player as a phantom it runs that player's frames on
  * its own predictions, and so may every other page, each on its own: some
@@ -67,4 +69,48 @@ export function recoveryStep(
   if (recoveredIsHost) return 'ask-at';
   if (requestOut) return 'nothing';
   return 'ask';
+}
+
+/**
+ * How the host answers a guest's request for a resync (its channel handler
+ * for `sync-request-full` and `sync-request-full-at:<frame>`).
+ *
+ * When the channel between the host and a guest dies and is healed (its
+ * close event, or the mesh health check), the host resets its entry for that
+ * guest (resetPeerState): the phantom flag goes, so no PEER-RECOVERED follows
+ * and recoveryStep never runs. The guest asks for a resync from the new
+ * channel's open handler. While the channel was dead the host ran the
+ * guest's frames on predictions and every other guest (a bystander) ran them
+ * on its real inputs, heard all along; those inputs never reach the host.
+ * A state for the returning guest alone leaves every bystander on frames the
+ * host ran on other inputs, and nothing compares them again. So:
+ *
+ *  - `resync-guests`: the first request from a guest whose channel the host
+ *    reset for a reconnect. One capture goes to every guest (the requests
+ *    share their frame and deadline and fall due together), as for
+ *    PEER-RECOVERED.
+ *  - `scheduled`: a coordinated request whose target frame is still ahead:
+ *    a state at that frame, for that guest.
+ *  - `direct`: a state now, for that guest.
+ *
+ * Modelled in specs/recovery_bystander.qnt: hostAndBystanderAgree holds on
+ * recovery_bystander_fixed; it is violated when the answer goes to the
+ * reconnected guest alone (recovery_bystander_reconnect_before;
+ * reconnectBystanderTest).
+ */
+export type SyncRequestAnswer = 'resync-guests' | 'scheduled' | 'direct';
+
+/**
+ * @param reconnected  the host reset its entry for this guest for a
+ *                     reconnect and has answered no request of it since
+ * @param targetAhead  the request names a frame (`-at:`) the host has not
+ *                     reached yet
+ */
+//@ ensures reconnected ==> \result === "resync-guests"
+//@ ensures !reconnected && targetAhead ==> \result === "scheduled"
+//@ ensures !reconnected && !targetAhead ==> \result === "direct"
+export function syncRequestAnswer(reconnected: boolean, targetAhead: boolean): SyncRequestAnswer {
+  if (reconnected) return 'resync-guests';
+  if (targetAhead) return 'scheduled';
+  return 'direct';
 }
