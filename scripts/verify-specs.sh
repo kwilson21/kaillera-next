@@ -448,6 +448,10 @@ drop_is_final() {
 rom_identity() {
   local ROM_IDENTITY=specs/rom_identity.qnt
   verify "$ROM_IDENTITY" rom_identity_current allHold
+  # No start took the guest's word for the host's previous ROM even while the
+  # host's drop said nothing: the host's Start waits for its own hash, and
+  # the server drops every guest's word when that hash lands.
+  verify "$ROM_IDENTITY" rom_identity_host_silent aStartCountsOnlyTheHostsRom
   # A wrong ROM hashed, the host's dropped over it, the host's ROM arrives:
   # 4 steps (rightOverWrongTest).
   expect_violation "$ROM_IDENTITY" rom_identity_before aRightRomStays
@@ -467,6 +471,17 @@ rom_identity() {
   expect_violation "$ROM_IDENTITY" rom_identity_first_push aSettledRomKeepsItsHash
   # A rejoin while the drop is hashed is 7 steps, past the bound: its scenario
   # (rejoinWhileHashingTest) checks it.
+  # The host's ROM known, the host's ROM picked from the library, the host
+  # drops another, Start: 4 steps (hostChangesThenStartsTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push aStartCountsOnlyTheHostsRom
+  # The host's ROM known, the host drops another, the guest picks that one
+  # from the library and refuses it against the host's previous ROM: 3 steps
+  # (hostChangesToTheGuestsRomTest drops it instead).
+  expect_violation "$ROM_IDENTITY" rom_identity_host_silent aRightRomStays
+  # The host's ROM known and the guest's ROM the host's, the host drops
+  # another: the server still counts the guest ready on the previous one,
+  # 3 steps (hostChangesAwayFromTheGuestsRomTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_host_silent theServerCountsOnlyTheHostsRom
 }
 
 start_group() {
