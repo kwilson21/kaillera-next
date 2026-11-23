@@ -47,7 +47,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import ColumnElement, Select, or_, select
 from starlette.middleware.gzip import GZipMiddleware
@@ -77,6 +77,7 @@ from src.api.signaling import (
     rooms,
     verify_upload_token,
 )
+from src.log_archive import ArchiveUnreadable
 from src.ratelimit import check_ip, extract_ip, ip_hash
 from src.schema import ClientEvent, DesyncEvent, Feedback, MatchMetrics, SessionLog
 
@@ -765,6 +766,12 @@ def create_app(lifespan=None) -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=500)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
     app.add_middleware(PublicCorsMiddleware)
+
+    @app.exception_handler(ArchiveUnreadable)
+    async def _archive_unreadable(_request: Request, exc: ArchiveUnreadable) -> JSONResponse:
+        # An evicted match's chunks are no longer in the database, so an
+        # archive that can't be read is an error, not an empty log.
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     # Load error page template
     _error_html_path = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "error.html"
@@ -1659,7 +1666,7 @@ def create_app(lifespan=None) -> FastAPI:
         # the count. For a live log at its size cap, the count can exceed
         # what is streamed: the cap may delete counted chunks meanwhile.
         match_id, slot = entry.get("match_id"), entry.get("slot")
-        legacy = await db.parse_log_data(entry.get("log_data"))
+        legacy = await db.legacy_log_entries(match_id, entry.get("log_data"))
         stored, through_id = await db.count_log_entries(match_id, slot)
         entry_count = len(legacy) + stored
 

@@ -151,7 +151,7 @@ def test_baseline_migration_applies_through_d1():
         return first, second, [t["name"] for t in tables]
 
     first, second, tables = run_async(_run(_backend(fake.transport()), call))
-    assert first == ["0001", "0002", "0003", "0004", "0005", "0006"]
+    assert first == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
     assert second == []
     assert {"feedback", "session_logs", "client_events", "screenshots", "match_metrics", "desync_events"} <= set(tables)
 
@@ -205,6 +205,7 @@ def test_archive_and_eviction_run_through_d1(tmp_path):
                 "UPDATE match_retention SET archived_at = datetime(archived_at, '-3 days'),"
                 " archived_updated_at = datetime(archived_updated_at, '-3 days') WHERE match_id = ?",
                 "UPDATE session_logs SET updated_at = datetime(updated_at, '-3 days') WHERE match_id = ?",
+                "UPDATE session_log_chunks SET created_at = datetime(created_at, '-3 days') WHERE match_id = ?",
             ):
                 await db.execute_write(statement, (match_id,))
             archived_too, evicted_now = await log_archive.sweep()

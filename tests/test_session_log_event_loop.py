@@ -267,3 +267,61 @@ def test_metrics_are_stored_even_when_the_classifier_raises(app_db):
             await db.close_db()
 
     assert run_async(scenario()) == [{"entry_count": 2}]
+
+
+def test_health_answers_while_a_long_log_is_archived_and_its_evicted_copy_exported(app_db):
+    """The archive gzips page by page in worker threads, and an evicted log is
+    read back a page at a time (src/log_archive.py): neither holds the loop."""
+
+    async def scenario():
+        from src import log_archive
+        from src.api.app import create_app
+
+        db = await app_db()
+        try:
+            await db.register_match("m1", "ROOM1")
+            await _seed_long_log(db)
+            for statement in (
+                "UPDATE match_retention SET ended_at = datetime('now', '-45 minutes')",
+                "UPDATE session_logs SET updated_at = datetime(updated_at, '-45 minutes')",
+                "UPDATE session_log_chunks SET created_at = datetime(created_at, '-45 minutes')",
+            ):
+                await db.execute_write(statement, ())
+            async with _client(create_app()) as http:
+                archived, archive_took, archive_worst = await _worst_health_wait(
+                    http, lambda: log_archive.archive_match("m1")
+                )
+                await db.execute_write(
+                    "UPDATE match_retention SET archived_at = datetime(archived_at, '-3 days'),"
+                    " archived_updated_at = datetime(archived_updated_at, '-3 days')",
+                    (),
+                )
+                # D1_HOT_DAYS pass: the whole match moves back, as time would
+                # leave it, so its chunks are still older than the archive.
+                await db.execute_write("UPDATE session_logs SET updated_at = datetime(updated_at, '-3 days')", ())
+                await db.execute_write(
+                    "UPDATE session_log_chunks SET created_at = datetime(created_at, '-3 days')", ()
+                )
+                evicted = await log_archive.evict_match("m1")
+                left = await db.query("SELECT COUNT(*) AS n FROM session_log_chunks", ())
+
+                async def export():
+                    lines = 0
+                    path = "/admin/api/session-logs/1/export?format=jsonl"
+                    async with http.stream("GET", path, headers={"X-Admin-Key": "k"}) as resp:
+                        assert resp.status_code == 200
+                        async for chunk in resp.aiter_bytes():
+                            lines += chunk.count(b"\n")
+                        return resp.headers["x-entry-count"], lines
+
+                exported, export_took, export_worst = await _worst_health_wait(http, export)
+            return archived, evicted, left[0]["n"], (archive_took, archive_worst), exported, (export_took, export_worst)
+        finally:
+            await db.close_db()
+
+    archived, evicted, left, archive_timing, (entry_count, lines), export_timing = run_async(scenario())
+    assert archived and evicted and left == 0
+    assert entry_count == str(FLUSHES * ENTRIES_PER_FLUSH)
+    assert lines == FLUSHES * ENTRIES_PER_FLUSH + 1
+    _assert_loop_stayed_free(*archive_timing)
+    _assert_loop_stayed_free(*export_timing)

@@ -9,6 +9,7 @@ Run: cd server && uv run --extra dev pytest ../tests/test_log_archive.py -q
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import json
 
@@ -125,10 +126,13 @@ async def _ended(db, minutes_ago):
     offset = f"-{minutes_ago} minutes"
     for statement in (
         "UPDATE match_retention SET ended_at = datetime('now', ?) WHERE match_id = ?",
-        "UPDATE session_logs SET updated_at = datetime(updated_at, ?) WHERE match_id = ?",
+        "UPDATE session_logs SET updated_at = datetime(updated_at, ?), created_at = datetime(created_at, ?)"
+        " WHERE match_id = ?",
         "UPDATE session_log_chunks SET created_at = datetime(created_at, ?) WHERE match_id = ?",
+        "UPDATE session_log_evictions SET updated_at = datetime(updated_at, ?) WHERE match_id = ?",
     ):
-        await db.execute_write(statement, (offset, MATCH))
+        params = (offset, offset, MATCH) if statement.startswith("UPDATE session_logs") else (offset, MATCH)
+        await db.execute_write(statement, params)
 
 
 async def _hot_days_pass(db):
@@ -141,9 +145,17 @@ async def _hot_days_pass(db):
             " archived_updated_at = datetime(archived_updated_at, '-3 days') WHERE match_id = ?",
             (MATCH,),
         ),
-        ("UPDATE session_logs SET updated_at = datetime(updated_at, '-3 days') WHERE match_id = ?", (MATCH,)),
+        (
+            "UPDATE session_logs SET updated_at = datetime(updated_at, '-3 days'),"
+            " created_at = datetime(created_at, '-3 days') WHERE match_id = ?",
+            (MATCH,),
+        ),
         (
             "UPDATE session_log_chunks SET created_at = datetime(created_at, '-3 days') WHERE match_id = ?",
+            (MATCH,),
+        ),
+        (
+            "UPDATE session_log_evictions SET updated_at = datetime(updated_at, '-3 days') WHERE match_id = ?",
             (MATCH,),
         ),
     ):
@@ -158,6 +170,18 @@ async def _retention_row(db):
 async def _archived_through(db):
     row = await _retention_row(db)
     return row["archived_max_chunk_id"] if row else None
+
+
+async def _token(db):
+    """The recorded attempt's token, which its object keys carry."""
+    row = await _retention_row(db)
+    return row["archive_token"] if row else None
+
+
+def _objects(tmp_path):
+    """Every object the blob store holds for the match."""
+    root = tmp_path / "blobs" / "matches" / MATCH
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()) if root.exists() else []
 
 
 async def _chunk_ids(db):
@@ -260,14 +284,14 @@ def test_a_failed_upload_leaves_the_match_un_archived(tmp_path):
         # taken back: an archive that is not recorded leaves nothing
         # (specs/log_archive.qnt, noStrayObjects).
         assert any(".entries.jsonl.gz" in key for key in store.puts)
-        assert not list((tmp_path / "blobs" / "matches").rglob("*.gz"))
+        assert _objects(tmp_path) == []
 
         store.fail_on = None
         assert await log_archive.archive_match(MATCH) is True
         assert (await _retention_row(db))["archived_at"]
         assert await _read(db, 0)
 
-    with_db(tmp_path, body, fail_on="1-6.entries")
+    with_db(tmp_path, body, fail_on="/1.entries")
 
 
 # ── refusedRecordTest ────────────────────────────────────────────────────────
@@ -277,30 +301,59 @@ def test_an_attempt_that_loses_the_race_removes_only_its_own_objects(tmp_path):
     """The model's refusedRecordTest: the record is refused because another
     attempt archived the match first (two servers sweep during a deploy).
 
-    The loser deletes what it uploaded and the winner's objects stay, because
-    each attempt's keys carry the chunk id it archived through.
+    The loser deletes what it uploaded and the winner's objects stay: each
+    attempt's keys carry a token of its own. Keyed by the chunk id, both
+    would have uploaded through the same id to the same keys
+    (log_archive_key_by_through).
     """
 
     async def body(db, store):
         from src import log_archive
 
         await _match(db, slots=(0,), ended_minutes_ago=45)
-        # The winner archived through an earlier chunk than this attempt, so
-        # its objects are under different keys.
-        winner_through = min(await _chunk_ids(db))
-        await db.put_blob(log_archive.entries_key(MATCH, 0, winner_through), b"winner")
+        through = max(await _chunk_ids(db))
+        await db.put_blob(log_archive.entries_key(MATCH, 0, "winner"), b"winner")
 
         async def archive_first(key):
             await db.execute_write(
-                "UPDATE match_retention SET archived_at = datetime('now'), archived_max_chunk_id = ?"
-                " WHERE match_id = ? AND archived_at IS NULL",
-                (winner_through, MATCH),
+                "UPDATE match_retention SET archived_at = datetime('now'), archived_max_chunk_id = ?,"
+                " archive_token = 'winner' WHERE match_id = ? AND archived_at IS NULL",
+                (through, MATCH),
             )
 
         store.after_put = archive_first
         assert await log_archive.archive_match(MATCH) is False
-        assert (await _retention_row(db))["archived_max_chunk_id"] == winner_through
-        assert await db.get_blob(log_archive.entries_key(MATCH, 0, winner_through)) == b"winner"
+        row = await _retention_row(db)
+        assert row["archive_token"] == "winner" and row["archived_max_chunk_id"] == through
+        assert _objects(tmp_path) == ["sessions/winner/0.entries.jsonl.gz"]
+
+    with_db(tmp_path, body)
+
+
+def test_two_archives_at_once_leave_one_complete_archive(tmp_path):
+    """Two servers' sweeps archive the same match concurrently, interleaving
+    every upload. One records; the other takes back its own objects; the
+    recorded archive is whole, and reads the same after eviction."""
+
+    async def body(db, store):
+        from src import log_archive
+
+        await _match(db, ended_minutes_ago=45)
+        before = {slot: await _read(db, slot) for slot in (0, 1)}
+
+        async def yield_after_put(key):
+            await asyncio.sleep(0)
+
+        store.after_put = yield_after_put
+        results = await asyncio.gather(log_archive.archive_match(MATCH), log_archive.archive_match(MATCH))
+        assert sorted(results) == [False, True]
+        token = await _token(db)
+        assert {key.split("/")[1] for key in _objects(tmp_path) if key.startswith("sessions/")} == {token}
+
+        await _hot_days_pass(db)
+        assert await log_archive.evict_match(MATCH) is True
+        assert await _chunk_ids(db) == []
+        assert {slot: await _read(db, slot) for slot in (0, 1)} == before
 
     with_db(tmp_path, body)
 
@@ -358,6 +411,170 @@ def test_a_chunk_written_after_the_eviction_is_read_after_the_archive(tmp_path):
     with_db(tmp_path, body)
 
 
+# ── partialEvictionTest and deleteAgainAfterReuseTest ────────────────────────
+
+
+def test_a_partial_eviction_reads_the_same_and_the_next_sweep_finishes_it(tmp_path):
+    """The model's partialEvictionTest: D1's HTTP batch is not documented as a
+    transaction, so the eviction can stop after setting evicted_at. The
+    archived chunks still in D1 are read once, from the archive (reading
+    every chunk left in D1 would read them twice), and the next sweep
+    finishes the DELETE."""
+
+    async def body(db, store):
+        from src import log_archive
+
+        await _match(db, ended_minutes_ago=45)
+        before = {slot: await _read(db, slot) for slot in (0, 1)}
+        assert await log_archive.archive_match(MATCH) is True
+        await _hot_days_pass(db)
+        # The batch's first statement alone.
+        await db.execute_write("UPDATE match_retention SET evicted_at = datetime('now') WHERE match_id = ?", (MATCH,))
+        assert await _chunk_ids(db)
+        assert {slot: await _read(db, slot) for slot in (0, 1)} == before
+
+        assert await log_archive.sweep() == (0, 1)
+        assert await _chunk_ids(db) == []
+        assert {slot: await _read(db, slot) for slot in (0, 1)} == before
+
+    with_db(tmp_path, body)
+
+
+def test_a_delete_run_again_keeps_a_chunk_that_reused_an_archived_id(tmp_path):
+    """The model's deleteAgainAfterReuseTest: once the eviction has deleted
+    the newest rows, SQLite gives the next chunk an id the archive covers. A
+    second run of the eviction (a second server's sweep) must not take it:
+    the DELETE picks the archive's chunks by created_at as well as by id."""
+
+    async def body(db, store):
+        from src import log_archive
+
+        await _match(db, slots=(0,), ended_minutes_ago=45)
+        assert await log_archive.archive_match(MATCH) is True
+        through = await _archived_through(db)
+        await _hot_days_pass(db)
+        assert await log_archive.evict_match(MATCH) is True
+        await _flush(db, 0, ["TICK after eviction"], seq_base=90)
+        reused = await _chunk_ids(db)
+        assert len(reused) == 1 and reused[0] <= through, "the table was emptied, so SQLite reuses the id"
+
+        assert await log_archive.evict_match(MATCH) is True
+        assert await _chunk_ids(db) == reused
+        assert _msgs((await _read(db, 0))["detail"]) == ["TICK slot=0 a", "[C] rb slot=0", "TICK after eviction"]
+
+    with_db(tmp_path, body)
+
+
+# ── An archive that can't be read ────────────────────────────────────────────
+
+
+def test_an_unreadable_archive_is_an_error_not_an_empty_log(tmp_path):
+    """Once evicted, the chunks are gone from D1, so a missing object or a
+    failed fetch must not read as a log that never had them."""
+
+    async def body(db, store):
+        from src import log_archive
+        from src.blobstore import BlobStoreError
+
+        await _match(db, slots=(0,), ended_minutes_ago=45)
+        assert await log_archive.archive_match(MATCH) is True
+        token = await _token(db)
+        await _hot_days_pass(db)
+        assert await log_archive.evict_match(MATCH) is True
+
+        await db.delete_blobs([log_archive.entries_key(MATCH, 0, token)])
+        with pytest.raises(log_archive.ArchiveUnreadable, match="missing"):
+            await db.get_full_log_entries(MATCH, 0, None)
+        with pytest.raises(log_archive.ArchiveUnreadable, match="missing"):
+            await db.count_log_entries(MATCH, 0)
+
+        async def broken_get(key):
+            raise BlobStoreError("R2 get_object failed: InternalError")
+
+        store.get = broken_get
+        with pytest.raises(log_archive.ArchiveUnreadable, match="unreadable"):
+            await db.get_input_audit(MATCH, 0)
+        with pytest.raises(log_archive.ArchiveUnreadable, match="unreadable"):
+            await db.get_session_context(MATCH, 0, None)
+
+    with_db(tmp_path, body)
+
+
+def test_a_slot_first_written_after_the_archive_reads_from_the_database(tmp_path):
+    """A slot whose first flush came after the archive has no objects; that is
+    expected, not an error, and its log is read from D1."""
+
+    async def body(db, store):
+        from src import log_archive
+
+        await _match(db, slots=(0,), ended_minutes_ago=45)
+        assert await log_archive.archive_match(MATCH) is True
+        await _hot_days_pass(db)
+        assert await log_archive.evict_match(MATCH) is True
+        await _flush(db, 1, ["TICK new slot"])
+        read = await _read(db, 1)
+        assert _msgs(read["detail"]) == ["TICK new slot"] and read["count"] == 1
+        assert json.loads(read["context"])["slot"] == 1
+
+    with_db(tmp_path, body)
+
+
+def test_the_admin_endpoints_read_an_evicted_match_and_answer_502_without_its_archive(tmp_path, monkeypatch):
+    """Through the HTTP API: detail, export and input-audit return the same
+    before and after eviction, and 502 naming the object once it is gone."""
+    import httpx
+
+    monkeypatch.setenv("ADMIN_KEY", "k")
+    from src.api import app as appmod
+
+    monkeypatch.setattr(appmod, "check_ip", lambda ip, event: True)
+
+    async def body(db, store):
+        from src import log_archive
+
+        await _match(db, ended_minutes_ago=45)
+        key = {"X-Admin-Key": "k"}
+        ids = [r["id"] for r in await db.query("SELECT id FROM session_logs ORDER BY slot", ())]
+
+        async def responses():
+            transport = httpx.ASGITransport(app=appmod.create_app())
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+                out = []
+                for log_id in ids:
+                    detail = await http.get(f"/admin/api/session-logs/{log_id}", headers=key)
+                    export = await http.get(f"/admin/api/session-logs/{log_id}/export", headers=key)
+                    out.append((detail.status_code, detail.json(), export.status_code, export.text))
+                audit = await http.get(f"/admin/api/input-audit/{MATCH}", headers=key)
+                out.append((audit.status_code, audit.json()))
+                return out
+
+        before = await responses()
+        assert all(r[0] == 200 for r in before)
+        assert await log_archive.archive_match(MATCH) is True
+        token = await _token(db)
+        await _hot_days_pass(db)
+        assert await log_archive.evict_match(MATCH) is True
+        after = await responses()
+        # The detail carries the row as stored: its cleared columns and
+        # updated_at differ; the log, summary and context do not.
+        for b, a in zip(before[:-1], after[:-1], strict=True):
+            assert a[0] == 200 and a[2] == 200
+            for field in ("log_data", "context", "summary", "match_id", "slot"):
+                assert a[1][field] == b[1][field], field
+            assert a[3].splitlines()[1:] == b[3].splitlines()[1:]
+        assert after[-1] == before[-1]
+
+        await db.delete_blobs([log_archive.entries_key(MATCH, 0, token)])
+        transport = httpx.ASGITransport(app=appmod.create_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+            detail = await http.get(f"/admin/api/session-logs/{ids[0]}", headers=key)
+            export = await http.get(f"/admin/api/session-logs/{ids[0]}/export", headers=key)
+        assert detail.status_code == 502 and "missing" in detail.json()["detail"]
+        assert export.status_code == 502
+
+    with_db(tmp_path, body)
+
+
 # ── deleteDuringArchiveTest ──────────────────────────────────────────────────
 
 
@@ -370,7 +587,6 @@ def test_a_delete_that_starts_during_the_archive_takes_the_upload_with_it(tmp_pa
         from src import log_archive
 
         await _match(db, ended_minutes_ago=45)
-        through = max(await _chunk_ids(db))
         tombstoned: list[bool] = []
 
         async def tombstone(key):
@@ -384,10 +600,7 @@ def test_a_delete_that_starts_during_the_archive_takes_the_upload_with_it(tmp_pa
         assert await log_archive.archive_match(MATCH) is False
         row = await _retention_row(db)
         assert row["archived_at"] is None and row["deleting_at"]
-        for slot in (0, 1):
-            assert await db.get_blob(log_archive.entries_key(MATCH, slot, through)) is None
-            assert await db.get_blob(log_archive.audit_key(MATCH, slot, through)) is None
-            assert await db.get_blob(log_archive.context_key(MATCH, slot, through)) is None
+        assert _objects(tmp_path) == []
 
     with_db(tmp_path, body)
 
@@ -423,17 +636,15 @@ def test_retention_deletes_an_evicted_match_and_its_archive(tmp_path):
 
         await _match(db, ended_minutes_ago=45)
         assert await log_archive.archive_match(MATCH) is True
-        through = await _archived_through(db)
+        token = await _token(db)
         await _hot_days_pass(db)
         assert await log_archive.evict_match(MATCH) is True
-        assert await db.get_blob(log_archive.entries_key(MATCH, 0, through)) is not None
+        assert await db.get_blob(log_archive.entries_key(MATCH, 0, token)) is not None
 
         await _ended(db, 30 * 24 * 60)
         await retention.sweep(include_unregistered=False)
         assert await _retention_row(db) is None
-        for slot in (0, 1):
-            assert await db.get_blob(log_archive.entries_key(MATCH, slot, through)) is None
-            assert await db.get_blob(log_archive.context_key(MATCH, slot, through)) is None
+        assert _objects(tmp_path) == []
         assert await db.query("SELECT COUNT(*) AS n FROM session_logs WHERE match_id = ?", (MATCH,)) == [{"n": 0}]
 
     with_db(tmp_path, body)
@@ -493,9 +704,9 @@ def test_the_archived_objects_hold_the_log_the_audit_and_the_context(tmp_path):
 
         await _match(db, slots=(0,), ended_minutes_ago=45)
         assert await log_archive.archive_match(MATCH) is True
-        through = await _archived_through(db)
+        token = await _token(db)
 
-        base = f"matches/{MATCH}/sessions/0-{through}"
+        base = f"matches/{MATCH}/sessions/{token}/0"
         entries = gzip.decompress(await db.get_blob(f"{base}.entries.jsonl.gz")).splitlines()
         assert [json.loads(line)["msg"] for line in entries] == ["TICK slot=0 a", "[C] rb slot=0"]
         audit = gzip.decompress(await db.get_blob(f"{base}.audit.jsonl.gz")).splitlines()
@@ -505,7 +716,7 @@ def test_the_archived_objects_hold_the_log_the_audit_and_the_context(tmp_path):
 
         # The rotation's Parquet copy goes up too, and the metrics row points
         # at it instead of this instance's disk, which a deploy wipes.
-        key = f"matches/{MATCH}/entries.zstd.parquet"
+        key = f"matches/{MATCH}/sessions/{token}/entries.zstd.parquet"
         assert key in store.puts
         rows = await db.query("SELECT parquet_path FROM match_metrics WHERE match_id = ?", (MATCH,))
         assert rows[0]["parquet_path"] == key
@@ -553,11 +764,111 @@ def test_a_slotless_session_is_archived_under_slot_none(tmp_path):
         await _ended(db, 45)
         before = await _read(db, None)
         assert await log_archive.archive_match(MATCH) is True
-        through = await _archived_through(db)
-        assert await db.get_blob(f"matches/{MATCH}/sessions/slot-none-{through}.entries.jsonl.gz") is not None
+        token = await _token(db)
+        assert await db.get_blob(f"matches/{MATCH}/sessions/{token}/slot-none.entries.jsonl.gz") is not None
         await _hot_days_pass(db)
         assert await log_archive.evict_match(MATCH) is True
         assert await _read(db, None) == before
+
+    with_db(tmp_path, body)
+
+
+def test_legacy_entries_are_read_once_after_a_late_flush_keeps_the_row(tmp_path):
+    """The archive's log object starts with a row's legacy `log_data`. A
+    flush after the archive keeps the row from being cleared, so readers past
+    evicted_at take legacy entries from the archive alone."""
+
+    async def body(db, store):
+        from src import log_archive
+
+        await _match(db, slots=(0,), ended_minutes_ago=45)
+        legacy = json.dumps([{"msg": "legacy"}])
+        await db.execute_write("UPDATE session_logs SET log_data = ? WHERE match_id = ?", (legacy, MATCH))
+        before = await _read(db, 0)
+        assert _msgs(before["detail"])[0] == "legacy"
+        assert await log_archive.archive_match(MATCH) is True
+        await _flush(db, 0, ["TICK late"], seq_base=50)
+        await _hot_days_pass(db)
+        assert await log_archive.evict_match(MATCH) is True
+
+        read = await _read(db, 0)
+        assert _msgs(read["detail"]) == ["legacy", "TICK slot=0 a", "[C] rb slot=0", "TICK late"]
+        # The export's own legacy entries are none now (the archive holds
+        # them), so its total is the count, the same as the detail.
+        assert await db.legacy_log_entries(MATCH, legacy) == []
+        assert read["count"] == 4 and _msgs(read["streamed"]) == _msgs(read["detail"])
+
+    with_db(tmp_path, body)
+
+
+def test_lines_a_cap_deletes_after_the_archive_are_shown_where_the_archive_ends(tmp_path):
+    """A live match past its window can flush after the archive and hit a
+    size cap. The archive's first lines say what had gone before it; D1's
+    record, changed since, is shown where the archive's entries end."""
+
+    async def body(db, store):
+        from src import db as dbmod
+        from src import log_archive
+
+        await _match(db, slots=(0,), ended_minutes_ago=45)
+        assert await log_archive.archive_match(MATCH) is True
+        await _flush(db, 0, ["TICK late"], seq_base=50)
+        await db.execute_write(
+            "INSERT INTO session_log_evictions (match_id, slot, kind, entries, through_seq) VALUES (?, 0, 'log', 4, 51)",
+            (MATCH,),
+        )
+        await _hot_days_pass(db)
+        await db.execute_write(
+            "UPDATE session_log_evictions SET updated_at = datetime('now') WHERE match_id = ?", (MATCH,)
+        )
+        assert await log_archive.evict_match(MATCH) is True
+
+        read = await _read(db, 0)
+        msgs = _msgs(read["detail"])
+        assert msgs[:2] == ["TICK slot=0 a", "[C] rb slot=0"]
+        assert msgs[2].startswith(f"{dbmod.SERVER_LOG_EVICTED} kind=log entries=4 through_seq=51")
+        assert msgs[3:] == ["TICK late"]
+        assert read["count"] == 4 and _msgs(read["streamed"]) == msgs
+
+    with_db(tmp_path, body)
+
+
+def test_an_evicted_flagged_match_still_counts_against_the_flagged_budget(tmp_path):
+    """Its chunks left D1, but its archive is kept as long as the match, so
+    the budget counts the archive in their place."""
+
+    async def body(db, store):
+        from src import log_archive
+
+        await _match(db, ended_minutes_ago=45)
+        await db.execute_write("UPDATE match_retention SET tier = 'flagged' WHERE match_id = ?", (MATCH,))
+        chunk_bytes = (await db.query("SELECT SUM(size) AS n FROM session_log_chunks", ()))[0]["n"]
+        assert await db._flagged_bytes() == chunk_bytes
+        assert await log_archive.archive_match(MATCH) is True
+        assert await db._flagged_bytes() == chunk_bytes, "archived but not evicted: the chunks still count"
+        await _hot_days_pass(db)
+        assert await log_archive.evict_match(MATCH) is True
+        archive_bytes = (await _retention_row(db))["archive_bytes"]
+        assert archive_bytes > 0
+        assert await db._flagged_bytes() == archive_bytes
+
+    with_db(tmp_path, body)
+
+
+def test_a_rotation_after_the_archive_keeps_the_uploaded_parquet_key(tmp_path):
+    """The minute sweeper or a forced backfill can rotate the match again; it
+    writes to this instance's disk, and the row keeps pointing at R2."""
+
+    async def body(db, store):
+        from src import log_archive, match_rotation
+
+        await _match(db, slots=(0,), ended_minutes_ago=45)
+        assert await log_archive.archive_match(MATCH) is True
+        key = f"matches/{MATCH}/sessions/{await _token(db)}/entries.zstd.parquet"
+        before = await db.query("SELECT parquet_path, parquet_bytes FROM match_metrics", ())
+        assert before[0]["parquet_path"] == key
+        await match_rotation.rotate_match(MATCH)
+        assert await db.query("SELECT parquet_path, parquet_bytes FROM match_metrics", ()) == before
 
     with_db(tmp_path, body)
 

@@ -47,7 +47,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src import db, retention, schema
@@ -354,10 +354,19 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
 
 
 async def _upsert_metrics(m: MatchMetrics) -> None:
-    """Insert-or-replace one match_metrics row."""
+    """Insert-or-replace one match_metrics row.
+
+    A row whose Parquet was archived to the blob store keeps pointing there:
+    a rotation that runs after the archive (the minute sweeper, or a forced
+    backfill) writes its file to this instance's disk, which a deploy wipes
+    (src/log_archive.py).
+    """
     row = dataclasses.asdict(m)
     upsert = sqlite_insert(schema.MatchMetrics).values(**row, rotated_at=db.now())
     replaced = {column: upsert.excluded[column] for column in row if column != "match_id"}
+    archived = schema.MatchMetrics.parquet_path.like("matches/%")
+    for column in ("parquet_path", "parquet_bytes"):
+        replaced[column] = case((archived, getattr(schema.MatchMetrics, column)), else_=upsert.excluded[column])
     await db.run(upsert.on_conflict_do_update(index_elements=["match_id"], set_={**replaced, "rotated_at": db.now()}))
 
 

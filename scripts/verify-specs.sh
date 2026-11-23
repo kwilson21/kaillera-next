@@ -632,20 +632,32 @@ session_log_store() {
 log_archive() {
   local ARCHIVE=specs/log_archive.qnt
   # A match's log is readable from exactly one place, the archive is recorded
-  # only once it is complete, and retention leaves nothing behind. Checked
-  # past the deepest counterexample below (8 steps).
+  # only once it is complete, and retention leaves nothing behind — with two
+  # archivers at once, crashes at each step, an eviction batch that runs in
+  # parts or again, and SQLite reusing ids. Checked as deep as the deepest
+  # counterexample below (9 steps); 10 outlasts a CI job's 20 minutes.
   verify "$ARCHIVE" log_archive_current allHold init 9
   # Recorded before the uploads are confirmed, a failed upload leaves an
-  # archived id R2 has nothing for (4 steps; failedUploadTest).
+  # archived id R2 has nothing for (failedUploadTest).
   expect_violation "$ARCHIVE" log_archive_record_first archivedOnlyWhenComplete
-  # Evicting every chunk, or reading the archive alone, loses a chunk written
-  # after the archive: flush, window, archive x3, hot, evict, flush (8 steps;
-  # lateChunkTest, chunkAfterEvictionTest).
-  expect_violation "$ARCHIVE" log_archive_evict_all logAlwaysReadable 8
-  expect_violation "$ARCHIVE" log_archive_archive_only logAlwaysReadable 8
+  # An eviction batch that stops after its mark leaves the archived chunks in
+  # D1; reading every chunk left there reads them twice: flush, window,
+  # archive x3, hot, evict (7 steps; partialEvictionTest).
+  expect_violation "$ARCHIVE" log_archive_read_all_tail logAlwaysReadable 7
+  # Two archivers keyed by the chunk id alone share keys; the refused one
+  # takes back the recorded one's objects: flush, window, begin x2, upload x2,
+  # finish x2 (8 steps; twoArchiversAtOnceTest).
+  expect_violation "$ARCHIVE" log_archive_key_by_through archivedOnlyWhenComplete 8
   # An archive that keeps its objects after finding the match tombstoned
   # leaves them behind for good (8 steps; deleteDuringArchiveTest).
   expect_violation "$ARCHIVE" log_archive_ignore_tombstone retentionLeavesNothing 8
+  # Reading the archive alone after eviction, or evicting every chunk, loses
+  # a chunk written after the archive (8 steps; lateChunkTest).
+  expect_violation "$ARCHIVE" log_archive_archive_only logAlwaysReadable 8
+  expect_violation "$ARCHIVE" log_archive_evict_all logAlwaysReadable 8
+  # A DELETE by id alone, run again after a chunk reused an archived id,
+  # takes it (9 steps; deleteAgainAfterReuseTest).
+  expect_violation "$ARCHIVE" log_archive_delete_by_id_only logAlwaysReadable 9
 }
 
 SPEC_GROUPS=(
