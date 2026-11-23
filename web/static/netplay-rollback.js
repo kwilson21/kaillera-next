@@ -327,6 +327,16 @@
   // of time to deliver their input before we need it.
   const DEFAULT_DELAY_FRAMES = 2;
   let DELAY_FRAMES = DEFAULT_DELAY_FRAMES;
+  // The newest input label a frame before the last mid-match delay change
+  // ran (-1: the delay has not changed in this match). A state taken soon
+  // after the delay rose holds inputs newer than frame - 1 - DELAY_FRAMES;
+  // a resync follow-up's watch counts those too (syncFollowUp.delayOfStateAt).
+  let _ranBeforeDelayChange = -1;
+  // Called as DELAY_FRAMES changes mid-match, before the frame _frameNum runs:
+  // the frames before it ran with `prev`.
+  const _noteDelayChange = (prev) => {
+    _ranBeforeDelayChange = Math.max(_ranBeforeDelayChange, _frameNum - 1 - prev);
+  };
   // Every input, local included, applies at frame + DELAY_FRAMES, so delay
   // is input lag. With predictions live it is sized small (see
   // RB_ROLLBACK_BUDGET_FRAMES) and rollback absorbs the rest of the network
@@ -454,6 +464,7 @@
           return DELAY_FRAMES;
         }
       }
+      _noteDelayChange(prev);
       DELAY_FRAMES = maxDelay;
       if (window.showEffectiveDelay) window.showEffectiveDelay(ownDelay, maxDelay);
       _syncLog(
@@ -5192,7 +5203,7 @@
   const INPUT_PAST_WINDOW_FRAMES = 240; // ~4s at 60fps — generous for a stalled peer
   const INPUT_FUTURE_MARGIN_FRAMES = 60; // 1s past delay buffer
 
-  // Host: an input at or before a watched frame (_followUpWatches) that
+  // Host: an input that ran before a watched frame (_followUpWatches) and
   // differs from the prediction it replaces means the state sent for that
   // frame may no longer be this page's (specs/sync_follow_up.qnt). C counts
   // every such difference in its breakdown before it decides whether it can
@@ -5200,9 +5211,10 @@
   // too. A breakdown that cannot be read counts as a difference: that can
   // only cost a follow-up, never keep a state that changed.
   // Host: for a guest sent a state while it was unconfirmed, the frame of
-  // that state and whether an input at or before it has since differed from
-  // its prediction (specs/sync_follow_up.qnt). Set as the state is taken.
-  const _followUpWatches = new Map(); // sid -> {frame, changed}
+  // that state, the delay it ran under, and whether an input that ran before
+  // it has since differed from its prediction (specs/sync_follow_up.qnt).
+  // Set as the state is taken.
+  const _followUpWatches = new Map(); // sid -> {frame, delay, changed, delivered}
   // Host: per guest, the newest direct answer (_answerDirectSyncRequest). Only
   // its completion schedules the follow-up; resetPeerState clears it (I2).
   const _directAnswerNewest = new Map(); // sid -> token
@@ -5235,18 +5247,23 @@
     if (failedBefore >= 0 && failedAfter > failedBefore) _onPastWindowMismatch(slot, frame);
     return result;
   };
+  // Only an input that ran before the watched frame counts: one labelled f
+  // runs at f + delay, so the state at the start of F holds inputs labelled
+  // at most F - 1 - delay, with the delay that state ran under (w.delay).
   const _feedWatchedFrame = (mod, slot, frame, feed) => {
     let watched = false;
-    for (const w of _followUpWatches.values()) if (!w.changed && frame <= w.frame) watched = true;
+    for (const w of _followUpWatches.values()) if (!w.changed && frame <= w.frame - 1 - w.delay) watched = true;
     if (!watched) return feed();
     const before = _mispredTotal(mod);
     const result = feed();
     const after = _mispredTotal(mod);
     for (const [sid, w] of _followUpWatches) {
-      if (w.changed || !window.KNCore.syncFollowUp.changesWatchedFrame(frame, w.frame, before, after)) continue;
+      if (w.changed || !window.KNCore.syncFollowUp.changesWatchedFrame(frame, w.frame, w.delay, before, after))
+        continue;
       w.changed = true;
       _syncLog(
-        `SYNC-FOLLOW-UP-NEEDED target=${sid} frame=${w.frame}: slot ${slot} f=${frame} differed from its prediction`,
+        `SYNC-FOLLOW-UP-NEEDED target=${sid} frame=${w.frame} delay=${w.delay}: slot ${slot} f=${frame} ` +
+          `differed from its prediction`,
       );
     }
     return result;
@@ -13234,6 +13251,7 @@
     if (delay === DELAY_FRAMES) return;
     for (let f = frame; f < frame + delay; f++) _localInputs[f] = { ...KNShared.ZERO_INPUT };
     const prev = DELAY_FRAMES;
+    _noteDelayChange(prev);
     DELAY_FRAMES = delay;
     window._rbDoInit(delay, frame, 'first player joined');
     window.showEffectiveDelay?.(delay, delay);
@@ -16433,7 +16451,7 @@
     for (const r of unchanged) {
       _syncLog(
         `SYNC-FOLLOW-UP-SKIPPED target=${r.targetSid} frame=${r.watch.frame} request=${r.requestId || 0} ` +
-          `follow-up=${r.followUp}: no input at or before it differed from its prediction`,
+          `follow-up=${r.followUp}: no input that ran before it differed from its prediction`,
       );
       if (_followUpWatches.get(r.targetSid) === r.watch) _followUpWatches.delete(r.targetSid);
     }
@@ -19969,9 +19987,29 @@
               _followUpWatches.delete(sid);
             }
           }
+          // The delay this state ran under: an input labelled at most
+          // frame - 1 - delay is in it (specs/sync_follow_up.qnt, DELAY_AWARE).
+          const delay = watchFor.length
+            ? window.KNCore.syncFollowUp.delayOfStateAt(frame, DELAY_FRAMES, _ranBeforeDelayChange)
+            : DELAY_FRAMES;
+          // Taken while a correction is still owed, the state is already not
+          // this page's, and the input behind it was fed before this watch:
+          // the watch starts changed (specs/sync_follow_up.qnt, OWED_AT_TAKE).
+          // A captured publication was sealed with none owed (capture-incident.ts).
+          const owedMod = gm.Module;
+          const owed =
+            watchFor.length > 0 &&
+            !capturedPublication &&
+            window.KNCore.syncFollowUp.correctionOwed(
+              owedMod?._kn_get_replay_depth?.() ?? -1,
+              owedMod?._kn_peek_pending_rollback?.() ?? -1,
+              !!_workerCoprocPending?.deferred,
+            );
           for (const sid of watchFor) {
-            _followUpWatches.set(sid, { frame, changed: false, delivered: false });
-            _syncLog(`SYNC-FOLLOW-UP-WATCH target=${sid} frame=${frame}: sent unconfirmed`);
+            _followUpWatches.set(sid, { frame, delay, changed: owed, delivered: false });
+            _syncLog(
+              `SYNC-FOLLOW-UP-WATCH target=${sid} frame=${frame} delay=${delay} owed=${owed ? 1 : 0}: sent unconfirmed`,
+            );
           }
           // Who this state is for, on the connections they are on now: a reconnect
           // while it is compressed or queued drops it for that guest.
@@ -21037,6 +21075,7 @@
     }
     _startTime = 0;
     DELAY_FRAMES = DEFAULT_DELAY_FRAMES;
+    _ranBeforeDelayChange = -1;
     _predictionsPaused = false;
     _lockstepWaitFrame = -1;
     _lockstepWaitStart = 0;
