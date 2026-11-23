@@ -22,6 +22,12 @@ const guest =
   resync(2, 214);
 const logs = { host: freeze(183, 5204), guest };
 
+test('the split reaches back the hash lag the run read at', () => {
+  const [recovery] = frozenRecoveries(logs, { hashLag: 23 });
+  assert.equal(recovery.from, 189 - 23);
+  assert.equal(recovery.to, 214);
+});
+
 test('a frozen page that is dropped and resynced is a proven recovery', () => {
   const recoveries = frozenRecoveries(logs);
   assert.deepEqual(recoveries, [
