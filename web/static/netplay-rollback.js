@@ -17568,11 +17568,11 @@
           }
         }
         // ── R4: Post-replay live-state mismatch poll ─────────────────────
-        // kn_post_tick compares the live emulator state hash to what the
-        // ring claims for the just-completed replay frame. If they differ,
-        // the replay introduced drift and the run is corrupted. Per §Core
-        // principle: dev throws, prod logs and continues. No resync.
-        // See docs/netplay-invariants.md §R4.
+        // Nothing raises this any more: the C engine has no post-replay
+        // comparison, and kn_get_live_mismatch always returns 0 on a current
+        // core. The poll stays for cores built before the check was removed.
+        // A log without RB-LIVE-MISMATCH is not evidence that a replay was
+        // faithful. See docs/netplay-invariants.md §R4.
         if (tickMod._kn_get_live_mismatch && _rbLiveMismatchBuf) {
           const hit = tickMod._kn_get_live_mismatch(_rbLiveMismatchBuf, _rbLiveMismatchBuf + 4, _rbLiveMismatchBuf + 8);
           if (hit) {
