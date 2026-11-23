@@ -49,7 +49,7 @@ function room(realTransfer = false) {
     const _isPeerPendingLateJoin=()=>false, _peerConnectionLive=()=>true, INPUT_PAST_WINDOW_FRAMES=240;
     const KN_MAX_VISIBLE_ROLLBACK_DEPTH=7, OVERDUE_PUSH_QUIET_MS=20000;
     const _syncEnabled=true, _coreFatalError=false, DELAY_FRAMES=3, SYNC_COORD_TIMEOUT_MS=3000;
-    const _lateJoinServing=new Map(), _queuedSyncPushes=new Map(), _followUpWatches=new Map();
+    const _lateJoinServing=new Map(), _queuedSyncPushes=new Map(), _followUpWatches=new Map(), _directAnswerNewest=new Map();
     const _syncSendChains={}, _syncChainMovedAt={}, _peerPhantom={};
     const _knownPlayers={a:{socketId:'actual-p2'},b:{socketId:'actual-p3'},c:{socketId:'actual-p4'}};
     const _peers={a:{slot:1},b:{slot:2},c:{slot:3}}, _syncQueueGen={a:3,b:4,c:5};
