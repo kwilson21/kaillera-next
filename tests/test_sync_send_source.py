@@ -82,7 +82,11 @@ def test_a_queued_transfer_never_reaches_a_new_connection():
     assert push.index("const frame = capturedPublication?.frame ?? _frameNum;") < capture
     assert capture < copy < first_await
     assert "_syncQueueGen[targetSid] || 0" in push[capture:copy]
-    assert "sendSyncChunks(compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver)" in push
+    # The hidden words and HLE state taken with the state go with it.
+    assert (
+        "sendSyncChunks( compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver, extras, )"
+        in " ".join(push.split())
+    )
     assert "if (!_syncTargetCurrent(socketTarget)) {" in push
     targets_for = _block(src, "const _syncTargetsFor = (targetSid) => {")
     assert "epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0" in targets_for
