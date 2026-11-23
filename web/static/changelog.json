@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.25",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a guest with no ROM takes the host's new one from its ROM library (#316)"
+      }
+    ]
+  },
+  {
     "version": "0.69.24",
     "date": "2026-11-23",
     "changes": [
