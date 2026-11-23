@@ -902,6 +902,22 @@ done
 $QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── What a removed player's slot is fed with, frame by frame ──────────────
+REMOVED=specs/removed_input.qnt
+$QUINT typecheck "$REMOVED"
+for variant in removed_input_before removed_input_fixed; do
+  $QUINT test "$REMOVED" --main="$variant" --backend="$BACKEND"
+done
+# Before, each page cut the removed player's input when it learned of the
+# removal: a guest ahead of the host ran frames past the host's cut with the
+# real inputs (removed_input_before; guestAheadTest), one behind went neutral
+# early (guestBehindTest), and a replay after a page's cut ran earlier frames
+# again neutral (replayAfterTheCutTest). Today the cut is at the host's
+# roster frame on every page, below it the host's inputs, and a guest that
+# ran frames otherwise runs them again (removedInputAgrees).
+$QUINT run "$REMOVED" --main=removed_input_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

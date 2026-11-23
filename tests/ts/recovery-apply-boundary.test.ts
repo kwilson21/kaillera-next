@@ -45,7 +45,7 @@ for (const refuses of [true, false])
     const c = vm.createContext({ Uint8Array, Error, refuses });
     vm.runInContext(
       `
- let _frameNum=99,_lastAppliedRecoveryId=0,_resyncCount=0,_consecutiveResyncs=0,_coreFatalError=false,acks=0;
+ let _frameNum=99,_lastAppliedRecoveryId=0,_resyncCount=0,_consecutiveResyncs=0,_coreFatalError=false,acks=0,_cutRerun=null;
  const _hasKnSync=true, _syncBufPtr=1,_syncBufSize=8,KNState={frameNum:99};
  let native=99;
  const mod={HEAPU8:new Uint8Array(16),_kn_sync_write:()=>0,_kn_set_frame:f=>{if(!refuses)native=f},_kn_get_frame:()=>native};

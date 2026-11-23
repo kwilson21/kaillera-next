@@ -43,6 +43,20 @@
  * MISSING_RECIPIENT_PERMANENT=1 (PLAYERS=4): fail every transfer on the
  *   original target channel; require three attempts, notified removal, normal
  *   late rejoin and clean post-rejoin hashes. Full historical oracle stays strict.
+ *   From the fault on the target walks left and right (never neutral), so the
+ *   inputs it leaves behind at its removal differ from the neutral the cut
+ *   gives. The removed player's applied input (`removedInput` in
+ *   summary.json): every page that stayed must have applied the same input
+ *   for it on every input tag all of them ran, from 90 tags before the
+ *   removal to 150 after the rejoin (specs/removed_input.qnt,
+ *   removedInputAgrees), read from each page's NORMAL-INPUT-TR,
+ *   CATCH-UP-INPUT-TR and the C engine's REPLAY-INPUT-TR lines, the last in
+ *   its log winning. A difference fails the run.
+ *   ROSTER_HOLD_MS=<n> (with it): the host's roster messages (`roster-cut:`,
+ *   `roster-mask:`, `roster:`) to the guest in ROSTER_HOLD_SLOT (default 1)
+ *   are held n ms each, in order, so that guest hears of the removal frames
+ *   after the cut (removed_input.qnt, guestAheadTest); it must run them again
+ *   (ROSTER-CUT-RERUN, or the host's state: ROSTER-CUT-LATE) and still agree.
  * CATCH_UP_MS=<n>: a third of the way into the battle the guest in
  *   CATCH_UP_SLOT (default 2, a guest that is not the host's first one) asks
  *   the host for a full resync through its network-change handler (a window
@@ -161,6 +175,8 @@ const CATCH_UP_HOLE_MODE = process.env.CATCH_UP_HOLE_MODE || 'deep';
 const DEEP_CATCH_UP_HOLE = CATCH_UP_HOLE && CATCH_UP_HOLE_MODE === 'deep';
 const CATCH_UP_HOLE_SLOT = Number(process.env.CATCH_UP_HOLE_SLOT || 1);
 const RECOVERY_BYSTANDER = process.env.RECOVERY_BYSTANDER === '1';
+const ROSTER_HOLD_MS = Number(process.env.ROSTER_HOLD_MS || 0);
+const ROSTER_HOLD_SLOT = Number(process.env.ROSTER_HOLD_SLOT || 1);
 const RECOVERY_SLOT = Number(process.env.RECOVERY_SLOT || 1);
 const RECOVERY_HOLD_MS = Number(process.env.RECOVERY_HOLD_MS || 3000);
 const RECOVERY_AT = Number(process.env.RECOVERY_AT || 600);
@@ -186,6 +202,18 @@ const fail = (msg) => {
   process.exit(1);
 };
 if (PERMANENT_RECIPIENT && !MISSING_RECIPIENT) fail('MISSING_RECIPIENT_PERMANENT requires MISSING_RECIPIENT=1');
+if (ROSTER_HOLD_MS && !(PERMANENT_RECIPIENT && Number.isFinite(ROSTER_HOLD_MS) && ROSTER_HOLD_MS > 0))
+  fail('ROSTER_HOLD_MS needs MISSING_RECIPIENT_PERMANENT=1 and a number of ms above 0');
+if (
+  ROSTER_HOLD_MS &&
+  !(
+    Number.isInteger(ROSTER_HOLD_SLOT) &&
+    ROSTER_HOLD_SLOT >= 1 &&
+    ROSTER_HOLD_SLOT < PLAYERS &&
+    ROSTER_HOLD_SLOT !== MISSING_RECIPIENT_SLOT
+  )
+)
+  fail(`ROSTER_HOLD_SLOT=${process.env.ROSTER_HOLD_SLOT} invalid: a guest's slot other than the removed one`);
 if (!ROM || !fs.existsSync(ROM)) fail('KN_ROM must name the ROM file');
 if (![3, 4].includes(PLAYERS)) fail(`PLAYERS=${process.env.PLAYERS} invalid: 3 or 4`);
 if (!/^\d+x\d+$/.test(SCREEN_SIZE)) fail(`SCREEN_SIZE=${SCREEN_SIZE} invalid: WIDTHxHEIGHT, e.g. 320x240`);
@@ -387,6 +415,8 @@ const install = async (p, slot) => {
         // does not.
         if (W.against === 'neutral') return { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
         if (W.against === 'right') return { buttons: 0, lx: 70, ly: 0, cx: 0, cy: 0 };
+        // MISSING_RECIPIENT_PERMANENT: the target walks left and right, never neutral.
+        if (W.against === 'pace') return { buttons: 0, lx: Math.floor(f / 30) % 2 ? 70 : -70, ly: 0, cx: 0, cy: 0 };
         if (f >= until) {
           const r = Math.random();
           held = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
@@ -613,6 +643,44 @@ if (MISSING_RECIPIENT) {
     }
     return [from, to];
   });
+  if (PERMANENT_RECIPIENT) {
+    await pages[MISSING_RECIPIENT_SLOT].evaluate(() => {
+      window.__mesh.against = 'pace';
+    });
+    if (ROSTER_HOLD_MS) {
+      await host.evaluate(
+        ({ slot, ms }) => {
+          const peer = Object.values(window.KNState?.peers ?? {}).find((p) => p.slot === slot);
+          if (peer?.dc?.readyState !== 'open') throw new Error('held guest channel is not open');
+          const dc = peer.dc;
+          const send = dc.send;
+          const queue = [];
+          const report = (window.__meshRosterHold = { held: 0, released: 0, first: null });
+          const flush = () => {
+            while (queue.length && queue[0].at <= performance.now()) {
+              const { data } = queue.shift();
+              try {
+                send.call(dc, data);
+                report.released++;
+              } catch (_) {}
+            }
+            if (queue.length) setTimeout(flush, Math.max(0, queue[0].at - performance.now()));
+          };
+          dc.send = function (data) {
+            if (typeof data === 'string' && data.startsWith('roster')) {
+              report.held++;
+              report.first ??= data.slice(0, 40);
+              queue.push({ data, at: performance.now() + ms });
+              if (queue.length === 1) setTimeout(flush, ms);
+              return;
+            }
+            return send.call(this, data);
+          };
+        },
+        { slot: ROSTER_HOLD_SLOT, ms: ROSTER_HOLD_MS },
+      );
+    }
+  }
   const p2 = await waitForLine(host, missingRecipient.hostAt, /INPUT-ASK-PUSH-SETTLED .*slot=1 /, 60000);
   if (PERMANENT_RECIPIENT) {
     const targetPage = pages[MISSING_RECIPIENT_SLOT];
@@ -1032,6 +1100,7 @@ const P = await Promise.all(
     ...(await p.evaluate(() => ({
       nativeInputs: window.__knNativeInputObserver?.export() ?? null,
       missingRecipientWire: window.__meshMissingRecipient ?? null,
+      rosterHold: window.__meshRosterHold ?? null,
       missingInputs: window.__meshMissingInputs ?? 0,
       hashes: { ...(window.__meshDroppedSnapshot?.hashes ?? {}), ...window.__mesh.hashes },
       rdram: window.__mesh.rdram,
@@ -1409,6 +1478,97 @@ const permanentProblems = !PERMANENT_RECIPIENT
         : []),
     ];
 const missingProblems = PERMANENT_RECIPIENT ? permanentProblems : transientMissingProblems;
+
+// MISSING_RECIPIENT_PERMANENT: the removed player's input, as every page that
+// stayed applied it, by input tag (specs/removed_input.qnt,
+// removedInputAgrees). A frame run again (a replay, a catch-up) replaces what
+// was logged for it before: the last line for a tag in the log wins. The C
+// engine's lines are drained into the log before a catch-up starts, so they
+// come before the catch-up's own.
+const appliedForTag = (sync, slot) => {
+  const out = new Map();
+  const re = new RegExp(
+    `\\t(?:NORMAL-INPUT-TR|CATCH-UP-INPUT-TR|\\[C\\] REPLAY-INPUT-TR) f=\\d+ .*?R${slot}@(\\d+)\\[(-?\\d+),(-?\\d+),(-?\\d+)(?:,[A-Z])?\\]`,
+    'g',
+  );
+  for (const m of sync.matchAll(re)) out.set(Number(m[1]), `${m[2]},${m[3]},${m[4]}`);
+  // A forward frame logs NORMAL-INPUT-TR only when an input it applied was
+  // not neutral (and every 60th frame): a frame the page ran without a line
+  // applied neutral for every slot. Frames a state load jumped over
+  // (`sync frame reset: a → b`, b > a) it never ran.
+  const forward = [...sync.matchAll(/\tNORMAL-INPUT-TR f=(\d+) apply=(-?\d+) /g)].map((m) => [+m[1], +m[2]]);
+  if (forward.length === 0) return out;
+  const delay = forward[0][0] - forward[0][1];
+  const jumps = [...sync.matchAll(/sync frame reset: (\d+) → (\d+)/g)]
+    .map((m) => [+m[1], +m[2]])
+    .filter(([a, b]) => b > a);
+  const firstRun = Math.min(...forward.map(([f]) => f));
+  const lastRun = Math.max(...forward.map(([f]) => f));
+  for (let f = firstRun; f <= lastRun; f++) {
+    if (out.has(f - delay) || jumps.some(([a, b]) => f >= a && f < b)) continue;
+    out.set(f - delay, '0,0,0');
+  }
+  return out;
+};
+const rosterBroadcasts = [...H.sync.matchAll(/\tROSTER broadcast: frame=(\d+) slots=\[([\d,]*)\]/g)].map((m) => ({
+  frame: Number(m[1]),
+  slots: m[2] ? m[2].split(',').map(Number) : [],
+}));
+const removal =
+  rosterBroadcasts.find((r) => r.frame >= H.inBattleAt && !r.slots.includes(MISSING_RECIPIENT_SLOT)) ?? null;
+const rejoin = removal
+  ? (rosterBroadcasts.find((r) => r.frame >= removal.frame && r.slots.includes(MISSING_RECIPIENT_SLOT)) ?? null)
+  : null;
+const removedInput = !PERMANENT_RECIPIENT
+  ? null
+  : (() => {
+      const stayed = P.map((x, slot) => ({ x, slot })).filter(({ slot }) => slot !== MISSING_RECIPIENT_SLOT);
+      const applied = stayed.map(({ x }) => appliedForTag(x.sync, MISSING_RECIPIENT_SLOT));
+      // Tags every page has finalized: well behind the last one each logged.
+      const lastTag = Math.min(...applied.map((m) => Math.max(-1, ...m.keys()))) - 40;
+      const from = removal ? removal.frame - 90 : 0;
+      const to = Math.min(lastTag, (rejoin ?? removal)?.frame + 150);
+      const differing = [];
+      let compared = 0;
+      for (let tag = from; removal && tag <= to; tag++) {
+        if (!applied.every((m) => m.has(tag))) continue;
+        compared++;
+        const values = applied.map((m) => m.get(tag));
+        if (values.some((v) => v !== values[0]))
+          differing.push({ tag, ...Object.fromEntries(stayed.map(({ slot }, i) => [`P${slot + 1}`, values[i]])) });
+      }
+      const rerun = stayed.map(({ x, slot }) => ({
+        page: `P${slot + 1}`,
+        cuts: [...x.sync.matchAll(/\tROSTER-CUT \(([^)]*)\) (.*)/g)].map((m) => `${m[1]}: ${m[2]}`),
+        reruns: [...x.sync.matchAll(/\t(ROSTER-CUT-RERUN .*|ROSTER-CUT-LATE .*|ROSTER-CUT-MISSING .*)/g)].map(
+          (m) => m[1],
+        ),
+      }));
+      return {
+        slot: MISSING_RECIPIENT_SLOT,
+        removedAt: removal?.frame ?? null,
+        rejoinedAt: rejoin?.frame ?? null,
+        tags: [from, to],
+        compared,
+        differing: differing.slice(0, 40),
+        differingCount: differing.length,
+        rosterHold: ROSTER_HOLD_MS ? { ms: ROSTER_HOLD_MS, slot: ROSTER_HOLD_SLOT, ...H.rosterHold } : null,
+        pages: rerun,
+      };
+    })();
+const removedInputProblems = !removedInput
+  ? []
+  : [
+      ...(removedInput.removedAt === null ? ['the host never broadcast the removal'] : []),
+      ...(removedInput.compared < 60 ? [`only ${removedInput.compared} tags of the removed player compared`] : []),
+      ...(removedInput.differingCount
+        ? [
+            `the removed player's applied input differs between pages on ${removedInput.differingCount} tags ` +
+              `(first ${JSON.stringify(removedInput.differing[0])})`,
+          ]
+        : []),
+      ...(ROSTER_HOLD_MS && !(H.rosterHold?.held > 0) ? ['no roster message was held'] : []),
+    ];
 const followUpLines = FOLLOW_UP_RECIPIENT
   ? H.sync.split('\n').filter((line) => seqOf(line) > followUpRecipient.hostAt)
   : [];
@@ -1612,6 +1772,7 @@ const summary = {
     problems: missingProblems,
   },
   followUpRecipient: FOLLOW_UP_RECIPIENT ? { ...followUpRecipient, problems: followUpProblems } : undefined,
+  removedInput: removedInput ? { ...removedInput, problems: removedInputProblems } : undefined,
   room,
   players: PLAYERS,
   latencyMs: LAT,
@@ -1637,6 +1798,7 @@ console.log(JSON.stringify(summary, null, 2));
 
 const failed =
   missingProblems.length > 0 ||
+  removedInputProblems.length > 0 ||
   followUpProblems.length > 0 ||
   recoveryProblems.length > 0 ||
   P.some((x) => x.inBattleAt < 0) ||
@@ -1652,7 +1814,7 @@ const failed =
   catchUpFailed;
 console.log(
   failed
-    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}`
+    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}${removedInputProblems.length ? `; ${removedInputProblems.join('; ')}` : ''}`
     : `PASS: all ${PLAYERS} fighters in the battle; every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
 );
 process.exit(failed ? 1 : 0);

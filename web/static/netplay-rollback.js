@@ -1799,10 +1799,27 @@
   let _lastInputRoster = null;
   let _lastInputRosterFrame = -1;
   const _lateJoinInputWindows = new Map();
+  // A removed player's input is cut by frame while the match is on the
+  // scheduled roster rule (web/src/removed-input.ts, specs/removed_input.qnt):
+  // neutral from the host's roster frame on every page, the host's inputs
+  // below it. Guest: the host's `roster-cut:` messages heard for the roster
+  // that follows, by slot. Host: the ones it sent with its last roster, for
+  // the resend to a channel that opens. A page that ran frames with other
+  // inputs runs again from the first one (_cutRerun, serviced in tick()).
+  const _heardRosterCuts = new Map();
+  let _lastRosterCuts = [];
+  let _cutRerun = null; // {from, at}: run again from frame `from`
+  // Host: slots hardDisconnectPeer left for the roster broadcast that follows
+  // to cut (or, on the immediate rule, to empty).
+  const _coreSlotsKeptForCut = new Set();
   const _clearLateJoinInputRoster = () => {
     _lastInputRoster = null;
     _lastInputRosterFrame = -1;
     _lateJoinInputWindows.clear();
+    _heardRosterCuts.clear();
+    _lastRosterCuts = [];
+    _cutRerun = null;
+    _coreSlotsKeptForCut.clear();
   };
   const _recordHostInputRoster = (frame, slots) => {
     if (RB_WORKER_COPROC) return true;
@@ -1810,7 +1827,10 @@
     const roster = new Set(slots);
     for (let slot = 0; slot < 4; slot++) {
       if (!roster.has(slot) && (!_lastInputRoster || _lastInputRoster.has(slot))) {
-        _lateJoinInputWindows.set(slot, { absentSince: frame, first: null, connected: false, primed: false });
+        // `cut`: the tag the cut by frame starts at, once _cutRemovedInput
+        // has written it (-1: the slot reads neutral by being emptied, the
+        // immediate rule).
+        _lateJoinInputWindows.set(slot, { absentSince: frame, first: null, connected: false, primed: false, cut: -1 });
       } else if (roster.has(slot) && _lastInputRoster && !_lastInputRoster.has(slot)) {
         const record = _lateJoinInputWindows.get(slot);
         if (record) {
@@ -1823,7 +1843,19 @@
     _lastInputRosterFrame = frame;
     return true;
   };
-  const _admissionInputFloor = (slot) => _lateJoinInputWindows.get(slot)?.first ?? 0;
+  // While a cut governs the slot no input of it is taken in; once admitted
+  // again, none before its floor (KNCore.removedInput.admissionFloor).
+  const _admissionInputFloor = (slot) => {
+    const record = _lateJoinInputWindows.get(slot);
+    if (!record) return 0;
+    return window.KNCore.removedInput.admissionFloor(record.first ?? -1, record.cut ?? -1);
+  };
+  // The slot's input is the cut's (written into the C ring): nothing may
+  // empty its ring until the player is admitted again.
+  const _cutGoverns = (slot) => {
+    const record = _lateJoinInputWindows.get(slot);
+    return !!record && record.first === null && (record.cut ?? -1) >= 0;
+  };
   const _waitingForHostAdmission = (slot) => _lateJoinInputWindows.get(slot)?.first === null;
   const _observeLateJoinDcOpen = (slot) => {
     const record = _lateJoinInputWindows.get(slot);
@@ -6215,9 +6247,16 @@
       frontier,
       frame: _frameNum,
     });
+    _askHostStateForLateRoster('ROSTER-MASK-LATE', 'roster mask late');
+  };
+
+  // A guest asks the host for its state after a roster it heard too late to
+  // run the frames it covers again itself; the state is run on with what the
+  // roster filed (the masks, a removed player's cut).
+  const _askHostStateForLateRoster = (tag, why) => {
     if (_playerSlot === 0) return;
     if (_resyncRequestInFlight) {
-      _syncLog('ROSTER-MASK-LATE: a resync request is out already; its state is run on with the filed masks');
+      _syncLog(`${tag}: a resync request is out already; its state is run on with what the roster filed`);
       return;
     }
     _syncTargetFrame = -1;
@@ -6229,10 +6268,147 @@
         return;
       } catch (e) {
         _resyncRequestInFlight = false;
-        _syncLog(`ROSTER-MASK-LATE resync request send failed: ${e}`);
+        _syncLog(`${tag} resync request send failed: ${e}`);
       }
     }
-    _requestSocketFullResync('roster mask late');
+    _requestSocketFullResync(why);
+  };
+
+  // The inputs `slot` ran with on the tags the frames still in the ring
+  // applied (a replay can run those again), as the ring holds them: only the
+  // ones it holds, none for a slot it holds nothing of.
+  const _ringInputsRan = (mod, slot) => {
+    const ranThrough = (mod._kn_get_frame?.() ?? _frameNum) - DELAY_FRAMES;
+    const out = [];
+    if (!mod._kn_get_input || !_rbInputPtr) return out;
+    for (let tag = Math.max(0, ranThrough - (_rbRollbackMax + 2)); tag < ranThrough; tag++) {
+      const i = _rbGetInput(mod, slot, tag);
+      if (i !== KNShared.ZERO_INPUT) out.push({ tag, i: { ...i } });
+    }
+    return out;
+  };
+
+  // The cut of a removed player's input (web/src/removed-input.ts,
+  // specs/removed_input.qnt): what the host applied in `slot` on the tags
+  // from `from` up to the cut tag, read from this page's (the host's) ring
+  // before the slot is touched. It is final: from now on the host takes no
+  // input of that player (_admissionInputFloor), so its ring keeps these.
+  const _hostRosterCut = (mod, slot, rosterFrame) => {
+    const RI = window.KNCore.removedInput;
+    const cut = RI.cutTag(rosterFrame, DELAY_FRAMES);
+    const from = Math.max(0, cut - RI.wordSpan(_rbRollbackMax, DELAY_FRAMES, DELAY_FRAMES + 8));
+    const inputs = [];
+    for (let tag = from; tag < cut; tag++) {
+      const i = _rbGetInput(mod, slot, tag);
+      inputs.push({ buttons: i.buttons | 0, lx: i.lx | 0, ly: i.ly | 0, cx: i.cx | 0, cy: i.cy | 0 });
+    }
+    return { rosterFrame, slot, cut, from, inputs };
+  };
+
+  // Write the host's cut of `slot` into this page's C ring and find the
+  // first frame this page ran with another input for it. Below the cut the
+  // ring gets the host's inputs, as real ones (a replay runs them again
+  // unchanged, and no input of the player replaces them: the slot takes none
+  // until it is admitted again); from the cut on, two neutral real inputs, so
+  // C predicts neutral for every tag after them. Returns that frame, or -1.
+  const _cutRemovedInput = (mod, slot, cut, reason) => {
+    const RI = window.KNCore.removedInput;
+    const record = _lateJoinInputWindows.get(slot);
+    if (!mod?._kn_feed_input || !mod._kn_rollback_slot_reset || !record) return -1;
+    // What this page applied on the tags of the frames still in its ring
+    // (the ones it can run again, as _ringInputsRan keeps them across a
+    // reset): the ring holds the input each tag last ran with. An older frame
+    // is final here, whatever it ran with.
+    const ranThrough = (mod._kn_get_frame?.() ?? _frameNum) - DELAY_FRAMES;
+    const checkFrom = Math.max(cut.from, ranThrough - (_rbRollbackMax + 2));
+    const ran = [];
+    const rule = [];
+    let lateFrame = -1;
+    for (let tag = checkFrom; tag < ranThrough; tag++) {
+      ran.push(RI.packInput(_rbGetInput(mod, slot, tag)));
+      rule.push(RI.packInput(RI.cutInputAt(cut, tag)));
+    }
+    const k = RI.firstDiffering(ran, rule);
+    if (k >= 0) lateFrame = checkFrom + k + DELAY_FRAMES;
+    mod._kn_rollback_slot_reset(slot);
+    for (let tag = cut.from; tag < cut.cut; tag++) {
+      const i = RI.cutInputAt(cut, tag);
+      _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
+    }
+    for (let tag = Math.max(0, cut.cut); tag < cut.cut + 2; tag++) {
+      _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, 0, 0, 0, 0, 0));
+    }
+    record.cut = cut.cut;
+    record.absentSince = cut.cut;
+    _syncLog(
+      `ROSTER-CUT (${reason}) slot=${slot} roster f=${cut.rosterFrame} cut=${cut.cut} from=${cut.from} ` +
+        `ranThrough=${ranThrough - 1}${lateFrame >= 0 ? ` late from f=${lateFrame}` : ''}`,
+    );
+    if (lateFrame >= 0) {
+      // What this page filed for the frames it runs again describes the
+      // state they replace.
+      window.KNDesync?.forgetFrom(lateFrame);
+      _rbCheckBook?.forgetFrom(lateFrame);
+      if (!_cutRerun || lateFrame < _cutRerun.from) _cutRerun = { from: lateFrame, at: performance.now() };
+    }
+    return lateFrame;
+  };
+
+  // A page that ran frames with other inputs than a cut gives runs them
+  // again, at a tick boundary: from its own ring when it still holds the
+  // first of them and nothing else is under way (a replay, a catch-up, a
+  // state to load), else from the host's state. A replay or state under way
+  // is waited out, CUT_RERUN_WAIT_MS at most (I1). A host state loaded
+  // meanwhile replaces it (applySyncState).
+  const CUT_RERUN_WAIT_MS = 1000;
+  const _serviceCutRerun = () => {
+    if (!_cutRerun) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const busy =
+      _catchUpTo >= 0 ||
+      !!_pendingResyncState ||
+      (mod?._kn_get_replay_depth?.() ?? 0) > 0 ||
+      (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
+    if (busy && performance.now() - _cutRerun.at < CUT_RERUN_WAIT_MS) return;
+    const { from } = _cutRerun;
+    _cutRerun = null;
+    const canRerun = !busy && !RB_WORKER_COPROC && _canCatchUp() && !!mod?._kn_restore_frame;
+    const step = window.KNCore.removedInput.rerunStep(from, _frameNum, _rbRollbackMax, canRerun);
+    if (step === 'nothing') return;
+    if (step === 'local' && _rerunFromRing(mod, from)) return;
+    _syncLog(
+      `ROSTER-CUT-LATE f=${_frameNum}: frames from ${from} ran with other inputs; asking the host for its state`,
+    );
+    KNEvent('desync', `removed player's input heard late f=${_frameNum}`, {
+      kind: 'roster-cut-late',
+      from,
+      frame: _frameNum,
+    });
+    _askHostStateForLateRoster('ROSTER-CUT-LATE', 'roster cut late');
+  };
+
+  // Run the frames from `from` up to the one this page is on again, from the
+  // ring's state of `from`: a catch-up (_startCatchUp), as after a host
+  // state from before this frame, on the inputs the ring now holds.
+  const _rerunFromRing = (mod, from) => {
+    const to = _frameNum;
+    if (!mod._kn_restore_frame(from)) {
+      _syncLog(`ROSTER-CUT-RERUN f=${to}: the ring no longer holds frame ${from}`);
+      return false;
+    }
+    // Restoring a state can leave the runner stale (R1), as a state load does.
+    recaptureManualRunner(mod, 'cut re-run');
+    mod._kn_set_frame(from);
+    if (mod._kn_get_frame?.() !== from) {
+      _syncLog(`ROSTER-CUT-RERUN f=${to}: kn_set_frame refused ${from}`);
+      _handleCoreFatal('cut-rerun', new Error(`Native frame refused re-run frame ${from}`));
+      return true;
+    }
+    _frameNum = from;
+    KNState.frameNum = from;
+    _syncLog(`ROSTER-CUT-RERUN from=${from} to=${to}`);
+    _startCatchUp(mod, from, to);
+    return true;
   };
 
   // This page leaves the scheduled rule for the rest of the match: the mask
@@ -9963,7 +10139,10 @@
         const slots = [..._activeRoster].sort((a, b) => a - b);
         const rosterFrame = _lastBroadcastRosterFrame >= 0 ? _lastBroadcastRosterFrame : _frameNum;
         try {
-          if (_maskMatchScheduled && _maskSchedule.active()) ch.send(`roster-mask:${rosterFrame}`);
+          if (_maskMatchScheduled && _maskSchedule.active()) {
+            for (const cut of _lastRosterCuts) ch.send(cut);
+            ch.send(`roster-mask:${rosterFrame}`);
+          }
           ch.send(`roster:${rosterFrame}:${slots.join(',')}`);
         } catch (_) {}
       }
@@ -10140,6 +10319,14 @@
           }
           return;
         }
+        // The host's cut of a player the roster that follows removes.
+        if (e.data.startsWith('roster-cut:')) {
+          if (!RB_WORKER_COPROC && (peer.slot !== 0 || peer.dc !== ch)) return;
+          const cut = window.KNCore.removedInput.parseRosterCut(e.data);
+          if (cut) _heardRosterCuts.set(cut.slot, cut);
+          else _syncLog(`ROSTER-CUT malformed, dropped: ${e.data.slice(0, 80)}`);
+          return;
+        }
         // The host schedules the controller mask of the roster that follows.
         if (e.data.startsWith('roster-mask:')) {
           if (!RB_WORKER_COPROC && (peer.slot !== 0 || peer.dc !== ch)) return;
@@ -10159,13 +10346,35 @@
           );
           _maskAnnouncedFrame = -1;
           if (!maskScheduled) _fallBackToImmediateMasks(`the host's roster f=${rosterFrame} is not scheduled`);
+          const heardCuts = new Map(_heardRosterCuts);
+          _heardRosterCuts.clear();
           if (!_recordHostInputRoster(rosterFrame, slots)) return;
           const previousRoster = _activeRoster ? new Set(_activeRoster) : null;
           if (previousRoster) {
+            // On the scheduled rule the host cut each removed player's input
+            // at this roster frame and sent its inputs below it: written into
+            // the ring here, they decide every frame, whenever the roster
+            // arrived (_cutRemovedInput). On the immediate rule the slot is
+            // emptied now, as before.
+            const cutMod = window.EJS_emulator?.gameManager?.Module;
+            const cutByFrame = maskScheduled && _useCRollback && !RB_WORKER_COPROC && !!cutMod?._kn_feed_input;
             for (const slot of previousRoster) {
               if (slot === _playerSlot || slots.includes(slot) || !_waitingForHostAdmission(slot)) continue;
               const [sid, departing] = _peerEntryForSlot(slot) || [];
-              resetPeerState(slot, 'host roster removed', { peer: departing, sid });
+              resetPeerState(slot, 'host roster removed', { peer: departing, sid, keepCoreSlot: cutByFrame });
+              if (!cutByFrame || _cutGoverns(slot)) continue;
+              const cut = heardCuts.get(slot);
+              if (cut && cut.rosterFrame === rosterFrame) {
+                _cutRemovedInput(cutMod, slot, cut, 'roster');
+              } else {
+                // No cut came with the roster (a channel that reopened between
+                // them): cut at the same frame on this page's own inputs, and
+                // take the host's state for what may differ below it.
+                _syncLog(`ROSTER-CUT-MISSING slot=${slot} roster f=${rosterFrame}`);
+                _cutRemovedInput(cutMod, slot, _hostRosterCut(cutMod, slot, rosterFrame), 'roster without its cut');
+                _cutRerun = null;
+                _askHostStateForLateRoster('ROSTER-CUT-MISSING', 'roster cut missing');
+              }
             }
           }
           _clearPendingLateJoinRosterSlots(slots, 'host roster');
@@ -10897,10 +11106,24 @@
 
     // C-side: clear the rollback engine's per-slot state. Without this,
     // slot_active stays sticky once kn_feed_input has ever seen the
-    // slot, polluting prediction and stats across roster changes.
-    if (_useCRollback) {
+    // slot, polluting prediction and stats across roster changes. Not for a
+    // slot a cut governs (its ring holds the cut, _cutRemovedInput), nor
+    // when the caller cuts it next (`keepCoreSlot`: the host dropping a
+    // player, a guest hearing it removed, both under the scheduled rule).
+    if (_useCRollback && !opts.keepCoreSlot && !_cutGoverns(slot)) {
       const mod = window.EJS_emulator?.gameManager?.Module;
-      if (mod?._kn_rollback_slot_reset) mod._kn_rollback_slot_reset(slot);
+      if (mod?._kn_rollback_slot_reset) {
+        // On the scheduled rule the inputs the frames still in the ring ran
+        // with go back in as real ones: a replay of those frames runs them
+        // again unchanged (an emptied ring ran them neutral), and a removal
+        // cut heard later sees what the page applied (_cutRemovedInput).
+        const ran = _maskMatchScheduled && _maskSchedule.active() ? _ringInputsRan(mod, slot) : [];
+        mod._kn_rollback_slot_reset(slot);
+        for (const { tag, i } of ran) {
+          _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
+        }
+        if (ran.length) _syncLog(`PEER-RESET-KEEPS slot=${slot} inputs ${ran[0].tag}..${ran.at(-1).tag}`);
+      }
     }
 
     // The same peer goes on after a reconnect: its inputs are waited for
@@ -11042,7 +11265,12 @@
       // preserve _peerInputStarted until the host's roster broadcast
       // removes the slot, so we save/restore that one field.
       if (_playerSlot === 0 || !_activeRoster) {
-        resetPeerState(peer.slot, 'hard-disconnect', { peer, sid: remoteSid });
+        // The host's roster broadcast below cuts this player's input by
+        // frame (or empties its slot, on the immediate rule): it reads what
+        // the slot ran first.
+        const cutNext = _playerSlot === 0 && running && !RB_WORKER_COPROC && !!_activeRoster?.has(peer.slot);
+        if (cutNext) _coreSlotsKeptForCut.add(peer.slot);
+        resetPeerState(peer.slot, 'hard-disconnect', { peer, sid: remoteSid, keepCoreSlot: cutNext });
       } else {
         const startedBefore = _peerInputStarted[peer.slot];
         resetPeerState(peer.slot, 'hard-disconnect-non-host', { peer, sid: remoteSid });
@@ -12661,6 +12889,28 @@
         _awaitFirstInputAfterReset[slot] = true;
       }
     }
+    // The players this roster removes: on the scheduled rule each one's
+    // input is cut at this roster frame, the host's inputs below it sent
+    // just before the roster (`roster-cut:`); on the immediate rule its slot
+    // is emptied now, as before the rule.
+    const cuts = [];
+    const rbModCut = window.EJS_emulator?.gameManager?.Module;
+    for (const slot of _activeRoster ?? []) {
+      if (slot === _playerSlot || slotSet.has(slot) || !_isValidPlayerSlot(slot) || !_useCRollback) continue;
+      if (_cutGoverns(slot) || !rbModCut?._kn_feed_input) continue;
+      if (maskScheduled && !RB_WORKER_COPROC) {
+        const cut = _hostRosterCut(rbModCut, slot, rosterFrame);
+        _cutRemovedInput(rbModCut, slot, cut, 'broadcast-roster');
+        cuts.push(window.KNCore.removedInput.encodeRosterCut(cut));
+      }
+    }
+    // A slot kept for a cut this roster did not make (the immediate rule, or
+    // a slot the roster still lists) is emptied, as before the rule.
+    for (const slot of _coreSlotsKeptForCut) {
+      if (!_cutGoverns(slot)) rbModCut?._kn_rollback_slot_reset?.(slot);
+    }
+    _coreSlotsKeptForCut.clear();
+    _lastRosterCuts = cuts;
     _activeRoster = slotSet;
     _fileRosterControllerMask(rosterFrame, slots, 'broadcast-roster');
     // Always 4 — see roster DC handler comment for rationale.
@@ -12678,7 +12928,10 @@
       if (_isPeerPendingLateJoin(sid, p)) continue;
       if (p.dc?.readyState === 'open') {
         try {
-          if (maskScheduled) p.dc.send(`roster-mask:${rosterFrame}`);
+          if (maskScheduled) {
+            for (const cut of cuts) p.dc.send(cut);
+            p.dc.send(`roster-mask:${rosterFrame}`);
+          }
           p.dc.send(msg);
         } catch (_) {}
       }
@@ -16565,6 +16818,12 @@
     }
 
     if (_coreFatalError) return; // sync application may have failed after loading native state
+    // A removed player's cut heard after this page ran frames it changes:
+    // they run again here, at the frame boundary (_serviceCutRerun).
+    if (_cutRerun) {
+      _serviceCutRerun();
+      if (_coreFatalError) return;
+    }
     _chk('post-sync-target');
 
     // ── Rollback-mode peer stall freeze ─────────────────────────────────
@@ -20204,6 +20463,9 @@
       _syncLog(`SYNC-CATCH-UP skipped from=${fromFrame} of=${toFrame}: a rollback is pending`);
       return;
     }
+    // The C log's lines so far (its replays of these frames among them) go
+    // into the sync log before the catch-up's own, in the order they ran.
+    _drainCDebugLog();
     _catchUpFrom = fromFrame;
     _catchUpTo = toFrame;
     _catchUpStartedAt = performance.now();
@@ -20302,7 +20564,18 @@
       }
       _frameNum = mod._kn_get_frame();
       KNState.frameNum = _frameNum;
-      _writeRingInputs(mod, _frameNum - DELAY_FRAMES);
+      const catchUpApplied = _writeRingInputs(mod, _frameNum - DELAY_FRAMES);
+      // Every frame it runs, what it applied: a frame run again here
+      // replaces what NORMAL-INPUT-TR said of it.
+      if (RB_TRUE_ROLLBACK && key >= 0) {
+        let line = `CATCH-UP-INPUT-TR f=${_frameNum} apply=${key} L${_playerSlot}@${key}[${catchUpApplied.buttons},${catchUpApplied.lx},${catchUpApplied.ly}]`;
+        for (let s = 0; s < rb_numPlayers; s++) {
+          if (s === _playerSlot) continue;
+          const inp = _rbGetInput(mod, s, key);
+          line += ` R${s}@${key}[${inp.buttons},${inp.lx},${inp.ly}]`;
+        }
+        _syncLog(line);
+      }
       if (mod._kn_reset_audio) {
         mod._kn_reset_audio();
         _resetAudioCallsSinceRb++;
@@ -20479,6 +20752,12 @@
     if (timelineAligned) {
       _lastAppliedRecoveryId = Math.max(_lastAppliedRecoveryId, recoveryId);
       _settleInputsAtResync(gm.Module, frame, recoveryId);
+      // The host's state carries the frames a removed player's cut changed:
+      // a re-run still owed from before it is not run.
+      if (_cutRerun) {
+        _syncLog(`ROSTER-CUT-RERUN from=${_cutRerun.from}: replaced by the host's state of f=${frame}`);
+        _cutRerun = null;
+      }
       if (_hasKnSync && gm.Module?._kn_set_frame) _finishLateJoinOriginalWaitAtSync(frame);
     }
     // A state from before this guest's frame: the frames up to it run again

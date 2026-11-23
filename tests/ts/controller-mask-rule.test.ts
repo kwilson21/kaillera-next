@@ -67,6 +67,11 @@ const page = (slot: number): Page => {
     function _requestSocketFullResync(){}
     function _peerEntryForSlot(s){for(const e of Object.entries(_peers)) if(e[1]?.slot===s) return e; return null}
     const _recordHostInputRoster=()=>true,_admissionInputFloor=()=>0,_awaitFirstInputAfterReset={};
+    // The removed player's cut (tests/ts/removed-input.test.ts): this core
+    // has no input ring, so no roster here cuts one.
+    const _heardRosterCuts=new Map(),_coreSlotsKeptForCut=new Set(),_cutGoverns=()=>false;
+    const _isValidPlayerSlot=(s)=>Number.isInteger(s)&&s>=0&&s<4;
+    let _lastRosterCuts=[];
     let stepMask=-1,_inDeterministicStep=false;
     const stepOneFrame=()=>{stepMask=mod.mask;return true};
     ${part('  const _controllerPresentMask = () => {', '  // Apply the real player-count mask the *instant*')}

@@ -59,6 +59,11 @@ const TEXT_GRAMMAR = {
     // of that frame, sent just before it (specs/controller_mask.qnt). A page
     // from before it drops it unread and applies the roster at once.
     'roster-mask': `:${INT}`,
+    // roster-cut:<frame>:<slot>:<cut tag>:<first tag>:<b,lx,ly,cx,cy>;...  the
+    // host's cut of a player that roster removes, sent just before its
+    // roster-mask and only with it (specs/removed_input.qnt): neutral from the
+    // cut tag, the host's inputs from the first tag up to it.
+    'roster-cut': `:${INT}:\\d+:${INT}:${INT}:(?:${INT}(?:,${INT}){4}(?:;${INT}(?:,${INT}){4})*)?`,
     // left-out:<slot>  the host left that player out of the start; it joins late (specs/start_group.qnt)
     'left-out': ':\\d+',
     // unreachable:<slot>  a guest cannot reach that player; the host decides who plays

@@ -34,6 +34,8 @@ import {
   rosterScheduled,
 } from './controller-mask.ts';
 import { MASK_CAP, canScheduleMask, createMaskSchedule, rosterMask } from './controller-mask-schedule.ts';
+import { admissionFloor, cutTag, firstDiffering, NO_INPUT_TAKEN, rerunStep, wordSpan } from './removed-input.ts';
+import { cutInputAt, encodeRosterCut, packInput, parseRosterCut } from './removed-input-wire.ts';
 import { framesToSendAgain } from './input-resend.ts';
 import {
   collectLateJoinInputBridge,
@@ -346,6 +348,23 @@ export const KNCore = {
     canScheduleMask,
     createMaskSchedule,
     rosterMask,
+  },
+  /**
+   * A removed player's input: neutral from the host's roster frame on every
+   * page, the host's inputs below it, and a page that ran otherwise runs
+   * again (removed-input.ts, proved; specs/removed_input.qnt).
+   */
+  removedInput: {
+    NO_INPUT_TAKEN,
+    admissionFloor,
+    cutTag,
+    firstDiffering,
+    rerunStep,
+    wordSpan,
+    cutInputAt,
+    encodeRosterCut,
+    packInput,
+    parseRosterCut,
   },
   framesToAskFor,
   framesToSendAgain,

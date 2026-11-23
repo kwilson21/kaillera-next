@@ -621,6 +621,11 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         const _awaitFirstInputAfterReset = {{}};
         const KNShared = {{ ZERO_INPUT: Object.freeze({{buttons:0,lx:0,ly:0,cx:0,cy:0}}) }};
         const mod = {{ _kn_feed_input: (...args) => calls.push(args) }};
+        // The admission floor (web/src/removed-input.ts admissionFloor): no
+        // slot here is cut, so a slot not admitted again takes any input.
+        const window = {{ KNCore: {{ removedInput: {{
+          admissionFloor: (first, cut) => (first >= 0 ? first : cut >= 0 ? Number.MAX_SAFE_INTEGER : 0),
+        }} }} }};
         for (let frame = 890; frame <= 910; frame++) {{
           _remoteInputs[1][frame] = {{ buttons: frame, lx: 0, ly: 0, cx: 0, cy: 0 }};
         }}
