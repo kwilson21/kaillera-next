@@ -147,6 +147,9 @@ _VALID_EVENT_TYPES = {
     "rejoin-no-answer",
     # A late joiner got no game state from a running host before its deadline.
     "late-join-timeout",
+    # The match could not start on a page: its core lacks the C engine, or it
+    # never heard the host's delay (netplay-rollback.js _stopAtStart).
+    "start-fail",
     # A late joiner that lost its channel to the host got no answer to any of
     # its resync requests and stopped asking (netplay-rollback.js).
     "late-join-lost-host-giveup",
@@ -1397,6 +1400,31 @@ def create_app(lifespan=None) -> FastAPI:
             terms.append(ClientEvent.room == room)
         return or_(*terms) if terms else None
 
+    async def _client_events(match_id: str | None, room: str | None) -> list[dict]:
+        """A session's client events (DC failures, WebRTC state, milestones),
+        oldest first, at most 200, with meta decoded."""
+        either = _events_of(match_id, room)
+        if either is None:
+            return []
+        rows = await db.fetch(
+            select(
+                ClientEvent.id,
+                ClientEvent.type,
+                ClientEvent.message,
+                ClientEvent.meta,
+                ClientEvent.slot,
+                ClientEvent.created_at,
+            )
+            .where(either)
+            .order_by(ClientEvent.created_at, ClientEvent.id)
+            .limit(200)
+        )
+        for row in rows:
+            if row.get("meta") and isinstance(row["meta"], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    row["meta"] = json.loads(row["meta"])
+        return rows
+
     def _desync_verdicts(match_id: str) -> Select:
         """A match's desync events with their vision verdicts, in frame order."""
         return (
@@ -1528,6 +1556,15 @@ def create_app(lifespan=None) -> FastAPI:
                 entry["summary"] = json.loads(entry["summary"])
         return entry
 
+    @app.get("/admin/api/session-logs/{log_id}/client-events")
+    async def admin_session_log_client_events(log_id: int, _auth: None = Depends(_require_admin)) -> dict:
+        """The client events the detail endpoint bundles, without the session's
+        log: tools/analyze_match.py already has the log from the export."""
+        rows = await db.fetch(select(SessionLog.match_id, SessionLog.room).where(SessionLog.id == log_id))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Session log not found")
+        return {"client_events": await _client_events(rows[0].get("match_id"), rows[0].get("room"))}
+
     @app.get("/admin/api/session-logs/{log_id}")
     async def admin_session_log_detail(request: Request, log_id: int, _auth: None = Depends(_require_admin)) -> dict:
         rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
@@ -1547,29 +1584,7 @@ def create_app(lifespan=None) -> FastAPI:
         # Bundle client events for the same match/room so the full picture
         # is visible in one API call (DC failures, WebRTC state, milestones).
         match_id = entry.get("match_id")
-        room = entry.get("room")
-        either = _events_of(match_id, room)
-        if either is not None:
-            event_rows = await db.fetch(
-                select(
-                    ClientEvent.id,
-                    ClientEvent.type,
-                    ClientEvent.message,
-                    ClientEvent.meta,
-                    ClientEvent.slot,
-                    ClientEvent.created_at,
-                )
-                .where(either)
-                .order_by(ClientEvent.created_at, ClientEvent.id)
-                .limit(200)
-            )
-            for row in event_rows:
-                if row.get("meta") and isinstance(row["meta"], str):
-                    with contextlib.suppress(json.JSONDecodeError, TypeError):
-                        row["meta"] = json.loads(row["meta"])
-            entry["client_events"] = event_rows
-        else:
-            entry["client_events"] = []
+        entry["client_events"] = await _client_events(match_id, entry.get("room"))
 
         # Bundle vision desync verdicts for this match.
         if match_id:

@@ -51,7 +51,7 @@ for (const refuses of [true, false])
  const mod={HEAPU8:new Uint8Array(16),_kn_sync_write:()=>0,_kn_set_frame:f=>{if(!refuses)native=f},_kn_get_frame:()=>native};
  const window={EJS_emulator:{gameManager:{Module:mod}}},performance={now:()=>0};
  const ensureSyncBuffer=()=>{},_syncLog=()=>{},recaptureManualRunner=()=>{},_setLastSyncState=()=>{};
- const _resetStrictMenuResends=()=>{},_clearStrictMenuWait=()=>{};
+ const _resetStrictMenuResends=()=>{};
  const _handleCoreFatal=()=>{_coreFatalError=true};
  const _settleInputsAtResync=()=>{acks++;throw Error('settled-test-boundary')};
  ${between('  const applySyncState =', '  // -- Init / Stop API')}

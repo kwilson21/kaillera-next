@@ -191,16 +191,15 @@ def test_smash_remix_rng_seed_sync_stays_out_of_live_tick_path():
     assert "void mod" in sync_window
     assert "void frameNum" in sync_window
 
-    tick_idx = source.find("// Step one frame with audio capture")
-    assert tick_idx != -1
-    tick_window = source[tick_idx : tick_idx + 700]
+    # The C engine's tick (the only one: every frame runs on it) steps
+    # through _runStepOneFrame (STEP-NORUN / STEP-THREW handling), which is
+    # the wrapper around the raw stepOneFrame() call, with the no-op seed
+    # sync just before it.
+    step_idx = source.find("if (!_runStepOneFrame('normal')) {")
+    assert step_idx != -1
+    tick_window = source[step_idx - 300 : step_idx]
     assert tick_window.count("_syncRNGSeed(tickMod, _frameNum);") == 1
-    sync_idx = tick_window.find("_syncRNGSeed(tickMod, _frameNum);")
-    # The tick loop steps through _runStepOneFrame (STEP-NORUN / STEP-THREW
-    # handling), which is the wrapper around the raw stepOneFrame() call.
-    step_idx = tick_window.find("_runStepOneFrame('fallback')")
-    assert sync_idx != -1
-    assert step_idx > sync_idx
+    assert "_runStepOneFrame('fallback')" not in source
 
     runner_idx = source.find("const _runStepOneFrame = (branch) => {")
     assert runner_idx != -1
