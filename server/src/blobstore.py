@@ -17,6 +17,8 @@ import os
 import re
 import shutil
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -26,6 +28,24 @@ from botocore.exceptions import BotoCoreError, ClientError
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _R2_ENV = ("CF_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
 _DELETE_BATCH = 1000  # S3 DeleteObjects limit
+_MATCHES = "matches/"
+# Keys listed per match prefix before its newest time is given up on as
+# unknown (which keeps the prefix): 10 pages of 1000. A match writes a few
+# dozen objects; one with more than this is left for a person to look at.
+_PREFIX_KEY_BUDGET = 10_000
+
+
+@dataclass(frozen=True)
+class MatchPrefixes:
+    """One bounded page of the `matches/<id>/` prefixes in the store.
+
+    `newest` maps each match id to its newest object's time (UTC), or None
+    when that isn't known (too many objects to list); `next_after` is the id
+    to pass as `after` for the next page, None once the listing reached the end.
+    """
+
+    newest: dict[str, datetime | None]
+    next_after: str | None
 
 
 class BlobStoreError(RuntimeError):
@@ -53,6 +73,12 @@ class BlobStore(Protocol):
     async def delete(self, keys: Sequence[str]) -> None: ...
 
     async def delete_prefix(self, prefix: str) -> None: ...
+
+    async def list_match_prefixes(self, *, after: str | None = None, limit: int = 500) -> MatchPrefixes: ...
+
+
+def _match_id_ok(match_id: str) -> bool:
+    return bool(_SEGMENT_RE.match(match_id)) and match_id not in (".", "..")
 
 
 class LocalBlobStore:
@@ -101,6 +127,28 @@ class LocalBlobStore:
         """Delete every blob under `prefix`, which names a folder ("matches/<id>/")."""
         folder = self._path(prefix.rstrip("/"))
         await asyncio.to_thread(shutil.rmtree, folder, True)
+
+    async def list_match_prefixes(self, *, after: str | None = None, limit: int = 500) -> MatchPrefixes:
+        """Up to `limit` match folders in name order after `after`, with each one's newest file time."""
+        root = self.root / "matches"
+
+        def scan() -> MatchPrefixes:
+            try:
+                names = sorted(p.name for p in root.iterdir() if p.is_dir() and _match_id_ok(p.name))
+            except FileNotFoundError:
+                return MatchPrefixes({}, None)
+            if after is not None:
+                names = [n for n in names if n > after]
+            page, rest = names[:limit], names[limit:]
+            newest: dict[str, datetime | None] = {}
+            for name in page:
+                folder = root / name
+                # An empty folder counts as written when the folder was.
+                times = [f.stat().st_mtime for f in folder.rglob("*") if f.is_file()] or [folder.stat().st_mtime]
+                newest[name] = datetime.fromtimestamp(max(times), UTC)
+            return MatchPrefixes(newest, page[-1] if rest else None)
+
+        return await asyncio.to_thread(scan)
 
 
 class R2BlobStore:
@@ -167,6 +215,56 @@ class R2BlobStore:
                 break
             token = page.get("NextContinuationToken")
         await self.delete(keys)
+
+    async def list_match_prefixes(self, *, after: str | None = None, limit: int = 500) -> MatchPrefixes:
+        """Up to `limit` `matches/<id>/` prefixes after `after`, with each one's newest object time.
+
+        One ListObjectsV2 call with a delimiter for the page of prefixes (at
+        most 1000 per call, so `limit` above that takes several), then one
+        listing per prefix for its newest LastModified, stopped at
+        _PREFIX_KEY_BUDGET keys (newest None: not known).
+        """
+        prefixes: list[str] = []
+        start = {"StartAfter": f"{_MATCHES}{after}/~"} if after else {}
+        token: str | None = None
+        truncated = False
+        last: str | None = None  # the cursor: the last prefix listed, valid or not
+        while len(prefixes) < limit:
+            page = await self._call(
+                "list_objects_v2",
+                Prefix=_MATCHES,
+                Delimiter="/",
+                MaxKeys=min(1000, limit - len(prefixes)),
+                **({"ContinuationToken": token} if token else start),
+            )
+            for entry in page.get("CommonPrefixes", []):
+                match_id = last = entry["Prefix"][len(_MATCHES) :].rstrip("/")
+                if _match_id_ok(match_id):
+                    prefixes.append(match_id)
+            truncated = bool(page.get("IsTruncated"))
+            if not truncated:
+                break
+            token = page.get("NextContinuationToken")
+        newest: dict[str, datetime | None] = {}
+        for match_id in prefixes:
+            newest[match_id] = await self._newest(f"{_MATCHES}{match_id}/")
+        return MatchPrefixes(newest, last if truncated else None)
+
+    async def _newest(self, prefix: str) -> datetime | None:
+        latest: datetime | None = None
+        token: str | None = None
+        seen = 0
+        while True:
+            page = await self._call("list_objects_v2", Prefix=prefix, **({"ContinuationToken": token} if token else {}))
+            for obj in page.get("Contents", []):
+                stamp = obj["LastModified"]
+                latest = stamp if latest is None or stamp > latest else latest
+                seen += 1
+            if not page.get("IsTruncated"):
+                return latest
+            if seen >= _PREFIX_KEY_BUDGET:
+                return None
+            token = page.get("NextContinuationToken")
 
     async def delete(self, keys: Sequence[str]) -> None:
         checked = [_check_key(k) for k in keys]

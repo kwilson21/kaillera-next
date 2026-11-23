@@ -174,3 +174,11 @@ class MatchRetention(Base):
     archive_bytes: Mapped[int | None] = mapped_column(Integer)
     archive_token: Mapped[str | None] = mapped_column(Text)
     evicted_at: Mapped[str | None] = mapped_column(Text)
+
+
+class ServerState(Base):
+    __tablename__ = "server_state"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[str] = mapped_column(Text)

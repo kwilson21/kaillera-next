@@ -6,6 +6,7 @@ Live R2 check: add KN_R2_LIVE=1 and the R2 env vars (see deploy/render/README.md
 
 import os
 import secrets
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from botocore.exceptions import ClientError
@@ -74,9 +75,13 @@ class _Body:
         return self._data
 
 
+_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
+
+
 class FakeS3:
     def __init__(self, fail_with=None):
         self.objects: dict[str, bytes] = {}
+        self.times: dict[str, datetime] = {}
         self.calls: list[tuple[str, dict]] = []
         self.fail_with = fail_with
 
@@ -97,15 +102,36 @@ class FakeS3:
         return {"Body": _Body(self.objects[kw["Key"]])}
 
     def list_objects_v2(self, **kw):
-        """Two keys per page, so tests exercise pagination."""
+        """Two entries per page, so tests exercise pagination. With a
+        Delimiter, keys sharing a next segment roll up into CommonPrefixes."""
         self.calls.append(("list_objects_v2", kw))
-        keys = sorted(k for k in self.objects if k.startswith(kw["Prefix"]))
+        self._maybe_fail("ListObjectsV2")
+        prefix = kw["Prefix"]
+        after = kw.get("StartAfter", "")
+        entries: list[tuple[str, str]] = []  # (sort key, "key"|"prefix")
+        rolled: set[str] = set()
+        for k in sorted(self.objects):
+            if not k.startswith(prefix) or k <= after:
+                continue
+            rest = k[len(prefix) :]
+            if kw.get("Delimiter") and kw["Delimiter"] in rest:
+                common = prefix + rest.split(kw["Delimiter"], 1)[0] + kw["Delimiter"]
+                if common not in rolled:
+                    rolled.add(common)
+                    entries.append((common, "prefix"))
+            else:
+                entries.append((k, "key"))
         start = int(kw.get("ContinuationToken", 0))
-        page = keys[start : start + 2]
-        more = start + 2 < len(keys)
-        out = {"Contents": [{"Key": k} for k in page], "IsTruncated": more}
+        size = min(2, kw.get("MaxKeys", 2))
+        page = entries[start : start + size]
+        more = start + size < len(entries)
+        out = {
+            "Contents": [{"Key": k, "LastModified": self.times.get(k, _EPOCH)} for k, kind in page if kind == "key"],
+            "CommonPrefixes": [{"Prefix": k} for k, kind in page if kind == "prefix"],
+            "IsTruncated": more,
+        }
         if more:
-            out["NextContinuationToken"] = str(start + 2)
+            out["NextContinuationToken"] = str(start + size)
         return out
 
     def delete_objects(self, **kw):
@@ -253,3 +279,86 @@ def test_r2_delete_reports_per_key_failures():
     client.delete_objects = partial_failure
     with pytest.raises(BlobStoreError, match="InternalError"):
         run_async(_r2(client).delete(["matches/m/screenshots/0-1.jpg"]))
+
+
+# ── Match prefix listing (the orphan sweep's input) ──────────────────────────
+
+
+def _put_times(store_or_client, objects):
+    for key, when in objects.items():
+        store_or_client.objects[key] = b"x"
+        store_or_client.times[key] = when
+
+
+def test_r2_lists_match_prefixes_with_their_newest_time_across_pages():
+    client = FakeS3()
+    t = _EPOCH
+    _put_times(
+        client,
+        {
+            "matches/a/screenshots/0-1.jpg": t,
+            "matches/a/screenshots/0-2.jpg": t + timedelta(days=2),
+            "matches/a/sessions/tok/0.log.gz": t + timedelta(days=1),
+            "matches/b/screenshots/0-1.jpg": t + timedelta(days=3),
+            "matches/c/x.jpg": t,
+            "other/d/x.jpg": t,
+        },
+    )
+    listing = run_async(_r2(client).list_match_prefixes())
+    assert listing.newest == {"a": t + timedelta(days=2), "b": t + timedelta(days=3), "c": t}
+    assert listing.next_after is None
+
+
+def test_r2_prefix_listing_is_bounded_and_resumes_after_the_cursor():
+    from src.blobstore import R2BlobStore
+
+    client = FakeS3()
+    _put_times(client, {f"matches/m{i}/x.jpg": _EPOCH for i in range(5)})
+    store: R2BlobStore = _r2(client)
+    first = run_async(store.list_match_prefixes(limit=3))
+    assert list(first.newest) == ["m0", "m1", "m2"] and first.next_after == "m2"
+    second = run_async(store.list_match_prefixes(after=first.next_after, limit=3))
+    assert list(second.newest) == ["m3", "m4"] and second.next_after is None
+
+
+def test_r2_prefix_listing_gives_up_on_a_prefix_with_too_many_objects(monkeypatch):
+    from src import blobstore
+
+    monkeypatch.setattr(blobstore, "_PREFIX_KEY_BUDGET", 3)
+    client = FakeS3()
+    _put_times(client, {f"matches/big/{i}.jpg": _EPOCH for i in range(6)})
+    _put_times(client, {"matches/small/0.jpg": _EPOCH})
+    assert run_async(_r2(client).list_match_prefixes()).newest == {"big": None, "small": _EPOCH}
+
+
+def test_r2_prefix_listing_failure_is_a_blobstore_error():
+    from src.blobstore import BlobStoreError
+
+    with pytest.raises(BlobStoreError, match="list_objects_v2"):
+        run_async(_r2(FakeS3(fail_with="InternalError")).list_match_prefixes())
+
+
+def test_local_lists_match_folders_with_their_newest_file_time(tmp_path):
+    from src.blobstore import LocalBlobStore
+
+    store = LocalBlobStore(tmp_path)
+
+    async def scenario():
+        for key in ("matches/a/screenshots/0-1.jpg", "matches/a/sessions/t/0.log.gz", "matches/b/0.jpg", "x/c/0.jpg"):
+            await store.put(key, b"x")
+        old, new = _EPOCH.timestamp(), (_EPOCH + timedelta(days=1)).timestamp()
+        os.utime(tmp_path / "matches/a/screenshots/0-1.jpg", (old, old))
+        os.utime(tmp_path / "matches/a/sessions/t/0.log.gz", (new, new))
+        os.utime(tmp_path / "matches/b/0.jpg", (old, old))
+        return await store.list_match_prefixes(limit=1), await store.list_match_prefixes(after="a", limit=1)
+
+    first, second = run_async(scenario())
+    assert first.newest == {"a": _EPOCH + timedelta(days=1)} and first.next_after == "a"
+    assert second.newest == {"b": _EPOCH} and second.next_after is None
+
+
+def test_local_listing_without_a_matches_folder_is_empty(tmp_path):
+    from src.blobstore import LocalBlobStore
+
+    listing = run_async(LocalBlobStore(tmp_path).list_match_prefixes())
+    assert listing.newest == {} and listing.next_after is None

@@ -15,10 +15,12 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import ColumnElement, and_, case, delete, func, or_, select, update
 
 from src import db
+from src.blobstore import BlobStoreError
 from src.schema import (
     ClientEvent,
     DesyncEvent,
@@ -245,11 +247,109 @@ async def sweep_unregistered() -> None:
     await db.run(delete(ClientEvent).where(ClientEvent.created_at < old, ~in_a_match))
 
 
+# ── Orphan sweep ─────────────────────────────────────────────────────────────
+#
+# A blob-store prefix `matches/<id>/` can outlive its match's rows: an upload
+# that lands after finish_deletes removed the prefix and the rows, or a crash
+# between an upload and its record. Nothing else ever deletes those objects.
+# Weekly (spec §4 "Retention sweep"), the sweep lists the prefixes and
+# deletes the orphans.
+#
+# The rule: a prefix is deleted only when BOTH
+#   1. no match_retention row has its id — not a live, flagged or tombstoned
+#      match (a tombstoned one is finish_deletes's to delete, objects first,
+#      row last), and
+#   2. its newest object is older than LOG_RETENTION_DAYS (at least a day).
+# Rule 2 is what keeps a match that is still being written. Its writers are
+# game-screenshot (for the room's live match, which can run before
+# register_match has committed the row) and log_archive.archive_match (for a
+# match with a row; an upload can be in flight while finish_deletes removes
+# that row). Either leaves an object minutes old, far inside the window, so
+# the prefix is kept, and a later sweep finds it again. A write landing
+# between the listing and the delete would need a prefix whose objects are
+# all a window old and that has no row: a match gone for days, which nothing
+# writes for again, since match ids are fresh uuid4s (api/signaling.py, _start_game_locked).
+_ORPHAN_SWEEP_EVERY = timedelta(days=7)
+# Prefixes looked at per sweep (one listing call each on R2). A bigger bucket
+# is worked through over several 6-hourly sweeps, resuming at the cursor.
+_ORPHAN_PREFIXES_PER_RUN = 500
+# D1 caps bound parameters per statement at 100.
+_ID_QUERY_BATCH = 90
+LAST_ORPHAN_SWEEP = "last_orphan_sweep"
+ORPHAN_SWEEP_CURSOR = "orphan_sweep_cursor"
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+async def _registered(match_ids: list[str]) -> set[str]:
+    found: set[str] = set()
+    for start in range(0, len(match_ids), _ID_QUERY_BATCH):
+        batch = match_ids[start : start + _ID_QUERY_BATCH]
+        rows = await db.fetch(select(MatchRetention.match_id).where(MatchRetention.match_id.in_(batch)))
+        found.update(row["match_id"] for row in rows)
+    return found
+
+
+async def sweep_orphans(now: datetime | None = None) -> int | None:
+    """Delete blob-store prefixes that belong to no match (see the rule above).
+
+    Runs only when the last full pass ended a week ago, or a pass is part way
+    through (`orphan_sweep_cursor`); each call looks at one bounded page of
+    prefixes. A listing that fails logs a warning and changes neither marker,
+    so the next sweep tries again. Returns prefixes deleted, or None when it
+    didn't run.
+    """
+    now = now or datetime.now(UTC)
+    cursor = await db.get_server_state(ORPHAN_SWEEP_CURSOR)
+    last = _parse_time(await db.get_server_state(LAST_ORPHAN_SWEEP))
+    if cursor is None and last is not None and now - last < _ORPHAN_SWEEP_EVERY:
+        return None
+    try:
+        listing = await db.list_match_prefixes(after=cursor, limit=_ORPHAN_PREFIXES_PER_RUN)
+    except BlobStoreError as exc:
+        log.warning("Orphan sweep: listing the blob store failed; retrying next sweep: %s", exc)
+        return None
+
+    cutoff = now - timedelta(days=window_days("LOG_RETENTION_DAYS", 7))
+    old = [match_id for match_id, newest in listing.newest.items() if newest is not None and newest < cutoff]
+    registered = await _registered(old) if old else set()
+    deleted = 0
+    for match_id in old:
+        if match_id in registered:
+            continue
+        try:
+            await db.delete_match_blobs(match_id)
+        except BlobStoreError as exc:
+            # Still an orphan next week; one failure doesn't stop the others.
+            log.warning("Orphan sweep: prefix of %s not deleted: %s", match_id[:8], exc)
+            continue
+        deleted += 1
+
+    await db.set_server_state(ORPHAN_SWEEP_CURSOR, listing.next_after)
+    if listing.next_after is None:
+        await db.set_server_state(LAST_ORPHAN_SWEEP, now.isoformat())
+    log.info(
+        "Orphan sweep: %d prefix(es) listed, %d orphan(s) deleted%s",
+        len(listing.newest),
+        deleted,
+        "" if listing.next_after is None else "; continuing next sweep",
+    )
+    return deleted
+
+
 async def sweep(*, include_unregistered: bool = True) -> None:
     """One retention pass: finish interrupted deletes, tombstone and delete
     newly expired matches, archive and evict what is left, then (unless told
     not to) age out unregistered rows, which scans whole tables and so runs
-    less often.
+    less often. Last, the weekly orphan sweep, which gates itself.
 
     Expiry runs before the archive so a match past its window is deleted
     rather than uploaded first (src/log_archive.py)."""
@@ -261,4 +361,5 @@ async def sweep(*, include_unregistered: bool = True) -> None:
     await log_archive.sweep()
     if include_unregistered:
         await sweep_unregistered()
+    await sweep_orphans()
     log.info("Retention sweep: %d match(es) expired, %d deleted", len(marked), finished)
