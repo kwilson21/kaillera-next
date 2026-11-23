@@ -228,12 +228,40 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   window.__knHoldSocketRequests = 0;
   window.__knSocketRequestsHeld = [];
   const heldSocketRequests = [];
+  const replayDepthNow = () => window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() ?? 0;
   const releaseHeldSocketRequests = () => {
     while (heldSocketRequests.length) {
       const { socket, packet, record } = heldSocketRequests.shift();
       record.releasedAt = performance.now();
+      record.replayDepth = replayDepthNow();
       realOnevent.call(socket, packet);
     }
+  };
+  // SYNC_FOLLOW_UP=owed (the host page): with window.__knReleaseOnReplay set,
+  // a held request is not delivered after the next input packet but between
+  // two ticks while the replay those inputs caused is still in flight (the
+  // engine replays a few frames per tick): the host takes its answer's state
+  // with a correction owed (specs/sync_follow_up.qnt, owedAtTakeTest). At
+  // SOCKET_REPLAY_WAIT_MS with no replay seen it is delivered anyway, and its
+  // record says so (replayDepth 0).
+  window.__knReleaseOnReplay = false;
+  const SOCKET_REPLAY_WAIT_MS = 4000;
+  let replayPoll = 0;
+  const releaseOnReplay = () => {
+    if (replayPoll) return;
+    const started = performance.now();
+    replayPoll = setInterval(() => {
+      if (!heldSocketRequests.length) {
+        clearInterval(replayPoll);
+        replayPoll = 0;
+        return;
+      }
+      if (replayDepthNow() > 0 || performance.now() - started > SOCKET_REPLAY_WAIT_MS) {
+        clearInterval(replayPoll);
+        replayPoll = 0;
+        releaseHeldSocketRequests();
+      }
+    }, 1);
   };
   // And the page's next two decode results (the sync worker's replies) once
   // the held answer is let go are held and delivered back to back in one
@@ -317,8 +345,10 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
             heldSocketRequests.length &&
             (ch.label === 'lockstep' || ch.label === 'rollback-input') &&
             typeof data !== 'string'
-          )
-            releaseHeldSocketRequests();
+          ) {
+            if (window.__knReleaseOnReplay) releaseOnReplay();
+            else releaseHeldSocketRequests();
+          }
           return handled;
         });
         if (ch.label === 'sync-state') afterSyncStateMessage(e.data);

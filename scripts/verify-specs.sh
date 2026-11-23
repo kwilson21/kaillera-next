@@ -305,6 +305,13 @@ sync_follow_up() {
   expect_violation "$FOLLOW" sync_follow_up_socket_undelivered aFollowUpCarriesANewState 5
   # A socket answer whose follow-up waits on a closed channel: 4 steps.
   expect_violation "$FOLLOW" sync_follow_up_socket_over_channel aWatchedAnswerCanBeFollowedUp 4
+  # An input labelled F - delay .. F differs after the send, and is counted as
+  # a change though it runs at F or later: 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_delay_unaware aFollowUpCarriesANewState 5
+  # A state taken with a correction owed, its follow-up skipped once the
+  # correction ran: 6 steps. Today's rule as well as the delay rule alone.
+  expect_violation "$FOLLOW" sync_follow_up_owed_unflagged theGuestEndsOnTheHostsState 6
+  expect_violation "$FOLLOW" sync_follow_up_delay_unaware theGuestEndsOnTheHostsState 6
 }
 
 rom_at_start() {

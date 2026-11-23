@@ -9,8 +9,9 @@
  * to JITTER ms, never reordering a channel) to stand in for a real network.
  *
  * Checks, printed as JSON and written to OUT/summary.json:
- *   - gameplay hash of every finalized frame (12 frames behind the head,
- *     past the rollback window) is identical on both peers
+ *   - gameplay hash of every finalized frame (read the engine's rollback
+ *     window + 1 frames behind the head, so no rollback can change it any
+ *     more: tests/hash-lag.mjs) is identical on both peers
  *   - no frame run on a prediction nothing corrects: one at the rollback
  *     window's edge whose input the peer is known to have made, or one run
  *     right after a reconnect reset, before C records predictions for that
@@ -530,6 +531,16 @@
  *     the answer was taken at shows it was rewritten (which any engine
  *     logs), so on an engine without the fix the answer the guest keeps is
  *     the last one applied, where the frames compared start, and they split.
+ *     `owed` is `socket` with the held request delivered between two ticks
+ *     while the replay the released inputs caused is still in flight (the
+ *     engine replays a few frames per tick): the host takes its answer's
+ *     state with a correction owed, the differing input fed before that
+ *     state's watch existed (specs/sync_follow_up.qnt, owedAtTakeTest).
+ *     Tried up to 3 times until the request is delivered with a replay in
+ *     flight (any engine). Fails unless the watch starts changed
+ *     (`SYNC-FOLLOW-UP-WATCH ... owed=1`), the follow-up goes out over the
+ *     socket after it, and the guest applies both; on an engine that does
+ *     not flag it the follow-up is skipped and the frames compared split.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -677,6 +688,7 @@ import {
 } from './frozen-recovery.mjs';
 import { fileURLToPath } from 'node:url';
 import { requireCurrentBundle } from './bundle-check.mjs';
+import { trackHashLag, unrecordedIn } from './hash-lag.mjs';
 import { spansInFrames } from './link-schedule.mjs';
 import { addNetworkInitScript } from './rb-page-network.mjs';
 import {
@@ -714,6 +726,15 @@ const DROP_SIGNALING_MS = Number(process.env.DROP_SIGNALING_MS || 0);
 const DROP_SIGNALING_GUEST_LATE_MS = Number(process.env.DROP_SIGNALING_GUEST_LATE_MS || 0);
 const HIDE_GUEST_FROZEN = process.env.HIDE_GUEST_FROZEN === '1';
 const VISUAL_CHECK = process.env.VISUAL_CHECK === '1';
+// COMPARE_HASH_LAG=N: also read the gameplay and game-state hashes N frames
+// behind the head, as the harness did before its lag came from the engine
+// (12), and report how those frames compare (`earlyLagCompare`): how many
+// differ, and how many of those agree at the run's own lag. Reported only.
+const COMPARE_HASH_LAG = Number(process.env.COMPARE_HASH_LAG || 0);
+if (!(Number.isInteger(COMPARE_HASH_LAG) && COMPARE_HASH_LAG >= 0)) {
+  console.log(`COMPARE_HASH_LAG=${process.env.COMPARE_HASH_LAG} invalid: a whole number of frames`);
+  process.exit(1);
+}
 const MIN_GAME_FPS = process.env.MIN_GAME_FPS ? Number(process.env.MIN_GAME_FPS) : null;
 const SUSPEND_GUEST_AUDIO = process.env.SUSPEND_GUEST_AUDIO === '1';
 const CLICK_DURING_BATTLE = process.env.CLICK_DURING_BATTLE === '1';
@@ -813,8 +834,8 @@ const UNANSWERED_LETGO_FREEZE_MS = 7000;
 // (`delay re-tuned` in the sync log says what it chose).
 const FORCE_DELAY = process.env.FORCE_DELAY ? Number(process.env.FORCE_DELAY) : null;
 const SYNC_FOLLOW_UP = process.env.SYNC_FOLLOW_UP || '';
-if (!['', 'same', 'changed', 'direct', 'socket'].includes(SYNC_FOLLOW_UP)) {
-  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same, changed, direct or socket`);
+if (!['', 'same', 'changed', 'direct', 'socket', 'owed'].includes(SYNC_FOLLOW_UP)) {
+  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same, changed, direct, socket or owed`);
   process.exit(1);
 }
 // SYNC_FOLLOW_UP freezes the host as letgo does, and how long the guest's
@@ -1982,12 +2003,15 @@ while (Date.now() - t0 < 60000) {
 // Autopilot + input hook + hash recorder, per page.
 const install = async (p, role) => {
   await p.addScriptTag({ url: `${URL}/static/ssb64-menu-autopilot.js` });
+  await p.evaluate(trackHashLag);
   await p.evaluate(
     (args) => {
-      const { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter, twelveCb } = args;
+      const { role, VISUAL_CHECK, ADDRESS_MAP_CHECK, ADDRESS_MAP_OF, anyFighter, twelveCb, earlyLag } = args;
       const W = (window.__tp = {
         role,
         hashes: {},
+        early: {},
+        ticksWithoutLag: 0,
         scene: -1,
         inBattleAt: -1,
         pilotFail: null,
@@ -2178,21 +2202,32 @@ const install = async (p, role) => {
       m._kn_post_tick = function (...a) {
         const r = post.apply(this, a);
         const idle = (m._kn_get_replay_depth?.() ?? 0) === 0;
+        // The page's own lag, max + 1 of the window its engine was armed
+        // with (tests/hash-lag.mjs says why); null until it is armed.
+        const lag = window.__knHashLag?.lag ?? null;
         // A sync rewind (frame goes down with no replay running) makes hashes
         // already recorded at or after the new frame stale; re-record them.
         if (idle && W.lastR !== undefined && r < W.lastR) {
-          for (const k of Object.keys(W.hashes)) if (+k >= r - 12) delete W.hashes[k];
+          if (lag !== null) for (const k of Object.keys(W.hashes)) if (+k >= r - lag) delete W.hashes[k];
+          if (earlyLag) for (const k of Object.keys(W.early)) if (+k >= r - earlyLag) delete W.early[k];
         }
         if (idle) W.lastR = r;
         window.__knResyncOneBack?.afterTick(r, idle);
-        if (idle && r > 40) {
-          const f = r - 12;
+        if (idle && r > 40 && lag === null) W.ticksWithoutLag++;
+        if (idle && r > 40 && lag !== null) {
+          const f = r - lag;
           if (!(f in W.hashes))
             W.hashes[f] = [
               m._kn_gameplay_hash(f) >>> 0,
               m._kn_full_state_hash(f) >>> 0,
               (m._kn_game_state_hash?.(f) ?? 0) >>> 0,
             ];
+        }
+        // COMPARE_HASH_LAG: the same hashes read at that lag too, to show
+        // what an earlier read would have compared.
+        if (idle && earlyLag && r > 40) {
+          const f = r - earlyLag;
+          if (!(f in W.early)) W.early[f] = [m._kn_gameplay_hash(f) >>> 0, (m._kn_game_state_hash?.(f) ?? 0) >>> 0];
         }
         if (VISUAL_CHECK && idle && W.inBattleAt >= 0 && r >= W.inBattleAt) {
           try {
@@ -2220,6 +2255,7 @@ const install = async (p, role) => {
       ADDRESS_MAP_OF,
       anyFighter: MENU_AUTOPILOT === 'any-fighter',
       twelveCb: process.env.TWELVE_CB === '1',
+      earlyLag: COMPARE_HASH_LAG,
     },
   );
 };
@@ -2642,7 +2678,10 @@ if (inBattle) {
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
-  } else if (SYNC_FOLLOW_UP === 'socket') {
+  } else if (SYNC_FOLLOW_UP === 'socket' || SYNC_FOLLOW_UP === 'owed') {
+    // `owed`: the held request is delivered while the replay the released
+    // inputs caused is still in flight (rb-page-network.mjs, __knReleaseOnReplay).
+    const owedMode = SYNC_FOLLOW_UP === 'owed';
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
     const started = Date.now();
@@ -2659,11 +2698,12 @@ if (inBattle) {
       // The socket request is held on the host page and delivered right
       // after the guest's kept-back inputs are taken in (below).
       // This attempt's request is the one held after the records kept so far.
-      const heldBefore = await host.evaluate(() => {
+      const heldBefore = await host.evaluate((owed) => {
         window.__knSyncAnswerDrops.push('chunks');
         window.__knHoldSocketRequests = 1;
+        window.__knReleaseOnReplay = owed;
         return window.__knSocketRequestsHeld.length;
-      });
+      }, owedMode);
       await guest.evaluate(() => window.dispatchEvent(new Event('online')));
       await guest.waitForTimeout(SYNC_FOLLOW_UP_SOCKET_HOLD_FROM_MS);
       // A button down, its packets kept back until the host holds the socket
@@ -2703,24 +2743,39 @@ if (inBattle) {
       const tail = received < 0 ? [] : hostLines.slice(received);
       const read = tail.findIndex((l) => /host kn_sync_read:/.test(l));
       const takenAt = read < 0 ? NaN : Number((tail[read].split('\t')[2] || '').replace('f=', ''));
-      syncFollowUp.watched =
-        received >= 0 &&
-        (tail.some((l) => /SYNC-FOLLOW-UP-NEEDED /.test(l)) ||
-          tail
-            .slice(read + 1)
-            .some(
-              (l) =>
-                /C-REPLAY start: depth=[1-9]/.test(l) && Number((l.split('\t')[2] || '').replace('f=', '')) <= takenAt,
-            ));
+      // `owed`: reached once the request was delivered with a replay in
+      // flight (any engine records it), so the answer's state was taken
+      // with a correction owed.
+      const record = await host.evaluate((n) => window.__knSocketRequestsHeld[n] ?? null, heldBefore);
+      syncFollowUp.releasedInReplay = (record?.replayDepth ?? 0) > 0;
+      syncFollowUp.watched = owedMode
+        ? received >= 0 && syncFollowUp.releasedInReplay
+        : received >= 0 &&
+          (tail.some((l) => /SYNC-FOLLOW-UP-NEEDED /.test(l)) ||
+            tail
+              .slice(read + 1)
+              .some(
+                (l) =>
+                  /C-REPLAY start: depth=[1-9]/.test(l) &&
+                  Number((l.split('\t')[2] || '').replace('f=', '')) <= takenAt,
+              ));
       await guest.evaluate((n) => {
         window.__knReleaseInputs();
         window.__knInputOverride = () => n;
       }, NEUTRAL);
       await host.evaluate(() => {
         window.__knHoldSocketRequests = 0;
+        window.__knReleaseOnReplay = false;
       });
       console.log(
-        `SYNC_FOLLOW_UP=socket: ${syncFollowUp.watched ? 'a replay rewrote the frame the socket answer was taken at' : 'no replay rewrote it; trying again'}`,
+        `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: ` +
+          (owedMode
+            ? syncFollowUp.watched
+              ? 'the request was answered with a replay in flight'
+              : 'no replay in flight when the request was delivered; trying again'
+            : syncFollowUp.watched
+              ? 'a replay rewrote the frame the socket answer was taken at'
+              : 'no replay rewrote it; trying again'),
       );
       if (!syncFollowUp.watched) await guest.waitForTimeout(5000);
     }
@@ -3454,6 +3509,14 @@ const collect = (p, VISUAL_CHECK) =>
     }
     return {
       hashes: window.__tp.hashes,
+      // The lag this page read its hashes at, and each time its engine was
+      // armed (tests/hash-lag.mjs).
+      hashLag: window.__knHashLag ?? null,
+      ticksWithoutLag: window.__tp.ticksWithoutLag,
+      // The frame of the last post_tick run outside a replay: the last
+      // frame read at was this minus the lag.
+      lastR: window.__tp.lastR ?? null,
+      early: window.__tp.early,
       inBattleAt: window.__tp.inBattleAt,
       menuInputs: window.__tp.menuInputs,
       delay: window.NetplayRollback.getHudCounters?.()?.delay ?? null,
@@ -3492,6 +3555,12 @@ const collect = (p, VISUAL_CHECK) =>
     };
   }, VISUAL_CHECK);
 const [H, G] = await Promise.all([collect(host, VISUAL_CHECK), collect(guest, VISUAL_CHECK)]);
+// The lag each page read its hashes at (tests/hash-lag.mjs), and the largest
+// any page used at any point (a re-arm mid-match can change it): how far
+// behind a frame an event can show in the hashes.
+const lagOf = (peer) => peer.hashLag?.lag ?? null;
+const HASH_LAG = Math.max(0, ...[H, G].flatMap((peer) => (peer.hashLag?.inits ?? []).map((i) => i.lag)));
+const ROLLBACK_MAX = Math.max(0, ...[H, G].flatMap((peer) => (peer.hashLag?.inits ?? []).map((i) => i.max)));
 // The whole C engine log. The page drains it into its sync log as [C] lines,
 // and a core with kn_clear_debug_log is emptied each time: the log is those
 // lines, then what has not been drained yet. An older core keeps it all.
@@ -3637,12 +3706,12 @@ const linkStarvedFrames = LINK_KBPS > 0 ? { host: starvedFramesOf(H), guest: sta
 const recoveries = FREEZE_LIKE
   ? []
   : linkStarvedFrames
-    ? withoutLinkStarved(frozenRecoveries({ host: H.sync, guest: G.sync }), linkStarvedFrames)
-    : frozenRecoveries({ host: H.sync, guest: G.sync });
+    ? withoutLinkStarved(frozenRecoveries({ host: H.sync, guest: G.sync }, { hashLag: HASH_LAG }), linkStarvedFrames)
+    : frozenRecoveries({ host: H.sync, guest: G.sync }, { hashLag: HASH_LAG });
 let framesExcluded = 0,
   mismatchesExcluded = 0;
-// DROP_PEER_MS: the reconnect as the logs show it, after the drop. From 12
-// frames before the drop (the hashes trail the head by 12) to the frame the
+// DROP_PEER_MS: the reconnect as the logs show it, after the drop. From
+// HASH_LAG frames before the drop (the hashes trail the head by that) to the frame the
 // guest's reconnect resync lands on, each page ran on predicted input for
 // the other, so the two timelines split by design; those frames are left
 // out, as a proven frozen-page recovery's are. Only when every step of the
@@ -3688,7 +3757,7 @@ const dropPeerReport = (() => {
     paths,
     window: {
       declaredBy: 'DROP_PEER_MS',
-      from: Math.min(dropPeer.hostFrame, dropPeer.closed?.frame ?? dropPeer.hostFrame) - 12,
+      from: Math.min(dropPeer.hostFrame, dropPeer.closed?.frame ?? dropPeer.hostFrame) - HASH_LAG,
       to,
       stoppedPage: null,
       stoppedMs: null,
@@ -3992,14 +4061,26 @@ const resyncOneBackReport = (() => {
 })();
 // DESYNC_GUEST holds its change for 3 s. A rollback in that time re-runs
 // frames from before the change with the change already in memory, so the
-// hashes and digests of up to a rollback window of earlier frames (22, the
-// engine's rollbackMax) carry it too. Those belong to the change.
-const DESYNC_REACHES_BACK_FRAMES = 22;
+// hashes and digests of up to a rollback window of earlier frames (the
+// engine's rollbackMax, 22 in practice) carry it too. Those belong to the change.
+const DESYNC_REACHES_BACK_FRAMES = ROLLBACK_MAX || 22;
 const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
-for (const f of Object.keys(H.hashes)) {
+// Frames one page read and the other has no hash for, or read as 0 (not in
+// its ring then): not compared, but counted, over the frames compared.
+const unrecorded = { host: { missing: 0, zero: 0 }, guest: { missing: 0, zero: 0 } };
+for (const f of new Set([...Object.keys(H.hashes), ...Object.keys(G.hashes)])) {
   const a = H.hashes[f],
     b = G.hashes[f];
-  if (!b || !a[0] || !b[0] || +f < recoveredAt || +f >= compareUntil) continue;
+  if (+f < recoveredAt || +f >= compareUntil) continue;
+  if (!a || !b || !a[0] || !b[0]) {
+    for (const [side, h] of [
+      ['host', a],
+      ['guest', b],
+    ])
+      if (!h) unrecorded[side].missing++;
+      else if (!h[0]) unrecorded[side].zero++;
+    continue;
+  }
   if (inFrozenRecovery(dropWindows, +f)) {
     dropPeerReport.framesExcluded++;
     if (a[0] !== b[0] || a[2] !== b[2]) dropPeerReport.mismatchesExcluded++;
@@ -4107,11 +4188,49 @@ const lastTickPerf = (log) => {
   return { f: +m[1], droppedSlots: +m[2], catchupFrames: +m[3] };
 };
 const schedulerCounters = { host: lastTickPerf(H.sync), guest: lastTickPerf(G.sync) };
-// Finalized battle frames both peers could have hashed (hashing trails the
-// head by 12 frames); coverage below 80% means the comparison proves little.
+// Finalized battle frames both peers could have hashed (each page's hashing
+// trails its head by its lag); coverage below 80% means the comparison
+// proves little. Every frame of the span counts, so a frame either page left
+// without a hash (missing, or 0: not in its ring when read) lowers it, and
+// those frames are counted per page in battleUnrecorded.
 const spanFrom = Math.max(battleFrom, recoveredAt);
-const battleSpan = battleFrom > 0 ? Math.min(Math.min(H.frame, G.frame) - 12, compareUntil - 1) - spanFrom + 1 : 0;
+const lastReadOf = (peer) => (peer.lastR ?? peer.frame) - (lagOf(peer) ?? 0);
+const spanTo = Math.min(lastReadOf(H), lastReadOf(G), compareUntil - 1);
+const battleSpan = battleFrom > 0 ? spanTo - spanFrom + 1 : 0;
 const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
+const battleUnrecorded =
+  battleSpan > 0
+    ? { host: unrecordedIn(H.hashes, spanFrom, spanTo), guest: unrecordedIn(G.hashes, spanFrom, spanTo) }
+    : null;
+// COMPARE_HASH_LAG: the frames read at that lag, compared as the run's own
+// are (same exclusions), and how many of those that differ agree at the
+// run's own lag: a difference there was a frame a rollback rewrote after it
+// was read.
+let earlyLagCompare = null;
+if (COMPARE_HASH_LAG) {
+  const e = { lag: COMPARE_HASH_LAG, framesCompared: 0, gameplayMismatches: 0, gameStateMismatches: 0 };
+  e.mismatchesAgreeingAtRunLag = 0;
+  e.mismatchesStillDifferingAtRunLag = 0;
+  e.mismatchesNotComparedAtRunLag = 0;
+  for (const f of Object.keys(H.early ?? {})) {
+    const a = H.early[f],
+      b = G.early?.[f];
+    if (!b || !a[0] || !b[0] || +f < recoveredAt || +f >= compareUntil) continue;
+    if (inFrozenRecovery(dropWindows, +f) || inFrozenRecovery(recoveries, +f)) continue;
+    e.framesCompared++;
+    const gp = a[0] !== b[0],
+      gs = a[1] !== b[1];
+    if (gp) e.gameplayMismatches++;
+    if (gs) e.gameStateMismatches++;
+    if (!gp && !gs) continue;
+    const x = H.hashes[f],
+      y = G.hashes[f];
+    if (!x || !y || !x[0] || !y[0]) e.mismatchesNotComparedAtRunLag++;
+    else if (x[0] === y[0] && x[2] === y[2]) e.mismatchesAgreeingAtRunLag++;
+    else e.mismatchesStillDifferingAtRunLag++;
+  }
+  earlyLagCompare = e;
+}
 
 // Visual check: decode both peers' downscaled canvas captures and diff
 // frames present on both sides at the same frame number — mean absolute
@@ -4503,8 +4622,23 @@ const summary = {
   tickStuck: { host: count(H.sync, /TICK-STUCK/g), guest: count(G.sync, /TICK-STUCK/g) },
   hashCompare: {
     framesCompared: both,
+    unrecorded,
     battleFramesCompared: battleCompared,
     battleCoverage: +battleCoverage.toFixed(3),
+    battleSpan,
+    // Battle-span frames a page has no hash for (missing) or read as 0 (not
+    // in its ring): counted against battleCoverage, never compared.
+    battleUnrecorded,
+    // The lag each page read its hashes at (rollback window + 1), every
+    // time its engine was armed, and the post_tick reads made before it was.
+    hashLag: {
+      host: lagOf(H),
+      guest: lagOf(G),
+      inits: { host: H.hashLag?.inits ?? [], guest: G.hashLag?.inits ?? [] },
+      ticksWithoutLag: { host: H.ticksWithoutLag, guest: G.ticksWithoutLag },
+    },
+    // COMPARE_HASH_LAG only; null without it.
+    earlyLagCompare,
     gameplayMismatches: gpMis,
     firstGameplayMismatch: firstGp,
     gameStateMismatches: gsMis,
@@ -5124,7 +5258,7 @@ if (doubleResyncAskReport) {
   );
 }
 // SYNC_FOLLOW_UP: the host answered the guest's recovery request unconfirmed
-// and watched the frame it sent. `same`: no input at or before it differed
+// and watched the frame it sent. `same`: no input that ran before it differed
 // from its prediction, so the follow-up was skipped and nothing else went out
 // for it. `changed`: one did, and the follow-up went out and was applied.
 // specs/sync_follow_up.qnt.
@@ -5142,21 +5276,20 @@ const syncFollowUpReport = (() => {
     guestLines,
     SYNC_FOLLOW_UP === 'direct'
       ? /BOOT-SYNC: guest requesting host state/
-      : SYNC_FOLLOW_UP === 'socket'
+      : SYNC_FOLLOW_UP === 'socket' || SYNC_FOLLOW_UP === 'owed'
         ? /sent socket sync-request-full to host/
         : /peer-recovery resync: sent sync-request-full-at:/,
   );
   // With `socket`, the answer under test is the one to the socket request.
-  const socketReceived = SYNC_FOLLOW_UP === 'socket' ? at(hostLines, /received socket sync-request-full/) : 0;
+  const viaSocket = SYNC_FOLLOW_UP === 'socket' || SYNC_FOLLOW_UP === 'owed';
+  const socketReceived = viaSocket ? at(hostLines, /received socket sync-request-full/) : 0;
   const watch = socketReceived < 0 ? -1 : at(hostLines, /SYNC-FOLLOW-UP-WATCH /, socketReceived);
   const after = (re) => (watch < 0 ? -1 : at(hostLines, re, watch));
   const needed = after(/SYNC-FOLLOW-UP-NEEDED /);
   const skipped = after(/SYNC-FOLLOW-UP-SKIPPED /);
   // The watch is logged as its state is taken, just after its dispatch: a
   // dispatch after it is the follow-up.
-  const followUpDispatch = after(
-    SYNC_FOLLOW_UP === 'socket' ? /coord sync dispatch: .*over the socket/ : /coord sync dispatch: /,
-  );
+  const followUpDispatch = after(viaSocket ? /coord sync dispatch: .*over the socket/ : /coord sync dispatch: /);
   const applied = recoveryAsk < 0 ? [] : guestLines.slice(recoveryAsk).filter((l) => /sync #\d+ applied/.test(l));
   const ticking = syncFollowUp.framesAfter >= 10;
   const passed =
@@ -5165,13 +5298,22 @@ const syncFollowUpReport = (() => {
     ticking &&
     (SYNC_FOLLOW_UP === 'same'
       ? needed < 0 && skipped > watch && followUpDispatch < 0 && applied.length >= 1
-      : needed > watch &&
-        followUpDispatch > needed &&
-        // The follow-up itself is not skipped. With `direct` a follow-up sent
-        // at its deadline, still unconfirmed, is watched in turn, and its own
-        // follow-up may rightly be skipped after it.
-        (skipped < 0 || (['direct', 'socket'].includes(SYNC_FOLLOW_UP) && skipped > followUpDispatch)) &&
-        applied.length >= 2);
+      : SYNC_FOLLOW_UP === 'owed'
+        ? // Taken with a correction owed: the watch starts changed (owed=1),
+          // so the follow-up goes out over the socket without any input
+          // flagging it, and the guest applies it.
+          syncFollowUp.releasedInReplay &&
+          / owed=1:/.test(hostLines[watch] || '') &&
+          followUpDispatch > watch &&
+          (skipped < 0 || skipped > followUpDispatch) &&
+          applied.length >= 2
+        : needed > watch &&
+          followUpDispatch > needed &&
+          // The follow-up itself is not skipped. With `direct` a follow-up sent
+          // at its deadline, still unconfirmed, is watched in turn, and its own
+          // follow-up may rightly be skipped after it.
+          (skipped < 0 || (['direct', 'socket'].includes(SYNC_FOLLOW_UP) && skipped > followUpDispatch)) &&
+          applied.length >= 2);
   return {
     mode: SYNC_FOLLOW_UP,
     attempts: syncFollowUp.attempts,
@@ -5180,6 +5322,7 @@ const syncFollowUpReport = (() => {
     needed: line(hostLines, needed),
     skipped: line(hostLines, skipped),
     followUpDispatch: line(hostLines, followUpDispatch),
+    releasedInReplay: syncFollowUp.releasedInReplay ?? null,
     dispatches: hostLines.filter((l) => /coord sync dispatch: |COORD-SYNC-TIMEOUT/.test(l)),
     applied,
     framesAfter: syncFollowUp.framesAfter,

@@ -81,7 +81,14 @@ import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
-import { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded } from './sync-follow-up.ts';
+import {
+  changesWatchedFrame,
+  correctionOwed,
+  delayOfStateAt,
+  directFollowUpDue,
+  directWatchIsStale,
+  followUpIsUnneeded,
+} from './sync-follow-up.ts';
 import { recoveryStep } from './recovery-resync.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
@@ -413,7 +420,14 @@ export const KNCore = {
   /** The host's resync state, a chunk at a time (sync-send.ts). */
   syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
   /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
-  syncFollowUp: { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded },
+  syncFollowUp: {
+    changesWatchedFrame,
+    correctionOwed,
+    delayOfStateAt,
+    directFollowUpDue,
+    directWatchIsStale,
+    followUpIsUnneeded,
+  },
   recoveryResync: { recoveryStep },
   startRejoin,
   shouldResumeRomTransfer,

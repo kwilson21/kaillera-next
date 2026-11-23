@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import (
@@ -36,7 +37,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from src.blobstore import BlobStore, BlobStoreError, blobstore_from_env
+from src.blobstore import BlobStore, BlobStoreError, MatchPrefixes, blobstore_from_env
 from src.dbbackend import DEFAULT_DB_PATH, Backend, backend_from_env
 from src.dbbackend.base import ExecResult, Statement
 from src.migrate import apply_migrations
@@ -45,6 +46,7 @@ from src.schema import (
     Feedback,
     MatchRetention,
     Screenshot,
+    ServerState,
     SessionLog,
     SessionLogChunk,
     SessionLogEviction,
@@ -1265,6 +1267,31 @@ async def put_blob(key: str, data: bytes, content_type: str = "application/octet
 async def get_blob(key: str) -> bytes | None:
     """One blob's bytes, or None when it isn't there."""
     return await _blob_store().get(key)
+
+
+async def list_match_prefixes(*, after: str | None = None, limit: int = 500) -> MatchPrefixes:
+    """One bounded page of the blob store's `matches/<id>/` prefixes (src/retention.py's orphan sweep)."""
+    return await _blob_store().list_match_prefixes(after=after, limit=limit)
+
+
+async def newest_in_match(match_id: str) -> datetime | None:
+    """The newest object time under `matches/<id>/`, or None when not known."""
+    return await _blob_store().newest_in_match(match_id)
+
+
+async def get_server_state(key: str) -> str | None:
+    """A value kept between restarts (the `server_state` table), or None when unset."""
+    rows = await fetch(select(ServerState.value).where(ServerState.key == key))
+    return rows[0]["value"] if rows else None
+
+
+async def set_server_state(key: str, value: str | None) -> None:
+    """Store `value` under `key`, or remove the key when `value` is None."""
+    if value is None:
+        await run(delete(ServerState).where(ServerState.key == key))
+        return
+    upsert = sqlite_insert(ServerState).values(key=key, value=value, updated_at=now())
+    await run(upsert.on_conflict_do_update(index_elements=["key"], set_={"value": value, "updated_at": now()}))
 
 
 async def query(sql: str, params: tuple) -> list[dict]:
