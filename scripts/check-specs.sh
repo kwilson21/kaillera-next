@@ -76,6 +76,7 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend="$BACKEND"
+$QUINT test "$SPEC" --main=room_before_serve_timeout_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_grace_wait --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_abandoned_end --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_resume_flag --backend="$BACKEND"
@@ -111,6 +112,10 @@ check room_current anAbandonedMatchIsEnded
 # the grace window never empties a playing room whose last player is still
 # in it (violated on room_before_grace_wait).
 check room_current aMatchIsNotLostToTheGraceWindow
+# Nobody loads for the start of a match someone is already running: a late
+# joiner the host dropped after its serve timed out starts its late join again
+# (violated on room_before_serve_timeout_fix).
+check room_current nobodyLoadsIntoARunningMatch
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt

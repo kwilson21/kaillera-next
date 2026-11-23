@@ -23,6 +23,16 @@
  *   late-join-shared  the guest has no ROM and accepts the host's: its engine
  *                     first connects only to receive the ROM, then late-joins
  *   late-join-two-player  a third player joins a two-player match in play
+ *   late-join-drop-before-request  the late-join-cached scenario with a fault:
+ *                     the joiner's first request for the match state is held
+ *                     and its signaling cut for a few seconds, so it comes
+ *                     back on a new socket id before it has the state; it
+ *                     must get the state and play on, with no page in the
+ *                     lobby, no late joiner left pending on the host and
+ *                     no peer in the joiner's own slot
+ *   late-join-drop-during-serve  the same, with the cut as the host's state
+ *                     reaches the joiner (that message is lost with the
+ *                     socket), so the host is serving the old socket id
  *   late-join-lost-host  the late-join scenario with a fault: once the host has
  *                     sent the state (over Socket.IO), the joiner's
  *                     RTCPeerConnection to the host is closed just before the
@@ -112,6 +122,8 @@ const SCENARIOS = [
   'late-join-cached',
   'late-join-shared',
   'late-join-two-player',
+  'late-join-drop-before-request',
+  'late-join-drop-during-serve',
   'late-join-lost-host',
   'late-join-after-leave',
   'missed-game-end',
@@ -189,9 +201,11 @@ const pageErrors = [];
 /**
  * A page in its own browser context, with a signaling socket the test can cut.
  * `fromServer(message, page)`, if given, sees each message from the server
- * before the page does; the page gets them in order once it has returned.
+ * before the page does; the page gets them in order once it has returned,
+ * except one it returned 'drop' for. `toServer(message, page)` does the same
+ * for each message the page sends.
  */
-const openPlayer = async (label, query, initScript = null, fromServer = null) => {
+const openPlayer = async (label, query, initScript = null, fromServer = null, toServer = null) => {
   const ctx = await browser.newContext({ viewport: { width: 1100, height: 900 } });
   await ctx.addInitScript(recordEvents);
   if (initScript) await ctx.addInitScript(initScript);
@@ -229,14 +243,25 @@ const openPlayer = async (label, query, initScript = null, fromServer = null) =>
     }
     const server = ws.connectToServer();
     signaling.sockets.push({ page: ws, server });
-    ws.onMessage((message) => server.send(message));
+    if (toServer) {
+      let sent = Promise.resolve();
+      ws.onMessage((message) => {
+        sent = sent
+          .then(() => toServer(message, page))
+          .catch((e) => console.log(`[${label}] toServer failed: ${e.message}`))
+          .then((verdict) => (verdict === 'drop' ? undefined : server.send(message)))
+          .catch(() => {});
+      });
+    } else {
+      ws.onMessage((message) => server.send(message));
+    }
     if (fromServer) {
       let delivered = Promise.resolve();
       server.onMessage((message) => {
         delivered = delivered
           .then(() => fromServer(message, page))
           .catch((e) => console.log(`[${label}] fromServer failed: ${e.message}`))
-          .then(() => ws.send(message))
+          .then((verdict) => (verdict === 'drop' ? undefined : ws.send(message)))
           .catch(() => {});
       });
     }
@@ -417,6 +442,169 @@ const endGame = async (host) => {
   await host.page.click('#toolbar-end');
 };
 
+// The ROM is in this page's library as the play page reads it on load: the
+// hash it autoloads (localStorage `kaillera-rom-hash`) and that hash's entry
+// in the library (IndexedDB `kaillera-rom-cache`, store `roms`). The start
+// button turns on once the ROM is hashed, which can be before the library
+// write has committed: a page that navigates then finds no ROM to autoload.
+const romStoredIn = (player) =>
+  player.page.evaluate(async () => {
+    const hash = localStorage.getItem('kaillera-rom-hash');
+    if (!hash) return false;
+    const known = (await indexedDB.databases?.()) ?? [];
+    if (!known.some((db) => db.name === 'kaillera-rom-cache')) return false;
+    return new Promise((resolve) => {
+      const request = indexedDB.open('kaillera-rom-cache');
+      request.onerror = () => resolve(false);
+      request.onsuccess = () => {
+        const db = request.result;
+        try {
+          const get = db.transaction('roms', 'readonly').objectStore('roms').get(hash);
+          get.onsuccess = () => resolve(get.result != null);
+          get.onerror = () => resolve(false);
+        } catch {
+          resolve(false);
+        } finally {
+          db.close();
+        }
+      };
+    });
+  });
+
+// Put the ROM in a guest's library from a room of its own, and wait until it
+// is stored, so the page it loads next autoloads it.
+const cacheRomIn = async (guest, failures) => {
+  await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+  await loadRom(guest);
+  await guest.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+  if (!(await waitUntil(() => romStoredIn(guest), 30000))) failures.push("the ROM never reached the guest's library");
+};
+
+// Where a late joiner that never got the state stopped: at the late-join ROM
+// prompt (no ROM it could use), or not, and what the page says about its ROM.
+const lateJoinStallOf = (player) =>
+  player.page.evaluate(() => ({
+    romPrompt: !!document.getElementById('late-join-msg'),
+    romStatus: document.getElementById('rom-status')?.textContent ?? null,
+    romInLibrary: !!localStorage.getItem('kaillera-rom-hash'),
+    engine: !!window.NetplayRollback?.getDebugState?.(),
+  }));
+
+// The late-join-cached join, with the joiner's signaling dropped for BLIP_MS
+// before it has the match state, so it comes back on a new socket id:
+//   'request'  its first `request-late-join` is held and the socket cut, so
+//              the host first hears of it from the new socket id (its wait
+//              asks again every 5 s)
+//   'serve'    the host's `late-join-state` is held and the socket cut, so
+//              the host is paused serving the old socket id when the new one
+//              asks again
+// Seen once on an older branch: the joiner logged "mid-game rejoin
+// succeeded", then went to the lobby and never booted, while the host held
+// the new socket id as a pending late joiner. The joiner must get the state
+// and play on, with no page in the lobby and nothing left pending on the host.
+const lateJoinSocketDrop = async (room, failures, log, when) => {
+  const host = await startSoloGame(room);
+  if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+
+  let guest = null;
+  let fault = null;
+  // Cut the joiner's signaling (once), and let it back after BLIP_MS.
+  const dropOnce = (why) => {
+    if (fault || !guest) return false;
+    fault = { why, at: Date.now() };
+    void (async () => {
+      await cutSignaling(guest);
+      await new Promise((resolve) => setTimeout(resolve, BLIP_MS));
+      guest.signaling.down = false;
+    })();
+    console.log(`  cut the joiner's signaling at its ${why}`);
+    return true;
+  };
+  const holds = (message, type) => String(message).includes(`"${type}"`);
+  const toServer =
+    when === 'request'
+      ? (message) => (holds(message, 'request-late-join') && dropOnce('first request-late-join') ? 'drop' : undefined)
+      : null;
+  const fromServer =
+    when === 'serve'
+      ? (message) => (holds(message, 'late-join-state') && dropOnce("host's late-join-state") ? 'drop' : undefined)
+      : null;
+
+  // Put the ROM in the guest's library first, from a room of its own.
+  guest = await openPlayer('guest', `room=${room}W&host=1&name=Guest&mode=rollback`, null, fromServer, toServer);
+  await cacheRomIn(guest, failures);
+
+  await guest.page.goto(`${URL}/play.html?room=${room}&name=Guest&knperf=light`);
+  const synced = await waitUntil(async () => {
+    await clickGesturePrompt(guest);
+    return (await frameOf(guest)) > 0;
+  }, 240000);
+  const inLobby = await lobbyShownOn(guest);
+  const events = await eventsOf(guest);
+  const count = (type) => events.filter((e) => e.type === type).length;
+  const pending = await host.page.evaluate(
+    () => window.NetplayRollback?.getDebugState?.()?.pendingLateJoinSids ?? null,
+  );
+  const joinerLog = await guest.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+  const result = {
+    fault,
+    synced,
+    stall: synced ? null : await lateJoinStallOf(guest),
+    inLobby,
+    reconnects: count('reconnect'),
+    rejoinRefused: count('rejoin-refused'),
+    rejoinReconciled: count('rejoin-reconciled'),
+    lateJoinTimeout: count('late-join-timeout'),
+    hostPendingLateJoinSids: pending,
+    joinerLateJoinLines: joinerLog
+      .split('\n')
+      .filter((line) => /late-join|LATE-JOIN/.test(line))
+      .slice(-15),
+  };
+  log.push({ lateJoinSocketDrop: result });
+  console.log(
+    `  late join with a socket drop (${when}): ${JSON.stringify({ ...result, joinerLateJoinLines: undefined })}`,
+  );
+  if (!fault)
+    failures.push(`the fault never fired: no ${when === 'request' ? 'request-late-join' : 'late-join-state'} seen`);
+  if (fault && result.reconnects < 1) failures.push("the joiner's socket never reconnected");
+  if (inLobby) failures.push('the late joiner went to the lobby');
+  if (!result.synced) failures.push('the late joiner never received state');
+  if (result.rejoinRefused) failures.push("the joiner's rejoin was refused");
+  if (result.rejoinReconciled) failures.push("the joiner's rejoin was reconciled away from the match");
+  if (result.lateJoinTimeout) failures.push('the late joiner timed out waiting for state');
+  if (!result.synced) return [host, guest];
+
+  if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
+  const settled = await waitUntil(
+    async () =>
+      ((await host.page.evaluate(() => window.NetplayRollback?.getDebugState?.()?.pendingLateJoinSids)) ?? [])
+        .length === 0,
+    30000,
+  );
+  if (!settled) failures.push('the host still holds a pending late joiner after the join');
+  // The joiner's engine may have restarted while its socket was down: its own
+  // roster entry (under an old socket id) must not have become a peer.
+  const ownSlotPeers = await guest.page.evaluate(() => {
+    const own = window.NetplayRollback?.getDebugState?.()?.playerSlot;
+    return Object.entries(window.KNState?.peers ?? {})
+      .filter(([, peer]) => peer?.slot === own)
+      .map(([sid]) => sid);
+  });
+  log.push({ lateJoinSocketDropOwnSlotPeers: ownSlotPeers });
+  if (ownSlotPeers.length) failures.push(`the joiner holds a peer in its own slot: ${ownSlotPeers.join(', ')}`);
+  await checkpoint(
+    `after late join with a socket drop (${when})`,
+    [
+      { player: host, lobby: false },
+      { player: guest, lobby: false, lateJoiner: true },
+    ],
+    failures,
+    log,
+  );
+  return [host, guest];
+};
+
 const scenarios = {
   'late-join': async (room, failures, log) => {
     const host = await startSoloGame(room);
@@ -496,16 +684,18 @@ const scenarios = {
 
     // Put the ROM in the guest's library first, from a room of its own.
     const guest = await openPlayer('guest', `room=${room}W&host=1&name=Guest&mode=rollback`);
-    await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
-    await loadRom(guest);
-    await guest.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await cacheRomIn(guest, failures);
 
     await guest.page.goto(`${URL}/play.html?room=${room}&name=Guest&knperf=light`);
     const synced = await waitUntil(async () => {
       await clickGesturePrompt(guest);
       return (await frameOf(guest)) > 0;
     }, 240000);
-    if (!synced) failures.push('the late joiner never received state');
+    if (!synced) {
+      const stall = await lateJoinStallOf(guest);
+      log.push({ lateJoinStall: stall });
+      failures.push(`the late joiner never received state (${JSON.stringify(stall)})`);
+    }
     if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after late join',
@@ -676,6 +866,9 @@ const scenarios = {
     );
     return [host, first, late];
   },
+
+  'late-join-drop-before-request': async (room, failures, log) => lateJoinSocketDrop(room, failures, log, 'request'),
+  'late-join-drop-during-serve': async (room, failures, log) => lateJoinSocketDrop(room, failures, log, 'serve'),
 
   'late-join-lost-host': async (room, failures, log) => {
     const host = await startSoloGame(room);
