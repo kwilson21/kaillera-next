@@ -782,6 +782,21 @@ $QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_before --bac
 $QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --backend="$BACKEND"
 $QUINT run "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --invariant=noGenericBootAfterValidatedHandoff --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
+# ── Which controllers the game sees as plugged in, frame by frame ─────────
+MASK=specs/controller_mask.qnt
+$QUINT typecheck "$MASK"
+for variant in controller_mask_before controller_mask_fixed; do
+  $QUINT test "$MASK" --main="$variant" --backend="$BACKEND"
+done
+# Before, each page set the mask when it heard the roster: pages ran the
+# frames between their arrival points with different masks
+# (controller_mask_before; arrivalOrderTest), and a rollback across the change
+# ran earlier frames again with the new one (rollbackAcrossTheChangeTest).
+# Today the change takes effect at the roster frame + LEAD on every page, and
+# a guest that hears it late asks for the host's state (lateArrivalTest).
+$QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

@@ -72,6 +72,7 @@ function room(realTransfer = false) {
       EJS_emulator:{gameManager:{Module:mod,getState(){throw Error('late or raw state escaped');}}},
     };
     const _localInputs={}, _remoteInputs={1:{},2:{},3:{}}, nativeFed=[], _inputFloor=()=>1066;
+    const _maskSchedule={active:()=>false};
     const KNShared={ZERO_INPUT:{},encodeInput:(f,input)=>({buffer:{f,input}})};
     const _missingConsumedInputs=()=>[...Array(7)].map((_,i)=>i+1066)
       .filter(f=>!_remoteInputs[1][f]).slice(0,1).map(frame=>({peer:_peers.a,frame}));

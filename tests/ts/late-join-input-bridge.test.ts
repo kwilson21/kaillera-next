@@ -47,6 +47,7 @@ async function send(replaceSource: boolean, mode: 'normal' | 'worker' | 'remix' 
     ${part('  const _currentSid =', '  const _evictPeer =')}
     const performance={now:()=>1},setTimeout=()=>{};
     const window={KNCore:api,EJS_emulator:{gameManager:{getState:()=>new Uint8Array([1]),Module:{}}}};
+    const _maskSchedule={active:()=>false};
     let compression; const compressAndEncode=()=>new Promise(resolve=>compression=resolve);
     ${funcs}
     ${part('  async function sendLateJoinState(remoteSid)', '  // Joiner: a full resync')}

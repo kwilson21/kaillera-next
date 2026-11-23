@@ -23,6 +23,8 @@ import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis }
 import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
 import { catchUpStep, tooOldStep } from './catch-up.ts';
+import { MASK_LEAD, changeInEffect, fileIndex, lateChange } from './controller-mask.ts';
+import { createMaskSchedule, rosterMask } from './controller-mask-schedule.ts';
 import { framesToSendAgain } from './input-resend.ts';
 import {
   collectLateJoinInputBridge,
@@ -316,6 +318,12 @@ export const KNCore = {
   captureFrame,
   /** A host state from before this guest's frame: apply, catch up or refuse it, and what then (catch-up.ts, proved). */
   catchUp: { catchUpStep, tooOldStep },
+  /**
+   * The controller-present mask by frame: a roster's mask takes effect at its
+   * roster frame + MASK_LEAD on every page (controller-mask.ts, proved;
+   * specs/controller_mask.qnt).
+   */
+  controllerMask: { MASK_LEAD, changeInEffect, fileIndex, lateChange, createMaskSchedule, rosterMask },
   framesToAskFor,
   framesToSendAgain,
   collectLateJoinInputBridge,

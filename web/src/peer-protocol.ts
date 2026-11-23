@@ -174,6 +174,9 @@ const LateJoinState = Schema.Struct({
   hiddenWords: Sidecar,
   audioFifo: Sidecar,
   inputBridge: Sidecar,
+  // The host's controller-present mask schedule from `frame` on
+  // (controller-mask-schedule.ts, MaskScheduleWire); absent from an older host.
+  controllerMasks: Sidecar,
 });
 
 const SyncStateSocket = Schema.Struct({

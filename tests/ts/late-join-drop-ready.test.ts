@@ -18,7 +18,7 @@ function room(peerPresent = false) {
  const _markPendingLateJoinPeer=()=>{pending=true},_clearPendingLateJoinPeer=(sid,slot,why,opts)=>{pending=false;if(opts?.activate)activated++};
  const _syncLog=()=>{},_endLateJoinPauseIfNoneServed=()=>{},_captureHiddenStateWords=()=>null,_captureAudioFifoState=()=>null,_captureSaveRam=()=>null;
  const _resetPacingAfterLateJoin=()=>{},_broadcastRoster=()=>{},_config=null,resumeLateJoinPause=()=>{resumes++};
- const _signalSocket={emit(){emits++}};
+ const _signalSocket={emit(){emits++}},_maskSchedule={active:()=>false};
  const window={EJS_emulator:{gameManager:{getState:()=>new Uint8Array([1]),Module:{}}}};
  let compression;const compressAndEncode=()=>new Promise(r=>compression=r);
  const hardDisconnectPeer=()=>{delete _peers.a;pending=false};

@@ -108,7 +108,8 @@ def test_smash_controller_presence_uses_core_mask_not_rdram_poke():
 
     assert "_forceSmashControllerRoster" not in source
     assert "_kn_set_controller_present_mask" in source
-    assert "_applyControllerPresentMask('broadcast-roster')" in source
+    # A roster's mask is filed at its frame (specs/controller_mask.qnt).
+    assert "_fileRosterControllerMask(rosterFrame, slots, 'broadcast-roster')" in source
     assert "_applyControllerPresentMask('late-join-state')" in source
     assert "_resetControllerPresentMask()" in source
 
