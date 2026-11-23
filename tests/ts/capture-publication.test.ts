@@ -485,3 +485,32 @@ test('a protected native capture proves host history even when every delivery at
   assert.equal(run('_hostReconnectDebts.size'), 0);
   assert.equal(run('_hostReconnectBlocksNativeCapture(mod)'), false);
 });
+
+test('the current room marker invalidates queued captures and fences a later slot-zero authority', async () => {
+  const run = room();
+  run(`
+    compressGate=new Promise(resolve=>{allowCompression=resolve});
+    const queued=pushSyncState('a');
+  `);
+  assert.deepEqual(JSON.parse(run('summary()')).reads, [1076]);
+  assert.equal(run("_setHostMatchUnverified('old-match', 'room recovery unverified')"), false);
+  run(`
+    let _lateJoinServeSeq=0;
+    const _markPendingLateJoinPeer=()=>{};
+    _playerSlot=1;
+    _setHostMatchUnverified(KNState.matchId, 'room recovery unverified');
+    allowCompression();
+  `);
+  await run('queued');
+  assert.deepEqual(JSON.parse(run('summary()')).shipments, []);
+
+  run('_playerSlot=0');
+  await run("Promise.all([pushSyncState('a'), sendLateJoinState('b')])");
+  assert.deepEqual(JSON.parse(run('summary()')).reads, [1076]);
+  assert.deepEqual(JSON.parse(run('summary()')).shipments, []);
+
+  run("KNState.matchId='next-match'");
+  await run("pushSyncState('a')");
+  assert.deepEqual(JSON.parse(run('summary()')).reads, [1076, 1076]);
+  assert.equal(JSON.parse(run('summary()')).shipments.length, 1);
+});

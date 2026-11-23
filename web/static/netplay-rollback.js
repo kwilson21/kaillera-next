@@ -7717,19 +7717,16 @@
   let _unverifiedHostMatch = null;
   const _hostDebtIsCurrent = (debt) => debt.epoch === _syncQueueEpoch && debt.matchId === KNState.matchId;
   const _hostMatchUnverified = () => !!_unverifiedHostMatch && _unverifiedHostMatch.matchId === KNState.matchId;
-  const _markHostMatchUnverified = (debt, reason) => {
-    if (
-      !_hostDebtIsCurrent(debt) ||
-      debt.historyProven ||
-      debt.lastHandoffId ||
-      !KNState.matchId ||
-      _hostMatchUnverified()
-    )
-      return;
-    _unverifiedHostMatch = { matchId: KNState.matchId, reason };
+  const _setHostMatchUnverified = (matchId, reason) => {
+    if (!matchId || matchId !== KNState.matchId || _hostMatchUnverified()) return false;
+    _unverifiedHostMatch = { matchId, reason };
     ++_hostReconnectFenceVersion;
     _deferredPhantomRecovery.clear();
-    _config?.onMatchIntegrityUnverified?.(_unverifiedHostMatch);
+    return true;
+  };
+  const _markHostMatchUnverified = (debt, reason) => {
+    if (!_hostDebtIsCurrent(debt) || debt.historyProven || debt.lastHandoffId) return;
+    if (_setHostMatchUnverified(debt.matchId, reason)) _config?.onMatchIntegrityUnverified?.(_unverifiedHostMatch);
   };
   const _forgetHostReconnectDebt = (debt) => {
     if (_hostDebtIsCurrent(debt) && !debt.historyProven && !debt.lastHandoffId) {
@@ -22226,6 +22223,7 @@
   const NetplayRollbackApi = {
     init,
     stop,
+    markMatchRecoveryUnverified: (matchId) => _setHostMatchUnverified(matchId, 'room recovery unverified'),
     exportSyncLog,
     flushSyncLog: _flushSyncLog,
     _startSpectatorStream: startSpectatorStream, // test hook
