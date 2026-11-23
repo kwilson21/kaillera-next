@@ -35,7 +35,16 @@ async function send(
   reconnectHost = false,
   scheduled = false,
 ) {
-  const c = vm.createContext({ H, zero, real, api, mode, scheduled });
+  const c = vm.createContext({
+    _hostReconnectBlocksNativeCapture: () => false,
+    _hostReconnectFenceVersion: 0,
+    H,
+    zero,
+    real,
+    api,
+    mode,
+    scheduled,
+  });
   vm.runInContext(
     `
     const KNShared={ZERO_INPUT:zero};
@@ -76,7 +85,19 @@ async function send(
 type LateJoinStateFixture = { frame: number; inputBridge?: import('../../web/src/wire.ts').WirePayload };
 
 function setupJoin(msg: LateJoinStateFixture, replaceSource = false, direct = false, ownSlot = 2, delay = 3) {
-  const c = vm.createContext({ msg, zero, real, H, api, replaceSource, direct, ownSlot, delay });
+  const c = vm.createContext({
+    _hostReconnectBlocksNativeCapture: () => false,
+    _hostReconnectFenceVersion: 0,
+    msg,
+    zero,
+    real,
+    H,
+    api,
+    replaceSource,
+    direct,
+    ownSlot,
+    delay,
+  });
   vm.runInContext(
     `
     const KNShared={ZERO_INPUT:zero},window={KNCore:api};
@@ -297,6 +318,8 @@ test('a bootstrap failure leaves only this player’s signaling slot, without re
   const events: string[] = [];
   let ack: (() => void) | undefined;
   const c = vm.createContext({
+    _hostReconnectBlocksNativeCapture: () => false,
+    _hostReconnectFenceVersion: 0,
     events,
     _sessionStopLateJoinPoll: () => events.push('stop poll'),
     showError: (msg: string) => events.push(msg),

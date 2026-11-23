@@ -554,6 +554,10 @@
     sendNextPing(peer); // completion (incl. broadcast + re-check) handled by _finishRttMeasurement
   };
 
+  const RECONNECT_PROOF_CAP = 'reconnectProofV1';
+  const RECONNECT_PROOF_REQUEST = 'reconnect-sync-request-v1';
+  const _reconnectProofPeers = new Map();
+  const _reconnectProofStatus = (sid) => _reconnectProofPeers.get(_knownPlayers[sid]?.socketId || sid);
   const KN_INPUT_MODEL = 2;
   const _localRollbackCaps = () => {
     const mod = window.EJS_emulator?.gameManager?.Module;
@@ -577,6 +581,7 @@
       // This page runs a roster's controller mask from an agreed frame
       // (specs/controller_mask.qnt); a page without it applies it at once.
       [window.KNCore.controllerMask.MASK_CAP]: true,
+      [RECONNECT_PROOF_CAP]: true,
     };
   };
 
@@ -2032,8 +2037,8 @@
       _feedWatched(tickMod, qi.slot, qi.frame, () =>
         tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy),
       );
+      _recordHostReconnectReceipt(qi);
       if (!qi.seeded) {
-        _recordHostReconnectReceipt(qi.slot, qi.frame);
         if (_keptSlotFirstInputAt.has(qi.slot) && qi.frame >= _inputFloor(qi.slot))
           _keptSlotFirstInputAt.delete(qi.slot);
       }
@@ -7520,6 +7525,7 @@
   // lost-host step, ask again for an owed resync, stop asking, or nothing.
   const _checkResyncRequestDeadline = () => {
     if (!_resyncRequestInFlight) return;
+    if (_reconnectAnswerDebt && _reconnectAnswerScopeCurrent(_reconnectAnswerDebt.scope)) return;
     const now = performance.now();
     // An answer arriving or held, or a coordinated target, has its own deadline.
     const answerComing = _syncExpected > 0 || !!_pendingResyncState || _syncTargetFrame > 0;
@@ -7606,9 +7612,7 @@
   // target's deadline gives the target up, not the frame the guest asked at
   // (specs/resync_flow.qnt, lateAndBehind).
   let _resyncRequestAt = -1;
-  // Local reconnect-debt prototype: independent of generic resync bookkeeping.
-  // Ordinary broadcast receipt/application is not proof that this request was
-  // answered. This does not certify the host's capture or a whole-room recovery.
+  // Exact protected answer, independent of generic resync bookkeeping.
   let _reconnectAnswerDebt = null;
   const _reconnectAnswerScope = (key, peer = _peers[key]) => {
     if (!peer || peer.slot !== 0 || _peers[key] !== peer || !KNState.matchId) return null;
@@ -7630,14 +7634,36 @@
         ? old.absolute
         : performance.now() + (RESYNC_MAX_ASKS_AGAIN + 1) * RESYNC_REQUEST_TIMEOUT_MS + SYNC_DECODE_GRACE_MS;
     const status = absolute === old?.absolute && old.status === 'unresolved' ? 'unresolved' : 'waiting';
-    _reconnectAnswerDebt = { scope, id, absolute, status };
+    _reconnectAnswerDebt = { scope, id, absolute, status, attempts: 0, retryAt: 0 };
+    if (status === 'waiting') _transmitReconnectProofRequest(_reconnectAnswerDebt);
   };
-  const _readReconnectAnswer = (answerFor, scope) => {
+  const _transmitReconnectProofRequest = (debt) => {
+    debt.attempts++;
+    debt.retryAt = performance.now() + RESYNC_REQUEST_TIMEOUT_MS;
+    const dc = debt.scope.peer.dc;
+    try {
+      if (dc?.readyState === 'open') {
+        dc.send(RECONNECT_PROOF_REQUEST + ':' + debt.id);
+      } else if (socket?.connected) {
+        _signalSocket.emit('data-message', {
+          type: RECONNECT_PROOF_REQUEST + '-socket',
+          targetSid: debt.scope.key,
+          requesterSid: socket.id,
+          matchId: debt.scope.matchId,
+          requestId: debt.id,
+        });
+      }
+    } catch (_) {
+      // A failed send is not permission to send a legacy request.
+    }
+  };
+  const _readReconnectAnswer = (answerFor, scope, proofFor) => {
     const debt = _reconnectAnswerDebt;
     return (
       !!debt &&
       debt.status === 'waiting' &&
       answerFor > 0 &&
+      proofFor === answerFor &&
       answerFor === debt.id &&
       _reconnectAnswerScopeCurrent(scope) &&
       scope.key === debt.scope.key &&
@@ -7647,8 +7673,8 @@
       performance.now() < debt.absolute
     );
   };
-  const _finishReconnectAnswer = (answerFor, scope, aligned) => {
-    if (!aligned || !_readReconnectAnswer(answerFor, scope)) return;
+  const _finishReconnectAnswer = (answerFor, scope, aligned, proofFor) => {
+    if (!aligned || !_readReconnectAnswer(answerFor, scope, proofFor)) return;
     _reconnectAnswerDebt = null;
     _syncLog('RECONNECT-ANSWER-APPLIED f=' + _frameNum + ' request=' + answerFor);
   };
@@ -7659,7 +7685,16 @@
       _reconnectAnswerDebt = null;
       return;
     }
-    if (performance.now() < debt.absolute) return;
+    const now = performance.now();
+    if (now < debt.absolute) {
+      const pending = _pendingResyncState;
+      const received = _readReconnectAnswer(pending?.answerFor, pending?.answerScope, pending?.proofFor);
+      if (!received && now >= debt.retryAt && debt.attempts <= RESYNC_MAX_ASKS_AGAIN) {
+        debt.id = _beginResyncRequest(-1, true);
+        _transmitReconnectProofRequest(debt);
+      }
+      return;
+    }
     debt.status = 'unresolved';
     _syncLog('RECONNECT-ANSWER-UNRESOLVED f=' + _frameNum + ' request=' + debt.id);
     KNEvent('resync-reask-giveup', 'Could not confirm recovery after reconnecting', {
@@ -7668,22 +7703,29 @@
     _config?.onToast?.('Could not confirm game recovery after reconnecting.');
   };
 
-  const _guestAllowsReconnectState = (answerFor, answerScope) => {
+  const _guestAllowsReconnectState = (answerFor, answerScope, proofFor) => {
     if (answerScope && !_reconnectAnswerScopeCurrent(answerScope)) return false;
     const debt = _reconnectAnswerDebt;
-    if (debt && _reconnectAnswerScopeCurrent(debt.scope) && !_readReconnectAnswer(answerFor, answerScope)) {
+    if (debt && _reconnectAnswerScopeCurrent(debt.scope) && !_readReconnectAnswer(answerFor, answerScope, proofFor)) {
       _syncLog('RECONNECT-OPAQUE-STATE-HELD answer=' + answerFor);
       return false;
     }
     return true;
   };
-  // Review-only host fence for originally rostered, native, nonphantom mesh
-  // reconnects. The receipt ledger is not transport ACK or pending-input state.
+  // A reconnect receipt is neither a transport ACK nor a pending input.
   const _hostReconnectDebts = new Map();
+  const _hostAuthoredReceipts = new Map();
+  const _deferredPhantomRecovery = new Map();
+  const _hostInputAuthor = (sid, peer) =>
+    _playerSlot === 0 && _peers[sid] === peer && _reconnectProofStatus(sid) === true
+      ? { sid, peer, epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0 }
+      : null;
   let _hostReconnectFenceVersion = 0;
   const _hostReconnectNative = () => window.EJS_emulator?.gameManager?.Module;
   const _armHostReconnectDebt = (slot, reason, sid, wasPhantom, mod = _hostReconnectNative()) => {
-    const old = _hostReconnectDebts.get(slot);
+    const retained = _hostReconnectDebts.get(slot);
+    const old = retained?.lastHandoffId && performance.now() >= retained.deadline ? null : retained;
+    if (retained && !old) _hostReconnectDebts.delete(slot);
     const owner = _knownPlayers[sid]?.persistentId || sid;
     const sameOwner = !!old && old.owner === owner && old.epoch === _syncQueueEpoch;
     if (
@@ -7702,7 +7744,8 @@
       if (old && (_playerSlot !== 0 || !_activeRoster?.has(slot) || !sameOwner)) _hostReconnectDebts.delete(slot);
       return;
     }
-    if ((_peerPhantom[slot] || wasPhantom) && !sameOwner) return; // existing phantom path
+    if (_reconnectProofStatus(sid) !== true && !sameOwner) return;
+    if ((_peerPhantom[slot] || wasPhantom) && !sameOwner) return;
     const failed = mod?._kn_get_failed_rollbacks?.();
     if (!Number.isSafeInteger(failed) || failed < 0) return;
     const edge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
@@ -7726,25 +7769,52 @@
     const pending = new Set(_pendingCInputs.filter((i) => i.slot === slot).map((i) => i.frame));
     const inputs = _remoteInputs[slot];
     for (let f = Math.max(edge, debt.from); f <= _frameNum - 1 - DELAY_FRAMES; ++f) {
-      if (inputs?.[f] && inputs[f] !== KNShared.ZERO_INPUT && !pending.has(f)) debt.receipts.add(f);
+      const receipt = _hostAuthoredReceipts.get(slot)?.get(f);
+      if (
+        receipt?.author.sid === sid &&
+        receipt.author.epoch === _syncQueueEpoch &&
+        receipt.author.gen === (_syncQueueGen[sid] || 0) &&
+        inputs?.[f] &&
+        inputs[f] !== KNShared.ZERO_INPUT &&
+        !pending.has(f) &&
+        _inputEq(receipt, inputs[f])
+      )
+        debt.receipts.add(f);
     }
     // Old request closures cannot authorize state for the replacement channel.
     debt.sid = sid;
     debt.gen = (_syncQueueGen[sid] || 0) + 1;
     debt.request = null;
+    debt.lastHandoffId = 0;
     ++_hostReconnectFenceVersion;
     if (wasPhantom || _peerPhantom[slot]) debt.status = 'unresolved';
     _hostReconnectDebts.set(slot, debt);
   };
-  const _recordHostReconnectReceipt = (slot, frame) => {
+  const _recordHostReconnectReceipt = (word) => {
+    const { slot, frame, author } = word;
+    const value = _remoteInputs[slot]?.[frame];
+    if (
+      !author ||
+      !value ||
+      value === KNShared.ZERO_INPUT ||
+      !_inputEq(word, value) ||
+      author.epoch !== _syncQueueEpoch ||
+      author.gen !== (_syncQueueGen[author.sid] || 0) ||
+      _peers[author.sid] !== author.peer ||
+      author.peer.slot !== slot
+    )
+      return;
+    const history = _hostAuthoredReceipts.get(slot) ?? new Map();
+    if (history.size >= INPUT_PAST_WINDOW_FRAMES && !history.has(frame)) history.delete(history.keys().next().value);
+    history.set(frame, { ...word, author: { sid: author.sid, epoch: author.epoch, gen: author.gen } });
+    _hostAuthoredReceipts.set(slot, history);
     const debt = _hostReconnectDebts.get(slot);
-    const input = _remoteInputs[slot]?.[frame];
     if (
       debt?.status === 'waiting' &&
       frame >= debt.from &&
-      input &&
-      input !== KNShared.ZERO_INPUT &&
-      debt.epoch === _syncQueueEpoch
+      debt.epoch === author.epoch &&
+      debt.sid === author.sid &&
+      debt.gen === author.gen
     )
       debt.receipts.add(frame);
   };
@@ -7779,11 +7849,17 @@
   };
   const _hostReconnectBlocksNativeCapture = (mod) => {
     for (const [slot, debt] of _hostReconnectDebts) {
-      if (debt.epoch !== _syncQueueEpoch || !_activeRoster?.has(slot)) {
+      if (
+        debt.epoch !== _syncQueueEpoch ||
+        !_activeRoster?.has(slot) ||
+        (debt.lastHandoffId && performance.now() >= debt.deadline)
+      ) {
         _hostReconnectDebts.delete(slot);
         continue;
       }
-      if (_readHostReconnectDebt(debt, mod) !== 'ready') return true;
+      // A verified capture establishes the host's history, independently of
+      // whether this guest could apply it. Keep bounded retry permission only.
+      if (!debt.lastHandoffId && _readHostReconnectDebt(debt, mod) !== 'ready') return true;
     }
     return false;
   };
@@ -7797,15 +7873,76 @@
       !_activeRoster?.has(debt.slot)
     )
       return false;
-    if (via.reconnectDebt === debt) return false; // release at service; capture revalidates
-    if (debt.status === 'waiting') {
+    if (via.reconnectDebt === debt || (!via.protected && debt.lastHandoffId)) return false;
+    if (via.protected && debt.status === 'waiting' && performance.now() < debt.deadline && id >= debt.lastHandoffId) {
       const previous = debt.request;
-      if (!previous || id >= previous.id) debt.request = { id, via };
+      if (!previous || id > previous.id) debt.request = { id, via };
     }
     return true;
   };
+  const _receiveReconnectProofRequest = (sid, id, transport) => {
+    const peer = _peers[sid];
+    if (
+      _playerSlot !== 0 ||
+      _phase !== PHASE_RUNNING ||
+      !peer ||
+      !_requestIdFrom(id) ||
+      !_activeRoster?.has(peer.slot) ||
+      _peerPhantom[peer.slot] ||
+      _reconnectProofStatus(sid) !== true
+    )
+      return;
+    _holdReconnectHostAnswer(sid, id, { protected: true, transport });
+  };
+  const _scheduleRecoveredHostGuest = (remoteSid, peer) => {
+    // The host ran on predicted inputs for this guest while it was a
+    // phantom, and its late real inputs landed past the rollback cap
+    // or are settled below. Every other guest ran those frames on
+    // something of its own: the guest's real inputs, heard all along,
+    // or its own predictions. The host is authoritative: push its
+    // state to every guest once it is final (the guest's real inputs
+    // have caught up), or at the I1 deadline. The requests share their
+    // frame and deadline, so they fall due together and one capture
+    // goes to all of them (a broadcast): the `inputs-settled:` the
+    // returning guest then sends is for a state every guest loads. A
+    // sync the host schedules for its own reasons carries no request
+    // number; another guest's own request already queued stays, to be
+    // answered: any state the host takes from now on is for this frame
+    // or a later one.
+    const deadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+    _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
+    const targets = [remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)].filter(
+      (sid, i, all) => all.indexOf(sid) === i && !_scheduledSyncRequests.some((r) => r.targetSid === sid),
+    );
+    for (const sid of targets) _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });
+    // That state will be for this frame or a later one, so the
+    // guest's inputs from before this frame minus the delay are
+    // settled by it already. (Only the host can say so here: a guest
+    // may be taken back to an earlier frame and still need them.)
+    _settleInputsBefore(peer.slot, _frameNum);
+    _syncLog(
+      `peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum} ` +
+        `guests=${targets.map((sid) => _peers[sid]?.slot ?? '?').join(',')}`,
+    );
+  };
   const _serviceReconnectHostAnswers = () => {
-    for (const debt of _hostReconnectDebts.values()) {
+    if (_deferredPhantomRecovery.size && !_hostReconnectBlocksNativeCapture()) {
+      for (const [sid, record] of _deferredPhantomRecovery) {
+        _deferredPhantomRecovery.delete(sid);
+        if (
+          record.epoch === _syncQueueEpoch &&
+          record.gen === (_syncQueueGen[sid] || 0) &&
+          _peers[sid] === record.peer &&
+          _activeRoster?.has(record.peer.slot)
+        )
+          _scheduleRecoveredHostGuest(sid, record.peer);
+      }
+    }
+    for (const [slot, debt] of _hostReconnectDebts) {
+      if (debt.lastHandoffId && performance.now() >= debt.deadline) {
+        _hostReconnectDebts.delete(slot);
+        continue;
+      }
       const state = _readHostReconnectDebt(debt);
       if (state === 'ready' && debt.request && !_hostReconnectBlocksNativeCapture()) {
         const pending = debt.request;
@@ -7835,12 +7972,28 @@
   const _admitReconnectNativeCapture = (options, mod) => {
     const debt = options.reconnectDebt;
     if (_hostReconnectBlocksNativeCapture(mod)) return false;
+    if (!debt) return true;
     if (
-      debt &&
-      (debt.request !== options.pending || debt.status !== 'waiting' || _hostReconnectDebts.get(debt.slot) !== debt)
+      debt.request !== options.pending ||
+      _hostReconnectDebts.get(debt.slot) !== debt ||
+      _readHostReconnectDebt(debt, mod) !== 'ready'
     )
       return false;
-    return true;
+    // The returning slot's native receipt ledger does not prove what other
+    // active owners contributed. Check the entire current roster at this
+    // capture boundary, not when the asynchronous push was enqueued.
+    const peers = getInputPeers();
+    const inputs = new Set(peers.map((peer) => peer.slot));
+    for (const slot of _activeRoster) {
+      if (slot === _playerSlot) continue;
+      if (!inputs.has(slot) || _peerPhantom[slot] || _corePhantomHistory.has(slot)) return false;
+    }
+    // Reset discarded the returning slot's JS input map. Its validated
+    // native receipt ledger already proves those older inputs.
+    return _liveStateConfirmed(
+      mod,
+      peers.filter((peer) => peer.slot !== debt.slot),
+    );
   };
 
   const _requestIdFrom = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
@@ -7861,6 +8014,7 @@
   // the same ordered channel: a host on an older version matches the request
   // strings exactly, and ignores a string it does not know.
   const _sendResyncRequest = (dc, requestId, request) => {
+    if (_reconnectAnswerDebt && _reconnectAnswerScopeCurrent(_reconnectAnswerDebt.scope)) return;
     dc.send(`sync-request-id:${requestId}`);
     dc.send(request);
   };
@@ -8488,6 +8642,7 @@
   }
 
   function _requestSocketFullResync(reason, again = false) {
+    if (_reconnectAnswerDebt && _reconnectAnswerScopeCurrent(_reconnectAnswerDebt.scope)) return false;
     if (_playerSlot === 0 || _phase !== PHASE_RUNNING || !socket) return false;
     const hostEntry = _peerEntryForSlot(0);
     const hostSid = hostEntry?.[0];
@@ -8530,12 +8685,20 @@
     // request for state only from a player, and it is answered to the socket
     // that really sent it, not the one it names. A message with no stamp, or
     // one this page cannot check (the bundle did not load), is refused.
-    const from = window.KNCore?.checkRelayed?.(msg) ?? null;
+    const protectedRequest = msg.type === RECONNECT_PROOF_REQUEST + '-socket';
+    const authMessage = protectedRequest ? { ...msg, type: 'sync-request-full-socket' } : msg;
+    const from = window.KNCore?.checkRelayed?.(authMessage) ?? null;
     if (!from?.allowed) {
       _syncLog(`relayed ${msg.type} refused: sender ${from?.sid ?? 'unknown'} slot=${from?.slot ?? null}`);
       return;
     }
     msg = { ...msg, requesterSid: from.sid, senderSid: from.sid };
+    if (protectedRequest) {
+      const key = _peerKey(from.sid);
+      if (key && _currentSid(key) === from.sid && msg.matchId === KNState.matchId)
+        _receiveReconnectProofRequest(key, msg.requestId, 'socket');
+      return;
+    }
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
@@ -8593,6 +8756,7 @@
           source: 'socket',
           answerFor,
           answerScope,
+          proofFor: msg.reconnectMatch === KNState.matchId ? _requestIdFrom(msg.reconnectProofFor) : 0,
           extras: _resyncExtrasFromFields(msg),
         });
       });
@@ -10170,6 +10334,7 @@
     }
     const decoded = KNShared.decodeInput(data);
     const recvFrame = decoded.frame;
+    const author = _hostInputAuthor(remoteSid, peer);
     const admissionFloor = _admissionInputFloor(peer.slot);
     if (admissionFloor > 0 && recvFrame < admissionFloor) return false;
     // Bounds-check the remote frame number. A malicious peer could send
@@ -10285,6 +10450,7 @@
         ) {
           _pendingCInputs.push({
             slot: peer.slot,
+            author,
             frame: r.frame,
             buttons: r.buttons,
             lx: r.lx,
@@ -10300,6 +10466,7 @@
     if (_useCRollback && (!headerDuplicate || (headerWasSeeded && !_inputEq(existingHeaderInput, recvInput)))) {
       _pendingCInputs.push({
         slot: peer.slot,
+        author,
         frame: recvFrame,
         buttons: recvInput.buttons,
         lx: recvInput.lx,
@@ -10352,37 +10519,14 @@
             _syncTargetFrame = -1;
             _syncTargetDeadlineAt = 0;
           }
-        } else if (recoveryStep === 'resync-guests' && !_hostReconnectBlocksNativeCapture()) {
-          // The host ran on predicted inputs for this guest while it was a
-          // phantom, and its late real inputs landed past the rollback cap
-          // or are settled below. Every other guest ran those frames on
-          // something of its own: the guest's real inputs, heard all along,
-          // or its own predictions. The host is authoritative: push its
-          // state to every guest once it is final (the guest's real inputs
-          // have caught up), or at the I1 deadline. The requests share their
-          // frame and deadline, so they fall due together and one capture
-          // goes to all of them (a broadcast): the `inputs-settled:` the
-          // returning guest then sends is for a state every guest loads. A
-          // sync the host schedules for its own reasons carries no request
-          // number; another guest's own request already queued stays, to be
-          // answered: any state the host takes from now on is for this frame
-          // or a later one.
-          const deadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
-          _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
-          const targets = [remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)].filter(
-            (sid, i, all) => all.indexOf(sid) === i && !_scheduledSyncRequests.some((r) => r.targetSid === sid),
-          );
-          for (const sid of targets)
-            _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });
-          // That state will be for this frame or a later one, so the
-          // guest's inputs from before this frame minus the delay are
-          // settled by it already. (Only the host can say so here: a guest
-          // may be taken back to an earlier frame and still need them.)
-          _settleInputsBefore(peer.slot, _frameNum);
-          _syncLog(
-            `peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum} ` +
-              `guests=${targets.map((sid) => _peers[sid]?.slot ?? '?').join(',')}`,
-          );
+        } else if (recoveryStep === 'resync-guests') {
+          if (_hostReconnectBlocksNativeCapture()) {
+            _deferredPhantomRecovery.set(remoteSid, {
+              peer,
+              epoch: _syncQueueEpoch,
+              gen: _syncQueueGen[remoteSid] || 0,
+            });
+          } else _scheduleRecoveredHostGuest(remoteSid, peer);
         } else if (recoveryStep === 'ask') {
           // Another guest, which this page held as a phantom: it ran that
           // guest's frames on its own predictions, and an input of it lost
@@ -10452,7 +10596,7 @@
     ch.onerror = () => {};
     ch.onmessage = (e) => {
       const peer = _peers[remoteSid];
-      if (!peer || (_hostReconnectDebts.has(peer.slot) && peer.rbDc !== ch)) return;
+      if (!peer || (_reconnectProofStatus(remoteSid) === true && peer.rbDc !== ch)) return;
       if (
         e.data instanceof ArrayBuffer &&
         e.data.byteLength >= 16 &&
@@ -10587,8 +10731,7 @@
             _syncTargetDeadlineAt = 0;
             const _reconnectRequestId = _beginResyncRequest();
             try {
-              _sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full');
-              if (
+              const qualify =
                 peer.slot === 0 &&
                 _phase === PHASE_RUNNING &&
                 _useCRollback &&
@@ -10596,10 +10739,13 @@
                 !_lateJoin &&
                 _activeRoster?.size >= 3 &&
                 _activeRoster.has(0) &&
-                _activeRoster.has(_playerSlot)
-              )
+                _activeRoster.has(_playerSlot);
+              if (qualify && _reconnectProofStatus(remoteSid) !== false) {
                 _startsReconnectAnswerDebt(remoteSid, peer, _reconnectRequestId);
-              _syncLog('reconnect resync: sent immediate sync-request-full to host DC');
+              } else {
+                _sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full');
+                if (qualify) setStatus('Legacy game recovery is not verified');
+              }
             } catch (e) {
               _syncLog(`reconnect resync send failed: ${e}`);
               _resyncRequestInFlight = false;
@@ -10697,7 +10843,7 @@
 
     ch.onmessage = (e) => {
       const peer = _peers[remoteSid];
-      if (!peer || (_hostReconnectDebts.has(peer.slot) && peer.dc !== ch)) return;
+      if (!peer || (_reconnectProofStatus(remoteSid) === true && peer.dc !== ch)) return;
 
       // String messages: one off its schema goes no further.
       if (typeof e.data === 'string') {
@@ -11201,6 +11347,10 @@
           }
         }
         // State sync: the number of the request that follows on this channel.
+        if (e.data.startsWith(RECONNECT_PROOF_REQUEST + ':')) {
+          _receiveReconnectProofRequest(remoteSid, Number(e.data.slice(RECONNECT_PROOF_REQUEST.length + 1)), 'dc');
+          return;
+        }
         if (e.data.startsWith('sync-request-id:')) {
           if (_playerSlot === 0) syncRequestIdNext = _requestIdFrom(Number(e.data.substring(16)));
           return;
@@ -11267,6 +11417,11 @@
             } else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
               peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
+              if (peer.dc === ch)
+                _reconnectProofPeers.set(
+                  _knownPlayers[remoteSid]?.socketId || remoteSid,
+                  peer.rollbackCaps[RECONNECT_PROOF_CAP] === true,
+                );
               _maskCapablePeers.set(remoteSid, window.KNCore.controllerMask.canScheduleMask(msg.caps));
               _lockstepReadyPeers[remoteSid] = true;
               _noteStartStep(peer.slot);
@@ -11323,6 +11478,8 @@
     // ahead of its header. It lives and dies with the channel.
     let syncAnswerIdNext = 0;
     let recoveryIdNext = 0;
+    let proofForAssembly = 0;
+    let proofScopeAssembly = null;
     let extrasNext = null;
     ch.onmessage = (e) => {
       // Check every message, including binary chunks and answer ids. A
@@ -11367,6 +11524,8 @@
         // Guest: incoming state transfer header
         if (e.data.startsWith('sync-start:')) {
           const parts = e.data.split(':');
+          proofForAssembly = _requestIdFrom(Number(parts[5]));
+          proofScopeAssembly = _reconnectAnswerScope(_remoteSid);
           _syncFrame = parseInt(parts[1], 10);
           _syncExpected = parseInt(parts[2], 10);
           _syncIsFull = parts[3] === '1';
@@ -11376,7 +11535,8 @@
           recoveryIdNext = 0;
           _syncExtras = extrasNext;
           extrasNext = null;
-          _syncAnswerFor = syncAnswerIdNext;
+          _syncAnswerFor = proofForAssembly || syncAnswerIdNext;
+          if (proofForAssembly) _hostNumbersAnswers = true;
           syncAnswerIdNext = 0;
           _syncChunks = [];
           _syncLastChunkProgressLogAt = 0;
@@ -11421,6 +11581,8 @@
         }
         // Guest: incoming regions patch header — only diverged RDRAM blocks
         if (e.data.startsWith('sync-regions-start:')) {
+          proofForAssembly = 0;
+          proofScopeAssembly = _reconnectAnswerScope(_remoteSid);
           const parts = e.data.split(':');
           _syncFrame = parseInt(parts[1], 10);
           _syncExpected = parseInt(parts[2], 10);
@@ -11464,7 +11626,7 @@
             }
             _rearmSyncChunkDeadline = null;
             _syncLog(`sync chunks complete: ${_syncChunks.length}/${_syncExpected} chunks received`);
-            handleSyncChunksComplete(ownsAssembly, _reconnectAnswerScope(_remoteSid));
+            handleSyncChunksComplete(ownsAssembly, proofScopeAssembly, proofForAssembly);
           }
           return;
         }
@@ -13757,6 +13919,8 @@
     const servedAs = _lateJoinServing.get(remoteSid);
     const serveId = servedAs ?? ++_lateJoinServeSeq;
 
+    if (_hostReconnectBlocksNativeCapture()) return;
+    const reconnectFence = _hostReconnectFenceVersion;
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) {
       _syncLog(`sendLateJoinState: gameManager not ready`);
@@ -13872,6 +14036,7 @@
       // fired, the joiner left, the match stopped): nothing to send.
       if (
         _lateJoinServing.get(remoteSid) !== serveId ||
+        reconnectFence !== _hostReconnectFenceVersion ||
         serveEpoch !== _syncQueueEpoch ||
         serveGen !== (_syncQueueGen[remoteSid] || 0) ||
         (servePeer && servePeer !== _peers[remoteSid])
@@ -16538,6 +16703,9 @@
     _resyncRequestInFlight = false;
     _reconnectAnswerDebt = null;
     _hostReconnectDebts.clear();
+    _hostAuthoredReceipts.clear();
+    _deferredPhantomRecovery.clear();
+    _reconnectProofPeers.clear();
     ++_hostReconnectFenceVersion;
     _resyncRequestAt = -1;
     _owedResync = false;
@@ -17064,7 +17232,7 @@
     }
     const options = {
       requestIds,
-      watchFor: [sid],
+      watchFor: via.reconnectDebt ? [] : [sid],
       ...(transport ? { transport, reason: via.reason } : {}),
       ...(via.reconnectDebt ? { reconnectDebt: via.reconnectDebt, pending: via.pending } : {}),
     };
@@ -17080,13 +17248,15 @@
       if (via.reconnectDebt?.request === via.pending && via.pending) {
         via.pending.dispatching = false;
         if (typeof skipped?.includes === 'function' && !skipped.includes(sid)) {
+          // Handoff is not native apply. Retain permission for a request
+          // from the same current generation until the original deadline.
+          via.reconnectDebt.lastHandoffId = via.pending.id;
           via.reconnectDebt.request = null;
-          if (_hostReconnectDebts.get(via.reconnectDebt.slot) === via.reconnectDebt)
-            _hostReconnectDebts.delete(via.reconnectDebt.slot);
         }
       }
       if (_directAnswerNewest.get(sid) !== token) return;
       _directAnswerNewest.delete(sid);
+      if (via.reconnectDebt) return; // only an explicit retry asks for another protected state
       // Still the guest it was sent to: not gone, reset (reconnect) or a
       // match stopped since (those are resetPeerState's job).
       const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
@@ -17123,22 +17293,22 @@
   // (the newest received frame alone can hide a gap) and fed to C (a queued
   // one could still trigger a rollback). Used by the host's sync dispatch and
   // by the GAMEPLAY→MENU C-rollback shutdown.
-  const _liveStateConfirmed = (mod) => {
+  const _liveStateConfirmed = (mod, peers) => {
     if (mod?._kn_get_replay_depth?.() > 0) return false;
     if ((mod?._kn_peek_pending_rollback?.() ?? -1) >= 0) return false;
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     if (_pendingCInputs.some((i) => i.frame <= lastUsed)) return false;
-    return _missingConsumedInputs().length === 0;
+    return _missingConsumedInputs(peers).length === 0;
   };
   // The earliest consumed remote input each live peer still lacks (absent,
   // or fabricated as ZERO_INPUT) in the window _liveStateConfirmed checks.
-  const _missingConsumedInputs = () => {
+  const _missingConsumedInputs = (peers = getInputPeers()) => {
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     // Frames applied before a deferred init ran on the lockstep path, which
     // deletes each remote input once applied (same floor as the gap check).
     const windowStart = lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES;
     const missing = [];
-    for (const p of getInputPeers()) {
+    for (const p of peers) {
       if (_peerPhantom[p.slot]) continue;
       const firstInWindow = Math.max(_inputFloor(p.slot), windowStart);
       const got = _remoteInputs[p.slot];
@@ -17373,6 +17543,7 @@
             pending.extras,
             pending.answerFor,
             pending.answerScope,
+            pending.proofFor,
           );
         } else if (_runSubstate !== RUN_AWAITING_RESYNC) {
           // Reached target frame but state not here yet — stall until it arrives
@@ -17412,6 +17583,7 @@
           pending.extras,
           pending.answerFor,
           pending.answerScope,
+          pending.proofFor,
         );
       }
     }
@@ -20353,6 +20525,7 @@
   });
 
   const _sealAndPublishCapture = (token, observe, attempts) => {
+    if (_hostReconnectBlocksNativeCapture()) return null;
     if (!_recovery.ownsPublication(token, attempts)) return null;
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?._kn_sync_read || !mod._kn_get_frame || !mod._kn_get_replay_depth || !mod._kn_peek_pending_rollback)
@@ -20486,11 +20659,16 @@
             return null;
           }
           const reconnectFence = _hostReconnectFenceVersion;
+          const proofFor = options.reconnectDebt && options.pending?.via?.protected ? options.pending.id : 0;
           let currentState;
           // The hidden words and HLE state taken with it (_captureResyncExtras).
           let extras = null;
           const frame = capturedPublication?.frame ?? _frameNum;
-          const reconnectFenceCurrent = () => reconnectFence === _hostReconnectFenceVersion;
+          const reconnectFenceCurrent = () =>
+            reconnectFence === _hostReconnectFenceVersion &&
+            (!options.reconnectDebt ||
+              (performance.now() < options.reconnectDebt.deadline &&
+                options.reconnectDebt.request === options.pending));
           const mayDeliver = (t) =>
             reconnectFenceCurrent() &&
             (!capturedPublication ||
@@ -20661,6 +20839,7 @@
                 data: encoded.data,
                 // The request this answers; absent when it answers none.
                 ...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {}),
+                ...(proofFor ? { reconnectProofFor: proofFor, reconnectMatch: KNState.matchId } : {}),
                 // The hidden words and HLE state; absent when the core has neither.
                 ..._resyncExtrasFields(extras),
               });
@@ -20689,6 +20868,7 @@
                 extras,
                 !!options.reconnectDebt,
                 reconnectFenceCurrent,
+                proofFor,
               );
             }
           } else {
@@ -20706,6 +20886,7 @@
               extras,
               !!options.reconnectDebt,
               reconnectFenceCurrent,
+              proofFor,
             );
           }
           return [];
@@ -20757,6 +20938,7 @@
     extras = null,
     requireSent = false,
     reconnectFenceCurrent,
+    proofFor = 0,
   ) => {
     // A guest the state is not for (held as a late joiner, gone): its
     // escalation push does not go out. The others reach their guest's chain
@@ -20787,6 +20969,7 @@
             attempts.find((a) => a.sid === t.sid)?.wireId ?? 0,
             extras,
             reconnectFenceCurrent,
+            proofFor,
           );
         });
         _syncSendChains[t.sid] = run.catch(() => {});
@@ -20820,6 +21003,7 @@
       const w = _followUpWatches.get(t.sid);
       if (outcomes[i] === 'sent' && w && w.frame === frame) w.delivered = true;
     });
+    if (requireSent && targets.length === 0) return null;
     return targets
       .filter((t, i) => (requireSent ? outcomes[i] !== 'sent' : outcomes[i] === 'skipped'))
       .map((t) => t.sid);
@@ -20846,6 +21030,7 @@
     recoveryId = 0,
     extras = null,
     reconnectFenceCurrent,
+    proofFor = 0,
   ) => {
     const CHUNK_SIZE = 64000;
     // The transfer starting moves its guest's chain.
@@ -20857,7 +21042,8 @@
       return 'dropped';
     }
     // Always full (the third field): the host sends no deltas.
-    const header = `sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}`;
+    const proofSuffix = proofFor ? ':' + proofFor : '';
+    const header = `sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}${proofSuffix}`;
     // The primary channel accepts input packets, not state headers/chunks.
     // Never report a state as delivered on a channel that cannot parse it
     // (specs/recovery_delivery.qnt primaryChannelTest).
@@ -20882,7 +21068,7 @@
       // ordered channel: a guest on an older version parses the header
       // strictly, and ignores a string it does not know.
       const answerFor = requestIds[t.sid] || 0;
-      if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
+      if (answerFor && !proofFor) dc.send(`sync-answer-id:${answerFor}`);
       dc.send(`sync-recovery-id:${recoveryId}`);
       // The hidden words and HLE state, for the state that follows.
       const extrasText = _resyncExtrasText(extras);
@@ -20961,9 +21147,11 @@
     source,
     answerFor = 0,
     answerScope = null,
+    proofFor = 0,
     recoveryId = 0,
     extras = null,
   }) {
+    if (!isFull || isRegions || isProactive) proofFor = 0;
     // Recheck after async legacy XOR too: a newer recovery can finish while
     // an older ordinary/socket payload is still decoding. A strictly newer
     // ordinary frame remains useful; equal/older frames cannot erase its ACK.
@@ -21050,9 +21238,12 @@
       }
       if (_keepsAwaitedAnswer(answerFor, frame)) return;
       const held = _pendingResyncState;
-      if (_readReconnectAnswer(held?.answerFor, held?.answerScope) && !_readReconnectAnswer(answerFor, answerScope))
+      if (
+        _readReconnectAnswer(held?.answerFor, held?.answerScope, held?.proofFor) &&
+        !_readReconnectAnswer(answerFor, answerScope, proofFor)
+      )
         return;
-      _pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, recoveryId, extras };
+      _pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras };
       _syncLog(
         `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +
           `answerFor=${answerFor} newest=${_resyncRequestId} endsRequest=${endsRequest})`,
@@ -21060,7 +21251,7 @@
     }
   }
 
-  const handleSyncChunksComplete = async (ownsAssembly = () => true, answerScope = null) => {
+  const handleSyncChunksComplete = async (ownsAssembly = () => true, answerScope = null, proofFor = 0) => {
     const decodeEpoch = _syncQueueEpoch;
     // Guest: reassemble chunks, decompress, reconstruct state, buffer for apply.
     const total = _syncChunks.reduce((a, c) => a + c.length, 0);
@@ -21101,6 +21292,7 @@
           recoveryId,
           answerFor,
           answerScope,
+          proofFor,
           extras,
         });
       });
@@ -21300,8 +21492,9 @@
     extras = null,
     answerFor = 0,
     answerScope = null,
+    proofFor = 0,
   ) => {
-    if (!_guestAllowsReconnectState(answerFor, answerScope)) return;
+    if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return;
     if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return;
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
@@ -21460,7 +21653,7 @@
     if (timelineAligned) {
       _lastAppliedRecoveryId = Math.max(_lastAppliedRecoveryId, recoveryId);
       _settleInputsAtResync(gm.Module, frame, recoveryId);
-      _finishReconnectAnswer(answerFor, answerScope, _hasKnSync && !!gm.Module?._kn_set_frame);
+      _finishReconnectAnswer(answerFor, answerScope, _hasKnSync && !!gm.Module?._kn_set_frame, proofFor);
       // The host's state carries the frames a removed player's cut changed:
       // a re-run still owed from before it is not run.
       if (_cutRerun) {

@@ -324,3 +324,35 @@ test('recovery attempt metadata is separate from legacy headers and rejects malf
     bad('lockstep', `recovery-settled:997:${id}`);
   }
 });
+
+test('protected reconnect uses a dedicated request and an atomic full-state header', () => {
+  ok('lockstep', 'reconnect-sync-request-v1:19');
+  bad('sync-state', 'reconnect-sync-request-v1:19');
+  bad('lockstep', 'reconnect-sync-request-v1:-1');
+  bad('lockstep', 'reconnect-sync-request-v1:19:20');
+  ok('sync-state', 'sync-start:520:2:1:0:19');
+  ok('sync-state', 'sync-start:520:2:1:0');
+  bad('sync-state', 'sync-start:520:2:1:0:19:20');
+  bad('sync-state', 'sync-start:520:2:0:0:19');
+  bad('sync-state', 'sync-start:520:2:1:1:19');
+  bad('sync-state', 'sync-start:520:2:1:0:0');
+  assert.equal(
+    checkPeerJson('data-message', {
+      type: 'reconnect-sync-request-v1-socket',
+      targetSid: 'host',
+      requesterSid: 'guest',
+      matchId: 'current-match',
+      requestId: 19,
+    }).issue,
+    null,
+  );
+  assert.notEqual(
+    checkPeerJson('data-message', {
+      type: 'reconnect-sync-request-v1-socket',
+      targetSid: 'host',
+      requesterSid: 'guest',
+      requestId: 19,
+    }).issue,
+    null,
+  );
+});

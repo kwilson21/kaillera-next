@@ -700,6 +700,11 @@ $QUINT test "$KEEP" --main=kept_slot_recovery_fixed --backend="$BACKEND"
 $QUINT run "$KEEP" --main=kept_slot_recovery_fixed --invariant=allHold \
   --max-samples=10000 --max-steps=20 --backend="$BACKEND"
 
+# Protected reconnect answers must not degrade to legacy or accept stale proof.
+PROOF=specs/reconnect_proof.qnt
+$QUINT typecheck "$PROOF"
+$QUINT test "$PROOF" --main=reconnect_proof --backend="$BACKEND"
+
 # ── A player dropped in a running match comes back only late ──────────────
 DROP=specs/drop_is_final.qnt
 $QUINT typecheck "$DROP"

@@ -11,7 +11,7 @@ def _run(scenario):
     source = RUNTIME.read_text()
     excerpts = "\n".join(
         (
-            _between(source, "  // Local reconnect-debt prototype:", "  const _requestIdFrom ="),
+            _between(source, "  // Exact protected answer,", "  const _requestIdFrom ="),
             _between(source, "  const handleSocketSyncState =", "  // Per-requester cooldown"),
             _between(source, "  async function _handleDecodedSyncPayload(", "  const handleSyncChunksComplete ="),
         )
@@ -19,7 +19,10 @@ def _run(scenario):
     mocks = """
     import {makeReconnectSettleGuard} from './tests/fixtures/reconnect-settle-guard.mjs';
     const PHASE_RUNNING = 5, _phase = PHASE_RUNNING, _playerSlot = 1, _isSpectator = false;
-    const _peers = {H: {slot: 0}, M: {slot: 1}};
+    const outbound = [], RECONNECT_PROOF_REQUEST = 'reconnect-sync-request-v1';
+    const _peers = {H: {slot: 0, dc: {readyState: 'open', send: x => outbound.push(x)}}, M: {slot: 1}};
+    const socket = {connected: true, id: 'M'};
+    const _signalSocket = {emit: (_route, body) => outbound.push(body.type)};
     const _syncQueueGen = {H: 2}, KNState = {matchId: 'first-match'};
     const RESYNC_MAX_ASKS_AGAIN = 2, RESYNC_REQUEST_TIMEOUT_MS = 8000, SYNC_DECODE_GRACE_MS = 10000;
     let _syncQueueEpoch = 1, _frameNum = 100, now = 100, _lastAppliedRecoveryId = 0;
@@ -30,6 +33,7 @@ def _run(scenario):
     const performance = {now: () => now}, _syncLog = s => logs.push(s);
     const KNEvent = (...args) => events.push(args);
     const _isOwnSid = sid => sid === 'M', _peerKey = sid => sid;
+    const _beginResyncRequest = () => ++_resyncRequestId;
     const _requestIdFrom = value => Number.isSafeInteger(value) && value > 0 ? value : 0;
     const _resyncExtrasFromFields = () => null, _decodingSyncAnswer = fn => fn();
     const _keepsAwaitedAnswer = () => false, _endsResyncRequest = id => id === _resyncRequestId;
@@ -39,11 +43,12 @@ def _run(scenario):
     cases = """
     _startsReconnectAnswerDebt('H', _peers.H, 9);
     const expected = _reconnectAnswerScope('H');
-    const send = (id) => handleSocketSyncState({
-      senderSid: 'H', targetSid: 'M', requestId: id, data: 'x', frame: 100, full: true,
+    const send = (id, stamped = id) => handleSocketSyncState({
+      senderSid: 'H', targetSid: 'M', requestId: id, reconnectProofFor: stamped, reconnectMatch: KNState.matchId,
+      data: 'x', frame: 100, full: true,
     });
-    const deliver = async (id) => {
-      const pending = send(id);
+    const deliver = async (id, stamped) => {
+      const pending = send(id, stamped);
       release();
       await pending;
     };
@@ -51,19 +56,42 @@ def _run(scenario):
     if (scenario === 'old-socket') {
       const pending = send(9);
       _syncQueueGen.H++;
-      _peers.H = {slot: 0};
+      _peers.H = {slot: 0, dc: {readyState: 'open', send: x => outbound.push(x)}};
       _startsReconnectAnswerDebt('H', _peers.H, 10);
       release();
       await pending;
       observed.buffer = _pendingResyncState?.answerFor ?? null;
-      _finishReconnectAnswer(10, expected, true);
+      _finishReconnectAnswer(10, expected, true, 10);
+    } else if (scenario === 'socket-retry') {
+      _peers.H.dc.readyState = 'closed';
+      now = 8100;
+      _checkReconnectAnswerDebt();
+      now = 16100;
+      _checkReconnectAnswerDebt();
+      now = 25000;
+      _checkReconnectAnswerDebt();
+      now = 34100;
+      _checkReconnectAnswerDebt();
+    } else if (scenario === 'failed-apply-retry') {
+      await deliver(9);
+      const pending = _pendingResyncState;
+      _pendingResyncState = null; // the tick consumed the buffered bytes
+      _finishReconnectAnswer(9, pending.answerScope, false, pending.proofFor);
+      observed.waitingAfterFailedApply = _reconnectAnswerDebt?.id === 9;
+      observed.genericTimerAlreadyCleared = !_resyncRequestInFlight;
+      now = 8100;
+      _checkReconnectAnswerDebt();
+      await deliver(9);
+      observed.staleFirstReplyRejected = !_guestAllowsReconnectState(9, expected, 9);
+      await deliver(10);
+      _finishReconnectAnswer(10, _pendingResyncState.answerScope, true, _pendingResyncState.proofFor);
     } else if (scenario === 'expiry') {
       await deliver(0);
       _finishReconnectAnswer(0, _pendingResyncState.answerScope, true);
       now = 34100;
       _checkReconnectAnswerDebt();
       _checkReconnectAnswerDebt();
-      _finishReconnectAnswer(9, expected, true);
+      _finishReconnectAnswer(9, expected, true, 9);
     } else if (scenario === 'old-match') {
       const pending = send(9);
       _syncQueueEpoch++;
@@ -72,18 +100,24 @@ def _run(scenario):
       release();
       await pending;
       observed.buffer = _pendingResyncState?.answerFor ?? null;
-      _finishReconnectAnswer(10, expected, true);
+      _finishReconnectAnswer(10, expected, true, 10);
     } else {
       await deliver(0);
       let settlements = 0;
       const apply = (pending, aligned) => {
-        if (!_guestAllowsReconnectState(pending.answerFor, pending.answerScope)) return;
+        if (!_guestAllowsReconnectState(pending.answerFor, pending.answerScope, pending.proofFor)) return;
         if (aligned) settlements++;
-        _finishReconnectAnswer(pending.answerFor, pending.answerScope, aligned);
+        _finishReconnectAnswer(pending.answerFor, pending.answerScope, aligned, pending.proofFor);
       };
       apply(_pendingResyncState, true);
       observed.opaqueBlockedBeforeSettlement = settlements === 0;
       observed.ordinaryRetainsDebt = _reconnectAnswerDebt?.id === 9;
+      await deliver(9, 0);
+      apply(_pendingResyncState, true);
+      observed.legacyNumberNotProof = settlements === 0;
+      await deliver(9, 8);
+      apply(_pendingResyncState, true);
+      observed.wrongNumberNotProof = settlements === 0;
       const hostScope = {epoch: 1, sid: 'M', generation: 2};
       const guard = makeReconnectSettleGuard({
         scope: hostScope, firstTag: 96, drainedBeforeReset: [97], failures: 0, deadlineAt: 8000,
@@ -108,7 +142,7 @@ def _run(scenario):
       observed.ordinaryAllowedAfterFinish = _guestAllowsReconnectState(0, expected);
     }
     process.stdout.write(JSON.stringify({observed, status: _reconnectAnswerDebt?.status ?? null,
-      id: _reconnectAnswerDebt?.id ?? null, toasts, events, logs}));
+      id: _reconnectAnswerDebt?.id ?? null, toasts, events, logs, outbound}));
     """
     run = subprocess.run(
         ["node", "--input-type=module", "-e", f"const scenario={json.dumps(scenario)};\n{mocks}\n{excerpts}\n{cases}"],
@@ -126,6 +160,8 @@ def test_actual_socket_routing_preserves_id_through_only_aligned_protected_apply
     assert actual["observed"] == {
         "opaqueBlockedBeforeSettlement": True,
         "ordinaryRetainsDebt": True,
+        "legacyNumberNotProof": True,
+        "wrongNumberNotProof": True,
         "hostBeforeInput": "wait",
         "hostBeforeReplay": "wait",
         "decodeOnlyRetainsDebt": True,
@@ -135,6 +171,7 @@ def test_actual_socket_routing_preserves_id_through_only_aligned_protected_apply
         "ordinaryAllowedAfterFinish": True,
     }
     assert actual["status"] is None
+    assert actual["outbound"] == ["reconnect-sync-request-v1:9"]
     assert sum(line.startswith("RECONNECT-ANSWER-APPLIED") for line in actual["logs"]) == 1
 
 
@@ -157,5 +194,27 @@ def test_prototype_arms_only_on_actual_host_reopen_and_routes_both_native_applie
     reconnect = _between(source, "        // Force resync", "          // Sync-state DC onopen handler")
     assert reconnect.count("_startsReconnectAnswerDebt(") == 1
     assert "peer.slot === 0 && _phase === PHASE_RUNNING && _useCRollback" in " ".join(reconnect.split())
-    assert "handleSyncChunksComplete(ownsAssembly, _reconnectAnswerScope(_remoteSid))" in source
-    assert " ".join(source.split()).count("pending.answerFor, pending.answerScope,") == 2
+    assert "handleSyncChunksComplete(ownsAssembly, proofScopeAssembly, proofForAssembly)" in source
+    assert " ".join(source.split()).count("pending.answerFor, pending.answerScope, pending.proofFor,") == 2
+
+
+def test_fallback_to_socket_keeps_dedicated_request_and_never_downgrades():
+    actual = _run("socket-retry")
+    assert actual["outbound"] == [
+        "reconnect-sync-request-v1:9",
+        "reconnect-sync-request-v1-socket",
+        "reconnect-sync-request-v1-socket",
+    ]
+    assert (actual["status"], actual["id"]) == ("unresolved", 11)
+    assert len(actual["toasts"]) == 1
+
+
+def test_failed_apply_retries_even_after_generic_timer_has_ended():
+    actual = _run("failed-apply-retry")
+    assert actual["observed"] == {
+        "waitingAfterFailedApply": True,
+        "genericTimerAlreadyCleared": True,
+        "staleFirstReplyRejected": True,
+    }
+    assert actual["outbound"] == ["reconnect-sync-request-v1:9", "reconnect-sync-request-v1:10"]
+    assert actual["status"] is None

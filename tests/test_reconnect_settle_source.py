@@ -24,8 +24,9 @@ def _race(*, transport, order, tag):
         (
             _between(source, "  const _settleInputsBefore =", "  let _rbConvergedLogged"),
             _between(source, "  const _drainPendingCInputs =", "  const _formatInputBrief"),
-            _between(source, "  // Review-only host fence", "  const _requestIdFrom ="),
+            _between(source, "  // A reconnect receipt", "  const _requestIdFrom ="),
             _between(source, "  const _answerDirectSyncRequest =", "  // True when this peer"),
+            _between(source, "  const _liveStateConfirmed =", "  // The earliest consumed remote input"),
         )
     )
     script = """
@@ -38,13 +39,20 @@ def _race(*, transport, order, tag):
     const _keptSlotFirstInputAt = new Map();
     const _syncQueueEpoch = 1, _syncQueueGen = {M: 1};
     const _directAnswerNewest = new Map(), _followUpWatches = new Map(), _peerPhantom = {};
+    const _corePhantomHistory = new Set();
     const DELAY_FRAMES = 2, SYNC_COORD_TIMEOUT_MS = 100, KN_MAX_VISIBLE_ROLLBACK_DEPTH = 7;
     const RESYNC_MAX_ASKS_AGAIN = 2, RESYNC_REQUEST_TIMEOUT_MS = 8000;
     const RB_INPUT_ASK_EVERY_MS = 500, RB_INPUT_ASK_MAX = 8;
-    const KNShared = {ZERO_INPUT: {}};
+    const KNShared = {ZERO_INPUT: {}}, INPUT_PAST_WINDOW_FRAMES = 600;
+    const _reconnectProofStatus = () => fixture.order !== 'mixed';
+    const _requestIdFrom = id => Number.isSafeInteger(id) && id > 0 ? id : 0;
+    const _inputEq = (a, b) => a.buttons === b.buttons;
     const socket = {connected: true}, asks = [];
     const _peers = {M: {slot: 1, dc: {readyState: 'open', send: s => asks.push(s)}, syncDc: {readyState: 'open'}},
       B: {slot: 2}};
+    const getInputPeers = () => Object.values(_peers);
+    // This bystander was connected and supplied all inputs in each scenario.
+    const _missingConsumedInputs = peers => peers.filter(peer => peer !== _peers.B);
     let _frameNum = 100, _scheduledSyncRequests = [], now = 100, failed = 0;
     const performance = {now: () => now};
     const logs = [], feeds = [], captures = [];
@@ -70,7 +78,10 @@ def _race(*, transport, order, tag):
     };
     const receive = () => {
       _remoteInputs[1][fixture.tag] = {buttons: 128};
-      _pendingCInputs.push({slot: 1, frame: fixture.tag, buttons: 128});
+      _pendingCInputs.push({slot: 1, frame: fixture.tag, buttons: 128,
+        author: fixture.order === 'unowned' ? null
+          : fixture.order === 'stale-input' ? {_syncQueueEpoch, sid: 'M', peer: _peers.M, gen: 1}
+          : _hostInputAuthor('M', _peers.M)});
     };
     // Stub physical I/O; run the application's actual native-admission guard.
     const pushSyncState = async (sid, _proactive, options) => {
@@ -80,7 +91,9 @@ def _race(*, transport, order, tag):
       if (sid) _settleInputsBefore(_peers[sid].slot, _frameNum);
       return [];
     };
-    const ask = () => _answerDirectSyncRequest('M', 9, {transport: fixture.transport});
+    const ask = () => fixture.order === 'ordinary'
+      ? _answerDirectSyncRequest('M', 9, {transport: fixture.transport})
+      : _receiveReconnectProofRequest('M', 9, fixture.transport);
     const service = async () => {
       _serviceReconnectHostAnswers();
       await Promise.resolve();
@@ -90,10 +103,13 @@ def _race(*, transport, order, tag):
     scenario = """
     // Native already drained these exact tags except the deliberately missing one.
     for (let f = 91; f <= 97; f++) {
-      if (f !== fixture.tag) _remoteInputs[1][f] = {buttons: 0};
+      if (f !== fixture.tag) {
+        _remoteInputs[1][f] = {buttons: 0};
+        _recordHostReconnectReceipt({slot: 1, frame: f, buttons: 0, author: _hostInputAuthor('M', _peers.M)});
+      }
     }
     if (fixture.order !== 'ordinary') {
-      _armHostReconnectDebt(1, 'reconnect', 'M', false, tickMod);
+      _armHostReconnectDebt(1, 'reconnect', 'M', fixture.order === 'phantom', tickMod);
       _syncQueueGen.M++;
       _remoteInputs[1] = {}; // normal reset clears JS input state
     }
@@ -106,7 +122,7 @@ def _race(*, transport, order, tag):
     await service();
     const capturesBeforeLateInput = captures.length;
     let capturesAfterDrain = null;
-    if (['request-first', 'expiry', 'reset', 'overlap', 'window-loss', 'native-failure'].includes(fixture.order)) {
+    if (['request-first', 'expiry', 'reset', 'overlap', 'window-loss', 'native-failure', 'unowned', 'stale-input'].includes(fixture.order)) {
       if (fixture.order === 'expiry') {
         now = 24100;
         await service();
@@ -199,4 +215,12 @@ def test_real_routing_arms_reset_and_fences_native_capture_before_settlement():
     assert push.index("_recoveryTransfers.run(") < push.index("_admitReconnectNativeCapture(")
     assert push.index("_admitReconnectNativeCapture(") < push.index("mod._kn_sync_read(")
     assert "!mayDeliver(socketTarget)" in push
-    assert "if (!_guestAllowsReconnectState(answerFor, answerScope)) return;" in source
+    assert "if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return;" in source
+
+
+@pytest.mark.parametrize("transport", ["dc", "socket"])
+@pytest.mark.parametrize("order", ["phantom", "mixed", "unowned", "stale-input"])
+def test_protected_requests_without_current_authored_proof_never_capture(transport, order):
+    result = _race(transport=transport, order=order, tag=96)
+    assert result["captures"] == []
+    assert result["cutoff"] is None

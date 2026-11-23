@@ -6,7 +6,12 @@ import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 const src = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const part = (a: string, b: string) => src.slice(src.indexOf(a), src.indexOf(b, src.indexOf(a)));
 function room(peerPresent = false) {
-  const c = vm.createContext({ Uint8Array, peerPresent });
+  const c = vm.createContext({
+    _hostReconnectBlocksNativeCapture: () => false,
+    _hostReconnectFenceVersion: 0,
+    Uint8Array,
+    peerPresent,
+  });
   vm.runInContext(
     `
  const peer={slot:1,dc:{readyState:'open',send(){}}};

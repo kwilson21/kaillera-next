@@ -12,6 +12,7 @@ import {
 } from '../../web/src/owner-proof.ts';
 import { checkRelayed } from '../../web/src/relay.ts';
 import * as syncSend from '../../web/src/sync-send.ts';
+import * as syncFollowUp from '../../web/src/sync-follow-up.ts';
 
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 function part(from: string, to: string): string {
@@ -28,10 +29,13 @@ function fn(name: string) {
 
 function room(realTransfer = false) {
   const context = vm.createContext({
+    _hostReconnectBlocksNativeCapture: () => false,
+    _hostReconnectFenceVersion: 0,
     createRecoveryManager,
     createRecoveryTransferPool,
     createOwnerProofRelay,
     syncSend,
+    syncFollowUp,
     openOwnerInputProof,
     ownerInputCaptureAllowed,
     checkRelayed,
@@ -52,10 +56,14 @@ function room(realTransfer = false) {
     const _syncEnabled=true, _coreFatalError=false, DELAY_FRAMES=3, SYNC_COORD_TIMEOUT_MS=3000;
     const _lateJoinServing=new Map(), _queuedSyncPushes=new Map(), _followUpWatches=new Map(), _directAnswerNewest=new Map();
     const _syncSendChains={}, _syncChainMovedAt={}, _peerPhantom={};
+    const _corePhantomHistory=new Set(), _pendingCInputs=[], _ranBeforeDelayChange=null, _workerCoprocPending=null;
+    const _reconnectProofStatus=()=>true, _requestIdFrom=n=>Number.isSafeInteger(n)&&n>0?n:0;
+    const RB_INPUT_ASK_EVERY_MS=100, RB_INPUT_ASK_MAX=8;
+    let bystanderHole=false;
     ${reconnectProofSource(source)}
     const _knownPlayers={a:{socketId:'actual-p2'},b:{socketId:'actual-p3'},c:{socketId:'actual-p4'}};
     const _peers={a:{slot:1},b:{slot:2},c:{slot:3}}, _syncQueueGen={a:3,b:4,c:5};
-    const performance={now:()=>now}, _syncLog=()=>{};
+    const proofLogs=[], performance={now:()=>now}, _syncLog=log=>proofLogs.push(log);
     const _syncBufPtr=1, _syncBufSize=8, reads=[], shipments=[], outcomes=[], bootEmits=[];
     const socket={connected:true,id:'actual-host',emit:(event, data)=>bootEmits.push({event,data})};
     let compressGate=Promise.resolve(), allowCompression;
@@ -70,19 +78,23 @@ function room(realTransfer = false) {
       _kn_sync_read(){ reads.push(nativeFrame); this.HEAPU8[1]=nativeFrame%256; this.HEAPU8[2]=99; return 2; },
     };
     const window={
-      KNCore:{checkRelayed,syncSend,recovery:{createOwnerProofRelay,openOwnerInputProof,ownerInputCaptureAllowed}},
+      KNCore:{checkRelayed,syncSend,syncFollowUp,recovery:{createOwnerProofRelay,openOwnerInputProof,ownerInputCaptureAllowed}},
       EJS_emulator:{gameManager:{Module:mod,getState(){throw Error('late or raw state escaped');}}},
     };
     const _localInputs={}, _remoteInputs={1:{},2:{},3:{}}, nativeFed=[], _inputFloor=()=>1066;
     const _maskSchedule={active:()=>false};
     const KNShared={ZERO_INPUT:{},encodeInput:(f,input)=>({buffer:{f,input}})};
-    const _missingConsumedInputs=()=>[...Array(7)].map((_,i)=>i+1066)
-      .filter(f=>!_remoteInputs[1][f]).slice(0,1).map(frame=>({peer:_peers.a,frame}));
+    const _missingConsumedInputs=(peers=getInputPeers())=>[
+      ...[...Array(7)].map((_,i)=>i+1066).filter(f=>!_remoteInputs[1][f]).slice(0,1)
+        .map(frame=>({peer:_peers.a,frame})),
+      ...(bystanderHole?[{peer:_peers.b,frame:1072}]:[]),
+    ].filter(hole=>peers.includes(hole.peer));
+    const getInputPeers=()=>Object.values(_peers);
     for (const f of [1067,1068,1069,1070,1071,1072]) _remoteInputs[1][f]={buttons:0,lx:0,ly:0,cx:0,cy:0};
     const _processInputPacket=(sid,peer,{f,input})=>{_remoteInputs[peer.slot][f]=input; nativeFed.push(f); return true};
     const _drainPendingCInputs=()=>{if(nativeFed.length && pending<0 && !drained){ pending=1069; drained=true; }};
     let drained=false;
-    const _liveStateConfirmed=()=>!_missingConsumedInputs().length;
+    ${fn('_liveStateConfirmed')}
     const ensureSyncBuffer=()=>{};
     const _recovery=createRecoveryManager({timeoutMs:5000,quietMs:20000,maxPushes:3},()=>{});
     const _recoveryTransfers=createRecoveryTransferPool();
@@ -106,7 +118,7 @@ function room(realTransfer = false) {
     const _onEscalationTransfer=(attempts,sid,sent,frame)=>outcomes.push([attempts.length,sid,sent,frame]);
     const _getTop=()=>_syncTargetsFor(null).map(t=>({id:t.sid,slot:t.peer.slot,generation:t.gen}));
     const observe=()=>({activeOwners:_getTop(),allRequiredInputsConfirmed:true,initialFailedRollbacks:0});
-    const _scheduledSyncRequests=[{targetSid:'a',targetFrame:1000,deadlineAt:1,requestId:4}];
+    let _scheduledSyncRequests=[{targetSid:'a',targetFrame:1000,deadlineAt:1,requestId:4}];
     ${fn('_emitSaveStateToPlayers')}
     ${fn('_runQueuedSyncPush')}
     ${fn('_openCapturePublication')}
@@ -122,6 +134,7 @@ function room(realTransfer = false) {
     ${fn('onDataMessage')}
     ${fn('_escalateLostInput')}
     ${fn('pushSyncState')}
+    ${fn('_answerDirectSyncRequest')}
     ${fn('sendSyncChunks')}
     ${fn('_checkOverduePushes')}
     ${fn('_dispatchScheduledSyncs')}
@@ -370,4 +383,84 @@ test('guest replies only with inputs recorded at their exact frame/current SID, 
   assert.deepEqual(sent.samples, [[1066, [2, 0, 0, 0, 0]]]);
   run("socket.id='rotated-p2'; onDataMessage({...request,targetSid:socket.id});");
   assert.equal(run('bootEmits.length'), 1);
+});
+
+test('the protected read requires every active owner, at actual capture rather than dispatch', async () => {
+  const run = room(true);
+  run(`
+    _peers.a.syncDc=stateChannel('returning');
+    const debt={
+      slot:1,sid:'a',gen:3,epoch:9,deadline:1500,status:'waiting',failed:0,
+      from:1073,through:1072,receipts:new Set(),lastHandoffId:0,request:null,
+    };
+    _hostReconnectDebts.set(1,debt);
+    _receiveReconnectProofRequest('a',27,'dc');
+    bystanderHole=true;
+    _serviceReconnectHostAnswers();
+  `);
+  await flush();
+  assert.deepEqual(JSON.parse(run('summary()')).reads, []);
+  assert.equal(run('headerWrites.length'), 0);
+  run(`
+    bystanderHole=false; now=150;
+    _corePhantomHistory.add(2);
+    _serviceReconnectHostAnswers();
+  `);
+  await flush();
+  assert.equal(run('headerWrites.length'), 0);
+  run(`
+    _corePhantomHistory.delete(2); now=300;
+    _serviceReconnectHostAnswers();
+  `);
+  await flush();
+  assert.deepEqual(JSON.parse(run('summary()')).reads, [1076], run('JSON.stringify({proofLogs,debt})'));
+  assert.equal(run("headerWrites.filter(([,msg])=>msg==='sync-start:1076:1:1:0:27').length"), 1);
+});
+
+test('successful wire handoff does not retire protected retry after an unsuccessful guest apply', async () => {
+  const run = room(true);
+  run(`
+    _peers.a.syncDc=stateChannel('returning');
+    const debt={
+      slot:1,sid:'a',gen:3,epoch:9,deadline:1500,status:'waiting',failed:0,
+      from:1073,through:1072,receipts:new Set(),lastHandoffId:0,request:null,
+    };
+    _hostReconnectDebts.set(1,debt);
+    _receiveReconnectProofRequest('a',27,'dc');
+    _serviceReconnectHostAnswers();
+  `);
+  await flush();
+  assert.equal(
+    run('_hostReconnectDebts.get(1) === debt && debt.lastHandoffId === 27'),
+    true,
+    run('JSON.stringify({proofLogs,debt})'),
+  );
+  assert.equal(run('debt.request'), null);
+  assert.equal(run('_scheduledSyncRequests.some(q=>q.followUp)'), false);
+  run(`
+    now=300;
+    _receiveReconnectProofRequest('a',26,'dc');
+    _serviceReconnectHostAnswers();
+  `);
+  await flush();
+  assert.equal(run('reads.length'), 1, 'no automatic or stale retransmission');
+  // Guest failed to apply the first handed-off state and sends its next
+  // bounded proof request. Identical wire duplicates share the in-flight work.
+  run(`
+    _receiveReconnectProofRequest('a',28,'dc');
+    _serviceReconnectHostAnswers();
+    _receiveReconnectProofRequest('a',28,'dc');
+    _serviceReconnectHostAnswers();
+  `);
+  await flush();
+  assert.equal(run("headerWrites.filter(([,msg])=>msg==='sync-start:1076:1:1:0:28').length"), 1);
+  assert.equal(run('reads.length'), 2);
+  run(`
+    now=1500;
+    _receiveReconnectProofRequest('a',29,'dc');
+    _serviceReconnectHostAnswers();
+  `);
+  assert.equal(run('_hostReconnectBlocksNativeCapture(mod)'), false);
+  assert.equal(run('_hostReconnectDebts.size'), 0);
+  assert.equal(run('reads.length'), 2, 'expired proof cannot be requested');
 });

@@ -20,11 +20,12 @@ function room() {
       _syncLastChunkProgressLogAt=0, _syncChunkSessionId=0,
       _syncChunkTimeoutTimer=null, _rearmSyncChunkDeadline=null,
       _hostNumbersAnswers=false, complete=0;
-    const _peerBoundary=()=>({peerText:()=>true}), _requestIdFrom=n=>n,
+    const _peerBoundary=()=>({peerText:()=>true}), _requestIdFrom=n=>Number.isSafeInteger(n)&&n>0?n:0,
       _resyncExtrasFromText=(t)=>({text:t}),
       _syncLog=()=>{}, performance={now:()=>1000},
       clearTimeout=()=>{}, setTimeout=()=>1, SYNC_CHUNK_TIMEOUT_MS=5000;
-    const handleSyncChunksComplete=()=>{complete++};
+    const receivedProofs=[];
+    const handleSyncChunksComplete=(_owns,scope,proof)=>{complete++; receivedProofs.push({scope,proof})};
     ${handler}
     const host={},guest={};
     _peers.host.syncDc=host; setupSyncDataChannel('host',host);
@@ -121,4 +122,17 @@ test('extras come only from the current host channel, and go with the header aft
     host.onmessage({data:'sync-extras:3:AQ=='});
     replacement.onmessage({data:'sync-start:103:2:1:0'});`);
   assert.equal(run('_syncExtras'), null);
+});
+
+test('protected proof stays bound to the header and cannot leak to a legacy state', () => {
+  const run = room();
+  run(`host.onmessage({data:'sync-start:200:1:1:0:19'});
+    _syncQueueGen.host=1;
+    host.onmessage({data:new Uint8Array([21]).buffer});
+    host.onmessage({data:'sync-start:201:1:1:0'});
+    host.onmessage({data:new Uint8Array([22]).buffer});`);
+  assert.equal(run('receivedProofs[0].scope.gen'), 0);
+  assert.equal(run('receivedProofs[0].proof'), 19);
+  assert.equal(run('receivedProofs[1].scope.gen'), 1);
+  assert.equal(run('receivedProofs[1].proof'), 0);
 });
