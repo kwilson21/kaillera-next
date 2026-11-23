@@ -925,13 +925,20 @@ const H = P[0];
 // (web/src/recovery-resync.ts), so the frames between differ by design.
 // Every phantom episode on the host counts: P2's, made by the fault (from the
 // drop), and any other the container makes (four emulators stall; from its
-// PEER-PHANTOM frame less PHANTOM_LEAD, the host being frozen in its stall
-// from the stall's start to the phantom). A guest's window ends at the first
+// PEER-PHANTOM frame less what the host can have run on prediction before
+// it stalled: its rollback window and delay, from its `C-ROLLBACK init`, and
+// PHANTOM_LEAD_MARGIN; the host is frozen in its stall from the stall's
+// start to the phantom). A guest's window ends at the first
 // host state it applies at or after the recovery frame. Mismatches inside are
 // counted (recoveryMismatches.during) and not failed; any outside fail. A
 // guest given no state after a recovery (main) has its window end at the
 // recovery, so the split it keeps fails.
-const PHANTOM_LEAD = 30;
+const PHANTOM_LEAD_MARGIN = 4;
+const phantomLead = (() => {
+  const init = /C-ROLLBACK init: max=(\d+) delay=(\d+)/.exec(H.sync);
+  // No init line (no C engine): the most the engine allows, 22 + 9.
+  return (init ? Number(init[1]) + Number(init[2]) : 31) + PHANTOM_LEAD_MARGIN;
+})();
 const phantomEpisodes = (() => {
   if (!PHANTOM_SETTLE) return [];
   const open = new Map();
@@ -951,8 +958,8 @@ const phantomEpisodes = (() => {
         phantomSettle.faultFrame !== null &&
         open.get(recovered[1]) >= phantomSettle.faultFrame;
       if (isFault) faultEpisodeTaken = true;
-      const from = isFault ? phantomSettle.faultFrame : open.get(recovered[1]) - PHANTOM_LEAD;
-      out.push({ slot, from, recovered: f });
+      const from = isFault ? phantomSettle.faultFrame : open.get(recovered[1]) - phantomLead;
+      out.push({ slot, from, recovered: f, byFault: isFault });
       open.delete(recovered[1]);
     }
   }
@@ -1414,7 +1421,17 @@ const summary = {
     problems: missingProblems,
   },
   followUpRecipient: FOLLOW_UP_RECIPIENT ? { ...followUpRecipient, problems: followUpProblems } : undefined,
-  phantomSettle: PHANTOM_SETTLE ? { ...phantomSettle, problems: phantomSettleProblems } : undefined,
+  phantomSettle: PHANTOM_SETTLE
+    ? {
+        ...phantomSettle,
+        // Each phantom episode on the host, its window's start and recovery
+        // frame: the fault's own, and any the container made by itself.
+        episodes: phantomEpisodes,
+        episodesByContainer: phantomEpisodes.filter((e) => !e.byFault).length,
+        phantomLead,
+        problems: phantomSettleProblems,
+      }
+    : undefined,
   room,
   players: PLAYERS,
   latencyMs: LAT,
