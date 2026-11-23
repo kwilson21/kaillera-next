@@ -721,6 +721,27 @@ class ErrorPageMiddleware:
         await self.app(scope, receive, capture_send)
 
 
+# ── Session-log rendering (run in worker threads) ─────────────────────────────
+# Each log entry is serialized by its own json.dumps call. One call over a
+# whole log would hold the GIL, and so the event loop, until it returned, even
+# from a worker thread; between small calls the loop gets its turn.
+
+
+def _jsonl_lines(entries: list, per_line_meta: dict) -> bytes:
+    """Export lines for `entries`: each dict entry with the session's per-line metadata merged in."""
+    return "".join(
+        json.dumps({**per_line_meta, **e}, separators=(",", ":")) + "\n" for e in entries if isinstance(e, dict)
+    ).encode("utf-8")
+
+
+def _detail_json(entry: dict) -> bytes:
+    """The session-log detail response: `entry` as JSON, its `log_data` list serialized entry by entry."""
+    log_data = entry.pop("log_data")
+    head = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+    items = ",".join(json.dumps(e, ensure_ascii=False, separators=(",", ":")) for e in log_data)
+    return f'{head[:-1]},"log_data":[{items}]}}'.encode()
+
+
 # ── App factory ───────────────────────────────────────────────────────────────
 
 
@@ -1401,6 +1422,31 @@ def create_app(lifespan=None) -> FastAPI:
             terms.append(ClientEvent.room == room)
         return or_(*terms) if terms else None
 
+    async def _client_events(match_id: str | None, room: str | None) -> list[dict]:
+        """A session's client events (DC failures, WebRTC state, milestones),
+        oldest first, at most 200, with meta decoded."""
+        either = _events_of(match_id, room)
+        if either is None:
+            return []
+        rows = await db.fetch(
+            select(
+                ClientEvent.id,
+                ClientEvent.type,
+                ClientEvent.message,
+                ClientEvent.meta,
+                ClientEvent.slot,
+                ClientEvent.created_at,
+            )
+            .where(either)
+            .order_by(ClientEvent.created_at, ClientEvent.id)
+            .limit(200)
+        )
+        for row in rows:
+            if row.get("meta") and isinstance(row["meta"], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    row["meta"] = json.loads(row["meta"])
+        return rows
+
     def _desync_verdicts(match_id: str) -> Select:
         """A match's desync events with their vision verdicts, in frame order."""
         return (
@@ -1532,8 +1578,19 @@ def create_app(lifespan=None) -> FastAPI:
                 entry["summary"] = json.loads(entry["summary"])
         return entry
 
+    @app.get("/admin/api/session-logs/{log_id}/client-events")
+    async def admin_session_log_client_events(log_id: int, _auth: None = Depends(_require_admin)) -> dict:
+        """The client events the detail endpoint bundles, without the session's
+        log: tools/analyze_match.py already has the log from the export."""
+        rows = await db.fetch(select(SessionLog.match_id, SessionLog.room).where(SessionLog.id == log_id))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Session log not found")
+        return {"client_events": await _client_events(rows[0].get("match_id"), rows[0].get("room"))}
+
     @app.get("/admin/api/session-logs/{log_id}")
-    async def admin_session_log_detail(request: Request, log_id: int, _auth: None = Depends(_require_admin)) -> dict:
+    async def admin_session_log_detail(
+        request: Request, log_id: int, _auth: None = Depends(_require_admin)
+    ) -> Response:
         rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
@@ -1551,29 +1608,7 @@ def create_app(lifespan=None) -> FastAPI:
         # Bundle client events for the same match/room so the full picture
         # is visible in one API call (DC failures, WebRTC state, milestones).
         match_id = entry.get("match_id")
-        room = entry.get("room")
-        either = _events_of(match_id, room)
-        if either is not None:
-            event_rows = await db.fetch(
-                select(
-                    ClientEvent.id,
-                    ClientEvent.type,
-                    ClientEvent.message,
-                    ClientEvent.meta,
-                    ClientEvent.slot,
-                    ClientEvent.created_at,
-                )
-                .where(either)
-                .order_by(ClientEvent.created_at, ClientEvent.id)
-                .limit(200)
-            )
-            for row in event_rows:
-                if row.get("meta") and isinstance(row["meta"], str):
-                    with contextlib.suppress(json.JSONDecodeError, TypeError):
-                        row["meta"] = json.loads(row["meta"])
-            entry["client_events"] = event_rows
-        else:
-            entry["client_events"] = []
+        entry["client_events"] = await _client_events(match_id, entry.get("room"))
 
         # Bundle vision desync verdicts for this match.
         if match_id:
@@ -1581,7 +1616,9 @@ def create_app(lifespan=None) -> FastAPI:
         else:
             entry["desync_events"] = []
 
-        return entry
+        # Megabytes of JSON for a long match: rendered in a worker thread, not
+        # by FastAPI on the event loop.
+        return Response(await asyncio.to_thread(_detail_json, entry), media_type="application/json")
 
     @app.get("/admin/api/session-logs/{log_id}/export")
     async def admin_session_log_export(
@@ -1610,10 +1647,18 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
 
-        # Pre-parse the JSON-stored fields. log_data is legacy full-blob
-        # entries (if any) plus appended session_log_chunks; summary and
-        # context are JSON objects.
-        log_data = await db.get_full_log_entries(entry.get("match_id"), entry.get("slot"), entry.get("log_data"))
+        # log_data is legacy full-blob entries (if any) plus appended
+        # session_log_chunks, streamed a page of chunks at a time and
+        # serialized in worker threads. Done in one piece on the event loop,
+        # a 19-minute match's export kept /health from answering for 5 s and
+        # Render restarted the server. SQLite counts the chunks' entries for
+        # the meta line and header, and the stream reads no chunk added after
+        # the count. For a live log at its size cap, the count can exceed
+        # what is streamed: the cap may delete counted chunks meanwhile.
+        match_id, slot = entry.get("match_id"), entry.get("slot")
+        legacy = await db.parse_log_data(entry.get("log_data"))
+        stored, through_id = await db.count_log_entries(match_id, slot)
+        entry_count = len(legacy) + stored
 
         summary = entry.get("summary") or "{}"
         if isinstance(summary, str):
@@ -1628,9 +1673,9 @@ def create_app(lifespan=None) -> FastAPI:
         meta = {
             "_kind": "meta",
             "id": entry.get("id"),
-            "match_id": entry.get("match_id"),
+            "match_id": match_id,
             "room": entry.get("room"),
-            "slot": entry.get("slot"),
+            "slot": slot,
             "player_name": entry.get("player_name"),
             "mode": entry.get("mode"),
             "ended_by": entry.get("ended_by"),
@@ -1638,7 +1683,7 @@ def create_app(lifespan=None) -> FastAPI:
             "updated_at": str(entry.get("updated_at")),
             "summary": summary,
             "context": context_obj,
-            "entry_count": len(log_data),
+            "entry_count": entry_count,
         }
 
         # Stable per-line metadata included on every entry so the
@@ -1646,26 +1691,25 @@ def create_app(lifespan=None) -> FastAPI:
         # back to the meta line.
         per_line_meta = {
             "session_id": entry.get("id"),
-            "match_id": entry.get("match_id"),
-            "slot": entry.get("slot"),
+            "match_id": match_id,
+            "slot": slot,
         }
 
         async def generate():
             yield (json.dumps(meta) + "\n").encode("utf-8")
-            for row_entry in log_data:
-                if not isinstance(row_entry, dict):
-                    continue
-                # Merge per-line metadata into each entry. Don't mutate
-                # the original dict — make a shallow copy.
-                merged = {**per_line_meta, **row_entry}
-                yield (json.dumps(merged, separators=(",", ":")) + "\n").encode("utf-8")
+            if legacy:
+                yield await asyncio.to_thread(_jsonl_lines, legacy, per_line_meta)
+            async for page in db.iter_chunk_entries(match_id, slot, through_id=through_id):
+                lines = await asyncio.to_thread(_jsonl_lines, page, per_line_meta)
+                if lines:
+                    yield lines
 
         return StreamingResponse(
             generate(),
             media_type="application/x-ndjson",
             headers={
                 "content-disposition": f'attachment; filename="session-{log_id}.jsonl"',
-                "x-entry-count": str(len(log_data)),
+                "x-entry-count": str(entry_count),
             },
         )
 

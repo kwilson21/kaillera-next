@@ -674,6 +674,22 @@ done
 $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── The ring while a page plays alone ──────────────────────────────────────
+SOLO=specs/solo_save.qnt
+$QUINT typecheck "$SOLO"
+for variant in solo_save_before solo_save_roster solo_save_keep_baseline solo_save_current; do
+  $QUINT test "$SOLO" --main="$variant" --backend="$BACKEND"
+done
+# kn_pre_tick skips the save while no other slot is active: no rollback
+# loses a frame today's ring has, and the first save after a skipped stretch
+# is whole. The first is VIOLATED when JS switches the saves off from the
+# room's roster: a player's first input can come before the roster that
+# lists them (solo_save_roster; inputBeforeRosterTest). The second is
+# VIOLATED when a skipped save keeps the sparse baseline
+# (solo_save_keep_baseline; firstSaveAfterAStretchTest).
+$QUINT run "$SOLO" --main=solo_save_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # ── How a page's C engine starts ───────────────────────────────────────────
 START=specs/engine_start.qnt
 $QUINT typecheck "$START"
