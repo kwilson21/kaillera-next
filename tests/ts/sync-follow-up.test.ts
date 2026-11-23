@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   changesWatchedFrame,
+  correctionOwed,
   delayOfStateAt,
   directFollowUpDue,
   directWatchIsStale,
@@ -151,4 +152,13 @@ test('a direct answer never both keeps a follow-up and drops its watch', () => {
           assert.ok(
             !(directFollowUpDue(current, sent, replaced, phantom) && directWatchIsStale(current, sent, replaced)),
           );
+});
+
+test('a correction owed at the take: a replay in flight, a pending rollback or a deferred worker replay', () => {
+  assert.equal(correctionOwed(0, -1, false), false, 'nothing owed: the watch starts unchanged');
+  assert.equal(correctionOwed(3, -1, false), true, 'a replay in flight');
+  assert.equal(correctionOwed(0, 120, false), true, 'a rollback pending in C');
+  assert.equal(correctionOwed(0, 0, false), true, 'pending at frame 0');
+  assert.equal(correctionOwed(0, -1, true), true, 'a deferred replay out to the worker');
+  assert.equal(correctionOwed(-1, -1, false), true, 'a replay depth that cannot be read counts as owed');
 });

@@ -33,6 +33,16 @@ lemma delayOfStateAt_ensures(watchFrame: int, delay: int, ranBeforeChange: int)
 {
 }
 
+function correctionOwed(replayDepth: int, pendingRollback: int, deferredReplayOut: bool): bool
+{
+  (((replayDepth != 0) || (pendingRollback >= 0)) || deferredReplayOut)
+}
+
+lemma correctionOwed_ensures(replayDepth: int, pendingRollback: int, deferredReplayOut: bool)
+  ensures (correctionOwed(replayDepth, pendingRollback, deferredReplayOut) == (((replayDepth != 0) || (pendingRollback >= 0)) || deferredReplayOut))
+{
+}
+
 function followUpIsUnneeded(followUp: int, watched: bool, changed: bool, confirmed: bool): bool
 {
   ((((followUp > 0) && watched) && !(changed)) && confirmed)

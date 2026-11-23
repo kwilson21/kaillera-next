@@ -60,6 +60,20 @@ export function delayOfStateAt(watchFrame: number, delay: number, ranBeforeChang
 }
 
 /**
+ * Whether the host still owes a correction as it takes a state: a replay in
+ * flight (`replayDepth` above 0, or -1 when it cannot be read), a rollback
+ * pending in C (`pendingRollback` at or above 0), or a deferred replay out to
+ * the shadow worker (`deferredReplayOut`). A state taken then is already not
+ * the host's, and the input that differed was fed before the watch existed,
+ * so no later feed flags it: its watch starts changed
+ * (specs/sync_follow_up.qnt, OWED_AT_TAKE). That can only cost a follow-up.
+ */
+//@ ensures \result === (replayDepth !== 0 || pendingRollback >= 0 || deferredReplayOut)
+export function correctionOwed(replayDepth: number, pendingRollback: number, deferredReplayOut: boolean): boolean {
+  return replayDepth !== 0 || pendingRollback >= 0 || deferredReplayOut;
+}
+
+/**
  * Whether a follow-up that has come due can be dropped: it follows a state
  * the host is watching and handed over whole (`watched`), no input at or
  * before that state's frame differed from its prediction (`changed` false),

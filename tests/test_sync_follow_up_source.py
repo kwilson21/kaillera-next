@@ -118,10 +118,14 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
     push = src[src.index("const pushSyncState = async (") :]
     push = push[: push.index("_kn_sync_read(")]
     # The watch is set before the state is read, not after it is sent.
+    # Starts changed when a correction is owed at the take (OWED_AT_TAKE),
+    # judged by the proved rule, never for a sealed capture.
     assert (
-        "_followUpWatches.set(sid, { frame, delay, changed: false, delivered: false });"
+        "_followUpWatches.set(sid, { frame, delay, changed: owed, delivered: false });"
         in push
     )
+    assert "window.KNCore.syncFollowUp.correctionOwed(" in push
+    assert "!capturedPublication &&" in push
     # With the delay that state ran under, the proved rule's.
     assert (
         "window.KNCore.syncFollowUp.delayOfStateAt(frame, DELAY_FRAMES, _ranBeforeDelayChange)"

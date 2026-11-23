@@ -23,7 +23,7 @@ function room(guests = 2, realTransfers = false) {
     let now = 10000;
     const performance = { now: () => now };
     const window = { KNCore: { resyncRequest, syncFollowUp, recovery: { createRecoveryManager, createRecoveryTransferPool } } };
-    const _playerSlot = 0, _frameNum = 1000, DELAY_FRAMES = 3, _ranBeforeDelayChange = -1;
+    const _playerSlot = 0, _frameNum = 1000, DELAY_FRAMES = 3, _ranBeforeDelayChange = -1, _workerCoprocPending = null;
     const INPUT_ASK_OVERDUE_ASKS = 3, INPUT_ASK_OVERDUE_MS = 1500;
     const OVERDUE_MAX_PUSHES = 3, OVERDUE_PUSH_QUIET_MS = 20000, OVERDUE_PUSH_TIMEOUT_MS = 5000;
     const _peers = ${JSON.stringify(Object.fromEntries(Array.from({ length: guests }, (_, i) => [String.fromCharCode(97 + i), { slot: i + 1 }])))};

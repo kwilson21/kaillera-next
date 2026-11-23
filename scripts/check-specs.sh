@@ -556,7 +556,7 @@ $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
 # ── The follow-up to an answer sent unconfirmed ────────────────────────────
 FOLLOW=specs/sync_follow_up.qnt
 $QUINT typecheck "$FOLLOW"
-for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_direct_unwatched sync_follow_up_socket_unwatched sync_follow_up_socket_over_channel sync_follow_up_socket_undelivered sync_follow_up_delay_unaware sync_follow_up_fixed; do
+for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_direct_unwatched sync_follow_up_socket_unwatched sync_follow_up_socket_over_channel sync_follow_up_socket_undelivered sync_follow_up_delay_unaware sync_follow_up_owed_unflagged sync_follow_up_fixed; do
   $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
 done
 # With the fix: a follow-up goes out only for a state an input changed after
@@ -575,6 +575,10 @@ done
 # Counting every input at or before the frame, not only those that ran
 # before it (labelled at most F - 1 - delay), sends a follow-up with the same
 # state (sync_follow_up_delay_unaware; differsAtFMinusDelayTest).
+# A state taken while a correction is owed is not the host's, and nothing fed
+# after the take flags it: unflagged, its follow-up is skipped and the guest
+# keeps a state the host rolled back (sync_follow_up_owed_unflagged, and
+# today's sync_follow_up_delay_unaware; owedAtTakeTest).
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

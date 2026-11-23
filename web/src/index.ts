@@ -83,6 +83,7 @@ import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
 import {
   changesWatchedFrame,
+  correctionOwed,
   delayOfStateAt,
   directFollowUpDue,
   directWatchIsStale,
@@ -419,7 +420,14 @@ export const KNCore = {
   /** The host's resync state, a chunk at a time (sync-send.ts). */
   syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
   /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
-  syncFollowUp: { changesWatchedFrame, delayOfStateAt, directFollowUpDue, directWatchIsStale, followUpIsUnneeded },
+  syncFollowUp: {
+    changesWatchedFrame,
+    correctionOwed,
+    delayOfStateAt,
+    directFollowUpDue,
+    directWatchIsStale,
+    followUpIsUnneeded,
+  },
   recoveryResync: { recoveryStep },
   startRejoin,
   shouldResumeRomTransfer,

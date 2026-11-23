@@ -19563,9 +19563,24 @@
           const delay = watchFor.length
             ? window.KNCore.syncFollowUp.delayOfStateAt(frame, DELAY_FRAMES, _ranBeforeDelayChange)
             : DELAY_FRAMES;
+          // Taken while a correction is still owed, the state is already not
+          // this page's, and the input behind it was fed before this watch:
+          // the watch starts changed (specs/sync_follow_up.qnt, OWED_AT_TAKE).
+          // A captured publication was sealed with none owed (capture-incident.ts).
+          const owedMod = gm.Module;
+          const owed =
+            watchFor.length > 0 &&
+            !capturedPublication &&
+            window.KNCore.syncFollowUp.correctionOwed(
+              owedMod?._kn_get_replay_depth?.() ?? -1,
+              owedMod?._kn_peek_pending_rollback?.() ?? -1,
+              !!_workerCoprocPending?.deferred,
+            );
           for (const sid of watchFor) {
-            _followUpWatches.set(sid, { frame, delay, changed: false, delivered: false });
-            _syncLog(`SYNC-FOLLOW-UP-WATCH target=${sid} frame=${frame} delay=${delay}: sent unconfirmed`);
+            _followUpWatches.set(sid, { frame, delay, changed: owed, delivered: false });
+            _syncLog(
+              `SYNC-FOLLOW-UP-WATCH target=${sid} frame=${frame} delay=${delay} owed=${owed ? 1 : 0}: sent unconfirmed`,
+            );
           }
           // Who this state is for, on the connections they are on now: a reconnect
           // while it is compressed or queued drops it for that guest.
