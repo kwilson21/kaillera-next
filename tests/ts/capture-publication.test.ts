@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 import { createRecoveryManager } from '../../web/src/recovery-delivery.ts';
 import { createRecoveryTransferPool } from '../../web/src/recovery-transfer.ts';
 import { createOwnerProofRelay } from '../../web/src/owner-proof-relay.ts';
@@ -51,6 +52,7 @@ function room(realTransfer = false) {
     const _syncEnabled=true, _coreFatalError=false, DELAY_FRAMES=3, SYNC_COORD_TIMEOUT_MS=3000;
     const _lateJoinServing=new Map(), _queuedSyncPushes=new Map(), _followUpWatches=new Map(), _directAnswerNewest=new Map();
     const _syncSendChains={}, _syncChainMovedAt={}, _peerPhantom={};
+    ${reconnectProofSource(source)}
     const _knownPlayers={a:{socketId:'actual-p2'},b:{socketId:'actual-p3'},c:{socketId:'actual-p4'}};
     const _peers={a:{slot:1},b:{slot:2},c:{slot:3}}, _syncQueueGen={a:3,b:4,c:5};
     const performance={now:()=>now}, _syncLog=()=>{};

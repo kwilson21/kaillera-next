@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 const src = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const part = (a: string, b: string) => src.slice(src.indexOf(a), src.indexOf(b, src.indexOf(a)));
 function room(peerPresent = false) {
@@ -26,6 +27,8 @@ function room(peerPresent = false) {
  ${part('  const finishLateJoinReady =', '  const _syntheticSidForSlot')}
  const _peerDriver=()=>null,_startSteps=new Map(),_endKeptOpen=()=>{},queueMicrotask=()=>{};
  const _lateJoinInputWindows=new Map(),_keptSlotFirstInputAt=new Map(),_corePhantomHistory=new Set();
+ const PHASE_RUNNING=5,_phase=PHASE_RUNNING;
+ ${reconnectProofSource(src)}
  const _clearSlotInputState=()=>{},_peerLastAdvanceTime={},_peerPhantom={},_inputLateLogTime={},_auditLastRemote={};
  const _rbCheckBook=null,_rbLegacyCheckSlots=new Set();
  const _pendingCInputs=[],_followUpWatches=new Map(),_directAnswerNewest=new Map(),_queuedSyncPushes=new Map(),_syncSendChains={},_syncChainMovedAt={};

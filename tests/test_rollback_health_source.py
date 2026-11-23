@@ -345,7 +345,7 @@ def test_resync_settles_the_inputs_before_its_frame():
     table_idx = src.index("const _slotInputMaps = () => [")
     assert "    _inputSettledBefore,\n" in src[table_idx : src.index("];", table_idx)]
     apply_idx = src.index(
-        "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {"
+        "const applySyncState = ("
     )
     assert re.search(
         r"if \(timelineAligned\) \{\s*_lastAppliedRecoveryId = Math.max\(_lastAppliedRecoveryId, recoveryId\);\s*_settleInputsAtResync\(gm.Module, frame, recoveryId\);",
@@ -723,7 +723,7 @@ def test_a_settled_input_is_not_fed_to_the_engine():
     # The host settles the guest's backlog when it schedules the recovery
     # resync: that state is for this frame or a later one. A guest does not:
     # it may be taken back to an earlier frame.
-    recovered = src[src.index("} else if (recoveryStep === 'resync-guests') {") :]
+    recovered = src[src.index("} else if (recoveryStep === 'resync-guests' && !_hostReconnectBlocksNativeCapture()) {") :]
     recovered = recovered[: recovered.index("peer-recovery resync: host scheduled full sync")]
     assert "_settleInputsBefore(peer.slot, _frameNum);" in recovered
 
@@ -748,7 +748,7 @@ def test_a_recovery_resyncs_every_guest():
     ) in recovered
     for step in ("'ask-at'", "'resync-guests'", "'ask'"):
         assert f"recoveryStep === {step}" in recovered
-    host = recovered[recovered.index("} else if (recoveryStep === 'resync-guests') {") :]
+    host = recovered[recovered.index("} else if (recoveryStep === 'resync-guests' && !_hostReconnectBlocksNativeCapture()) {") :]
     host = host[: host.index("} else if (recoveryStep === 'ask') {")]
     assert "[remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)]" in host
     assert "_scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });" in host
@@ -858,7 +858,7 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
 
     apply = src[
         src.index(
-            "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {"
+            "const applySyncState = ("
         ) :
     ]
     apply = apply[: apply.index("\n  };\n")]
@@ -1026,10 +1026,11 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert boot.index("if (_resyncRequestInFlight) {") < boot.index("_beginResyncRequest()")
     assert "_syncTargetFrame" not in boot
 
-    # A new match starts counting again.
+    # A rematch gets no debt from the old match and never reuses its IDs.
     stop = src[src.index("const stopSync = () => {") :]
     stop = stop[: stop.index("\n  };\n")]
-    assert "_resyncRequestId = 0;" in stop
+    assert "_reconnectAnswerDebt = null;" in stop
+    assert "_resyncRequestId = 0;" not in stop
     assert "_hostNumbersAnswers = false;" in stop
 
 
@@ -1052,7 +1053,7 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert handle.count("_resyncRequestInFlight = false;") == 4
     assert "_resyncRequestInFlight = false; // allow fresh request" in handle
     assert (
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId, extras };"
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, recoveryId, extras };"
         in handle
     )
     assert "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };" in handle
@@ -1072,7 +1073,7 @@ def test_only_its_own_answer_ends_a_resync_request():
     direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId, via = {}) => {") :]
     direct = direct[: direct.index("\n  };\n")]
     assert "const requestIds = { [sid]: requestId };" in direct
-    assert "const options = { requestIds, watchFor: [sid]," in direct
+    assert "requestIds, watchFor: [sid]," in " ".join(direct.split())
     assert "pushSyncState(sid, false, options)" in direct
     assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {" in src
 
@@ -1098,7 +1099,7 @@ def test_only_its_own_answer_ends_a_resync_request():
     wrapper = src[src.index("const sendSyncChunks = async (") :]
     wrapper = wrapper[: wrapper.index("\n  };\n")]
     assert re.search(
-        r"_sendSyncChunksTo\(\s*t,\s*compressed,\s*frame,\s*isProactive,\s*requestIds,\s*attempts.find\(\(a\) => a.sid === t.sid\)\?\.wireId \?\? 0,\s*extras,\s*\)",
+        r"_sendSyncChunksTo\(\s*t,\s*compressed,\s*frame,\s*isProactive,\s*requestIds,\s*attempts.find\(\(a\) => a.sid === t.sid\)\?\.wireId \?\? 0,\s*extras,\s*reconnectFenceCurrent,\s*\)",
         wrapper,
     )
     chunks = src[src.index("const _sendSyncChunksTo = async (") :]
@@ -1171,15 +1172,15 @@ def test_a_late_answer_does_not_replace_the_awaited_one():
     payload = src[src.index("async function _handleDecodedSyncPayload({") :]
     payload = payload[
         : payload.index(
-            "const handleSyncChunksComplete = async (ownsAssembly = () => true) => {"
+            "const handleSyncChunksComplete = async ("
         )
     ]
     for pending in (
         "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };",
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId, extras };",
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, recoveryId, extras };",
     ):
         at = payload.index(pending)
-        assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 200
+        assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 400
 
 
 def test_a_stale_late_answer_keeps_the_lifecycle_guard():
@@ -1189,7 +1190,7 @@ def test_a_stale_late_answer_keeps_the_lifecycle_guard():
     payload = src[src.index("async function _handleDecodedSyncPayload({") :]
     payload = payload[
         : payload.index(
-            "const handleSyncChunksComplete = async (ownsAssembly = () => true) => {"
+            "const handleSyncChunksComplete = async ("
         )
     ]
     assert "if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('regions sync stale');" in payload

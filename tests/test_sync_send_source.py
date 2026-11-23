@@ -84,10 +84,10 @@ def test_a_queued_transfer_never_reaches_a_new_connection():
     assert "_syncQueueGen[targetSid] || 0" in push[capture:copy]
     # The hidden words and HLE state taken with the state go with it.
     assert (
-        "sendSyncChunks( compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver, extras, )"
+        "sendSyncChunks( compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver, extras, !!options.reconnectDebt, reconnectFenceCurrent, )"
         in " ".join(push.split())
     )
-    assert "if (!_syncTargetCurrent(socketTarget)) {" in push
+    assert "if (!_syncTargetCurrent(socketTarget) || !mayDeliver(socketTarget)) {" in push
     targets_for = _block(src, "const _syncTargetsFor = (targetSid) => {")
     assert "epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0" in targets_for
     current = src[src.index("const _syncTargetCurrent = (t) =>") :]
@@ -97,7 +97,7 @@ def test_a_queued_transfer_never_reaches_a_new_connection():
     body = _send_body()
     # Checked when the transfer comes up, and between chunks.
     assert body.index("if (!_syncTargetCurrent(t)) {") < body.index("dc.send(header);")
-    assert "open: () => dc.readyState === 'open' && _syncTargetCurrent(t)," in body
+    assert "open: () => dc.readyState === 'open' && _syncTargetCurrent(t) && (!reconnectFenceCurrent || reconnectFenceCurrent())," in " ".join(body.split())
     # resetPeerState bumps the generation and drops the chain; stop() bumps
     # the epoch and drops every chain.
     reset = _block(src, "const resetPeerState = (slot, reason, opts = {}) => {")
@@ -117,7 +117,7 @@ def test_inputs_are_settled_only_for_a_state_that_was_sent():
     settle = body.index("_settleInputsBefore(target.slot, frame);")
     assert body.count("_settleInputsBefore(") == 1
     assert body.index("await window.KNCore.syncSend.sendPaced(") < settle
-    assert "if (outcome === 'sent' && _syncTargetCurrent(t)) {" in body[:settle]
+    assert "if (outcome === 'sent' && _syncTargetCurrent(t) && (!reconnectFenceCurrent || reconnectFenceCurrent())) {" in body[:settle]
     assert "SYNC-SEND-STALLED" in body[settle:]
 
 

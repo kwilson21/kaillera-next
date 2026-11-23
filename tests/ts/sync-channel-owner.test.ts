@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 import { mayReceiveState } from '../../web/src/sync-chunk-room.ts';
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const start = source.indexOf('  const setupSyncDataChannel = ');
@@ -12,6 +13,8 @@ function room() {
     `
     const window = { KNCore: { syncSend: { mayReceiveState } } };
     const _peers = { host: { slot: 0 }, guest: { slot: 2 } };
+    const KNState={matchId:'assembly-fixture'},_syncQueueEpoch=1,_syncQueueGen={};
+    ${reconnectProofSource(source)}
     let _syncRecoveryId=0, _syncExtras=null, _syncExpected=0, _syncChunks=[], _syncFrame=0, _syncIsFull=false,
       _syncIsProactive=false, _syncIsRegions=false, _syncAnswerFor=0,
       _syncLastChunkProgressLogAt=0, _syncChunkSessionId=0,

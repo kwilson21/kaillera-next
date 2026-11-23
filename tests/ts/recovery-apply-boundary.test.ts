@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const between = (a: string, b: string) => source.slice(source.indexOf(a), source.indexOf(b, source.indexOf(a)));
 const decode = between('  async function _handleDecodedSyncPayload(', '  const handleSyncChunksComplete =');
@@ -14,6 +15,7 @@ function decoder() {
  const _endsResyncRequest=()=>false,_syncLog=()=>{},_keepsAwaitedAnswer=()=>false;
  let _resyncRequestInFlight=false;const _resyncRequestId=0,_lastSyncState={length:1};
  let finishXor;const workerPost=()=>new Promise(r=>finishXor=r);
+ ${reconnectProofSource(source)}
  ${decode}
  globalThis.receive=(frame,isFull=true,recoveryId=0)=>_handleDecodedSyncPayload({decompressed:{length:1},frame,isFull,isProactive:false,isRegions:false,wireSize:1,source:'socket',answerFor:0,recoveryId});
  `,
@@ -55,6 +57,7 @@ for (const refuses of [true, false])
  const _resetStrictMenuResends=()=>{};
  const _handleCoreFatal=()=>{_coreFatalError=true};
  const _settleInputsAtResync=()=>{acks++;throw Error('settled-test-boundary')};
+ ${reconnectProofSource(source)}
  ${between('  const applySyncState =', '  // -- Init / Stop API')}
  try {applySyncState(new Uint8Array([1]),100,false,8,'extras')}catch(e){if(e.message!=='settled-test-boundary')throw e}
  globalThis.result={fatal:_coreFatalError,acks,frame:_frameNum,knFrame:KNState.frameNum,id:_lastAppliedRecoveryId,calls};

@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 
 import { KNCore } from '../../web/src/index.ts';
 import { keepsCoreSlot } from '../../web/src/peer-reset.ts';
@@ -226,6 +227,9 @@ const keptRuntime = () => {
     const _clearSlotInputState=(s)=>{delete _remoteInputs[s];delete _awaitFirstInputAfterReset[s];_keptSlotFirstInputAt.delete(s)};
     const _useCRollback=true,_cutGoverns=()=>false;
     let _activeRoster=new Set([0,SLOT]);
+    const _knownPlayers={},_playerSlot=0,PHASE_RUNNING=5,_phase=PHASE_RUNNING,_hasKnSync=true;
+    const RB_WORKER_COPROC=false,_syncQueueEpoch=1;
+    ${reconnectProofSource(src)}
     const _maskMatchScheduled=false,_inputSettledBefore={},_admissionInputFloor=()=>0,_inputFloor=()=>30;
     let resets=0,sent=0,present=true;
     const mod={_kn_rollback_slot_reset(){resets++},_kn_feed_input(){sent++}};
