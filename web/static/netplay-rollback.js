@@ -8314,6 +8314,9 @@
   // they connected under: _knownPlayers keeps that key, with the player's
   // current id in .socketId, so signals still reach them.
   const _ownSids = new Set();
+  // This page's persistent player id (config.persistentId): the roster's key
+  // for it, known whether or not the signaling socket is up.
+  let _ownPlayerId = '';
   let _lastUsersUpdated = null;
 
   // The _peers key for a player's current Socket.IO id.
@@ -8548,8 +8551,11 @@
     _tagPeerIdentities();
     _dropPendingLateJoinPeersMissingFromRoster(players);
 
-    // Update my slot from server (handles spectator -> player transition)
-    const myPlayerEntry = Object.values(players).find((p) => p.socketId === socket.id);
+    // Update my slot from server (handles spectator -> player transition).
+    // This page's own entry is found by its player id too: while the
+    // signaling socket is down socket.id is undefined.
+    const myPlayerEntry =
+      (_ownPlayerId && players[_ownPlayerId]) || Object.values(players).find((p) => p.socketId === socket.id);
     if (myPlayerEntry) {
       if (_isSpectator) {
         _syncLog(`transitioned from spectator to player, slot: ${myPlayerEntry.slot}`);
@@ -8560,7 +8566,24 @@
       window._playerSlot = _playerSlot;
     }
 
-    const otherPlayers = Object.values(players).filter((p) => p.socketId !== socket.id);
+    // Who is a peer is KNCore.rosterPeers (web/src/roster.ts, proved): never
+    // an entry under a socket id this page has had, in its own slot, or with
+    // its own player id. Comparing with socket.id alone took this page's own
+    // entry for a peer whenever the engine started with the socket down (a
+    // late joiner the host dropped, restarting: lifecycle-e2e
+    // late-join-drop-during-serve), and it offered to itself all match.
+    const rosterEntries = Object.entries(players);
+    if (socket?.id) _ownSids.add(socket.id);
+    const otherPlayers = window.KNCore.rosterPeers(
+      rosterEntries.map(([pid, p]) => ({
+        sid: p.socketId ?? '',
+        slot: Number.isInteger(p.slot) ? p.slot : -1,
+        player: pid,
+      })),
+      [..._ownSids],
+      !_isSpectator && Number.isInteger(_playerSlot) ? _playerSlot : -1,
+      _ownPlayerId || '',
+    ).map((index) => rosterEntries[index][1]);
     const existingPeerSids = Object.keys(_peers);
     _syncLog(
       `onUsersUpdated: ${Object.keys(players).length} players, ${otherPlayers.length} others, ` +
@@ -20682,6 +20705,7 @@
     _config = config;
     socket = config.socket;
     _playerSlot = config.playerSlot;
+    _ownPlayerId = typeof config.persistentId === 'string' ? config.persistentId : '';
     _isSpectator = config.isSpectator;
 
     // Apply pre-game options

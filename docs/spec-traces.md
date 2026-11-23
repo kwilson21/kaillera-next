@@ -53,19 +53,19 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
   Server-->>host: Loading(1)
   host->>Server: reload("host")
-  Note over Server: grace = {host}<br/>online = {}
+  Note over Server: online = {}<br/>grace = {host}
   Note over host: Closed
   host->>Server: reopen("host", true)
-  Note over Server: grace = {}<br/>status = lobby<br/>matchId = 0<br/>online = {host}
+  Note over Server: online = {host}<br/>grace = {}<br/>status = lobby<br/>matchId = 0
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
 ```
 
@@ -79,10 +79,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -95,9 +95,9 @@ sequenceDiagram
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
   host->>Server: dropSocket("host")
-  Note over Server: grace = {host}<br/>online = {guest1}
+  Note over Server: online = {guest1}<br/>grace = {host}
   host->>Server: resume("host", true)
-  Note over Server: grace = {}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>grace = {}
 ```
 
 ### returnAfterGraceTest
@@ -110,10 +110,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -126,11 +126,11 @@ sequenceDiagram
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
   guest1->>Server: dropSocket("guest1")
-  Note over Server: grace = {guest1}<br/>online = {host}
+  Note over Server: online = {host}<br/>grace = {guest1}
   Server->>Server: graceExpire("guest1")
   Note over Server: grace = {}<br/>members = {host}
   guest1->>Server: returnAfterExpiry("guest1", true, false)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
 ```
 
 ### hostReturnsAfterGraceTest
@@ -143,10 +143,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -159,11 +159,11 @@ sequenceDiagram
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
   host->>Server: dropSocket("host")
-  Note over Server: grace = {host}<br/>online = {guest1}
+  Note over Server: online = {guest1}<br/>grace = {host}
   Server->>Server: graceExpire("host")
-  Note over Server: grace = {}<br/>members = {guest1}<br/>owner = guest1<br/>creator = ""
+  Note over Server: grace = {}<br/>creator = ""<br/>members = {guest1}<br/>owner = guest1
   host->>Server: returnAfterExpiry("host", true, true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
 ```
 
 ### everyoneDropsTest
@@ -176,10 +176,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -192,11 +192,11 @@ sequenceDiagram
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
   host->>Server: dropSocket("host")
-  Note over Server: grace = {host}<br/>online = {guest1}
+  Note over Server: online = {guest1}<br/>grace = {host}
   guest1->>Server: dropSocket("guest1")
-  Note over Server: grace = {guest1, host}<br/>online = {}
+  Note over Server: online = {}<br/>grace = {guest1, host}
   host->>Server: resume("host", true)
-  Note over Server: grace = {guest1}<br/>online = {host}
+  Note over Server: online = {host}<br/>grace = {guest1}
 ```
 
 ### abandonedMatchTest
@@ -209,7 +209,7 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -219,10 +219,10 @@ sequenceDiagram
   Server->>Server: startRunning
   Server-->>host: Running(1)
   guest1->>Server: join("guest1", false)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: AwaitingRom(1)
   host->>Server: leave("host")
-  Note over Server: members = {guest1}<br/>owner = guest1<br/>online = {guest1}<br/>creator = ""
+  Note over Server: online = {guest1}<br/>creator = ""<br/>members = {guest1}<br/>owner = guest1
   Note over host: Closed
   Server->>Server: endAbandonedMatch
   Note over Server: status = lobby<br/>matchId = 0
@@ -237,7 +237,7 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -247,7 +247,7 @@ sequenceDiagram
   Server->>Server: startRunning
   Server-->>host: Running(1)
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Starting(1)
   guest1->>Server: startLateJoinEngine("guest1")
   Note over guest1: Syncing(1)
@@ -257,6 +257,78 @@ sequenceDiagram
   Note over Server: status = lobby<br/>matchId = 0
   Server-->>host: Lobby
   Server-->>guest1: Lobby
+```
+
+### lateJoinerSocketDropTest
+
+A late joiner's socket drops and comes back (a new socket id) before it has the match state: once while its engine is starting, and once more while it is asking for the state. Seen once in a real-ROM run of tests/lifecycle-e2e.mjs late-join-cached on an older branch, where the joiner logged "mid-game rejoin succeeded" and then went to the lobby. Here, as on the server, the resume keeps the joiner on the late-join path of the same match, and it is still served. What a new socket id does to the engines' own state is below this model: the fault modes late-join-drop-before-request and late-join-drop-during-serve in tests/lifecycle-e2e.mjs take a real page through both windows.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
+  Note over host: Lobby
+  Server->>Server: startGame
+  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Server-->>host: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  guest1->>Server: join("guest1", true)
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
+  Note over guest1: Starting(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: online = {host}<br/>grace = {guest1}
+  guest1->>Server: resume("guest1", true)
+  Note over Server: online = {guest1, host}<br/>grace = {}
+  guest1->>Server: startLateJoinEngine("guest1")
+  Note over guest1: Syncing(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: online = {host}<br/>grace = {guest1}
+  guest1->>Server: resume("guest1", true)
+  Note over Server: online = {guest1, host}<br/>grace = {}
+  Server->>Server: serveLateJoin("guest1")
+  Server-->>guest1: Running(1)
+```
+
+### lateJoinServeTimeoutTest
+
+The same, and the host's state for the joiner is lost with the socket: the host's serve deadline runs out and it drops the joiner so that it asks again (tests/lifecycle-e2e.mjs late-join-drop-during-serve). Before, the joiner restarted as a player loading for the start and was stuck.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
+  Note over host: Lobby
+  Server->>Server: startGame
+  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Server-->>host: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  guest1->>Server: join("guest1", true)
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
+  Note over guest1: Starting(1)
+  guest1->>Server: startLateJoinEngine("guest1")
+  Note over guest1: Syncing(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: online = {host}<br/>grace = {guest1}
+  guest1->>Server: resume("guest1", true)
+  Note over Server: online = {guest1, host}<br/>grace = {}
+  guest1->>Server: serveTimesOut("guest1")
+  Note over guest1: Starting(1)
+  guest1->>Server: startLateJoinEngine("guest1")
+  Note over guest1: Syncing(1)
+  Server->>Server: serveLateJoin("guest1")
+  Server-->>guest1: Running(1)
 ```
 
 ### lateJoinWithoutRomTest
@@ -269,7 +341,7 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -279,7 +351,7 @@ sequenceDiagram
   Server->>Server: startRunning
   Server-->>host: Running(1)
   guest1->>Server: join("guest1", false)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: AwaitingRom(1)
   guest1->>Server: romReady("guest1")
   Note over guest1: Starting(1)
@@ -299,13 +371,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
   Server-->>host: Loading(1)
   guest1->>Server: join("guest1", false)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: AwaitingRom(1)
   Server->>Server: endGame
   Note over Server: status = lobby<br/>matchId = 0
@@ -324,17 +396,17 @@ sequenceDiagram
   participant guest1
   participant guest2
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   guest2->>Server: join("guest2", true)
-  Note over Server: members = {guest1, guest2, host}<br/>online = {guest1, guest2, host}
+  Note over Server: online = {guest1, guest2, host}<br/>members = {guest1, guest2, host}
   Note over guest2: Starting(1)
   guest2->>Server: startLateJoinEngine("guest2")
   Note over guest2: Syncing(1)
@@ -361,10 +433,10 @@ sequenceDiagram
   participant guest1
   participant guest2
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -374,7 +446,7 @@ sequenceDiagram
   Server-->>host: StartSync(1)
   Server-->>guest1: StartSync(1)
   guest2->>Server: join("guest2", true)
-  Note over Server: members = {guest1, guest2, host}<br/>online = {guest1, guest2, host}
+  Note over Server: online = {guest1, guest2, host}<br/>members = {guest1, guest2, host}
   Note over guest2: Starting(1)
   guest2->>Server: startLateJoinEngine("guest2")
   Note over guest2: Syncing(1)

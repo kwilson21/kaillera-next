@@ -101,9 +101,14 @@ room_lifecycle_drops() {
   verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
   verify "$ROOM" room_current anAbandonedMatchIsEnded
   verify "$ROOM" room_current aMatchIsNotLostToTheGraceWindow
+  verify "$ROOM" room_current nobodyLoadsIntoARunningMatch
   expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
   expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
   expect_violation "$ROOM" room_before_grace_wait aMatchIsNotLostToTheGraceWindow
+  # nobodyLoadsIntoARunningMatch is violated on room_before_serve_timeout_fix,
+  # but its shortest counterexample is 7 steps (a match running, a joiner
+  # serving, its serve timing out), beyond this bound; lateJoinServeTimeoutTest
+  # replays it in check-specs.sh.
 }
 
 peer_connection() {
