@@ -7406,6 +7406,8 @@
   let _syncChunks = []; // incoming chunks from host DC
   let _syncExpected = 0; // expected chunk count
   let _syncRecoveryId = 0;
+  // The hidden words and HLE state sent ahead of the state being assembled.
+  let _syncExtras = null;
   let _syncFrame = 0; // frame number of incoming sync
   let _syncIsFull = true; // true=full state, false=XOR delta
   let _syncChunkTimeoutTimer = null;
@@ -7642,8 +7644,12 @@
     _syncLog(`sync buffer allocated: ptr=${_syncBufPtr} size=${_syncBufSize}`);
   };
 
+  // The 18 words kn_pack_hidden_state_impl packs (AI FIFO, AI carry and
+  // samples_format_changed, VI field, SI/DP flags, CP0 next interrupt and
+  // cycle count, ...). Taken for every game: no game's code makes them safe
+  // to leave behind when a state moves between pages.
   const _captureHiddenStateWords = (mod) => {
-    if (!_isSmashRemix() || !mod?._kn_pack_hidden_state_impl || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
+    if (!mod?._kn_pack_hidden_state_impl || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
       return null;
     }
     const wordCount = 18;
@@ -7662,14 +7668,20 @@
     if (!words?.length || !restoreFn || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
       return false;
     }
-    const wordCount = Math.min(18, words.length);
+    // The native restore reads all 18 words: a shorter list would leave it
+    // reading whatever follows in the heap.
+    if (words.length < 18) {
+      _syncLog(`${reason}: hidden state not restored: ${words.length} words, 18 needed`);
+      return false;
+    }
+    const wordCount = 18;
     const ptr = mod._malloc(wordCount * 4);
     if (!ptr) return false;
     try {
       new Uint32Array(mod.HEAPU32.buffer, ptr, wordCount).set(words.slice(0, wordCount).map((w) => w >>> 0));
       restoreFn(ptr);
       const method = mod._kn_restore_hidden_state_impl ? 'full' : 'boot';
-      _syncLog(`${reason}: restored Remix hidden state (${method}) words=${wordCount}`);
+      _syncLog(`${reason}: restored hidden state (${method}) words=${wordCount}`);
       return true;
     } finally {
       mod._free(ptr);
@@ -7697,6 +7709,109 @@
     mod._kn_set_audio_fifo_state(vals[0], vals[1], vals[2], vals[3]);
     _syncLog(`${reason}: restored audio FIFO [${vals.join(',')}]`);
     return true;
+  };
+
+  // The RSP HLE plugin's state (kn_hle_save_to: g_hle from alist_buffer up to
+  // cached_ucodes), which kn_sync_read does not carry. The rollback ring
+  // saves it per frame; a resync must carry it too.
+  const _captureHleState = (mod) => {
+    if (!mod?._kn_hle_state_size || !mod?._kn_hle_save_to || !mod?._malloc || !mod?._free || !mod.HEAPU8) {
+      return null;
+    }
+    const size = mod._kn_hle_state_size();
+    if (!(size > 0)) return null;
+    const ptr = mod._malloc(size);
+    if (!ptr) return null;
+    try {
+      mod._kn_hle_save_to(ptr);
+      return new Uint8Array(mod.HEAPU8.buffer, ptr, size).slice();
+    } finally {
+      mod._free(ptr);
+    }
+  };
+
+  const _restoreHleState = (mod, bytes, reason) => {
+    if (!bytes?.length || !mod?._kn_hle_restore_from || !mod?._malloc || !mod?._free || !mod.HEAPU8) return false;
+    const size = mod._kn_hle_state_size?.() ?? -1;
+    if (size !== bytes.length) {
+      // Another core build lays g_hle out differently: its bytes are not ours.
+      _syncLog(`${reason}: HLE state not restored: ${bytes.length} bytes, this core's is ${size}`);
+      return false;
+    }
+    const ptr = mod._malloc(size);
+    if (!ptr) return false;
+    try {
+      mod.HEAPU8.set(bytes, ptr);
+      mod._kn_hle_restore_from(ptr);
+      return true;
+    } finally {
+      mod._free(ptr);
+    }
+  };
+
+  // What a resync carries beside kn_sync_read's bytes, taken at the same
+  // instant: the hidden words and the HLE state. Without them a guest keeps
+  // its own after the load (measured: HLE bytes and ai.samples_format_changed
+  // differed from the host's after every resync). Null fields when the core
+  // has no export for them; an older host sends neither.
+  const _captureResyncExtras = (mod) => {
+    return { hiddenWords: _captureHiddenStateWords(mod), hle: _captureHleState(mod) };
+  };
+
+  // On the wire. The DataChannel string, sent just ahead of the state's
+  // header on the same channel: sync-extras:<word>,<word>,...:<HLE base64>.
+  // Its own message, so a guest that does not know it drops it and still
+  // reads the header (peer-protocol.ts).
+  const _resyncExtrasText = (extras) => {
+    if (!extras?.hiddenWords?.length && !extras?.hle?.length) return null;
+    const words = (extras.hiddenWords || []).map((w) => w >>> 0).join(',');
+    return `sync-extras:${words}:${extras.hle?.length ? uint8ToBase64(extras.hle) : ''}`;
+  };
+
+  // HLE bytes that do not decode are dropped, as if none were sent.
+  const _hleFromBase64 = (b64) => {
+    if (typeof b64 !== 'string' || !b64) return null;
+    try {
+      return base64ToUint8(b64);
+    } catch (_) {
+      _syncLog('resync extras: HLE state is not base64, dropped');
+      return null;
+    }
+  };
+
+  const _resyncExtrasFromText = (text) => {
+    const [, words, hle] = text.split(':');
+    return {
+      hiddenWords: words ? words.split(',').map((w) => Number(w) >>> 0) : null,
+      hle: _hleFromBase64(hle),
+    };
+  };
+
+  // The socket message's fields: absent when there is nothing to carry.
+  const _resyncExtrasFields = (extras) => {
+    return {
+      ...(extras?.hiddenWords?.length ? { hiddenWords: extras.hiddenWords.map((w) => w >>> 0) } : {}),
+      ...(extras?.hle?.length ? { hle: uint8ToBase64(extras.hle) } : {}),
+    };
+  };
+
+  const _resyncExtrasFromFields = (msg) => {
+    return {
+      hiddenWords: Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => Number(w) >>> 0) : null,
+      hle: _hleFromBase64(msg.hle),
+    };
+  };
+
+  // Applied straight after kn_sync_write, before the next frame runs: the
+  // hidden words last, so they hold over what the load set (the core's
+  // kn_sync_write sets ai.samples_format_changed to 1, word 13).
+  const _applyResyncExtras = (mod, extras, reason) => {
+    if (!extras) return;
+    const hle = _restoreHleState(mod, extras.hle, reason);
+    const words = _restoreHiddenStateWords(mod, extras.hiddenWords, reason);
+    _syncLog(
+      `${reason}: resync extras applied hle=${hle ? extras.hle.length : 0} words=${words ? extras.hiddenWords.length : 0}`,
+    );
   };
 
   // Cartridge save memory (EEPROM/SRAM/flash/mempak). Neither kn_sync nor
@@ -8209,6 +8324,7 @@
           wireSize: msg.compressedSize || 0,
           source: 'socket',
           answerFor,
+          extras: _resyncExtrasFromFields(msg),
         });
       });
     } catch (err) {
@@ -10893,6 +11009,7 @@
     if (ownsAssembly()) {
       _syncExpected = 0;
       _syncChunks = [];
+      _syncExtras = null;
       _syncChunkSessionId++;
       if (_syncChunkTimeoutTimer) clearTimeout(_syncChunkTimeoutTimer);
       _syncChunkTimeoutTimer = null;
@@ -10902,6 +11019,7 @@
     // ahead of its header. It lives and dies with the channel.
     let syncAnswerIdNext = 0;
     let recoveryIdNext = 0;
+    let extrasNext = null;
     ch.onmessage = (e) => {
       // Check every message, including binary chunks and answer ids. A
       // replaced host channel is stale even though its peer still has slot 0.
@@ -10916,6 +11034,11 @@
         if (e.data.startsWith('sync-recovery-id:')) {
           const id = Number(e.data.substring(17));
           recoveryIdNext = _peers[_remoteSid]?.slot === 0 && Number.isSafeInteger(id) && id > 0 ? id : 0;
+          return;
+        }
+        // Only the host sends a state (the rule for headers below).
+        if (e.data.startsWith('sync-extras:')) {
+          extrasNext = _peers[_remoteSid]?.slot === 0 ? _resyncExtrasFromText(e.data) : null;
           return;
         }
         if (e.data.startsWith('sync-answer-id:')) {
@@ -10947,6 +11070,8 @@
           _syncIsRegions = false;
           _syncRecoveryId = recoveryIdNext;
           recoveryIdNext = 0;
+          _syncExtras = extrasNext;
+          extrasNext = null;
           _syncAnswerFor = syncAnswerIdNext;
           syncAnswerIdNext = 0;
           _syncChunks = [];
@@ -11000,6 +11125,8 @@
           _syncIsRegions = true;
           _syncRecoveryId = recoveryIdNext;
           recoveryIdNext = 0;
+          _syncExtras = null;
+          extrasNext = null;
           _syncAnswerFor = syncAnswerIdNext;
           syncAnswerIdNext = 0;
           _syncChunks = [];
@@ -16893,7 +17020,7 @@
           if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
-          applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId);
+          applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId, pending.extras);
         } else if (_runSubstate !== RUN_AWAITING_RESYNC) {
           // Reached target frame but state not here yet — stall until it arrives
           _runSubstate = RUN_AWAITING_RESYNC;
@@ -16924,7 +17051,7 @@
       } else {
         _pendingResyncState = null;
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId);
+        applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId, pending.extras);
       }
     }
 
@@ -19878,6 +20005,8 @@
           evidence.allRequiredInputsConfirmed && window.EJS_emulator?.gameManager?.Module === mod,
       };
     };
+    // Taken in the same read as the state, under the same fence.
+    let capturedExtras = null;
     const sealed = _recovery.publication.seal(
       token,
       () => performance.now(),
@@ -19886,13 +20015,13 @@
         ensureSyncBuffer();
         if (!_syncBufPtr || _syncBufSize <= 0) return new Uint8Array();
         const written = mod._kn_sync_read(_syncBufPtr, _syncBufSize);
-        return written > 0 && written <= _syncBufSize
-          ? new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, written)
-          : new Uint8Array();
+        if (!(written > 0 && written <= _syncBufSize)) return new Uint8Array();
+        capturedExtras = _captureResyncExtras(mod);
+        return new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, written);
       },
     );
     if (!sealed) return null;
-    return pushSyncState(null, false, { escalation: attempts, capturedPublication: token });
+    return pushSyncState(null, false, { escalation: attempts, capturedPublication: token, capturedExtras });
   };
 
   // Resolves to the sids a DC send skipped (closed channel), [] when sent,
@@ -19987,6 +20116,8 @@
         }
         try {
           let currentState;
+          // The hidden words and HLE state taken with it (_captureResyncExtras).
+          let extras = null;
           const frame = capturedPublication?.frame ?? _frameNum;
           const mayDeliver = capturedPublication
             ? (t) =>
@@ -20044,6 +20175,7 @@
               target &&
               _recovery.publication.bytesFor(capturedPublication, _ownedCaptureScope(target), performance.now());
             if (!currentState) return notSent('verified capture expired or lost its recipients', attempts);
+            extras = options.capturedExtras || null;
           } else if (_hasKnSync) {
             // C-level: read state directly from g_dev — no getState(), no memory growth
             ensureSyncBuffer();
@@ -20057,7 +20189,11 @@
               return null;
             }
             currentState = new Uint8Array(mod.HEAPU8.buffer, _syncBufPtr, bytesWritten).slice();
-            _syncLog(`host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms`);
+            extras = _captureResyncExtras(mod);
+            _syncLog(
+              `host kn_sync_read: ${Math.round(currentState.length / 1024)}KB, ${(ps1 - ps0).toFixed(1)}ms ` +
+                `hle=${extras.hle?.length ?? 0} words=${extras.hiddenWords?.length ?? 0}`,
+            );
             // Arm post-sync diagnostic burst on host too
             window._knPostSyncDiagFrames = 10;
 
@@ -20153,6 +20289,8 @@
                 data: encoded.data,
                 // The request this answers; absent when it answers none.
                 ...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {}),
+                // The hidden words and HLE state; absent when the core has neither.
+                ..._resyncExtrasFields(extras),
               });
               _settleInputsBefore(_peers[targetSid].slot, frame);
               // Handed over whole: a follow-up may be skipped if nothing
@@ -20175,13 +20313,24 @@
                 isProactive,
                 requestIds,
                 attempts,
+                undefined,
+                extras,
               );
             }
           } else {
             const compressed = await compressState(toCompress);
             const sizeKB = Math.round(compressed.length / 1024);
             _syncLog(`full state: ${sizeKB}KB compressed`);
-            return await sendSyncChunks(compressed, frame, targets, isProactive, requestIds, attempts, mayDeliver);
+            return await sendSyncChunks(
+              compressed,
+              frame,
+              targets,
+              isProactive,
+              requestIds,
+              attempts,
+              mayDeliver,
+              extras,
+            );
           }
           return [];
         } catch (err) {
@@ -20229,6 +20378,7 @@
     requestIds = {},
     attempts = [],
     mayDeliver,
+    extras = null,
   ) => {
     // A guest the state is not for (held as a late joiner, gone): its
     // escalation push does not go out. The others reach their guest's chain
@@ -20257,6 +20407,7 @@
             isProactive,
             requestIds,
             attempts.find((a) => a.sid === t.sid)?.wireId ?? 0,
+            extras,
           );
         });
         _syncSendChains[t.sid] = run.catch(() => {});
@@ -20305,7 +20456,7 @@
   // closed with the guest still on it), 'dropped' (reconnected or the match
   // ended since the state was taken), 'busy' (a proactive push onto a
   // backed-up channel), 'stalled' or 'failed'.
-  const _sendSyncChunksTo = async (t, compressed, frame, isProactive, requestIds, recoveryId = 0) => {
+  const _sendSyncChunksTo = async (t, compressed, frame, isProactive, requestIds, recoveryId = 0, extras = null) => {
     const CHUNK_SIZE = 64000;
     // The transfer starting moves its guest's chain.
     _syncChainMovedAt[t.sid] = performance.now();
@@ -20343,6 +20494,9 @@
       const answerFor = requestIds[t.sid] || 0;
       if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
       dc.send(`sync-recovery-id:${recoveryId}`);
+      // The hidden words and HLE state, for the state that follows.
+      const extrasText = _resyncExtrasText(extras);
+      if (extrasText) dc.send(extrasText);
       dc.send(header);
       // I1: each chunk waits at most SYNC_SEND_STALL_MS for room; then the
       // transfer is given up (the guest's chunk and request deadlines ask
@@ -20416,6 +20570,7 @@
     source,
     answerFor = 0,
     recoveryId = 0,
+    extras = null,
   }) {
     // Recheck after async legacy XOR too: a newer recovery can finish while
     // an older ordinary/socket payload is still decoding. A strictly newer
@@ -20502,7 +20657,7 @@
         return;
       }
       if (_keepsAwaitedAnswer(answerFor, frame)) return;
-      _pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };
+      _pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId, extras };
       _syncLog(
         `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +
           `answerFor=${answerFor} newest=${_resyncRequestId} endsRequest=${endsRequest})`,
@@ -20524,6 +20679,8 @@
     _syncExpected = 0;
     const recoveryId = _syncRecoveryId;
     _syncRecoveryId = 0;
+    const extras = _syncExtras;
+    _syncExtras = null;
     const frame = _syncFrame;
     const isFull = _syncIsFull;
     const isProactive = _syncIsProactive;
@@ -20548,6 +20705,7 @@
           source: 'dc',
           recoveryId,
           answerFor,
+          extras,
         });
       });
     } catch (err) {
@@ -20738,7 +20896,7 @@
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
   };
 
-  const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {
+  const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {
     if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return;
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
@@ -20770,6 +20928,8 @@
         _syncLog(`kn_sync_write failed: ${result} (bytes=${bytes.length} ptr=${_syncBufPtr})`);
         return;
       }
+      // The rest of the host's state, in the same step, before any frame runs.
+      _applyResyncExtras(mod, extras, 'resync');
 
       // kn_sync_write calls invalidate_cached_code_hacktarux which clears
       // mupen64plus's cached interpreter blocks. Without re-capturing the
@@ -21234,6 +21394,7 @@
     _syncCheckInterval = _syncBaseInterval;
     _syncChunks = [];
     _syncExpected = 0;
+    _syncExtras = null;
     if (_syncChunkTimeoutTimer) {
       clearTimeout(_syncChunkTimeoutTimer);
       _syncChunkTimeoutTimer = null;

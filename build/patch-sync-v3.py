@@ -48,6 +48,11 @@ KN_SYNC_READ_V3 = '''EMSCRIPTEN_KEEPALIVE uint32_t kn_sync_read(uint8_t *buf, ui
     { uint16_t ep = dev->cart.flashram.erase_page; memcpy(p,&ep,2); p+=2; }
     { uint8_t fm = dev->cart.flashram.mode; *p++ = fm; }
     { uint8_t sf_rm = (uint8_t)softfloat_roundingMode; uint8_t sf_ef = (uint8_t)softfloat_exceptionFlags; *p++ = sf_rm; *p++ = sf_ef; }
+    /* ai.samples_format_changed, after the SoftFloat bytes so a reader
+     * without it stops before it. kn_sync_write used to set it to 1 on every
+     * load, so a page that loaded the host's state differed from the host's
+     * (hidden-state word 13) until the next audio DMA. */
+    { uint32_t sfc = (uint32_t)dev->ai.samples_format_changed; memcpy(p,&sfc,4); p+=4; }
     header[2] = (uint32_t)(p - buf); return (uint32_t)(p - buf);
 }
 '''
@@ -106,6 +111,10 @@ KN_SYNC_WRITE_V3 = '''EMSCRIPTEN_KEEPALIVE int kn_sync_write(const uint8_t *buf,
         { dev->cart.flashram.mode = *p++; }
     }
     if (p + 2 <= buf + size) { softfloat_roundingMode = *p++; softfloat_exceptionFlags = *p++; }
+    /* The sender's ai.samples_format_changed, after the SoftFloat bytes of a v4
+     * state (a v1 state has its peripheral block there); a state without it
+     * keeps the 1 set above. */
+    if (version >= 4 && p + 4 <= buf + size) { uint32_t sfc; memcpy(&sfc,p,4); p+=4; dev->ai.samples_format_changed = (unsigned int)sfc; }
     setup_channels_format(&dev->pif);
     { uint32_t *cp0 = r4300_cp0_regs(&dev->r4300.cp0); set_fpr_pointers(&dev->r4300.cp1, cp0[CP0_STATUS_REG]); update_x86_rounding_mode(&dev->r4300.cp1); savestates_load_set_pc(&dev->r4300, pc_val); dev->r4300.delay_slot = delay_slot; dev->r4300.skip_jump = skip_jump; }
     /* Match savestates_load_m64p cleanup. Importing host RDRAM/CPU state

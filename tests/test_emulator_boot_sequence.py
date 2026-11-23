@@ -98,7 +98,7 @@ def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fal
     assert "const _restoreHiddenStateWords = (mod, words, reason) =>" in source
     assert "mod?._kn_restore_hidden_state_impl || mod?._kn_restore_hidden_state_boot" in source
     assert "const method = mod._kn_restore_hidden_state_impl ? 'full' : 'boot'" in source
-    assert "restored Remix hidden state (${method}) words=${wordCount}" in source
+    assert "restored hidden state (${method}) words=${wordCount}" in source
 
     initial_idx = source.find("initial-sync-load", source.find("if (isKnSyncInitialState)"))
     assert initial_idx != -1

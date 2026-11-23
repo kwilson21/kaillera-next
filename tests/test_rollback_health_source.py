@@ -345,7 +345,7 @@ def test_resync_settles_the_inputs_before_its_frame():
     table_idx = src.index("const _slotInputMaps = () => [")
     assert "    _inputSettledBefore,\n" in src[table_idx : src.index("];", table_idx)]
     apply_idx = src.index(
-        "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
+        "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {"
     )
     assert re.search(
         r"if \(timelineAligned\) \{\s*_lastAppliedRecoveryId = Math.max\(_lastAppliedRecoveryId, recoveryId\);\s*_settleInputsAtResync\(gm.Module, frame, recoveryId\);",
@@ -858,7 +858,7 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
 
     apply = src[
         src.index(
-            "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
+            "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {"
         ) :
     ]
     apply = apply[: apply.index("\n  };\n")]
@@ -1052,7 +1052,7 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert handle.count("_resyncRequestInFlight = false;") == 4
     assert "_resyncRequestInFlight = false; // allow fresh request" in handle
     assert (
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };"
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId, extras };"
         in handle
     )
     assert "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };" in handle
@@ -1098,7 +1098,7 @@ def test_only_its_own_answer_ends_a_resync_request():
     wrapper = src[src.index("const sendSyncChunks = async (") :]
     wrapper = wrapper[: wrapper.index("\n  };\n")]
     assert re.search(
-        r"_sendSyncChunksTo\(\s*t,\s*compressed,\s*frame,\s*isProactive,\s*requestIds,\s*attempts.find\(\(a\) => a.sid === t.sid\)\?\.wireId \?\? 0,\s*\)",
+        r"_sendSyncChunksTo\(\s*t,\s*compressed,\s*frame,\s*isProactive,\s*requestIds,\s*attempts.find\(\(a\) => a.sid === t.sid\)\?\.wireId \?\? 0,\s*extras,\s*\)",
         wrapper,
     )
     chunks = src[src.index("const _sendSyncChunksTo = async (") :]
@@ -1176,7 +1176,7 @@ def test_a_late_answer_does_not_replace_the_awaited_one():
     ]
     for pending in (
         "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };",
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };",
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId, extras };",
     ):
         at = payload.index(pending)
         assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 200

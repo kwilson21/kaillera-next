@@ -47,16 +47,17 @@ for (const refuses of [true, false])
       `
  let _frameNum=99,_lastAppliedRecoveryId=0,_resyncCount=0,_consecutiveResyncs=0,_coreFatalError=false,acks=0,_cutRerun=null;
  const _hasKnSync=true, _syncBufPtr=1,_syncBufSize=8,KNState={frameNum:99};
- let native=99;
- const mod={HEAPU8:new Uint8Array(16),_kn_sync_write:()=>0,_kn_set_frame:f=>{if(!refuses)native=f},_kn_get_frame:()=>native};
+ let native=99; const calls=[];
+ const mod={HEAPU8:new Uint8Array(16),_kn_sync_write:()=>{calls.push('write');return 0},_kn_set_frame:f=>{calls.push('frame');if(!refuses)native=f},_kn_get_frame:()=>native};
+ const _applyResyncExtras=(m,extras)=>calls.push(extras);
  const window={EJS_emulator:{gameManager:{Module:mod}}},performance={now:()=>0};
  const ensureSyncBuffer=()=>{},_syncLog=()=>{},recaptureManualRunner=()=>{},_setLastSyncState=()=>{};
  const _resetStrictMenuResends=()=>{};
  const _handleCoreFatal=()=>{_coreFatalError=true};
  const _settleInputsAtResync=()=>{acks++;throw Error('settled-test-boundary')};
  ${between('  const applySyncState =', '  // -- Init / Stop API')}
- try {applySyncState(new Uint8Array([1]),100,false,8)}catch(e){if(e.message!=='settled-test-boundary')throw e}
- globalThis.result={fatal:_coreFatalError,acks,frame:_frameNum,knFrame:KNState.frameNum,id:_lastAppliedRecoveryId};
+ try {applySyncState(new Uint8Array([1]),100,false,8,'extras')}catch(e){if(e.message!=='settled-test-boundary')throw e}
+ globalThis.result={fatal:_coreFatalError,acks,frame:_frameNum,knFrame:KNState.frameNum,id:_lastAppliedRecoveryId,calls};
  `,
       c,
     );
@@ -65,4 +66,31 @@ for (const refuses of [true, false])
     assert.equal(c.result.frame, refuses ? 99 : 100);
     assert.equal(c.result.knFrame, refuses ? 99 : 100);
     assert.equal(c.result.id, refuses ? 0 : 8);
+    // The hidden words and HLE state go in straight after the state, in the same step.
+    assert.deepEqual([...c.result.calls], ['write', 'extras', 'frame']);
   });
+
+test('hidden words are restored only as all 18: the native restore reads 18', () => {
+  const start = source.indexOf('  const _restoreHiddenStateWords = ');
+  const restore = source.slice(start, source.indexOf('\n  };', start) + 5);
+  for (const count of [1, 17, 18]) {
+    const c = vm.createContext({ Uint32Array });
+    vm.runInContext(
+      `
+ const restored=[], logs=[];
+ const mod={HEAPU32:new Uint32Array(64),_malloc:()=>16,_free:()=>{},_kn_restore_hidden_state_impl:(ptr)=>restored.push([...mod.HEAPU32.slice(ptr>>2,(ptr>>2)+18)])};
+ const _syncLog=(l)=>logs.push(l);
+ ${restore}
+ globalThis.result={ok:_restoreHiddenStateWords(mod,[...Array(${count})].map((_,i)=>i+1),'resync'),restored,logs};
+ `,
+      c,
+    );
+    assert.equal(c.result.ok, count === 18, `${count} words`);
+    assert.equal(c.result.restored.length, count === 18 ? 1 : 0);
+    if (count === 18)
+      assert.deepEqual(
+        [...c.result.restored[0]],
+        [...Array(18)].map((_, i) => i + 1),
+      );
+  }
+});
