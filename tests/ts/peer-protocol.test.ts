@@ -231,6 +231,11 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
   assert.equal(issueOf('data-message', syncState), null);
   assert.equal(issueOf('data-message', { ...syncState, requestId: 3 }), null);
   assert.notEqual(issueOf('data-message', { ...syncState, full: 'yes' }), null);
+  // The hidden words and HLE state taken with the state; an older host sends neither.
+  const extras = { hiddenWords: [1, 4294967295], hle: 'AQID' };
+  assert.equal(issueOf('data-message', { ...syncState, ...extras }), null);
+  assert.notEqual(issueOf('data-message', { ...syncState, hiddenWords: 'x' }), null);
+  assert.notEqual(issueOf('data-message', { ...syncState, hle: [1, 2] }), null);
 });
 
 test("signal relays carry a sender; the server's own renegotiate request does not", () => {
@@ -283,6 +288,30 @@ test('dropped names why the host dropped the player', () => {
   bad('lockstep', 'dropped:');
   bad('lockstep', 'dropped:anything');
   bad('lockstep', 'dropped');
+});
+
+test('resync extras carry hidden words and base64 HLE bytes, either part empty', () => {
+  ok('sync-state', 'sync-extras:0,1,4294967295:AQID');
+  ok('sync-state', 'sync-extras:1:AQI=');
+  ok('sync-state', 'sync-extras::AQ==');
+  ok('sync-state', 'sync-extras:7:');
+  ok('sync-state', 'sync-extras::');
+  ok('sync-state', 'sync-extras:1:AQIDBA==');
+  for (const text of [
+    'sync-extras',
+    'sync-extras:1',
+    'sync-extras:-1:',
+    'sync-extras:1,:',
+    'sync-extras:1:A=A',
+    'sync-extras:1:AQ:x',
+    // Not whole quartets: atob throws on these.
+    'sync-extras::A',
+    'sync-extras::AQIDB',
+    'sync-extras::AQ=',
+  ])
+    bad('sync-state', text);
+  // Only the state channel carries it.
+  bad('lockstep', 'sync-extras:1:AQ==');
 });
 
 test('recovery attempt metadata is separate from legacy headers and rejects malformed IDs', () => {
