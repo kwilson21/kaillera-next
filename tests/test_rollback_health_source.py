@@ -750,6 +750,9 @@ def test_a_recovery_resyncs_every_guest():
     ask = recovered[recovered.index("} else if (recoveryStep === 'ask') {") :]
     assert "Object.values(_peers).find((p) => p.slot === 0)?.dc" in ask
     assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in ask
+    # No channel to the host, or the send failed: over the socket, as an owed
+    # resync asked again is (the phantom flag is cleared, nothing asks later).
+    assert "if (!asked && _requestSocketFullResync('peer-recovery')) {" in ask
 
 
 def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():

@@ -92,8 +92,9 @@
  *   differently, from NORMAL-INPUT-TR). On PEER-RECOVERED the host settles
  *   the inputs it held and resyncs the guest. Every guest must end on the
  *   host's state: from the host's last state for the recovery on (the first
- *   one, or its last follow-up when it was taken while an input was still
- *   predicted), the gameplay and game-state hashes must match the host's
+ *   one, or the last of its follow-ups, sent while an input was still
+ *   predicted, once the host has sent none for 10 s), the gameplay and
+ *   game-state hashes must match the host's
  *   (at least 60 frames), and so must RDRAM, compared in 4 KB pages every
  *   16th battle frame from each frame's saved state. The core's hashes do
  *   not see a fighter that moved differently (the battle state lives in the
@@ -164,7 +165,8 @@ const RECOVERY_SLOT = Number(process.env.RECOVERY_SLOT || 1);
 const RECOVERY_HOLD_MS = Number(process.env.RECOVERY_HOLD_MS || 3000);
 const RECOVERY_AT = Number(process.env.RECOVERY_AT || 600);
 const RECOVERY_MODE = process.env.RECOVERY_MODE || 'hold';
-const RECOVERY_FOLLOW_UP_MS = 12000;
+const RECOVERY_QUIET_MS = 10000;
+const RECOVERY_SETTLE_MS = 120000;
 const QUERY = process.env.KN_QUERY || '';
 const OUT = process.env.OUT || '/tmp/rb-mesh';
 const HEADLESS = process.env.HEADED !== '1';
@@ -558,6 +560,7 @@ const recovery = {
   leftOut: null,
   pageAt: null,
   dispatches: [],
+  settledQuiet: false,
   bystanderPhantoms: null,
   bystanderAsks: null,
 };
@@ -785,20 +788,43 @@ if (RECOVERY_BYSTANDER) {
   }
   // The host's state can be followed up: one taken while an input was still
   // predicted is sent again once that input differed (SYNC-FOLLOW-UP-NEEDED;
-  // specs/sync_follow_up.qnt), and a guest runs on the first one until then,
-  // as the model's agreement waits for every state still owed
-  // (mayStillChange). The compare starts at the last state of the recovery:
-  // the first, and the follow-ups that come within RECOVERY_FOLLOW_UP_MS of
-  // it (at most SYNC_FOLLOW_UP_MAX, 3 s apart).
+  // specs/sync_follow_up.qnt), and a guest runs on the earlier one until
+  // then, as the model's agreement waits for every state still owed
+  // (mayStillChange). Each chain is bounded (SYNC_FOLLOW_UP_MAX, 3 s apart),
+  // but a guest's own request starts one of its own, and in a container that
+  // runs the emulators at a few frames a second they can run for many
+  // seconds. So the compare starts at the last state the host sent once it
+  // has sent none for RECOVERY_QUIET_MS (within RECOVERY_SETTLE_MS).
   if (recovery.dispatch) {
-    await host.waitForTimeout(RECOVERY_FOLLOW_UP_MS);
-    const firstAt = Number(recovery.dispatch.line.split('\t')[1]);
-    recovery.dispatches = (await syncLogOf(host))
-      .split('\n')
-      .filter((line) => seqOf(line) >= recovery.dispatch.seq && /coord sync dispatch:/.test(line))
-      .filter((line) => Number(line.split('\t')[1]) <= firstAt + RECOVERY_FOLLOW_UP_MS)
-      .map((line) => Number(line.match(/at frame (\d+)/)[1]));
-    recovery.leftOut = [recovery.heldFrom, Math.max(...recovery.dispatches)];
+    const dispatchesSince = async () =>
+      (await syncLogOf(host))
+        .split('\n')
+        .filter((line) => seqOf(line) >= recovery.dispatch.seq && /coord sync dispatch:/.test(line));
+    const until = Date.now() + RECOVERY_SETTLE_MS;
+    let lines = await dispatchesSince();
+    let quietSince = Date.now();
+    while (Date.now() < until && Date.now() - quietSince < RECOVERY_QUIET_MS) {
+      await host.waitForTimeout(1000);
+      const now = await dispatchesSince();
+      if (now.length !== lines.length) quietSince = Date.now();
+      lines = now;
+    }
+    recovery.settledQuiet = Date.now() - quietSince >= RECOVERY_QUIET_MS;
+    recovery.dispatches = lines.map((line) => Number(line.match(/at frame (\d+)/)[1]));
+    // And every state a guest loaded meanwhile: the answer to its own request
+    // goes out directly, not through a dispatch.
+    const loaded = await Promise.all(
+      pages.slice(1).map(async (page, i) =>
+        (await syncLogOf(page))
+          .split('\n')
+          .filter((line) => seqOf(line) > recovery.pageAt[i + 1])
+          .flatMap((line) => {
+            const m = line.match(/\tRESYNC-INPUTS f=(\d+)/);
+            return m ? [Number(m[1])] : [];
+          }),
+      ),
+    );
+    recovery.leftOut = [recovery.heldFrom, Math.max(...recovery.dispatches, ...loaded.flat())];
   }
   // RECOVERY_MODE=pause: each bystander heard the guest again and asked the
   // host for its state (web/src/recovery-resync.ts, `ask`).
@@ -1501,6 +1527,9 @@ const recoveryProblems = !RECOVERY_BYSTANDER
       ...(!recovery.phantom ? ['the host never dropped the guest as a phantom'] : []),
       ...(!recovery.recovered ? ['the host never heard the guest again (PEER-RECOVERED)'] : []),
       ...(!recovery.dispatch ? ['the host sent no state after the recovery'] : []),
+      ...(recovery.dispatch && !recovery.settledQuiet
+        ? [`the host was still sending states ${RECOVERY_SETTLE_MS / 1000} s after the recovery`]
+        : []),
       ...(RECOVERY_MODE === 'hold' && Object.values(inputSplit).every((n) => n === 0)
         ? ['the host and the bystanders ran the held frames on the same inputs: the fault made no split']
         : []),

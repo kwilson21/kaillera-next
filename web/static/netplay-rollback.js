@@ -9557,16 +9557,24 @@
           // guest's frames on its own predictions, and an input of it lost
           // meanwhile is behind this page's window by now, never asked for
           // again and never compared. Only the host's state brings it back.
+          // On the channel to the host, or over the socket when that channel
+          // is not open or the send fails, as an owed resync asked again is:
+          // the phantom flag is cleared, so nothing would ask later.
           const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+          let asked = false;
           if (hostDc?.readyState === 'open') {
             const requestId = _beginResyncRequest();
             try {
               _sendResyncRequest(hostDc, requestId, 'sync-request-full');
+              asked = true;
               _syncLog(`peer-recovery resync: slot=${peer.slot} heard again; asked the host for its state`);
             } catch (e) {
               _resyncRequestInFlight = false;
               _syncLog(`peer-recovery resync send failed: ${e}`);
             }
+          }
+          if (!asked && _requestSocketFullResync('peer-recovery')) {
+            _syncLog(`peer-recovery resync: slot=${peer.slot} heard again; asked the host over the socket`);
           }
         }
       }
