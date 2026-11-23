@@ -369,6 +369,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `GET /admin/api/screenshots/{match_id}` | List screenshots for a match |
 | `GET /admin/api/screenshots/img/{screenshot_id}` | Serve screenshot image |
 | `GET /admin/api/session-logs/{log_id}/export` | Stream a session log's entries as newline-delimited JSON |
+| `GET /admin/api/session-logs/{log_id}/client-events` | A session's client events (as the detail bundles them), without its log |
 | `GET /admin/api/matches` | List recently-rotated matches with precomputed metrics |
 | `GET /admin/api/matches/{match_id}` | One match's precomputed metrics row |
 | `GET /admin/api/input-audit/{match_id}` | Per-slot input audit for a match |

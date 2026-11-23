@@ -248,13 +248,28 @@ runner exhausted its retry."
 
 ### R3 — Ring coverage within the rollback window
 
-For any frame F where `rb.frame - F <= rb.max_frames`, the ring
-buffer must hold valid state for F. As of v0.43.0, state is saved
-every frame unconditionally (the previous dirty-input serialize gate
-was removed after FATAL-RING-STALE at f=23410 proved that skipping
-saves created ring coverage gaps). Violations during a
-misprediction-triggered restore log `FATAL-RING-STALE` and throw
-in dev (RF7).
+For any frame F where `rb.frame - F <= rb.max_frames` that a rollback
+can go back to, the ring buffer must hold valid state for F. A rollback
+goes back to F only for an input that F's `kn_pre_tick` predicted, and
+only an active slot (one `kn_feed_input` has had an input for) is
+predicted. So `kn_pre_tick` saves every frame while a slot other than
+the page's own is active, which is every frame of a match with anyone
+else in it. A dirty-input serialize gate that skipped saves when inputs
+didn't change was removed in v0.43.0, after FATAL-RING-STALE at f=23410
+proved it left gaps a rollback needed.
+
+A page alone skips the save: alone in a match (at a delay of 0), or
+after every other player left (`kn_rollback_slot_reset`). No rollback
+can come back to those frames (`specs/solo_save.qnt`,
+`noTargetLostToTheGate`). The first input for another slot starts the
+saves again from the next frame. A switch from JS's roster would not be
+safe: a player's first input can arrive before the roster lists them
+(`solo_save_roster`). The engine logs `SAVE-SKIP` and `SAVE-RESUME` at
+the ends of a stretch, and the C-PERF line's `serSkip` counts the
+frames skipped.
+
+Violations during a misprediction-triggered restore log
+`FATAL-RING-STALE` and throw in dev (RF7).
 
 Valid means of the timeline the page is running. A resync loads the
 host's state and the page calls `kn_set_frame` on every state it loads,
