@@ -66,7 +66,9 @@
 // server takes no `rom-ready` from a guest while the room's ROM is
 // changing); the host's ROM changing while the guest's socket is down (the
 // page hears the room's ROM again in the rejoin's ack); the host's socket;
-// a second drop by the host while its first is being hashed; ROMs in the
+// a second drop by the host while its first is being hashed; spectators (a
+// spectator's refused ROM is looked for as a player's is, and one claiming a
+// slot with none looks too: the same decision); ROMs in the
 // library from earlier visits (the library holds what the run has given it:
 // drops once cached, and picks), and the join's autoload from it; a library
 // read's own delay (a lookup is atomic here); the ROM
@@ -104,6 +106,10 @@
 //   holds none, it loads that ROM from its library if it is there
 //   (handleHostRomChanged, looksInLibraryForHostsRom). false: only a refusal
 //   looked there.
+// LOOKS_WHEN_CACHED: a dropped file's copy landing in the library is looked
+//   for too, when the room already names it as the host's and the page holds
+//   none (cacheRom). false: the lookup when the room named it found nothing,
+//   the copy landing a moment later, and nothing looked again.
 module rom_identity {
   const JUDGE_OWN_HASH: bool
   const HASH_KEEPS_ITS_LOAD: bool
@@ -114,6 +120,7 @@ module rom_identity {
   const REJOIN_SAYS_PENDING: bool
   const HOST_DROP_SAYS_CHANGING: bool
   const HOST_ROM_FROM_LIBRARY: bool
+  const LOOKS_WHEN_CACHED: bool
 
   pure val ROMS = Set("right", "wrong")
 
@@ -322,19 +329,42 @@ module rom_identity {
   }
 
   // A dropped file's copy lands in the ROM library (cacheRom hashes it again
-  // and stores it, a moment after the drop).
-  action cacheLands(r: str): bool = all {
-    caching.contains(r),
-    caching' = caching.exclude(Set(r)),
-    library' = library.union(Set(r)),
-    missedLibraryRom' = missedLibraryRom,
-    unchangedRom,
-    keepTold,
-    banner' = banner,
-    clearedRight' = clearedRight,
-    hashing' = hashing,
-    unchangedWorld,
-    unchangedStart,
+  // and stores it, a moment after the drop). With LOOKS_WHEN_CACHED, a page
+  // holding none loads it at once when the room names it as the host's (and
+  // a page waiting in a started game joins it late).
+  action cacheLands(r: str): bool = {
+    val theHosts = r == "right" and roomRom == "right" and loaded == "none"
+    val looks = theHosts and HOST_ROM_FROM_LIBRARY and LOOKS_WHEN_CACHED
+    val joins = looks and plan == "awaiting"
+    all {
+      caching.contains(r),
+      caching' = caching.exclude(Set(r)),
+      library' = library.union(Set(r)),
+      missedLibraryRom' = (missedLibraryRom or (theHosts and not(looks))),
+      hashing' = hashing,
+      unchangedWorld,
+      startedStale' = startedStale,
+      hostStartedStale' = hostStartedStale,
+      startedOnAnotherRom' = startedOnAnotherRom,
+      clearedRight' = clearedRight,
+      if (looks) all {
+        loaded' = r,
+        load' = load + 1,
+        loadedIsDrop' = false,
+        hash' = r,
+        hashLoad' = load + 1,
+        banner' = false,
+        tell(r, load + 1, false),
+        plan' = if (joins) "booted" else plan,
+        bootedWrong' = bootedWrong,
+      } else all {
+        unchangedRom,
+        keepTold,
+        banner' = banner,
+        plan' = plan,
+        bootedWrong' = bootedWrong,
+      },
+    }
   }
 
   action cacheLandsAny = { nondet r = oneOf(caching) cacheLands(r) }
@@ -995,6 +1025,24 @@ module rom_identity {
       .expect(loaded == (if (HOST_ROM_FROM_LIBRARY) "right" else "none"))
       .expect(told == (if (HOST_ROM_FROM_LIBRARY) "right" else "none"))
 
+  // The same, but the dropped file's copy lands in the library only after the
+  // room names the host's ROM: the lookup then found nothing. #316 as first
+  // pushed left the guest without it; today the copy, landing, is loaded.
+  run cacheLandsLateTest =
+    initWith(true, false)
+      .then(hostArrives)
+      .then(drop("wrong"))
+      .then(hashLands(1, "wrong"))
+      .expect(loaded == "none")
+      .then(hostDrops(true))
+      .then(hostHashLands)
+      .expect(loaded == "none")
+      .expect(theHostsRomComesFromTheLibrary)
+      .then(cacheLands("right"))
+      .expect(theHostsRomComesFromTheLibrary == (HOST_ROM_FROM_LIBRARY and LOOKS_WHEN_CACHED))
+      .expect(loaded == (if (HOST_ROM_FROM_LIBRARY and LOOKS_WHEN_CACHED) "right" else "none"))
+      .expect(told == (if (HOST_ROM_FROM_LIBRARY and LOOKS_WHEN_CACHED) "right" else "none"))
+
   // A guest refused against the host's ROM looks in its library for it, as
   // it always has (refuseRom): the host's ROM, picked earlier, comes back.
   run refusalLooksInTheLibraryTest =
@@ -1021,6 +1069,7 @@ module rom_identity_before {
     REJOIN_SAYS_PENDING = false,
     HOST_DROP_SAYS_CHANGING = false,
     HOST_ROM_FROM_LIBRARY = false,
+    LOOKS_WHEN_CACHED = false,
   ).*
 }
 
@@ -1037,6 +1086,7 @@ module rom_identity_judge_only {
     REJOIN_SAYS_PENDING = false,
     HOST_DROP_SAYS_CHANGING = false,
     HOST_ROM_FROM_LIBRARY = false,
+    LOOKS_WHEN_CACHED = false,
   ).*
 }
 
@@ -1053,6 +1103,7 @@ module rom_identity_no_retract {
     REJOIN_SAYS_PENDING = false,
     HOST_DROP_SAYS_CHANGING = false,
     HOST_ROM_FROM_LIBRARY = false,
+    LOOKS_WHEN_CACHED = false,
   ).*
 }
 
@@ -1070,6 +1121,7 @@ module rom_identity_first_push {
     REJOIN_SAYS_PENDING = false,
     HOST_DROP_SAYS_CHANGING = false,
     HOST_ROM_FROM_LIBRARY = false,
+    LOOKS_WHEN_CACHED = false,
   ).*
 }
 
@@ -1087,6 +1139,7 @@ module rom_identity_host_silent {
     REJOIN_SAYS_PENDING = true,
     HOST_DROP_SAYS_CHANGING = false,
     HOST_ROM_FROM_LIBRARY = false,
+    LOOKS_WHEN_CACHED = false,
   ).*
 }
 
@@ -1103,6 +1156,25 @@ module rom_identity_no_library {
     REJOIN_SAYS_PENDING = true,
     HOST_DROP_SAYS_CHANGING = true,
     HOST_ROM_FROM_LIBRARY = false,
+    LOOKS_WHEN_CACHED = false,
+  ).*
+}
+
+// #316 as first pushed: a page holding none looks in its library when the
+// room names the host's ROM, but not again when a dropped file's copy lands
+// there a moment later.
+module rom_identity_no_cache_lookup {
+  import rom_identity(
+    JUDGE_OWN_HASH = true,
+    HASH_KEEPS_ITS_LOAD = true,
+    DROP_SAYS_NOT_READY = true,
+    BOOT_WAITS_FOR_HASH = true,
+    HOST_START_WAITS_FOR_HASH = true,
+    FAILED_HASH_REFUSES = true,
+    REJOIN_SAYS_PENDING = true,
+    HOST_DROP_SAYS_CHANGING = true,
+    HOST_ROM_FROM_LIBRARY = true,
+    LOOKS_WHEN_CACHED = false,
   ).*
 }
 
@@ -1118,5 +1190,6 @@ module rom_identity_current {
     REJOIN_SAYS_PENDING = true,
     HOST_DROP_SAYS_CHANGING = true,
     HOST_ROM_FROM_LIBRARY = true,
+    LOOKS_WHEN_CACHED = true,
   ).*
 }

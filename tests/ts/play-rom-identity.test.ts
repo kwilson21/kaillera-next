@@ -105,14 +105,14 @@ test('the plans count a ROM only once its own hash or its size has decided it', 
   assert.equal(offersHostsRom('pending', true), false);
 });
 
-test("a player's page with no ROM looks in its library once the room names the host's ROM", () => {
-  for (const isPlayer of BOOLS) {
+test("a page that wants a ROM and has none looks in its library once the room names the host's ROM", () => {
+  for (const wantsRom of BOOLS) {
     for (const hasRom of BOOLS) {
       for (const hostHashKnown of BOOLS) {
         assert.equal(
-          looksInLibraryForHostsRom(isPlayer, hasRom, hostHashKnown),
-          isPlayer && !hasRom && hostHashKnown,
-          JSON.stringify({ isPlayer, hasRom, hostHashKnown }),
+          looksInLibraryForHostsRom(wantsRom, hasRom, hostHashKnown),
+          wantsRom && !hasRom && hostHashKnown,
+          JSON.stringify({ wantsRom, hasRom, hostHashKnown }),
         );
       }
     }
@@ -122,7 +122,7 @@ test("a player's page with no ROM looks in its library once the room names the h
   assert.equal(looksInLibraryForHostsRom(true, false, true), true);
   // While the host's ROM is changing the room names no hash: nothing to look for.
   assert.equal(looksInLibraryForHostsRom(true, false, false), false);
-  // A spectator needs no ROM.
+  // A spectator that never held a ROM needs none.
   assert.equal(looksInLibraryForHostsRom(false, false, true), false);
 });
 

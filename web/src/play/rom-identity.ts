@@ -105,14 +105,18 @@ export function announcesRom(hasRom: boolean, hashIsLoaded: boolean, hostRomChan
 
 /**
  * Whether a page looks in its ROM library for the host's ROM and loads it if
- * it is there (`autoMatchRom`): a player's page that holds no ROM, once the
- * room names the host's ROM by its hash. After a refusal, and when the room
- * names a new ROM: a ROM the player dropped a moment before the host changed
- * to it was refused then, rightly, against the host's previous ROM, and comes
- * back without being dropped again (specs/rom_identity.qnt,
- * guestDroppedFirstTest). A spectator needs no ROM.
+ * it is there (`autoMatchRom`): a page that wants a ROM and holds none, once
+ * the room names the host's ROM by its hash. It looks after a refusal, when
+ * the room names a new ROM, when a dropped file's copy lands in the library,
+ * and when a spectator claims a slot: a ROM the player dropped a moment
+ * before the host changed to it was refused then, rightly, against the
+ * host's previous ROM, and comes back without being dropped again
+ * (specs/rom_identity.qnt, guestDroppedFirstTest, cacheLandsLateTest).
+ * `wantsRom`: the page is a player's, or held a ROM until now (a refused
+ * one, spectating or not, is replaced by the host's). A spectator that never
+ * held one needs none.
  */
-//@ ensures \result <==> isPlayer && !hasRom && hostHashKnown
-export function looksInLibraryForHostsRom(isPlayer: boolean, hasRom: boolean, hostHashKnown: boolean): boolean {
-  return isPlayer && !hasRom && hostHashKnown;
+//@ ensures \result <==> wantsRom && !hasRom && hostHashKnown
+export function looksInLibraryForHostsRom(wantsRom: boolean, hasRom: boolean, hostHashKnown: boolean): boolean {
+  return wantsRom && !hasRom && hostHashKnown;
 }

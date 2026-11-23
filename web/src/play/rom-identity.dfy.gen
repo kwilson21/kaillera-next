@@ -70,12 +70,12 @@ lemma announcesRom_ensures(hasRom: bool, hashIsLoaded: bool, hostRomChanging: bo
 {
 }
 
-function looksInLibraryForHostsRom(isPlayer: bool, hasRom: bool, hostHashKnown: bool): bool
+function looksInLibraryForHostsRom(wantsRom: bool, hasRom: bool, hostHashKnown: bool): bool
 {
-  ((isPlayer && !(hasRom)) && hostHashKnown)
+  ((wantsRom && !(hasRom)) && hostHashKnown)
 }
 
-lemma looksInLibraryForHostsRom_ensures(isPlayer: bool, hasRom: bool, hostHashKnown: bool)
-  ensures (looksInLibraryForHostsRom(isPlayer, hasRom, hostHashKnown) <==> ((isPlayer && !(hasRom)) && hostHashKnown))
+lemma looksInLibraryForHostsRom_ensures(wantsRom: bool, hasRom: bool, hostHashKnown: bool)
+  ensures (looksInLibraryForHostsRom(wantsRom, hasRom, hostHashKnown) <==> ((wantsRom && !(hasRom)) && hostHashKnown))
 {
 }

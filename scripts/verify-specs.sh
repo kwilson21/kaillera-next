@@ -487,6 +487,9 @@ rom_identity() {
   # none with the host's ROM in its library, 4 steps (guestDroppedFirstTest
   # drops it instead).
   expect_violation "$ROM_IDENTITY" rom_identity_no_library theHostsRomComesFromTheLibrary
+  # The same, with the dropped file's copy landing after the room names the
+  # host's ROM (cacheLandsLateTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_no_cache_lookup theHostsRomComesFromTheLibrary
 }
 
 start_group() {
