@@ -15863,6 +15863,14 @@
         // The guest asked again while this push was in flight; its newer
         // request replaces this one.
         if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
+        // A direct answer to this guest is on its way (queued behind this
+        // push): it owns the next follow-up, for the state the guest ends on.
+        // Requeued here, this older one would stand in its place as
+        // `replaced` and carry the older request number.
+        if (_directAnswerNewest.has(r.targetSid)) {
+          _syncLog(`coord sync to ${r.targetSid}: superseded by a newer direct answer, not re-queued`);
+          return;
+        }
         if (r.transport === 'socket' && (skipped == null || skipped.includes(r.targetSid))) {
           // Not sent over the socket (a state too large for it falls back to
           // a channel that is down). The socket stays reachable, so put back

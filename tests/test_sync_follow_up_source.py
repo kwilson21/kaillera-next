@@ -531,3 +531,24 @@ def test_a_socket_follow_up_that_did_not_go_out_is_retried_within_the_bound():
     assert "const n = (r.followUp || 0) + 1;" in branch
     assert "if (n <= SYNC_FOLLOW_UP_MAX) {" in branch
     assert "requeue(r, n, null);" in branch
+
+
+def test_an_in_flight_follow_up_yields_to_a_pending_direct_answer():
+    # A follow-up already handed to pushSyncState when the guest asks again:
+    # the new answer queues behind it. Requeued on completion, the old one
+    # would stand as `replaced` for the new answer, which would then schedule
+    # nothing for the state the guest ends on (#315 review).
+    src = LOCKSTEP_JS.read_text()
+    dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
+    dispatch = dispatch[: dispatch.index("\n  };\n")]
+    after = dispatch[
+        dispatch.index("const afterPush = (group, gens) => (skipped) => {") :
+    ]
+    replaced = after.index(
+        "if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;"
+    )
+    pending = after.index("if (_directAnswerNewest.has(r.targetSid)) {")
+    assert replaced < pending
+    assert pending < after.index("if (r.transport === 'socket' && (skipped == null")
+    assert pending < after.index("requeue(r, r.followUp || 0, null);")
+    assert pending < after.index("requeue(r, n, _followUpWatches.get(r.targetSid))")
