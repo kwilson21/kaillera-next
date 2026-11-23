@@ -122,11 +122,12 @@ const slotWith = (which: 'old' | 'new', scheduled: boolean, listed: boolean, pha
     const _useCRollback=true,_maskMatchScheduled=scheduled;
     const _maskSchedule={active:()=>scheduled};
     const _activeRoster=new Set(listed?[0,SLOT]:[0]);
+    const _corePhantomHistory=new Set();
     const _cutGoverns=()=>false;
     const _syncLog=()=>{};
     const _feedWatchedFrame=(m,s,t,feed)=>feed();
     ${part('  const _ringInputsRan = (mod, slot) => {', '  // The cut of a removed player')}
-    ${part('  const _resetCoreSlot = (slot, reason, keepCoreSlot, phantom) => {', '  /**')}
+    ${part('  const _resetCoreSlot = (slot, reason, keepCoreSlot, unsafeHistory) => {', '  /**')}
     ${OLD}
     globalThis.ring=ring;
     globalThis.slot=slot;
@@ -206,4 +207,144 @@ test('every other reset, a reconnect into a slot the roster no longer lists, and
       assert.deepEqual(now.ring, before.ring);
     }
   }
+});
+
+const keptRuntime = () => {
+  const context = vm.createContext({ KNCore, SLOT });
+  vm.runInContext(
+    `
+    let now=100;
+    const performance={now:()=>now};
+    const _peerDriver=()=>null, _startSteps=new Map(), _endKeptOpen=()=>{};
+    const _lateJoinInputWindows=new Map(), _lateJoinReadyHandled=new Set(), _lateJoinStateSent=new Map();
+    const _pendingLateJoinReadySids=new Set(), _lateJoinOfferedDelay=new Map(), _lateJoinServing=new Map();
+    const _clearPendingLateJoinPeer=()=>{},_rbCheckBook=null,_rbLegacyCheckSlots=new Set(),_pendingCInputs=[];
+    const _peerLastAdvanceTime={},_peerPhantom={},_inputLateLogTime={},_auditLastRemote={};
+    const _followUpWatches=new Map(),_directAnswerNewest=new Map(),_queuedSyncPushes=new Map();
+    const _syncQueueGen={},_syncSendChains={},_syncChainMovedAt={};let _scheduledSyncRequests=[];
+    const _remoteInputs={},_awaitFirstInputAfterReset={},_keptSlotFirstInputAt=new Map(),_corePhantomHistory=new Set();
+    const _clearSlotInputState=(s)=>{delete _remoteInputs[s];delete _awaitFirstInputAfterReset[s];_keptSlotFirstInputAt.delete(s)};
+    const _useCRollback=true,_cutGoverns=()=>false;
+    let _activeRoster=new Set([0,SLOT]);
+    const _maskMatchScheduled=false,_inputSettledBefore={},_admissionInputFloor=()=>0,_inputFloor=()=>30;
+    let resets=0,sent=0,present=true;
+    const mod={_kn_rollback_slot_reset(){resets++},_kn_feed_input(){sent++}};
+    const window={KNCore,EJS_emulator:{gameManager:{Module:mod}},dispatchEvent(){}};
+    const CustomEvent=class {};
+    const _syncLog=()=>{},_testRunPastEdgeFrame=()=>-1,_pushTickProfile=()=>{},_markTickReturn=()=>{};
+    let _rbInputStallKey='',_rbInputStallStartTime=0,_rbStallLogged=0,_predictedKnownCount=0;
+    const clearPeerStallTimers=()=>{_rbInputStallKey='';_rbInputStallStartTime=0};
+    const _lastRemoteFramePerSlot={},_inputDroppedAheadUpTo={},_rbInputStallThreshold=()=>8;
+    const _frameNum=52,DELAY_FRAMES=2,KN_MAX_VISIBLE_ROLLBACK_DEPTH=7,RB_TRUE_ROLLBACK=true;
+    const MAX_STALL_MS=3000,RESEND_TIMEOUT_MS=2000,_askForMissingInputs=()=>{};
+    const getInputPeers=()=>present?[{slot:SLOT}]:[];
+    const _pendingCInputsSortFn=(a,b)=>a.frame-b.frame;
+    const _primeLateJoinInactiveInput=()=>{};
+    const _feedWatched=(m,s,t,feed)=>feed();
+    ${part('  const _awaitingFirstInput =', '  const _settleInputsBefore =')}
+    ${part('  const _drainPendingCInputs =', '  const _formatInputBrief =')}
+    ${part('  const _resetCoreSlot =', '  /**')}
+    ${part('  const resetPeerState =', '  // -- Peer disconnect')}
+    ${part('  const _keptSlotStallPeers =', '  // Every AudioContext')}
+    globalThis.tick=()=>{
+      const rbApplyFrame=50,ownerGate='open';
+      ${part("        if (rbApplyFrame >= 0 && ownerGate !== 'replay') {", "        if (ownerGate !== 'replay' && _delayRetunePending")}
+      _drainPendingCInputs(mod);
+      return true;
+    };
+    globalThis.setNow=(ms)=>{now=ms};
+    globalThis.setPresent=(v)=>{present=v};
+    globalThis.legacy=()=>{_activeRoster=null};
+    globalThis.reset=(r)=>resetPeerState(SLOT,r);
+    globalThis.phantom=(v)=>{if(v)_setPacingPhantom(SLOT);else _peerPhantom[SLOT]=false};
+    globalThis.queue=(frame,seeded)=>_pendingCInputs.push({slot:SLOT,frame,seeded,buttons:0,lx:0,ly:0,cx:0,cy:0});
+    globalThis.isPhantom=()=>!!_peerPhantom[SLOT];
+    globalThis.unsafe=()=>_corePhantomHistory.has(SLOT);
+    globalThis.nativeResets=()=>resets;
+    globalThis.nativeFeeds=()=>sent;
+    globalThis.waitStart=()=>_keptSlotFirstInputAt.get(SLOT);
+    `,
+    context,
+  );
+  const runtime: {
+    tick: () => true | undefined;
+    setNow: (ms: number) => void;
+    setPresent: (present: boolean) => void;
+    legacy: () => void;
+    reset: (reason: string) => void;
+    phantom: (active: boolean) => void;
+    queue: (frame: number, seeded: boolean) => void;
+    isPhantom: () => boolean;
+    unsafe: () => boolean;
+    nativeResets: () => number;
+    nativeFeeds: () => number;
+    waitStart: () => number | null | undefined;
+  } = vm.runInContext('globalThis', context);
+  return runtime;
+};
+
+test('all kept-slot reset reasons wait for an at-floor live input, not a seeded or stale entry', () => {
+  for (const reason of KEPT) {
+    const r = keptRuntime();
+    r.reset(reason);
+    assert.equal(r.waitStart(), null, reason);
+    assert.equal(r.tick(), undefined, reason);
+    assert.equal(r.waitStart(), 100, reason);
+    r.queue(40, true);
+    r.queue(29, false);
+    assert.equal(r.tick(), undefined, reason);
+    r.queue(45, false); // a real neutral sample from this peer
+    assert.equal(r.tick(), true, reason);
+    assert.equal(r.waitStart(), undefined, reason);
+    assert.ok(r.nativeFeeds() > 0, reason);
+    assert.equal(r.nativeResets(), 0, reason);
+  }
+});
+
+test('a listed but transport-less slot stalls and repeated mesh heal cannot extend its deadline', () => {
+  const r = keptRuntime();
+  r.reset('hard-disconnect-non-host');
+  r.setPresent(false);
+  assert.equal(r.tick(), undefined);
+  r.setNow(4900);
+  assert.equal(r.tick(), undefined);
+  r.reset('mesh-heal');
+  assert.equal(r.waitStart(), 100);
+  r.setNow(5099);
+  assert.equal(r.tick(), undefined);
+  r.setNow(5100);
+  assert.equal(r.tick(), true);
+  assert.equal(r.isPhantom(), true);
+  assert.equal(r.unsafe(), true);
+});
+
+test('time spent paused before the first active stall does not consume the wait', () => {
+  const r = keptRuntime();
+  r.reset('mesh-heal');
+  r.setNow(30000);
+  assert.equal(r.tick(), undefined);
+  assert.equal(r.waitStart(), 30000);
+  assert.equal(r.isPhantom(), false);
+});
+
+test('a rosterless legacy mesh-heal still gates an excluded peer', () => {
+  const r = keptRuntime();
+  r.legacy();
+  r.setPresent(false);
+  r.reset('mesh-heal');
+  assert.equal(r.tick(), undefined);
+});
+
+test('a pacing recovery does not clear native phantom history on the second outage', () => {
+  const r = keptRuntime();
+  r.phantom(true);
+  r.phantom(false); // the packet receiver restores pacing, not native history
+  assert.equal(r.unsafe(), true);
+  r.reset('reconnect');
+  assert.equal(r.nativeResets(), 1);
+  assert.equal(r.unsafe(), false);
+  assert.equal(r.waitStart(), undefined); // reset (not kept) follows existing reconnect wait
+  r.reset('mesh-heal');
+  assert.equal(r.nativeResets(), 1);
+  assert.equal(r.waitStart(), null);
 });

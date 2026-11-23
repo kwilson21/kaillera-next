@@ -131,7 +131,7 @@ const page = (): Page => {
   vm.runInContext(
     `
     const window={KNCore,KNDesync:{forgetFrom(){}}};
-    const ring=new Map();
+    const ring=new Map(),_corePhantomHistory=new Set();
     const mod={cFrame:0,
       _kn_get_frame(){return this.cFrame},
       _kn_feed_input(s,t,b,lx,ly,cx,cy){if(s===SLOT)ring.set(t,{buttons:b,lx,ly,cx,cy})},

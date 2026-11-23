@@ -149,11 +149,12 @@
  *   RTCPeerConnection to the host (pc.close() on its engine's peer entry
  *   for slot 0). Every bystander ran those tags on the real inputs. The engine reconnects (the host,
  *   the lower slot, offers), resets the peer on both sides and the guest
- *   resyncs from the host. Fails unless the connection was closed; the host
- *   kept its C slot of the guest at the reconnect reset
+ *   resyncs from the host. Fails unless walk packets were actually held and
+ *   the host ran at least three of those tags before closing the connection.
+ *   The host must keep its C slot of the guest at the reconnect reset
  *   (`PEER-RESET-KEEPS-CORE slot=<s> reason=reconnect`); the host's C engine
  *   then compared one of the guest's real inputs with what it predicted and
- *   rolled back (`[C] MISPREDICTION slot=<s>` after that reset): the path the
+ *   rolled back one of those same held tags after the reset: the path the
  *   fault is there to reach; the guest applied a resync after the reconnect;
  *   and the host and every bystander applied the same input for that guest
  *   on every tag all of them ran, from 60 tags before the drop to 400 after
@@ -198,6 +199,7 @@ import { catchUpHoleInput } from './directional-input-gate.mjs';
 import { installNativeInputObserver } from './native-input-observer.mjs';
 import { appliedForTag, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
 import { trackHashLag, unrecordedIn } from './hash-lag.mjs';
+import { heldPredictionAfterReset } from './drop-link-check.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -1214,17 +1216,25 @@ if (DROP_LINK) {
     return from;
   });
   // Until the host has run three tags of the walk (on its prediction).
-  dropLink.hostRanWalk = await host
+  dropLink.hostWalkThrough = await host
     .waitForFunction(
       (from) => {
         const c = window.NetplayRollback.getHudCounters();
-        return c.currentFrame - (c.delay ?? 0) >= from + 3;
+        const lastRanTag = c.currentFrame - (c.delay ?? 0) - 1;
+        return lastRanTag >= from + 2 && lastRanTag;
       },
       dropLink.heldFrom,
       { timeout: 20000, polling: 20 },
     )
-    .then(() => true)
-    .catch(() => false);
+    .then(async (handle) => {
+      try {
+        return await handle.jsonValue();
+      } finally {
+        await handle.dispose();
+      }
+    })
+    .catch(() => -1);
+  dropLink.hostRanWalk = dropLink.hostWalkThrough >= dropLink.heldFrom + 2;
   dropLink.closed = await guest.evaluate(() => {
     const frame = window.NetplayRollback.getHudCounters().currentFrame;
     const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
@@ -2012,6 +2022,13 @@ const dropLinkReport = !DROP_LINK
         closed: dropLink.closed,
         walkFrom: dropLink.heldFrom,
         hostRanWalk: dropLink.hostRanWalk,
+        hostWalkThrough: dropLink.hostWalkThrough,
+        heldPrediction: heldPredictionAfterReset(
+          rolledBack,
+          DROP_LINK_SLOT,
+          dropLink.heldFrom,
+          dropLink.hostWalkThrough,
+        ),
         resynced: dropLink.resynced,
         window: dropLinkWindow,
         keptCore: kept >= 0 ? hostLines[kept] : null,
@@ -2036,10 +2053,10 @@ const dropLinkProblems = !dropLinkReport
       ...(!dropLinkReport.closed?.closed
         ? [`the connection was not closed: ${JSON.stringify(dropLinkReport.closed)}`]
         : []),
+      ...(!dropLinkReport.hostRanWalk ? ['the host did not run three held walk tags before the reset'] : []),
+      ...(!(dropLinkReport.closed?.walkPacketsDropped > 0) ? ['no walk packets were held from the host'] : []),
       ...(!dropLinkReport.keptCore ? ["the host's reconnect reset did not keep the guest's C slot"] : []),
-      ...(dropLinkReport.rolledBack === 0
-        ? ['no real input of the guest after the reset was compared with a prediction and rolled back on the host']
-        : []),
+      ...(!dropLinkReport.heldPrediction ? ['no held pre-reset walk prediction was corrected on the host'] : []),
       ...(!dropLinkReport.resynced || !dropLinkWindow?.resyncSent || dropLinkWindow?.to == null
         ? ['the guest applied no resync after the reconnect']
         : []),

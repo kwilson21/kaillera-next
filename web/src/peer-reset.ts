@@ -22,7 +22,7 @@
  * roster removes it, and that roster's cut or reset is what empties it).
  * Only while the roster this page holds still lists the slot: a slot the
  * roster no longer lists may be taken by another player. And only when this
- * page did not hold the peer as a phantom (PEER-PHANTOM): until then the
+ * page's native input ring has no phantom predictions (PEER-PHANTOM): before it the
  * frame-ahead stall kept every frame it ran on a prediction of that peer
  * inside the rollback window, so the peer's real inputs roll them back. A
  * phantom's frames ran on predictions past the window by design, and the
@@ -47,7 +47,7 @@
  *
  * @param reason   the reset's reason, as resetPeerState is called with it
  * @param listed   the roster this page holds lists the slot (or there is no roster yet)
- * @param phantom  this page held the peer as a phantom when it was reset
+ * @param phantom  this slot's native history has not been reset since the page marked it phantom
  */
 //@ ensures \result <==> listed && !phantom && (reason === "reconnect" || reason === "mesh-heal" || reason === "hard-disconnect-non-host")
 //@ ensures \result ==> listed && !phantom

@@ -25,7 +25,7 @@ function room(peerPresent = false) {
  ${part('  async function sendLateJoinState(remoteSid)', '  // Joiner: a full resync')}
  ${part('  const finishLateJoinReady =', '  const _syntheticSidForSlot')}
  const _peerDriver=()=>null,_startSteps=new Map(),_endKeptOpen=()=>{},queueMicrotask=()=>{};
- const _lateJoinInputWindows=new Map();
+ const _lateJoinInputWindows=new Map(),_keptSlotFirstInputAt=new Map(),_corePhantomHistory=new Set();
  const _clearSlotInputState=()=>{},_peerLastAdvanceTime={},_peerPhantom={},_inputLateLogTime={},_auditLastRemote={};
  const _rbCheckBook=null,_rbLegacyCheckSlots=new Set();
  const _pendingCInputs=[],_followUpWatches=new Map(),_directAnswerNewest=new Map(),_queuedSyncPushes=new Map(),_syncSendChains={},_syncChainMovedAt={};

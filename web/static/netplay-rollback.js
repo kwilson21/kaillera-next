@@ -1749,6 +1749,10 @@
   // slot (_resetCoreSlot) and the wait is kept with it: the frame-ahead
   // stall is measured from the frame last heard, which the reset forgets.
   let _awaitFirstInputAfterReset = {};
+  // A kept native slot must wait even when its transport entry is absent.
+  // Start on the first stall, not during an unrelated paused state; keep
+  // that wall-clock start across successive transport resets.
+  const _keptSlotFirstInputAt = new Map();
   let _predictedKnownCount = 0;
   // RESEND log lines per peer slot: at most one a second, with the count.
   let _resendLog = {};
@@ -1905,8 +1909,13 @@
   // After a reconnect reset: no input of that peer at or above the floor
   // has been taken in yet (one that has will be fed before the frame runs).
   const _awaitingFirstInput = (slot) => {
-    if (!_awaitFirstInputAfterReset[slot]) return false;
     const floor = _inputFloor(slot);
+    if (_keptSlotFirstInputAt.has(slot)) {
+      // Only an admitted live input queued for C can release this wait;
+      // backfill or a locally seeded neutral is not a fresh peer input.
+      return !_pendingCInputs.some((input) => !input.seeded && input.slot === slot && input.frame >= floor);
+    }
+    if (!_awaitFirstInputAfterReset[slot]) return false;
     for (const key of Object.keys(_remoteInputs[slot] || {})) if (+key >= floor) return false;
     return true;
   };
@@ -1924,7 +1933,11 @@
       const floor = _inputFloor(p.slot);
       const peerHas = Math.max(_lastRemoteFramePerSlot[p.slot] ?? -1, _inputDroppedAheadUpTo[p.slot] ?? -1);
       let why = '';
-      if (applyFrame >= floor && !_remoteInputs[p.slot]?.[applyFrame] && _awaitingFirstInput(p.slot))
+      if (
+        applyFrame >= floor &&
+        (_keptSlotFirstInputAt.has(p.slot) || !_remoteInputs[p.slot]?.[applyFrame]) &&
+        _awaitingFirstInput(p.slot)
+      )
         why = 'first-input';
       else if (RB_TRUE_ROLLBACK && windowEdge >= floor && windowEdge <= peerHas && !_remoteInputs[p.slot]?.[windowEdge])
         why = 'edge';
@@ -2019,6 +2032,8 @@
       _feedWatched(tickMod, qi.slot, qi.frame, () =>
         tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy),
       );
+      if (!qi.seeded && _keptSlotFirstInputAt.has(qi.slot) && qi.frame >= _inputFloor(qi.slot))
+        _keptSlotFirstInputAt.delete(qi.slot);
     }
     _pendingCInputs.length = 0;
     if (settledSkipped > 0) _syncLog(`C-INPUT-SETTLED-SKIP f=${_frameNum} count=${settledSkipped}`);
@@ -6012,6 +6027,7 @@
     if (_useCRollback) {
       _pendingCInputs.push({
         slot,
+        seeded: true,
         frame,
         buttons: 0,
         lx: 0,
@@ -6123,6 +6139,7 @@
   // by startLockstep (a new match restarts frames at 0) and stop().
   const _clearSlotInputState = (slot) => {
     _recovery.reset(slot);
+    _keptSlotFirstInputAt.delete(slot);
     for (const map of _slotInputMaps()) delete map[slot];
     delete _remoteInputs[slot];
     delete _peerInputStarted[slot];
@@ -6134,6 +6151,8 @@
   // new match, stop).
   const _resetInputMaps = () => {
     _recovery.resetAll();
+    _keptSlotFirstInputAt.clear();
+    _corePhantomHistory.clear();
     if (typeof _ownerRepair !== 'undefined') _ownerRepair = null;
     if (typeof _authoredOwnerInputs !== 'undefined') _authoredOwnerInputs.clear();
     for (const map of _slotInputMaps()) for (const slot in map) delete map[slot];
@@ -6403,6 +6422,7 @@
     const k = RI.firstDiffering(ran, rule);
     if (k >= 0) lateFrame = checkFrom + k + DELAY_FRAMES;
     mod._kn_rollback_slot_reset(slot);
+    _corePhantomHistory.delete(slot);
     for (let tag = cut.from; tag < cut.cut; tag++) {
       const i = RI.cutInputAt(cut, tag);
       _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
@@ -11223,14 +11243,14 @@
   // comes, is checked against it. Any other reset empties it: slot_active is
   // sticky once kn_feed_input has seen the slot, and the next player in it
   // must not be predicted from this one's inputs.
-  // `phantom`: this page held the peer as a phantom: it ran its frames on
-  // predictions past the rollback window, which the resync recovers.
-  const _resetCoreSlot = (slot, reason, keepCoreSlot, phantom) => {
-    if (!_useCRollback || keepCoreSlot || _cutGoverns(slot)) return;
+  // Only an actual native reset, not the pacing flag or a state load,
+  // removes past-window phantom predictions from this slot.
+  const _resetCoreSlot = (slot, reason, keepCoreSlot, unsafeHistory) => {
+    if (!_useCRollback || keepCoreSlot || _cutGoverns(slot)) return false;
     const listed = !_activeRoster || _activeRoster.has(slot);
-    if (window.KNCore.peerReset.keepsCoreSlot(reason, listed, phantom)) {
+    if (window.KNCore.peerReset.keepsCoreSlot(reason, listed, unsafeHistory)) {
       _syncLog(`PEER-RESET-KEEPS-CORE slot=${slot} reason=${reason}`);
-      return;
+      return true;
     }
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?._kn_rollback_slot_reset) return;
@@ -11240,6 +11260,7 @@
     // cut heard later sees what the page applied (_cutRemovedInput).
     const ran = _maskMatchScheduled && _maskSchedule.active() ? _ringInputsRan(mod, slot) : [];
     mod._kn_rollback_slot_reset(slot);
+    _corePhantomHistory.delete(slot);
     for (const { tag, i } of ran) {
       _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
     }
@@ -11283,6 +11304,7 @@
    *   - _syncSendChains (by sid): that peer's chain of state transfers
    *
    * C engine's slot: _resetCoreSlot (kept when the same player goes on in it).
+   * Its phantom-history marker survives until a native slot reset or init.
    *
    * @param {number} slot - player slot to clear (0-3)
    * @param {string} reason - short human-readable reason for the reset;
@@ -11294,7 +11316,8 @@
   const resetPeerState = (slot, reason, opts = {}) => {
     _peerDriver()?.peerReset(slot, opts.sid ?? null);
     if (slot === null || slot === undefined) return;
-    const wasPhantom = !!_peerPhantom[slot];
+    const unsafeHistory = _corePhantomHistory.has(slot);
+    const keptSlotWaitAt = _keptSlotFirstInputAt.get(slot);
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A player that comes back is measured from its next start step.
     _startSteps.delete(slot);
@@ -11363,11 +11386,12 @@
     // new peer fills the slot.
     clearPeerStallTimers();
 
-    _resetCoreSlot(slot, reason, !!opts.keepCoreSlot, wasPhantom);
+    const kept = _resetCoreSlot(slot, reason, !!opts.keepCoreSlot, unsafeHistory);
 
-    // The same peer goes on after a reconnect: its inputs are waited for
-    // until one is taken in (the C slot active again).
-    if (reason === 'reconnect') _awaitFirstInputAfterReset[slot] = true;
+    // Every kept slot starts with no JS input frontier, even during a
+    // mesh heal or while a non-host has removed just the transport.
+    if (reason === 'reconnect' || kept) _awaitFirstInputAfterReset[slot] = true;
+    if (kept) _keptSlotFirstInputAt.set(slot, keptSlotWaitAt ?? null);
     _syncLog(`PEER-RESET slot=${slot} reason=${reason}`);
   };
 
@@ -11731,9 +11755,21 @@
     });
   };
 
+  const _keptSlotStallPeers = (peers) => {
+    if (!_keptSlotFirstInputAt.size) return peers;
+    const stalled = peers.slice();
+    for (const slot of _keptSlotFirstInputAt.keys())
+      if ((!_activeRoster || _activeRoster.has(slot)) && !peers.some((p) => p.slot === slot)) stalled.push({ slot });
+    return stalled;
+  };
+
+  const _setPacingPhantom = (slot) => {
+    _peerPhantom[slot] = true;
+    _corePhantomHistory.add(slot);
+  };
   const markPeerPhantomForStallTimeout = (slot, reason, detail = '') => {
     if (slot === null || slot === undefined || _peerPhantom[slot]) return;
-    _peerPhantom[slot] = true;
+    _setPacingPhantom(slot);
     const suffix = detail ? ` ${detail}` : '';
     _syncLog(`PEER-PHANTOM slot=${slot} reason=${reason}${suffix}`);
     window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot } }));
@@ -13153,7 +13189,10 @@
     // A slot kept for a cut this roster did not make (the immediate rule, or
     // a slot the roster still lists) is emptied, as before the rule.
     for (const slot of _coreSlotsKeptForCut) {
-      if (!_cutGoverns(slot)) rbModCut?._kn_rollback_slot_reset?.(slot);
+      if (!_cutGoverns(slot) && rbModCut?._kn_rollback_slot_reset) {
+        rbModCut._kn_rollback_slot_reset(slot);
+        _corePhantomHistory.delete(slot);
+      }
     }
     _coreSlotsKeptForCut.clear();
     _lastRosterCuts = cuts;
@@ -15064,6 +15103,8 @@
   let _lastRemoteFramePerSlot = {}; // slot -> highest frame received from that peer
   let _peerLastAdvanceTime = {}; // slot -> performance.now() when peer last sent a NEW frame
   let _peerPhantom = {}; // slot -> true when peer is detected as unresponsive
+  // Lives with C's input ring, not with the transport or active pacing flag.
+  const _corePhantomHistory = new Set();
   let _resumeInputGuardUntil = 0;
   let _lifecycleResyncPending = false;
   let _lifecycleResyncStartedAt = 0;
@@ -15552,6 +15593,7 @@
         // comes after its final flush), which is not this match's to send.
         if (_useCRollback) _drainCDebugLog();
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        _corePhantomHistory.clear();
         for (const record of _lateJoinInputWindows.values()) record.primed = false;
         // The desync detector reports a frame only once it is this far
         // behind the newest one: the engine never replays further back.
@@ -17175,7 +17217,7 @@
           if (_frameNum - DELAY_FRAMES < _admissionInputFloor(p.slot)) continue;
           if (!_peerPhantom[p.slot] && _peerLastAdvanceTime[p.slot] !== undefined) {
             if (nowPacing - _peerLastAdvanceTime[p.slot] >= PEER_DEAD_MS) {
-              _peerPhantom[p.slot] = true;
+              _setPacingPhantom(p.slot);
               _syncLog(
                 `PEER-PHANTOM slot=${p.slot} lastAdvance=${_peerLastAdvanceTime[p.slot].toFixed(0)} staleSec=${((nowPacing - _peerLastAdvanceTime[p.slot]) / 1000).toFixed(1)} — excluded from pacing`,
               );
@@ -17269,7 +17311,7 @@
                   `force-releasing pacing (I1 deadline)`,
               );
               if (slowestSlot >= 0) {
-                _peerPhantom[slowestSlot] = true;
+                _setPacingPhantom(slowestSlot);
                 _syncLog(
                   `PEER-PHANTOM slot=${slowestSlot} reason=pacing-timeout stalledMs=${Math.round(_pacingStallMs)} — excluded from pacing`,
                 );
@@ -17680,7 +17722,7 @@
         _meshHealthTick();
         if (rbApplyFrame >= 0 && ownerGate !== 'replay') {
           // Stall only when too far ahead for rollback to help
-          const rbInputPeers = getInputPeers();
+          const rbInputPeers = _keptSlotStallPeers(getInputPeers());
           // Prediction window. A remote input X that turns out mispredicted
           // rewinds to frame X + delay (its first use). The C engine silently
           // skips (DEEP-MISPREDICT-SKIP = cross-peer desync) any rollback
@@ -17719,24 +17761,29 @@
               windowEdge >= _inputFloor(p.slot) &&
               windowEdge < peerFrame &&
               !_remoteInputs[p.slot]?.[windowEdge];
-            // After a reconnect reset nothing is known of how far ahead
-            // the peer is, and C would record no prediction: wait for its
-            // first input (specs/reconnect_inputs.qnt).
+            // A transport reset forgets how far ahead this peer is.
+            // Do not let predictions run unbounded before its first input.
+            let keptSlotWaitAt = _keptSlotFirstInputAt.get(p.slot);
             const firstWait =
-              !_remoteInputs[p.slot]?.[rbApplyFrame] &&
+              (keptSlotWaitAt !== undefined || !_remoteInputs[p.slot]?.[rbApplyFrame]) &&
               rbApplyFrame >= _inputFloor(p.slot) &&
               _awaitingFirstInput(p.slot);
-            if (gapAtEdge || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
+            if (gapAtEdge || firstWait || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
               // Input missing — check how far ahead we are
               const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
               if (gapAtEdge || firstWait || adv >= stallThreshold) {
                 const nowRbInputStall = performance.now();
+                if (firstWait && keptSlotWaitAt === null) {
+                  keptSlotWaitAt = nowRbInputStall;
+                  _keptSlotFirstInputAt.set(p.slot, keptSlotWaitAt);
+                }
                 const rbStallKey = `${p.slot}:${rbApplyFrame}`;
                 if (_rbInputStallKey !== rbStallKey) {
                   _rbInputStallKey = rbStallKey;
                   _rbInputStallStartTime = nowRbInputStall;
                 }
-                const stalledMs = nowRbInputStall - _rbInputStallStartTime;
+                const stalledMs =
+                  nowRbInputStall - ((firstWait ? keptSlotWaitAt : undefined) ?? _rbInputStallStartTime);
                 if (stalledMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
                   markPeerPhantomForStallTimeout(
                     p.slot,
@@ -17758,7 +17805,7 @@
                   _syncLog(
                     `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
                       `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling ` +
-                      (firstWait ? '(first input since the reconnect)' : '(rollback budget exhausted)'),
+                      (firstWait ? '(first input since the transport reset)' : '(rollback budget exhausted)'),
                   );
                   _rbStallLogged = _frameNum;
                 }

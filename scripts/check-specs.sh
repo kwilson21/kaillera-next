@@ -692,6 +692,14 @@ $QUINT run "$REC" --main=reconnect_history_current --invariant=allHold \
 $QUINT run "$REC" --main=reconnect_history_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# Repeated native-slot resets and the bounded first-input wait, even absent.
+KEEP=specs/kept_slot_recovery.qnt
+$QUINT typecheck "$KEEP"
+$QUINT test "$KEEP" --main=kept_slot_recovery_before --backend="$BACKEND"
+$QUINT test "$KEEP" --main=kept_slot_recovery_fixed --backend="$BACKEND"
+$QUINT run "$KEEP" --main=kept_slot_recovery_fixed --invariant=allHold \
+  --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
 # ── A player dropped in a running match comes back only late ──────────────
 DROP=specs/drop_is_final.qnt
 $QUINT typecheck "$DROP"
