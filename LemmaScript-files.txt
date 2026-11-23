@@ -37,3 +37,4 @@ web/src/contextual-reset-intent.ts
 web/src/controller-mask.ts
 web/src/rb-check.ts
 web/src/removed-input.ts
+web/src/late-join-input-rule.ts

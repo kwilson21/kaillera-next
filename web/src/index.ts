@@ -37,6 +37,7 @@ import { MASK_CAP, canScheduleMask, createMaskSchedule, rosterMask } from './con
 import { admissionFloor, cutTag, firstDiffering, NO_INPUT_TAKEN, rerunStep, wordSpan } from './removed-input.ts';
 import { cutInputAt, encodeRosterCut, packInput, parseRosterCut } from './removed-input-wire.ts';
 import { framesToSendAgain } from './input-resend.ts';
+import { admittedLate, bridgeOffered, joinerHoldsOwnInput, legacyBootstrap } from './late-join-input-rule.ts';
 import {
   collectLateJoinInputBridge,
   decodeLateJoinInputBridge,
@@ -366,6 +367,13 @@ export const KNCore = {
     packInput,
     parseRosterCut,
   },
+  /**
+   * Around a join every page applies the same input for every slot: no
+   * placeholder and no held window but the joiner's own, derived from the
+   * host's roster frame (late-join-input-rule.ts, proved;
+   * specs/late_join_input_agreement.qnt).
+   */
+  lateJoinInput: { admittedLate, bridgeOffered, joinerHoldsOwnInput, legacyBootstrap },
   framesToAskFor,
   framesToSendAgain,
   collectLateJoinInputBridge,

@@ -5930,6 +5930,21 @@
   let _lateJoinInputBootstrapUntilFrame = -1;
   let _lateJoinSeededInputFrames = {}; // slot -> Set<frame> seeded as deterministic late-join zeros
   let _lateJoinReadyRetryTimer = null;
+  // Joiner, on the scheduled rule: its own input is neutral until it has
+  // heard the host's roster that admits it, and below that roster's frame +
+  // MASK_LEAD (KNCore.lateJoinInput.joinerHoldsOwnInput). {stateFrame,
+  // rosterFrame} (-1 until heard), or null.
+  let _joinHold = null;
+  const JOIN_HOLD_LEAD = window.KNCore.controllerMask.MASK_LEAD;
+  // The join rule of this match is the scheduled roster rule (one per match,
+  // the host's). On the host, the roster it is about to broadcast stays
+  // scheduled only if every player page in it can.
+  const _joinRuleScheduled = () => {
+    if (!_maskMatchScheduled || !_maskSchedule.active()) return false;
+    if (_playerSlot !== 0) return true;
+    const others = _hostRosterSlots().filter((slot) => slot !== _playerSlot);
+    return window.KNCore.controllerMask.matchScheduled(true, others.map(_maskSlotCapable));
+  };
 
   // Smash Remix ROM hashes (for game-specific RNG/settings sync).
   // Must match hashes in server/config/known_roms.json.
@@ -6003,8 +6018,15 @@
     return [...slots].filter((slot) => slot !== _playerSlot);
   };
 
+  // The old Remix bootstrap: a neutral window of this page's own input and
+  // neutral placeholders for the others, from the frame this page is on.
+  // Only in a Remix match on the immediate rule (a page from before the
+  // scheduled rule is in it and runs it too). On the scheduled rule no page
+  // holds or seeds anything for a join: the joiner holds its own input
+  // (_joinHold) and gets the others' real inputs (the late-join input
+  // bridge); web/src/late-join-input-rule.ts, specs/late_join_input_agreement.qnt.
   const _startLateJoinInputBootstrap = (reason = '', extraSlots = []) => {
-    if (!_isSmashRemix()) return;
+    if (!window.KNCore.lateJoinInput.legacyBootstrap(_isSmashRemix(), _joinRuleScheduled())) return;
     if (!_isValidPlayerSlot(_playerSlot)) return;
     const startFrame = Math.max(0, _frameNum - DELAY_FRAMES - 2);
     const endFrame = _frameNum + Math.max(LATE_JOIN_INPUT_BOOTSTRAP_FRAMES, DELAY_FRAMES * 4);
@@ -6272,6 +6294,36 @@
       }
     }
     _requestSocketFullResync(why);
+  };
+
+  // A roster heard from the host (specs/late_join_input_agreement.qnt):
+  //  - the joiner: the first one that lists it, from its state's frame on,
+  //    fixes where its own input hold ends (rosterFrame + JOIN_HOLD_LEAD);
+  //  - a guest, on the scheduled rule, that hears a roster admit a player
+  //    after it has run a tag of that player at or past the joiner's hold:
+  //    it ran that tag as absent, where the joiner may have sent a real
+  //    input, and takes the host's state (KNCore.lateJoinInput.admittedLate).
+  const _noteJoinRoster = (rosterFrame, slots, addedSlots, scheduled) => {
+    if (_joinHold && _joinHold.rosterFrame < 0 && slots.includes(_playerSlot) && rosterFrame >= _joinHold.stateFrame) {
+      _joinHold.rosterFrame = rosterFrame;
+      _syncLog(`LATE-JOIN-HOLD roster f=${rosterFrame}: own input neutral below tag ${rosterFrame + JOIN_HOLD_LEAD}`);
+    }
+    if (!scheduled || _playerSlot === 0 || RB_WORKER_COPROC || !_maskSchedule.active()) return;
+    const joined = addedSlots.filter((slot) => slot !== _playerSlot);
+    if (joined.length === 0) return;
+    const ranThroughTag = _maskSchedule.frontier() - 1 - DELAY_FRAMES;
+    if (!window.KNCore.lateJoinInput.admittedLate(rosterFrame, ranThroughTag, JOIN_HOLD_LEAD)) return;
+    _syncLog(
+      `ROSTER-ADMIT-LATE f=${_frameNum}: ran tags of slot(s) [${joined.join(',')}] up to ${ranThroughTag} as absent, ` +
+        `past the joiner's hold (roster f=${rosterFrame}); asking the host for its state`,
+    );
+    KNEvent('desync', `roster admission heard late f=${_frameNum}`, {
+      kind: 'roster-admit-late',
+      rosterFrame,
+      ranThroughTag,
+      frame: _frameNum,
+    });
+    _askHostStateForLateRoster('ROSTER-ADMIT-LATE', 'roster admission late');
   };
 
   // The inputs `slot` ran with on the tags the frames still in the ring
@@ -10387,6 +10439,7 @@
           if (_phase === PHASE_RUNNING && addedSlots.length > 0) {
             _startLateJoinInputBootstrap('roster added slot', addedSlots);
           }
+          _noteJoinRoster(rosterFrame, slots, addedSlots, maskScheduled);
           // Always use 4 (KN_MAX_PLAYERS) so the C engine covers all
           // slots regardless of gaps (e.g. roster [0,1,3]). Empty slots
           // get zero predictions — harmless since no input arrives.
@@ -12863,8 +12916,9 @@
 
   // -- Late join -------------------------------------------------------------
 
-  const _broadcastRoster = () => {
-    if (_playerSlot !== 0) return;
+  // Host: the slots its next roster lists (itself, every peer not held as a
+  // late joiner and not leaving), in order.
+  const _hostRosterSlots = () => {
     const slotSet = new Set([_playerSlot]);
     for (const [sid, p] of Object.entries(_peers)) {
       if (_isPeerPendingLateJoin(sid, p)) continue;
@@ -12872,7 +12926,13 @@
         slotSet.add(p.slot);
       }
     }
-    const slots = [...slotSet].sort((a, b) => a - b);
+    return [...slotSet].sort((a, b) => a - b);
+  };
+
+  const _broadcastRoster = () => {
+    if (_playerSlot !== 0) return;
+    const slots = _hostRosterSlots();
+    const slotSet = new Set(slots);
     // The host's frame, or the last roster's when a replay has the host below
     // it: a guest drops a roster older than the last one it filed.
     const rosterFrame = Math.max(_frameNum, _lastBroadcastRosterFrame);
@@ -12938,9 +12998,14 @@
     }
   };
 
+  // The host offers the bridge on every ROM, on Smash Remix when the match
+  // is on the scheduled rule (KNCore.lateJoinInput.bridgeOffered): a Remix
+  // match on the immediate rule keeps the old bootstrap, whose placeholders
+  // the bridge's wait would refuse. A joiner takes a bridge whenever one comes.
   const _snapshotLateJoinBridgeSources = (joiningSid) => {
     const ownSid = socket?.id; // The targeted signaling wrapper only forwards emits.
-    if (!_useCRollback || RB_WORKER_COPROC || _isSmashRemix() || !_activeRoster || !ownSid) return null;
+    if (!_useCRollback || RB_WORKER_COPROC || !_activeRoster || !ownSid) return null;
+    if (!window.KNCore.lateJoinInput.bridgeOffered(_isSmashRemix(), _maskSchedule.active())) return null;
     const own = { slot: _playerSlot, sid: ownSid, peer: null, history: _localInputs };
     const originals = [own];
     for (const [sid, peer] of Object.entries(_peers)) {
@@ -13045,7 +13110,7 @@
   };
   const _beginLateJoinOriginalWait = (msg, mod, bridgePeers) => {
     _lateJoinBootContinuation = null;
-    if (!mod?._kn_pre_tick || RB_WORKER_COPROC || _isSmashRemix() || !Object.hasOwn(msg, 'inputBridge')) return null;
+    if (!mod?._kn_pre_tick || RB_WORKER_COPROC || !Object.hasOwn(msg, 'inputBridge')) return null;
     const sources = window.KNCore.decodeLateJoinInputBridge(msg.inputBridge, msg.frame, DELAY_FRAMES, _playerSlot);
     const slots = new Map(sources.map(({ slot, sid }) => [slot, sid]));
     if (!slots.has(0)) slots.clear(); // malformed new handoff; no ownership to infer
@@ -13438,8 +13503,9 @@
     }
     _isApplyingLateJoinState = true;
     const bridgeEpoch = _syncQueueEpoch;
+    // The host sent a bridge only where its rule offers one (bridgeOffered).
     const bridgePeers =
-      Array.isArray(msg.inputBridge) && !RB_WORKER_COPROC && !_isSmashRemix()
+      Array.isArray(msg.inputBridge) && !RB_WORKER_COPROC
         ? new Map(Object.entries(_peers).map(([sid, peer]) => [sid, { peer, gen: _syncQueueGen[sid] || 0 }]))
         : null;
 
@@ -13613,6 +13679,13 @@
       _applyControllerPresentMask('late-join-state');
       _releaseMenuStartBarrierAfterLateJoin();
       _startLateJoinInputBootstrap('late-join-state', [..._activeRoster]);
+      // On the scheduled rule this page's own input is neutral until it hears
+      // the roster that admits it, and below that roster's frame + MASK_LEAD:
+      // the other pages hold its tags below the roster frame as absent and
+      // run them as absent until they hear it (specs/late_join_input_agreement.qnt).
+      _joinHold = _joinRuleScheduled() ? { stateFrame: msg.frame, rosterFrame: -1 } : null;
+      if (_joinHold)
+        _syncLog(`LATE-JOIN-HOLD own input neutral from f=${msg.frame} until the roster + ${JOIN_HOLD_LEAD}`);
 
       // Ensure rollback init can proceed — the late joiner missed the
       // host's rb-delay broadcast over DataChannel (sent at game start).
@@ -16188,6 +16261,7 @@
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};
+    _joinHold = null;
     _lateJoinOriginalWait = null;
     _lateJoinBootContinuation = null;
     // Free C-level sync buffers
@@ -17068,8 +17142,18 @@
           `ejsPaused=${suppressEjsPausedInput} guard=${suppressResumeGuardInput} lifecycle=${_lifecycleResyncPending}`,
       );
     }
+    // A joiner on the scheduled rule holds its own input neutral until the
+    // roster that admits it + MASK_LEAD (KNCore.lateJoinInput.joinerHoldsOwnInput).
+    if (
+      _joinHold &&
+      !window.KNCore.lateJoinInput.joinerHoldsOwnInput(_frameNum, _joinHold.rosterFrame, JOIN_HOLD_LEAD)
+    ) {
+      _syncLog(`LATE-JOIN-HOLD ended at f=${_frameNum} (roster f=${_joinHold.rosterFrame})`);
+      _joinHold = null;
+    }
+    const joinHoldsOwnInput = _joinHold !== null;
     const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);
-    const localInput = hadLocalInputForFrame
+    const madeInput = hadLocalInputForFrame
       ? _localInputs[_frameNum]
       : _applyExtraInputDelay(
           _cloneInput(
@@ -17083,8 +17167,10 @@
             ),
           ),
         );
+    const localInput = !hadLocalInputForFrame && joinHoldsOwnInput ? _cloneInput(KNShared.ZERO_INPUT) : madeInput;
     let recordAuthorOnSend =
       !hadLocalInputForFrame &&
+      !joinHoldsOwnInput &&
       _playerSlot !== 0 &&
       !menuStartBarrier.suppressInput &&
       !suppressLateJoinBootstrapInput &&
@@ -21059,6 +21145,7 @@
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};
+    _joinHold = null;
     clearLateJoinReadyRetry();
     _cacheAttempted = false;
     _lockstepReadyPeers = {};
