@@ -43,23 +43,47 @@ def test_rollback_stall_sites_have_wall_clock_action_markers():
     src = LOCKSTEP_JS.read_text()
     doc = INVARIANTS_DOC.read_text()
 
-    for marker in ("MENU-LOCKSTEP-WAIT", "RB-INPUT-STALL-TIMEOUT", "LOCKSTEP-WAIT-TIMEOUT"):
+    for marker in ("RB-INPUT-STALL-TIMEOUT", "LOCKSTEP-WAIT-TIMEOUT"):
         assert marker in src
         assert marker in doc
 
     assert "stalledMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS" in src
-    assert "stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS" in src
     assert "markPeerPhantomForStallTimeout" in src
 
 
-def test_strict_menu_lockstep_never_fabricates_or_phantoms_inputs():
+def test_the_old_js_lockstep_path_is_gone():
+    """Every frame runs on the C engine (specs/engine_start.qnt), so the JS
+    path that stepped a frame without it is deleted: its menu lockstep, the
+    inputs it made up, its fast-forward on a tab's return and its pacing."""
     src = LOCKSTEP_JS.read_text()
+    play_src = (ROOT / "web/static/play.js").read_text()
+    html_src = (ROOT / "web/play.html").read_text()
 
-    assert "MENU-LOCKSTEP-TIMEOUT" not in src
-    assert "phase-lock-timeout" not in src
-    assert "menu-lockstep-timeout" not in src
-    assert "MENU-LOCKSTEP-WAIT" in src
-    assert "holding strict menu lockstep" in src
+    for gone in (
+        "MENU-LOCKSTEP",
+        "strictInputLockstep",
+        "kn-menu-lockstep",
+        "INPUT-GAP-FILL",
+        "INPUT-FABRICATE",
+        "INPUT-STALL hard-timeout",
+        "INPUT-STALL-RESYNC",
+        "RAPID_FABRICATION_THRESHOLD",
+        "_consecutiveFabrications",
+        "skip:legacy-",
+        "advance:legacy",
+        "_runStepOneFrame('fallback')",
+        "resync wait timeout",
+        "fast-forward: ",
+        "PACING-SAFETY-FREEZE",
+        "fpu-trace",
+    ):
+        assert gone not in src, gone
+    # Nothing after the C branch: it always returns.
+    tick = src[src.index("  const tick = () => {") :]
+    tick = tick[: tick.index("\n  };\n")]
+    assert tick.rstrip().endswith("_handleCoreFatal('c-rollback', eCR);\n        return;\n      }\n    }")
+    assert "showMenuLockstepWait" not in play_src
+    assert "menu-wait-overlay" not in html_src
 
 
 def test_strict_menu_resend_cadence_is_per_slot():
@@ -70,7 +94,7 @@ def test_strict_menu_resend_cadence_is_per_slot():
     assert "const resendKey = `${source}:${slot}:${applyFrame}`;" in src
     assert "prev?.key === resendKey && nowMs - prev.lastAt < RESEND_TIMEOUT_MS" in src
     assert "_strictMenuResendState[slot] = { key: resendKey, lastAt: nowMs };" in src
-    assert "_requestStrictMenuResends(inputPeers, _missingSlots, applyFrame, now, 'js-menu')" in src
+    assert "_requestStrictMenuResends(lockstepPeers, missingSlots, applyFrame, nowLockstep, 'lockstep')" in src
 
 
 def test_retroarch_deterministic_patch_is_enforced_by_build():
@@ -459,16 +483,8 @@ def test_failed_frame_step_does_not_advance_bookkeeping():
     assert "if (!_runStepOneFrame('replay')) return false;" in src
     assert "if (!_runCReplayFrame(tickMod)) break;" in src
     assert re.search(r"if \(!_runStepOneFrame\('normal'\)\) \{\s*_markTickReturn\('skip:step-norun'\);\s*return;", src)
-    assert "if (!_runStepOneFrame('fallback')) return;" in src
-
-    fallback_idx = src.index("if (!_runStepOneFrame('fallback')) return;")
-    increment_idx = src.index("_frameNum++;", fallback_idx)
-    assert fallback_idx < increment_idx
-
-    assert "const consumedRemoteInputSlots = [];" in src
-    assert "consumedRemoteInputSlots.push(peerSlot);" in src
-    delete_idx = src.index("delete _remoteInputs[peerSlot][applyFrame];", fallback_idx)
-    assert fallback_idx < delete_idx < increment_idx
+    # The old path's own frame step went with that path.
+    assert "_runStepOneFrame('fallback')" not in src
 
 
 def test_asyncify_remove_preserves_normal_frame_fiber_stack():
@@ -482,15 +498,12 @@ def test_asyncify_remove_preserves_normal_frame_fiber_stack():
     assert "loading-frame fiber switch into a WASM" in build_src
 
 
-def test_stall_and_input_logs_use_cheap_slot_formatting():
+def test_input_logs_use_cheap_input_formatting():
     src = LOCKSTEP_JS.read_text()
 
-    assert "const _formatSlotMap = (obj) => {" in src
     assert "const _formatInputBrief = (input) =>" in src
-    assert "rBuf=${_formatSlotMap(rBufSizes)}" in src
-    assert "peerStarted=${_formatSlotMap(_peerInputStarted)}" in src
-    assert "local=${_formatInputBrief(localInput)}" in src
-    assert "rBuf=${_formatSlotMap(rBufDetail)} dc=${_formatSlotMap(dcStates)}" in src
+    assert "`local=${_formatInputBrief(localInput)}`," in src
+    assert "`input=${_formatInputBrief(preTickLocalInput)}`," in src
 
 
 def test_rb_input_dc_close_routes_through_cleanup_and_reliable_fallback():
@@ -726,9 +739,9 @@ def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
     send = src[idx : src.index("DC health monitor", idx)]
     assert "const peerBuf = KNShared.encodeInput(\n          _frameNum,\n          localInput," in send
     assert send.index("if (!hadLocalInputForFrame) {") < send.index("const peerBuf = KNShared.encodeInput(")
-    # No resync path drops the cached inputs: only a new match, a stop, and
-    # the fast-forward at lockstep start do (and the declaration).
-    assert src.count("_localInputs = {};") == 4
+    # No resync path drops the cached inputs: only a new match and a stop do
+    # (and the declaration).
+    assert src.count("_localInputs = {};") == 3
     settle = src[
         src.index("const _settleInputsAtResync = (mod, frame, recoveryId = 0) => {") :
     ]
@@ -927,16 +940,16 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Twelve sites ask: one over Socket.IO, eleven on a DataChannel (the
-    # seventh is a late joiner that lost its channel to the host,
-    # specs/late_join_pause.qnt; the eighth the deadline asking again for an
-    # owed "now" resync, specs/resync_reask.qnt; then the boot sync and the
-    # input stall's, specs/resync_flow.qnt EVERY_REQUEST_NUMBERED; the last a
-    # guest's ask for a missing input gone overdue, specs/ask_escalation.qnt).
+    # Ten sites ask: one over Socket.IO, nine on a DataChannel (among them a
+    # late joiner that lost its channel to the host,
+    # specs/late_join_pause.qnt; the deadline asking again for an owed "now"
+    # resync, specs/resync_reask.qnt; the boot sync, specs/resync_flow.qnt
+    # EVERY_REQUEST_NUMBERED; and a guest's ask for a missing input gone
+    # overdue, specs/ask_escalation.qnt).
     # The two that name a target frame give it to the request, which keeps
     # it after the target's deadline (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 12
-    assert src.count("_beginResyncRequest()") == 8
+    assert src.count("_beginResyncRequest(") == 10
+    assert src.count("_beginResyncRequest()") == 6
     assert src.count("_beginResyncRequest(-1, true)") == 1
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
@@ -953,29 +966,23 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 11
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 9
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 9
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 7
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
-    # Never sent bare. The boot sync and the input stall's request were, and
-    # their unnumbered answers were applied wherever they found the guest,
-    # even after a newer request (specs/resync_flow.qnt,
-    # bootAnswerAfterANewerRequestTest).
+    # Never sent bare. The boot sync's request was, and its unnumbered
+    # answer was applied wherever it found the guest, even after a newer
+    # request (specs/resync_flow.qnt, bootAnswerAfterANewerRequestTest).
     assert not re.search(r"""\.send\(['"`]sync-request(?!-id:)""", src)
     boot = src[src.index("if (_bootDoneForSync && !window._knBootSyncDone) {") :]
     boot = boot[: boot.index("BOOT-SYNC skipped: initial state")]
     assert "const bootRequestId = _beginResyncRequest();" in boot
     assert "_sendResyncRequest(hostPeer.dc, bootRequestId, 'sync-request-full');" in boot
-    stall = src[src.index("`INPUT-STALL-RESYNC f=${_frameNum}") :]
-    stall = stall[: stall.index("INPUT-STALL-RESYNC send failed")]
-    assert "const stallRequestId = _beginResyncRequest();" in stall
-    assert "_sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');" in stall
-    # Neither asks over a request that is out (its answer brings a host
+    # It does not ask over a request that is out (its answer brings a host
     # state; asked over, that answer would be dropped as an older request's),
-    # nor gives up a target, which would apply a held state early
+    # nor give up a target, which would apply a held state early
     # (specs/resync_flow.qnt, guestAsksOnItsOwn).
-    for site in (boot, stall):
-        assert site.index("if (_resyncRequestInFlight) {") < site.index("_beginResyncRequest()")
-        assert "_syncTargetFrame" not in site
+    assert boot.index("if (_resyncRequestInFlight) {") < boot.index("_beginResyncRequest()")
+    assert "_syncTargetFrame" not in boot
 
     # A new match starts counting again.
     stop = src[src.index("const stopSync = () => {") :]

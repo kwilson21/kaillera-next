@@ -827,12 +827,6 @@
       const slot = e.detail?.slot;
       removePeerStatusEntry(slot);
     });
-    window.addEventListener('kn-menu-lockstep-wait', (e) => {
-      showMenuLockstepWait(e.detail || {});
-    });
-    window.addEventListener('kn-menu-lockstep-clear', () => {
-      hideMenuLockstepWait();
-    });
   };
 
   // ── Peer status indicator (P1-6) ───────────────────────────────────────
@@ -883,27 +877,6 @@
   const removePeerStatusEntry = (slot) => {
     _peerStatusEntries.delete(slot);
     _renderPeerStatus();
-  };
-  const showMenuLockstepWait = (detail) => {
-    const overlay = document.getElementById('menu-wait-overlay');
-    if (!overlay) return;
-    const title = document.getElementById('menu-wait-title');
-    const detailEl = document.getElementById('menu-wait-detail');
-    // The same wait covers menus and the match; the wording is connect.ts.
-    // Which scene is a match is the loaded ROM's own table: a scene number
-    // means nothing across games, and a ROM without a table gets neutral words.
-    const matchScene = window.KNCore.addressMapFor(_romHash)?.scenes.battle ?? null;
-    const wait = _connect.menuWait(
-      Array.isArray(detail?.peers) ? detail.peers : [],
-      _connect.pausedIn(matchScene, Number(detail?.scene)),
-    );
-    if (title) title.textContent = wait.title;
-    if (detailEl) detailEl.textContent = wait.detail;
-    overlay.classList.remove('hidden');
-  };
-  const hideMenuLockstepWait = () => {
-    const overlay = document.getElementById('menu-wait-overlay');
-    if (overlay) overlay.classList.add('hidden');
   };
 
   // The requests a page sends to open or join a room, and what the answers

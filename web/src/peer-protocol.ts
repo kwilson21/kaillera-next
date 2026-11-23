@@ -80,8 +80,6 @@ const TEXT_GRAMMAR = {
     'rb-delay': `:${INT}`,
     'rb-transport': ':(?:reliable|unreliable)',
     'rb-init-frame': `:${INT}`,
-    // fpu-trace:<frame>:<hash>:<count>
-    'fpu-trace': `:${INT}:${INT}:${INT}`,
     'sync-request-full': '',
     'sync-request-full-at': `:${INT}`,
     // The number of the request that follows on the same channel. A message
