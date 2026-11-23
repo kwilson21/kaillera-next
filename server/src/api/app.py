@@ -1596,6 +1596,9 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
         raw_log_data = entry.get("log_data")
+        # `context` is cleared when a match's log moves to the archive
+        # (src/log_archive.py); read it back from there.
+        entry["context"] = await db.get_session_context(entry.get("match_id"), entry.get("slot"), entry.get("context"))
         for field in ("summary", "context"):
             if entry.get(field) and isinstance(entry[field], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -1665,7 +1668,7 @@ def create_app(lifespan=None) -> FastAPI:
             with contextlib.suppress(json.JSONDecodeError, TypeError):
                 summary = json.loads(summary)
 
-        context_obj = entry.get("context") or "{}"
+        context_obj = await db.get_session_context(match_id, slot, entry.get("context")) or "{}"
         if isinstance(context_obj, str):
             with contextlib.suppress(json.JSONDecodeError, TypeError):
                 context_obj = json.loads(context_obj)
@@ -1797,7 +1800,7 @@ def create_app(lifespan=None) -> FastAPI:
 
         peers: dict = {}
         for row in rows:
-            ctx = row.get("context") or "{}"
+            ctx = await db.get_session_context(match_id, row.get("slot"), row.get("context")) or "{}"
             if isinstance(ctx, str):
                 try:
                     ctx = json.loads(ctx)

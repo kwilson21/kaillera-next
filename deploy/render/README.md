@@ -111,11 +111,15 @@ database, which Render also wipes. With them, screenshot bytes go to R2 under
 ## Log retention
 
 The server sweeps old logs a minute after it starts and every 6 hours
-(`src/retention.py`). Defaults work; override in Render → Environment:
+(`src/retention.py`). The same sweep archives a match's logs to R2 once it
+can no longer receive uploads and deletes its chunks from D1 `D1_HOT_DAYS`
+later (`src/log_archive.py`); the admin pages read the archive from then on.
+Defaults work; override in Render → Environment:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `LOG_RETENTION_DAYS` | 7 | Normal matches are deleted this long after they end; resolved flagged matches this long after they're resolved |
+| `D1_HOT_DAYS` | 2 | How long an archived match's log chunks stay in D1 before the sweep deletes them (the archive in R2 is kept for the whole retention window) |
 | `FLAGGED_STALE_DAYS` | 180 | Flagged matches nobody has resolved or looked at are deleted after this long |
 | `BUDGET_AUTO_FLAGGED_BYTES` | 209715200 (200 MB) | Past this much flagged data, automatic flags are recorded but no longer keep the match; feedback flags always do |
 

@@ -63,6 +63,7 @@ kaillera-next/
 │       ├── migrate.py       # plain-SQL schema migrations shared by SQLite/D1 (replaces Alembic)
 │       ├── blobstore.py     # blob storage for screenshots (R2 in prod, local folder in dev)
 │       ├── retention.py     # flags matches with a crash/freeze/desync; sweeps expired ones
+│       ├── log_archive.py   # archives an ended match's session log to the blob store, then evicts its chunks from the database
 │       ├── match_rotation.py # rolls up ended session logs into Parquet + match_metrics rows
 │       ├── stats.py         # "matches started in last 7 days" counter for the front page
 │       ├── landing_build.py # content-hash build id shared by the server and the landing Worker
@@ -438,6 +439,9 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   but not currently wired to anything — OG-card game images are always on
 - `LOG_RETENTION_DAYS` (default 7): how long a normal (non-flagged) match's
   session logs are kept before the retention sweep deletes them
+- `D1_HOT_DAYS` (default 2): how long an archived match's log chunks stay in
+  the database before the sweep deletes them; its logs are read from the blob
+  store after that (`log_archive.py`)
 - `FLAGGED_STALE_DAYS` (default 180): how long an unresolved flagged match's
   logs are kept before the retention sweep deletes them
 - `DEBUG_MODE`: enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset
