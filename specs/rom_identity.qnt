@@ -1,10 +1,11 @@
 // -*- mode: Bluespec; -*-
 //
 // Which ROM a guest's page judges, announces and boots while a ROM it was
-// given is still being hashed (web/static/play.js: loadRomData,
-// loadRomFromLibrary, clearLoadedRom, handleHostRomChanged, notifyRomReady,
-// onGameStarted, the join-room and rejoin paths, startGame; the server's
-// rom-ready and start-game checks in server/src/api/signaling.py).
+// given is still being hashed, its own or the host's (web/static/play.js:
+// loadRomData, loadRomFromLibrary, clearLoadedRom, applyHostRomFromData,
+// handleHostRomChanged, notifyRomReady, tellRomAfterRejoin, onGameStarted,
+// the join-room and rejoin paths, startGame; the server's rom-ready and
+// start-game checks in server/src/api/signaling.py).
 //
 // A dropped file is the page's at once (its name and size), but its hash
 // comes from a FileReader a moment later. Until then `_romHash` is the
@@ -23,24 +24,42 @@
 // the page booted the file before its hash said whose it was, and the host
 // could start on the hash of the ROM it had before.
 //
-// "right" is the host's ROM, "wrong" is not. A wrong ROM may be the same
-// size as the host's (two releases of one game often are), and the server
-// and the page check the size first. A load is each change of the page's
-// ROM: a drop, a pick from the ROM library (whose hash is known at once), a
-// clear.
+// The host's drop has the same window, seen from the guests. Until the
+// host's new ROM is hashed and its `rom-ready` reaches the server, the room
+// names the host's previous ROM, and every guest judges against it:
+//   - a guest's ROM that is the host's new one is refused as not the host's;
+//   - a guest's ROM that is the previous one is kept, announced again at
+//     every room change, and counted ready by the server.
+// No start can take that word: the host's Start waits for its own hash, and
+// the server drops every guest's word when the host's new hash reaches it.
 //
-// What is modelled: one guest, the host's ROM becoming known once, drops,
-// library picks and clears in any order, their hashes landing or failing in
-// any order, the guest's socket dropping and the page rejoining, the host
-// sharing its ROM or not, and a start: the host's Start (the host's own drop
-// being hashed or not), the server taking it, and the guest's page deciding
-// what to do with it. The server's view is what the page last told it while
-// its socket was up, heard at once (rom_at_start.qnt has the socket's
-// ordering), and the server keeps it across a rejoin.
+// "right" is the ROM the host holds, "wrong" is not. The names follow the
+// host: when the host drops a ROM of its own, the one it held becomes
+// "wrong", and the one it dropped "right" (the guest's "wrong", or a ROM the
+// guest has never held). A wrong ROM may be the same size as the host's (two
+// releases of one game often are), and the server and the page check the
+// size first. A load is each change of the page's ROM: a drop, a pick from
+// the ROM library (whose hash is known at once), a clear.
 //
-// Not modelled: what the host's new ROM means for the guests (the host
-// changing its ROM; its drop is here only for its own Start), the ROM
-// transfer (its hash is the host's, known at once), the host's ROM arriving
+// What is modelled: one guest; the host's ROM becoming known; the host
+// dropping another ROM of its own, its hash landing, and what the server and
+// the guest's page make of each; the guest's drops, library picks and clears
+// in any order, their hashes landing or failing in any order; the guest's
+// socket dropping and the page rejoining; the host sharing its ROM or not;
+// and a start: the host's Start, the server taking it, and the guest's page
+// deciding what to do with it. The server's view of the guest is what the
+// page last told it while its socket was up, heard at once (rom_at_start.qnt
+// has the socket's ordering), and the server keeps it across a rejoin. What
+// the host's page tells the server about its own ROM reaches the server, and
+// the room's ROM the guest's page, at once.
+//
+// Not modelled: the flight of the host's word to the guest's page (a guest's
+// hash landing in it is judged against what the page last heard, and the
+// server takes no `rom-ready` from a guest while the room's ROM is
+// changing); the host's ROM changing while the guest's socket is down (the
+// page hears the room's ROM again in the rejoin's ack); the host's socket;
+// a second drop by the host while its first is being hashed; the ROM
+// transfer (its hash is the host's, known at once); the host's ROM arriving
 // with the start message (the guest has it from the room by then: a start
 // here needs it known).
 //
@@ -63,6 +82,13 @@
 // REJOIN_SAYS_PENDING: a page that rejoins with a ROM still being hashed
 //   says it is not ready. The server carries the old socket's word over to
 //   the new one, and a drop made while the socket was down said nothing.
+// HOST_DROP_SAYS_CHANGING: the host's drop tells the server at once that its
+//   ROM is being hashed (`rom-ready {ready: false, pending: true}`). The
+//   server drops every guest's word and names no ROM, only that it is
+//   changing, and refuses a start; a guest's page judges nothing against it
+//   (its verdict is pending) and announces nothing until the host's new hash
+//   is the room's. false: the host said nothing until its hash landed, and
+//   the room named its previous ROM.
 module rom_identity {
   const JUDGE_OWN_HASH: bool
   const HASH_KEEPS_ITS_LOAD: bool
@@ -71,10 +97,11 @@ module rom_identity {
   const HOST_START_WAITS_FOR_HASH: bool
   const FAILED_HASH_REFUSES: bool
   const REJOIN_SAYS_PENDING: bool
+  const HOST_DROP_SAYS_CHANGING: bool
 
   pure val ROMS = Set("right", "wrong")
 
-  var sameSize: bool // the wrong ROM is the size of the host's
+  var sameSize: bool // a ROM that is not the host's is the size of the host's
   var sharing: bool // the host shares its ROM: the server starts without the guest's word
   var up: bool // the guest's socket is connected
   var loaded: str // the ROM the page holds: "none" | "right" | "wrong"
@@ -83,7 +110,10 @@ module rom_identity {
   var hash: str // `_romHash`: "none" | "right" | "wrong"
   var hashLoad: int // the load `hash` was computed for
   var hashing: Set[(int, str)] // drops being hashed: (load, ROM)
-  var hostKnown: bool // the host's ROM has reached the page
+  // The host's ROM as the room names it, which the page has heard:
+  // "none" (not known yet) | "changing" (the host's new ROM is being hashed) |
+  // "right" | "wrong" (the host's previous ROM).
+  var roomRom: str
   var told: str // the server's word for this page: "none" (not ready) | "nohash" | a ROM
   var toldFor: int // the load that word was said for
   var banner: bool // "Your ROM doesn't match" is shown
@@ -96,32 +126,43 @@ module rom_identity {
   var startedStale: bool // a start counted the page ready on a word not about the ROM it holds
   var bootedWrong: bool // the page booted a ROM that is not the host's
   var hostStartedStale: bool // the host started while its own ROM was being hashed
+  var startedOnAnotherRom: bool // a start counted the guest ready on a ROM the host no longer holds
 
-  // What the page makes of its ROM against the host's.
+  // The room names a ROM: "right" or "wrong".
+  pure def names(room: str): bool = room == "right" or room == "wrong"
+
+  // A ROM `r` the page holds is not the size of the room's.
+  pure def sizeDiffersFrom(room: str, r: str, same: bool): bool =
+    names(room) and r != "none" and r != room and not(same)
+
+  // What the page makes of its ROM against the room's.
   pure def verdictOf(
     judgeOwn: bool,
     hasRom: bool,
     hashIsLoaded: bool,
-    hostKnown: bool,
+    room: str,
     hash: str,
     sizeDiffers: bool,
-  ): str =
+  ): str = {
+    val hashDiffers = names(room) and hash != "none" and hash != room
     if (not(hasRom)) "none"
+    else if (room == "changing") "pending"
     else if (judgeOwn)
-      if (hostKnown and sizeDiffers) "mismatch"
+      if (sizeDiffers) "mismatch"
       else if (not(hashIsLoaded)) "pending"
-      else if (hostKnown and hash == "wrong") "mismatch"
+      else if (hashDiffers) "mismatch"
       else "match"
-    else if (hostKnown and (hash == "wrong" or sizeDiffers)) "mismatch"
+    else if (hashDiffers or sizeDiffers) "mismatch"
     else "match"
+  }
 
-  def sizeDiffers = loaded == "wrong" and not(sameSize)
+  def sizeDiffers = sizeDiffersFrom(roomRom, loaded, sameSize)
 
-  def verdict = verdictOf(JUDGE_OWN_HASH, loaded != "none", hashLoad == load, hostKnown, hash, sizeDiffers)
+  def verdict = verdictOf(JUDGE_OWN_HASH, loaded != "none", hashLoad == load, roomRom, hash, sizeDiffers)
 
   // `rom-ready` with the page's ROM. With JUDGE_OWN_HASH, never while the
-  // load is being hashed.
-  def announces = loaded != "none" and (not(JUDGE_OWN_HASH) or hashLoad == load)
+  // load is being hashed; never while the room's ROM is changing.
+  def announces = loaded != "none" and (not(JUDGE_OWN_HASH) or hashLoad == load) and roomRom != "changing"
 
   def wordFor(h: str): str = if (h == "none") "nohash" else h
 
@@ -134,6 +175,12 @@ module rom_identity {
   // The start and late-join plans: whether they count a ROM the page holds.
   def planHasRom(v: str): bool = if (BOOT_WAITS_FOR_HASH) (v == "match" or v == "mismatch") else loaded != "none"
 
+  // The names after the host drops a ROM: the one it held is "wrong" now,
+  // and the one it dropped "right": the guest's "wrong" (`toGuests`), or one
+  // the guest has never held.
+  pure def renamed(r: str, toGuests: bool): str =
+    if (r == "right") "wrong" else if (r == "wrong" and toGuests) "right" else r
+
   action initWith(same: bool, shares: bool): bool = all {
     sameSize' = same,
     sharing' = shares,
@@ -144,7 +191,7 @@ module rom_identity {
     hash' = "none",
     hashLoad' = 0,
     hashing' = Set(),
-    hostKnown' = false,
+    roomRom' = "none",
     told' = "none",
     toldFor' = 0,
     banner' = false,
@@ -156,6 +203,7 @@ module rom_identity {
     startedStale' = false,
     bootedWrong' = false,
     hostStartedStale' = false,
+    startedOnAnotherRom' = false,
   }
 
   action init = { nondet same = oneOf(Set(true, false)) nondet shares = oneOf(Set(true, false)) initWith(same, shares) }
@@ -184,7 +232,7 @@ module rom_identity {
     sameSize' = sameSize,
     sharing' = sharing,
     up' = up,
-    hostKnown' = hostKnown,
+    roomRom' = roomRom,
     hostHashing' = hostHashing,
     started' = started,
   }
@@ -194,19 +242,25 @@ module rom_identity {
     bootedWrong' = bootedWrong,
     startedStale' = startedStale,
     hostStartedStale' = hostStartedStale,
+    startedOnAnotherRom' = startedOnAnotherRom,
   }
 
-  // The page clears its ROM and says it has none (clearLoadedRom): as not the
-  // host's (a dropped one with the banner), or as unreadable.
-  action refuse(notTheHosts: bool, showBanner: bool): bool = all {
+  // The page clears its ROM (clearLoadedRom): as not the host's (a dropped
+  // one with the banner), or as unreadable.
+  action clearRom(notTheHosts: bool, showBanner: bool): bool = all {
     loaded' = "none",
     load' = load + 1,
     loadedIsDrop' = false,
     hash' = "none",
     hashLoad' = load + 1,
-    tell("none", load + 1, false),
     banner' = showBanner,
     clearedRight' = (clearedRight or (notTheHosts and loaded == "right")),
+  }
+
+  // ... and says it has none.
+  action refuse(notTheHosts: bool, showBanner: bool): bool = all {
+    clearRom(notTheHosts, showBanner),
+    tell("none", load + 1, false),
   }
 
   // The player drops a file: the page holds it now, and hashes it.
@@ -229,7 +283,7 @@ module rom_identity {
   // library: its hash is known at once (loadRomFromLibrary). A page waiting
   // in a started game joins it late with a ROM that is the host's.
   action pick(r: str): bool = {
-    val v = verdictOf(JUDGE_OWN_HASH, true, true, hostKnown, r, r == "wrong" and not(sameSize))
+    val v = verdictOf(JUDGE_OWN_HASH, true, true, roomRom, r, sizeDiffersFrom(roomRom, r, sameSize))
     val joins = plan == "awaiting" and v == "match"
     all {
       plan != "booted",
@@ -249,7 +303,8 @@ module rom_identity {
         loadedIsDrop' = false,
         hash' = r,
         hashLoad' = load + 1,
-        tell(r, load + 1, false),
+        // Nothing while the room's ROM is changing.
+        if (v == "match") tell(r, load + 1, false) else keepTold,
         banner' = false,
         clearedRight' = clearedRight,
       },
@@ -257,6 +312,7 @@ module rom_identity {
       bootedWrong' = (bootedWrong or (joins and r == "wrong")),
       startedStale' = startedStale,
       hostStartedStale' = hostStartedStale,
+      startedOnAnotherRom' = startedOnAnotherRom,
       hashing' = hashing,
       unchangedWorld,
     }
@@ -279,28 +335,43 @@ module rom_identity {
     unchangedStart,
   }
 
-  // The host's ROM reaches the page (handleHostRomChanged): a ROM that is not
-  // the host's is refused; one that is, is announced.
-  action hostArrives = {
-    val v = verdictOf(JUDGE_OWN_HASH, loaded != "none", hashLoad == load, true, hash, sizeDiffers)
+  // The room takes the host's ROM: the host's page said ready with it. A ROM
+  // that is not the room's previous one drops every guest's word
+  // (_invalidate_non_host_rom_state), and the guest's page, hearing it
+  // (applyHostRomFromData, handleHostRomChanged), refuses a ROM that is not
+  // the host's and announces one that is.
+  action roomTakesHostsRom = {
+    val v = verdictOf(JUDGE_OWN_HASH, loaded != "none", hashLoad == load, "right", hash, sizeDiffersFrom("right", loaded, sameSize))
     all {
-      not(hostKnown),
-      hostKnown' = true,
-      hashing' = hashing,
-      sameSize' = sameSize,
-      sharing' = sharing,
-      up' = up,
-      hostHashing' = hostHashing,
-      started' = started,
-      unchangedStart,
-      if (v == "mismatch") refuse(true, loadedIsDrop)
-      else all {
+      roomRom' = "right",
+      if (v == "mismatch") all {
+        clearRom(true, loadedIsDrop),
+        told' = "none",
+        toldFor' = load + 1,
+        toldStale' = toldStale,
+      } else all {
         unchangedRom,
         banner' = banner,
         clearedRight' = clearedRight,
-        if (v == "match") announce else keepTold,
+        if (v == "match" and up and loaded != "none" and (not(JUDGE_OWN_HASH) or hashLoad == load))
+          tell(wordFor(hash), load, staleWord(hash))
+        else all { told' = "none", toldFor' = toldFor, toldStale' = toldStale },
       },
     }
+  }
+
+  // The host's ROM reaches the room, and the page.
+  action hostArrives = all {
+    roomRom == "none",
+    not(hostHashing),
+    roomTakesHostsRom,
+    hashing' = hashing,
+    sameSize' = sameSize,
+    sharing' = sharing,
+    up' = up,
+    hostHashing' = hostHashing,
+    started' = started,
+    unchangedStart,
   }
 
   // The room changes (users-updated): the page says it is ready with its ROM
@@ -320,7 +391,7 @@ module rom_identity {
   // not that, or else announces it, and a page waiting in a started game
   // joins it late (dismissLateJoinPrompt).
   action hashLands(l: int, r: str): bool = {
-    val v = verdictOf(JUDGE_OWN_HASH, loaded != "none", l == load, hostKnown, r, sizeDiffers)
+    val v = verdictOf(JUDGE_OWN_HASH, loaded != "none", l == load, roomRom, r, sizeDiffers)
     // The onload announces with the hash it just set, whatever the page holds.
     val sends = not(JUDGE_OWN_HASH and l != load)
     val joins = plan == "awaiting" and v == "match" and loaded != "none"
@@ -330,6 +401,7 @@ module rom_identity {
       unchangedWorld,
       startedStale' = startedStale,
       hostStartedStale' = hostStartedStale,
+      startedOnAnotherRom' = startedOnAnotherRom,
       if (HASH_KEEPS_ITS_LOAD and l != load) all {
         unchangedRom,
         banner' = banner,
@@ -367,6 +439,7 @@ module rom_identity {
     unchangedWorld,
     startedStale' = startedStale,
     hostStartedStale' = hostStartedStale,
+    startedOnAnotherRom' = startedOnAnotherRom,
     plan' = plan,
     bootedWrong' = bootedWrong,
     if (FAILED_HASH_REFUSES and l == load) refuse(false, false)
@@ -389,7 +462,7 @@ module rom_identity {
     hashing' = hashing,
     sameSize' = sameSize,
     sharing' = sharing,
-    hostKnown' = hostKnown,
+    roomRom' = roomRom,
     hostHashing' = hostHashing,
     started' = started,
     unchangedStart,
@@ -415,60 +488,80 @@ module rom_identity {
     hashing' = hashing,
     sameSize' = sameSize,
     sharing' = sharing,
-    hostKnown' = hostKnown,
+    roomRom' = roomRom,
     hostHashing' = hostHashing,
     started' = started,
     unchangedStart,
   }
 
-  // The host drops a new ROM of its own (here only for its own Start).
-  action hostDrops = all {
+  // The host drops a new ROM of its own (loadRomData on the host's page): the
+  // guest's ROM's name follows the host's (`renamed`). With
+  // HOST_DROP_SAYS_CHANGING the server hears at once that the host's ROM is
+  // changing, drops every guest's word (_clear_host_rom) and tells the room;
+  // without, nothing changes for the server or the guest until the hash lands.
+  action hostDrops(toGuests: bool): bool = all {
+    up,
     not(started),
     not(hostHashing),
     hostHashing' = true,
-    unchangedRom,
-    keepTold,
+    loaded' = renamed(loaded, toGuests),
+    load' = load,
+    loadedIsDrop' = loadedIsDrop,
+    hash' = renamed(hash, toGuests),
+    hashLoad' = hashLoad,
+    hashing' = hashing.map(x => (x._1, renamed(x._2, toGuests))),
+    if (HOST_DROP_SAYS_CHANGING) all {
+      roomRom' = "changing",
+      told' = "none",
+      toldFor' = toldFor,
+      toldStale' = toldStale,
+    } else all {
+      roomRom' = renamed(roomRom, toGuests),
+      told' = renamed(told, toGuests),
+      toldFor' = toldFor,
+      toldStale' = toldStale,
+    },
     banner' = banner,
     clearedRight' = clearedRight,
-    hashing' = hashing,
     sameSize' = sameSize,
     sharing' = sharing,
     up' = up,
-    hostKnown' = hostKnown,
     started' = started,
     unchangedStart,
   }
 
+  // The host's dropped ROM is hashed: its page says ready with it, and the
+  // room takes it.
   action hostHashLands = all {
+    up,
+    not(started),
     hostHashing,
     hostHashing' = false,
-    unchangedRom,
-    keepTold,
-    banner' = banner,
-    clearedRight' = clearedRight,
+    roomTakesHostsRom,
     hashing' = hashing,
     sameSize' = sameSize,
     sharing' = sharing,
     up' = up,
-    hostKnown' = hostKnown,
     started' = started,
     unchangedStart,
   }
 
   // The host presses Start. The host's page refuses while its own ROM is
-  // being hashed (HOST_START_WAITS_FOR_HASH); the server takes it when the
-  // host shares its ROM or the guest's word says ready.
+  // being hashed (HOST_START_WAITS_FOR_HASH), the server while the room's ROM
+  // is changing; it takes it when the host shares its ROM or the guest's word
+  // says ready.
   action start = {
     val hostRefuses = HOST_START_WAITS_FOR_HASH and hostHashing
-    val takes = not(hostRefuses) and (sharing or told != "none")
+    val takes = not(hostRefuses) and roomRom != "changing" and (sharing or told != "none")
     all {
       not(started),
-      hostKnown,
+      roomRom != "none",
       started' = takes,
       // While the guest's socket is down the server holds its last word,
       // whatever the page does (rom_at_start.qnt, clearedWhileDownTest).
       startedStale' = (startedStale or (takes and up and not(sharing) and serverWordIsStale)),
       hostStartedStale' = (hostStartedStale or (takes and hostHashing)),
+      startedOnAnotherRom' = (startedOnAnotherRom or (takes and not(sharing) and told == "wrong")),
       plan' = plan,
       bootedWrong' = bootedWrong,
       unchangedRom,
@@ -479,7 +572,7 @@ module rom_identity {
       sameSize' = sameSize,
       sharing' = sharing,
       up' = up,
-      hostKnown' = hostKnown,
+      roomRom' = roomRom,
       hostHashing' = hostHashing,
     }
   }
@@ -500,6 +593,7 @@ module rom_identity {
       if (boots) keepTold else tell("none", load, false),
       startedStale' = startedStale,
       hostStartedStale' = hostStartedStale,
+      startedOnAnotherRom' = startedOnAnotherRom,
       unchangedRom,
       banner' = banner,
       clearedRight' = clearedRight,
@@ -518,7 +612,7 @@ module rom_identity {
     hashFailsAny,
     dropSocket,
     rejoin,
-    hostDrops,
+    nondet toGuests = oneOf(Set(true, false)) hostDrops(toGuests),
     hostHashLands,
     start,
     gameStarted,
@@ -528,13 +622,14 @@ module rom_identity {
   // never says it is ready with no ROM.
   val neverAnnouncesAStaleRom = not(toldStale)
 
-  // The page never clears the host's ROM as not the host's.
+  // The page never clears the host's ROM as not the host's: neither the ROM
+  // the host has nor the one it has just dropped.
   val aRightRomStays = not(clearedRight)
 
-  // With the socket up, nothing being hashed and the host's ROM known, the
-  // page holds the host's ROM and has said so, or holds none.
+  // With the socket up, nothing being hashed and the room naming the host's
+  // ROM, the page holds the host's ROM and has said so, or holds none.
   val aSettledRomIsTheHosts =
-    (up and hashing == Set() and hostKnown and loaded != "none") implies (loaded == "right" and told == "right")
+    (up and hashing == Set() and roomRom == "right" and loaded != "none") implies (loaded == "right" and told == "right")
 
   // Once nothing is being hashed, the hash the page holds is its ROM's own.
   val aSettledRomKeepsItsHash = (hashing == Set() and loaded != "none") implies (hashLoad == load and hash == loaded)
@@ -549,6 +644,14 @@ module rom_identity {
   // The host never starts on a hash that is not its loaded ROM's.
   val theHostStartsOnItsOwnHash = not(hostStartedStale)
 
+  // While the room names a ROM, the server never counts the guest ready on a
+  // ROM the host no longer holds. (While the room names none, the server
+  // has nothing to hold a guest's word against.)
+  val theServerCountsOnlyTheHostsRom = names(roomRom) implies told != "wrong"
+
+  // No start counts the guest ready on a ROM the host no longer holds.
+  val aStartCountsOnlyTheHostsRom = not(startedOnAnotherRom)
+
   val allHold = and {
     neverAnnouncesAStaleRom,
     aRightRomStays,
@@ -557,6 +660,8 @@ module rom_identity {
     aStartCountsOnlyTheLoadedRom,
     neverBootsAWrongRom,
     theHostStartsOnItsOwnHash,
+    theServerCountsOnlyTheHostsRom,
+    aStartCountsOnlyTheHostsRom,
   }
 
   // The guest has a wrong ROM, drops the host's over it, and the host's ROM
@@ -681,7 +786,7 @@ module rom_identity {
   run hostStartsWhileHashingTest =
     initWith(true, true)
       .then(hostArrives)
-      .then(hostDrops)
+      .then(hostDrops(false))
       .then(start)
       .expect(theHostStartsOnItsOwnHash == HOST_START_WAITS_FOR_HASH)
       .expect(started == not(HOST_START_WAITS_FOR_HASH))
@@ -710,6 +815,62 @@ module rom_identity {
       .then(rejoin)
       .then(start)
       .expect(aStartCountsOnlyTheLoadedRom == (DROP_SAYS_NOT_READY and REJOIN_SAYS_PENDING))
+
+  // The host's ROM is known, and the host drops another: the one the guest
+  // is about to drop (the guest's "wrong" is "right" from here on). The
+  // guest drops it, and its hash lands before the host's. With the host's
+  // drop unsaid, the room still names the host's previous ROM, and the
+  // guest's ROM, the host's new one, is refused against it. Today the room's
+  // ROM is changing: the guest's page waits, and the host's hash, landing,
+  // finds the guest's ROM is the host's and it is announced.
+  run hostChangesToTheGuestsRomTest =
+    initWith(true, false)
+      .then(hostArrives)
+      .then(hostDrops(true))
+      .then(drop("right"))
+      .then(hashLands(1, "right"))
+      .expect(aRightRomStays == HOST_DROP_SAYS_CHANGING)
+      .expect(loaded == (if (HOST_DROP_SAYS_CHANGING) "right" else "none"))
+      .then(hostHashLands)
+      .expect(told == (if (HOST_DROP_SAYS_CHANGING) "right" else "none"))
+      .expect(allHold == HOST_DROP_SAYS_CHANGING)
+
+  // The guest holds the host's ROM, and the server has heard so; the host
+  // drops another, one the guest has never held. With the host's drop
+  // unsaid, the room names the host's previous ROM while the new one is
+  // hashed: the server still counts the guest ready on it, and the page says
+  // so again at the next room change. Today the server drops the guest's
+  // word at once and the page waits. Either way the host's hash, landing,
+  // drops the guest's word and refuses its ROM.
+  run hostChangesAwayFromTheGuestsRomTest =
+    initWith(true, false)
+      .then(hostArrives)
+      .then(drop("right"))
+      .then(hashLands(1, "right"))
+      .expect(told == "right")
+      .then(hostDrops(false))
+      .then(roomUpdate)
+      .expect(theServerCountsOnlyTheHostsRom == HOST_DROP_SAYS_CHANGING)
+      .expect(told == (if (HOST_DROP_SAYS_CHANGING) "none" else "wrong"))
+      .then(hostHashLands)
+      .expect(told == "none")
+      .expect(loaded == "none")
+      .expect(banner)
+
+  // The same, and the host presses Start while its new ROM is hashed. No
+  // start takes the guest's word for the host's previous ROM while the
+  // host's Start waits for its own hash (or the server refuses while the
+  // room's ROM is changing); without either (#289 as first pushed), the
+  // start was taken on it.
+  run hostChangesThenStartsTest =
+    initWith(true, false)
+      .then(hostArrives)
+      .then(drop("right"))
+      .then(hashLands(1, "right"))
+      .then(hostDrops(false))
+      .then(start)
+      .expect(aStartCountsOnlyTheHostsRom == (HOST_START_WAITS_FOR_HASH or HOST_DROP_SAYS_CHANGING))
+      .expect(started == not(HOST_START_WAITS_FOR_HASH or HOST_DROP_SAYS_CHANGING))
 }
 
 // Before: every check and every rom-ready read `_romHash`, whatever load it
@@ -723,6 +884,7 @@ module rom_identity_before {
     HOST_START_WAITS_FOR_HASH = false,
     FAILED_HASH_REFUSES = false,
     REJOIN_SAYS_PENDING = false,
+    HOST_DROP_SAYS_CHANGING = false,
   ).*
 }
 
@@ -737,6 +899,7 @@ module rom_identity_judge_only {
     HOST_START_WAITS_FOR_HASH = false,
     FAILED_HASH_REFUSES = false,
     REJOIN_SAYS_PENDING = false,
+    HOST_DROP_SAYS_CHANGING = false,
   ).*
 }
 
@@ -751,6 +914,7 @@ module rom_identity_no_retract {
     HOST_START_WAITS_FOR_HASH = false,
     FAILED_HASH_REFUSES = false,
     REJOIN_SAYS_PENDING = false,
+    HOST_DROP_SAYS_CHANGING = false,
   ).*
 }
 
@@ -766,6 +930,23 @@ module rom_identity_first_push {
     HOST_START_WAITS_FOR_HASH = false,
     FAILED_HASH_REFUSES = false,
     REJOIN_SAYS_PENDING = false,
+    HOST_DROP_SAYS_CHANGING = false,
+  ).*
+}
+
+// #289: a guest's page judges only by its own ROM's hash, but the host's
+// drop says nothing, so the room names the host's previous ROM while the
+// new one is hashed.
+module rom_identity_host_silent {
+  import rom_identity(
+    JUDGE_OWN_HASH = true,
+    HASH_KEEPS_ITS_LOAD = true,
+    DROP_SAYS_NOT_READY = true,
+    BOOT_WAITS_FOR_HASH = true,
+    HOST_START_WAITS_FOR_HASH = true,
+    FAILED_HASH_REFUSES = true,
+    REJOIN_SAYS_PENDING = true,
+    HOST_DROP_SAYS_CHANGING = false,
   ).*
 }
 
@@ -779,5 +960,6 @@ module rom_identity_current {
     HOST_START_WAITS_FOR_HASH = true,
     FAILED_HASH_REFUSES = true,
     REJOIN_SAYS_PENDING = true,
+    HOST_DROP_SAYS_CHANGING = true,
   ).*
 }

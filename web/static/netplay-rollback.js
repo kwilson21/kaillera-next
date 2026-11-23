@@ -5171,6 +5171,9 @@
   // that state and whether an input at or before it has since differed from
   // its prediction (specs/sync_follow_up.qnt). Set as the state is taken.
   const _followUpWatches = new Map(); // sid -> {frame, changed}
+  // Host: per guest, the newest direct answer (_answerDirectSyncRequest). Only
+  // its completion schedules the follow-up; resetPeerState clears it (I2).
+  const _directAnswerNewest = new Map(); // sid -> token
   // The buffer belongs to the module that allocated it: EmulatorJS can
   // replace the module between matches, and stopSync drops it with the
   // other scratch buffers.
@@ -7000,16 +7003,17 @@
   // context, so adding a new top-level field would be silently dropped —
   // emitting via _syncLog is the path of least resistance.
   //
-  // The C buffer holds the newest lines: when full it drops its oldest half
-  // and counts the bytes dropped (_kn_get_debug_log_dropped), so the buffer
-  // starts at that absolute offset. We remember the absolute offset drained
-  // so far and emit only what follows it; if more was dropped than we had
-  // read, a C-LOG-DROPPED line says how much was missed. A core built before
-  // that export fills its buffer and stops, and kn_rollback_init restarts
-  // it: its offset is the length, and a shorter log than drained is a
-  // restart, read from its start. Lines are prefixed [C] so they're easy to
-  // filter post-mortem.
-  let _cDebugLogDrainedTo = 0;
+  // We track how much of the C log has been drained and only emit the new
+  // tail. A core from before _kn_get_debug_log_dropped fills its buffer and
+  // stops, and kn_rollback_init starts it over: the count is a length
+  // (KNCore.cLogTail), doRollbackInit drains first when it re-inits a running
+  // match and resets the count after. A current core keeps the newest lines:
+  // when full it drops its oldest half and counts the bytes dropped, and its
+  // log runs on across inits, so the count is an absolute offset
+  // (KNCore.cLogTailFrom) and a C-LOG-DROPPED line says how much was dropped
+  // before it was read. Lines are prefixed [C] so they're easy to filter
+  // post-mortem.
+  let _cDebugLogLastLen = 0;
   const _drainCDebugLog = () => {
     const m = window.EJS_emulator?.gameManager?.Module;
     if (!m?._kn_get_debug_log) return;
@@ -7017,23 +7021,33 @@
       const ptr = m._kn_get_debug_log();
       if (!ptr) return;
       const full = m.UTF8ToString ? m.UTF8ToString(ptr) : window.UTF8ToString?.(ptr);
-      if (typeof full !== 'string') return;
-      const dropped = m._kn_get_debug_log_dropped ? m._kn_get_debug_log_dropped() >>> 0 : 0;
-      const end = dropped + full.length;
-      if (end < _cDebugLogDrainedTo) _cDebugLogDrainedTo = dropped;
-      if (end === _cDebugLogDrainedTo) return;
-      let from = _cDebugLogDrainedTo - dropped;
-      if (from < 0) {
-        _syncLog(`[C] C-LOG-DROPPED bytes=${-from}`);
-        from = 0;
+      if (!full || typeof full !== 'string') return;
+      let next;
+      if (m._kn_get_debug_log_dropped) {
+        next = window.KNCore.cLogTailFrom(full, _cDebugLogLastLen, m._kn_get_debug_log_dropped() >>> 0);
+        if (next.missed) _syncLog(`[C] C-LOG-DROPPED bytes=${next.missed}`);
+      } else {
+        next = window.KNCore.cLogTail(full, _cDebugLogLastLen);
       }
-      const tail = full.slice(from);
-      _cDebugLogDrainedTo = end;
+      const tail = next.tail;
+      _cDebugLogLastLen = next.drained;
+      if (!tail) return;
       // Emit each non-empty line as its own entry
       const lines = tail.split('\n');
       for (const line of lines) {
         if (line.trim()) _syncLog(`[C] ${line}`);
       }
+    } catch (_) {}
+  };
+  // A current core's log runs on across matches: what it holds now is the
+  // last match's tail, which is not this match's to send.
+  const _skipCDebugLog = () => {
+    const m = window.EJS_emulator?.gameManager?.Module;
+    if (!m?._kn_get_debug_log || !m._kn_get_debug_log_dropped) return;
+    try {
+      const ptr = m._kn_get_debug_log();
+      const full = ptr ? (m.UTF8ToString ? m.UTF8ToString(ptr) : window.UTF8ToString?.(ptr)) : '';
+      _cDebugLogLastLen = (m._kn_get_debug_log_dropped() >>> 0) + (typeof full === 'string' ? full.length : 0);
     } catch (_) {}
   };
 
@@ -7928,11 +7942,11 @@
       return;
     }
     _syncLog(`received socket sync-request-full from ${requesterSid} reason=${msg.reason || 'unknown'}`);
-    pushSyncState(requesterSid, false, {
+    // Watched and followed up like a data-channel request, over the socket
+    // (specs/sync_follow_up.qnt, SOCKET_WATCHED).
+    _answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {
       transport: 'socket',
-      waitForResult: false,
       reason: msg.reason || 'socket-request',
-      requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) },
     });
   };
 
@@ -10832,6 +10846,7 @@
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
       _followUpWatches.delete(opts.sid);
+      _directAnswerNewest.delete(opts.sid);
       _queuedSyncPushes.get(opts.sid)?.resolve?.(null);
       _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
@@ -14986,6 +15001,15 @@
             'C-ROLLBACK split-rdram requested but _kn_set_state_backend export is missing; using retro_serialize',
           );
         }
+        // kn_rollback_init starts the C log over. Armed already, this is a
+        // re-init within the match (the re-arm at a late join): drain what
+        // the engine has logged since the last flush first. Not armed, the
+        // buffer holds the last match's tail (its kn_rollback_shutdown line
+        // comes after its final flush), which is not this match's to send:
+        // the reset below drops it on a core whose log starts over, and a
+        // core whose log runs on skips it here.
+        if (_useCRollback) _drainCDebugLog();
+        else _skipCDebugLog();
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
         for (const record of _lateJoinInputWindows.values()) record.primed = false;
         // The desync detector reports a frame only once it is this far
@@ -15071,10 +15095,10 @@
         // P4: reset the failed_rollbacks baseline at init so any increase
         // during the match is detected fresh.
         _rbLastFailedRollbacks = 0;
-        // A core from before _kn_get_debug_log_dropped restarts its log in
+        // A core from before _kn_get_debug_log_dropped starts its log over in
         // kn_rollback_init, so the new log is read from its start. A current
         // core's log runs on across inits and its offset only grows.
-        if (!detMod._kn_get_debug_log_dropped) _cDebugLogDrainedTo = 0;
+        if (!detMod._kn_get_debug_log_dropped) _cDebugLogLastLen = 0;
         // Reset divergence diagnostics state
         _rbLastGoodFrame = -1;
         _rbBisectActive = false;
@@ -16017,7 +16041,11 @@
     // opens, or resetPeerState drops it when that peer disconnects (I2).
     const reachable = (r) => {
       const p = _peers[r.targetSid];
-      const ok = p?.syncDc?.readyState === 'open';
+      // A request asked over the signaling socket is answered over it, while
+      // that socket is connected: Socket.IO buffers an emit made while it is
+      // down and sends it on reconnect, by then to an old socket id, after the
+      // guest may have asked again.
+      const ok = r.transport === 'socket' ? !!p && !!socket?.connected : p?.syncDc?.readyState === 'open';
       if (!ok && !r.unreachableLogged) {
         r.unreachableLogged = true;
         _syncLog(`coord sync held: target ${r.targetSid} has no open channel`);
@@ -16068,10 +16096,13 @@
       }
     }
     _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !due.includes(r));
-    // Broadcast if multiple guests need sync simultaneously (all at same lockstep frame)
-    const targetSid = due.length === 1 ? due[0].targetSid : null;
+    // Broadcast over the data channel if several guests need a sync at once
+    // (all at the same lockstep frame); one asked over the socket gets its own.
+    const viaSocket = due.filter((r) => r.transport === 'socket');
+    const viaChannel = due.filter((r) => r.transport !== 'socket');
     _syncLog(
-      `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}${targetSid === null ? ' (broadcast)' : ''}`,
+      `coord sync dispatch: ${due.length} guest(s) at frame ${_frameNum}` +
+        `${viaChannel.length > 1 ? ' (broadcast)' : ''}${viaSocket.length > 0 ? ` (${viaSocket.length} over the socket)` : ''}`,
     );
     const requeue = (r, followUp, watch) =>
       _scheduledSyncRequests.push({
@@ -16083,6 +16114,8 @@
         deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
         // What became of the state it follows (null: send regardless).
         watch: watch ?? null,
+        // The way the request came (the signaling socket, or the data channel).
+        ...(r.transport ? { transport: r.transport } : {}),
       });
     // Confirmation skips phantom peers, so a state sent while a target is a
     // phantom is not confirmed for that target.
@@ -16090,19 +16123,39 @@
       due.filter((r) => !confirmed || _peerPhantom[_peers[r.targetSid]?.slot]).map((r) => r.targetSid),
     );
     const epoch = _syncQueueEpoch;
-    const gens = due.map((r) => _syncQueueGen[r.targetSid] || 0);
     // Each guest numbers its own requests: one number per target. A sync the
     // host scheduled for its own reasons has none.
-    const requestIds = {};
-    for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;
-    pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] }).then((skipped) => {
-      due.forEach((r, i) => {
+    const requestIdsOf = (group) => {
+      const ids = {};
+      for (const r of group) if (r.requestId) ids[r.targetSid] = r.requestId;
+      return ids;
+    };
+    const afterPush = (group, gens) => (skipped) => {
+      group.forEach((r, i) => {
         // Gone, reset (reconnect) or match stopped since: resetPeerState's job.
         if (!_peers[r.targetSid] || epoch !== _syncQueueEpoch || gens[i] !== (_syncQueueGen[r.targetSid] || 0)) return;
         // The guest asked again while this push was in flight; its newer
         // request replaces this one.
         if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
-        if (skipped === null || skipped?.includes(r.targetSid)) {
+        // A direct answer to this guest is on its way (queued behind this
+        // push): it owns the next follow-up, for the state the guest ends on.
+        // Requeued here, this older one would stand in its place as
+        // `replaced` and carry the older request number.
+        if (_directAnswerNewest.has(r.targetSid)) {
+          _syncLog(`coord sync to ${r.targetSid}: superseded by a newer direct answer, not re-queued`);
+          return;
+        }
+        if (r.transport === 'socket' && (skipped == null || skipped.includes(r.targetSid))) {
+          // Not sent over the socket (a state too large for it falls back to
+          // a channel that is down). The socket stays reachable, so put back
+          // unchanged it would be taken again every tick: count it against
+          // SYNC_FOLLOW_UP_MAX instead (I1; from #307).
+          const n = (r.followUp || 0) + 1;
+          if (n <= SYNC_FOLLOW_UP_MAX) {
+            _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; re-queued (${n})`);
+            requeue(r, n, null);
+          } else _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; follow-ups exhausted`);
+        } else if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so
           // it goes out when reachable.
@@ -16118,7 +16171,18 @@
           else _syncLog(`coord sync follow-ups exhausted for ${r.targetSid}`);
         }
       });
-    });
+    };
+    const push = (group, targetSid, extra = {}) => {
+      const gens = group.map((r) => _syncQueueGen[r.targetSid] || 0);
+      const watchFor = group.filter((r) => unconfirmedFor.has(r.targetSid)).map((r) => r.targetSid);
+      return Promise.resolve(
+        pushSyncState(targetSid, false, { requestIds: requestIdsOf(group), watchFor, ...extra }),
+      ).then(afterPush(group, gens));
+    };
+    // Over the data channel: one push, a broadcast when several are due.
+    if (viaChannel.length > 0) push(viaChannel, viaChannel.length === 1 ? viaChannel[0].targetSid : null);
+    // Over the signaling socket: one push per guest, the way it asked.
+    for (const r of viaSocket) push([r], r.targetSid, { transport: 'socket', reason: 'socket-follow-up' });
   };
   const SYNC_FOLLOW_UP_MAX = 3;
 
@@ -16135,11 +16199,33 @@
   // confirmed or at its deadline, within SYNC_FOLLOW_UP_MAX. Unwatched, such
   // an answer was final, and a late joiner played on split for the rest of
   // the match (specs/sync_follow_up.qnt, DIRECT_WATCHED).
-  const _answerDirectSyncRequest = (sid, requestId) => {
+  const _answerDirectSyncRequest = (sid, requestId, via = {}) => {
     const requestIds = { [sid]: requestId };
+    // Over the socket (handleSocketSyncRequest) the answer and its follow-up
+    // go the way the request came.
+    const transport = via.transport === 'socket' ? 'socket' : undefined;
     const epoch = _syncQueueEpoch;
     const gen = _syncQueueGen[sid] || 0;
-    Promise.resolve(pushSyncState(sid, false, { requestIds, watchFor: [sid] })).then((skipped) => {
+    // This answer supersedes any follow-up still queued for an earlier one to
+    // this guest (a request asked again over the socket after its data-channel
+    // answer stalled): it gets its own, the way it asked.
+    const superseded = _scheduledSyncRequests.filter((q) => q.targetSid === sid && q.followUp > 0).length;
+    if (superseded > 0) {
+      _scheduledSyncRequests = _scheduledSyncRequests.filter((q) => !(q.targetSid === sid && q.followUp > 0));
+      _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid}: ${superseded} queued follow-up(s) superseded by a new answer`);
+    }
+    const options = { requestIds, watchFor: [sid], ...(transport ? { transport, reason: via.reason } : {}) };
+    // Answers to one guest asked while a push is in flight share the queued
+    // push behind it, whose state is taken last. Only the newest answer's
+    // completion schedules the follow-up, with that state's watch and that
+    // request's number: an older one finishing first would follow up its own
+    // state's watch, and the newer answer, finding that follow-up queued,
+    // would add none for the state the guest ends on (from #307).
+    const token = {};
+    _directAnswerNewest.set(sid, token);
+    Promise.resolve(pushSyncState(sid, false, options)).then((skipped) => {
+      if (_directAnswerNewest.get(sid) !== token) return;
+      _directAnswerNewest.delete(sid);
       // Still the guest it was sent to: not gone, reset (reconnect) or a
       // match stopped since (those are resetPeerState's job).
       const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
@@ -16163,6 +16249,7 @@
         requestId: requestId || 0,
         deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
         watch: _followUpWatches.get(sid) ?? null,
+        ...(transport ? { transport } : {}),
       });
     });
   };
@@ -19614,6 +19701,13 @@
               notSent('the socket target changed', attempts);
               return [];
             }
+            // The socket can drop while the state is compressed: not sent (a
+            // follow-up retries within its bound, an answer is asked again).
+            if (!socket?.connected) {
+              _syncLog(`socket sync send skipped: the signaling socket is not connected (${targetSid})`);
+              notSent('the signaling socket is not connected', attempts);
+              return [targetSid];
+            }
             const b64KB = Math.round(encoded.data.length / 1024);
             const wireKB = Math.round(encoded.compressedSize / 1024);
             if (encoded.data.length <= SOCKET_SYNC_B64_SOFT_LIMIT) {
@@ -19632,6 +19726,10 @@
                 ...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {}),
               });
               _settleInputsBefore(_peers[targetSid].slot, frame);
+              // Handed over whole: a follow-up may be skipped if nothing
+              // changed (specs/sync_follow_up.qnt, SOCKET_DELIVERED).
+              const watch = _followUpWatches.get(targetSid);
+              if (watch && watch.frame === frame) watch.delivered = true;
               _onEscalationTransfer(attempts, targetSid, true, frame);
               _syncLog(
                 `socket sync sent to slot=${_peers[targetSid].slot}: full ` +
@@ -20706,6 +20804,7 @@
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
     _followUpWatches.clear();
+    _directAnswerNewest.clear();
     _syncQueueEpoch++;
     // Each transfer still on a chain sees the new epoch and stops.
     _syncSendChains = {};

@@ -549,9 +549,9 @@ const scenarios = {
     await guest.page.evaluate(() => document.getElementById('toolbar-leave')?.click());
     if (!(await waitUntil(async () => (await playersInRoom(room)) === 1, 30000)))
       failures.push('the room did not let the guest go');
+    const leftAtFrame = await frameOf(host);
     if (!(await waitForFrames([host], 120, 120000))) failures.push('the host stopped advancing after the guest left');
     const skippedAlone = await skippedOn(host);
-    const leftAtFrame = await frameOf(host);
     if (skippedAlone === null) failures.push("the host's core has no kn_get_serialize_skip_count");
     else if (!(skippedAlone > skippedWhileTwo))
       failures.push(`the host did not skip its saves once alone (count ${skippedWhileTwo} -> ${skippedAlone})`);

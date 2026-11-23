@@ -1029,19 +1029,20 @@ def test_only_its_own_answer_ends_a_resync_request():
     # A direct request is answered by the watched answer, which numbers each
     # state it sends with the request it answers (specs/sync_follow_up.qnt).
     assert "_answerDirectSyncRequest(remoteSid, requestId);" in host
-    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId) => {") :]
+    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId, via = {}) => {") :]
     direct = direct[: direct.index("\n  };\n")]
     assert "const requestIds = { [sid]: requestId };" in direct
-    assert "pushSyncState(sid, false, { requestIds, watchFor: [sid] })" in direct
-    assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
+    assert "const options = { requestIds, watchFor: [sid]," in direct
+    assert "pushSyncState(sid, false, options)" in direct
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {" in src
 
     # A scheduled capture, its follow-ups and re-queues keep the number; a
     # sync the host schedules for its own reasons has none.
     dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
     dispatch = dispatch[: dispatch.index("\n  };\n")]
     assert "requestId: r.requestId || 0," in dispatch
-    assert "for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;" in dispatch
-    assert "pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] })" in dispatch
+    assert "for (const r of group) if (r.requestId) ids[r.targetSid] = r.requestId;" in dispatch
+    assert "pushSyncState(targetSid, false, { requestIds: requestIdsOf(group), watchFor, ...extra })" in dispatch
     recovery = src[src.index("push its state to the guest once it is final") :]
     recovery = recovery[: recovery.index("_settleInputsBefore(")]
     assert "requestId" not in recovery
@@ -1191,9 +1192,11 @@ def test_a_chunk_timeout_is_scoped_to_the_request_its_transfer_answers():
 
 
 def test_the_c_log_drain_offset_is_reset_under_its_own_name():
-    """The drain offset was renamed and doRollbackInit kept assigning the old
-    name: in strict mode that throws, and the match stops as it starts."""
+    """One name for the drain count everywhere: a rename once left doRollbackInit
+    assigning the old one, which throws in strict mode as the match starts."""
     src = (ROOT / "web" / "static" / "netplay-rollback.js").read_text()
-    assert "_cDebugLogLastLen" not in src
-    assert "let _cDebugLogDrainedTo = 0;" in src
-    assert "if (!detMod._kn_get_debug_log_dropped) _cDebugLogDrainedTo = 0;" in src
+    assert "_cDebugLogDrainedTo" not in src
+    assert "let _cDebugLogLastLen = 0;" in src
+    # Only a core whose log starts over at init has its count reset there.
+    assert "if (!detMod._kn_get_debug_log_dropped) _cDebugLogLastLen = 0;" in src
+    assert len(re.findall(r"(?<![\w.])_cDebugLogLastLen\b", src)) >= 5

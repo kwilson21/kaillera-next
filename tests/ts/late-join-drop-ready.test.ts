@@ -28,7 +28,7 @@ function room(peerPresent = false) {
  const _lateJoinInputWindows=new Map();
  const _clearSlotInputState=()=>{},_peerLastAdvanceTime={},_peerPhantom={},_inputLateLogTime={},_auditLastRemote={};
  const _rbCheckBook=null,_rbLegacyCheckSlots=new Set();
- const _pendingCInputs=[],_followUpWatches=new Map(),_queuedSyncPushes=new Map(),_syncSendChains={},_syncChainMovedAt={};
+ const _pendingCInputs=[],_followUpWatches=new Map(),_directAnswerNewest=new Map(),_queuedSyncPushes=new Map(),_syncSendChains={},_syncChainMovedAt={};
  let _scheduledSyncRequests=[];const clearPeerStallTimers=()=>{},_useCRollback=false,_awaitFirstInputAfterReset={};
  ${part('  const resetPeerState =', '  // -- Peer disconnect')}
  globalThis.reset=()=>resetPeerState(1,'drop',{sid:'a',peer});

@@ -16,6 +16,7 @@ import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { lockstepStep } from './lockstep-wait.ts';
 import { delayAtJoin, guestStartStep } from './engine-start.ts';
+import { cLogTail, cLogTailFrom } from './c-log-tail.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
@@ -372,6 +373,9 @@ export const KNCore = {
   guestStartStep,
   /** The delay a match runs at once a player joins it: its first player moves a match at 0 to a match delay (web/src/engine-start.ts). */
   delayAtJoin,
+  /** The part of the C engine's debug log not yet drained; a buffer shorter than what was drained is a new one (web/src/c-log-tail.ts). */
+  cLogTail,
+  cLogTailFrom,
   measureCanvasHealth,
   digestFrame,
   /** RB-CHECK: the rollback engine's cross-peer check of confirmed gameplay hashes (web/src/rb-check.ts, specs/rb_check.qnt). */

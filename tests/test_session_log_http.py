@@ -413,21 +413,37 @@ def test_admin_legacy_detail_and_explicit_export_still_bundle_raw_data(audit_cli
     )
     chunks = AsyncMock(return_value=[{"msg": "older"}, {"msg": "chunk"}])
     monkeypatch.setattr(db, "get_full_log_entries", chunks)
+    # The export streams the chunks it counted, a page at a time.
+    monkeypatch.setattr(db, "count_log_entries", AsyncMock(return_value=(1, 7)))
+    pages = []
+
+    async def iter_chunk_entries(match_id, slot, kind="log", *, through_id=None):
+        pages.append((match_id, slot, kind, through_id))
+        yield [{"msg": "chunk"}]
+
+    monkeypatch.setattr(db, "iter_chunk_entries", iter_chunk_entries)
     path = "/admin/api/session-logs/42"
     key = {"X-Admin-Key": "k"}
     resp = http.get(path, headers=key)
     assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/json"
     assert resp.json()["log_data"] == [{"msg": "older"}, {"msg": "chunk"}]
     assert resp.json()["client_events"] == []
     assert resp.json()["desync_events"] == []
+    assert chunks.await_count == 1
     assert http.get(f"{path}/export").status_code == 401
     resp = http.get(f"{path}/export", headers=key)
     assert resp.status_code == 200
     assert resp.headers["content-disposition"] == 'attachment; filename="session-42.jsonl"'
     assert resp.headers["x-entry-count"] == "2"
-    assert '"_kind": "meta"' in resp.text.splitlines()[0]
-    assert '"msg":"chunk"' in resp.text.splitlines()[2]
-    assert chunks.await_count == 2
+    lines = resp.text.splitlines()
+    assert '"_kind": "meta"' in lines[0] and '"entry_count": 2' in lines[0]
+    assert lines[1:] == [
+        '{"session_id":42,"match_id":"m1","slot":1,"msg":"older"}',
+        '{"session_id":42,"match_id":"m1","slot":1,"msg":"chunk"}',
+    ]
+    assert pages == [("m1", 1, "log", 7)]
+    assert chunks.await_count == 1
 
 
 def test_admin_compact_verdicts_keep_outcomes_without_replay_or_payload_blobs(audit_client):
