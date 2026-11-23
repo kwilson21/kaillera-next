@@ -656,13 +656,26 @@ $QUINT run "$ESCP" --main=hole_counts_fixed --invariant=pushesAreBoundedForEvery
 # ── After a reconnect, frames run before the peer's inputs ────────────────
 REC=specs/reconnect_inputs.qnt
 $QUINT typecheck "$REC"
-for variant in reconnect_inputs_current reconnect_inputs_fixed; do
+for variant in reconnect_inputs_current reconnect_inputs_fixed reconnect_inputs_keeps_history \
+  reconnect_history_before reconnect_history_current reconnect_history_fixed; do
   $QUINT test "$REC" --main="$variant" --backend="$BACKEND"
 done
 # Today the reset leaves the C slot inactive and the page runs frames on the
 # peer's missing input, recording no prediction (reconnect_inputs_current;
 # runBeforeFirstInputTest).
 $QUINT run "$REC" --main=reconnect_inputs_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# The same with the reset that puts the ring's inputs back (de361fd, the
+# scheduled rule): the slot may be active at once; the first-input wait is JS's.
+$QUINT run "$REC" --main=reconnect_inputs_keeps_history --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# The frames run before the reset: an emptied slot loses the predictions C
+# would check and a replay runs those frames neutral (reconnect_history_before);
+# the ring's inputs put back as real ones make a prediction real, so the
+# peer's real input is stored over it unchecked (reconnect_history_current;
+# predictionPutBackAsRealTest). A reconnect that keeps the C slot checks
+# every one (everyInputItDidNotMakeIsChecked).
+$QUINT run "$REC" --main=reconnect_history_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 # ── A player dropped in a running match comes back only late ──────────────
@@ -916,7 +929,7 @@ $QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
 # ── What a removed player's slot is fed with, frame by frame ──────────────
 REMOVED=specs/removed_input.qnt
 $QUINT typecheck "$REMOVED"
-for variant in removed_input_before removed_input_fixed; do
+for variant in removed_input_before removed_input_fixed removed_input_mid_replay; do
   $QUINT test "$REMOVED" --main="$variant" --backend="$BACKEND"
 done
 # Before, each page cut the removed player's input when it learned of the
@@ -927,6 +940,12 @@ done
 # roster frame on every page, below it the host's inputs, and a guest that
 # ran frames otherwise runs them again (removedInputAgrees).
 $QUINT run "$REMOVED" --main=removed_input_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# A replay is run a few frames a tick, so the host can cut (and a guest hear
+# the cut) in the middle of one: the cut is at the replay's frame or the last
+# roster's, the word is what the ring holds, and the replay runs the rest
+# with the cut (hostCutsMidReplayTest, cutAboveTheReplayTest).
+$QUINT run "$REMOVED" --main=removed_input_mid_replay --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 # ── The server's store for a player's session log ──────────────────────────
