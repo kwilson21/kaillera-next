@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.22",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "watch and follow up a resync answer asked over the signaling socket (#315)"
+      }
+    ]
+  },
+  {
     "version": "0.69.21",
     "date": "2026-11-23",
     "changes": [
