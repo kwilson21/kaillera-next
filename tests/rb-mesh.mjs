@@ -808,6 +808,20 @@ if (MISSING_RECIPIENT) {
   // Keep observing after settlement: transient success followed by another
   // retry/drop is not recovery. At least 60 later hash frames are required.
   await host.waitForTimeout(20000);
+  // The join-input check needs 60 tags past the rejoin that every page has
+  // finalized (40 behind its last). A slow machine runs fewer than that in
+  // 20 s, so wait for the frames themselves, to a bound.
+  if (PERMANENT_RECIPIENT) {
+    const need = Math.max(...(missingRecipient.permanent?.framesAfterJoin ?? [0])) + 130;
+    const until = Date.now() + 90000;
+    while (Date.now() < until) {
+      const frames = await Promise.all(
+        pages.map((p) => p.evaluate(() => window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1)),
+      );
+      if (Math.min(...frames) >= need) break;
+      await host.waitForTimeout(1000);
+    }
+  }
 }
 if (RECOVERY_BYSTANDER) {
   // RECOVERY_AT frames into the battle: past its countdown, when fighters move.
