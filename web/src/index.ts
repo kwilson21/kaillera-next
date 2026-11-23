@@ -16,7 +16,7 @@ import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { lockstepStep } from './lockstep-wait.ts';
 import { delayAtJoin, guestStartStep } from './engine-start.ts';
-import { cLogTail } from './c-log-tail.ts';
+import { cLogDrain, cLogDroppedSince, cLogTail } from './c-log-tail.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
@@ -349,6 +349,10 @@ export const KNCore = {
   delayAtJoin,
   /** The part of the C engine's debug log not yet drained; a buffer shorter than what was drained is a new one (web/src/c-log-tail.ts). */
   cLogTail,
+  /** What one drain of the C log sends, and whether it empties the buffer (web/src/c-log-tail.ts). */
+  cLogDrain,
+  /** Lines the C log dropped since the last drain (web/src/c-log-tail.ts). */
+  cLogDroppedSince,
   measureCanvasHealth,
   digestFrame,
   createRomResumeAnswerer,

@@ -3427,6 +3427,11 @@ const collect = (p, VISUAL_CHECK) =>
       fpsWindowStart: window.__tp.fpsWindowStart,
       fpsWindowEnd,
       clog: m.UTF8ToString(m._kn_get_debug_log()),
+      // A core with kn_clear_debug_log is emptied at each drain into the sync log.
+      clogDrained: typeof m._kn_clear_debug_log === 'function',
+      // Lines the C log dropped since kn_rollback_init, read now: a drop after
+      // the last drain has no C-LOG-DROPPED line in the sync log yet.
+      clogDropped: m._kn_get_debug_log_dropped?.() ?? 0,
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       syncAnswersHeld: window.__knSyncAnswersHeld ?? [],
       rbInputsLost: window.__knRbInputsLost ?? [],
@@ -3450,6 +3455,31 @@ const collect = (p, VISUAL_CHECK) =>
     };
   }, VISUAL_CHECK);
 const [H, G] = await Promise.all([collect(host, VISUAL_CHECK), collect(guest, VISUAL_CHECK)]);
+// The whole C engine log. The page drains it into its sync log as [C] lines,
+// and a core with kn_clear_debug_log is emptied each time: the log is those
+// lines, then what has not been drained yet. An older core keeps it all.
+// The sync log is a ring of SYNC_LOG_MAX entries numbered from 0: once its
+// first entry is gone, so may be drained C lines, and the C log is not whole.
+const syncRotated = (peer) => Number(peer.sync.slice(0, peer.sync.indexOf('\t'))) > 0;
+const cLogPartial = { host: H.clogDrained && syncRotated(H), guest: G.clogDrained && syncRotated(G) };
+// C lines the engine's buffer had no room for: reported by a drain
+// (C-LOG-DROPPED), and counted since kn_rollback_init up to now.
+const cLogDropped = {
+  host: { reported: (H.sync.match(/C-LOG-DROPPED/g) || []).length, sinceInit: H.clogDropped },
+  guest: { reported: (G.sync.match(/C-LOG-DROPPED/g) || []).length, sinceInit: G.clogDropped },
+};
+const wholeCLog = (peer) =>
+  peer.clogDrained
+    ? [
+        ...peer.sync
+          .split('\n')
+          .filter((line) => line.includes('\t[C] '))
+          .map((line) => line.slice(line.indexOf('\t[C] ') + 5)),
+        peer.clog,
+      ].join('\n')
+    : peer.clog;
+H.clog = wholeCLog(H);
+G.clog = wholeCLog(G);
 const knEventsOf = (page) => page.evaluate(() => window.__knEvents ?? []);
 const [hostEvents, guestEvents] = await Promise.all([knEventsOf(host), knEventsOf(guest)]);
 // The observers' reports: sync-log lines, the client events the pages sent,
@@ -4430,6 +4460,8 @@ const summary = {
   predictedKnown: { host: H.predictedKnown, guest: G.predictedKnown },
   engineDelay: { host: delayOf(H.sync), guest: delayOf(G.sync) },
   integrityEvents: { host: bad(H.clog) + bad(H.sync), guest: bad(G.clog) + bad(G.sync) },
+  cLogDropped,
+  cLogPartial,
   bootInputStallTimeouts: { host: bootInputStallTimeoutsOf(H.sync), guest: bootInputStallTimeoutsOf(G.sync) },
   tickStuck: { host: count(H.sync, /TICK-STUCK/g), guest: count(G.sync, /TICK-STUCK/g) },
   hashCompare: {
@@ -4578,6 +4610,16 @@ const integrityFailed =
     : (H.failed || 0) + (G.failed || 0) - excusedIntegrity.failedRollbacksExcluded > 0 ||
       summary.integrityEvents.host + summary.integrityEvents.guest - excusedIntegrity.integrityEventsExcluded > 0;
 const minGameFpsFailed = MIN_GAME_FPS !== null && (!(gameFps.host >= MIN_GAME_FPS) || !(gameFps.guest >= MIN_GAME_FPS));
+// A C log line with no room in the engine's buffer is one the checks above
+// could not read: reported by a drain (C-LOG-DROPPED), or counted since the
+// last drain. So is a drained one the sync log's ring no longer holds.
+const cLogDroppedFailed =
+  cLogDropped.host.reported + cLogDropped.host.sinceInit + cLogDropped.guest.reported + cLogDropped.guest.sinceInit > 0;
+if (cLogDroppedFailed) console.log('C-LOG-DROPPED: the C log dropped lines:', JSON.stringify(cLogDropped));
+const cLogPartialFailed = cLogPartial.host || cLogPartial.guest;
+if (cLogPartialFailed) {
+  console.log('C-LOG-PARTIAL: the sync log ring rotated, so drained C lines may be gone:', JSON.stringify(cLogPartial));
+}
 if (minGameFpsFailed) {
   console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));
 }
@@ -5252,6 +5294,8 @@ const failed =
   summary.bootInputStallTimeouts.host > 0 ||
   summary.bootInputStallTimeouts.guest > 0 ||
   integrityFailed ||
+  cLogDroppedFailed ||
+  cLogPartialFailed ||
   H.inBattleAt < 0 ||
   G.inBattleAt < 0 ||
   battleCoverage < 0.8 ||
