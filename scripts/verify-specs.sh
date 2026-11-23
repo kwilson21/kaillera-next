@@ -296,6 +296,8 @@ sync_follow_up() {
   # while the state is compressed, recorded from the send only: 5 steps.
   expect_violation "$FOLLOW" sync_follow_up_current aFollowUpCarriesANewState
   expect_violation "$FOLLOW" sync_follow_up_from_send theGuestEndsOnTheHostsState
+  # A direct answer taken unconfirmed, final, then the input differs: 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_direct_unwatched theGuestEndsOnTheHostsState 5
 }
 
 rom_at_start() {
@@ -377,6 +379,8 @@ escalation_push() {
   expect_violation "$DELIVERY" recovery_partial_before freeRecipientProceeds 2
   verify "$DELIVERY" recovery_followup_fixed allHold init 10
   expect_violation "$DELIVERY" recovery_followup_before healthySourceIsNeverBlocked 3
+  verify "$DELIVERY" recovery_skipped_fixed allHold init 10
+  expect_violation "$DELIVERY" recovery_skipped_current settledCoversNewestHole 2
   verify "$DELIVERY" recovery_actor_enabled allHold init 10
   verify "$DELIVERY" recovery_actor_disabled allHold init 10
   verify "$DELIVERY" recovery_delivery_fixed allHold init 10
@@ -555,12 +559,35 @@ ring_after_resync() {
   expect_violation "$RING" ring_after_resync_save_only everyCopyIsWhole
 }
 
+engine_start() {
+  local START=specs/engine_start.qnt
+  verify "$START" engine_start_current allHold
+  # A tab that comes back while its page waits moves the page's frame:
+  # start, GO, lose the delay, reopen, arm, a frame, the return, the start
+  # frame (8 steps; tabReturnWhileWaitingTest).
+  expect_violation "$START" engine_start_before theHostsStartIsWhereTheGuestIs 8
+  expect_violation "$START" engine_start_jump_on_return aGuestStopsOnlyWhenTheHostIsUnreachable 8
+  # A solo match: start, arm, one frame (3 steps; soloTest).
+  expect_violation "$START" engine_start_before everyFrameRunsOnTheCEngine
+  # A guest that hears nothing: start, three ticks, the deadline (5 steps).
+  expect_violation "$START" engine_start_before armsWithTheHostsDelay
+  # engine_start_stop_only's counterexample needs a close, an open and the
+  # whole wait (9 steps): check-specs.sh's random runs find it.
+  # A friend joins a solo match with no bridge window at 0: start alone, arm,
+  # join late (3 steps; lateJoinIntoSoloTest).
+  expect_violation "$START" engine_start_no_zero_bridge aGuestStopsOnlyWhenTheHostIsUnreachable
+  # A friend joins a solo match and plays at 0: start alone, arm, join late
+  # (3 steps; lateJoinIntoSoloTest).
+  expect_violation "$START" engine_start_no_rearm aJoinedMatchRunsAboveZero
+}
+
 # Every group, in the order a local run takes them.
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
   rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
+  engine_start
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -568,7 +595,7 @@ SPEC_GROUPS=(
 # whole set took 32 minutes in one job. A group added above goes in a shard
 # here; the check below fails until it does.
 SHARDS=(
-  "room_lifecycle_start"                                          # ~7 min
+  "room_lifecycle_start engine_start"                             # ~7 min + engine_start (~30 s)
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min

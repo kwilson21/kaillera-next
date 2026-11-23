@@ -21,12 +21,13 @@ def _health_check() -> str:
     return _function(_src(), "const _meshHealthCheck = () => {")
 
 
-def test_the_check_runs_on_c_rollback_ticks_and_on_the_lockstep_path():
+def test_the_check_runs_on_c_rollback_ticks():
     src = _src()
     calls = [i for i in range(len(src)) if src.startswith("_meshHealthTick();", i)]
-    assert len(calls) == 2, calls
-    # The C branch: beside its TICK-PERF block, which a lockstep tick never
-    # reaches; the C branch returns before the lockstep one.
+    # Every frame runs on the C engine (specs/engine_start.qnt): the old JS
+    # path's call went with it.
+    assert len(calls) == 1, calls
+    # The C branch: beside its TICK-PERF block.
     c_call = calls[0]
     assert src.rindex("TICK-PERF f=", 0, c_call) > src.rindex(
         "if (_useCRollback) {", 0, c_call

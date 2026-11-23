@@ -106,7 +106,8 @@ def test_the_kept_resend_is_per_peer_state_cleared_with_it():
     assert "_resetInputMaps();" in clear
     # Every place the tables are cleared (the declarations aside) is the one reset.
     assert src.count("_resendAtSwitch = {};") == src.count("let _resendAtSwitch = {};") == 1
-    assert src.count("_resetInputMaps();") == 3
+    # A new match and stop() (the old path's fast-forward, the third, is gone).
+    assert src.count("_resetInputMaps();") == 2
 
 
 def test_the_comment_no_longer_promises_redundancy_carries_the_gap():
@@ -122,7 +123,7 @@ def test_only_the_host_sets_the_transport():
     # RB_RESEND_AT_SWITCH_MAX inputs to every peer.
     src = ENGINE_JS.read_text()
     handler = src[src.index("if (e.data.startsWith('rb-transport:')) {") :]
-    handler = handler[: handler.index("\n        }\n        if (e.data.startsWith('fpu-trace:'))")]
+    handler = handler[: handler.index("\n        }\n        // State sync: hash check from host")]
     guard = handler.index("if (_peers[remoteSid]?.slot !== 0) {")
     assert guard < handler.index("_switchInputsToReliable('rb-transport')")
     assert guard < handler.index("_rbTransport = mode")

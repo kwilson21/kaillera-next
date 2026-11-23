@@ -19,3 +19,23 @@ lemma followUpIsUnneeded_ensures(followUp: int, watched: bool, changed: bool, co
   ensures (followUpIsUnneeded(followUp, watched, changed, confirmed) == ((((followUp > 0) && watched) && !(changed)) && confirmed))
 {
 }
+
+function directFollowUpDue(current: bool, sent: bool, replaced: bool, targetPhantom: bool): bool
+{
+  (((current && sent) && !(replaced)) && !(targetPhantom))
+}
+
+lemma directFollowUpDue_ensures(current: bool, sent: bool, replaced: bool, targetPhantom: bool)
+  ensures (directFollowUpDue(current, sent, replaced, targetPhantom) == (((current && sent) && !(replaced)) && !(targetPhantom)))
+{
+}
+
+function directWatchIsStale(current: bool, sent: bool, replaced: bool): bool
+{
+  ((current && !(sent)) && !(replaced))
+}
+
+lemma directWatchIsStale_ensures(current: bool, sent: bool, replaced: bool)
+  ensures (directWatchIsStale(current, sent, replaced) == ((current && !(sent)) && !(replaced)))
+{
+}

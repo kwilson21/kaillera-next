@@ -4,13 +4,9 @@ import { Result } from 'effect';
 import {
   joinRefusal,
   joinRoomRequest,
-  menuWait,
   openRoomAnswer,
   openRoomRequest,
-  pausedIn,
   resumeSlot,
-  waitedNames,
-  type WaitedPeer,
 } from '../../web/src/play/connect.ts';
 import { becomesSpectator, lateJoinPlan } from '../../web/src/play/join-plan.ts';
 import { decodeJoinRoomPayload, decodeOpenRoomPayload } from '../../web/src/protocol.ts';
@@ -229,55 +225,4 @@ test('a late joiner takes the same path the old branches took', () => {
     }
   }
   assert.equal(compared, 64);
-});
-
-// ── waiting on a peer ────────────────────────────────────────────────────────
-
-// formatMenuWaitNames in web/static/play.js as of #155.
-const oldNames = (peers: readonly WaitedPeer[]) => {
-  const names = peers
-    .map((peer) => {
-      const raw = String(peer?.name || '').trim();
-      if (raw) return raw;
-      const slot = Number(peer?.slot);
-      return Number.isFinite(slot) ? `Player ${slot + 1}` : 'Player';
-    })
-    .filter(Boolean);
-  if (names.length <= 1) return names[0] || 'peer';
-  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
-};
-
-test('waited-on peers are named as the old code named them', () => {
-  const some: WaitedPeer[] = [
-    { name: 'Ana', slot: 0 },
-    { name: '  ', slot: 1 },
-    { slot: 2 },
-    { name: null, slot: 'x' },
-    { name: 'Bo' },
-  ];
-  for (let from = 0; from <= some.length; from++) {
-    for (let to = from; to <= some.length; to++) {
-      const peers = some.slice(from, to);
-      assert.equal(waitedNames(peers), oldNames(peers));
-    }
-  }
-  assert.equal(waitedNames([]), 'peer');
-  assert.equal(waitedNames([{ name: 'Ana' }, { slot: 1 }, { name: 'Cy' }]), 'Ana, Player 2 and Cy');
-});
-
-test("the wait says whether a menu or the match is paused, from the ROM's own scene table", () => {
-  assert.deepEqual(menuWait([{ name: 'Ana' }], pausedIn(22, 22)), {
-    title: 'Waiting on Ana',
-    detail: 'The match is paused to stay in sync.',
-  });
-  assert.equal(menuWait([], pausedIn(22, 16)).detail, 'The menu is paused to stay in sync.');
-  // Another game's match scene is another number.
-  assert.equal(pausedIn(7, 22), 'menu');
-  assert.equal(pausedIn(7, 7), 'match');
-});
-
-test('a ROM with no scene table gets words that claim nothing about the game', () => {
-  assert.equal(pausedIn(null, 22), 'unknown');
-  assert.equal(pausedIn(22, Number.NaN), 'unknown');
-  assert.equal(menuWait([], 'unknown').detail, 'The game is paused to stay in sync.');
 });

@@ -80,8 +80,6 @@ const TEXT_GRAMMAR = {
     'rb-delay': `:${INT}`,
     'rb-transport': ':(?:reliable|unreliable)',
     'rb-init-frame': `:${INT}`,
-    // fpu-trace:<frame>:<hash>:<count>
-    'fpu-trace': `:${INT}:${INT}:${INT}`,
     'sync-request-full': '',
     'sync-request-full-at': `:${INT}`,
     // The number of the request that follows on the same channel. A message
@@ -168,6 +166,8 @@ const LateJoinState = Schema.Struct({
   frame: Schema.Number,
   data: Encoded,
   effectiveDelay: Schema.optional(Schema.Number),
+  // The host runs every frame on the C engine, a delay of 0 included.
+  cEngine: Schema.optional(Schema.Boolean),
   rbTransport: Schema.optional(Schema.String),
   rngValues: Sidecar,
   saveRam: Schema.optional(Schema.NullOr(Encoded)),
@@ -212,7 +212,8 @@ const JSON_MESSAGES = {
     'rom-accepted': Schema.Struct({ sender: Schema.String }),
     'save-state': SaveState,
     'late-join-state': LateJoinState,
-    'request-late-join': Schema.Struct({ requesterSid: Schema.String }),
+    // delay: the joiner's delay from its RTT samples to the host, for a match at 0 its join moves to a match delay.
+    'request-late-join': Schema.Struct({ requesterSid: Schema.String, delay: Schema.optional(Schema.Number) }),
     'sync-request-full-socket': Schema.Struct({
       targetSid: Schema.String,
       requesterSid: Schema.String,

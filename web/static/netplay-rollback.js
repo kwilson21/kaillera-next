@@ -1,5 +1,5 @@
 /**
- * kaillera-next — Rollback Netplay Engine (with lockstep stall fallback)
+ * kaillera-next — Rollback Netplay Engine
  *
  * Deterministic netplay for up to 4 players running EmulatorJS
  * (mupen64plus-next WASM core) in sync. All players run their own
@@ -9,16 +9,15 @@
  * with C-level replay (build/.../kn_rollback.c), exposed as the
  * "rollback" wire-protocol mode and as window.NetplayRollback.
  *
- * The classic lockstep stall path lives inside this file as the silent
- * fallback when the WASM core does not export kn_pre_tick (stock CDN
- * core or older builds). Mode dispatch above this layer treats the
- * whole engine as one unit; users never see a "Classic" option.
+ * Every frame runs on the C engine (specs/engine_start.qnt). Lockstep
+ * mode is the same engine with nothing predicted: a frame runs only once
+ * every player's input for it is here. A core without the C engine's
+ * exports stops at the start and says so.
  *
  * The names "lockstep" / "lockstep-ready" / "_lockstepActive" /
  * "[lockstep]" log prefix appear throughout this file as implementation
- * vocabulary for strict input stalls (boot convergence, menu phase-lock
- * gate, the in-engine fallback path) and as stable protocol/log labels.
- * They are deliberately NOT renamed.
+ * vocabulary (the start handshake, lockstep mode) and as stable
+ * protocol/log labels. They are deliberately NOT renamed.
  *
  * ── Network Topology ──────────────────────────────────────────────────────
  *
@@ -85,20 +84,12 @@
  *
  * ── Tick Loop (Per-Frame) ─────────────────────────────────────────────────
  *
- *   Two modes: Classic (lockstep stall) or Rollback (predict + replay).
- *   Rollback activates automatically when the WASM core exports kn_pre_tick.
- *
- *   CLASSIC (lockstep) — each tick at frame N:
+ *   Each tick at frame N (lockstep mode waits at step 4 for every
+ *   player's input for the frame instead of predicting it; a player
+ *   missing for 5 s is dropped):
  *     1. Apply pending resync state if buffered
  *     2. Proportional frame pacing check — skip ticks if ahead of slowest peer
  *     3. Read local input → 24-bit mask, send to all peers
- *     4. Compute applyFrame = N - DELAY_FRAMES
- *     5. Stall until all peers' input for applyFrame arrives (two-stage:
- *        3s wait, then resend request, then 5s hard timeout → inject zero)
- *     6. Write inputs to WASM, step one frame, feed audio
- *
- *   ROLLBACK — each tick at frame N:
- *     1-3. Same as Classic (pacing, read input, send to peers)
  *     4. Drain _pendingCInputs queue: WebRTC callbacks push remote inputs
  *        to a JS array; they are fed to the C engine (kn_feed_input) here
  *        at the tick boundary, guaranteeing a consistent input snapshot.
@@ -109,7 +100,7 @@
  *        bounded mini-burst so catch-up can finish faster when budget allows.
  *        Returns 2 if catching up (JS steps emulator), 0 for normal.
  *     6. Read inputs from C ring buffer via kn_get_input(), write to WASM
- *        via writeInputToMemory (same path as Classic)
+ *        via writeInputToMemory
  *     7. Step one frame via EJS runner, feed audio
  *     8. kn_post_tick(): advance C frame counter
  *     9. After replay catch-up completes, hash RDRAM and broadcast to
@@ -168,14 +159,6 @@
  *   title capture keeps menu/CSS random selection in one shared state. On late
  *   join, the host still transfers current RNG state in the late-join-state
  *   message.
- *
- * ── FPU Trace Verification ──────────────────────────────────────────────
- *
- *   The host periodically (every 300 frames) broadcasts FNV-1a hashes of
- *   the FPU instruction trace ring buffer. Guests compare their local
- *   trace hash to detect cross-platform FPU divergence (e.g., ARM vs x86
- *   WASM JIT differences). Mismatches log the last 20 FPU ops and emit
- *   debug-sync events for investigation.
  *
  * ── Dual DataChannels (Input + Sync-State) ──────────────────────────────
  *
@@ -275,9 +258,8 @@
  *
  *   A visibilitychange listener detects when the tab loses or regains
  *   focus. Background tabs are naturally throttled by the browser
- *   (~1fps setInterval). While the C rollback engine is active, returning
- *   does nothing; only the lockstep fallback fast-forwards and requests a
- *   full resync.
+ *   (~1fps setInterval). Returning does nothing: the other players' input
+ *   stall holds them near this page's last input.
  *
  * ── Diagnostics ─────────────────────────────────────────────────────────
  *
@@ -609,11 +591,12 @@
   //     received different "last" inputs due to network timing.
   const MAX_STALL_MS = 3000;
   const RESEND_TIMEOUT_MS = 2000;
-  const STRICT_MENU_OVERLAY_DELAY_MS = 5000;
-  // I1: _rbPendingInit fallback deadline (MF2). If the host's
-  // rb-delay DC broadcast never arrives, the guest falls back to a
-  // locally-computed delay instead of freezing forever.
-  const RB_INIT_TIMEOUT_MS = 3000;
+  // I1: _rbPendingInit deadline (MF2). A guest with no delay from the host by
+  // then stops and says so (KNCore.guestStartStep, specs/engine_start.qnt);
+  // one with the delay arms with it at its own frame. Well past the time
+  // between two pages' starts, since a host that arms after it is passed
+  // leaves the guest stopped.
+  const RB_INIT_TIMEOUT_MS = 10000;
   // I1 (MF5): late-join state transfer + decompression deadline.
   // Host pauses tick loop for up to LATE_JOIN_TIMEOUT_MS waiting for
   // joiner's ready signal; joiner wraps decompression in a
@@ -1991,10 +1974,6 @@
     _pendingCInputs.length = 0;
     if (settledSkipped > 0) _syncLog(`C-INPUT-SETTLED-SKIP f=${_frameNum} count=${settledSkipped}`);
   };
-  const _formatSlotMap = (obj) => {
-    const keys = Object.keys(obj || {}).sort((a, b) => Number(a) - Number(b));
-    return keys.length ? keys.map((k) => `${k}:${obj[k]}`).join(',') : 'none';
-  };
   const _formatInputBrief = (input) =>
     input ? `${input.buttons || 0}/${input.lx || 0}/${input.ly || 0}/${input.cx || 0}/${input.cy || 0}` : '0/0/0/0/0';
   const _resetStrictMenuResends = () => {
@@ -2015,44 +1994,6 @@
       sentSlots.push(slot);
     }
     return sentSlots;
-  };
-  const _playerNameForSlot = (slot) => {
-    const numericSlot = Number(slot);
-    for (const info of Object.values(_knownPlayers || {})) {
-      if (Number(info?.slot) === numericSlot && info?.playerName) return info.playerName;
-    }
-    return Number.isFinite(numericSlot) ? `Player ${numericSlot + 1}` : 'Player';
-  };
-  const _emitStrictMenuWait = (missingSlots, applyFrame, stalledMs, scene, gameStatus) => {
-    const slots = [...new Set(missingSlots || [])].sort((a, b) => a - b);
-    if (!slots.length || stalledMs < STRICT_MENU_OVERLAY_DELAY_MS) return;
-    const nowMs = performance.now();
-    const waitKey = `${applyFrame}:${scene}:${gameStatus}:${slots.join(',')}`;
-    if (_strictMenuWaitOverlayKey === waitKey && nowMs - _strictMenuWaitOverlayLastAt < 1000) return;
-    _strictMenuWaitOverlayKey = waitKey;
-    _strictMenuWaitOverlayLastAt = nowMs;
-    try {
-      window.dispatchEvent(
-        new CustomEvent('kn-menu-lockstep-wait', {
-          detail: {
-            slots,
-            peers: slots.map((slot) => ({ slot, name: _playerNameForSlot(slot) })),
-            applyFrame,
-            stalledMs: Math.round(stalledMs),
-            scene,
-            gameStatus,
-          },
-        }),
-      );
-    } catch (_) {}
-  };
-  const _clearStrictMenuWait = () => {
-    if (!_strictMenuWaitOverlayKey) return;
-    _strictMenuWaitOverlayKey = '';
-    _strictMenuWaitOverlayLastAt = 0;
-    try {
-      window.dispatchEvent(new CustomEvent('kn-menu-lockstep-clear'));
-    } catch (_) {}
   };
   const _findRollbackVisualCanvas = () => {
     const visibleCanvas = (canvas) => {
@@ -4331,8 +4272,6 @@
   let _rbInputStallKey = '';
   let _rbInputStallStartTime = 0;
   let _strictMenuResendState = {}; // slot -> { key, lastAt }
-  let _strictMenuWaitOverlayKey = '';
-  let _strictMenuWaitOverlayLastAt = 0;
   // P4: last observed failed_rollbacks counter (logged only — see policy below).
   let _rbLastFailedRollbacks = 0;
   // Determinism diagnostics: last frame where peers' hashes matched, plus
@@ -5489,13 +5428,33 @@
   const _escalationHeld = (slot, hole) => _recovery.held(slot, hole, _syncEnabled);
   const _forgetHolePushes = (slot) => _recovery.forgetHistory(slot);
 
-  const _handleRecoveryCommand = ({ type, attempt, pushes, hole, firstFrame, budget }) => {
+  const _handleRecoveryCommand = ({ type, attempt, pushes, hole, firstFrame, budget, deliveredBefore, followUp }) => {
     const { slot, sid } = attempt;
     if (type === 'retry') {
       _syncLog(`INPUT-ASK-PUSH-AGAIN f=${_frameNum} slot=${slot} push=${pushes}/${OVERDUE_MAX_PUSHES}`);
       pushSyncState(sid, false, { escalation: [attempt] });
     } else if (type === 'settled') {
-      _syncLog(`INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${firstFrame} pushes=${pushes}`);
+      // The frame of the state it settled on (deliveredBefore is that minus delay).
+      const settledFrame = deliveredBefore >= 0 ? deliveredBefore + DELAY_FRAMES : -1;
+      _syncLog(
+        `INPUT-ASK-PUSH-SETTLED f=${_frameNum} slot=${slot} frame=${firstFrame} pushes=${pushes}` +
+          (followUp ? ` kind=follow-up state=${settledFrame}` : ''),
+      );
+      // A later broadcast skipped this guest while it still owed this one:
+      // unless the state it just settled on was taken at or after that
+      // broadcast's frame, it is from before that hole. Push it afresh.
+      const next = _recovery.followUp(attempt, performance.now(), settledFrame);
+      if (next.kind === 'push') {
+        _syncLog(`INPUT-ASK-PUSH-FOLLOWUP f=${_frameNum} slot=${slot} id=${next.attempt.wireId}`);
+        pushSyncState(sid, false, { escalation: [next.attempt] });
+      } else if (next.kind === 'covered') {
+        _syncLog(`INPUT-ASK-PUSH-FOLLOWUP-COVERED f=${_frameNum} slot=${slot} state=${next.frame}`);
+      } else if (next.kind === 'budget') {
+        _syncLog(
+          `INPUT-ASK-PUSH-FOLLOWUP-BUDGET f=${_frameNum} slot=${slot}: room capture budget spent ` +
+            `(used=${next.used} limit=${next.limit}); left to its own resync`,
+        );
+      }
     } else if (type === 'ended') {
       const target = _peers[sid];
       _syncLog(
@@ -5822,7 +5781,6 @@
   };
   let _peerInputStarted = {}; // slot -> true once first input received (survives buffer drain)
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
-  let _rosterChangeFrame = -1; // frame when roster last changed — enables dense DIAG-INPUT logging
   let _lastControllerPresentMask = -1;
   let _lastControllerPresentMaskModule = null;
   const MENU_START_BARRIER_SETTLE_MS = 500;
@@ -5979,7 +5937,6 @@
     }
 
     _resetStrictMenuResends();
-    _clearStrictMenuWait();
     _syncLog(
       `late-join input bootstrap: frames=${startFrame}-${endFrame} slots=[${slots.join(',')}] ` +
         `seeded=${seeded} suppressLocalUntil=${_lateJoinInputBootstrapUntilFrame}` +
@@ -6039,9 +5996,7 @@
   // reset where the timeline it belongs to starts over: _remoteInputs and
   // _peerInputStarted by each reset site (a new match keeps a synthetic
   // peer's); the frame last heard from each peer and the late-join windows
-  // by startLockstep (a new match restarts frames at 0) and stop(). A
-  // fast-forward keeps them: it moves this page's frame only, and the peers'
-  // frames and the windows already passed still hold.
+  // by startLockstep (a new match restarts frames at 0) and stop().
   const _clearSlotInputState = (slot) => {
     _recovery.reset(slot);
     for (const map of _slotInputMaps()) delete map[slot];
@@ -6052,7 +6007,7 @@
     delete _lateJoinSeededInputFrames[slot];
   };
   // Every slot's entry in the table, when the input timeline starts over (a
-  // new match, a fast-forward, stop).
+  // new match, stop).
   const _resetInputMaps = () => {
     _recovery.resetAll();
     if (typeof _ownerRepair !== 'undefined') _ownerRepair = null;
@@ -6326,30 +6281,21 @@
     return scene === 1 || (scene >= 7 && scene <= 21) || INITIAL_SMASH_FALLBACK_SCENES.has(scene);
   };
 
-  // Where the game is, for the paths that cannot roll a frame back.
+  // Where the game is (Smash Remix): a battle in play is scene 22, status 1.
   const _readMenuPhase = () => {
     const gameStatus = _readGameStatus();
     const sceneCurr = _readSceneCurr();
-    const inBattleTransition = sceneCurr === 22 && gameStatus === 0;
     return {
       gameStatus,
       sceneCurr,
       gameplay: sceneCurr === 22 && gameStatus === 1,
-      // Without the C engine (a core with no kn_pre_tick) nothing can roll
-      // a menu frame back, so a missing remote
-      // input is waited for there and never made up. Battle loading
-      // (scene 22, status 0) is not controllable and runs freely.
-      strictInputLockstep:
-        !_useCRollback &&
-        !inBattleTransition &&
-        (_isControllableMenuScene(sceneCurr) || (sceneCurr === 22 && gameStatus === 2)),
     };
   };
 
   const _isRbCheckGameplayPhase = () => {
-    // RB-CHECK validates rollback determinism. Smash Remix menus and post-match
-    // results are guarded by strict lockstep/setup checks instead; hashing them
-    // here turns harmless post-match menu drift into a false rollback desync.
+    // RB-CHECK validates rollback determinism. On Smash Remix it hashes only a
+    // battle in play: hashing menus and post-match results turns harmless
+    // post-match menu drift into a false rollback desync.
     return !_isSmashRemix() || _readMenuPhase().gameplay;
   };
 
@@ -6378,18 +6324,11 @@
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
   let _manualMode = false; // true once enterManualMode() called
   let _stallStart = 0; // timestamp when current stall began
-  let _resendSent = false; // true once normal input-stall resend request sent
-  // I1 (MF4): INPUT-STALL hard-timeout fabricates ZERO_INPUT to keep
-  // the game moving, but any real inputs that arrive later are dropped
-  // — creating permanent hash divergence. When hard-timeout fires, we
-  // also request a full resync so the divergence converges. Rate-limited
-  // so we don't resync-storm under sustained marginal WiFi.
-  let _lastInputStallResyncAt = 0;
-  const INPUT_STALL_RESYNC_COOLDOWN_MS = 10000;
   let _awaitingLateJoinState = false; // true when late-join path taken, prevents normal sync
   let _isApplyingLateJoinState = false; // re-entrancy guard for handleLateJoinState (rejects dup state packets mid-load)
   let _tickInterval = null; // setInterval handle for tick scheduler pump
   let _coreFatalError = false; // set once the WASM core traps; the page must reload to play again
+  let _coreFatalMessage; // the message a stopped start showed; a later start shows it again
   let _externalTickPaused = false; // demo/UI pause: gates the tick callback without tearing down state
   let _tickNextAt = 0;
   const TICK_TARGET_MS = 1000 / 60;
@@ -6979,7 +6918,6 @@
   // Cost: ~2-5ms per call (GPU→CPU sync). Runs every 10 frames (~167ms).
 
   // -- Diagnostic functions (delegated to kn-diagnostics.js) --
-  const _diagInput = (frameNum, applyFrame, force) => _diag.diagInput(frameNum, applyFrame, force);
   const _diagInstallHooks = () => _diag.installHooks();
 
   // -- State machine observer (read-only) ------------------------------------
@@ -7611,7 +7549,6 @@
   // Pacing skip counter — used by the tighter proportional throttle
   // (Fix 3): excess=1 → 50% skip, excess≥2 → 100% stall. The old
   // 3-stage SKIP_TABLE was removed in favor of this tighter policy.
-  let _pacingSkipCounter = 0;
   const PACING_LOG_INTERVAL_MS = 1000;
   let _pacingLastLogAt = 0;
   let _pacingSuppressedLogs = 0;
@@ -7854,6 +7791,7 @@
   // resync interval; a real reconnect after disconnect already starts fresh.
   const _LATE_JOIN_COOLDOWN_MS = 8000;
   const _lateJoinLastSentAt = new Map(); // requesterSid -> ms timestamp
+  const _lateJoinOfferedDelay = new Map(); // requesterSid -> the joiner's measured delay, 0 if none
 
   // The joiner's wait for an answer to its state request, as an Effect
   // program (web/src/late-join-wait.ts): repeated request, deadline, and a
@@ -7864,7 +7802,16 @@
   let _lateJoinWait = null;
 
   const _sendLateJoinRequest = () => {
-    socket.emit('data-message', { type: 'request-late-join', requesterSid: socket.id });
+    // The delay this page measured to the host: a match the host ran alone
+    // at 0 moves to the larger of the two at the join (delayAtJoin).
+    const hostPeer = Object.values(_peers).find((p) => p?.slot === 0);
+    const samples = hostPeer?.rttSamples?.length ? hostPeer.rttSamples : hostPeer?._rttSamples;
+    const delay = samples?.length ? _delayFromRttSamples(samples, _delayIsLockstep()) : null;
+    socket.emit('data-message', {
+      type: 'request-late-join',
+      requesterSid: socket.id,
+      ...(delay ? { delay } : {}),
+    });
   };
 
   // A player waiting to be let into a match says so on each of its own data
@@ -7991,6 +7938,10 @@
       return;
     }
     _lateJoinLastSentAt.set(requesterSid, now);
+    _lateJoinOfferedDelay.set(
+      requesterSid,
+      Number.isInteger(msg.delay) && msg.delay > 0 ? clampRollbackDelay(msg.delay) : 0,
+    );
     _syncLog(`received late-join request from ${requesterSid}`);
     const name = _knownPlayers[requesterSid]?.playerName || 'A player';
     _config?.onToast?.(`${name} is joining...`);
@@ -8255,7 +8206,7 @@
   // (specs/mesh_heal.qnt, aDeadChannelIsNeverForgotten). Once per frame: a
   // frozen sim ticks on the same frame.
   let _lastMeshHealthFrame = -1;
-  // Called on every tick of either branch. Any frame that is not a check's
+  // Called on every tick. Any frame that is not a check's
   // forgets the last one, so a new match or a resync that goes back past a
   // checked frame checks it again.
   const _meshHealthTick = () => {
@@ -9518,7 +9469,6 @@
       _peerInputStarted[peer.slot] = true;
       _syncLog(`INPUT-FIRST slot=${peer.slot} f=${recvFrame} myF=${_frameNum}`);
     }
-    _remoteReceived++;
     if (recvFrame > _lastRemoteFrame) _lastRemoteFrame = recvFrame;
     if (!_lastRemoteFramePerSlot[peer.slot] || recvFrame > _lastRemoteFramePerSlot[peer.slot]) {
       _lastRemoteFramePerSlot[peer.slot] = recvFrame;
@@ -9527,7 +9477,6 @@
         _syncLog(`PEER-RECOVERED slot=${peer.slot} f=${recvFrame} — resuming normal pacing`);
         _peerPhantom[peer.slot] = false;
         _forgetHolePushes(peer.slot);
-        _consecutiveFabrications[peer.slot] = 0;
         window.dispatchEvent(new CustomEvent('kn-peer-recovered', { detail: { slot: peer.slot } }));
         if (_playerSlot !== 0 && peer.slot === 0 && _syncEnabled) {
           _lastResyncTime = 0;
@@ -9782,6 +9731,23 @@
       if (_playerSlot === 0 && _pendingLateJoinReadySids.has(remoteSid)) {
         finishLateJoinReady('deferred DC open', remoteSid);
       }
+      // The armed host sends a guest its delay and start frame on every
+      // channel that opens: ones lost to a channel that closed before they
+      // arrived would leave a waiting guest stopping at its deadline though
+      // the host is there (specs/engine_start.qnt). A late joiner still
+      // loading has both from the host's state.
+      if (
+        _playerSlot === 0 &&
+        _useCRollback &&
+        _rbInitFrame >= 0 &&
+        peer.slot !== null &&
+        peer.slot !== undefined &&
+        !_isPeerPendingLateJoin(remoteSid, peer)
+      ) {
+        try {
+          _sendHostStart(ch);
+        } catch (_) {}
+      }
       // Host: a player whose channel opens before the match runs hears whom
       // the host left out of the start, and stops waiting for them.
       if (_playerSlot === 0 && _phase < PHASE_RUNNING) {
@@ -9951,7 +9917,6 @@
           }
           _clearPendingLateJoinRosterSlots(slots, 'host roster');
           _activeRoster = new Set(slots);
-          _rosterChangeFrame = _frameNum;
           _applyControllerPresentMask('roster');
           const addedSlots = slots.filter((slot) => _isValidPlayerSlot(slot) && !previousRoster?.has(slot));
           for (const slot of addedSlots) {
@@ -10076,12 +10041,10 @@
           (e.data.startsWith('rb-check:') ||
             e.data.startsWith('rb-blocks:') ||
             e.data.startsWith('rb-subhash:') ||
-            e.data.startsWith('rb-regions:') ||
-            e.data.startsWith('fpu-trace:'))
+            e.data.startsWith('rb-regions:'))
         ) {
           return;
         }
-        // FPU trace: cross-platform determinism verification from host
         // Rollback state checksum verification
         if (e.data.startsWith('rb-check:')) {
           // Store peer's hash — compare when we reach the same frame
@@ -10149,27 +10112,22 @@
         //      kept here only for the case where init somehow happened
         //      first (shouldn't happen for guests now).
         if (e.data.startsWith('rb-delay:')) {
-          const hostDelay = clampRollbackDelay(e.data.split(':')[1], 0);
-          if (hostDelay > 0) {
-            // Cache for guests that haven't reached the init code yet.
+          // Only the host's word: a waiting guest arms with it, or stops on a
+          // start frame other than its own, so another player's would let it
+          // stop any guest's start (the same rule as rb-transport).
+          if (_peers[remoteSid]?.slot !== 0) {
+            _syncLog(`rb-delay: from slot=${_peers[remoteSid]?.slot ?? 'unknown'} ignored — not the host`);
+            return;
+          }
+          const hostDelay = _hostDelayFrom(e.data.split(':')[1]);
+          if (hostDelay >= 0) {
             window._rbHostDelay = hostDelay;
-            // Deferred init now waits for BOTH rb-delay AND rb-init-frame so
-            // guest's rb.frame is set to the host's frame at init. The
-            // rb-init-frame handler below covers the symmetric "fire when
-            // delay was already known" case.
-            if (window._rbPendingInit && window._rbDoInit && window._rbHostInitFrame !== undefined) {
-              _syncLog(
-                `rb-delay: deferred init triggered with host delay=${hostDelay} initFrame=${window._rbHostInitFrame}`,
-              );
-              _requestRollbackInit(hostDelay, window._rbHostInitFrame, 'rb-delay');
-            } else if (hostDelay !== DELAY_FRAMES) {
-              // Init already ran (e.g. host, or race). C engine can't be
-              // updated mid-flight; only the JS variable is changed, which
-              // is the legacy buggy path. Log loudly so we notice.
-              _syncLog(
-                `rb-delay: WARN host set delay=${hostDelay} but JS was ${DELAY_FRAMES}; C engine NOT updated (already inited)`,
-              );
-              DELAY_FRAMES = hostDelay;
+            if (window._rbPendingInit) {
+              _guestStart('rb-delay');
+            } else if (_useCRollback && hostDelay !== DELAY_FRAMES) {
+              // Armed already: the C engine's delay is set, and JS must
+              // apply inputs with the same one, so nothing changes here.
+              _syncLog(`rb-delay: WARN host says delay=${hostDelay} but this page runs ${DELAY_FRAMES}`);
             }
           }
           return;
@@ -10184,20 +10142,14 @@
         // and exchanged input-frame numbers no longer correspond to the
         // same simulation point on both sides.
         if (e.data.startsWith('rb-init-frame:')) {
+          if (_peers[remoteSid]?.slot !== 0) {
+            _syncLog(`rb-init-frame: from slot=${_peers[remoteSid]?.slot ?? 'unknown'} ignored — not the host`);
+            return;
+          }
           const hostInitFrame = parseInt(e.data.split(':')[1], 10);
           if (Number.isFinite(hostInitFrame) && hostInitFrame >= 0) {
             window._rbHostInitFrame = hostInitFrame;
-            if (
-              window._rbPendingInit &&
-              window._rbDoInit &&
-              window._rbHostDelay !== undefined &&
-              window._rbHostDelay > 0
-            ) {
-              _syncLog(
-                `rb-init-frame: deferred init triggered with host delay=${window._rbHostDelay} initFrame=${hostInitFrame}`,
-              );
-              _requestRollbackInit(window._rbHostDelay, hostInitFrame, 'rb-init-frame');
-            }
+            if (window._rbPendingInit) _guestStart('rb-init-frame');
           }
           return;
         }
@@ -10218,44 +10170,6 @@
           if (mode !== 'unreliable' && _rbTransport === 'unreliable') _switchInputsToReliable('rb-transport');
           _rbTransport = mode === 'unreliable' ? 'unreliable' : 'reliable';
           _syncLog(`rb-transport: host=${mode} adopted=${_rbTransport}`);
-          return;
-        }
-        if (e.data.startsWith('fpu-trace:')) {
-          if (!_fpuTraceEnabled) return;
-          const parts = e.data.split(':');
-          const hostFrame = parseInt(parts[1], 10);
-          const hostHash = parseInt(parts[2], 10);
-          const hostCount = parseInt(parts[3], 10);
-          const local = _fpuTraceHash();
-          if (!local) return;
-          if (local.hash === hostHash) {
-            if (!_fpuTraceVerified) {
-              _syncLog(`FPU trace MATCH: ${local.count} ops verified (frame ${hostFrame})`);
-              _fpuTraceVerified = true;
-            }
-          } else {
-            _syncLog(
-              `FPU trace MISMATCH at frame ${hostFrame}! host_hash=${hostHash} local_hash=${local.hash} host_count=${hostCount} local_count=${local.count}`,
-            );
-            const entries = _fpuTraceExtract(Math.max(0, hostFrame - 300), hostFrame);
-            _syncLog(`FPU trace dump (last ${entries.length} entries):`);
-            for (const ent of entries.slice(0, 20)) {
-              _syncLog(
-                `  frame=${ent.frame} op=${_FPU_OP_NAMES[ent.op] ?? ent.op} in1=0x${ent.in1} in2=0x${ent.in2} out=0x${ent.out}`,
-              );
-            }
-            if (socket) {
-              socket.emit('debug-sync', {
-                type: 'fpu-trace-mismatch',
-                frame: hostFrame,
-                hostHash,
-                localHash: local.hash,
-                hostCount,
-                localCount: local.count,
-                entries: entries.slice(0, 100),
-              });
-            }
-          }
           return;
         }
         // State sync: hash check from host
@@ -10368,7 +10282,7 @@
             });
             _syncLog(`coord sync scheduled for ${remoteSid} at frame ${targetFrame}`);
           } else {
-            pushSyncState(remoteSid, false, { waitForResult: false, requestIds: { [remoteSid]: requestId } });
+            _answerDirectSyncRequest(remoteSid, requestId);
           }
         }
         // JSON messages
@@ -10621,7 +10535,6 @@
    *   - _lastRemoteFramePerSlot[slot]  (highest received frame)
    *   - _peerLastAdvanceTime[slot]     (wall-clock of last new frame)
    *   - _peerPhantom[slot]             (dead-peer flag)
-   *   - _consecutiveFabrications[slot] (fabrication counter)
    *   - _inputLateLogTime[slot]        (rate-limit timestamp)
    *   - _auditLastRemote[slot]         (last audited remote input)
    *   - _lateJoinActivatedAtFrame[slot] (post-activation grace window)
@@ -10663,6 +10576,7 @@
       _lateJoinReadyHandled.delete(opts.sid);
       _lateJoinStateSent.delete(opts.sid);
       _pendingLateJoinReadySids.delete(opts.sid);
+      _lateJoinOfferedDelay.delete(opts.sid);
     }
     if (opts.sid && _lateJoinServing.delete(opts.sid) && _runSubstate === RUN_LATE_JOIN_PAUSE) {
       const leftSid = opts.sid;
@@ -10675,7 +10589,6 @@
     _clearSlotInputState(slot);
     delete _peerLastAdvanceTime[slot];
     delete _peerPhantom[slot];
-    delete _consecutiveFabrications[slot];
     delete _inputLateLogTime[slot];
     delete _auditLastRemote[slot];
 
@@ -11049,7 +10962,7 @@
   // Uses _peerInputStarted (persistent flag) instead of checking buffer
   // length — prevents peers from dropping out when their buffer is
   // momentarily empty between frames (causes 3+ player desync).
-  const getInputPeers = (includeUnstarted = false) => {
+  const getInputPeers = () => {
     if (_activeRoster) {
       // Roster mode: return one peer per roster slot (excluding self).
       // Deduplicate by slot — if zombie peers survive, prefer the one with
@@ -11077,7 +10990,6 @@
     // Legacy mode (pre-roster): original behavior
     return getActivePeers().filter((p) => {
       if (p.reconnecting) return false;
-      if (includeUnstarted) return true;
       if (_peerInputStarted[p.slot]) return true;
       // Boot grace: include connected peers before their first input arrives
       return _frameNum < BOOT_GRACE_FRAMES;
@@ -12472,7 +12384,6 @@
       }
     }
     _activeRoster = slotSet;
-    _rosterChangeFrame = _frameNum;
     _applyControllerPresentMask('broadcast-roster');
     // Always 4 — see roster DC handler comment for rationale.
     rb_numPlayers = 4;
@@ -12700,6 +12611,39 @@
     if (_lateJoinOriginalWait && frame - DELAY_FRAMES > _lateJoinOriginalWait.through) _lateJoinOriginalWait = null;
   };
 
+  // The first player into a match the host ran alone at a delay of 0: at the
+  // frame of the state it sends (H), the host arms its C engine again with
+  // the delay this join negotiates, and the joiner arms with it from the
+  // state (specs/engine_start.qnt, REARM_AT_JOIN). Alone, the host made no
+  // rollback and runs no replay, and the joiner's slot was inactive, so
+  // nothing reaches back before H (noRollbackBeforeTheRearm). The host made
+  // no input for H..H+delay-1 (at 0 each input applied at the frame it was
+  // made): they are neutral here, and the bridge gives the joiner the same.
+  const _rearmForFirstPlayer = (remoteSid, frame) => {
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const others = _activeRoster ? [..._activeRoster].filter((slot) => slot !== _playerSlot) : [];
+    const replayDepth = mod?._kn_get_replay_depth?.() ?? 0;
+    if (others.length || replayDepth > 0 || !window._rbDoInit) {
+      _syncLog(`DELAY-AT-JOIN skipped f=${frame}: others=[${others.join(',')}] replayDepth=${replayDepth}`);
+      return;
+    }
+    const peer = _peers[remoteSid];
+    const samples = peer?.rttSamples?.length ? peer.rttSamples : peer?._rttSamples;
+    const own = (samples?.length && _delayFromRttSamples(samples, _delayIsLockstep())) || 0;
+    const offered = _lateJoinOfferedDelay.get(remoteSid) || 0;
+    const delay = window.KNCore.delayAtJoin(DELAY_FRAMES, own, offered, clampRollbackDelay(DEFAULT_DELAY_FRAMES));
+    if (delay === DELAY_FRAMES) return;
+    for (let f = frame; f < frame + delay; f++) _localInputs[f] = { ...KNShared.ZERO_INPUT };
+    const prev = DELAY_FRAMES;
+    DELAY_FRAMES = delay;
+    window._rbDoInit(delay, frame, 'first player joined');
+    window.showEffectiveDelay?.(delay, delay);
+    _syncLog(
+      `DELAY-AT-JOIN ${prev} -> ${delay} f=${frame} joiner=${remoteSid} own=${own} offered=${offered} ` +
+        `samples=${samples?.length ?? 0} — armed again for the first player`,
+    );
+  };
+
   async function sendLateJoinState(remoteSid) {
     // Look up slot from _peers first, fall back to _knownPlayers.
     // The peer's WebRTC connection may have failed/disconnected (removed
@@ -12785,6 +12729,14 @@
 
       // Capture state + frame number + RNG atomically while paused
       const capturedFrame = _frameNum;
+      if (DELAY_FRAMES === 0 && _useCRollback) {
+        try {
+          _rearmForFirstPlayer(remoteSid, capturedFrame);
+        } catch (e) {
+          _handleCoreFatal('rollback-init', e);
+          return;
+        }
+      }
       const bridgeSources = _useCRollback ? _snapshotLateJoinBridgeSources(remoteSid) : null;
       const raw = gm.getState();
       const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
@@ -12851,6 +12803,9 @@
         frame: capturedFrame,
         data: encoded.data,
         effectiveDelay: DELAY_FRAMES,
+        // This page runs every frame on the C engine, at a delay of 0 too.
+        // A host from before that ran a delay of 0 on the old JS path.
+        cEngine: _useCRollback,
         rbTransport: _rbTransport,
         rngValues,
         saveRam,
@@ -13108,7 +13063,6 @@
           .filter((slot) => Number.isInteger(slot) && slot >= 0 && slot < 4),
       );
       if (Number.isInteger(_playerSlot) && _playerSlot >= 0 && _playerSlot < 4) _activeRoster.add(_playerSlot);
-      _rosterChangeFrame = _frameNum;
       _applyControllerPresentMask('late-join-state');
       _releaseMenuStartBarrierAfterLateJoin();
       _startLateJoinInputBootstrap('late-join-state', [..._activeRoster]);
@@ -13117,9 +13071,15 @@
       // host's rb-delay broadcast over DataChannel (sent at game start).
       // Without this, startLockstep sets _rbPendingInit=true and the
       // tick loop is completely gated, causing a black screen.
-      if (msg.effectiveDelay !== undefined && msg.effectiveDelay !== null && DELAY_FRAMES > 0) {
-        window._rbHostDelay = clampRollbackDelay(msg.effectiveDelay);
+      const lateJoinDelay = _hostDelayFrom(msg.effectiveDelay);
+      // A host from before every page armed the C engine ran a delay of 0 on
+      // the old JS path (a solo match it kept through a deploy). Armed here,
+      // the two pages would run different engines; stop and say so.
+      if (lateJoinDelay === 0 && msg.cEngine !== true) {
+        _stopAtStart('old-host', { effectiveDelay: 0 });
+        return;
       }
+      if (lateJoinDelay >= 0) window._rbHostDelay = lateJoinDelay;
       // The joiner's _frameNum was set to msg.frame above. Set the
       // matching host init frame so tryInitRollback fires immediately
       // instead of waiting RB_INIT_TIMEOUT_MS (3s) for the timeout
@@ -13664,94 +13624,6 @@
 
   let _hasForkedCore = false; // true if Module exports kn_set_deterministic
 
-  // FPU trace — cross-platform determinism verification
-  const _FPU_TRACE_SIZE = 4096;
-  const _FPU_TRACE_ENTRY_BYTES = 32;
-  const _FPU_TRACE_CHECK_INTERVAL = 300; // frames between hash comparisons
-  let _fpuTraceEnabled = false;
-  let _fpuTraceLastCheckFrame = 0;
-  let _fpuTraceVerified = false; // true once a match is confirmed
-
-  /** Read the FPU trace ring buffer from WASM and compute FNV-1a hash */
-  const _fpuTraceHash = () => {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod?._kn_fpu_trace_get_buf || !mod?._kn_fpu_trace_get_count) return null;
-    const count = mod._kn_fpu_trace_get_count();
-    if (count === 0) return null;
-    const bufPtr = mod._kn_fpu_trace_get_buf();
-    const totalBytes = _FPU_TRACE_SIZE * _FPU_TRACE_ENTRY_BYTES;
-    const buf = mod.HEAPU8.subarray(bufPtr, bufPtr + totalBytes);
-    let hash = 2166136261;
-    for (let i = 0; i < totalBytes; i++) {
-      hash ^= buf[i];
-      hash = Math.imul(hash, 16777619) >>> 0;
-    }
-    return { hash, count };
-  };
-
-  /** Extract trace entries for a frame range from the ring buffer */
-  const _fpuTraceExtract = (startFrame, endFrame) => {
-    const mod = window.EJS_emulator?.gameManager?.Module;
-    if (!mod?._kn_fpu_trace_get_buf) return [];
-    const bufPtr = mod._kn_fpu_trace_get_buf();
-    const count = mod._kn_fpu_trace_get_count();
-    const entries = [];
-    const used = Math.min(count, _FPU_TRACE_SIZE);
-    const startIdx = count > _FPU_TRACE_SIZE ? count - _FPU_TRACE_SIZE : 0;
-    for (let i = 0; i < used; i++) {
-      const idx = (startIdx + i) & (_FPU_TRACE_SIZE - 1);
-      const off = bufPtr + idx * _FPU_TRACE_ENTRY_BYTES;
-      const op = mod.HEAPU8[off];
-      const frame =
-        mod.HEAPU8[off + 4] | (mod.HEAPU8[off + 5] << 8) | (mod.HEAPU8[off + 6] << 16) | (mod.HEAPU8[off + 7] << 24);
-      if (frame < startFrame || frame > endFrame) continue;
-      const dv = new DataView(mod.HEAPU8.buffer, off, _FPU_TRACE_ENTRY_BYTES);
-      const in1Lo = dv.getUint32(8, true),
-        in1Hi = dv.getUint32(12, true);
-      const in2Lo = dv.getUint32(16, true),
-        in2Hi = dv.getUint32(20, true);
-      const outLo = dv.getUint32(24, true),
-        outHi = dv.getUint32(28, true);
-      entries.push({
-        op,
-        frame,
-        in1: in1Hi
-          ? `${in1Hi.toString(16).padStart(8, '0')}${in1Lo.toString(16).padStart(8, '0')}`
-          : in1Lo.toString(16).padStart(8, '0'),
-        in2: in2Hi
-          ? `${in2Hi.toString(16).padStart(8, '0')}${in2Lo.toString(16).padStart(8, '0')}`
-          : in2Lo.toString(16).padStart(8, '0'),
-        out: outHi
-          ? `${outHi.toString(16).padStart(8, '0')}${outLo.toString(16).padStart(8, '0')}`
-          : outLo.toString(16).padStart(8, '0'),
-      });
-    }
-    return entries;
-  };
-
-  const _FPU_OP_NAMES = [
-    'add_s',
-    'sub_s',
-    'mul_s',
-    'div_s',
-    'sqrt_s',
-    'abs_s',
-    'neg_s',
-    'add_d',
-    'sub_d',
-    'mul_d',
-    'div_d',
-    'sqrt_d',
-    'abs_d',
-    'neg_d',
-    'cvt_s_d',
-    'cvt_d_s',
-    'cvt_s_w',
-    'cvt_d_w',
-    'cvt_s_l',
-    'cvt_d_l',
-  ];
-
   // ── R2: no silent no-ops during rollback replay ────────────────────────
   // If a tick lands with no way to actually step the emulator, kn_post_tick
   // would still advance rb.frame, producing a Frankenstein state with
@@ -14273,9 +14145,9 @@
     // engine.
     queueMicrotask(() => _config?.onLeftOutOfStart?.());
   };
-  const _notifyCoreFatal = () => {
+  const _notifyCoreFatal = (message) => {
     try {
-      _config?.onFatal?.();
+      _config?.onFatal?.(message);
     } catch (cbErr) {
       console.error('[lockstep] onFatal callback threw:', cbErr);
     }
@@ -14301,6 +14173,38 @@
     // pending, the result handler drops it as stale.
     _workerCoprocAbort(`core fatal (${branch})`);
     _notifyCoreFatal();
+  };
+
+  // The match cannot start on this page: its core lacks the C engine, or it
+  // never heard the host's delay, or the host started at another frame.
+  // Nothing else runs a match, so the page stops and says so, and the other
+  // players drop it at the input deadline, as they drop a page whose core
+  // trapped (specs/engine_start.qnt).
+  const START_FAIL_MESSAGES = {
+    core: "This page's emulator can't run online play. Reload the page to rejoin the match.",
+    'old-host':
+      "The match couldn't start: the host is on an older version of the site. Ask them to reload the page, then rejoin.",
+    'no-host': "The match couldn't start: no word from the host. Reload the page to rejoin the match.",
+    'start-frame':
+      "The match couldn't start: this page and the host disagree on where it begins. Reload the page to rejoin the match.",
+  };
+  const _stopAtStart = (reason, detail = {}) => {
+    if (_coreFatalError) return;
+    // As after a trap: only a reload starts this page again.
+    _coreFatalError = true;
+    const message = START_FAIL_MESSAGES[reason] || START_FAIL_MESSAGES['no-host'];
+    // A later start on this page (a late join) shows this again, not a crash.
+    _coreFatalMessage = message;
+    _syncLog(`START-FAIL reason=${reason} f=${_frameNum} ${JSON.stringify(detail)}`);
+    KNEvent('start-fail', `match could not start (${reason})`, { reason, frame: _frameNum, ...detail });
+    _phase = PHASE_STOPPED;
+    _checkStateTransition();
+    if (_tickInterval) {
+      clearInterval(_tickInterval);
+      _tickInterval = null;
+    }
+    _workerCoprocAbort(`start failed (${reason})`);
+    _notifyCoreFatal(message);
   };
 
   const _runStepOneFrame = (branch) => {
@@ -14358,9 +14262,6 @@
   let _fpsLastTime = 0;
   let _fpsFrameAtWindowStart = -1;
   let _fpsCurrent = 0;
-  let _remoteReceived = 0;
-  let _remoteMissed = 0;
-  let _remoteApplied = 0;
   let _lastRemoteFrame = -1;
   let _lastRemoteFramePerSlot = {}; // slot -> highest frame received from that peer
   let _peerLastAdvanceTime = {}; // slot -> performance.now() when peer last sent a NEW frame
@@ -14427,11 +14328,8 @@
   // freeze the local sim until inputs return. See ROLLBACK-STALL logic.
   const ROLLBACK_STALL_MS = 3000; // was 500 — keep predicting through drops
   let _rollbackStallStart = 0;
-  let _consecutiveFabrications = {}; // slot -> count of consecutive hard-timeout fabrications
-  const RAPID_FABRICATION_THRESHOLD = 2; // after N consecutive fabrications, skip stall wait
   let _inputLateLogTime = {}; // slot -> last time INPUT-LATE was logged (rate-limiting)
   let _rbPendingInputLastLogAt = 0;
-  let _rbPendingInitCatchup = null;
 
   // ── Per-player extra input delay ────────────────────────────────────
   // Each player can hold their own input back EXTRA frames before it is
@@ -14546,41 +14444,77 @@
     }
   };
 
-  const _requestRollbackInit = (delay, initFrame, source) => {
-    if (!window._rbDoInit) return false;
-    const effectiveDelay = clampRollbackDelay(delay, ROLLBACK_MIN_DELAY_FRAMES);
-    const targetFrame = Number.isFinite(initFrame) && initFrame >= 0 ? initFrame : _frameNum;
-    DELAY_FRAMES = effectiveDelay;
+  // ── A guest's start: what it does with the host's delay and start frame ──
+  // The host arms its C engine when its match starts and sends each guest the
+  // delay and the frame it armed at (`rb-delay:`, `rb-init-frame:`), and both
+  // again on every channel to a guest that opens (_sendHostStart). A late
+  // joiner learns both from the host's state. Until the guest arms it runs no
+  // frame (tick's rb-pending-init hold). KNCore.guestStartStep decides when
+  // it arms or stops (web/src/engine-start.ts, specs/engine_start.qnt).
+  const _heardHostDelay = () =>
+    Number.isInteger(window._rbHostDelay) && window._rbHostDelay >= 0 ? window._rbHostDelay : -1;
+  const _heardHostStart = () =>
+    Number.isInteger(window._rbHostInitFrame) && window._rbHostInitFrame >= 0 ? window._rbHostInitFrame : -1;
+  // A delay as the host sends it: 0 stays 0 (alone in a room the match runs
+  // at 0, and a friend who joins runs at it too); anything else is clamped as
+  // the host's own was. -1 for what is not a delay.
+  const _hostDelayFrom = (value) => {
+    const n = parseInt(value, 10);
+    if (!Number.isFinite(n) || n < 0) return -1;
+    return n === 0 ? 0 : clampRollbackDelay(n);
+  };
 
-    if (_playerSlot !== 0 && targetFrame > _frameNum) {
-      window._rbPendingInit = true;
-      if (!window._rbPendingInitAt) window._rbPendingInitAt = performance.now();
-      _rbPendingInitCatchup = { delay: effectiveDelay, initFrame: targetFrame, source };
-      _syncLog(
-        `RB-INIT-CATCHUP armed source=${source} localF=${_frameNum} ` + `hostF=${targetFrame} delay=${effectiveDelay}`,
-      );
+  // The host's side: its delay and start frame to one guest, the delay first.
+  const _sendHostStart = (dc) => {
+    dc.send(`rb-delay:${DELAY_FRAMES}`);
+    dc.send(`rb-init-frame:${_rbInitFrame}`);
+  };
+
+  const _guestStart = (source) => {
+    if (_playerSlot === 0 || _useCRollback || _coreFatalError || !window._rbPendingInit || !window._rbDoInit) {
       return false;
     }
-
+    const heardDelay = _heardHostDelay();
+    const heardStart = _heardHostStart();
+    const waitedMs = window._rbPendingInitAt ? performance.now() - window._rbPendingInitAt : 0;
+    const step = window.KNCore.guestStartStep(heardDelay, heardStart, _frameNum, waitedMs, RB_INIT_TIMEOUT_MS);
+    if (step === 'wait') return false;
     window._rbPendingInit = false;
     window._rbPendingInitAt = 0;
-    _rbPendingInitCatchup = null;
-    const alignedFrame = _playerSlot !== 0 && targetFrame < _frameNum ? _frameNum : targetFrame;
-    if (alignedFrame !== targetFrame) {
-      _syncLog(
-        `RB-INIT-CATCHUP overshot source=${source} localF=${_frameNum} ` +
-          `hostF=${targetFrame}; init uses local frame`,
-      );
+    if (step === 'arm') {
+      DELAY_FRAMES = heardDelay;
+      if (heardStart < 0) {
+        _syncLog(
+          `RB-INIT-NO-START-FRAME source=${source} — armed with the host's delay=${heardDelay} at f=${_frameNum}`,
+        );
+      }
+      // A trap while arming leaves the page neither armed nor waiting: it
+      // ends the match as any core trap does, never a silent hold.
+      try {
+        window._rbDoInit(
+          heardDelay,
+          _frameNum,
+          heardStart >= 0 ? `host start frame (${source})` : `own frame at the deadline (${source})`,
+        );
+      } catch (e) {
+        _handleCoreFatal('rollback-init', e);
+        return false;
+      }
+      return true;
     }
-    window._rbDoInit(effectiveDelay, alignedFrame);
-    return true;
+    if (step === 'stopFrame') {
+      _stopAtStart('start-frame', { source, hostFrame: heardStart, ownFrame: _frameNum });
+    } else {
+      _stopAtStart('no-host', { source, waitedMs: Math.round(waitedMs) });
+    }
+    return false;
   };
 
   const startLockstep = () => {
     // Late join and reconnect cannot resume a dead core.
     if (_coreFatalError) {
       _syncLog('FATAL-CORE-ABORT start blocked — core is dead, reload required');
-      _notifyCoreFatal();
+      _notifyCoreFatal(_coreFatalMessage);
       return;
     }
     if (_phase === PHASE_RUNNING) return;
@@ -14614,6 +14548,20 @@
 
     // Detect forked core with C-level deterministic timing exports
     const lsMod = window.EJS_emulator?.gameManager?.Module;
+    // Every frame of a match runs on the C engine (specs/engine_start.qnt,
+    // everyFrameRunsOnTheCEngine). A core without it cannot play online.
+    const missingExports = [
+      '_kn_set_deterministic',
+      '_kn_set_frame_time',
+      '_kn_rollback_init',
+      '_kn_pre_tick',
+      '_kn_post_tick',
+      '_kn_set_frame',
+    ].filter((name) => typeof lsMod?.[name] !== 'function');
+    if (missingExports.length) {
+      _stopAtStart('core', { missing: missingExports });
+      return;
+    }
     _hasForkedCore = !!(lsMod?._kn_set_deterministic && lsMod._kn_set_frame_time);
     if (_hasForkedCore) {
       _syncLog('forked core detected — C-level deterministic timing');
@@ -14692,7 +14640,6 @@
       _lateJoinActivatedAtFrame = {};
       _lateJoinInputBootstrapUntilFrame = -1;
       _lateJoinSeededInputFrames = {};
-      _rosterChangeFrame = -1;
       // On a kn-sync rematch, both peers boot from a bit-identical state
       // captured by the host — the menu-start barrier (which exists to
       // bridge the cold-boot scene-mismatch window) serves no purpose
@@ -14710,20 +14657,14 @@
     _fpsLastTime = performance.now();
     _fpsFrameAtWindowStart = -1;
     _fpsCurrent = 0;
-    _remoteReceived = 0;
-    _remoteMissed = 0;
-    _remoteApplied = 0;
     _lastRemoteFrame = -1;
     _lastRemoteFramePerSlot = {};
     _peerLastAdvanceTime = {};
     _peerPhantom = {};
-    _consecutiveFabrications = {};
     _inputLateLogTime = {};
     _resumeInputGuardUntil = 0;
     _stallStart = 0;
-    _resendSent = false;
     _resetStrictMenuResends();
-    _clearStrictMenuWait();
     _rbInputStallKey = '';
     _rbInputStallStartTime = 0;
     _rbPendingInputLastLogAt = 0;
@@ -14758,17 +14699,6 @@
         detMod._kn_int_trace_enable(0);
       }
 
-      if (_knTraceDiagnostics && detMod?._kn_fpu_trace_enable) {
-        detMod._kn_fpu_trace_enable(1);
-        _fpuTraceEnabled = true;
-        _fpuTraceLastCheckFrame = 0;
-        _fpuTraceVerified = false;
-        _syncLog('FPU trace enabled for determinism verification');
-      } else if (detMod?._kn_fpu_trace_enable) {
-        detMod._kn_fpu_trace_enable(0);
-        _fpuTraceEnabled = false;
-      }
-
       // Initialize C-level rollback engine if available.
       //
       // CRITICAL: both peers MUST init kn_rollback_init with the SAME delay
@@ -14781,9 +14711,9 @@
       // before initializing — initializing first with locally-computed delay
       // and then "updating DELAY_FRAMES" later only fixes the JS-side
       // variable, not the C engine's internal delay.
-      const doRollbackInit = (effectiveDelay, initFrameOverride = null) => {
+      const doRollbackInit = (effectiveDelay, initFrameOverride = null, initSource = null) => {
         if (!detMod?._kn_rollback_init) {
-          _useCRollback = false;
+          _stopAtStart('core', { missing: ['_kn_rollback_init'] });
           return;
         }
         // Choose init frame: host-broadcast value (when guest is matching the
@@ -14835,18 +14765,12 @@
         // frame numbers line up across peers. Late-join: _frameNum was set
         // to the host's frame from the loaded state. Deferred-init guest:
         // initFrame is the host's broadcast frame (initFrameOverride).
-        if (initFrame > 0 && detMod._kn_set_frame) {
+        if (initFrame > 0) {
+          // startLockstep has checked the core has _kn_set_frame.
           detMod._kn_set_frame(initFrame);
           _syncLog(
-            `C-ROLLBACK init: set C frame to ${initFrame}` +
-              (initFrameOverride != null ? ` (host-authoritative)` : ` (local)`),
+            `C-ROLLBACK init: set C frame to ${initFrame} (${initSource ?? (initFrameOverride != null ? 'given' : 'local')})`,
           );
-        } else if (initFrame > 0) {
-          // WASM doesn't have kn_set_frame yet — disable C rollback so the
-          // tick loop doesn't sync _frameNum from the C engine's stale 0.
-          _syncLog(`C-ROLLBACK late-join: no _kn_set_frame, disabling C rollback`);
-          _useCRollback = false;
-          return;
         }
         rb_numPlayers = numPlayers;
         _rbRollbackMax = rollbackMax;
@@ -14887,19 +14811,15 @@
           }
         }
 
-        // Host broadcasts its init frame so guests can match it. Mirrors the
-        // rb-delay broadcast at line ~5017; deferred-init for SR fires after
-        // that broadcast, so a separate message here is required. Sent over
-        // the same DC as rb-delay (reliable+ordered), so guests receive
-        // rb-delay before rb-init-frame and gate accordingly. Non-host peers
-        // are no-op here because their _peers map is keyed by remote slot
-        // and doesn't include the host (the only guest→guest broadcast in
-        // this codebase is the rb-blocks per-block hash exchange).
+        // The host tells every guest its delay and start frame, together:
+        // `rb-delay:` went out at "GO" too, but a channel that closed since
+        // took it with it (specs/engine_start.qnt, HOST_SENDS_BOTH). They go
+        // again on every channel that opens (setupDataChannel's onOpen).
         if (_playerSlot === 0) {
           for (const p of Object.values(_peers)) {
-            if (p.dc?.readyState === 'open') {
+            if (p.dc?.readyState === 'open' && p.slot !== null && p.slot !== undefined) {
               try {
-                p.dc.send(`rb-init-frame:${initFrame}`);
+                _sendHostStart(p.dc);
               } catch (_) {}
             }
           }
@@ -14961,39 +14881,33 @@
       const tryInitRollback = () => {
         if (_playerSlot === 0) {
           // Host: init immediately at local frame; doRollbackInit broadcasts
-          // rb-init-frame inside so guests can match.
-          doRollbackInit(DELAY_FRAMES);
-        } else if (
-          window._rbHostDelay !== undefined &&
-          window._rbHostDelay > 0 &&
-          window._rbHostInitFrame !== undefined
-        ) {
-          _requestRollbackInit(window._rbHostDelay, window._rbHostInitFrame, 'try-init');
+          // rb-init-frame inside so guests can match. A trap here ends the
+          // match, as on a guest (_guestStart).
+          try {
+            doRollbackInit(DELAY_FRAMES);
+          } catch (e) {
+            _handleCoreFatal('rollback-init', e);
+          }
         } else {
-          // I1 (MF2): record the wall-clock start of the pending
-          // state so tick() can fire RB-INIT-TIMEOUT if the host's
-          // rb-delay/rb-init-frame broadcast never arrives (DC died
-          // mid-send, host crashed, etc).
+          // I1 (MF2): the guest holds from here, and tick() asks
+          // KNCore.guestStartStep each frame until it arms or stops.
           window._rbPendingInit = true;
           window._rbPendingInitAt = performance.now();
-          const haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
-          const haveInitFrame = window._rbHostInitFrame !== undefined;
-          _syncLog(
-            `C-ROLLBACK deferred: waiting for host ` +
-              `${haveDelay ? '' : 'rb-delay '}${haveInitFrame ? '' : 'rb-init-frame '}` +
-              `broadcast (own delay=${DELAY_FRAMES})`,
-          );
+          if (!_guestStart('try-init') && window._rbPendingInit) {
+            const haveDelay = _heardHostDelay() >= 0;
+            const haveInitFrame = _heardHostStart() >= 0;
+            _syncLog(
+              `C-ROLLBACK deferred: waiting for host ` +
+                `${haveDelay ? '' : 'rb-delay '}${haveInitFrame ? '' : 'rb-init-frame '}` +
+                `broadcast (own delay=${DELAY_FRAMES})`,
+            );
+          }
         }
       };
 
-      if (detMod?._kn_rollback_init && DELAY_FRAMES > 0) {
-        tryInitRollback();
-      } else {
-        if (DELAY_FRAMES <= 0 && detMod?._kn_rollback_init) {
-          _syncLog('C-ROLLBACK disabled for zero-delay solo play');
-        }
-        _useCRollback = false;
-      }
+      // Every page arms, at a delay of 0 too: alone in a room the match
+      // runs at 0, on the C engine like any other.
+      tryInitRollback();
 
       // Override performance.now() during WASM frame steps for COMPLETE timing
       // determinism. Emscripten's _emscripten_get_now calls performance.now()
@@ -15265,63 +15179,23 @@
     // player sending input (slowly). Pausing completely breaks multi-tab
     // setups where one tab is always document.hidden.
     //
-    // On return, while the C rollback engine is active, do nothing. The
-    // other peer's input stall holds it near our last input whether this tab
-    // was throttled or frozen; a freeze thawed within 5s is still in step,
-    // though visibilitychange can run before queued packets update our view
-    // (#64, #69). Fast-forwarding and wiping inputs leaves holes neither
-    // peer can fill, causing mutual input-stall timeouts and phantoming.
-    // After 5s the peer may already have phantomed us and run ahead; this
-    // path cannot recover that stale state either (#69 item 3 is out of scope).
-    // Only the lockstep fallback fast-forwards and requests a full resync.
+    // On return, do nothing. The other peer's input stall holds it near our
+    // last input whether this tab was throttled or frozen; a freeze thawed
+    // within 5s is still in step, though visibilitychange can run before
+    // queued packets update our view (#64, #69). Fast-forwarding and wiping
+    // inputs leaves holes neither peer can fill, causing mutual input-stall
+    // timeouts and phantoming. After 5s the peer may already have phantomed
+    // us and run ahead; this path cannot recover that stale state either
+    // (#69 item 3 is out of scope).
     let _backgroundAt = 0;
-    const _requestLifecycleFullResync = (reason) => {
-      if (_useCRollback) {
-        _syncLog(`${reason}: rollback mode — no fast-forward/resync (behind=${_lastRemoteFrame - _frameNum})`);
+    const _noteLifecycleReturn = (reason) => {
+      // Waiting to arm: the page has run no frame, and its frame must stay
+      // the host's start (specs/engine_start.qnt, tabReturnWhileWaitingTest).
+      if (window._rbPendingInit) {
+        _syncLog(`${reason}: waiting to arm — no fast-forward/resync (f=${_frameNum})`);
         return;
       }
-
-      // Reset a guest's delta base only when a full resync will follow;
-      // rollback return has no resync, so clearing it would force an
-      // unnecessary full-state round trip on the host's next delta sync.
-      if (_playerSlot !== 0) {
-        _setLastSyncState(null, reason);
-      }
-
-      // Fast-forward _frameNum to catch up with peers. Background throttling
-      // means we fell behind — peers have moved far ahead.
-      if (_lastRemoteFrame > _frameNum) {
-        _syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}`);
-        _frameNum = _lastRemoteFrame;
-        KNState.frameNum = _frameNum;
-        _localInputs = {};
-        _remoteInputs = {};
-        _resetInputMaps();
-        for (let d = 0; d < DELAY_FRAMES; d++) {
-          _localInputs[_frameNum + d] = KNShared.ZERO_INPUT;
-        }
-      }
-
-      // Request resync (emulator state drifted during background throttling)
-      if (_playerSlot === 0) {
-        _consecutiveResyncs = 0;
-        _syncCheckInterval = _syncBaseInterval;
-      } else {
-        _beginLifecycleResyncGuard(reason);
-        _resyncRequestInFlight = false; // override — lifecycle resync always wins
-        _syncTargetFrame = -1; // cancel any pending coord target — lifecycle return needs immediate sync
-        _syncTargetDeadlineAt = 0;
-        const sentSocket = _requestSocketFullResync(reason);
-        const hostPeer = Object.values(_peers).find((p) => p.slot === 0);
-        if (!sentSocket && hostPeer?.dc?.readyState === 'open') {
-          try {
-            _sendResyncRequest(hostPeer.dc, _beginResyncRequest(), 'sync-request-full');
-            _syncLog(`${reason}: sent sync-request-full to host over DC fallback`);
-          } catch (_) {
-            _resyncRequestInFlight = false;
-          }
-        }
-      }
+      _syncLog(`${reason}: rollback mode — no fast-forward/resync (behind=${_lastRemoteFrame - _frameNum})`);
     };
 
     _visChangeHandler = () => {
@@ -15366,7 +15240,7 @@
           } catch (_) {}
         }
 
-        _requestLifecycleFullResync('bg-return');
+        _noteLifecycleReturn('bg-return');
       }
     };
     document.addEventListener('visibilitychange', _visChangeHandler);
@@ -15426,7 +15300,7 @@
       _clearEjsPauseFlagWithRetries('pageshow');
       _syncLog(`pageshow at frame ${_frameNum} persisted=${!!event?.persisted} backgroundMs=${bgDuration}`);
       if (bgDuration >= 500) {
-        _requestLifecycleFullResync('pageshow');
+        _noteLifecycleReturn('pageshow');
       }
     };
     window.addEventListener('pagehide', _pageHideHandler);
@@ -15553,7 +15427,6 @@
     _lastAppliedSyncHostFrame = -1;
     _lastAppliedRecoveryId = 0;
     _resetStrictMenuResends();
-    _clearStrictMenuWait();
 
     // Re-enable RSP audio DRAM writes
     const stopMod = window.EJS_emulator?.gameManager?.Module;
@@ -15646,13 +15519,6 @@
     window._rbHostInitFrame = undefined;
     window._rbPendingInit = false;
     window._rbPendingInitAt = 0;
-    _rbPendingInitCatchup = null;
-
-    // Disable FPU trace
-    if (_fpuTraceEnabled) {
-      if (stopMod?._kn_fpu_trace_enable) stopMod._kn_fpu_trace_enable(0);
-      _fpuTraceEnabled = false;
-    }
 
     // Disable all deterministic timing
     window._kn_inStep = false;
@@ -15784,12 +15650,10 @@
     _pacingMaxAdv = 0;
     _pacingAdvSum = 0;
     _pacingAdvCount = 0;
-    _pacingSkipCounter = 0;
     _pacingLastLogAt = 0;
     _pacingSuppressedLogs = 0;
     _lastPacingStateLogAt = 0;
     _rbPendingInputLastLogAt = 0;
-    _rbPendingInitCatchup = null;
     // Remove diagnostic hooks (delegated to kn-diagnostics.js)
     _diag?.cleanup();
   };
@@ -16004,6 +15868,51 @@
   };
   const SYNC_FOLLOW_UP_MAX = 3;
 
+  // A direct request (`sync-request-full`, no target frame: the guest's
+  // BOOT-SYNC after a late join, a reconnect, a visibility or network change)
+  // is answered at once, at the frame the host has reached. A state taken
+  // there while an input it consumed was still predicted (a peer's, a
+  // phantom's) can change through a later rollback, so every direct answer is
+  // watched and followed up like a coordinated answer. Whether it was
+  // confirmed is decided by _dispatchScheduledSyncs once the state was
+  // actually taken (a push queued behind another is taken later), not here:
+  // the follow-up is skipped when the frame is confirmed with no phantom, the
+  // state was delivered and no prediction differed; otherwise it is sent once
+  // confirmed or at its deadline, within SYNC_FOLLOW_UP_MAX. Unwatched, such
+  // an answer was final, and a late joiner played on split for the rest of
+  // the match (specs/sync_follow_up.qnt, DIRECT_WATCHED).
+  const _answerDirectSyncRequest = (sid, requestId) => {
+    const requestIds = { [sid]: requestId };
+    const epoch = _syncQueueEpoch;
+    const gen = _syncQueueGen[sid] || 0;
+    Promise.resolve(pushSyncState(sid, false, { requestIds, watchFor: [sid] })).then((skipped) => {
+      // Still the guest it was sent to: not gone, reset (reconnect) or a
+      // match stopped since (those are resetPeerState's job).
+      const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
+      const sent = skipped != null && !skipped.includes(sid);
+      // A newer request from this guest replaces the follow-up.
+      const replaced = _scheduledSyncRequests.some((q) => q.targetSid === sid);
+      const targetPhantom = !!_peerPhantom[_peers[sid]?.slot];
+      const rules = window.KNCore.syncFollowUp;
+      if (!rules.directFollowUpDue(current, sent, replaced, targetPhantom)) {
+        // Not sent: the guest asks again, and the watch follows nothing.
+        if (rules.directWatchIsStale(current, sent, replaced)) _followUpWatches.delete(sid);
+        if (current && sent && targetPhantom)
+          _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid}: a phantom, its recovery resyncs it`);
+        return;
+      }
+      _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid} request=${requestId || 0}: answered, follow-up scheduled`);
+      _scheduledSyncRequests.push({
+        targetFrame: _frameNum,
+        targetSid: sid,
+        followUp: 1,
+        requestId: requestId || 0,
+        deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
+        watch: _followUpWatches.get(sid) ?? null,
+      });
+    });
+  };
+
   // True when this peer's live state at the start of _frameNum is final: no
   // replay in flight or pending, and every input it consumed is real. Frames
   // before _frameNum applied inputs up to _frameNum - 1 - DELAY_FRAMES. An
@@ -16147,82 +16056,17 @@
       _lateJoinGuestPausedAt = 0;
       _resetPacingAfterLateJoin();
     }
-    // Guests defer the entire tick loop until the host's authoritative
-    // rb-delay broadcast arrives and the C rollback engine is initialized
-    // with the agreed delay. Without this, the guest would advance frames
-    // 0..N in pure-lockstep mode, then the C engine would init at frame 0
-    // (its internal counter), and JS would jump backwards from frame N to
-    // frame 0 — corrupting input ring frame tags and the rollback ring.
-    //
-    // I1 (MF2): the stall is bounded by RB_INIT_TIMEOUT_MS. If the
-    // host's rb-delay DC broadcast never arrives (DC died before
-    // send, host crashed, message lost), fall back to a locally
-    // computed delay so the guest does not freeze forever. The next
-    // hash mismatch → resync converges both peers if the fallback
-    // delay differs from what the host would have broadcast.
-    // See docs/netplay-invariants.md §I1 and spec §MF2.
+    // A guest runs no frame until its C engine is armed with the host's delay
+    // at the frame it is on (specs/engine_start.qnt). Each tick asks
+    // KNCore.guestStartStep: arm, wait, or stop and say so (I1, MF2: the wait
+    // ends at RB_INIT_TIMEOUT_MS). See docs/netplay-invariants.md §I1.
     if (window._rbPendingInit) {
-      // Keep the reliable input stream alive while the guest is frozen
-      // waiting for the host's authoritative rb-init-frame. Otherwise the
-      // host can stall in pre-gameplay lockstep waiting for this guest's
-      // next frame, never reach its own deferred init, and force the guest
-      // into a local RB-INIT-TIMEOUT with a different init frame.
+      // Keep the reliable input stream alive while the guest waits, so the
+      // host hears this page's frame and does not count it stale.
       _sendPendingRollbackInitInput();
-      if (_rbPendingInitCatchup) {
-        const { delay, initFrame, source } = _rbPendingInitCatchup;
-        if (_frameNum >= initFrame) {
-          const alignedFrame = _frameNum > initFrame ? _frameNum : initFrame;
-          _syncLog(
-            `RB-INIT-CATCHUP complete source=${source} localF=${_frameNum} ` +
-              `hostF=${initFrame} initF=${alignedFrame} delay=${delay}`,
-          );
-          window._rbPendingInit = false;
-          window._rbPendingInitAt = 0;
-          _rbPendingInitCatchup = null;
-          if (window._rbDoInit) {
-            try {
-              window._rbDoInit(delay, alignedFrame);
-            } catch (e) {
-              _syncLog(`RB-INIT-CATCHUP init failed: ${e}`);
-            }
-          }
-        } else {
-          if (_frameNum % 30 === 0 && window._knLastRbInitCatchupLogFrame !== _frameNum) {
-            window._knLastRbInitCatchupLogFrame = _frameNum;
-            _syncLog(
-              `RB-INIT-CATCHUP advance localF=${_frameNum} hostF=${initFrame} ` + `remaining=${initFrame - _frameNum}`,
-            );
-          }
-          // Fall through to the JS lockstep path so the emulator state
-          // advances to the host's init frame before C rollback is armed.
-        }
-      } else {
-        const _rbPendingStart = window._rbPendingInitAt || 0;
-        if (_rbPendingStart > 0 && performance.now() - _rbPendingStart > RB_INIT_TIMEOUT_MS) {
-          const _rbFallbackDelay = clampRollbackDelay(DELAY_FRAMES, ROLLBACK_MIN_DELAY_FRAMES);
-          const _haveDelay = window._rbHostDelay !== undefined && window._rbHostDelay > 0;
-          const _haveInitFrame = window._rbHostInitFrame !== undefined;
-          const _missing = (!_haveDelay ? 'rb-delay ' : '') + (!_haveInitFrame ? 'rb-init-frame' : '');
-          _syncLog(
-            `RB-INIT-TIMEOUT elapsed=${Math.round(performance.now() - _rbPendingStart)}ms — ` +
-              `host ${_missing.trim() || 'broadcast'} never arrived, falling back to local delay=${_rbFallbackDelay} initFrame=${_frameNum}`,
-          );
-          window._rbPendingInit = false;
-          window._rbPendingInitAt = 0;
-          if (window._rbDoInit) {
-            try {
-              // No initFrameOverride: fall back to local _frameNum. Hash
-              // mismatch + resync below converges both peers if local frames
-              // diverged from host's intended init frame.
-              window._rbDoInit(_rbFallbackDelay);
-            } catch (e) {
-              _syncLog(`RB-INIT-TIMEOUT fallback init failed: ${e}`);
-            }
-          }
-        } else {
-          _markTickReturn('skip:rb-pending-init');
-          return;
-        }
+      if (!_guestStart('tick')) {
+        _markTickReturn(_coreFatalError ? 'skip:start-failed' : 'skip:rb-pending-init');
+        return;
       }
     }
 
@@ -16503,56 +16347,12 @@
               `PACING-CONVERGED f=${_frameNum} initF=${_rbInitFrame} fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax}`,
             );
           }
-          if (!_useCRollback) {
-            if (_rbConverged && _frameAdvRaw >= _rbRollbackMax - 2) {
-              if (_runSubstate !== RUN_PACING) {
-                _runSubstate = RUN_PACING;
-                _pacingThrottleStartAt = nowPacing;
-                _pacingCapsCount++;
-                _syncLog(
-                  `PACING-SAFETY-FREEZE fAdv=${_frameAdvRaw} rbMax=${_rbRollbackMax} minRemote=${minRemoteFrame} — skipping frame advance (inputs still sent)`,
-                );
-              }
-              _pacingCapsFrames++;
-              _skipFrameAdvance = true;
-            }
-          }
-
           const alpha = _frameAdvRaw > _frameAdvantage ? FRAME_ADV_ALPHA_UP : FRAME_ADV_ALPHA_DOWN;
           _frameAdvantage = _frameAdvantage * (1 - alpha) + _frameAdvRaw * alpha;
 
           _pacingAdvSum += _frameAdvantage;
           _pacingAdvCount++;
           if (_frameAdvantage > _pacingMaxAdv) _pacingMaxAdv = _frameAdvantage;
-
-          if (!_useCRollback) {
-            const excess = _rbConverged ? _frameAdvRaw - DELAY_FRAMES : -1;
-            let shouldSkip = false;
-            if (excess >= 3) {
-              shouldSkip = true;
-            } else if (excess >= 2) {
-              _pacingSkipCounter++;
-              shouldSkip = (_pacingSkipCounter & 1) === 0;
-            }
-            if (shouldSkip) {
-              _pacingCapsFrames++;
-              if (_runSubstate !== RUN_PACING) {
-                _runSubstate = RUN_PACING;
-                _pacingThrottleStartAt = nowPacing;
-                _pacingCapsCount++;
-                const ratio = excess >= 2 ? '100%' : '50%';
-                _logPacing(
-                  `PACING-THROTTLE start fAdv=${_frameAdvRaw} ratio=${ratio} smooth=${_frameAdvantage.toFixed(1)} delay=${DELAY_FRAMES} minRemote=${minRemoteFrame}`,
-                );
-              }
-              _skipFrameAdvance = true;
-            }
-            if (_runSubstate === RUN_PACING && !_skipFrameAdvance) {
-              if (_runSubstate === RUN_PACING) _runSubstate = RUN_NORMAL;
-              _pacingThrottleStartAt = 0;
-              _logPacing(`PACING-THROTTLE end fAdv=${_frameAdvRaw} smooth=${_frameAdvantage.toFixed(1)}`);
-            }
-          }
 
           // ── I1: Pacing throttle wall-clock deadline ────────────────────
           // If the throttle has been continuously active for longer than
@@ -16838,21 +16638,26 @@
     }
     _chk('post-skip-gate');
 
+    // Every frame runs on the C engine (specs/engine_start.qnt,
+    // everyFrameRunsOnTheCEngine). A page that is waiting to arm returned
+    // above (skip:rb-pending-init, with its deadline), and one whose arming
+    // trapped has stopped, so this is not reached; if it were, holding would
+    // be a stall with no deadline (I1), so it ends the match instead.
+    if (!_useCRollback) {
+      _markTickReturn('skip:not-armed');
+      _handleCoreFatal('not-armed', new Error('a tick with the C engine neither armed nor waiting'));
+      return;
+    }
+
     // ── C-level rollback path ──────────────────────────────────────────
     // C manages: state ring buffer, input storage, prediction, misprediction detection
     // JS handles: all frame stepping (normal + replay) via writeInputToMemory + stepOneFrame
-    //
-    // Boot convergence: during the first 300 frames after rollback init,
-    // fall through to the lockstep path (which stalls for remote input).
-    // This prevents the boot race where both emulators predict through
-    // ~120 boot frames independently and end up permanently desynced.
-    // After convergence, the rollback path takes over with prediction.
     if (_useCRollback) {
       try {
         _chk('cr:enter');
         const tickMod = window.EJS_emulator?.gameManager?.Module;
         if (!tickMod?._kn_pre_tick) {
-          _useCRollback = false;
+          _stopAtStart('core', { missing: ['_kn_pre_tick'] });
           _markTickReturn('skip:no-pre-tick');
           return;
         }
@@ -16893,8 +16698,6 @@
           _inGameplay = true;
           _syncLog(`C-ROLLBACK ticking from f=${_frameNum}`);
         }
-        // A wait shown by the lockstep path before the engine started.
-        _clearStrictMenuWait();
         // Boot sync: legacy savestate startup can still need one host state push
         // after boot grace. kn-sync startup already loaded the host's authoritative
         // CPU/peripheral/RDRAM state at the manual start boundary; repeating that
@@ -18752,6 +18555,13 @@
         if (_knScreenshots() && _frameNum > 0 && _frameNum % _diag.SCREENSHOT_INTERVAL === 0) {
           _diag.captureAndSendScreenshot();
         }
+        // P0-1 funnel: fire milestone_reached once when the player reaches
+        // ~30 seconds of sustained gameplay (frame 1800 at 60fps). This is the
+        // "actually played, not just loaded" signal for the reliability funnel.
+        if (!_funnelMilestoneSent && _frameNum >= 1800) {
+          _funnelMilestoneSent = true;
+          KNEvent('milestone_reached', '', { frame: 1800 });
+        }
         _markTickReturn('end:c-rollback');
         return;
       } catch (eCR) {
@@ -18804,402 +18614,6 @@
         } catch (_) {}
         _handleCoreFatal('c-rollback', eCR);
         return;
-      }
-    }
-
-    // Check if all INPUT peers (peers who have sent at least 1 input)
-    // have input for the apply frame. Late joiners who haven't started
-    // sending yet won't stall existing players.
-    const menuLockstepPhase = _readMenuPhase();
-    const inputPeers = getInputPeers(menuLockstepPhase.strictInputLockstep);
-    const applyFrame = _frameNum - DELAY_FRAMES;
-    const consumedRemoteInputSlots = [];
-    if (applyFrame >= 0) {
-      let allArrived = true;
-      const _missingSlots = [];
-      for (let j = 0; j < inputPeers.length; j++) {
-        const pSlot = inputPeers[j].slot;
-        if (applyFrame < _admissionInputFloor(pSlot)) continue;
-        if (!_remoteInputs[pSlot] || _remoteInputs[pSlot][applyFrame] === undefined) {
-          allArrived = false;
-          _missingSlots.push(pSlot);
-        }
-      }
-
-      if (!allArrived) {
-        if (menuLockstepPhase.strictInputLockstep) {
-          if (_stallStart === 0) {
-            _stallStart = now;
-            _resetStrictMenuResends();
-            _syncLog(
-              `MENU-LOCKSTEP start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
-                `scene=${menuLockstepPhase.sceneCurr} gameStatus=${menuLockstepPhase.gameStatus} ` +
-                `inputPeers=${inputPeers.map((p) => p.slot).join(',')}`,
-            );
-          }
-          const stallDuration = now - _stallStart;
-          if (stallDuration >= MAX_STALL_MS) {
-            const sentSlots = _requestStrictMenuResends(inputPeers, _missingSlots, applyFrame, now, 'js-menu');
-            if (sentSlots.length) {
-              _syncLog(
-                `MENU-LOCKSTEP resend-request f=${_frameNum} apply=${applyFrame} ` +
-                  `missing=[${_missingSlots.join(',')}] sent=[${sentSlots.join(',')}] ` +
-                  `stalledMs=${stallDuration.toFixed(0)}`,
-              );
-            }
-            _emitStrictMenuWait(
-              _missingSlots,
-              applyFrame,
-              stallDuration,
-              menuLockstepPhase.sceneCurr,
-              menuLockstepPhase.gameStatus,
-            );
-          }
-          if (_frameNum % 60 === 0 && window._knLastMenuStallLogFrame !== _frameNum) {
-            window._knLastMenuStallLogFrame = _frameNum;
-            _syncLog(
-              `MENU-LOCKSTEP-WAIT f=${_frameNum} applyF=${applyFrame} ` +
-                `stalledMs=${stallDuration.toFixed(0)} slots=[${_missingSlots.join(',')}] ` +
-                `- holding strict menu lockstep`,
-            );
-          }
-          _markTickReturn('skip:legacy-menu-lockstep-stall');
-          return;
-        }
-
-        // Gap-fill: if a peer has already sent inputs AHEAD of applyFrame, this specific
-        // frame will never arrive (late-join or post-reconnect gap). Fabricate immediately
-        // rather than waiting MAX_STALL_MS + RESEND_TIMEOUT_MS (5s) — otherwise a proactive
-        // state flood can starve the setInterval tick and the hard-timeout never fires.
-        const gapSlots = _missingSlots.filter(
-          (s) => _lastRemoteFramePerSlot[s] !== undefined && _lastRemoteFramePerSlot[s] > applyFrame,
-        );
-        if (gapSlots.length > 0) {
-          for (const s of gapSlots) {
-            if (!_remoteInputs[s]) _remoteInputs[s] = {};
-            if (_remoteInputs[s][applyFrame] === undefined) {
-              _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
-              _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
-            }
-          }
-          _syncLog(
-            `INPUT-GAP-FILL applyFrame=${applyFrame} slots=[${gapSlots.join(',')}] — peer ahead, immediate fabricate`,
-          );
-          _stallStart = 0;
-          _markTickReturn('skip:legacy-gap-fill');
-          return; // re-enter next tick with input now present
-        }
-
-        // Check if ALL missing peers are phantom (dead) or in rapid-fabrication mode
-        const allMissingArePhantom = _missingSlots.every(
-          (s) => _peerPhantom[s] || (_consecutiveFabrications[s] || 0) >= RAPID_FABRICATION_THRESHOLD,
-        );
-
-        if (allMissingArePhantom) {
-          // Rapid fabrication — peer(s) confirmed dead, no wait
-          const repeatInfo = [];
-          for (const s of _missingSlots) {
-            if (!_remoteInputs[s]) _remoteInputs[s] = {};
-            if (_remoteInputs[s][applyFrame] === undefined) {
-              _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
-              _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
-              repeatInfo.push(`s${s}=0`);
-            }
-          }
-          // Log once per second to avoid flooding
-          if (_stallStart === 0 || now - _stallStart >= 1000) {
-            _stallStart = now;
-            _syncLog(
-              `INPUT-FABRICATE f=${_frameNum} apply=${applyFrame} phantom=[${_missingSlots.join(',')}] fabricated=[${repeatInfo.join(',')}]`,
-            );
-          }
-        } else {
-          // STALL -- remote input not here yet (normal path for live peers)
-          if (_stallStart === 0) {
-            _stallStart = now;
-            _resendSent = false;
-            // Log first stall occurrence with full state
-            const rBufSizes = {};
-            for (const s of Object.keys(_remoteInputs)) {
-              rBufSizes[s] = Object.keys(_remoteInputs[s] || {}).length;
-            }
-            _syncLog(
-              `INPUT-STALL start f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] ` +
-                `inputPeers=${inputPeers.map((p) => p.slot).join(',')} rBuf=${_formatSlotMap(rBufSizes)} ` +
-                `peerStarted=${_formatSlotMap(_peerInputStarted)}`,
-            );
-          }
-          const stallDuration = now - _stallStart;
-          if (stallDuration >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
-            // Hard timeout — fabricate ZERO_INPUT for all missing slots.
-            // Always ZERO_INPUT (never _lastKnownInput) so all players agree.
-            const repeatInfo = [];
-            for (let k = 0; k < inputPeers.length; k++) {
-              const s = inputPeers[k].slot;
-              if (!_remoteInputs[s]) _remoteInputs[s] = {};
-              if (_remoteInputs[s][applyFrame] === undefined) {
-                _remoteInputs[s][applyFrame] = KNShared.ZERO_INPUT;
-                _consecutiveFabrications[s] = (_consecutiveFabrications[s] || 0) + 1;
-                repeatInfo.push(`s${s}=0`);
-              }
-            }
-            _syncLog(
-              `INPUT-STALL hard-timeout f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}] stallMs=${stallDuration.toFixed(0)} fabricated=[${repeatInfo.join(',')}]`,
-            );
-            KNEvent('stall', `Input stall at frame ${_frameNum}`, {
-              frame: _frameNum,
-              stallMs: Math.round(stallDuration),
-              missing: [..._missingSlots],
-            });
-            KNState.sessionStats.stalls++;
-            // MF4: fabrication keeps the game moving but creates
-            // permanent hash divergence from peers that had the real
-            // input. Request a full resync so the divergence
-            // converges. Rate-limited via
-            // INPUT_STALL_RESYNC_COOLDOWN_MS to avoid storms under
-            // sustained marginal WiFi. See spec §MF4, audit §A7.
-            const _nowStallResync = performance.now();
-            if (_syncEnabled && _nowStallResync - _lastInputStallResyncAt > INPUT_STALL_RESYNC_COOLDOWN_MS) {
-              _lastInputStallResyncAt = _nowStallResync;
-              _syncLog(
-                `INPUT-STALL-RESYNC f=${_frameNum} apply=${applyFrame} ` +
-                  `missing=[${_missingSlots.join(',')}] — requesting full resync`,
-              );
-              if (_playerSlot !== 0) {
-                const _hostForResync = Object.values(_peers).find((p) => p.slot === 0);
-                const _hostDcForResync = _hostForResync?.dc;
-                if (_resyncRequestInFlight) {
-                  // As the boot sync: the request that is out brings a host state.
-                  _syncLog(`INPUT-STALL-RESYNC f=${_frameNum}: request ${_resyncRequestId} is out, not asked again`);
-                } else if (_hostDcForResync?.readyState === 'open') {
-                  // Numbered like the boot sync's, and for the same reason: an
-                  // unnumbered answer is applied wherever it finds the guest
-                  // (specs/resync_flow.qnt, EVERY_REQUEST_NUMBERED).
-                  const stallRequestId = _beginResyncRequest();
-                  try {
-                    _sendResyncRequest(_hostDcForResync, stallRequestId, 'sync-request-full');
-                  } catch (_e) {
-                    _resyncRequestInFlight = false;
-                    _syncLog(`INPUT-STALL-RESYNC send failed: ${_e}`);
-                  }
-                }
-              }
-            }
-            _stallStart = 0;
-          } else if (stallDuration >= MAX_STALL_MS && !_resendSent) {
-            // Stage 2 — request resend from missing peers (once per stall)
-            _resendSent = true;
-            for (let k2 = 0; k2 < inputPeers.length; k2++) {
-              const s2 = inputPeers[k2].slot;
-              if (_remoteInputs[s2]?.[applyFrame] !== undefined) continue;
-              const dc2 = inputPeers[k2].dc;
-              if (dc2?.readyState === 'open') {
-                try {
-                  dc2.send(`resend:${applyFrame}`);
-                } catch (_) {}
-              }
-            }
-            _syncLog(
-              `INPUT-STALL resend-request f=${_frameNum} apply=${applyFrame} missing=[${_missingSlots.join(',')}]`,
-            );
-            _remoteMissed++;
-            // Don't re-enter full tick() — that causes burst frame processing
-            // when buffered inputs resolve. Let setInterval(16) handle the
-            // next frame step at the natural 60fps cadence.
-            _markTickReturn('skip:legacy-input-stall-resend');
-            return;
-          } else {
-            _remoteMissed++;
-            _markTickReturn('skip:legacy-input-stall-wait');
-            return;
-          }
-        } // end normal stall path (else of allMissingArePhantom)
-      } else {
-        _stallStart = 0;
-        _resendSent = false;
-        _resetStrictMenuResends();
-        _clearStrictMenuWait();
-        // Reset consecutive fabrication counts for peers whose input arrived
-        for (const p of inputPeers) {
-          if (_consecutiveFabrications[p.slot]) _consecutiveFabrications[p.slot] = 0;
-        }
-      }
-
-      // Zero ALL 4 slots first, then overwrite with real input.
-      // This ensures consistency: every slot is either written from real
-      // input or zeroed, with no conditional checks on peer state.
-      for (let zs = 0; zs < 4; zs++) {
-        writeInputToMemory(zs, 0);
-      }
-
-      // Write local player's input
-      const localInput = _localInputs[applyFrame] || KNShared.ZERO_INPUT;
-      writeInputToMemory(_playerSlot, localInput);
-
-      // Write remote inputs for peers in the input roster
-      for (let m = 0; m < inputPeers.length; m++) {
-        const peerSlot = inputPeers[m].slot;
-        const remoteInput = (_remoteInputs[peerSlot] && _remoteInputs[peerSlot][applyFrame]) || KNShared.ZERO_INPUT;
-        writeInputToMemory(peerSlot, remoteInput);
-        _consumeLateJoinSeededInput(peerSlot, applyFrame);
-        if (_remoteInputs[peerSlot]) consumedRemoteInputSlots.push(peerSlot);
-      }
-
-      // Also write input for roster slots that have no peer object yet
-      // (e.g., late joiner whose DC hasn't formed). They get zeros, which
-      // is what every other player also writes for that slot.
-      if (_activeRoster) {
-        for (const rosterSlot of _activeRoster) {
-          if (rosterSlot === _playerSlot) continue;
-          const hasPeer = inputPeers.some((p) => p.slot === rosterSlot);
-          if (!hasPeer) writeInputToMemory(rosterSlot, 0);
-        }
-      }
-
-      // Dense DIAG-INPUT after roster changes: read back what's in WASM
-      // memory for each slot so we can compare across players frame-by-frame.
-      if (_rosterChangeFrame >= 0 && _frameNum - _rosterChangeFrame < 120) {
-        _diagInput(_frameNum, applyFrame, true);
-      }
-
-      // Periodic input pipeline log (every 60 frames = ~1s)
-      if (_frameNum % 60 === 0) {
-        let rBufTot = 0;
-        const rBufDetail = {};
-        for (const sl of Object.keys(_remoteInputs)) {
-          const n = Object.keys(_remoteInputs[sl] || {}).length;
-          rBufTot += n;
-          rBufDetail[sl] = n;
-        }
-        const dcStates = {};
-        for (const [sid, p] of Object.entries(_peers)) {
-          if (p.slot !== null && p.slot !== undefined) {
-            dcStates[p.slot] = p.dc ? p.dc.readyState : 'none';
-          }
-        }
-        const _ti = KNState?.touchInput || {};
-        let _touchActive = 0;
-        for (const _tk in _ti) if (_ti[_tk]) _touchActive++;
-        const _keymapSize = _p1KeyMap ? Object.keys(_p1KeyMap).length : -1;
-        const _hasFocus =
-          typeof document !== 'undefined' && typeof document.hasFocus === 'function' ? document.hasFocus() : 'n/a';
-        _syncLog(
-          `INPUT-LOG f=${_frameNum} apply=${applyFrame} local=${_formatInputBrief(localInput)} ` +
-            `delay=${DELAY_FRAMES} inputPeers=[${inputPeers.map((p) => p.slot).join(',')}] ` +
-            `rBuf=${_formatSlotMap(rBufDetail)} dc=${_formatSlotMap(dcStates)} missed=${_remoteMissed} ` +
-            `applied=${_remoteApplied} sendFails=${_sendFails} fps=${_fpsCurrent} ` +
-            `fAdv=${_frameAdvantage.toFixed(1)} fAdvRaw=${_frameAdvRaw} ` +
-            `roster=[${_activeRoster ? [..._activeRoster].join(',') : 'none'}] ` +
-            `remap=${!!KNState?.remapActive} hasFocus=${_hasFocus} ` +
-            `heldKeys=${_heldKeys.size} touchKeys=${_touchActive} keymapSize=${_keymapSize}`,
-        );
-      }
-      // Periodic pacing summary (~5s)
-      if (_frameNum % 300 === 0) {
-        _logPacingSummary();
-      }
-      // Mesh health check: _meshHealthCheck.
-      _meshHealthTick();
-      _remoteApplied++;
-
-      // Cleanup old local inputs — keep a history window for resend requests.
-      // Peers may request frames up to (MAX_STALL_MS + RESEND_TIMEOUT_MS) / 16.67
-      // frames behind, so keep ~600 frames (~10s at 60fps).
-      const cleanupBefore = applyFrame - 600;
-      if (cleanupBefore >= 0) delete _localInputs[cleanupBefore];
-    }
-
-    // Guest: pause emulator while waiting for resync data.
-    // Input sending above continues so the host doesn't INPUT-STALL,
-    // but the emulator doesn't advance (no divergent frames).
-    // Safety: resume after 3s if resync data never arrives.
-    if (_runSubstate === RUN_AWAITING_RESYNC) {
-      if (performance.now() - _awaitingResyncAt > 3000) {
-        _syncLog('resync wait timeout — resuming');
-        console.warn('[lockstep] resync timeout — log dump:\n' + exportSyncLog());
-        if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        _syncTargetFrame = -1;
-        _syncTargetDeadlineAt = 0;
-        _resyncRequestInFlight = false; // unblock future resync requests
-        _lastResyncTime = 0; // clear cooldown so next desync triggers immediately
-      } else {
-        _markTickReturn('skip:legacy-awaiting-resync');
-        return;
-      }
-    }
-
-    // Step one frame with audio capture
-    const tickMod = window.EJS_emulator?.gameManager?.Module;
-    if (tickMod?._kn_reset_audio) {
-      tickMod._kn_reset_audio();
-      _resetAudioCallsSinceRb++;
-    }
-    _syncRNGSeed(tickMod, _frameNum);
-    if (!_runStepOneFrame('fallback')) return;
-    for (const peerSlot of consumedRemoteInputSlots) {
-      if (_remoteInputs[peerSlot]) delete _remoteInputs[peerSlot][applyFrame];
-    }
-    feedAudio();
-
-    _frameNum++;
-    KNState.frameNum = _frameNum;
-    if (window.KNDesync) KNDesync.tick(_frameNum);
-    _markTickReturn('advance:legacy');
-
-    // P0-1 funnel: fire milestone_reached once when the player reaches
-    // ~30 seconds of sustained gameplay (frame 1800 at 60fps). This is the
-    // "actually played, not just loaded" signal for the reliability funnel.
-    if (!_funnelMilestoneSent && _frameNum >= 1800) {
-      _funnelMilestoneSent = true;
-      KNEvent('milestone_reached', '', { frame: 1800 });
-    }
-
-    _dispatchScheduledSyncs(() => true);
-
-    // (Deferred sync check removed — frame hash computes live, no deferral needed.)
-
-    // -- Periodic desync check DISABLED -----
-    // AI DMA determinism + RSP audio skip makes steady-state gameplay deterministic.
-    // Periodic hash checks (RDRAM, canvas, frame hash) all had reliability issues:
-    //   - RDRAM anchors: audio regions diverge cross-platform (RSP HLE WASM JIT differences)
-    //   - Canvas hash: WebGL preserveDrawingBuffer returns constant; GPU rendering differs
-    //   - kn_frame_hash: VI RDRAM not updated by GLideN64
-    // Resync is triggered by explicit recovery paths, not by periodic hash checks.
-    // Lazy detection for C-level sync (needed for state transfer on reconnect)
-    if (_syncEnabled && _playerSlot === 0 && _frameNum === 510) {
-      const mod = window.EJS_emulator?.gameManager?.Module;
-      if (mod && !_hasKnSync && mod._kn_sync_hash && mod._kn_sync_read && mod._kn_sync_write) {
-        _hasKnSync = true;
-        ensureSyncBuffer();
-        _syncLog('C-level sync available [lazy]');
-      }
-    }
-    // FPU trace hash check — host broadcasts periodically
-    if (_fpuTraceEnabled && _playerSlot === 0 && _frameNum - _fpuTraceLastCheckFrame >= _FPU_TRACE_CHECK_INTERVAL) {
-      _fpuTraceLastCheckFrame = _frameNum;
-      const traceInfo = _fpuTraceHash();
-      if (traceInfo) {
-        for (const p of getActivePeers()) {
-          if (p.dc?.readyState === 'open') {
-            try {
-              p.dc.send(`fpu-trace:${_frameNum}:${traceInfo.hash}:${traceInfo.count}`);
-            } catch (_) {}
-          }
-        }
-      }
-    }
-    // Debug overlay -- update every 15 frames (~4x per second)
-    if (_frameNum % 15 === 0) {
-      const dbg = document.getElementById('np-debug');
-      if (dbg) {
-        dbg.style.display = '';
-        const playerCount = activePeers.length + 1; // +1 for self
-        const spectatorCount = Object.values(_peers).filter((p) => p.slot === null).length;
-        let remoteBufTotal = 0;
-        for (const slot of Object.keys(_remoteInputs)) {
-          remoteBufTotal += Object.keys(_remoteInputs[slot] || {}).length;
-        }
-        dbg.textContent = `F:${_frameNum} fps:${_fpsCurrent} slot:${_playerSlot} players:${playerCount}${spectatorCount > 0 ? ` spec:${spectatorCount}` : ''} delay:${DELAY_FRAMES} rBuf:${remoteBufTotal} rcv:${_remoteReceived} hit:${_remoteApplied} miss:${_remoteMissed} lastR:${_lastRemoteFrame}`;
       }
     }
   };
@@ -20802,7 +20216,6 @@
         KNState.frameNum = frame;
         if (oldFrame !== frame) {
           _resetStrictMenuResends();
-          _clearStrictMenuWait();
           _syncLog(`sync frame reset: ${oldFrame} → ${frame}`);
           // Arm post-sync diagnostic burst: log full state hash for 10 frames
           window._knPostSyncDiagFrames = 10;
@@ -20899,7 +20312,6 @@
     _pacingMaxAdv = 0;
     _pacingAdvSum = 0;
     _pacingAdvCount = 0;
-    _pacingSkipCounter = 0;
     const now = performance.now();
     if (_resumeInputGuardUntil > now + EJS_RESUME_INPUT_GUARD_MS) {
       _resumeInputGuardUntil = now + EJS_RESUME_INPUT_GUARD_MS;
@@ -21150,7 +20562,6 @@
     _lastRemoteFramePerSlot = {};
     _peerLastAdvanceTime = {};
     _peerPhantom = {};
-    _consecutiveFabrications = {};
     _inputLateLogTime = {};
     _frameAdvantage = 0;
     _frameAdvRaw = 0;
@@ -21161,7 +20572,6 @@
     _pacingMaxAdv = 0;
     _pacingAdvSum = 0;
     _pacingAdvCount = 0;
-    _pacingSkipCounter = 0;
     _resyncCount = 0;
     _consecutiveResyncs = 0;
     _syncCheckInterval = _syncBaseInterval;
