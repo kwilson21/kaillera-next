@@ -1740,11 +1740,14 @@
   // asked for each frame. Cleared with the peer's other input state
   // (resetPeerState, I2) and with every input timeline.
   let _inputDroppedAheadUpTo = {};
-  // After a reconnect reset (resetPeerState 'reconnect') the C slot is
-  // inactive: a frame run on that peer's missing input records no
-  // prediction, and nothing corrects it when the input comes. Until one real
-  // input at or above the floor is taken in, such a frame waits
-  // (specs/reconnect_inputs.qnt, WAIT_FIRST_INPUT).
+  // After a reconnect reset (resetPeerState 'reconnect') and a roster that
+  // admits a player again, that peer's inputs are waited for until one real
+  // input at or above the floor is taken in (specs/reconnect_inputs.qnt,
+  // WAIT_FIRST_INPUT). A reset that empties the C slot leaves it inactive: a
+  // frame run on that peer's missing input would record no prediction, and
+  // nothing would correct it when the input came. A reconnect keeps the C
+  // slot (_resetCoreSlot) and the wait is kept with it: the frame-ahead
+  // stall is measured from the frame last heard, which the reset forgets.
   let _awaitFirstInputAfterReset = {};
   let _predictedKnownCount = 0;
   // RESEND log lines per peer slot: at most one a second, with the count.
@@ -11060,6 +11063,37 @@
     _syncLog(`RB-TRANSPORT-RESET slot=${peer.slot ?? 'null'} reason=${reason}`);
   };
 
+  // C-side of resetPeerState: the rollback engine's slot of the peer. Not for
+  // a slot a cut governs (its ring holds the cut, _cutRemovedInput), nor when
+  // the caller cuts it next (`keepCoreSlot`: the host dropping a player, a
+  // guest hearing it removed, both under the scheduled rule). The same player
+  // going on in the same slot keeps it as it is (KNCore.peerReset,
+  // specs/reconnect_inputs.qnt reconnect_history): every input of it C
+  // predicts stays recorded as a prediction, and its real input, when it
+  // comes, is checked against it. Any other reset empties it: slot_active is
+  // sticky once kn_feed_input has seen the slot, and the next player in it
+  // must not be predicted from this one's inputs.
+  const _resetCoreSlot = (slot, reason, keepCoreSlot) => {
+    if (!_useCRollback || keepCoreSlot || _cutGoverns(slot)) return;
+    const listed = !_activeRoster || _activeRoster.has(slot);
+    if (window.KNCore.peerReset.keepsCoreSlot(reason, listed)) {
+      _syncLog(`PEER-RESET-KEEPS-CORE slot=${slot} reason=${reason}`);
+      return;
+    }
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._kn_rollback_slot_reset) return;
+    // On the scheduled rule the inputs the frames still in the ring ran
+    // with go back in as real ones: a replay of those frames runs them
+    // again unchanged (an emptied ring ran them neutral), and a removal
+    // cut heard later sees what the page applied (_cutRemovedInput).
+    const ran = _maskMatchScheduled && _maskSchedule.active() ? _ringInputsRan(mod, slot) : [];
+    mod._kn_rollback_slot_reset(slot);
+    for (const { tag, i } of ran) {
+      _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
+    }
+    if (ran.length) _syncLog(`PEER-RESET-KEEPS slot=${slot} inputs ${ran[0].tag}..${ran.at(-1).tag}`);
+  };
+
   /**
    * Resets ALL per-peer state for a given slot. This is the single
    * authoritative cleanup path for peer disconnects, reconnects,
@@ -11095,6 +11129,8 @@
    *     _syncQueueGen so an in-flight push can't requeue for it, and a
    *     state transfer queued or running for it is dropped)
    *   - _syncSendChains (by sid): that peer's chain of state transfers
+   *
+   * C engine's slot: _resetCoreSlot (kept when the same player goes on in it).
    *
    * @param {number} slot - player slot to clear (0-3)
    * @param {string} reason - short human-readable reason for the reset;
@@ -11174,27 +11210,7 @@
     // new peer fills the slot.
     clearPeerStallTimers();
 
-    // C-side: clear the rollback engine's per-slot state. Without this,
-    // slot_active stays sticky once kn_feed_input has ever seen the
-    // slot, polluting prediction and stats across roster changes. Not for a
-    // slot a cut governs (its ring holds the cut, _cutRemovedInput), nor
-    // when the caller cuts it next (`keepCoreSlot`: the host dropping a
-    // player, a guest hearing it removed, both under the scheduled rule).
-    if (_useCRollback && !opts.keepCoreSlot && !_cutGoverns(slot)) {
-      const mod = window.EJS_emulator?.gameManager?.Module;
-      if (mod?._kn_rollback_slot_reset) {
-        // On the scheduled rule the inputs the frames still in the ring ran
-        // with go back in as real ones: a replay of those frames runs them
-        // again unchanged (an emptied ring ran them neutral), and a removal
-        // cut heard later sees what the page applied (_cutRemovedInput).
-        const ran = _maskMatchScheduled && _maskSchedule.active() ? _ringInputsRan(mod, slot) : [];
-        mod._kn_rollback_slot_reset(slot);
-        for (const { tag, i } of ran) {
-          _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
-        }
-        if (ran.length) _syncLog(`PEER-RESET-KEEPS slot=${slot} inputs ${ran[0].tag}..${ran.at(-1).tag}`);
-      }
-    }
+    _resetCoreSlot(slot, reason, !!opts.keepCoreSlot);
 
     // The same peer goes on after a reconnect: its inputs are waited for
     // until one is taken in (the C slot active again).

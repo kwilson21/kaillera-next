@@ -664,7 +664,7 @@ $QUINT run "$ESCP" --main=hole_counts_fixed --invariant=pushesAreBoundedForEvery
 REC=specs/reconnect_inputs.qnt
 $QUINT typecheck "$REC"
 for variant in reconnect_inputs_current reconnect_inputs_fixed reconnect_inputs_keeps_history \
-  reconnect_history_before reconnect_history_current reconnect_history_fixed; do
+  reconnect_history_before reconnect_history_as_real reconnect_history_current reconnect_history_fixed; do
   $QUINT test "$REC" --main="$variant" --backend="$BACKEND"
 done
 # Today the reset leaves the C slot inactive and the page runs frames on the
@@ -679,9 +679,11 @@ $QUINT run "$REC" --main=reconnect_inputs_keeps_history --invariant=allHold \
 # The frames run before the reset: an emptied slot loses the predictions C
 # would check and a replay runs those frames neutral (reconnect_history_before);
 # the ring's inputs put back as real ones make a prediction real, so the
-# peer's real input is stored over it unchecked (reconnect_history_current;
-# predictionPutBackAsRealTest). A reconnect that keeps the C slot checks
-# every one (everyInputItDidNotMakeIsChecked).
+# peer's real input is stored over it unchecked (reconnect_history_as_real;
+# predictionPutBackAsRealTest). Today a reconnect keeps the C slot and every
+# one is checked (reconnect_history_current, everyInputItDidNotMakeIsChecked).
+$QUINT run "$REC" --main=reconnect_history_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 $QUINT run "$REC" --main=reconnect_history_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

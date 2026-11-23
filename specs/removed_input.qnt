@@ -59,11 +59,12 @@
 // property.
 //
 // A page's ring is the record of what it applied: the cut compares the host's
-// inputs with it. A page that empties a player's slot for its own reasons
-// (resetPeerState: a reconnect, a mesh heal) puts back the inputs the frames
-// still in its ring ran with, on the scheduled rule, so a replay runs them
-// again unchanged and a cut heard later reads them; not modelled apart (it is
-// `replay` keeping its inputs).
+// inputs with it. A reconnect or a mesh heal leaves the player's C slot as it
+// is (resetPeerState, _resetCoreSlot; specs/reconnect_inputs.qnt
+// reconnect_history), and a page that empties it for another reason puts back
+// the inputs the frames still in its ring ran with, on the scheduled rule:
+// either way a replay runs them again unchanged and a cut heard later reads
+// them; not modelled apart (it is `replay` keeping its inputs).
 //
 // What is modelled: the host and one guest; the removed player's inputs
 // (one session before the cut, one after the admission) reaching each page

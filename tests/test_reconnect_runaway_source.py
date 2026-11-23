@@ -131,15 +131,21 @@ def test_an_input_past_the_window_that_differs_escalates_like_an_overdue_ask():
 
 
 def test_after_a_reconnect_reset_a_frame_waits_for_the_peers_first_input():
-    # specs/reconnect_inputs.qnt WAIT_FIRST_INPUT: the reset leaves the C slot
-    # inactive, so a frame run on the peer's missing input would record no
-    # prediction. It waits until one input at or above the floor is in.
+    # specs/reconnect_inputs.qnt WAIT_FIRST_INPUT: a reset that empties the C
+    # slot leaves it inactive, so a frame run on the peer's missing input would
+    # record no prediction. It waits until one input at or above the floor is
+    # in. A reconnect keeps the C slot (reconnect_history) and the wait too.
     src = _src()
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
     assert "    _awaitFirstInputAfterReset,\n" in _slot_clear(src)
-    assert reset.index("mod._kn_rollback_slot_reset(slot)") < reset.index(
+    assert reset.index("_resetCoreSlot(slot, reason, !!opts.keepCoreSlot);") < reset.index(
         "if (reason === 'reconnect') _awaitFirstInputAfterReset[slot] = true;"
+    )
+    core = src[src.index("const _resetCoreSlot = (slot, reason, keepCoreSlot) => {") :]
+    core = core[: core.index("\n  };\n")]
+    assert core.index("window.KNCore.peerReset.keepsCoreSlot(reason, listed)") < core.index(
+        "mod._kn_rollback_slot_reset(slot);"
     )
     feed = src[src.index("const _feedWatched = (mod, slot, frame, feed) => {") :]
     feed = feed[: feed.index("\n  };\n")]

@@ -446,12 +446,13 @@ reconnect_inputs() {
   expect_violation "$REC" reconnect_inputs_current theHostNeverPredictsAFrameThePeerHasMade 2
   # The same with the reset that puts the ring's inputs back (de361fd).
   verify "$REC" reconnect_inputs_keeps_history allHold init 12
-  # The frames run before the reset (~40 s at 5 steps).
-  verify "$REC" reconnect_history_fixed allHold init 5
+  # The frames run before the reset (~40 s at 5 steps); today a reconnect
+  # keeps the C slot (current, the same as fixed).
+  verify "$REC" reconnect_history_current allHold init 5
   # A frame run on a prediction, then the reset: the prediction is gone
-  # (before) or is a real input now (current), 3 steps.
+  # (before) or is a real input now (as_real, de361fd to the fix), 3 steps.
   expect_violation "$REC" reconnect_history_before everyInputItDidNotMakeIsChecked 3
-  expect_violation "$REC" reconnect_history_current everyInputItDidNotMakeIsChecked 3
+  expect_violation "$REC" reconnect_history_as_real everyInputItDidNotMakeIsChecked 3
 }
 
 drop_is_final() {
