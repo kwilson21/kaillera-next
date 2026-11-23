@@ -162,6 +162,11 @@
  *   the dropped guest's, from 30 frames before the drop to the frame its
  *   resync lands on, are left out (each side ran on predictions of the
  *   other there, and the resync replaces the guest's), and compared after.
+ *   Known to fail on an ordering the reset does not decide: when the host
+ *   pushes the guest its state before the guest's re-sent inputs arrive,
+ *   the push settles them (C-INPUT-SETTLED-SKIP) and the host keeps its
+ *   predictions where the bystanders applied the real inputs
+ *   (`dropLink.settledSkips`, `applied.differing`).
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
  *   for seconds in a cloud container; a quarter of the pixels is a quarter
