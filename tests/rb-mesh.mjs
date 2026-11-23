@@ -15,6 +15,7 @@
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [PLAYERS=4] [LAT=50] [JITTER=20] [LINK_KBPS=0] \
  *     [BATTLE_SECONDS=45] [CATCH_UP_MS=0] [CATCH_UP_SLOT=2] [MENU_AUTOPILOT=ssb64|any-fighter] \
+ *     [RECOVERY_BYSTANDER=1 [RECOVERY_MODE=hold|pause] [RECOVERY_SLOT=1] [RECOVERY_AT=600]] \
  *     [KN_QUERY='&knperf=light'] [HEADED=1] [OUT=/tmp/rb-mesh] node tests/rb-mesh.mjs
  *
  * PLAYERS: 3 or 4 (default 4). Four emulators share the machine: in a cloud
@@ -90,8 +91,9 @@
  *   bystanders on its real inputs (`inputSplit`: the keys they applied
  *   differently, from NORMAL-INPUT-TR). On PEER-RECOVERED the host settles
  *   the inputs it held and resyncs the guest. Every guest must end on the
- *   host's state: from the frame of the host's first state after the
- *   recovery on, the gameplay and game-state hashes must match the host's
+ *   host's state: from the host's last state for the recovery on (the first
+ *   one, or its last follow-up when it was taken while an input was still
+ *   predicted), the gameplay and game-state hashes must match the host's
  *   (at least 60 frames), and so must RDRAM, compared in 4 KB pages every
  *   16th battle frame from each frame's saved state. The core's hashes do
  *   not see a fighter that moved differently (the battle state lives in the
@@ -105,6 +107,12 @@
  *   dropped and heard the guest again and sent a state, a bystander applied
  *   inputs different from the host's, the page compare saw a guest split in
  *   the held stretch, and no bystander dropped anyone in the meantime.
+ *   RECOVERY_MODE=pause: the guest's ticks are paused instead
+ *   (NetplayRollback.pauseTick) until the host and every bystander have
+ *   dropped it, then resumed, so every page predicted it
+ *   (bystanderAppliesWhatTheHostSettledTest's setting). Each bystander must
+ *   hear it again and ask the host for its state (web/src/recovery-resync.ts,
+ *   `ask`), and the same agreement from the host's state on is required.
  *
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
@@ -155,6 +163,8 @@ const RECOVERY_BYSTANDER = process.env.RECOVERY_BYSTANDER === '1';
 const RECOVERY_SLOT = Number(process.env.RECOVERY_SLOT || 1);
 const RECOVERY_HOLD_MS = Number(process.env.RECOVERY_HOLD_MS || 3000);
 const RECOVERY_AT = Number(process.env.RECOVERY_AT || 600);
+const RECOVERY_MODE = process.env.RECOVERY_MODE || 'hold';
+const RECOVERY_FOLLOW_UP_MS = 12000;
 const QUERY = process.env.KN_QUERY || '';
 const OUT = process.env.OUT || '/tmp/rb-mesh';
 const HEADLESS = process.env.HEADED !== '1';
@@ -220,11 +230,12 @@ if (
     RECOVERY_SLOT < 1 ||
     RECOVERY_SLOT >= PLAYERS ||
     !(Number.isFinite(RECOVERY_HOLD_MS) && RECOVERY_HOLD_MS >= 0) ||
-    !(Number.isInteger(RECOVERY_AT) && RECOVERY_AT >= 0))
+    !(Number.isInteger(RECOVERY_AT) && RECOVERY_AT >= 0) ||
+    !['hold', 'pause'].includes(RECOVERY_MODE))
 )
   fail(
     'RECOVERY_BYSTANDER is a run of its own, with RECOVERY_SLOT a guest (1..PLAYERS-1), RECOVERY_HOLD_MS >= 0 ' +
-      'and RECOVERY_AT a whole number of frames',
+      'RECOVERY_AT a whole number of frames, and RECOVERY_MODE hold or pause',
   );
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -532,7 +543,9 @@ const hole = {
   resumedAt: null,
   resumedSeq: null,
 };
-// RECOVERY_BYSTANDER=1: what the fault did, from the host's log.
+// RECOVERY_BYSTANDER=1: the guests other than the one dropped, and what the
+// fault did, from the host's log.
+const bystanderSlots = Array.from({ length: PLAYERS - 1 }, (_, i) => i + 1).filter((s) => s !== RECOVERY_SLOT);
 const recovery = {
   slot: RECOVERY_SLOT,
   holdMs: RECOVERY_HOLD_MS,
@@ -544,6 +557,9 @@ const recovery = {
   dispatch: null,
   leftOut: null,
   pageAt: null,
+  dispatches: [],
+  bystanderPhantoms: null,
+  bystanderAsks: null,
 };
 const tBattle = Date.now();
 if (MISSING_RECIPIENT) {
@@ -709,29 +725,49 @@ if (RECOVERY_BYSTANDER) {
     { timeout: 30000, polling: 20 },
   );
   recovery.heldFrom = await pages[RECOVERY_SLOT].evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
-  await host.evaluate((slot) => window.__knDirectionalInputGate.arm(slot, 'isolated'), RECOVERY_SLOT);
+  if (RECOVERY_MODE === 'pause') await pages[RECOVERY_SLOT].evaluate(() => window.NetplayRollback.pauseTick());
+  else await host.evaluate((slot) => window.__knDirectionalInputGate.arm(slot, 'isolated'), RECOVERY_SLOT);
   await pages[RECOVERY_SLOT].evaluate(() => {
     window.__mesh.against = 'right';
   });
-  console.log(`RECOVERY_BYSTANDER: P${RECOVERY_SLOT + 1}'s inputs held on the host's side from f=${recovery.heldFrom}`);
+  console.log(
+    `RECOVERY_BYSTANDER: P${RECOVERY_SLOT + 1} ` +
+      `${RECOVERY_MODE === 'pause' ? 'paused' : "held on the host's side"} from f=${recovery.heldFrom}`,
+  );
   recovery.phantom = await waitForLineAfter(
     host,
     recovery.hostAt,
     new RegExp(`PEER-PHANTOM slot=${RECOVERY_SLOT}(?: |$)`),
     30000,
   );
+  // RECOVERY_MODE=pause: every bystander drops it too.
+  recovery.bystanderPhantoms =
+    RECOVERY_MODE === 'pause'
+      ? await Promise.all(
+          bystanderSlots.map((slot) =>
+            waitForLineAfter(
+              pages[slot],
+              recovery.pageAt[slot],
+              new RegExp(`PEER-PHANTOM slot=${RECOVERY_SLOT}(?: |$)`),
+              30000,
+            ),
+          ),
+        )
+      : null;
   if (recovery.phantom) await host.waitForTimeout(RECOVERY_HOLD_MS);
   recovery.stocksAtRelease = await stocks(host);
-  // What each page shows as the held inputs are let through.
+  // What each page shows as the guest is let through (held inputs, or ticks).
   await Promise.all(pages.map((p, i) => p.screenshot({ path: `${OUT}/recovery-p${i + 1}.png` }).catch(() => {})));
-  recovery.gate = await host.evaluate(() => {
-    const gate = window.__knDirectionalInputGate;
-    gate.release(0);
-    return gate.stats();
-  });
+  if (RECOVERY_MODE === 'pause') await pages[RECOVERY_SLOT].evaluate(() => window.NetplayRollback.resumeTick());
+  else
+    recovery.gate = await host.evaluate(() => {
+      const gate = window.__knDirectionalInputGate;
+      gate.release(0);
+      return gate.stats();
+    });
   console.log(
     `RECOVERY_BYSTANDER: host dropped it ${recovery.phantom ? `at f=${recovery.phantom.frame}` : 'never'}; ` +
-      `${recovery.gate?.held ?? 0} held packet(s) let through`,
+      (RECOVERY_MODE === 'pause' ? 'resumed' : `${recovery.gate?.held ?? 0} held packet(s) let through`),
   );
   recovery.recovered = await waitForLineAfter(
     host,
@@ -747,7 +783,38 @@ if (RECOVERY_BYSTANDER) {
       30000,
     );
   }
-  if (recovery.dispatch) recovery.leftOut = [recovery.heldFrom, Number(recovery.dispatch.match[2])];
+  // The host's state can be followed up: one taken while an input was still
+  // predicted is sent again once that input differed (SYNC-FOLLOW-UP-NEEDED;
+  // specs/sync_follow_up.qnt), and a guest runs on the first one until then,
+  // as the model's agreement waits for every state still owed
+  // (mayStillChange). The compare starts at the last state of the recovery:
+  // the first, and the follow-ups that come within RECOVERY_FOLLOW_UP_MS of
+  // it (at most SYNC_FOLLOW_UP_MAX, 3 s apart).
+  if (recovery.dispatch) {
+    await host.waitForTimeout(RECOVERY_FOLLOW_UP_MS);
+    const firstAt = Number(recovery.dispatch.line.split('\t')[1]);
+    recovery.dispatches = (await syncLogOf(host))
+      .split('\n')
+      .filter((line) => seqOf(line) >= recovery.dispatch.seq && /coord sync dispatch:/.test(line))
+      .filter((line) => Number(line.split('\t')[1]) <= firstAt + RECOVERY_FOLLOW_UP_MS)
+      .map((line) => Number(line.match(/at frame (\d+)/)[1]));
+    recovery.leftOut = [recovery.heldFrom, Math.max(...recovery.dispatches)];
+  }
+  // RECOVERY_MODE=pause: each bystander heard the guest again and asked the
+  // host for its state (web/src/recovery-resync.ts, `ask`).
+  recovery.bystanderAsks =
+    RECOVERY_MODE === 'pause'
+      ? await Promise.all(
+          bystanderSlots.map((slot) =>
+            waitForLineAfter(
+              pages[slot],
+              recovery.pageAt[slot],
+              new RegExp(`peer-recovery resync: slot=${RECOVERY_SLOT} heard again; asked the host`),
+              30000,
+            ),
+          ),
+        )
+      : null;
   await pages[RECOVERY_SLOT].evaluate(() => {
     window.__mesh.against = null;
   });
@@ -1341,7 +1408,6 @@ const followUpProblems = !FOLLOW_UP_RECIPIENT
 // RECOVERY_BYSTANDER: the fault landed (the gate held inputs, the host
 // dropped the guest and heard it again, and sent a state), no bystander
 // dropped anyone while it did, and every guest ends on the host's state.
-const bystanderSlots = Array.from({ length: PLAYERS - 1 }, (_, i) => i + 1).filter((s) => s !== RECOVERY_SLOT);
 const linesSince = (x, slot) =>
   RECOVERY_BYSTANDER && recovery.pageAt ? x.sync.split('\n').filter((line) => seqOf(line) > recovery.pageAt[slot]) : [];
 const recoveryEvents = !RECOVERY_BYSTANDER
@@ -1423,15 +1489,25 @@ const rdram = !RECOVERY_BYSTANDER ? null : Object.fromEntries(P.slice(1).map((G,
 const recoveryProblems = !RECOVERY_BYSTANDER
   ? []
   : [
-      ...(!(recovery.gate?.held > 0) ? ["the gate held none of the guest's inputs"] : []),
+      ...(RECOVERY_MODE === 'hold' && !(recovery.gate?.held > 0) ? ["the gate held none of the guest's inputs"] : []),
+      ...(RECOVERY_MODE === 'pause'
+        ? bystanderSlots.flatMap((slot, i) => [
+            ...(!recovery.bystanderPhantoms?.[i] ? [`bystander P${slot + 1} never dropped the paused guest`] : []),
+            ...(!recovery.bystanderAsks?.[i]
+              ? [`bystander P${slot + 1} heard the guest again but did not ask the host for its state`]
+              : []),
+          ])
+        : []),
       ...(!recovery.phantom ? ['the host never dropped the guest as a phantom'] : []),
       ...(!recovery.recovered ? ['the host never heard the guest again (PEER-RECOVERED)'] : []),
       ...(!recovery.dispatch ? ['the host sent no state after the recovery'] : []),
-      ...(Object.values(inputSplit).every((n) => n === 0)
+      ...(RECOVERY_MODE === 'hold' && Object.values(inputSplit).every((n) => n === 0)
         ? ['the host and the bystanders ran the held frames on the same inputs: the fault made no split']
         : []),
       ...bystanderSlots.flatMap((slot) =>
-        recoveryEvents[slot].drops.length
+        recoveryEvents[slot].drops.filter(
+          (line) => RECOVERY_MODE === 'hold' || !line.includes(`slot=${RECOVERY_SLOT} `),
+        ).length
           ? [`bystander P${slot + 1} dropped a player: ${recoveryEvents[slot].drops.join(' | ')}`]
           : [],
       ),
@@ -1450,7 +1526,7 @@ const recoveryProblems = !RECOVERY_BYSTANDER
             ]
           : [],
       ),
-      ...(Object.values(rdram).every((r) => r.splitDuring.length === 0)
+      ...(RECOVERY_MODE === 'hold' && Object.values(rdram).every((r) => r.splitDuring.length === 0)
         ? ['no guest split from the host in the held stretch: the fault changed no game state the compare can see']
         : []),
       ...Object.entries(rdram).flatMap(([page, r]) =>
