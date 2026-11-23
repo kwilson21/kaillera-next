@@ -5124,7 +5124,7 @@ if (doubleResyncAskReport) {
   );
 }
 // SYNC_FOLLOW_UP: the host answered the guest's recovery request unconfirmed
-// and watched the frame it sent. `same`: no input at or before it differed
+// and watched the frame it sent. `same`: no input that ran before it differed
 // from its prediction, so the follow-up was skipped and nothing else went out
 // for it. `changed`: one did, and the follow-up went out and was applied.
 // specs/sync_follow_up.qnt.

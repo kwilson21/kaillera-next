@@ -13,14 +13,50 @@
 
 /**
  * Whether an input fed for `inputFrame` changed the state sent for
- * `watchFrame`: it is at or before that frame, and C's count of
- * mispredictions moved while it was fed (`before` to `after`). A count that
- * could not be read (-1) counts as a change: that can only cost a follow-up,
- * never keep a state that changed.
+ * `watchFrame`: it ran before that frame, and C's count of mispredictions
+ * moved while it was fed (`before` to `after`).
+ *
+ * The state sent for F is the state at the start of F. An input labelled f
+ * first runs at frame f + delay, so that state holds only inputs labelled at
+ * most F - 1 - delay: one labelled F - delay .. F runs at F or later and
+ * cannot change it (specs/sync_follow_up.qnt, DELAY_AWARE). `delay` is the
+ * delay that state ran under (delayOfStateAt). A count that could not be read
+ * (-1) counts as a change: that can only cost a follow-up, never keep a state
+ * that changed.
  */
-//@ ensures \result === (inputFrame <= watchFrame && (before < 0 || after < 0 || after !== before))
-export function changesWatchedFrame(inputFrame: number, watchFrame: number, before: number, after: number): boolean {
-  return inputFrame <= watchFrame && (before < 0 || after < 0 || after !== before);
+//@ requires delay >= 0
+//@ ensures \result === (inputFrame <= watchFrame - 1 - delay && (before < 0 || after < 0 || after !== before))
+export function changesWatchedFrame(
+  inputFrame: number,
+  watchFrame: number,
+  delay: number,
+  before: number,
+  after: number,
+): boolean {
+  return inputFrame <= watchFrame - 1 - delay && (before < 0 || after < 0 || after !== before);
+}
+
+/**
+ * The delay the state at the start of `watchFrame` ran under, for
+ * changesWatchedFrame: the newest input that state holds is labelled
+ * watchFrame - 1 - result. With the delay `delay` since the last change,
+ * that is watchFrame - 1 - delay, unless a frame before the change ran a
+ * newer one: `ranBeforeChange`, the newest label any frame before the last
+ * delay change ran (-1 when the delay never changed in this match). A delay
+ * raised mid-match (the re-arm at a late join, 0 to D; a live re-tune) leaves
+ * frames just before the change having run inputs newer than
+ * watchFrame - 1 - delay for the next few frames. Never above `delay` nor
+ * below 0: a smaller result only counts more inputs, at the cost of a
+ * follow-up.
+ */
+//@ requires delay >= 0
+//@ ensures 0 <= \result && \result <= delay
+//@ ensures \result === 0 || watchFrame - 1 - \result >= ranBeforeChange
+//@ ensures \result === delay || watchFrame - 1 - \result <= ranBeforeChange
+export function delayOfStateAt(watchFrame: number, delay: number, ranBeforeChange: number): number {
+  if (ranBeforeChange <= watchFrame - 1 - delay) return delay;
+  if (ranBeforeChange >= watchFrame - 1) return 0;
+  return watchFrame - 1 - ranBeforeChange;
 }
 
 /**

@@ -52,6 +52,20 @@
 // phantom gets no follow-up: its recovery replaces any request queued for it
 // with its own resync (directFollowUpDue in web/src/sync-follow-up.ts).
 //
+// The input delay: an input labelled f first runs at frame f + DELAY, so the
+// state at the start of F (the state taken for F) depends only on inputs
+// labelled at most F - 1 - DELAY. One labelled F - DELAY .. F runs at F or
+// later: it differing from its prediction leaves the state sent for F as it
+// was. The model labels each arriving input by its offset below F (0 = F
+// itself).
+//
+// DELAY_AWARE: the host records a difference only for an input labelled at
+//   most F - 1 - DELAY (changesWatchedFrame's delay). Without it (today), every
+//   input at or before F counts: one in the band F - DELAY .. F sends a
+//   follow-up that carries no new state, a full state for nothing. Every live
+//   SYNC_FOLLOW_UP run before this fix hit that band (its misprediction's
+//   replay target was F itself).
+//
 // SKIP_UNCHANGED: a follow-up whose frame is confirmed is sent only if an
 //   input at or before F differed from its prediction after the state was
 //   taken. The fix.
@@ -90,10 +104,18 @@ module sync_follow_up {
   const SOCKET_WATCHED: bool
   const SOCKET_DELIVERED: bool
   const SOCKET_FOLLOW_UP_BY_SOCKET: bool
+  const DELAY_AWARE: bool
 
   pure val FOLLOW_UP_MAX = 3
   // Inputs at or before the frame that may still be predicted (bound for the model).
   pure val MAX_PENDING = 2
+  // The input delay (DELAY_FRAMES); the model's inputs are labelled from F
+  // down to F - 1 - DELAY, the first that can change the state at F.
+  pure val DELAY = 2
+  pure val MAX_OFFSET = DELAY + 1
+  // Whether an input labelled `offset` frames before F ran before F: the
+  // state taken for F depends on it.
+  pure def runsBeforeF(offset: int): bool = offset >= DELAY + 1
 
   // "idle": nothing out. "taken": the state is taken and being compressed.
   // "sending": its chunks are on the channel. "waiting": sent unconfirmed, a
@@ -175,18 +197,24 @@ module sync_follow_up {
     followUps' = followUps, guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
   }
 
-  // A predicted input at or before F arrives, as predicted or not.
-  action inputArrives(differs: bool): bool = all {
+  // A predicted input at or before F, labelled `offset` frames before it,
+  // arrives, as predicted or not. It changes the state at F only if it ran
+  // before F.
+  action inputArrives(differs: bool, offset: int): bool = all {
     // Inputs keep arriving whatever became of the answer.
     pending > 0,
     pending' = pending - 1,
     val after = phase != "idle"
     val records = if (FLAG_FROM_TAKEN) after else phase == "sending" or phase == "waiting"
+    val changes = differs and after and runsBeforeF(offset)
+    // What the host counts: with DELAY_AWARE the same test as the truth;
+    // without, any input at or before F that differed.
+    val counts = differs and records and (runsBeforeF(offset) or not(DELAY_AWARE))
     all {
-      changed' = (changed or (differs and after)),
-      flagged' = (flagged or (differs and records)),
+      changed' = (changed or changes),
+      flagged' = (flagged or counts),
       // The guest's state stops matching the host's once F changes.
-      guestRight' = (guestRight and not(differs and after)),
+      guestRight' = (guestRight and not(changes)),
     },
     phase' = phase, confirmedAtTake' = confirmedAtTake, inFlight' = inFlight,
     followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
@@ -251,7 +279,8 @@ module sync_follow_up {
   action step = any {
     take, send, drained, followUpConfirmed, followUpDeadline,
     nondet differs = oneOf(Set(true, false))
-    inputArrives(differs),
+    nondet offset = 0.to(MAX_OFFSET).oneOf()
+    inputArrives(differs, offset),
     // Nothing more to do: stutter so a run can end here.
     all { phase == "done", pending == 0, nothingHappens },
   }
@@ -290,7 +319,7 @@ module sync_follow_up {
     initWith(1, false)
       .then(take).then(send).then(drained)
       .expect(phase == "waiting")
-      .then(inputArrives(false))
+      .then(inputArrives(false, MAX_OFFSET))
       .then(followUpConfirmed)
       .expect(aFollowUpCarriesANewState == SKIP_UNCHANGED)
       .expect(if (SKIP_UNCHANGED) phase == "done" and followUps == 0 and guestRight else followUps == 1)
@@ -300,7 +329,7 @@ module sync_follow_up {
   run changedFollowUpTest =
     initWith(1, false)
       .then(take).then(send).then(drained)
-      .then(inputArrives(true))
+      .then(inputArrives(true, MAX_OFFSET))
       .expect(not(guestRight))
       .then(followUpConfirmed)
       .expect(followUps == 1 and phase == "sending")
@@ -313,7 +342,7 @@ module sync_follow_up {
   run mispredictWhileCompressingTest =
     initWith(1, false)
       .then(take)
-      .then(inputArrives(true))
+      .then(inputArrives(true, MAX_OFFSET))
       .then(send).then(drained)
       .then(followUpConfirmed)
       .expect(theGuestEndsOnTheHostsState == (FLAG_FROM_TAKEN or not(SKIP_UNCHANGED)))
@@ -332,7 +361,7 @@ module sync_follow_up {
     initWith(1, true)
       .then(take).then(send).then(drained)
       .expect(phase == (if (DIRECT_WATCHED) "waiting" else "done"))
-      .then(inputArrives(true))
+      .then(inputArrives(true, MAX_OFFSET))
       .then(if (DIRECT_WATCHED) followUpConfirmed.then(drained) else nothingHappens)
       .expect(theGuestEndsOnTheHostsState == DIRECT_WATCHED)
 
@@ -345,7 +374,7 @@ module sync_follow_up {
       .then(take).then(send).then(drained)
       .expect(phase == (if (SOCKET_WATCHED) "waiting" else "done"))
       .expect(aWatchedAnswerCanBeFollowedUp == (not(SOCKET_WATCHED) or SOCKET_FOLLOW_UP_BY_SOCKET))
-      .then(inputArrives(true))
+      .then(inputArrives(true, MAX_OFFSET))
       .then(if (SOCKET_WATCHED and SOCKET_FOLLOW_UP_BY_SOCKET) followUpConfirmed.then(drained) else nothingHappens)
       .expect(phase == "done" implies (theGuestEndsOnTheHostsState == SOCKET_WATCHED))
       .expect((SOCKET_WATCHED and SOCKET_FOLLOW_UP_BY_SOCKET) implies (phase == "done" and guestRight and allHold))
@@ -355,7 +384,7 @@ module sync_follow_up {
   run socketFollowUpOverChannelTest =
     initWithSocket(1, true)
       .then(take).then(send).then(drained)
-      .then(inputArrives(true))
+      .then(inputArrives(true, MAX_OFFSET))
       .then(if (SOCKET_WATCHED) followUpConfirmed.then(drained) else nothingHappens)
       .expect(theGuestEndsOnTheHostsState == SOCKET_WATCHED)
 
@@ -364,7 +393,7 @@ module sync_follow_up {
   run socketUnchangedFollowUpTest =
     initWithSocket(1, true)
       .then(take).then(send).then(drained)
-      .then(if (SOCKET_WATCHED) inputArrives(false).then(followUpConfirmed) else nothingHappens)
+      .then(if (SOCKET_WATCHED) inputArrives(false, MAX_OFFSET).then(followUpConfirmed) else nothingHappens)
       .expect(aFollowUpCarriesANewState == ((SKIP_UNCHANGED and SOCKET_DELIVERED) or not(SOCKET_WATCHED)))
 
   // A direct request answered confirmed needs no follow-up either way.
@@ -372,6 +401,41 @@ module sync_follow_up {
     initWith(0, true)
       .then(take).then(send).then(drained)
       .expect(phase == "done" and followUps == 0 and guestRight and allHold)
+
+  // The boundary: an input labelled F - DELAY (runs at F, after the state
+  // was taken) differs. Today it sends a follow-up carrying the same state;
+  // delay-aware, none goes out and the guest already has the host's state.
+  run differsAtFMinusDelayTest =
+    initWith(1, false)
+      .then(take).then(send).then(drained)
+      .then(inputArrives(true, DELAY))
+      .expect(guestRight and not(changed))
+      .expect(flagged == not(DELAY_AWARE))
+      .then(followUpConfirmed)
+      .expect(aFollowUpCarriesANewState == (DELAY_AWARE and SKIP_UNCHANGED))
+      .expect(if (DELAY_AWARE and SKIP_UNCHANGED) phase == "done" and followUps == 0 and guestRight else followUps == 1)
+
+  // The same for the frame F itself: it runs DELAY frames after F.
+  run differsAtFTest =
+    initWith(1, false)
+      .then(take).then(send).then(drained)
+      .then(inputArrives(true, 0))
+      .expect(guestRight and flagged == not(DELAY_AWARE))
+      .then(followUpConfirmed)
+      .expect(aFollowUpCarriesANewState == (DELAY_AWARE and SKIP_UNCHANGED))
+
+  // The other side of the boundary: an input labelled F - 1 - DELAY ran at
+  // F - 1, so it differing changes the state at F. Flagged either way, and the
+  // follow-up carries the host's new state.
+  run differsAtFMinusOneMinusDelayTest =
+    initWith(1, false)
+      .then(take).then(send).then(drained)
+      .then(inputArrives(true, DELAY + 1))
+      .expect(changed and flagged and not(guestRight))
+      .then(followUpConfirmed)
+      .expect(followUps == 1 and phase == "sending" and not(wasted))
+      .then(drained)
+      .expect(phase == "done" and guestRight and allHold)
 
   // Still unconfirmed at every deadline: fresh states up to the bound, then
   // given up visibly.
@@ -388,37 +452,43 @@ module sync_follow_up {
 
 // Today: every unconfirmed answer is followed up.
 module sync_follow_up_current {
-  import sync_follow_up(SKIP_UNCHANGED = false, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
+  import sync_follow_up(SKIP_UNCHANGED = false, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true, DELAY_AWARE = true).*
 }
 
 // Skipping an unchanged follow-up, the difference recorded from the send only.
 module sync_follow_up_from_send {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = false, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = false, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true, DELAY_AWARE = true).*
 }
 
 // Today: coordinated answers are followed up only when changed, but a direct
 // answer is never followed up (directUnconfirmedAnswerTest).
 module sync_follow_up_direct_unwatched {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = false, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = false, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true, DELAY_AWARE = true).*
 }
 
 // Today: a direct answer over the signaling socket is never followed up.
 module sync_follow_up_socket_unwatched {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = false, SOCKET_DELIVERED = false, SOCKET_FOLLOW_UP_BY_SOCKET = false).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = false, SOCKET_DELIVERED = false, SOCKET_FOLLOW_UP_BY_SOCKET = false, DELAY_AWARE = true).*
 }
 
 // Watched over the socket, but its follow-up sent on the channel only: held
 // for good while the channel is down (#307's variant).
 module sync_follow_up_socket_over_channel {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = false).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = false, DELAY_AWARE = true).*
 }
 
 // Watched over the socket, but its send not recorded as delivered.
 module sync_follow_up_socket_undelivered {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = false, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = false, SOCKET_FOLLOW_UP_BY_SOCKET = true, DELAY_AWARE = true).*
+}
+
+// Today: every input at or before F counts as a change, the band
+// F - DELAY .. F included (differsAtFMinusDelayTest).
+module sync_follow_up_delay_unaware {
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true, DELAY_AWARE = false).*
 }
 
 // The fix.
 module sync_follow_up_fixed {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true, DELAY_AWARE = true).*
 }
