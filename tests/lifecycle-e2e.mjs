@@ -442,6 +442,54 @@ const endGame = async (host) => {
   await host.page.click('#toolbar-end');
 };
 
+// The ROM is in this page's library as the play page reads it on load: the
+// hash it autoloads (localStorage `kaillera-rom-hash`) and that hash's entry
+// in the library (IndexedDB `kaillera-rom-cache`, store `roms`). The start
+// button turns on once the ROM is hashed, which can be before the library
+// write has committed: a page that navigates then finds no ROM to autoload.
+const romStoredIn = (player) =>
+  player.page.evaluate(async () => {
+    const hash = localStorage.getItem('kaillera-rom-hash');
+    if (!hash) return false;
+    const known = (await indexedDB.databases?.()) ?? [];
+    if (!known.some((db) => db.name === 'kaillera-rom-cache')) return false;
+    return new Promise((resolve) => {
+      const request = indexedDB.open('kaillera-rom-cache');
+      request.onerror = () => resolve(false);
+      request.onsuccess = () => {
+        const db = request.result;
+        try {
+          const get = db.transaction('roms', 'readonly').objectStore('roms').get(hash);
+          get.onsuccess = () => resolve(get.result != null);
+          get.onerror = () => resolve(false);
+        } catch {
+          resolve(false);
+        } finally {
+          db.close();
+        }
+      };
+    });
+  });
+
+// Put the ROM in a guest's library from a room of its own, and wait until it
+// is stored, so the page it loads next autoloads it.
+const cacheRomIn = async (guest, failures) => {
+  await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
+  await loadRom(guest);
+  await guest.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+  if (!(await waitUntil(() => romStoredIn(guest), 30000))) failures.push("the ROM never reached the guest's library");
+};
+
+// Where a late joiner that never got the state stopped: at the late-join ROM
+// prompt (no ROM it could use), or not, and what the page says about its ROM.
+const lateJoinStallOf = (player) =>
+  player.page.evaluate(() => ({
+    romPrompt: !!document.getElementById('late-join-msg'),
+    romStatus: document.getElementById('rom-status')?.textContent ?? null,
+    romInLibrary: !!localStorage.getItem('kaillera-rom-hash'),
+    engine: !!window.NetplayRollback?.getDebugState?.(),
+  }));
+
 // The late-join-cached join, with the joiner's signaling dropped for BLIP_MS
 // before it has the match state, so it comes back on a new socket id:
 //   'request'  its first `request-late-join` is held and the socket cut, so
@@ -484,9 +532,7 @@ const lateJoinSocketDrop = async (room, failures, log, when) => {
 
   // Put the ROM in the guest's library first, from a room of its own.
   guest = await openPlayer('guest', `room=${room}W&host=1&name=Guest&mode=rollback`, null, fromServer, toServer);
-  await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
-  await loadRom(guest);
-  await guest.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+  await cacheRomIn(guest, failures);
 
   await guest.page.goto(`${URL}/play.html?room=${room}&name=Guest&knperf=light`);
   const synced = await waitUntil(async () => {
@@ -503,6 +549,7 @@ const lateJoinSocketDrop = async (room, failures, log, when) => {
   const result = {
     fault,
     synced,
+    stall: synced ? null : await lateJoinStallOf(guest),
     inLobby,
     reconnects: count('reconnect'),
     rejoinRefused: count('rejoin-refused'),
@@ -637,16 +684,18 @@ const scenarios = {
 
     // Put the ROM in the guest's library first, from a room of its own.
     const guest = await openPlayer('guest', `room=${room}W&host=1&name=Guest&mode=rollback`);
-    await guest.page.waitForSelector('#overlay', { state: 'visible', timeout: 20000 });
-    await loadRom(guest);
-    await guest.page.waitForSelector('#start-btn:not([disabled])', { timeout: 60000 });
+    await cacheRomIn(guest, failures);
 
     await guest.page.goto(`${URL}/play.html?room=${room}&name=Guest&knperf=light`);
     const synced = await waitUntil(async () => {
       await clickGesturePrompt(guest);
       return (await frameOf(guest)) > 0;
     }, 240000);
-    if (!synced) failures.push('the late joiner never received state');
+    if (!synced) {
+      const stall = await lateJoinStallOf(guest);
+      log.push({ lateJoinStall: stall });
+      failures.push(`the late joiner never received state (${JSON.stringify(stall)})`);
+    }
     if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after late join',
