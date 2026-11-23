@@ -1547,28 +1547,43 @@ const resyncExtrasProbeInitScript = () => {
     if (!m?._kn_sync_read || !m._kn_sync_write || !m._kn_set_frame || !m._kn_get_frame || seen.has(m)) return;
     seen.add(m);
     P.modules++;
-    const read = m._kn_sync_read;
-    m._kn_sync_read = Object.assign(
-      function (...args) {
-        const n = read.apply(this, args);
-        if (n > 0) P.reads.push({ frame: m._kn_get_frame(), ...hiddenOf(m) });
-        return n;
-      },
-      { knResyncProbe: true },
-    );
+    // Emscripten's export on Module is a stub that, on its first call, puts
+    // the export it stands for in its own place, over any wrapper around it.
+    // A change made during the inner call is that: the wrapper calls the new
+    // export from then on and puts back what was there before the call (this
+    // wrapper, or one another script put over it).
+    const around = (name, body) => {
+      let inner = m[name];
+      const self = Object.assign(
+        function (...args) {
+          const before = m[name];
+          const result = body((...a) => inner.apply(this, a), args);
+          if (m[name] !== before) {
+            inner = m[name];
+            m[name] = before;
+          }
+          return result;
+        },
+        { knResyncProbe: true },
+      );
+      m[name] = self;
+    };
+    around('_kn_sync_read', (call, args) => {
+      const n = call(...args);
+      if (n > 0) P.reads.push({ frame: m._kn_get_frame(), ...hiddenOf(m) });
+      return n;
+    });
     let wrote = false;
-    const write = m._kn_sync_write;
-    m._kn_sync_write = function (...args) {
-      const r = write.apply(this, args);
+    around('_kn_sync_write', (call, args) => {
+      const r = call(...args);
       wrote = r === 0;
       return r;
-    };
-    const setFrame = m._kn_set_frame;
-    m._kn_set_frame = function (frame, ...rest) {
-      if (wrote) P.applies.push({ frame, ...hiddenOf(m) });
+    });
+    around('_kn_set_frame', (call, args) => {
+      if (wrote) P.applies.push({ frame: args[0], ...hiddenOf(m) });
       wrote = false;
-      return setFrame.call(this, frame, ...rest);
-    };
+      return call(...args);
+    });
     P.wrapped = true;
   };
   // Again for each new Module the page makes (a core restarted mid-match).
