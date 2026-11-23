@@ -52,6 +52,13 @@
  *   removedInputAgrees), read from each page's NORMAL-INPUT-TR,
  *   CATCH-UP-INPUT-TR and the C engine's REPLAY-INPUT-TR lines, the last in
  *   its log winning. A difference fails the run.
+ *   Around the rejoin (`joinInput`, any run in which a page joins the running
+ *   match): from the frame of the state the joining page loaded to 150 frames
+ *   on, every page, the joining one too, must have applied the same input
+ *   for every slot on every tag all of them ran
+ *   (specs/late_join_input_agreement.qnt, pagesAgreeAroundTheJoin;
+ *   tests/join-input-check.mjs), a difference only on frames a later host
+ *   state replaced being reported, not failed.
  *   ROSTER_HOLD_MS=<n> (with it): the host's roster messages (`roster-cut:`,
  *   `roster-mask:`, `roster:`) to the guest in ROSTER_HOLD_SLOT (default 1)
  *   are held n ms each, in order, so that guest hears of the removal frames
@@ -151,6 +158,7 @@ import { requireCurrentBundle } from './bundle-check.mjs';
 import { addNetworkInitScript } from './rb-page-network.mjs';
 import { catchUpHoleInput } from './directional-input-gate.mjs';
 import { installNativeInputObserver } from './native-input-observer.mjs';
+import { appliedForTag, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -1481,51 +1489,7 @@ const missingProblems = PERMANENT_RECIPIENT ? permanentProblems : transientMissi
 
 // MISSING_RECIPIENT_PERMANENT: the removed player's input, as every page that
 // stayed applied it, by input tag (specs/removed_input.qnt,
-// removedInputAgrees). A frame run again (a replay, a catch-up) replaces what
-// was logged for it before: the last line for a tag in the log wins. The C
-// engine's lines are drained into the log before a catch-up starts, so they
-// come before the catch-up's own.
-const appliedForTag = (sync, slot) => {
-  const out = new Map();
-  // A state the page loads from the host (`sync frame reset: a → b`) replaces
-  // its own: a frame below b that it ran before that load, right or wrong, is
-  // no longer where its state comes from. `superseded` holds those tags: a
-  // difference on one is reported, not failed.
-  const loggedAt = new Map();
-  const loads = [];
-  const re = new RegExp(
-    `\\t(?:NORMAL-INPUT-TR|CATCH-UP-INPUT-TR|\\[C\\] REPLAY-INPUT-TR) f=\\d+ .*?R${slot}@(\\d+)\\[(-?\\d+),(-?\\d+),(-?\\d+)(?:,[A-Z])?\\]|sync frame reset: \\d+ → (\\d+)`,
-    'g',
-  );
-  let at = 0;
-  for (const m of sync.matchAll(re)) {
-    at++;
-    if (m[5] !== undefined) loads.push({ at, frame: Number(m[5]) });
-    else {
-      out.set(Number(m[1]), `${m[2]},${m[3]},${m[4]}`);
-      loggedAt.set(Number(m[1]), at);
-    }
-  }
-  out.superseded = (tag, delay) => loads.some((load) => load.frame > tag + delay && load.at > (loggedAt.get(tag) ?? 0));
-  // A forward frame logs NORMAL-INPUT-TR only when an input it applied was
-  // not neutral (and every 60th frame): a frame the page ran without a line
-  // applied neutral for every slot. Frames a state load jumped over
-  // (`sync frame reset: a → b`, b > a) it never ran.
-  const forward = [...sync.matchAll(/\tNORMAL-INPUT-TR f=(\d+) apply=(-?\d+) /g)].map((m) => [+m[1], +m[2]]);
-  out.delay = forward.length ? forward[0][0] - forward[0][1] : 0;
-  if (forward.length === 0) return out;
-  const delay = out.delay;
-  const jumps = [...sync.matchAll(/sync frame reset: (\d+) → (\d+)/g)]
-    .map((m) => [+m[1], +m[2]])
-    .filter(([a, b]) => b > a);
-  const firstRun = Math.min(...forward.map(([f]) => f));
-  const lastRun = Math.max(...forward.map(([f]) => f));
-  for (let f = firstRun; f <= lastRun; f++) {
-    if (out.has(f - delay) || jumps.some(([a, b]) => f >= a && f < b)) continue;
-    out.set(f - delay, '0,0,0');
-  }
-  return out;
-};
+// removedInputAgrees): tests/join-input-check.mjs `appliedForTag`.
 const rosterBroadcasts = [...H.sync.matchAll(/\tROSTER broadcast: frame=(\d+) slots=\[([\d,]*)\]/g)].map((m) => ({
   frame: Number(m[1]),
   slots: m[2] ? m[2].split(',').map(Number) : [],
@@ -1592,6 +1556,42 @@ const removedInputProblems = !removedInput
           ]
         : []),
       ...(ROSTER_HOLD_MS && !(H.rosterHold?.held > 0) ? ['no roster message was held'] : []),
+    ];
+// Any page that joined the running match (MISSING_RECIPIENT_PERMANENT's
+// rejoin, or a new player): from the frame of the state it loaded to 150
+// frames on, every page, the joining one too, must have applied the same
+// input for every slot on every tag all of them ran
+// (specs/late_join_input_agreement.qnt, pagesAgreeAroundTheJoin;
+// tests/join-input-check.mjs). A difference only on frames a page ran before
+// a host state replaced its own is reported, not failed.
+const joinInput = (() => {
+  const joiner = P.findIndex((x, slot) => slot !== 0 && joinStateFrame(x.sync) !== null);
+  if (joiner < 0) return null;
+  const stateFrame = joinStateFrame(P[joiner].sync);
+  const delay = appliedForTag(H.sync, 0).delay;
+  return {
+    joiner: `P${joiner + 1}`,
+    stateFrame,
+    ...joinInputAgreement({
+      pages: P.map((x, slot) => ({ name: `P${slot + 1}`, sync: x.sync })),
+      slots: P.map((_, slot) => slot),
+      from: stateFrame - delay,
+      to: stateFrame + 150,
+    }),
+  };
+})();
+const joinInputProblems = !joinInput
+  ? []
+  : [
+      ...Object.entries(joinInput.compared)
+        .filter(([, n]) => n < 60)
+        .map(([slot, n]) => `only ${n} tags of slot ${slot} compared around the join`),
+      ...(joinInput.differingCount
+        ? [
+            `the pages applied different inputs around the join on ${joinInput.differingCount} slot tags ` +
+              `(first ${JSON.stringify(joinInput.differing[0])})`,
+          ]
+        : []),
     ];
 const followUpLines = FOLLOW_UP_RECIPIENT
   ? H.sync.split('\n').filter((line) => seqOf(line) > followUpRecipient.hostAt)
@@ -1797,6 +1797,7 @@ const summary = {
   },
   followUpRecipient: FOLLOW_UP_RECIPIENT ? { ...followUpRecipient, problems: followUpProblems } : undefined,
   removedInput: removedInput ? { ...removedInput, problems: removedInputProblems } : undefined,
+  joinInput: joinInput ? { ...joinInput, problems: joinInputProblems } : undefined,
   room,
   players: PLAYERS,
   latencyMs: LAT,
@@ -1823,6 +1824,7 @@ console.log(JSON.stringify(summary, null, 2));
 const failed =
   missingProblems.length > 0 ||
   removedInputProblems.length > 0 ||
+  joinInputProblems.length > 0 ||
   followUpProblems.length > 0 ||
   recoveryProblems.length > 0 ||
   P.some((x) => x.inBattleAt < 0) ||
@@ -1838,7 +1840,7 @@ const failed =
   catchUpFailed;
 console.log(
   failed
-    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}${removedInputProblems.length ? `; ${removedInputProblems.join('; ')}` : ''}`
+    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}${removedInputProblems.length ? `; ${removedInputProblems.join('; ')}` : ''}${joinInputProblems.length ? `; ${joinInputProblems.join('; ')}` : ''}`
     : `PASS: all ${PLAYERS} fighters in the battle; every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
 );
 process.exit(failed ? 1 : 0);

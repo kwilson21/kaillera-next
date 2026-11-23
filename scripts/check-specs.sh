@@ -877,6 +877,17 @@ $QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap
 $QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --backend="$BACKEND"
 $QUINT run specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --invariant=neverAdvanceOnMissing --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
+# Around a join every page applies the host's inputs for every slot: before,
+# each page's bootstrap window started at the frame it heard of the join and
+# its placeholders ran as real inputs (late_join_input_agreement_before;
+# joinerMissesTheTagsBelowFirstLiveTest, pagesHearAtDifferentFramesTest,
+# rosterAfterTheStateTest, aPageThatHearsLateTakesTheHostsStateTest).
+AGREEMENT=specs/late_join_input_agreement.qnt
+$QUINT typecheck "$AGREEMENT"
+$QUINT test "$AGREEMENT" --main=late_join_input_agreement_before --backend="$BACKEND"
+$QUINT test "$AGREEMENT" --main=late_join_input_agreement_fixed --backend="$BACKEND"
+$QUINT run "$AGREEMENT" --main=late_join_input_agreement_fixed --invariant=allHold --max-samples=10000 --max-steps=2 --backend="$BACKEND"
+
 BOOT_CONTINUATION=specs/late_join_boot_continuation.qnt
 $QUINT typecheck "$BOOT_CONTINUATION"
 $QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_before --backend="$BACKEND"
