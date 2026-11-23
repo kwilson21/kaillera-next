@@ -113,3 +113,18 @@ test('a socket follow-up it replaces keeps its transport; a channel request stay
   assert.equal(queue.find((r) => r.targetSid === 'p2')?.transport, undefined);
   assert.equal(queue.length, 3);
 });
+
+test("a guest's own queued request keeps its number, the newest when it has several", () => {
+  const queued = [
+    { targetFrame: 980, targetSid: 'p3', deadlineAt: 1, requestId: 5 },
+    { targetFrame: 990, targetSid: 'p3', deadlineAt: 1, requestId: 7 },
+    { targetFrame: 991, targetSid: 'p4', deadlineAt: 1 },
+  ];
+  const { queue } = scheduleRecoveryResyncs(queued, PEERS, 'p2', 1000, 5);
+  const p3 = queue.filter((r) => r.targetSid === 'p3');
+  assert.equal(p3.length, 1);
+  assert.equal(p3[0]?.requestId, 7);
+  assert.equal(p3[0]?.targetFrame, 1000);
+  assert.equal(queue.find((r) => r.targetSid === 'p4')?.requestId, undefined);
+  assert.equal(queue.find((r) => r.targetSid === 'p2')?.requestId, undefined);
+});

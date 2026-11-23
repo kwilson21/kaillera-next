@@ -24,6 +24,8 @@ export interface ScheduledSync {
   deadlineAt: number;
   /** How the guest asked: over the signaling socket, or the data channel (absent). */
   transport?: 'socket' | 'channel';
+  /** The number of the guest's own request this answers, if any. */
+  requestId?: number;
 }
 
 /** The queue after a recovery, and the slots of the other guests it resyncs. */
@@ -77,9 +79,16 @@ export function scheduleRecoveryResyncs<T extends ScheduledSync>(
         // follow-up of a socket answer: the guest's channel may be down) keeps
         // going that way; on the channel it could be held for good
         // (specs/sync_follow_up.qnt, aWatchedAnswerCanBeFollowedUp).
-        const viaSocket = queued.some((r) => r.targetSid === p.sid && r.transport === 'socket');
+        const replaced = queued.filter((r) => r.targetSid === p.sid);
+        const viaSocket = replaced.some((r) => r.transport === 'socket');
+        // The guest's own request, if one was queued, is answered by this
+        // state: a guest's request ends only with its own answer, so without
+        // its number it would wait out its deadline and ask again. The
+        // guest waits only on its newest.
+        const requestId = Math.max(0, ...replaced.map((r) => r.requestId ?? 0));
         const request: ScheduledSync = { targetFrame: frame, targetSid: p.sid, deadlineAt };
         if (viaSocket) request.transport = 'socket';
+        if (requestId > 0) request.requestId = requestId;
         return request;
       }),
     ],
