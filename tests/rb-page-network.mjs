@@ -120,6 +120,19 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   // that moment; what the page sends after them on the same channel (its
   // resync request) follows them in the same burst.
   window.__knHoldInputsUntil = 0;
+  // SYNC_FOLLOW_UP=socket (the guest page): while window.__knInputGate is
+  // set, every input packet (binary, on `lockstep` or `rollback-input`) is
+  // kept back, and window.__knReleaseInputs() sends them all, in order, when
+  // the test says (after the host has answered a request sent meanwhile over
+  // the signaling socket, which nothing orders against the data channels).
+  window.__knInputGate = false;
+  const gatedInputs = [];
+  window.__knReleaseInputs = () => {
+    window.__knInputGate = false;
+    const n = gatedInputs.length;
+    for (const send of gatedInputs.splice(0)) send();
+    return n;
+  };
   // CATCH_UP_HOLE_MS (the host page): once window.__knDropInputsAfterOpenMs
   // is above 0, a channel whose first input packet goes out after that drops
   // every input packet (binary, on `lockstep` or `rollback-input`) from its
@@ -204,23 +217,6 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   window.__knHoldSocketAnswers = 0;
   window.__knSocketAnswersHeld = [];
   const heldSocketPackets = [];
-  // SYNC_FOLLOW_UP=socket (the host page): while window.__knHoldSocketRequests
-  // is above 0, the next socket resync request that arrives
-  // (`data-message` of type `sync-request-full-socket`) is held, and
-  // delivered right after the next input packet (binary, on `lockstep` or
-  // `rollback-input`) has been handled, in the same task: the request is
-  // answered after the inputs held with it are taken in and before the
-  // page's next tick runs. Kept in __knSocketRequestsHeld.
-  window.__knHoldSocketRequests = 0;
-  window.__knSocketRequestsHeld = [];
-  const heldSocketRequests = [];
-  const releaseHeldSocketRequests = () => {
-    while (heldSocketRequests.length) {
-      const { socket, packet, record } = heldSocketRequests.shift();
-      record.releasedAt = performance.now();
-      realOnevent.call(socket, packet);
-    }
-  };
   let realOnevent = null;
   // And the page's next two decode results (the sync worker's replies) once
   // the held answer is let go are held and delivered back to back in one
@@ -298,16 +294,9 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       }
       const ch = this;
       realOnmessage.set.call(this, function (e) {
-        const result = receiveGate.receive(ch, e.data, (data) => {
-          const handled = fn.call(this, data === e.data ? e : new MessageEvent('message', { data }));
-          if (
-            heldSocketRequests.length &&
-            (ch.label === 'lockstep' || ch.label === 'rollback-input') &&
-            typeof data !== 'string'
-          )
-            releaseHeldSocketRequests();
-          return handled;
-        });
+        const result = receiveGate.receive(ch, e.data, (data) =>
+          fn.call(this, data === e.data ? e : new MessageEvent('message', { data })),
+        );
         if (ch.label === 'sync-state') afterSyncStateMessage(e.data);
         return result;
       });
@@ -330,17 +319,6 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
             const record = { requestId: args[1].requestId ?? null, heldAt: performance.now(), releasedAt: null };
             window.__knSocketAnswersHeld.push(record);
             heldSocketPackets.push({ socket: this, packet, record });
-            return;
-          }
-          if (
-            window.__knHoldSocketRequests > 0 &&
-            args?.[0] === 'data-message' &&
-            args[1]?.type === 'sync-request-full-socket'
-          ) {
-            window.__knHoldSocketRequests--;
-            const record = { requestId: args[1].requestId ?? null, heldAt: performance.now(), releasedAt: null };
-            window.__knSocketRequestsHeld.push(record);
-            heldSocketRequests.push({ socket: this, packet, record });
             return;
           }
           return onevent.call(this, packet);
@@ -460,6 +438,17 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       performance.now() < window.__knHoldInputsUntil
     )
       hold = Math.max(hold, window.__knHoldInputsUntil - performance.now());
+    if (
+      window.__knInputGate &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer
+    ) {
+      gatedInputs.push(() => {
+        net.send(ch, data, bytesOf(data), 0, performance.now());
+        arm(ch.pumped);
+      });
+      return;
+    }
     net.send(ch, data, bytesOf(data), hold, performance.now());
     arm(ch.pumped);
   };

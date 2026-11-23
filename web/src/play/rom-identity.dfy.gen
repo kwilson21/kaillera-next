@@ -12,28 +12,31 @@ lemma hashIsTheLoadedRoms_ensures(hashLoad: int, load: int)
 {
 }
 
-function romVerdict(hasRom: bool, hashIsLoaded: bool, hashDiffers: bool, sizeDiffers: bool): RomVerdict
+function romVerdict(hasRom: bool, hostRomChanging: bool, hashIsLoaded: bool, hashDiffers: bool, sizeDiffers: bool): RomVerdict
 {
   if !(hasRom) then
     RomVerdict.noRom
   else
-    if sizeDiffers then
-      RomVerdict.mismatch
+    if hostRomChanging then
+      RomVerdict.pending
     else
-      if !(hashIsLoaded) then
-        RomVerdict.pending
+      if sizeDiffers then
+        RomVerdict.mismatch
       else
-        if hashDiffers then
-          RomVerdict.mismatch
+        if !(hashIsLoaded) then
+          RomVerdict.pending
         else
-          RomVerdict.match_
+          if hashDiffers then
+            RomVerdict.mismatch
+          else
+            RomVerdict.match_
 }
 
-lemma romVerdict_ensures(hasRom: bool, hashIsLoaded: bool, hashDiffers: bool, sizeDiffers: bool)
-  ensures (!(hasRom) ==> romVerdict(hasRom, hashIsLoaded, hashDiffers, sizeDiffers).noRom?)
-  ensures (romVerdict(hasRom, hashIsLoaded, hashDiffers, sizeDiffers).mismatch? <==> (hasRom && (sizeDiffers || (hashIsLoaded && hashDiffers))))
-  ensures (romVerdict(hasRom, hashIsLoaded, hashDiffers, sizeDiffers).pending? <==> ((hasRom && !(sizeDiffers)) && !(hashIsLoaded)))
-  ensures (romVerdict(hasRom, hashIsLoaded, hashDiffers, sizeDiffers).match_? <==> (((hasRom && !(sizeDiffers)) && hashIsLoaded) && !(hashDiffers)))
+lemma romVerdict_ensures(hasRom: bool, hostRomChanging: bool, hashIsLoaded: bool, hashDiffers: bool, sizeDiffers: bool)
+  ensures (!(hasRom) ==> romVerdict(hasRom, hostRomChanging, hashIsLoaded, hashDiffers, sizeDiffers).noRom?)
+  ensures (romVerdict(hasRom, hostRomChanging, hashIsLoaded, hashDiffers, sizeDiffers).mismatch? <==> ((hasRom && !(hostRomChanging)) && (sizeDiffers || (hashIsLoaded && hashDiffers))))
+  ensures (romVerdict(hasRom, hostRomChanging, hashIsLoaded, hashDiffers, sizeDiffers).pending? <==> (hasRom && (hostRomChanging || (!(sizeDiffers) && !(hashIsLoaded)))))
+  ensures (romVerdict(hasRom, hostRomChanging, hashIsLoaded, hashDiffers, sizeDiffers).match_? <==> ((((hasRom && !(hostRomChanging)) && !(sizeDiffers)) && hashIsLoaded) && !(hashDiffers)))
 {
 }
 
@@ -57,12 +60,22 @@ lemma offersHostsRom_ensures(v: RomVerdict, hostShares: bool)
 {
 }
 
-function announcesRom(hasRom: bool, hashIsLoaded: bool): bool
+function announcesRom(hasRom: bool, hashIsLoaded: bool, hostRomChanging: bool): bool
 {
-  (hasRom && hashIsLoaded)
+  ((hasRom && hashIsLoaded) && !(hostRomChanging))
 }
 
-lemma announcesRom_ensures(hasRom: bool, hashIsLoaded: bool)
-  ensures (announcesRom(hasRom, hashIsLoaded) <==> (hasRom && hashIsLoaded))
+lemma announcesRom_ensures(hasRom: bool, hashIsLoaded: bool, hostRomChanging: bool)
+  ensures (announcesRom(hasRom, hashIsLoaded, hostRomChanging) <==> ((hasRom && hashIsLoaded) && !(hostRomChanging)))
+{
+}
+
+function looksInLibraryForHostsRom(wantsRom: bool, hasRom: bool, hostHashKnown: bool): bool
+{
+  ((wantsRom && !(hasRom)) && hostHashKnown)
+}
+
+lemma looksInLibraryForHostsRom_ensures(wantsRom: bool, hasRom: bool, hostHashKnown: bool)
+  ensures (looksInLibraryForHostsRom(wantsRom, hasRom, hostHashKnown) <==> ((wantsRom && !(hasRom)) && hostHashKnown))
 {
 }

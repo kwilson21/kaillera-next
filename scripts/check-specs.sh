@@ -168,7 +168,7 @@ $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
 ROM_IDENTITY=specs/rom_identity.qnt
 $QUINT typecheck "$ROM_IDENTITY"
 for variant in rom_identity_before rom_identity_judge_only rom_identity_no_retract rom_identity_first_push \
-  rom_identity_current; do
+  rom_identity_host_silent rom_identity_no_library rom_identity_no_cache_lookup rom_identity_current; do
   $QUINT test "$ROM_IDENTITY" --main="$variant" --backend="$BACKEND"
 done
 # Today: a page never announces a hash that is not its ROM's, never clears
@@ -183,7 +183,17 @@ done
 # pushed, which booted a ROM still being hashed, let the host start on its
 # previous hash, left a failed hash pending for good and a rejoin with the
 # previous ROM's word (rom_identity_first_push; bootWhileHashingTest,
-# hostStartsWhileHashingTest, hashFailsTest, rejoinWhileHashingTest).
+# hostStartsWhileHashingTest, hashFailsTest, rejoinWhileHashingTest,
+# hostChangesThenStartsTest). And while the host's own drop said nothing, the
+# room named the host's previous ROM until its new one was hashed: a guest's
+# ROM that is the new one was refused against it, and the server counted a
+# guest ready on the previous one (rom_identity_host_silent;
+# hostChangesToTheGuestsRomTest, hostChangesAwayFromTheGuestsRomTest). And a
+# page holding no ROM when the room named the host's did not look for it in
+# its library, so a guest who dropped it first had to drop it again
+# (rom_identity_no_library; guestDroppedFirstTest), nor again when the
+# dropped file's copy landed there a moment after the room named it
+# (rom_identity_no_cache_lookup; cacheLandsLateTest).
 $QUINT run "$ROM_IDENTITY" --main=rom_identity_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
@@ -478,6 +488,29 @@ done
 $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# A guest dropped as a phantom comes back: the host and every other guest end
+# up having run its frames on the same inputs.
+BYSTANDER=specs/recovery_bystander.qnt
+$QUINT typecheck "$BYSTANDER"
+for variant in recovery_bystander_before recovery_bystander_broadcast_only \
+  recovery_bystander_broadcast_lossless recovery_bystander_fixed; do
+  $QUINT test "$BYSTANDER" --main="$variant" --backend="$BACKEND"
+done
+# Fixed: the host's PEER-RECOVERED resync goes to every guest, and a guest
+# that hears again from any player it held as a phantom asks for one. VIOLATED
+# before the fix, when the host's resync went to the returning guest alone and settled
+# its late inputs, while a bystander applied them
+# (recovery_bystander_before; onlyTheHostDroppedItTest,
+# bystanderAppliesWhatTheHostSettledTest; tests/rb-mesh.mjs
+# RECOVERY_BYSTANDER=1 drives the first on the real ROM). With
+# inputs lost, VIOLATED too while only the host was heard from again
+# (recovery_bystander_broadcast_only; bystanderStillPhantomTest). 150 steps:
+# most runs play the model to its end (LAST frames, nothing on the way).
+$QUINT run "$BYSTANDER" --main=recovery_bystander_fixed --invariant=allHold \
+  --max-samples=3000 --max-steps=150 --backend="$BACKEND"
+$QUINT run "$BYSTANDER" --main=recovery_bystander_broadcast_lossless --invariant=allHold \
+  --max-samples=2000 --max-steps=150 --backend="$BACKEND"
+
 # ── Inputs on the unreliable channel, and the switch to the reliable one ────
 INPUTS=specs/input_transport.qnt
 $QUINT typecheck "$INPUTS"
@@ -523,9 +556,7 @@ $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
 # ── The follow-up to an answer sent unconfirmed ────────────────────────────
 FOLLOW=specs/sync_follow_up.qnt
 $QUINT typecheck "$FOLLOW"
-for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_direct_unwatched \
-  sync_follow_up_socket_unwatched sync_follow_up_socket_over_channel sync_follow_up_socket_undelivered \
-  sync_follow_up_fixed; do
+for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_direct_unwatched sync_follow_up_socket_unwatched sync_follow_up_socket_over_channel sync_follow_up_socket_undelivered sync_follow_up_fixed; do
   $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
 done
 # With the fix: a follow-up goes out only for a state an input changed after
@@ -535,12 +566,12 @@ done
 # the send only misses one made while the state is compressed
 # (sync_follow_up_from_send; mispredictWhileCompressingTest).
 # A direct request's answer (BOOT-SYNC, reconnect) was never followed up
-# (sync_follow_up_direct_unwatched; directUnconfirmedAnswerTest), nor was a
-# socket request's (sync_follow_up_socket_unwatched;
-# socketUnconfirmedAnswerTest). Its follow-up on the channel only waits for a
-# channel that is down (sync_follow_up_socket_over_channel), and one whose
-# socket send is never marked delivered goes out unchanged
-# (sync_follow_up_socket_undelivered; socketUnchangedFollowUpTest).
+# (sync_follow_up_direct_unwatched; directUnconfirmedAnswerTest).
+# Nor was one asked over the signaling socket (sync_follow_up_socket_unwatched;
+# socketUnconfirmedAnswerTest); watched there but never recorded delivered, an
+# unchanged follow-up goes out anyway (sync_follow_up_socket_undelivered).
+# Its follow-up sent on the channel only waits for good while the channel is
+# down (sync_follow_up_socket_over_channel; aWatchedAnswerCanBeFollowedUp).
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
