@@ -1,5 +1,35 @@
 [
   {
+    "version": "0.69.26",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "flag a match when the desync detector raises a confirmed suspect (#313)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.25",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a guest with no ROM takes the host's new one from its ROM library (#316)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.24",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "resync every guest when a phantom is heard again (#318)"
+      }
+    ]
+  },
+  {
     "version": "0.69.23",
     "date": "2026-11-23",
     "changes": [

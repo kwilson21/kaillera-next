@@ -28,6 +28,7 @@ web/src/catch-up.ts
 web/src/input-resend.ts
 web/src/start-group.ts
 web/src/engine-start.ts
+web/src/recovery-resync.ts
 
 web/src/reset-combo.ts
 
