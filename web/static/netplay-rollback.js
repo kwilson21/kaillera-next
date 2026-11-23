@@ -15767,8 +15767,11 @@
     // opens, or resetPeerState drops it when that peer disconnects (I2).
     const reachable = (r) => {
       const p = _peers[r.targetSid];
-      // A request asked over the signaling socket is answered over it.
-      const ok = r.transport === 'socket' ? !!p && !!_signalSocket : p?.syncDc?.readyState === 'open';
+      // A request asked over the signaling socket is answered over it, while
+      // that socket is connected: Socket.IO buffers an emit made while it is
+      // down and sends it on reconnect, by then to an old socket id, after the
+      // guest may have asked again.
+      const ok = r.transport === 'socket' ? !!p && !!socket?.connected : p?.syncDc?.readyState === 'open';
       if (!ok && !r.unreachableLogged) {
         r.unreachableLogged = true;
         _syncLog(`coord sync held: target ${r.targetSid} has no open channel`);
@@ -19568,6 +19571,13 @@
               _syncLog(`socket sync dropped: ${targetSid} reconnected or match ended since the state was taken`);
               notSent('the socket target changed', attempts);
               return [];
+            }
+            // The socket can drop while the state is compressed: not sent (a
+            // follow-up retries within its bound, an answer is asked again).
+            if (!socket?.connected) {
+              _syncLog(`socket sync send skipped: the signaling socket is not connected (${targetSid})`);
+              notSent('the signaling socket is not connected', attempts);
+              return [targetSid];
             }
             const b64KB = Math.round(encoded.data.length / 1024);
             const wireKB = Math.round(encoded.compressedSize / 1024);

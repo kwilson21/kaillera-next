@@ -335,8 +335,10 @@ def test_a_socket_follow_up_is_dispatched_over_the_socket_and_a_socket_send_is_d
     src = LOCKSTEP_JS.read_text()
     dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
     dispatch = dispatch[: dispatch.index("\n  };\n")]
-    # Reachable over the socket while the guest is known; one push each.
-    assert "r.transport === 'socket' ? !!p && !!_signalSocket" in dispatch
+    # Reachable over the socket while the guest is known and the socket is
+    # connected (an emit while it is down is buffered and sent on reconnect,
+    # to an old socket id); one push each.
+    assert "r.transport === 'socket' ? !!p && !!socket?.connected" in dispatch
     assert (
         "for (const r of viaSocket) push([r], r.targetSid, { transport: 'socket', reason: 'socket-follow-up' });"
         in dispatch
@@ -346,6 +348,11 @@ def test_a_socket_follow_up_is_dispatched_over_the_socket_and_a_socket_send_is_d
     push = src[src.index("const pushSyncState = async (") :]
     push = push[: push.index("socket sync too large")]
     assert "if (watch && watch.frame === frame) watch.delivered = true;" in push
+    # Checked again before the emit: the socket can drop while the state is
+    # compressed. Reported as skipped, so a follow-up's retry is counted.
+    guard = push.index("if (!socket?.connected) {")
+    assert guard < push.index("_signalSocket.emit('data-message', {")
+    assert "return [targetSid];" in push[guard : guard + 300]
 
 
 def test_a_new_direct_answer_supersedes_a_queued_follow_up_to_the_same_guest():
