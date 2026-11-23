@@ -6832,8 +6832,9 @@
   // The C buffer is fill-and-stop (not a ring), so we track the highest
   // length we've already drained and only emit the new tail
   // (KNCore.cLogTail). kn_rollback_init starts the buffer over:
-  // doRollbackInit drains it first and resets this count after. Lines are
-  // prefixed [C] so they're easy to filter post-mortem.
+  // doRollbackInit drains it first when it re-inits a running match, and
+  // resets this count after. Lines are prefixed [C] so they're easy to
+  // filter post-mortem.
   let _cDebugLogLastLen = 0;
   const _drainCDebugLog = () => {
     const m = window.EJS_emulator?.gameManager?.Module;
@@ -14745,9 +14746,12 @@
             'C-ROLLBACK split-rdram requested but _kn_set_state_backend export is missing; using retro_serialize',
           );
         }
-        // kn_rollback_init starts the C log over: drain what it has logged
-        // since the last flush first (the re-arm at a late join runs mid-match).
-        _drainCDebugLog();
+        // kn_rollback_init starts the C log over. Armed already, this is a
+        // re-init within the match (the re-arm at a late join): drain what
+        // the engine has logged since the last flush first. Not armed, the
+        // buffer holds the last match's tail (its kn_rollback_shutdown line
+        // comes after its final flush), which is not this match's to send.
+        if (_useCRollback) _drainCDebugLog();
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
         for (const record of _lateJoinInputWindows.values()) record.primed = false;
         // The desync detector reports a frame only once it is this far

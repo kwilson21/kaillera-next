@@ -73,9 +73,11 @@ test('the engine drains a C buffer that started over shorter than its count', ()
   assert.deepEqual(c.logs, ['[C] SAVE-RESUME f=3120'], 'nothing new, nothing sent');
 });
 
-test('doRollbackInit drains the C log before kn_rollback_init and resets the count after', () => {
+test('doRollbackInit drains the C log before a re-init within a match, and resets the count after', () => {
   const init = src.slice(src.indexOf('const doRollbackInit = ('));
-  const drainAt = init.indexOf('_drainCDebugLog();');
+  // Only when armed already: at a match's first init the buffer holds the
+  // last match's tail (kn_rollback_shutdown logs after its final flush).
+  const drainAt = init.indexOf('if (_useCRollback) _drainCDebugLog();');
   const initAt = init.indexOf('detMod._kn_rollback_init(');
   const resetAt = init.indexOf('_cDebugLogLastLen = 0;');
   assert.ok(drainAt > 0 && drainAt < initAt, 'drained before kn_rollback_init starts the buffer over');
