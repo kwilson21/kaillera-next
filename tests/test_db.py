@@ -759,7 +759,7 @@ async def _run_init_twice(tmp_db):
     await close_db()
     await init_db(tmp_db)
     rows = await query("SELECT version FROM schema_migrations ORDER BY version", ())
-    assert [r["version"] for r in rows] == ["0001", "0002", "0003", "0004", "0005"]
+    assert [r["version"] for r in rows] == ["0001", "0002", "0003", "0004", "0005", "0006"]
     await close_db()
 
 
@@ -892,4 +892,282 @@ async def _run_audit_cap(tmp_db):
         assert len(await get_full_log_entries("m-audit", 0, None)) == 10
     finally:
         db_mod._SESSION_LOG_AUDIT_CAP = original_cap
+    await close_db()
+
+
+# ── the C engine's lines ────────────────────────────────────────────────────
+#
+# The play page drains the C rollback engine's log into its own as "[C] "
+# lines, in the same seq stream. The server stores each run of them as
+# kind = 'clog' chunks under their own cap, and the log's readers take both
+# kinds in row-id order (specs/session_log_store.qnt; each test below is one
+# of its scenarios).
+
+_CLOG_BASE = {
+    "match_id": "m-clog", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+    "summary": "{}", "context": "{}", "ip_hash": "abc", "epoch": "e1",
+}
+
+
+def _js(seq, msg="js"):
+    return {"seq": seq, "t": seq, "f": seq, "msg": f"{msg} {seq}"}
+
+
+def _c(seq, msg="MISPREDICTION"):
+    return {"seq": seq, "t": seq, "f": seq, "msg": f"[C] {msg} {seq}"}
+
+
+async def _kinds(match_id):
+    from src.db import query
+
+    rows = await query("SELECT kind FROM session_log_chunks WHERE match_id=? ORDER BY id", (match_id,))
+    return [r["kind"] for r in rows]
+
+
+async def _read_back(match_id):
+    """The log as each reader gets it: the assembled list, the stream, the count."""
+    from src.db import count_log_entries, get_full_log_entries, iter_chunk_entries
+
+    full = [e["msg"] for e in await get_full_log_entries(match_id, 0, None)]
+    streamed = [e["msg"] async for page in iter_chunk_entries(match_id, 0) for e in page]
+    counted, _ = await count_log_entries(match_id, 0)
+    assert streamed == full and counted == len(full)
+    return full
+
+
+def test_c_lines_in_the_middle_of_a_flush_come_back_in_order(tmp_db):
+    # cLinesInTheMiddleOfAFlushTest: a re-init drained the C log mid-window
+    # and JS lines followed. Each run is its own chunk.
+    _run_async(_run_c_lines_in_order(tmp_db))
+
+
+async def _run_c_lines_in_order(tmp_db):
+    from src.db import append_session_flush, close_db, get_input_audit, init_db
+
+    await init_db(tmp_db)
+    entries = [_js(0), _c(1), _c(2), _js(3)]
+    acks = await append_session_flush({**_CLOG_BASE, "entries": entries})
+    assert acks["lastSeq"] == 3
+    assert await _kinds("m-clog") == ["log", "clog", "log"]
+    assert await _read_back("m-clog") == [e["msg"] for e in entries]
+    assert await get_input_audit("m-clog", 0) == []
+    await close_db()
+
+
+def test_js_lines_and_c_lines_keep_their_own_room(tmp_db):
+    # jsLinesPushACLineOutTest and cLinesPushAJsLineOutTest: in one store,
+    # each kind's volume pushed the other kind's oldest lines out.
+    _run_async(_run_own_room(tmp_db))
+
+
+async def _run_own_room(tmp_db):
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db
+
+    await init_db(tmp_db)
+    caps = db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP
+    db_mod._SESSION_LOG_CHUNK_CAP = db_mod._SESSION_LOG_C_CAP = 400
+    try:
+        # One C line, then JS lines far past the JS cap: the C line stays.
+        await append_session_flush({**_CLOG_BASE, "entries": [_c(0)]})
+        for seq in range(1, 11):
+            await append_session_flush({**_CLOG_BASE, "entries": [_js(seq, "x" * 80)]})
+        log = await _read_back("m-clog")
+        # The JS lines' cap deleted some: the log says so first, then the C line.
+        assert log[0].startswith("SERVER-LOG-EVICTED kind=log ")
+        assert log[1] == "[C] MISPREDICTION 0"
+        assert log[-1] == "x" * 80 + " 10" and len(log) < 12
+
+        # One JS line, then C lines far past the C cap: the JS line stays.
+        base = {**_CLOG_BASE, "match_id": "m-clog-2"}
+        await append_session_flush({**base, "entries": [_js(0)]})
+        for seq in range(1, 11):
+            await append_session_flush({**base, "entries": [_c(seq, "y" * 80)]})
+        log = await _read_back("m-clog-2")
+        assert log[0].startswith("SERVER-LOG-EVICTED kind=clog ")
+        assert log[1] == "js 0"
+        assert log[-1] == "[C] " + "y" * 80 + " 10" and len(log) < 12
+
+        # Each kind is held to its own cap.
+        for match_id in ("m-clog", "m-clog-2"):
+            for kind in ("log", "clog"):
+                assert await db_mod._stored_chunk_bytes(match_id, 0, kind) <= 400
+    finally:
+        db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP = caps
+    await close_db()
+
+
+def test_a_resend_after_a_lost_ack_stores_each_line_once(tmp_db):
+    # lostAckTest
+    _run_async(_run_lost_ack(tmp_db))
+
+
+async def _run_lost_ack(tmp_db):
+    from src.db import append_session_flush, close_db, init_db
+
+    await init_db(tmp_db)
+    await append_session_flush({**_CLOG_BASE, "entries": [_js(0), _c(1)]})
+    # The ack was lost: the page sends both again, with a new one.
+    acks = await append_session_flush({**_CLOG_BASE, "entries": [_js(0), _c(1), _js(2)]})
+    assert acks["lastSeq"] == 2
+    assert await _read_back("m-clog") == ["js 0", "[C] MISPREDICTION 1", "js 2"]
+    await close_db()
+
+
+def test_a_reload_stores_its_new_ring_after_the_old_one(tmp_db):
+    # reloadTest: a new epoch numbers from 0 again.
+    _run_async(_run_reload(tmp_db))
+
+
+async def _run_reload(tmp_db):
+    from src.db import append_session_flush, close_db, init_db
+
+    await init_db(tmp_db)
+    await append_session_flush({**_CLOG_BASE, "entries": [_c(0, "before")]})
+    acks = await append_session_flush({**_CLOG_BASE, "epoch": "e2", "entries": [_js(0), _c(1, "after")]})
+    assert acks["lastSeq"] == 1
+    assert await _read_back("m-clog") == ["[C] before 0", "js 0", "[C] after 1"]
+    await close_db()
+
+
+def test_a_flush_of_alternating_lines_is_held_to_a_bounded_number_of_rows(tmp_db):
+    # Each run is a row in one batch. A modified client alternating its lines
+    # gets _MAX_KIND_RUNS rows at most; the rest of its flush is one 'log'
+    # run, still in order.
+    _run_async(_run_alternating(tmp_db))
+
+
+async def _run_alternating(tmp_db):
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db
+
+    await init_db(tmp_db)
+    entries = [_c(seq) if seq % 2 else _js(seq) for seq in range(500)]
+    await append_session_flush({**_CLOG_BASE, "entries": entries})
+    kinds = await _kinds("m-clog")
+    assert len(kinds) == db_mod._MAX_KIND_RUNS and kinds[-1] == "log"
+    assert await _read_back("m-clog") == [e["msg"] for e in entries]
+    await close_db()
+
+
+def test_a_cap_that_deletes_lines_says_so_first_in_the_log(tmp_db, caplog):
+    # evictionIsRecordedTest: each stream past its cap. The record counts
+    # exactly what the DELETE removed, the reader's first line says so, the
+    # other stream's record stays empty, and the server logs it once.
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="src.db"):
+        _run_async(_run_eviction_record(tmp_db))
+    warned = [r.getMessage() for r in caplog.records if "Session log cap reached" in r.getMessage()]
+    assert warned == [
+        "Session log cap reached: match=m-evict slot=0 kind=log; its oldest lines are being deleted"
+        " (counted in session_log_evictions)",
+        "Session log cap reached: match=m-evict- slot=0 kind=clog; its oldest lines are being deleted"
+        " (counted in session_log_evictions)",
+    ]
+
+
+async def _run_eviction_record(tmp_db):
+    import json
+
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db, query
+
+    await init_db(tmp_db)
+    caps = db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP
+    db_mod._SESSION_LOG_CHUNK_CAP = db_mod._SESSION_LOG_C_CAP = 600
+    try:
+        for match_id, line in (("m-evict", _js), ("m-evict-c", _c)):
+            base = {**_CLOG_BASE, "match_id": match_id}
+            sent = []
+            for seq in range(12):
+                entries = [line(seq, "z" * 60), line(seq + 100, "z" * 60)]  # two lines a flush
+                for e in entries:
+                    e["seq"] = len(sent)
+                    sent.append(e)
+                await append_session_flush({**base, "entries": entries})
+            kind = "log" if line is _js else "clog"
+            other = "clog" if kind == "log" else "log"
+            stored = [
+                e
+                for (text,) in [
+                    (r["entries"],)
+                    for r in await query("SELECT entries FROM session_log_chunks WHERE match_id=? ORDER BY id", (match_id,))
+                ]
+                for e in json.loads(text)
+            ]
+            gone = sent[: len(sent) - len(stored)]
+            assert [e["seq"] for e in stored] == [e["seq"] for e in sent[len(gone) :]], "the oldest went, in order"
+            rows = await query(
+                "SELECT kind, entries, through_seq FROM session_log_evictions WHERE match_id=? ORDER BY kind", (match_id,)
+            )
+            assert [dict(r) for r in rows] == [{"kind": kind, "entries": len(gone), "through_seq": gone[-1]["seq"]}]
+            log = await _read_back(match_id)
+            assert log[0].startswith(
+                f"SERVER-LOG-EVICTED kind={kind} entries={len(gone)} through_seq={gone[-1]['seq']}:"
+            )
+            assert not any(m.startswith(f"SERVER-LOG-EVICTED kind={other} ") for m in log)
+            assert log[1:] == [e["msg"] for e in stored]
+    finally:
+        db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP = caps
+    await close_db()
+
+
+def test_the_security_reproducer_stays_under_the_row_ceiling(tmp_db):
+    # rowsPerFlushBounded: Codex's reproducer on #321, 60,000 entries
+    # alternating "[C] " and plain lines in a 1.79 MB body, one row per line
+    # before the bound. It now adds at most _MAX_FLUSH_ROWS rows and takes
+    # about as long as a flush of one kind.
+    _run_async(_run_reproducer(tmp_db))
+
+
+async def _run_reproducer(tmp_db):
+    import json
+    import time
+
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db, query
+
+    await init_db(tmp_db)
+    took = {}
+    for name, msg in (("alternating", lambda i: ("[C] " if i % 2 else "") + "x"), ("one-kind", lambda i: "x")):
+        entries = [{"seq": i, "msg": msg(i)} for i in range(60_000)]
+        if name == "alternating":
+            assert 1.7e6 < len(json.dumps(entries)) < 1.9e6
+        started = time.perf_counter()
+        acks = await append_session_flush({**_CLOG_BASE, "match_id": f"m-{name}", "entries": entries})
+        took[name] = time.perf_counter() - started
+        assert acks["lastSeq"] == 59_999
+        rows = await query("SELECT COUNT(*) AS n FROM session_log_chunks WHERE match_id=?", (f"m-{name}",))
+        assert rows[0]["n"] <= db_mod._MAX_FLUSH_ROWS
+    assert took["alternating"] < 4 * took["one-kind"] + 0.5, took
+    await close_db()
+
+
+def test_a_flush_past_the_row_ceiling_is_refused_whole(tmp_db):
+    # Rows from size splits too: a flush past _MAX_FLUSH_ROWS stores nothing
+    # and acks nothing, so the page sends it again.
+    _run_async(_run_refused(tmp_db))
+
+
+async def _run_refused(tmp_db):
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db, query
+
+    await init_db(tmp_db)
+    limits = db_mod._SESSION_LOG_CHUNK_MAX, db_mod._MAX_FLUSH_ROWS
+    db_mod._SESSION_LOG_CHUNK_MAX, db_mod._MAX_FLUSH_ROWS = 300, 10
+    try:
+        entries = [_js(seq, "w" * 200) for seq in range(20)]  # one row each: 20 rows
+        assert await append_session_flush({**_CLOG_BASE, "entries": entries}) is None
+        assert (await query("SELECT COUNT(*) AS n FROM session_log_chunks", ()))[0]["n"] == 0
+        assert (await query("SELECT COUNT(*) AS n FROM session_logs", ()))[0]["n"] == 0
+        # Sent again in flushes that fit, every entry is stored and acked.
+        acks = await append_session_flush({**_CLOG_BASE, "entries": entries[:10]})
+        assert acks["lastSeq"] == 9
+        acks = await append_session_flush({**_CLOG_BASE, "entries": entries})
+        assert acks["lastSeq"] == 19
+        assert await _read_back("m-clog") == [e["msg"] for e in entries]
+    finally:
+        db_mod._SESSION_LOG_CHUNK_MAX, db_mod._MAX_FLUSH_ROWS = limits
     await close_db()
