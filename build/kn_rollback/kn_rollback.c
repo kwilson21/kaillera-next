@@ -1554,8 +1554,27 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
      * only monotonically. DataChannel callbacks can deliver older frames
      * after newer ones (unordered transport, artificial jitter, reconnect
      * backlog). Letting an old frame rewrite last_known makes future
-     * predictions depend on callback race order instead of input frame order. */
+     * predictions depend on callback race order instead of input frame order.
+     *
+     * The entry holds a real input now, so it is no prediction: clear the
+     * flag whatever frame it was set for. The check above clears it only for
+     * a prediction of this frame. One of a frame a ring lap back, whose real
+     * input never came (skipped as settled, never sent), would stay set over
+     * this real input, and a replay covering this frame would take it as an
+     * unconfirmed prediction and predict over the real input. That input has
+     * been fed and is not fed again, so nothing would check the prediction:
+     * the page keeps another input for the frame than every other page does
+     * (specs/input_ring_flags.qnt). */
+    if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame != frame) {
+        /* The prediction a lap back was never checked and now never will
+         * be: counted as the forward pass counts one it predicts over, so
+         * prediction_count = correct + rollbacks + failed + clobbered. */
+        rb.clobbered_predictions++;
+        rb_log("STALE-PREDICTION-FLAG slot=%d f=%d predicted_f=%d", slot, frame,
+            rb.predicted_values[slot][idx].frame);
+    }
     rb.inputs[slot][idx] = real_input;
+    rb.predicted[slot][idx] = 0;
     if (!rb.slot_active[slot]) {
         rb.prev_known[slot] = real_input;
         rb.last_known[slot] = real_input;
@@ -1819,7 +1838,12 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                      * so one input change became a chain of rollbacks. The
                      * new guess is stored as the prediction, so later
                      * arrivals are checked against what this replay ran. */
-                    int unconfirmed = (inp->present && inp->frame == replay_apply && rb.predicted[s][idx]);
+                    /* Only a prediction of this frame is unconfirmed: a flag
+                     * left from a frame a ring lap back is not about this
+                     * input (specs/input_ring_flags.qnt; kn_feed_input
+                     * clears it too). */
+                    int unconfirmed = (inp->present && inp->frame == replay_apply && rb.predicted[s][idx]
+                                       && rb.predicted_values[s][idx].frame == replay_apply);
                     int missing = !(inp->present && inp->frame == replay_apply);
                     if (rb.slot_active[s] && (unconfirmed || missing)) {
                         kn_input_t pred_input = rb_predict_input(s);
@@ -1908,7 +1932,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
              * triggering a misprediction — so we need state in the ring. */
             int needs_prediction = !rb.inputs[s][idx].present
                                 || rb.inputs[s][idx].frame != apply_frame
-                                || rb.predicted[s][idx];
+                                || (rb.predicted[s][idx]
+                                    && rb.predicted_values[s][idx].frame == apply_frame);
             if (needs_prediction && (!rb.inputs[s][idx].present || rb.inputs[s][idx].frame != apply_frame)) {
                 /* Predict: dead-reckoning for stick, repeat-last for buttons.
                  * Extrapolate stick position based on velocity between the

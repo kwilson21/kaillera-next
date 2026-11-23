@@ -572,6 +572,17 @@ ring_after_resync() {
   expect_violation "$RING" ring_after_resync_save_only everyCopyIsWhole
 }
 
+input_ring_flags() {
+  local FLAGS=specs/input_ring_flags.qnt
+  # The counterexample below is 7 steps; the fix is checked past it.
+  verify "$FLAGS" input_ring_flags_fixed allHold init 8
+  # Three frames run (the first on a prediction whose real input never
+  # comes), the next lap's real input, its frame, another player's rollback,
+  # the replay: 7 steps (staleFlagTest).
+  expect_violation "$FLAGS" input_ring_flags_current aRealInputIsNeverReplacedByAPrediction 8
+  expect_violation "$FLAGS" input_ring_flags_current everyFedFrameRanOnItsRealInput 8
+}
+
 solo_save() {
   local SOLO=specs/solo_save.qnt
   # The keep-baseline counterexample is 7 steps; check the gate past it.
@@ -634,7 +645,7 @@ SPEC_GROUPS=(
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
   rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
-  engine_start solo_save session_log_store
+  engine_start solo_save session_log_store input_ring_flags
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -642,7 +653,7 @@ SPEC_GROUPS=(
 # whole set took 32 minutes in one job. A group added above goes in a shard
 # here; the check below fails until it does.
 SHARDS=(
-  "room_lifecycle_start engine_start solo_save"                   # ~7 min + engine_start (~30 s) + solo_save (~40 s)
+  "room_lifecycle_start engine_start solo_save input_ring_flags"  # ~7 min + engine_start (~30 s) + solo_save (~40 s) + input_ring_flags
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min

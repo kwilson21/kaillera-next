@@ -707,6 +707,19 @@ done
 $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── The input ring's prediction flags ──────────────────────────────────────
+FLAGS=specs/input_ring_flags.qnt
+$QUINT typecheck "$FLAGS"
+for variant in input_ring_flags_current input_ring_flags_fixed; do
+  $QUINT test "$FLAGS" --main="$variant" --backend="$BACKEND"
+done
+# A real input stored over a stale prediction flag, one ring lap old, and a
+# replay that predicted over it: VIOLATED in input_ring_flags_current
+# (staleFlagTest holds the ordering; the host split from both guests at
+# 2704 in a three-player run that way).
+$QUINT run "$FLAGS" --main=input_ring_flags_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # ── The ring while a page plays alone ──────────────────────────────────────
 SOLO=specs/solo_save.qnt
 $QUINT typecheck "$SOLO"
