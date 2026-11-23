@@ -223,6 +223,13 @@ if [ -d "${PATCHES_DIR}" ]; then
         echo "    Added runtime delay-frames update WASM exports"
     fi
 
+    # The debug log's dropped-bytes count: the page drains the C log by
+    # absolute offset, so it keeps flowing past its 64 KB buffer.
+    if grep -q "_kn_get_debug_log," Makefile.emulatorjs && ! grep -q "_kn_get_debug_log_dropped" Makefile.emulatorjs; then
+        sed -i 's|_kn_get_debug_log,|_kn_get_debug_log,_kn_get_debug_log_dropped,|' Makefile.emulatorjs
+        echo "    Added debug-log dropped-bytes WASM export"
+    fi
+
     # 2026-04-29 rollback-engine OOB-throw localization probes. Exports the
     # last rollback phase/frame/slot/serialize counters so JS can dump them
     # in the STEP-THREW handler. Remove once root cause is found.

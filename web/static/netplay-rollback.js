@@ -6890,10 +6890,16 @@
   // context, so adding a new top-level field would be silently dropped —
   // emitting via _syncLog is the path of least resistance.
   //
-  // The C buffer is fill-and-stop (not a ring), so we track the highest
-  // length we've already drained and only emit the new tail. Lines are
-  // prefixed [C] so they're easy to filter post-mortem.
-  let _cDebugLogLastLen = 0;
+  // The C buffer holds the newest lines: when full it drops its oldest half
+  // and counts the bytes dropped (_kn_get_debug_log_dropped), so the buffer
+  // starts at that absolute offset. We remember the absolute offset drained
+  // so far and emit only what follows it; if more was dropped than we had
+  // read, a C-LOG-DROPPED line says how much was missed. A core built before
+  // that export fills its buffer and stops, and kn_rollback_init restarts
+  // it: its offset is the length, and a shorter log than drained is a
+  // restart, read from its start. Lines are prefixed [C] so they're easy to
+  // filter post-mortem.
+  let _cDebugLogDrainedTo = 0;
   const _drainCDebugLog = () => {
     const m = window.EJS_emulator?.gameManager?.Module;
     if (!m?._kn_get_debug_log) return;
@@ -6901,10 +6907,18 @@
       const ptr = m._kn_get_debug_log();
       if (!ptr) return;
       const full = m.UTF8ToString ? m.UTF8ToString(ptr) : window.UTF8ToString?.(ptr);
-      if (!full || typeof full !== 'string') return;
-      if (full.length === _cDebugLogLastLen) return;
-      const tail = full.slice(_cDebugLogLastLen);
-      _cDebugLogLastLen = full.length;
+      if (typeof full !== 'string') return;
+      const dropped = m._kn_get_debug_log_dropped ? m._kn_get_debug_log_dropped() >>> 0 : 0;
+      const end = dropped + full.length;
+      if (end < _cDebugLogDrainedTo) _cDebugLogDrainedTo = dropped;
+      if (end === _cDebugLogDrainedTo) return;
+      let from = _cDebugLogDrainedTo - dropped;
+      if (from < 0) {
+        _syncLog(`[C] C-LOG-DROPPED bytes=${-from}`);
+        from = 0;
+      }
+      const tail = full.slice(from);
+      _cDebugLogDrainedTo = end;
       // Emit each non-empty line as its own entry
       const lines = tail.split('\n');
       for (const line of lines) {
