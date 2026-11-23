@@ -134,6 +134,9 @@ EXPECTED_COLUMNS = {
     "session_log_chunks": [
         "id", "match_id", "slot", "first_seq", "last_seq", "entries", "size", "created_at", "kind",
     ],
+    "session_log_evictions": [
+        "id", "match_id", "slot", "kind", "entries", "through_seq", "created_at", "updated_at",
+    ],
     "client_events": ["id", "type", "message", "meta", "room", "slot", "ip_hash", "user_agent", "created_at"],
     "screenshots": ["id", "match_id", "slot", "frame", "data", "blob_key", "size", "created_at"],
     "match_metrics": [
@@ -149,7 +152,7 @@ EXPECTED_COLUMNS = {
     "match_retention": [
         "match_id", "room", "created_at", "ended_at", "tier", "flag_reasons", "auto_flag_capped",
         "resolved_at", "resolved_note", "last_touched_at", "deleting_at", "archived_at",
-        "archived_max_chunk_id", "archived_updated_at", "archive_bytes", "evicted_at",
+        "archived_max_chunk_id", "archived_updated_at", "archive_bytes", "evicted_at", "archive_token",
     ],
 }
 # fmt: on
@@ -160,6 +163,7 @@ EXPECTED_INDEXES = {
     "idx_match_metrics_created_at": ("match_metrics", 0),
     "idx_desync_events_match_frame": ("desync_events", 0),
     "idx_session_log_chunks_match_slot": ("session_log_chunks", 0),
+    "idx_session_log_evictions_match_slot": ("session_log_evictions", 0),
     "idx_match_retention_created_at": ("match_retention", 0),
 }
 
@@ -222,7 +226,7 @@ def test_baseline_upgrades_existing_alembic_database(tmp_path):
             await backend.close()
 
     applied, feedback, leftover = run_async(scenario())
-    assert applied == ["0001", "0002", "0003", "0004", "0005"]
+    assert applied == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
     assert feedback == [{"message": "kept"}]
     assert leftover == []
 
@@ -270,8 +274,8 @@ def test_alembic_0008_database_skips_session_log_chunks_migration(tmp_path):
             await backend.close()
 
     applied, recorded, chunks = run_async(scenario())
-    assert applied == ["0001", "0003", "0004", "0005"]
-    assert recorded == ["0001", "0002", "0003", "0004", "0005"]
+    assert applied == ["0001", "0003", "0004", "0005", "0006", "0007"]
+    assert recorded == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
     assert chunks == [{"n": 1}]
 
 
@@ -303,5 +307,5 @@ def test_screenshot_rows_keep_their_bytes_through_0003(tmp_path):
             await backend.close()
 
     applied, rows = run_async(scenario())
-    assert applied == ["0003", "0004", "0005"]
+    assert applied == ["0003", "0004", "0005", "0006", "0007"]
     assert rows == [{"match_id": "m", "slot": 0, "frame": 60, "data": b"\xff\xd8old", "blob_key": None, "size": 5}]

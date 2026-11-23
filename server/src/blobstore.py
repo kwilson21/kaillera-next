@@ -41,6 +41,10 @@ def _check_key(key: str) -> str:
 
 class BlobStore(Protocol):
     name: str
+    # Survives a deploy. A blob in a store that doesn't may be the only copy
+    # of nothing that matters (a screenshot) but must never be the only copy
+    # of a session log (src/log_archive.py).
+    durable: bool
 
     async def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None: ...
 
@@ -53,6 +57,8 @@ class BlobStore(Protocol):
 
 class LocalBlobStore:
     name = "local"
+    # A folder on the instance's disk: Render wipes it on every deploy.
+    durable = False
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -99,6 +105,7 @@ class LocalBlobStore:
 
 class R2BlobStore:
     name = "r2"
+    durable = True
 
     def __init__(
         self,

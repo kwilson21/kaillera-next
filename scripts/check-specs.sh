@@ -918,6 +918,55 @@ done
 $QUINT run "$REMOVED" --main=removed_input_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── The server's store for a player's session log ──────────────────────────
+STORE=specs/session_log_store.qnt
+$QUINT typecheck "$STORE"
+for variant in session_log_store_before session_log_store_per_flush session_log_store_unrecorded \
+  session_log_store_unbounded session_log_store_current; do
+  $QUINT test "$STORE" --main="$variant" --backend="$BACKEND"
+done
+# Each run of JS lines or of C lines is its own row, in order, and each kind
+# has its own store: the rows come back in the order the page logged them,
+# and neither kind's volume evicts the other's lines. The second and third
+# are VIOLATED with one store (session_log_store_before;
+# jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest), the first with a JS
+# row and a C row per flush (session_log_store_per_flush;
+# cLinesInTheMiddleOfAFlushTest). A reader can tell what a cap deleted
+# (truncationIsVisible): VIOLATED with no record of it
+# (session_log_store_unrecorded; evictionIsRecordedTest). No flush adds more
+# than its bound of rows (rowsPerFlushBounded): VIOLATED with one row per run
+# and no bound (session_log_store_unbounded; alternatingLinesTest).
+$QUINT run "$STORE" --main=session_log_store_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# ── Archiving a match's log off D1, and evicting it ────────────────────────
+ARCHIVE=specs/log_archive.qnt
+$QUINT typecheck "$ARCHIVE"
+for variant in log_archive_record_first log_archive_evict_all log_archive_archive_only \
+  log_archive_ignore_tombstone log_archive_read_all_tail log_archive_delete_by_id_only \
+  log_archive_key_by_through log_archive_any_store log_archive_current; do
+  $QUINT test "$ARCHIVE" --main="$variant" --backend="$BACKEND"
+done
+# A match's log is always readable, from exactly one place: D1 until it is
+# evicted, then the archive the record's token names and the D1 chunks it
+# does not hold. VIOLATED by an eviction of every chunk and by a reader of
+# the archive alone (log_archive_evict_all, log_archive_archive_only;
+# lateChunkTest), by a reader of every chunk left in D1 after an eviction
+# that stopped part-way (log_archive_read_all_tail; partialEvictionTest), and
+# by a DELETE by id alone run again after a chunk reused an archived id
+# (log_archive_delete_by_id_only; deleteAgainAfterReuseTest), and by an
+# archive and eviction into a store a deploy wipes (log_archive_any_store;
+# localStoreTest). The archive is
+# recorded only once complete and nothing takes it back after
+# (archivedOnlyWhenComplete): VIOLATED by recording it before the uploads are
+# confirmed (log_archive_record_first; failedUploadTest) and by two archivers
+# sharing keys (log_archive_key_by_through; twoArchiversAtOnceTest).
+# Retention leaves nothing behind (retentionLeavesNothing): VIOLATED by an
+# archive that keeps its objects after finding the match tombstoned
+# (log_archive_ignore_tombstone; deleteDuringArchiveTest).
+$QUINT run "$ARCHIVE" --main=log_archive_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2

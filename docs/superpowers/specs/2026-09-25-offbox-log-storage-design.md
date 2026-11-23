@@ -77,8 +77,8 @@ integer/float/NULL params bind correctly, and D1's HTTP batch **is** atomic.
    stay in D1. Once a match can no longer receive uploads, it is archived to
    R2 (each slot's raw entries and context, plus a Parquet analytics copy);
    `D1_HOT_DAYS` (default 2) after that, its chunks leave D1. Admin reads
-   switch from D1 to the archive on `archived_at`. Details in §1 "Archive and
-   eviction".
+   switch from D1 to the archive on `evicted_at` (a hot match's own chunks
+   are still there until then). Details in §1 "Archive and eviction".
 3. **Context size cap (defensive).** Both session-log handlers allowed
    `context` (with `inputAudit`) up to 2 MiB = 2,097,152 bytes, but it shares
    a D1 row with `summary` and D1 rows are capped at 2,000,000 bytes. Honest
@@ -103,7 +103,7 @@ integer/float/NULL params bind correctly, and D1's HTTP batch **is** atomic.
 | Data | D1 (rows) | R2 (objects) |
 |---|---|---|
 | Session logs (hot) | `session_logs` (metadata, `summary` ≤ 4 KB, `context` ≤ 1.5 MB, `last_seq`, `log_epoch`) and `session_log_chunks` (entries, ≤ 512 KB per row) | — |
-| Session logs (archive, after rotation) | `session_logs` kept with `context` cleared; chunks deleted after `D1_HOT_DAYS` | `matches/<match_id>/entries.zstd.parquet` (all slots' entries) and `matches/<match_id>/sessions/<slot>.context.json.gz` |
+| Session logs (archive, after rotation) | `session_logs` kept with `context` cleared; chunks deleted after `D1_HOT_DAYS` | under `matches/<match_id>/sessions/<archive_token>/`: `entries.zstd.parquet` (all slots' entries) and, per slot, `<slot>.{entries.jsonl,audit.jsonl,context.json}.gz` |
 | Match metrics | `match_metrics` (unchanged columns; `parquet_path` holds the R2 key) | — |
 | Screenshots | `screenshots`: `id`, `match_id`, `slot`, `frame`, `size`, `blob_key`, `created_at` | `matches/<match_id>/screenshots/<slot>-<frame>.jpg` |
 | Feedback, client events, desync verdicts | As today | — |
@@ -176,32 +176,73 @@ leaving mid-match already sets `ended_by`, and final flushes can land later.
 
 ### Archive and eviction
 
+**Only into a durable store.** The archive and the eviction run only when
+the blob store survives a deploy (R2; `BlobStore.durable`). Without R2 the
+store is a folder on the instance's disk, which a deploy wipes: an archive
+there would be evicted from D1 and then lost, so the archive stays off and
+the logs stay in D1 (`log_archive.archive_enabled`, logged once;
+`LOG_ARCHIVE_LOCAL=1` lets tests and local development use the folder).
+
 **When a match is archived.** Only once it can no longer receive uploads:
 its ingest window (§5) has closed, i.e. 30 min after `ended_at`, or 4 h after
 `created_at` when no end was ever recorded (crash, restart). Archiving then:
 
 1. Recomputes `match_metrics` and re-runs the classifier on the complete logs.
 2. Uploads, for each slot, the raw entries exactly as stored (log and audit
-   chunks, JSON Lines) to `matches/<id>/sessions/<slot>.entries.jsonl.gz`
-   and its `context` to `matches/<id>/sessions/<slot>.context.json.gz`. A
-   NULL slot uses `slot-none`. These are what admin detail, export and
-   input-audit read after eviction, so they return the same data.
-3. Uploads the Parquet copy (`matches/<id>/entries.zstd.parquet`) for
-   DuckDB/Polars analysis. It is not used to serve admin reads (Parquet
-   null-pads missing keys and coerces types).
-4. Records, in one D1 statement, `archived_at`, the highest chunk `id` and
-   the `session_logs.updated_at` it covered, and `archive_bytes`. It does this
-   only after every upload succeeded; a failed upload leaves the match
-   un-archived for the next sweep.
+   chunks, JSON Lines; the log is its `kind = 'log'` and `kind = 'clog'`
+   chunks, the C engine's lines, taken together in `id` order as
+   `db.iter_chunk_entries` reads them, after its `SERVER-LOG-EVICTED` lines
+   from `session_log_evictions`, and its legacy `log_data` before those) to
+   `matches/<id>/sessions/<token>/<slot>.entries.jsonl.gz`, the audit chunks
+   to `…/<slot>.audit.jsonl.gz` and its `context` to
+   `…/<slot>.context.json.gz`. A NULL slot uses `slot-none`. `<token>` is
+   random, one per attempt, and recorded as `archive_token` (migration 0007),
+   so a reader names the objects of the attempt that was recorded. Two
+   servers can archive one match at once (a Render deploy keeps the old
+   instance up while the new one boots, and both sweep); both see the same
+   newest chunk id, so keys made from it would be shared, and the attempt
+   that is refused would take back the recorded one's objects. These are
+   what admin detail, export and input-audit read after eviction, so they
+   return the same data.
+3. Uploads the Parquet copy (`…/<token>/entries.zstd.parquet`) for
+   DuckDB/Polars analysis, and points `match_metrics.parquet_path` at it; a
+   later rotation keeps that key. It is not used to serve admin reads
+   (Parquet null-pads missing keys and coerces types).
+4. Records, in one D1 statement, `archived_at`, the highest chunk `id`, the
+   token, the `session_logs.updated_at` it covered, and `archive_bytes`. It
+   does this only after every upload succeeded, and only if no other attempt
+   recorded first and no delete has started; otherwise it takes back what it
+   uploaded, and the match stays un-archived for the next sweep.
 
-**Eviction.** `D1_HOT_DAYS` after `archived_at`, one atomic D1 batch deletes
-the match's chunks with `id <= archived_max_chunk_id`, clears `context` and
-`log_data` on rows whose `updated_at` still equals the archived value, and
-sets `evicted_at`. Tombstoned matches (§4) are skipped, so a late archive
-can never recreate objects after a delete has started.
+**Eviction.** `D1_HOT_DAYS` after `archived_at`, one D1 batch sets
+`evicted_at`, deletes the chunks the archive holds (`id <=
+archived_max_chunk_id` **and** `created_at <= archived_at`), clears every
+row's legacy `log_data` (which never changes once written), and clears
+`context` on rows not written since the archive (`updated_at <=
+archived_updated_at` and `< archived_at`, which rules out a write in the same
+second as the value the archive read). `evicted_at` goes first and the
+others are conditional on it, so a batch that runs in parts — D1's HTTP
+batch is not documented as a transaction — is read the same at every point,
+and the next sweep runs it again for a match it left chunks in. Run again,
+it touches nothing written since: by id alone, it could take a chunk that
+reused an archived id. Tombstoned matches (§4) are skipped, so a late
+archive can never recreate objects after a delete has started.
 
 **Admin reads** use D1 until `evicted_at` is set and the archive after, so a
 hot session with no chunks yet shows as empty rather than `log_deleted`.
+After eviction a reader takes the archive first and then the chunks the
+archive does not hold: a flush can still land, because the Socket.IO path
+accepts a room's live match past its upload window. Those are the chunks
+with an id past `archived_max_chunk_id` **or** a `created_at` after
+`archived_at`, read in that order by time: SQLite gives an INSERT
+`max(id) + 1`, so a chunk written after the eviction can take the id of one
+the eviction deleted. Where the archive's entries end, a reader adds the
+`SERVER-LOG-EVICTED` lines of any stream a size cap deleted more from after
+the archive. Legacy `log_data` comes from the archive alone. An archive that
+can't be read (a failed fetch, or a missing object for a slot that existed
+before the archive) is an error, not an empty log: the admin endpoints
+answer 502. An evicted flagged match's `archive_bytes` count against
+`BUDGET_AUTO_FLAGGED_BYTES` in place of its chunks.
 
 **Existing data.** The PR that adds archiving also backfills: matches rotated
 since the 2026-09-28 cutover (their `parquet_path` points at the wiped local
@@ -489,7 +530,7 @@ many IPs from exhausting the shared free tier or the bill:
 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | — | unset → `blobs/` next to the SQLite file; production bucket `kaillera-next-screenshots` (it holds every match's objects despite the name) |
 | `LOG_RETENTION_DAYS` | 7 | was 14 |
 | `FLAGGED_STALE_DAYS` | 180 | |
-| `D1_HOT_DAYS` | 2 | days after `ended_at` before an archived match leaves D1 |
+| `D1_HOT_DAYS` | 2 | days after `archived_at` before an archived match's chunks leave D1 |
 | `BUDGET_*` | see §5 | |
 
 `render.yaml` adds the secrets with `sync: false`. `deploy/render/README.md`
@@ -555,9 +596,13 @@ Remaining:
    only new audit entries, stored as `kind = 'audit'` chunks, trimmed
    newest-kept; a dropped audit never overwrites a stored one. Changes the
    netplay client's flush path, so `tests/rb-two-player.mjs` must pass.
-4. `feat(logs)`: archive and eviction (§1): archive after the ingest window,
-   eviction after `D1_HOT_DAYS`, admin reads switching on `evicted_at`,
-   `BUDGET_D1_BYTES`, and the backfill of existing matches.
+4. Done: archive and eviction (§1) — `src/log_archive.py`, modelled in
+   `specs/log_archive.qnt`: archive after the ingest window, eviction
+   `D1_HOT_DAYS` after `archived_at`, admin reads switching on `evicted_at`,
+   and the backfill, which registers an ended match that has no
+   `match_retention` row (its newest flush over 4 h and inside the retention
+   window) so the sweep archives it. `BUDGET_D1_BYTES` is not part of it and
+   follows with the other budgets in item 2.
 5. `feat(retention)`: classifier (early and at archive); flag hooks for client
    events, desync verdicts and feedback; `BUDGET_AUTO_FLAGGED_BYTES`; the two
    client changes.

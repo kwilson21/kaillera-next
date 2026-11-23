@@ -609,13 +609,68 @@ engine_start() {
   expect_violation "$START" engine_start_no_rearm aJoinedMatchRunsAboveZero
 }
 
+session_log_store() {
+  local STORE=specs/session_log_store.qnt
+  # The counterexamples below are 5 steps or fewer; the change is checked
+  # past them.
+  verify "$STORE" session_log_store_current allHold
+  # The shortest in one store: four lines in one flush, one row over the
+  # store's cap, taking the other kind's line with it (5 steps). Over two
+  # flushes it is 6 (jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest).
+  expect_violation "$STORE" session_log_store_before cLinesKeepTheirOwnRoom
+  expect_violation "$STORE" session_log_store_before jsLinesKeepTheirOwnRoom
+  # A C line, a JS line, a flush: the JS row before the C row (3 steps;
+  # cLinesInTheMiddleOfAFlushTest).
+  expect_violation "$STORE" session_log_store_per_flush readInOrder
+  # Four JS lines in one flush, one row over the cap, deleted with no record
+  # of it (5 steps; over two flushes, evictionIsRecordedTest).
+  expect_violation "$STORE" session_log_store_unrecorded truncationIsVisible
+  # Four lines alternating in one flush, one row each, past the bound of
+  # three (5 steps; alternatingLinesTest).
+  expect_violation "$STORE" session_log_store_unbounded rowsPerFlushBounded
+}
+
 # Every group, in the order a local run takes them.
+log_archive() {
+  local ARCHIVE=specs/log_archive.qnt
+  # A match's log is readable from exactly one place, the archive is recorded
+  # only once it is complete, and retention leaves nothing behind — with two
+  # archivers at once, crashes at each step, an eviction batch that runs in
+  # parts or again, and SQLite reusing ids. Checked as deep as the deepest
+  # counterexample below (9 steps); 10 outlasts a CI job's 20 minutes.
+  verify "$ARCHIVE" log_archive_current allHold init 9
+  # Recorded before the uploads are confirmed, a failed upload leaves an
+  # archived id R2 has nothing for (failedUploadTest).
+  expect_violation "$ARCHIVE" log_archive_record_first archivedOnlyWhenComplete
+  # An eviction batch that stops after its mark leaves the archived chunks in
+  # D1; reading every chunk left there reads them twice: flush, window,
+  # archive x3, hot, evict (7 steps; partialEvictionTest).
+  expect_violation "$ARCHIVE" log_archive_read_all_tail logAlwaysReadable 7
+  # Two archivers keyed by the chunk id alone share keys; the refused one
+  # takes back the recorded one's objects: flush, window, begin x2, upload x2,
+  # finish x2 (8 steps; twoArchiversAtOnceTest).
+  expect_violation "$ARCHIVE" log_archive_key_by_through archivedOnlyWhenComplete 8
+  # An archive that keeps its objects after finding the match tombstoned
+  # leaves them behind for good (8 steps; deleteDuringArchiveTest).
+  expect_violation "$ARCHIVE" log_archive_ignore_tombstone retentionLeavesNothing 8
+  # Reading the archive alone after eviction, or evicting every chunk, loses
+  # a chunk written after the archive (8 steps; lateChunkTest).
+  expect_violation "$ARCHIVE" log_archive_archive_only logAlwaysReadable 8
+  expect_violation "$ARCHIVE" log_archive_evict_all logAlwaysReadable 8
+  # A DELETE by id alone, run again after a chunk reused an archived id,
+  # takes it (9 steps; deleteAgainAfterReuseTest).
+  expect_violation "$ARCHIVE" log_archive_delete_by_id_only logAlwaysReadable 9
+  # Archiving and evicting into a store a deploy wipes (a local folder, no
+  # R2) loses the log at the next deploy (8 steps; localStoreTest).
+  expect_violation "$ARCHIVE" log_archive_any_store logAlwaysReadable 8
+}
+
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
   rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
-  engine_start solo_save
+  engine_start solo_save session_log_store log_archive
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -625,9 +680,9 @@ SPEC_GROUPS=(
 SHARDS=(
   "room_lifecycle_start engine_start solo_save"                   # ~7 min + engine_start (~30 s) + solo_save (~40 s)
   "room_lifecycle_drops"                                          # ~8 min
-  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
+  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final log_archive" # ~7.5 min + log_archive (~1 min)
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs" # ~7.5 min
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs session_log_store" # ~7.5 min + session_log_store (~3.5 min)
 )
 
 # Each group is in exactly one shard, and each shard names only groups.

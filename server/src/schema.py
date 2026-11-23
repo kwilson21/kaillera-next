@@ -83,6 +83,21 @@ class SessionLogChunk(Base):
     kind: Mapped[str] = mapped_column(Text)
 
 
+class SessionLogEviction(Base):
+    """What a size cap deleted from one stream of one player's log (migration 0006)."""
+
+    __tablename__ = "session_log_evictions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    match_id: Mapped[str] = mapped_column(Text)
+    slot: Mapped[int | None] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(Text)
+    entries: Mapped[int] = mapped_column(Integer)
+    through_seq: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[str] = mapped_column(Text)
+
+
 class Screenshot(Base):
     __tablename__ = "screenshots"
 
@@ -157,4 +172,5 @@ class MatchRetention(Base):
     archived_max_chunk_id: Mapped[int | None] = mapped_column(Integer)
     archived_updated_at: Mapped[str | None] = mapped_column(Text)
     archive_bytes: Mapped[int | None] = mapped_column(Integer)
+    archive_token: Mapped[str | None] = mapped_column(Text)
     evicted_at: Mapped[str | None] = mapped_column(Text)

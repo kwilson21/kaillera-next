@@ -1,5 +1,25 @@
 [
   {
+    "version": "0.71.0",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "archive an ended match's session log to the blob store, then evict it from the database (#324)"
+      }
+    ]
+  },
+  {
+    "version": "0.70.0",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "a server store of their own for C log lines, and a record of what a size cap deletes (#321)"
+      }
+    ]
+  },
+  {
     "version": "0.69.26",
     "date": "2026-11-23",
     "changes": [
