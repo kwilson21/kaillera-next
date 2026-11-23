@@ -182,7 +182,9 @@ its ingest window (§5) has closed, i.e. 30 min after `ended_at`, or 4 h after
 
 1. Recomputes `match_metrics` and re-runs the classifier on the complete logs.
 2. Uploads, for each slot, the raw entries exactly as stored (log and audit
-   chunks, JSON Lines) to `matches/<id>/sessions/<slot>.entries.jsonl.gz`
+   chunks, JSON Lines; the log is its `kind = 'log'` and `kind = 'clog'`
+   chunks, the C engine's lines, taken together in `id` order as
+   `db.iter_chunk_entries` reads them) to `matches/<id>/sessions/<slot>.entries.jsonl.gz`
    and its `context` to `matches/<id>/sessions/<slot>.context.json.gz`. A
    NULL slot uses `slot-none`. These are what admin detail, export and
    input-audit read after eviction, so they return the same data.

@@ -156,9 +156,26 @@ _SESSION_LOG_CHUNK_CAP = 12 * 1024 * 1024  # 12MB per (match_id, slot) — same 
 # the opponent's) grows ~4-5 KB/s, so this holds about half an hour of play.
 _SESSION_LOG_AUDIT_CAP = 8 * 1024 * 1024
 
+# The C rollback engine's lines get their own budget too: chunks of kind =
+# 'clog', so a long match's JS lines can't push them out and a burst of them
+# can't push the JS lines out (specs/session_log_store.qnt). They ride in the
+# log's own seq stream as "[C] " lines (netplay-rollback.js, _drainCDebugLog),
+# so the server splits each flush into runs of one kind, in order, and the
+# log's readers take both kinds in row-id order. About 120-160 KB a minute of
+# 60 fps play, so this holds about an hour.
+_SESSION_LOG_C_CAP = 8 * 1024 * 1024
+_C_LINE_PREFIX = "[C] "
+
+# The chunk kinds a reader of each stream takes, in row-id order.
+_STREAM_KINDS = {"log": ("log", "clog"), "audit": ("audit",)}
+
 
 def _chunk_cap(kind: str) -> int:
-    return _SESSION_LOG_AUDIT_CAP if kind == "audit" else _SESSION_LOG_CHUNK_CAP
+    if kind == "audit":
+        return _SESSION_LOG_AUDIT_CAP
+    if kind == "clog":
+        return _SESSION_LOG_C_CAP
+    return _SESSION_LOG_CHUNK_CAP
 
 
 # Largest chunk written in one row. A reconnect re-sends the whole ring (MBs)
@@ -234,14 +251,16 @@ async def append_session_log(data: dict) -> int | None:
 
 
 async def append_session_flush(data: dict) -> dict | None:
-    """Append new, deduped log entries as a chunk and update session metadata.
+    """Append new, deduped log entries as chunks and update session metadata.
 
     This never rewrites the `log_data` blob: new entries land in
     `session_log_chunks`, keyed by the client's monotonic `seq`. Entries
     with `seq` <= the stored `last_seq` are dropped — this dedupes resends
     and old cached clients that still send their entire ring on every
-    flush. Returns `{"lastSeq": ..., "auditLastSeq": ...}` so the caller can
-    ack both back to the client.
+    flush. Each run of JS lines or of C engine lines ("[C] ") becomes chunks
+    of its own kind ('log' or 'clog'), in order, each kind under its own cap
+    (_kind_runs). Returns `{"lastSeq": ..., "auditLastSeq": ...}` so the
+    caller can ack both back to the client.
 
     `data["epoch"]` identifies the client's in-memory ring instance (see
     migration 0002_session_log_chunks.sql). When it differs from the epoch
@@ -295,7 +314,7 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
 
     # The chunk inserts, cap enforcement and metadata upsert commit together.
     new_entries, max_seq = _entries_past(data.get("entries") or [], current_last_seq)
-    statements = await _chunk_statements(match_id, slot, "log", new_entries, current_last_seq)
+    statements = await _chunk_statements(match_id, slot, _kind_runs(new_entries), current_last_seq)
 
     stored_audit_epoch = row["audit_epoch"] if row and row["audit_epoch"] is not None else ""
     stored_audit_seq = row["audit_last_seq"] if row and row["audit_last_seq"] is not None else -1
@@ -303,7 +322,7 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
     if audit_epoch:
         audit_last_seq = stored_audit_seq if audit_epoch == stored_audit_epoch else -1
         new_audit, audit_max_seq = _entries_past(data.get("audit_entries") or [], audit_last_seq)
-        statements += await _chunk_statements(match_id, slot, "audit", new_audit, audit_last_seq)
+        statements += await _chunk_statements(match_id, slot, [("audit", new_audit)], audit_last_seq)
     else:
         audit_epoch, audit_max_seq = stored_audit_epoch, stored_audit_seq
 
@@ -371,34 +390,59 @@ def _entries_past(entries: list, last_seq: int) -> tuple[list[dict], int]:
     return new_entries, max_seq
 
 
+def _entry_kind(entry: dict) -> str:
+    """The chunk kind a log entry is stored as: 'clog' for a C engine line."""
+    msg = entry.get("msg")
+    return "clog" if isinstance(msg, str) and msg.startswith(_C_LINE_PREFIX) else "log"
+
+
+def _kind_runs(entries: list[dict]) -> list[tuple[str, list[dict]]]:
+    """A flush's log entries split, in order, into runs of one kind.
+
+    Each run becomes chunks of its own, so the log's readers, taking both
+    kinds in row-id order, get every entry back in the order it was sent
+    (specs/session_log_store.qnt). One chunk of C lines per flush would
+    not: a re-init drains the C log in the middle of a flush window, and JS
+    lines follow it.
+    """
+    runs: list[tuple[str, list[dict]]] = []
+    for entry in entries:
+        kind = _entry_kind(entry)
+        if runs and runs[-1][0] == kind:
+            runs[-1][1].append(entry)
+        else:
+            runs.append((kind, [entry]))
+    return runs
+
+
 async def _chunk_statements(
-    match_id: str, slot: int | None, kind: str, new_entries: list[dict], last_seq: int
+    match_id: str, slot: int | None, runs: list[tuple[str, list[dict]]], last_seq: int
 ) -> list[Executable]:
-    """INSERTs storing `new_entries` as `kind` chunks, plus the cap DELETE when needed."""
+    """INSERTs storing each run as chunks of its kind, in order, plus each kind's cap DELETE when needed."""
     statements: list[Executable] = []
-    if not new_entries:
-        return statements
     high_seq = last_seq
-    new_bytes = 0
-    for group in _split_entries(new_entries):
-        entries_json = json.dumps(group)
-        seqs = [s for s in (_valid_seq(e.get("seq")) for e in group) if s is not None]
-        first_seq = min(seqs) if seqs else high_seq
-        high_seq = max([high_seq, *seqs])
-        new_bytes += len(entries_json)
-        statements.append(
-            insert(SessionLogChunk).values(
-                match_id=match_id,
-                slot=slot,
-                kind=kind,
-                first_seq=first_seq,
-                last_seq=high_seq,
-                entries=entries_json,
-                size=len(entries_json),
+    new_bytes: dict[str, int] = {}
+    for kind, run_entries in runs:
+        for group in _split_entries(run_entries):
+            entries_json = json.dumps(group)
+            seqs = [s for s in (_valid_seq(e.get("seq")) for e in group) if s is not None]
+            first_seq = min(seqs) if seqs else high_seq
+            high_seq = max([high_seq, *seqs])
+            new_bytes[kind] = new_bytes.get(kind, 0) + len(entries_json)
+            statements.append(
+                insert(SessionLogChunk).values(
+                    match_id=match_id,
+                    slot=slot,
+                    kind=kind,
+                    first_seq=first_seq,
+                    last_seq=high_seq,
+                    entries=entries_json,
+                    size=len(entries_json),
+                )
             )
-        )
-    if await _stored_chunk_bytes(match_id, slot, kind) + new_bytes > _chunk_cap(kind):
-        statements.append(_chunk_cap_statement(match_id, slot, kind))
+    for kind, added in new_bytes.items():
+        if await _stored_chunk_bytes(match_id, slot, kind) + added > _chunk_cap(kind):
+            statements.append(_chunk_cap_statement(match_id, slot, kind))
     return statements
 
 
@@ -429,14 +473,16 @@ async def _stored_chunk_bytes(match_id: str, slot: int | None, kind: str = "log"
     `length(entries)` for every stored chunk on every flush.
     """
     rows = await fetch(
-        select(func.coalesce(func.sum(SessionLogChunk.size), 0).label("total")).where(*_chunks_of(match_id, slot, kind))
+        select(func.coalesce(func.sum(SessionLogChunk.size), 0).label("total")).where(
+            *_chunks_of(match_id, slot, (kind,))
+        )
     )
     return int(rows[0]["total"]) if rows else 0
 
 
-def _chunks_of(match_id: str, slot: int | None, kind: str) -> tuple[ColumnElement[bool], ...]:
-    """The WHERE terms selecting one player's chunks of one kind."""
-    return (SessionLogChunk.match_id == match_id, SessionLogChunk.slot.is_(slot), SessionLogChunk.kind == kind)
+def _chunks_of(match_id: str, slot: int | None, kinds: tuple[str, ...]) -> tuple[ColumnElement[bool], ...]:
+    """The WHERE terms selecting one player's chunks of the given kinds."""
+    return (SessionLogChunk.match_id == match_id, SessionLogChunk.slot.is_(slot), SessionLogChunk.kind.in_(kinds))
 
 
 def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> Executable:
@@ -444,17 +490,18 @@ def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> 
 
     Keeps the newest chunks whose cumulative size (counted from the newest
     backwards) still fits, in one statement rather than a per-row DELETE.
+    Only chunks of `kind` count and go: each kind has its own budget.
     """
     newest_first = (
         select(
             SessionLogChunk.id,
             func.sum(SessionLogChunk.size).over(order_by=SessionLogChunk.id.desc()).label("running_total"),
         )
-        .where(*_chunks_of(match_id, slot, kind))
+        .where(*_chunks_of(match_id, slot, (kind,)))
         .subquery()
     )
     fits = select(newest_first.c.id).where(newest_first.c.running_total <= _chunk_cap(kind))
-    return delete(SessionLogChunk).where(*_chunks_of(match_id, slot, kind), SessionLogChunk.id.not_in(fits))
+    return delete(SessionLogChunk).where(*_chunks_of(match_id, slot, (kind,)), SessionLogChunk.id.not_in(fits))
 
 
 # Chunks read per query when a stored log is assembled or streamed: at most
@@ -483,8 +530,11 @@ async def parse_log_data(log_data_str: str | None) -> list:
 async def iter_chunk_entries(
     match_id: str, slot: int | None, kind: str = "log", *, through_id: int | None = None
 ) -> AsyncIterator[list]:
-    """One player's stored chunks of one kind, oldest first, as lists of entries.
+    """One player's stored chunks of one stream, oldest first, as lists of entries.
 
+    `kind` names the stream: "log" takes the JS lines' chunks and the C
+    lines' ('clog') together in row-id order, which is the order the entries
+    were sent in (_kind_runs); "audit" the input audit's.
     Reads a page of chunks per query and parses each page in a worker thread,
     so a long log never holds the event loop for long (see the admin export
     in api/app.py). `through_id` stops at that chunk id.
@@ -492,7 +542,7 @@ async def iter_chunk_entries(
     after = 0
     while True:
         page = select(SessionLogChunk.id, SessionLogChunk.entries).where(
-            *_chunks_of(match_id, slot, kind), SessionLogChunk.id > after
+            *_chunks_of(match_id, slot, _STREAM_KINDS[kind]), SessionLogChunk.id > after
         )
         if through_id is not None:
             page = page.where(SessionLogChunk.id <= through_id)
@@ -508,11 +558,13 @@ async def iter_chunk_entries(
 async def count_log_entries(match_id: str, slot: int | None) -> tuple[int, int]:
     """How many entries one player's stored log chunks hold, and the id of the newest one.
 
-    SQLite counts them, so nothing is parsed here. A chunk that isn't valid
-    JSON counts none, as it holds none for iter_chunk_entries. Reading
-    `through_id=` the returned id leaves out chunks a live match appends
-    afterwards. It can't bring back chunks the size cap deletes meanwhile
-    (a live log near 12 MB), so a stream can hold fewer entries than counted.
+    The log's chunks are its JS lines' and its C lines' ('clog'), as
+    iter_chunk_entries reads them. SQLite counts them, so nothing is parsed
+    here. A chunk that isn't valid JSON counts none, as it holds none for
+    iter_chunk_entries. Reading `through_id=` the returned id leaves out
+    chunks a live match appends afterwards. It can't bring back chunks a size
+    cap deletes meanwhile (a live log near its cap), so a stream can hold
+    fewer entries than counted.
     """
     entries = SessionLogChunk.entries
     length = case((func.json_valid(entries), func.json_array_length(entries)), else_=0)
@@ -520,14 +572,15 @@ async def count_log_entries(match_id: str, slot: int | None) -> tuple[int, int]:
         select(
             func.coalesce(func.sum(length), 0).label("n"),
             func.coalesce(func.max(SessionLogChunk.id), 0).label("through"),
-        ).where(*_chunks_of(match_id, slot, "log"))
+        ).where(*_chunks_of(match_id, slot, _STREAM_KINDS["log"]))
     )
     return (int(rows[0]["n"]), int(rows[0]["through"])) if rows else (0, 0)
 
 
 async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: str | None) -> list[dict]:
     """Assemble a session's full entry list: legacy `log_data` (if any) plus
-    every `session_log_chunks` row for (match_id, slot), in insertion order.
+    every log `session_log_chunks` row for (match_id, slot), JS and C lines
+    alike, in insertion order.
 
     Used by the admin detail endpoint and match_rotation, so their output
     shapes are unchanged even though storage moved to append-only chunks.

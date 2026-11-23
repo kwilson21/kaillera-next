@@ -893,3 +893,135 @@ async def _run_audit_cap(tmp_db):
     finally:
         db_mod._SESSION_LOG_AUDIT_CAP = original_cap
     await close_db()
+
+
+# ── the C engine's lines ────────────────────────────────────────────────────
+#
+# The play page drains the C rollback engine's log into its own as "[C] "
+# lines, in the same seq stream. The server stores each run of them as
+# kind = 'clog' chunks under their own cap, and the log's readers take both
+# kinds in row-id order (specs/session_log_store.qnt; each test below is one
+# of its scenarios).
+
+_CLOG_BASE = {
+    "match_id": "m-clog", "room": "R1", "slot": 0, "player_name": "P1", "mode": "rollback",
+    "summary": "{}", "context": "{}", "ip_hash": "abc", "epoch": "e1",
+}
+
+
+def _js(seq, msg="js"):
+    return {"seq": seq, "t": seq, "f": seq, "msg": f"{msg} {seq}"}
+
+
+def _c(seq, msg="MISPREDICTION"):
+    return {"seq": seq, "t": seq, "f": seq, "msg": f"[C] {msg} {seq}"}
+
+
+async def _kinds(match_id):
+    from src.db import query
+
+    rows = await query("SELECT kind FROM session_log_chunks WHERE match_id=? ORDER BY id", (match_id,))
+    return [r["kind"] for r in rows]
+
+
+async def _read_back(match_id):
+    """The log as each reader gets it: the assembled list, the stream, the count."""
+    from src.db import count_log_entries, get_full_log_entries, iter_chunk_entries
+
+    full = [e["msg"] for e in await get_full_log_entries(match_id, 0, None)]
+    streamed = [e["msg"] async for page in iter_chunk_entries(match_id, 0) for e in page]
+    counted, _ = await count_log_entries(match_id, 0)
+    assert streamed == full and counted == len(full)
+    return full
+
+
+def test_c_lines_in_the_middle_of_a_flush_come_back_in_order(tmp_db):
+    # cLinesInTheMiddleOfAFlushTest: a re-init drained the C log mid-window
+    # and JS lines followed. Each run is its own chunk.
+    _run_async(_run_c_lines_in_order(tmp_db))
+
+
+async def _run_c_lines_in_order(tmp_db):
+    from src.db import append_session_flush, close_db, get_input_audit, init_db
+
+    await init_db(tmp_db)
+    entries = [_js(0), _c(1), _c(2), _js(3)]
+    acks = await append_session_flush({**_CLOG_BASE, "entries": entries})
+    assert acks["lastSeq"] == 3
+    assert await _kinds("m-clog") == ["log", "clog", "log"]
+    assert await _read_back("m-clog") == [e["msg"] for e in entries]
+    assert await get_input_audit("m-clog", 0) == []
+    await close_db()
+
+
+def test_js_lines_and_c_lines_keep_their_own_room(tmp_db):
+    # jsLinesPushACLineOutTest and cLinesPushAJsLineOutTest: in one store,
+    # each kind's volume pushed the other kind's oldest lines out.
+    _run_async(_run_own_room(tmp_db))
+
+
+async def _run_own_room(tmp_db):
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db
+
+    await init_db(tmp_db)
+    caps = db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP
+    db_mod._SESSION_LOG_CHUNK_CAP = db_mod._SESSION_LOG_C_CAP = 400
+    try:
+        # One C line, then JS lines far past the JS cap: the C line stays.
+        await append_session_flush({**_CLOG_BASE, "entries": [_c(0)]})
+        for seq in range(1, 11):
+            await append_session_flush({**_CLOG_BASE, "entries": [_js(seq, "x" * 80)]})
+        log = await _read_back("m-clog")
+        assert log[0] == "[C] MISPREDICTION 0"
+        assert log[-1] == "x" * 80 + " 10" and len(log) < 11
+
+        # One JS line, then C lines far past the C cap: the JS line stays.
+        base = {**_CLOG_BASE, "match_id": "m-clog-2"}
+        await append_session_flush({**base, "entries": [_js(0)]})
+        for seq in range(1, 11):
+            await append_session_flush({**base, "entries": [_c(seq, "y" * 80)]})
+        log = await _read_back("m-clog-2")
+        assert log[0] == "js 0"
+        assert log[-1] == "[C] " + "y" * 80 + " 10" and len(log) < 11
+
+        # Each kind is held to its own cap.
+        for match_id in ("m-clog", "m-clog-2"):
+            for kind in ("log", "clog"):
+                assert await db_mod._stored_chunk_bytes(match_id, 0, kind) <= 400
+    finally:
+        db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP = caps
+    await close_db()
+
+
+def test_a_resend_after_a_lost_ack_stores_each_line_once(tmp_db):
+    # lostAckTest
+    _run_async(_run_lost_ack(tmp_db))
+
+
+async def _run_lost_ack(tmp_db):
+    from src.db import append_session_flush, close_db, init_db
+
+    await init_db(tmp_db)
+    await append_session_flush({**_CLOG_BASE, "entries": [_js(0), _c(1)]})
+    # The ack was lost: the page sends both again, with a new one.
+    acks = await append_session_flush({**_CLOG_BASE, "entries": [_js(0), _c(1), _js(2)]})
+    assert acks["lastSeq"] == 2
+    assert await _read_back("m-clog") == ["js 0", "[C] MISPREDICTION 1", "js 2"]
+    await close_db()
+
+
+def test_a_reload_stores_its_new_ring_after_the_old_one(tmp_db):
+    # reloadTest: a new epoch numbers from 0 again.
+    _run_async(_run_reload(tmp_db))
+
+
+async def _run_reload(tmp_db):
+    from src.db import append_session_flush, close_db, init_db
+
+    await init_db(tmp_db)
+    await append_session_flush({**_CLOG_BASE, "entries": [_c(0, "before")]})
+    acks = await append_session_flush({**_CLOG_BASE, "epoch": "e2", "entries": [_js(0), _c(1, "after")]})
+    assert acks["lastSeq"] == 1
+    assert await _read_back("m-clog") == ["[C] before 0", "js 0", "[C] after 1"]
+    await close_db()

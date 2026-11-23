@@ -599,13 +599,28 @@ engine_start() {
   expect_violation "$START" engine_start_no_rearm aJoinedMatchRunsAboveZero
 }
 
+session_log_store() {
+  local STORE=specs/session_log_store.qnt
+  # The counterexamples below are 5 steps or fewer; the change is checked
+  # past them.
+  verify "$STORE" session_log_store_current allHold
+  # The shortest in one store: four lines in one flush, one row over the
+  # store's cap, taking the other kind's line with it (5 steps). Over two
+  # flushes it is 6 (jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest).
+  expect_violation "$STORE" session_log_store_before cLinesKeepTheirOwnRoom
+  expect_violation "$STORE" session_log_store_before jsLinesKeepTheirOwnRoom
+  # A C line, a JS line, a flush: the JS row before the C row (3 steps;
+  # cLinesInTheMiddleOfAFlushTest).
+  expect_violation "$STORE" session_log_store_per_flush readInOrder
+}
+
 # Every group, in the order a local run takes them.
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
   rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
-  engine_start solo_save
+  engine_start solo_save session_log_store
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -617,7 +632,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs" # ~7.5 min
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs session_log_store" # ~7.5 min + session_log_store (~1.5 min)
 )
 
 # Each group is in exactly one shard, and each shard names only groups.
