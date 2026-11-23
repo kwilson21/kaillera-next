@@ -261,7 +261,13 @@ int kn_get_tainted_block_count(void) {
 /* ── Constants ─────────────────────────────────────────────────────── */
 #define KN_MAX_PLAYERS      4
 #define KN_INPUT_RING_SIZE  256   /* ~4 seconds at 60fps */
-#define KN_DEBUG_LOG_SIZE   (64 * 1024)
+/* The debug log holds what rb_log writes between two drains: the play page
+ * reads it, sends it with the session log and empties it
+ * (kn_clear_debug_log) every 5 s. A rollback logs about 1 KB at the deepest
+ * replay (its MISPREDICTION, C-REPLAY-START and two lines per replayed
+ * frame), so 512 KB holds one at every frame for 5 s at 60 fps. A line that
+ * does not fit is counted (kn_get_debug_log_dropped), never cut. */
+#define KN_DEBUG_LOG_SIZE   (512 * 1024)
 
 /* ── Input entry ───────────────────────────────────────────────────── */
 typedef struct {
@@ -497,6 +503,7 @@ static struct {
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
     int debug_log_pos;
+    int debug_log_dropped; /* lines that did not fit, since kn_rollback_init */
 } rb;
 
 /* ── SoftFloat state save/restore ──────────────────────────────────── */
@@ -948,17 +955,19 @@ static void rb_restore_slot_aux(int idx) {
 static void rb_log(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
+    /* Room for the line, its newline and the terminator. */
     int remaining = KN_DEBUG_LOG_SIZE - rb.debug_log_pos - 1;
-    if (remaining > 0) {
-        int written = vsnprintf(rb.debug_log + rb.debug_log_pos, remaining, fmt, args);
-        if (written > 0) {
-            rb.debug_log_pos += written;
-            if (rb.debug_log_pos < KN_DEBUG_LOG_SIZE - 1) {
-                rb.debug_log[rb.debug_log_pos++] = '\n';
-            }
-        }
-    }
+    int written = remaining > 1 ? vsnprintf(rb.debug_log + rb.debug_log_pos, remaining, fmt, args) : -1;
     va_end(args);
+    if (written < 0 || written >= remaining) {
+        /* It does not fit whole: count it, and leave the log as it was. */
+        rb.debug_log[rb.debug_log_pos] = '\0';
+        rb.debug_log_dropped++;
+        return;
+    }
+    rb.debug_log_pos += written;
+    rb.debug_log[rb.debug_log_pos++] = '\n';
+    rb.debug_log[rb.debug_log_pos] = '\0';
 }
 
 /* ── Per-frame setup: RNG seed + frame time ────────────────────────── */
@@ -3388,6 +3397,22 @@ uint32_t kn_get_hidden_state_fingerprint(void) {
 EMSCRIPTEN_KEEPALIVE
 #endif
 const char* kn_get_debug_log(void) { return rb.debug_log; }
+
+/* The page has read and sent the log: start it over, so it only has to hold
+ * what is logged until the next drain. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_clear_debug_log(void) {
+    rb.debug_log_pos = 0;
+    rb.debug_log[0] = '\0';
+}
+
+/* Lines rb_log dropped since kn_rollback_init because the log was full. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_debug_log_dropped(void) { return rb.debug_log_dropped; }
 
 /* ── Determinism self-test ─────────────────────────────────────────── */
 /* NOTE: This test cannot call retro_run() from C in ASYNC mode.

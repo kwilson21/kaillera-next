@@ -60,6 +60,19 @@
 //   taken. Without it, from the send only: a misprediction while the state
 //   is being compressed is missed.
 //
+// SOCKET_WATCHED, SOCKET_DELIVERED: the same request asked and answered over
+//   the signaling socket (`sync-request-full-socket`: the guest's return from a
+//   hidden tab, a chunk timeout, a missing delta base, the re-ask fallback) is
+//   watched and followed up like a direct one, over the socket, and its send
+//   records the state as delivered so an unchanged follow-up can be skipped.
+//   Today it is neither (#305 review).
+//
+// SOCKET_FOLLOW_UP_BY_SOCKET: that follow-up goes back over the socket, the
+//   way the request came. Without it, _dispatchScheduledSyncs sends it on the
+//   channel only, and holds it while the channel is not open (`reachable`):
+//   the channel being down is why the guest asked over the socket, so the
+//   follow-up can wait for good (I1). From #307's model.
+//
 // DIRECT_WATCHED: a direct request (`sync-request-full`, no target frame:
 //   the guest's BOOT-SYNC after a late join, reconnect, visibility and
 //   network change) is answered at once at the frame the host has reached,
@@ -74,6 +87,9 @@ module sync_follow_up {
   const SKIP_UNCHANGED: bool
   const FLAG_FROM_TAKEN: bool
   const DIRECT_WATCHED: bool
+  const SOCKET_WATCHED: bool
+  const SOCKET_DELIVERED: bool
+  const SOCKET_FOLLOW_UP_BY_SOCKET: bool
 
   pure val FOLLOW_UP_MAX = 3
   // Inputs at or before the frame that may still be predicted (bound for the model).
@@ -93,11 +109,26 @@ module sync_follow_up {
   var wasted: bool        // a follow-up went out for a frame that had not changed
   var gaveUp: bool        // follow-ups exhausted with the frame unconfirmed
   var direct: bool        // the request had no target frame (answered at once)
+  var viaSocket: bool     // asked and answered over the signaling socket
+  var dcOpen: bool        // the guest's data channel to the host is open
 
   action initWith(p: int, d: bool): bool = all {
     phase' = "idle",
     pending' = p,
     direct' = d,
+    viaSocket' = false,
+    dcOpen' = true,
+    changed' = false, flagged' = false, confirmedAtTake' = false,
+    inFlight' = 0, followUps' = 0, guestRight' = false, wasted' = false, gaveUp' = false,
+  }
+
+  // Asked over the socket: the guest's channel may be down (`open`).
+  action initWithSocket(p: int, open: bool): bool = all {
+    phase' = "idle",
+    pending' = p,
+    direct' = true,
+    viaSocket' = true,
+    dcOpen' = open,
     changed' = false, flagged' = false, confirmedAtTake' = false,
     inFlight' = 0, followUps' = 0, guestRight' = false, wasted' = false, gaveUp' = false,
   }
@@ -105,7 +136,9 @@ module sync_follow_up {
   action init = {
     nondet p = 0.to(MAX_PENDING).oneOf()
     nondet d = oneOf(Set(true, false))
-    initWith(p, d)
+    nondet sock = oneOf(Set(true, false))
+    nondet open = oneOf(Set(true, false))
+    if (d and sock) initWithSocket(p, open) else initWith(p, d)
   }
 
   // The request is answered: the state at F is taken (kn_sync_read). From
@@ -117,7 +150,7 @@ module sync_follow_up {
     changed' = false, flagged' = false,
     confirmedAtTake' = pending == 0,
     pending' = pending, inFlight' = inFlight, followUps' = followUps, guestRight' = guestRight,
-    wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
+    wasted' = wasted, gaveUp' = gaveUp, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
   }
 
   // Compressed and handed to the channel.
@@ -127,17 +160,19 @@ module sync_follow_up {
     inFlight' = inFlight + 1,
     guestRight' = not(changed),
     pending' = pending, changed' = changed, flagged' = flagged, confirmedAtTake' = confirmedAtTake,
-    followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
+    followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
   }
 
   // The last chunk leaves the channel. Unconfirmed: a follow-up is scheduled.
   action drained = all {
     phase == "sending",
     inFlight' = inFlight - 1,
-    // A direct answer is followed up only when DIRECT_WATCHED.
-    phase' = if (confirmedAtTake or (direct and not(DIRECT_WATCHED))) "done" else "waiting",
+    // A direct answer is followed up only when watched: DIRECT_WATCHED on
+    // the data channel, SOCKET_WATCHED over the signaling socket.
+    val watched = if (viaSocket) SOCKET_WATCHED else DIRECT_WATCHED
+    phase' = if (confirmedAtTake or (direct and not(watched))) "done" else "waiting",
     pending' = pending, changed' = changed, flagged' = flagged, confirmedAtTake' = confirmedAtTake,
-    followUps' = followUps, guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
+    followUps' = followUps, guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
   }
 
   // A predicted input at or before F arrives, as predicted or not.
@@ -154,16 +189,25 @@ module sync_follow_up {
       guestRight' = (guestRight and not(differs and after)),
     },
     phase' = phase, confirmedAtTake' = confirmedAtTake, inFlight' = inFlight,
-    followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
+    followUps' = followUps, wasted' = wasted, gaveUp' = gaveUp, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
   }
+
+  // Where a waiting follow-up can go: back over the socket, or the channel
+  // while it is open. The dispatcher holds one it cannot reach, with no
+  // deadline (`reachable`).
+  val followUpReachable = (viaSocket and SOCKET_FOLLOW_UP_BY_SOCKET) or dcOpen
 
   // F is confirmed and the follow-up is due: sent fresh (confirmed now, so
   // final), or, with SKIP_UNCHANGED and nothing recorded, not sent.
   action followUpConfirmed = all {
     phase == "waiting",
+    followUpReachable,
     pending == 0,
     followUps < FOLLOW_UP_MAX,
-    val sends = not(SKIP_UNCHANGED) or flagged
+    // Skipped only for a state recorded as handed over whole: a socket send
+    // records it only with SOCKET_DELIVERED.
+    val delivered = not(viaSocket) or SOCKET_DELIVERED
+    val sends = not(SKIP_UNCHANGED) or flagged or not(delivered)
     all {
       phase' = if (sends) "sending" else "done",
       inFlight' = if (sends) inFlight + 1 else inFlight,
@@ -174,7 +218,7 @@ module sync_follow_up {
       changed' = if (sends) false else changed,
       flagged' = if (sends) false else flagged,
     },
-    pending' = pending, gaveUp' = gaveUp, direct' = direct,
+    pending' = pending, gaveUp' = gaveUp, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
   }
 
   // The follow-up's deadline with F still unconfirmed: a fresh state is
@@ -182,6 +226,7 @@ module sync_follow_up {
   // more is sent.
   action followUpDeadline = all {
     phase == "waiting",
+    followUpReachable,
     pending > 0,
     if (followUps < FOLLOW_UP_MAX) all {
       phase' = "taken",
@@ -194,13 +239,13 @@ module sync_follow_up {
       changed' = changed, flagged' = flagged, confirmedAtTake' = confirmedAtTake,
       gaveUp' = true,
     },
-    pending' = pending, inFlight' = inFlight, guestRight' = guestRight, wasted' = wasted, direct' = direct,
+    pending' = pending, inFlight' = inFlight, guestRight' = guestRight, wasted' = wasted, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
   }
 
   action nothingHappens = all {
     phase' = phase, pending' = pending, changed' = changed, flagged' = flagged,
     confirmedAtTake' = confirmedAtTake, inFlight' = inFlight, followUps' = followUps,
-    guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp, direct' = direct,
+    guestRight' = guestRight, wasted' = wasted, gaveUp' = gaveUp, direct' = direct, viaSocket' = viaSocket, dcOpen' = dcOpen,
   }
 
   action step = any {
@@ -228,8 +273,14 @@ module sync_follow_up {
 
   val followUpsAreBounded = followUps <= FOLLOW_UP_MAX
 
+  // A waiting follow-up can be handed to a transport. Held for a channel
+  // that is not open, it waits with no deadline: the guest asked over the
+  // socket because that channel was down (I1). Violated when the follow-up
+  // of a socket answer goes on the channel only (socketUnconfirmedAnswerTest).
+  val aWatchedAnswerCanBeFollowedUp = phase == "waiting" implies followUpReachable
+
   val allHold = atMostOneAnswerInFlight and aFollowUpCarriesANewState and theGuestEndsOnTheHostsState and
-    followUpsAreBounded
+    followUpsAreBounded and aWatchedAnswerCanBeFollowedUp
 
   // ── scenarios ──────────────────────────────────────────────────────────
 
@@ -285,6 +336,37 @@ module sync_follow_up {
       .then(if (DIRECT_WATCHED) followUpConfirmed.then(drained) else nothingHappens)
       .expect(theGuestEndsOnTheHostsState == DIRECT_WATCHED)
 
+  // The same over the signaling socket (a guest back from a hidden tab, a
+  // chunk timeout), its channel down: today never followed up. Watched, the
+  // follow-up must go back over the socket: on the channel it is held for
+  // good.
+  run socketUnconfirmedAnswerTest =
+    initWithSocket(1, false)
+      .then(take).then(send).then(drained)
+      .expect(phase == (if (SOCKET_WATCHED) "waiting" else "done"))
+      .expect(aWatchedAnswerCanBeFollowedUp == (not(SOCKET_WATCHED) or SOCKET_FOLLOW_UP_BY_SOCKET))
+      .then(inputArrives(true))
+      .then(if (SOCKET_WATCHED and SOCKET_FOLLOW_UP_BY_SOCKET) followUpConfirmed.then(drained) else nothingHappens)
+      .expect(phase == "done" implies (theGuestEndsOnTheHostsState == SOCKET_WATCHED))
+      .expect((SOCKET_WATCHED and SOCKET_FOLLOW_UP_BY_SOCKET) implies (phase == "done" and guestRight and allHold))
+
+  // The same with the channel open: on the channel or the socket, the
+  // follow-up goes out.
+  run socketFollowUpOverChannelTest =
+    initWithSocket(1, true)
+      .then(take).then(send).then(drained)
+      .then(inputArrives(true))
+      .then(if (SOCKET_WATCHED) followUpConfirmed.then(drained) else nothingHappens)
+      .expect(theGuestEndsOnTheHostsState == SOCKET_WATCHED)
+
+  // Watched over the socket but never recorded delivered: an unchanged
+  // follow-up is not skipped, a full state sent for nothing.
+  run socketUnchangedFollowUpTest =
+    initWithSocket(1, true)
+      .then(take).then(send).then(drained)
+      .then(if (SOCKET_WATCHED) inputArrives(false).then(followUpConfirmed) else nothingHappens)
+      .expect(aFollowUpCarriesANewState == ((SKIP_UNCHANGED and SOCKET_DELIVERED) or not(SOCKET_WATCHED)))
+
   // A direct request answered confirmed needs no follow-up either way.
   run directConfirmedAnswerTest =
     initWith(0, true)
@@ -306,21 +388,37 @@ module sync_follow_up {
 
 // Today: every unconfirmed answer is followed up.
 module sync_follow_up_current {
-  import sync_follow_up(SKIP_UNCHANGED = false, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true).*
+  import sync_follow_up(SKIP_UNCHANGED = false, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
 }
 
 // Skipping an unchanged follow-up, the difference recorded from the send only.
 module sync_follow_up_from_send {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = false, DIRECT_WATCHED = true).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = false, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
 }
 
 // Today: coordinated answers are followed up only when changed, but a direct
 // answer is never followed up (directUnconfirmedAnswerTest).
 module sync_follow_up_direct_unwatched {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = false).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = false, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
+}
+
+// Today: a direct answer over the signaling socket is never followed up.
+module sync_follow_up_socket_unwatched {
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = false, SOCKET_DELIVERED = false, SOCKET_FOLLOW_UP_BY_SOCKET = false).*
+}
+
+// Watched over the socket, but its follow-up sent on the channel only: held
+// for good while the channel is down (#307's variant).
+module sync_follow_up_socket_over_channel {
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = false).*
+}
+
+// Watched over the socket, but its send not recorded as delivered.
+module sync_follow_up_socket_undelivered {
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = false, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
 }
 
 // The fix.
 module sync_follow_up_fixed {
-  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true).*
+  import sync_follow_up(SKIP_UNCHANGED = true, FLAG_FROM_TAKEN = true, DIRECT_WATCHED = true, SOCKET_WATCHED = true, SOCKET_DELIVERED = true, SOCKET_FOLLOW_UP_BY_SOCKET = true).*
 }

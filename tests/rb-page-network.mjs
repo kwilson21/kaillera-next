@@ -120,6 +120,19 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   // that moment; what the page sends after them on the same channel (its
   // resync request) follows them in the same burst.
   window.__knHoldInputsUntil = 0;
+  // SYNC_FOLLOW_UP=socket (the guest page): while window.__knInputGate is
+  // set, every input packet (binary, on `lockstep` or `rollback-input`) is
+  // kept back, and window.__knReleaseInputs() sends them all, in order, when
+  // the test says (after the host has answered a request sent meanwhile over
+  // the signaling socket, which nothing orders against the data channels).
+  window.__knInputGate = false;
+  const gatedInputs = [];
+  window.__knReleaseInputs = () => {
+    window.__knInputGate = false;
+    const n = gatedInputs.length;
+    for (const send of gatedInputs.splice(0)) send();
+    return n;
+  };
   // CATCH_UP_HOLE_MS (the host page): once window.__knDropInputsAfterOpenMs
   // is above 0, a channel whose first input packet goes out after that drops
   // every input packet (binary, on `lockstep` or `rollback-input`) from its
@@ -425,6 +438,17 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       performance.now() < window.__knHoldInputsUntil
     )
       hold = Math.max(hold, window.__knHoldInputsUntil - performance.now());
+    if (
+      window.__knInputGate &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer
+    ) {
+      gatedInputs.push(() => {
+        net.send(ch, data, bytesOf(data), 0, performance.now());
+        arm(ch.pumped);
+      });
+      return;
+    }
     net.send(ch, data, bytesOf(data), hold, performance.now());
     arm(ch.pumped);
   };

@@ -1,5 +1,55 @@
 [
   {
+    "version": "0.69.24",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "resync every guest when a phantom is heard again (#318)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.23",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "drop no C log line between two drains (#317)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.22",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "watch and follow up a resync answer asked over the signaling socket (#315)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.21",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "drain the C engine's log before a re-init starts it over (#312)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.20",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "guests judge nothing against the host's ROM while the host's new one is hashed (#303)"
+      }
+    ]
+  },
+  {
     "version": "0.69.19",
     "date": "2026-11-23",
     "changes": [

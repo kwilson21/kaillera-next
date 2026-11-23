@@ -16,6 +16,7 @@ import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { lockstepStep } from './lockstep-wait.ts';
 import { delayAtJoin, guestStartStep } from './engine-start.ts';
+import { cLogDrain, cLogDroppedSince, cLogTail } from './c-log-tail.ts';
 import { audioTransition, hashPixels, measureCanvasHealth, screenshotCrop } from './diagnostics.ts';
 import { installDiagnostics } from './page/diagnostics.ts';
 import { decodeGamepadProfile } from './gamepad-profile.ts';
@@ -81,6 +82,7 @@ import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from '
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
 import { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded } from './sync-follow-up.ts';
+import { recoveryStep } from './recovery-resync.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
 import { newPageId, readAttemptId } from './attempt-id.ts';
@@ -344,6 +346,12 @@ export const KNCore = {
   guestStartStep,
   /** The delay a match runs at once a player joins it: its first player moves a match at 0 to a match delay (web/src/engine-start.ts). */
   delayAtJoin,
+  /** The part of the C engine's debug log not yet drained; a buffer shorter than what was drained is a new one (web/src/c-log-tail.ts). */
+  cLogTail,
+  /** What one drain of the C log sends, and whether it empties the buffer (web/src/c-log-tail.ts). */
+  cLogDrain,
+  /** Lines the C log dropped since the last drain (web/src/c-log-tail.ts). */
+  cLogDroppedSince,
   measureCanvasHealth,
   digestFrame,
   createRomResumeAnswerer,
@@ -406,6 +414,7 @@ export const KNCore = {
   syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
   /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
   syncFollowUp: { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded },
+  recoveryResync: { recoveryStep },
   startRejoin,
   shouldResumeRomTransfer,
   /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */

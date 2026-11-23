@@ -717,9 +717,42 @@ def test_a_settled_input_is_not_fed_to_the_engine():
     # The host settles the guest's backlog when it schedules the recovery
     # resync: that state is for this frame or a later one. A guest does not:
     # it may be taken back to an earlier frame.
-    recovered = src[src.index("} else if (_playerSlot === 0 && peer.slot !== 0 && _syncEnabled) {") :]
+    recovered = src[src.index("} else if (recoveryStep === 'resync-guests') {") :]
     recovered = recovered[: recovered.index("peer-recovery resync: host scheduled full sync")]
     assert "_settleInputsBefore(peer.slot, _frameNum);" in recovered
+
+
+def test_a_recovery_resyncs_every_guest():
+    # specs/recovery_bystander.qnt, hostAndBystanderAgree (recovery_bystander_fixed):
+    # what a page does on PEER-RECOVERED is the proved rule
+    # (web/src/recovery-resync.ts). The host resyncs every guest, not only the
+    # one it heard again (onlyTheHostDroppedItTest), with one frame and one
+    # deadline so the requests fall due together; a guest that hears another
+    # guest again asks the host (bystanderStillPhantomTest).
+    src = LOCKSTEP_JS.read_text()
+    recovered = src[src.index("_syncLog(`PEER-RECOVERED slot=${peer.slot}") :]
+    recovered = recovered[: recovered.index("    return true;\n  };\n")]
+    assert (
+        "window.KNCore.recoveryResync.recoveryStep(\n"
+        "          _playerSlot === 0,\n"
+        "          peer.slot === 0,\n"
+        "          _syncEnabled,\n"
+        "          _resyncRequestInFlight,\n"
+        "        );"
+    ) in recovered
+    for step in ("'ask-at'", "'resync-guests'", "'ask'"):
+        assert f"recoveryStep === {step}" in recovered
+    host = recovered[recovered.index("} else if (recoveryStep === 'resync-guests') {") :]
+    host = host[: host.index("} else if (recoveryStep === 'ask') {")]
+    assert "[remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)]" in host
+    assert "_scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });" in host
+    assert host.count("deadlineAt") == 2
+    ask = recovered[recovered.index("} else if (recoveryStep === 'ask') {") :]
+    assert "Object.values(_peers).find((p) => p.slot === 0)?.dc" in ask
+    assert "_sendResyncRequest(hostDc, requestId, 'sync-request-full');" in ask
+    # No channel to the host, or the send failed: over the socket, as an owed
+    # resync asked again is (the phantom flag is cleared, nothing asks later).
+    assert "if (!asked && _requestSocketFullResync('peer-recovery')) {" in ask
 
 
 def test_a_guest_taken_back_reuses_the_inputs_it_already_sent():
@@ -940,16 +973,17 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Ten sites ask: one over Socket.IO, nine on a DataChannel (among them a
+    # Eleven sites ask: one over Socket.IO, ten on a DataChannel (among them a
     # late joiner that lost its channel to the host,
     # specs/late_join_pause.qnt; the deadline asking again for an owed "now"
     # resync, specs/resync_reask.qnt; the boot sync, specs/resync_flow.qnt
-    # EVERY_REQUEST_NUMBERED; and a guest's ask for a missing input gone
-    # overdue, specs/ask_escalation.qnt).
+    # EVERY_REQUEST_NUMBERED; a guest's ask for a missing input gone
+    # overdue, specs/ask_escalation.qnt; and a guest that hears another guest
+    # again after holding it as a phantom, specs/recovery_bystander.qnt).
     # The two that name a target frame give it to the request, which keeps
     # it after the target's deadline (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 10
-    assert src.count("_beginResyncRequest()") == 6
+    assert src.count("_beginResyncRequest(") == 11
+    assert src.count("_beginResyncRequest()") == 7
     assert src.count("_beginResyncRequest(-1, true)") == 1
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
@@ -966,8 +1000,8 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 9
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 7
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 10
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 8
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
     # Never sent bare. The boot sync's request was, and its unnumbered
     # answer was applied wherever it found the guest, even after a newer
@@ -1027,20 +1061,21 @@ def test_only_its_own_answer_ends_a_resync_request():
     # A direct request is answered by the watched answer, which numbers each
     # state it sends with the request it answers (specs/sync_follow_up.qnt).
     assert "_answerDirectSyncRequest(remoteSid, requestId);" in host
-    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId) => {") :]
+    direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId, via = {}) => {") :]
     direct = direct[: direct.index("\n  };\n")]
     assert "const requestIds = { [sid]: requestId };" in direct
-    assert "pushSyncState(sid, false, { requestIds, watchFor: [sid] })" in direct
-    assert "requestIds: { [requesterSid]: _requestIdFrom(msg.requestId) }," in src
+    assert "const options = { requestIds, watchFor: [sid]," in direct
+    assert "pushSyncState(sid, false, options)" in direct
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {" in src
 
     # A scheduled capture, its follow-ups and re-queues keep the number; a
     # sync the host schedules for its own reasons has none.
     dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
     dispatch = dispatch[: dispatch.index("\n  };\n")]
     assert "requestId: r.requestId || 0," in dispatch
-    assert "for (const r of due) if (r.requestId) requestIds[r.targetSid] = r.requestId;" in dispatch
-    assert "pushSyncState(targetSid, false, { requestIds, watchFor: [...unconfirmedFor] })" in dispatch
-    recovery = src[src.index("push its state to the guest once it is final") :]
+    assert "for (const r of group) if (r.requestId) ids[r.targetSid] = r.requestId;" in dispatch
+    assert "pushSyncState(targetSid, false, { requestIds: requestIdsOf(group), watchFor, ...extra })" in dispatch
+    recovery = src[src.index("state to every guest once it is final") :]
     recovery = recovery[: recovery.index("_settleInputsBefore(")]
     assert "requestId" not in recovery
 
