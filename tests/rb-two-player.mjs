@@ -523,6 +523,10 @@
  *     inputs in after. Fails unless, after the host received the socket
  *     request, it watched its answer, logged SYNC-FOLLOW-UP-NEEDED,
  *     dispatched the follow-up over the socket and the guest applied both.
+ *     Tried up to 3 times until a replay starting at or before the frame
+ *     the answer was taken at shows it was rewritten (which any engine
+ *     logs), so on an engine without the fix the answer the guest keeps is
+ *     the last one applied, where the frames compared start, and they split.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -2677,13 +2681,30 @@ if (inBattle) {
       await host.waitForTimeout(8000);
       const hostLines = linesAfter(await syncLogOf(host), syncFollowUp.hostAt.seq);
       const received = hostLines.findIndex((l) => /received socket sync-request-full/.test(l));
-      syncFollowUp.watched = received >= 0 && hostLines.slice(received).some((l) => /SYNC-FOLLOW-UP-NEEDED /.test(l));
+      // Reached, on any engine: after the host took the socket answer's state
+      // at F, a replay starts at or before F and rewrites it. With the fix the
+      // host also logs SYNC-FOLLOW-UP-NEEDED; without it nothing is watched,
+      // so only the replay shows it. Stopping on it keeps that answer the last
+      // one applied, where the frames compared start: an engine without the
+      // fix then shows the split instead of trying again past it.
+      const tail = received < 0 ? [] : hostLines.slice(received);
+      const read = tail.findIndex((l) => /host kn_sync_read:/.test(l));
+      const takenAt = read < 0 ? NaN : Number((tail[read].split('\t')[2] || '').replace('f=', ''));
+      syncFollowUp.watched =
+        received >= 0 &&
+        (tail.some((l) => /SYNC-FOLLOW-UP-NEEDED /.test(l)) ||
+          tail
+            .slice(read + 1)
+            .some(
+              (l) =>
+                /C-REPLAY start: depth=[1-9]/.test(l) && Number((l.split('\t')[2] || '').replace('f=', '')) <= takenAt,
+            ));
       await guest.evaluate((n) => {
         window.__knReleaseInputs();
         window.__knInputOverride = () => n;
       }, NEUTRAL);
       console.log(
-        `SYNC_FOLLOW_UP=socket: ${syncFollowUp.watched ? 'a prediction the socket answer was taken on differed' : 'no differing prediction seen; trying again'}`,
+        `SYNC_FOLLOW_UP=socket: ${syncFollowUp.watched ? 'a replay rewrote the frame the socket answer was taken at' : 'no replay rewrote it; trying again'}`,
       );
       if (!syncFollowUp.watched) await guest.waitForTimeout(5000);
     }
