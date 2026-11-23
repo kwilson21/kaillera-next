@@ -69,3 +69,13 @@ lemma announcesRom_ensures(hasRom: bool, hashIsLoaded: bool, hostRomChanging: bo
   ensures (announcesRom(hasRom, hashIsLoaded, hostRomChanging) <==> ((hasRom && hashIsLoaded) && !(hostRomChanging)))
 {
 }
+
+function looksInLibraryForHostsRom(wantsRom: bool, hasRom: bool, hostHashKnown: bool): bool
+{
+  ((wantsRom && !(hasRom)) && hostHashKnown)
+}
+
+lemma looksInLibraryForHostsRom_ensures(wantsRom: bool, hasRom: bool, hostHashKnown: bool)
+  ensures (looksInLibraryForHostsRom(wantsRom, hasRom, hostHashKnown) <==> ((wantsRom && !(hasRom)) && hostHashKnown))
+{
+}

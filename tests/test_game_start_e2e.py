@@ -434,6 +434,139 @@ def test_a_guest_holding_the_rom_the_host_changes_from_is_not_counted_ready_mean
         guest.close()
 
 
+def test_a_rom_the_guest_dropped_before_the_host_changed_to_it_comes_back_from_the_library(browser, server_url, room):
+    # specs/rom_identity.qnt, guestDroppedFirstTest. The players agree to
+    # switch games, and the guest drops the new ROM a moment before the host
+    # does: it is refused, rightly, against the ROM the host still holds, and
+    # its copy is in the guest's ROM library. When the room names the host's
+    # new ROM, the guest's page loads it from there and says ready; it used to
+    # stay without a ROM until the player dropped it again.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _load_rom(host, OTHER_ROM)
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+        guest.set_input_files("#rom-drop input[type=file]", ROM)
+        expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
+        expect(guest.locator("#rom-status")).not_to_contain_text("test.z64")
+        # Its copy lands in the library a moment after the drop (cacheRom).
+        library_rom = guest.locator("#rom-library .rom-library-item")
+        expect(library_rom).to_have_count(1, timeout=15000)
+        dropped_hash = library_rom.get_attribute("data-hash")
+        guest.evaluate(_RECORD_ROM_READY)
+        _load_rom(host)
+        host.wait_for_function("(h) => window.KNState.romHash === h", arg=dropped_hash, timeout=15000)
+        # The room names the host's new ROM: the guest's comes back and is said ready.
+        guest.wait_for_function(
+            "(h) => window.__romReady.some((m) => m.ready && m.hash === h)", arg=dropped_hash, timeout=15000
+        )
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
+# Holds the copy a drop puts in the ROM library (cacheRom reads the file with
+# Blob.arrayBuffer; the drop's own hash reads it with a FileReader) until the
+# test lets it go.
+_HOLD_CACHE = """() => {
+    window.__heldCache = [];
+    const read = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function () {
+        return new Promise((resolve, reject) => window.__heldCache.push(() => read.call(this).then(resolve, reject)));
+    };
+}"""
+_RELEASE_CACHE = "() => { for (const go of window.__heldCache.splice(0)) go(); }"
+
+
+def test_a_rom_whose_library_copy_lands_after_the_host_changed_to_it_comes_back(browser, server_url, room):
+    # specs/rom_identity.qnt, cacheLandsLateTest. As above, but the dropped
+    # file's copy reaches the library only after the room names the host's new
+    # ROM: the lookup then finds nothing, and the copy, landing, is loaded.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _load_rom(host, OTHER_ROM)
+        host.wait_for_function("() => !!window.KNState?.romHash", timeout=15000)
+        old_hash = host.evaluate("window.KNState.romHash")
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+        guest.evaluate(_RECORD_ROOM)
+        guest.evaluate(_HOLD_CACHE)
+        guest.set_input_files("#rom-drop input[type=file]", ROM)
+        expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
+        guest.evaluate(_RECORD_ROM_READY)
+        _load_rom(host)
+        host.wait_for_function(
+            "(h) => !!window.KNState.romHash && window.KNState.romHash !== h", arg=old_hash, timeout=15000
+        )
+        new_hash = host.evaluate("window.KNState.romHash")
+        guest.wait_for_function("(h) => window.__room?.hostRom?.hash === h", arg=new_hash, timeout=10000)
+        # The room names the host's new ROM; its copy is not in the library yet.
+        expect(guest.locator("#rom-library .rom-library-item")).to_have_count(0)
+        expect(guest.locator("#rom-status")).not_to_contain_text("test.z64")
+        guest.evaluate(_RELEASE_CACHE)
+        # The copy lands, is the host's ROM, and is loaded and said ready.
+        guest.wait_for_function(
+            "(h) => window.__romReady.some((m) => m.ready && m.hash === h)", arg=new_hash, timeout=15000
+        )
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
+def _guest_has_the_new_rom_in_its_library(host, guest):
+    """The host has other.z64; the guest drops test.z64, which is refused and lands in its library."""
+    _load_rom(host, OTHER_ROM)
+    expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+    guest.set_input_files("#rom-drop input[type=file]", ROM)
+    expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
+    expect(guest.locator("#rom-library .rom-library-item")).to_have_count(1, timeout=15000)
+
+
+def test_a_spectators_refused_rom_is_replaced_from_the_library(browser, server_url, room):
+    # A player holding the host's ROM watches instead; the host changes to a ROM
+    # in the spectator's library. The spectator's ROM is refused and the host's
+    # comes from the library, as it always has (refuseRom), so the spectator who
+    # claims a slot again is ready at once.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _guest_has_the_new_rom_in_its_library(host, guest)
+        _load_rom(guest, OTHER_ROM)
+        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
+        guest.click("#watch-instead-btn")
+        expect(guest.locator("#rom-drop")).to_be_hidden(timeout=10000)
+        _load_rom(host)
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64", timeout=15000)
+        guest.click('.claim-slot-btn[data-slot="1"]')
+        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_a_spectator_with_no_rom_who_claims_a_slot_takes_the_hosts_from_the_library(browser, server_url, room):
+    # A spectator holding no ROM needs none; once it claims a slot it is a
+    # player, and the host's ROM comes from its library.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _guest_has_the_new_rom_in_its_library(host, guest)
+        guest.click("#watch-instead-btn")
+        expect(guest.locator("#rom-drop")).to_be_hidden(timeout=10000)
+        _load_rom(host)
+        guest.wait_for_timeout(1000)
+        expect(guest.locator("#rom-status")).not_to_contain_text("test.z64")
+        guest.click('.claim-slot-btn[data-slot="1"]')
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64", timeout=15000)
+        expect(host.locator('.player-slot[data-slot="1"] .rom-status')).to_have_text("✓ ROM", timeout=10000)
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
 # Every read the page starts fails, as an unreadable file's does.
 _FAIL_READS = """() => {
     FileReader.prototype.readAsArrayBuffer = function () {

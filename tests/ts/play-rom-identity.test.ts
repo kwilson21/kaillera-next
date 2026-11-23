@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   announcesRom,
   hashIsTheLoadedRoms,
+  looksInLibraryForHostsRom,
   offersHostsRom,
   romDecided,
   romVerdict,
@@ -104,10 +105,32 @@ test('the plans count a ROM only once its own hash or its size has decided it', 
   assert.equal(offersHostsRom('pending', true), false);
 });
 
+test("a page that wants a ROM and has none looks in its library once the room names the host's ROM", () => {
+  for (const wantsRom of BOOLS) {
+    for (const hasRom of BOOLS) {
+      for (const hostHashKnown of BOOLS) {
+        assert.equal(
+          looksInLibraryForHostsRom(wantsRom, hasRom, hostHashKnown),
+          wantsRom && !hasRom && hostHashKnown,
+          JSON.stringify({ wantsRom, hasRom, hostHashKnown }),
+        );
+      }
+    }
+  }
+  // specs/rom_identity.qnt, guestDroppedFirstTest: refused against the host's
+  // previous ROM, the guest holds none when the host's new one is named.
+  assert.equal(looksInLibraryForHostsRom(true, false, true), true);
+  // While the host's ROM is changing the room names no hash: nothing to look for.
+  assert.equal(looksInLibraryForHostsRom(true, false, false), false);
+  // A spectator that never held a ROM needs none.
+  assert.equal(looksInLibraryForHostsRom(false, false, true), false);
+});
+
 test('the play page reads these from the core bundle', () => {
   assert.equal(KNCore.play.romIdentity.romVerdict, romVerdict);
   assert.equal(KNCore.play.romIdentity.hashIsTheLoadedRoms, hashIsTheLoadedRoms);
   assert.equal(KNCore.play.romIdentity.announcesRom, announcesRom);
   assert.equal(KNCore.play.romIdentity.romDecided, romDecided);
   assert.equal(KNCore.play.romIdentity.offersHostsRom, offersHostsRom);
+  assert.equal(KNCore.play.romIdentity.looksInLibraryForHostsRom, looksInLibraryForHostsRom);
 });

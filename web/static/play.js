@@ -548,7 +548,11 @@
     clearLoadedRom();
     if (droppedName) showRomMismatch(droppedName);
     resetTransferForHostRomChange();
-    if (_hostRom?.hash) autoMatchRom(_hostRom.hash);
+    // The page held a ROM a moment ago: it wants the host's, spectating or
+    // not (a spectator may claim a slot).
+    if (romIdentity.looksInLibraryForHostsRom(true, localRomLoaded(), !!_hostRom?.hash)) {
+      autoMatchRom(_hostRom.hash);
+    }
     updateRomSharingUI();
   };
 
@@ -579,7 +583,9 @@
   // `hasNext`: the room names a host ROM. While the host's is changing it
   // names none: the page keeps its ROM, judges it against nothing and says it
   // is not ready, and the host's new hash, once the room's, decides.
-  const handleHostRomChanged = (hadPrevious, hasNext, toastOnChange) => {
+  // `roomHadReported`: this is not the room's first report to the page (at
+  // the first, the join's own autoload looks in the library).
+  const handleHostRomChanged = (hadPrevious, hasNext, toastOnChange, roomHadReported) => {
     if (isHost) return;
     if (hadPrevious && toastOnChange) {
       if (_hostRom?.changing) showToast('Host is changing their ROM');
@@ -610,6 +616,13 @@
       notifyRomReady();
     } else {
       resetTransferForHostRomChange();
+      // A ROM the player dropped a moment before the host changed to it was
+      // refused then, against the host's previous ROM, and is in the
+      // library: it comes back, as after a refusal (specs/rom_identity.qnt,
+      // guestDroppedFirstTest).
+      if (roomHadReported && romIdentity.looksInLibraryForHostsRom(!isSpectator, false, !!_hostRom?.hash)) {
+        autoMatchRom(_hostRom.hash);
+      }
       updateRomSharingUI();
     }
   };
@@ -642,11 +655,11 @@
 
     updateHostRomInfo();
     if (prevKey !== nextKey || !!prev?.changing !== _hostRom.changing) {
-      handleHostRomChanged(!!prevKey, !!nextKey, toastOnChange);
+      handleHostRomChanged(!!prevKey, !!nextKey, toastOnChange, prev !== null);
       return true;
     }
     if (hostRomMismatch()) {
-      handleHostRomChanged(false, !!nextKey, false);
+      handleHostRomChanged(false, !!nextKey, false, prev !== null);
       return true;
     }
     return false;
@@ -1382,6 +1395,10 @@
       // spectators — claiming a slot needs your ROM (§7.2 M3 #3).
       if (!isGameRunning()) showOverlay();
       if (localRomLoaded() && (isHost || !hostRomMismatch())) notifyRomReady();
+      // A player now: with no ROM, the host's comes from the library if it is there.
+      if (!isHost && romIdentity.looksInLibraryForHostsRom(true, localRomLoaded(), !!_hostRom?.hash)) {
+        autoMatchRom(_hostRom.hash);
+      }
     }
 
     // Detect player → spectator transition ("Watch instead" / release-slot).
@@ -3300,6 +3317,16 @@
       const hash = await hashArrayBuffer(bytes);
       await _romLibrary.put(hash, window.KNCore.play.newStoredRom(bytes, hash, name, source, _knownRoms, Date.now()));
       if (!isSpectator) renderRomLibrary();
+      // The room may have named this ROM as the host's while its copy was on
+      // its way here, and the lookup then found nothing (specs/rom_identity.qnt,
+      // cacheLandsLateTest).
+      if (
+        !isHost &&
+        hash === _hostRom?.hash &&
+        romIdentity.looksInLibraryForHostsRom(!isSpectator, localRomLoaded(), true)
+      ) {
+        autoMatchRom(hash);
+      }
     } catch (_) {}
   };
 

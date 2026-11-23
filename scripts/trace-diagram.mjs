@@ -124,6 +124,26 @@ const SPECS = [
       "(`changing`) and drops every guest's word, the guest's page judges nothing and says nothing, and the " +
       "host's hash, once it is the room's, decides.",
   },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_no_library',
+    hub: 'Guest',
+    runs: ['guestDroppedFirstTest'],
+    about:
+      'The guest drops the ROM the host is about to change to, a moment before the host does (#303). Its copy ' +
+      "lands in the library (`cacheLands`), and it is refused, rightly, against the host's ROM of the moment. " +
+      "When the room names the host's new ROM the page holds none, and stays so: it looked in its library only " +
+      'after a refusal (`missedLibraryRom`).',
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_current',
+    hub: 'Guest',
+    runs: ['guestDroppedFirstTest'],
+    about:
+      "The same ordering today. When the room names the host's new ROM and the page holds none, it looks in " +
+      'its library, finds the ROM it dropped, loads it and says ready.',
+  },
 ];
 
 const argument = (name) => {
