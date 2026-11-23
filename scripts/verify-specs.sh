@@ -482,6 +482,11 @@ rom_identity() {
   # another: the server still counts the guest ready on the previous one,
   # 3 steps (hostChangesAwayFromTheGuestsRomTest).
   expect_violation "$ROM_IDENTITY" rom_identity_host_silent theServerCountsOnlyTheHostsRom
+  # The host's ROM known, the guest picks another from the library and it is
+  # refused, the host changes to that one and its hash lands: the page holds
+  # none with the host's ROM in its library, 4 steps (guestDroppedFirstTest
+  # drops it instead).
+  expect_violation "$ROM_IDENTITY" rom_identity_no_library theHostsRomComesFromTheLibrary
 }
 
 start_group() {

@@ -434,6 +434,39 @@ def test_a_guest_holding_the_rom_the_host_changes_from_is_not_counted_ready_mean
         guest.close()
 
 
+def test_a_rom_the_guest_dropped_before_the_host_changed_to_it_comes_back_from_the_library(browser, server_url, room):
+    # specs/rom_identity.qnt, guestDroppedFirstTest. The players agree to
+    # switch games, and the guest drops the new ROM a moment before the host
+    # does: it is refused, rightly, against the ROM the host still holds, and
+    # its copy is in the guest's ROM library. When the room names the host's
+    # new ROM, the guest's page loads it from there and says ready; it used to
+    # stay without a ROM until the player dropped it again.
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _load_rom(host, OTHER_ROM)
+        expect(guest.locator("#host-rom-info")).to_contain_text("Host ROM:", timeout=10000)
+        guest.set_input_files("#rom-drop input[type=file]", ROM)
+        expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=15000)
+        expect(guest.locator("#rom-status")).not_to_contain_text("test.z64")
+        # Its copy lands in the library a moment after the drop (cacheRom).
+        library_rom = guest.locator("#rom-library .rom-library-item")
+        expect(library_rom).to_have_count(1, timeout=15000)
+        dropped_hash = library_rom.get_attribute("data-hash")
+        guest.evaluate(_RECORD_ROM_READY)
+        _load_rom(host)
+        host.wait_for_function("(h) => window.KNState.romHash === h", arg=dropped_hash, timeout=15000)
+        # The room names the host's new ROM: the guest's comes back and is said ready.
+        guest.wait_for_function(
+            "(h) => window.__romReady.some((m) => m.ready && m.hash === h)", arg=dropped_hash, timeout=15000
+        )
+        expect(guest.locator("#rom-status")).to_contain_text("test.z64")
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+    finally:
+        host.close()
+        guest.close()
+
+
 # Every read the page starts fails, as an unreadable file's does.
 _FAIL_READS = """() => {
     FileReader.prototype.readAsArrayBuffer = function () {

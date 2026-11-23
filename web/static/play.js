@@ -548,7 +548,9 @@
     clearLoadedRom();
     if (droppedName) showRomMismatch(droppedName);
     resetTransferForHostRomChange();
-    if (_hostRom?.hash) autoMatchRom(_hostRom.hash);
+    if (romIdentity.looksInLibraryForHostsRom(!isSpectator, localRomLoaded(), !!_hostRom?.hash)) {
+      autoMatchRom(_hostRom.hash);
+    }
     updateRomSharingUI();
   };
 
@@ -579,7 +581,9 @@
   // `hasNext`: the room names a host ROM. While the host's is changing it
   // names none: the page keeps its ROM, judges it against nothing and says it
   // is not ready, and the host's new hash, once the room's, decides.
-  const handleHostRomChanged = (hadPrevious, hasNext, toastOnChange) => {
+  // `roomHadReported`: this is not the room's first report to the page (at
+  // the first, the join's own autoload looks in the library).
+  const handleHostRomChanged = (hadPrevious, hasNext, toastOnChange, roomHadReported) => {
     if (isHost) return;
     if (hadPrevious && toastOnChange) {
       if (_hostRom?.changing) showToast('Host is changing their ROM');
@@ -610,6 +614,13 @@
       notifyRomReady();
     } else {
       resetTransferForHostRomChange();
+      // A ROM the player dropped a moment before the host changed to it was
+      // refused then, against the host's previous ROM, and is in the
+      // library: it comes back, as after a refusal (specs/rom_identity.qnt,
+      // guestDroppedFirstTest).
+      if (roomHadReported && romIdentity.looksInLibraryForHostsRom(!isSpectator, false, !!_hostRom?.hash)) {
+        autoMatchRom(_hostRom.hash);
+      }
       updateRomSharingUI();
     }
   };
@@ -642,11 +653,11 @@
 
     updateHostRomInfo();
     if (prevKey !== nextKey || !!prev?.changing !== _hostRom.changing) {
-      handleHostRomChanged(!!prevKey, !!nextKey, toastOnChange);
+      handleHostRomChanged(!!prevKey, !!nextKey, toastOnChange, prev !== null);
       return true;
     }
     if (hostRomMismatch()) {
-      handleHostRomChanged(false, !!nextKey, false);
+      handleHostRomChanged(false, !!nextKey, false, prev !== null);
       return true;
     }
     return false;

@@ -168,7 +168,7 @@ $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
 ROM_IDENTITY=specs/rom_identity.qnt
 $QUINT typecheck "$ROM_IDENTITY"
 for variant in rom_identity_before rom_identity_judge_only rom_identity_no_retract rom_identity_first_push \
-  rom_identity_host_silent rom_identity_current; do
+  rom_identity_host_silent rom_identity_no_library rom_identity_current; do
   $QUINT test "$ROM_IDENTITY" --main="$variant" --backend="$BACKEND"
 done
 # Today: a page never announces a hash that is not its ROM's, never clears
@@ -188,7 +188,10 @@ done
 # room named the host's previous ROM until its new one was hashed: a guest's
 # ROM that is the new one was refused against it, and the server counted a
 # guest ready on the previous one (rom_identity_host_silent;
-# hostChangesToTheGuestsRomTest, hostChangesAwayFromTheGuestsRomTest).
+# hostChangesToTheGuestsRomTest, hostChangesAwayFromTheGuestsRomTest). And a
+# page holding no ROM when the room named the host's did not look for it in
+# its library, so a guest who dropped it first had to drop it again
+# (rom_identity_no_library; guestDroppedFirstTest).
 $QUINT run "$ROM_IDENTITY" --main=rom_identity_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
