@@ -528,7 +528,7 @@ $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
 # ── The follow-up to an answer sent unconfirmed ────────────────────────────
 FOLLOW=specs/sync_follow_up.qnt
 $QUINT typecheck "$FOLLOW"
-for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_direct_unwatched sync_follow_up_fixed; do
+for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_direct_unwatched sync_follow_up_socket_unwatched sync_follow_up_socket_over_channel sync_follow_up_socket_undelivered sync_follow_up_fixed; do
   $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
 done
 # With the fix: a follow-up goes out only for a state an input changed after
@@ -539,6 +539,11 @@ done
 # (sync_follow_up_from_send; mispredictWhileCompressingTest).
 # A direct request's answer (BOOT-SYNC, reconnect) was never followed up
 # (sync_follow_up_direct_unwatched; directUnconfirmedAnswerTest).
+# Nor was one asked over the signaling socket (sync_follow_up_socket_unwatched;
+# socketUnconfirmedAnswerTest); watched there but never recorded delivered, an
+# unchanged follow-up goes out anyway (sync_follow_up_socket_undelivered).
+# Its follow-up sent on the channel only waits for good while the channel is
+# down (sync_follow_up_socket_over_channel; aWatchedAnswerCanBeFollowedUp).
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
