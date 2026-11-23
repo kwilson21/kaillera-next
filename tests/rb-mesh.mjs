@@ -1322,8 +1322,11 @@ const phantomSettleProblems = !PHANTOM_SETTLE
         ? ["P2's stick never went right (the input override did not take)"]
         : []),
       // The fault must change some frame on some guest, inside a window or
-      // not: a run where P2's input changed nothing tested nothing.
-      ...(!pairs.some((p) => p.recoveryMismatches.during > 0 || p.recoveryMismatches.after > 0)
+      // not: a run where P2's input changed nothing tested nothing. Not with
+      // PHANTOM_SETTLE_LATE: there the other guests get P2's real input only
+      // after their resync, so they predict it as the host does and nothing
+      // splits by design; what it tests is the skip (lateRealProblems).
+      ...(!PHANTOM_SETTLE_LATE && !pairs.some((p) => p.recoveryMismatches.during > 0 || p.recoveryMismatches.after > 0)
         ? ["P2's input changed no frame on any guest (not exercised)"]
         : []),
       ...(!phantomLines.some((l) => /PEER-PHANTOM slot=1 /.test(l)) ? ['the host never made P2 a phantom'] : []),
