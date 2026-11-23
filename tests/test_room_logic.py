@@ -353,6 +353,82 @@ class TestRomReady:
         assert "sid-2" in room.rom_ready
         assert room.rom_prompt == set()
 
+    def _changing_room(self, code):
+        """A room whose host had ROM a and whose guest was ready with it."""
+        room = _make_room(owner="sid-host")
+        room.rom_hash = "S" + "a" * 64
+        room.rom_size = 4096
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[0] = "pid-host"
+        room.slots[1] = "pid-2"
+        room.rom_ready.update({"sid-host", "sid-2"})
+        rooms[code] = room
+        _sid_to_room["sid-host"] = (code, "pid-host", False)
+        _sid_to_room["sid-2"] = (code, "pid-2", False)
+        return room
+
+    def test_the_hosts_drop_being_hashed_leaves_the_room_naming_no_rom(self):
+        # specs/rom_identity.qnt, HOST_DROP_SAYS_CHANGING: the host drops a new
+        # ROM. Until its hash arrives the room names none, and the guest's word
+        # for the previous one no longer counts.
+        room = self._changing_room("ROOM8")
+
+        assert self._run("sid-host", {"ready": False, "pending": True}) is None
+
+        assert room.rom_changing is True
+        assert (room.rom_hash, room.rom_name, room.rom_size) == (None, None, None)
+        assert room.rom_ready == set()
+        host_rom = _players_payload(room)["hostRom"]
+        assert host_rom["changing"] is True
+        assert host_rom["hash"] is None
+
+    def test_a_guest_is_not_counted_ready_while_the_hosts_rom_is_changing(self):
+        # specs/rom_identity.qnt, hostChangesAwayFromTheGuestsRomTest: a word
+        # sent against the previous ROM (in flight, or from an older page) has
+        # nothing to be held against.
+        room = self._changing_room("ROOM9")
+        self._run("sid-host", {"ready": False, "pending": True})
+
+        err = self._run("sid-2", {"ready": True, "hash": "S" + "a" * 64, "size": 4096})
+
+        assert err == "The host is changing ROM"
+        assert "sid-2" not in room.rom_ready
+
+    def test_the_hosts_new_hash_ends_the_change(self):
+        room = self._changing_room("ROOM10")
+        self._run("sid-host", {"ready": False, "pending": True})
+
+        assert self._run("sid-host", {"ready": True, "hash": "S" + "b" * 64, "size": 4096}) is None
+
+        assert room.rom_changing is False
+        assert room.rom_hash == "S" + "b" * 64
+        assert _players_payload(room)["hostRom"]["changing"] is False
+        # The guest is held to the new ROM: the previous one is refused, the
+        # new one counted.
+        assert self._run("sid-2", {"ready": True, "hash": "S" + "a" * 64, "size": 4096}) == "ROM does not match host"
+        assert self._run("sid-2", {"ready": True, "hash": "S" + "b" * 64, "size": 4096}) is None
+        assert "sid-2" in room.rom_ready
+
+    def test_a_host_with_no_rom_is_not_changing_one(self):
+        room = self._changing_room("ROOM11")
+        self._run("sid-host", {"ready": False, "pending": True})
+
+        # Its new ROM could not be read: it has none.
+        assert self._run("sid-host", {"ready": False}) is None
+
+        assert room.rom_changing is False
+        assert _players_payload(room)["hostRom"]["changing"] is False
+
+    def test_a_guests_pending_rom_changes_nothing_for_the_room(self):
+        room = self._changing_room("ROOM12")
+
+        assert self._run("sid-2", {"ready": False, "pending": True}) is None
+
+        assert room.rom_changing is False
+        assert room.rom_hash == "S" + "a" * 64
+        assert room.rom_ready == {"sid-host"}
+
 
 class TestReleaseSlot:
     def test_same_ip_spectator_cap_refuses_release(self):
@@ -591,6 +667,22 @@ def test_start_game_survives_register_failure():
 
     assert _run_with(patches, _start_game_locked("sid-host", StartGamePayload(mode="rollback"))) is None
     assert room.status == "playing" and room.match_id
+
+
+def test_start_game_is_refused_while_the_hosts_rom_is_changing():
+    # specs/rom_identity.qnt, hostChangesThenStartsTest: a start then would
+    # carry the previous ROM's hash. Streaming needs no guest ROM, so only the
+    # change refuses it.
+    from src.api.payloads import StartGamePayload
+    from src.api.signaling import _start_game_locked
+
+    room = _host_room("ROOM13")
+    room.rom_changing = True
+
+    err = _run_with(_patched_start(), _start_game_locked("sid-host", StartGamePayload(mode="streaming")))
+
+    assert err == "The host's ROM is still being checked"
+    assert room.status == "lobby"
 
 
 def _screenshot_room():

@@ -38,7 +38,7 @@ function room(guests = 2, realTransfers = false) {
       realTransfers
         ? `
       let _pushingSyncState = false, _proactivePushInFlight = false;
-      const _queuedSyncPushes = new Map(), _followUpWatches = new Map();
+      const _queuedSyncPushes = new Map(), _followUpWatches = new Map(), _directAnswerNewest = new Map();
       const _coreFatalError = false, _hasKnSync = false;
       const _syncQueueEpoch = 1, _syncQueueGen = {}, _syncSendChains = {};
       let captureThrows = false, compressions = 0, holdCompression = false, releaseCompression;

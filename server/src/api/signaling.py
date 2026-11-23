@@ -327,6 +327,10 @@ class Room:
     rom_hash: str | None = None  # SHA-256 of ROM, set on start-game
     rom_name: str | None = None  # Host-provided display name for the currently loaded ROM
     rom_size: int | None = None  # Host-provided byte size for the currently loaded ROM
+    # The host has dropped a new ROM whose hash it has not sent yet
+    # (rom-ready {ready: false, pending: true}): the room names no ROM, takes
+    # no guest's word and refuses a start until the host's hash arrives.
+    rom_changing: bool = False
     rom_sharing: bool = False  # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
     rom_prompt: set[str] = field(default_factory=set)  # sids at the ROM prompt: no ROM, asking for one
@@ -427,6 +431,7 @@ def _players_payload(room: Room) -> dict:
             "size": room.rom_size,
             "gameId": room.game_id,
             "game_id": room.game_id,
+            "changing": room.rom_changing,
         },
         "gameId": room.game_id,
         "game_id": room.game_id,
@@ -507,6 +512,7 @@ def _clear_host_rom(room: Room) -> None:
     room.rom_hash = None
     room.rom_name = None
     room.rom_size = None
+    room.rom_changing = False
     room.rom_ready.clear()
 
 
@@ -1182,6 +1188,12 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
 
     mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
 
+    # The host's new ROM is still being hashed: the start would carry the
+    # previous ROM's hash, and no guest has been held to the new one
+    # (specs/rom_identity.qnt, hostChangesThenStartsTest).
+    if room.rom_changing:
+        return "The host's ROM is still being checked"
+
     # Streaming: host runs the only emulator; guests don't need a ROM.
     # Rollback: every player must have a ROM loaded (or host is sharing).
     if mode != "streaming" and not _room_rom_sharing(room):
@@ -1232,6 +1244,7 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
                 "size": room.rom_size,
                 "gameId": room.game_id,
                 "game_id": room.game_id,
+                "changing": room.rom_changing,
             },
             "gameId": room.game_id,
             "matchId": room.match_id,
@@ -1492,7 +1505,12 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
         if sid == room.owner:
             if not payload.ready:
                 _clear_host_rom(room)
+                # A new ROM being hashed: until its hash arrives the room
+                # names none, so no guest is judged against the ROM the host
+                # had before (specs/rom_identity.qnt, HOST_DROP_SAYS_CHANGING).
+                room.rom_changing = payload.pending
             else:
+                room.rom_changing = False
                 old_identity = _rom_identity(room)
                 if payload.hash is not None:
                     room.rom_hash = payload.hash if len(payload.hash) >= 16 else None
@@ -1507,6 +1525,16 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
                     _invalidate_non_host_rom_state(room)
                 room.rom_ready.add(sid)
         elif payload.ready:
+            # Nothing to hold the word against while the host's ROM is
+            # changing; the guest's page says ready again once the room has
+            # the host's new hash. A page that sends it anyway judged against
+            # the ROM the host had before (its word was in flight, or it is
+            # an older page).
+            if room.rom_changing:
+                room.rom_ready.discard(sid)
+                await _emit("users-updated", _players_payload(room), room=session_id)
+                await state.save_room(session_id, room)
+                return "The host is changing ROM"
             if _rom_hashes_conflict(room.rom_hash, payload.hash):
                 room.rom_ready.discard(sid)
                 await _emit("users-updated", _players_payload(room), room=session_id)

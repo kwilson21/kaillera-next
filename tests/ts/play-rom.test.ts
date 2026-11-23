@@ -15,7 +15,7 @@ const HASH = `S${'ab'.repeat(32)}`;
 const bytes = (...values: number[]): Uint8Array => new Uint8Array(values);
 
 test('the host ROM reads the same from every payload that carries it', () => {
-  const expected = { hash: HASH, name: 'Smash.z64', size: 16777216, gameId: 'ssb64' };
+  const expected = { hash: HASH, name: 'Smash.z64', size: 16777216, gameId: 'ssb64', changing: false };
   // users-updated / the join-room ack: flat camelCase (and more beside it).
   const usersUpdated = { romHash: HASH, romName: 'Smash.z64', romSize: 16777216, gameId: 'ssb64', rom_name: 'x' };
   assert.deepEqual(hostRomFromData(usersUpdated), expected);
@@ -30,24 +30,48 @@ test('the host ROM reads the same from every payload that carries it', () => {
 });
 
 test('a room with no ROM yet, and no payload at all, read as all-unknown', () => {
-  const unknown = { hash: null, name: null, size: null, gameId: null };
+  const unknown = { hash: null, name: null, size: null, gameId: null, changing: false };
   assert.deepEqual(hostRomFromData({ romHash: null, romName: null, romSize: null, hostRom: null }), unknown);
   assert.deepEqual(hostRomFromData(null), unknown);
   assert.deepEqual(hostRomFromData(undefined), unknown);
+});
+
+test('a host ROM being hashed reads as changing, with nothing named', () => {
+  // users-updated while the host's new ROM is hashed (specs/rom_identity.qnt).
+  const changing = {
+    romHash: null,
+    romName: null,
+    romSize: null,
+    hostRom: { hash: null, name: null, size: null, gameId: 'ssb64', game_id: 'ssb64', changing: true },
+  };
+  assert.deepEqual(hostRomFromData(changing), { hash: null, name: null, size: null, gameId: 'ssb64', changing: true });
+  // A server that predates it says nothing: not changing.
+  assert.equal(hostRomFromData({ hostRom: { hash: HASH } }).changing, false);
 });
 
 test('a size that arrives as text becomes a number', () => {
   assert.equal(hostRomFromData({ rom_size: '4096' }).size, 4096);
 });
 
+test('an empty hash or name, or a size that is not a number, is none', () => {
+  const rom = hostRomFromData({ romHash: '', romName: '', romSize: 'big' });
+  assert.equal(rom.hash, null);
+  assert.equal(rom.name, null);
+  assert.equal(rom.size, null);
+});
+
 test('the identity key changes with the ROM and is empty for none', () => {
-  assert.equal(hostRomIdentityKey(HASH, 'Smash.z64', 16777216), `h:${HASH}:16777216`);
-  assert.equal(hostRomIdentityKey(HASH, null, null), `h:${HASH}:`);
+  const key = (hash: string | null, name: string | null, size: number | null) =>
+    hostRomIdentityKey({ hash, name, size });
+  assert.equal(key(HASH, 'Smash.z64', 16777216), `h:${HASH}:16777216`);
+  assert.equal(key(HASH, null, null), `h:${HASH}:`);
   // Before the hash is known, the name and size stand in.
-  assert.equal(hostRomIdentityKey(null, 'Smash.z64', 16777216), 'n:Smash.z64:16777216');
-  assert.equal(hostRomIdentityKey(null, null, 0), 'n::0');
-  assert.equal(hostRomIdentityKey(null, null, null), '');
-  assert.notEqual(hostRomIdentityKey(HASH, 'a', 1), hostRomIdentityKey(HASH, 'a', 2));
+  assert.equal(key(null, 'Smash.z64', 16777216), 'n:Smash.z64:16777216');
+  assert.equal(key(null, null, 0), 'n::0');
+  assert.equal(key(null, null, null), '');
+  assert.notEqual(key(HASH, 'a', 1), key(HASH, 'a', 2));
+  // Before the room has said anything.
+  assert.equal(hostRomIdentityKey(null), '');
 });
 
 test('sizes read as people say them', () => {

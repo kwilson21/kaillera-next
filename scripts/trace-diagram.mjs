@@ -102,6 +102,28 @@ const SPECS = [
       "arriving refuses nothing and nothing is announced, and the drop's own hash, once it lands, decides. A " +
       'hash for a load the page no longer holds changes nothing.',
   },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_host_silent',
+    hub: 'Guest',
+    runs: ['hostChangesToTheGuestsRomTest', 'hostChangesAwayFromTheGuestsRomTest'],
+    about:
+      "The host changing its ROM while the host's drop said nothing (#289). `roomRom` is the host's ROM as the " +
+      'room names it and the guest has heard; the names follow the host, so `"right"` is always the ROM the ' +
+      'host holds. Until the host\'s new ROM is hashed the room names its previous one (`"wrong"`): the ' +
+      "guest's ROM that is the host's new one is refused against it, and a guest holding the previous one " +
+      'is still counted ready on it.',
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_current',
+    hub: 'Guest',
+    runs: ['hostChangesToTheGuestsRomTest', 'hostChangesAwayFromTheGuestsRomTest'],
+    about:
+      "The same orderings today. The host's drop says its ROM is being hashed: the room names none " +
+      "(`changing`) and drops every guest's word, the guest's page judges nothing and says nothing, and the " +
+      "host's hash, once it is the room's, decides.",
+  },
 ];
 
 const argument = (name) => {
