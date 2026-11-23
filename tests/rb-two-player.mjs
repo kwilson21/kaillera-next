@@ -565,8 +565,8 @@
  *     its inputs were dropped, and it logged DC-FALLBACK after that; and
  *     fails if, after the fault began, the guest asked the host for an input
  *     (`RB-INPUT-ASK ... slot=0`: one was lost and nothing sent it again), or
- *     either page logged PEER-PHANTOM, RB-INPUT-STALL-TIMEOUT or
- *     INPUT-STALL-RESYNC. Frames are compared as usual: no exclusion.
+ *     either page logged PEER-PHANTOM or RB-INPUT-STALL-TIMEOUT. Frames are
+ *     compared as usual: no exclusion.
  *     Reported as `loseBeforeFallback` in summary.json.
  *
  *   DESYNC_GUEST=1   The one knob that makes the match unhealthy on purpose:
@@ -3709,7 +3709,6 @@ const loseBeforeFallbackReport = (() => {
     guestAsksForHostInputs: linesIn(guestLines, /RB-INPUT-ASK .*slot=0\b/),
     peerPhantoms: [...linesIn(hostLines, /PEER-PHANTOM/), ...linesIn(guestLines, /PEER-PHANTOM/)],
     stallTimeouts: [...linesIn(hostLines, /RB-INPUT-STALL-TIMEOUT/), ...linesIn(guestLines, /RB-INPUT-STALL-TIMEOUT/)],
-    stallResyncs: [...linesIn(hostLines, /INPUT-STALL-RESYNC/), ...linesIn(guestLines, /INPUT-STALL-RESYNC/)],
   };
   return {
     unreliable,
@@ -3899,8 +3898,8 @@ const rbInputStallTimeoutsOf = (log) => count(log, /RB-INPUT-STALL-TIMEOUT/g);
 // The run must actually exercise the fix, not just avoid tripping on a
 // no-op path: the guest's sync log must show it went through the real
 // bg-return handler ("tab visible (was background") and that
-// _requestLifecycleFullResync skipped fast-forward/resync while C rollback
-// was active ("rollback mode — no fast-forward/resync").
+// _noteLifecycleReturn skipped fast-forward/resync ("rollback mode — no
+// fast-forward/resync").
 // Their absence means the hide/throttle/visibilitychange plumbing didn't
 // reach netplay-rollback.js, and a pass wouldn't mean anything.
 const guestExercisedTabVisible = (log) => log.includes('tab visible (was background');
