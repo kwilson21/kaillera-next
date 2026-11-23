@@ -5209,6 +5209,9 @@
   // that state and whether an input at or before it has since differed from
   // its prediction (specs/sync_follow_up.qnt). Set as the state is taken.
   const _followUpWatches = new Map(); // sid -> {frame, changed}
+  // Host: per guest, the newest direct answer (_answerDirectSyncRequest). Only
+  // its completion schedules the follow-up; resetPeerState clears it (I2).
+  const _directAnswerNewest = new Map(); // sid -> token
   // The buffer belongs to the module that allocated it: EmulatorJS can
   // replace the module between matches, and stopSync drops it with the
   // other scratch buffers.
@@ -10741,6 +10744,7 @@
     if (opts.sid) {
       _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== opts.sid);
       _followUpWatches.delete(opts.sid);
+      _directAnswerNewest.delete(opts.sid);
       _queuedSyncPushes.get(opts.sid)?.resolve?.(null);
       _queuedSyncPushes.delete(opts.sid);
       // A state push still in flight for this sid must not requeue into
@@ -16157,7 +16161,17 @@
         // The guest asked again while this push was in flight; its newer
         // request replaces this one.
         if (_scheduledSyncRequests.some((q) => q.targetSid === r.targetSid)) return;
-        if (skipped === null || skipped?.includes(r.targetSid)) {
+        if (r.transport === 'socket' && (skipped == null || skipped.includes(r.targetSid))) {
+          // Not sent over the socket (a state too large for it falls back to
+          // a channel that is down). The socket stays reachable, so put back
+          // unchanged it would be taken again every tick: count it against
+          // SYNC_FOLLOW_UP_MAX instead (I1; from #307).
+          const n = (r.followUp || 0) + 1;
+          if (n <= SYNC_FOLLOW_UP_MAX) {
+            _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; re-queued (${n})`);
+            requeue(r, n, null);
+          } else _syncLog(`coord sync over the socket to ${r.targetSid} did not go out; follow-ups exhausted`);
+        } else if (skipped === null || skipped?.includes(r.targetSid)) {
           // A channel can close while the state is being compressed; the
           // send then skips that target. Put its request back unchanged so
           // it goes out when reachable.
@@ -16217,7 +16231,17 @@
       _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid}: ${superseded} queued follow-up(s) superseded by a new answer`);
     }
     const options = { requestIds, watchFor: [sid], ...(transport ? { transport, reason: via.reason } : {}) };
+    // Answers to one guest asked while a push is in flight share the queued
+    // push behind it, whose state is taken last. Only the newest answer's
+    // completion schedules the follow-up, with that state's watch and that
+    // request's number: an older one finishing first would follow up its own
+    // state's watch, and the newer answer, finding that follow-up queued,
+    // would add none for the state the guest ends on (from #307).
+    const token = {};
+    _directAnswerNewest.set(sid, token);
     Promise.resolve(pushSyncState(sid, false, options)).then((skipped) => {
+      if (_directAnswerNewest.get(sid) !== token) return;
+      _directAnswerNewest.delete(sid);
       // Still the guest it was sent to: not gone, reset (reconnect) or a
       // match stopped since (those are resetPeerState's job).
       const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
@@ -21373,6 +21397,7 @@
     _syncTargetDeadlineAt = 0;
     _scheduledSyncRequests = [];
     _followUpWatches.clear();
+    _directAnswerNewest.clear();
     _syncQueueEpoch++;
     // Each transfer still on a chain sees the new epoch and stops.
     _syncSendChains = {};

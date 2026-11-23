@@ -211,6 +211,7 @@ def _answer_direct(
         const _syncQueueGen = {{}};
         let _scheduledSyncRequests = {json.dumps(queued or [])};
         const _followUpWatches = new Map();
+        const _directAnswerNewest = new Map();
         let _frameNum = 1986;
         const SYNC_COORD_TIMEOUT_MS = 3000;
         const pushes = [];
@@ -393,6 +394,7 @@ def _socket_request(src_text):
         const _syncQueueGen = {{}};
         let _scheduledSyncRequests = [];
         const _followUpWatches = new Map();
+        const _directAnswerNewest = new Map();
         let _frameNum = 1986;
         const SYNC_COORD_TIMEOUT_MS = 3000;
         const pushes = [];
@@ -429,3 +431,96 @@ def test_a_socket_request_answered_unconfirmed_is_followed_up_over_the_socket():
     [follow] = out["scheduled"]
     assert follow["targetSid"] == "g" and follow["followUp"] == 1
     assert follow["transport"] == "socket" and follow["requestId"] == 4
+
+
+def test_only_the_newest_direct_answer_schedules_the_follow_up():
+    # Two answers to one guest: the second's push is queued behind the first
+    # and takes its state later. The first finishing must not schedule a
+    # follow-up for its own (older) state: the second's, the state the guest
+    # ends on, is the one followed up, with its request number (from #307).
+    src = LOCKSTEP_JS.read_text()
+    start = src.index(
+        "  const _answerDirectSyncRequest = (sid, requestId, via = {}) => {"
+    )
+    helper = src[start : src.index("\n  };\n", start) + 5]
+    script = textwrap.dedent(
+        f"""
+        const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        globalThis.window = {{ KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }} }};
+        const _syncLog = () => {{}};
+        const _peers = {{ g: {{ slot: 1 }} }};
+        const _peerPhantom = {{}};
+        let _syncQueueEpoch = 1;
+        const _syncQueueGen = {{}};
+        let _scheduledSyncRequests = [];
+        const _followUpWatches = new Map();
+        const _directAnswerNewest = new Map();
+        let _frameNum = 1986;
+        const SYNC_COORD_TIMEOUT_MS = 3000;
+        const pending = [];
+        // Each push takes its state (sets the watch) and finishes when told.
+        const pushSyncState = (sid, proactive, options) => new Promise((resolve) => {{
+          pending.push({{
+            take: (frame) => _followUpWatches.set(sid, {{ frame }}),
+            finish: () => resolve([]),
+          }});
+        }});
+        const tick = () => new Promise((r) => setTimeout(r, 0));
+        eval({json.dumps(helper)} + `
+          (async () => {{
+            _answerDirectSyncRequest('g', 7, {{ transport: 'socket', reason: 'r' }});
+            _answerDirectSyncRequest('g', 8, {{ transport: 'socket', reason: 'r' }});
+            pending[0].take(1986);
+            pending[0].finish();
+            await tick();
+            const afterFirst = _scheduledSyncRequests.length;
+            pending[1].take(1990);
+            pending[1].finish();
+            await tick();
+            process.stdout.write(JSON.stringify({{ afterFirst, scheduled: _scheduledSyncRequests }}));
+          }})();
+        `);
+        """
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    out = json.loads(result.stdout)
+    assert out["afterFirst"] == 0
+    [follow] = out["scheduled"]
+    assert follow["requestId"] == 8 and follow["watch"] == {"frame": 1990}
+    assert follow["transport"] == "socket"
+
+
+def test_the_newest_answer_token_is_per_peer_state():
+    # I2: resetPeerState and the stop clear it with the other per-guest state.
+    src = LOCKSTEP_JS.read_text()
+    reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
+    reset = reset[: reset.index("\n  };\n")]
+    assert "_directAnswerNewest.delete(opts.sid);" in reset
+    assert "_directAnswerNewest.clear();" in src
+
+
+def test_a_socket_follow_up_that_did_not_go_out_is_retried_within_the_bound():
+    # The socket stays reachable, so put back unchanged it would be taken
+    # again every tick: each retry counts against SYNC_FOLLOW_UP_MAX (I1).
+    src = LOCKSTEP_JS.read_text()
+    dispatch = src[src.index("const _dispatchScheduledSyncs = (isConfirmed) => {") :]
+    dispatch = dispatch[: dispatch.index("\n  };\n")]
+    socket = dispatch.index(
+        "if (r.transport === 'socket' && (skipped == null || skipped.includes(r.targetSid))) {"
+    )
+    channel = dispatch.index(
+        "} else if (skipped === null || skipped?.includes(r.targetSid)) {"
+    )
+    assert socket < channel
+    branch = dispatch[socket:channel]
+    assert "const n = (r.followUp || 0) + 1;" in branch
+    assert "if (n <= SYNC_FOLLOW_UP_MAX) {" in branch
+    assert "requeue(r, n, null);" in branch
