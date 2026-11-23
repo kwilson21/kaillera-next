@@ -28,7 +28,8 @@
  *                     and its signaling cut for a few seconds, so it comes
  *                     back on a new socket id before it has the state; it
  *                     must get the state and play on, with no page in the
- *                     lobby and no late joiner left pending on the host
+ *                     lobby, no late joiner left pending on the host and
+ *                     no peer in the joiner's own slot
  *   late-join-drop-during-serve  the same, with the cut as the host's state
  *                     reaches the joiner (that message is lost with the
  *                     socket), so the host is serving the old socket id
@@ -535,6 +536,16 @@ const lateJoinSocketDrop = async (room, failures, log, when) => {
     30000,
   );
   if (!settled) failures.push('the host still holds a pending late joiner after the join');
+  // The joiner's engine may have restarted while its socket was down: its own
+  // roster entry (under an old socket id) must not have become a peer.
+  const ownSlotPeers = await guest.page.evaluate(() => {
+    const own = window.NetplayRollback?.getDebugState?.()?.playerSlot;
+    return Object.entries(window.KNState?.peers ?? {})
+      .filter(([, peer]) => peer?.slot === own)
+      .map(([sid]) => sid);
+  });
+  log.push({ lateJoinSocketDropOwnSlotPeers: ownSlotPeers });
+  if (ownSlotPeers.length) failures.push(`the joiner holds a peer in its own slot: ${ownSlotPeers.join(', ')}`);
   await checkpoint(
     `after late join with a socket drop (${when})`,
     [

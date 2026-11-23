@@ -3516,6 +3516,8 @@
       socket,
       sessionId: roomCode,
       playerSlot: isSpectator ? null : mySlot,
+      // This page's own roster entry is found by this too (KNCore.rosterPeers).
+      persistentId: _persistentId,
       isSpectator,
       playerName,
       gameElement: document.getElementById('game'),
