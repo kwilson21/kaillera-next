@@ -15,8 +15,6 @@ and it changes to the game.
 Run: KN_ROM=/path/ssb64-us.z64 pytest tests/test_host_rom_change_boot.py -v   (needs the server running)
 """
 
-import os
-
 from playwright.sync_api import expect
 from test_game_start_e2e import (
     _HOLD_READS,
@@ -36,16 +34,12 @@ def _open(browser, url):
     page = browser.new_page()
     page.goto(url)
     expect(page.locator("#overlay")).to_be_visible(timeout=10000)
-    page.wait_for_function(
-        "window.__test_socket && window.__test_socket.connected", timeout=10000
-    )
+    page.wait_for_function("window.__test_socket && window.__test_socket.connected", timeout=10000)
     return page
 
 
 def _host_on_other_rom_and_a_guest(browser, server_url, room):
-    host = _open(
-        browser, f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback"
-    )
+    host = _open(browser, f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
     guest = _open(browser, f"{server_url}/play.html?room={room}&name=Guest")
     expect(host.locator("#player-list")).to_contain_text("Guest", timeout=10000)
     host.set_input_files("#rom-drop input[type=file]", OTHER_ROM)
@@ -55,9 +49,7 @@ def _host_on_other_rom_and_a_guest(browser, server_url, room):
 
 
 def _frame(page):
-    return page.evaluate(
-        "window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0"
-    )
+    return page.evaluate("window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? 0")
 
 
 def _both_play_the_hosts_rom(host, guest, start_game):
@@ -80,9 +72,7 @@ def _both_play_the_hosts_rom(host, guest, start_game):
         assert not any(tag in log for tag in _FAILED), log[-3000:]
 
 
-def test_a_guest_holding_the_game_the_host_changes_to_plays_it(
-    browser, server_url, rom_path, room, start_game
-):
+def test_a_guest_holding_the_game_the_host_changes_to_plays_it(browser, server_url, rom_path, room, start_game):
     host, guest = _host_on_other_rom_and_a_guest(browser, server_url, room)
     try:
         old_hash = host.evaluate("window.KNState.romHash")
@@ -100,16 +90,12 @@ def test_a_guest_holding_the_game_the_host_changes_to_plays_it(
             arg=old_hash,
             timeout=30000,
         )
-        assert not guest.evaluate("window.__refusedShown"), (
-            "the host's new ROM was refused against its previous one"
-        )
+        assert not guest.evaluate("window.__refusedShown"), "the host's new ROM was refused against its previous one"
         expect(guest.locator("#host-rom-info")).to_contain_text("Host is loading a ROM")
         assert not any(m.get("ready") for m in guest.evaluate("window.__romReady"))
         new_hash = guest.evaluate("window.KNState.romHash")
         host.evaluate(_RELEASE_READS)
-        host.wait_for_function(
-            "(h) => window.KNState.romHash === h", arg=new_hash, timeout=30000
-        )
+        host.wait_for_function("(h) => window.KNState.romHash === h", arg=new_hash, timeout=30000)
         guest.wait_for_function(
             "(h) => window.__romReady.some((m) => m.ready && m.hash === h)",
             arg=new_hash,
@@ -129,24 +115,21 @@ def test_a_game_the_guest_dropped_before_the_host_changed_to_it_boots_from_the_l
     try:
         # Dropped before the host changes: refused, and kept in the library.
         guest.set_input_files("#rom-drop input[type=file]", rom_path)
-        expect(guest.locator("#rom-mismatch")).to_contain_text(
-            "doesn't match", timeout=30000
-        )
+        expect(guest.locator("#rom-mismatch")).to_contain_text("doesn't match", timeout=30000)
         library_rom = guest.locator("#rom-library .rom-library-item")
         expect(library_rom).to_have_count(1, timeout=30000)
         game_hash = library_rom.get_attribute("data-hash")
         guest.evaluate(_RECORD_ROM_READY)
         host.set_input_files("#rom-drop input[type=file]", rom_path)
-        host.wait_for_function(
-            "(h) => window.KNState.romHash === h", arg=game_hash, timeout=30000
-        )
+        host.wait_for_function("(h) => window.KNState.romHash === h", arg=game_hash, timeout=30000)
         # The room names the game: the guest's page loads it from the library.
         guest.wait_for_function(
             "(h) => window.__romReady.some((m) => m.ready && m.hash === h)",
             arg=game_hash,
             timeout=30000,
         )
-        expect(guest.locator("#rom-status")).to_contain_text(os.path.basename(rom_path))
+        expect(guest.locator("#rom-status")).to_contain_text("Loaded:")
+        expect(guest.locator("#rom-mismatch")).to_be_hidden()
         _both_play_the_hosts_rom(host, guest, start_game)
     finally:
         host.close()
