@@ -460,6 +460,9 @@ const phantomSettle = {
   // PHANTOM_SETTLE_LATE: per other guest, whether it applied a state before
   // its held packets were sent, and how many were held.
   appliedBeforeRelease: {},
+  // PHANTOM_SETTLE_LATE: each other guest's frame when P2's held packets
+  // were sent to it.
+  releasedFrame: {},
   // Where each page's sync log stood when the host recovered P2.
   guestsRecoveredAt: null,
   // The host's frame when P2's packets to it began to be dropped.
@@ -675,6 +678,7 @@ if (PHANTOM_SETTLE) {
           30000,
         );
         ps.held[slot] = await pages[1].evaluate((s) => window.__meshRelease(s), slot);
+        ps.releasedFrame[slot] = await pages[slot].evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
         console.log(
           `PHANTOM_SETTLE_LATE: P${slot + 1} applied a state first: ${ps.appliedBeforeRelease[slot]}; ` +
             `${ps.held[slot]} held packet(s) from P2 sent`,
@@ -939,6 +943,17 @@ const phantomLead = (() => {
   // No init line (no C engine): the most the engine allows, 22 + 9.
   return (init ? Number(init[1]) + Number(init[2]) : 31) + PHANTOM_LEAD_MARGIN;
 })();
+// P2 runs ahead of the host: its first walking input can be labelled before
+// the frame the host had reached when the drop was set up.
+const faultStart = (() => {
+  if (!PHANTOM_SETTLE || phantomSettle.faultFrame === null) return null;
+  const walk = P[1].sync
+    .split('\n')
+    .filter((l) => seqOf(l) > phantomSettle.guestsAt[1])
+    .map((l) => /LOCAL-INPUT slot=1 f=(\d+) b=0 lx=70 ly=0 /.exec(l))
+    .find(Boolean);
+  return walk ? Math.min(phantomSettle.faultFrame, Number(walk[1])) : phantomSettle.faultFrame;
+})();
 const phantomEpisodes = (() => {
   if (!PHANTOM_SETTLE) return [];
   const open = new Map();
@@ -958,17 +973,49 @@ const phantomEpisodes = (() => {
         phantomSettle.faultFrame !== null &&
         open.get(recovered[1]) >= phantomSettle.faultFrame;
       if (isFault) faultEpisodeTaken = true;
-      const from = isFault ? phantomSettle.faultFrame : open.get(recovered[1]) - phantomLead;
+      const from = isFault ? faultStart : open.get(recovered[1]) - phantomLead;
       out.push({ slot, from, recovered: f, byFault: isFault });
       open.delete(recovered[1]);
     }
   }
   return out;
 })();
+// PHANTOM_SETTLE_LATE: P2's packets to the other guests are held from the
+// drop, so each makes P2 a phantom of its own and runs on its predictions;
+// the held inputs above its settled point arrive too late to roll back to,
+// and it asks for a state (INPUT-PAST-WINDOW-MISMATCH). Its window runs on to
+// the first state it applies after the release, or the release plus the
+// lead when none comes: a split it keeps still fails.
 const phantomWindowsOf = (slot) => {
   const applied = [...P[slot].sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => Number(m[1]));
-  return phantomEpisodes.map((e) => [e.from, applied.find((F) => F >= e.recovered) ?? e.recovered]);
+  const released = PHANTOM_SETTLE_LATE ? phantomSettle.releasedFrame[slot] : undefined;
+  return phantomEpisodes.map((e) => {
+    let to = applied.find((F) => F >= e.recovered) ?? e.recovered;
+    if (e.byFault && released !== undefined)
+      to = Math.max(to, applied.find((F) => F >= released) ?? released + phantomLead);
+    return [e.from, to];
+  });
 };
+// Whether the fault was exercised: the host ran some frame of the fault's
+// window on a value of P2's input other than the one P2 played
+// (NORMAL-INPUT-TR, the inputs each page applied). Read from the inputs, not
+// the hashes: the hashes cover no fighter's position, so a walk shows in them
+// only once it reaches something they do.
+const appliedInputs = (sync, tag) => {
+  const out = new Map();
+  const re = new RegExp(`NORMAL-INPUT-TR f=\\d+ apply=(-?\\d+) [^\\n]*?${tag}@-?\\d+\\[([^\\]]*)\\]`, 'g');
+  for (const m of sync.matchAll(re)) out.set(Number(m[1]), m[2]);
+  return out;
+};
+const faultInputsDiffered = (() => {
+  const e = phantomEpisodes.find((x) => x.byFault);
+  if (!e) return 0;
+  const host = appliedInputs(H.sync, 'R1');
+  const own = appliedInputs(P[1].sync, 'L1');
+  let n = 0;
+  for (const [f, v] of host) if (f >= e.from && f <= e.recovered && own.has(f) && own.get(f) !== v) n++;
+  return n;
+})();
 const pairs = P.slice(1).map((G, gi) => {
   const slot = gi + 1;
   const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
@@ -1328,14 +1375,9 @@ const phantomSettleProblems = !PHANTOM_SETTLE
         .some((l) => seqOf(l) > phantomSettle.guestsAt[1] && /LOCAL-INPUT slot=1 f=\d+ b=0 lx=70 ly=0 /.test(l))
         ? ["P2's stick never went right (the input override did not take)"]
         : []),
-      // The fault must change some frame on some guest, inside a window or
-      // not: a run where P2's input changed nothing tested nothing. Not with
-      // PHANTOM_SETTLE_LATE: there the other guests get P2's real input only
-      // after their resync, so they predict it as the host does and nothing
-      // splits by design; what it tests is the skip (lateRealProblems).
-      ...(!PHANTOM_SETTLE_LATE && !pairs.some((p) => p.recoveryMismatches.during > 0 || p.recoveryMismatches.after > 0)
-        ? ["P2's input changed no frame on any guest (not exercised)"]
-        : []),
+      // The host must have run on a value of P2's input other than P2's: a
+      // run where its prediction was right tested nothing.
+      ...(faultInputsDiffered === 0 ? ["the host's prediction of P2 was never wrong (not exercised)"] : []),
       ...(!phantomLines.some((l) => /PEER-PHANTOM slot=1 /.test(l)) ? ['the host never made P2 a phantom'] : []),
       ...(!phantomSettle.recovered ? ['the host never recovered P2'] : []),
       ...(!phantomLines.some((l) => /full sync also scheduled for slot\(s\) /.test(l))
@@ -1428,6 +1470,7 @@ const summary = {
         // frame: the fault's own, and any the container made by itself.
         episodes: phantomEpisodes,
         episodesByContainer: phantomEpisodes.filter((e) => !e.byFault).length,
+        faultInputsDiffered,
         phantomLead,
         problems: phantomSettleProblems,
       }
