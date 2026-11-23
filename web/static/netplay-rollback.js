@@ -9532,21 +9532,17 @@
           // frame and deadline, so they fall due together and one capture
           // goes to all of them (a broadcast): the `inputs-settled:` the
           // returning guest then sends is for a state every guest loads. A
-          // guest's own pending request is folded in, its number kept, so
-          // this state answers it too.
+          // sync the host schedules for its own reasons carries no request
+          // number; another guest's own request already queued stays, to be
+          // answered: any state the host takes from now on is for this frame
+          // or a later one.
           const deadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
-          const targets = [...new Set([remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)])];
-          const pendingIds = {};
-          for (const r of _scheduledSyncRequests) if (r.requestId) pendingIds[r.targetSid] = r.requestId;
-          _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => !targets.includes(r.targetSid));
-          for (const sid of targets) {
-            _scheduledSyncRequests.push({
-              targetFrame: _frameNum,
-              targetSid: sid,
-              requestId: pendingIds[sid] || 0,
-              deadlineAt,
-            });
-          }
+          _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
+          const targets = [remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)].filter(
+            (sid, i, all) => all.indexOf(sid) === i && !_scheduledSyncRequests.some((r) => r.targetSid === sid),
+          );
+          for (const sid of targets)
+            _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });
           // That state will be for this frame or a later one, so the
           // guest's inputs from before this frame minus the delay are
           // settled by it already. (Only the host can say so here: a guest
