@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.23",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "drop no C log line between two drains (#317)"
+      }
+    ]
+  },
+  {
     "version": "0.69.22",
     "date": "2026-11-23",
     "changes": [
