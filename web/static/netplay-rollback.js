@@ -9492,7 +9492,16 @@
         _peerPhantom[peer.slot] = false;
         _forgetHolePushes(peer.slot);
         window.dispatchEvent(new CustomEvent('kn-peer-recovered', { detail: { slot: peer.slot } }));
-        if (_playerSlot !== 0 && peer.slot === 0 && _syncEnabled) {
+        // What this page does now is web/src/recovery-resync.ts (proved;
+        // specs/recovery_bystander.qnt, recovery_bystander_fixed): the host
+        // resyncs every guest; a guest asks the host for a resync.
+        const recoveryStep = window.KNCore.recoveryResync.recoveryStep(
+          _playerSlot === 0,
+          peer.slot === 0,
+          _syncEnabled,
+          _resyncRequestInFlight,
+        );
+        if (recoveryStep === 'ask-at') {
           _lastResyncTime = 0;
           _resyncRequestInFlight = false;
           _consecutiveResyncs = 0;
@@ -9512,24 +9521,61 @@
             _syncTargetFrame = -1;
             _syncTargetDeadlineAt = 0;
           }
-        } else if (_playerSlot === 0 && peer.slot !== 0 && _syncEnabled) {
+        } else if (recoveryStep === 'resync-guests') {
           // The host ran on predicted inputs for this guest while it was a
-          // phantom, and its late real inputs landed past the rollback cap,
-          // so the two timelines have split. The host is authoritative:
-          // push its state to the guest once it is final (the guest's real
-          // inputs have caught up), or at the I1 deadline.
+          // phantom, and its late real inputs landed past the rollback cap
+          // or are settled below. Every other guest ran those frames on
+          // something of its own: the guest's real inputs, heard all along,
+          // or its own predictions. The host is authoritative: push its
+          // state to every guest once it is final (the guest's real inputs
+          // have caught up), or at the I1 deadline. The requests share their
+          // frame and deadline, so they fall due together and one capture
+          // goes to all of them (a broadcast): the `inputs-settled:` the
+          // returning guest then sends is for a state every guest loads. A
+          // sync the host schedules for its own reasons carries no request
+          // number; another guest's own request already queued stays, to be
+          // answered: any state the host takes from now on is for this frame
+          // or a later one.
+          const deadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
           _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
-          _scheduledSyncRequests.push({
-            targetFrame: _frameNum,
-            targetSid: remoteSid,
-            deadlineAt: performance.now() + SYNC_COORD_TIMEOUT_MS,
-          });
+          const targets = [remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)].filter(
+            (sid, i, all) => all.indexOf(sid) === i && !_scheduledSyncRequests.some((r) => r.targetSid === sid),
+          );
+          for (const sid of targets)
+            _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });
           // That state will be for this frame or a later one, so the
           // guest's inputs from before this frame minus the delay are
           // settled by it already. (Only the host can say so here: a guest
           // may be taken back to an earlier frame and still need them.)
           _settleInputsBefore(peer.slot, _frameNum);
-          _syncLog(`peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum}`);
+          _syncLog(
+            `peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum} ` +
+              `guests=${targets.map((sid) => _peers[sid]?.slot ?? '?').join(',')}`,
+          );
+        } else if (recoveryStep === 'ask') {
+          // Another guest, which this page held as a phantom: it ran that
+          // guest's frames on its own predictions, and an input of it lost
+          // meanwhile is behind this page's window by now, never asked for
+          // again and never compared. Only the host's state brings it back.
+          // On the channel to the host, or over the socket when that channel
+          // is not open or the send fails, as an owed resync asked again is:
+          // the phantom flag is cleared, so nothing would ask later.
+          const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+          let asked = false;
+          if (hostDc?.readyState === 'open') {
+            const requestId = _beginResyncRequest();
+            try {
+              _sendResyncRequest(hostDc, requestId, 'sync-request-full');
+              asked = true;
+              _syncLog(`peer-recovery resync: slot=${peer.slot} heard again; asked the host for its state`);
+            } catch (e) {
+              _resyncRequestInFlight = false;
+              _syncLog(`peer-recovery resync send failed: ${e}`);
+            }
+          }
+          if (!asked && _requestSocketFullResync('peer-recovery')) {
+            _syncLog(`peer-recovery resync: slot=${peer.slot} heard again; asked the host over the socket`);
+          }
         }
       }
     }
