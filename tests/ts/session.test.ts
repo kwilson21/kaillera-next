@@ -195,6 +195,33 @@ test('a dropped socket under a running game keeps the match (socketDropKeepsMatc
   await session.stop();
 });
 
+test('a late joiner whose socket comes back before it has the state stays on the late join (lateJoinerSocketDropTest)', async () => {
+  const joined: string[] = [];
+  const session = createSession(
+    () => undefined,
+    5000,
+    (matchId) => joined.push(matchId),
+  );
+  session.send(joinMidGame);
+  // Dropped while the engine is starting: the rejoin's answer is the same match.
+  session.send({ type: 'socketDown' });
+  session.socketUp();
+  assert.equal(session.rejoined({ playing: true, matchId: 'm1' }), 'keep');
+  assert.equal(session.state(), 'lateJoinStarting');
+  assert.equal(session.flag('lateJoin'), true);
+  session.send(engineUp);
+  // Dropped again while asking for the state.
+  session.send({ type: 'socketDown' });
+  session.socketUp();
+  assert.equal(session.rejoined({ playing: true, matchId: 'm1' }), 'keep');
+  assert.equal(session.state(), 'lateJoinSyncing');
+  assert.deepEqual(joined, [], 'not in the match while still joining');
+  session.send({ type: 'lateJoinSynced' });
+  assert.equal(session.state(), 'running');
+  assert.deepEqual(joined, ['m1']);
+  await session.stop();
+});
+
 test('game-started for a page already joining the match does not skip the late join', async () => {
   const { session } = open();
   session.send(joinMidGame);

@@ -656,6 +656,33 @@ module room {
       .then(endGame)
       .expect(status == "lobby" and page.get("guest1") == Lobby and ownerSeesGame)
 
+  // A late joiner's socket drops and comes back (a new socket id) before it
+  // has the match state: once while its engine is starting, and once more
+  // while it is asking for the state. Seen once in a real-ROM run of
+  // tests/lifecycle-e2e.mjs late-join-cached on an older branch, where the
+  // joiner logged "mid-game rejoin succeeded" and then went to the lobby.
+  // Here, as on the server, the resume keeps the joiner on the late-join path
+  // of the same match, and it is still served. What a new socket id does to
+  // the engines' own state is below this model: the fault modes
+  // late-join-drop-before-request and late-join-drop-during-serve in
+  // tests/lifecycle-e2e.mjs take a real page through both windows.
+  run lateJoinerSocketDropTest =
+    init
+      .then(openRoom("host"))
+      .then(startGame)
+      .then(beginSync).then(startRunning)
+      .then(join("guest1", true))
+      .expect(page.get("guest1") == Starting(1))
+      .then(dropSocket("guest1"))
+      .then(resume("guest1", true))
+      .expect(page.get("guest1") == Starting(1) and members.contains("guest1") and status == "playing")
+      .then(startLateJoinEngine("guest1"))
+      .then(dropSocket("guest1"))
+      .then(resume("guest1", true))
+      .expect(page.get("guest1") == Syncing(1) and pagesAgreeWithServer and lateJoinersChaseTheCurrentMatch)
+      .then(serveLateJoin("guest1"))
+      .expect(page.get("guest1") == Running(1) and page.get("host") == Running(1))
+
   // A joiner with no ROM is asked for one before its engine starts.
   run lateJoinWithoutRomTest =
     init
