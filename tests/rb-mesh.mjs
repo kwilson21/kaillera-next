@@ -143,10 +143,11 @@
  *   ran on a prediction is still checked). DROP_LINK_AT frames into the
  *   battle (default 600) the guest in DROP_LINK_SLOT (default 1) stands
  *   still for 20 frames, so the host predicts it standing, then holds the
- *   stick right and closes its RTCPeerConnection to the host (pc.close() on
- *   its engine's peer entry for slot 0) in the same step: the host runs the
- *   frames past its last input from that guest on a neutral prediction,
- *   every bystander on the real inputs. The engine reconnects (the host,
+ *   stick right while no input packet of the walk goes to the host (its
+ *   channels to the host drop them on send) until the host has run three
+ *   tags of the walk, on a neutral prediction, and then closes its
+ *   RTCPeerConnection to the host (pc.close() on its engine's peer entry
+ *   for slot 0). Every bystander ran those tags on the real inputs. The engine reconnects (the host,
  *   the lower slot, offers), resets the peer on both sides and the guest
  *   resyncs from the host. Fails unless the connection was closed; the host
  *   kept its C slot of the guest at the reconnect reset
@@ -1173,17 +1174,46 @@ if (DROP_LINK) {
     neutralFrom,
     { timeout: 30000, polling: 20 },
   );
-  // One step: no input of the walk reaches the host on the old connection.
+  // The walk starts, and no input packet of it goes to the host on the old
+  // connection (the new one's channels are not wrapped): the host runs its
+  // tags on a neutral prediction, the bystanders on the real inputs.
+  dropLink.heldFrom = await guest.evaluate(() => {
+    const from = window.NetplayRollback.getHudCounters().currentFrame;
+    window.__mesh.against = 'right';
+    window.__meshWalkDropped = 0;
+    const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
+    for (const dc of new Set([entry?.dc, entry?.rbDc].filter(Boolean))) {
+      const send = dc.send;
+      dc.send = function (data) {
+        if (data instanceof ArrayBuffer && data.byteLength >= 4 && new Int32Array(data, 0, 1)[0] >= from) {
+          window.__meshWalkDropped++;
+          return;
+        }
+        return send.call(this, data);
+      };
+    }
+    return from;
+  });
+  // Until the host has run three tags of the walk (on its prediction).
+  dropLink.hostRanWalk = await host
+    .waitForFunction(
+      (from) => {
+        const c = window.NetplayRollback.getHudCounters();
+        return c.currentFrame - (c.delay ?? 0) >= from + 3;
+      },
+      dropLink.heldFrom,
+      { timeout: 20000, polling: 20 },
+    )
+    .then(() => true)
+    .catch(() => false);
   dropLink.closed = await guest.evaluate(() => {
     const frame = window.NetplayRollback.getHudCounters().currentFrame;
-    window.__mesh.against = 'right';
     const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
     if (!entry?.pc) return { closed: false, frame, why: 'no peer entry for slot 0' };
     const was = { pc: entry.pc.connectionState, dc: entry.dc?.readyState ?? null };
     entry.pc.close();
-    return { closed: true, frame, was };
+    return { closed: true, frame, was, walkPacketsDropped: window.__meshWalkDropped };
   });
-  dropLink.heldFrom = dropLink.closed.frame;
   console.log(`DROP_LINK: P${DROP_LINK_SLOT + 1} closed its connection to the host`, JSON.stringify(dropLink.closed));
   dropLink.resynced = await waitForLine(guest, dropLink.pageAt[DROP_LINK_SLOT], /sync #\d+ applied/, 90000);
   console.log(`DROP_LINK: P${DROP_LINK_SLOT + 1} resynced after the reconnect: ${dropLink.resynced}`);
@@ -1961,6 +1991,8 @@ const dropLinkReport = !DROP_LINK
         slot: DROP_LINK_SLOT,
         at: DROP_LINK_AT,
         closed: dropLink.closed,
+        walkFrom: dropLink.heldFrom,
+        hostRanWalk: dropLink.hostRanWalk,
         resynced: dropLink.resynced,
         window: dropLinkWindow,
         keptCore: kept >= 0 ? hostLines[kept] : null,
