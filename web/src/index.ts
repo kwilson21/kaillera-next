@@ -24,8 +24,15 @@ import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis }
 import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
 import { catchUpStep, tooOldStep } from './catch-up.ts';
-import { MASK_LEAD, changeInEffect, fileIndex, lateChange } from './controller-mask.ts';
-import { createMaskSchedule, rosterMask } from './controller-mask-schedule.ts';
+import {
+  MASK_LEAD,
+  changeInEffect,
+  fileIndex,
+  lateChange,
+  matchScheduled,
+  rosterScheduled,
+} from './controller-mask.ts';
+import { MASK_CAP, canScheduleMask, createMaskSchedule, rosterMask } from './controller-mask-schedule.ts';
 import { framesToSendAgain } from './input-resend.ts';
 import {
   collectLateJoinInputBridge,
@@ -326,7 +333,18 @@ export const KNCore = {
    * roster frame + MASK_LEAD on every page (controller-mask.ts, proved;
    * specs/controller_mask.qnt).
    */
-  controllerMask: { MASK_LEAD, changeInEffect, fileIndex, lateChange, createMaskSchedule, rosterMask },
+  controllerMask: {
+    MASK_LEAD,
+    MASK_CAP,
+    changeInEffect,
+    fileIndex,
+    lateChange,
+    matchScheduled,
+    rosterScheduled,
+    canScheduleMask,
+    createMaskSchedule,
+    rosterMask,
+  },
   framesToAskFor,
   framesToSendAgain,
   collectLateJoinInputBridge,

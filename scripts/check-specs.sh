@@ -848,7 +848,7 @@ $QUINT run "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --invar
 # ── Which controllers the game sees as plugged in, frame by frame ─────────
 MASK=specs/controller_mask.qnt
 $QUINT typecheck "$MASK"
-for variant in controller_mask_before controller_mask_fixed; do
+for variant in controller_mask_before controller_mask_unversioned controller_mask_fixed; do
   $QUINT test "$MASK" --main="$variant" --backend="$BACKEND"
 done
 # Before, each page set the mask when it heard the roster: pages ran the
@@ -857,6 +857,10 @@ done
 # ran earlier frames again with the new one (rollbackAcrossTheChangeTest).
 # Today the change takes effect at the roster frame + LEAD on every page, and
 # a guest that hears it late asks for the host's state (lateArrivalTest).
+# Scheduling whatever the other pages did put a match that spans a deploy on
+# two rules (controller_mask_unversioned; oldGuestTest, oldHostTest,
+# oldJoinerTest); today the host's rule is the match's, scheduled only while
+# every player page can.
 $QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

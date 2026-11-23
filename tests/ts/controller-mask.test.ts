@@ -162,3 +162,30 @@ test('the engine reaches the rules through KNCore', () => {
   assert.equal(typeof KNCore.controllerMask.createMaskSchedule, 'function');
   assert.equal(KNCore.controllerMask.rosterMask([0, 1]), 3);
 });
+
+test('a match is scheduled only while it was and every other player page can', () => {
+  const { matchScheduled } = KNCore.controllerMask;
+  assert.equal(matchScheduled(true, []), true);
+  assert.equal(matchScheduled(true, [true, true]), true);
+  assert.equal(matchScheduled(true, [true, false]), false);
+  // Once immediate, immediate for the rest of the match.
+  assert.equal(matchScheduled(false, [true, true]), false);
+});
+
+test('a guest schedules only a roster the host announced, while it has not fallen back', () => {
+  const { rosterScheduled } = KNCore.controllerMask;
+  assert.equal(rosterScheduled(true, 100, 100), true);
+  assert.equal(rosterScheduled(true, -1, 100), false);
+  assert.equal(rosterScheduled(true, 99, 100), false);
+  assert.equal(rosterScheduled(false, 100, 100), false);
+});
+
+test('only caps that name the capability count; none or malformed is an old page', () => {
+  const { canScheduleMask, MASK_CAP } = KNCore.controllerMask;
+  assert.equal(canScheduleMask({ [MASK_CAP]: true }), true);
+  assert.equal(canScheduleMask({ [MASK_CAP]: 1 }), false);
+  assert.equal(canScheduleMask({ trueRollback: true }), false);
+  assert.equal(canScheduleMask(undefined), false);
+  assert.equal(canScheduleMask(null), false);
+  assert.equal(canScheduleMask([true]), false);
+});

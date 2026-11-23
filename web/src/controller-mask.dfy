@@ -10,6 +10,16 @@ lemma lateChange_ensures(from: int, frontier: int, maskBefore: int, mask: int)
 {
 }
 
+function rosterScheduled(scheduling: bool, announcedFrame: int, rosterFrame: int): bool
+{
+  ((scheduling && (announcedFrame >= 0)) && (announcedFrame == rosterFrame))
+}
+
+lemma rosterScheduled_ensures(scheduling: bool, announcedFrame: int, rosterFrame: int)
+  ensures (rosterScheduled(scheduling, announcedFrame, rosterFrame) <==> ((scheduling && (announcedFrame >= 0)) && (announcedFrame == rosterFrame)))
+{
+}
+
 const MASK_LEAD: int := 60
 
 method changeInEffect(froms: seq<int>, frame: int) returns (res: int)
@@ -52,4 +62,25 @@ method fileIndex(froms: seq<int>, from: int) returns (res: int)
     i := (i + 1);
   }
   return |froms|;
+}
+
+method matchScheduled(wasScheduled: bool, capable: seq<bool>) returns (res: bool)
+  ensures (res <==> (wasScheduled && forall k: nat :: ((k < |capable|) ==> capable[k])))
+{
+  if !(wasScheduled) {
+    return false;
+  }
+  var i := 0;
+  while (i < |capable|)
+    invariant (0 <= i)
+    invariant (i <= |capable|)
+    invariant forall k: nat :: ((k < i) ==> capable[k])
+    decreases (|capable| - i)
+  {
+    if !(capable[i]) {
+      return false;
+    }
+    i := (i + 1);
+  }
+  return true;
 }

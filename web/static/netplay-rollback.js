@@ -563,6 +563,9 @@
       // Always true now. Tabs from before the Remix menu lockstep was
       // removed still refuse a peer that doesn't send it.
       remixMenuRollback: true,
+      // This page runs a roster's controller mask from an agreed frame
+      // (specs/controller_mask.qnt); a page without it applies it at once.
+      [window.KNCore.controllerMask.MASK_CAP]: true,
     };
   };
 
@@ -5812,6 +5815,21 @@
   // started with the match, stopped with the engine.
   const _maskSchedule = window.KNCore.controllerMask.createMaskSchedule();
   let _maskFrameMismatchLogged = false;
+  // One rule per match, the host's (specs/controller_mask.qnt, VERSIONED):
+  // scheduled only while every player page in it can; a page from before the
+  // scheduled rule applies each roster at once, and a match it is in runs on
+  // that rule for good. Host: the match is still scheduled. Guest: this page
+  // has not fallen back yet. True at a match's start.
+  let _maskMatchScheduled = true;
+  // Guest: the roster frame the host's last `roster-mask:` named (it comes
+  // just before the roster it announces), or -1.
+  let _maskAnnouncedFrame = -1;
+  // Host: the frame of the last roster it sent (the one its resend carries).
+  let _lastBroadcastRosterFrame = -1;
+  // Which player pages said they can run the scheduled rule, by peer key: in
+  // lockstep-ready's caps (starters) or request-late-join's (late joiners).
+  // Each admission writes its own entry again; a page with none is old.
+  const _maskCapablePeers = new Map();
   const MENU_START_BARRIER_SETTLE_MS = 500;
   let _menuStartBarrierReleased = false;
   let _menuStartLocalReady = false;
@@ -6214,6 +6232,23 @@
     _requestSocketFullResync('roster mask late');
   };
 
+  // This page leaves the scheduled rule for the rest of the match: the mask
+  // follows each roster at once, as on a page from before the rule.
+  const _fallBackToImmediateMasks = (why) => {
+    if (!_maskMatchScheduled) return;
+    _maskMatchScheduled = false;
+    _maskSchedule.stop();
+    _syncLog(`CONTROLLER-MASK-RULE immediate f=${_frameNum}: ${why}`);
+  };
+
+  // Host: the player in `slot` said it can run the scheduled rule. A
+  // synthetic peer (the demo's) is this page's own.
+  const _maskSlotCapable = (slot) => {
+    const [sid, peer] = _peerEntryForSlot(slot) || [];
+    if (peer?.synthetic === true) return true;
+    return !!sid && _maskCapablePeers.get(sid) === true;
+  };
+
   // File the host's roster of `rosterFrame` (broadcast here or heard from
   // the host). It takes effect at rosterFrame + MASK_LEAD on every page.
   const _fileRosterControllerMask = (rosterFrame, slots, reason) => {
@@ -6302,6 +6337,9 @@
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
     _maskSchedule.stop();
+    _maskMatchScheduled = true;
+    _maskAnnouncedFrame = -1;
+    _lastBroadcastRosterFrame = -1;
     _maskFrameMismatchLogged = false;
     _earlyMaskApplied = false;
     if (_earlyMaskPoller) {
@@ -7957,6 +7995,7 @@
     socket.emit('data-message', {
       type: 'request-late-join',
       requesterSid: socket.id,
+      caps: { [window.KNCore.controllerMask.MASK_CAP]: true },
       ...(delay ? { delay } : {}),
     });
   };
@@ -8046,6 +8085,10 @@
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
     if (_playerSlot !== 0) return;
+    {
+      const capSid = _peerKey(msg.requesterSid);
+      if (capSid) _maskCapablePeers.set(capSid, window.KNCore.controllerMask.canScheduleMask(msg.caps));
+    }
     if (_phase !== PHASE_RUNNING) {
       // Not running yet: there is no state to send, and this host will not
       // start until that player has loaded. Without an answer both sides
@@ -9873,8 +9916,9 @@
       // files the same input floor and the same controller-mask frame.
       if (_playerSlot === 0 && _activeRoster && !_isPeerPendingLateJoin(remoteSid, peer)) {
         const slots = [..._activeRoster].sort((a, b) => a - b);
-        const rosterFrame = _maskSchedule.lastRosterFrame() >= 0 ? _maskSchedule.lastRosterFrame() : _frameNum;
+        const rosterFrame = _lastBroadcastRosterFrame >= 0 ? _lastBroadcastRosterFrame : _frameNum;
         try {
+          if (_maskMatchScheduled && _maskSchedule.active()) ch.send(`roster-mask:${rosterFrame}`);
           ch.send(`roster:${rosterFrame}:${slots.join(',')}`);
         } catch (_) {}
       }
@@ -10051,11 +10095,25 @@
           }
           return;
         }
+        // The host schedules the controller mask of the roster that follows.
+        if (e.data.startsWith('roster-mask:')) {
+          if (!RB_WORKER_COPROC && (peer.slot !== 0 || peer.dc !== ch)) return;
+          _maskAnnouncedFrame = parseInt(e.data.slice('roster-mask:'.length), 10);
+          return;
+        }
         if (e.data.startsWith('roster:')) {
           if (!RB_WORKER_COPROC && (peer.slot !== 0 || peer.dc !== ch)) return;
           const parts = e.data.split(':');
           const rosterFrame = parseInt(parts[1], 10);
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
+          // The host's rule for this roster: scheduled only if announced so.
+          const maskScheduled = window.KNCore.controllerMask.rosterScheduled(
+            _maskMatchScheduled && _maskSchedule.active(),
+            _maskAnnouncedFrame,
+            rosterFrame,
+          );
+          _maskAnnouncedFrame = -1;
+          if (!maskScheduled) _fallBackToImmediateMasks(`the host's roster f=${rosterFrame} is not scheduled`);
           if (!_recordHostInputRoster(rosterFrame, slots)) return;
           const previousRoster = _activeRoster ? new Set(_activeRoster) : null;
           if (previousRoster) {
@@ -10462,6 +10520,7 @@
             } else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
               peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
+              _maskCapablePeers.set(remoteSid, window.KNCore.controllerMask.canScheduleMask(msg.caps));
               _lockstepReadyPeers[remoteSid] = true;
               _noteStartStep(peer.slot);
               checkAllLockstepReady();
@@ -12542,8 +12601,15 @@
     const slots = [...slotSet].sort((a, b) => a - b);
     // The host's frame, or the last roster's when a replay has the host below
     // it: a guest drops a roster older than the last one it filed.
-    const rosterFrame = Math.max(_frameNum, _maskSchedule.lastRosterFrame());
+    const rosterFrame = Math.max(_frameNum, _lastBroadcastRosterFrame);
+    _lastBroadcastRosterFrame = rosterFrame;
     _recordHostInputRoster(rosterFrame, slots);
+    // The match stays scheduled only while every player page in it can.
+    const maskScheduled = window.KNCore.controllerMask.matchScheduled(
+      _maskMatchScheduled && _maskSchedule.active(),
+      slots.filter((slot) => slot !== _playerSlot).map(_maskSlotCapable),
+    );
+    if (!maskScheduled) _fallBackToImmediateMasks(`roster f=${rosterFrame} has a page that cannot schedule`);
     for (const slot of slots) {
       if (slot !== _playerSlot && !_activeRoster?.has(slot) && _admissionInputFloor(slot) > 0) {
         _awaitFirstInputAfterReset[slot] = true;
@@ -12559,11 +12625,14 @@
       _syncLog(`C-ROLLBACK num_players updated to ${rb_numPlayers}`);
     }
     const msg = `roster:${rosterFrame}:${slots.join(',')}`;
-    _syncLog(`ROSTER broadcast: frame=${rosterFrame} slots=[${slots.join(',')}]`);
+    _syncLog(
+      `ROSTER broadcast: frame=${rosterFrame} slots=[${slots.join(',')}] mask=${maskScheduled ? 'scheduled' : 'immediate'}`,
+    );
     for (const [sid, p] of Object.entries(_peers)) {
       if (_isPeerPendingLateJoin(sid, p)) continue;
       if (p.dc?.readyState === 'open') {
         try {
+          if (maskScheduled) p.dc.send(`roster-mask:${rosterFrame}`);
           p.dc.send(msg);
         } catch (_) {}
       }
@@ -13232,13 +13301,15 @@
           .filter((slot) => Number.isInteger(slot) && slot >= 0 && slot < 4),
       );
       if (Number.isInteger(_playerSlot) && _playerSlot >= 0 && _playerSlot < 4) _activeRoster.add(_playerSlot);
+      _maskAnnouncedFrame = -1;
+      _maskMatchScheduled = true;
       if (_maskSchedule.adopt(msg.controllerMasks, msg.frame)) {
         _syncLog(`late-join: controller masks from the host: ${_maskSchedule.describe()}`);
       } else {
-        // An older host sends none: the mask follows this page's own view
-        // until the next roster, as before.
+        // The host sends none when the match runs on the immediate rule, and
+        // an older host never does: the mask follows each roster at once.
         _maskSchedule.stop();
-        _syncLog("late-join: no controller mask schedule from the host; this page's own view until a roster");
+        _fallBackToImmediateMasks('late-join state without a controller mask schedule');
       }
       _applyControllerPresentMask('late-join-state');
       _releaseMenuStartBarrierAfterLateJoin();
@@ -14796,6 +14867,9 @@
       // a peer that started first may have sent frames 0+.
       _activeRoster = null;
       _maskSchedule.stop();
+      _maskMatchScheduled = true;
+      _maskAnnouncedFrame = -1;
+      _lastBroadcastRosterFrame = -1;
       _clearLateJoinInputRoster();
       _pendingLateJoinPeerSids.clear();
       _pendingLateJoinPeerSlots.clear();
@@ -15193,7 +15267,7 @@
     // From here on frames take their mask from the schedule: the mask this
     // page starts with until the first roster's frame (a late joiner has the
     // host's already).
-    if (!_maskSchedule.active()) {
+    if (_maskMatchScheduled && !_maskSchedule.active()) {
       _maskSchedule.start(_controllerPresentMask(), _frameNum);
       _syncLog(`controller masks start: ${_maskSchedule.describe()}`);
     }
@@ -20536,6 +20610,9 @@
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
     _maskSchedule.stop();
+    _maskMatchScheduled = true;
+    _maskAnnouncedFrame = -1;
+    _lastBroadcastRosterFrame = -1;
     _menuStartBarrierReleased = false;
     _menuStartLocalReady = false;
     _menuStartLocalScene = 0;

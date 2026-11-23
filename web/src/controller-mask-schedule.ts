@@ -162,3 +162,13 @@ export const createMaskSchedule = (lead: number = MASK_LEAD): MaskSchedule => {
         .join(',')}]`,
   };
 };
+
+/**
+ * The capability a page sends in `lockstep-ready`'s and `request-late-join`'s
+ * caps when it can run the scheduled rule. A page that does not send it is
+ * from before the rule (specs/controller_mask.qnt, VERSIONED).
+ */
+export const MASK_CAP = 'scheduledControllerMask';
+
+/** The caps a page sent say it can run the scheduled rule; anything else (none, malformed) counts as old. */
+export const canScheduleMask = (caps: WirePayload): boolean => isRecord(caps) && caps[MASK_CAP] === true;

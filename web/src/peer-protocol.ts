@@ -55,6 +55,10 @@ const TEXT_GRAMMAR = {
     'peer-resumed': '',
     // roster:<frame>:<slot>,<slot>,...   (no slots: the part after the colon is empty)
     roster: `:${INT}:(?:\\d+(?:,\\d+)*)?`,
+    // roster-mask:<frame>  the host schedules the controller mask of the roster
+    // of that frame, sent just before it (specs/controller_mask.qnt). A page
+    // from before it drops it unread and applies the roster at once.
+    'roster-mask': `:${INT}`,
     // left-out:<slot>  the host left that player out of the start; it joins late (specs/start_group.qnt)
     'left-out': ':\\d+',
     // unreachable:<slot>  a guest cannot reach that player; the host decides who plays
@@ -221,7 +225,12 @@ const JSON_MESSAGES = {
     'save-state': SaveState,
     'late-join-state': LateJoinState,
     // delay: the joiner's delay from its RTT samples to the host, for a match at 0 its join moves to a match delay.
-    'request-late-join': Schema.Struct({ requesterSid: Schema.String, delay: Schema.optional(Schema.Number) }),
+    'request-late-join': Schema.Struct({
+      requesterSid: Schema.String,
+      delay: Schema.optional(Schema.Number),
+      // What the joiner can do; absent from an older page (controller-mask-schedule.ts, MASK_CAP).
+      caps: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+    }),
     'sync-request-full-socket': Schema.Struct({
       targetSid: Schema.String,
       requesterSid: Schema.String,

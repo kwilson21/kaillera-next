@@ -100,3 +100,46 @@ export function fileIndex(froms: number[], from: number): number {
 export function lateChange(from: number, frontier: number, maskBefore: number, mask: number): boolean {
   return from < frontier && maskBefore !== mask;
 }
+
+/**
+ * Whether the host schedules the next roster of its match: only while it has
+ * scheduled every roster so far and every player page in the match can
+ * (said so in `lockstep-ready`'s or `request-late-join`'s caps; a page that
+ * said nothing is from before the scheduled rule). A page on the immediate
+ * rule beside one on the scheduled rule would run up to MASK_LEAD frames with
+ * other present bits, so once a page that cannot is in, the match stays
+ * immediate (switching back would need a frame every page agrees on, and
+ * the old page cannot agree). specs/controller_mask.qnt, oneRulePerMatch.
+ *
+ * @param wasScheduled  the match has been scheduled so far (true at its start)
+ * @param capable       for each other player page in the match: it can schedule
+ */
+//@ ensures \result <==> wasScheduled && forall(k: nat, k < capable.length ==> capable[k])
+export function matchScheduled(wasScheduled: boolean, capable: boolean[]): boolean {
+  if (!wasScheduled) return false;
+  let i = 0;
+  while (i < capable.length) {
+    //@ invariant 0 <= i && i <= capable.length
+    //@ invariant forall(k: nat, k < i ==> capable[k])
+    //@ decreases capable.length - i
+    if (!capable[i]) return false;
+    i = i + 1;
+  }
+  return true;
+}
+
+/**
+ * Whether a guest schedules a roster from the host: only one the host
+ * announced as scheduled (`roster-mask:<frame>` just before it on the same
+ * channel, naming its frame), and only while the guest has not fallen back:
+ * a host from before the scheduled rule never announces one, and one that
+ * has fallen back to the immediate rule does not again.
+ *
+ * @param scheduling     this page has not fallen back to the immediate rule
+ * @param announcedFrame the roster frame the host's last announcement named, or -1
+ * @param rosterFrame    the frame of the roster heard
+ */
+//@ ensures \result <==> scheduling && announcedFrame >= 0 && announcedFrame === rosterFrame
+export function rosterScheduled(scheduling: boolean, announcedFrame: number, rosterFrame: number): boolean {
+  return scheduling && announcedFrame >= 0 && announcedFrame === rosterFrame;
+}
