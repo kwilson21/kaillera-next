@@ -29,6 +29,9 @@ def _env(monkeypatch):
     monkeypatch.setenv("FLAGGED_STALE_DAYS", "180")
     monkeypatch.delenv("D1_HOT_DAYS", raising=False)
     monkeypatch.delenv("PARQUET_DIR", raising=False)
+    # The store here is a local folder, which isn't durable: the archive runs
+    # into it only because tests opt in (log_archive.archive_enabled).
+    monkeypatch.setenv("LOG_ARCHIVE_LOCAL", "1")
 
 
 MATCH = "11111111-1111-4111-8111-111111111111"
@@ -38,6 +41,7 @@ class CountingStore:
     """A LocalBlobStore that records its puts and can fail a chosen one."""
 
     name = "counting"
+    durable = False  # a local folder, as without R2
 
     def __init__(self, inner, fail_on: str | None = None):
         self.inner = inner
@@ -871,6 +875,50 @@ def test_a_rotation_after_the_archive_keeps_the_uploaded_parquet_key(tmp_path):
         assert await db.query("SELECT parquet_path, parquet_bytes FROM match_metrics", ()) == before
 
     with_db(tmp_path, body)
+
+
+def test_without_a_durable_store_nothing_is_archived_or_evicted(tmp_path, monkeypatch, caplog):
+    """The model's localStoreTest: without R2 the blob store is a folder that a
+    deploy wipes. An archive there would be evicted from D1 and lost at the
+    next deploy, so the archive stays off and the log stays in D1, and the
+    log says so once."""
+    import logging
+
+    monkeypatch.delenv("LOG_ARCHIVE_LOCAL")
+
+    async def body(db, store):
+        from src import log_archive
+
+        monkeypatch.setattr(log_archive, "_warned_not_durable", False)
+        await _match(db, ended_minutes_ago=45)
+        before = {slot: await _read(db, slot) for slot in (0, 1)}
+        with caplog.at_level(logging.WARNING, logger="src.log_archive"):
+            assert log_archive.archive_enabled() is False
+            assert await log_archive.sweep() == (0, 0)
+            assert await log_archive.archive_match(MATCH) is False
+        assert (await _retention_row(db))["archived_at"] is None
+        # Even an archived match isn't evicted into it.
+        await db.execute_write(
+            "UPDATE match_retention SET archived_at = datetime('now', '-3 days'), archived_max_chunk_id = 99,"
+            " archive_token = 'x' WHERE match_id = ?",
+            (MATCH,),
+        )
+        assert await log_archive.evict_match(MATCH) is False
+        assert await _chunk_ids(db)
+        assert (await _retention_row(db))["evicted_at"] is None
+        assert store.puts == []
+        assert {slot: await _read(db, slot) for slot in (0, 1)} == before
+        warnings = [r for r in caplog.records if "Log archive is off" in r.getMessage()]
+        assert len(warnings) == 1
+
+    with_db(tmp_path, body)
+
+
+def test_only_r2_is_a_durable_store(tmp_path):
+    from src.blobstore import LocalBlobStore, R2BlobStore
+
+    assert LocalBlobStore(tmp_path).durable is False
+    assert R2BlobStore("acct", "key", "secret", "bucket", client=object()).durable is True
 
 
 def test_hot_days_is_never_zero(monkeypatch):

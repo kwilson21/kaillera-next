@@ -41,6 +41,10 @@
 //   place.
 // - retention deletes the match's R2 prefix, then its D1 rows; the archive
 //   objects go with the prefix.
+// - the blob store is durable (R2) or not (a local folder, which a deploy
+//   wipes). The archive and the eviction run only into a durable one
+//   (log_archive.archive_enabled; LOG_ARCHIVE_LOCAL=1 lets tests and local
+//   dev use the folder), so a non-durable store leaves the log in D1.
 //
 // Not modelled: more than one slot (each slot's objects and chunks follow
 // the same steps), the input audit and context (archived and read the same
@@ -67,6 +71,9 @@
 //   delete that runs again after a chunk reused an id removes it.
 // KEY_BY_THROUGH: an attempt's keys carry only the chunk id it archived
 //   through, so two attempts at once share them.
+// ANY_STORE: archives and evicts into whatever blob store it has. Without R2
+//   configured that is a folder on the instance's disk, which a deploy
+//   wipes (`wipe`): the chunks are gone from D1 and the archive with it.
 module log_archive {
   const RECORD_FIRST: bool
   const EVICT_ALL: bool
@@ -75,6 +82,7 @@ module log_archive {
   const READ_ALL_TAIL: bool
   const DELETE_BY_ID_ONLY: bool
   const KEY_BY_THROUGH: bool
+  const ANY_STORE: bool
 
   pure val MAX_CHUNKS = 2
   pure val SERIALS = 0.to(MAX_CHUNKS - 1)
@@ -120,6 +128,8 @@ module log_archive {
     gone: bool,          // the delete finished: match_retention is deleted
     // An archive stopped after its upload landed past a delete (Known gap).
     orphaned: bool,
+    // The blob store survives a deploy (R2), or not (a local folder).
+    durable: bool,
   }
 
   var s: State
@@ -151,13 +161,18 @@ module log_archive {
 
   pure def fromArchive(st: State): Set[int] = attempt(st, st.archivedKey)
 
-  action init = s' = {
+  action initWith(durable: bool): bool = s' = {
     d1: Set(), nextChunk: 0, idOf: SERIALS.mapBy(_ => 0), createdOf: SERIALS.mapBy(_ => 0),
     written: Set(), clock: 0, live: true, windowOpen: true, hotOver: false,
     archivers: ARCHIVERS.mapBy(_ => IDLE), attempts: 0, objects: KEYS.mapBy(_ => Set()),
     archivedThrough: NONE, archivedKey: NONE, archivedAt: 0, recorded: Set(), evicted: false,
-    deleting: false, gone: false, orphaned: false,
+    deleting: false, gone: false, orphaned: false, durable: durable,
   }
+
+  action init = { nondet durable = Set(true, false).oneOf() initWith(durable) }
+
+  // The archive and the eviction run only into a durable store.
+  def storeOk: bool = s.durable or ANY_STORE
 
   // A flush lands a chunk: the socket path while the room's live match is
   // this one, the HTTP path while the window is open. SQLite's id: one past
@@ -193,7 +208,7 @@ module log_archive {
   // archived, and no delete has started. It notes the newest chunk id, and
   // its keys carry a token of its own (or, rejected, that id alone).
   action archiveBegin(a: int): bool = all {
-    not(s.windowOpen), s.archivedThrough == NONE, not(s.archivers.get(a).running), not(s.deleting), not(s.gone),
+    storeOk, not(s.windowOpen), s.archivedThrough == NONE, not(s.archivers.get(a).running), not(s.deleting), not(s.gone),
     s.attempts < MAX_ATTEMPTS,
     val through = newestId(s, s.d1)
     val key = if (KEY_BY_THROUGH) through else MAX_CHUNKS + 1 + s.attempts
@@ -261,14 +276,14 @@ module log_archive {
   // The eviction batch: evicted_at, once, and its DELETE, which acts only
   // once evicted_at is set — or not, when the batch stops part-way.
   action evict(deleteToo: bool): bool = all {
-    s.archivedThrough != NONE, s.hotOver, not(s.evicted), not(s.deleting), not(s.gone),
+    storeOk, s.archivedThrough != NONE, s.hotOver, not(s.evicted), not(s.deleting), not(s.gone),
     s' = { ...s, evicted: true, d1: if (deleteToo) afterDelete(s) else s.d1 },
   }
 
   // The DELETE again later: the sweep finishing a partial batch, or a
   // second server's eviction (and then it may find nothing).
   action evictDelete = all {
-    s.evicted, not(s.deleting), not(s.gone), s' = { ...s, d1: afterDelete(s) },
+    storeOk, s.evicted, not(s.deleting), not(s.gone), s' = { ...s, d1: afterDelete(s) },
   }
 
   // Nothing happens: a scenario's step where a variant has nothing to do.
@@ -279,6 +294,9 @@ module log_archive {
   action tombstone = all {
     not(s.live), not(s.windowOpen), not(s.deleting), not(s.gone), s' = { ...s, deleting: true },
   }
+
+  // A deploy wipes a store that isn't durable.
+  action wipe = all { not(s.durable), s' = { ...s, objects: KEYS.mapBy(_ => Set()) } }
 
   action finishDelete = all {
     s.deleting, not(s.gone), s' = { ...s, objects: KEYS.mapBy(_ => Set()), d1: Set(), gone: true },
@@ -292,7 +310,7 @@ module log_archive {
     any {
       flush, matchEnds, windowCloses, hotPasses,
       archiveBegin(a), archiveUpload(a, ok), archiveFinish(a, quiet), archiveCrash(a),
-      evict(deleteToo), evictDelete, tombstone, finishDelete,
+      evict(deleteToo), evictDelete, tombstone, finishDelete, wipe,
     }
   }
 
@@ -336,7 +354,7 @@ module log_archive {
   // Two chunks, the match ends, its window closes: archived, then evicted.
   // A reader gets both from the archive.
   run archiveThenEvictTest =
-    init.then(flush).then(flush).then(matchEnds).then(windowCloses)
+    initWith(true).then(flush).then(flush).then(matchEnds).then(windowCloses)
       .then(archived)
       .expect(s.archivedThrough == 2 and fromArchive(s) == Set(0, 1) and readable == Set(0, 1))
       .then(hotPasses).then(evict(true))
@@ -345,7 +363,7 @@ module log_archive {
   // The window closes while the room is still on the match: archived, then
   // a chunk lands. Eviction leaves it in D1, and a reader gets it there.
   run lateChunkTest =
-    init.then(flush).then(windowCloses).then(archived)
+    initWith(true).then(flush).then(windowCloses).then(archived)
       .then(flush).then(hotPasses).then(evict(true))
       .expect(s.written == Set(0, 1))
       .expect(s.d1 == (if (EVICT_ALL) Set() else Set(1)))
@@ -354,7 +372,7 @@ module log_archive {
   // A chunk lands after the eviction, taking the id of the chunk it deleted:
   // a reader gets the archive, then it, by its created_at.
   run chunkAfterEvictionTest =
-    init.then(flush).then(windowCloses).then(archived)
+    initWith(true).then(flush).then(windowCloses).then(archived)
       .then(hotPasses).then(evict(true)).then(flush)
       .expect(s.d1 == Set(1) and s.idOf.get(1) == s.idOf.get(0))
       .expect(logAlwaysReadable == not(ARCHIVE_ONLY))
@@ -363,7 +381,7 @@ module log_archive {
   // D1. A reader takes it once, from the archive; reading every chunk left
   // in D1 takes it twice. The sweep then finishes the DELETE.
   run partialEvictionTest =
-    init.then(flush).then(windowCloses).then(archived)
+    initWith(true).then(flush).then(windowCloses).then(archived)
       .then(hotPasses).then(evict(false))
       .expect(s.evicted and s.d1 == Set(0))
       .expect(logAlwaysReadable == not(READ_ALL_TAIL))
@@ -374,7 +392,7 @@ module log_archive {
   // server) after a chunk reused the archived id: it stays. By id alone, the
   // second delete takes it.
   run deleteAgainAfterReuseTest =
-    init.then(flush).then(windowCloses).then(archived)
+    initWith(true).then(flush).then(windowCloses).then(archived)
       .then(hotPasses).then(evict(true)).then(flush)
       .then(evictDelete)
       .expect(logAlwaysReadable == not(DELETE_BY_ID_ONLY or EVICT_ALL or ARCHIVE_ONLY))
@@ -383,7 +401,7 @@ module log_archive {
   // is recorded and nothing is left in R2; the next archive takes the match
   // as it is then.
   run refusedRecordTest =
-    init.then(flush).then(matchEnds).then(windowCloses)
+    initWith(true).then(flush).then(matchEnds).then(windowCloses)
       .then(archiveBegin(0)).then(archiveUpload(0, true)).then(archiveFinish(0, false))
       .expect(s.archivedThrough == (if (RECORD_FIRST) 1 else NONE))
       .expect(s.d1 == Set(0) and allObjects(s) == Set())
@@ -391,7 +409,7 @@ module log_archive {
   // An upload fails: the match stays un-archived and in D1. Recorded first,
   // the record names an archive that holds nothing.
   run failedUploadTest =
-    init.then(flush).then(matchEnds).then(windowCloses)
+    initWith(true).then(flush).then(matchEnds).then(windowCloses)
       .then(archiveBegin(0)).then(archiveUpload(0, false)).then(archiveFinish(0, true))
       .expect(s.archivedThrough == (if (RECORD_FIRST) 1 else NONE))
       .expect(archivedOnlyWhenComplete == not(RECORD_FIRST))
@@ -400,7 +418,7 @@ module log_archive {
   // The archive stops after its upload, before the record: its objects stay,
   // unread. The next sweep archives the match again, under keys of its own.
   run crashAfterUploadTest =
-    init.then(flush).then(matchEnds).then(windowCloses)
+    initWith(true).then(flush).then(matchEnds).then(windowCloses)
       .then(archiveBegin(0)).then(archiveUpload(0, true)).then(archiveCrash(0))
       .expect(s.archivedThrough == (if (RECORD_FIRST) 1 else NONE) and allObjects(s) == Set(0))
       .then(if (RECORD_FIRST) stutter else archived)
@@ -410,7 +428,7 @@ module log_archive {
   // after the R2 prefix delete. The archive finds the match gone and deletes
   // what it uploaded.
   run deleteDuringArchiveTest =
-    init.then(flush).then(matchEnds).then(windowCloses)
+    initWith(true).then(flush).then(matchEnds).then(windowCloses)
       .then(archiveBegin(0)).then(tombstone).then(finishDelete)
       .then(archiveUpload(0, true)).then(archiveFinish(0, true))
       .expect(s.archivedThrough == (if (RECORD_FIRST) 1 else NONE))
@@ -420,7 +438,7 @@ module log_archive {
   // The Known gap: the same, but the archive stops before it can take the
   // upload back.
   run orphanedByACrashTest =
-    init.then(flush).then(matchEnds).then(windowCloses)
+    initWith(true).then(flush).then(matchEnds).then(windowCloses)
       .then(archiveBegin(0)).then(tombstone).then(finishDelete)
       .then(archiveUpload(0, true)).then(archiveCrash(0))
       .expect(s.orphaned and allObjects(s) == Set(0))
@@ -430,7 +448,7 @@ module log_archive {
   // their own the recorded archive is intact; keyed by the chunk id alone
   // they share keys, and the refused one takes the recorded one's objects.
   run twoArchiversAtOnceTest =
-    init.then(flush).then(matchEnds).then(windowCloses)
+    initWith(true).then(flush).then(matchEnds).then(windowCloses)
       .then(archiveBegin(0))
       .then(if (RECORD_FIRST) stutter else archiveBegin(1))
       .then(archiveUpload(0, true))
@@ -439,52 +457,67 @@ module log_archive {
       .then(if (RECORD_FIRST) stutter else archiveFinish(1, true))
       .expect(s.archivedThrough == 1)
       .expect(archivedOnlyWhenComplete == not(KEY_BY_THROUGH))
+
+  // No R2: the store is a folder a deploy wipes. Nothing is archived or
+  // evicted, and the log stays in D1. Archived and evicted all the same, the
+  // next deploy takes the only copy.
+  run localStoreTest =
+    initWith(false).then(flush).then(windowCloses)
+      .then(if (ANY_STORE and not(RECORD_FIRST)) archived else stutter)
+      .then(if (ANY_STORE and not(RECORD_FIRST)) hotPasses.then(evict(true)).then(wipe) else wipe)
+      .expect(logAlwaysReadable == not(ANY_STORE and not(RECORD_FIRST)))
 }
 
 // Rejected: archived_at recorded before the uploads are confirmed.
 module log_archive_record_first {
   import log_archive(RECORD_FIRST = true, EVICT_ALL = false, ARCHIVE_ONLY = false, IGNORE_TOMBSTONE = false,
-    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false).*
+    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false, ANY_STORE = false).*
 }
 
 // Rejected: eviction deletes every chunk of the match.
 module log_archive_evict_all {
   import log_archive(RECORD_FIRST = false, EVICT_ALL = true, ARCHIVE_ONLY = false, IGNORE_TOMBSTONE = false,
-    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false).*
+    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false, ANY_STORE = false).*
 }
 
 // Rejected: once evicted, readers read the archive alone.
 module log_archive_archive_only {
   import log_archive(RECORD_FIRST = false, EVICT_ALL = false, ARCHIVE_ONLY = true, IGNORE_TOMBSTONE = false,
-    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false).*
+    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false, ANY_STORE = false).*
 }
 
 // Rejected: an archive that finds a delete started keeps what it uploaded.
 module log_archive_ignore_tombstone {
   import log_archive(RECORD_FIRST = false, EVICT_ALL = false, ARCHIVE_ONLY = false, IGNORE_TOMBSTONE = true,
-    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false).*
+    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false, ANY_STORE = false).*
 }
 
 // Rejected: once evicted, readers read every chunk left in D1 after the archive.
 module log_archive_read_all_tail {
   import log_archive(RECORD_FIRST = false, EVICT_ALL = false, ARCHIVE_ONLY = false, IGNORE_TOMBSTONE = false,
-    READ_ALL_TAIL = true, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false).*
+    READ_ALL_TAIL = true, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false, ANY_STORE = false).*
 }
 
 // Rejected: the eviction's DELETE picks the archived chunks by id alone.
 module log_archive_delete_by_id_only {
   import log_archive(RECORD_FIRST = false, EVICT_ALL = false, ARCHIVE_ONLY = false, IGNORE_TOMBSTONE = false,
-    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = true, KEY_BY_THROUGH = false).*
+    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = true, KEY_BY_THROUGH = false, ANY_STORE = false).*
 }
 
 // Rejected: an attempt's keys carry only the chunk id it archived through.
 module log_archive_key_by_through {
   import log_archive(RECORD_FIRST = false, EVICT_ALL = false, ARCHIVE_ONLY = false, IGNORE_TOMBSTONE = false,
-    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = true).*
+    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = true, ANY_STORE = false).*
+}
+
+// Rejected: archives and evicts into whatever store it has, durable or not.
+module log_archive_any_store {
+  import log_archive(RECORD_FIRST = false, EVICT_ALL = false, ARCHIVE_ONLY = false, IGNORE_TOMBSTONE = false,
+    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false, ANY_STORE = true).*
 }
 
 // The change.
 module log_archive_current {
   import log_archive(RECORD_FIRST = false, EVICT_ALL = false, ARCHIVE_ONLY = false, IGNORE_TOMBSTONE = false,
-    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false).*
+    READ_ALL_TAIL = false, DELETE_BY_ID_ONLY = false, KEY_BY_THROUGH = false, ANY_STORE = false).*
 }

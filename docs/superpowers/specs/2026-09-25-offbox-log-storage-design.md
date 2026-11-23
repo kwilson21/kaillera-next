@@ -176,6 +176,13 @@ leaving mid-match already sets `ended_by`, and final flushes can land later.
 
 ### Archive and eviction
 
+**Only into a durable store.** The archive and the eviction run only when
+the blob store survives a deploy (R2; `BlobStore.durable`). Without R2 the
+store is a folder on the instance's disk, which a deploy wipes: an archive
+there would be evicted from D1 and then lost, so the archive stays off and
+the logs stay in D1 (`log_archive.archive_enabled`, logged once;
+`LOG_ARCHIVE_LOCAL=1` lets tests and local development use the folder).
+
 **When a match is archived.** Only once it can no longer receive uploads:
 its ingest window (§5) has closed, i.e. 30 min after `ended_at`, or 4 h after
 `created_at` when no end was ever recorded (crash, restart). Archiving then:

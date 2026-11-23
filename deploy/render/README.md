@@ -111,9 +111,13 @@ database, which Render also wipes. With them, screenshot bytes go to R2 under
 ## Log retention
 
 The server sweeps old logs a minute after it starts and every 6 hours
-(`src/retention.py`). The same sweep archives a match's logs to R2 once it
-can no longer receive uploads and deletes its chunks from D1 `D1_HOT_DAYS`
-later (`src/log_archive.py`); the admin pages read the archive from then on.
+(`src/retention.py`). With R2 configured, the same sweep archives a match's
+logs to R2 once it can no longer receive uploads and deletes its chunks from
+D1 `D1_HOT_DAYS` later (`src/log_archive.py`); the admin pages read the
+archive from then on. Without R2 the archive stays off and logs stay in D1:
+the local blob folder is wiped on every deploy, so it can't hold the only
+copy (the startup log says `blobs: r2` or `blobs: local`, and the sweep logs
+once when the archive is off). Don't set `LOG_ARCHIVE_LOCAL` here.
 Defaults work; override in Render → Environment:
 
 | Variable | Default | Meaning |

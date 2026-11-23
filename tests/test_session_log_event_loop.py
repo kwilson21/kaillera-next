@@ -269,9 +269,10 @@ def test_metrics_are_stored_even_when_the_classifier_raises(app_db):
     assert run_async(scenario()) == [{"entry_count": 2}]
 
 
-def test_health_answers_while_a_long_log_is_archived_and_its_evicted_copy_exported(app_db):
+def test_health_answers_while_a_long_log_is_archived_and_its_evicted_copy_exported(app_db, monkeypatch):
     """The archive gzips page by page in worker threads, and an evicted log is
     read back a page at a time (src/log_archive.py): neither holds the loop."""
+    monkeypatch.setenv("LOG_ARCHIVE_LOCAL", "1")  # the store is a local folder
 
     async def scenario():
         from src import log_archive

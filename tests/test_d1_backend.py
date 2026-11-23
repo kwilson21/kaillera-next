@@ -157,7 +157,7 @@ def test_baseline_migration_applies_through_d1():
 
 
 
-def test_archive_and_eviction_run_through_d1(tmp_path):
+def test_archive_and_eviction_run_through_d1(tmp_path, monkeypatch):
     """Every statement the archive and the eviction build, run on D1's HTTP
     API: the flush, the record, the batch, and the readers afterwards.
 
@@ -168,6 +168,7 @@ def test_archive_and_eviction_run_through_d1(tmp_path):
     """
     from src.blobstore import LocalBlobStore
 
+    monkeypatch.setenv("LOG_ARCHIVE_LOCAL", "1")  # the store is a local folder
     match_id = "22222222-2222-4222-8222-222222222222"
     fake = FakeD1()
 

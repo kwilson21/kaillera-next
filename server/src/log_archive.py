@@ -35,6 +35,9 @@ what the steps below are for:
 
 Retention deletes the whole `matches/<id>/` prefix before the match's rows
 (src/retention.py), so the archive objects go with it.
+
+All of it runs only into a durable blob store, R2 (`archive_enabled`): a
+local folder is wiped on deploy, so without R2 the logs stay in D1.
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ import gzip
 import io
 import json
 import logging
+import os
 import secrets
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -67,6 +71,30 @@ _EVICT_LIMIT = 50
 # parsed in pieces off the event loop (as iter_chunk_entries does in D1).
 _PAGE_ENTRIES = 2000
 _GZIP_LEVEL = 6
+
+
+_warned_not_durable = False
+
+
+def archive_enabled() -> bool:
+    """Whether the archive and the eviction may run: only into a durable store.
+
+    Without R2 the blob store is a folder on the instance's disk, which a
+    deploy wipes. An archive there would be evicted from D1 two days later
+    and gone at the next deploy, so nothing is archived and the log stays in
+    D1 (specs/log_archive.qnt, log_archive_any_store). `LOG_ARCHIVE_LOCAL=1`
+    lets tests and local development use the folder; production never sets it.
+    """
+    global _warned_not_durable
+    if db.blob_store_durable() or os.environ.get("LOG_ARCHIVE_LOCAL") == "1":
+        return True
+    if not _warned_not_durable:
+        _warned_not_durable = True
+        log.warning(
+            "Log archive is off: the blob store is not durable (no R2 configured), so session logs stay in the"
+            " database. Set the R2 variables to archive them, or LOG_ARCHIVE_LOCAL=1 for local development."
+        )
+    return False
 
 
 def hot_days() -> int:
@@ -225,6 +253,8 @@ async def archive_match(match_id: str) -> bool:
     """
     from src import match_rotation
 
+    if not archive_enabled():
+        return False
     rows = await db.fetch(
         select(MatchRetention.match_id).where(
             MatchRetention.match_id == match_id,
@@ -329,6 +359,8 @@ async def evict_match(match_id: str) -> bool:
     and running it again (the next sweep, or a second server's) finishes it
     without touching anything written since (specs/log_archive.qnt).
     """
+    if not archive_enabled():
+        return False
     rows = await db.fetch(
         select(
             MatchRetention.archived_max_chunk_id, MatchRetention.archived_updated_at, MatchRetention.archived_at
@@ -461,8 +493,11 @@ async def sweep() -> tuple[int, int]:
     Called from the retention sweep (src/retention.py), which runs an hour
     after boot and every 6 hours after that. Every step is idempotent and
     depends only on timestamps, so a skipped or interrupted sweep is
-    finished by the next one.
+    finished by the next one. Off unless the blob store is durable
+    (archive_enabled).
     """
+    if not archive_enabled():
+        return 0, 0
     try:
         registered = await register_old_matches()
         if registered:

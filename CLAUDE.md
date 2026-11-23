@@ -441,7 +441,10 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   session logs are kept before the retention sweep deletes them
 - `D1_HOT_DAYS` (default 2): how long an archived match's log chunks stay in
   the database before the sweep deletes them; its logs are read from the blob
-  store after that (`log_archive.py`)
+  store after that (`log_archive.py`). The archive runs only into R2: a local
+  blob folder is wiped on deploy, so without R2 logs stay in the database
+- `LOG_ARCHIVE_LOCAL` (`=1`, tests and local dev only): let the log archive use
+  the local blob folder; never set in production
 - `FLAGGED_STALE_DAYS` (default 180): how long an unresolved flagged match's
   logs are kept before the retention sweep deletes them
 - `DEBUG_MODE`: enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset

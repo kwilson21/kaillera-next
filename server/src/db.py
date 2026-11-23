@@ -1252,6 +1252,11 @@ async def delete_blobs(keys: list[str]) -> None:
     await _blob_store().delete(keys)
 
 
+def blob_store_durable() -> bool:
+    """Whether the blob store survives a deploy (R2), or is a folder that doesn't."""
+    return bool(getattr(_blob_store(), "durable", False))
+
+
 async def put_blob(key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
     """Store one blob (src/log_archive.py's session-log objects)."""
     await _blob_store().put(key, data, content_type)

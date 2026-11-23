@@ -884,7 +884,7 @@ ARCHIVE=specs/log_archive.qnt
 $QUINT typecheck "$ARCHIVE"
 for variant in log_archive_record_first log_archive_evict_all log_archive_archive_only \
   log_archive_ignore_tombstone log_archive_read_all_tail log_archive_delete_by_id_only \
-  log_archive_key_by_through log_archive_current; do
+  log_archive_key_by_through log_archive_any_store log_archive_current; do
   $QUINT test "$ARCHIVE" --main="$variant" --backend="$BACKEND"
 done
 # A match's log is always readable, from exactly one place: D1 until it is
@@ -894,7 +894,9 @@ done
 # lateChunkTest), by a reader of every chunk left in D1 after an eviction
 # that stopped part-way (log_archive_read_all_tail; partialEvictionTest), and
 # by a DELETE by id alone run again after a chunk reused an archived id
-# (log_archive_delete_by_id_only; deleteAgainAfterReuseTest). The archive is
+# (log_archive_delete_by_id_only; deleteAgainAfterReuseTest), and by an
+# archive and eviction into a store a deploy wipes (log_archive_any_store;
+# localStoreTest). The archive is
 # recorded only once complete and nothing takes it back after
 # (archivedOnlyWhenComplete): VIOLATED by recording it before the uploads are
 # confirmed (log_archive_record_first; failedUploadTest) and by two archivers

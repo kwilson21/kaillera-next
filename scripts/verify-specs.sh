@@ -658,6 +658,9 @@ log_archive() {
   # A DELETE by id alone, run again after a chunk reused an archived id,
   # takes it (9 steps; deleteAgainAfterReuseTest).
   expect_violation "$ARCHIVE" log_archive_delete_by_id_only logAlwaysReadable 9
+  # Archiving and evicting into a store a deploy wipes (a local folder, no
+  # R2) loses the log at the next deploy (8 steps; localStoreTest).
+  expect_violation "$ARCHIVE" log_archive_any_store logAlwaysReadable 8
 }
 
 SPEC_GROUPS=(
