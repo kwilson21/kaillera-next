@@ -312,7 +312,8 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     pending = src[src.index("const _markPendingLateJoinPeer = ") :]
     pending = pending[: pending.index("\n  };\n")]
     assert "_clearSlotInputState(slot);" in pending
-    assert src.count("_resetInputMaps();") == 3
+    # A new match and stop() (the old path's fast-forward, the third, is gone).
+    assert src.count("_resetInputMaps();") == 2
     clear = _slot_clear(src)
     assert "    _inputOorLog,\n" in clear
     assert "    _resendLog,\n" in clear
@@ -347,8 +348,7 @@ def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
 
 def test_the_per_slot_only_maps_are_reset_where_their_timeline_starts_over():
     # Not in _slotInputMaps: a new match (startLockstep, frames from 0) and
-    # stop() reset them; a fast-forward keeps them, since it moves only this
-    # page's frame.
+    # stop() reset them.
     src = _src()
     start = src[src.index("const startLockstep = ") :]
     start = start[: start.index("_peerLastAdvanceTime = {};")]
@@ -367,11 +367,8 @@ def test_the_per_slot_only_maps_are_reset_where_their_timeline_starts_over():
         "_lateJoinSeededInputFrames",
     ):
         assert f"{name} = {{}};" in stop
-    ff = src[
-        src.index("_syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}`);") :
-    ]
-    ff = ff[: ff.index("_resetInputMaps();") + 20]
-    assert "_lastRemoteFramePerSlot = {};" not in ff
+    # The old path's fast-forward on a tab's return is gone with that path.
+    assert "fast-forward: ${_frameNum}" not in src
 
 
 def test_recovery_transfers_are_bounded_and_only_the_delivered_state_is_acknowledged():
