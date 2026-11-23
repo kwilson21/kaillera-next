@@ -71,15 +71,42 @@
 // frame, or neutral); a page runs again from a frame whose input it held
 // differently when the real one arrives (a rollback, of any depth), and
 // rollbacks of up to W frames started by other players' inputs; pacing of
-// AHEAD frames between the pages. Not modelled: a host mid-replay at the
-// cut (its replay then runs the frames from R with the cut, as the frames
-// still ahead of it), three or more pages (each guest is this guest), the
-// C engine's limit on a rollback's depth (a deeper misprediction is a
-// failed rollback, as it is in every other case), the deadline on the host's
-// state (specs/resync_reask.qnt).
+// AHEAD frames between the pages; with HOST_MID_REPLAY, a page in the middle
+// of a replay (below). Not modelled: three or more pages (each guest is this
+// guest), the C engine's limit on a rollback's depth (a deeper misprediction
+// is a failed rollback, as it is in every other case), the deadline on the
+// host's state (specs/resync_reask.qnt).
+
+// HOST_MID_REPLAY: a replay runs a few frames a tick (the amortized burst in
+// tick(), _runCReplayFrame), so a roster can be broadcast between two of its
+// ticks: the host's _frameNum is then the C engine's frame (kn_get_frame),
+// below the frame the replay returns to. What happens then, on the host:
+//   1. _broadcastRoster takes R = max(_frameNum, _lastBroadcastRosterFrame):
+//      the replay's frame, or the last roster's frame when that is higher
+//      (a roster broadcast before the rollback rewound the host);
+//   2. _hostRosterCut reads the slot's ring below C = R - delay: tags the
+//      replay has run again hold what it ran them with; tags of frames it
+//      has yet to run hold what the first pass ran, or a real input taken
+//      in since (the input that started the replay);
+//   3. _cutRemovedInput resets the slot and feeds those values below C, and
+//      neutral at C and C + 1, as real inputs (its late check reads tags
+//      below kn_get_frame() - delay only, all of them the word it just read);
+//   4. the replay goes on to its end reading the ring: every frame it still
+//      runs applies the word below C and neutral from C (C predicts neutral
+//      after the two neutral inputs), and no input of the player is taken
+//      in any more (_admissionInputFloor).
+// So the host runs exactly what it sent, and the frames from R the first
+// pass ran with the player's inputs are run again neutral by the replay that
+// was under way (not a replay changing a cut frame: they ran before the
+// cut). A guest mid-replay when the roster comes is the same: its late
+// check reads the frames below its replay's frame, and the replay runs the
+// rest with the cut. Both pages' replays are a frame at a time here, a
+// real input taken in during one restarts it from that frame (a cascade),
+// and the host can broadcast another roster before the cut (`lastRoster`).
 
 module removed_input {
   const AT_FRAME: bool
+  const HOST_MID_REPLAY: bool
 
   // Bound on frames for the model.
   pure val MAX_F = 6
@@ -111,6 +138,9 @@ module removed_input {
   var inflight: List[(str, int)]    // rosters on their way to the guest: ("cut" | "admit", frame)
   var rerunFrom: int                // the guest must run again from this frame, or -1
   var replayChanged: bool           // history: a replay ran a cut frame with another input
+  var replayAt: str -> int          // the next frame a page's replay under way runs, or -1 (HOST_MID_REPLAY)
+  var replayBeforeCut: str -> bool  // that replay started before the page knew of the cut
+  var lastRoster: int               // the host's _lastBroadcastRosterFrame, or -1
 
   pure def maxInt(a: int, b: int): int = if (a > b) a else b
   pure def minInt(a: int, b: int): int = if (a < b) a else b
@@ -126,6 +156,9 @@ module removed_input {
       else inputs.get(earlier.fold(-1, (acc, g) => maxInt(acc, g)))
 
   def cutKnown(p: str): bool = if (p == "host") cutR >= 0 else guestCut
+  def replaying(p: str): bool = replayAt.get(p) >= 0
+  // The frame the C engine is on: the replay's while one is under way.
+  def cFrame(p: str): int = if (replaying(p)) replayAt.get(p) else frontier.get(p)
   def admitKnown(p: str): bool = if (p == "host") admitA >= 0 else guestAdmit
 
   // The input page p runs frame f with, as it knows things now.
@@ -156,6 +189,9 @@ module removed_input {
     inflight' = List(),
     rerunFrom' = -1,
     replayChanged' = false,
+    replayAt' = Map("host" -> -1, "guest" -> -1),
+    replayBeforeCut' = Map("host" -> false, "guest" -> false),
+    lastRoster' = -1,
   }
 
   // The late joiner's ramp is neutral.
@@ -175,11 +211,12 @@ module removed_input {
       f < MAX_F,
       f + 1 - frontier.get(other(p)) <= AHEAD,
       rerunFrom < 0 or p == "host",
+      not(replaying(p)),
       frontier' = frontier.set(p, f + 1),
       applied' = applied.set(p, applied.get(p).put(f, inputAt(p, f))),
       first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, cutR' = cutR,
       word' = word, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit, inflight' = inflight,
-      rerunFrom' = rerunFrom, replayChanged' = replayChanged,
+      rerunFrom' = rerunFrom, replayChanged' = replayChanged, replayAt' = replayAt, replayBeforeCut' = replayBeforeCut, lastRoster' = lastRoster,
     }
   }
 
@@ -193,12 +230,21 @@ module removed_input {
       not(cutKnown(p)),
       not(held1.get(p).contains(f)),
       held1' = held1.set(p, held),
-      // Taken in only before the cut is known: the prediction with it.
-      applied' = applied.set(p, applied.get(p).keys().mapBy(g =>
-        if (g >= f) predict(held, first, g) else applied.get(p).get(g))),
+      if (HOST_MID_REPLAY) all {
+        // The rollback is a replay from f, a frame at a time (a cascade when
+        // one is under way); the ring takes the real input now.
+        applied' = applied,
+        replayAt' = if (f < cFrame(p)) replayAt.set(p, f) else replayAt,
+        replayBeforeCut' = if (f < cFrame(p)) replayBeforeCut.set(p, true) else replayBeforeCut,
+      } else all {
+        // Taken in only before the cut is known: the prediction with it.
+        applied' = applied.set(p, applied.get(p).keys().mapBy(g =>
+          if (g >= f) predict(held, first, g) else applied.get(p).get(g))),
+        replayAt' = replayAt, replayBeforeCut' = replayBeforeCut,
+      },
       first' = first, second' = second, alive' = alive, held2' = held2, frontier' = frontier, cutR' = cutR,
       word' = word, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit, inflight' = inflight,
-      rerunFrom' = rerunFrom, replayChanged' = replayChanged,
+      rerunFrom' = rerunFrom, replayChanged' = replayChanged, lastRoster' = lastRoster,
     }
   }
 
@@ -216,7 +262,7 @@ module removed_input {
         if (g >= f) predict(held, second, g) else applied.get(p).get(g))),
       first' = first, second' = second, alive' = alive, held1' = held1, frontier' = frontier, cutR' = cutR,
       word' = word, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit, inflight' = inflight,
-      rerunFrom' = rerunFrom, replayChanged' = replayChanged,
+      rerunFrom' = rerunFrom, replayChanged' = replayChanged, replayAt' = replayAt, replayBeforeCut' = replayBeforeCut, lastRoster' = lastRoster,
     }
   }
 
@@ -226,7 +272,7 @@ module removed_input {
     alive' = false,
     first' = first, second' = second, held1' = held1, held2' = held2, frontier' = frontier, applied' = applied,
     cutR' = cutR, word' = word, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit,
-    inflight' = inflight, rerunFrom' = rerunFrom, replayChanged' = replayChanged,
+    inflight' = inflight, rerunFrom' = rerunFrom, replayChanged' = replayChanged, replayAt' = replayAt, replayBeforeCut' = replayBeforeCut, lastRoster' = lastRoster,
   }
 
   // Another player's misprediction: page p runs its last d frames again.
@@ -241,40 +287,97 @@ module removed_input {
     all {
       from >= 0,
       rerunFrom < 0 or p == "host",
-      applied' = applied.set(p, again),
-      replayChanged' = (replayChanged or changed),
+      not(replaying(p)),
+      if (HOST_MID_REPLAY) all {
+        // Started here, run a frame at a time (replayStep).
+        applied' = applied,
+        replayChanged' = replayChanged,
+        replayAt' = replayAt.set(p, from),
+        replayBeforeCut' = replayBeforeCut.set(p, not(cutKnown(p))),
+      } else all {
+        applied' = applied.set(p, again),
+        replayChanged' = (replayChanged or changed),
+        replayAt' = replayAt, replayBeforeCut' = replayBeforeCut,
+      },
       first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
       cutR' = cutR, word' = word, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit,
-      inflight' = inflight, rerunFrom' = rerunFrom,
+      inflight' = inflight, rerunFrom' = rerunFrom, lastRoster' = lastRoster,
     }
   }
 
+  // The next frame of page p's replay under way, run with what p knows now
+  // (the ring, after any cut written into it). A frame the removal governs
+  // that ran with another input counts only for a replay that started once
+  // p knew of the cut: one under way at the cut runs the frames it had not
+  // reached yet with the cut, as the frames ahead of it.
+  action replayStep(p: str): bool = {
+    val f = replayAt.get(p)
+    val v = inputAt(p, f)
+    val changed =
+      cutKnown(p) and (admitA < 0 or f < admitA) and v != applied.get(p).get(f)
+      and not(replayBeforeCut.get(p)) and (p == "host" or rerunFrom < 0)
+    all {
+      replaying(p),
+      applied' = applied.set(p, applied.get(p).put(f, v)),
+      replayAt' = replayAt.set(p, if (f + 1 >= frontier.get(p)) -1 else f + 1),
+      replayChanged' = (replayChanged or changed),
+      first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
+      cutR' = cutR, word' = word, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit,
+      inflight' = inflight, rerunFrom' = rerunFrom, replayBeforeCut' = replayBeforeCut, lastRoster' = lastRoster,
+    }
+  }
+
+  // The host broadcasts a roster that changes nothing here (another
+  // player's join, a resume): _lastBroadcastRosterFrame moves up to its
+  // frame, the replay's while one is under way.
+  action hostOtherRoster: bool = all {
+    HOST_MID_REPLAY,
+    cutR < 0,
+    lastRoster' = maxInt(cFrame("host"), lastRoster),
+    first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
+    applied' = applied, cutR' = cutR, word' = word, admitA' = admitA, guestCut' = guestCut,
+    guestAdmit' = guestAdmit, inflight' = inflight, rerunFrom' = rerunFrom, replayChanged' = replayChanged,
+    replayAt' = replayAt, replayBeforeCut' = replayBeforeCut,
+  }
+
+  // What the host's ring holds for the player at f before the cut: a real
+  // input taken in, else what the frame last ran with (a replay under way
+  // has not run it again yet).
+  def hostRingAt(f: int): int =
+    if (held1.get("host").contains(f)) first.get(f) else applied.get("host").get(f)
+
   // The host drops the player at the frame it is on and sends the roster
   // (by frame: its inputs below R first).
+  // R = max(_frameNum, _lastBroadcastRosterFrame); the word is read from
+  // its ring.
   action hostCut: bool = {
-    val r = frontier.get("host")
+    val r = maxInt(cFrame("host"), lastRoster)
     all {
       cutR < 0,
       cutR' = r,
-      word' = 0.to(r - 1).mapBy(f => applied.get("host").get(f)),
+      word' = 0.to(r - 1).mapBy(f => hostRingAt(f)),
       inflight' = inflight.append(("cut", r)),
+      lastRoster' = r,
       first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
       applied' = applied, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit,
-      rerunFrom' = rerunFrom, replayChanged' = replayChanged,
+      rerunFrom' = rerunFrom, replayChanged' = replayChanged, replayAt' = replayAt,
+      replayBeforeCut' = replayBeforeCut,
     }
   }
 
   // The player joins again, into the same slot, at the host's frame.
   action hostAdmit: bool = {
-    val a = frontier.get("host")
+    val a = maxInt(cFrame("host"), lastRoster)
     all {
       cutR >= 0,
       admitA < 0,
       admitA' = a,
       inflight' = inflight.append(("admit", a)),
+      lastRoster' = a,
       first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
       applied' = applied, cutR' = cutR, word' = word, guestCut' = guestCut, guestAdmit' = guestAdmit,
-      rerunFrom' = rerunFrom, replayChanged' = replayChanged,
+      rerunFrom' = rerunFrom, replayChanged' = replayChanged, replayAt' = replayAt,
+      replayBeforeCut' = replayBeforeCut,
     }
   }
 
@@ -288,8 +391,11 @@ module removed_input {
 
   // The first frame the guest has run with another input than it knows now
   // it should have, or -1.
+  // Only frames below the C engine's frame (_cutRemovedInput's ranThrough):
+  // a replay under way runs the rest with the cut.
   def firstDiffering(nowCut: bool, nowAdmit: bool): int =
-    val diff = applied.get("guest").keys().filter(f => applied.get("guest").get(f) != guestKnows(nowCut, nowAdmit, f))
+    val diff = applied.get("guest").keys().filter(f =>
+      f < cFrame("guest") and applied.get("guest").get(f) != guestKnows(nowCut, nowAdmit, f))
     if (diff.size() == 0) -1 else diff.fold(MAX_F, (acc, f) => minInt(acc, f))
 
   // The oldest roster on its way reaches the guest.
@@ -307,23 +413,27 @@ module removed_input {
       rerunFrom' = if (late < 0) rerunFrom else if (rerunFrom < 0) late else minInt(rerunFrom, late),
       first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
       applied' = applied, cutR' = cutR, word' = word, admitA' = admitA, replayChanged' = replayChanged,
+      replayAt' = replayAt, replayBeforeCut' = replayBeforeCut, lastRoster' = lastRoster,
     }
   }
 
   // The guest runs again from the first frame that ran differently.
+  // A replay under way is waited out first (_serviceCutRerun, busy).
   action rerun: bool = all {
     rerunFrom >= 0,
+    not(replaying("guest")),
     applied' = applied.set("guest", rerunFromFrame("guest", rerunFrom)),
     rerunFrom' = -1,
     first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
     cutR' = cutR, word' = word, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit,
-    inflight' = inflight, replayChanged' = replayChanged,
+    inflight' = inflight, replayChanged' = replayChanged, replayAt' = replayAt, replayBeforeCut' = replayBeforeCut, lastRoster' = lastRoster,
   }
 
   action stutter = all {
     first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
     applied' = applied, cutR' = cutR, word' = word, admitA' = admitA, guestCut' = guestCut,
     guestAdmit' = guestAdmit, inflight' = inflight, rerunFrom' = rerunFrom, replayChanged' = replayChanged,
+    replayAt' = replayAt, replayBeforeCut' = replayBeforeCut, lastRoster' = lastRoster,
   }
 
   action step = any {
@@ -335,8 +445,10 @@ module removed_input {
       deliverFirst(p, f),
       deliverSecond(p, f),
       replay(p, d),
+      replayStep(p),
     },
     playerGone,
+    hostOtherRoster,
     hostCut,
     hostAdmit,
     deliver,
@@ -354,7 +466,7 @@ module removed_input {
       .filter(f => admitA < 0 or f < admitA)
       .forall(f => applied.get("host").get(f) == applied.get("guest").get(f))
 
-  val settled = cutR >= 0 and guestCut and rerunFrom < 0
+  val settled = cutR >= 0 and guestCut and rerunFrom < 0 and not(replaying("host")) and not(replaying("guest"))
   val removedInputAgrees = settled implies ranAlike
 
   // A frame the removal governs runs again with the input it ran with.
@@ -363,7 +475,7 @@ module removed_input {
   // Below its cut the host runs the inputs it froze, from its cut on neutral.
   val hostRunsItsWord =
     (AT_FRAME and cutR >= 0) implies
-      applied.get("host").keys().filter(f => admitA < 0 or f < admitA)
+      applied.get("host").keys().filter(f => (admitA < 0 or f < admitA) and f < cFrame("host"))
         .forall(f => applied.get("host").get(f) == (if (f < cutR) word.get(f) else 0))
 
   val allHold = removedInputAgrees and aReplayKeepsTheCut and hostRunsItsWord
@@ -452,14 +564,105 @@ module removed_input {
       .then(if (AT_FRAME) rerun else stutter)
       .then(stepFrame("host")).then(stepFrame("host"))
       .expect(if (AT_FRAME) allHold and applied.get("guest").get(1) == 0 else not(removedInputAgrees))
+
+  // Both pages ran frames 0 to 3 with the player's inputs; the host is
+  // replaying from frame 2 and has run frame 2 again when it drops the
+  // player: R is the replay's frame, 3. The replay runs frame 3 neutral (it
+  // ran before the cut: no replay changed a cut frame), the host runs its
+  // word, and the guest, ahead of R, runs frame 3 again.
+  run hostCutsMidReplayTest =
+    if (HOST_MID_REPLAY)
+      initWith(MOVING, STILL)
+        .then(deliverFirst("host", 0)).then(deliverFirst("host", 1))
+        .then(deliverFirst("host", 2)).then(deliverFirst("host", 3))
+        .then(deliverFirst("guest", 0)).then(deliverFirst("guest", 1))
+        .then(deliverFirst("guest", 2)).then(deliverFirst("guest", 3))
+        .then(stepFrame("host")).then(stepFrame("guest")).then(stepFrame("host")).then(stepFrame("guest"))
+        .then(stepFrame("host")).then(stepFrame("guest")).then(stepFrame("host")).then(stepFrame("guest"))
+        .then(replay("host", 2))
+        .then(replayStep("host"))
+        .expect(replayAt.get("host") == 3)
+        .then(hostCut)
+        .expect(cutR == 3 and word == Map(0 -> 1, 1 -> 1, 2 -> 1))
+        .then(replayStep("host"))
+        .expect(not(replaying("host")) and applied.get("host").get(3) == 0 and hostRunsItsWord and aReplayKeepsTheCut)
+        .then(deliver)
+        .expect(rerunFrom == 3)
+        .then(rerun)
+        .expect(allHold and applied.get("guest").get(3) == 0)
+    else
+      initWith(MOVING, STILL)
+
+  // A roster went out at frame 3; the host then ran frames 2 and 3 on a
+  // prediction (0) of an input the player made as 1, and its real input of
+  // frame 2 starts a replay from 2. The host drops the player before the
+  // replay has run frame 2 again: R is the last roster's frame, 3, above the
+  // replay's. Its word for frame 2 is what its ring holds there, the real
+  // input taken in (not what the first pass ran), and the replay runs frame
+  // 2 with it and frame 3 neutral: the host runs its word; the guest, which
+  // ran frame 3 with the player's input, runs it again.
+  run cutAboveTheReplayTest =
+    if (HOST_MID_REPLAY)
+      initWith(Map(0 -> 0, 1 -> 0, 2 -> 1, 3 -> 1, 4 -> 1, 5 -> 1), STILL)
+        .then(deliverFirst("host", 0)).then(deliverFirst("host", 1))
+        .then(deliverFirst("guest", 0)).then(deliverFirst("guest", 1))
+        .then(deliverFirst("guest", 2)).then(deliverFirst("guest", 3))
+        .then(stepFrame("host")).then(stepFrame("guest")).then(stepFrame("host")).then(stepFrame("guest"))
+        .then(stepFrame("host")).then(stepFrame("guest"))
+        .then(hostOtherRoster)
+        .expect(lastRoster == 3)
+        .then(stepFrame("host")).then(stepFrame("guest"))
+        .expect(applied.get("host").get(2) == 0)
+        .then(deliverFirst("host", 2))
+        .expect(replayAt.get("host") == 2)
+        .then(hostCut)
+        .expect(cutR == 3 and word.get(2) == 1)
+        .then(replayStep("host")).then(replayStep("host"))
+        .expect(
+          not(replaying("host")) and applied.get("host").get(2) == 1 and applied.get("host").get(3) == 0
+          and hostRunsItsWord
+        )
+        .then(deliver)
+        .expect(rerunFrom == 3)
+        .then(rerun)
+        .expect(allHold)
+    else
+      initWith(MOVING, STILL)
+
+  // The guest is replaying from frame 1 when the roster cutting at frame 2
+  // reaches it: its late check reads frame 0 only (below its replay's
+  // frame) and finds nothing to run again; the replay runs frame 1 with the
+  // host's input and frame 2 neutral.
+  run guestHearsMidReplayTest =
+    if (HOST_MID_REPLAY)
+      initWith(MOVING, STILL)
+        .then(deliverFirst("host", 0)).then(deliverFirst("host", 1))
+        .then(deliverFirst("guest", 0)).then(deliverFirst("guest", 1)).then(deliverFirst("guest", 2))
+        .then(stepFrame("host")).then(stepFrame("guest")).then(stepFrame("host")).then(stepFrame("guest"))
+        .then(stepFrame("guest"))
+        .then(hostCut)
+        .expect(cutR == 2)
+        .then(replay("guest", 2))
+        .then(deliver)
+        .expect(rerunFrom < 0 and replayAt.get("guest") == 1)
+        .then(replayStep("guest")).then(replayStep("guest"))
+        .expect(allHold and applied.get("guest").get(1) == 1 and applied.get("guest").get(2) == 0)
+    else
+      initWith(MOVING, STILL)
 }
 
 // Before: each page cut the player when it learned of the removal.
 module removed_input_before {
-  import removed_input(AT_FRAME = false).*
+  import removed_input(AT_FRAME = false, HOST_MID_REPLAY = false).*
 }
 
 // The fix: the cut at the host's roster frame, the host's inputs below it.
 module removed_input_fixed {
-  import removed_input(AT_FRAME = true).*
+  import removed_input(AT_FRAME = true, HOST_MID_REPLAY = false).*
+}
+
+// The fix with replays run a frame at a time: a host (or guest) can be in
+// the middle of one when the cut is made (or heard).
+module removed_input_mid_replay {
+  import removed_input(AT_FRAME = true, HOST_MID_REPLAY = true).*
 }
