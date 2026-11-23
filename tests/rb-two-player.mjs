@@ -516,11 +516,14 @@
  *     drops the binary chunks of its next answer on `sync-state` and the
  *     guest's network-change handler asks (`online`), so the guest's 3 s
  *     chunk timeout asks again over the socket; just before that a button
- *     goes down while the guest's input packets are kept back, and they are
- *     released only once the host has received the socket request and taken
- *     its answer's state (nothing orders the socket against the data
- *     channels), so the host answers it on its prediction and takes the
- *     inputs in after. Fails unless, after the host received the socket
+ *     goes down while the guest's input packets are kept back. The host page
+ *     holds the socket request (nothing orders the socket against the data
+ *     channels); once it does, the inputs are released and the request is
+ *     delivered right after the first of them is handled, so the host takes
+ *     in the differing inputs, with a rollback owed for its next tick, and
+ *     answers before that tick. Inputs that arrive after the answer would be
+ *     settled by it and never fed in two players (docs/roadmap.md). Fails
+ *     unless, after the host received the socket
  *     request, it watched its answer, logged SYNC-FOLLOW-UP-NEEDED,
  *     dispatched the follow-up over the socket and the guest applied both.
  *     Tried up to 3 times until a replay starting at or before the frame
@@ -829,9 +832,6 @@ const SYNC_FOLLOW_UP_DIRECT_ASK_MS = 250;
 // chunk timeout's socket request (3 s after the answer's header) and the
 // host's answer to it.
 const SYNC_FOLLOW_UP_SOCKET_HOLD_FROM_MS = 2200;
-// How long after the host received the socket request its answer's state is
-// surely taken, before the kept-back inputs are released.
-const SYNC_FOLLOW_UP_SOCKET_CAPTURE_MS = 500;
 // Whether the host's deadline finds its frame confirmed is a race with its own
 // stall; an attempt whose answer goes out confirmed is tried again.
 const SYNC_FOLLOW_UP_ATTEMPTS = 3;
@@ -2656,25 +2656,36 @@ if (inBattle) {
       [syncFollowUp.hostAt, syncFollowUp.guestAt] = await Promise.all([lastLogLine(host), lastLogLine(guest)]);
       // The host's next answer on `sync-state` loses its chunks; the guest's
       // chunk timeout then asks over the socket.
+      // The socket request is held on the host page and delivered right
+      // after the guest's kept-back inputs are taken in (below).
       await host.evaluate(() => {
         window.__knSyncAnswerDrops.push('chunks');
+        window.__knHoldSocketRequests = 1;
       });
       await guest.evaluate(() => window.dispatchEvent(new Event('online')));
       await guest.waitForTimeout(SYNC_FOLLOW_UP_SOCKET_HOLD_FROM_MS);
-      // A button down, its packets kept back until the host has answered the
-      // socket request: the host answers on its prediction (neutral) and
-      // takes them in after.
+      // A button down, its packets kept back until the host holds the socket
+      // request. Released then, they reach the host before it (the request
+      // is delivered right after the first of them): the host takes in the
+      // differing inputs, with a rollback owed for its next tick, and answers
+      // before that tick, as the channel orders `direct`'s request. Inputs
+      // that arrive after the answer instead are settled by it and never fed
+      // in two players (docs/roadmap.md), so the frame would not change.
       await guest.evaluate((n) => {
         window.__knInputGate = true;
         window.__knInputOverride = () => ({ ...n, buttons: 1 });
       }, NEUTRAL);
       const asked = await waitForLine(guest, syncFollowUp.guestAt.seq, /sent socket sync-request-full to host/, 8000);
-      // Released once the host has taken its answer's state (its capture
-      // follows the request at once).
-      const answered = await waitForLine(host, syncFollowUp.hostAt.seq, /received socket sync-request-full/, 8000);
-      await host.waitForTimeout(SYNC_FOLLOW_UP_SOCKET_CAPTURE_MS);
+      const held = await host
+        .waitForFunction(() => window.__knSocketRequestsHeld.length > 0, null, { timeout: 8000 })
+        .then(
+          () => true,
+          () => false,
+        );
       const released = await guest.evaluate(() => window.__knReleaseInputs());
-      console.log(`SYNC_FOLLOW_UP=socket: ${released} input packet(s) released after the host's answer (${answered})`);
+      console.log(
+        `SYNC_FOLLOW_UP=socket: ${released} input packet(s) released while the host holds the request (${held})`,
+      );
       console.log(
         `SYNC_FOLLOW_UP=socket: attempt ${syncFollowUp.attempts}: socket request ${asked ? 'sent' : 'not sent'}`,
       );
@@ -2703,6 +2714,9 @@ if (inBattle) {
         window.__knReleaseInputs();
         window.__knInputOverride = () => n;
       }, NEUTRAL);
+      await host.evaluate(() => {
+        window.__knHoldSocketRequests = 0;
+      });
       console.log(
         `SYNC_FOLLOW_UP=socket: ${syncFollowUp.watched ? 'a replay rewrote the frame the socket answer was taken at' : 'no replay rewrote it; trying again'}`,
       );

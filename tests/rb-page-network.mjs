@@ -218,6 +218,23 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   window.__knSocketAnswersHeld = [];
   const heldSocketPackets = [];
   let realOnevent = null;
+  // SYNC_FOLLOW_UP=socket (the host page): while window.__knHoldSocketRequests
+  // is above 0, the next socket resync request that arrives
+  // (`data-message` of type `sync-request-full-socket`) is held, and
+  // delivered right after the next input packet (binary, on `lockstep` or
+  // `rollback-input`) has been handled, in the same task: the host takes in
+  // the inputs held with it (a rollback owed for its next tick) and answers
+  // before that tick. Kept in __knSocketRequestsHeld.
+  window.__knHoldSocketRequests = 0;
+  window.__knSocketRequestsHeld = [];
+  const heldSocketRequests = [];
+  const releaseHeldSocketRequests = () => {
+    while (heldSocketRequests.length) {
+      const { socket, packet, record } = heldSocketRequests.shift();
+      record.releasedAt = performance.now();
+      realOnevent.call(socket, packet);
+    }
+  };
   // And the page's next two decode results (the sync worker's replies) once
   // the held answer is let go are held and delivered back to back in one
   // task: the newest answer's first, then the late one's. A held "now"
@@ -294,9 +311,16 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       }
       const ch = this;
       realOnmessage.set.call(this, function (e) {
-        const result = receiveGate.receive(ch, e.data, (data) =>
-          fn.call(this, data === e.data ? e : new MessageEvent('message', { data })),
-        );
+        const result = receiveGate.receive(ch, e.data, (data) => {
+          const handled = fn.call(this, data === e.data ? e : new MessageEvent('message', { data }));
+          if (
+            heldSocketRequests.length &&
+            (ch.label === 'lockstep' || ch.label === 'rollback-input') &&
+            typeof data !== 'string'
+          )
+            releaseHeldSocketRequests();
+          return handled;
+        });
         if (ch.label === 'sync-state') afterSyncStateMessage(e.data);
         return result;
       });
@@ -319,6 +343,17 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
             const record = { requestId: args[1].requestId ?? null, heldAt: performance.now(), releasedAt: null };
             window.__knSocketAnswersHeld.push(record);
             heldSocketPackets.push({ socket: this, packet, record });
+            return;
+          }
+          if (
+            window.__knHoldSocketRequests > 0 &&
+            args?.[0] === 'data-message' &&
+            args[1]?.type === 'sync-request-full-socket'
+          ) {
+            window.__knHoldSocketRequests--;
+            const record = { requestId: args[1].requestId ?? null, heldAt: performance.now(), releasedAt: null };
+            window.__knSocketRequestsHeld.push(record);
+            heldSocketRequests.push({ socket: this, packet, record });
             return;
           }
           return onevent.call(this, packet);
