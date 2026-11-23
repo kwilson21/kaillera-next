@@ -435,7 +435,8 @@ static struct {
      * Reduces per-frame serialize from 16MB × 60fps = 960MB/s to near
      * zero on stable connections. */
     int has_active_predictions; /* 1 if any slot has predicted input */
-    int serialize_skip_count;  /* diagnostic: frames skipped */
+    int serialize_skip_count;  /* frames kn_pre_tick did not save: no other slot active */
+    int save_skipping;         /* 1 while kn_pre_tick skips the save (for its log lines) */
 
     /* Ring staleness ceiling: last frame where a state was saved.
      * Forces a periodic save even during long zero-input runs so
@@ -1933,32 +1934,54 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
         }
     }
 
-    /* ── Save state for current frame (dirty-input gated) ──
-     * Only serialize when predictions are active — if all remote inputs
-     * arrived on time, no rollback can target this frame. Inspired by
-     * RetroArch's runahead preemptive frames: skip serialization on
-     * steady-state frames to avoid 16MB memcpy at 60fps (960MB/s).
+    /* ── Save state for current frame ──
+     * Every frame, while another player's slot is active.
      *
-     * When a prediction IS active, we must save because a future
-     * misprediction could roll back to this frame. We also save
-     * unconditionally if a rollback is pending (need the most recent
-     * state for the replay target). */
-        /* Save state every frame — no serialize skip gate.
-         *
-         * The previous dirty-input gate skipped saves when inputs didn't
-         * change, creating ring coverage gaps. FATAL-RING-STALE at f=23410
-         * proved this causes permanent desync: 4 mispredictions couldn't
-         * be rolled back, wrong inputs ran uncorrected, characters diverged.
-         *
-         * Cost: ~3-5ms per serialize (16MB). At 60fps with the gate, we
-         * already saved ~59% of frames. Going to 100% adds ~1.5-2ms/frame
-        * average — well within the 16.6ms budget. Eliminates ring gaps. */
-        {
+     * A dirty-input gate once skipped saves when inputs didn't change and
+     * left ring gaps: FATAL-RING-STALE at f=23410, 4 mispredictions that
+     * couldn't be rolled back, characters diverged. A frame a rollback can
+     * go back to is always saved since.
+     *
+     * A rollback goes back to a frame only for an input that frame's
+     * kn_pre_tick predicted (kn_feed_input checks predicted[slot][tag];
+     * rb_rollback_target finds the frame that applied the tag), and this
+     * kn_pre_tick predicts only an active slot (above). So while no slot but
+     * this page's own is active, no rollback can come back to this frame:
+     * a page alone in a match (at a delay of 0), or one whose other players
+     * all left (kn_rollback_slot_reset). Its save, 3-6 ms of a 16.6 ms frame,
+     * is skipped. The first input kn_feed_input takes for another slot makes
+     * it active, and the next kn_pre_tick saves again; a player who joins a
+     * solo match arrives after the re-arm (kn_rollback_init), which starts
+     * the ring over anyway. specs/solo_save.qnt, noTargetLostToTheGate: no
+     * rollback misses a frame the every-frame ring has. A switch from JS's
+     * roster instead loses one (solo_save_roster): a player's first input can
+     * come before the roster that lists them.
+     *
+     * A skipped save forgets the sparse save mode's baseline, as kn_set_frame
+     * does: the first save after the stretch is whole, not diffed against a
+     * copy older than the frame before it (everyCopyIsWhole). */
+    {
+        int other_active = 0;
+        for (s = 0; s < KN_MAX_PLAYERS; s++) {
+            if (s != rb.local_slot && rb.slot_active[s]) { other_active = 1; break; }
+        }
+        if (!other_active) {
+            if (!rb.save_skipping)
+                rb_log("SAVE-SKIP from f=%d: no other slot is active", rb.frame);
+            rb.save_skipping = 1;
+            rb.serialize_skip_count++;
+            rb.baseline_initialized = 0;
+        } else {
             int save_idx = rb.frame % rb.ring_size;
+            if (rb.save_skipping) {
+                rb_log("SAVE-RESUME f=%d (%d skipped in all)", rb.frame, rb.serialize_skip_count);
+                rb.save_skipping = 0;
+            }
             if (rb.last_save_frame != rb.frame) {
                 rb_save_slot(save_idx, rb.frame, 1);
             }
         }
+    }
 
     /* Input writing is done by JS using kn_get_input + writeInputToMemory */
     /* R5 diagnostic: log if replay_depth is nonzero at normal-tick return.
