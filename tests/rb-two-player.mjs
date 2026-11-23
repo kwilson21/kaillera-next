@@ -531,6 +531,16 @@
  *     the answer was taken at shows it was rewritten (which any engine
  *     logs), so on an engine without the fix the answer the guest keeps is
  *     the last one applied, where the frames compared start, and they split.
+ *     `owed` is `socket` with the held request delivered between two ticks
+ *     while the replay the released inputs caused is still in flight (the
+ *     engine replays a few frames per tick): the host takes its answer's
+ *     state with a correction owed, the differing input fed before that
+ *     state's watch existed (specs/sync_follow_up.qnt, owedAtTakeTest).
+ *     Tried up to 3 times until the request is delivered with a replay in
+ *     flight (any engine). Fails unless the watch starts changed
+ *     (`SYNC-FOLLOW-UP-WATCH ... owed=1`), the follow-up goes out over the
+ *     socket after it, and the guest applies both; on an engine that does
+ *     not flag it the follow-up is skipped and the frames compared split.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -824,8 +834,8 @@ const UNANSWERED_LETGO_FREEZE_MS = 7000;
 // (`delay re-tuned` in the sync log says what it chose).
 const FORCE_DELAY = process.env.FORCE_DELAY ? Number(process.env.FORCE_DELAY) : null;
 const SYNC_FOLLOW_UP = process.env.SYNC_FOLLOW_UP || '';
-if (!['', 'same', 'changed', 'direct', 'socket'].includes(SYNC_FOLLOW_UP)) {
-  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same, changed, direct or socket`);
+if (!['', 'same', 'changed', 'direct', 'socket', 'owed'].includes(SYNC_FOLLOW_UP)) {
+  console.log(`SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP} invalid: same, changed, direct, socket or owed`);
   process.exit(1);
 }
 // SYNC_FOLLOW_UP freezes the host as letgo does, and how long the guest's
@@ -2668,7 +2678,10 @@ if (inBattle) {
     }
     await waitForLine(guest, delaySyncAnswer.guestAt.seq, /sync #\d+ applied/, DELAY_SYNC_ANSWER_RECOVER_MS);
     await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - before - (Date.now() - started)));
-  } else if (SYNC_FOLLOW_UP === 'socket') {
+  } else if (SYNC_FOLLOW_UP === 'socket' || SYNC_FOLLOW_UP === 'owed') {
+    // `owed`: the held request is delivered while the replay the released
+    // inputs caused is still in flight (rb-page-network.mjs, __knReleaseOnReplay).
+    const owedMode = SYNC_FOLLOW_UP === 'owed';
     const before = (BATTLE_SECONDS * 1000) / 3;
     await host.waitForTimeout(before);
     const started = Date.now();
@@ -2685,11 +2698,12 @@ if (inBattle) {
       // The socket request is held on the host page and delivered right
       // after the guest's kept-back inputs are taken in (below).
       // This attempt's request is the one held after the records kept so far.
-      const heldBefore = await host.evaluate(() => {
+      const heldBefore = await host.evaluate((owed) => {
         window.__knSyncAnswerDrops.push('chunks');
         window.__knHoldSocketRequests = 1;
+        window.__knReleaseOnReplay = owed;
         return window.__knSocketRequestsHeld.length;
-      });
+      }, owedMode);
       await guest.evaluate(() => window.dispatchEvent(new Event('online')));
       await guest.waitForTimeout(SYNC_FOLLOW_UP_SOCKET_HOLD_FROM_MS);
       // A button down, its packets kept back until the host holds the socket
@@ -2729,24 +2743,39 @@ if (inBattle) {
       const tail = received < 0 ? [] : hostLines.slice(received);
       const read = tail.findIndex((l) => /host kn_sync_read:/.test(l));
       const takenAt = read < 0 ? NaN : Number((tail[read].split('\t')[2] || '').replace('f=', ''));
-      syncFollowUp.watched =
-        received >= 0 &&
-        (tail.some((l) => /SYNC-FOLLOW-UP-NEEDED /.test(l)) ||
-          tail
-            .slice(read + 1)
-            .some(
-              (l) =>
-                /C-REPLAY start: depth=[1-9]/.test(l) && Number((l.split('\t')[2] || '').replace('f=', '')) <= takenAt,
-            ));
+      // `owed`: reached once the request was delivered with a replay in
+      // flight (any engine records it), so the answer's state was taken
+      // with a correction owed.
+      const record = await host.evaluate((n) => window.__knSocketRequestsHeld[n] ?? null, heldBefore);
+      syncFollowUp.releasedInReplay = (record?.replayDepth ?? 0) > 0;
+      syncFollowUp.watched = owedMode
+        ? received >= 0 && syncFollowUp.releasedInReplay
+        : received >= 0 &&
+          (tail.some((l) => /SYNC-FOLLOW-UP-NEEDED /.test(l)) ||
+            tail
+              .slice(read + 1)
+              .some(
+                (l) =>
+                  /C-REPLAY start: depth=[1-9]/.test(l) &&
+                  Number((l.split('\t')[2] || '').replace('f=', '')) <= takenAt,
+              ));
       await guest.evaluate((n) => {
         window.__knReleaseInputs();
         window.__knInputOverride = () => n;
       }, NEUTRAL);
       await host.evaluate(() => {
         window.__knHoldSocketRequests = 0;
+        window.__knReleaseOnReplay = false;
       });
       console.log(
-        `SYNC_FOLLOW_UP=socket: ${syncFollowUp.watched ? 'a replay rewrote the frame the socket answer was taken at' : 'no replay rewrote it; trying again'}`,
+        `SYNC_FOLLOW_UP=${SYNC_FOLLOW_UP}: ` +
+          (owedMode
+            ? syncFollowUp.watched
+              ? 'the request was answered with a replay in flight'
+              : 'no replay in flight when the request was delivered; trying again'
+            : syncFollowUp.watched
+              ? 'a replay rewrote the frame the socket answer was taken at'
+              : 'no replay rewrote it; trying again'),
       );
       if (!syncFollowUp.watched) await guest.waitForTimeout(5000);
     }
@@ -5229,7 +5258,7 @@ if (doubleResyncAskReport) {
   );
 }
 // SYNC_FOLLOW_UP: the host answered the guest's recovery request unconfirmed
-// and watched the frame it sent. `same`: no input at or before it differed
+// and watched the frame it sent. `same`: no input that ran before it differed
 // from its prediction, so the follow-up was skipped and nothing else went out
 // for it. `changed`: one did, and the follow-up went out and was applied.
 // specs/sync_follow_up.qnt.
@@ -5247,21 +5276,20 @@ const syncFollowUpReport = (() => {
     guestLines,
     SYNC_FOLLOW_UP === 'direct'
       ? /BOOT-SYNC: guest requesting host state/
-      : SYNC_FOLLOW_UP === 'socket'
+      : SYNC_FOLLOW_UP === 'socket' || SYNC_FOLLOW_UP === 'owed'
         ? /sent socket sync-request-full to host/
         : /peer-recovery resync: sent sync-request-full-at:/,
   );
   // With `socket`, the answer under test is the one to the socket request.
-  const socketReceived = SYNC_FOLLOW_UP === 'socket' ? at(hostLines, /received socket sync-request-full/) : 0;
+  const viaSocket = SYNC_FOLLOW_UP === 'socket' || SYNC_FOLLOW_UP === 'owed';
+  const socketReceived = viaSocket ? at(hostLines, /received socket sync-request-full/) : 0;
   const watch = socketReceived < 0 ? -1 : at(hostLines, /SYNC-FOLLOW-UP-WATCH /, socketReceived);
   const after = (re) => (watch < 0 ? -1 : at(hostLines, re, watch));
   const needed = after(/SYNC-FOLLOW-UP-NEEDED /);
   const skipped = after(/SYNC-FOLLOW-UP-SKIPPED /);
   // The watch is logged as its state is taken, just after its dispatch: a
   // dispatch after it is the follow-up.
-  const followUpDispatch = after(
-    SYNC_FOLLOW_UP === 'socket' ? /coord sync dispatch: .*over the socket/ : /coord sync dispatch: /,
-  );
+  const followUpDispatch = after(viaSocket ? /coord sync dispatch: .*over the socket/ : /coord sync dispatch: /);
   const applied = recoveryAsk < 0 ? [] : guestLines.slice(recoveryAsk).filter((l) => /sync #\d+ applied/.test(l));
   const ticking = syncFollowUp.framesAfter >= 10;
   const passed =
@@ -5270,13 +5298,22 @@ const syncFollowUpReport = (() => {
     ticking &&
     (SYNC_FOLLOW_UP === 'same'
       ? needed < 0 && skipped > watch && followUpDispatch < 0 && applied.length >= 1
-      : needed > watch &&
-        followUpDispatch > needed &&
-        // The follow-up itself is not skipped. With `direct` a follow-up sent
-        // at its deadline, still unconfirmed, is watched in turn, and its own
-        // follow-up may rightly be skipped after it.
-        (skipped < 0 || (['direct', 'socket'].includes(SYNC_FOLLOW_UP) && skipped > followUpDispatch)) &&
-        applied.length >= 2);
+      : SYNC_FOLLOW_UP === 'owed'
+        ? // Taken with a correction owed: the watch starts changed (owed=1),
+          // so the follow-up goes out over the socket without any input
+          // flagging it, and the guest applies it.
+          syncFollowUp.releasedInReplay &&
+          / owed=1:/.test(hostLines[watch] || '') &&
+          followUpDispatch > watch &&
+          (skipped < 0 || skipped > followUpDispatch) &&
+          applied.length >= 2
+        : needed > watch &&
+          followUpDispatch > needed &&
+          // The follow-up itself is not skipped. With `direct` a follow-up sent
+          // at its deadline, still unconfirmed, is watched in turn, and its own
+          // follow-up may rightly be skipped after it.
+          (skipped < 0 || (['direct', 'socket'].includes(SYNC_FOLLOW_UP) && skipped > followUpDispatch)) &&
+          applied.length >= 2);
   return {
     mode: SYNC_FOLLOW_UP,
     attempts: syncFollowUp.attempts,
@@ -5285,6 +5322,7 @@ const syncFollowUpReport = (() => {
     needed: line(hostLines, needed),
     skipped: line(hostLines, skipped),
     followUpDispatch: line(hostLines, followUpDispatch),
+    releasedInReplay: syncFollowUp.releasedInReplay ?? null,
     dispatches: hostLines.filter((l) => /coord sync dispatch: |COORD-SYNC-TIMEOUT/.test(l)),
     applied,
     framesAfter: syncFollowUp.framesAfter,
