@@ -164,6 +164,16 @@ def test_a_shard_with_an_empty_worker_fails_before_starting_workers(monkeypatch)
     assert exit_info.value.code != 0
 
 
+def test_a_shard_left_without_checks_fails_before_starting_workers(monkeypatch):
+    # Use a synthetic plan smaller than the two-shard, two-worker grid.
+    plan = [verify.Check("a.qnt", f"m{i}", "p", "init", 6, "hold", i) for i in range(3)]
+    monkeypatch.setattr(verify, "load_plan", lambda: plan)
+    with pytest.raises(SystemExit) as exit_info:
+        verify.main(["--plan", "--shard", "2", "--shards", "2", "--workers", "2"])
+    assert exit_info.value.code != 0
+    assert verify.main(["--plan", "--shard", "1", "--shards", "1", "--workers", "2"]) == 0
+
+
 def test_server_cleanup_kills_process_group_and_reaps(monkeypatch):
     calls = []
     monkeypatch.setattr(verify.os, "killpg", lambda pid, sig: calls.append((pid, sig)))

@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.72.3",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a late joiner the host drops while it waits for the state joins late again (#327)"
+      }
+    ]
+  },
+  {
     "version": "0.72.2",
     "date": "2026-11-23",
     "changes": [

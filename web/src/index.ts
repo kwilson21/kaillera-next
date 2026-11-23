@@ -133,7 +133,7 @@ import {
   missedDeliveryStep,
   resyncDeadlineStep,
 } from './resync-request.ts';
-import { meshHealTargets } from './roster.ts';
+import { meshHealTargets, rosterPeers } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
 import { installSite, KNSite } from './site/index.ts';
 import { installSafeStorage } from './site/storage.ts';
@@ -431,6 +431,8 @@ export const KNCore = {
     sayUntilHeard,
   },
   meshHealTargets,
+  /** Which roster entries are this page's peers: never its own, by socket id, slot or player id (roster.ts, proved). */
+  rosterPeers,
   normalizeAxis,
   peerFacts,
   peerTiming: PEER_TIMING,
