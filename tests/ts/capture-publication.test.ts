@@ -108,6 +108,11 @@ function room(realTransfer = false) {
     ${fn('_runQueuedSyncPush')}
     ${fn('_openCapturePublication')}
     ${fn('_deferMatchCapture')}
+    ${fn('_captureHiddenStateWords')}
+    ${fn('_captureHleState')}
+    ${fn('_captureResyncExtras')}
+    ${fn('_resyncExtrasText')}
+    ${fn('_resyncExtrasFields')}
     ${part('  const _ownedCaptureScope =', '  const _sealAndPublishCapture =')}
     ${fn('_sealAndPublishCapture')}
     ${part('  // Experimental fault-only owner path.', '  const _ownedCaptureScope =')}

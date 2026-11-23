@@ -101,6 +101,10 @@ const TEXT_GRAMMAR = {
     // the host sent for its own reasons has none.
     'sync-answer-id': ':\\d+',
     'sync-recovery-id': ':\\d+',
+    // The rest of the state that follows on the same channel, beside
+    // kn_sync_read's bytes: sync-extras:<hidden word>,...:<RSP HLE state, base64>.
+    // Either part may be empty. A page that does not know it drops it.
+    'sync-extras': `:(?:\\d+(?:,\\d+)*)?:[A-Za-z0-9+/]*={0,2}`,
     'sync-request-full': '',
     'sync-request-id': ':\\d+',
   },
@@ -188,6 +192,10 @@ const SyncStateSocket = Schema.Struct({
   data: Encoded,
   // The request this state answers; absent when it answers none.
   requestId: Schema.optional(Schema.Number),
+  // The hidden words and RSP HLE state (base64) taken with it; absent from an
+  // older host, and from a core without the exports.
+  hiddenWords: Schema.optional(Schema.Array(Schema.Number)),
+  hle: Schema.optional(Schema.String),
 });
 
 /** JSON messages by where they travel and their `type`. */
