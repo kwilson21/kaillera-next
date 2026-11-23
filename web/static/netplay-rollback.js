@@ -20237,14 +20237,14 @@
     _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
   };
 
-  // Internal opt-in seam; the owner wire and forward-tick path do not
-  // invoke this yet. Never overlap a native capture which already started.
+  // Reserve the capture for an owner-proof incident without overlapping
+  // another native capture that has already started.
   const _openCapturePublication = (plan, attempts, now) => {
     if (
       !_useCRollback ||
       !_hasKnSync ||
       RB_WORKER_COPROC ||
-      _isSmashRemix() ||
+      (_isSmashRemix() && !_readMenuPhase().gameplay) ||
       _playerSlot !== 0 ||
       _phase !== PHASE_RUNNING ||
       _runSubstate === RUN_LATE_JOIN_PAUSE ||
@@ -20292,7 +20292,8 @@
     _useCRollback &&
     _hasKnSync &&
     !RB_WORKER_COPROC &&
-    !_isSmashRemix() &&
+    // Remix menu and transition inputs keep their legacy behavior.
+    (!_isSmashRemix() || _readMenuPhase().gameplay) &&
     !_isSpectator &&
     !_demoMode &&
     _activeRoster?.size >= 3 &&

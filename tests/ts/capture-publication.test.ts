@@ -50,7 +50,10 @@ function room(realTransfer = false) {
     const PHASE_RUNNING=5, RUN_LATE_JOIN_PAUSE=1, _phase=5, _runSubstate=0; let _playerSlot=0;
     const _useCRollback=true, _hasKnSync=true, _isSpectator=false, _demoMode=false, _catchUpTo=-1;
     let RB_WORKER_COPROC=false;
-    const _isSmashRemix=()=>false, _activeRoster=new Set([0,1,2,3]), KNState={matchId:'running-match'};
+    let remix=false, gameStatus=0, sceneCurr=16;
+    const _isSmashRemix=()=>remix, _readGameStatus=()=>gameStatus, _readSceneCurr=()=>sceneCurr;
+    ${fn('_readMenuPhase')}
+    const _activeRoster=new Set([0,1,2,3]), KNState={matchId:'running-match'};
     const _isPeerPendingLateJoin=()=>false, _peerConnectionLive=()=>true, INPUT_PAST_WINDOW_FRAMES=240;
     const KN_MAX_VISIBLE_ROLLBACK_DEPTH=7, OVERDUE_PUSH_QUIET_MS=20000;
     const _syncEnabled=true, _coreFatalError=false, DELAY_FRAMES=3, SYNC_COORD_TIMEOUT_MS=3000;
@@ -307,47 +310,63 @@ test('cached frame-zero sender cannot publish during a running capture incident'
   assert.equal(run('bootEmits.length'), 1);
 });
 
-test('genuine overdue emits to current stamped owner; partial proof neither feeds nor seals until idle at F', async () => {
-  const run = room();
-  run("_escalateLostInput(_peers.a, 'push', now, 1066, true);");
-  assert.equal(run("bootEmits.filter(x=>x.data.type==='recovery-input-proof-request').length"), 1);
-  const request = JSON.parse(run('JSON.stringify(bootEmits.at(-1).data)'));
-  assert.equal(request.targetSid, 'actual-p2');
-  assert.deepEqual(request.ids, [1066, 1073]);
-  const send = (samples: readonly [number, readonly number[]][], sid = 'actual-p2') =>
-    run(
-      `onDataMessage(${JSON.stringify({
-        type: 'recovery-input-proof-reply',
-        token: request.token,
-        targetSid: 'actual-host',
-        samples,
-        knFrom: { sid, slot: 1, owner: false },
-      })})`,
+for (const [game, remix] of [
+  ['stock', false],
+  ['Smash Remix battle', true],
+] as const)
+  test(`${game}: genuine overdue emits to current stamped owner; partial proof neither feeds nor seals until idle at F`, async () => {
+    const run = room();
+    if (remix) run('remix=true; gameStatus=1; sceneCurr=22');
+    run("_escalateLostInput(_peers.a, 'push', now, 1066, true);");
+    assert.equal(run("bootEmits.filter(x=>x.data.type==='recovery-input-proof-request').length"), 1);
+    const request = JSON.parse(run('JSON.stringify(bootEmits.at(-1).data)'));
+    assert.equal(request.targetSid, 'actual-p2');
+    assert.deepEqual(request.ids, [1066, 1073]);
+    const send = (samples: readonly [number, readonly number[]][], sid = 'actual-p2') =>
+      run(
+        `onDataMessage(${JSON.stringify({
+          type: 'recovery-input-proof-reply',
+          token: request.token,
+          targetSid: 'actual-host',
+          samples,
+          knFrom: { sid, slot: 1, owner: false },
+        })})`,
+      );
+    send(
+      [
+        [1066, [0, 0, 0, 0, 0]],
+        [1073, [2, 0, 0, 0, 0]],
+      ],
+      'a',
     );
-  send(
-    [
-      [1066, [0, 0, 0, 0, 0]],
-      [1073, [2, 0, 0, 0, 0]],
-    ],
-    'a',
-  );
-  assert.equal(run('_ownerRepair.proof.accepted.size'), 0);
-  send([[1066, [0, 0, 0, 0, 0]]]);
-  assert.equal(run('_serviceOwnerRepair(mod)'), 'hold');
-  assert.equal(run('nativeFed.length'), 0);
-  send([[1073, [2, 0, 0, 0, 0]]]);
-  assert.equal(run('_serviceOwnerRepair(mod)'), 'replay');
-  assert.equal(run('nativeFed.length'), 2);
-  assert.deepEqual(JSON.parse(run('summary()')).reads, []);
-  run('depth=1; nativeFrame=1069; _frameNum=1069;');
-  assert.equal(run('_serviceOwnerRepair(mod)'), 'replay');
-  run('depth=0; pending=-1; nativeFrame=1076; _frameNum=1076;');
-  assert.equal(run('_serviceOwnerRepair(mod)'), 'hold');
-  await flush();
-  const out = JSON.parse(run('summary()'));
-  assert.deepEqual(out.reads, [1076]);
-  assert.equal(out.shipments.length, 3);
-  assert.ok(out.shipments.every((x: { frame: number }) => x.frame === 1076));
+    assert.equal(run('_ownerRepair.proof.accepted.size'), 0);
+    send([[1066, [0, 0, 0, 0, 0]]]);
+    assert.equal(run('_serviceOwnerRepair(mod)'), 'hold');
+    assert.equal(run('nativeFed.length'), 0);
+    send([[1073, [2, 0, 0, 0, 0]]]);
+    assert.equal(run('_serviceOwnerRepair(mod)'), 'replay');
+    assert.equal(run('nativeFed.length'), 2);
+    assert.deepEqual(JSON.parse(run('summary()')).reads, []);
+    run('depth=1; nativeFrame=1069; _frameNum=1069;');
+    assert.equal(run('_serviceOwnerRepair(mod)'), 'replay');
+    run('depth=0; pending=-1; nativeFrame=1076; _frameNum=1076;');
+    assert.equal(run('_serviceOwnerRepair(mod)'), 'hold');
+    await flush();
+    const out = JSON.parse(run('summary()'));
+    assert.deepEqual(out.reads, [1076]);
+    assert.equal(out.shipments.length, 3);
+    assert.ok(out.shipments.every((x: { frame: number }) => x.frame === 1076));
+  });
+
+test('Smash Remix menus and inactive battles do not start an owner-proof incident', async () => {
+  for (const phase of ['sceneCurr=16; gameStatus=1', 'sceneCurr=22; gameStatus=0']) {
+    const run = room();
+    run(`remix=true; ${phase}; _escalateLostInput(_peers.a, 'push', now, 1066, true)`);
+    await flush();
+    assert.equal(run('_ownerRepair'), null);
+    assert.equal(run('bootEmits.length'), 0);
+    assert.deepEqual(JSON.parse(run('summary()')).reads, [1076]);
+  }
 });
 
 test('absent owner reply expires into the legacy attempt without sealing; 2p/worker never request proof', async () => {
@@ -368,9 +387,14 @@ test('absent owner reply expires into the legacy attempt without sealing; 2p/wor
   }
 });
 
-test('guest replies only with inputs recorded at their exact frame/current SID, not placeholder or reused identity', () => {
-  const run = room();
-  run(`
+for (const [game, remix] of [
+  ['stock', false],
+  ['Smash Remix battle', true],
+] as const)
+  test(`${game}: guest replies only with inputs recorded at their exact frame/current SID, not placeholder or reused identity`, () => {
+    const run = room();
+    if (remix) run('remix=true; gameStatus=1; sceneCurr=22');
+    run(`
     _playerSlot=1; _peers.a.slot=0; _knownPlayers.a.socketId='actual-host'; socket.id='actual-p2';
     const authored={buttons:2,lx:0,ly:0,cx:0,cy:0};
     _localInputs[1066]=authored; _recordAuthoredOwnerInput(1066,authored);
@@ -379,11 +403,11 @@ test('guest replies only with inputs recorded at their exact frame/current SID, 
       ids:[1066,1067,1068],knFrom:{sid:'actual-host',slot:0,owner:true}};
     onDataMessage(request);
   `);
-  const sent = JSON.parse(run('JSON.stringify(bootEmits.at(-1).data)'));
-  assert.deepEqual(sent.samples, [[1066, [2, 0, 0, 0, 0]]]);
-  run("socket.id='rotated-p2'; onDataMessage({...request,targetSid:socket.id});");
-  assert.equal(run('bootEmits.length'), 1);
-});
+    const sent = JSON.parse(run('JSON.stringify(bootEmits.at(-1).data)'));
+    assert.deepEqual(sent.samples, [[1066, [2, 0, 0, 0, 0]]]);
+    run("socket.id='rotated-p2'; onDataMessage({...request,targetSid:socket.id});");
+    assert.equal(run('bootEmits.length'), 1);
+  });
 
 test('the protected read requires every active owner, at actual capture rather than dispatch', async () => {
   const run = room(true);
