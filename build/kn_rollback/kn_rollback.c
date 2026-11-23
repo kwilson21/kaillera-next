@@ -79,7 +79,7 @@ extern void kn_reset_audio(void);
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
 
-/* Forward declaration: RF5 live gameplay hash (defined later). */
+/* Forward declaration: live gameplay hash (defined later). */
 uint32_t kn_live_gameplay_hash(void);
 
 /* Hidden emulator/plugin state that retro_serialize does not fully cover.
@@ -481,17 +481,6 @@ static struct {
     int fatal_stale_ring_idx;
     int fatal_stale_actual;
     int fatal_stale_pending;
-
-    /* RF5 (R4): Live-vs-ring hash mismatch signal. Set by kn_post_tick
-     * when a replay completes and the live state hash differs from
-     * what the ring claims for the just-completed frame. JS polls via
-     * kn_get_live_mismatch() and logs RB-LIVE-MISMATCH. No resync
-     * recovery per §Core principle.
-     * See docs/netplay-invariants.md §R4. */
-    int live_mismatch_pending;
-    int live_mismatch_f;
-    uint32_t live_mismatch_replay;
-    uint32_t live_mismatch_live;
 } rb;
 
 /* Debug log (rb_log): the newest lines, NUL-terminated. When a line does not
@@ -1795,8 +1784,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
          * REMOTE is applied at replay_apply (delayed, from C ring or predicted).
          * If we wrote ALL slots from replay_apply during replay while the
          * forward path wrote local-at-current, replay would simulate with a
-         * stale local input the original frame never used → R4 LIVE-MISMATCH
-         * fires every replay frame → silent state divergence.
+         * stale local input the original frame never used → silent state
+         * divergence.
          *
          * Legacy (rb.true_rollback=0): all slots from replay_apply, matching
          * the legacy JS forward path that also writes all slots from applyFrame.
@@ -2341,20 +2330,25 @@ int kn_get_fatal_stale(int *out_f, int *out_idx, int *out_actual) {
     return 1;
 }
 
-/* ── RF5 (R4): Returns 1 (and clears flag) if post-replay live-state
- * hash mismatch was detected. Writes frame, ring hash, live hash to
- * out params. Per §Core principle: JS logs and continues; no resync
- * recovery. */
+/* ── Retired RF5 (R4) signal: always 0 ────────────────────────────────
+ * kn_post_tick no longer checks the live state against the ring at the end
+ * of a replay (the check was dropped in f322745), so there is never a
+ * mismatch to report and RB-LIVE-MISMATCH is never logged. The check it
+ * reported compared the ring copy of the last replayed frame, saved at
+ * that frame's start, with the live state at its end: one frame apart.
+ * And both come from the replay itself, so even aligned it could not see
+ * the replay drift from the original timeline; today the replay endpoint
+ * is saved from the live state on the next kn_pre_tick, which makes a
+ * live-vs-ring comparison there equal by construction. Kept, returning 0,
+ * because pages poll it (docs/netplay-invariants.md §R4). */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_live_mismatch(int *out_f, uint32_t *out_ring, uint32_t *out_live) {
-    if (!rb.live_mismatch_pending) return 0;
-    if (out_f) *out_f = rb.live_mismatch_f;
-    if (out_ring) *out_ring = rb.live_mismatch_replay;
-    if (out_live) *out_live = rb.live_mismatch_live;
-    rb.live_mismatch_pending = 0;
-    return 1;
+    (void)out_f;
+    (void)out_ring;
+    (void)out_live;
+    return 0;
 }
 
 /* ── Query: replay start frame ─────────────────────────────────────── */
@@ -2555,18 +2549,15 @@ uint32_t kn_gameplay_hash(int frame) {
     return hash;
 }
 
-/* ── Live gameplay hash (RF5, R4) ──────────────────────────────────
- * Fresh retro_serialize + gameplay hash of the CURRENT live emulator
- * state, bypassing the ring buffer. Used by kn_post_tick to verify
- * that after a replay completes, the live state matches what the ring
- * claims. If they differ, the replay introduced drift and we log
- * RB-LIVE-MISMATCH.
+/* ── Live gameplay hash ─────────────────────────────────────────────
+ * Fresh gameplay hash of the CURRENT live emulator state, bypassing the
+ * ring buffer. The engine itself does not call it: the page reads it
+ * around a rollback for its own diagnostics, and test harnesses read it.
+ * (It was added for an end-of-replay live-vs-ring check in kn_post_tick,
+ * RF5, which no longer exists; see kn_get_live_mismatch.)
  *
  * Uses a static scratch buffer reused across calls to avoid malloc
- * pressure. Expected cost: one retro_serialize (~1-2ms) per call.
- * Called at most once per rollback completion (rollbacks are rare),
- * so total overhead is negligible. Also exported for V1 integrity
- * harness use. */
+ * pressure. Expected cost: one retro_serialize (~1-2ms) per call. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif

@@ -286,12 +286,29 @@ orderings (natively, against a stand-in core, on both state backends),
 and `RESYNC_ONE_BACK=1` and `RESYNC_SAME_FRAME=1` in
 `tests/rb-two-player.mjs` land the two orderings in a real match.
 
-### R4 — Post-replay live state equals ring state
+### R4 — A replay reproduces the timeline it corrects
 
-After a replay completes at frame N, the emulator's live state
-(fresh `retro_serialize` + `kn_gameplay_hash`) must match the ring's
-stored hash for frame N. Mismatches log `RB-LIVE-MISMATCH` with both
-hashes and throw in dev (RF5).
+A replay must leave the emulator in the state the peers reach with the
+same inputs. **Nothing checks this at run time.** The engine never logs
+`RB-LIVE-MISMATCH`: `kn_get_live_mismatch` always returns 0 (pages still
+poll it), so the absence of `RB-LIVE-MISMATCH` from a log is not
+evidence that R4 held.
+
+RF5's check (April 2026) hashed the live state in `kn_post_tick` at the
+end of a replay and compared it with the ring copy of the last replayed
+frame. It was dropped in f322745, when the replay endpoint save moved to
+the next `kn_pre_tick`, and was not sound before that: the ring copy was
+saved at the start of that frame and the live state is its end, one frame
+apart, and both come from the replay itself, so it could not see the
+replay drift from the original or from the other peers. Compared at the
+endpoint the two are now equal by construction. A check worth having
+compares against something the replay did not produce; today that is the
+cross-peer comparisons: the desync detector, and the gameplay and
+game-state hashes in `tests/rb-two-player.mjs` (see "Which hash to trust"
+in CLAUDE.md for what each covers). The replay's inputs are checked
+natively: `tests/rollback-native/test_stale_prediction_flag.py`
+(specs/stale_prediction_flag.qnt) holds that a replay runs a confirmed
+input's real value.
 
 ### R5 — Pre-tick return value consistency
 
@@ -368,16 +385,16 @@ slot rather than in a loop for the tick pump's whole replay budget.
 
 ### Detection events
 
-Every violation of R1-R6 produces a loud analyzer event. Zero of
-any of these events across a real session log means the integrity
-invariants held.
+A violation of R2, R3 or R5 produces a loud analyzer event. Zero of
+these events across a real session log means those invariants held; it
+says nothing about R4, which has no run-time check (see R4).
 
 | Event | Invariant | Spec RF |
 |-------|-----------|---------|
 | `REPLAY-NORUN` | R2 | RF2 |
 | `RB-INVARIANT-FIXUP` | R5 | RF3 |
 | `FATAL-RING-STALE` | R3 | RF7 |
-| `RB-LIVE-MISMATCH` | R4 | RF5 |
+| `RB-LIVE-MISMATCH` | R4 (retired: never emitted, see R4) | RF5 |
 | `AUDIO-DEATH` (enriched) | R6 diagnostic | RF6 Part A |
 
 `FATAL-CORE-ABORT` means the WASM core trapped. It stops this peer's tick

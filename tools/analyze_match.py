@@ -1065,7 +1065,9 @@ def query_freeze_detection(df: pl.DataFrame, jsonl_dir: str = "") -> None:
         for row in fatal_stale.head(5).iter_rows(named=True):
             print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
 
-    # RF5: post-replay live-state drift
+    # RF5: post-replay live-state drift. Only logs recorded before f322745
+    # (April 2026) can hold it: the engine no longer makes this check, so
+    # its absence proves nothing (docs/netplay-invariants.md §R4).
     live_mismatch = df.filter(pl.col("msg").str.contains("RB-LIVE-MISMATCH"))
     if live_mismatch.height > 0:
         found_any = True
