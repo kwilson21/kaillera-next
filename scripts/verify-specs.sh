@@ -362,6 +362,8 @@ escalation_push() {
   expect_violation "$LIFECYCLE" recovery_lifecycle_before unusableChannelDoesNotCapture 2
   verify specs/input_placeholder.qnt input_placeholder_fixed allHold init 4
   expect_violation specs/input_placeholder.qnt input_placeholder_before allHold 2
+  verify specs/stale_prediction_flag.qnt stale_prediction_flag_fixed allHold
+  expect_violation specs/stale_prediction_flag.qnt stale_prediction_flag_before allHold 5
   verify specs/recovery_review.qnt recovery_review_fixed allHold init 14
   expect_violation specs/recovery_review.qnt recovery_review_before rosterGapCannotRenew 5
   expect_violation specs/recovery_review.qnt recovery_review_before readinessHasDeadline 1

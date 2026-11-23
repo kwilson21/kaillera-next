@@ -988,6 +988,20 @@ static void setup_frame(int frame) {
     (void)frame;
 }
 
+/* ── Prediction flag ───────────────────────────────────────────────── */
+/* Whether ring entry `idx` of `slot` holds a prediction of input `frame`.
+ * The input ring is reused every KN_INPUT_RING_SIZE frames, and a
+ * prediction whose real input never arrives (the page drops inputs older
+ * than a resync's settled point) leaves rb.predicted set at its index. The
+ * real input KN_INPUT_RING_SIZE frames later is stored in the same entry
+ * without clearing it, so the bare flag would make that real input read as
+ * a prediction (a replay then overwrote it with a new guess). Every
+ * decision taken from the flag goes through here, with the frame it is
+ * about (specs/stale_prediction_flag.qnt). */
+static int rb_is_prediction_of(int slot, int idx, int frame) {
+    return rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame;
+}
+
 /* ── Write inputs for all players for a given frame ────────────────── */
 /* During replay (is_replay=1), logs what's actually being written to catch
  * input divergence between normal play and replay. */
@@ -1004,7 +1018,7 @@ static void write_frame_inputs_logged(int frame, int is_replay) {
             kn_input_t *inp = &rb.inputs[s][idx];
             if (inp->present && inp->frame == frame) {
                 btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
-                origin = rb.predicted[s][idx] ? 'P' : 'R'; /* Predicted or Real */
+                origin = rb_is_prediction_of(s, idx, frame) ? 'P' : 'R'; /* Predicted or Real */
                 kn_write_controller(s, btn, lx, ly, cx, cy);
             } else {
                 origin = 'Z'; /* Zero — missing input */
@@ -1415,7 +1429,7 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
     /* Check if this corrects a prediction.
      * Validate the predicted_values entry has the right frame — the ring
      * buffer at idx may contain stale predictions from 256 frames ago. */
-    if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {
+    if (rb_is_prediction_of(slot, idx, frame)) {
         kn_input_t *pred = &rb.predicted_values[slot][idx];
         /* Exact prediction match. A predicted stick value that differs from
          * the real one by any amount leaves different game state on the
@@ -1809,7 +1823,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                      * so one input change became a chain of rollbacks. The
                      * new guess is stored as the prediction, so later
                      * arrivals are checked against what this replay ran. */
-                    int unconfirmed = (inp->present && inp->frame == replay_apply && rb.predicted[s][idx]);
+                    int unconfirmed = (inp->present && inp->frame == replay_apply
+                                       && rb_is_prediction_of(s, idx, replay_apply));
                     int missing = !(inp->present && inp->frame == replay_apply);
                     if (rb.slot_active[s] && (unconfirmed || missing)) {
                         kn_input_t pred_input = rb_predict_input(s);
@@ -1823,7 +1838,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                     }
                     if (inp->present && inp->frame == replay_apply) {
                         btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
-                        origin = rb.predicted[s][idx] ? 'P' : 'R';
+                        origin = rb_is_prediction_of(s, idx, replay_apply) ? 'P' : 'R';
                         kn_write_controller(s, btn, lx, ly, cx, cy);
                     } else {
                         origin = 'Z';
@@ -1898,7 +1913,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
              * triggering a misprediction — so we need state in the ring. */
             int needs_prediction = !rb.inputs[s][idx].present
                                 || rb.inputs[s][idx].frame != apply_frame
-                                || rb.predicted[s][idx];
+                                || rb_is_prediction_of(s, idx, apply_frame);
             if (needs_prediction && (!rb.inputs[s][idx].present || rb.inputs[s][idx].frame != apply_frame)) {
                 /* Predict: dead-reckoning for stick, repeat-last for buttons.
                  * Extrapolate stick position based on velocity between the

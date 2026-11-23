@@ -707,6 +707,18 @@ $QUINT typecheck specs/input_placeholder.qnt
 $QUINT test specs/input_placeholder.qnt --main=input_placeholder_before --backend="$BACKEND"
 $QUINT test specs/input_placeholder.qnt --main=input_placeholder_fixed --backend="$BACKEND"
 $QUINT run specs/input_placeholder.qnt --main=input_placeholder_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+
+# A replay applies a confirmed input's real value: the prediction flag is read
+# together with the tag it was set for. VIOLATED while the replay branch read
+# the bare flag, which a prediction 256 tags older could leave set
+# (stale_prediction_flag_before; staleFlagTest).
+STALE=specs/stale_prediction_flag.qnt
+$QUINT typecheck "$STALE"
+for variant in stale_prediction_flag_before stale_prediction_flag_fixed; do
+  $QUINT test "$STALE" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$STALE" --main=stale_prediction_flag_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
 ACK=specs/recovery_ack.qnt
 $QUINT typecheck "$ACK"
 for variant in recovery_ack_before recovery_ack_fixed; do
