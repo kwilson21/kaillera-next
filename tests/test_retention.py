@@ -89,6 +89,47 @@ def test_repeats_are_counted_with_the_first_frame():
     assert classify_entries(entries) == [{"signal": "TICK-STUCK", "count": 3, "slot": 0, "first_f": 100}]
 
 
+_SUSPECT = "KNDesync suspect frame={f} field=rng slot=g trigger=flag phase=22"
+
+
+def test_kndesync_suspect_flags():
+    from src.retention import classify_entries
+
+    reasons = classify_entries([_e("TICK f=1"), _e(_SUSPECT.format(f=19212), slot=1, f=19230)])
+    assert reasons == [{"signal": "KNDESYNC-SUSPECT", "count": 1, "slot": 1, "first_f": 19230}]
+
+
+def test_kndesync_suspects_count_with_the_first_frame():
+    from src.retention import classify_entries
+
+    entries = [
+        _e(_SUSPECT.format(f=480), slot=1, f=500),
+        _e("KNDesync suspect frame=280 field=stocks slot=0 trigger=flag phase=22", slot=0, f=300),
+        _e(_SUSPECT.format(f=380), slot=1, f=400),
+    ]
+    assert classify_entries(entries) == [{"signal": "KNDESYNC-SUSPECT", "count": 3, "slot": 1, "first_f": 300}]
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        "KNDesync suspect frame=300 field=heartbeat slot=g trigger=heartbeat",  # mode B heartbeat
+        "KNDesync init mode=A",
+        "KNDesync confirm window=8",
+        "KNDesync capture frame=310 suspect=300 field=rng slot=g",
+        "KNDesync capture skipped: suspect frame=300 raised at tick=320, past its capture frame",
+        "KNDesync capture dropped: frame=310 was never ticked (now 330)",
+        "KNDesync address map=SSB64",
+        "KNDesync disabled: core missing exports _kn_x",
+        "KNDesync dropped a malformed digest from peer-1",
+    ],
+)
+def test_other_kndesync_lines_do_not_flag(msg):
+    from src.retention import classify_entries
+
+    assert classify_entries([_e(msg)]) == []
+
+
 # ── db.flag_match ────────────────────────────────────────────────────────────
 
 

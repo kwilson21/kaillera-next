@@ -278,6 +278,7 @@ single pass over merged entries that `_compute_metrics` already makes.
 | | `RB-CHECK` … `MISMATCH` | any |
 | | `TICK-STUCK`, `RB-INPUT-STALL-TIMEOUT`, `PEER-PHANTOM`, `LOCAL-FREEZE` (not `VISUAL-FREEZE`: the client only logs `VISUAL-FREEZE failed`, the detector erroring) | any |
 | | `INPUT-OOR` | ≥ 20 on one slot |
+| | `KNDesync suspect` … `trigger=flag` (the field desync detector's mismatch on a confirmed frame, past the rollback window), as `KNDESYNC-SUSPECT`; not `trigger=heartbeat` (mode B's periodic capture) nor any other `KNDesync` line | any |
 | Client events (`meta.match_id`, which must be the room's registered match) | `wasm-fail` (includes boot timeouts); not `unhandled`, which carries browser noise | any; flagged when the event is ingested |
 | `desync_events` | `vision_equal = 0` | any; flagged when the verdict is written |
 | Feedback (`context.matchId`; for bug reports without one, the room's most recent open match) | `feedback` | any; flagged at submit |

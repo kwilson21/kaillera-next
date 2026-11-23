@@ -1,6 +1,7 @@
 """Retention tiers: which matches are kept until someone resolves them.
 
-A match is flagged when its session logs show a crash, freeze or desync, a
+A match is flagged when its session logs show a crash, freeze or desync
+(including a field-detector `KNDesync suspect` raised by a real mismatch), a
 client reports a fatal error, a vision check finds a visual desync, or a
 player sends feedback about it (docs/superpowers/specs/
 2026-09-25-offbox-log-storage-design.md §2). Flagged matches are kept until
@@ -48,6 +49,16 @@ _ANY_TAGS = frozenset(
 # (FATAL, FATAL-RING-STALE, ...) and rollback-invariant events
 # (RB-INVARIANT-FIXUP).
 _ANY_PREFIXES = ("FATAL", "RB-INVARIANT-")
+# The field desync detector (web/src/page/desync-detector.ts) logs
+# `KNDesync suspect frame=... field=... slot=... trigger=flag ...` when the
+# peers' per-field hashes differ for a confirmed frame. It only compares
+# frames a confirm window behind the newest, past the rollback window, so a
+# suspect is a real split, not a stale prediction a rollback would correct.
+# It flags as KNDESYNC-SUSPECT. Mode B's heartbeat logs the same line with
+# `trigger=heartbeat` on healthy matches; that one, and every other
+# `KNDesync ...` line (init, confirm window, capture, disabled, ...), is not a
+# signal.
+_KNDESYNC_SUSPECT = "KNDESYNC-SUSPECT"
 # Out-of-range inputs from one peer this many times in a match is a storm.
 _INPUT_OOR_STORM = 20
 
@@ -73,6 +84,11 @@ def classify_entries(entries: Iterable[dict]) -> list[dict]:
             continue
         if tag == "RB-CHECK" and "MISMATCH" in msg:
             signal = "RB-CHECK-MISMATCH"
+        elif tag == "KNDesync":
+            words = msg.removeprefix("[C] ").split()
+            if len(words) < 2 or words[1] != "suspect" or "trigger=flag" not in words:
+                continue
+            signal = _KNDESYNC_SUSPECT
         elif tag in _ANY_TAGS or tag.startswith(_ANY_PREFIXES):
             signal = tag
         else:
