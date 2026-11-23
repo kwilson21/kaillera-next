@@ -7267,7 +7267,13 @@
     if (!words?.length || !restoreFn || !mod?._malloc || !mod?._free || !mod.HEAPU32) {
       return false;
     }
-    const wordCount = Math.min(18, words.length);
+    // The native restore reads all 18 words: a shorter list would leave it
+    // reading whatever follows in the heap.
+    if (words.length < 18) {
+      _syncLog(`${reason}: hidden state not restored: ${words.length} words, 18 needed`);
+      return false;
+    }
+    const wordCount = 18;
     const ptr = mod._malloc(wordCount * 4);
     if (!ptr) return false;
     try {
@@ -7361,11 +7367,22 @@
     return `sync-extras:${words}:${extras.hle?.length ? uint8ToBase64(extras.hle) : ''}`;
   };
 
+  // HLE bytes that do not decode are dropped, as if none were sent.
+  const _hleFromBase64 = (b64) => {
+    if (typeof b64 !== 'string' || !b64) return null;
+    try {
+      return base64ToUint8(b64);
+    } catch (_) {
+      _syncLog('resync extras: HLE state is not base64, dropped');
+      return null;
+    }
+  };
+
   const _resyncExtrasFromText = (text) => {
     const [, words, hle] = text.split(':');
     return {
       hiddenWords: words ? words.split(',').map((w) => Number(w) >>> 0) : null,
-      hle: hle ? base64ToUint8(hle) : null,
+      hle: _hleFromBase64(hle),
     };
   };
 
@@ -7380,7 +7397,7 @@
   const _resyncExtrasFromFields = (msg) => {
     return {
       hiddenWords: Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => Number(w) >>> 0) : null,
-      hle: typeof msg.hle === 'string' && msg.hle ? base64ToUint8(msg.hle) : null,
+      hle: _hleFromBase64(msg.hle),
     };
   };
 

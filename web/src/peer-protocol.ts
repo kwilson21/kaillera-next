@@ -103,8 +103,9 @@ const TEXT_GRAMMAR = {
     'sync-recovery-id': ':\\d+',
     // The rest of the state that follows on the same channel, beside
     // kn_sync_read's bytes: sync-extras:<hidden word>,...:<RSP HLE state, base64>.
-    // Either part may be empty. A page that does not know it drops it.
-    'sync-extras': `:(?:\\d+(?:,\\d+)*)?:[A-Za-z0-9+/]*={0,2}`,
+    // Either part may be empty; the base64 is whole quartets. A page that
+    // does not know it drops it.
+    'sync-extras': `:(?:\\d+(?:,\\d+)*)?:(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?`,
     'sync-request-full': '',
     'sync-request-id': ':\\d+',
   },

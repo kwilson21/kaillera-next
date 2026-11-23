@@ -69,3 +69,28 @@ for (const refuses of [true, false])
     // The hidden words and HLE state go in straight after the state, in the same step.
     assert.deepEqual([...c.result.calls], ['write', 'extras', 'frame']);
   });
+
+test('hidden words are restored only as all 18: the native restore reads 18', () => {
+  const start = source.indexOf('  const _restoreHiddenStateWords = ');
+  const restore = source.slice(start, source.indexOf('\n  };', start) + 5);
+  for (const count of [1, 17, 18]) {
+    const c = vm.createContext({ Uint32Array });
+    vm.runInContext(
+      `
+ const restored=[], logs=[];
+ const mod={HEAPU32:new Uint32Array(64),_malloc:()=>16,_free:()=>{},_kn_restore_hidden_state_impl:(ptr)=>restored.push([...mod.HEAPU32.slice(ptr>>2,(ptr>>2)+18)])};
+ const _syncLog=(l)=>logs.push(l);
+ ${restore}
+ globalThis.result={ok:_restoreHiddenStateWords(mod,[...Array(${count})].map((_,i)=>i+1),'resync'),restored,logs};
+ `,
+      c,
+    );
+    assert.equal(c.result.ok, count === 18, `${count} words`);
+    assert.equal(c.result.restored.length, count === 18 ? 1 : 0);
+    if (count === 18)
+      assert.deepEqual(
+        [...c.result.restored[0]],
+        [...Array(18)].map((_, i) => i + 1),
+      );
+  }
+});

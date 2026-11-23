@@ -287,6 +287,7 @@ test('resync extras carry hidden words and base64 HLE bytes, either part empty',
   ok('sync-state', 'sync-extras::AQ==');
   ok('sync-state', 'sync-extras:7:');
   ok('sync-state', 'sync-extras::');
+  ok('sync-state', 'sync-extras:1:AQIDBA==');
   for (const text of [
     'sync-extras',
     'sync-extras:1',
@@ -294,6 +295,10 @@ test('resync extras carry hidden words and base64 HLE bytes, either part empty',
     'sync-extras:1,:',
     'sync-extras:1:A=A',
     'sync-extras:1:AQ:x',
+    // Not whole quartets: atob throws on these.
+    'sync-extras::A',
+    'sync-extras::AQIDB',
+    'sync-extras::AQ=',
   ])
     bad('sync-state', text);
   // Only the state channel carries it.
