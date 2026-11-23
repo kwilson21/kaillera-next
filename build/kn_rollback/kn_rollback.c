@@ -2307,7 +2307,8 @@ int kn_peek_pending_rollback(void) {
 }
 
 /* ── Query: replay depth after kn_pre_tick ─────────────────────────── */
-/* Returns number of frames to replay (0 = none). Clears the flag. */
+/* Returns the number of frames the replay in progress has to run (0 = none).
+ * A pure read of rb.replay_depth: calling it changes nothing. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
