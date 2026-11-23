@@ -32,7 +32,10 @@
 // a large run into several chunks of at most _SESSION_LOG_CHUNK_MAX (each is
 // a run of one kind in order, so a reader sees the same order), the page's
 // own ring cap, the input audit (its own seq, epoch and store, as before),
-// concurrent flushes (an append lock serializes them per player).
+// concurrent flushes (an append lock serializes them per player), the bound
+// on runs per flush (_MAX_KIND_RUNS, 64: a page's flush has two runs per 5 s
+// window it covers; past the bound, which only a modified client alternating
+// its lines reaches, the rest of the flush is one JS run, still in order).
 //
 // SPLIT: "none" (today: one store), "per_flush" (rejected: a JS chunk and a
 // C chunk per flush), "runs" (each run of one kind a chunk, in order; one

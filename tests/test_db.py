@@ -1025,3 +1025,23 @@ async def _run_reload(tmp_db):
     assert acks["lastSeq"] == 1
     assert await _read_back("m-clog") == ["[C] before 0", "js 0", "[C] after 1"]
     await close_db()
+
+
+def test_a_flush_of_alternating_lines_is_held_to_a_bounded_number_of_rows(tmp_db):
+    # Each run is a row in one batch. A modified client alternating its lines
+    # gets _MAX_KIND_RUNS rows at most; the rest of its flush is one 'log'
+    # run, still in order.
+    _run_async(_run_alternating(tmp_db))
+
+
+async def _run_alternating(tmp_db):
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db
+
+    await init_db(tmp_db)
+    entries = [_c(seq) if seq % 2 else _js(seq) for seq in range(500)]
+    await append_session_flush({**_CLOG_BASE, "entries": entries})
+    kinds = await _kinds("m-clog")
+    assert len(kinds) == db_mod._MAX_KIND_RUNS and kinds[-1] == "log"
+    assert await _read_back("m-clog") == [e["msg"] for e in entries]
+    await close_db()

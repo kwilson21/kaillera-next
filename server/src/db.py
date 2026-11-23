@@ -169,6 +169,14 @@ _C_LINE_PREFIX = "[C] "
 # The chunk kinds a reader of each stream takes, in row-id order.
 _STREAM_KINDS = {"log": ("log", "clog"), "audit": ("audit",)}
 
+# Each run of one kind is at least one row, in one batch (one D1 request,
+# which must finish within 30 s). A page's flush holds a run of JS lines and
+# a run of C lines for each 5 s window it covers: two, or a few dozen in a
+# 5,000-entry resend after an outage (about 40 at 30 fps). Many more can
+# only come from a modified client alternating its lines; past this many
+# runs, the rest of the flush is stored as one 'log' run, still in order.
+_MAX_KIND_RUNS = 64
+
 
 def _chunk_cap(kind: str) -> int:
     if kind == "audit":
@@ -403,7 +411,7 @@ def _kind_runs(entries: list[dict]) -> list[tuple[str, list[dict]]]:
     kinds in row-id order, get every entry back in the order it was sent
     (specs/session_log_store.qnt). One chunk of C lines per flush would
     not: a re-init drains the C log in the middle of a flush window, and JS
-    lines follow it.
+    lines follow it. Past _MAX_KIND_RUNS runs, the rest is one 'log' run.
     """
     runs: list[tuple[str, list[dict]]] = []
     for entry in entries:
@@ -412,6 +420,9 @@ def _kind_runs(entries: list[dict]) -> list[tuple[str, list[dict]]]:
             runs[-1][1].append(entry)
         else:
             runs.append((kind, [entry]))
+    if len(runs) > _MAX_KIND_RUNS:
+        rest = [entry for _, run_entries in runs[_MAX_KIND_RUNS - 1 :] for entry in run_entries]
+        runs = [*runs[: _MAX_KIND_RUNS - 1], ("log", rest)]
     return runs
 
 
