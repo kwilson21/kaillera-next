@@ -938,7 +938,8 @@ $QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
 # ── What a removed player's slot is fed with, frame by frame ──────────────
 REMOVED=specs/removed_input.qnt
 $QUINT typecheck "$REMOVED"
-for variant in removed_input_before removed_input_fixed removed_input_mid_replay; do
+for variant in removed_input_before removed_input_fixed removed_input_mid_replay \
+  removed_input_delay_one_unheld removed_input_delay_one_fixed; do
   $QUINT test "$REMOVED" --main="$variant" --backend="$BACKEND"
 done
 # Before, each page cut the removed player's input when it learned of the
@@ -955,6 +956,13 @@ $QUINT run "$REMOVED" --main=removed_input_fixed --invariant=allHold \
 # roster's, the word is what the ring holds, and the replay runs the rest
 # with the cut (hostCutsMidReplayTest, cutAboveTheReplayTest).
 $QUINT run "$REMOVED" --main=removed_input_mid_replay --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# Delay 1 with the admission at the cut's roster frame: the admission's first
+# tag is C + 1, which the cut fed neutral as a real input, so the rejoined
+# player's input there is stored with no check (removed_input_delay_one_unheld;
+# delayOneCollisionTest). The joiner holds its own input neutral below its
+# roster frame + MASK_LEAD (#330), so what ran is what it sent (joinerInputRuns).
+$QUINT run "$REMOVED" --main=removed_input_delay_one_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 # ── The server's store for a player's session log ──────────────────────────
