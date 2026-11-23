@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.20",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "guests judge nothing against the host's ROM while the host's new one is hashed (#303)"
+      }
+    ]
+  },
+  {
     "version": "0.69.19",
     "date": "2026-11-23",
     "changes": [
