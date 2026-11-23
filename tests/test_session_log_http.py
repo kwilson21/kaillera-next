@@ -337,6 +337,53 @@ def test_admin_session_summary_selects_only_metadata(audit_client, monkeypatch):
     assert http.get("/admin/api/session-logs/42/summary", headers=key).status_code == 404
 
 
+def test_admin_session_client_events_reads_no_log(audit_client, monkeypatch):
+    """The analyzer's client events: what the detail endpoint bundles, without the log."""
+    import src.db as db
+
+    http, fetch = audit_client
+    event = {"id": 7, "type": "webrtc", "message": "dc open", "meta": '{"match_id":"m1"}', "slot": 1, "created_at": "t"}
+    session = {"id": 42, "match_id": "m1", "room": "ROOM1", "slot": 1, "log_data": None}
+    statements = []
+
+    def answer(statement):
+        sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        statements.append(sql)
+        if "FROM client_events" in sql:
+            return [dict(event)]
+        return [session] if "session_logs.id = 42" in sql else []
+
+    fetch.side_effect = answer
+    path = "/admin/api/session-logs/42/client-events"
+    assert http.get(path).status_code == 401
+    fetch.assert_not_awaited()
+
+    key = {"X-Admin-Key": "k"}
+    resp = http.get(path, headers=key)
+    assert resp.status_code == 200
+    events = [{**event, "meta": {"match_id": "m1"}}]
+    assert resp.json() == {"client_events": events}
+    session_sql, events_sql = statements
+    assert "log_data" not in session_sql
+    assert "context" not in session_sql
+
+    # The detail endpoint keeps bundling the same events, from the same query.
+    monkeypatch.setattr(db, "get_full_log_entries", AsyncMock(return_value=[{"msg": "a"}]))
+    statements.clear()
+    detail = http.get("/admin/api/session-logs/42", headers=key)
+    assert detail.status_code == 200
+    assert detail.json()["client_events"] == events
+    assert detail.json()["log_data"] == [{"msg": "a"}]
+    assert events_sql in statements
+
+    # Only the detail endpoint ever reads the log.
+    log = AsyncMock(side_effect=AssertionError("client events must not read the log"))
+    monkeypatch.setattr(db, "get_full_log_entries", log)
+    assert http.get(path, headers=key).status_code == 200
+    log.assert_not_awaited()
+    assert http.get("/admin/api/session-logs/43/client-events", headers=key).status_code == 404
+
+
 def test_admin_capture_frame_requires_header_and_bounds_frame(audit_client, monkeypatch):
     import src.db as db
 
