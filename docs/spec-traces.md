@@ -259,6 +259,42 @@ sequenceDiagram
   Server-->>guest1: Lobby
 ```
 
+### lateJoinerSocketDropTest
+
+A late joiner's socket drops and comes back (a new socket id) before it has the match state: once while its engine is starting, and once more while it is asking for the state. Seen once in a real-ROM run of tests/lifecycle-e2e.mjs late-join-cached on an older branch, where the joiner logged "mid-game rejoin succeeded" and then went to the lobby. Here, as on the server, the resume keeps the joiner on the late-join path of the same match, and it is still served. What a new socket id does to the engines' own state is below this model: the fault modes late-join-drop-before-request and late-join-drop-during-serve in tests/lifecycle-e2e.mjs take a real page through both windows.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over host: Lobby
+  Server->>Server: startGame
+  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Server-->>host: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  guest1->>Server: join("guest1", true)
+  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over guest1: Starting(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: grace = {guest1}<br/>online = {host}
+  guest1->>Server: resume("guest1", true)
+  Note over Server: grace = {}<br/>online = {guest1, host}
+  guest1->>Server: startLateJoinEngine("guest1")
+  Note over guest1: Syncing(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: grace = {guest1}<br/>online = {host}
+  guest1->>Server: resume("guest1", true)
+  Note over Server: grace = {}<br/>online = {guest1, host}
+  Server->>Server: serveLateJoin("guest1")
+  Server-->>guest1: Running(1)
+```
+
 ### lateJoinWithoutRomTest
 
 A joiner with no ROM is asked for one before its engine starts.
