@@ -21556,6 +21556,13 @@
     answerScope = null,
     proofFor = 0,
   ) => {
+    // A same-match warning may arrive after a full state was buffered.
+    // Unverified is terminal for this match: do not change native state
+    // or settle inputs from even a previously valid protected answer.
+    if (_hostMatchUnverified()) {
+      _syncLog(`SYNC-STATE-HELD recovery unverified frame=${frame}`);
+      return;
+    }
     if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return;
     if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return;
     // Guest: hot-swap emulator state at a clean frame boundary.
