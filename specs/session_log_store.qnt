@@ -32,10 +32,10 @@
 // a large run into several chunks of at most _SESSION_LOG_CHUNK_MAX (each is
 // a run of one kind in order, so a reader sees the same order), the page's
 // own ring cap, the input audit (its own seq, epoch and store, as before),
-// concurrent flushes (an append lock serializes them per player), the bound
-// on runs per flush (_MAX_KIND_RUNS, 64: a page's flush has two runs per 5 s
-// window it covers; past the bound, which only a modified client alternating
-// its lines reaches, the rest of the flush is one JS run, still in order).
+// concurrent flushes (an append lock serializes them per player), the
+// refusal of a flush whose rows, size splits included, pass
+// _MAX_FLUSH_ROWS (only a payload larger than either transport takes can:
+// such a flush is stored nowhere and acked never, as a lost one).
 //
 // What a cap deleted is recorded apart from the chunks, per store (table
 // session_log_evictions): how many entries and the seq of the last one. The
@@ -47,15 +47,22 @@
 // C chunk per flush), "runs" (each run of one kind a chunk, in order; one
 // store per kind).
 // RECORD: each store keeps a record of what its cap deleted.
+// BOUND: one flush adds at most MAX_ROWS rows, whatever its lines' kinds:
+// past MAX_ROWS - 1 runs, the rest of the flush is one JS row, still in
+// order (_MAX_KIND_RUNS). Its C lines then count against the JS lines' cap.
+// Each row is a statement in the flush's one batch, and a modified client
+// alternating its lines could make one per line.
 module session_log_store {
   const SPLIT: str
   const RECORD: bool
+  const BOUND: bool
 
   pure val MAX_N = 6      // entries the page logs in one run of the model
   pure val ENTRIES = 0.to(MAX_N - 1)
   pure val MAX_EPOCH = 1  // reloads
   pure val CAP_LOG = 3    // the JS lines' store (today the only one), in entries
   pure val CAP_C = 2      // the C lines' store, in entries
+  pure val MAX_ROWS = 3   // rows one flush may add (_MAX_KIND_RUNS)
   pure val NO_EPOCH = -1
   pure val NONE = -1
 
@@ -82,6 +89,9 @@ module session_log_store {
   var jsEvictedUnderCap: bool // a JS line evicted while the JS lines fit theirs
   var recordLog: Set[int]     // the JS lines' store's record: the entries its cap deleted
   var recordC: Set[int]       // the C lines' store's record
+  var cRow: Set[int]          // entries stored in a C row: the C lines' store
+  var coalesced: Set[int]     // C or JS lines stored in the rest of a flush past the bound
+  var tooManyRows: bool       // a flush added more than MAX_ROWS rows
 
   action init = all {
     logged' = 0, isCOf' = ENTRIES.mapBy(n => false), seqOf' = ENTRIES.mapBy(n => NONE),
@@ -89,7 +99,7 @@ module session_log_store {
     serverEpoch' = NO_EPOCH, lastSeq' = -1, stored' = Set(), chunkOf' = ENTRIES.mapBy(n => NONE),
     nextId' = 0, storedEver' = Set(), storedTwice' = false,
     cEvictedUnderCap' = false, jsEvictedUnderCap' = false,
-    recordLog' = Set(), recordC' = Set(),
+    recordLog' = Set(), recordC' = Set(), cRow' = Set(), coalesced' = Set(), tooManyRows' = false,
   }
 
   // _syncLog: a JS line, or a "[C] " line the C log drain writes.
@@ -103,7 +113,7 @@ module session_log_store {
     serverEpoch' = serverEpoch, lastSeq' = lastSeq, stored' = stored, chunkOf' = chunkOf,
     nextId' = nextId, storedEver' = storedEver, storedTwice' = storedTwice,
     cEvictedUnderCap' = cEvictedUnderCap, jsEvictedUnderCap' = jsEvictedUnderCap,
-    recordLog' = recordLog, recordC' = recordC,
+    recordLog' = recordLog, recordC' = recordC, cRow' = cRow, coalesced' = coalesced, tooManyRows' = tooManyRows,
   }
 
   // A reload or a reconnect: a new ring, a new epoch, seqs from 0 again.
@@ -115,11 +125,8 @@ module session_log_store {
     serverEpoch' = serverEpoch, lastSeq' = lastSeq, stored' = stored, chunkOf' = chunkOf,
     nextId' = nextId, storedEver' = storedEver, storedTwice' = storedTwice,
     cEvictedUnderCap' = cEvictedUnderCap, jsEvictedUnderCap' = jsEvictedUnderCap,
-    recordLog' = recordLog, recordC' = recordC,
+    recordLog' = recordLog, recordC' = recordC, cRow' = cRow, coalesced' = coalesced, tooManyRows' = tooManyRows,
   }
-
-  // Which store an entry counts against: the C lines' own with a split.
-  def inCStore(n: int): bool = SPLIT != "none" and isCOf.get(n)
 
   def capOf(cStore: bool): int = if (cStore) CAP_C else CAP_LOG
 
@@ -128,20 +135,37 @@ module session_log_store {
   def runStarts(fresh: Set[int]): Set[int] =
     fresh.filter(n => not(fresh.contains(n - 1)) or isCOf.get(n) != isCOf.get(n - 1))
 
+  // With the bound, the rest of a flush past MAX_ROWS - 1 runs: one JS row.
+  def restOf(fresh: Set[int]): Set[int] =
+    val starts = runStarts(fresh)
+    if (SPLIT == "runs" and BOUND and starts.size() > MAX_ROWS)
+      val cut = starts.filter(s => starts.filter(t => t < s).size() == MAX_ROWS - 1).fold(NONE, (m, s) => if (s > m) s else m)
+      fresh.filter(n => n >= cut)
+    else Set()
+
   // The row a new entry of one flush goes in.
-  def rowOf(fresh: Set[int], n: int): int =
+  def rowOf(fresh: Set[int], rest: Set[int], n: int): int =
     if (SPLIT == "none") nextId
     else if (SPLIT == "per_flush")
       if (isCOf.get(n) and fresh.exists(m => not(isCOf.get(m)))) nextId + 1 else nextId
+    else if (rest.contains(n)) nextId + MAX_ROWS - 1
     else nextId + runStarts(fresh).filter(s => s <= n).size() - 1
 
   // How many rows one flush adds.
-  def rowsAdded(fresh: Set[int]): int =
+  def rowsAdded(fresh: Set[int], rest: Set[int]): int =
     if (fresh == Set()) 0
     else if (SPLIT == "none") 1
     else if (SPLIT == "per_flush")
       (if (fresh.exists(m => not(isCOf.get(m)))) 1 else 0) + (if (fresh.exists(m => isCOf.get(m))) 1 else 0)
+    else if (rest != Set()) MAX_ROWS
     else runStarts(fresh).size()
+
+  // The lines the C lines' cap is for: a line in the rest of a flush past
+  // the bound is stored as a JS line, whatever its kind.
+  def cLineIn(merged: Set[int], n: int): bool = isCOf.get(n) and not(merged.contains(n))
+
+  // Whether a new entry goes in a C row: the C lines' own store.
+  def inCRow(rest: Set[int], n: int): bool = SPLIT != "none" and isCOf.get(n) and not(rest.contains(n))
 
   // The page sends what the server has not acked; the server stores what it
   // does not have yet, evicts past each cap, and acks its highest seq. The
@@ -153,26 +177,33 @@ module session_log_store {
     val from = if (epoch == serverEpoch) lastSeq else -1
     val fresh = sent.filter(n => seqOf.get(n) > from)
     val ack = fresh.fold(from, (m, n) => if (seqOf.get(n) > m) seqOf.get(n) else m)
-    val rows = ENTRIES.mapBy(n => if (fresh.contains(n)) rowOf(fresh, n) else chunkOf.get(n))
+    val rest = restOf(fresh)
+    val rows = ENTRIES.mapBy(n => if (fresh.contains(n)) rowOf(fresh, rest, n) else chunkOf.get(n))
+    val cRows = cRow.union(fresh.filter(n => inCRow(rest, n)))
+    val merged = coalesced.union(rest)
     val held = stored.union(fresh)
     // _chunk_cap_statement, for each store: keep its newest rows while their
     // sizes, counted from the newest back, fit its cap.
     val keep = held.filter(n =>
-      held.filter(m => inCStore(m) == inCStore(n) and rows.get(m) >= rows.get(n)).size() <= capOf(inCStore(n)))
+      held.filter(m => cRows.contains(m) == cRows.contains(n) and rows.get(m) >= rows.get(n)).size()
+        <= capOf(cRows.contains(n)))
     val evicted = held.exclude(keep)
     all {
       stored' = keep,
       chunkOf' = rows,
-      nextId' = nextId + rowsAdded(fresh),
+      nextId' = nextId + rowsAdded(fresh, rest),
+      cRow' = cRows,
+      coalesced' = merged,
+      tooManyRows' = (tooManyRows or rowsAdded(fresh, rest) > MAX_ROWS),
       serverEpoch' = epoch,
       lastSeq' = ack,
       storedEver' = storedEver.union(fresh),
       storedTwice' = (storedTwice or fresh.exists(n => storedEver.contains(n))),
-      cEvictedUnderCap' = (cEvictedUnderCap or (evicted.exists(n => isCOf.get(n)) and held.filter(n => isCOf.get(n)).size() <= CAP_C)),
-      jsEvictedUnderCap' = (jsEvictedUnderCap or (evicted.exists(n => not(isCOf.get(n))) and held.filter(n => not(isCOf.get(n))).size() <= CAP_LOG)),
+      cEvictedUnderCap' = (cEvictedUnderCap or (evicted.exists(n => cLineIn(merged, n)) and held.filter(n => cLineIn(merged, n)).size() <= CAP_C)),
+      jsEvictedUnderCap' = (jsEvictedUnderCap or (evicted.exists(n => not(isCOf.get(n))) and held.filter(n => not(cLineIn(merged, n))).size() <= CAP_LOG)),
       // Each store's record takes the entries in the rows its DELETE removes.
-      recordLog' = if (RECORD) recordLog.union(evicted.filter(n => not(inCStore(n)))) else recordLog,
-      recordC' = if (RECORD) recordC.union(evicted.filter(n => inCStore(n))) else recordC,
+      recordLog' = if (RECORD) recordLog.union(evicted.filter(n => not(cRows.contains(n)))) else recordLog,
+      recordC' = if (RECORD) recordC.union(evicted.filter(n => cRows.contains(n))) else recordC,
       ackedSeq' = if (ackLost) ackedSeq else ack,
       acked' = if (ackLost) acked else acked.union(sent.filter(n => seqOf.get(n) <= ack)),
       logged' = logged, isCOf' = isCOf, seqOf' = seqOf, epoch' = epoch,
@@ -195,12 +226,17 @@ module session_log_store {
   val readInOrder = stored.forall(m => stored.forall(n => chunkOf.get(m) < chunkOf.get(n) implies m < n))
 
   // A C line is evicted only when the C lines stored are over their cap: JS
-  // lines never push it out. Violated with one store.
+  // lines never push it out. Violated with one store. (A line in the rest of
+  // a flush past the bound is stored, and counted, as a JS line.)
   val cLinesKeepTheirOwnRoom = not(cEvictedUnderCap)
 
   // A JS line is evicted only when the JS lines stored are over their cap: C
   // lines never push it out. Violated with one store.
   val jsLinesKeepTheirOwnRoom = not(jsEvictedUnderCap)
+
+  // No flush adds more than MAX_ROWS rows, however its lines alternate.
+  // Violated with no bound: one row per run.
+  val rowsPerFlushBounded = not(tooManyRows)
 
   // Every entry the page saw acked reached the store (a cap may have evicted
   // it since), and none was stored twice.
@@ -212,14 +248,14 @@ module session_log_store {
   // is older (in an earlier row) than any line the store still holds, so
   // "everything up to seq X is gone" is true. Violated with no record.
   val truncationIsVisible = all {
-    recordLog == storedEver.exclude(stored).filter(n => not(inCStore(n))),
-    recordC == storedEver.exclude(stored).filter(n => inCStore(n)),
-    stored.forall(n => (if (inCStore(n)) recordC else recordLog).forall(m => chunkOf.get(m) < chunkOf.get(n))),
+    recordLog == storedEver.exclude(stored).filter(n => not(cRow.contains(n))),
+    recordC == storedEver.exclude(stored).filter(n => cRow.contains(n)),
+    stored.forall(n => (if (cRow.contains(n)) recordC else recordLog).forall(m => chunkOf.get(m) < chunkOf.get(n))),
   }
 
   val allHold = all {
     readInOrder, cLinesKeepTheirOwnRoom, jsLinesKeepTheirOwnRoom, everyAckedEntryWasStored, noEntryStoredTwice,
-    truncationIsVisible,
+    truncationIsVisible, rowsPerFlushBounded,
   }
 
   // ── Scenarios ─────────────────────────────────────────────────────────
@@ -275,28 +311,44 @@ module session_log_store {
       .expect(stored == Set(1, 2, 3))
       .expect(recordLog == (if (RECORD) Set(0) else Set()) and recordC == Set())
       .expect(truncationIsVisible == RECORD)
+
+  // Four lines alternating in one flush, as only a modified client sends.
+  // With the bound, the rest past the second run is one JS row, in order.
+  run alternatingLinesTest =
+    init.then(log(false)).then(log(true)).then(log(false)).then(log(true)).then(flush(false))
+      .expect(rowsPerFlushBounded == (SPLIT != "runs" or BOUND))
+      .expect(readInOrder == (SPLIT != "per_flush"))
+      .expect(SPLIT != "runs" or not(BOUND) or (nextId == 3 and cRow == Set(1) and coalesced == Set(2, 3)))
+      .expect(everyAckedEntryWasStored and noEntryStoredTwice)
 }
 
 // Today: every entry in one store under one cap.
 module session_log_store_before {
-  import session_log_store(SPLIT = "none", RECORD = false).*
+  import session_log_store(SPLIT = "none", RECORD = false, BOUND = false).*
 }
 
 // Rejected: each flush stored as a row of its JS lines, then one of its C
 // lines, each kind under its own cap.
 module session_log_store_per_flush {
-  import session_log_store(SPLIT = "per_flush", RECORD = true).*
+  import session_log_store(SPLIT = "per_flush", RECORD = true, BOUND = true).*
 }
 
 // Each run of one kind its own chunk, in order, the C lines' chunks under
 // their own cap, but no record of what a cap deleted: a log whose oldest
 // lines are gone reads as one that started late.
 module session_log_store_unrecorded {
-  import session_log_store(SPLIT = "runs", RECORD = false).*
+  import session_log_store(SPLIT = "runs", RECORD = false, BOUND = true).*
 }
 
-// The change: each run of one kind its own chunk, in order; the C lines'
-// chunks under their own cap; each store's record of what its cap deleted.
+// Each run of one kind its own row, with no bound on how many: a flush of
+// alternating lines adds one row, and one statement, per line.
+module session_log_store_unbounded {
+  import session_log_store(SPLIT = "runs", RECORD = true, BOUND = false).*
+}
+
+// The change: each run of one kind its own chunk, in order, at most MAX_ROWS
+// a flush; the C lines' chunks under their own cap; each store's record of
+// what its cap deleted.
 module session_log_store_current {
-  import session_log_store(SPLIT = "runs", RECORD = true).*
+  import session_log_store(SPLIT = "runs", RECORD = true, BOUND = true).*
 }

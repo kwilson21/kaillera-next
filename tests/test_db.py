@@ -1111,3 +1111,63 @@ async def _run_eviction_record(tmp_db):
     finally:
         db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP = caps
     await close_db()
+
+
+def test_the_security_reproducer_stays_under_the_row_ceiling(tmp_db):
+    # rowsPerFlushBounded: Codex's reproducer on #321, 60,000 entries
+    # alternating "[C] " and plain lines in a 1.79 MB body, one row per line
+    # before the bound. It now adds at most _MAX_FLUSH_ROWS rows and takes
+    # about as long as a flush of one kind.
+    _run_async(_run_reproducer(tmp_db))
+
+
+async def _run_reproducer(tmp_db):
+    import json
+    import time
+
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db, query
+
+    await init_db(tmp_db)
+    took = {}
+    for name, msg in (("alternating", lambda i: ("[C] " if i % 2 else "") + "x"), ("one-kind", lambda i: "x")):
+        entries = [{"seq": i, "msg": msg(i)} for i in range(60_000)]
+        if name == "alternating":
+            assert 1.7e6 < len(json.dumps(entries)) < 1.9e6
+        started = time.perf_counter()
+        acks = await append_session_flush({**_CLOG_BASE, "match_id": f"m-{name}", "entries": entries})
+        took[name] = time.perf_counter() - started
+        assert acks["lastSeq"] == 59_999
+        rows = await query("SELECT COUNT(*) AS n FROM session_log_chunks WHERE match_id=?", (f"m-{name}",))
+        assert rows[0]["n"] <= db_mod._MAX_FLUSH_ROWS
+    assert took["alternating"] < 4 * took["one-kind"] + 0.5, took
+    await close_db()
+
+
+def test_a_flush_past_the_row_ceiling_is_refused_whole(tmp_db):
+    # Rows from size splits too: a flush past _MAX_FLUSH_ROWS stores nothing
+    # and acks nothing, so the page sends it again.
+    _run_async(_run_refused(tmp_db))
+
+
+async def _run_refused(tmp_db):
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db, query
+
+    await init_db(tmp_db)
+    limits = db_mod._SESSION_LOG_CHUNK_MAX, db_mod._MAX_FLUSH_ROWS
+    db_mod._SESSION_LOG_CHUNK_MAX, db_mod._MAX_FLUSH_ROWS = 300, 10
+    try:
+        entries = [_js(seq, "w" * 200) for seq in range(20)]  # one row each: 20 rows
+        assert await append_session_flush({**_CLOG_BASE, "entries": entries}) is None
+        assert (await query("SELECT COUNT(*) AS n FROM session_log_chunks", ()))[0]["n"] == 0
+        assert (await query("SELECT COUNT(*) AS n FROM session_logs", ()))[0]["n"] == 0
+        # Sent again in flushes that fit, every entry is stored and acked.
+        acks = await append_session_flush({**_CLOG_BASE, "entries": entries[:10]})
+        assert acks["lastSeq"] == 9
+        acks = await append_session_flush({**_CLOG_BASE, "entries": entries})
+        assert acks["lastSeq"] == 19
+        assert await _read_back("m-clog") == [e["msg"] for e in entries]
+    finally:
+        db_mod._SESSION_LOG_CHUNK_MAX, db_mod._MAX_FLUSH_ROWS = limits
+    await close_db()

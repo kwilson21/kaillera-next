@@ -200,6 +200,18 @@ _STREAM_KINDS = {"log": ("log", "clog"), "audit": ("audit",)}
 # runs, the rest of the flush is stored as one 'log' run, still in order.
 _MAX_KIND_RUNS = 64
 
+# The most chunk rows one flush may add, all kinds together: whatever its
+# lines' kinds, its batch holds at most this many INSERTs (plus a few cap and
+# eviction statements per kind and the metadata upsert). The largest honest
+# flush is a 5,000-entry resend after an outage, about 1 MB: about 40 runs at
+# 30 fps, a size split or two, an audit row or two, so under 50. Any payload
+# either transport accepts (Socket.IO's 4 MB buffer, the HTTP fallback's
+# 2 MB) makes at most _MAX_KIND_RUNS runs plus one more row per 512 KB, so
+# under 80. A flush past this is refused whole: nothing is stored and
+# nothing acked, as when an append is already running, so a page resends it
+# (specs/session_log_store.qnt, rowsPerFlushBounded).
+_MAX_FLUSH_ROWS = 96
+
 
 def _chunk_cap(kind: str) -> int:
     if kind == "audit":
@@ -312,7 +324,8 @@ async def append_session_flush(data: dict) -> dict | None:
     `_acquire_append_lock` so two overlapping calls can't both read the same
     `last_seq` and both insert a chunk for entries the other has already
     covered. Returns None, storing nothing, when one append is already
-    running and another waiting for the key (see _APPEND_MAX_PENDING).
+    running and another waiting for the key (see _APPEND_MAX_PENDING), or
+    when the flush would add more than _MAX_FLUSH_ROWS rows.
     """
     _require()
     match_id = data["match_id"]
@@ -328,7 +341,7 @@ async def append_session_flush(data: dict) -> dict | None:
             await _release_append_lock((match_id, slot))
 
 
-async def _append_session_log_locked(data: dict, match_id: str, slot: int | None, epoch: str) -> dict:
+async def _append_session_log_locked(data: dict, match_id: str, slot: int | None, epoch: str) -> dict | None:
     rows = await fetch(
         select(SessionLog.last_seq, SessionLog.log_epoch, SessionLog.audit_last_seq, SessionLog.audit_epoch).where(
             SessionLog.match_id == match_id, SessionLog.slot.is_(slot)
@@ -345,7 +358,7 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
 
     # The chunk inserts, cap enforcement and metadata upsert commit together.
     new_entries, max_seq = _entries_past(data.get("entries") or [], current_last_seq)
-    statements, first_evicted = await _chunk_statements(match_id, slot, _kind_runs(new_entries), current_last_seq)
+    statements, first_evicted, rows = await _chunk_statements(match_id, slot, _kind_runs(new_entries), current_last_seq)
 
     stored_audit_epoch = row["audit_epoch"] if row and row["audit_epoch"] is not None else ""
     stored_audit_seq = row["audit_last_seq"] if row and row["audit_last_seq"] is not None else -1
@@ -353,13 +366,24 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
     if audit_epoch:
         audit_last_seq = stored_audit_seq if audit_epoch == stored_audit_epoch else -1
         new_audit, audit_max_seq = _entries_past(data.get("audit_entries") or [], audit_last_seq)
-        audit_statements, audit_evicted = await _chunk_statements(
+        audit_statements, audit_evicted, audit_rows = await _chunk_statements(
             match_id, slot, [("audit", new_audit)], audit_last_seq
         )
         statements += audit_statements
         first_evicted += audit_evicted
+        rows += audit_rows
     else:
         audit_epoch, audit_max_seq = stored_audit_epoch, stored_audit_seq
+
+    if rows > _MAX_FLUSH_ROWS:
+        log.warning(
+            "Session log flush refused: match=%s slot=%s would add %d rows (at most %d)",
+            match_id[:8],
+            slot,
+            rows,
+            _MAX_FLUSH_ROWS,
+        )
+        return None
 
     upsert = sqlite_insert(SessionLog).values(
         match_id=match_id,
@@ -463,15 +487,17 @@ def _kind_runs(entries: list[dict]) -> list[tuple[str, list[dict]]]:
 
 async def _chunk_statements(
     match_id: str, slot: int | None, runs: list[tuple[str, list[dict]]], last_seq: int
-) -> tuple[list[Executable], list[str]]:
+) -> tuple[list[Executable], list[str], int]:
     """INSERTs storing each run as chunks of its kind, in order, plus each kind's cap DELETE when needed.
 
     Each cap DELETE comes after the statements that record what it removes
     (_eviction_statements). Also returns the kinds whose cap deletes for the
-    first time for this player, for the caller to log once the batch is in.
+    first time for this player, for the caller to log once the batch is in,
+    and how many chunk rows the INSERTs add (held to _MAX_FLUSH_ROWS).
     """
     statements: list[Executable] = []
     first_evicted: list[str] = []
+    rows = 0
     high_seq = last_seq
     new_bytes: dict[str, int] = {}
     for kind, run_entries in runs:
@@ -481,6 +507,7 @@ async def _chunk_statements(
             first_seq = min(seqs) if seqs else high_seq
             high_seq = max([high_seq, *seqs])
             new_bytes[kind] = new_bytes.get(kind, 0) + len(entries_json)
+            rows += 1
             statements.append(
                 insert(SessionLogChunk).values(
                     match_id=match_id,
@@ -498,7 +525,7 @@ async def _chunk_statements(
                 first_evicted.append(kind)
             statements += _eviction_statements(match_id, slot, kind)
             statements.append(_chunk_cap_statement(match_id, slot, kind))
-    return statements, first_evicted
+    return statements, first_evicted, rows
 
 
 def _split_entries(entries: list[dict]) -> list[list[dict]]:
