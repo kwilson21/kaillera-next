@@ -23,28 +23,36 @@ export function cLogTail(full: string, drained: number): CLogTail {
   return { tail: full.slice(drained), drained: full.length };
 }
 
-export interface CLogTailFrom extends CLogTail {
-  /** Bytes the core dropped before they were drained. */
-  missed: number;
+export interface CLogDrain {
+  /** The text to send. */
+  tail: string;
+  /** How much of the buffer counts as drained once it is sent. */
+  drained: number;
+  /** Empty the C buffer once the text is read (kn_clear_debug_log). */
+  clear: boolean;
 }
 
 /**
- * The same for a core whose log keeps its newest lines
- * (`kn_get_debug_log_dropped`): when its buffer is full it drops its oldest
- * lines and counts the bytes, and it runs on across inits. The buffer then
- * starts at the absolute offset `dropped`, and what was drained is an
- * absolute offset too.
+ * What one drain of the C log sends. A core that can empty its log gives the
+ * whole buffer up each time, so the buffer only has to hold what is logged
+ * between two drains; an older core keeps everything, and only its new tail
+ * is sent (cLogTail).
  *
- * With `dropped` 0 the tail and the count are `cLogTail`'s.
- *
- * @param full     the whole C buffer as it is now
- * @param drained  the absolute offset drained before
- * @param dropped  the bytes the core has dropped from the front of its log
+ * @param full      the whole C buffer as it is now
+ * @param drained   how much of it was drained before (an older core only)
+ * @param canClear  the core has kn_clear_debug_log
  */
-export function cLogTailFrom(full: string, drained: number, dropped: number): CLogTailFrom {
-  const end = dropped + full.length;
-  if (end < drained) return { tail: full, drained: end, missed: 0 };
-  const from = drained - dropped;
-  if (from < 0) return { tail: full, drained: end, missed: -from };
-  return { tail: full.slice(from), drained: end, missed: 0 };
+export function cLogDrain(full: string, drained: number, canClear: boolean): CLogDrain {
+  if (canClear) return { tail: full, drained: 0, clear: full.length > 0 };
+  const next = cLogTail(full, drained);
+  return { tail: next.tail, drained: next.drained, clear: false };
+}
+
+/**
+ * Lines the C log dropped since the last drain, from its count since
+ * kn_rollback_init (kn_get_debug_log_dropped). A count lower than before is
+ * a new init's, all of it new.
+ */
+export function cLogDroppedSince(before: number, now: number): number {
+  return now >= before ? now - before : now;
 }

@@ -1,12 +1,11 @@
-"""The rollback engine's debug log keeps flowing past its 64 KB buffer.
+"""The rollback engine's debug log (build/kn_rollback/kn_rollback.c, rb_log).
 
-rb_log used to append to a 64 KB buffer and drop every line once it was
-full, so in a real match the C log (MISPREDICTION, DEEP-MISPREDICT-SKIP,
-RESTORE-FAILED...) stopped after a few hundred rollbacks. The buffer now
-drops its oldest lines to make room and counts the bytes dropped
-(kn_get_debug_log_dropped); the page drains it by absolute offset
-(_drainCDebugLog in web/static/netplay-rollback.js). These run the real
-engine against fake_core.c and drain the way the page does."""
+The play page drains the log into its session log every few seconds and
+empties it (kn_clear_debug_log), so it only has to hold what is logged between
+two drains. A line that does not fit whole is counted, never cut
+(kn_get_debug_log_dropped), and the drain reports the count. These run the
+real engine against fake_core.c; kn_rollback_slot_reset logs one line a call.
+"""
 
 from __future__ import annotations
 
@@ -14,98 +13,58 @@ import ctypes
 
 import pytest
 
-LOG_SIZE = 64 * 1024
+LINE = "slot_reset: slot=1\n"
 
 
 @pytest.fixture
-def log(lib):
+def rb(lib):
     lib.kn_get_debug_log.restype = ctypes.c_char_p
-    lib.kn_get_debug_log_dropped.restype = ctypes.c_uint32
-    lib.kn_set_state_backend(1)
     lib.kn_rollback_init(7, 2, 0, 2)
+    lib.kn_clear_debug_log()
     yield lib
     lib.kn_rollback_shutdown()
 
 
-def snapshot(lib) -> tuple[int, str]:
-    """(bytes dropped before the buffer, the buffer)."""
-    return lib.kn_get_debug_log_dropped(), lib.kn_get_debug_log().decode()
+def log_of(lib) -> str:
+    return lib.kn_get_debug_log().decode()
 
 
-class Drain:
-    """The page's drain: remembers the absolute offset it read up to."""
-
-    def __init__(self, lib) -> None:
-        self.lib = lib
-        dropped, full = snapshot(lib)
-        self.to = dropped + len(full)
-        self.lines: list[str] = []
-        self.missed = 0
-
-    def __call__(self) -> None:
-        dropped, full = snapshot(self.lib)
-        end = dropped + len(full)
-        assert end >= self.to
-        start = self.to - dropped
-        if start < 0:
-            self.missed += -start
-            start = 0
-        self.lines += [line for line in full[start:].split("\n") if line]
-        self.to = end
+def test_a_line_is_logged_whole(rb):
+    rb.kn_rollback_slot_reset(1)
+    assert log_of(rb) == LINE
+    assert rb.kn_get_debug_log_dropped() == 0
 
 
-def log_frames(lib, frames: range) -> None:
-    for frame in frames:
-        lib.kn_set_frame(frame)
+def test_clearing_empties_the_log_and_logging_goes_on(rb):
+    rb.kn_rollback_slot_reset(1)
+    rb.kn_clear_debug_log()
+    assert log_of(rb) == ""
+    rb.kn_rollback_slot_reset(1)
+    assert log_of(rb) == LINE
 
 
-def test_the_log_keeps_the_newest_lines_past_its_size(log):
-    first_dropped, _ = snapshot(log)
-    log_frames(log, range(20_000))  # ~20 bytes a line: about 6x the buffer
-    dropped, full = snapshot(log)
-    assert dropped > first_dropped
-    assert len(full) < LOG_SIZE
-    assert full.endswith("kn_set_frame: 19999\n")
-    # The buffer starts on a whole line, and its lines are the newest, in order.
-    lines = full.split("\n")[:-1]
-    first = int(lines[0].removeprefix("kn_set_frame: "))
-    assert lines == [f"kn_set_frame: {f}" for f in range(first, 20_000)]
-    # At least half the buffer stays after a drop.
-    assert len(full) >= LOG_SIZE // 2 - 64
+def test_a_full_log_counts_what_it_drops_and_cuts_no_line(rb):
+    # Fill it: more lines than 512 KB holds.
+    calls = 512 * 1024 // len(LINE) + 50
+    for _ in range(calls):
+        rb.kn_rollback_slot_reset(1)
+    text = log_of(rb)
+    kept = text.count("\n")
+    assert text.endswith("\n"), "the last line was cut"
+    assert set(text.splitlines()) == {LINE.strip()}
+    assert kept + rb.kn_get_debug_log_dropped() == calls
+    assert rb.kn_get_debug_log_dropped() > 0
+    # Emptied, it takes lines again; the count stays until the next init.
+    dropped = rb.kn_get_debug_log_dropped()
+    rb.kn_clear_debug_log()
+    rb.kn_rollback_slot_reset(1)
+    assert log_of(rb) == LINE
+    assert rb.kn_get_debug_log_dropped() == dropped
 
 
-def test_a_drain_by_offset_reads_every_line_once(log):
-    drain = Drain(log)
-    for start in range(0, 30_000, 1_000):
-        log_frames(log, range(start, start + 1_000))
-        drain()
-    assert drain.missed == 0
-    assert drain.lines == [f"kn_set_frame: {f}" for f in range(30_000)]
-
-
-def test_a_drain_that_falls_behind_counts_what_it_missed(log):
-    drain = Drain(log)
-    log_frames(log, range(10_000))
-    drain()
-    assert drain.missed > 0
-    assert drain.lines[-1] == "kn_set_frame: 9999"
-    # What it missed and what it read add up to everything logged.
-    assert drain.missed + sum(len(line) + 1 for line in drain.lines) == sum(
-        len(f"kn_set_frame: {f}\n") for f in range(10_000)
-    )
-
-
-def test_a_new_init_continues_the_log(log):
-    # kn_rollback_init (a new match on the same page) does not restart the
-    # log, so the page's offset stays valid across it.
-    drain = Drain(log)
-    for _ in range(3):
-        log_frames(log, range(1_000))
-        log.kn_rollback_init(7, 2, 0, 2)
-        drain()
-    log_frames(log, range(3))
-    drain()
-    assert drain.missed == 0
-    assert drain.lines[-3:] == ["kn_set_frame: 0", "kn_set_frame: 1", "kn_set_frame: 2"]
-    assert sum(line == "kn_set_frame: 999" for line in drain.lines) == 3
-    assert sum(line.startswith("kn_rollback_init: max=") for line in drain.lines) == 3
+def test_init_starts_the_count_over(rb):
+    for _ in range(512 * 1024 // len(LINE) + 10):
+        rb.kn_rollback_slot_reset(1)
+    assert rb.kn_get_debug_log_dropped() > 0
+    rb.kn_rollback_init(7, 2, 0, 2)
+    assert rb.kn_get_debug_log_dropped() == 0

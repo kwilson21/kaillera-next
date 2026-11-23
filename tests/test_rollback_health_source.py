@@ -1190,13 +1190,3 @@ def test_a_chunk_timeout_is_scoped_to_the_request_its_transfer_answers():
     assert older < header.index("_resyncRequestInFlight = false;")
     assert older < header.index("_requestSocketFullResync('sync-chunk-timeout');")
 
-
-def test_the_c_log_drain_offset_is_reset_under_its_own_name():
-    """One name for the drain count everywhere: a rename once left doRollbackInit
-    assigning the old one, which throws in strict mode as the match starts."""
-    src = (ROOT / "web" / "static" / "netplay-rollback.js").read_text()
-    assert "_cDebugLogDrainedTo" not in src
-    assert "let _cDebugLogLastLen = 0;" in src
-    # Only a core whose log starts over at init has its count reset there.
-    assert "if (!detMod._kn_get_debug_log_dropped) _cDebugLogLastLen = 0;" in src
-    assert len(re.findall(r"(?<![\w.])_cDebugLogLastLen\b", src)) >= 5

@@ -261,7 +261,13 @@ int kn_get_tainted_block_count(void) {
 /* ── Constants ─────────────────────────────────────────────────────── */
 #define KN_MAX_PLAYERS      4
 #define KN_INPUT_RING_SIZE  256   /* ~4 seconds at 60fps */
-#define KN_DEBUG_LOG_SIZE   (64 * 1024)
+/* The debug log holds what rb_log writes between two drains: the play page
+ * reads it, sends it with the session log and empties it
+ * (kn_clear_debug_log) every 5 s. A rollback logs about 1 KB at the deepest
+ * replay (its MISPREDICTION, C-REPLAY-START and two lines per replayed
+ * frame), so 512 KB holds one at every frame for 5 s at 60 fps. A line that
+ * does not fit is counted (kn_get_debug_log_dropped), never cut. */
+#define KN_DEBUG_LOG_SIZE   (512 * 1024)
 
 /* ── Input entry ───────────────────────────────────────────────────── */
 typedef struct {
@@ -482,17 +488,12 @@ static struct {
     int fatal_stale_ring_idx;
     int fatal_stale_actual;
     int fatal_stale_pending;
-} rb;
 
-/* Debug log (rb_log): the newest lines, NUL-terminated. When a line does not
- * fit, the oldest lines (at least half the buffer) are dropped and counted
- * in kn_debug_log_dropped, so the log keeps flowing for a whole match; the
- * page drains it by absolute offset (kn_get_debug_log_dropped + length).
- * Kept outside `rb` so kn_rollback_init does not restart it and the offset
- * only grows for the life of the page. */
-static char kn_debug_log[KN_DEBUG_LOG_SIZE];
-static int kn_debug_log_pos;
-static uint32_t kn_debug_log_dropped;
+    /* Debug log */
+    char debug_log[KN_DEBUG_LOG_SIZE];
+    int debug_log_pos;
+    int debug_log_dropped; /* lines that did not fit, since kn_rollback_init */
+} rb;
 
 /* ── SoftFloat state save/restore ──────────────────────────────────── */
 /* SoftFloat globals are NOT part of retro_serialize. Pack them into one
@@ -940,31 +941,22 @@ static void rb_restore_slot_aux(int idx) {
 }
 
 /* ── Debug logging ─────────────────────────────────────────────────── */
-/* Appends one line. A line longer than KN_DEBUG_LOG_LINE_MAX - 1 is cut. */
-#define KN_DEBUG_LOG_LINE_MAX 1024
 static void rb_log(const char *fmt, ...) {
-    char line[KN_DEBUG_LOG_LINE_MAX];
     va_list args;
     va_start(args, fmt);
-    int len = vsnprintf(line, sizeof(line), fmt, args);
+    /* Room for the line, its newline and the terminator. */
+    int remaining = KN_DEBUG_LOG_SIZE - rb.debug_log_pos - 1;
+    int written = remaining > 1 ? vsnprintf(rb.debug_log + rb.debug_log_pos, remaining, fmt, args) : -1;
     va_end(args);
-    if (len <= 0) return;
-    if (len > (int)sizeof(line) - 1) len = (int)sizeof(line) - 1;
-    /* The line, its '\n' and the terminating NUL must fit. If not, drop the
-     * oldest lines: everything before the first line that starts at or past
-     * the middle of the buffer. */
-    if (kn_debug_log_pos + len + 2 > KN_DEBUG_LOG_SIZE) {
-        int cut = KN_DEBUG_LOG_SIZE / 2;
-        if (cut > kn_debug_log_pos) cut = kn_debug_log_pos;
-        while (cut > 0 && cut < kn_debug_log_pos && kn_debug_log[cut - 1] != '\n') cut++;
-        memmove(kn_debug_log, kn_debug_log + cut, (size_t)(kn_debug_log_pos - cut));
-        kn_debug_log_pos -= cut;
-        kn_debug_log_dropped += (uint32_t)cut;
+    if (written < 0 || written >= remaining) {
+        /* It does not fit whole: count it, and leave the log as it was. */
+        rb.debug_log[rb.debug_log_pos] = '\0';
+        rb.debug_log_dropped++;
+        return;
     }
-    memcpy(kn_debug_log + kn_debug_log_pos, line, (size_t)len);
-    kn_debug_log_pos += len;
-    kn_debug_log[kn_debug_log_pos++] = '\n';
-    kn_debug_log[kn_debug_log_pos] = '\0';
+    rb.debug_log_pos += written;
+    rb.debug_log[rb.debug_log_pos++] = '\n';
+    rb.debug_log[rb.debug_log_pos] = '\0';
 }
 
 /* ── Per-frame setup: RNG seed + frame time ────────────────────────── */
@@ -3410,16 +3402,23 @@ uint32_t kn_get_hidden_state_fingerprint(void) {
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-const char* kn_get_debug_log(void) { return kn_debug_log; }
+const char* kn_get_debug_log(void) { return rb.debug_log; }
 
-/* Bytes rb_log has dropped from the front of the debug log to make room.
- * The log's first byte is at this absolute offset of everything logged
- * since the page loaded; a reader that remembers the offset it read up to
- * reads only what is new, and sees how much it missed if it fell behind. */
+/* The page has read and sent the log: start it over, so it only has to hold
+ * what is logged until the next drain. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-uint32_t kn_get_debug_log_dropped(void) { return kn_debug_log_dropped; }
+void kn_clear_debug_log(void) {
+    rb.debug_log_pos = 0;
+    rb.debug_log[0] = '\0';
+}
+
+/* Lines rb_log dropped since kn_rollback_init because the log was full. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_debug_log_dropped(void) { return rb.debug_log_dropped; }
 
 /* ── Determinism self-test ─────────────────────────────────────────── */
 /* NOTE: This test cannot call retro_run() from C in ASYNC mode.

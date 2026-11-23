@@ -6997,23 +6997,23 @@
     } catch (_) {}
   };
 
-  // Drain new lines from the C-side rb_log() ring buffer into the JS sync
-  // log so they ride along in `entries` to the server. The server's
-  // SessionLogPayload Pydantic model only accepts matchId/entries/summary/
-  // context, so adding a new top-level field would be silently dropped —
-  // emitting via _syncLog is the path of least resistance.
+  // Drain the C engine's rb_log() buffer into the JS sync log, so its lines
+  // ride along in `entries` to the server. The server's SessionLogPayload
+  // Pydantic model only accepts matchId/entries/summary/context, so adding a
+  // new top-level field would be silently dropped; emitting via _syncLog is
+  // the path of least resistance. Lines are prefixed [C] so they're easy to
+  // filter post-mortem.
   //
-  // We track how much of the C log has been drained and only emit the new
-  // tail. A core from before _kn_get_debug_log_dropped fills its buffer and
-  // stops, and kn_rollback_init starts it over: the count is a length
-  // (KNCore.cLogTail), doRollbackInit drains first when it re-inits a running
-  // match and resets the count after. A current core keeps the newest lines:
-  // when full it drops its oldest half and counts the bytes dropped, and its
-  // log runs on across inits, so the count is an absolute offset
-  // (KNCore.cLogTailFrom) and a C-LOG-DROPPED line says how much was dropped
-  // before it was read. Lines are prefixed [C] so they're easy to filter
-  // post-mortem.
+  // Each drain sends the whole buffer and empties it (kn_clear_debug_log), so
+  // it only has to hold what is logged until the next drain; an older core
+  // without that export keeps everything, and only the new tail is sent
+  // (KNCore.cLogDrain). A line the C buffer had no room for is counted, and a
+  // drain that finds the count grown says so (C-LOG-DROPPED).
+  // kn_rollback_init starts the buffer and its count over: doRollbackInit
+  // drains it first when it re-inits a running match, and resets both
+  // counts after.
   let _cDebugLogLastLen = 0;
+  let _cDebugLogDropped = 0;
   const _drainCDebugLog = () => {
     const m = window.EJS_emulator?.gameManager?.Module;
     if (!m?._kn_get_debug_log) return;
@@ -7021,36 +7021,21 @@
       const ptr = m._kn_get_debug_log();
       if (!ptr) return;
       const full = m.UTF8ToString ? m.UTF8ToString(ptr) : window.UTF8ToString?.(ptr);
-      if (!full || typeof full !== 'string') return;
-      let next;
-      if (m._kn_get_debug_log_dropped) {
-        next = window.KNCore.cLogTailFrom(full, _cDebugLogLastLen, m._kn_get_debug_log_dropped() >>> 0);
-        if (next.missed) _syncLog(`[C] C-LOG-DROPPED bytes=${next.missed}`);
-      } else {
-        next = window.KNCore.cLogTail(full, _cDebugLogLastLen);
-      }
-      const tail = next.tail;
-      _cDebugLogLastLen = next.drained;
-      if (!tail) return;
-      // Emit each non-empty line as its own entry
-      const lines = tail.split('\n');
-      for (const line of lines) {
+      if (typeof full !== 'string') return;
+      const step = window.KNCore.cLogDrain(full, _cDebugLogLastLen, typeof m._kn_clear_debug_log === 'function');
+      if (step.clear) m._kn_clear_debug_log();
+      _cDebugLogLastLen = step.drained;
+      for (const line of step.tail.split('\n')) {
         if (line.trim()) _syncLog(`[C] ${line}`);
       }
+      const dropped = m._kn_get_debug_log_dropped?.();
+      if (typeof dropped === 'number') {
+        const lost = window.KNCore.cLogDroppedSince(_cDebugLogDropped, dropped);
+        _cDebugLogDropped = dropped;
+        if (lost > 0) _syncLog(`C-LOG-DROPPED n=${lost}: the C log was full between two drains`);
+      }
     } catch (_) {}
   };
-  // A current core's log runs on across matches: what it holds now is the
-  // last match's tail, which is not this match's to send.
-  const _skipCDebugLog = () => {
-    const m = window.EJS_emulator?.gameManager?.Module;
-    if (!m?._kn_get_debug_log || !m._kn_get_debug_log_dropped) return;
-    try {
-      const ptr = m._kn_get_debug_log();
-      const full = ptr ? (m.UTF8ToString ? m.UTF8ToString(ptr) : window.UTF8ToString?.(ptr)) : '';
-      _cDebugLogLastLen = (m._kn_get_debug_log_dropped() >>> 0) + (typeof full === 'string' ? full.length : 0);
-    } catch (_) {}
-  };
-
   const _flushSyncLog = () => {
     const matchId = _cachedMatchId || KNState.matchId;
     if (!matchId) return;
@@ -15005,11 +14990,8 @@
         // re-init within the match (the re-arm at a late join): drain what
         // the engine has logged since the last flush first. Not armed, the
         // buffer holds the last match's tail (its kn_rollback_shutdown line
-        // comes after its final flush), which is not this match's to send:
-        // the reset below drops it on a core whose log starts over, and a
-        // core whose log runs on skips it here.
+        // comes after its final flush), which is not this match's to send.
         if (_useCRollback) _drainCDebugLog();
-        else _skipCDebugLog();
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
         for (const record of _lateJoinInputWindows.values()) record.primed = false;
         // The desync detector reports a frame only once it is this far
@@ -15095,10 +15077,9 @@
         // P4: reset the failed_rollbacks baseline at init so any increase
         // during the match is detected fresh.
         _rbLastFailedRollbacks = 0;
-        // A core from before _kn_get_debug_log_dropped starts its log over in
-        // kn_rollback_init, so the new log is read from its start. A current
-        // core's log runs on across inits and its offset only grows.
-        if (!detMod._kn_get_debug_log_dropped) _cDebugLogLastLen = 0;
+        // kn_rollback_init started the C log and its dropped count over.
+        _cDebugLogLastLen = 0;
+        _cDebugLogDropped = 0;
         // Reset divergence diagnostics state
         _rbLastGoodFrame = -1;
         _rbBisectActive = false;

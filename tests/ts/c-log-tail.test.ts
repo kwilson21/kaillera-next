@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
-import { cLogTail, cLogTailFrom } from '../../web/src/c-log-tail.ts';
+import { cLogDrain, cLogDroppedSince, cLogTail } from '../../web/src/c-log-tail.ts';
 
 // The engine's drain before cLogTail: nothing when the length is unchanged,
 // else everything past the old length.
@@ -36,23 +36,72 @@ const drainSource = src.slice(start, src.indexOf('\n  };\n', start) + 5);
 interface Drainer {
   logs: string[];
   buffer: string;
+  dropped: number;
   drain: () => void;
 }
 
-const drainer = (): Drainer => {
-  const box: Drainer = { logs: [], buffer: '', drain: () => {} };
+/**
+ * The engine's drain against a fake core. `canClear`: the core has
+ * kn_clear_debug_log and kn_get_debug_log_dropped (this PR's core); without
+ * them it is an older core that keeps its whole log.
+ */
+const drainer = (canClear = false): Drainer => {
+  const box: Drainer = { logs: [], buffer: '', dropped: 0, drain: () => {} };
   vm.runInContext(
     `
     const _syncLog = (line) => box.logs.push(line);
-    const window = { KNCore: { cLogTail }, EJS_emulator: { gameManager: { Module: {
-      _kn_get_debug_log: () => 1, UTF8ToString: () => box.buffer } } } };
+    const Module = { _kn_get_debug_log: () => 1, UTF8ToString: () => box.buffer };
+    if (canClear) {
+      Module._kn_clear_debug_log = () => { box.buffer = ''; };
+      Module._kn_get_debug_log_dropped = () => box.dropped;
+    }
+    const window = { KNCore: { cLogTail, cLogDrain, cLogDroppedSince }, EJS_emulator: { gameManager: { Module } } };
     ${drainSource}
     box.drain = _drainCDebugLog;
     `,
-    vm.createContext({ box, cLogTail }),
+    vm.createContext({ box, canClear, cLogTail, cLogDrain, cLogDroppedSince }),
   );
   return box;
 };
+
+test('a core that can empty its log gives the whole buffer up at each drain', () => {
+  assert.deepEqual(cLogDrain('a\nb\n', 0, true), { tail: 'a\nb\n', drained: 0, clear: true });
+  assert.deepEqual(cLogDrain('', 0, true), { tail: '', drained: 0, clear: false });
+  // An older core: the tail past what was drained, as cLogTail.
+  assert.deepEqual(cLogDrain('a\nb\n', 2, false), { tail: 'b\n', drained: 4, clear: false });
+});
+
+test('dropped lines since the last drain; a lower count is a new init', () => {
+  assert.equal(cLogDroppedSince(0, 0), 0);
+  assert.equal(cLogDroppedSince(3, 10), 7);
+  assert.equal(cLogDroppedSince(10, 4), 4);
+});
+
+test('the engine sends each drain once and empties the C log', () => {
+  const c = drainer(true);
+  c.buffer = 'MISPREDICTION slot=1 f=40\nC-REPLAY-FRAME f=41\n';
+  c.drain();
+  assert.deepEqual(c.logs, ['[C] MISPREDICTION slot=1 f=40', '[C] C-REPLAY-FRAME f=41']);
+  assert.equal(c.buffer, '', 'emptied, so it only holds what comes after');
+  c.logs.length = 0;
+  c.buffer = 'C-REPLAY-FRAME f=42\n';
+  c.drain();
+  assert.deepEqual(c.logs, ['[C] C-REPLAY-FRAME f=42']);
+});
+
+test('the engine says when the C log dropped lines, once for each growth', () => {
+  const c = drainer(true);
+  c.buffer = 'SAVE-SKIP from f=0\n';
+  c.dropped = 12;
+  c.drain();
+  assert.deepEqual(c.logs, ['[C] SAVE-SKIP from f=0', 'C-LOG-DROPPED n=12: the C log was full between two drains']);
+  c.logs.length = 0;
+  c.drain();
+  assert.deepEqual(c.logs, [], 'no new drops, nothing said');
+  c.dropped = 15;
+  c.drain();
+  assert.deepEqual(c.logs, ['C-LOG-DROPPED n=3: the C log was full between two drains']);
+});
 
 test('the engine drains a C buffer that started over shorter than its count', () => {
   const c = drainer();
@@ -82,83 +131,4 @@ test('doRollbackInit drains the C log before a re-init within a match, and reset
   const resetAt = init.indexOf('_cDebugLogLastLen = 0;');
   assert.ok(drainAt > 0 && drainAt < initAt, 'drained before kn_rollback_init starts the buffer over');
   assert.ok(resetAt > initAt, 'the count is reset after it');
-});
-
-// A core whose log keeps its newest lines (kn_get_debug_log_dropped).
-test('with nothing dropped, cLogTailFrom is cLogTail', () => {
-  for (const full of ['', 'a\n', 'a\nbb\n', 'a\nbb\nccc\n']) {
-    for (let drained = 0; drained <= full.length + 2; drained++) {
-      const { tail, drained: to, missed } = cLogTailFrom(full, drained, 0);
-      assert.deepEqual({ tail, drained: to }, cLogTail(full, drained));
-      assert.equal(missed, 0);
-    }
-  }
-});
-
-test('cLogTailFrom reads on from an absolute offset and counts what was dropped unread', () => {
-  // 100 bytes dropped, the buffer holds offsets 100..110.
-  assert.deepEqual(cLogTailFrom('0123456789', 104, 100), { tail: '456789', drained: 110, missed: 0 });
-  assert.deepEqual(cLogTailFrom('0123456789', 110, 100), { tail: '', drained: 110, missed: 0 });
-  // Drained to 60 only: 40 bytes went unread.
-  assert.deepEqual(cLogTailFrom('0123456789', 60, 100), { tail: '0123456789', drained: 110, missed: 40 });
-});
-
-interface DroppingDrainer extends Drainer {
-  dropped: number;
-  skip: () => void;
-}
-
-const droppingDrainer = (): DroppingDrainer => {
-  const box: DroppingDrainer = { logs: [], buffer: '', dropped: 0, drain: () => {}, skip: () => {} };
-  const from = src.indexOf('  let _cDebugLogLastLen = 0;');
-  const to = src.indexOf('  const _flushSyncLog = () => {', from);
-  vm.runInContext(
-    `
-    const _syncLog = (line) => box.logs.push(line);
-    const window = { KNCore: { cLogTail, cLogTailFrom }, EJS_emulator: { gameManager: { Module: {
-      _kn_get_debug_log: () => 1, _kn_get_debug_log_dropped: () => box.dropped,
-      UTF8ToString: () => box.buffer } } } };
-    ${src.slice(from, to)}
-    box.drain = _drainCDebugLog;
-    box.skip = _skipCDebugLog;
-    `,
-    vm.createContext({ box, cLogTail, cLogTailFrom }),
-  );
-  return box;
-};
-
-test('the engine drains a core that drops its oldest lines: each line once, and what it missed', () => {
-  const c = droppingDrainer();
-  c.buffer = 'one\ntwo\n';
-  c.drain();
-  assert.deepEqual(c.logs, ['[C] one', '[C] two']);
-  // The core dropped "one\n" (4 bytes) and logged a third line: nothing missed.
-  c.logs.length = 0;
-  c.dropped = 4;
-  c.buffer = 'two\nthree\n';
-  c.drain();
-  assert.deepEqual(c.logs, ['[C] three']);
-  // It dropped 20 more bytes, 10 of them never read.
-  c.logs.length = 0;
-  c.dropped = 24;
-  c.buffer = 'nine\n';
-  c.drain();
-  assert.deepEqual(c.logs, ['[C] C-LOG-DROPPED bytes=10', '[C] nine']);
-  c.drain();
-  assert.equal(c.logs.length, 2, 'nothing new, nothing sent');
-});
-
-test("a new match skips the last match's tail on a core whose log runs on", () => {
-  const c = droppingDrainer();
-  c.buffer = 'last match\nkn_rollback_shutdown\n';
-  c.skip();
-  c.buffer += 'C-ROLLBACK init\n';
-  c.drain();
-  assert.deepEqual(c.logs, ['[C] C-ROLLBACK init']);
-});
-
-test('doRollbackInit resets the count only for a core whose log starts over, and skips for one whose log runs on', () => {
-  const init = src.slice(src.indexOf('const doRollbackInit = ('));
-  assert.ok(init.includes('if (_useCRollback) _drainCDebugLog();\n        else _skipCDebugLog();'));
-  assert.ok(init.includes('if (!detMod._kn_get_debug_log_dropped) _cDebugLogLastLen = 0;'));
 });

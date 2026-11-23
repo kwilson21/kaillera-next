@@ -198,13 +198,8 @@ int kn_rollback_self_test(void);
  * or negative on error (-1 OOM, -2 serialize fail, -3 unserialize fail). */
 int kn_replay_self_test(int n_frames, uint32_t *out_hashes);
 
-/* Debug log: the newest lines as a null-terminated string. When full, the
- * oldest lines (at least half the buffer) are dropped to make room. */
+/* Debug log ring buffer. Returns pointer to null-terminated string. */
 const char* kn_get_debug_log(void);
-
-/* Bytes dropped from the front of the debug log so far: the absolute offset
- * of its first byte, for a reader that drains it by offset. */
-uint32_t kn_get_debug_log_dropped(void);
 
 /* Update player count (e.g., late join adds a player). */
 void kn_set_num_players(int num_players);
