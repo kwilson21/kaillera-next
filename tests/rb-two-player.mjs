@@ -2658,9 +2658,11 @@ if (inBattle) {
       // chunk timeout then asks over the socket.
       // The socket request is held on the host page and delivered right
       // after the guest's kept-back inputs are taken in (below).
-      await host.evaluate(() => {
+      // This attempt's request is the one held after the records kept so far.
+      const heldBefore = await host.evaluate(() => {
         window.__knSyncAnswerDrops.push('chunks');
         window.__knHoldSocketRequests = 1;
+        return window.__knSocketRequestsHeld.length;
       });
       await guest.evaluate(() => window.dispatchEvent(new Event('online')));
       await guest.waitForTimeout(SYNC_FOLLOW_UP_SOCKET_HOLD_FROM_MS);
@@ -2677,7 +2679,7 @@ if (inBattle) {
       }, NEUTRAL);
       const asked = await waitForLine(guest, syncFollowUp.guestAt.seq, /sent socket sync-request-full to host/, 8000);
       const held = await host
-        .waitForFunction(() => window.__knSocketRequestsHeld.length > 0, null, { timeout: 8000 })
+        .waitForFunction((n) => window.__knSocketRequestsHeld.length > n, heldBefore, { timeout: 8000 })
         .then(
           () => true,
           () => false,
