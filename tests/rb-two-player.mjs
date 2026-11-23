@@ -1518,7 +1518,8 @@ const recordEventsInitScript = () => {
 // frame set, before any frame runs. The run compares the guest's with the
 // host's read for that frame (resyncExtras in summary.json).
 const resyncExtrasProbeInitScript = () => {
-  const P = { reads: [], applies: [], wrapped: false };
+  const P = { reads: [], applies: [], wrapped: false, modules: 0 };
+  const seen = new WeakSet();
   window.__knResyncExtras = P;
   const hiddenOf = (m) => {
     const out = { fp: m._kn_get_hidden_state_fingerprint?.() ?? null, words: null, hle: null, hleBytes: 0 };
@@ -1543,13 +1544,18 @@ const resyncExtrasProbeInitScript = () => {
   };
   const wrap = () => {
     const m = window.EJS_emulator?.gameManager?.Module;
-    if (!m?._kn_sync_read || !m._kn_sync_write || !m._kn_set_frame || !m._kn_get_frame) return false;
+    if (!m?._kn_sync_read || !m._kn_sync_write || !m._kn_set_frame || !m._kn_get_frame || seen.has(m)) return;
+    seen.add(m);
+    P.modules++;
     const read = m._kn_sync_read;
-    m._kn_sync_read = function (...args) {
-      const n = read.apply(this, args);
-      if (n > 0) P.reads.push({ frame: m._kn_get_frame(), ...hiddenOf(m) });
-      return n;
-    };
+    m._kn_sync_read = Object.assign(
+      function (...args) {
+        const n = read.apply(this, args);
+        if (n > 0) P.reads.push({ frame: m._kn_get_frame(), ...hiddenOf(m) });
+        return n;
+      },
+      { knResyncProbe: true },
+    );
     let wrote = false;
     const write = m._kn_sync_write;
     m._kn_sync_write = function (...args) {
@@ -1564,9 +1570,11 @@ const resyncExtrasProbeInitScript = () => {
       return setFrame.call(this, frame, ...rest);
     };
     P.wrapped = true;
-    return true;
   };
-  const poll = setInterval(() => wrap() && clearInterval(poll), 50);
+  // Again for each new Module the page makes (a core restarted mid-match).
+  setInterval(wrap, 50);
+  // At the end: is the page's Module still the one wrapped last?
+  P.stillWrapped = () => !!window.EJS_emulator?.gameManager?.Module?._kn_sync_read?.knResyncProbe;
 };
 
 // RESYNC_ONE_BACK / RESYNC_SAME_FRAME (guest page only): lands the resync
@@ -3617,7 +3625,9 @@ const collect = (p, VISUAL_CHECK) =>
       mapOngoing: window.__tp.mapOngoing,
       mapLiveHeaderPointer: window.__tp.mapLiveHeaderPointer,
       mapSamples: window.__tp.mapSamples,
-      resyncExtras: window.__knResyncExtras ?? null,
+      resyncExtras: window.__knResyncExtras
+        ? { ...window.__knResyncExtras, stillWrapped: window.__knResyncExtras.stillWrapped() }
+        : null,
       visual,
     };
   }, VISUAL_CHECK);
@@ -4154,6 +4164,8 @@ const resyncExtrasReport = (() => {
   }
   return {
     probed: { host: !!H.resyncExtras?.wrapped, guest: !!G.resyncExtras?.wrapped },
+    modules: { host: H.resyncExtras?.modules ?? 0, guest: G.resyncExtras?.modules ?? 0 },
+    stillWrapped: { host: !!H.resyncExtras?.stillWrapped, guest: !!G.resyncExtras?.stillWrapped },
     hostReads: reads.length,
     guestApplies: applies.length,
     hleBytes: reads[0]?.hleBytes ?? applies[0]?.hleBytes ?? null,
