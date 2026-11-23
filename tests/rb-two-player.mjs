@@ -3344,6 +3344,8 @@ const collect = (p, VISUAL_CHECK) =>
       fpsWindowStart: window.__tp.fpsWindowStart,
       fpsWindowEnd,
       clog: m.UTF8ToString(m._kn_get_debug_log()),
+      // A core with kn_clear_debug_log is emptied at each drain into the sync log.
+      clogDrained: typeof m._kn_clear_debug_log === 'function',
       sync: window.NetplayRollback.exportSyncLog?.() || '',
       syncAnswersHeld: window.__knSyncAnswersHeld ?? [],
       rbInputsLost: window.__knRbInputsLost ?? [],
@@ -3367,6 +3369,21 @@ const collect = (p, VISUAL_CHECK) =>
     };
   }, VISUAL_CHECK);
 const [H, G] = await Promise.all([collect(host, VISUAL_CHECK), collect(guest, VISUAL_CHECK)]);
+// The whole C engine log. The page drains it into its sync log as [C] lines,
+// and a core with kn_clear_debug_log is emptied each time: the log is those
+// lines, then what has not been drained yet. An older core keeps it all.
+const wholeCLog = (peer) =>
+  peer.clogDrained
+    ? [
+        ...peer.sync
+          .split('\n')
+          .filter((line) => line.includes('\t[C] '))
+          .map((line) => line.slice(line.indexOf('\t[C] ') + 5)),
+        peer.clog,
+      ].join('\n')
+    : peer.clog;
+H.clog = wholeCLog(H);
+G.clog = wholeCLog(G);
 const knEventsOf = (page) => page.evaluate(() => window.__knEvents ?? []);
 const [hostEvents, guestEvents] = await Promise.all([knEventsOf(host), knEventsOf(guest)]);
 // The observers' reports: sync-log lines, the client events the pages sent,
@@ -4495,6 +4512,11 @@ const integrityFailed =
     : (H.failed || 0) + (G.failed || 0) - excusedIntegrity.failedRollbacksExcluded > 0 ||
       summary.integrityEvents.host + summary.integrityEvents.guest - excusedIntegrity.integrityEventsExcluded > 0;
 const minGameFpsFailed = MIN_GAME_FPS !== null && (!(gameFps.host >= MIN_GAME_FPS) || !(gameFps.guest >= MIN_GAME_FPS));
+// A C log line with no room in the engine's buffer (C-LOG-DROPPED) is one
+// the checks above could not read.
+const cLogDropped = { host: count(H.sync, /C-LOG-DROPPED/g), guest: count(G.sync, /C-LOG-DROPPED/g) };
+const cLogDroppedFailed = cLogDropped.host + cLogDropped.guest > 0;
+if (cLogDroppedFailed) console.log('C-LOG-DROPPED: the C log dropped lines:', JSON.stringify(cLogDropped));
 if (minGameFpsFailed) {
   console.log(`MIN_GAME_FPS=${MIN_GAME_FPS} not met:`, JSON.stringify(gameFps));
 }
@@ -5163,6 +5185,7 @@ const failed =
   summary.bootInputStallTimeouts.host > 0 ||
   summary.bootInputStallTimeouts.guest > 0 ||
   integrityFailed ||
+  cLogDroppedFailed ||
   H.inBattleAt < 0 ||
   G.inBattleAt < 0 ||
   battleCoverage < 0.8 ||
