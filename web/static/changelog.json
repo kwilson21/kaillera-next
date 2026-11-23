@@ -1,5 +1,25 @@
 [
   {
+    "version": "0.72.2",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync carries the hidden words and HLE state, not just kn_sync_read (#331)"
+      }
+    ]
+  },
+  {
+    "version": "0.72.1",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync follow-up counts only inputs that ran before the state it watched (#329)"
+      }
+    ]
+  },
+  {
     "version": "0.72.0",
     "date": "2026-11-23",
     "changes": [

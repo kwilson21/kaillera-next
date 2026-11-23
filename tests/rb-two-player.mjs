@@ -16,6 +16,12 @@
  *     window's edge whose input the peer is known to have made, or one run
  *     right after a reconnect reset, before C records predictions for that
  *     peer again (PREDICTED-KNOWN, specs/reconnect_inputs.qnt)
+ *   - every state the guest applied left it with the host's hidden state:
+ *     right after the apply step (the kn_set_frame after kn_sync_write), its
+ *     18 packed hidden words, kn_get_hidden_state_fingerprint and RSP HLE
+ *     state equal the host's as it read that state (kn_sync_read) for that
+ *     frame. With RESYNC_ONE_BACK or RESYNC_SAME_FRAME at least one is
+ *     compared. Reported as `resyncExtras` in summary.json
  *   - no failed rollbacks or integrity events (R2-R5 and fatal WASM traps
  *     in docs/netplay-invariants.md) in either peer's engine or sync log
  *   - no rollback input-stall timeouts below frame 300 on either peer
@@ -1504,6 +1510,88 @@ const recordEventsInitScript = () => {
   });
 };
 
+// Every run, both pages: what a resync leaves out of kn_sync_read. Each
+// kn_sync_read records the page's hidden state as it is read (the 18 packed
+// words, kn_get_hidden_state_fingerprint, and a hash of the RSP HLE state),
+// by the core's frame; each kn_set_frame that follows a kn_sync_write (the
+// end of a resync's apply step, applySyncState) records the same, by the
+// frame set, before any frame runs. The run compares the guest's with the
+// host's read for that frame (resyncExtras in summary.json).
+const resyncExtrasProbeInitScript = () => {
+  const P = { reads: [], applies: [], wrapped: false, modules: 0 };
+  const seen = new WeakSet();
+  window.__knResyncExtras = P;
+  const hiddenOf = (m) => {
+    const out = { fp: m._kn_get_hidden_state_fingerprint?.() ?? null, words: null, hle: null, hleBytes: 0 };
+    if (m._kn_pack_hidden_state_impl) {
+      const ptr = m._malloc(18 * 4);
+      m._kn_pack_hidden_state_impl(ptr);
+      out.words = Array.from(new Uint32Array(m.HEAPU32.buffer, ptr, 18));
+      m._free(ptr);
+    }
+    const size = m._kn_hle_state_size?.() ?? 0;
+    if (size > 0 && m._kn_hle_save_to) {
+      const ptr = m._malloc(size);
+      m._kn_hle_save_to(ptr);
+      const bytes = new Uint8Array(m.HEAPU8.buffer, ptr, size);
+      let h = 2166136261;
+      for (let i = 0; i < size; i++) h = Math.imul(h ^ bytes[i], 16777619) >>> 0;
+      m._free(ptr);
+      out.hle = h.toString(16);
+      out.hleBytes = size;
+    }
+    return out;
+  };
+  const wrap = () => {
+    const m = window.EJS_emulator?.gameManager?.Module;
+    if (!m?._kn_sync_read || !m._kn_sync_write || !m._kn_set_frame || !m._kn_get_frame || seen.has(m)) return;
+    seen.add(m);
+    P.modules++;
+    // Emscripten's export on Module is a stub that, on its first call, puts
+    // the export it stands for in its own place, over any wrapper around it.
+    // A change made during the inner call is that: the wrapper calls the new
+    // export from then on and puts back what was there before the call (this
+    // wrapper, or one another script put over it).
+    const around = (name, body) => {
+      let inner = m[name];
+      const self = Object.assign(
+        function (...args) {
+          const before = m[name];
+          const result = body((...a) => inner.apply(this, a), args);
+          if (m[name] !== before) {
+            inner = m[name];
+            m[name] = before;
+          }
+          return result;
+        },
+        { knResyncProbe: true },
+      );
+      m[name] = self;
+    };
+    around('_kn_sync_read', (call, args) => {
+      const n = call(...args);
+      if (n > 0) P.reads.push({ frame: m._kn_get_frame(), ...hiddenOf(m) });
+      return n;
+    });
+    let wrote = false;
+    around('_kn_sync_write', (call, args) => {
+      const r = call(...args);
+      wrote = r === 0;
+      return r;
+    });
+    around('_kn_set_frame', (call, args) => {
+      if (wrote) P.applies.push({ frame: args[0], ...hiddenOf(m) });
+      wrote = false;
+      return call(...args);
+    });
+    P.wrapped = true;
+  };
+  // Again for each new Module the page makes (a core restarted mid-match).
+  setInterval(wrap, 50);
+  // At the end: is the page's Module still the one wrapped last?
+  P.stillWrapped = () => !!window.EJS_emulator?.gameManager?.Module?._kn_sync_read?.knResyncProbe;
+};
+
 // RESYNC_ONE_BACK / RESYNC_SAME_FRAME (guest page only): lands the resync
 // answer one frame behind the guest's counter, or on the frame it is on after
 // kn_pre_tick saved it. Inert until the run calls start(). Each pause has a
@@ -1706,6 +1794,7 @@ const mkPage = async (
   if (resyncOneBack) await ctx.addInitScript(resyncOneBackInitScript);
   // Every run: the observers' client events are counted from these.
   await ctx.addInitScript(recordEventsInitScript);
+  await ctx.addInitScript(resyncExtrasProbeInitScript);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
   if (DROP_PEER_MS && name === 'guest') {
@@ -3551,6 +3640,9 @@ const collect = (p, VISUAL_CHECK) =>
       mapOngoing: window.__tp.mapOngoing,
       mapLiveHeaderPointer: window.__tp.mapLiveHeaderPointer,
       mapSamples: window.__tp.mapSamples,
+      resyncExtras: window.__knResyncExtras
+        ? { ...window.__knResyncExtras, stillWrapped: window.__knResyncExtras.stillWrapped() }
+        : null,
       visual,
     };
   }, VISUAL_CHECK);
@@ -4057,6 +4149,44 @@ const resyncOneBackReport = (() => {
     landed: resyncFaultLanded,
     applied: guestLines.filter((line) => /sync #\d+ applied/.test(line)),
     comparedFrom: recoveredAt,
+  };
+})();
+// Every state the guest applied (resyncExtrasProbeInitScript): its hidden
+// words, fingerprint and HLE state once the apply step is done, against the
+// host's as it read that state. A state carries kn_sync_read's bytes and,
+// beside them, the hidden words and HLE state; any difference here is one the
+// resync left behind.
+const resyncExtrasReport = (() => {
+  const reads = H.resyncExtras?.reads ?? [];
+  const applies = G.resyncExtras?.applies ?? [];
+  const same = (r, a) => r.fp === a.fp && r.hle === a.hle && JSON.stringify(r.words) === JSON.stringify(a.words);
+  const compared = [];
+  const unmatched = [];
+  for (const a of applies) {
+    const atFrame = reads.filter((r) => r.frame === a.frame);
+    if (!atFrame.length) {
+      unmatched.push(a.frame);
+      continue;
+    }
+    const r = atFrame.find((x) => same(x, a)) ?? atFrame.at(-1);
+    compared.push({
+      frame: a.frame,
+      equal: same(r, a),
+      fp: r.fp === a.fp ? null : { host: r.fp, guest: a.fp },
+      hle: r.hle === a.hle ? null : { host: r.hle, guest: a.hle },
+      words: (r.words ?? []).flatMap((w, i) => (w === a.words?.[i] ? [] : [{ i, host: w, guest: a.words?.[i] }])),
+    });
+  }
+  return {
+    probed: { host: !!H.resyncExtras?.wrapped, guest: !!G.resyncExtras?.wrapped },
+    modules: { host: H.resyncExtras?.modules ?? 0, guest: G.resyncExtras?.modules ?? 0 },
+    stillWrapped: { host: !!H.resyncExtras?.stillWrapped, guest: !!G.resyncExtras?.stillWrapped },
+    hostReads: reads.length,
+    guestApplies: applies.length,
+    hleBytes: reads[0]?.hleBytes ?? applies[0]?.hleBytes ?? null,
+    compared: compared.length,
+    unmatched,
+    mismatched: compared.filter((c) => !c.equal),
   };
 })();
 // DESYNC_GUEST holds its change for 3 s. A rollback in that time re-runs
@@ -4683,6 +4813,7 @@ if (linkReport) summary.link = linkReport;
 if (doubleResyncAskReport) summary.doubleResyncAsk = doubleResyncAskReport;
 if (RESYNC_FAULT) summary[RESYNC_ONE_BACK ? 'resyncOneBack' : 'resyncSameFrame'] = resyncOneBackReport;
 if (unansweredSocketResyncReport) summary.unansweredSocketResync = unansweredSocketResyncReport;
+summary.resyncExtras = resyncExtrasReport;
 fs.writeFileSync(`${OUT}/hashes.json`, JSON.stringify({ H: H.hashes, G: G.hashes }));
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 console.log(JSON.stringify(summary, null, 1));
@@ -5413,6 +5544,19 @@ if (RESYNC_FAULT)
         : 'RESYNC_SAME_FRAME: the resync landed on a frame kn_pre_tick had saved and not run:',
     JSON.stringify(resyncOneBackReport),
   );
+// Any applied state whose hidden or HLE state is not the host's fails the
+// run; a mode that forces a resync must also have compared one.
+const resyncExtrasFailed =
+  resyncExtrasReport.mismatched.length > 0 ||
+  !resyncExtrasReport.probed.host ||
+  !resyncExtrasReport.probed.guest ||
+  (!!RESYNC_FAULT && resyncExtrasReport.compared === 0);
+console.log(
+  resyncExtrasFailed
+    ? "RESYNC-EXTRAS: an applied state left the guest with hidden or HLE state not the host's (or none compared):"
+    : "RESYNC-EXTRAS: every applied state left the guest with the host's hidden and HLE state:",
+  JSON.stringify(resyncExtrasReport),
+);
 const startLostFailed =
   START_LOST &&
   !(
@@ -5452,6 +5596,7 @@ const failed =
   resetComboFailed ||
   addressMapFailed ||
   resyncOneBackFailed ||
+  resyncExtrasFailed ||
   linkFailed ||
   dropPeerFailed ||
   catchUpHoleFailed ||
