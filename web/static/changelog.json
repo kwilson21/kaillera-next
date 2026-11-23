@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.69.19",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep /health answering while a long session log is exported or rotated (#308)"
+      }
+    ]
+  },
+  {
     "version": "0.69.18",
     "date": "2026-11-22",
     "changes": [
