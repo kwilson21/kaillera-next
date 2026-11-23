@@ -134,9 +134,16 @@
  *   for seconds in a cloud container; a quarter of the pixels is a quarter
  *   of that work. It changes what is drawn, not what is emulated.
  *
+ * Each page reads a frame's hashes its engine's rollback window + 1 frames
+ * behind the newest frame, the first frame no rollback can rewrite
+ * (tests/hash-lag.mjs; `hashLag` in summary.json).
  * A frame the engine no longer holds hashes to 0 (kn_gameplay_hash and the
  * others read the frame from the ring buffer), as right after a resync takes
- * a page back; such frames are counted as `unrecorded`, not compared.
+ * a page back; such frames are counted as `unrecorded`, not compared. A
+ * frame one page has a hash for and the other none is counted as `missing`.
+ * Both lower each pair's `battleCoverage` (battle frames compared over the
+ * battle frames both pages could have read), with the battle ones per page
+ * in `battleUnrecorded`.
  * summary.json lists the differing frames and, per page, the stops of its
  * main thread of 4 s or more (`LOCAL-FREEZE`), which get a page dropped as a
  * phantom; OUT/p<n>-hashes.json has every page's hashes.
@@ -151,6 +158,7 @@ import { requireCurrentBundle } from './bundle-check.mjs';
 import { addNetworkInitScript } from './rb-page-network.mjs';
 import { catchUpHoleInput } from './directional-input-gate.mjs';
 import { installNativeInputObserver } from './native-input-observer.mjs';
+import { trackHashLag, unrecordedIn } from './hash-lag.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -193,9 +201,9 @@ const RESYNC_REQUEST_TIMEOUT_MS = 8000;
 const CATCH_UP_RECOVER_MS = 60000;
 // Battle frames compared per guest, at the least, for the run to say anything.
 const MIN_BATTLE_FRAMES = 60;
-// Hashes are recorded this many frames behind the frame just run: past the
-// rollback window, so a later rollback no longer changes them.
-const HASH_LAG = 12;
+// Hashes are recorded each page's own lag behind the frame just run: its
+// engine's rollback window + 1, so no later rollback can change them
+// (tests/hash-lag.mjs).
 
 const fail = (msg) => {
   console.log(msg);
@@ -361,11 +369,13 @@ if (slots.some((s, i) => s !== i)) fail(`pages did not take slots 0..${PLAYERS -
 // Autopilot for the page's own slot, random battle inputs, and the hash recorder.
 const install = async (p, slot) => {
   await p.addScriptTag({ url: `${URL}/static/ssb64-menu-autopilot.js` });
+  await p.evaluate(trackHashLag);
   await p.evaluate(
-    ({ slot, players, anyFighter, hashLag, rdram }) => {
+    ({ slot, players, anyFighter, rdram }) => {
       const W = (window.__mesh = {
         slot,
         hashes: {},
+        ticksWithoutLag: 0,
         rdram: rdram ? {} : null,
         scene: -1,
         inBattleAt: -1,
@@ -467,13 +477,16 @@ const install = async (p, slot) => {
       m._kn_post_tick = function (...a) {
         const r = post.apply(this, a);
         const idle = (m._kn_get_replay_depth?.() ?? 0) === 0;
+        // This page's lag (tests/hash-lag.mjs); null until its engine is armed.
+        const hashLag = window.__knHashLag?.lag ?? null;
         // A resync that takes the counter back (and the catch-up that runs the
         // frames again) makes hashes already recorded from there on stale.
-        if (idle && W.lastR !== undefined && r < W.lastR) {
+        if (idle && W.lastR !== undefined && r < W.lastR && hashLag !== null) {
           for (const k of Object.keys(W.hashes)) if (+k >= r - hashLag) delete W.hashes[k];
         }
         if (idle) W.lastR = r;
-        if (idle && r > 40) {
+        if (idle && r > 40 && hashLag === null) W.ticksWithoutLag++;
+        if (idle && r > 40 && hashLag !== null) {
           const f = r - hashLag;
           if (!(f in W.hashes)) {
             const gameplay = m._kn_gameplay_hash(f) >>> 0;
@@ -487,7 +500,7 @@ const install = async (p, slot) => {
         return r;
       };
     },
-    { slot, players: PLAYERS, anyFighter, hashLag: HASH_LAG, rdram: RECOVERY_BYSTANDER },
+    { slot, players: PLAYERS, anyFighter, rdram: RECOVERY_BYSTANDER },
   );
 };
 for (let i = 0; i < PLAYERS; i++) await install(pages[i], i);
@@ -1109,6 +1122,8 @@ const P = await Promise.all(
       preDropHashCount: Object.keys(window.__meshDroppedSnapshot?.hashes ?? {}).length,
       inBattleAt: window.__meshDroppedSnapshot?.inBattleAt ?? window.__mesh.inBattleAt,
       lastR: window.__mesh.lastR,
+      hashLag: window.__knHashLag ?? null,
+      ticksWithoutLag: window.__mesh.ticksWithoutLag,
       // Who the battle state says is playing: each player's kind (0 = human)
       // and fighter, the bytes at +2 and +3 of its 0x74-byte entry from
       // 0x800A4D28 (gSCManagerTransferBattleState's players, web/src/address-maps.ts).
@@ -1165,13 +1180,19 @@ const pairs = P.slice(1).map((G, gi) => {
   let preFaultBattle = 0;
   const recoveryMismatches = { before: 0, during: 0, after: 0 };
   let unrecorded = 0;
+  // A frame one page read and the other has no hash for (never read there:
+  // its lag not yet known, or a resync took it past the frame).
+  const missing = { host: 0, guest: 0 };
   let leftOut = 0;
   const mismatches = { gameplay: [], gameState: [], fullState: 0 };
-  for (const k of Object.keys(G.hashes)) {
+  for (const k of new Set([...Object.keys(G.hashes), ...Object.keys(H.hashes)])) {
     const f = +k;
     const h = H.hashes[k];
-    if (!h) continue;
     const g = G.hashes[k];
+    if (!h || !g) {
+      missing[h ? 'guest' : 'host']++;
+      continue;
+    }
     // 0: that page's engine no longer held the frame when it was recorded.
     if (h[0] === 0 || g[0] === 0) {
       unrecorded++;
@@ -1218,12 +1239,25 @@ const pairs = P.slice(1).map((G, gi) => {
     if (h[0] !== old[0]) preDropMismatches.gameplay.push(Number(key));
     if (h[1] && old[1] && h[1] !== old[1]) preDropMismatches.gameState.push(Number(key));
   }
+  // Battle frames both pages could have read by the end, each its own lag
+  // behind its last frame; every one counts, so one left without a hash (or
+  // read as 0) lowers the coverage and is counted per page.
+  const lagOf = (x) => x.hashLag?.lag ?? 0;
+  const spanTo = Math.min((H.lastR ?? 0) - lagOf(H), (G.lastR ?? 0) - lagOf(G));
+  const battleSpan = battleFrom > 0 && spanTo >= battleFrom ? spanTo - battleFrom + 1 : 0;
   return {
     slot,
     preDropMismatches,
     compared,
     unrecorded,
+    missing,
     leftOut,
+    battleSpan,
+    battleCoverage: battleSpan > 0 ? +Math.min(1, battle / battleSpan).toFixed(3) : 0,
+    battleUnrecorded:
+      battleSpan > 0
+        ? { host: unrecordedIn(H.hashes, battleFrom, spanTo), guest: unrecordedIn(G.hashes, battleFrom, spanTo) }
+        : null,
     battleFramesCompared: battle,
     postRecoveryFramesCompared: postRecovery,
     preFaultBattleFramesCompared: preFaultBattle,
@@ -1804,6 +1838,13 @@ const summary = {
   linkKbps: LINK_KBPS,
   inBattleAt: P.map((x) => x.inBattleAt),
   lastFrame: P.map((x) => x.lastR),
+  // Per page: the lag its hashes were read at (rollback window + 1), each
+  // time its engine was armed, and the reads made before it was.
+  hashLag: P.map((x) => ({
+    lag: x.hashLag?.lag ?? null,
+    inits: x.hashLag?.inits ?? [],
+    ticksWithoutLag: x.ticksWithoutLag,
+  })),
   screenSize: SCREEN_SIZE,
   fighters: H.fighters,
   fighterProblems,

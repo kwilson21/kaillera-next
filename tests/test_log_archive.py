@@ -68,6 +68,12 @@ class CountingStore:
     async def delete_prefix(self, prefix):
         await self.inner.delete_prefix(prefix)
 
+    async def list_match_prefixes(self, *, after=None, limit=500):
+        return await self.inner.list_match_prefixes(after=after, limit=limit)
+
+    async def newest_in_match(self, match_id):
+        return await self.inner.newest_in_match(match_id)
+
 
 def with_db(tmp_path, body, *, fail_on=None):
     """Run `body(db, store)` against a fresh database and blob store.
