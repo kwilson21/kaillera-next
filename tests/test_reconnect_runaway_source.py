@@ -139,12 +139,12 @@ def test_after_a_reconnect_reset_a_frame_waits_for_the_peers_first_input():
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
     assert "    _awaitFirstInputAfterReset,\n" in _slot_clear(src)
-    assert reset.index("_resetCoreSlot(slot, reason, !!opts.keepCoreSlot);") < reset.index(
+    assert reset.index("_resetCoreSlot(slot, reason, !!opts.keepCoreSlot, wasPhantom);") < reset.index(
         "if (reason === 'reconnect') _awaitFirstInputAfterReset[slot] = true;"
     )
-    core = src[src.index("const _resetCoreSlot = (slot, reason, keepCoreSlot) => {") :]
+    core = src[src.index("const _resetCoreSlot = (slot, reason, keepCoreSlot, phantom) => {") :]
     core = core[: core.index("\n  };\n")]
-    assert core.index("window.KNCore.peerReset.keepsCoreSlot(reason, listed)") < core.index(
+    assert core.index("window.KNCore.peerReset.keepsCoreSlot(reason, listed, phantom)") < core.index(
         "mod._kn_rollback_slot_reset(slot);"
     )
     feed = src[src.index("const _feedWatched = (mod, slot, frame, feed) => {") :]

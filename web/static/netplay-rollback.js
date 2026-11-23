@@ -11067,16 +11067,18 @@
   // a slot a cut governs (its ring holds the cut, _cutRemovedInput), nor when
   // the caller cuts it next (`keepCoreSlot`: the host dropping a player, a
   // guest hearing it removed, both under the scheduled rule). The same player
-  // going on in the same slot keeps it as it is (KNCore.peerReset,
-  // specs/reconnect_inputs.qnt reconnect_history): every input of it C
+  // going on in the same slot, not held as a phantom, keeps it as it is
+  // (KNCore.peerReset, specs/reconnect_inputs.qnt reconnect_history): every input of it C
   // predicts stays recorded as a prediction, and its real input, when it
   // comes, is checked against it. Any other reset empties it: slot_active is
   // sticky once kn_feed_input has seen the slot, and the next player in it
   // must not be predicted from this one's inputs.
-  const _resetCoreSlot = (slot, reason, keepCoreSlot) => {
+  // `phantom`: this page held the peer as a phantom: it ran its frames on
+  // predictions past the rollback window, which the resync recovers.
+  const _resetCoreSlot = (slot, reason, keepCoreSlot, phantom) => {
     if (!_useCRollback || keepCoreSlot || _cutGoverns(slot)) return;
     const listed = !_activeRoster || _activeRoster.has(slot);
-    if (window.KNCore.peerReset.keepsCoreSlot(reason, listed)) {
+    if (window.KNCore.peerReset.keepsCoreSlot(reason, listed, phantom)) {
       _syncLog(`PEER-RESET-KEEPS-CORE slot=${slot} reason=${reason}`);
       return;
     }
@@ -11142,6 +11144,7 @@
   const resetPeerState = (slot, reason, opts = {}) => {
     _peerDriver()?.peerReset(slot, opts.sid ?? null);
     if (slot === null || slot === undefined) return;
+    const wasPhantom = !!_peerPhantom[slot];
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A player that comes back is measured from its next start step.
     _startSteps.delete(slot);
@@ -11210,7 +11213,7 @@
     // new peer fills the slot.
     clearPeerStallTimers();
 
-    _resetCoreSlot(slot, reason, !!opts.keepCoreSlot);
+    _resetCoreSlot(slot, reason, !!opts.keepCoreSlot, wasPhantom);
 
     // The same peer goes on after a reconnect: its inputs are waited for
     // until one is taken in (the C slot active again).

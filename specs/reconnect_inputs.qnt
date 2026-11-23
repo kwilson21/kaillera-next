@@ -243,6 +243,16 @@ module reconnect_inputs_keeps_history {
 //     every frame run on a prediction is checked when the real input comes,
 //     and a replay runs the real entries again unchanged. JS still forgets
 //     what it held of the peer (I2) and waits for its first input.
+//     Only for a peer this page did not hold as a phantom: the frame-ahead
+//     stall keeps every frame run on its prediction inside the window (W
+//     here). A phantom (PEER-PHANTOM, after the stall's deadline) runs on
+//     predictions past the window by design, and the resync after the
+//     reconnect is its recovery; its reset empties the slot as before. Kept,
+//     the peer's backlog, asked for tag by tag, mispredicted against those
+//     frames one rollback after another past what the ring holds
+//     (FATAL-RING-STALE, a two-player Smash Remix run with a 17 s outage).
+//     Not modelled here: the phantom and its resync (specs/tick_deadlines.qnt,
+//     specs/resync_flow.qnt).
 //
 // The property: this page never has run a frame for the peer with an input
 // the peer did not make unless C holds that input as a recorded prediction

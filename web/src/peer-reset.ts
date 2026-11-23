@@ -21,7 +21,15 @@
  * (`hard-disconnect-non-host`: the player stays in the slot until the host's
  * roster removes it, and that roster's cut or reset is what empties it).
  * Only while the roster this page holds still lists the slot: a slot the
- * roster no longer lists may be taken by another player. Every other reset
+ * roster no longer lists may be taken by another player. And only when this
+ * page did not hold the peer as a phantom (PEER-PHANTOM): until then the
+ * frame-ahead stall kept every frame it ran on a prediction of that peer
+ * inside the rollback window, so the peer's real inputs roll them back. A
+ * phantom's frames ran on predictions past the window by design, and the
+ * resync after the reconnect is their recovery; kept, the peer's backlog,
+ * asked for tag by tag, mispredicts against them one rollback after another
+ * past what the ring holds (FATAL-RING-STALE in a two-player Smash Remix run
+ * with a 17 s outage). Every other reset
  * (the host dropping a player, a roster removal on the immediate rule, a page
  * replaced by a new one, a late joiner's reconnect) empties it as before.
  * The JS side of the reset (I2) is the same for every reason.
@@ -37,12 +45,13 @@
 /**
  * Whether resetPeerState(slot, reason) leaves the C engine's slot as it is.
  *
- * @param reason  the reset's reason, as resetPeerState is called with it
- * @param listed  the roster this page holds lists the slot (or there is no roster yet)
+ * @param reason   the reset's reason, as resetPeerState is called with it
+ * @param listed   the roster this page holds lists the slot (or there is no roster yet)
+ * @param phantom  this page held the peer as a phantom when it was reset
  */
-//@ ensures \result <==> listed && (reason === "reconnect" || reason === "mesh-heal" || reason === "hard-disconnect-non-host")
-//@ ensures \result ==> listed
-export function keepsCoreSlot(reason: string, listed: boolean): boolean {
-  if (!listed) return false;
+//@ ensures \result <==> listed && !phantom && (reason === "reconnect" || reason === "mesh-heal" || reason === "hard-disconnect-non-host")
+//@ ensures \result ==> listed && !phantom
+export function keepsCoreSlot(reason: string, listed: boolean, phantom: boolean): boolean {
+  if (!listed || phantom) return false;
   return reason === 'reconnect' || reason === 'mesh-heal' || reason === 'hard-disconnect-non-host';
 }

@@ -5,7 +5,9 @@
 // engine), run on the same stand-in C slot. They differ exactly where the
 // spec's fix says they should (predictionPutBackAsRealTest): a reconnect of
 // the same player in a slot the roster lists keeps the slot's predictions,
-// so a real input that differs from one is checked. Everywhere else they
+// so a real input that differs from one is checked, unless this page held
+// the peer as a phantom (its frames past the window, recovered by the
+// resync). Everywhere else they
 // leave the slot the same.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -25,14 +27,16 @@ const EMPTIED = [
   'replaced-by-new-page',
 ];
 
-test('the same player in a listed slot keeps the C slot; nothing else does', () => {
+test('the same player in a listed slot, not held as a phantom, keeps the C slot; nothing else does', () => {
   for (const reason of KEPT) {
-    assert.equal(keepsCoreSlot(reason, true), true, reason);
-    assert.equal(keepsCoreSlot(reason, false), false, `${reason}, slot not listed`);
+    assert.equal(keepsCoreSlot(reason, true, false), true, reason);
+    assert.equal(keepsCoreSlot(reason, false, false), false, `${reason}, slot not listed`);
+    assert.equal(keepsCoreSlot(reason, true, true), false, `${reason}, held as a phantom`);
   }
   for (const reason of EMPTIED) {
-    assert.equal(keepsCoreSlot(reason, true), false, reason);
-    assert.equal(keepsCoreSlot(reason, false), false, reason);
+    for (const listed of [true, false]) {
+      for (const phantom of [true, false]) assert.equal(keepsCoreSlot(reason, listed, phantom), false, reason);
+    }
   }
   assert.equal(KNCore.peerReset.keepsCoreSlot, keepsCoreSlot);
 });
@@ -90,8 +94,8 @@ interface Slot {
   reset: (reason: string) => void;
 }
 
-const slotWith = (which: 'old' | 'new', scheduled: boolean, listed: boolean): Slot => {
-  const c = vm.createContext({ KNCore, SLOT, DELAY, scheduled, listed });
+const slotWith = (which: 'old' | 'new', scheduled: boolean, listed: boolean, phantom = false): Slot => {
+  const c = vm.createContext({ KNCore, SLOT, DELAY, scheduled, listed, phantom });
   vm.runInContext(
     `
     const ZERO={buttons:0,lx:0,ly:0,cx:0,cy:0};
@@ -122,14 +126,14 @@ const slotWith = (which: 'old' | 'new', scheduled: boolean, listed: boolean): Sl
     const _syncLog=()=>{};
     const _feedWatchedFrame=(m,s,t,feed)=>feed();
     ${part('  const _ringInputsRan = (mod, slot) => {', '  // The cut of a removed player')}
-    ${part('  const _resetCoreSlot = (slot, reason, keepCoreSlot) => {', '  /**')}
+    ${part('  const _resetCoreSlot = (slot, reason, keepCoreSlot, phantom) => {', '  /**')}
     ${OLD}
     globalThis.ring=ring;
     globalThis.slot=slot;
     globalThis.feed=(t,b)=>mod._kn_feed_input(SLOT,t,b,0,0,0,0)===1;
     // C runs a frame on a missing input: a recorded prediction, repeat-last.
     globalThis.predict=(t)=>{if(slot.active&&!(ring[t]&&!ring[t].pred))ring[t]={buttons:slot.last,pred:true}};
-    globalThis.reset=(reason)=>${which === 'old' ? 'oldResetCoreSlot' : '_resetCoreSlot'}(SLOT,reason,false);
+    globalThis.reset=(reason)=>${which === 'old' ? 'oldResetCoreSlot' : '_resetCoreSlot'}(SLOT,reason,false,phantom);
     `,
     c,
   );
@@ -184,17 +188,19 @@ test('the old reset lost the prediction both ways: emptied, or put back as a rea
   assert.deepEqual(asReal.ring['6'], { buttons: 1, pred: false });
 });
 
-test('every other reset, and a reconnect into a slot the roster no longer lists, empties the slot as before', () => {
+test('every other reset, a reconnect into a slot the roster no longer lists, and one of a phantom empty the slot as before', () => {
   for (const scheduled of [true, false]) {
-    for (const [reason, listed] of [
-      ...EMPTIED.map((r) => [r, true] as const),
-      ...KEPT.map((r) => [r, false] as const),
+    for (const [reason, listed, phantom] of [
+      ...EMPTIED.map((r) => [r, true, false] as const),
+      ...EMPTIED.map((r) => [r, true, true] as const),
+      ...KEPT.map((r) => [r, false, false] as const),
+      ...KEPT.map((r) => [r, true, true] as const),
     ]) {
-      const before = slotWith('old', scheduled, listed);
-      const now = slotWith('new', scheduled, listed);
+      const before = slotWith('old', scheduled, listed, phantom);
+      const now = slotWith('new', scheduled, listed, phantom);
       before.reset(reason);
       now.reset(reason);
-      assert.deepEqual(now.ring, before.ring, `${reason} listed=${listed} scheduled=${scheduled}`);
+      assert.deepEqual(now.ring, before.ring, `${reason} listed=${listed} phantom=${phantom} scheduled=${scheduled}`);
       assert.equal(now.active, before.active);
       assert.equal(now.feed(6, 0), before.feed(6, 0));
       assert.deepEqual(now.ring, before.ring);
