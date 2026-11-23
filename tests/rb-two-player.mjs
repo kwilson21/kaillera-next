@@ -524,9 +524,11 @@
  *     rollback owed for its next tick) and answers before that tick. Fails
  *     unless the host watches the socket answer, SYNC-FOLLOW-UP-NEEDED is
  *     logged, the follow-up goes out over the socket after it and the guest
- *     applies both, tried up to 3 times until the need is seen. Without the
- *     follow-up the guest keeps a state the host corrects a tick later and
- *     the frames compared split.
+ *     applies both. Tried up to 3 times until the answer is taken with a
+ *     replay owed (`C-REPLAY start` between the host's read and its send),
+ *     which any engine logs, so the last answer applied, where the frames
+ *     compared start, is one the host rewrote. Without the follow-up the
+ *     guest keeps that state and the frames compared split.
  *   LINK_KBPS=<n>   Caps each RTCPeerConnection's simulated link at n
  *     kbit/s, in both directions, shared by all of that connection's data
  *     channels (tests/link-schedule.mjs): a message handed to send() on any
@@ -2712,13 +2714,25 @@ if (inBattle) {
       const received = hostLines.findIndex((l) =>
         /received socket sync-request-full .*reason=sync-chunk-timeout/.test(l),
       );
-      syncFollowUp.watched = received >= 0 && hostLines.slice(received).some((l) => /SYNC-FOLLOW-UP-NEEDED /.test(l));
+      // Reached, on any engine: the state the socket request is answered
+      // with is taken with a replay owed, which runs before the answer goes
+      // out and rewrites frames up to the one taken. With the fix the host
+      // also logs SYNC-FOLLOW-UP-NEEDED. Without it nothing is watched, so
+      // only the replay shows it; stopping on it keeps that answer the last
+      // one applied, where the frames compared start.
+      const tail = received < 0 ? [] : hostLines.slice(received);
+      const read = tail.findIndex((l) => /host kn_sync_read:/.test(l));
+      const sent = tail.findIndex((l) => /socket sync sent to /.test(l));
+      syncFollowUp.watched =
+        received >= 0 &&
+        (tail.some((l) => /SYNC-FOLLOW-UP-NEEDED /.test(l)) ||
+          (read >= 0 && sent > read && tail.slice(read, sent).some((l) => /C-REPLAY start: depth=[1-9]/.test(l))));
       await guest.evaluate((n) => {
         window.__knHoldInputsUntil = 0;
         window.__knInputOverride = () => n;
       }, NEUTRAL);
       console.log(
-        `SYNC_FOLLOW_UP=socket: ${syncFollowUp.watched ? 'a prediction the socket answer was taken on differed' : 'no differing prediction seen; trying again'}`,
+        `SYNC_FOLLOW_UP=socket: ${syncFollowUp.watched ? 'the socket answer was taken with a replay owed' : 'answered with no replay owed; trying again'}`,
       );
       if (!syncFollowUp.watched) await guest.waitForTimeout(5000);
     }
