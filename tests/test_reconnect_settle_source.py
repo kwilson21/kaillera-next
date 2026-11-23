@@ -32,6 +32,7 @@ def _race(*, transport, order, tag):
     script = """
     import * as syncFollowUp from './web/src/sync-follow-up.ts';
     const PHASE_RUNNING = 5, _phase = PHASE_RUNNING, _playerSlot = 0;
+    const KNState = {matchId: 'm'}, _config = {};
     const _useCRollback = true, _hasKnSync = true, RB_WORKER_COPROC = false;
     const _activeRoster = new Set([0, 1, 2]), _knownPlayers = {M: {persistentId: 'mover'}};
     const _admissionInputFloor = () => 0, _cutGoverns = () => false, _inputFloor = () => 0;

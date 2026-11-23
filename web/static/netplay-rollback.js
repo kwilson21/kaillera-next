@@ -7714,20 +7714,58 @@
   };
   // A reconnect receipt is neither a transport ACK nor a pending input.
   const _hostReconnectDebts = new Map();
+  let _unverifiedHostMatch = null;
+  const _hostDebtIsCurrent = (debt) => debt.epoch === _syncQueueEpoch && debt.matchId === KNState.matchId;
+  const _hostMatchUnverified = () => !!_unverifiedHostMatch && _unverifiedHostMatch.matchId === KNState.matchId;
+  const _markHostMatchUnverified = (debt, reason) => {
+    if (
+      !_hostDebtIsCurrent(debt) ||
+      debt.historyProven ||
+      debt.lastHandoffId ||
+      !KNState.matchId ||
+      _hostMatchUnverified()
+    )
+      return;
+    _unverifiedHostMatch = { matchId: KNState.matchId, reason };
+    ++_hostReconnectFenceVersion;
+    _deferredPhantomRecovery.clear();
+    _config?.onMatchIntegrityUnverified?.(_unverifiedHostMatch);
+  };
+  const _forgetHostReconnectDebt = (debt) => {
+    if (_hostDebtIsCurrent(debt) && !debt.historyProven && !debt.lastHandoffId) {
+      // A future roster cut cannot correct a historical input.
+      let oldest = debt.from;
+      const through = Math.max(debt.through, _frameNum - 1 - DELAY_FRAMES);
+      while (oldest <= through && debt.receipts.has(oldest)) oldest++;
+      const mod = _hostReconnectNative();
+      if (
+        debt.status === 'unresolved' ||
+        oldest <= through ||
+        mod?._kn_get_failed_rollbacks?.() !== debt.failed ||
+        mod?._kn_get_replay_depth?.() !== 0 ||
+        mod?._kn_peek_pending_rollback?.() !== -1
+      )
+        _markHostMatchUnverified(debt, 'participant left before input recovery was verified');
+    }
+    _hostReconnectDebts.delete(debt.slot);
+  };
   const _hostAuthoredReceipts = new Map();
   const _deferredPhantomRecovery = new Map();
   const _hostInputAuthor = (sid, peer) =>
     _playerSlot === 0 && _peers[sid] === peer && _reconnectProofStatus(sid) === true
-      ? { sid, peer, epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0 }
+      ? { sid, peer, matchId: KNState.matchId, epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0 }
       : null;
   let _hostReconnectFenceVersion = 0;
   const _hostReconnectNative = () => window.EJS_emulator?.gameManager?.Module;
   const _armHostReconnectDebt = (slot, reason, sid, wasPhantom, mod = _hostReconnectNative()) => {
     const retained = _hostReconnectDebts.get(slot);
-    const old = retained?.lastHandoffId && performance.now() >= retained.deadline ? null : retained;
+    const old =
+      (retained?.historyProven || retained?.lastHandoffId) && performance.now() >= retained.deadline ? null : retained;
     if (retained && !old) _hostReconnectDebts.delete(slot);
     const owner = _knownPlayers[sid]?.persistentId || sid;
-    const sameOwner = !!old && old.owner === owner && old.epoch === _syncQueueEpoch;
+    const sameOwner = !!old && old.owner === owner && _hostDebtIsCurrent(old);
+    if (old && (!sameOwner || !_activeRoster?.has(slot))) _forgetHostReconnectDebt(old);
+    if (_hostMatchUnverified()) return;
     if (
       _playerSlot !== 0 ||
       _phase !== PHASE_RUNNING ||
@@ -7735,13 +7773,13 @@
       !_hasKnSync ||
       RB_WORKER_COPROC ||
       !sid ||
+      !KNState.matchId ||
       _admissionInputFloor(slot) > 0 ||
       _cutGoverns(slot) ||
       !_activeRoster?.has(slot) ||
       _activeRoster.size < 3 ||
       (reason !== 'reconnect' && reason !== 'mesh-heal')
     ) {
-      if (old && (_playerSlot !== 0 || !_activeRoster?.has(slot) || !sameOwner)) _hostReconnectDebts.delete(slot);
       return;
     }
     if (_reconnectProofStatus(sid) !== true && !sameOwner) return;
@@ -7754,6 +7792,7 @@
       : {
           slot,
           owner,
+          matchId: KNState.matchId,
           epoch: _syncQueueEpoch,
           from: Math.max(_inputFloor(slot), edge),
           through: _frameNum - 1 - DELAY_FRAMES,
@@ -7772,6 +7811,7 @@
       const receipt = _hostAuthoredReceipts.get(slot)?.get(f);
       if (
         receipt?.author.sid === sid &&
+        receipt.author.matchId === KNState.matchId &&
         receipt.author.epoch === _syncQueueEpoch &&
         receipt.author.gen === (_syncQueueGen[sid] || 0) &&
         inputs?.[f] &&
@@ -7786,8 +7826,12 @@
     debt.gen = (_syncQueueGen[sid] || 0) + 1;
     debt.request = null;
     debt.lastHandoffId = 0;
+    debt.historyProven = false;
     ++_hostReconnectFenceVersion;
-    if (wasPhantom || _peerPhantom[slot]) debt.status = 'unresolved';
+    if (wasPhantom || _peerPhantom[slot]) {
+      debt.status = 'unresolved';
+      _markHostMatchUnverified(debt, 'participant became phantom');
+    }
     _hostReconnectDebts.set(slot, debt);
   };
   const _recordHostReconnectReceipt = (word) => {
@@ -7798,6 +7842,7 @@
       !value ||
       value === KNShared.ZERO_INPUT ||
       !_inputEq(word, value) ||
+      author.matchId !== KNState.matchId ||
       author.epoch !== _syncQueueEpoch ||
       author.gen !== (_syncQueueGen[author.sid] || 0) ||
       _peers[author.sid] !== author.peer ||
@@ -7806,12 +7851,16 @@
       return;
     const history = _hostAuthoredReceipts.get(slot) ?? new Map();
     if (history.size >= INPUT_PAST_WINDOW_FRAMES && !history.has(frame)) history.delete(history.keys().next().value);
-    history.set(frame, { ...word, author: { sid: author.sid, epoch: author.epoch, gen: author.gen } });
+    history.set(frame, {
+      ...word,
+      author: { sid: author.sid, matchId: author.matchId, epoch: author.epoch, gen: author.gen },
+    });
     _hostAuthoredReceipts.set(slot, history);
     const debt = _hostReconnectDebts.get(slot);
     if (
       debt?.status === 'waiting' &&
       frame >= debt.from &&
+      debt.matchId === author.matchId &&
       debt.epoch === author.epoch &&
       debt.sid === author.sid &&
       debt.gen === author.gen
@@ -7819,11 +7868,12 @@
       debt.receipts.add(frame);
   };
   const _readHostReconnectDebt = (debt, mod = _hostReconnectNative()) => {
+    if (!_hostDebtIsCurrent(debt) || !_activeRoster?.has(debt.slot)) return 'stale';
     if (debt.status === 'unresolved') return 'unresolved';
-    if (debt.epoch !== _syncQueueEpoch || !_activeRoster?.has(debt.slot)) return 'stale';
     const fail = (reason) => {
       debt.status = 'unresolved';
       debt.request = null;
+      _markHostMatchUnverified(debt, reason);
       _syncLog('RECONNECT-HOST-UNRESOLVED slot=' + debt.slot + ' reason=' + reason);
       return 'unresolved';
     };
@@ -7848,18 +7898,23 @@
     return 'ready';
   };
   const _hostReconnectBlocksNativeCapture = (mod) => {
+    if (_hostMatchUnverified()) return true;
     for (const [slot, debt] of _hostReconnectDebts) {
-      if (
-        debt.epoch !== _syncQueueEpoch ||
-        !_activeRoster?.has(slot) ||
-        (debt.lastHandoffId && performance.now() >= debt.deadline)
-      ) {
+      if (!_hostDebtIsCurrent(debt)) {
         _hostReconnectDebts.delete(slot);
         continue;
       }
-      // A verified capture establishes the host's history, independently of
-      // whether this guest could apply it. Keep bounded retry permission only.
-      if (!debt.lastHandoffId && _readHostReconnectDebt(debt, mod) !== 'ready') return true;
+      if (!_activeRoster?.has(slot)) {
+        _forgetHostReconnectDebt(debt);
+        if (_hostMatchUnverified()) return true;
+        continue;
+      }
+      const proven = debt.historyProven || debt.lastHandoffId;
+      if (proven && performance.now() >= debt.deadline) {
+        _hostReconnectDebts.delete(slot);
+        continue;
+      }
+      if (!proven && _readHostReconnectDebt(debt, mod) !== 'ready') return true;
     }
     return false;
   };
@@ -7869,7 +7924,7 @@
       !debt ||
       debt.sid !== sid ||
       debt.gen !== (_syncQueueGen[sid] || 0) ||
-      debt.epoch !== _syncQueueEpoch ||
+      !_hostDebtIsCurrent(debt) ||
       !_activeRoster?.has(debt.slot)
     )
       return false;
@@ -7926,6 +7981,7 @@
     );
   };
   const _serviceReconnectHostAnswers = () => {
+    if (_hostMatchUnverified()) return;
     if (_deferredPhantomRecovery.size && !_hostReconnectBlocksNativeCapture()) {
       for (const [sid, record] of _deferredPhantomRecovery) {
         _deferredPhantomRecovery.delete(sid);
@@ -7939,11 +7995,17 @@
       }
     }
     for (const [slot, debt] of _hostReconnectDebts) {
-      if (debt.lastHandoffId && performance.now() >= debt.deadline) {
+      if (!_hostDebtIsCurrent(debt) || !_activeRoster?.has(slot)) {
+        _forgetHostReconnectDebt(debt);
+        if (_hostMatchUnverified()) return;
+        continue;
+      }
+      if ((debt.historyProven || debt.lastHandoffId) && performance.now() >= debt.deadline) {
         _hostReconnectDebts.delete(slot);
         continue;
       }
       const state = _readHostReconnectDebt(debt);
+      if (_hostMatchUnverified()) return;
       if (state === 'ready' && debt.request && !_hostReconnectBlocksNativeCapture()) {
         const pending = debt.request;
         if (pending.dispatching || performance.now() < (pending.nextDispatch || 0)) continue;
@@ -11122,6 +11184,7 @@
             Number.isFinite(settled) &&
             settled >= 0 &&
             settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES &&
+            !_hostMatchUnverified() &&
             (!_hostReconnectDebts.has(peer.slot) || !_hostReconnectBlocksNativeCapture())
           ) {
             _inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);
@@ -20801,6 +20864,8 @@
           // moved it, so the next delta to another guest was applied, without a
           // word, onto a base it never got. A guest still decodes a delta from an
           // older host.
+          // Keep a locally confirmed history separate from a transport handoff.
+          if (proofFor && currentState.length > 0) options.reconnectDebt.historyProven = true;
           const toCompress = currentState;
 
           // By target sid: the number of the request this state answers, if any.

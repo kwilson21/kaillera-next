@@ -127,6 +127,8 @@
   let engine = null;
   let _endGameRequest = null;
   let _lastHandledGameEndMatchId = null;
+  let _unverifiedMatchId = null;
+  const RECOVERY_UNVERIFIED = 'Recovery unverified. The host can end this match.';
   let _gameResyncEnabled = true;
   let previousPlayers = {};
   let previousSpectators = {};
@@ -1572,13 +1574,15 @@
     showGameLoading();
     // Clear stale status text from previous game
     const toolbarEl = document.getElementById('toolbar-status');
-    if (toolbarEl) toolbarEl.textContent = '';
+    if (toolbarEl)
+      toolbarEl.textContent = _unverifiedMatchId && _unverifiedMatchId === KNState.matchId ? RECOVERY_UNVERIFIED : '';
     const loadingText = document.getElementById('game-loading-text');
     if (loadingText) loadingText.textContent = 'Loading...';
     initEngine();
   };
 
   const onGameEnded = (data = {}) => {
+    if (_unverifiedMatchId && _unverifiedMatchId === KNState.matchId && data?.matchId !== _unverifiedMatchId) return;
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (!_gameStart.endMatchesCurrent(endedMatchId ?? '', KNState.matchId ?? '')) return;
     // Whether this page has the end to handle (web/src/play/game-start.ts,
@@ -1595,6 +1599,7 @@
     );
     if (!handled) return;
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
+    if (_unverifiedMatchId === endedMatchId) _unverifiedMatchId = null;
     _endGameRequest?.cancel();
     _endGameRequest = null;
     console.log(
@@ -3529,15 +3534,23 @@
       gameId: _gameId ?? null,
       uploadToken: _uploadToken,
       isMobile: _isMobile,
+      onMatchIntegrityUnverified: ({ matchId }) => {
+        if (matchId !== KNState.matchId || _unverifiedMatchId === matchId) return;
+        _unverifiedMatchId = matchId;
+        const toolbar = document.getElementById('toolbar-status');
+        if (toolbar) toolbar.textContent = RECOVERY_UNVERIFIED;
+        showToast(RECOVERY_UNVERIFIED);
+      },
       onStatus: (msg) => {
+        const status = _unverifiedMatchId && _unverifiedMatchId === KNState.matchId ? RECOVERY_UNVERIFIED : msg;
         // Show in toolbar (visible during gameplay) and overlay (visible pre-game)
         const toolbarEl = document.getElementById('toolbar-status');
-        if (toolbarEl) toolbarEl.textContent = msg;
+        if (toolbarEl) toolbarEl.textContent = status;
         const overlayEl = document.getElementById('engine-status');
-        if (overlayEl) overlayEl.textContent = msg;
+        if (overlayEl) overlayEl.textContent = status;
         // Update game loading overlay
         const loadingText = document.getElementById('game-loading-text');
-        if (loadingText) loadingText.textContent = msg;
+        if (loadingText) loadingText.textContent = status;
         // Dismiss loading overlay when game loop starts or stream connects
         if (msg.includes('game on') || msg.includes('Spectating') || msg.includes('streaming')) {
           dismissGameLoading();
@@ -3761,6 +3774,10 @@
       _endGameRequest = null;
       if (!_gameStart.endMatchesCurrent(endingMatchId ?? '', KNState.matchId ?? '')) return;
       if (outcome.kind === 'resumed') {
+        if (_unverifiedMatchId && _unverifiedMatchId === endingMatchId) {
+          showToast('End request acknowledged. The lobby is not yet confirmed.');
+          return;
+        }
         onGameEnded({ matchId: endingMatchId, localAck: true });
       } else {
         showToast(

@@ -390,7 +390,7 @@ test('the protected read requires every active owner, at actual capture rather t
   run(`
     _peers.a.syncDc=stateChannel('returning');
     const debt={
-      slot:1,sid:'a',gen:3,epoch:9,deadline:1500,status:'waiting',failed:0,
+      slot:1,sid:'a',gen:3,epoch:9,matchId:KNState.matchId,deadline:1500,status:'waiting',failed:0,
       from:1073,through:1072,receipts:new Set(),lastHandoffId:0,request:null,
     };
     _hostReconnectDebts.set(1,debt);
@@ -422,7 +422,7 @@ test('successful wire handoff does not retire protected retry after an unsuccess
   run(`
     _peers.a.syncDc=stateChannel('returning');
     const debt={
-      slot:1,sid:'a',gen:3,epoch:9,deadline:1500,status:'waiting',failed:0,
+      slot:1,sid:'a',gen:3,epoch:9,matchId:KNState.matchId,deadline:1500,status:'waiting',failed:0,
       from:1073,through:1072,receipts:new Set(),lastHandoffId:0,request:null,
     };
     _hostReconnectDebts.set(1,debt);
@@ -463,4 +463,25 @@ test('successful wire handoff does not retire protected retry after an unsuccess
   assert.equal(run('_hostReconnectBlocksNativeCapture(mod)'), false);
   assert.equal(run('_hostReconnectDebts.size'), 0);
   assert.equal(run('reads.length'), 2, 'expired proof cannot be requested');
+});
+
+test('a protected native capture proves host history even when every delivery attempt fails', async () => {
+  const run = room(true);
+  run(`
+    _peers.a.syncDc={ ...stateChannel('returning'), send:() => { throw new Error('closed during send'); } };
+    const debt={
+      slot:1,sid:'a',gen:3,epoch:9,matchId:KNState.matchId,deadline:1500,status:'waiting',failed:0,
+      from:1073,through:1072,receipts:new Set(),lastHandoffId:0,request:null,
+    };
+    _hostReconnectDebts.set(1,debt);
+    _receiveReconnectProofRequest('a',27,'dc');
+    _serviceReconnectHostAnswers();
+  `);
+  await flush();
+  assert.deepEqual(JSON.parse(run('summary()')).reads, [1076]);
+  assert.equal(run('debt.historyProven'), true);
+  assert.equal(run('debt.lastHandoffId'), 0);
+  run('now=1500; _serviceReconnectHostAnswers();');
+  assert.equal(run('_hostReconnectDebts.size'), 0);
+  assert.equal(run('_hostReconnectBlocksNativeCapture(mod)'), false);
 });

@@ -706,6 +706,13 @@ $QUINT typecheck "$PROOF"
 $QUINT test "$PROOF" --main=reconnect_proof --backend="$BACKEND"
 
 # ── A player dropped in a running match comes back only late ──────────────
+INTEGRITY=specs/reconnect_integrity.qnt
+$QUINT typecheck "$INTEGRITY"
+$QUINT test "$INTEGRITY" --main=reconnect_integrity --backend="$BACKEND"
+$QUINT run "$INTEGRITY" --main=reconnect_integrity \
+  --invariants unsafeMatchNeverCaptures oldUnverifiedMatchIsNotHealthy \
+  --max-samples=5000 --max-steps=12 --backend="$BACKEND"
+
 DROP=specs/drop_is_final.qnt
 $QUINT typecheck "$DROP"
 for variant in drop_is_final_before drop_is_final_skip_everywhere drop_is_final_fixed; do
