@@ -41,7 +41,8 @@
  *   of them after recovery.
  * PHANTOM_SETTLE=1 (PLAYERS=3|4): a guest made a phantom by the host only
  *   (specs/phantom_settle.qnt). A third of the way in, P2's input is held
- *   neutral for 3 s, then a button goes down and every input packet P2 sends
+ *   neutral for 3 s, then its stick is held right (it walks: a held button
+ *   acts on one frame only, if the fighter can act then) and every input packet P2 sends
  *   the host is dropped for PHANTOM_SETTLE_MS (default 7000, past the host's
  *   5 s phantom deadline) while the other guests still get them. When P2's
  *   inputs reach the host again it settles P2's inputs from before then as
@@ -598,7 +599,7 @@ if (PHANTOM_SETTLE) {
   await host.waitForTimeout(3000);
   ps.hostAt = await lastSeq(host);
   ps.guestsAt = await Promise.all(pages.map((p) => lastSeq(p)));
-  // A button down; what P2 sends the host is dropped, what it sends the
+  // Stick held right; what P2 sends the host is dropped, what it sends the
   // other guests goes through.
   await pages[1].evaluate(
     ({ n, late }) => {
@@ -642,7 +643,7 @@ if (PHANTOM_SETTLE) {
           }
         }
       }
-      window.__knInputOverride = () => ({ ...n, buttons: 1 });
+      window.__knInputOverride = () => ({ ...n, lx: 70 });
     },
     { n: NEUTRAL, late: PHANTOM_SETTLE_LATE },
   );
@@ -918,20 +919,48 @@ const spans = (frames) =>
     }, []);
 
 const H = P[0];
-// PHANTOM_SETTLE: from the drop until a guest applies the host's state after
-// P2's recovery, the host runs on its prediction of P2 and the guests on P2's
-// real input, so their frames differ by design. Mismatches there are counted
-// (recoveryMismatches.during) and not failed; any before or after fail. A
-// guest given no state after the recovery (main) has its window end at the
+// PHANTOM_SETTLE: while a guest is a phantom on the host, the host runs on
+// its prediction of that guest and the other pages on its real input; at its
+// recovery the host settles its prediction and sends every guest its state
+// (web/src/recovery-resync.ts), so the frames between differ by design.
+// Every phantom episode on the host counts: P2's, made by the fault (from the
+// drop), and any other the container makes (four emulators stall; from its
+// PEER-PHANTOM frame less PHANTOM_LEAD, the host being frozen in its stall
+// from the stall's start to the phantom). A guest's window ends at the first
+// host state it applies at or after the recovery frame. Mismatches inside are
+// counted (recoveryMismatches.during) and not failed; any outside fail. A
+// guest given no state after a recovery (main) has its window end at the
 // recovery, so the split it keeps fails.
-const phantomWindowOf = (slot) => {
-  if (!PHANTOM_SETTLE || phantomSettle.faultFrame === null || phantomSettle.recoveredFrame === null) return null;
-  const applied = P[slot].sync
-    .split('\n')
-    .filter((l) => seqOf(l) > (phantomSettle.guestsRecoveredAt?.[slot] ?? Infinity))
-    .map((l) => /sync #\d+ applied \(frame \d+ -> (\d+)/.exec(l))
-    .find(Boolean);
-  return [phantomSettle.faultFrame, applied ? Number(applied[1]) : phantomSettle.recoveredFrame];
+const PHANTOM_LEAD = 30;
+const phantomEpisodes = (() => {
+  if (!PHANTOM_SETTLE) return [];
+  const open = new Map();
+  const out = [];
+  let faultEpisodeTaken = false;
+  for (const line of H.sync.split('\n')) {
+    const f = Number(/\tf=(\d+)\t/.exec(line)?.[1]);
+    const phantom = /\tPEER-PHANTOM slot=(\d+) /.exec(line);
+    const recovered = /\tPEER-RECOVERED slot=(\d+) /.exec(line);
+    if (phantom && !open.has(phantom[1])) open.set(phantom[1], f);
+    if (recovered && open.has(recovered[1])) {
+      const slot = Number(recovered[1]);
+      // P2's first episode after the drop is the fault's: it starts there.
+      const isFault =
+        slot === 1 &&
+        !faultEpisodeTaken &&
+        phantomSettle.faultFrame !== null &&
+        open.get(recovered[1]) >= phantomSettle.faultFrame;
+      if (isFault) faultEpisodeTaken = true;
+      const from = isFault ? phantomSettle.faultFrame : open.get(recovered[1]) - PHANTOM_LEAD;
+      out.push({ slot, from, recovered: f });
+      open.delete(recovered[1]);
+    }
+  }
+  return out;
+})();
+const phantomWindowsOf = (slot) => {
+  const applied = [...P[slot].sync.matchAll(/sync #\d+ applied \(frame \d+ -> (\d+)/g)].map((m) => Number(m[1]));
+  return phantomEpisodes.map((e) => [e.from, applied.find((F) => F >= e.recovered) ?? e.recovered]);
 };
 const pairs = P.slice(1).map((G, gi) => {
   const slot = gi + 1;
@@ -944,7 +973,7 @@ const pairs = P.slice(1).map((G, gi) => {
   let unrecorded = 0;
   let leftOut = 0;
   const mismatches = { gameplay: [], gameState: [], fullState: 0 };
-  const phantomWindow = phantomWindowOf(slot);
+  const phantomWindows = PHANTOM_SETTLE ? phantomWindowsOf(slot) : [];
   for (const k of Object.keys(G.hashes)) {
     const f = +k;
     const h = H.hashes[k];
@@ -973,11 +1002,12 @@ const pairs = P.slice(1).map((G, gi) => {
         recoveryMismatches[phase]++;
       }
     }
-    if (phantomWindow) {
+    if (phantomWindows.length) {
       const differs = h[0] !== g[0] || (h[1] !== 0 && g[1] !== 0 && h[1] !== g[1]);
-      const phase = f < phantomWindow[0] ? 'before' : f > phantomWindow[1] ? 'after' : 'during';
+      const inside = phantomWindows.some(([from, to]) => f >= from && f <= to);
+      const phase = inside ? 'during' : f < Math.min(...phantomWindows.map(([from]) => from)) ? 'before' : 'after';
       if (differs) recoveryMismatches[phase]++;
-      if (phase === 'during') continue;
+      if (inside) continue;
     }
     if (h[0] !== g[0]) mismatches.gameplay.push(f);
     if (h[1] !== 0 && g[1] !== 0 && h[1] !== g[1]) mismatches.gameState.push(f);
@@ -1007,7 +1037,7 @@ const pairs = P.slice(1).map((G, gi) => {
     gameStateMismatchFrames: spans(mismatches.gameState),
     fullStateMismatches: mismatches.fullState,
     catchUps: catchUpsOf(G.sync),
-    phantomWindow,
+    phantomWindows,
   };
 });
 
@@ -1285,11 +1315,16 @@ const phantomSettleProblems = !PHANTOM_SETTLE
   : [
       ...(!(phantomSettle.dropped > 0) ? ["P2's inputs to the host were not dropped"] : []),
       // The split needs P2's real input to differ from the host's prediction
-      // (its last input before the drop, neutral): the button went down.
+      // (its last input before the drop, neutral): the stick went right.
       ...(!P[1].sync
         .split('\n')
-        .some((l) => seqOf(l) > phantomSettle.guestsAt[1] && /LOCAL-INPUT slot=1 f=\d+ b=1 lx=0 ly=0 /.test(l))
-        ? ["P2's button never went down (the input override did not take)"]
+        .some((l) => seqOf(l) > phantomSettle.guestsAt[1] && /LOCAL-INPUT slot=1 f=\d+ b=0 lx=70 ly=0 /.test(l))
+        ? ["P2's stick never went right (the input override did not take)"]
+        : []),
+      // The fault must change some frame on some guest, inside a window or
+      // not: a run where P2's input changed nothing tested nothing.
+      ...(!pairs.some((p) => p.recoveryMismatches.during > 0 || p.recoveryMismatches.after > 0)
+        ? ["P2's input changed no frame on any guest (not exercised)"]
         : []),
       ...(!phantomLines.some((l) => /PEER-PHANTOM slot=1 /.test(l)) ? ['the host never made P2 a phantom'] : []),
       ...(!phantomSettle.recovered ? ['the host never recovered P2'] : []),
