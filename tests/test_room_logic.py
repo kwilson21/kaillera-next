@@ -857,3 +857,125 @@ def test_the_host_can_clear_and_change_the_game_id():
     # A request without the field is not taken as SSB64 either.
     assert _run_with(patches, set_game_id("sid-host", {})) is None
     assert room.game_id == ""
+
+
+def test_unverified_recovery_latches_once_and_is_in_room_and_join_snapshots(monkeypatch):
+    room = _host_room()
+    room.status, room.mode, room.match_id = "playing", "rollback", "match-1"
+    save_entered = asyncio.Event()
+    release_save = asyncio.Event()
+    emit = AsyncMock()
+    payload = {"matchId": room.match_id}
+
+    async def slow_save(*_args):
+        save_entered.set()
+        await release_save.wait()
+
+    save = AsyncMock(side_effect=slow_save)
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    monkeypatch.setattr(signaling.state, "save_room", save)
+    monkeypatch.setattr(signaling.sio, "emit", emit)
+
+    async def report_twice():
+        first = asyncio.create_task(signaling.match_recovery_unverified("sid-host", payload))
+        await asyncio.wait_for(save_entered.wait(), timeout=3)
+        retry = asyncio.create_task(signaling.match_recovery_unverified("sid-host", payload))
+        await asyncio.sleep(0)
+        assert not retry.done()
+        release_save.set()
+        assert await asyncio.gather(first, retry) == [None, None]
+
+    _run_async(report_twice())
+    save.assert_awaited_once_with("ROOM1", room)
+    emit.assert_awaited_once_with("users-updated", _players_payload(room), room="ROOM1")
+    assert room.status == "playing"
+    assert room.match_id == "match-1"
+    assert room.recovery_unverified_match_id == "match-1"
+    assert signaling._join_ack(room)["recoveryUnverifiedMatchId"] == "match-1"
+
+    # The same match keeps the latch on roster changes and owner SID rotation.
+    _swap_sid(room, "pid-host", "sid-host", "sid-current")
+    _sid_to_room.pop("sid-host")
+    _sid_to_room["sid-current"] = ("ROOM1", "pid-host", False)
+    assert _players_payload(room)["recoveryUnverifiedMatchId"] == "match-1"
+
+
+@pytest.mark.parametrize(
+    ("sid", "status", "mode", "payload", "expected"),
+    [
+        ("sid-guest", "playing", "rollback", {"matchId": "match-1"}, "Only the host"),
+        ("sid-spec", "playing", "rollback", {"matchId": "match-1"}, "Only the host"),
+        ("sid-old", "playing", "rollback", {"matchId": "match-1"}, "Only the host"),
+        ("sid-outside", "playing", "rollback", {"matchId": "match-1"}, "Not in a room"),
+        ("sid-host", "playing", "rollback", {"matchId": "old-match"}, "Not the current"),
+        ("sid-host", "playing", "streaming", {"matchId": "match-1"}, "Not the current"),
+        ("sid-host", "lobby", "rollback", {"matchId": "match-1"}, "Not the current"),
+        ("sid-host", "playing", "rollback", {}, "Invalid data"),
+    ],
+)
+def test_unverified_recovery_rejects_non_owner_and_wrong_match(sid, status, mode, payload, expected, monkeypatch):
+    room = _host_room()
+    room.status, room.mode, room.match_id = status, mode, "match-1" if status == "playing" else None
+    room.players["pid-guest"] = {"socketId": "sid-guest"}
+    room.spectators["pid-spec"] = {"socketId": "sid-spec"}
+    _sid_to_room["sid-guest"] = ("ROOM1", "pid-guest", False)
+    _sid_to_room["sid-spec"] = ("ROOM1", "pid-spec", True)
+    _sid_to_room["sid-old"] = ("ROOM1", "pid-host", False)
+    emit, save = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    monkeypatch.setattr(signaling.state, "save_room", save)
+    monkeypatch.setattr(signaling.sio, "emit", emit)
+
+    result = _run_async(signaling.match_recovery_unverified(sid, payload))
+    assert result is not None and result.startswith(expected)
+    assert room.recovery_unverified_match_id is None
+    emit.assert_not_awaited()
+    save.assert_not_awaited()
+
+
+def test_unverified_recovery_restores_only_the_active_matching_room():
+    import json
+
+    room = _make_room(status="playing", mode="rollback", match_id="match-1", recovery_unverified_match_id="match-1")
+    snapshot = json.loads(signaling.state._serialize_room(room))
+    assert signaling.state._deserialize_room(snapshot).recovery_unverified_match_id == "match-1"
+    assert signaling.state._deserialize_room({**snapshot, "match_id": "match-2"}).recovery_unverified_match_id is None
+    assert signaling.state._deserialize_room({**snapshot, "status": "lobby"}).recovery_unverified_match_id is None
+    snapshot.pop("recovery_unverified_match_id")
+    assert signaling.state._deserialize_room(snapshot).recovery_unverified_match_id is None
+
+
+def test_unverified_recovery_survives_until_owner_ends_match_and_cannot_latch_rematch(monkeypatch):
+    from src.api.payloads import EndGamePayload, StartGamePayload
+
+    room = _host_room()
+    room.status, room.mode, room.match_id = "playing", "rollback", "match-1"
+    room.recovery_unverified_match_id = "match-1"
+    _sid_to_room["sid-guest"] = ("ROOM1", "pid-guest", False)
+    save, emit = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    monkeypatch.setattr(signaling.state, "save_room", save)
+    monkeypatch.setattr(signaling.sio, "emit", emit)
+    monkeypatch.setattr(signaling.db, "register_match", AsyncMock())
+    monkeypatch.setattr(signaling.db, "set_session_ended", AsyncMock())
+    monkeypatch.setattr(signaling.db, "insert_client_event", AsyncMock())
+    monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+    monkeypatch.setattr(signaling.stats, "record_match", AsyncMock())
+
+    async def end_and_restart():
+        assert await signaling._end_game_locked("sid-guest", EndGamePayload(matchId="match-1"))
+        assert room.recovery_unverified_match_id == "match-1"
+        assert await signaling._end_game_locked("sid-host", EndGamePayload(matchId="wrong-match")) is None
+        assert room.recovery_unverified_match_id == "match-1"
+        assert await signaling._end_game_locked("sid-host", EndGamePayload(matchId="match-1")) is None
+        assert room.match_id is None
+        assert room.recovery_unverified_match_id is None
+        assert await signaling._start_game_locked("sid-host", StartGamePayload(mode="rollback")) is None
+        assert room.match_id and room.match_id != "match-1"
+        assert await signaling.match_recovery_unverified("sid-host", {"matchId": "match-1"})
+        assert room.recovery_unverified_match_id is None
+
+    _run_async(end_and_restart())

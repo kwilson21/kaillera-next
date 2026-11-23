@@ -12,6 +12,7 @@ Client → Server events:
   release-slot     — player gives up their slot to spectate ("Watch instead")
   start-game       — host starts the game (broadcasts mode + settings)
   end-game         — host ends the game (returns room to lobby)
+  match-recovery-unverified — host reports unverified recovery for its current match
   set-mode         — host changes netplay mode (rollback/streaming)
   rom-sharing-toggle — host enables/disables P2P ROM sharing
   rom-ready        — player signals ROM is loaded
@@ -86,6 +87,7 @@ from src.api.payloads import (
     JoinRoomExtra,
     JoinRoomPayload,
     MatchJoinedPayload,
+    MatchRecoveryUnverifiedPayload,
     OpenRoomExtra,
     OpenRoomPayload,
     RelaySender,
@@ -337,6 +339,7 @@ class Room:
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
+    recovery_unverified_match_id: str | None = None
     listed: bool = False  # host opted in to the front-page board; never true with a password
     started_at: float | None = None  # wall-clock start of the current match, for the board
     # playerIds who joined after the current match began and are not in it
@@ -438,6 +441,7 @@ def _players_payload(room: Room) -> dict:
         "mode": room.mode,
         "status": room.status,
         "listed": room.listed,
+        "recoveryUnverifiedMatchId": room.recovery_unverified_match_id,
     }
 
 
@@ -1215,6 +1219,7 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.status = "playing"
     room.mode = mode
     room.match_id = str(uuid.uuid4())
+    room.recovery_unverified_match_id = None
     room.waiting_for_state.clear()
     # Register before announcing the match, so log uploads quoting this id
     # are accepted. Logging never blocks a game: a failed write is logged and
@@ -1287,6 +1292,32 @@ async def match_joined(sid: str, payload: MatchJoinedPayload) -> str | None:
         return None
 
 
+@sio.on("match-recovery-unverified")
+@validated(MatchRecoveryUnverifiedPayload)
+async def match_recovery_unverified(sid: str, payload: MatchRecoveryUnverifiedPayload) -> str | None:
+    """Record the current owner's inability to verify recovery, without changing play."""
+    if not check(sid, "match-recovery-unverified"):
+        return "Rate limited"
+    async with _room_lock:
+        entry = _sid_to_room.get(sid)
+        if entry is None:
+            return "Not in a room"
+        session_id, player_id, spectator = entry
+        room = rooms.get(session_id)
+        if room is None:
+            return "Not in a room"
+        if spectator or room.owner != sid or room.players.get(player_id, {}).get("socketId") != sid:
+            return "Only the host can report unverified match recovery"
+        if room.status != "playing" or room.mode not in ("rollback", "lockstep") or room.match_id != payload.matchId:
+            return "Not the current rollback or lockstep match"
+        if room.recovery_unverified_match_id == room.match_id:
+            return None
+        room.recovery_unverified_match_id = room.match_id
+        await state.save_room(session_id, room)
+        await _emit("users-updated", _players_payload(room), room=session_id)
+        return None
+
+
 @sio.on("end-game")
 @validated(EndGamePayload)
 async def end_game(sid: str, payload: EndGamePayload) -> str | None:
@@ -1332,6 +1363,7 @@ async def _end_match(session_id: str, room: Room, reason: str) -> None:
     """Put a playing room back in the lobby and tell everyone in it."""
     ended_match_id = room.match_id
     room.match_id = None
+    room.recovery_unverified_match_id = None
     room.waiting_for_state.clear()
     room.status = "lobby"
     room.started_at = None
