@@ -74,6 +74,38 @@
  *   The deliberate phantom period never grants a hash exclusion; all
  *   transient and persistent divergence remains a failure.
  *
+ * RECOVERY_BYSTANDER=1 (PLAYERS=3|4): only the host drops a guest as a
+ *   phantom, and hears it again (PEER-RECOVERED) while every other guest (a
+ *   "bystander") heard it all along (specs/recovery_bystander.qnt,
+ *   onlyTheHostDroppedItTest). RECOVERY_AT frames into the battle (default
+ *   600: past the countdown, when fighters move; wall time is no measure in
+ *   a container that runs the emulators at a few frames a second) the guest
+ *   in RECOVERY_SLOT (default 1) stands still for 20 frames (so the host
+ *   predicts it standing) and then walks right, and its inputs are held on
+ *   the host's
+ *   receive path alone (the directional input gate of
+ *   tests/rb-page-network.mjs, as CATCH_UP_HOLE uses it) until the host logs
+ *   PEER-PHANTOM for it and RECOVERY_HOLD_MS (default 3000) more; then they
+ *   are let through. The host ran that guest's frames on predictions, the
+ *   bystanders on its real inputs (`inputSplit`: the keys they applied
+ *   differently, from NORMAL-INPUT-TR). On PEER-RECOVERED the host settles
+ *   the inputs it held and resyncs the guest. Every guest must end on the
+ *   host's state: from the frame of the host's first state after the
+ *   recovery on, the gameplay and game-state hashes must match the host's
+ *   (at least 60 frames), and so must RDRAM, compared in 4 KB pages every
+ *   16th battle frame from each frame's saved state. The core's hashes do
+ *   not see a fighter that moved differently (the battle state lives in the
+ *   64 KB blocks the game-state hash leaves out), so the page compare does
+ *   it: pages that already differ between the host and a guest before the
+ *   fault are the ones the audio and video hardware write, and are left
+ *   out; any other page that differs is game state that split. The frames
+ *   from the hold to the host's state are left out of the hash compare
+ *   (`leftOut`): the host predicted that guest there by design. The run
+ *   fails, too, unless the fault landed: the gate held inputs, the host
+ *   dropped and heard the guest again and sent a state, a bystander applied
+ *   inputs different from the host's, the page compare saw a guest split in
+ *   the held stretch, and no bystander dropped anyone in the meantime.
+ *
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
  *   for seconds in a cloud container; a quarter of the pixels is a quarter
@@ -119,6 +151,10 @@ const CATCH_UP_HOLE_DELIVERY = process.env.CATCH_UP_HOLE_DELIVERY || 'isolated';
 const CATCH_UP_HOLE_MODE = process.env.CATCH_UP_HOLE_MODE || 'deep';
 const DEEP_CATCH_UP_HOLE = CATCH_UP_HOLE && CATCH_UP_HOLE_MODE === 'deep';
 const CATCH_UP_HOLE_SLOT = Number(process.env.CATCH_UP_HOLE_SLOT || 1);
+const RECOVERY_BYSTANDER = process.env.RECOVERY_BYSTANDER === '1';
+const RECOVERY_SLOT = Number(process.env.RECOVERY_SLOT || 1);
+const RECOVERY_HOLD_MS = Number(process.env.RECOVERY_HOLD_MS || 3000);
+const RECOVERY_AT = Number(process.env.RECOVERY_AT || 600);
 const QUERY = process.env.KN_QUERY || '';
 const OUT = process.env.OUT || '/tmp/rb-mesh';
 const HEADLESS = process.env.HEADED !== '1';
@@ -175,6 +211,21 @@ if (
 ) {
   fail(`CATCH_UP_HOLE_SLOT=${process.env.CATCH_UP_HOLE_SLOT} invalid: a guest's slot other than CATCH_UP_SLOT`);
 }
+if (
+  RECOVERY_BYSTANDER &&
+  (MISSING_RECIPIENT ||
+    FOLLOW_UP_RECIPIENT ||
+    CATCH_UP_MS > 0 ||
+    !Number.isInteger(RECOVERY_SLOT) ||
+    RECOVERY_SLOT < 1 ||
+    RECOVERY_SLOT >= PLAYERS ||
+    !(Number.isFinite(RECOVERY_HOLD_MS) && RECOVERY_HOLD_MS >= 0) ||
+    !(Number.isInteger(RECOVERY_AT) && RECOVERY_AT >= 0))
+)
+  fail(
+    'RECOVERY_BYSTANDER is a run of its own, with RECOVERY_SLOT a guest (1..PLAYERS-1), RECOVERY_HOLD_MS >= 0 ' +
+      'and RECOVERY_AT a whole number of frames',
+  );
 fs.mkdirSync(OUT, { recursive: true });
 
 await requireCurrentBundle(fileURLToPath(new globalThis.URL('..', import.meta.url)), URL);
@@ -270,8 +321,16 @@ if (slots.some((s, i) => s !== i)) fail(`pages did not take slots 0..${PLAYERS -
 const install = async (p, slot) => {
   await p.addScriptTag({ url: `${URL}/static/ssb64-menu-autopilot.js` });
   await p.evaluate(
-    ({ slot, players, anyFighter, hashLag }) => {
-      const W = (window.__mesh = { slot, hashes: {}, scene: -1, inBattleAt: -1, pilotFail: null, lastR: undefined });
+    ({ slot, players, anyFighter, hashLag, rdram }) => {
+      const W = (window.__mesh = {
+        slot,
+        hashes: {},
+        rdram: rdram ? {} : null,
+        scene: -1,
+        inBattleAt: -1,
+        pilotFail: null,
+        lastR: undefined,
+      });
       const rb = window.NetplayRollback;
       const frameNow = () => rb.getHudCounters?.()?.currentFrame ?? 0;
       const pilot = window.KNMenuAutopilot.create({
@@ -310,6 +369,11 @@ const install = async (p, slot) => {
           return inp;
         }
         if (W.inBattleAt < 0) W.inBattleAt = f;
+        // RECOVERY_BYSTANDER: neutral, so the host's prediction is neutral;
+        // then the stick right, held, so its fighter walks where the host's
+        // does not.
+        if (W.against === 'neutral') return { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+        if (W.against === 'right') return { buttons: 0, lx: 70, ly: 0, cx: 0, cy: 0 };
         if (f >= until) {
           const r = Math.random();
           held = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
@@ -324,6 +388,38 @@ const install = async (p, slot) => {
         return held;
       };
       const m = window.EJS_emulator.gameManager.Module;
+      // RDRAM in 4 KB pages, from frame f's saved state: one FNV hash per
+      // page (RECOVERY_BYSTANDER). None of the three hashes above sees a
+      // fighter that moved differently (the battle state lives in the blocks
+      // the game-state hash leaves out, and the full-state hash samples them
+      // with their legitimate differences); a page compare does, once the
+      // pages the audio and video hardware write are known. null when the
+      // engine no longer holds the frame.
+      const PAGE = 4096;
+      const shadowOut = m._malloc(40);
+      const rdramPages = (f) => {
+        let rdram = 0;
+        let size = 0;
+        if (m._kn_get_state_backend?.() === 1) {
+          if (!(m._kn_get_split_state_for_shadow?.(f, shadowOut, 10) >= 9)) return null;
+          rdram = m.HEAPU32[shadowOut >> 2];
+          size = m.HEAPU32[(shadowOut >> 2) + 1];
+        } else {
+          const state = m._kn_get_state_for_frame?.(f) ?? 0;
+          if (!state) return null;
+          rdram = state + m._kn_get_rdram_offset_in_state();
+          size = 0x800000;
+        }
+        if (!rdram || !size) return null;
+        const words = new Uint32Array(m.HEAPU8.buffer, rdram, size >> 2);
+        const out = new Array(Math.floor(size / PAGE));
+        for (let pg = 0; pg < out.length; pg++) {
+          let h = 0x811c9dc5;
+          for (let w = (pg * PAGE) >> 2, end = w + (PAGE >> 2); w < end; w++) h = Math.imul(h ^ words[w], 0x01000193);
+          out[pg] = h >>> 0;
+        }
+        return out;
+      };
       const post = m._kn_post_tick;
       m._kn_post_tick = function (...a) {
         const r = post.apply(this, a);
@@ -337,17 +433,18 @@ const install = async (p, slot) => {
         if (idle && r > 40) {
           const f = r - hashLag;
           if (!(f in W.hashes)) {
-            W.hashes[f] = [
-              m._kn_gameplay_hash(f) >>> 0,
-              (m._kn_game_state_hash?.(f) ?? 0) >>> 0,
-              m._kn_full_state_hash(f) >>> 0,
-            ];
+            const gameplay = m._kn_gameplay_hash(f) >>> 0;
+            W.hashes[f] = [gameplay, (m._kn_game_state_hash?.(f) ?? 0) >>> 0, m._kn_full_state_hash(f) >>> 0];
+            if (W.rdram && gameplay && W.inBattleAt >= 0 && f >= W.inBattleAt && f % 16 === 0) {
+              const pages = rdramPages(f);
+              if (pages) W.rdram[f] = pages;
+            }
           }
         }
         return r;
       };
     },
-    { slot, players: PLAYERS, anyFighter, hashLag: HASH_LAG },
+    { slot, players: PLAYERS, anyFighter, hashLag: HASH_LAG, rdram: RECOVERY_BYSTANDER },
   );
 };
 for (let i = 0; i < PLAYERS; i++) await install(pages[i], i);
@@ -434,6 +531,19 @@ const hole = {
   phantomObserved: false,
   resumedAt: null,
   resumedSeq: null,
+};
+// RECOVERY_BYSTANDER=1: what the fault did, from the host's log.
+const recovery = {
+  slot: RECOVERY_SLOT,
+  holdMs: RECOVERY_HOLD_MS,
+  hostAt: null,
+  heldFrom: null,
+  phantom: null,
+  gate: null,
+  recovered: null,
+  dispatch: null,
+  leftOut: null,
+  pageAt: null,
 };
 const tBattle = Date.now();
 if (MISSING_RECIPIENT) {
@@ -541,6 +651,111 @@ if (MISSING_RECIPIENT) {
   missingRecipient.recoveredFrame = await host.evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
   // Keep observing after settlement: transient success followed by another
   // retry/drop is not recovery. At least 60 later hash frames are required.
+  await host.waitForTimeout(20000);
+}
+if (RECOVERY_BYSTANDER) {
+  // RECOVERY_AT frames into the battle: past its countdown, when fighters move.
+  await host.waitForFunction(
+    (after) => window.NetplayRollback.getHudCounters().currentFrame >= window.__mesh.inBattleAt + after,
+    RECOVERY_AT,
+    { timeout: BATTLE_SECONDS * 1000, polling: 250 },
+  );
+  // The first line after `afterSeq` that matches, with its frame and match.
+  const lineAfter = async (page, afterSeq, re) => {
+    for (const line of (await syncLogOf(page)).split('\n')) {
+      if (seqOf(line) <= afterSeq) continue;
+      const m = line.match(re);
+      if (m)
+        return {
+          seq: seqOf(line),
+          frame: Number(line.split('\t')[2]?.slice(2)),
+          match: [...m],
+          line,
+        };
+    }
+    return null;
+  };
+  const waitForLineAfter = async (page, afterSeq, re, timeoutMs) => {
+    const until = Date.now() + timeoutMs;
+    while (Date.now() < until) {
+      const found = await lineAfter(page, afterSeq, re);
+      if (found) return found;
+      await page.waitForTimeout(250);
+    }
+    return null;
+  };
+  recovery.hostAt = await lastSeq(host);
+  recovery.pageAt = await Promise.all(pages.map(lastSeq));
+  // Each player's stock count (SCPlayerData.stock_count, 0x74 bytes apart).
+  const stocks = (page) =>
+    page.evaluate((n) => {
+      const rb = window.NetplayRollback;
+      return Array.from({ length: n }, (_, i) => {
+        const a = 0x800a4d33 + 0x74 * i;
+        return (rb.readRdram32(a & ~3) >>> ((3 - (a & 3)) * 8)) & 0xff;
+      });
+    }, PLAYERS);
+  recovery.stocksAtHold = await stocks(host);
+  // The guest stands still for 20 frames, so the host's last inputs of it
+  // are neutral and so is its prediction; then every input of it is held on
+  // the host's receive path only, and it walks right.
+  const neutralFrom = await pages[RECOVERY_SLOT].evaluate(() => {
+    window.__mesh.against = 'neutral';
+    return window.NetplayRollback.getHudCounters().currentFrame;
+  });
+  await pages[RECOVERY_SLOT].waitForFunction(
+    (from) => window.NetplayRollback.getHudCounters().currentFrame >= from + 20,
+    neutralFrom,
+    { timeout: 30000, polling: 20 },
+  );
+  recovery.heldFrom = await pages[RECOVERY_SLOT].evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+  await host.evaluate((slot) => window.__knDirectionalInputGate.arm(slot, 'isolated'), RECOVERY_SLOT);
+  await pages[RECOVERY_SLOT].evaluate(() => {
+    window.__mesh.against = 'right';
+  });
+  console.log(`RECOVERY_BYSTANDER: P${RECOVERY_SLOT + 1}'s inputs held on the host's side from f=${recovery.heldFrom}`);
+  recovery.phantom = await waitForLineAfter(
+    host,
+    recovery.hostAt,
+    new RegExp(`PEER-PHANTOM slot=${RECOVERY_SLOT}(?: |$)`),
+    30000,
+  );
+  if (recovery.phantom) await host.waitForTimeout(RECOVERY_HOLD_MS);
+  recovery.stocksAtRelease = await stocks(host);
+  // What each page shows as the held inputs are let through.
+  await Promise.all(pages.map((p, i) => p.screenshot({ path: `${OUT}/recovery-p${i + 1}.png` }).catch(() => {})));
+  recovery.gate = await host.evaluate(() => {
+    const gate = window.__knDirectionalInputGate;
+    gate.release(0);
+    return gate.stats();
+  });
+  console.log(
+    `RECOVERY_BYSTANDER: host dropped it ${recovery.phantom ? `at f=${recovery.phantom.frame}` : 'never'}; ` +
+      `${recovery.gate?.held ?? 0} held packet(s) let through`,
+  );
+  recovery.recovered = await waitForLineAfter(
+    host,
+    recovery.hostAt,
+    new RegExp(`peer-recovery resync: host scheduled full sync for slot=${RECOVERY_SLOT} at f=(\\d+)`),
+    30000,
+  );
+  if (recovery.recovered) {
+    recovery.dispatch = await waitForLineAfter(
+      host,
+      recovery.recovered.seq,
+      /coord sync dispatch: (\d+) guest\(s\) at frame (\d+)/,
+      30000,
+    );
+  }
+  if (recovery.dispatch) recovery.leftOut = [recovery.heldFrom, Number(recovery.dispatch.match[2])];
+  await pages[RECOVERY_SLOT].evaluate(() => {
+    window.__mesh.against = null;
+  });
+  console.log(
+    `RECOVERY_BYSTANDER: ${recovery.recovered ? recovery.recovered.line.split('\t').at(-1) : 'the host never heard it again'}; ` +
+      `${recovery.dispatch ? recovery.dispatch.line.split('\t').at(-1) : 'no state dispatched'}`,
+  );
+  // Keep playing: at least 60 frames after the host's state must match.
   await host.waitForTimeout(20000);
 }
 if (FOLLOW_UP_RECIPIENT) {
@@ -726,6 +941,7 @@ const P = await Promise.all(
       missingRecipientWire: window.__meshMissingRecipient ?? null,
       missingInputs: window.__meshMissingInputs ?? 0,
       hashes: { ...(window.__meshDroppedSnapshot?.hashes ?? {}), ...window.__mesh.hashes },
+      rdram: window.__mesh.rdram,
       dropNotifications: (window.__knEvents ?? []).filter((e) => e.meta?.kind === 'dropped-by-host').length,
       preDropHashes: window.__meshDroppedSnapshot?.hashes ?? {},
       preDropHashCount: Object.keys(window.__meshDroppedSnapshot?.hashes ?? {}).length,
@@ -799,11 +1015,24 @@ const pairs = P.slice(1).map((G, gi) => {
       unrecorded++;
       continue;
     }
+    // RECOVERY_BYSTANDER: the host ran the held guest's frames on
+    // predictions, from the hold to its first state after the recovery (to
+    // the end, if it never sent one: the run fails on that).
+    if (
+      RECOVERY_BYSTANDER &&
+      recovery.heldFrom !== null &&
+      f >= recovery.heldFrom &&
+      f < (recovery.leftOut?.[1] ?? Infinity)
+    ) {
+      leftOut++;
+      continue;
+    }
     compared++;
     if (
       (MISSING_RECIPIENT && f > missingRecipient.recoveredFrame) ||
       (FOLLOW_UP_RECIPIENT && followUpRecipient.recoveredFrame !== null && f > followUpRecipient.recoveredFrame) ||
-      (CATCH_UP_HOLE && hole.recoveredFrame !== null && f > hole.recoveredFrame)
+      (CATCH_UP_HOLE && hole.recoveredFrame !== null && f > hole.recoveredFrame) ||
+      (RECOVERY_BYSTANDER && recovery.leftOut && f >= recovery.leftOut[1])
     )
       postRecovery++;
     if (f >= battleFrom) battle++;
@@ -1109,6 +1338,131 @@ const followUpProblems = !FOLLOW_UP_RECIPIENT
         : []),
     ];
 
+// RECOVERY_BYSTANDER: the fault landed (the gate held inputs, the host
+// dropped the guest and heard it again, and sent a state), no bystander
+// dropped anyone while it did, and every guest ends on the host's state.
+const bystanderSlots = Array.from({ length: PLAYERS - 1 }, (_, i) => i + 1).filter((s) => s !== RECOVERY_SLOT);
+const linesSince = (x, slot) =>
+  RECOVERY_BYSTANDER && recovery.pageAt ? x.sync.split('\n').filter((line) => seqOf(line) > recovery.pageAt[slot]) : [];
+const recoveryEvents = !RECOVERY_BYSTANDER
+  ? null
+  : P.map((x, slot) => {
+      const lines = linesSince(x, slot);
+      return {
+        slot,
+        drops: lines.filter((line) => /\tPEER-PHANTOM slot=/.test(line)).map((line) => line.split('\t').at(-1)),
+        recovered: lines.filter((line) => /\tPEER-RECOVERED slot=/.test(line)).map((line) => line.split('\t').at(-1)),
+        statesLoaded: lines.flatMap((line) => {
+          const m = line.match(/\tRESYNC-INPUTS f=(\d+)/);
+          return m ? [Number(m[1])] : [];
+        }),
+        dispatches:
+          slot === 0
+            ? lines.filter((line) => /coord sync dispatch:/.test(line)).map((line) => line.split('\t').at(-1))
+            : [],
+      };
+    });
+// What each page applied for the held guest on a forward tick, by key
+// (NORMAL-INPUT-TR), and on how many keys of the held stretch the host and a
+// bystander applied different ones: the split the fault is there to make.
+const appliedFor = (x, slot) => {
+  const out = new Map();
+  for (const m of x.sync.matchAll(
+    new RegExp(`\\tNORMAL-INPUT-TR f=\\d+ apply=\\d+ .*?R${slot}@(\\d+)\\[([-\\d,]+)\\]`, 'g'),
+  ))
+    out.set(Number(m[1]), m[2]);
+  return out;
+};
+const inputSplit = !RECOVERY_BYSTANDER
+  ? null
+  : Object.fromEntries(
+      bystanderSlots.map((slot) => {
+        const host = appliedFor(P[0], RECOVERY_SLOT);
+        const other = appliedFor(P[slot], RECOVERY_SLOT);
+        const to = recovery.leftOut?.[1] ?? Infinity;
+        const keys = [...host.keys()].filter(
+          (k) => k >= (recovery.heldFrom ?? Infinity) && k < to && other.has(k) && other.get(k) !== host.get(k),
+        );
+        return [`P${slot + 1}`, keys.length];
+      }),
+    );
+// The page compare: pages that already differ between the host and a guest
+// on a battle frame before the fault are the ones the audio and video
+// hardware write (and rendering skipped in a replay leaves different); any
+// other page that differs is game state that split.
+const rdramCompare = (G) => {
+  const host = P[0].rdram ?? {};
+  const noisy = new Set();
+  const before = [];
+  const during = [];
+  const after = [];
+  for (const [k, g] of Object.entries(G.rdram ?? {})) {
+    const f = Number(k);
+    const h = host[k];
+    if (!h || !g) continue;
+    const diff = [];
+    for (let i = 0; i < Math.min(h.length, g.length); i++) if (h[i] !== g[i]) diff.push(i);
+    if (f < recovery.heldFrom) {
+      before.push(f);
+      for (const i of diff) noisy.add(i);
+    } else if (recovery.leftOut && f >= recovery.leftOut[1]) after.push({ f, diff });
+    else during.push({ f, diff });
+  }
+  const split = (list) =>
+    list.map(({ f, diff }) => ({ f, pages: diff.filter((i) => !noisy.has(i)) })).filter((x) => x.pages.length);
+  return {
+    calibrationFrames: before.length,
+    noisyPages: noisy.size,
+    framesDuring: during.length,
+    framesAfter: after.length,
+    splitDuring: split(during),
+    splitAfter: split(after),
+  };
+};
+const rdram = !RECOVERY_BYSTANDER ? null : Object.fromEntries(P.slice(1).map((G, i) => [`P${i + 2}`, rdramCompare(G)]));
+const recoveryProblems = !RECOVERY_BYSTANDER
+  ? []
+  : [
+      ...(!(recovery.gate?.held > 0) ? ["the gate held none of the guest's inputs"] : []),
+      ...(!recovery.phantom ? ['the host never dropped the guest as a phantom'] : []),
+      ...(!recovery.recovered ? ['the host never heard the guest again (PEER-RECOVERED)'] : []),
+      ...(!recovery.dispatch ? ['the host sent no state after the recovery'] : []),
+      ...(Object.values(inputSplit).every((n) => n === 0)
+        ? ['the host and the bystanders ran the held frames on the same inputs: the fault made no split']
+        : []),
+      ...bystanderSlots.flatMap((slot) =>
+        recoveryEvents[slot].drops.length
+          ? [`bystander P${slot + 1} dropped a player: ${recoveryEvents[slot].drops.join(' | ')}`]
+          : [],
+      ),
+      ...pairs.flatMap((p) =>
+        p.postRecoveryFramesCompared < MIN_BATTLE_FRAMES
+          ? [
+              `P${p.slot + 1}: ${p.postRecoveryFramesCompared} frames compared after the host's state, fewer than ${MIN_BATTLE_FRAMES}`,
+            ]
+          : [],
+      ),
+      ...Object.entries(rdram).flatMap(([page, r]) =>
+        r.calibrationFrames < 8 || r.framesAfter < 4
+          ? [
+              `${page}: ${r.calibrationFrames} page-compared frames before the fault and ${r.framesAfter} after the ` +
+                `host's state, fewer than 8 and 4`,
+            ]
+          : [],
+      ),
+      ...(Object.values(rdram).every((r) => r.splitDuring.length === 0)
+        ? ['no guest split from the host in the held stretch: the fault changed no game state the compare can see']
+        : []),
+      ...Object.entries(rdram).flatMap(([page, r]) =>
+        r.splitAfter.length
+          ? [
+              `${page}: RDRAM differs from the host's after its state on ${r.splitAfter.length} of ` +
+                `${r.framesAfter} frames (first f=${r.splitAfter[0].f}, pages ${r.splitAfter[0].pages.slice(0, 8).join(',')})`,
+            ]
+          : [],
+      ),
+    ];
+
 // Secondary recovery result, not an exemption from the original hash oracle.
 // The lower boundary is the first deliberately lost input frame, recorded
 // BEFORE the fault, and the upper boundary is the observed host frame after
@@ -1168,6 +1522,9 @@ const summary = {
   pairs,
   catchUp: catchUpReport,
   hole: holeReport,
+  recoveryBystander: RECOVERY_BYSTANDER
+    ? { ...recovery, events: recoveryEvents, inputSplit, rdram, problems: recoveryProblems }
+    : undefined,
 };
 if (hostEnd) summary.hostEnd = hostEnd;
 fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 2));
@@ -1176,6 +1533,7 @@ console.log(JSON.stringify(summary, null, 2));
 const failed =
   missingProblems.length > 0 ||
   followUpProblems.length > 0 ||
+  recoveryProblems.length > 0 ||
   P.some((x) => x.inBattleAt < 0) ||
   fighterProblems.length > 0 ||
   pairs.some(
@@ -1189,7 +1547,7 @@ const failed =
   catchUpFailed;
 console.log(
   failed
-    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}`
+    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}`
     : `PASS: all ${PLAYERS} fighters in the battle; every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
 );
 process.exit(failed ? 1 : 0);
