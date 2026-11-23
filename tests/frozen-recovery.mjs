@@ -22,10 +22,14 @@
  * data channel, which is a real failure; its frames are compared as usual.
  */
 
-// The hashes the test compares trail the head by this many frames, which is
-// past the rollback window, so a split can show this far before the frame
-// at which the phantom was declared.
-const BEFORE_PHANTOM_FRAMES = 12;
+// The hashes the test compares trail the head by its hash lag (the engine's
+// rollback window + 1, tests/hash-lag.mjs), so a split can show this far
+// before the frame at which the phantom was declared. A caller passes the
+// lag its pages used; 12 is the constant the harness used before.
+const DEFAULT_HASH_LAG = 12;
+// Recovery can take a second resync right after the first, within this many
+// frames of it.
+const SECOND_RESYNC_WITHIN_FRAMES = 12;
 // The resync that ends a recovery follows it within this many frames; a
 // later one is some other resync. Counted from the frame the dropped page
 // was seen again (`PEER-RECOVERED`) when the log has one, because the page
@@ -46,8 +50,9 @@ const entriesOf = (log, pattern) =>
  * the logs prove it was a frozen page that was then resynced.
  *
  * @param {{host: string, guest: string}} syncLogs
+ * @param {{hashLag?: number}} [options] how far behind the head the hashes were read
  */
-export const frozenRecoveries = (syncLogs) => {
+export const frozenRecoveries = (syncLogs, { hashLag = DEFAULT_HASH_LAG } = {}) => {
   const freezes = [];
   for (const [page, log] of Object.entries(syncLogs)) {
     for (const match of log.matchAll(/\tf=(\d+)\tLOCAL-FREEZE f=\d+ gap=(\d+)ms/g)) {
@@ -76,7 +81,8 @@ export const frozenRecoveries = (syncLogs) => {
       let to = first !== undefined && first.frame <= seen.frame + RECOVERY_WITHIN_FRAMES ? first.frame : null;
       // Recovery can take a second resync right after the first; the split
       // ends at the last of them.
-      for (const r of later) if (to !== null && r.frame > to && r.frame <= to + BEFORE_PHANTOM_FRAMES) to = r.frame;
+      for (const r of later)
+        if (to !== null && r.frame > to && r.frame <= to + SECOND_RESYNC_WITHIN_FRAMES) to = r.frame;
       // The longest stop on the other page shortly before, which is what the
       // phantom was declared for.
       const stopped = freezes
@@ -85,7 +91,7 @@ export const frozenRecoveries = (syncLogs) => {
       const stoppedMs = stopped?.ms ?? null;
       recoveries.push({
         declaredBy: page,
-        from: frame - BEFORE_PHANTOM_FRAMES,
+        from: frame - hashLag,
         to,
         stoppedPage: stopped?.page ?? null,
         stoppedMs,
