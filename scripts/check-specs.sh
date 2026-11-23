@@ -879,6 +879,26 @@ done
 $QUINT run "$STORE" --main=session_log_store_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── Archiving a match's log off D1, and evicting it ────────────────────────
+ARCHIVE=specs/log_archive.qnt
+$QUINT typecheck "$ARCHIVE"
+for variant in log_archive_record_first log_archive_evict_all log_archive_archive_only \
+  log_archive_ignore_tombstone log_archive_current; do
+  $QUINT test "$ARCHIVE" --main="$variant" --backend="$BACKEND"
+done
+# A match's log is always readable, from exactly one place: D1 until it is
+# evicted, then the archive for the chunks it holds and D1 for any later one.
+# VIOLATED by an eviction of every chunk and by a reader of the archive alone
+# (log_archive_evict_all, log_archive_archive_only; lateChunkTest,
+# chunkAfterEvictionTest). The archive is recorded only once complete
+# (archivedOnlyWhenComplete): VIOLATED by recording it before the uploads are
+# confirmed (log_archive_record_first; failedUploadTest). Retention leaves
+# nothing behind (retentionLeavesNothing): VIOLATED by an archive that keeps
+# its objects after finding the match tombstoned (log_archive_ignore_tombstone;
+# deleteDuringArchiveTest).
+$QUINT run "$ARCHIVE" --main=log_archive_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then
   echo "shard $shard of $shards selected no checks" >&2
