@@ -22,6 +22,8 @@ export interface ScheduledSync {
   targetFrame: number;
   targetSid: string;
   deadlineAt: number;
+  /** How the guest asked: over the signaling socket, or the data channel (absent). */
+  transport?: 'socket' | 'channel';
 }
 
 /** The queue after a recovery, and the slots of the other guests it resyncs. */
@@ -70,7 +72,16 @@ export function scheduleRecoveryResyncs<T extends ScheduledSync>(
   return {
     queue: [
       ...queued.filter((r) => !targetSids.has(r.targetSid)),
-      ...targets.map((p) => ({ targetFrame: frame, targetSid: p.sid, deadlineAt })),
+      ...targets.map((p) => {
+        // A request it replaces that goes over the signaling socket (the
+        // follow-up of a socket answer: the guest's channel may be down) keeps
+        // going that way; on the channel it could be held for good
+        // (specs/sync_follow_up.qnt, aWatchedAnswerCanBeFollowedUp).
+        const viaSocket = queued.some((r) => r.targetSid === p.sid && r.transport === 'socket');
+        const request: ScheduledSync = { targetFrame: frame, targetSid: p.sid, deadlineAt };
+        if (viaSocket) request.transport = 'socket';
+        return request;
+      }),
     ],
     others: slots.filter((slot) => slot !== recovered),
   };

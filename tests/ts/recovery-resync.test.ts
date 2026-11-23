@@ -101,3 +101,15 @@ test('a late joiner still being admitted keeps its queued request and is not res
   assert.equal(queue.find((r) => r.targetSid === 'p4')?.targetFrame, 990);
   assert.deepEqual(others, [2]);
 });
+
+test('a socket follow-up it replaces keeps its transport; a channel request stays on the channel', () => {
+  const queued = [
+    { targetFrame: 990, targetSid: 'p3', deadlineAt: 1, transport: 'socket' as const },
+    { targetFrame: 991, targetSid: 'p4', deadlineAt: 1 },
+  ];
+  const { queue } = scheduleRecoveryResyncs(queued, PEERS, 'p2', 1000, 5);
+  assert.equal(queue.find((r) => r.targetSid === 'p3')?.transport, 'socket');
+  assert.equal(queue.find((r) => r.targetSid === 'p4')?.transport, undefined);
+  assert.equal(queue.find((r) => r.targetSid === 'p2')?.transport, undefined);
+  assert.equal(queue.length, 3);
+});
