@@ -36,6 +36,16 @@
  *                     resync is done`) or a visible
  *                     `LATE-JOIN-LOST-HOST-GIVEUP`; both pages must go on
  *                     advancing
+ *   late-join-after-leave  the late-join scenario, then the guest leaves the
+ *                     match for good (Leave: `leaving` to its peers,
+ *                     `leave-room`) and the host plays on alone; the same
+ *                     guest then joins it again late. Alone, the host's C
+ *                     engine must skip its state save (no other slot is
+ *                     active; specs/solo_save.qnt), counted by
+ *                     kn_get_serialize_skip_count; once the guest is back its
+ *                     input must start the saves again (the count stops), the
+ *                     guest must arm with the host's delay, and the engine's
+ *                     hash checks after the rejoin must match
  *   missed-game-end   a guest's signaling is down while the host ends the
  *                     game; on reconnect it must return to the lobby
  *   missed-game-end-at-rom-prompt  the same for a guest that joined mid-game
@@ -103,6 +113,7 @@ const SCENARIOS = [
   'late-join-shared',
   'late-join-two-player',
   'late-join-lost-host',
+  'late-join-after-leave',
   'missed-game-end',
   'missed-game-end-at-rom-prompt',
   'missed-new-match',
@@ -498,6 +509,94 @@ const scenarios = {
     if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the join');
     await checkpoint(
       'after late join',
+      [
+        { player: host, lobby: false },
+        { player: guest, lobby: false, lateJoiner: true },
+      ],
+      failures,
+      log,
+    );
+    return [host, guest];
+  },
+
+  // A player leaves for good and the host plays on alone, then the same
+  // player joins again late. While no other slot is active, the host's
+  // kn_pre_tick skips its state save (specs/solo_save.qnt); the first input
+  // from the player who came back starts it again, and the first save after
+  // the stretch is whole. The engine's hash checks after the rejoin say the
+  // two pages agree.
+  'late-join-after-leave': async (room, failures, log) => {
+    const logOf = (player) => player.page.evaluate(() => window.NetplayRollback?.exportSyncLog?.() || '');
+    const skippedOn = (player) =>
+      player.page.evaluate(() => window.EJS_emulator?.gameManager?.Module?._kn_get_serialize_skip_count?.() ?? null);
+    const host = await startSoloGame(room);
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host game never started');
+
+    const guest = await openPlayer('guest', `room=${room}&name=Guest`);
+    await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
+    await loadRom(guest);
+    const joined = await waitUntil(async () => {
+      await clickGesturePrompt(guest);
+      return (await frameOf(guest)) > 0;
+    }, 180000);
+    if (!joined) failures.push('the late joiner never received state');
+    if (!(await waitForFrames([host, guest], 120, 120000))) failures.push('the game stopped advancing after the join');
+    const delayMatch = (await logOf(host)).match(/DELAY-AT-JOIN 0 -> (\d+) f=\d+/);
+    const hostDelay = delayMatch ? Number(delayMatch[1]) : null;
+
+    // The guest leaves for good. The host plays on alone and skips its saves.
+    const skippedWhileTwo = await skippedOn(host);
+    await guest.page.evaluate(() => document.getElementById('toolbar-leave')?.click());
+    if (!(await waitUntil(async () => (await playersInRoom(room)) === 1, 30000)))
+      failures.push('the room did not let the guest go');
+    if (!(await waitForFrames([host], 120, 120000))) failures.push('the host stopped advancing after the guest left');
+    const skippedAlone = await skippedOn(host);
+    const leftAtFrame = await frameOf(host);
+    if (skippedAlone === null) failures.push("the host's core has no kn_get_serialize_skip_count");
+    else if (!(skippedAlone > skippedWhileTwo))
+      failures.push(`the host did not skip its saves once alone (count ${skippedWhileTwo} -> ${skippedAlone})`);
+
+    // The same guest joins again late, from its library this time.
+    await guest.page.goto(`${URL}/play.html?room=${room}&name=Guest&knperf=light`);
+    const rejoined = await waitUntil(async () => {
+      await clickGesturePrompt(guest);
+      return (await frameOf(guest)) > 0;
+    }, 240000);
+    if (!rejoined) failures.push('the guest never received state when it joined again');
+    if (!(await waitForFrames([host, guest], 60, 120000))) failures.push('the game stopped advancing after the rejoin');
+    const skippedAfterRejoin = await skippedOn(host);
+    if (!(await waitForFrames([host, guest], 120, 120000)))
+      failures.push('the game stopped advancing after the rejoin');
+    const skippedLater = await skippedOn(host);
+    if (skippedLater !== skippedAfterRejoin)
+      failures.push(
+        `the host kept skipping its saves with the guest back (count ${skippedAfterRejoin} -> ${skippedLater})`,
+      );
+
+    await waitUntil(async () => /RB-CHECK f=\d+ (?:MATCH|MISMATCH)/.test(await logOf(guest)), 120000);
+    const [hostLog, guestLog] = [await logOf(host), await logOf(guest)];
+    const guestArm = guestLog.match(/C-ROLLBACK init: max=\d+ delay=(\d+)/);
+    // The guest's page is new, so all its checks are after the rejoin; the
+    // host's are counted from the frame it was on when the guest left.
+    const checksAfter = (text, kind, from) =>
+      [...text.matchAll(new RegExp(`RB-CHECK f=(\\d+) ${kind}`, 'g'))].filter((m) => Number(m[1]) >= from).length;
+    const afterLeave = {
+      hostDelay,
+      guestArmDelay: guestArm ? Number(guestArm[1]) : null,
+      skipped: { whileTwo: skippedWhileTwo, alone: skippedAlone, afterRejoin: skippedAfterRejoin, later: skippedLater },
+      leftAtFrame,
+      saveLines: (hostLog.match(/SAVE-(?:SKIP|RESUME)[^\n]*/g) || []).slice(-4),
+      matches: checksAfter(guestLog, 'MATCH', 0) + checksAfter(hostLog, 'MATCH', leftAtFrame),
+      mismatches: checksAfter(guestLog, 'MISMATCH', 0) + checksAfter(hostLog, 'MISMATCH', leftAtFrame),
+    };
+    log.push({ afterLeave });
+    console.log(`  after the leave and rejoin: ${JSON.stringify(afterLeave)}`);
+    if (afterLeave.guestArmDelay !== hostDelay)
+      failures.push("the guest did not arm with the host's delay when it rejoined");
+    if (afterLeave.matches === 0) failures.push('no hash check after the rejoin');
+    if (afterLeave.mismatches > 0) failures.push('a hash check after the rejoin mismatched');
+    await checkpoint(
+      'after the rejoin',
       [
         { player: host, lobby: false },
         { player: guest, lobby: false, lateJoiner: true },

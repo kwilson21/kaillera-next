@@ -544,6 +544,19 @@ ring_after_resync() {
   expect_violation "$RING" ring_after_resync_save_only everyCopyIsWhole
 }
 
+solo_save() {
+  local SOLO=specs/solo_save.qnt
+  # The keep-baseline counterexample is 7 steps; check the gate past it.
+  verify "$SOLO" solo_save_current allHold init 8
+  # The friend's first input, two frames, the next input wrong, before the
+  # roster lists them: join, feed, tick, tick, feed (5 steps;
+  # inputBeforeRosterTest).
+  expect_violation "$SOLO" solo_save_roster noTargetLostToTheGate
+  # A save, the other player leaves, a skipped frame, they come back, the
+  # next save: 7 steps (firstSaveAfterAStretchTest).
+  expect_violation "$SOLO" solo_save_keep_baseline everyCopyIsWhole 8
+}
+
 engine_start() {
   local START=specs/engine_start.qnt
   verify "$START" engine_start_current allHold
@@ -572,7 +585,7 @@ SPEC_GROUPS=(
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
   rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
-  engine_start
+  engine_start solo_save
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -580,7 +593,7 @@ SPEC_GROUPS=(
 # whole set took 32 minutes in one job. A group added above goes in a shard
 # here; the check below fails until it does.
 SHARDS=(
-  "room_lifecycle_start engine_start"                             # ~7 min + engine_start (~30 s)
+  "room_lifecycle_start engine_start solo_save"                   # ~7 min + engine_start (~30 s) + solo_save (~40 s)
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
