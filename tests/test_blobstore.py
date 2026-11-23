@@ -290,7 +290,7 @@ def _put_times(store_or_client, objects):
         store_or_client.times[key] = when
 
 
-def test_r2_lists_match_prefixes_with_their_newest_time_across_pages():
+def test_r2_lists_match_prefixes_and_their_newest_time_across_pages():
     client = FakeS3()
     t = _EPOCH
     _put_times(
@@ -304,31 +304,36 @@ def test_r2_lists_match_prefixes_with_their_newest_time_across_pages():
             "other/d/x.jpg": t,
         },
     )
-    listing = run_async(_r2(client).list_match_prefixes())
-    assert listing.newest == {"a": t + timedelta(days=2), "b": t + timedelta(days=3), "c": t}
-    assert listing.next_after is None
+    store = _r2(client)
+    listing = run_async(store.list_match_prefixes())
+    assert listing.match_ids == ["a", "b", "c"] and listing.next_after is None
+    # The listing itself reads no objects: one delimiter listing per page.
+    assert all(kw.get("Delimiter") == "/" for _, kw in client.calls)
+    assert run_async(store.newest_in_match("a")) == t + timedelta(days=2)
+    assert run_async(store.newest_in_match("b")) == t + timedelta(days=3)
+    assert run_async(store.newest_in_match("missing")) is None
 
 
 def test_r2_prefix_listing_is_bounded_and_resumes_after_the_cursor():
-    from src.blobstore import R2BlobStore
-
     client = FakeS3()
     _put_times(client, {f"matches/m{i}/x.jpg": _EPOCH for i in range(5)})
-    store: R2BlobStore = _r2(client)
+    store = _r2(client)
     first = run_async(store.list_match_prefixes(limit=3))
-    assert list(first.newest) == ["m0", "m1", "m2"] and first.next_after == "m2"
+    assert first.match_ids == ["m0", "m1", "m2"] and first.next_after == "m2"
     second = run_async(store.list_match_prefixes(after=first.next_after, limit=3))
-    assert list(second.newest) == ["m3", "m4"] and second.next_after is None
+    assert second.match_ids == ["m3", "m4"] and second.next_after is None
 
 
-def test_r2_prefix_listing_gives_up_on_a_prefix_with_too_many_objects(monkeypatch):
+def test_r2_newest_time_is_unknown_for_a_prefix_with_too_many_objects(monkeypatch):
     from src import blobstore
 
     monkeypatch.setattr(blobstore, "_PREFIX_KEY_BUDGET", 3)
     client = FakeS3()
     _put_times(client, {f"matches/big/{i}.jpg": _EPOCH for i in range(6)})
     _put_times(client, {"matches/small/0.jpg": _EPOCH})
-    assert run_async(_r2(client).list_match_prefixes()).newest == {"big": None, "small": _EPOCH}
+    store = _r2(client)
+    assert run_async(store.newest_in_match("big")) is None
+    assert run_async(store.newest_in_match("small")) == _EPOCH
 
 
 def test_r2_prefix_listing_failure_is_a_blobstore_error():
@@ -338,7 +343,7 @@ def test_r2_prefix_listing_failure_is_a_blobstore_error():
         run_async(_r2(FakeS3(fail_with="InternalError")).list_match_prefixes())
 
 
-def test_local_lists_match_folders_with_their_newest_file_time(tmp_path):
+def test_local_lists_match_folders_and_their_newest_file_time(tmp_path):
     from src.blobstore import LocalBlobStore
 
     store = LocalBlobStore(tmp_path)
@@ -350,15 +355,22 @@ def test_local_lists_match_folders_with_their_newest_file_time(tmp_path):
         os.utime(tmp_path / "matches/a/screenshots/0-1.jpg", (old, old))
         os.utime(tmp_path / "matches/a/sessions/t/0.log.gz", (new, new))
         os.utime(tmp_path / "matches/b/0.jpg", (old, old))
-        return await store.list_match_prefixes(limit=1), await store.list_match_prefixes(after="a", limit=1)
+        return (
+            await store.list_match_prefixes(limit=1),
+            await store.list_match_prefixes(after="a", limit=1),
+            await store.newest_in_match("a"),
+            await store.newest_in_match("b"),
+            await store.newest_in_match("missing"),
+        )
 
-    first, second = run_async(scenario())
-    assert first.newest == {"a": _EPOCH + timedelta(days=1)} and first.next_after == "a"
-    assert second.newest == {"b": _EPOCH} and second.next_after is None
+    first, second, newest_a, newest_b, missing = run_async(scenario())
+    assert first.match_ids == ["a"] and first.next_after == "a"
+    assert second.match_ids == ["b"] and second.next_after is None
+    assert (newest_a, newest_b, missing) == (_EPOCH + timedelta(days=1), _EPOCH, None)
 
 
 def test_local_listing_without_a_matches_folder_is_empty(tmp_path):
     from src.blobstore import LocalBlobStore
 
     listing = run_async(LocalBlobStore(tmp_path).list_match_prefixes())
-    assert listing.newest == {} and listing.next_after is None
+    assert listing.match_ids == [] and listing.next_after is None

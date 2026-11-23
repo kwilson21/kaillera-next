@@ -97,6 +97,57 @@ def test_a_match_with_a_retention_row_is_kept(tmp_path, state):
     assert _run(tmp_path, scenario) == 0 and _exists(tmp_path, "owned")
 
 
+class _WatchingStore:
+    """A local store that records which prefixes the sweep asked the time of."""
+
+    name = "local"
+    durable = False
+
+    def __init__(self, inner, unknown=()):
+        self.inner = inner
+        self.asked = []
+        self.unknown = set(unknown)
+
+    async def list_match_prefixes(self, *, after=None, limit=500):
+        return await self.inner.list_match_prefixes(after=after, limit=limit)
+
+    async def newest_in_match(self, match_id):
+        self.asked.append(match_id)
+        return None if match_id in self.unknown else await self.inner.newest_in_match(match_id)
+
+    async def delete_prefix(self, prefix):
+        await self.inner.delete_prefix(prefix)
+
+
+def test_registered_prefixes_are_never_listed_for_their_objects(tmp_path):
+    """The database is asked first; only unregistered prefixes cost a listing."""
+    from src import retention
+    from src.blobstore import LocalBlobStore
+
+    _blob(tmp_path, "owned", days_old=30)
+    _blob(tmp_path, "orphan", days_old=30)
+    store = _WatchingStore(LocalBlobStore(tmp_path / "blobs"))
+
+    async def scenario(db):
+        await db.register_match("owned", "ROOM1")
+        return await retention.sweep_orphans(NOW)
+
+    assert _run(tmp_path, scenario, blobs=store) == 1
+    assert store.asked == ["orphan"] and _exists(tmp_path, "owned")
+
+
+def test_a_prefix_whose_newest_time_is_unknown_is_kept_with_a_warning(tmp_path, caplog):
+    from src import retention
+    from src.blobstore import LocalBlobStore
+
+    _blob(tmp_path, "huge-match", days_old=30)
+    store = _WatchingStore(LocalBlobStore(tmp_path / "blobs"), unknown={"huge-match"})
+    with caplog.at_level("WARNING", logger="src.retention"):
+        deleted = _run(tmp_path, lambda db: retention.sweep_orphans(NOW), blobs=store)
+    assert deleted == 0 and _exists(tmp_path, "huge-match")
+    assert "prefix of huge-mat kept" in caplog.text
+
+
 class _FailingListing:
     """A blob store whose listing fails, as R2 does when unreachable."""
 

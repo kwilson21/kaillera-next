@@ -318,12 +318,23 @@ async def sweep_orphans(now: datetime | None = None) -> int | None:
         log.warning("Orphan sweep: listing the blob store failed; retrying next sweep: %s", exc)
         return None
 
+    # The database first: most prefixes have a row, and each newest-time
+    # check below is a listing call (an R2 Class A operation).
+    registered = await _registered(listing.match_ids) if listing.match_ids else set()
     cutoff = now - timedelta(days=window_days("LOG_RETENTION_DAYS", 7))
-    old = [match_id for match_id, newest in listing.newest.items() if newest is not None and newest < cutoff]
-    registered = await _registered(old) if old else set()
     deleted = 0
-    for match_id in old:
+    for match_id in listing.match_ids:
         if match_id in registered:
+            continue
+        try:
+            newest = await db.newest_in_match(match_id)
+        except BlobStoreError as exc:
+            log.warning("Orphan sweep: prefix of %s not listed: %s", match_id[:8], exc)
+            continue
+        if newest is None:
+            log.warning("Orphan sweep: prefix of %s kept: its newest object time isn't known", match_id[:8])
+            continue
+        if newest >= cutoff:
             continue
         try:
             await db.delete_match_blobs(match_id)
@@ -338,7 +349,7 @@ async def sweep_orphans(now: datetime | None = None) -> int | None:
         await db.set_server_state(LAST_ORPHAN_SWEEP, now.isoformat())
     log.info(
         "Orphan sweep: %d prefix(es) listed, %d orphan(s) deleted%s",
-        len(listing.newest),
+        len(listing.match_ids),
         deleted,
         "" if listing.next_after is None else "; continuing next sweep",
     )

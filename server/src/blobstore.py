@@ -31,7 +31,7 @@ _DELETE_BATCH = 1000  # S3 DeleteObjects limit
 _MATCHES = "matches/"
 # Keys listed per match prefix before its newest time is given up on as
 # unknown (which keeps the prefix): 10 pages of 1000. A match writes a few
-# dozen objects; one with more than this is left for a person to look at.
+# dozen objects; one with more than this is kept, and the sweep logs it.
 _PREFIX_KEY_BUDGET = 10_000
 
 
@@ -39,12 +39,11 @@ _PREFIX_KEY_BUDGET = 10_000
 class MatchPrefixes:
     """One bounded page of the `matches/<id>/` prefixes in the store.
 
-    `newest` maps each match id to its newest object's time (UTC), or None
-    when that isn't known (too many objects to list); `next_after` is the id
-    to pass as `after` for the next page, None once the listing reached the end.
+    `match_ids` in listing order; `next_after` is the id to pass as `after`
+    for the next page, None once the listing reached the end.
     """
 
-    newest: dict[str, datetime | None]
+    match_ids: list[str]
     next_after: str | None
 
 
@@ -75,6 +74,8 @@ class BlobStore(Protocol):
     async def delete_prefix(self, prefix: str) -> None: ...
 
     async def list_match_prefixes(self, *, after: str | None = None, limit: int = 500) -> MatchPrefixes: ...
+
+    async def newest_in_match(self, match_id: str) -> datetime | None: ...
 
 
 def _match_id_ok(match_id: str) -> bool:
@@ -129,24 +130,31 @@ class LocalBlobStore:
         await asyncio.to_thread(shutil.rmtree, folder, True)
 
     async def list_match_prefixes(self, *, after: str | None = None, limit: int = 500) -> MatchPrefixes:
-        """Up to `limit` match folders in name order after `after`, with each one's newest file time."""
+        """Up to `limit` match folders in name order after `after`."""
         root = self.root / "matches"
 
         def scan() -> MatchPrefixes:
             try:
                 names = sorted(p.name for p in root.iterdir() if p.is_dir() and _match_id_ok(p.name))
             except FileNotFoundError:
-                return MatchPrefixes({}, None)
+                return MatchPrefixes([], None)
             if after is not None:
                 names = [n for n in names if n > after]
             page, rest = names[:limit], names[limit:]
-            newest: dict[str, datetime | None] = {}
-            for name in page:
-                folder = root / name
-                # An empty folder counts as written when the folder was.
+            return MatchPrefixes(page, page[-1] if rest else None)
+
+        return await asyncio.to_thread(scan)
+
+    async def newest_in_match(self, match_id: str) -> datetime | None:
+        """The newest file time under the match's folder; an empty folder counts as written when the folder was."""
+        folder = self._path(f"matches/{match_id}")
+
+        def scan() -> datetime | None:
+            try:
                 times = [f.stat().st_mtime for f in folder.rglob("*") if f.is_file()] or [folder.stat().st_mtime]
-                newest[name] = datetime.fromtimestamp(max(times), UTC)
-            return MatchPrefixes(newest, page[-1] if rest else None)
+            except FileNotFoundError:
+                return None
+            return datetime.fromtimestamp(max(times), UTC)
 
         return await asyncio.to_thread(scan)
 
@@ -217,13 +225,8 @@ class R2BlobStore:
         await self.delete(keys)
 
     async def list_match_prefixes(self, *, after: str | None = None, limit: int = 500) -> MatchPrefixes:
-        """Up to `limit` `matches/<id>/` prefixes after `after`, with each one's newest object time.
-
-        One ListObjectsV2 call with a delimiter for the page of prefixes (at
-        most 1000 per call, so `limit` above that takes several), then one
-        listing per prefix for its newest LastModified, stopped at
-        _PREFIX_KEY_BUDGET keys (newest None: not known).
-        """
+        """Up to `limit` `matches/<id>/` prefixes after `after`: ListObjectsV2
+        with a delimiter, at most 1000 per call, so a `limit` above that takes several."""
         prefixes: list[str] = []
         start = {"StartAfter": f"{_MATCHES}{after}/~"} if after else {}
         token: str | None = None
@@ -245,12 +248,12 @@ class R2BlobStore:
             if not truncated:
                 break
             token = page.get("NextContinuationToken")
-        newest: dict[str, datetime | None] = {}
-        for match_id in prefixes:
-            newest[match_id] = await self._newest(f"{_MATCHES}{match_id}/")
-        return MatchPrefixes(newest, last if truncated else None)
+        return MatchPrefixes(prefixes, last if truncated else None)
 
-    async def _newest(self, prefix: str) -> datetime | None:
+    async def newest_in_match(self, match_id: str) -> datetime | None:
+        """The newest LastModified under `matches/<id>/`, or None when the
+        prefix is empty or holds more than _PREFIX_KEY_BUDGET keys (not known)."""
+        prefix = f"{_MATCHES}{_check_key(match_id)}/"
         latest: datetime | None = None
         token: str | None = None
         seen = 0

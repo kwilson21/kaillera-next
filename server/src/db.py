@@ -15,6 +15,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import (
@@ -1271,6 +1272,11 @@ async def get_blob(key: str) -> bytes | None:
 async def list_match_prefixes(*, after: str | None = None, limit: int = 500) -> MatchPrefixes:
     """One bounded page of the blob store's `matches/<id>/` prefixes (src/retention.py's orphan sweep)."""
     return await _blob_store().list_match_prefixes(after=after, limit=limit)
+
+
+async def newest_in_match(match_id: str) -> datetime | None:
+    """The newest object time under `matches/<id>/`, or None when not known."""
+    return await _blob_store().newest_in_match(match_id)
 
 
 async def get_server_state(key: str) -> str | None:
