@@ -106,8 +106,27 @@ def _fetch_desync_events(base: str, key: str, match_id: str) -> list[dict]:
     return []
 
 
+def _get_session_client_events(base: str, key: str, session_id: int) -> requests.Response:
+    """GET one session's client events without its log.
+
+    A server without the client-events endpoint answers 404 there; its detail
+    endpoint bundles the same list, along with the session's whole log.
+    """
+    r = None
+    for path in (f"session-logs/{session_id}/client-events", f"session-logs/{session_id}"):
+        r = requests.get(
+            f"{base}/admin/api/{path}",
+            headers={"X-Admin-Key": key},
+            verify=False,
+            timeout=10,
+        )
+        if r.status_code != 404:
+            break
+    return r
+
+
 def _fetch_client_events(base: str, key: str, sessions: list[dict]) -> list[dict]:
-    """Fetch client_events from each session's detail endpoint.
+    """Fetch each session's client_events.
 
     Client events (room_created, peer_joined, webrtc_connected, emulator_booted,
     game_started, game_ended, disconnect) are stored separately from log_data.
@@ -116,12 +135,7 @@ def _fetch_client_events(base: str, key: str, sessions: list[dict]) -> list[dict
     all_events = []
     for s in sessions:
         try:
-            r = requests.get(
-                f"{base}/admin/api/session-logs/{s['id']}",
-                headers={"X-Admin-Key": key},
-                verify=False,
-                timeout=10,
-            )
+            r = _get_session_client_events(base, key, s["id"])
             if r.status_code == 200:
                 detail = r.json()
                 for ev in detail.get("client_events", []):
