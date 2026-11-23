@@ -420,3 +420,34 @@ def test_retention_windows_have_a_one_day_floor(tmp_path, monkeypatch):
         )
 
     assert _sweep_and_count(tmp_path, setup, "today") == [KEPT]
+
+
+def test_a_match_s_eviction_records_go_with_it(tmp_path):
+    """What a size cap deleted (session_log_evictions) is deleted with the match."""
+
+    async def scenario():
+        from src import retention
+
+        db = await _open(tmp_path)
+        try:
+            caps = db._SESSION_LOG_CHUNK_CAP, db._SESSION_LOG_C_CAP
+            db._SESSION_LOG_CHUNK_CAP = db._SESSION_LOG_C_CAP = 200
+            try:
+                for match_id, days in (("old", 8), ("recent", 6)):
+                    await _match(db, match_id, ended_days_ago=days, created_days_ago=days)
+                    base = {"match_id": match_id, "room": "ROOM1", "player_name": "P", "mode": "rollback", "epoch": "e"}
+                    for seq in range(1, 6):
+                        msg = ("[C] " if seq % 2 else "") + "x" * 100
+                        await db.append_session_log({**base, "slot": 0, "entries": [{"seq": seq, "msg": msg}]})
+            finally:
+                db._SESSION_LOG_CHUNK_CAP, db._SESSION_LOG_C_CAP = caps
+            before = await db.query("SELECT match_id, kind FROM session_log_evictions ORDER BY match_id, kind", ())
+            await retention.sweep()
+            after = await db.query("SELECT match_id, kind FROM session_log_evictions ORDER BY match_id, kind", ())
+            return [tuple(r.values()) for r in before], [tuple(r.values()) for r in after]
+        finally:
+            await db.close_db()
+
+    before, after = run_async(scenario())
+    assert before == [("old", "clog"), ("old", "log"), ("recent", "clog"), ("recent", "log")]
+    assert after == [("recent", "clog"), ("recent", "log")]

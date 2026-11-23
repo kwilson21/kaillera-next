@@ -612,6 +612,9 @@ session_log_store() {
   # A C line, a JS line, a flush: the JS row before the C row (3 steps;
   # cLinesInTheMiddleOfAFlushTest).
   expect_violation "$STORE" session_log_store_per_flush readInOrder
+  # Four JS lines in one flush, one row over the cap, deleted with no record
+  # of it (5 steps; over two flushes, evictionIsRecordedTest).
+  expect_violation "$STORE" session_log_store_unrecorded truncationIsVisible
 }
 
 # Every group, in the order a local run takes them.
@@ -632,7 +635,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs session_log_store" # ~7.5 min + session_log_store (~1.5 min)
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs session_log_store" # ~7.5 min + session_log_store (~2.5 min)
 )
 
 # Each group is in exactly one shard, and each shard names only groups.

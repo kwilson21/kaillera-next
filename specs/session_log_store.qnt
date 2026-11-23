@@ -37,11 +37,19 @@
 // window it covers; past the bound, which only a modified client alternating
 // its lines reaches, the rest of the flush is one JS run, still in order).
 //
+// What a cap deleted is recorded apart from the chunks, per store (table
+// session_log_evictions): how many entries and the seq of the last one. The
+// log's readers show it as the log's first line, so a log whose oldest lines
+// are gone does not read as one that started late. The record is updated in
+// the cap DELETE's own batch, from the rows it removes.
+//
 // SPLIT: "none" (today: one store), "per_flush" (rejected: a JS chunk and a
 // C chunk per flush), "runs" (each run of one kind a chunk, in order; one
 // store per kind).
+// RECORD: each store keeps a record of what its cap deleted.
 module session_log_store {
   const SPLIT: str
+  const RECORD: bool
 
   pure val MAX_N = 6      // entries the page logs in one run of the model
   pure val ENTRIES = 0.to(MAX_N - 1)
@@ -72,6 +80,8 @@ module session_log_store {
   var storedTwice: bool
   var cEvictedUnderCap: bool  // a C line evicted while the C lines fit their cap
   var jsEvictedUnderCap: bool // a JS line evicted while the JS lines fit theirs
+  var recordLog: Set[int]     // the JS lines' store's record: the entries its cap deleted
+  var recordC: Set[int]       // the C lines' store's record
 
   action init = all {
     logged' = 0, isCOf' = ENTRIES.mapBy(n => false), seqOf' = ENTRIES.mapBy(n => NONE),
@@ -79,6 +89,7 @@ module session_log_store {
     serverEpoch' = NO_EPOCH, lastSeq' = -1, stored' = Set(), chunkOf' = ENTRIES.mapBy(n => NONE),
     nextId' = 0, storedEver' = Set(), storedTwice' = false,
     cEvictedUnderCap' = false, jsEvictedUnderCap' = false,
+    recordLog' = Set(), recordC' = Set(),
   }
 
   // _syncLog: a JS line, or a "[C] " line the C log drain writes.
@@ -92,6 +103,7 @@ module session_log_store {
     serverEpoch' = serverEpoch, lastSeq' = lastSeq, stored' = stored, chunkOf' = chunkOf,
     nextId' = nextId, storedEver' = storedEver, storedTwice' = storedTwice,
     cEvictedUnderCap' = cEvictedUnderCap, jsEvictedUnderCap' = jsEvictedUnderCap,
+    recordLog' = recordLog, recordC' = recordC,
   }
 
   // A reload or a reconnect: a new ring, a new epoch, seqs from 0 again.
@@ -103,6 +115,7 @@ module session_log_store {
     serverEpoch' = serverEpoch, lastSeq' = lastSeq, stored' = stored, chunkOf' = chunkOf,
     nextId' = nextId, storedEver' = storedEver, storedTwice' = storedTwice,
     cEvictedUnderCap' = cEvictedUnderCap, jsEvictedUnderCap' = jsEvictedUnderCap,
+    recordLog' = recordLog, recordC' = recordC,
   }
 
   // Which store an entry counts against: the C lines' own with a split.
@@ -157,6 +170,9 @@ module session_log_store {
       storedTwice' = (storedTwice or fresh.exists(n => storedEver.contains(n))),
       cEvictedUnderCap' = (cEvictedUnderCap or (evicted.exists(n => isCOf.get(n)) and held.filter(n => isCOf.get(n)).size() <= CAP_C)),
       jsEvictedUnderCap' = (jsEvictedUnderCap or (evicted.exists(n => not(isCOf.get(n))) and held.filter(n => not(isCOf.get(n))).size() <= CAP_LOG)),
+      // Each store's record takes the entries in the rows its DELETE removes.
+      recordLog' = if (RECORD) recordLog.union(evicted.filter(n => not(inCStore(n)))) else recordLog,
+      recordC' = if (RECORD) recordC.union(evicted.filter(n => inCStore(n))) else recordC,
       ackedSeq' = if (ackLost) ackedSeq else ack,
       acked' = if (ackLost) acked else acked.union(sent.filter(n => seqOf.get(n) <= ack)),
       logged' = logged, isCOf' = isCOf, seqOf' = seqOf, epoch' = epoch,
@@ -191,8 +207,20 @@ module session_log_store {
   val everyAckedEntryWasStored = acked.subseteq(storedEver)
   val noEntryStoredTwice = not(storedTwice)
 
-  val allHold =
-    readInOrder and cLinesKeepTheirOwnRoom and jsLinesKeepTheirOwnRoom and everyAckedEntryWasStored and noEntryStoredTwice
+  // A reader can always tell a store's log is incomplete, and where: its
+  // record counts exactly the entries its cap deleted, and every one of them
+  // is older (in an earlier row) than any line the store still holds, so
+  // "everything up to seq X is gone" is true. Violated with no record.
+  val truncationIsVisible = all {
+    recordLog == storedEver.exclude(stored).filter(n => not(inCStore(n))),
+    recordC == storedEver.exclude(stored).filter(n => inCStore(n)),
+    stored.forall(n => (if (inCStore(n)) recordC else recordLog).forall(m => chunkOf.get(m) < chunkOf.get(n))),
+  }
+
+  val allHold = all {
+    readInOrder, cLinesKeepTheirOwnRoom, jsLinesKeepTheirOwnRoom, everyAckedEntryWasStored, noEntryStoredTwice,
+    truncationIsVisible,
+  }
 
   // ── Scenarios ─────────────────────────────────────────────────────────
 
@@ -237,21 +265,38 @@ module session_log_store {
       .then(log(false)).then(log(true)).then(flush(false))
       .expect(storedEver == Set(0, 1, 2) and everyAckedEntryWasStored)
       .expect(readInOrder and noEntryStoredTwice)
+
+  // Four JS lines over two flushes, past the JS store's cap: its oldest row
+  // is deleted. With the record, the reader can tell it is gone; the C
+  // lines' record stays empty.
+  run evictionIsRecordedTest =
+    init.then(log(false)).then(flush(false))
+      .then(log(false)).then(log(false)).then(log(false)).then(flush(false))
+      .expect(stored == Set(1, 2, 3))
+      .expect(recordLog == (if (RECORD) Set(0) else Set()) and recordC == Set())
+      .expect(truncationIsVisible == RECORD)
 }
 
 // Today: every entry in one store under one cap.
 module session_log_store_before {
-  import session_log_store(SPLIT = "none").*
+  import session_log_store(SPLIT = "none", RECORD = false).*
 }
 
 // Rejected: each flush stored as a row of its JS lines, then one of its C
 // lines, each kind under its own cap.
 module session_log_store_per_flush {
-  import session_log_store(SPLIT = "per_flush").*
+  import session_log_store(SPLIT = "per_flush", RECORD = true).*
+}
+
+// Each run of one kind its own chunk, in order, the C lines' chunks under
+// their own cap, but no record of what a cap deleted: a log whose oldest
+// lines are gone reads as one that started late.
+module session_log_store_unrecorded {
+  import session_log_store(SPLIT = "runs", RECORD = false).*
 }
 
 // The change: each run of one kind its own chunk, in order; the C lines'
-// chunks under their own cap.
+// chunks under their own cap; each store's record of what its cap deleted.
 module session_log_store_current {
-  import session_log_store(SPLIT = "runs").*
+  import session_log_store(SPLIT = "runs", RECORD = true).*
 }

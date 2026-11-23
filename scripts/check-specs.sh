@@ -856,7 +856,7 @@ $QUINT run "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --invar
 # ── The server's store for a player's session log ──────────────────────────
 STORE=specs/session_log_store.qnt
 $QUINT typecheck "$STORE"
-for variant in session_log_store_before session_log_store_per_flush session_log_store_current; do
+for variant in session_log_store_before session_log_store_per_flush session_log_store_unrecorded session_log_store_current; do
   $QUINT test "$STORE" --main="$variant" --backend="$BACKEND"
 done
 # Each run of JS lines or of C lines is its own row, in order, and each kind
@@ -865,7 +865,9 @@ done
 # are VIOLATED with one store (session_log_store_before;
 # jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest), the first with a JS
 # row and a C row per flush (session_log_store_per_flush;
-# cLinesInTheMiddleOfAFlushTest).
+# cLinesInTheMiddleOfAFlushTest). A reader can tell what a cap deleted
+# (truncationIsVisible): VIOLATED with no record of it
+# (session_log_store_unrecorded; evictionIsRecordedTest).
 $QUINT run "$STORE" --main=session_log_store_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 

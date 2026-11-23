@@ -17,7 +17,22 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from sqlalchemy import ColumnElement, Executable, Select, and_, case, delete, func, insert, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    Executable,
+    Integer,
+    Select,
+    and_,
+    case,
+    delete,
+    exists,
+    func,
+    insert,
+    literal,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.dialects import sqlite
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -25,7 +40,15 @@ from src.blobstore import BlobStore, BlobStoreError, blobstore_from_env
 from src.dbbackend import DEFAULT_DB_PATH, Backend, backend_from_env
 from src.dbbackend.base import ExecResult, Statement
 from src.migrate import apply_migrations
-from src.schema import ClientEvent, Feedback, MatchRetention, Screenshot, SessionLog, SessionLogChunk
+from src.schema import (
+    ClientEvent,
+    Feedback,
+    MatchRetention,
+    Screenshot,
+    SessionLog,
+    SessionLogChunk,
+    SessionLogEviction,
+)
 
 log = logging.getLogger(__name__)
 
@@ -322,7 +345,7 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
 
     # The chunk inserts, cap enforcement and metadata upsert commit together.
     new_entries, max_seq = _entries_past(data.get("entries") or [], current_last_seq)
-    statements = await _chunk_statements(match_id, slot, _kind_runs(new_entries), current_last_seq)
+    statements, first_evicted = await _chunk_statements(match_id, slot, _kind_runs(new_entries), current_last_seq)
 
     stored_audit_epoch = row["audit_epoch"] if row and row["audit_epoch"] is not None else ""
     stored_audit_seq = row["audit_last_seq"] if row and row["audit_last_seq"] is not None else -1
@@ -330,7 +353,11 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
     if audit_epoch:
         audit_last_seq = stored_audit_seq if audit_epoch == stored_audit_epoch else -1
         new_audit, audit_max_seq = _entries_past(data.get("audit_entries") or [], audit_last_seq)
-        statements += await _chunk_statements(match_id, slot, [("audit", new_audit)], audit_last_seq)
+        audit_statements, audit_evicted = await _chunk_statements(
+            match_id, slot, [("audit", new_audit)], audit_last_seq
+        )
+        statements += audit_statements
+        first_evicted += audit_evicted
     else:
         audit_epoch, audit_max_seq = stored_audit_epoch, stored_audit_seq
 
@@ -377,6 +404,14 @@ async def _append_session_log_locked(data: dict, match_id: str, slot: int | None
         )
     )
     await run_batch(statements)
+    for kind in first_evicted:
+        log.warning(
+            "Session log cap reached: match=%s slot=%s kind=%s; its oldest lines are being deleted"
+            " (counted in session_log_evictions)",
+            match_id[:8],
+            slot,
+            kind,
+        )
     return {"lastSeq": max_seq, "auditLastSeq": audit_max_seq}
 
 
@@ -428,9 +463,15 @@ def _kind_runs(entries: list[dict]) -> list[tuple[str, list[dict]]]:
 
 async def _chunk_statements(
     match_id: str, slot: int | None, runs: list[tuple[str, list[dict]]], last_seq: int
-) -> list[Executable]:
-    """INSERTs storing each run as chunks of its kind, in order, plus each kind's cap DELETE when needed."""
+) -> tuple[list[Executable], list[str]]:
+    """INSERTs storing each run as chunks of its kind, in order, plus each kind's cap DELETE when needed.
+
+    Each cap DELETE comes after the statements that record what it removes
+    (_eviction_statements). Also returns the kinds whose cap deletes for the
+    first time for this player, for the caller to log once the batch is in.
+    """
     statements: list[Executable] = []
+    first_evicted: list[str] = []
     high_seq = last_seq
     new_bytes: dict[str, int] = {}
     for kind, run_entries in runs:
@@ -453,8 +494,11 @@ async def _chunk_statements(
             )
     for kind, added in new_bytes.items():
         if await _stored_chunk_bytes(match_id, slot, kind) + added > _chunk_cap(kind):
+            if not await fetch(select(SessionLogEviction.id).where(*_eviction_of(match_id, slot, kind))):
+                first_evicted.append(kind)
+            statements += _eviction_statements(match_id, slot, kind)
             statements.append(_chunk_cap_statement(match_id, slot, kind))
-    return statements
+    return statements, first_evicted
 
 
 def _split_entries(entries: list[dict]) -> list[list[dict]]:
@@ -496,12 +540,12 @@ def _chunks_of(match_id: str, slot: int | None, kinds: tuple[str, ...]) -> tuple
     return (SessionLogChunk.match_id == match_id, SessionLogChunk.slot.is_(slot), SessionLogChunk.kind.in_(kinds))
 
 
-def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> Executable:
-    """DELETE the oldest `kind` chunks for (match_id, slot) until the total fits its cap.
+def _over_cap(match_id: str, slot: int | None, kind: str) -> tuple[ColumnElement[bool], ...]:
+    """The WHERE terms selecting the `kind` chunks for (match_id, slot) past its cap.
 
-    Keeps the newest chunks whose cumulative size (counted from the newest
-    backwards) still fits, in one statement rather than a per-row DELETE.
-    Only chunks of `kind` count and go: each kind has its own budget.
+    The newest chunks whose cumulative size (counted from the newest
+    backwards) still fits are kept; the rest are past the cap. Only chunks of
+    `kind` count: each kind has its own budget.
     """
     newest_first = (
         select(
@@ -512,7 +556,79 @@ def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> 
         .subquery()
     )
     fits = select(newest_first.c.id).where(newest_first.c.running_total <= _chunk_cap(kind))
-    return delete(SessionLogChunk).where(*_chunks_of(match_id, slot, (kind,)), SessionLogChunk.id.not_in(fits))
+    return (*_chunks_of(match_id, slot, (kind,)), SessionLogChunk.id.not_in(fits))
+
+
+def _chunk_cap_statement(match_id: str, slot: int | None, kind: str = "log") -> Executable:
+    """DELETE the oldest `kind` chunks for (match_id, slot) until the total fits its cap.
+
+    One statement rather than a per-row DELETE (_over_cap).
+    """
+    return delete(SessionLogChunk).where(*_over_cap(match_id, slot, kind))
+
+
+def _eviction_of(match_id: str, slot: int | None, kind: str) -> tuple[ColumnElement[bool], ...]:
+    """The WHERE terms selecting one player's eviction record for one kind."""
+    return (
+        SessionLogEviction.match_id == match_id,
+        SessionLogEviction.slot.is_(slot),
+        SessionLogEviction.kind == kind,
+    )
+
+
+def _eviction_statements(match_id: str, slot: int | None, kind: str) -> list[Executable]:
+    """Record what the cap DELETE right after these is about to remove.
+
+    In the same batch, before the DELETE, so the record counts exactly the
+    chunks it removes: their entries, and the last seq of the newest of them
+    (every chunk of this kind before it goes too). The record lives apart from
+    the chunks, so no later cap removes it (specs/session_log_store.qnt,
+    truncationIsVisible). The first statement creates the record if missing.
+    """
+    removed = _over_cap(match_id, slot, kind)
+    length = case((func.json_valid(SessionLogChunk.entries), func.json_array_length(SessionLogChunk.entries)), else_=0)
+    gone = select(func.coalesce(func.sum(length), 0)).where(*removed).scalar_subquery()
+    last = select(SessionLogChunk.last_seq).where(*removed).order_by(SessionLogChunk.id.desc()).limit(1)
+    missing = ~exists(select(SessionLogEviction.id).where(*_eviction_of(match_id, slot, kind)))
+    return [
+        insert(SessionLogEviction).from_select(
+            ["match_id", "slot", "kind"],
+            select(literal(match_id), literal(slot, Integer), literal(kind)).where(missing),
+        ),
+        update(SessionLogEviction)
+        .where(*_eviction_of(match_id, slot, kind))
+        .values(
+            entries=SessionLogEviction.entries + gone,
+            through_seq=func.coalesce(last.scalar_subquery(), SessionLogEviction.through_seq),
+            updated_at=now(),
+        ),
+    ]
+
+
+# The line a log's readers put first for each of its streams a cap has
+# deleted lines from (specs/session_log_store.qnt, truncationIsVisible).
+SERVER_LOG_EVICTED = "SERVER-LOG-EVICTED"
+
+
+async def eviction_lines(match_id: str, slot: int | None, kind: str = "log") -> list[dict]:
+    """One entry per kind of a stream whose cap has deleted lines, saying how many and through which seq."""
+    rows = await fetch(
+        select(SessionLogEviction.kind, SessionLogEviction.entries, SessionLogEviction.through_seq)
+        .where(
+            SessionLogEviction.match_id == match_id,
+            SessionLogEviction.slot.is_(slot),
+            SessionLogEviction.kind.in_(_STREAM_KINDS[kind]),
+            SessionLogEviction.entries > 0,
+        )
+        .order_by(SessionLogEviction.kind)
+    )
+    return [
+        {
+            "msg": f"{SERVER_LOG_EVICTED} kind={r['kind']} entries={r['entries']} through_seq={r['through_seq']}:"
+            " the server's size cap deleted this stream's oldest lines, up to and including that seq"
+        }
+        for r in rows
+    ]
 
 
 # Chunks read per query when a stored log is assembled or streamed: at most
@@ -545,11 +661,17 @@ async def iter_chunk_entries(
 
     `kind` names the stream: "log" takes the JS lines' chunks and the C
     lines' ('clog') together in row-id order, which is the order the entries
-    were sent in (_kind_runs); "audit" the input audit's.
+    were sent in (_kind_runs); "audit" the input audit's. The log's first
+    page is its eviction lines, if a cap has deleted any of its lines
+    (eviction_lines); the audit's records keep their own shape.
     Reads a page of chunks per query and parses each page in a worker thread,
     so a long log never holds the event loop for long (see the admin export
     in api/app.py). `through_id` stops at that chunk id.
     """
+    if kind == "log":
+        evicted = await eviction_lines(match_id, slot, kind)
+        if evicted:
+            yield evicted
     after = 0
     while True:
         page = select(SessionLogChunk.id, SessionLogChunk.entries).where(
@@ -570,8 +692,8 @@ async def count_log_entries(match_id: str, slot: int | None) -> tuple[int, int]:
     """How many entries one player's stored log chunks hold, and the id of the newest one.
 
     The log's chunks are its JS lines' and its C lines' ('clog'), as
-    iter_chunk_entries reads them. SQLite counts them, so nothing is parsed
-    here. A chunk that isn't valid JSON counts none, as it holds none for
+    iter_chunk_entries reads them, and its eviction lines count too. SQLite
+    counts them, so nothing is parsed here. A chunk that isn't valid JSON counts none, as it holds none for
     iter_chunk_entries. Reading `through_id=` the returned id leaves out
     chunks a live match appends afterwards. It can't bring back chunks a size
     cap deletes meanwhile (a live log near its cap), so a stream can hold
@@ -585,7 +707,8 @@ async def count_log_entries(match_id: str, slot: int | None) -> tuple[int, int]:
             func.coalesce(func.max(SessionLogChunk.id), 0).label("through"),
         ).where(*_chunks_of(match_id, slot, _STREAM_KINDS["log"]))
     )
-    return (int(rows[0]["n"]), int(rows[0]["through"])) if rows else (0, 0)
+    evicted = len(await eviction_lines(match_id, slot))
+    return (int(rows[0]["n"]) + evicted, int(rows[0]["through"])) if rows else (evicted, 0)
 
 
 async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: str | None) -> list[dict]:

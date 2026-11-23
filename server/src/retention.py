@@ -26,6 +26,7 @@ from src.schema import (
     Screenshot,
     SessionLog,
     SessionLogChunk,
+    SessionLogEviction,
 )
 
 log = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ def _event_match_id() -> ColumnElement:
 
 
 # Everything keyed by match_id, in deletion order.
-_MATCH_TABLES = (Screenshot, DesyncEvent, SessionLogChunk, SessionLog, MatchMetrics)
+_MATCH_TABLES = (Screenshot, DesyncEvent, SessionLogChunk, SessionLogEviction, SessionLog, MatchMetrics)
 
 
 async def mark_expired() -> list[str]:

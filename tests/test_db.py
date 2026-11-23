@@ -759,7 +759,7 @@ async def _run_init_twice(tmp_db):
     await close_db()
     await init_db(tmp_db)
     rows = await query("SELECT version FROM schema_migrations ORDER BY version", ())
-    assert [r["version"] for r in rows] == ["0001", "0002", "0003", "0004", "0005"]
+    assert [r["version"] for r in rows] == ["0001", "0002", "0003", "0004", "0005", "0006"]
     await close_db()
 
 
@@ -973,8 +973,10 @@ async def _run_own_room(tmp_db):
         for seq in range(1, 11):
             await append_session_flush({**_CLOG_BASE, "entries": [_js(seq, "x" * 80)]})
         log = await _read_back("m-clog")
-        assert log[0] == "[C] MISPREDICTION 0"
-        assert log[-1] == "x" * 80 + " 10" and len(log) < 11
+        # The JS lines' cap deleted some: the log says so first, then the C line.
+        assert log[0].startswith("SERVER-LOG-EVICTED kind=log ")
+        assert log[1] == "[C] MISPREDICTION 0"
+        assert log[-1] == "x" * 80 + " 10" and len(log) < 12
 
         # One JS line, then C lines far past the C cap: the JS line stays.
         base = {**_CLOG_BASE, "match_id": "m-clog-2"}
@@ -982,8 +984,9 @@ async def _run_own_room(tmp_db):
         for seq in range(1, 11):
             await append_session_flush({**base, "entries": [_c(seq, "y" * 80)]})
         log = await _read_back("m-clog-2")
-        assert log[0] == "js 0"
-        assert log[-1] == "[C] " + "y" * 80 + " 10" and len(log) < 11
+        assert log[0].startswith("SERVER-LOG-EVICTED kind=clog ")
+        assert log[1] == "js 0"
+        assert log[-1] == "[C] " + "y" * 80 + " 10" and len(log) < 12
 
         # Each kind is held to its own cap.
         for match_id in ("m-clog", "m-clog-2"):
@@ -1044,4 +1047,67 @@ async def _run_alternating(tmp_db):
     kinds = await _kinds("m-clog")
     assert len(kinds) == db_mod._MAX_KIND_RUNS and kinds[-1] == "log"
     assert await _read_back("m-clog") == [e["msg"] for e in entries]
+    await close_db()
+
+
+def test_a_cap_that_deletes_lines_says_so_first_in_the_log(tmp_db, caplog):
+    # evictionIsRecordedTest: each stream past its cap. The record counts
+    # exactly what the DELETE removed, the reader's first line says so, the
+    # other stream's record stays empty, and the server logs it once.
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="src.db"):
+        _run_async(_run_eviction_record(tmp_db))
+    warned = [r.getMessage() for r in caplog.records if "Session log cap reached" in r.getMessage()]
+    assert warned == [
+        "Session log cap reached: match=m-evict slot=0 kind=log; its oldest lines are being deleted"
+        " (counted in session_log_evictions)",
+        "Session log cap reached: match=m-evict- slot=0 kind=clog; its oldest lines are being deleted"
+        " (counted in session_log_evictions)",
+    ]
+
+
+async def _run_eviction_record(tmp_db):
+    import json
+
+    import src.db as db_mod
+    from src.db import append_session_flush, close_db, init_db, query
+
+    await init_db(tmp_db)
+    caps = db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP
+    db_mod._SESSION_LOG_CHUNK_CAP = db_mod._SESSION_LOG_C_CAP = 600
+    try:
+        for match_id, line in (("m-evict", _js), ("m-evict-c", _c)):
+            base = {**_CLOG_BASE, "match_id": match_id}
+            sent = []
+            for seq in range(12):
+                entries = [line(seq, "z" * 60), line(seq + 100, "z" * 60)]  # two lines a flush
+                for e in entries:
+                    e["seq"] = len(sent)
+                    sent.append(e)
+                await append_session_flush({**base, "entries": entries})
+            kind = "log" if line is _js else "clog"
+            other = "clog" if kind == "log" else "log"
+            stored = [
+                e
+                for (text,) in [
+                    (r["entries"],)
+                    for r in await query("SELECT entries FROM session_log_chunks WHERE match_id=? ORDER BY id", (match_id,))
+                ]
+                for e in json.loads(text)
+            ]
+            gone = sent[: len(sent) - len(stored)]
+            assert [e["seq"] for e in stored] == [e["seq"] for e in sent[len(gone) :]], "the oldest went, in order"
+            rows = await query(
+                "SELECT kind, entries, through_seq FROM session_log_evictions WHERE match_id=? ORDER BY kind", (match_id,)
+            )
+            assert [dict(r) for r in rows] == [{"kind": kind, "entries": len(gone), "through_seq": gone[-1]["seq"]}]
+            log = await _read_back(match_id)
+            assert log[0].startswith(
+                f"SERVER-LOG-EVICTED kind={kind} entries={len(gone)} through_seq={gone[-1]['seq']}:"
+            )
+            assert not any(m.startswith(f"SERVER-LOG-EVICTED kind={other} ") for m in log)
+            assert log[1:] == [e["msg"] for e in stored]
+    finally:
+        db_mod._SESSION_LOG_CHUNK_CAP, db_mod._SESSION_LOG_C_CAP = caps
     await close_db()
