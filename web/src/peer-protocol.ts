@@ -69,8 +69,13 @@ const TEXT_GRAMMAR = {
     // its pushes went unanswered; host: any other drop); taken only from the
     // host (specs/drop_is_final.qnt).
     dropped: ':(?:desync|host)',
-    // rb-check:<frame>:<gameplay hash>[:<game state hash>]
+    // rb-check:<frame>:<gameplay hash>[:<game state hash>]  Read but no longer
+    // sent: from a page before rb-final, of a frame that may still be rolled
+    // back. A current page ignores it.
     'rb-check': `:${INT}:${INT}(?::${INT})?`,
+    // rb-final:<frame>:<gameplay hash>:<game state hash>  of a frame the sender
+    // can no longer roll back (web/src/rb-check.ts, specs/rb_check.qnt)
+    'rb-final': `:\\d+:\\d+:\\d+`,
     // rb-blocks:<frame>:<8 hex digits per block, no separator>
     'rb-blocks': `:${INT}:(?:${HEX}{8})*`,
     // rb-regions:<frame>:<hex>,<hex>,...

@@ -33,3 +33,4 @@ web/src/reset-combo.ts
 web/src/contextual-reset-intent.ts
 
 web/src/controller-mask.ts
+web/src/rb-check.ts

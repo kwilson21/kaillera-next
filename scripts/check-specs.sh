@@ -253,6 +253,19 @@ done
 $QUINT run "$DIGEST" --main=desync_digest_current --invariant=neverReportsAnUnconfirmedHash \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── RB-CHECK: the rollback engine's cross-peer gameplay-hash check ──────────
+RBCHECK=specs/rb_check.qnt
+$QUINT typecheck "$RBCHECK"
+for variant in rb_check_before rb_check_current; do
+  $QUINT test "$RBCHECK" --main="$variant" --backend="$BACKEND"
+done
+# Today: a MISMATCH means the peers' final states differ, and a frame whose
+# final states differ is never logged MATCH or dropped uncompared. Violated
+# when each page sent the frame it had just simulated and the receiver
+# compared it with its ring a few frames later, dropping it past the window.
+$QUINT run "$RBCHECK" --main=rb_check_current --invariant=rbCheckIsSound \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # ── Desync screenshots: which frame each peer captures ──────────────────────
 CAPTURE=specs/desync_capture.qnt
 $QUINT typecheck "$CAPTURE"

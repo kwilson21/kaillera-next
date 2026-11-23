@@ -75,6 +75,15 @@ test('rollback checks: hashes are signed integers, the game hash optional', () =
   bad('lockstep', 'rb-check:1200:0xdeadbeef');
 });
 
+test('confirmed rollback checks: frame and both hashes, unsigned', () => {
+  ok('lockstep', 'rb-final:1200:3405691582:0');
+  ok('lockstep', 'rb-final:0:4294967295:305419896');
+  bad('lockstep', 'rb-final:1200:3405691582');
+  bad('lockstep', 'rb-final:1200:-5:0');
+  bad('lockstep', 'rb-final:-1:5:0');
+  bad('lockstep', 'rb-final:1200:0xdeadbeef:0');
+});
+
 test('block, region and sub-hash lists are hex', () => {
   ok('lockstep', 'rb-blocks:1200:00000000deadbeef0badf00d');
   ok('lockstep', 'rb-blocks:1200:');

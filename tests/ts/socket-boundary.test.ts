@@ -261,6 +261,7 @@ test("the engine's channel strings: what each channel carries is taken, anything
   const { lines, boundary } = logging();
   // As netplay-rollback.js builds them.
   assert.equal(boundary.peerText('lockstep', 'rb-check:120:-5:77'), true);
+  assert.equal(boundary.peerText('lockstep', 'rb-final:120:5:77'), true);
   assert.equal(boundary.peerText('lockstep', 'ready'), true);
   assert.equal(boundary.peerText('lockstep', 'roster:900:0,1'), true);
   assert.equal(boundary.peerText('sync-state', 'sync-start:900:12:1:0'), true);

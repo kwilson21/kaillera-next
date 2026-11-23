@@ -32,6 +32,8 @@ import {
   lateJoinBootProgress,
 } from './late-join-input-bridge.ts';
 import { digestFrame } from './desync-confirm.ts';
+import { createRbCheckBook } from './rb-check-book.ts';
+import { pairVerdict } from './rb-check.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import {
   decodeGameEnded,
@@ -349,6 +351,8 @@ export const KNCore = {
   lockstepStep,
   measureCanvasHealth,
   digestFrame,
+  /** RB-CHECK: the rollback engine's cross-peer check of confirmed gameplay hashes (web/src/rb-check.ts, specs/rb_check.qnt). */
+  rbCheck: { createBook: createRbCheckBook, pairVerdict },
   createRomResumeAnswerer,
   disconnectDisposition,
   hasAttemptLeft,

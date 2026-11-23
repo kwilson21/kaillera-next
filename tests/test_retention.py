@@ -55,6 +55,8 @@ def test_each_signal_flags(msg, signal):
     "msg",
     [
         "RB-CHECK f=10 STALE (frame not in ring) peer=0x1",  # not a desync
+        "RB-CHECK f=10 UNCOMPARED slot=1 missing=peer hash=0x1",  # no counterpart: not a desync
+        "RB-LEGACY-CHECK slot=1: peer sends unconfirmed hashes (older page); not compared",
         "VISUAL-FREEZE failed count=1 Error: x",  # the detector failing, not a freeze
         "note: TICK-STUCK mentioned mid-message",  # tag must be the first word
         "INPUT-OOR slot=1 recvF=5 myF=9",  # one OOR is not a storm

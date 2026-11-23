@@ -467,10 +467,14 @@ def query_desync_timeline(df: pl.DataFrame, base: str, key: str, match_id: str) 
     print()
     rb_checks = df.filter(pl.col("msg").str.contains("RB-CHECK"))
     if rb_checks.height > 0:
-        stale = rb_checks.filter(pl.col("msg").str.contains("STALE"))
-        match_ok = rb_checks.filter(pl.col("msg").str.contains("MATCH"))
+        # STALE: pages before rb-final; UNCOMPARED: a value whose counterpart never came.
+        stale = rb_checks.filter(pl.col("msg").str.contains("STALE|UNCOMPARED"))
+        match_ok = rb_checks.filter(pl.col("msg").str.contains(" MATCH"))
         mismatch_rb = rb_checks.filter(pl.col("msg").str.contains("MISMATCH"))
-        print(f"  RB-CHECK: {rb_checks.height} total — {match_ok.height} MATCH, {mismatch_rb.height} MISMATCH, {stale.height} STALE")
+        print(
+            f"  RB-CHECK: {rb_checks.height} total — {match_ok.height} MATCH, {mismatch_rb.height} MISMATCH, "
+            f"{stale.height} STALE/UNCOMPARED"
+        )
         if mismatch_rb.height > 0:
             print("  First RB-CHECK mismatches:")
             for row in mismatch_rb.head(5).iter_rows(named=True):

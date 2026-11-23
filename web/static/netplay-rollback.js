@@ -4348,9 +4348,31 @@
   // cause and ate the frame budget, contributing to user-perceived lag.
   const RB_BISECT_MAX_PER_MATCH = 5;
   let _rbBisectCount = 0;
-  // Per-frame hash broadcast pending — populated after rollback to verify
-  // the rollback restoration produced bit-identical state across peers.
+  // Set when a replay finishes: the next tick logs RB-POST-RB, this page's
+  // own hashes of the first frame after the replay. Local only: that frame
+  // can still be rolled back, so it is not sent for comparison.
   let _rbPendingPostRollbackHash = false;
+  // RB-CHECK (web/src/rb-check.ts, specs/rb_check.qnt): each page files the
+  // gameplay hash of the frame one rollback window behind the newest, which
+  // it can no longer roll back, sends it (`rb-final:`), and compares it with
+  // each peer's value for that frame whichever arrives second. A lone value
+  // is logged as UNCOMPARED after RB_CHECK_HISTORY_FRAMES.
+  const RB_CHECK_HISTORY_FRAMES = 600;
+  let _rbCheckBook = null;
+  const _rbChecks = () => {
+    if (!_rbCheckBook) _rbCheckBook = window.KNCore.rbCheck.createBook(RB_CHECK_HISTORY_FRAMES);
+    return _rbCheckBook;
+  };
+  // Comparisons and expiries decided since the last normal tick, logged there.
+  let _rbCheckOutcomes = [];
+  // Peers (by slot) already logged as sending `rb-check:` (a page from
+  // before rb-final: its hashes may be of frames still rolled back).
+  const _rbLegacyCheckSlots = new Set();
+  const _rbCheckClear = () => {
+    _rbCheckBook?.clear();
+    _rbCheckOutcomes = [];
+    _rbLegacyCheckSlots.clear();
+  };
   // RF6 Part A: AUDIO-DEATH diagnostics enrichment. Track the most recent
   // `C-REPLAY done` frame and how many kn_reset_audio() calls have fired
   // since then, so audio-empty / audio-silent log lines can report
@@ -10202,6 +10224,7 @@
         if (
           _isPeerPendingLateJoin(remoteSid, peer) &&
           (e.data.startsWith('rb-check:') ||
+            e.data.startsWith('rb-final:') ||
             e.data.startsWith('rb-blocks:') ||
             e.data.startsWith('rb-subhash:') ||
             e.data.startsWith('rb-regions:') ||
@@ -10211,18 +10234,25 @@
         }
         // FPU trace: cross-platform determinism verification from host
         // Rollback state checksum verification
-        if (e.data.startsWith('rb-check:')) {
-          // Store peer's hash — compare when we reach the same frame
-          // Format: rb-check:frame:gpHash:gameHash (gameHash added for full state detection)
+        if (e.data.startsWith('rb-final:')) {
+          // A peer's gameplay hash of a frame it can no longer roll back:
+          // rb-final:<frame>:<gameplay hash>:<game state hash>. The book
+          // compares it with ours once both are here (web/src/rb-check.ts).
+          if (peer.slot === null || peer.slot === undefined) return;
           const parts = e.data.split(':');
-          const checkFrame = parseInt(parts[1], 10);
-          const peerHash = parseInt(parts[2], 10);
-          const peerGameHash = parts.length > 3 ? parseInt(parts[3], 10) : null;
-          if (!window._rbPendingChecks) window._rbPendingChecks = {};
-          window._rbPendingChecks[checkFrame] = peerHash;
-          if (peerGameHash !== null) {
-            if (!window._rbPendingGameChecks) window._rbPendingGameChecks = {};
-            window._rbPendingGameChecks[checkFrame] = peerGameHash;
+          const outcome = _rbChecks().filePeer(peer.slot, parseInt(parts[1], 10), {
+            gp: parseInt(parts[2], 10),
+            game: parseInt(parts[3], 10),
+          });
+          if (outcome) _rbCheckOutcomes.push(outcome);
+          return;
+        }
+        if (e.data.startsWith('rb-check:')) {
+          // A page from before rb-final: the hash of the frame it had just
+          // simulated, which may still be rolled back there. Not compared.
+          if (!_rbLegacyCheckSlots.has(peer.slot)) {
+            _rbLegacyCheckSlots.add(peer.slot);
+            _syncLog(`RB-LEGACY-CHECK slot=${peer.slot}: peer sends unconfirmed hashes (older page); not compared`);
           }
           return;
         }
@@ -10806,6 +10836,9 @@
     delete _consecutiveFabrications[slot];
     delete _inputLateLogTime[slot];
     delete _auditLastRemote[slot];
+    // RB-CHECK values it sent and not yet compared; whether it is an older page.
+    _rbCheckBook?.forgetPeer(slot);
+    _rbLegacyCheckSlots.delete(slot);
 
     // Per-peer-object ack state
     if (opts.peer) {
@@ -14305,12 +14338,12 @@
     // when the overlay is still covering the live canvas.
     _hideRollbackVisualFreeze();
     _shadowScheduleResync('post-replay');
-    // Replay finished — broadcast the gameplay hash so the peer can
-    // verify the rollback restoration produced identical game state.
-    // gameplay_hash hashes ONLY game-relevant RDRAM addresses (damage,
-    // stocks, timer, RNG) — immune to audio/video/heap noise.
+    // Replay finished — log this page's hashes of the frame it caught up
+    // to. Local only: that frame can still be rolled back, so it is not
+    // sent for RB-CHECK; the frame is compared once it is a rollback window
+    // old (rb-final, web/src/rb-check.ts). gameplay_hash hashes ONLY
+    // game-relevant RDRAM addresses (damage, stocks, timer, RNG).
     const hashFrame = _frameNum;
-    const checkFrame = hashFrame;
     const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
     const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
     const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
@@ -14349,19 +14382,8 @@
       }
     }
     _rollbackPreHashFrame = -1;
-    if (rbCheckGameplay) {
-      for (const p of getActivePeers()) {
-        if (p.dc?.readyState === 'open') {
-          try {
-            p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-          } catch (_) {}
-        }
-      }
-    }
-    // Schedule one more hash broadcast on the NEXT tick so we capture
-    // the state of the FIRST frame after replay completes — that's the
-    // frame most likely to expose "rollback restoration was lossy"
-    // bugs because it's the first divergence point.
+    // Log the hashes of the FIRST frame after the replay on the next tick
+    // too (RB-POST-RB; tools/analyze_match.py compares it with this line).
     _rbPendingPostRollbackHash = rbCheckGameplay;
     _rbReplayLogged = false;
     _lastRollbackDoneFrame = _frameNum;
@@ -15061,6 +15083,8 @@
         _rbBisectFramesRemaining = 0;
         _rbBisectCount = 0;
         _rbPendingPostRollbackHash = false;
+        // RB-CHECK values of an earlier run: a late join or restart re-inits here.
+        _rbCheckClear();
         if (_runSubstate === RUN_RB_STALL) _runSubstate = RUN_NORMAL;
         _rollbackStallStart = 0;
 
@@ -18139,13 +18163,12 @@
         // ── Freeze detection (delegated to kn-diagnostics.js) ──────────
         _diag.checkFreeze(localInput);
 
-        // ── Bisect-on-mismatch: when a divergence is detected, switch to
-        // per-frame hash broadcasts for the next N frames so we can pinpoint
-        // exactly when the next divergence happens. Without this, mismatch
-        // detection only fires at 300-frame boundaries — we can detect THAT
-        // divergence exists but not WHEN it was introduced. Per-frame hashing
-        // shrinks the window from 300 frames to 1 frame, but is expensive
-        // (~0.5 ms/frame), so we only run it briefly after a mismatch.
+        // ── Bisect-on-mismatch: when a divergence is detected, file and send
+        // the RB-CHECK hash (and, deep, the region snapshot) of every frame
+        // for the next N frames instead of every 300th, so the next
+        // divergence is found to the frame. The filing itself is the RB-CHECK
+        // block below (cadence 1 while this is on); it still files only
+        // frames one rollback window back, which can no longer be replayed.
         const bisectThisFrame =
           _knDeepDiagnostics &&
           _rbBisectActive &&
@@ -18158,164 +18181,34 @@
             _rbBisectActive = false;
             _syncLog(`RB-BISECT done at f=${_frameNum}`);
           }
-          // Broadcast both the cheap hash AND the per-region snapshot.
-          // Field test 754/755 had 1553 RB-REGION-DIFF entries stuck on
-          // "peer regions not yet received" because the receiver had no
-          // peer region data for the frame the bisect was checking. The
-          // periodic rb-regions broadcast only fires every 300 frames;
-          // bisect mode needs to send region snapshots per frame too.
-          // Cost: ~2 KB extra per bisect frame for at most 30 frames.
-          const hashFrame = _frameNum - 1;
-          const checkFrame = hashFrame;
-          const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
-          if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
-                } catch (_) {}
-              }
-            }
-            // Region snapshot via the frame-specific export so the snapshot
-            // matches the frame we just sent the hash for, not the most
-            // recent ring slot.
-            const NUM_REGIONS_BISECT = 256;
-            if (!_rbRegionsBufPtr && tickMod._malloc) _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_BISECT * 4);
-            if (_rbRegionsBufPtr) {
-              let ok = 0;
-              if (tickMod._kn_state_region_hashes_frame) {
-                ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_BISECT);
-              } else if (tickMod._kn_state_region_hashes) {
-                tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS_BISECT);
-                ok = NUM_REGIONS_BISECT;
-              }
-              if (ok > 0) {
-                const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_BISECT);
-                const regionsHex = Array.from(regions)
-                  .map((h) => h.toString(16))
-                  .join(',');
-                if (!window._rbLocalRegions) window._rbLocalRegions = {};
-                window._rbLocalRegions[checkFrame] = regionsHex;
-                for (const p of getActivePeers()) {
-                  if (p.dc?.readyState === 'open') {
-                    try {
-                      p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-                    } catch (_) {}
-                  }
-                }
-              }
-            }
-          }
         }
 
-        // ── Post-rollback verification: immediately after a replay completes,
-        // broadcast the rolled-forward state hash so peers can confirm the
-        // rollback restoration produced bit-identical state. Without this,
-        // a "toxic" rollback (one that introduces divergence) is invisible
-        // until the next 300-frame checkpoint, making it impossible to
-        // attribute the divergence to a specific rollback event.
-        //
-        // We ALSO broadcast per-64KB RDRAM block hashes + the per-region
-        // savestate digest here, so the 2026-04-08 audit path (match
-        // 002ad0f6) can pinpoint which block diverges AT the rollback
-        // boundary instead of inferring it from the next 300-frame
-        // checkpoint 180 frames later. Without per-rollback block data, we
-        // can see divergence has happened by f=3599 but not whether it was
-        // introduced at f=3420, f=3440, or f=3460.
+        // ── Post-rollback hashes: the tick after a replay completes, log this
+        // page's hashes of the frame just run (RB-POST-RB; with C-REPLAY done,
+        // tools/analyze_match.py checks that the restoration kept the ring
+        // and the live state together). Local only: the frame can still be
+        // rolled back, so a peer's hash of it could legitimately differ. It
+        // reaches RB-CHECK one rollback window later, like every frame.
         if (_rbPendingPostRollbackHash && !_isRbCheckGameplayPhase()) {
           _rbPendingPostRollbackHash = false;
         }
         if (_rbPendingPostRollbackHash) {
           _rbPendingPostRollbackHash = false;
           const hashFrame = _frameNum - 1;
-          const checkFrame = hashFrame;
           const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
           const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
           const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
           const hiddenFp = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
           const sfState = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
           const taintedCount = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
-          if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
+          if (gpHash !== 0) {
             _syncLog(
-              `RB-POST-RB f=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (verifying restoration)`,
+              `RB-POST-RB f=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (local, not compared)`,
             );
-            // Cache for RB-CHECK comparison (see periodic broadcast below for
-            // why — same race window applies on the post-rollback path).
-            if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
-            window._rbLocalGameHashes[checkFrame] = gpHash;
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-                } catch (_) {}
-              }
-            }
-
-            // Block-level snapshot + broadcast (duplicates the 300-frame
-            // periodic logic at a per-rollback cadence). Cache locally and
-            // broadcast so the peer can diff at this exact frame. Skips if
-            // the WASM exports or malloc aren't available (old core).
-            if (
-              _knDeepDiagnostics &&
-              tickMod._kn_rdram_block_hashes &&
-              tickMod._kn_get_taint_blocks &&
-              tickMod._malloc
-            ) {
-              if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
-              if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
-              if (_rbHashBufPtr && _rbTaintBufPtr) {
-                tickMod._kn_rdram_block_hashes(_rbHashBufPtr, RDRAM_TAINT_BLOCKS);
-                tickMod._kn_get_taint_blocks(_rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
-                const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, RDRAM_TAINT_BLOCKS);
-                const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
-                const blocksSnap = Array.from(blocks);
-                const taintSnap = Array.from(taint);
-                const blocksHex = blocksSnap.map((h) => h.toString(16).padStart(8, '0')).join('');
-                const taintHex = taintSnap.map((t) => (t ? '1' : '0')).join('');
-                _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex} (post-rollback)`);
-                window._rbLocalBlocks[checkFrame] = blocksSnap;
-                window._rbLocalTaint[checkFrame] = taintSnap;
-                for (const p of getActivePeers()) {
-                  if (p.dc?.readyState === 'open') {
-                    try {
-                      p.dc.send(`rb-blocks:${checkFrame}:${blocksHex}`);
-                    } catch (_) {}
-                  }
-                }
-              }
-            }
-
-            // Per-region savestate digest (frame-specific variant so the
-            // regions match the post-rollback state of hashFrame, not the
-            // most recent ring slot). This is what lets the peer see which
-            // slice of the savestate — RDRAM r0..r31 vs post-RDRAM r32 —
-            // drifted at the rollback boundary.
-            const NUM_REGIONS_POSTRB = 256;
-            if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
-              _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_POSTRB * 4);
-            }
-            if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes_frame) {
-              const ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
-              if (ok > 0) {
-                const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
-                const regionsHex = Array.from(regions)
-                  .map((h) => h.toString(16))
-                  .join(',');
-                if (!window._rbLocalRegions) window._rbLocalRegions = {};
-                window._rbLocalRegions[checkFrame] = regionsHex;
-                for (const p of getActivePeers()) {
-                  if (p.dc?.readyState === 'open') {
-                    try {
-                      p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-                    } catch (_) {}
-                  }
-                }
-              }
-            }
           }
         }
 
-        // ── Periodic logging with timing + per-region hash exchange ──
+        // ── Periodic logging with timing ──
         // Tighter interval during menus (30 frames) to catch CSS/stage-select
         // divergence before it compounds. 300 frames during gameplay.
         const _hashInterval = _inGameplay ? 300 : _isLocalDev ? 30 : 60;
@@ -18324,102 +18217,31 @@
           const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
           const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
           const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+          // The NEWEST frame's hashes (hashF), for the log only: that frame
+          // may have run on a predicted input and may still be rolled back,
+          // so two healthy peers can log different values for it here.
+          // RB-CHECK compares the frame one rollback window back instead
+          // (the RB-CHECK block below). gameplay_hash hashes ONLY
+          // game-relevant RDRAM addresses (damage, stocks, timer, RNG seeds).
           const hashFrame = _frameNum - 1;
-          const checkFrame = hashFrame;
-          // Gameplay hash for RB-CHECK: hashes ONLY game-relevant RDRAM
-          // addresses (damage, stocks, timer, RNG seeds). Immune to audio/
-          // video/heap noise. game_state_hash + full_state_hash kept for
-          // diagnostic monitoring.
           const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
           const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
           const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
           const taintedCount = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
           const hiddenFp = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
           const sfState = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
-          // Per-region hashes — splits state buffer into 256 chunks
-          // (~34 KB regions for an ~8.6 MB savestate). At 32 regions the
-          // entire post-RDRAM section (CPU/cp0/cp1/event queue/fb) fit in
-          // one region, hiding which subsystem was diverging. 256 regions
-          // gives us ~7 regions covering the 256 KB post-RDRAM section, so
-          // a single mismatch pinpoints subsystem-level granularity.
-          const NUM_REGIONS = 256;
-          if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
-            _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS * 4);
-          }
-          let regionsHex = '';
-          if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes) {
-            tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS);
-            const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS);
-            regionsHex = Array.from(regions)
-              .map((h) => h.toString(16))
-              .join(',');
-          }
           _syncLog(
             `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} eq=0x${(tickMod._kn_eventqueue_hash?.() >>> 0).toString(16)} serSkip=${tickMod._kn_get_serialize_skip_count?.() ?? '?'}`,
           );
-          if (regionsHex) {
-            _syncLog(`C-REGIONS f=${checkFrame} ${regionsHex}`);
-            // Stash our own snapshot keyed by frame so the RB-CHECK mismatch
-            // handler can diff against the peer's regions for the SAME frame.
-            // Without this, comparing regions across slightly different frames
-            // would always show divergence (regions evolve every frame).
-            if (!window._rbLocalRegions) window._rbLocalRegions = {};
-            window._rbLocalRegions[checkFrame] = regionsHex;
-            // Trim old snapshots — keep only the last ~16 frames to bound memory
-            const keys = Object.keys(window._rbLocalRegions)
-              .map(Number)
-              .sort((a, b) => a - b);
-            if (keys.length > 16) {
-              for (const k of keys.slice(0, keys.length - 16)) {
-                delete window._rbLocalRegions[k];
-              }
-            }
-            // Broadcast regions for cross-player comparison
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-                } catch (_) {}
-              }
-            }
-          }
-          // Broadcast gameplay hash for peer comparison.
-          // This is the authoritative desync detection hash — only game-relevant
-          // RDRAM addresses. game_state_hash kept for diagnostic monitoring.
-          //
-          // Cache the hash we sent so RB-CHECK can compare against it instead
-          // of re-hashing the ring buffer when the peer's reply arrives. Without
-          // this cache, a rollback that occurs between broadcast and receipt
-          // would invalidate the local state for that frame, producing a
-          // phantom MISMATCH (host hash post-rollback vs peer hash from before
-          // the rollback). The peer's hash IS the canonical "what did this frame
-          // look like at the moment of broadcast" — so the right comparison is
-          // "what we broadcast" vs "what they broadcast" at the same instant.
-          if (_isRbCheckGameplayPhase()) {
-            if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
-            window._rbLocalGameHashes[checkFrame] = gpHash;
-            // Trim — keep only the most recent ~16 frames to bound memory.
-            const _rbHashKeys = Object.keys(window._rbLocalGameHashes)
-              .map(Number)
-              .sort((a, b) => a - b);
-            if (_rbHashKeys.length > 16) {
-              for (const k of _rbHashKeys.slice(0, _rbHashKeys.length - 16)) {
-                delete window._rbLocalGameHashes[k];
-              }
-            }
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-                } catch (_) {}
-              }
-            }
-          }
-
           // Block-level diagnostic: hash every 64 KB of RDRAM (128 blocks) and
           // dump the taint bitmap. Share with peer so that when RB-CHECK misses
           // we can pinpoint which untainted block is diverging and map it back
-          // to the subsystem that owns that address.
+          // to the subsystem that owns that address. The export reads LIVE
+          // RDRAM, which after the post-tick is the state frame _frameNum
+          // starts from: the state the ring will hold for _frameNum, taken
+          // before it is final. Keyed by that frame, which is on the cadence,
+          // so a MISMATCH on it a rollback window later (RB-DIFF) diffs the
+          // two peers' snapshots of it.
           if (_knDeepDiagnostics && tickMod._kn_rdram_block_hashes && tickMod._kn_get_taint_blocks && tickMod._malloc) {
             if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
             if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
@@ -18438,17 +18260,17 @@
               // Taint bitmap is 128 chars — tiny. Full block hashes are
               // 1024 chars per line; we keep them out of the steady-state log
               // and only dump via RB-BYTES on actual mismatch.
-              _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex}`);
-              // Cache our own snapshot keyed by hashFrame so RB-DIFF can
+              _syncLog(`C-BLOCKS f=${_frameNum} taint=${taintHex} (live, not final)`);
+              // Cache our own snapshot keyed by its frame so RB-DIFF can
               // compare frame-exactly against the peer's snapshot instead of
               // re-sampling live RDRAM (which would be frames ahead by then).
-              window._rbLocalBlocks[checkFrame] = blocksSnap;
-              window._rbLocalTaint[checkFrame] = taintSnap;
+              window._rbLocalBlocks[_frameNum] = blocksSnap;
+              window._rbLocalTaint[_frameNum] = taintSnap;
               // Broadcast block hashes to peer for per-block divergence diff
               for (const p of getActivePeers()) {
                 if (p.dc?.readyState === 'open') {
                   try {
-                    p.dc.send(`rb-blocks:${checkFrame}:${blocksHex}`);
+                    p.dc.send(`rb-blocks:${_frameNum}:${blocksHex}`);
                   } catch (_) {}
                 }
               }
@@ -18456,42 +18278,95 @@
           }
         }
 
-        // Check pending peer hashes only after the frame has aged out of the
-        // local correction window. A peer may send rb-check immediately after
-        // its own rollback while we have not received/applied the matching late
-        // input yet; comparing at age 1-3 frames flags the old prediction, not
-        // the final corrected state. Once old enough, compare against the newest
-        // ring entry for that frame, since rollback endpoint saves can replace
-        // the earlier predicted hash.
-        if (window._rbPendingChecks) {
-          for (const fStr of Object.keys(window._rbPendingChecks)) {
-            const f = parseInt(fStr);
-            const checkAge = _frameNum - f;
-            // Match the stall threshold's depth budget so we wait long enough
-            // for rollback-driven hash corrections to finalize before treating
-            // a peer's rb-check as authoritative. True-rollback widens this
-            // window to delay+10 (cap 12); legacy stays at delay+4.
-            const _checkAgeBudget = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
-            const minCheckAge = Math.min(Math.max(_checkAgeBudget, 4), Math.max(_rbRollbackMax - 1, 4));
-            if (checkAge > _rbRollbackMax) {
-              delete window._rbPendingChecks[fStr];
-              delete window._rbPendingGameChecks?.[fStr];
-              _syncLog(`RB-CHECK f=${f} STALE (missed finalized window age=${checkAge})`);
+        // ── RB-CHECK: file and send the gameplay hash of the frame one
+        // rollback window behind the newest (web/src/rb-check.ts,
+        // specs/rb_check.qnt). The engine never replays further back than
+        // _rbRollbackMax (the window KNDesync.setConfirmWindow gets too), so
+        // the ring's hash of that frame is final now, and the value filed is
+        // the one compared: a peer's value for the frame is compared with it
+        // whenever the second of the two arrives. The ring holds the window
+        // + 1 newest frames, so the frame is still in it at this tick; a
+        // frame before a resync's or late join's state is not, hashes to 0
+        // and is not filed. Frames on the cadence; every frame during bisect.
+        const rbCheckFrame = window.KNCore.digestFrame(_frameNum, _rbRollbackMax, bisectThisFrame ? 1 : _hashInterval);
+        if (rbCheckFrame >= 0 && _isRbCheckGameplayPhase()) {
+          const gp = (tickMod._kn_gameplay_hash?.(rbCheckFrame) ?? 0) >>> 0;
+          if (gp !== 0) {
+            const game = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(rbCheckFrame) ?? 0) >>> 0 : 0;
+            _rbCheckOutcomes.push(..._rbChecks().fileLocal(rbCheckFrame, { gp, game }));
+            for (const p of getActivePeers()) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send(`rb-final:${rbCheckFrame}:${gp}:${game}`);
+                } catch (_) {}
+              }
+            }
+            // Per-region savestate hashes of the same frame (deep), from the
+            // ring, so a MISMATCH on it can diff them against the peer's
+            // (RB-REGION-DIFF). 256 regions of ~34 KB: ~7 cover the post-RDRAM
+            // section (CPU/cp0/cp1/event queue/fb), so a mismatch pinpoints
+            // the subsystem.
+            const NUM_REGIONS = 256;
+            if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
+              _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS * 4);
+            }
+            if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes_frame) {
+              const ok = tickMod._kn_state_region_hashes_frame(rbCheckFrame, _rbRegionsBufPtr, NUM_REGIONS);
+              if (ok > 0) {
+                const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS);
+                const regionsHex = Array.from(regions)
+                  .map((h) => h.toString(16))
+                  .join(',');
+                if (!bisectThisFrame) _syncLog(`C-REGIONS f=${rbCheckFrame} ${regionsHex}`);
+                if (!window._rbLocalRegions) window._rbLocalRegions = {};
+                window._rbLocalRegions[rbCheckFrame] = regionsHex;
+                // Trim old snapshots — keep only the last ~16 frames to bound memory
+                const keys = Object.keys(window._rbLocalRegions)
+                  .map(Number)
+                  .sort((a, b) => a - b);
+                if (keys.length > 16) {
+                  for (const k of keys.slice(0, keys.length - 16)) {
+                    delete window._rbLocalRegions[k];
+                  }
+                }
+                for (const p of getActivePeers()) {
+                  if (p.dc?.readyState === 'open') {
+                    try {
+                      p.dc.send(`rb-regions:${rbCheckFrame}:${regionsHex}`);
+                    } catch (_) {}
+                  }
+                }
+              }
+            }
+          }
+        }
+        _rbCheckOutcomes.push(..._rbChecks().expire(_frameNum));
+
+        // Log what the book decided since the last tick: a comparison when
+        // the second value of a pair was filed, an UNCOMPARED value whose
+        // counterpart did not come within RB_CHECK_HISTORY_FRAMES.
+        if (_rbCheckOutcomes.length > 0) {
+          const rbCheckDecided = _rbCheckOutcomes;
+          _rbCheckOutcomes = [];
+          for (const outcome of rbCheckDecided) {
+            const f = outcome.frame;
+            const fStr = String(f);
+            if (outcome.kind === 'uncompared') {
+              _syncLog(
+                `RB-CHECK f=${f} UNCOMPARED slot=${outcome.slot} missing=${outcome.missing} hash=0x${outcome.value.gp.toString(16)}`,
+              );
               continue;
             }
-            if (checkAge >= minCheckAge) {
-              const peerHash = window._rbPendingChecks[fStr];
-              delete window._rbPendingChecks[fStr];
-              const localHash = tickMod._kn_gameplay_hash?.(f) ?? window._rbLocalGameHashes?.[f] ?? 0;
-              if (localHash === 0) {
-                _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
-              } else if (localHash === peerHash) {
+            {
+              const peerHash = outcome.peer.gp;
+              const localHash = outcome.local.gp;
+              if (localHash === peerHash) {
                 // Gameplay hash matches — also check game_state_hash for
                 // broader divergence (player positions, animation, objects).
-                const peerGameHash = window._rbPendingGameChecks?.[fStr];
-                if (peerGameHash != null) {
-                  delete window._rbPendingGameChecks[fStr];
-                  const localGameHash = tickMod._kn_game_state_hash?.(f) ?? 0;
+                // Both were filed with the gameplay hash, for the same frame.
+                {
+                  const peerGameHash = outcome.peer.game;
+                  const localGameHash = outcome.local.game;
                   if (localGameHash !== 0 && peerGameHash !== 0 && localGameHash !== peerGameHash) {
                     // Throttle STATE-DRIFT logging: first + every 300 frames on prod
                     if (!window._stateDriftCount) window._stateDriftCount = 0;
@@ -18544,8 +18419,6 @@
                   } else {
                     _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)} game=MATCH`);
                   }
-                } else {
-                  _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)}`);
                 }
                 // Track last-known-good frame so post-mortem analysis can
                 // bound the divergence window without scanning the whole log.
@@ -18554,10 +18427,11 @@
                 _rbBisectFramesRemaining = 0;
               } else {
                 _syncLog(
-                  `RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)} lastGood=${_rbLastGoodFrame}`,
+                  `RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)} lastGood=${_rbLastGoodFrame} slot=${outcome.slot}`,
                 );
                 // Dump actual gameplay address values on first mismatch so we
-                // can see exactly which byte diverges. Read live RDRAM directly.
+                // can see exactly which byte diverges. Read live RDRAM directly:
+                // the newest frame's state, a rollback window past f.
                 if (_rdramBase) {
                   const m = window.EJS_emulator?.gameManager?.Module;
                   if (m?.HEAPU32) {
@@ -18851,11 +18725,8 @@
             }
           }
         }
-        // Clean up old pending checks (older than 60 frames)
-        if (window._rbPendingChecks && _frameNum % 300 === 0) {
-          for (const f of Object.keys(window._rbPendingChecks)) {
-            if (parseInt(f) < _frameNum - 60) delete window._rbPendingChecks[f];
-          }
+        // Clean up old block/region snapshots (older than 60 frames)
+        if (_frameNum % 300 === 0) {
           if (window._rbPendingBlocks) {
             for (const f of Object.keys(window._rbPendingBlocks)) {
               if (parseInt(f) < _frameNum - 60) delete window._rbPendingBlocks[f];
@@ -20721,6 +20592,7 @@
     _catchUpStartedAt = performance.now();
     // Its own digests for the frames run again describe the state replaced.
     window.KNDesync?.forgetFrom(fromFrame);
+    _rbCheckBook?.forgetFrom(fromFrame);
     _catchUpWorkMs = 0;
     _catchUpSlices = 0;
     _catchUpSendsReliable = 0;
@@ -21176,6 +21048,8 @@
       document.removeEventListener('visibilitychange', _unloadVisChangeHandler);
       _unloadVisChangeHandler = null;
     }
+    // RB-CHECK values of this run, filed and received.
+    _rbCheckClear();
     // KNDesync owns its own setInterval heartbeat — without an explicit stop
     // it keeps firing across game cycles and retains module + digest caches.
     if (window.KNDesync && typeof window.KNDesync.stop === 'function') {
