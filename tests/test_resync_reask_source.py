@@ -105,7 +105,7 @@ def test_the_owed_resync_ends_when_a_host_state_is_applied_or_the_match_ends():
     src = LOCKSTEP_JS.read_text()
     apply = _body(
         src,
-        "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {",
+        "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {",
     )
     assert apply.index("_lastAppliedSyncHostFrame = frame;") < apply.index("_owedResync = false;")
     stop_sync = _body(src, "const stopSync = () => {")
