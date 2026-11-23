@@ -3484,6 +3484,9 @@ const collect = (p, VISUAL_CHECK) =>
       // armed (tests/hash-lag.mjs).
       hashLag: window.__knHashLag ?? null,
       ticksWithoutLag: window.__tp.ticksWithoutLag,
+      // The frame of the last post_tick run outside a replay: the last
+      // frame read at was this minus the lag.
+      lastR: window.__tp.lastR ?? null,
       early: window.__tp.early,
       inBattleAt: window.__tp.inBattleAt,
       menuInputs: window.__tp.menuInputs,
@@ -4162,7 +4165,8 @@ const schedulerCounters = { host: lastTickPerf(H.sync), guest: lastTickPerf(G.sy
 // without a hash (missing, or 0: not in its ring when read) lowers it, and
 // those frames are counted per page in battleUnrecorded.
 const spanFrom = Math.max(battleFrom, recoveredAt);
-const spanTo = Math.min(H.frame - (lagOf(H) ?? 0), G.frame - (lagOf(G) ?? 0), compareUntil - 1);
+const lastReadOf = (peer) => (peer.lastR ?? peer.frame) - (lagOf(peer) ?? 0);
+const spanTo = Math.min(lastReadOf(H), lastReadOf(G), compareUntil - 1);
 const battleSpan = battleFrom > 0 ? spanTo - spanFrom + 1 : 0;
 const battleCoverage = battleSpan > 0 ? Math.min(1, battleCompared / battleSpan) : 0;
 const battleUnrecorded =
