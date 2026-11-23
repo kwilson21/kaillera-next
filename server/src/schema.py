@@ -172,4 +172,5 @@ class MatchRetention(Base):
     archived_max_chunk_id: Mapped[int | None] = mapped_column(Integer)
     archived_updated_at: Mapped[str | None] = mapped_column(Text)
     archive_bytes: Mapped[int | None] = mapped_column(Integer)
+    archive_token: Mapped[str | None] = mapped_column(Text)
     evicted_at: Mapped[str | None] = mapped_column(Text)

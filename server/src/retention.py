@@ -122,7 +122,7 @@ def _count(found: dict[str, dict], signal: str, entry: dict) -> None:
 _BATCH = 200
 
 
-def _days(name: str, default: int) -> int:
+def window_days(name: str, default: int) -> int:
     """A retention window in days, never below 1: 0 would delete live matches."""
     try:
         value = int(os.environ.get(name, default))
@@ -133,13 +133,13 @@ def _days(name: str, default: int) -> int:
 
 
 def _retention_window() -> str:
-    return f"-{_days('LOG_RETENTION_DAYS', 7)} days"
+    return f"-{window_days('LOG_RETENTION_DAYS', 7)} days"
 
 
 def _expired() -> ColumnElement[bool]:
     """The match_retention rows whose window has passed (see the three cases above)."""
     kept_until = db.ago(_retention_window())
-    stale = db.ago(f"-{_days('FLAGGED_STALE_DAYS', 180)} days")
+    stale = db.ago(f"-{window_days('FLAGGED_STALE_DAYS', 180)} days")
     return or_(
         and_(
             MatchRetention.tier == "normal",
@@ -247,11 +247,18 @@ async def sweep_unregistered() -> None:
 
 async def sweep(*, include_unregistered: bool = True) -> None:
     """One retention pass: finish interrupted deletes, tombstone and delete
-    newly expired matches, then (unless told not to) age out unregistered
-    rows, which scans whole tables and so runs less often."""
+    newly expired matches, archive and evict what is left, then (unless told
+    not to) age out unregistered rows, which scans whole tables and so runs
+    less often.
+
+    Expiry runs before the archive so a match past its window is deleted
+    rather than uploaded first (src/log_archive.py)."""
+    from src import log_archive
+
     await finish_deletes()
     marked = await mark_expired()
     finished = await finish_deletes()
+    await log_archive.sweep()
     if include_unregistered:
         await sweep_unregistered()
     log.info("Retention sweep: %d match(es) expired, %d deleted", len(marked), finished)

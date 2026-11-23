@@ -47,7 +47,7 @@ from typing import Literal
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import ColumnElement, Select, or_, select
 from starlette.middleware.gzip import GZipMiddleware
@@ -77,6 +77,7 @@ from src.api.signaling import (
     rooms,
     verify_upload_token,
 )
+from src.log_archive import ArchiveUnreadable
 from src.ratelimit import check_ip, extract_ip, ip_hash
 from src.schema import ClientEvent, DesyncEvent, Feedback, MatchMetrics, SessionLog
 
@@ -765,6 +766,12 @@ def create_app(lifespan=None) -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=500)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
     app.add_middleware(PublicCorsMiddleware)
+
+    @app.exception_handler(ArchiveUnreadable)
+    async def _archive_unreadable(_request: Request, exc: ArchiveUnreadable) -> JSONResponse:
+        # An evicted match's chunks are no longer in the database, so an
+        # archive that can't be read is an error, not an empty log.
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     # Load error page template
     _error_html_path = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "error.html"
@@ -1596,6 +1603,9 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
         raw_log_data = entry.get("log_data")
+        # `context` is cleared when a match's log moves to the archive
+        # (src/log_archive.py); read it back from there.
+        entry["context"] = await db.get_session_context(entry.get("match_id"), entry.get("slot"), entry.get("context"))
         for field in ("summary", "context"):
             if entry.get(field) and isinstance(entry[field], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -1656,7 +1666,7 @@ def create_app(lifespan=None) -> FastAPI:
         # the count. For a live log at its size cap, the count can exceed
         # what is streamed: the cap may delete counted chunks meanwhile.
         match_id, slot = entry.get("match_id"), entry.get("slot")
-        legacy = await db.parse_log_data(entry.get("log_data"))
+        legacy = await db.legacy_log_entries(match_id, entry.get("log_data"))
         stored, through_id = await db.count_log_entries(match_id, slot)
         entry_count = len(legacy) + stored
 
@@ -1665,7 +1675,7 @@ def create_app(lifespan=None) -> FastAPI:
             with contextlib.suppress(json.JSONDecodeError, TypeError):
                 summary = json.loads(summary)
 
-        context_obj = entry.get("context") or "{}"
+        context_obj = await db.get_session_context(match_id, slot, entry.get("context")) or "{}"
         if isinstance(context_obj, str):
             with contextlib.suppress(json.JSONDecodeError, TypeError):
                 context_obj = json.loads(context_obj)
@@ -1797,7 +1807,7 @@ def create_app(lifespan=None) -> FastAPI:
 
         peers: dict = {}
         for row in rows:
-            ctx = row.get("context") or "{}"
+            ctx = await db.get_session_context(match_id, row.get("slot"), row.get("context")) or "{}"
             if isinstance(ctx, str):
                 try:
                     ctx = json.loads(ctx)

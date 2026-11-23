@@ -637,9 +637,13 @@ def _eviction_statements(match_id: str, slot: int | None, kind: str) -> list[Exe
 SERVER_LOG_EVICTED = "SERVER-LOG-EVICTED"
 
 
-async def eviction_lines(match_id: str, slot: int | None, kind: str = "log") -> list[dict]:
-    """One entry per kind of a stream whose cap has deleted lines, saying how many and through which seq."""
-    rows = await fetch(
+async def eviction_lines(match_id: str, slot: int | None, kind: str = "log", *, since: str | None = None) -> list[dict]:
+    """One entry per kind of a stream whose cap has deleted lines, saying how many and through which seq.
+
+    `since` keeps only the records a cap changed at or after that time (an
+    evicted match's archive already starts with the lines from before it).
+    """
+    query = (
         select(SessionLogEviction.kind, SessionLogEviction.entries, SessionLogEviction.through_seq)
         .where(
             SessionLogEviction.match_id == match_id,
@@ -649,6 +653,9 @@ async def eviction_lines(match_id: str, slot: int | None, kind: str = "log") -> 
         )
         .order_by(SessionLogEviction.kind)
     )
+    if since is not None:
+        query = query.where(SessionLogEviction.updated_at >= since)
+    rows = await fetch(query)
     return [
         {
             "msg": f"{SERVER_LOG_EVICTED} kind={r['kind']} entries={r['entries']} through_seq={r['through_seq']}:"
@@ -681,10 +688,89 @@ async def parse_log_data(log_data_str: str | None) -> list:
     return await asyncio.to_thread(_entry_list, log_data_str) if log_data_str else []
 
 
-async def iter_chunk_entries(
-    match_id: str, slot: int | None, kind: str = "log", *, through_id: int | None = None
+async def eviction_point(match_id: str) -> tuple[int, str, str] | None:
+    """What the archive holds for this match, once its chunks have left D1.
+
+    `(archived_max_chunk_id, archived_at, archive_token)`, or None while the match's log is
+    still in D1 — the usual case: a match is archived to the blob store after
+    its upload window closes and evicted `D1_HOT_DAYS` later
+    (src/log_archive.py). After eviction the archive is read for what it
+    holds and D1 for anything else: a flush can still land, because the
+    Socket.IO path takes a room's live match past its upload window
+    (specs/log_archive.qnt).
+    """
+    rows = await fetch(
+        select(MatchRetention.archived_max_chunk_id, MatchRetention.archived_at, MatchRetention.archive_token).where(
+            MatchRetention.match_id == match_id, MatchRetention.evicted_at.is_not(None)
+        )
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    return (
+        int(row.get("archived_max_chunk_id") or 0),
+        str(row.get("archived_at") or ""),
+        str(row.get("archive_token") or ""),
+    )
+
+
+def _chunks_past(point: tuple[int, str, str]) -> ColumnElement[bool]:
+    """The chunks an evicted match's archive does not hold.
+
+    Either id is past the archived one, or the row was written after the
+    archive: SQLite gives an INSERT `max(id) + 1`, so a chunk written after
+    the eviction can take the id of one the eviction deleted.
+    """
+    max_id, archived_at, _token = point
+    return or_(SessionLogChunk.id > max_id, SessionLogChunk.created_at > archived_at)
+
+
+async def _archived_pages(
+    match_id: str, slot: int | None, kind: str, point: tuple[int, str, str]
 ) -> AsyncIterator[list]:
-    """One player's stored chunks of one stream, oldest first, as lists of entries.
+    """An evicted match's stream: the archive, then the chunks it doesn't hold.
+
+    Those chunks are read oldest-first by time and then id, because an id
+    written after the eviction can be lower than the archived one
+    (_chunks_past), so a page is taken by offset rather than by id.
+    """
+    from src import log_archive
+
+    async for page in log_archive.archived_entries(match_id, slot, point, kind):
+        yield page
+    if kind == "log":
+        # A live match past its window can still flush after the archive,
+        # and a cap can then delete lines (the archive's own first lines say
+        # what it had deleted before). Say so where the archive ends.
+        later = await eviction_lines(match_id, slot, kind, since=point[1])
+        if later:
+            yield later
+    seen = 0
+    while True:
+        rows = await fetch(
+            select(SessionLogChunk.entries)
+            .where(*_chunks_of(match_id, slot, _STREAM_KINDS[kind]), _chunks_past(point))
+            .order_by(SessionLogChunk.created_at, SessionLogChunk.id)
+            .limit(_CHUNK_PAGE_ROWS)
+            .offset(seen)
+        )
+        if not rows:
+            return
+        seen += len(rows)
+        yield await asyncio.to_thread(_page_entries, [r["entries"] for r in rows])
+        if len(rows) < _CHUNK_PAGE_ROWS:
+            return
+
+
+async def iter_chunk_entries(
+    match_id: str,
+    slot: int | None,
+    kind: str = "log",
+    *,
+    through_id: int | None = None,
+    archived: bool = True,
+) -> AsyncIterator[list]:
+    """One player's stored entries of one stream, oldest first, as lists of entries.
 
     `kind` names the stream: "log" takes the JS lines' chunks and the C
     lines' ('clog') together in row-id order, which is the order the entries
@@ -694,7 +780,20 @@ async def iter_chunk_entries(
     Reads a page of chunks per query and parses each page in a worker thread,
     so a long log never holds the event loop for long (see the admin export
     in api/app.py). `through_id` stops at that chunk id.
+
+    Once the match has been evicted from D1 the first pages come from the
+    archive, which holds this stream as it read here before the eviction
+    (eviction lines and legacy `log_data` included), and the rest from the
+    chunks the archive does not hold (_chunks_past), oldest first by time:
+    ids no longer order them, so `through_id` is not applied to those.
+    `archived=False` reads D1 alone: it is how the archive itself reads what
+    it uploads.
     """
+    point = await eviction_point(match_id) if archived else None
+    if point is not None:
+        async for page in _archived_pages(match_id, slot, kind, point):
+            yield page
+        return
     if kind == "log":
         evicted = await eviction_lines(match_id, slot, kind)
         if evicted:
@@ -725,17 +824,43 @@ async def count_log_entries(match_id: str, slot: int | None) -> tuple[int, int]:
     chunks a live match appends afterwards. It can't bring back chunks a size
     cap deletes meanwhile (a live log near its cap), so a stream can hold
     fewer entries than counted.
+
+    For a match evicted from D1 the count is the archived object's lines plus
+    the chunks the archive does not hold, and the returned id is 0: those
+    chunks are read by time, not by id, so a flush between the count and the
+    read is streamed though it wasn't counted (src/log_archive.py).
     """
     entries = SessionLogChunk.entries
     length = case((func.json_valid(entries), func.json_array_length(entries)), else_=0)
-    rows = await fetch(
-        select(
-            func.coalesce(func.sum(length), 0).label("n"),
-            func.coalesce(func.max(SessionLogChunk.id), 0).label("through"),
-        ).where(*_chunks_of(match_id, slot, _STREAM_KINDS["log"]))
-    )
+    counted = select(
+        func.coalesce(func.sum(length), 0).label("n"),
+        func.coalesce(func.max(SessionLogChunk.id), 0).label("through"),
+    ).where(*_chunks_of(match_id, slot, _STREAM_KINDS["log"]))
+    point = await eviction_point(match_id)
+    if point is not None:
+        from src import log_archive
+
+        rows = await fetch(counted.where(_chunks_past(point)))
+        archived = await log_archive.archived_entry_count(match_id, slot, point)
+        archived += len(await eviction_lines(match_id, slot, since=point[1]))
+        return (archived + int(rows[0]["n"]), 0) if rows else (archived, 0)
+    rows = await fetch(counted)
     evicted = len(await eviction_lines(match_id, slot))
     return (int(rows[0]["n"]) + evicted, int(rows[0]["through"])) if rows else (evicted, 0)
+
+
+async def legacy_log_entries(match_id: str | None, log_data_str: str | None) -> list:
+    """A session's legacy `log_data` entries, as its readers put them first.
+
+    None once the match is evicted: the archive's log object starts with
+    them, and a row a late flush wrote after the archive keeps its column
+    (src/log_archive.py), so reading both would show them twice.
+    """
+    if not log_data_str or log_data_str == "[]":
+        return []
+    if _backend is not None and match_id and await eviction_point(match_id) is not None:
+        return []
+    return await parse_log_data(log_data_str)
 
 
 async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: str | None) -> list[dict]:
@@ -748,12 +873,28 @@ async def get_full_log_entries(match_id: str, slot: int | None, log_data_str: st
     The parsing runs in worker threads (iter_chunk_entries); the export
     endpoint streams the same entries a page at a time instead.
     """
-    entries = await parse_log_data(log_data_str)
     if _backend is None:
-        return entries
+        return await parse_log_data(log_data_str)
+    entries = await legacy_log_entries(match_id, log_data_str)
     async for page in iter_chunk_entries(match_id, slot):
         entries.extend(page)
     return entries
+
+
+async def get_session_context(match_id: str, slot: int | None, context_str: str | None) -> str | None:
+    """A session's `context` JSON: the stored column, or the archived copy once evicted.
+
+    The eviction clears `context` for the rows the archive covers, so the
+    admin detail, export and input-audit endpoints read it through here.
+    """
+    if context_str:
+        return context_str
+    point = await eviction_point(match_id)
+    if point is None:
+        return context_str
+    from src import log_archive
+
+    return await log_archive.archived_context(match_id, slot, point)
 
 
 async def get_input_audit(match_id: str, slot: int | None) -> list[dict]:
@@ -869,8 +1010,18 @@ _DEFAULT_BUDGET_AUTO_FLAGGED_BYTES = 200 * 1024 * 1024
 
 
 async def _flagged_bytes() -> int:
-    """Bytes of session-log chunks and screenshots held by flagged matches."""
+    """Bytes of session-log chunks, archives and screenshots held by flagged matches.
+
+    An evicted match's chunks have left D1, but its archive is kept as long
+    as the match: it counts in their place (src/log_archive.py). An archived
+    match not yet evicted still has its chunks, which count instead.
+    """
     flagged = MatchRetention.tier == "flagged"
+    archive_bytes = (
+        select(func.sum(MatchRetention.archive_bytes))
+        .where(flagged, MatchRetention.evicted_at.is_not(None))
+        .scalar_subquery()
+    )
     chunk_bytes = (
         select(func.sum(SessionLogChunk.size))
         .join(MatchRetention, MatchRetention.match_id == SessionLogChunk.match_id)
@@ -883,7 +1034,13 @@ async def _flagged_bytes() -> int:
         .where(flagged)
         .scalar_subquery()
     )
-    rows = await fetch(select((func.coalesce(chunk_bytes, 0) + func.coalesce(shot_bytes, 0)).label("bytes")))
+    rows = await fetch(
+        select(
+            (func.coalesce(chunk_bytes, 0) + func.coalesce(shot_bytes, 0) + func.coalesce(archive_bytes, 0)).label(
+                "bytes"
+            )
+        )
+    )
     return int(rows[0]["bytes"] or 0) if rows else 0
 
 
@@ -1093,6 +1250,21 @@ async def delete_match_blobs(match_id: str) -> None:
 
 async def delete_blobs(keys: list[str]) -> None:
     await _blob_store().delete(keys)
+
+
+def blob_store_durable() -> bool:
+    """Whether the blob store survives a deploy (R2), or is a folder that doesn't."""
+    return bool(getattr(_blob_store(), "durable", False))
+
+
+async def put_blob(key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+    """Store one blob (src/log_archive.py's session-log objects)."""
+    await _blob_store().put(key, data, content_type)
+
+
+async def get_blob(key: str) -> bytes | None:
+    """One blob's bytes, or None when it isn't there."""
+    return await _blob_store().get(key)
 
 
 async def query(sql: str, params: tuple) -> list[dict]:
