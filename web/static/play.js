@@ -971,10 +971,20 @@
     const matchId = KNState.matchId;
     const connection = socket;
     const sid = connection?.id;
-    const stillOwnsMatch = () =>
+    const canReportFromRoster = () => {
+      const room = lastUsersData;
+      const localPlayer = room?.players?.[_persistentId];
+      return (
+        room?.status === 'playing' &&
+        (room.matchId == null || room.matchId === matchId) &&
+        localPlayer?.socketId === sid &&
+        localPlayer.slot === 0
+      );
+    };
+    const canStillReport = () =>
       !!(
         sid &&
-        isHost &&
+        (isHost || canReportFromRoster()) &&
         socket === connection &&
         socket.connected &&
         socket.id === sid &&
@@ -982,8 +992,9 @@
         _localUnverifiedMatchId === matchId &&
         isGameRunning()
       );
-    if (!matchId || !stillOwnsMatch()) {
+    if (!matchId || !canStillReport()) {
       _cancelIntegrityNotice();
+      _integrityNoticeAttempt = null;
       return;
     }
     if (_reportedUnverifiedMatchId === matchId) return;
@@ -995,7 +1006,7 @@
     _integrityNotice = notice;
     const request = window.KNCore.startRejoin({
       send: (answer) => {
-        if (_integrityNotice === notice && stillOwnsMatch()) {
+        if (_integrityNotice === notice && canStillReport()) {
           connection.emit('match-recovery-unverified', { matchId }, answer);
         }
       },
@@ -1007,7 +1018,7 @@
     void request.outcome.then((outcome) => {
       if (_integrityNotice !== notice) return;
       _integrityNotice = null;
-      if (stillOwnsMatch() && outcome.kind === 'resumed') _reportedUnverifiedMatchId = matchId;
+      if (canStillReport() && outcome.kind === 'resumed') _reportedUnverifiedMatchId = matchId;
     });
   };
 
@@ -1427,10 +1438,6 @@
     if (wasHost !== isHost) {
       const endButton = document.getElementById('toolbar-end');
       if (endButton) endButton.style.display = isHost ? '' : 'none';
-      if (!isHost) {
-        _cancelIntegrityNotice();
-        _integrityNoticeAttempt = null;
-      }
     }
     if (data.status === 'playing' && (data.matchId == null || data.matchId === KNState.matchId)) {
       _maybeReportMatchIntegrity();

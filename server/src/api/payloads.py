@@ -159,7 +159,7 @@ class MatchJoinedPayload(BaseModel):
 
 
 class MatchRecoveryUnverifiedPayload(BaseModel):
-    """The room owner could not verify recovery of the named running match."""
+    """The room owner or active slot zero could not verify recovery of the named running match."""
 
     matchId: str = Field(min_length=1, max_length=64)
 

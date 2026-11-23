@@ -166,7 +166,9 @@ def test_authoritative_old_end_cannot_end_the_selected_current_match():
     }
 
 
-@pytest.mark.parametrize("scenario", ["snapshots", "retry", "owner-loss", "match-change", "authority"])
+@pytest.mark.parametrize(
+    "scenario", ["snapshots", "retry", "owner-loss", "match-change", "authority", "slot-zero", "slot-zero-retained"]
+)
 def test_client_propagation_ignores_stale_updates_and_never_echoes_remote_warning(scenario):
     play = (ROOT / "web/static/play.js").read_text()
     helpers = _slice(play, "  const _cancelIntegrityNotice =", "  // This page's socket was down")
@@ -177,7 +179,9 @@ def test_client_propagation_ignores_stale_updates_and_never_echoes_remote_warnin
     const engine={markMatchRecoveryUnverified: (matchId)=>marks.push(matchId)};
     let _unverifiedMatchId=null, _localUnverifiedMatchId=null, _reportedUnverifiedMatchId=null,
       _integrityNotice=null, _integrityNoticeAttempt=null;
-    let isHost=false, active=true, socket={id:'sid-a',connected:true,emit:(...x)=>sends.push(x.slice(0,2))};
+    const _persistentId='local';
+    let isHost=false, lastUsersData=null, active=true,
+      socket={id:'sid-a',connected:true,emit:(...x)=>sends.push(x.slice(0,2))};
     const showToast=s=>toasts.push(s), isGameRunning=()=>active;
     const document={getElementById:id=>ui[id]??=( {textContent:''} )};
     const window={KNCore:{startRejoin(o){
@@ -251,13 +255,56 @@ def test_client_propagation_ignores_stale_updates_and_never_echoes_remote_warnin
           requests[0].options.send(()=>{});
           if (!requests[0].cancelled || _reportedUnverifiedMatchId!=='a') throw Error('lost authority');
         """,
+        "slot-zero": """
+          const roster = (sid, slot, matchId) => ({
+            status:'playing', matchId, players:{local:{socketId:sid,slot}}
+          });
+          lastUsersData=roster('sid-old',0);
+          callbacks.onMatchIntegrityUnverified({matchId:'a'});
+          lastUsersData=roster('sid-a',1);
+          _maybeReportMatchIntegrity();
+          lastUsersData=roster('sid-a',0,'old-match');
+          _maybeReportMatchIntegrity();
+          if (requests.length) throw Error('bad roster allowed warning publication');
+          lastUsersData=roster('sid-a',0);
+          _maybeReportMatchIntegrity();
+          if (requests.length!==1) throw Error('active slot zero denied');
+          socket.id='sid-b';
+          requests[0].options.send(()=>{});
+          requests[0].finish('resumed');
+          await Promise.resolve();
+          _maybeReportMatchIntegrity();
+          if (_reportedUnverifiedMatchId || requests.length!==1) throw Error('old socket allowed report');
+          lastUsersData=roster('sid-b',0);
+          _maybeReportMatchIntegrity();
+          requests[1].finish('resumed');
+          await Promise.resolve();
+          if (_reportedUnverifiedMatchId!=='a') throw Error('new current slot-zero report lost');
+        """,
+        "slot-zero-retained": """
+          isHost=true;
+          callbacks.onMatchIntegrityUnverified({matchId:'a'});
+          isHost=false;
+          lastUsersData={status:'playing',players:{local:{socketId:'sid-a',slot:0}}};
+          _maybeReportMatchIntegrity();
+          if (requests.length!==1 || requests[0].cancelled) throw Error('retained authority lost');
+          lastUsersData.players.local.slot=1;
+          _maybeReportMatchIntegrity();
+          requests[0].options.send(()=>{});
+          requests[0].finish('resumed');
+          await Promise.resolve();
+          if (!requests[0].cancelled || _reportedUnverifiedMatchId) throw Error('lost slot-zero authority accepted');
+        """,
     }
     actions = f"""
     const callbacks={{{real_callback}}};
     {commands[scenario]}
     process.stdout.write(JSON.stringify({{sends,toasts,marks,warning:_unverifiedMatchId}}));
     """
-    expected_sends = {"snapshots": [], "retry": ["a", "a"], "owner-loss": ["a"], "match-change": ["a"], "authority": ["a"]}
+    expected_sends = {
+        "snapshots": [], "retry": ["a", "a"], "owner-loss": ["a"], "match-change": ["a"], "authority": ["a"],
+        "slot-zero": ["a", "a"], "slot-zero-retained": ["a"],
+    }
     assert _run(f"{mocks}\n{helpers}\n{actions}") == {
         "sends": [["match-recovery-unverified", {"matchId": match}] for match in expected_sends[scenario]],
         "toasts": ["Recovery unverified"],

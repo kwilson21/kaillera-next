@@ -83,7 +83,7 @@ export const MatchJoinedPayload = Schema.Struct({
 });
 export type MatchJoinedPayload = typeof MatchJoinedPayload.Type;
 
-/** The room owner could not verify recovery of the named running match. */
+/** The room owner or active slot zero could not verify recovery of the named running match. */
 export const MatchRecoveryUnverifiedPayload = Schema.Struct({
   matchId: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(64)),
 });

@@ -918,6 +918,7 @@ def test_unverified_recovery_rejects_non_owner_and_wrong_match(sid, status, mode
     room = _host_room()
     room.status, room.mode, room.match_id = status, mode, "match-1" if status == "playing" else None
     room.players["pid-guest"] = {"socketId": "sid-guest"}
+    room.slots[1] = "pid-guest"
     room.spectators["pid-spec"] = {"socketId": "sid-spec"}
     _sid_to_room["sid-guest"] = ("ROOM1", "pid-guest", False)
     _sid_to_room["sid-spec"] = ("ROOM1", "pid-spec", True)
@@ -979,3 +980,71 @@ def test_unverified_recovery_survives_until_owner_ends_match_and_cannot_latch_re
         assert room.recovery_unverified_match_id is None
 
     _run_async(end_and_restart())
+
+
+def test_readmitted_slot_zero_can_report_after_owner_transfer_but_cannot_end(monkeypatch):
+    room = _host_room()
+    room.status, room.mode, room.match_id = "playing", "rollback", "match-1"
+    room.players["pid-next"] = {"socketId": "sid-next-owner", "playerName": "Next owner"}
+    room.slots[1] = "pid-next"
+    _sid_to_room["sid-next-owner"] = ("ROOM1", "pid-next", False)
+    monkeypatch.setattr(signaling, "_sid_host", dict.fromkeys(("sid-next-owner", "sid-returned"), "example.test"))
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    for name in ("emit", "enter_room", "leave_room"):
+        monkeypatch.setattr(signaling.sio, name, AsyncMock())
+    monkeypatch.setattr(signaling.state, "save_room", AsyncMock())
+    for name in ("insert_client_event", "set_session_ended", "reopen_session"):
+        monkeypatch.setattr(signaling.db, name, AsyncMock())
+    monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+
+    async def transfer_then_readmit():
+        await _leave("sid-host")
+        assert room.owner == "sid-next-owner" and 0 not in room.slots and room.status == "playing"
+        assert (
+            await signaling.open_room(
+                "sid-returned",
+                {
+                    "extra": {
+                        "sessionid": "ROOM1",
+                        "persistentId": "pid-host",
+                        "resume": True,
+                        "slot": 0,
+                        "matchId": "match-1",
+                    }
+                },
+            )
+            is None
+        )
+        assert room.owner == "sid-next-owner" and room.slots[0] == "pid-host"
+        assert not room.waiting_for_state
+        payload = {"matchId": "match-1"}
+        assert await signaling.match_recovery_unverified("sid-host", payload) == "Not in a room"
+        assert await signaling.match_recovery_unverified("sid-returned", payload) is None
+        assert room.recovery_unverified_match_id == "match-1"
+        assert await signaling.end_game("sid-returned", payload) == "Only the host can end the game"
+        assert room.status == "playing"
+        assert await signaling.end_game("sid-next-owner", payload) is None
+        assert room.status == "lobby" and room.recovery_unverified_match_id is None
+
+    _run_async(transfer_then_readmit())
+
+
+@pytest.mark.parametrize(("connected", "waiting"), [(True, True), (False, False)])
+def test_slot_zero_needs_active_membership_to_report(connected, waiting, monkeypatch):
+    room = _host_room()
+    room.status, room.mode, room.match_id = "playing", "rollback", "match-1"
+    room.owner = "sid-next-owner"
+    room.players["pid-next"] = {"socketId": "sid-next-owner"}
+    room.slots[1] = "pid-next"
+    if waiting:
+        room.waiting_for_state.add("pid-host")
+    monkeypatch.setattr(signaling, "_sid_host", {"sid-host": "example.test"} if connected else {})
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    emit = AsyncMock()
+    monkeypatch.setattr(signaling.sio, "emit", emit)
+    result = _run_async(signaling.match_recovery_unverified("sid-host", {"matchId": "match-1"}))
+    assert result == "Only the host or active player 1 can report unverified match recovery"
+    assert room.recovery_unverified_match_id is None
+    emit.assert_not_awaited()

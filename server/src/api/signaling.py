@@ -12,7 +12,7 @@ Client → Server events:
   release-slot     — player gives up their slot to spectate ("Watch instead")
   start-game       — host starts the game (broadcasts mode + settings)
   end-game         — host ends the game (returns room to lobby)
-  match-recovery-unverified — host reports unverified recovery for its current match
+  match-recovery-unverified — current owner or active P1 reports unverified recovery
   set-mode         — host changes netplay mode (rollback/streaming)
   rom-sharing-toggle — host enables/disables P2P ROM sharing
   rom-ready        — player signals ROM is loaded
@@ -1295,7 +1295,7 @@ async def match_joined(sid: str, payload: MatchJoinedPayload) -> str | None:
 @sio.on("match-recovery-unverified")
 @validated(MatchRecoveryUnverifiedPayload)
 async def match_recovery_unverified(sid: str, payload: MatchRecoveryUnverifiedPayload) -> str | None:
-    """Record the current owner's inability to verify recovery, without changing play."""
+    """Record unverified recovery from the room owner or its native slot-zero authority."""
     if not check(sid, "match-recovery-unverified"):
         return "Rate limited"
     async with _room_lock:
@@ -1306,8 +1306,14 @@ async def match_recovery_unverified(sid: str, payload: MatchRecoveryUnverifiedPa
         room = rooms.get(session_id)
         if room is None:
             return "Not in a room"
-        if spectator or room.owner != sid or room.players.get(player_id, {}).get("socketId") != sid:
-            return "Only the host can report unverified match recovery"
+        current_player = not spectator and room.players.get(player_id, {}).get("socketId") == sid
+        # Ownership can transfer without reshuffling the active rollback slots.
+        # The retained native snapshot authority may report, never end the game.
+        may_report = room.owner == sid or (
+            room.slots.get(0) == player_id and player_id not in room.waiting_for_state and sid in _sid_host
+        )
+        if not current_player or not may_report:
+            return "Only the host or active player 1 can report unverified match recovery"
         if room.status != "playing" or room.mode not in ("rollback", "lockstep") or room.match_id != payload.matchId:
             return "Not the current rollback or lockstep match"
         if room.recovery_unverified_match_id == room.match_id:
