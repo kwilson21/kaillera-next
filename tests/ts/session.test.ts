@@ -222,6 +222,26 @@ test('a late joiner whose socket comes back before it has the state stays on the
   await session.stop();
 });
 
+test('a late joiner the host drops while it waits for the state joins late again (lateJoinServeTimeoutTest)', async () => {
+  const { session } = open();
+  session.send(joinMidGame);
+  session.send(engineUp);
+  assert.equal(session.state(), 'lateJoinSyncing');
+  assert.equal(session.flag('lateJoin'), false);
+  // The host's serve timed out (the state was lost with the socket) and it
+  // dropped this page: play.js sends leftOutOfStart, then starts the engine
+  // again. That start must be a late join; before, the machine stayed here and
+  // the engine came up as a player loading for the start.
+  session.send({ type: 'leftOutOfStart' });
+  assert.equal(session.state(), 'lateJoinStarting');
+  assert.equal(session.flag('lateJoin'), true);
+  assert.equal(session.gameOn(), true);
+  session.send(engineUp);
+  session.send({ type: 'lateJoinSynced' });
+  assert.equal(session.state(), 'running');
+  await session.stop();
+});
+
 test('game-started for a page already joining the match does not skip the late join', async () => {
   const { session } = open();
   session.send(joinMidGame);

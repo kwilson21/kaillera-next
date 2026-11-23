@@ -3607,7 +3607,10 @@
       // its own deadline on the start (specs/start_group.qnt, rejoinLate). It
       // joins late instead of waiting for an offer that will not come.
       // The same when the host dropped this page in the match because it
-      // could not be kept in sync (specs/drop_is_final.qnt).
+      // could not be kept in sync (specs/drop_is_final.qnt), or while it was
+      // still waiting for the state, its serve having timed out
+      // (specs/room_lifecycle.qnt, serveTimesOut). The machine moves to
+      // lateJoinStarting first, so initEngine below starts a late join.
       onLeftOutOfStart: () => {
         crumb('left-out-of-start', {});
         _session?.send({ type: 'leftOutOfStart' });
