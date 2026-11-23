@@ -1487,18 +1487,34 @@ const missingProblems = PERMANENT_RECIPIENT ? permanentProblems : transientMissi
 // come before the catch-up's own.
 const appliedForTag = (sync, slot) => {
   const out = new Map();
+  // A state the page loads from the host (`sync frame reset: a → b`) replaces
+  // its own: a frame below b that it ran before that load, right or wrong, is
+  // no longer where its state comes from. `superseded` holds those tags: a
+  // difference on one is reported, not failed.
+  const loggedAt = new Map();
+  const loads = [];
   const re = new RegExp(
-    `\\t(?:NORMAL-INPUT-TR|CATCH-UP-INPUT-TR|\\[C\\] REPLAY-INPUT-TR) f=\\d+ .*?R${slot}@(\\d+)\\[(-?\\d+),(-?\\d+),(-?\\d+)(?:,[A-Z])?\\]`,
+    `\\t(?:NORMAL-INPUT-TR|CATCH-UP-INPUT-TR|\\[C\\] REPLAY-INPUT-TR) f=\\d+ .*?R${slot}@(\\d+)\\[(-?\\d+),(-?\\d+),(-?\\d+)(?:,[A-Z])?\\]|sync frame reset: \\d+ → (\\d+)`,
     'g',
   );
-  for (const m of sync.matchAll(re)) out.set(Number(m[1]), `${m[2]},${m[3]},${m[4]}`);
+  let at = 0;
+  for (const m of sync.matchAll(re)) {
+    at++;
+    if (m[5] !== undefined) loads.push({ at, frame: Number(m[5]) });
+    else {
+      out.set(Number(m[1]), `${m[2]},${m[3]},${m[4]}`);
+      loggedAt.set(Number(m[1]), at);
+    }
+  }
+  out.superseded = (tag, delay) => loads.some((load) => load.frame > tag + delay && load.at > (loggedAt.get(tag) ?? 0));
   // A forward frame logs NORMAL-INPUT-TR only when an input it applied was
   // not neutral (and every 60th frame): a frame the page ran without a line
   // applied neutral for every slot. Frames a state load jumped over
   // (`sync frame reset: a → b`, b > a) it never ran.
   const forward = [...sync.matchAll(/\tNORMAL-INPUT-TR f=(\d+) apply=(-?\d+) /g)].map((m) => [+m[1], +m[2]]);
+  out.delay = forward.length ? forward[0][0] - forward[0][1] : 0;
   if (forward.length === 0) return out;
-  const delay = forward[0][0] - forward[0][1];
+  const delay = out.delay;
   const jumps = [...sync.matchAll(/sync frame reset: (\d+) → (\d+)/g)]
     .map((m) => [+m[1], +m[2]])
     .filter(([a, b]) => b > a);
@@ -1529,13 +1545,19 @@ const removedInput = !PERMANENT_RECIPIENT
       const from = removal ? removal.frame - 90 : 0;
       const to = Math.min(lastTag, (rejoin ?? removal)?.frame + 150);
       const differing = [];
+      // Differences only on frames a page ran before a host state replaced
+      // its own: reported, not a failure (the host is slot 0, never loads one).
+      const superseded = [];
       let compared = 0;
       for (let tag = from; removal && tag <= to; tag++) {
         if (!applied.every((m) => m.has(tag))) continue;
         compared++;
         const values = applied.map((m) => m.get(tag));
-        if (values.some((v) => v !== values[0]))
-          differing.push({ tag, ...Object.fromEntries(stayed.map(({ slot }, i) => [`P${slot + 1}`, values[i]])) });
+        const off = values.map((v, i) => i).filter((i) => values[i] !== values[0]);
+        if (off.length === 0) continue;
+        const row = { tag, ...Object.fromEntries(stayed.map(({ slot }, i) => [`P${slot + 1}`, values[i]])) };
+        if (off.every((i) => applied[i].superseded(tag, applied[i].delay))) superseded.push(row);
+        else differing.push(row);
       }
       const rerun = stayed.map(({ x, slot }) => ({
         page: `P${slot + 1}`,
@@ -1552,6 +1574,8 @@ const removedInput = !PERMANENT_RECIPIENT
         compared,
         differing: differing.slice(0, 40),
         differingCount: differing.length,
+        supersededByHostState: superseded.slice(0, 40),
+        supersededCount: superseded.length,
         rosterHold: ROSTER_HOLD_MS ? { ms: ROSTER_HOLD_MS, slot: ROSTER_HOLD_SLOT, ...H.rosterHold } : null,
         pages: rerun,
       };
