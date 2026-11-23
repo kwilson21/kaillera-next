@@ -42,7 +42,10 @@ module stale_prediction_flag {
   pure val VALUES = 0.to(1)
 
   // One input ring entry: the tag it holds (NONE when empty) and its value.
-  type Entry = { tag: int, value: int }
+  // The fields are not named `tag` and `value`: a record with exactly those
+  // two is how a trace encodes a sum-type variant, and printing an example
+  // execution then fails ("malformed variant operator") on the Rust backend.
+  type Entry = { forTag: int, input: int }
 
   var entry: int -> Entry // rb.inputs[slot][idx]
   var flag: int -> bool // rb.predicted[slot][idx]
@@ -54,7 +57,7 @@ module stale_prediction_flag {
   var replayAppliedWrong: bool
 
   action init = all {
-    entry' = 0.to(RING - 1).mapBy(_ => { tag: NONE, value: 0 }),
+    entry' = 0.to(RING - 1).mapBy(_ => { forTag: NONE, input: 0 }),
     flag' = 0.to(RING - 1).mapBy(_ => false),
     predictedTag' = 0.to(RING - 1).mapBy(_ => NONE),
     real' = Map(),
@@ -71,7 +74,7 @@ module stale_prediction_flag {
   def replaySeesPrediction(t: int): bool =
     if (CHECK_TAG) isPredictionOf(t) else flag.get(idx(t))
 
-  def holds(t: int): bool = entry.get(idx(t)).tag == t
+  def holds(t: int): bool = entry.get(idx(t)).forTag == t
 
   // Tag t is one a replay can reach and a real input is still taken for.
   def inWindow(t: int): bool = t >= 0 and t >= nextTag - WINDOW and t <= MAX_TAG
@@ -84,7 +87,7 @@ module stale_prediction_flag {
     not(real.keys().contains(t)),
     inWindow(t),
     t - RING < nextTag - WINDOW,
-    entry' = entry.put(idx(t), { tag: t, value: v }),
+    entry' = entry.put(idx(t), { forTag: t, input: v }),
     flag' = if (isPredictionOf(t)) flag.put(idx(t), false) else flag,
     predictedTag' = predictedTag,
     real' = real.put(t, v),
@@ -98,7 +101,7 @@ module stale_prediction_flag {
     val t = nextTag
     all {
       t <= MAX_TAG,
-      entry' = if (holds(t)) entry else entry.put(idx(t), { tag: t, value: p }),
+      entry' = if (holds(t)) entry else entry.put(idx(t), { forTag: t, input: p }),
       flag' = if (holds(t)) flag else flag.put(idx(t), true),
       predictedTag' = if (holds(t)) predictedTag else predictedTag.put(idx(t), t),
       real' = real,
@@ -112,12 +115,12 @@ module stale_prediction_flag {
   // stored as the prediction; otherwise the stored real input runs.
   action replay(t: int, p: int): bool = {
     val repredict = not(holds(t)) or replaySeesPrediction(t)
-    val applied = if (repredict) p else entry.get(idx(t)).value
+    val applied = if (repredict) p else entry.get(idx(t)).input
     val wrong = real.keys().contains(t) and holds(t) and applied != real.get(t)
     all {
       t < nextTag,
       inWindow(t),
-      entry' = if (repredict) entry.put(idx(t), { tag: t, value: p }) else entry,
+      entry' = if (repredict) entry.put(idx(t), { forTag: t, input: p }) else entry,
       flag' = if (repredict) flag.put(idx(t), true) else flag,
       predictedTag' = if (repredict) predictedTag.put(idx(t), t) else predictedTag,
       real' = real,
@@ -168,7 +171,7 @@ module stale_prediction_flag {
     init
       .then(forward(0))
       .then(replay(0, 1))
-      .expect(entry.get(0) == { tag: 0, value: 1 } and isPredictionOf(0))
+      .expect(entry.get(0) == { forTag: 0, input: 1 } and isPredictionOf(0))
 }
 
 // Before: the replay branch read the bare flag.
