@@ -154,10 +154,19 @@ def test_invalid_and_empty_shards_fail_before_starting_workers():
         assert result.returncode != 0
 
 
+def test_a_shard_with_an_empty_worker_fails_before_starting_workers(monkeypatch):
+    # The real plan can outgrow every shard/worker count the CLI accepts
+    # (64 x 4 slots), so an empty worker is shown on a plan of three checks.
+    plan = [verify.Check("a.qnt", f"m{i}", "p", "init", 6, "hold", i) for i in range(3)]
+    monkeypatch.setattr(verify, "load_plan", lambda: plan)
+    with pytest.raises(SystemExit) as exit_info:
+        verify.main(["--plan", "--workers", "4"])
+    assert exit_info.value.code != 0
+
+
 def test_a_shard_left_without_checks_fails_before_starting_workers(monkeypatch):
-    # The real plan now fills even the widest grid (64 shards x 4 workers), so
-    # an empty worker is shown with a plan smaller than the grid.
-    plan = verify.load_plan()[:3]
+    # Use a synthetic plan smaller than the two-shard, two-worker grid.
+    plan = [verify.Check("a.qnt", f"m{i}", "p", "init", 6, "hold", i) for i in range(3)]
     monkeypatch.setattr(verify, "load_plan", lambda: plan)
     with pytest.raises(SystemExit) as exit_info:
         verify.main(["--plan", "--shard", "2", "--shards", "2", "--workers", "2"])

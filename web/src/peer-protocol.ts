@@ -55,6 +55,15 @@ const TEXT_GRAMMAR = {
     'peer-resumed': '',
     // roster:<frame>:<slot>,<slot>,...   (no slots: the part after the colon is empty)
     roster: `:${INT}:(?:\\d+(?:,\\d+)*)?`,
+    // roster-mask:<frame>  the host schedules the controller mask of the roster
+    // of that frame, sent just before it (specs/controller_mask.qnt). A page
+    // from before it drops it unread and applies the roster at once.
+    'roster-mask': `:${INT}`,
+    // roster-cut:<frame>:<slot>:<cut tag>:<first tag>:<b,lx,ly,cx,cy>;...  the
+    // host's cut of a player that roster removes, sent just before its
+    // roster-mask and only with it (specs/removed_input.qnt): neutral from the
+    // cut tag, the host's inputs from the first tag up to it.
+    'roster-cut': `:${INT}:\\d+:${INT}:${INT}:(?:${INT}(?:,${INT}){4}(?:;${INT}(?:,${INT}){4})*)?`,
     // left-out:<slot>  the host left that player out of the start; it joins late (specs/start_group.qnt)
     'left-out': ':\\d+',
     // unreachable:<slot>  a guest cannot reach that player; the host decides who plays
@@ -69,8 +78,13 @@ const TEXT_GRAMMAR = {
     // its pushes went unanswered; host: any other drop); taken only from the
     // host (specs/drop_is_final.qnt).
     dropped: ':(?:desync|host)',
-    // rb-check:<frame>:<gameplay hash>[:<game state hash>]
+    // rb-check:<frame>:<gameplay hash>[:<game state hash>]  Read but no longer
+    // sent: from a page before rb-final, of a frame that may still be rolled
+    // back. A current page ignores it.
     'rb-check': `:${INT}:${INT}(?::${INT})?`,
+    // rb-final:<frame>:<gameplay hash>:<game state hash>  of a frame the sender
+    // can no longer roll back (web/src/rb-check.ts, specs/rb_check.qnt)
+    'rb-final': `:\\d+:\\d+:\\d+`,
     // rb-blocks:<frame>:<8 hex digits per block, no separator>
     'rb-blocks': `:${INT}:(?:${HEX}{8})*`,
     // rb-regions:<frame>:<hex>,<hex>,...
@@ -80,6 +94,7 @@ const TEXT_GRAMMAR = {
     'rb-delay': `:${INT}`,
     'rb-transport': ':(?:reliable|unreliable)',
     'rb-init-frame': `:${INT}`,
+    'reconnect-sync-request-v1': ':\\d+',
     'sync-request-full': '',
     'sync-request-full-at': `:${INT}`,
     // The number of the request that follows on the same channel. A message
@@ -95,7 +110,7 @@ const TEXT_GRAMMAR = {
   },
   'sync-state': {
     // sync-start:<frame>:<chunks>:<full 0|1>:<proactive 0|1>
-    'sync-start': `:${INT}:\\d+:[01]:[01]`,
+    'sync-start': `:${INT}:\\d+:(?:[01]:[01]|1:0:[1-9]\\d*)`,
     'sync-regions-start': `:${INT}:\\d+`,
     // The request the state that follows on the same channel answers; a state
     // the host sent for its own reasons has none.
@@ -164,6 +179,8 @@ const SaveState = Schema.Struct({
   saveRam: Schema.optional(Schema.NullOr(Encoded)),
   hiddenWords: Sidecar,
   audioFifo: Sidecar,
+  // Startup KNS4 omits the RSP HLE plugin state. Older hosts omit it.
+  hle: Schema.optional(Encoded),
 });
 
 const LateJoinState = Schema.Struct({
@@ -179,6 +196,9 @@ const LateJoinState = Schema.Struct({
   hiddenWords: Sidecar,
   audioFifo: Sidecar,
   inputBridge: Sidecar,
+  // The host's controller-present mask schedule from `frame` on
+  // (controller-mask-schedule.ts, MaskScheduleWire); absent from an older host.
+  controllerMasks: Sidecar,
 });
 
 const SyncStateSocket = Schema.Struct({
@@ -193,6 +213,8 @@ const SyncStateSocket = Schema.Struct({
   data: Encoded,
   // The request this state answers; absent when it answers none.
   requestId: Schema.optional(Schema.Number),
+  reconnectProofFor: Schema.optional(Schema.Number),
+  reconnectMatch: Schema.optional(Schema.String),
   // The hidden words and RSP HLE state (base64) taken with it; absent from an
   // older host, and from a core without the exports.
   hiddenWords: Schema.optional(Schema.Array(Schema.Number)),
@@ -222,7 +244,12 @@ const JSON_MESSAGES = {
     'save-state': SaveState,
     'late-join-state': LateJoinState,
     // delay: the joiner's delay from its RTT samples to the host, for a match at 0 its join moves to a match delay.
-    'request-late-join': Schema.Struct({ requesterSid: Schema.String, delay: Schema.optional(Schema.Number) }),
+    'request-late-join': Schema.Struct({
+      requesterSid: Schema.String,
+      delay: Schema.optional(Schema.Number),
+      // What the joiner can do; absent from an older page (controller-mask-schedule.ts, MASK_CAP).
+      caps: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+    }),
     'sync-request-full-socket': Schema.Struct({
       targetSid: Schema.String,
       requesterSid: Schema.String,
@@ -230,6 +257,12 @@ const JSON_MESSAGES = {
       frame: Schema.Number,
       // The request's number; absent from a page that does not number them.
       requestId: Schema.optional(Schema.Number),
+    }),
+    'reconnect-sync-request-v1-socket': Schema.Struct({
+      targetSid: Schema.String,
+      requesterSid: Schema.String,
+      matchId: Schema.String,
+      requestId: Schema.Number,
     }),
     'sync-state-socket': SyncStateSocket,
     'late-join-ready': Schema.Struct({ senderSid: Schema.String }),

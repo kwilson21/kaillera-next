@@ -75,6 +75,15 @@ test('rollback checks: hashes are signed integers, the game hash optional', () =
   bad('lockstep', 'rb-check:1200:0xdeadbeef');
 });
 
+test('confirmed rollback checks: frame and both hashes, unsigned', () => {
+  ok('lockstep', 'rb-final:1200:3405691582:0');
+  ok('lockstep', 'rb-final:0:4294967295:305419896');
+  bad('lockstep', 'rb-final:1200:3405691582');
+  bad('lockstep', 'rb-final:1200:-5:0');
+  bad('lockstep', 'rb-final:-1:5:0');
+  bad('lockstep', 'rb-final:1200:0xdeadbeef:0');
+});
+
 test('block, region and sub-hash lists are hex', () => {
   ok('lockstep', 'rb-blocks:1200:00000000deadbeef0badf00d');
   ok('lockstep', 'rb-blocks:1200:');
@@ -190,6 +199,8 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
     toPlayers: true,
   };
   assert.equal(issueOf('data-message', saveState), null);
+  assert.equal(issueOf('data-message', { ...saveState, hle: 'AQI=' }), null);
+  assert.notEqual(issueOf('data-message', { ...saveState, hle: 123 }), null);
   assert.equal(issueOf('data-message', { type: 'save-state', frame: 0, data: 'H4sI' }), null);
   assert.notEqual(issueOf('data-message', { type: 'save-state', frame: 0 }), null);
   const lateJoin = {
@@ -314,4 +325,36 @@ test('recovery attempt metadata is separate from legacy headers and rejects malf
     bad('sync-state', `sync-recovery-id:${id}`);
     bad('lockstep', `recovery-settled:997:${id}`);
   }
+});
+
+test('protected reconnect uses a dedicated request and an atomic full-state header', () => {
+  ok('lockstep', 'reconnect-sync-request-v1:19');
+  bad('sync-state', 'reconnect-sync-request-v1:19');
+  bad('lockstep', 'reconnect-sync-request-v1:-1');
+  bad('lockstep', 'reconnect-sync-request-v1:19:20');
+  ok('sync-state', 'sync-start:520:2:1:0:19');
+  ok('sync-state', 'sync-start:520:2:1:0');
+  bad('sync-state', 'sync-start:520:2:1:0:19:20');
+  bad('sync-state', 'sync-start:520:2:0:0:19');
+  bad('sync-state', 'sync-start:520:2:1:1:19');
+  bad('sync-state', 'sync-start:520:2:1:0:0');
+  assert.equal(
+    checkPeerJson('data-message', {
+      type: 'reconnect-sync-request-v1-socket',
+      targetSid: 'host',
+      requesterSid: 'guest',
+      matchId: 'current-match',
+      requestId: 19,
+    }).issue,
+    null,
+  );
+  assert.notEqual(
+    checkPeerJson('data-message', {
+      type: 'reconnect-sync-request-v1-socket',
+      targetSid: 'host',
+      requesterSid: 'guest',
+      requestId: 19,
+    }).issue,
+    null,
+  );
 });

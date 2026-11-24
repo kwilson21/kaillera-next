@@ -33,6 +33,7 @@ local-state branches (`if (!_running) return;`) are not stalls.
 | LOCKSTEP-WAIT (lockstep mode, and the demo's paused predictions: the input of a player for the frame about to run is missing; nothing is predicted). The rule is `lockstepStep` (`web/src/lockstep-wait.ts`, proved); the wait's start is credited for the page's own freeze like the others that drop a player | `MAX_STALL_MS` to ask again, `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` to give up | A hole (an input the player has made, as a later one arrived or was dropped) is asked for at once, as the rollback input stall does (`RB-INPUT-ASK`); any input still missing is asked for again at the first deadline; at the second the player is dropped (phantom) and the frame runs without it; the two resync when it is heard from again | `LOCKSTEP-WAIT` / `LOCKSTEP-WAIT-TIMEOUT` | specs/tick_deadlines.qnt `everyWaitHasADeadline`; specs/resync_inputs.qnt ASK_FOR_MISSING |
 | RB-INPUT-STALL after a reconnect reset (`resetPeerState(slot, 'reconnect')`): the C slot is inactive and the page no longer knows the frame last heard from the peer, so a frame run on its missing input would record no prediction, and nothing would correct it (the CATCH_UP_HOLE split at 1344). A frame at or above the floor that lacks the peer's input waits until one input at or above the floor has been taken in (`_awaitFirstInputAfterReset`, cleared when C is fed) | the same `MAX_STALL_MS + RESEND_TIMEOUT_MS = 5000` | Force-phantom the peer, as the stall above; `PEER-RECOVERED` then resyncs | `RB-INPUT-STALL … (first input since the reconnect)`; every two-player run fails on `PREDICTED-KNOWN` | specs/reconnect_inputs.qnt `theHostNeverPredictsAFrameThePeerHasMade` |
 | Pending sync state held while a rollback replay is in flight (C refuses `kn_set_frame` mid-replay) | `SYNC_APPLY_REPLAY_WAIT_MS = 1000` | Drop the replay (`kn_clear_replay_state`) and load the state | `SYNC-APPLY-DEFERRED` | two-browser test 2026-09-24 |
+| A removed player's cut heard after this page ran frames it changes (`_cutRerun`): the re-run waits for a replay, catch-up or state load under way. Not a tick-loop return: the page runs on meanwhile | `CUT_RERUN_WAIT_MS = 1000` | Run the frames again from this page's ring (`ROSTER-CUT-RERUN`, a catch-up) when it still holds the first of them and nothing is under way; else ask the host for its state (`KNCore.removedInput.rerunStep`, proved) | `ROSTER-CUT-RERUN`, `ROSTER-CUT-LATE` | specs/removed_input.qnt `removedInputAgrees` |
 | Pending sync state held while a catch-up runs (`_catchUpTo >= 0`) | `MAX_CATCH_UP_FRAMES` ticks: each slice runs a frame or ends the catch-up | Apply it once the catch-up ends | `SYNC-CATCH-UP` | specs/resync_flow.qnt `theGuestIsNeverRewound` |
 | Catch-up waiting on a peer's input deeper than the rollback window (asked for with `resend:`) | `CATCH_UP_HOLE_WAIT_MS = 3000`; a slice that waits spends the tick's 60 Hz slot, so the wait is one slice a slot, not a spin (before: 59k-397k slices, each resending the frame's input, which buried the ask on the reliable channel for ~50 s) | End the catch-up; normal ticks play the rest (and stall and ask there as usual) | `SYNC-CATCH-UP ... stopped: slot N input K not here after 3000ms` | Codex review of #261; specs/catch_up_wait.qnt `aWaitingCatchUpDoesNotSpin`, `theAskIsNotBuried` |
 | An ask for a missing input (`resend:<frame>`, every 500 ms, `RB-INPUT-ASK`) that is never answered, or a real input past the rollback window that differs from its prediction (C's `DEEP-MISPREDICT-SKIP`: it cannot be rolled back). Not a tick-loop return: the page predicts that input and runs on, split from the peer | `INPUT_ASK_OVERDUE_ASKS = 3` asks and `INPUT_ASK_OVERDUE_MS = 1500` since the first (`overdueAskStep`, `web/src/resync-request.ts`, proved); a late mismatch is overdue at once | Resync onto the host's state: the host pushes it to that guest (`pushSyncState(sid, false)`), a guest sends an owed `sync-request-full` (its own deadline, `_resyncRequestInFlight` below) | `INPUT-ASK-OVERDUE`, `INPUT-PAST-WINDOW-MISMATCH` | specs/ask_escalation.qnt `everyAskEnds`, `noEarlyEscalation`; `ASK_UNANSWERED_STALL_MS`; the late mismatch only through `PAST_WINDOW_FORCED`, a test-only step past the edge stall that guards it in normal play (`ROLLBACK_AT_EDGE` checks the deepest rollback that stall allows) |
@@ -226,25 +227,12 @@ Count (`kn_get_cycle_time_ms`) unchanged across the call and no
 successor runner scheduled — while `EJS_emulator.paused` stays false;
 the old code counted the frame anyway, a silent one-tick desync.
 
-Root cause: `enterManualMode()`'s `overrideRAF` interceptor captured
-ANY callback passed to `requestAnimationFrame` as `_pendingRunner`,
-not just Emscripten's main-loop runner. Page UI code that calls
-`requestAnimationFrame` during a match — `toggleMoreDropdown` in
-play.js, `_openModal` in feedback.js — overwrote `_pendingRunner` with
-its own callback; the next `stepOneFrame()` ran that UI callback
-instead of emulating, and the real runner was lost. Fixed by having
-the interceptor capture only Emscripten's runner
-(`KNShared.isMainLoopRunner`, matched by `cb.name ===
-'MainLoop_runner'`) and pass every other callback straight to the
-native `requestAnimationFrame` (`APISandbox.nativeRAF`). `stepOneFrame()`
-still detects the no-op signature (no runner rescheduled AND
-`kn_get_cycle_time_ms` unchanged across the call, when the core exports
-it), recaptures the runner, and re-steps the SAME frame once, as a
-safety net for any other cause of a stale runner. If the retry still
-does not emulate, `stepOneFrame()` returns `false` like the no-runner
-case above, so the frame is never counted — R2's `REPLAY-NORUN` logging
-applies identically whether the cause was "no runner at all" or "stale
-runner exhausted its retry."
+The bundled core gives the manual scheduler the current runner for rAF,
+timers, immediates and blocker continuations. A stale generation returns
+before taking a blocker. A counted step requires dispatch into the core
+and CP0 movement when available. These signals establish progress, not
+an exact VI count. Older cores use the name-filtered rAF interceptor and
+retry a stale runner once.
 
 ### R3 — Ring coverage within the rollback window
 
@@ -291,12 +279,29 @@ orderings (natively, against a stand-in core, on both state backends),
 and `RESYNC_ONE_BACK=1` and `RESYNC_SAME_FRAME=1` in
 `tests/rb-two-player.mjs` land the two orderings in a real match.
 
-### R4 — Post-replay live state equals ring state
+### R4 — A replay reproduces the timeline it corrects
 
-After a replay completes at frame N, the emulator's live state
-(fresh `retro_serialize` + `kn_gameplay_hash`) must match the ring's
-stored hash for frame N. Mismatches log `RB-LIVE-MISMATCH` with both
-hashes and throw in dev (RF5).
+A replay must leave the emulator in the state the peers reach with the
+same inputs. **Nothing checks this at run time.** The engine never logs
+`RB-LIVE-MISMATCH`: `kn_get_live_mismatch` always returns 0 (pages still
+poll it), so the absence of `RB-LIVE-MISMATCH` from a log is not
+evidence that R4 held.
+
+RF5's check (April 2026) hashed the live state in `kn_post_tick` at the
+end of a replay and compared it with the ring copy of the last replayed
+frame. It was dropped in f322745, when the replay endpoint save moved to
+the next `kn_pre_tick`, and was not sound before that: the ring copy was
+saved at the start of that frame and the live state is its end, one frame
+apart, and both come from the replay itself, so it could not see the
+replay drift from the original or from the other peers. Compared at the
+endpoint the two are now equal by construction. A check worth having
+compares against something the replay did not produce; today that is the
+cross-peer comparisons: the desync detector, and the gameplay and
+game-state hashes in `tests/rb-two-player.mjs` (see "Which hash to trust"
+in CLAUDE.md for what each covers). The replay's inputs are checked
+natively: `tests/rollback-native/test_stale_prediction_flag.py`
+(specs/stale_prediction_flag.qnt) holds that a replay runs a confirmed
+input's real value.
 
 ### R5 — Pre-tick return value consistency
 
@@ -373,16 +378,16 @@ slot rather than in a loop for the tick pump's whole replay budget.
 
 ### Detection events
 
-Every violation of R1-R6 produces a loud analyzer event. Zero of
-any of these events across a real session log means the integrity
-invariants held.
+A violation of R2, R3 or R5 produces a loud analyzer event. Zero of
+these events across a real session log means those invariants held; it
+says nothing about R4, which has no run-time check (see R4).
 
 | Event | Invariant | Spec RF |
 |-------|-----------|---------|
 | `REPLAY-NORUN` | R2 | RF2 |
 | `RB-INVARIANT-FIXUP` | R5 | RF3 |
 | `FATAL-RING-STALE` | R3 | RF7 |
-| `RB-LIVE-MISMATCH` | R4 | RF5 |
+| `RB-LIVE-MISMATCH` | R4 (retired: never emitted, see R4) | RF5 |
 | `AUDIO-DEATH` (enriched) | R6 diagnostic | RF6 Part A |
 
 `FATAL-CORE-ABORT` means the WASM core trapped. It stops this peer's tick

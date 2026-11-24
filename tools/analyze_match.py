@@ -481,10 +481,14 @@ def query_desync_timeline(df: pl.DataFrame, base: str, key: str, match_id: str) 
     print()
     rb_checks = df.filter(pl.col("msg").str.contains("RB-CHECK"))
     if rb_checks.height > 0:
-        stale = rb_checks.filter(pl.col("msg").str.contains("STALE"))
-        match_ok = rb_checks.filter(pl.col("msg").str.contains("MATCH"))
+        # STALE: pages before rb-final; UNCOMPARED: a value whose counterpart never came.
+        stale = rb_checks.filter(pl.col("msg").str.contains("STALE|UNCOMPARED"))
+        match_ok = rb_checks.filter(pl.col("msg").str.contains(" MATCH"))
         mismatch_rb = rb_checks.filter(pl.col("msg").str.contains("MISMATCH"))
-        print(f"  RB-CHECK: {rb_checks.height} total — {match_ok.height} MATCH, {mismatch_rb.height} MISMATCH, {stale.height} STALE")
+        print(
+            f"  RB-CHECK: {rb_checks.height} total — {match_ok.height} MATCH, {mismatch_rb.height} MISMATCH, "
+            f"{stale.height} STALE/UNCOMPARED"
+        )
         if mismatch_rb.height > 0:
             print("  First RB-CHECK mismatches:")
             for row in mismatch_rb.head(5).iter_rows(named=True):
@@ -1079,7 +1083,9 @@ def query_freeze_detection(df: pl.DataFrame, jsonl_dir: str = "") -> None:
         for row in fatal_stale.head(5).iter_rows(named=True):
             print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
 
-    # RF5: post-replay live-state drift
+    # RF5: post-replay live-state drift. Only logs recorded before f322745
+    # (April 2026) can hold it: the engine no longer makes this check, so
+    # its absence proves nothing (docs/netplay-invariants.md §R4).
     live_mismatch = df.filter(pl.col("msg").str.contains("RB-LIVE-MISMATCH"))
     if live_mismatch.height > 0:
         found_any = True

@@ -13,7 +13,7 @@ for (const incomingLx of [0, 35]) {
   for (const seeded of [false, true]) {
     for (const redundant of [false, true]) {
       test(`real lx=${incomingLx} ${redundant ? 'redundancy' : 'header'} replaces placeholder once (seed marker=${seeded})`, () => {
-        const ctx = vm.createContext({ seeded, redundant, incomingLx });
+        const ctx = vm.createContext({ _hostInputAuthor: () => null, seeded, redundant, incomingLx });
         vm.runInContext(
           `
         const zero={buttons:0,lx:0,ly:0,cx:0,cy:0};

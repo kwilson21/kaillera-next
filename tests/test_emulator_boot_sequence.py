@@ -250,7 +250,9 @@ def test_determinism_harness_has_setup_only_css_character_gate():
 
 def test_controller_mask_reapplies_when_emulator_module_changes():
     source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
-    apply_idx = source.find("const _applyControllerPresentMask =")
+    # The core call and its per-module cache are in _setCoreControllerMask,
+    # which every application (before the match and per frame) goes through.
+    apply_idx = source.find("const _setCoreControllerMask =")
     reset_idx = source.find("const _resetControllerPresentMask =", apply_idx)
     assert apply_idx != -1
     assert reset_idx != -1

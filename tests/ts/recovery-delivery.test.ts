@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 import * as resyncRequest from '../../web/src/resync-request.ts';
 import { createRecoveryManager } from '../../web/src/recovery-delivery.ts';
 import { createRecoveryTransferPool } from '../../web/src/recovery-transfer.ts';
@@ -28,6 +29,7 @@ function room(guests = 2, realTransfers = false) {
     const OVERDUE_MAX_PUSHES = 3, OVERDUE_PUSH_QUIET_MS = 20000, OVERDUE_PUSH_TIMEOUT_MS = 5000;
     const _peers = ${JSON.stringify(Object.fromEntries(Array.from({ length: guests }, (_, i) => [String.fromCharCode(97 + i), { slot: i + 1 }])))};
     const _peerPhantom = {}, _syncChainMovedAt = {}, _knownPlayers = {};
+    ${reconnectProofSource(source)}
     let _syncEnabled = true;
     const _recovery = createRecoveryManager({timeoutMs:5000, quietMs:20000, maxPushes:3}, notice => _handleRecoveryCommand(notice));
     const _recoveryTransfers = createRecoveryTransferPool();
@@ -598,6 +600,7 @@ test('actual receiver keeps tokens across buffering, rejects stale decode and sa
     const _syncLog = () => {}, _clearLifecycleResyncGuard = () => {};
     const _endsResyncRequest = () => false, _answersAnOlderRequest = () => false;
     const _keepsAwaitedAnswer = () => false;
+    ${reconnectProofSource(source)}
     ${handler}
     const receive = (id, frame=1000, full=true) => _handleDecodedSyncPayload({
       recoveryId:id, frame, isFull:full, isRegions:false, isProactive:false,

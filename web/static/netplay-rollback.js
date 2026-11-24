@@ -65,19 +65,9 @@
  *
  * ── Frame Stepping (Manual Mode) ─────────────────────────────────────────
  *
- *   Emscripten's main loop is driven by requestAnimationFrame. To control
- *   frame timing, we intercept rAF via APISandbox (api-sandbox.js):
- *     - APISandbox saves native browser APIs (rAF, getGamepads,
- *       performance.now) at page load before any scripts can override them
- *     - overrideRAF() replaces window.requestAnimationFrame with an
- *       interceptor that captures only Emscripten's main-loop runner
- *       (_pendingRunner) by name; every other callback (UI code calling
- *       rAF during a match) is passed through to the native rAF (#62)
- *     - Module.resumeMainLoop() registers Emscripten's runner through
- *       our interceptor, giving us the callback
- *     - stepOneFrame() calls _pendingRunner(frameTimeMs), advancing the
- *       emulator by exactly one frame, then schedules a real rAF no-op
- *       to force GL compositing
+ *   The patched core passes scheduled runners to this module. Older cores
+ *   use the name-filtered rAF interceptor. stepOneFrame takes one runner
+ *   and checks dispatch and cycle progress before counting the step.
  *
  *   The tick loop uses setInterval(16) instead of rAF because rAF is
  *   throttled to ~1fps in background tabs, which would stall the game.
@@ -554,6 +544,10 @@
     sendNextPing(peer); // completion (incl. broadcast + re-check) handled by _finishRttMeasurement
   };
 
+  const RECONNECT_PROOF_CAP = 'reconnectProofV1';
+  const RECONNECT_PROOF_REQUEST = 'reconnect-sync-request-v1';
+  const _reconnectProofPeers = new Map();
+  const _reconnectProofStatus = (sid) => _reconnectProofPeers.get(_knownPlayers[sid]?.socketId || sid);
   const KN_INPUT_MODEL = 2;
   const _localRollbackCaps = () => {
     const mod = window.EJS_emulator?.gameManager?.Module;
@@ -574,6 +568,10 @@
       // Always true now. Tabs from before the Remix menu lockstep was
       // removed still refuse a peer that doesn't send it.
       remixMenuRollback: true,
+      // This page runs a roster's controller mask from an agreed frame
+      // (specs/controller_mask.qnt); a page without it applies it at once.
+      [window.KNCore.controllerMask.MASK_CAP]: true,
+      [RECONNECT_PROOF_CAP]: true,
     };
   };
 
@@ -1737,12 +1735,19 @@
   // asked for each frame. Cleared with the peer's other input state
   // (resetPeerState, I2) and with every input timeline.
   let _inputDroppedAheadUpTo = {};
-  // After a reconnect reset (resetPeerState 'reconnect') the C slot is
-  // inactive: a frame run on that peer's missing input records no
-  // prediction, and nothing corrects it when the input comes. Until one real
-  // input at or above the floor is taken in, such a frame waits
-  // (specs/reconnect_inputs.qnt, WAIT_FIRST_INPUT).
+  // After a reconnect reset (resetPeerState 'reconnect') and a roster that
+  // admits a player again, that peer's inputs are waited for until one real
+  // input at or above the floor is taken in (specs/reconnect_inputs.qnt,
+  // WAIT_FIRST_INPUT). A reset that empties the C slot leaves it inactive: a
+  // frame run on that peer's missing input would record no prediction, and
+  // nothing would correct it when the input came. A reconnect keeps the C
+  // slot (_resetCoreSlot) and the wait is kept with it: the frame-ahead
+  // stall is measured from the frame last heard, which the reset forgets.
   let _awaitFirstInputAfterReset = {};
+  // A kept native slot must wait even when its transport entry is absent.
+  // Start on the first stall, not during an unrelated paused state; keep
+  // that wall-clock start across successive transport resets.
+  const _keptSlotFirstInputAt = new Map();
   let _predictedKnownCount = 0;
   // RESEND log lines per peer slot: at most one a second, with the count.
   let _resendLog = {};
@@ -1807,10 +1812,27 @@
   let _lastInputRoster = null;
   let _lastInputRosterFrame = -1;
   const _lateJoinInputWindows = new Map();
+  // A removed player's input is cut by frame while the match is on the
+  // scheduled roster rule (web/src/removed-input.ts, specs/removed_input.qnt):
+  // neutral from the host's roster frame on every page, the host's inputs
+  // below it. Guest: the host's `roster-cut:` messages heard for the roster
+  // that follows, by slot. Host: the ones it sent with its last roster, for
+  // the resend to a channel that opens. A page that ran frames with other
+  // inputs runs again from the first one (_cutRerun, serviced in tick()).
+  const _heardRosterCuts = new Map();
+  let _lastRosterCuts = [];
+  let _cutRerun = null; // {from, at}: run again from frame `from`
+  // Host: slots hardDisconnectPeer left for the roster broadcast that follows
+  // to cut (or, on the immediate rule, to empty).
+  const _coreSlotsKeptForCut = new Set();
   const _clearLateJoinInputRoster = () => {
     _lastInputRoster = null;
     _lastInputRosterFrame = -1;
     _lateJoinInputWindows.clear();
+    _heardRosterCuts.clear();
+    _lastRosterCuts = [];
+    _cutRerun = null;
+    _coreSlotsKeptForCut.clear();
   };
   const _recordHostInputRoster = (frame, slots) => {
     if (RB_WORKER_COPROC) return true;
@@ -1818,7 +1840,10 @@
     const roster = new Set(slots);
     for (let slot = 0; slot < 4; slot++) {
       if (!roster.has(slot) && (!_lastInputRoster || _lastInputRoster.has(slot))) {
-        _lateJoinInputWindows.set(slot, { absentSince: frame, first: null, connected: false, primed: false });
+        // `cut`: the tag the cut by frame starts at, once _cutRemovedInput
+        // has written it (-1: the slot reads neutral by being emptied, the
+        // immediate rule).
+        _lateJoinInputWindows.set(slot, { absentSince: frame, first: null, connected: false, primed: false, cut: -1 });
       } else if (roster.has(slot) && _lastInputRoster && !_lastInputRoster.has(slot)) {
         const record = _lateJoinInputWindows.get(slot);
         if (record) {
@@ -1831,7 +1856,19 @@
     _lastInputRosterFrame = frame;
     return true;
   };
-  const _admissionInputFloor = (slot) => _lateJoinInputWindows.get(slot)?.first ?? 0;
+  // While a cut governs the slot no input of it is taken in; once admitted
+  // again, none before its floor (KNCore.removedInput.admissionFloor).
+  const _admissionInputFloor = (slot) => {
+    const record = _lateJoinInputWindows.get(slot);
+    if (!record) return 0;
+    return window.KNCore.removedInput.admissionFloor(record.first ?? -1, record.cut ?? -1);
+  };
+  // The slot's input is the cut's (written into the C ring): nothing may
+  // empty its ring until the player is admitted again.
+  const _cutGoverns = (slot) => {
+    const record = _lateJoinInputWindows.get(slot);
+    return !!record && record.first === null && (record.cut ?? -1) >= 0;
+  };
   const _waitingForHostAdmission = (slot) => _lateJoinInputWindows.get(slot)?.first === null;
   const _observeLateJoinDcOpen = (slot) => {
     const record = _lateJoinInputWindows.get(slot);
@@ -1867,8 +1904,13 @@
   // After a reconnect reset: no input of that peer at or above the floor
   // has been taken in yet (one that has will be fed before the frame runs).
   const _awaitingFirstInput = (slot) => {
-    if (!_awaitFirstInputAfterReset[slot]) return false;
     const floor = _inputFloor(slot);
+    if (_keptSlotFirstInputAt.has(slot)) {
+      // Only an admitted live input queued for C can release this wait;
+      // backfill or a locally seeded neutral is not a fresh peer input.
+      return !_pendingCInputs.some((input) => !input.seeded && input.slot === slot && input.frame >= floor);
+    }
+    if (!_awaitFirstInputAfterReset[slot]) return false;
     for (const key of Object.keys(_remoteInputs[slot] || {})) if (+key >= floor) return false;
     return true;
   };
@@ -1886,7 +1928,11 @@
       const floor = _inputFloor(p.slot);
       const peerHas = Math.max(_lastRemoteFramePerSlot[p.slot] ?? -1, _inputDroppedAheadUpTo[p.slot] ?? -1);
       let why = '';
-      if (applyFrame >= floor && !_remoteInputs[p.slot]?.[applyFrame] && _awaitingFirstInput(p.slot))
+      if (
+        applyFrame >= floor &&
+        (_keptSlotFirstInputAt.has(p.slot) || !_remoteInputs[p.slot]?.[applyFrame]) &&
+        _awaitingFirstInput(p.slot)
+      )
         why = 'first-input';
       else if (RB_TRUE_ROLLBACK && windowEdge >= floor && windowEdge <= peerHas && !_remoteInputs[p.slot]?.[windowEdge])
         why = 'edge';
@@ -1981,6 +2027,11 @@
       _feedWatched(tickMod, qi.slot, qi.frame, () =>
         tickMod._kn_feed_input(qi.slot, qi.frame, qi.buttons, qi.lx, qi.ly, qi.cx, qi.cy),
       );
+      _recordHostReconnectReceipt(qi);
+      if (!qi.seeded) {
+        if (_keptSlotFirstInputAt.has(qi.slot) && qi.frame >= _inputFloor(qi.slot))
+          _keptSlotFirstInputAt.delete(qi.slot);
+      }
     }
     _pendingCInputs.length = 0;
     if (settledSkipped > 0) _syncLog(`C-INPUT-SETTLED-SKIP f=${_frameNum} count=${settledSkipped}`);
@@ -4298,9 +4349,31 @@
   // cause and ate the frame budget, contributing to user-perceived lag.
   const RB_BISECT_MAX_PER_MATCH = 5;
   let _rbBisectCount = 0;
-  // Per-frame hash broadcast pending — populated after rollback to verify
-  // the rollback restoration produced bit-identical state across peers.
+  // Set when a replay finishes: the next tick logs RB-POST-RB, this page's
+  // own hashes of the first frame after the replay. Local only: that frame
+  // can still be rolled back, so it is not sent for comparison.
   let _rbPendingPostRollbackHash = false;
+  // RB-CHECK (web/src/rb-check.ts, specs/rb_check.qnt): each page files the
+  // gameplay hash of the frame one rollback window behind the newest, which
+  // it can no longer roll back, sends it (`rb-final:`), and compares it with
+  // each peer's value for that frame whichever arrives second. A lone value
+  // is logged as UNCOMPARED after RB_CHECK_HISTORY_FRAMES.
+  const RB_CHECK_HISTORY_FRAMES = 600;
+  let _rbCheckBook = null;
+  const _rbChecks = () => {
+    if (!_rbCheckBook) _rbCheckBook = window.KNCore.rbCheck.createBook(RB_CHECK_HISTORY_FRAMES);
+    return _rbCheckBook;
+  };
+  // Comparisons and expiries decided since the last normal tick, logged there.
+  let _rbCheckOutcomes = [];
+  // Peers (by slot) already logged as sending `rb-check:` (a page from
+  // before rb-final: its hashes may be of frames still rolled back).
+  const _rbLegacyCheckSlots = new Set();
+  const _rbCheckClear = () => {
+    _rbCheckBook?.clear();
+    _rbCheckOutcomes = [];
+    _rbLegacyCheckSlots.clear();
+  };
   // RF6 Part A: AUDIO-DEATH diagnostics enrichment. Track the most recent
   // `C-REPLAY done` frame and how many kn_reset_audio() calls have fired
   // since then, so audio-empty / audio-silent log lines can report
@@ -5511,6 +5584,7 @@
   const _escalateLostInput = (peer, step, now, hole, atOverdue = false) => {
     const slot = peer.slot;
     if (step === 'push') {
+      if (_hostReconnectDebts.has(slot) && _hostReconnectBlocksNativeCapture()) return;
       // Only the server roster supplies the budget identity. A peer's connection
       // key changes on reconnect and peer-supplied fields cannot buy a new budget.
       const recipients = _syncTargetsFor(null).map(({ sid, peer: target }) => ({
@@ -5709,6 +5783,7 @@
   let _lockstepStartStateKind = 'savestate'; // state kind that launched the current lockstep run
   let _guestStateHiddenWords = null; // host-side hidden state sidecar for startup
   let _guestStateAudioFifo = null; // host-side AI FIFO sidecar; kn-sync does not carry it
+  let _guestStateHle = null; // optional host RSP HLE sidecar; kn-sync does not carry it
   let _guestStateSaveRam = null; // host's cartridge save memory; no state format carries it
   let _guestStateCapturedLocally = false; // host already sits at this paused state
   let _frameNum = 0; // current logical frame number
@@ -5803,6 +5878,28 @@
   let _activeRoster = null; // Set<number> of active slots — host-authoritative, null until first roster
   let _lastControllerPresentMask = -1;
   let _lastControllerPresentMaskModule = null;
+  // The controller-present mask by frame for the running match: a roster's
+  // mask takes effect at its roster frame + MASK_LEAD on every page, and each
+  // frame stepped (forward, replay, catch-up) runs with the mask filed for it
+  // (KNCore.controllerMask; specs/controller_mask.qnt). Not per-peer state:
+  // started with the match, stopped with the engine.
+  const _maskSchedule = window.KNCore.controllerMask.createMaskSchedule();
+  let _maskFrameMismatchLogged = false;
+  // One rule per match, the host's (specs/controller_mask.qnt, VERSIONED):
+  // scheduled only while every player page in it can; a page from before the
+  // scheduled rule applies each roster at once, and a match it is in runs on
+  // that rule for good. Host: the match is still scheduled. Guest: this page
+  // has not fallen back yet. True at a match's start.
+  let _maskMatchScheduled = true;
+  // Guest: the roster frame the host's last `roster-mask:` named (it comes
+  // just before the roster it announces), or -1.
+  let _maskAnnouncedFrame = -1;
+  // Host: the frame of the last roster it sent (the one its resend carries).
+  let _lastBroadcastRosterFrame = -1;
+  // Which player pages said they can run the scheduled rule, by peer key: in
+  // lockstep-ready's caps (starters) or request-late-join's (late joiners).
+  // Each admission writes its own entry again; a page with none is old.
+  const _maskCapablePeers = new Map();
   const MENU_START_BARRIER_SETTLE_MS = 500;
   let _menuStartBarrierReleased = false;
   let _menuStartLocalReady = false;
@@ -5868,6 +5965,21 @@
   let _lateJoinInputBootstrapUntilFrame = -1;
   let _lateJoinSeededInputFrames = {}; // slot -> Set<frame> seeded as deterministic late-join zeros
   let _lateJoinReadyRetryTimer = null;
+  // Joiner, on the scheduled rule: its own input is neutral until it has
+  // heard the host's roster that admits it, and below that roster's frame +
+  // MASK_LEAD (KNCore.lateJoinInput.joinerHoldsOwnInput). {stateFrame,
+  // rosterFrame} (-1 until heard), or null.
+  let _joinHold = null;
+  const JOIN_HOLD_LEAD = window.KNCore.controllerMask.MASK_LEAD;
+  // The join rule of this match is the scheduled roster rule (one per match,
+  // the host's). On the host, the roster it is about to broadcast stays
+  // scheduled only if every player page in it can.
+  const _joinRuleScheduled = () => {
+    if (!_maskMatchScheduled || !_maskSchedule.active()) return false;
+    if (_playerSlot !== 0) return true;
+    const others = _hostRosterSlots().filter((slot) => slot !== _playerSlot);
+    return window.KNCore.controllerMask.matchScheduled(true, others.map(_maskSlotCapable));
+  };
 
   // Smash Remix ROM hashes (for game-specific RNG/settings sync).
   // Must match hashes in server/config/known_roms.json.
@@ -5915,6 +6027,7 @@
     if (_useCRollback) {
       _pendingCInputs.push({
         slot,
+        seeded: true,
         frame,
         buttons: 0,
         lx: 0,
@@ -5941,8 +6054,15 @@
     return [...slots].filter((slot) => slot !== _playerSlot);
   };
 
+  // The old Remix bootstrap: a neutral window of this page's own input and
+  // neutral placeholders for the others, from the frame this page is on.
+  // Only in a Remix match on the immediate rule (a page from before the
+  // scheduled rule is in it and runs it too). On the scheduled rule no page
+  // holds or seeds anything for a join: the joiner holds its own input
+  // (_joinHold) and gets the others' real inputs (the late-join input
+  // bridge); web/src/late-join-input-rule.ts, specs/late_join_input_agreement.qnt.
   const _startLateJoinInputBootstrap = (reason = '', extraSlots = []) => {
-    if (!_isSmashRemix()) return;
+    if (!window.KNCore.lateJoinInput.legacyBootstrap(_isSmashRemix(), _joinRuleScheduled())) return;
     if (!_isValidPlayerSlot(_playerSlot)) return;
     const startFrame = Math.max(0, _frameNum - DELAY_FRAMES - 2);
     const endFrame = _frameNum + Math.max(LATE_JOIN_INPUT_BOOTSTRAP_FRAMES, DELAY_FRAMES * 4);
@@ -6019,6 +6139,7 @@
   // by startLockstep (a new match restarts frames at 0) and stop().
   const _clearSlotInputState = (slot) => {
     _recovery.reset(slot);
+    _keptSlotFirstInputAt.delete(slot);
     for (const map of _slotInputMaps()) delete map[slot];
     delete _remoteInputs[slot];
     delete _peerInputStarted[slot];
@@ -6030,6 +6151,8 @@
   // new match, stop).
   const _resetInputMaps = () => {
     _recovery.resetAll();
+    _keptSlotFirstInputAt.clear();
+    _corePhantomHistory.clear();
     if (typeof _ownerRepair !== 'undefined') _ownerRepair = null;
     if (typeof _authoredOwnerInputs !== 'undefined') _authoredOwnerInputs.clear();
     for (const map of _slotInputMaps()) for (const slot in map) delete map[slot];
@@ -6132,16 +6255,310 @@
     return mask & 0x0f;
   };
 
-  const _applyControllerPresentMask = (reason = 'tick') => {
+  // Set the core's mask. `frame` is the frame it takes effect at (-1: before
+  // the match, when the host's state carries what the boot frames did).
+  const _setCoreControllerMask = (mask, reason, frame) => {
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?._kn_set_controller_present_mask) return;
-    const mask = _controllerPresentMask();
     if (!mask) return;
     if (mod === _lastControllerPresentMaskModule && mask === _lastControllerPresentMask) return;
     _lastControllerPresentMaskModule = mod;
     _lastControllerPresentMask = mask;
     mod._kn_set_controller_present_mask(mask);
-    _syncLog(`controller present mask (${reason}): 0x${mask.toString(16)}`);
+    _syncLog(`controller present mask (${reason}): 0x${mask.toString(16)}${frame >= 0 ? ` f=${frame}` : ''}`);
+  };
+
+  // Before the match runs, the mask follows what this page knows at once.
+  // Once it runs, the schedule decides: the core is set to the mask of the
+  // frame about to run, and nothing heard mid-match changes it directly.
+  const _applyControllerPresentMask = (reason = 'tick') => {
+    if (_maskSchedule.active()) {
+      _setCoreControllerMask(_maskSchedule.maskAt(_frameNum), reason, _frameNum);
+      return;
+    }
+    _setCoreControllerMask(_controllerPresentMask(), reason, -1);
+  };
+
+  // The mask of a roster: its slots, less synthetic peers outside the demo.
+  // The page's own slot is not added: every page computes the same mask.
+  const _rosterControllerMask = (slots) => {
+    const leaveOut =
+      _demoMode === true
+        ? []
+        : Object.values(_peers)
+            .filter((peer) => peer?.synthetic === true)
+            .map((peer) => peer.slot);
+    return window.KNCore.controllerMask.rosterMask(slots, leaveOut);
+  };
+
+  // A guest heard a roster after it had run frames the change covers, with
+  // another mask: those frames ran differently from the other pages', and
+  // the core has no way to run them again from here. The change is filed at
+  // its agreed frame all the same; the host's state puts this page back on
+  // the frames everyone ran (a catch-up runs them with the filed masks).
+  const _askHostStateAfterLateRoster = (filed, mask, reason) => {
+    const frontier = _maskSchedule.frontier();
+    _syncLog(
+      `ROSTER-MASK-LATE (${reason}) f=${_frameNum}: frames ${filed.from}..${frontier - 1} ran with ` +
+        `0x${filed.maskBefore.toString(16)}, not 0x${mask.toString(16)}; asking the host for its state`,
+    );
+    KNEvent('desync', `roster heard late f=${_frameNum}`, {
+      kind: 'roster-mask-late',
+      from: filed.from,
+      frontier,
+      frame: _frameNum,
+    });
+    _askHostStateForLateRoster('ROSTER-MASK-LATE', 'roster mask late');
+  };
+
+  // A guest asks the host for its state after a roster it heard too late to
+  // run the frames it covers again itself; the state is run on with what the
+  // roster filed (the masks, a removed player's cut).
+  const _askHostStateForLateRoster = (tag, why) => {
+    if (_playerSlot === 0) return;
+    if (_resyncRequestInFlight) {
+      _syncLog(`${tag}: a resync request is out already; its state is run on with what the roster filed`);
+      return;
+    }
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    const hostDc = Object.values(_peers).find((p) => p.slot === 0)?.dc;
+    if (hostDc?.readyState === 'open') {
+      try {
+        _sendResyncRequest(hostDc, _beginResyncRequest(), 'sync-request-full');
+        return;
+      } catch (e) {
+        _resyncRequestInFlight = false;
+        _syncLog(`${tag} resync request send failed: ${e}`);
+      }
+    }
+    _requestSocketFullResync(why);
+  };
+
+  // A roster heard from the host (specs/late_join_input_agreement.qnt):
+  //  - the joiner: the first one that lists it, from its state's frame on,
+  //    fixes where its own input hold ends (rosterFrame + JOIN_HOLD_LEAD);
+  //  - a guest, on the scheduled rule, that hears a roster admit a player
+  //    after it has run a tag of that player at or past the joiner's hold:
+  //    it ran that tag as absent, where the joiner may have sent a real
+  //    input, and takes the host's state (KNCore.lateJoinInput.admittedLate).
+  const _noteJoinRoster = (rosterFrame, slots, addedSlots, scheduled) => {
+    if (_joinHold && _joinHold.rosterFrame < 0 && slots.includes(_playerSlot) && rosterFrame >= _joinHold.stateFrame) {
+      _joinHold.rosterFrame = rosterFrame;
+      _syncLog(`LATE-JOIN-HOLD roster f=${rosterFrame}: own input neutral below tag ${rosterFrame + JOIN_HOLD_LEAD}`);
+    }
+    if (!scheduled || _playerSlot === 0 || RB_WORKER_COPROC || !_maskSchedule.active()) return;
+    const joined = addedSlots.filter((slot) => slot !== _playerSlot);
+    if (joined.length === 0) return;
+    const ranThroughTag = _maskSchedule.frontier() - 1 - DELAY_FRAMES;
+    if (!window.KNCore.lateJoinInput.admittedLate(rosterFrame, ranThroughTag, JOIN_HOLD_LEAD)) return;
+    _syncLog(
+      `ROSTER-ADMIT-LATE f=${_frameNum}: ran tags of slot(s) [${joined.join(',')}] up to ${ranThroughTag} as absent, ` +
+        `past the joiner's hold (roster f=${rosterFrame}); asking the host for its state`,
+    );
+    KNEvent('desync', `roster admission heard late f=${_frameNum}`, {
+      kind: 'roster-admit-late',
+      rosterFrame,
+      ranThroughTag,
+      frame: _frameNum,
+    });
+    _askHostStateForLateRoster('ROSTER-ADMIT-LATE', 'roster admission late');
+  };
+
+  // The inputs `slot` ran with on the tags the frames still in the ring
+  // applied (a replay can run those again), as the ring holds them: only the
+  // ones it holds, none for a slot it holds nothing of.
+  const _ringInputsRan = (mod, slot) => {
+    const ranThrough = (mod._kn_get_frame?.() ?? _frameNum) - DELAY_FRAMES;
+    const out = [];
+    if (!mod._kn_get_input || !_rbInputPtr) return out;
+    for (let tag = Math.max(0, ranThrough - (_rbRollbackMax + 2)); tag < ranThrough; tag++) {
+      const i = _rbGetInput(mod, slot, tag);
+      if (i !== KNShared.ZERO_INPUT) out.push({ tag, i: { ...i } });
+    }
+    return out;
+  };
+
+  // The cut of a removed player's input (web/src/removed-input.ts,
+  // specs/removed_input.qnt): what the host applied in `slot` on the tags
+  // from `from` up to the cut tag, read from this page's (the host's) ring
+  // before the slot is touched. It is final: from now on the host takes no
+  // input of that player (_admissionInputFloor), so its ring keeps these.
+  const _hostRosterCut = (mod, slot, rosterFrame) => {
+    const RI = window.KNCore.removedInput;
+    const cut = RI.cutTag(rosterFrame, DELAY_FRAMES);
+    const from = Math.max(0, cut - RI.wordSpan(_rbRollbackMax, DELAY_FRAMES, DELAY_FRAMES + 8));
+    const inputs = [];
+    for (let tag = from; tag < cut; tag++) {
+      const i = _rbGetInput(mod, slot, tag);
+      inputs.push({ buttons: i.buttons | 0, lx: i.lx | 0, ly: i.ly | 0, cx: i.cx | 0, cy: i.cy | 0 });
+    }
+    return { rosterFrame, slot, cut, from, inputs };
+  };
+
+  // Write the host's cut of `slot` into this page's C ring and find the
+  // first frame this page ran with another input for it. Below the cut the
+  // ring gets the host's inputs, as real ones (a replay runs them again
+  // unchanged, and no input of the player replaces them: the slot takes none
+  // until it is admitted again); from the cut on, two neutral real inputs, so
+  // C predicts neutral for every tag after them. Returns that frame, or -1.
+  const _cutRemovedInput = (mod, slot, cut, reason) => {
+    const RI = window.KNCore.removedInput;
+    const record = _lateJoinInputWindows.get(slot);
+    if (!mod?._kn_feed_input || !mod._kn_rollback_slot_reset || !record) return -1;
+    // What this page applied on the tags of the frames still in its ring
+    // (the ones it can run again, as _ringInputsRan keeps them across a
+    // reset): the ring holds the input each tag last ran with. An older frame
+    // is final here, whatever it ran with.
+    const ranThrough = (mod._kn_get_frame?.() ?? _frameNum) - DELAY_FRAMES;
+    const checkFrom = Math.max(cut.from, ranThrough - (_rbRollbackMax + 2));
+    const ran = [];
+    const rule = [];
+    let lateFrame = -1;
+    for (let tag = checkFrom; tag < ranThrough; tag++) {
+      ran.push(RI.packInput(_rbGetInput(mod, slot, tag)));
+      rule.push(RI.packInput(RI.cutInputAt(cut, tag)));
+    }
+    const k = RI.firstDiffering(ran, rule);
+    if (k >= 0) lateFrame = checkFrom + k + DELAY_FRAMES;
+    mod._kn_rollback_slot_reset(slot);
+    _corePhantomHistory.delete(slot);
+    for (let tag = cut.from; tag < cut.cut; tag++) {
+      const i = RI.cutInputAt(cut, tag);
+      _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
+    }
+    for (let tag = Math.max(0, cut.cut); tag < cut.cut + 2; tag++) {
+      _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, 0, 0, 0, 0, 0));
+    }
+    record.cut = cut.cut;
+    record.absentSince = cut.cut;
+    _syncLog(
+      `ROSTER-CUT (${reason}) slot=${slot} roster f=${cut.rosterFrame} cut=${cut.cut} from=${cut.from} ` +
+        `ranThrough=${ranThrough - 1}${lateFrame >= 0 ? ` late from f=${lateFrame}` : ''}`,
+    );
+    if (lateFrame >= 0) {
+      // What this page filed for the frames it runs again describes the
+      // state they replace.
+      window.KNDesync?.forgetFrom(lateFrame);
+      _rbCheckBook?.forgetFrom(lateFrame);
+      if (!_cutRerun || lateFrame < _cutRerun.from) _cutRerun = { from: lateFrame, at: performance.now() };
+    }
+    return lateFrame;
+  };
+
+  // A page that ran frames with other inputs than a cut gives runs them
+  // again, at a tick boundary: from its own ring when it still holds the
+  // first of them and nothing else is under way (a replay, a catch-up, a
+  // state to load), else from the host's state. A replay or state under way
+  // is waited out, CUT_RERUN_WAIT_MS at most (I1). A host state loaded
+  // meanwhile replaces it (applySyncState).
+  const CUT_RERUN_WAIT_MS = 1000;
+  const _serviceCutRerun = () => {
+    if (!_cutRerun) return;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    const busy =
+      _catchUpTo >= 0 ||
+      !!_pendingResyncState ||
+      (mod?._kn_get_replay_depth?.() ?? 0) > 0 ||
+      (mod?._kn_peek_pending_rollback?.() ?? -1) >= 0;
+    if (busy && performance.now() - _cutRerun.at < CUT_RERUN_WAIT_MS) return;
+    const { from } = _cutRerun;
+    _cutRerun = null;
+    const canRerun = !busy && !RB_WORKER_COPROC && _canCatchUp() && !!mod?._kn_restore_frame;
+    const step = window.KNCore.removedInput.rerunStep(from, _frameNum, _rbRollbackMax, canRerun);
+    if (step === 'nothing') return;
+    if (step === 'local' && _rerunFromRing(mod, from)) return;
+    _syncLog(
+      `ROSTER-CUT-LATE f=${_frameNum}: frames from ${from} ran with other inputs; asking the host for its state`,
+    );
+    KNEvent('desync', `removed player's input heard late f=${_frameNum}`, {
+      kind: 'roster-cut-late',
+      from,
+      frame: _frameNum,
+    });
+    _askHostStateForLateRoster('ROSTER-CUT-LATE', 'roster cut late');
+  };
+
+  // Run the frames from `from` up to the one this page is on again, from the
+  // ring's state of `from`: a catch-up (_startCatchUp), as after a host
+  // state from before this frame, on the inputs the ring now holds.
+  const _rerunFromRing = (mod, from) => {
+    const to = _frameNum;
+    if (!mod._kn_restore_frame(from)) {
+      _syncLog(`ROSTER-CUT-RERUN f=${to}: the ring no longer holds frame ${from}`);
+      return false;
+    }
+    // Restoring a state can leave the runner stale (R1), as a state load does.
+    recaptureManualRunner(mod, 'cut re-run');
+    mod._kn_set_frame(from);
+    if (mod._kn_get_frame?.() !== from) {
+      _syncLog(`ROSTER-CUT-RERUN f=${to}: kn_set_frame refused ${from}`);
+      _handleCoreFatal('cut-rerun', new Error(`Native frame refused re-run frame ${from}`));
+      return true;
+    }
+    _frameNum = from;
+    KNState.frameNum = from;
+    _syncLog(`ROSTER-CUT-RERUN from=${from} to=${to}`);
+    _startCatchUp(mod, from, to);
+    return true;
+  };
+
+  // This page leaves the scheduled rule for the rest of the match: the mask
+  // follows each roster at once, as on a page from before the rule.
+  const _fallBackToImmediateMasks = (why) => {
+    if (!_maskMatchScheduled) return;
+    _maskMatchScheduled = false;
+    _maskSchedule.stop();
+    _syncLog(`CONTROLLER-MASK-RULE immediate f=${_frameNum}: ${why}`);
+  };
+
+  // Host: the player in `slot` said it can run the scheduled rule. A
+  // synthetic peer (the demo's) is this page's own.
+  const _maskSlotCapable = (slot) => {
+    const [sid, peer] = _peerEntryForSlot(slot) || [];
+    if (peer?.synthetic === true) return true;
+    return !!sid && _maskCapablePeers.get(sid) === true;
+  };
+
+  // File the host's roster of `rosterFrame` (broadcast here or heard from
+  // the host). It takes effect at rosterFrame + MASK_LEAD on every page.
+  const _fileRosterControllerMask = (rosterFrame, slots, reason) => {
+    if (!_maskSchedule.active()) {
+      _applyControllerPresentMask(reason);
+      return;
+    }
+    const mask = _rosterControllerMask(slots);
+    if (!mask) return;
+    const filed = _maskSchedule.fileRoster(rosterFrame, mask);
+    if (filed.maskBefore !== mask || filed.late) {
+      _syncLog(
+        `ROSTER-MASK (${reason}) 0x${mask.toString(16)} from f=${filed.from} ` +
+          `(roster f=${rosterFrame}, was 0x${filed.maskBefore.toString(16)}, run up to f=${_maskSchedule.frontier() - 1})`,
+      );
+    }
+    if (filed.late) _askHostStateAfterLateRoster(filed, mask, reason);
+  };
+
+  // Just before a frame is stepped: the core gets the mask filed for it. The
+  // frame is C's when the C engine runs (kn_pre_tick has picked it: the
+  // replay frame, or the forward one), else the page's. Returns the frame,
+  // or -1 when no match is running.
+  const _applyControllerMaskForStep = (branch) => {
+    if (!_maskSchedule.active()) return -1;
+    let frame = _frameNum;
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (_useCRollback && mod?._kn_get_frame) {
+      const cFrame = mod._kn_get_frame();
+      if (cFrame !== frame) {
+        if (!_maskFrameMismatchLogged) {
+          _maskFrameMismatchLogged = true;
+          _syncLog(`controller mask: stepping C frame ${cFrame} with _frameNum=${frame} (branch=${branch})`);
+        }
+        frame = cFrame;
+      }
+    }
+    _setCoreControllerMask(_maskSchedule.maskAt(frame), 'frame', frame);
+    return frame;
   };
 
   // Apply the real player-count mask the *instant* the WASM export is
@@ -6190,6 +6607,11 @@
   const _resetControllerPresentMask = () => {
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
+    _maskSchedule.stop();
+    _maskMatchScheduled = true;
+    _maskAnnouncedFrame = -1;
+    _lastBroadcastRosterFrame = -1;
+    _maskFrameMismatchLogged = false;
     _earlyMaskApplied = false;
     if (_earlyMaskPoller) {
       clearInterval(_earlyMaskPoller);
@@ -6341,6 +6763,7 @@
   };
 
   // Manual mode / rAF interception state (native refs managed by APISandbox)
+  let _manualSchedulerModule = null;
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
   let _manualMode = false; // true once enterManualMode() called
   let _stallStart = 0; // timestamp when current stall began
@@ -6882,7 +7305,6 @@
       }
     } catch (_) {}
   };
-
   const _flushSyncLog = () => {
     const matchId = _cachedMatchId || KNState.matchId;
     if (!matchId) return;
@@ -7095,6 +7517,7 @@
   // lost-host step, ask again for an owed resync, stop asking, or nothing.
   const _checkResyncRequestDeadline = () => {
     if (!_resyncRequestInFlight) return;
+    if (_reconnectAnswerDebt && _reconnectAnswerScopeCurrent(_reconnectAnswerDebt.scope)) return;
     const now = performance.now();
     // An answer arriving or held, or a coordinated target, has its own deadline.
     const answerComing = _syncExpected > 0 || !!_pendingResyncState || _syncTargetFrame > 0;
@@ -7138,6 +7561,7 @@
     if (!_owedResync || _playerSlot === 0 || _phase !== PHASE_RUNNING) return;
     _owedResyncAsksAgain++;
     const ask = `${_owedResyncAsksAgain}/${RESYNC_MAX_ASKS_AGAIN}`;
+    const debt = _reconnectAnswerDebt?.id === _resyncRequestId ? _reconnectAnswerDebt : null;
     _setLastSyncState(null, 'resync-reask');
     _syncTargetFrame = -1;
     _syncTargetDeadlineAt = 0;
@@ -7146,6 +7570,7 @@
       const requestId = _beginResyncRequest(-1, true);
       try {
         _sendResyncRequest(hostDc, requestId, 'sync-request-full');
+        if (debt?.status === 'waiting' && _reconnectAnswerScopeCurrent(debt.scope)) debt.id = requestId;
         _syncLog(`RESYNC-REASK f=${_frameNum} ask=${ask}: sent sync-request-full to the host`);
         return;
       } catch (e) {
@@ -7154,6 +7579,7 @@
       }
     }
     if (_requestSocketFullResync('resync-reask', true)) {
+      if (debt?.status === 'waiting' && _reconnectAnswerScopeCurrent(debt.scope)) debt.id = _resyncRequestId;
       _syncLog(`RESYNC-REASK f=${_frameNum} ask=${ask}: sent over the socket`);
       return;
     }
@@ -7167,7 +7593,7 @@
   // reconnect asking again over it); without the number that late answer
   // ended the newer request and was applied at the newer request's target.
   // 0 = none: a state the host sent for its own reasons carries no number.
-  let _resyncRequestId = 0; // the newest request's number; per match
+  let _resyncRequestId = 0; // page-lifetime counter: an old socket answer may outlive a match
   // The host numbers its answers: learned from the first numbered one. Until
   // then (a host on a version that does not) an unnumbered state ends the
   // request as it always did, or the flag would only clear at its deadline.
@@ -7178,6 +7604,449 @@
   // target's deadline gives the target up, not the frame the guest asked at
   // (specs/resync_flow.qnt, lateAndBehind).
   let _resyncRequestAt = -1;
+  // Exact protected answer, independent of generic resync bookkeeping.
+  let _reconnectAnswerDebt = null;
+  const _reconnectAnswerScope = (key, peer = _peers[key]) => {
+    if (!peer || peer.slot !== 0 || _peers[key] !== peer || !KNState.matchId) return null;
+    return { key, peer, matchId: KNState.matchId, epoch: _syncQueueEpoch, gen: _syncQueueGen[key] || 0 };
+  };
+  const _reconnectAnswerScopeCurrent = (scope) =>
+    !!scope &&
+    scope.matchId === KNState.matchId &&
+    scope.epoch === _syncQueueEpoch &&
+    scope.gen === (_syncQueueGen[scope.key] || 0) &&
+    _peers[scope.key] === scope.peer &&
+    scope.peer.slot === 0;
+  const _startsReconnectAnswerDebt = (key, peer, id) => {
+    const scope = _reconnectAnswerScope(key, peer);
+    if (!scope) return;
+    const old = _reconnectAnswerDebt;
+    const absolute =
+      old && old.scope.matchId === scope.matchId && old.scope.epoch === scope.epoch
+        ? old.absolute
+        : performance.now() + (RESYNC_MAX_ASKS_AGAIN + 1) * RESYNC_REQUEST_TIMEOUT_MS + SYNC_DECODE_GRACE_MS;
+    const status = absolute === old?.absolute && old.status === 'unresolved' ? 'unresolved' : 'waiting';
+    _reconnectAnswerDebt = { scope, id, absolute, status, attempts: 0, retryAt: 0 };
+    if (status === 'waiting') _transmitReconnectProofRequest(_reconnectAnswerDebt);
+  };
+  const _transmitReconnectProofRequest = (debt) => {
+    debt.attempts++;
+    debt.retryAt = performance.now() + RESYNC_REQUEST_TIMEOUT_MS;
+    const dc = debt.scope.peer.dc;
+    try {
+      if (dc?.readyState === 'open') {
+        dc.send(RECONNECT_PROOF_REQUEST + ':' + debt.id);
+      } else if (socket?.connected) {
+        _signalSocket.emit('data-message', {
+          type: RECONNECT_PROOF_REQUEST + '-socket',
+          targetSid: debt.scope.key,
+          requesterSid: socket.id,
+          matchId: debt.scope.matchId,
+          requestId: debt.id,
+        });
+      }
+    } catch (_) {
+      // A failed send is not permission to send a legacy request.
+    }
+  };
+  const _readReconnectAnswer = (answerFor, scope, proofFor) => {
+    const debt = _reconnectAnswerDebt;
+    return (
+      !!debt &&
+      debt.status === 'waiting' &&
+      answerFor > 0 &&
+      proofFor === answerFor &&
+      answerFor === debt.id &&
+      _reconnectAnswerScopeCurrent(scope) &&
+      scope.key === debt.scope.key &&
+      scope.peer === debt.scope.peer &&
+      scope.gen === debt.scope.gen &&
+      scope.epoch === debt.scope.epoch &&
+      performance.now() < debt.absolute
+    );
+  };
+  const _finishReconnectAnswer = (answerFor, scope, aligned, proofFor) => {
+    if (!aligned || !_readReconnectAnswer(answerFor, scope, proofFor)) return;
+    _reconnectAnswerDebt = null;
+    _syncLog('RECONNECT-ANSWER-APPLIED f=' + _frameNum + ' request=' + answerFor);
+  };
+  const _checkReconnectAnswerDebt = () => {
+    const debt = _reconnectAnswerDebt;
+    if (!debt || debt.status !== 'waiting') return;
+    if (!_reconnectAnswerScopeCurrent(debt.scope)) {
+      _reconnectAnswerDebt = null;
+      return;
+    }
+    const now = performance.now();
+    if (now < debt.absolute) {
+      const pending = _pendingResyncState;
+      const received = _readReconnectAnswer(pending?.answerFor, pending?.answerScope, pending?.proofFor);
+      if (!received && now >= debt.retryAt && debt.attempts <= RESYNC_MAX_ASKS_AGAIN) {
+        debt.id = _beginResyncRequest(-1, true);
+        _transmitReconnectProofRequest(debt);
+      }
+      return;
+    }
+    debt.status = 'unresolved';
+    _syncLog('RECONNECT-ANSWER-UNRESOLVED f=' + _frameNum + ' request=' + debt.id);
+    KNEvent('resync-reask-giveup', 'Could not confirm recovery after reconnecting', {
+      kind: 'reconnect-answer-unresolved',
+    });
+    _config?.onToast?.('Could not confirm game recovery after reconnecting.');
+  };
+
+  const _guestAllowsReconnectState = (answerFor, answerScope, proofFor) => {
+    if (answerScope && !_reconnectAnswerScopeCurrent(answerScope)) return false;
+    const debt = _reconnectAnswerDebt;
+    if (debt && _reconnectAnswerScopeCurrent(debt.scope) && !_readReconnectAnswer(answerFor, answerScope, proofFor)) {
+      _syncLog('RECONNECT-OPAQUE-STATE-HELD answer=' + answerFor);
+      return false;
+    }
+    return true;
+  };
+  // A reconnect receipt is neither a transport ACK nor a pending input.
+  const _hostReconnectDebts = new Map();
+  let _unverifiedHostMatch = null;
+  const _hostDebtIsCurrent = (debt) => debt.epoch === _syncQueueEpoch && debt.matchId === KNState.matchId;
+  const _hostMatchUnverified = () => !!_unverifiedHostMatch && _unverifiedHostMatch.matchId === KNState.matchId;
+  const _setHostMatchUnverified = (matchId, reason) => {
+    if (!matchId || matchId !== KNState.matchId || _hostMatchUnverified()) return false;
+    _unverifiedHostMatch = { matchId, reason };
+    ++_hostReconnectFenceVersion;
+    _deferredPhantomRecovery.clear();
+    return true;
+  };
+  const _markHostMatchUnverified = (debt, reason) => {
+    if (!_hostDebtIsCurrent(debt) || debt.historyProven || debt.lastHandoffId) return;
+    if (_setHostMatchUnverified(debt.matchId, reason)) _config?.onMatchIntegrityUnverified?.(_unverifiedHostMatch);
+  };
+  const _forgetHostReconnectDebt = (debt) => {
+    if (_hostDebtIsCurrent(debt) && !debt.historyProven && !debt.lastHandoffId) {
+      // A future roster cut cannot correct a historical input.
+      let oldest = debt.from;
+      const through = Math.max(debt.through, _frameNum - 1 - DELAY_FRAMES);
+      while (oldest <= through && debt.receipts.has(oldest)) oldest++;
+      const mod = _hostReconnectNative();
+      if (
+        debt.status === 'unresolved' ||
+        oldest <= through ||
+        mod?._kn_get_failed_rollbacks?.() !== debt.failed ||
+        mod?._kn_get_replay_depth?.() !== 0 ||
+        mod?._kn_peek_pending_rollback?.() !== -1
+      )
+        _markHostMatchUnverified(debt, 'participant left before input recovery was verified');
+    }
+    _hostReconnectDebts.delete(debt.slot);
+  };
+  const _hostAuthoredReceipts = new Map();
+  const _deferredPhantomRecovery = new Map();
+  const _hostInputAuthor = (sid, peer) =>
+    _playerSlot === 0 && _peers[sid] === peer && _reconnectProofStatus(sid) === true
+      ? { sid, peer, matchId: KNState.matchId, epoch: _syncQueueEpoch, gen: _syncQueueGen[sid] || 0 }
+      : null;
+  let _hostReconnectFenceVersion = 0;
+  const _hostReconnectNative = () => window.EJS_emulator?.gameManager?.Module;
+  const _armHostReconnectDebt = (slot, reason, sid, wasPhantom, mod = _hostReconnectNative()) => {
+    const retained = _hostReconnectDebts.get(slot);
+    const old =
+      (retained?.historyProven || retained?.lastHandoffId) && performance.now() >= retained.deadline ? null : retained;
+    if (retained && !old) _hostReconnectDebts.delete(slot);
+    const owner = _knownPlayers[sid]?.persistentId || sid;
+    const sameOwner = !!old && old.owner === owner && _hostDebtIsCurrent(old);
+    if (old && (!sameOwner || !_activeRoster?.has(slot))) _forgetHostReconnectDebt(old);
+    if (_hostMatchUnverified()) return;
+    if (
+      _playerSlot !== 0 ||
+      _phase !== PHASE_RUNNING ||
+      !_useCRollback ||
+      !_hasKnSync ||
+      RB_WORKER_COPROC ||
+      !sid ||
+      !KNState.matchId ||
+      _admissionInputFloor(slot) > 0 ||
+      _cutGoverns(slot) ||
+      !_activeRoster?.has(slot) ||
+      _activeRoster.size < 3 ||
+      (reason !== 'reconnect' && reason !== 'mesh-heal')
+    ) {
+      return;
+    }
+    if (_reconnectProofStatus(sid) !== true && !sameOwner) return;
+    if ((_peerPhantom[slot] || wasPhantom) && !sameOwner) return;
+    const failed = mod?._kn_get_failed_rollbacks?.();
+    if (!Number.isSafeInteger(failed) || failed < 0) return;
+    const edge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+    const debt = sameOwner
+      ? old
+      : {
+          slot,
+          owner,
+          matchId: KNState.matchId,
+          epoch: _syncQueueEpoch,
+          from: Math.max(_inputFloor(slot), edge),
+          through: _frameNum - 1 - DELAY_FRAMES,
+          failed,
+          receipts: new Set(),
+          deadline: performance.now() + (RESYNC_MAX_ASKS_AGAIN + 1) * RESYNC_REQUEST_TIMEOUT_MS,
+          nextAsk: 0,
+          status: 'waiting',
+          request: null,
+        };
+    // Before JS reset, preserve only actual authored tags already drained
+    // through native on the same slot. Never infer from highest received tag.
+    const pending = new Set(_pendingCInputs.filter((i) => i.slot === slot).map((i) => i.frame));
+    const inputs = _remoteInputs[slot];
+    for (let f = Math.max(edge, debt.from); f <= _frameNum - 1 - DELAY_FRAMES; ++f) {
+      const receipt = _hostAuthoredReceipts.get(slot)?.get(f);
+      if (
+        receipt?.author.sid === sid &&
+        receipt.author.matchId === KNState.matchId &&
+        receipt.author.epoch === _syncQueueEpoch &&
+        receipt.author.gen === (_syncQueueGen[sid] || 0) &&
+        inputs?.[f] &&
+        inputs[f] !== KNShared.ZERO_INPUT &&
+        !pending.has(f) &&
+        _inputEq(receipt, inputs[f])
+      )
+        debt.receipts.add(f);
+    }
+    // Old request closures cannot authorize state for the replacement channel.
+    debt.sid = sid;
+    debt.gen = (_syncQueueGen[sid] || 0) + 1;
+    debt.request = null;
+    debt.lastHandoffId = 0;
+    debt.historyProven = false;
+    ++_hostReconnectFenceVersion;
+    if (wasPhantom || _peerPhantom[slot]) {
+      debt.status = 'unresolved';
+      _markHostMatchUnverified(debt, 'participant became phantom');
+    }
+    _hostReconnectDebts.set(slot, debt);
+  };
+  const _recordHostReconnectReceipt = (word) => {
+    const { slot, frame, author } = word;
+    const value = _remoteInputs[slot]?.[frame];
+    if (
+      !author ||
+      !value ||
+      value === KNShared.ZERO_INPUT ||
+      !_inputEq(word, value) ||
+      author.matchId !== KNState.matchId ||
+      author.epoch !== _syncQueueEpoch ||
+      author.gen !== (_syncQueueGen[author.sid] || 0) ||
+      _peers[author.sid] !== author.peer ||
+      author.peer.slot !== slot
+    )
+      return;
+    const history = _hostAuthoredReceipts.get(slot) ?? new Map();
+    if (history.size >= INPUT_PAST_WINDOW_FRAMES && !history.has(frame)) history.delete(history.keys().next().value);
+    history.set(frame, {
+      ...word,
+      author: { sid: author.sid, matchId: author.matchId, epoch: author.epoch, gen: author.gen },
+    });
+    _hostAuthoredReceipts.set(slot, history);
+    const debt = _hostReconnectDebts.get(slot);
+    if (
+      debt?.status === 'waiting' &&
+      frame >= debt.from &&
+      debt.matchId === author.matchId &&
+      debt.epoch === author.epoch &&
+      debt.sid === author.sid &&
+      debt.gen === author.gen
+    )
+      debt.receipts.add(frame);
+  };
+  const _readHostReconnectDebt = (debt, mod = _hostReconnectNative()) => {
+    if (!_hostDebtIsCurrent(debt) || !_activeRoster?.has(debt.slot)) return 'stale';
+    if (debt.status === 'unresolved') return 'unresolved';
+    const fail = (reason) => {
+      debt.status = 'unresolved';
+      debt.request = null;
+      _markHostMatchUnverified(debt, reason);
+      _syncLog('RECONNECT-HOST-UNRESOLVED slot=' + debt.slot + ' reason=' + reason);
+      return 'unresolved';
+    };
+    if (performance.now() >= debt.deadline) return fail('reconnect input proof expired');
+    if (_peerPhantom[debt.slot]) return fail('participant became phantom');
+    if (mod?._kn_get_failed_rollbacks?.() !== debt.failed) return fail('native rollback failed');
+    debt.through = Math.max(debt.through, _frameNum - 1 - DELAY_FRAMES);
+    while (debt.from <= debt.through && debt.receipts.delete(debt.from)) debt.from++;
+    const edge = _frameNum - DELAY_FRAMES - KN_MAX_VISIBLE_ROLLBACK_DEPTH;
+    if (debt.from <= debt.through && debt.from < edge) return fail('owed input left native history');
+    if (
+      (_syncQueueGen[debt.sid] || 0) !== debt.gen ||
+      !_peers[debt.sid] ||
+      _peers[debt.sid].slot !== debt.slot ||
+      debt.from <= debt.through ||
+      mod?._kn_get_frame?.() !== _frameNum ||
+      mod?._kn_get_replay_depth?.() !== 0 ||
+      mod?._kn_peek_pending_rollback?.() !== -1 ||
+      _pendingCInputs.some((i) => i.frame <= debt.through)
+    )
+      return 'wait';
+    return 'ready';
+  };
+  const _hostReconnectBlocksNativeCapture = (mod) => {
+    if (_hostMatchUnverified()) return true;
+    for (const [slot, debt] of _hostReconnectDebts) {
+      if (!_hostDebtIsCurrent(debt)) {
+        _hostReconnectDebts.delete(slot);
+        continue;
+      }
+      if (!_activeRoster?.has(slot)) {
+        _forgetHostReconnectDebt(debt);
+        if (_hostMatchUnverified()) return true;
+        continue;
+      }
+      const proven = debt.historyProven || debt.lastHandoffId;
+      if (proven && performance.now() >= debt.deadline) {
+        _hostReconnectDebts.delete(slot);
+        continue;
+      }
+      if (!proven && _readHostReconnectDebt(debt, mod) !== 'ready') return true;
+    }
+    return false;
+  };
+  const _holdReconnectHostAnswer = (sid, id, via) => {
+    const debt = _hostReconnectDebts.get(_peers[sid]?.slot);
+    if (
+      !debt ||
+      debt.sid !== sid ||
+      debt.gen !== (_syncQueueGen[sid] || 0) ||
+      !_hostDebtIsCurrent(debt) ||
+      !_activeRoster?.has(debt.slot)
+    )
+      return false;
+    if (via.reconnectDebt === debt || (!via.protected && debt.lastHandoffId)) return false;
+    if (via.protected && debt.status === 'waiting' && performance.now() < debt.deadline && id >= debt.lastHandoffId) {
+      const previous = debt.request;
+      if (!previous || id > previous.id) debt.request = { id, via };
+    }
+    return true;
+  };
+  const _receiveReconnectProofRequest = (sid, id, transport) => {
+    const peer = _peers[sid];
+    if (
+      _playerSlot !== 0 ||
+      _phase !== PHASE_RUNNING ||
+      !peer ||
+      !_requestIdFrom(id) ||
+      !_activeRoster?.has(peer.slot) ||
+      _peerPhantom[peer.slot] ||
+      _reconnectProofStatus(sid) !== true
+    )
+      return;
+    _holdReconnectHostAnswer(sid, id, { protected: true, transport });
+  };
+  const _scheduleRecoveredHostGuest = (remoteSid, peer) => {
+    // The host ran on predicted inputs for this guest while it was a
+    // phantom, and its late real inputs landed past the rollback cap
+    // or are settled below. Every other guest ran those frames on
+    // something of its own: the guest's real inputs, heard all along,
+    // or its own predictions. The host is authoritative: push its
+    // state to every guest once it is final (the guest's real inputs
+    // have caught up), or at the I1 deadline. The requests share their
+    // frame and deadline, so they fall due together and one capture
+    // goes to all of them (a broadcast): the `inputs-settled:` the
+    // returning guest then sends is for a state every guest loads. A
+    // sync the host schedules for its own reasons carries no request
+    // number; another guest's own request already queued stays, to be
+    // answered: any state the host takes from now on is for this frame
+    // or a later one.
+    const deadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
+    _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
+    const targets = [remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)].filter(
+      (sid, i, all) => all.indexOf(sid) === i && !_scheduledSyncRequests.some((r) => r.targetSid === sid),
+    );
+    for (const sid of targets) _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });
+    // That state will be for this frame or a later one, so the
+    // guest's inputs from before this frame minus the delay are
+    // settled by it already. (Only the host can say so here: a guest
+    // may be taken back to an earlier frame and still need them.)
+    _settleInputsBefore(peer.slot, _frameNum);
+    _syncLog(
+      `peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum} ` +
+        `guests=${targets.map((sid) => _peers[sid]?.slot ?? '?').join(',')}`,
+    );
+  };
+  const _serviceReconnectHostAnswers = () => {
+    if (_hostMatchUnverified()) return;
+    if (_deferredPhantomRecovery.size && !_hostReconnectBlocksNativeCapture()) {
+      for (const [sid, record] of _deferredPhantomRecovery) {
+        _deferredPhantomRecovery.delete(sid);
+        if (
+          record.epoch === _syncQueueEpoch &&
+          record.gen === (_syncQueueGen[sid] || 0) &&
+          _peers[sid] === record.peer &&
+          _activeRoster?.has(record.peer.slot)
+        )
+          _scheduleRecoveredHostGuest(sid, record.peer);
+      }
+    }
+    for (const [slot, debt] of _hostReconnectDebts) {
+      if (!_hostDebtIsCurrent(debt) || !_activeRoster?.has(slot)) {
+        _forgetHostReconnectDebt(debt);
+        if (_hostMatchUnverified()) return;
+        continue;
+      }
+      if ((debt.historyProven || debt.lastHandoffId) && performance.now() >= debt.deadline) {
+        _hostReconnectDebts.delete(slot);
+        continue;
+      }
+      const state = _readHostReconnectDebt(debt);
+      if (_hostMatchUnverified()) return;
+      if (state === 'ready' && debt.request && !_hostReconnectBlocksNativeCapture()) {
+        const pending = debt.request;
+        if (pending.dispatching || performance.now() < (pending.nextDispatch || 0)) continue;
+        if (pending.via.transport === 'socket' ? !socket?.connected : _peers[debt.sid]?.syncDc?.readyState !== 'open')
+          continue;
+        pending.dispatching = true;
+        pending.nextDispatch = performance.now() + RB_INPUT_ASK_EVERY_MS;
+        _answerDirectSyncRequest(debt.sid, pending.id, { ...pending.via, reconnectDebt: debt, pending });
+      } else if (state === 'wait' && performance.now() >= debt.nextAsk) {
+        const peer = _peers[debt.sid];
+        if (peer?.dc?.readyState !== 'open' || (_syncQueueGen[debt.sid] || 0) !== debt.gen) continue;
+        debt.nextAsk = performance.now() + RB_INPUT_ASK_EVERY_MS;
+        let asks = 0;
+        for (let f = debt.from; f <= debt.through && asks < RB_INPUT_ASK_MAX; ++f) {
+          if (debt.receipts.has(f) || _pendingCInputs.some((p) => p.slot === debt.slot && p.frame === f)) continue;
+          try {
+            peer.dc.send('resend:' + f);
+          } catch (_) {
+            break;
+          }
+          ++asks;
+        }
+      }
+    }
+  };
+  const _admitReconnectNativeCapture = (options, mod) => {
+    const debt = options.reconnectDebt;
+    if (_hostReconnectBlocksNativeCapture(mod)) return false;
+    if (!debt) return true;
+    if (
+      debt.request !== options.pending ||
+      _hostReconnectDebts.get(debt.slot) !== debt ||
+      _readHostReconnectDebt(debt, mod) !== 'ready'
+    )
+      return false;
+    // The returning slot's native receipt ledger does not prove what other
+    // active owners contributed. Check the entire current roster at this
+    // capture boundary, not when the asynchronous push was enqueued.
+    const peers = getInputPeers();
+    const inputs = new Set(peers.map((peer) => peer.slot));
+    for (const slot of _activeRoster) {
+      if (slot === _playerSlot) continue;
+      if (!inputs.has(slot) || _peerPhantom[slot] || _corePhantomHistory.has(slot)) return false;
+    }
+    // Reset discarded the returning slot's JS input map. Its validated
+    // native receipt ledger already proves those older inputs.
+    return _liveStateConfirmed(
+      mod,
+      peers.filter((peer) => peer.slot !== debt.slot),
+    );
+  };
+
   const _requestIdFrom = (value) => (Number.isSafeInteger(value) && value > 0 ? value : 0);
   // `again`: the deadline asking again for an owed resync; any other request,
   // "now" or at a frame, marks the resync owed and starts its count afresh.
@@ -7196,6 +8065,7 @@
   // the same ordered channel: a host on an older version matches the request
   // strings exactly, and ignores a string it does not know.
   const _sendResyncRequest = (dc, requestId, request) => {
+    if (_reconnectAnswerDebt && _reconnectAnswerScopeCurrent(_reconnectAnswerDebt.scope)) return;
     dc.send(`sync-request-id:${requestId}`);
     dc.send(request);
   };
@@ -7635,6 +8505,7 @@
           return {
             bytes,
             kind: 'kn-sync',
+            hle: _captureHleState(mod),
             hiddenWords: _captureHiddenStateWords(mod),
             audioFifo: _captureAudioFifoState(mod),
           };
@@ -7823,6 +8694,7 @@
   }
 
   function _requestSocketFullResync(reason, again = false) {
+    if (_reconnectAnswerDebt && _reconnectAnswerScopeCurrent(_reconnectAnswerDebt.scope)) return false;
     if (_playerSlot === 0 || _phase !== PHASE_RUNNING || !socket) return false;
     const hostEntry = _peerEntryForSlot(0);
     const hostSid = hostEntry?.[0];
@@ -7865,12 +8737,20 @@
     // request for state only from a player, and it is answered to the socket
     // that really sent it, not the one it names. A message with no stamp, or
     // one this page cannot check (the bundle did not load), is refused.
-    const from = window.KNCore?.checkRelayed?.(msg) ?? null;
+    const protectedRequest = msg.type === RECONNECT_PROOF_REQUEST + '-socket';
+    const authMessage = protectedRequest ? { ...msg, type: 'sync-request-full-socket' } : msg;
+    const from = window.KNCore?.checkRelayed?.(authMessage) ?? null;
     if (!from?.allowed) {
       _syncLog(`relayed ${msg.type} refused: sender ${from?.sid ?? 'unknown'} slot=${from?.slot ?? null}`);
       return;
     }
     msg = { ...msg, requesterSid: from.sid, senderSid: from.sid };
+    if (protectedRequest) {
+      const key = _peerKey(from.sid);
+      if (key && _currentSid(key) === from.sid && msg.matchId === KNState.matchId)
+        _receiveReconnectProofRequest(key, msg.requestId, 'socket');
+      return;
+    }
     if (msg.type === 'save-state') handleSaveStateMsg(msg);
     if (msg.type === 'late-join-state') handleLateJoinState(msg);
     if (msg.type === 'request-late-join') handleLateJoinRequest(msg);
@@ -7900,6 +8780,9 @@
   const handleSocketSyncState = async (msg) => {
     if (_playerSlot === 0 || _isSpectator || _phase !== PHASE_RUNNING) return;
     if (msg.targetSid && !_isOwnSid(msg.targetSid)) return;
+    const sourceKey = _peerKey(msg.senderSid);
+    const answerScope = _reconnectAnswerScope(sourceKey);
+    const inputEpoch = _syncQueueEpoch;
     const frame = Number.parseInt(msg.frame, 10);
     if (!Number.isFinite(frame)) {
       _syncLog('socket sync-state ignored — invalid frame');
@@ -7914,6 +8797,7 @@
       if (answerFor > 0) _hostNumbersAnswers = true;
       await _decodingSyncAnswer(async () => {
         const decompressed = await decodeAndDecompress(msg.data);
+        if (inputEpoch !== _syncQueueEpoch || (answerScope && !_reconnectAnswerScopeCurrent(answerScope))) return;
         await _handleDecodedSyncPayload({
           decompressed,
           frame,
@@ -7923,6 +8807,8 @@
           wireSize: msg.compressedSize || 0,
           source: 'socket',
           answerFor,
+          answerScope,
+          proofFor: msg.reconnectMatch === KNState.matchId ? _requestIdFrom(msg.reconnectProofFor) : 0,
           extras: _resyncExtrasFromFields(msg),
         });
       });
@@ -7957,6 +8843,7 @@
     socket.emit('data-message', {
       type: 'request-late-join',
       requesterSid: socket.id,
+      caps: { [window.KNCore.controllerMask.MASK_CAP]: true },
       ...(delay ? { delay } : {}),
     });
   };
@@ -8046,6 +8933,10 @@
   const handleLateJoinRequest = (msg) => {
     // Only host responds to late-join requests
     if (_playerSlot !== 0) return;
+    {
+      const capSid = _peerKey(msg.requesterSid);
+      if (capSid) _maskCapablePeers.set(capSid, window.KNCore.controllerMask.canScheduleMask(msg.caps));
+    }
     if (_phase !== PHASE_RUNNING) {
       // Not running yet: there is no state to send, and this host will not
       // start until that player has loaded. Without an answer both sides
@@ -9081,11 +9972,78 @@
     _armStartLoadDeadline(Math.max(START_LOAD_RECHECK_MIN_MS, nextDueMs));
   };
 
+  const _lockstepChannelRegistries = new WeakMap();
+  const _ownsPeerConnection = (remoteSid, peer, pc) => _peers[remoteSid] === peer && peer.pc === pc;
+  const _acceptLockstepChannel = (peer, ch, verified) =>
+    !!peer && peer.pc === ch._knPc && ch.readyState === 'open' && (verified !== true || peer.dc === ch);
+
+  const _adoptLockstepChannel = (remoteSid, peer, pc, ch) => {
+    if (!_ownsPeerConnection(remoteSid, peer, pc)) return;
+    let registry = _lockstepChannelRegistries.get(pc);
+    if (!registry) {
+      registry = { channels: new Map(), activated: null };
+      _lockstepChannelRegistries.set(pc, registry);
+    }
+    if (registry.channels.has(ch)) return;
+    // A browser can enter closed before dispatching its close callback.
+    // Retire those records before deciding whether the bounded set is full.
+    for (const candidate of registry.channels.keys()) {
+      if (candidate.readyState === 'closed') registry.channels.delete(candidate);
+    }
+    if (registry.channels.size >= 4) return;
+    ch._knPc = pc;
+    if (!peer.dc || peer.dc._knPc !== pc) peer.dc = ch;
+    const handlers = setupDataChannel(remoteSid, ch);
+    registry.channels.set(ch, handlers);
+    const selectOpen = () => {
+      if (!_ownsPeerConnection(remoteSid, peer, pc)) return false;
+      let selected = null;
+      let lowestId = Infinity;
+      // Simultaneous offers can produce two channels on the same connection.
+      // The SCTP stream ID is shared by its two endpoints, unlike arrival order
+      // or whether our browser created it. Both sides pick the same open lane.
+      for (const candidate of registry.channels.keys()) {
+        if (candidate.readyState !== 'open') continue;
+        const id = Number.isInteger(candidate.id) && candidate.id >= 0 ? candidate.id : Infinity;
+        if (!selected || id < lowestId) {
+          selected = candidate;
+          lowestId = id;
+        }
+      }
+      if (!selected) return false;
+      peer.dc = selected;
+      if (registry.activated !== selected) {
+        registry.activated = selected;
+        registry.channels.get(selected).opened();
+      }
+      return true;
+    };
+    const deliver = ch.onmessage;
+    ch.onmessage = (event) => {
+      if (!_ownsPeerConnection(remoteSid, peer, pc) || !registry.channels.has(ch)) return;
+      // A reliable message can reach a browser-open lane before its local
+      // open callback. Resolve the same authority before checking the lane.
+      selectOpen();
+      deliver(event);
+    };
+    ch.onopen = selectOpen;
+    ch.onclose = () => {
+      if (!_ownsPeerConnection(remoteSid, peer, pc)) return;
+      const wasSelected = peer.dc === ch;
+      registry.channels.delete(ch);
+      // Losing a duplicate is not a peer disconnect. A selected lane may
+      // fail over only to an open channel belonging to the same exact PC.
+      if (wasSelected && !selectOpen()) handlers.closed();
+    };
+    if (ch.readyState === 'open') selectOpen();
+  };
+
   const installPeerDataChannelHandlers = (remoteSid, peer) => {
-    peer.pc.ondatachannel = (e) => {
+    const pc = peer.pc;
+    pc.ondatachannel = (e) => {
+      if (!_ownsPeerConnection(remoteSid, peer, pc)) return;
       if (e.channel.label === 'lockstep') {
-        peer.dc = e.channel;
-        setupDataChannel(remoteSid, peer.dc);
+        _adoptLockstepChannel(remoteSid, peer, pc, e.channel);
       } else if (e.channel.label === 'sync-state') {
         peer.syncDc = e.channel;
         setupSyncDataChannel(remoteSid, peer.syncDc);
@@ -9105,13 +10063,13 @@
   };
 
   const createOutgoingPeerChannels = (remoteSid, peer) => {
-    peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
-    setupDataChannel(remoteSid, peer.dc);
-    peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
+    const pc = peer.pc;
+    _adoptLockstepChannel(remoteSid, peer, pc, pc.createDataChannel('lockstep', { ordered: true }));
+    peer.syncDc = pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
     setupSyncDataChannel(remoteSid, peer.syncDc);
     // P2: unordered input channel — always created, only used when the
     // host broadcasts rb-transport:unreliable. Cheap to leave idle.
-    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
+    peer.rbDc = pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
     peer.rbDcUnreliable = false;
     setupRollbackInputDataChannel(remoteSid, peer.rbDc);
     installPeerDataChannelHandlers(remoteSid, peer);
@@ -9495,6 +10453,7 @@
     }
     const decoded = KNShared.decodeInput(data);
     const recvFrame = decoded.frame;
+    const author = _hostInputAuthor(remoteSid, peer);
     const admissionFloor = _admissionInputFloor(peer.slot);
     if (admissionFloor > 0 && recvFrame < admissionFloor) return false;
     // Bounds-check the remote frame number. A malicious peer could send
@@ -9610,6 +10569,7 @@
         ) {
           _pendingCInputs.push({
             slot: peer.slot,
+            author,
             frame: r.frame,
             buttons: r.buttons,
             lx: r.lx,
@@ -9625,6 +10585,7 @@
     if (_useCRollback && (!headerDuplicate || (headerWasSeeded && !_inputEq(existingHeaderInput, recvInput)))) {
       _pendingCInputs.push({
         slot: peer.slot,
+        author,
         frame: recvFrame,
         buttons: recvInput.buttons,
         lx: recvInput.lx,
@@ -9678,36 +10639,13 @@
             _syncTargetDeadlineAt = 0;
           }
         } else if (recoveryStep === 'resync-guests') {
-          // The host ran on predicted inputs for this guest while it was a
-          // phantom, and its late real inputs landed past the rollback cap
-          // or are settled below. Every other guest ran those frames on
-          // something of its own: the guest's real inputs, heard all along,
-          // or its own predictions. The host is authoritative: push its
-          // state to every guest once it is final (the guest's real inputs
-          // have caught up), or at the I1 deadline. The requests share their
-          // frame and deadline, so they fall due together and one capture
-          // goes to all of them (a broadcast): the `inputs-settled:` the
-          // returning guest then sends is for a state every guest loads. A
-          // sync the host schedules for its own reasons carries no request
-          // number; another guest's own request already queued stays, to be
-          // answered: any state the host takes from now on is for this frame
-          // or a later one.
-          const deadlineAt = performance.now() + SYNC_COORD_TIMEOUT_MS;
-          _scheduledSyncRequests = _scheduledSyncRequests.filter((r) => r.targetSid !== remoteSid);
-          const targets = [remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)].filter(
-            (sid, i, all) => all.indexOf(sid) === i && !_scheduledSyncRequests.some((r) => r.targetSid === sid),
-          );
-          for (const sid of targets)
-            _scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });
-          // That state will be for this frame or a later one, so the
-          // guest's inputs from before this frame minus the delay are
-          // settled by it already. (Only the host can say so here: a guest
-          // may be taken back to an earlier frame and still need them.)
-          _settleInputsBefore(peer.slot, _frameNum);
-          _syncLog(
-            `peer-recovery resync: host scheduled full sync for slot=${peer.slot} at f=${_frameNum} ` +
-              `guests=${targets.map((sid) => _peers[sid]?.slot ?? '?').join(',')}`,
-          );
+          if (_hostReconnectBlocksNativeCapture()) {
+            _deferredPhantomRecovery.set(remoteSid, {
+              peer,
+              epoch: _syncQueueEpoch,
+              gen: _syncQueueGen[remoteSid] || 0,
+            });
+          } else _scheduleRecoveredHostGuest(remoteSid, peer);
         } else if (recoveryStep === 'ask') {
           // Another guest, which this page held as a phantom: it ran that
           // guest's frames on its own predictions, and an input of it lost
@@ -9777,7 +10715,7 @@
     ch.onerror = () => {};
     ch.onmessage = (e) => {
       const peer = _peers[remoteSid];
-      if (!peer) return;
+      if (!peer || (_reconnectProofStatus(remoteSid) === true && peer.rbDc !== ch)) return;
       if (
         e.data instanceof ArrayBuffer &&
         e.data.byteLength >= 16 &&
@@ -9912,8 +10850,21 @@
             _syncTargetDeadlineAt = 0;
             const _reconnectRequestId = _beginResyncRequest();
             try {
-              _sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full');
-              _syncLog('reconnect resync: sent immediate sync-request-full to host DC');
+              const qualify =
+                peer.slot === 0 &&
+                _phase === PHASE_RUNNING &&
+                _useCRollback &&
+                !_isSpectator &&
+                !_lateJoin &&
+                _activeRoster?.size >= 3 &&
+                _activeRoster.has(0) &&
+                _activeRoster.has(_playerSlot);
+              if (qualify && _reconnectProofStatus(remoteSid) !== false) {
+                _startsReconnectAnswerDebt(remoteSid, peer, _reconnectRequestId);
+              } else {
+                _sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full');
+                if (qualify) setStatus('Legacy game recovery is not verified');
+              }
             } catch (e) {
               _syncLog(`reconnect resync send failed: ${e}`);
               _resyncRequestInFlight = false;
@@ -9938,10 +10889,17 @@
       // Host: send current roster to newly connected/reconnected peer.
       // A running late joiner must not receive the old roster before it has
       // loaded state and sent late-join-ready.
+      // It carries the frame the roster was broadcast at: the page hearing it
+      // files the same input floor and the same controller-mask frame.
       if (_playerSlot === 0 && _activeRoster && !_isPeerPendingLateJoin(remoteSid, peer)) {
         const slots = [..._activeRoster].sort((a, b) => a - b);
+        const rosterFrame = _lastBroadcastRosterFrame >= 0 ? _lastBroadcastRosterFrame : _frameNum;
         try {
-          ch.send(`roster:${_frameNum}:${slots.join(',')}`);
+          if (_maskMatchScheduled && _maskSchedule.active()) {
+            for (const cut of _lastRosterCuts) ch.send(cut);
+            ch.send(`roster-mask:${rosterFrame}`);
+          }
+          ch.send(`roster:${rosterFrame}:${slots.join(',')}`);
         } catch (_) {}
       }
       if (_playerSlot === 0 && _pendingLateJoinReadySids.has(remoteSid)) {
@@ -9984,16 +10942,7 @@
       _peerDriver()?.close(openedFrame, openedAttempt ? { type: 'opened', ...openedAttempt } : null);
       if (_phase < PHASE_GAME_STARTED) startGameSequence();
     };
-    ch.onopen = onOpen;
-    // If the DataChannel is already open (race: ondatachannel delivered it
-    // in the 'open' state), fire the handler immediately. Without this,
-    // startGameSequence() never runs and the gesture prompt never appears.
-    if (ch.readyState === 'open') onOpen();
-
-    ch.onclose = () => {
-      // Guard: ignore stale close events from replaced peers after restart
-      const current = _peers[remoteSid];
-      if (!current || current.dc !== ch) return;
+    const onClose = () => {
       _syncLog(`DC closed with ${remoteSid}`);
       handlePeerDisconnect(remoteSid, ch._knPc?._knAttempt);
     };
@@ -10004,7 +10953,7 @@
 
     ch.onmessage = (e) => {
       const peer = _peers[remoteSid];
-      if (!peer) return;
+      if (!_acceptLockstepChannel(peer, ch, _reconnectProofStatus(remoteSid))) return;
 
       // String messages: one off its schema goes no further.
       if (typeof e.data === 'string') {
@@ -10117,23 +11066,67 @@
           }
           return;
         }
+        // The host's cut of a player the roster that follows removes.
+        if (e.data.startsWith('roster-cut:')) {
+          if (!RB_WORKER_COPROC && (peer.slot !== 0 || peer.dc !== ch)) return;
+          const cut = window.KNCore.removedInput.parseRosterCut(e.data);
+          if (cut) _heardRosterCuts.set(cut.slot, cut);
+          else _syncLog(`ROSTER-CUT malformed, dropped: ${e.data.slice(0, 80)}`);
+          return;
+        }
+        // The host schedules the controller mask of the roster that follows.
+        if (e.data.startsWith('roster-mask:')) {
+          if (!RB_WORKER_COPROC && (peer.slot !== 0 || peer.dc !== ch)) return;
+          _maskAnnouncedFrame = parseInt(e.data.slice('roster-mask:'.length), 10);
+          return;
+        }
         if (e.data.startsWith('roster:')) {
           if (!RB_WORKER_COPROC && (peer.slot !== 0 || peer.dc !== ch)) return;
           const parts = e.data.split(':');
           const rosterFrame = parseInt(parts[1], 10);
           const slots = parts[2] ? parts[2].split(',').map(Number) : [];
+          // The host's rule for this roster: scheduled only if announced so.
+          const maskScheduled = window.KNCore.controllerMask.rosterScheduled(
+            _maskMatchScheduled && _maskSchedule.active(),
+            _maskAnnouncedFrame,
+            rosterFrame,
+          );
+          _maskAnnouncedFrame = -1;
+          if (!maskScheduled) _fallBackToImmediateMasks(`the host's roster f=${rosterFrame} is not scheduled`);
+          const heardCuts = new Map(_heardRosterCuts);
+          _heardRosterCuts.clear();
           if (!_recordHostInputRoster(rosterFrame, slots)) return;
           const previousRoster = _activeRoster ? new Set(_activeRoster) : null;
           if (previousRoster) {
+            // On the scheduled rule the host cut each removed player's input
+            // at this roster frame and sent its inputs below it: written into
+            // the ring here, they decide every frame, whenever the roster
+            // arrived (_cutRemovedInput). On the immediate rule the slot is
+            // emptied now, as before.
+            const cutMod = window.EJS_emulator?.gameManager?.Module;
+            const cutByFrame = maskScheduled && _useCRollback && !RB_WORKER_COPROC && !!cutMod?._kn_feed_input;
             for (const slot of previousRoster) {
               if (slot === _playerSlot || slots.includes(slot) || !_waitingForHostAdmission(slot)) continue;
               const [sid, departing] = _peerEntryForSlot(slot) || [];
-              resetPeerState(slot, 'host roster removed', { peer: departing, sid });
+              resetPeerState(slot, 'host roster removed', { peer: departing, sid, keepCoreSlot: cutByFrame });
+              if (!cutByFrame || _cutGoverns(slot)) continue;
+              const cut = heardCuts.get(slot);
+              if (cut && cut.rosterFrame === rosterFrame) {
+                _cutRemovedInput(cutMod, slot, cut, 'roster');
+              } else {
+                // No cut came with the roster (a channel that reopened between
+                // them): cut at the same frame on this page's own inputs, and
+                // take the host's state for what may differ below it.
+                _syncLog(`ROSTER-CUT-MISSING slot=${slot} roster f=${rosterFrame}`);
+                _cutRemovedInput(cutMod, slot, _hostRosterCut(cutMod, slot, rosterFrame), 'roster without its cut');
+                _cutRerun = null;
+                _askHostStateForLateRoster('ROSTER-CUT-MISSING', 'roster cut missing');
+              }
             }
           }
           _clearPendingLateJoinRosterSlots(slots, 'host roster');
           _activeRoster = new Set(slots);
-          _applyControllerPresentMask('roster');
+          _fileRosterControllerMask(rosterFrame, slots, 'roster');
           const addedSlots = slots.filter((slot) => _isValidPlayerSlot(slot) && !previousRoster?.has(slot));
           for (const slot of addedSlots) {
             if (slot !== _playerSlot && _admissionInputFloor(slot) > 0) _awaitFirstInputAfterReset[slot] = true;
@@ -10141,6 +11134,7 @@
           if (_phase === PHASE_RUNNING && addedSlots.length > 0) {
             _startLateJoinInputBootstrap('roster added slot', addedSlots);
           }
+          _noteJoinRoster(rosterFrame, slots, addedSlots, maskScheduled);
           // Always use 4 (KN_MAX_PLAYERS) so the C engine covers all
           // slots regardless of gaps (e.g. roster [0,1,3]). Empty slots
           // get zero predictions — harmless since no input arrives.
@@ -10237,7 +11231,9 @@
             _isValidPlayerSlot(peer.slot) &&
             Number.isFinite(settled) &&
             settled >= 0 &&
-            settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES
+            settled <= _frameNum + INPUT_FUTURE_MARGIN_FRAMES &&
+            !_hostMatchUnverified() &&
+            (!_hostReconnectDebts.has(peer.slot) || !_hostReconnectBlocksNativeCapture())
           ) {
             _inputSettledBefore[peer.slot] = Math.max(_inputSettledBefore[peer.slot] ?? 0, settled);
             _inputSettledAckBefore[peer.slot] = Math.max(_inputSettledAckBefore[peer.slot] ?? -1, settled);
@@ -10255,6 +11251,7 @@
         if (
           _isPeerPendingLateJoin(remoteSid, peer) &&
           (e.data.startsWith('rb-check:') ||
+            e.data.startsWith('rb-final:') ||
             e.data.startsWith('rb-blocks:') ||
             e.data.startsWith('rb-subhash:') ||
             e.data.startsWith('rb-regions:'))
@@ -10262,18 +11259,25 @@
           return;
         }
         // Rollback state checksum verification
-        if (e.data.startsWith('rb-check:')) {
-          // Store peer's hash — compare when we reach the same frame
-          // Format: rb-check:frame:gpHash:gameHash (gameHash added for full state detection)
+        if (e.data.startsWith('rb-final:')) {
+          // A peer's gameplay hash of a frame it can no longer roll back:
+          // rb-final:<frame>:<gameplay hash>:<game state hash>. The book
+          // compares it with ours once both are here (web/src/rb-check.ts).
+          if (peer.slot === null || peer.slot === undefined) return;
           const parts = e.data.split(':');
-          const checkFrame = parseInt(parts[1], 10);
-          const peerHash = parseInt(parts[2], 10);
-          const peerGameHash = parts.length > 3 ? parseInt(parts[3], 10) : null;
-          if (!window._rbPendingChecks) window._rbPendingChecks = {};
-          window._rbPendingChecks[checkFrame] = peerHash;
-          if (peerGameHash !== null) {
-            if (!window._rbPendingGameChecks) window._rbPendingGameChecks = {};
-            window._rbPendingGameChecks[checkFrame] = peerGameHash;
+          const outcome = _rbChecks().filePeer(peer.slot, parseInt(parts[1], 10), {
+            gp: parseInt(parts[2], 10),
+            game: parseInt(parts[3], 10),
+          });
+          if (outcome) _rbCheckOutcomes.push(outcome);
+          return;
+        }
+        if (e.data.startsWith('rb-check:')) {
+          // A page from before rb-final: the hash of the frame it had just
+          // simulated, which may still be rolled back there. Not compared.
+          if (!_rbLegacyCheckSlots.has(peer.slot)) {
+            _rbLegacyCheckSlots.add(peer.slot);
+            _syncLog(`RB-LEGACY-CHECK slot=${peer.slot}: peer sends unconfirmed hashes (older page); not compared`);
           }
           return;
         }
@@ -10285,7 +11289,9 @@
           const checkFrame = parseInt(e.data.slice(firstColon + 1, secondColon), 10);
           const peerBlocksHex = e.data.slice(secondColon + 1);
           if (!window._rbPendingBlocks) window._rbPendingBlocks = {};
-          window._rbPendingBlocks[checkFrame] = peerBlocksHex;
+          // Keyed by frame and sender: with three or four players each peer
+          // sends a snapshot of the same frame.
+          window._rbPendingBlocks[`${checkFrame}:${peer.slot}`] = peerBlocksHex;
           return;
         }
         if (e.data.startsWith('rb-subhash:')) {
@@ -10298,7 +11304,7 @@
             const subRi = parseInt(parts[2], 10);
             const subCsv = parts.slice(3).join(':');
             if (!window._rbPendingSubHashes) window._rbPendingSubHashes = {};
-            window._rbPendingSubHashes[`${subFrame}:${subRi}`] = subCsv;
+            window._rbPendingSubHashes[`${subFrame}:${subRi}:${peer.slot}`] = subCsv;
           }
           return;
         }
@@ -10314,7 +11320,7 @@
           const checkFrame = parseInt(e.data.slice(firstColon + 1, secondColon), 10);
           const peerRegionsCsv = e.data.slice(secondColon + 1);
           if (!window._rbPendingRegions) window._rbPendingRegions = {};
-          window._rbPendingRegions[checkFrame] = peerRegionsCsv;
+          window._rbPendingRegions[`${checkFrame}:${peer.slot}`] = peerRegionsCsv;
           return;
         }
         // Host-authoritative delay for rollback mode.
@@ -10452,6 +11458,10 @@
           }
         }
         // State sync: the number of the request that follows on this channel.
+        if (e.data.startsWith(RECONNECT_PROOF_REQUEST + ':')) {
+          _receiveReconnectProofRequest(remoteSid, Number(e.data.slice(RECONNECT_PROOF_REQUEST.length + 1)), 'dc');
+          return;
+        }
         if (e.data.startsWith('sync-request-id:')) {
           if (_playerSlot === 0) syncRequestIdNext = _requestIdFrom(Number(e.data.substring(16)));
           return;
@@ -10518,6 +11528,12 @@
             } else if (msg.type === 'lockstep-ready') {
               peer.delayValue = msg.delay || 2;
               peer.rollbackCaps = msg.caps && typeof msg.caps === 'object' ? msg.caps : {};
+              if (peer.dc === ch)
+                _reconnectProofPeers.set(
+                  _knownPlayers[remoteSid]?.socketId || remoteSid,
+                  peer.rollbackCaps[RECONNECT_PROOF_CAP] === true,
+                );
+              _maskCapablePeers.set(remoteSid, window.KNCore.controllerMask.canScheduleMask(msg.caps));
               _lockstepReadyPeers[remoteSid] = true;
               _noteStartStep(peer.slot);
               checkAllLockstepReady();
@@ -10546,6 +11562,7 @@
         _processInputPacket(remoteSid, peer, e.data);
       }
     };
+    return { opened: onOpen, closed: onClose };
   };
 
   // -- Sync-state data channel -----------------------------------------------
@@ -10573,6 +11590,8 @@
     // ahead of its header. It lives and dies with the channel.
     let syncAnswerIdNext = 0;
     let recoveryIdNext = 0;
+    let proofForAssembly = 0;
+    let proofScopeAssembly = null;
     let extrasNext = null;
     ch.onmessage = (e) => {
       // Check every message, including binary chunks and answer ids. A
@@ -10617,6 +11636,8 @@
         // Guest: incoming state transfer header
         if (e.data.startsWith('sync-start:')) {
           const parts = e.data.split(':');
+          proofForAssembly = _requestIdFrom(Number(parts[5]));
+          proofScopeAssembly = _reconnectAnswerScope(_remoteSid);
           _syncFrame = parseInt(parts[1], 10);
           _syncExpected = parseInt(parts[2], 10);
           _syncIsFull = parts[3] === '1';
@@ -10626,7 +11647,8 @@
           recoveryIdNext = 0;
           _syncExtras = extrasNext;
           extrasNext = null;
-          _syncAnswerFor = syncAnswerIdNext;
+          _syncAnswerFor = proofForAssembly || syncAnswerIdNext;
+          if (proofForAssembly) _hostNumbersAnswers = true;
           syncAnswerIdNext = 0;
           _syncChunks = [];
           _syncLastChunkProgressLogAt = 0;
@@ -10671,6 +11693,8 @@
         }
         // Guest: incoming regions patch header — only diverged RDRAM blocks
         if (e.data.startsWith('sync-regions-start:')) {
+          proofForAssembly = 0;
+          proofScopeAssembly = _reconnectAnswerScope(_remoteSid);
           const parts = e.data.split(':');
           _syncFrame = parseInt(parts[1], 10);
           _syncExpected = parseInt(parts[2], 10);
@@ -10714,7 +11738,7 @@
             }
             _rearmSyncChunkDeadline = null;
             _syncLog(`sync chunks complete: ${_syncChunks.length}/${_syncExpected} chunks received`);
-            handleSyncChunksComplete(ownsAssembly);
+            handleSyncChunksComplete(ownsAssembly, proofScopeAssembly, proofForAssembly);
           }
           return;
         }
@@ -10742,6 +11766,40 @@
     if (sid) _dcBufferStaleStreak[sid] = 0;
     clearPeerStallTimers();
     _syncLog(`RB-TRANSPORT-RESET slot=${peer.slot ?? 'null'} reason=${reason}`);
+  };
+
+  // C-side of resetPeerState: the rollback engine's slot of the peer. Not for
+  // a slot a cut governs (its ring holds the cut, _cutRemovedInput), nor when
+  // the caller cuts it next (`keepCoreSlot`: the host dropping a player, a
+  // guest hearing it removed, both under the scheduled rule). The same player
+  // going on in the same slot, not held as a phantom, keeps it as it is
+  // (KNCore.peerReset, specs/reconnect_inputs.qnt reconnect_history): every input of it C
+  // predicts stays recorded as a prediction, and its real input, when it
+  // comes, is checked against it. Any other reset empties it: slot_active is
+  // sticky once kn_feed_input has seen the slot, and the next player in it
+  // must not be predicted from this one's inputs.
+  // Only an actual native reset, not the pacing flag or a state load,
+  // removes past-window phantom predictions from this slot.
+  const _resetCoreSlot = (slot, reason, keepCoreSlot, unsafeHistory) => {
+    if (!_useCRollback || keepCoreSlot || _cutGoverns(slot)) return false;
+    const listed = !_activeRoster || _activeRoster.has(slot);
+    if (window.KNCore.peerReset.keepsCoreSlot(reason, listed, unsafeHistory)) {
+      _syncLog(`PEER-RESET-KEEPS-CORE slot=${slot} reason=${reason}`);
+      return true;
+    }
+    const mod = window.EJS_emulator?.gameManager?.Module;
+    if (!mod?._kn_rollback_slot_reset) return;
+    // On the scheduled rule the inputs the frames still in the ring ran
+    // with go back in as real ones: a replay of those frames runs them
+    // again unchanged (an emptied ring ran them neutral), and a removal
+    // cut heard later sees what the page applied (_cutRemovedInput).
+    const ran = _maskMatchScheduled && _maskSchedule.active() ? _ringInputsRan(mod, slot) : [];
+    mod._kn_rollback_slot_reset(slot);
+    _corePhantomHistory.delete(slot);
+    for (const { tag, i } of ran) {
+      _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
+    }
+    if (ran.length) _syncLog(`PEER-RESET-KEEPS slot=${slot} inputs ${ran[0].tag}..${ran.at(-1).tag}`);
   };
 
   /**
@@ -10780,6 +11838,9 @@
    *     state transfer queued or running for it is dropped)
    *   - _syncSendChains (by sid): that peer's chain of state transfers
    *
+   * C engine's slot: _resetCoreSlot (kept when the same player goes on in it).
+   * Its phantom-history marker survives until a native slot reset or init.
+   *
    * @param {number} slot - player slot to clear (0-3)
    * @param {string} reason - short human-readable reason for the reset;
    *   used in PEER-RESET log and analyze_match.py attribution
@@ -10790,6 +11851,8 @@
   const resetPeerState = (slot, reason, opts = {}) => {
     _peerDriver()?.peerReset(slot, opts.sid ?? null);
     if (slot === null || slot === undefined) return;
+    const unsafeHistory = _corePhantomHistory.has(slot);
+    const keptSlotWaitAt = _keptSlotFirstInputAt.get(slot);
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A player that comes back is measured from its next start step.
     _startSteps.delete(slot);
@@ -10811,6 +11874,7 @@
     }
 
     // Slot-indexed globals. A transport reset does not change host admission.
+    _armHostReconnectDebt(slot, reason, opts.sid, unsafeHistory);
     const inputWindow = _lateJoinInputWindows.get(slot);
     if (inputWindow) inputWindow.primed = false;
     _clearSlotInputState(slot);
@@ -10818,6 +11882,9 @@
     delete _peerPhantom[slot];
     delete _inputLateLogTime[slot];
     delete _auditLastRemote[slot];
+    // RB-CHECK values it sent and not yet compared; whether it is an older page.
+    _rbCheckBook?.forgetPeer(slot);
+    _rbLegacyCheckSlots.delete(slot);
 
     // Per-peer-object ack state
     if (opts.peer) {
@@ -10855,17 +11922,12 @@
     // new peer fills the slot.
     clearPeerStallTimers();
 
-    // C-side: clear the rollback engine's per-slot state. Without this,
-    // slot_active stays sticky once kn_feed_input has ever seen the
-    // slot, polluting prediction and stats across roster changes.
-    if (_useCRollback) {
-      const mod = window.EJS_emulator?.gameManager?.Module;
-      if (mod?._kn_rollback_slot_reset) mod._kn_rollback_slot_reset(slot);
-    }
+    const kept = _resetCoreSlot(slot, reason, !!opts.keepCoreSlot, unsafeHistory);
 
-    // The same peer goes on after a reconnect: its inputs are waited for
-    // until one is taken in (the C slot active again).
-    if (reason === 'reconnect') _awaitFirstInputAfterReset[slot] = true;
+    // Every kept slot starts with no JS input frontier, even during a
+    // mesh heal or while a non-host has removed just the transport.
+    if (reason === 'reconnect' || kept) _awaitFirstInputAfterReset[slot] = true;
+    if (kept) _keptSlotFirstInputAt.set(slot, keptSlotWaitAt ?? null);
     _syncLog(`PEER-RESET slot=${slot} reason=${reason}`);
   };
 
@@ -11002,7 +12064,12 @@
       // preserve _peerInputStarted until the host's roster broadcast
       // removes the slot, so we save/restore that one field.
       if (_playerSlot === 0 || !_activeRoster) {
-        resetPeerState(peer.slot, 'hard-disconnect', { peer, sid: remoteSid });
+        // The host's roster broadcast below cuts this player's input by
+        // frame (or empties its slot, on the immediate rule): it reads what
+        // the slot ran first.
+        const cutNext = _playerSlot === 0 && running && !RB_WORKER_COPROC && !!_activeRoster?.has(peer.slot);
+        if (cutNext) _coreSlotsKeptForCut.add(peer.slot);
+        resetPeerState(peer.slot, 'hard-disconnect', { peer, sid: remoteSid, keepCoreSlot: cutNext });
       } else {
         const startedBefore = _peerInputStarted[peer.slot];
         resetPeerState(peer.slot, 'hard-disconnect-non-host', { peer, sid: remoteSid });
@@ -11120,35 +12187,8 @@
       }
     };
 
-    peer.pc.ondatachannel = (e) => {
-      if (e.channel.label === 'lockstep') {
-        peer.dc = e.channel;
-        setupDataChannel(remoteSid, peer.dc);
-      } else if (e.channel.label === 'sync-state') {
-        peer.syncDc = e.channel;
-        setupSyncDataChannel(remoteSid, peer.syncDc);
-      } else if (e.channel.label === 'rollback-input') {
-        if (peer.rbDc)
-          try {
-            peer.rbDc.onclose = null;
-            peer.rbDc.close();
-          } catch (_) {}
-        peer.rbDc = e.channel;
-        peer.rbDcUnreliable = false;
-        setupRollbackInputDataChannel(remoteSid, peer.rbDc);
-      } else if (_onExtraDataChannel) {
-        _onExtraDataChannel(remoteSid, e.channel);
-      }
-    };
-
-    // Create new DCs and send offer with reconnect flag
-    peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
-    setupDataChannel(remoteSid, peer.dc);
-    peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
-    setupSyncDataChannel(remoteSid, peer.syncDc);
-    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
-    peer.rbDcUnreliable = false;
-    setupRollbackInputDataChannel(remoteSid, peer.rbDc);
+    // Use the same channel ownership rules for initial connection and retry.
+    createOutgoingPeerChannels(remoteSid, peer);
 
     try {
       const offer = await peer.pc.createOffer();
@@ -11224,9 +12264,21 @@
     });
   };
 
+  const _keptSlotStallPeers = (peers) => {
+    if (!_keptSlotFirstInputAt.size) return peers;
+    const stalled = peers.slice();
+    for (const slot of _keptSlotFirstInputAt.keys())
+      if ((!_activeRoster || _activeRoster.has(slot)) && !peers.some((p) => p.slot === slot)) stalled.push({ slot });
+    return stalled;
+  };
+
+  const _setPacingPhantom = (slot) => {
+    _peerPhantom[slot] = true;
+    _corePhantomHistory.add(slot);
+  };
   const markPeerPhantomForStallTimeout = (slot, reason, detail = '') => {
     if (slot === null || slot === undefined || _peerPhantom[slot]) return;
-    _peerPhantom[slot] = true;
+    _setPacingPhantom(slot);
     const suffix = detail ? ` ${detail}` : '';
     _syncLog(`PEER-PHANTOM slot=${slot} reason=${reason}${suffix}`);
     window.dispatchEvent(new CustomEvent('kn-peer-phantom', { detail: { slot } }));
@@ -11999,6 +13051,7 @@
       _guestStateKind = 'savestate';
       _guestStateHiddenWords = null;
       _guestStateAudioFifo = null;
+      _guestStateHle = null;
       _guestStateSaveRam = null;
       _guestStateCapturedLocally = false;
       _syncLog('synthetic demo: starting from live boot state (no state capture/load)');
@@ -12020,6 +13073,7 @@
         _guestStateKind = 'savestate';
         _guestStateHiddenWords = null;
         _guestStateAudioFifo = null;
+        _guestStateHle = null;
         _guestStateSaveRam = null;
         _guestStateCapturedLocally = false;
         _syncLog('host using own state (authoritative)');
@@ -12056,7 +13110,7 @@
     // the libretro savestate path has historically under-specified for startup.
     //
     // Host runs the IDENTICAL restore stack as guest (kn_sync_write of its own
-    // captured bytes + restoreHiddenState + restoreAudioFifo + cleanup). Even
+    // captured bytes + HLE + hidden state + audio FIFO + cleanup). Even
     // though the emulator was paused since capture, the restore path has
     // side effects the host's runtime hasn't been through (TLB rebuild, JIT
     // invalidate, full event-queue normalize). Skipping them on host meant
@@ -12083,6 +13137,9 @@
         kStage = 'post-write-dump';
         _checkAiInvariant(readyMod, 4);
         _logAudioDump(readyMod, `${stagePrefix}:post-knsync-write`);
+        kStage = 'restore-hle';
+        if (_restoreHleState(readyMod, _guestStateHle, 'initial-sync-load'))
+          _syncLog(`initial-sync-load: restored HLE (${_guestStateHle.length} bytes)`);
         kStage = 'restore-hidden';
         _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
         kStage = 'restore-audio-fifo';
@@ -12123,6 +13180,7 @@
     _guestStateKind = 'savestate';
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
+    _guestStateHle = null;
     _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
     _syncLog(`state loaded (manual mode, kind=${isKnSyncInitialState ? 'kn-sync' : 'savestate'})`);
@@ -12366,6 +13424,7 @@
         _guestStateKind = 'savestate';
         _guestStateHiddenWords = null;
         _guestStateAudioFifo = null;
+        _guestStateHle = null;
         _guestStateSaveRam = null;
         _guestStateCapturedLocally = false;
 
@@ -12412,6 +13471,7 @@
       _guestStateKind = 'savestate';
       _guestStateHiddenWords = null;
       _guestStateAudioFifo = null;
+      _guestStateHle = null;
       _guestStateSaveRam = null;
       _guestStateCapturedLocally = false;
 
@@ -12480,6 +13540,7 @@
         sourceRuntimeFamily: _getRuntimeFamily(),
         hiddenWords: captured.hiddenWords,
         audioFifo: captured.audioFifo,
+        ..._resyncExtrasFields({ hle: captured.hle }),
         data: encoded.data,
         saveRam,
       });
@@ -12491,6 +13552,7 @@
       _guestStateKind = captured.kind;
       _guestStateHiddenWords = captured.hiddenWords;
       _guestStateAudioFifo = captured.audioFifo;
+      _guestStateHle = captured.hle ?? null;
       _guestStateCapturedLocally = captured.kind === 'kn-sync';
       _clearInputsForNewMatch('host-capture-ready');
       _recordStartCohortIfMissing('host-capture-ready');
@@ -12576,6 +13638,7 @@
       _guestStateKind = msg.stateFormat === 'kn-sync' ? 'kn-sync' : 'savestate';
       _guestStateHiddenWords = Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null;
       _guestStateAudioFifo = Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null;
+      _guestStateHle = _guestStateKind === 'kn-sync' ? _resyncExtrasFromFields(msg).hle : null;
       _guestStateSaveRam = saveRam;
       _guestStateCapturedLocally = false;
       _syncLog(
@@ -12595,8 +13658,9 @@
 
   // -- Late join -------------------------------------------------------------
 
-  const _broadcastRoster = () => {
-    if (_playerSlot !== 0) return;
+  // Host: the slots its next roster lists (itself, every peer not held as a
+  // late joiner and not leaving), in order.
+  const _hostRosterSlots = () => {
     const slotSet = new Set([_playerSlot]);
     for (const [sid, p] of Object.entries(_peers)) {
       if (_isPeerPendingLateJoin(sid, p)) continue;
@@ -12604,15 +13668,56 @@
         slotSet.add(p.slot);
       }
     }
-    const slots = [...slotSet].sort((a, b) => a - b);
-    _recordHostInputRoster(_frameNum, slots);
+    return [...slotSet].sort((a, b) => a - b);
+  };
+
+  const _broadcastRoster = () => {
+    if (_playerSlot !== 0) return;
+    const slots = _hostRosterSlots();
+    const slotSet = new Set(slots);
+    // The host's frame, or the last roster's when a replay has the host below
+    // it: a guest drops a roster older than the last one it filed.
+    const rosterFrame = Math.max(_frameNum, _lastBroadcastRosterFrame);
+    _lastBroadcastRosterFrame = rosterFrame;
+    _recordHostInputRoster(rosterFrame, slots);
+    // The match stays scheduled only while every player page in it can.
+    const maskScheduled = window.KNCore.controllerMask.matchScheduled(
+      _maskMatchScheduled && _maskSchedule.active(),
+      slots.filter((slot) => slot !== _playerSlot).map(_maskSlotCapable),
+    );
+    if (!maskScheduled) _fallBackToImmediateMasks(`roster f=${rosterFrame} has a page that cannot schedule`);
     for (const slot of slots) {
       if (slot !== _playerSlot && !_activeRoster?.has(slot) && _admissionInputFloor(slot) > 0) {
         _awaitFirstInputAfterReset[slot] = true;
       }
     }
+    // The players this roster removes: on the scheduled rule each one's
+    // input is cut at this roster frame, the host's inputs below it sent
+    // just before the roster (`roster-cut:`); on the immediate rule its slot
+    // is emptied now, as before the rule.
+    const cuts = [];
+    const rbModCut = window.EJS_emulator?.gameManager?.Module;
+    for (const slot of _activeRoster ?? []) {
+      if (slot === _playerSlot || slotSet.has(slot) || !_isValidPlayerSlot(slot) || !_useCRollback) continue;
+      if (_cutGoverns(slot) || !rbModCut?._kn_feed_input) continue;
+      if (maskScheduled && !RB_WORKER_COPROC) {
+        const cut = _hostRosterCut(rbModCut, slot, rosterFrame);
+        _cutRemovedInput(rbModCut, slot, cut, 'broadcast-roster');
+        cuts.push(window.KNCore.removedInput.encodeRosterCut(cut));
+      }
+    }
+    // A slot kept for a cut this roster did not make (the immediate rule, or
+    // a slot the roster still lists) is emptied, as before the rule.
+    for (const slot of _coreSlotsKeptForCut) {
+      if (!_cutGoverns(slot) && rbModCut?._kn_rollback_slot_reset) {
+        rbModCut._kn_rollback_slot_reset(slot);
+        _corePhantomHistory.delete(slot);
+      }
+    }
+    _coreSlotsKeptForCut.clear();
+    _lastRosterCuts = cuts;
     _activeRoster = slotSet;
-    _applyControllerPresentMask('broadcast-roster');
+    _fileRosterControllerMask(rosterFrame, slots, 'broadcast-roster');
     // Always 4 — see roster DC handler comment for rationale.
     rb_numPlayers = 4;
     const rbMod = window.EJS_emulator?.gameManager?.Module;
@@ -12620,21 +13725,32 @@
       rbMod._kn_set_num_players(rb_numPlayers);
       _syncLog(`C-ROLLBACK num_players updated to ${rb_numPlayers}`);
     }
-    const msg = `roster:${_frameNum}:${slots.join(',')}`;
-    _syncLog(`ROSTER broadcast: frame=${_frameNum} slots=[${slots.join(',')}]`);
+    const msg = `roster:${rosterFrame}:${slots.join(',')}`;
+    _syncLog(
+      `ROSTER broadcast: frame=${rosterFrame} slots=[${slots.join(',')}] mask=${maskScheduled ? 'scheduled' : 'immediate'}`,
+    );
     for (const [sid, p] of Object.entries(_peers)) {
       if (_isPeerPendingLateJoin(sid, p)) continue;
       if (p.dc?.readyState === 'open') {
         try {
+          if (maskScheduled) {
+            for (const cut of cuts) p.dc.send(cut);
+            p.dc.send(`roster-mask:${rosterFrame}`);
+          }
           p.dc.send(msg);
         } catch (_) {}
       }
     }
   };
 
+  // The host offers the bridge on every ROM, on Smash Remix when the match
+  // is on the scheduled rule (KNCore.lateJoinInput.bridgeOffered): a Remix
+  // match on the immediate rule keeps the old bootstrap, whose placeholders
+  // the bridge's wait would refuse. A joiner takes a bridge whenever one comes.
   const _snapshotLateJoinBridgeSources = (joiningSid) => {
     const ownSid = socket?.id; // The targeted signaling wrapper only forwards emits.
-    if (!_useCRollback || RB_WORKER_COPROC || _isSmashRemix() || !_activeRoster || !ownSid) return null;
+    if (!_useCRollback || RB_WORKER_COPROC || !_activeRoster || !ownSid) return null;
+    if (!window.KNCore.lateJoinInput.bridgeOffered(_isSmashRemix(), _maskSchedule.active())) return null;
     const own = { slot: _playerSlot, sid: ownSid, peer: null, history: _localInputs };
     const originals = [own];
     for (const [sid, peer] of Object.entries(_peers)) {
@@ -12739,7 +13855,7 @@
   };
   const _beginLateJoinOriginalWait = (msg, mod, bridgePeers) => {
     _lateJoinBootContinuation = null;
-    if (!mod?._kn_pre_tick || RB_WORKER_COPROC || _isSmashRemix() || !Object.hasOwn(msg, 'inputBridge')) return null;
+    if (!mod?._kn_pre_tick || RB_WORKER_COPROC || !Object.hasOwn(msg, 'inputBridge')) return null;
     const sources = window.KNCore.decodeLateJoinInputBridge(msg.inputBridge, msg.frame, DELAY_FRAMES, _playerSlot);
     const slots = new Map(sources.map(({ slot, sid }) => [slot, sid]));
     if (!slots.has(0)) slots.clear(); // malformed new handoff; no ownership to infer
@@ -12899,6 +14015,8 @@
     const servedAs = _lateJoinServing.get(remoteSid);
     const serveId = servedAs ?? ++_lateJoinServeSeq;
 
+    if (_hostReconnectBlocksNativeCapture()) return;
+    const reconnectFence = _hostReconnectFenceVersion;
     const gm = window.EJS_emulator?.gameManager;
     if (!gm) {
       _syncLog(`sendLateJoinState: gameManager not ready`);
@@ -13014,6 +14132,7 @@
       // fired, the joiner left, the match stopped): nothing to send.
       if (
         _lateJoinServing.get(remoteSid) !== serveId ||
+        reconnectFence !== _hostReconnectFenceVersion ||
         serveEpoch !== _syncQueueEpoch ||
         serveGen !== (_syncQueueGen[remoteSid] || 0) ||
         (servePeer && servePeer !== _peers[remoteSid])
@@ -13040,6 +14159,9 @@
         saveRam,
         hiddenWords,
         audioFifo,
+        // The controller masks from the state's frame on: the joiner runs
+        // them as every other page does.
+        controllerMasks: _maskSchedule.active() ? _maskSchedule.wireFrom(capturedFrame) : null,
       };
       // Original peers can advance briefly before receiving the pause.
       // Their real input may arrive while compression runs; pair it
@@ -13130,8 +14252,9 @@
     }
     _isApplyingLateJoinState = true;
     const bridgeEpoch = _syncQueueEpoch;
+    // The host sent a bridge only where its rule offers one (bridgeOffered).
     const bridgePeers =
-      Array.isArray(msg.inputBridge) && !RB_WORKER_COPROC && !_isSmashRemix()
+      Array.isArray(msg.inputBridge) && !RB_WORKER_COPROC
         ? new Map(Object.entries(_peers).map(([sid, peer]) => [sid, { peer, gen: _syncQueueGen[sid] || 0 }]))
         : null;
 
@@ -13292,9 +14415,26 @@
           .filter((slot) => Number.isInteger(slot) && slot >= 0 && slot < 4),
       );
       if (Number.isInteger(_playerSlot) && _playerSlot >= 0 && _playerSlot < 4) _activeRoster.add(_playerSlot);
+      _maskAnnouncedFrame = -1;
+      _maskMatchScheduled = true;
+      if (_maskSchedule.adopt(msg.controllerMasks, msg.frame)) {
+        _syncLog(`late-join: controller masks from the host: ${_maskSchedule.describe()}`);
+      } else {
+        // The host sends none when the match runs on the immediate rule, and
+        // an older host never does: the mask follows each roster at once.
+        _maskSchedule.stop();
+        _fallBackToImmediateMasks('late-join state without a controller mask schedule');
+      }
       _applyControllerPresentMask('late-join-state');
       _releaseMenuStartBarrierAfterLateJoin();
       _startLateJoinInputBootstrap('late-join-state', [..._activeRoster]);
+      // On the scheduled rule this page's own input is neutral until it hears
+      // the roster that admits it, and below that roster's frame + MASK_LEAD:
+      // the other pages hold its tags below the roster frame as absent and
+      // run them as absent until they hear it (specs/late_join_input_agreement.qnt).
+      _joinHold = _joinRuleScheduled() ? { stateFrame: msg.frame, rosterFrame: -1 } : null;
+      if (_joinHold)
+        _syncLog(`LATE-JOIN-HOLD own input neutral from f=${msg.frame} until the roster + ${JOIN_HOLD_LEAD}`);
 
       // Ensure rollback init can proceed — the late joiner missed the
       // host's rb-delay broadcast over DataChannel (sent at game start).
@@ -13681,14 +14821,19 @@
     // Pause first to invalidate stale runners
     mod.pauseMainLoop();
 
-    // Replace rAF with interceptor that captures only Emscripten's runner;
-    // every other callback (UI code calling requestAnimationFrame during a
-    // match) goes to the native rAF instead (#62).
-    APISandbox.overrideRAF((cb) => {
-      if (!KNShared.isMainLoopRunner(cb)) return APISandbox.nativeRAF(cb);
-      _pendingRunner = cb;
-      return -999;
-    });
+    if (mod.knSetManualScheduler) {
+      _manualSchedulerModule = mod;
+      mod.knSetManualScheduler((runner) => {
+        _pendingRunner = runner;
+      });
+    } else {
+      // Older cores expose only the rAF runner. Leave unrelated UI callbacks alone.
+      APISandbox.overrideRAF((cb) => {
+        if (!KNShared.isMainLoopRunner(cb)) return APISandbox.nativeRAF(cb);
+        _pendingRunner = cb;
+        return -999;
+      });
+    }
 
     // Resume to capture fresh runner
     mod.resumeMainLoop();
@@ -13924,20 +15069,8 @@
 
   let _staleRunnerLastLogAt = 0;
 
-  // Run the currently-captured _pendingRunner once for `frameTimeMs` and
-  // report whether it actually emulated the frame. See #62: after a click
-  // moved DOM focus (e.g. toolbar or feedback form), the runner call could
-  // emulate nothing — no mainloop func call, no reschedule — while
-  // stepOneFrame still counted the frame as stepped. Root cause: the
-  // overrideRAF interceptor used to capture ANY callback passed to
-  // requestAnimationFrame, so the page UI code's own rAF call (fired by the
-  // click) overwrote _pendingRunner with a UI callback, stranding the real
-  // runner. Fixed by having the interceptor capture only Emscripten's
-  // runner (KNShared.isMainLoopRunner) and pass everything else to the
-  // native rAF. The detection below (KNShared.classifyRunnerStep, from two
-  // signals sampled around the call — did a fresh runner get rescheduled,
-  // and did CP0 Count (kn_get_cycle_time_ms) move at all) stays as a safety
-  // net for any other cause of a stale runner.
+  // A blocker or skipped iteration can reschedule without entering the core.
+  // On the patched core, require native dispatch and CP0 progress when available.
   const _runCapturedRunner = (frameTimeMs) => {
     const runner = _pendingRunner;
     _pendingRunner = null;
@@ -13945,8 +15078,11 @@
     const cycleMod = _hasForkedCore ? window.EJS_emulator?.gameManager?.Module : null;
     const hasCycleCheck = !!cycleMod?._kn_get_cycle_time_ms;
     const cycleBefore = hasCycleCheck ? cycleMod._kn_get_cycle_time_ms() : null;
-    runner(frameTimeMs);
+    const dispatched = runner(frameTimeMs);
     const cycleAfter = hasCycleCheck ? cycleMod._kn_get_cycle_time_ms() : null;
+    if (_manualSchedulerModule) {
+      return dispatched === true && (!hasCycleCheck || cycleAfter !== cycleBefore) ? 'emulated' : 'stale';
+    }
     const rescheduled = !!_pendingRunner;
     return KNShared.classifyRunnerStep(rescheduled, cycleBefore, cycleAfter);
   };
@@ -13982,7 +15118,7 @@
     const frameTimeMs = (_frameNum + 1) * 16.666666666666668;
     let outcome = _runCapturedRunner(frameTimeMs);
 
-    if (outcome === 'stale') {
+    if (outcome === 'stale' && !_manualSchedulerModule) {
       // The runner did not emulate: it was stale (see _runCapturedRunner
       // above) and this peer would otherwise count an unemulated frame —
       // exactly the #62 click-during-match desync. Recapture and re-step
@@ -14264,12 +15400,12 @@
     // when the overlay is still covering the live canvas.
     _hideRollbackVisualFreeze();
     _shadowScheduleResync('post-replay');
-    // Replay finished — broadcast the gameplay hash so the peer can
-    // verify the rollback restoration produced identical game state.
-    // gameplay_hash hashes ONLY game-relevant RDRAM addresses (damage,
-    // stocks, timer, RNG) — immune to audio/video/heap noise.
+    // Replay finished — log this page's hashes of the frame it caught up
+    // to. Local only: that frame can still be rolled back, so it is not
+    // sent for RB-CHECK; the frame is compared once it is a rollback window
+    // old (rb-final, web/src/rb-check.ts). gameplay_hash hashes ONLY
+    // game-relevant RDRAM addresses (damage, stocks, timer, RNG).
     const hashFrame = _frameNum;
-    const checkFrame = hashFrame;
     const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
     const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
     const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
@@ -14308,19 +15444,8 @@
       }
     }
     _rollbackPreHashFrame = -1;
-    if (rbCheckGameplay) {
-      for (const p of getActivePeers()) {
-        if (p.dc?.readyState === 'open') {
-          try {
-            p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-          } catch (_) {}
-        }
-      }
-    }
-    // Schedule one more hash broadcast on the NEXT tick so we capture
-    // the state of the FIRST frame after replay completes — that's the
-    // frame most likely to expose "rollback restoration was lossy"
-    // bugs because it's the first divergence point.
+    // Log the hashes of the FIRST frame after the replay on the next tick
+    // too (RB-POST-RB; tools/analyze_match.py compares it with this line).
     _rbPendingPostRollbackHash = rbCheckGameplay;
     _rbReplayLogged = false;
     _lastRollbackDoneFrame = _frameNum;
@@ -14437,9 +15562,11 @@
   };
 
   const _runStepOneFrame = (branch) => {
+    const maskFrame = _applyControllerMaskForStep(branch);
     _inDeterministicStep = true;
     try {
       const stepped = stepOneFrame();
+      if (stepped && maskFrame >= 0) _maskSchedule.ran(maskFrame);
       if (!stepped) {
         const nowMs = window.APISandbox?.nativePerfNow ? window.APISandbox.nativePerfNow() : performance.now();
         if (nowMs - _stepNoRunLastLogAt >= 1000) {
@@ -14495,6 +15622,8 @@
   let _lastRemoteFramePerSlot = {}; // slot -> highest frame received from that peer
   let _peerLastAdvanceTime = {}; // slot -> performance.now() when peer last sent a NEW frame
   let _peerPhantom = {}; // slot -> true when peer is detected as unresponsive
+  // Lives with C's input ring, not with the transport or active pacing flag.
+  const _corePhantomHistory = new Set();
   let _resumeInputGuardUntil = 0;
   let _lifecycleResyncPending = false;
   let _lifecycleResyncStartedAt = 0;
@@ -14856,6 +15985,10 @@
       // Fresh match (late join sets _frameNum first). Input buffers were already cleared on entering LOCKSTEP_READY;
       // a peer that started first may have sent frames 0+.
       _activeRoster = null;
+      _maskSchedule.stop();
+      _maskMatchScheduled = true;
+      _maskAnnouncedFrame = -1;
+      _lastBroadcastRosterFrame = -1;
       _clearLateJoinInputRoster();
       _pendingLateJoinPeerSids.clear();
       _pendingLateJoinPeerSlots.clear();
@@ -14979,6 +16112,7 @@
         // comes after its final flush), which is not this match's to send.
         if (_useCRollback) _drainCDebugLog();
         detMod._kn_rollback_init(rollbackMax, effectiveDelay, _playerSlot, numPlayers);
+        _corePhantomHistory.clear();
         for (const record of _lateJoinInputWindows.values()) record.primed = false;
         // The desync detector reports a frame only once it is this far
         // behind the newest one: the engine never replays further back.
@@ -15072,6 +16206,8 @@
         _rbBisectFramesRemaining = 0;
         _rbBisectCount = 0;
         _rbPendingPostRollbackHash = false;
+        // RB-CHECK values of an earlier run: a late join or restart re-inits here.
+        _rbCheckClear();
         if (_runSubstate === RUN_RB_STALL) _runSubstate = RUN_NORMAL;
         _rollbackStallStart = 0;
 
@@ -15253,6 +16389,13 @@
     const activePeers = getActivePeers();
     const peerSlots = activePeers.map((p) => p.slot);
     _syncLog(`lockstep started -- slot: ${_playerSlot} peerSlots: ${peerSlots.join(',')} delay: ${DELAY_FRAMES}`);
+    // From here on frames take their mask from the schedule: the mask this
+    // page starts with until the first roster's frame (a late joiner has the
+    // host's already).
+    if (_maskMatchScheduled && !_maskSchedule.active()) {
+      _maskSchedule.start(_controllerPresentMask(), _frameNum);
+      _syncLog(`controller masks start: ${_maskSchedule.describe()}`);
+    }
     _broadcastRoster();
     _applyControllerPresentMask('start-lockstep');
     _syncLog(`SYNC-MODE: RDRAM hash desync detection, knSync=${_hasKnSync}`);
@@ -15650,7 +16793,12 @@
     _checkStateTransition();
     window._lockstepActive = false;
     _resyncRequestInFlight = false;
-    _resyncRequestId = 0;
+    _reconnectAnswerDebt = null;
+    _hostReconnectDebts.clear();
+    _hostAuthoredReceipts.clear();
+    _deferredPhantomRecovery.clear();
+    _reconnectProofPeers.clear();
+    ++_hostReconnectFenceVersion;
     _resyncRequestAt = -1;
     _owedResync = false;
     _owedResyncAsksAgain = 0;
@@ -15831,6 +16979,8 @@
     window._knLastTickWall = 0;
     // Restore rAF if we intercepted it (other overrides restored in stop())
     if (_manualMode) {
+      _manualSchedulerModule?.knSetManualScheduler(null);
+      _manualSchedulerModule = null;
       APISandbox.restoreAll();
       // Restore EJS / gameManager / WASM pause overrides installed in
       // enterManualMode. Match the install order so any chained restore
@@ -15866,6 +17016,7 @@
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};
+    _joinHold = null;
     _lateJoinOriginalWait = null;
     _lateJoinBootContinuation = null;
     // Free C-level sync buffers
@@ -16158,6 +17309,7 @@
   // an answer was final, and a late joiner played on split for the rest of
   // the match (specs/sync_follow_up.qnt, DIRECT_WATCHED).
   const _answerDirectSyncRequest = (sid, requestId, via = {}) => {
+    if (_holdReconnectHostAnswer(sid, requestId, via)) return;
     const requestIds = { [sid]: requestId };
     // Over the socket (handleSocketSyncRequest) the answer and its follow-up
     // go the way the request came.
@@ -16172,7 +17324,12 @@
       _scheduledSyncRequests = _scheduledSyncRequests.filter((q) => !(q.targetSid === sid && q.followUp > 0));
       _syncLog(`SYNC-FOLLOW-UP-DIRECT target=${sid}: ${superseded} queued follow-up(s) superseded by a new answer`);
     }
-    const options = { requestIds, watchFor: [sid], ...(transport ? { transport, reason: via.reason } : {}) };
+    const options = {
+      requestIds,
+      watchFor: via.reconnectDebt ? [] : [sid],
+      ...(transport ? { transport, reason: via.reason } : {}),
+      ...(via.reconnectDebt ? { reconnectDebt: via.reconnectDebt, pending: via.pending } : {}),
+    };
     // Answers to one guest asked while a push is in flight share the queued
     // push behind it, whose state is taken last. Only the newest answer's
     // completion schedules the follow-up, with that state's watch and that
@@ -16182,8 +17339,18 @@
     const token = {};
     _directAnswerNewest.set(sid, token);
     Promise.resolve(pushSyncState(sid, false, options)).then((skipped) => {
+      if (via.reconnectDebt?.request === via.pending && via.pending) {
+        via.pending.dispatching = false;
+        if (typeof skipped?.includes === 'function' && !skipped.includes(sid)) {
+          // Handoff is not native apply. Retain permission for a request
+          // from the same current generation until the original deadline.
+          via.reconnectDebt.lastHandoffId = via.pending.id;
+          via.reconnectDebt.request = null;
+        }
+      }
       if (_directAnswerNewest.get(sid) !== token) return;
       _directAnswerNewest.delete(sid);
+      if (via.reconnectDebt) return; // only an explicit retry asks for another protected state
       // Still the guest it was sent to: not gone, reset (reconnect) or a
       // match stopped since (those are resetPeerState's job).
       const current = !!_peers[sid] && epoch === _syncQueueEpoch && gen === (_syncQueueGen[sid] || 0);
@@ -16220,22 +17387,22 @@
   // (the newest received frame alone can hide a gap) and fed to C (a queued
   // one could still trigger a rollback). Used by the host's sync dispatch and
   // by the GAMEPLAY→MENU C-rollback shutdown.
-  const _liveStateConfirmed = (mod) => {
+  const _liveStateConfirmed = (mod, peers) => {
     if (mod?._kn_get_replay_depth?.() > 0) return false;
     if ((mod?._kn_peek_pending_rollback?.() ?? -1) >= 0) return false;
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     if (_pendingCInputs.some((i) => i.frame <= lastUsed)) return false;
-    return _missingConsumedInputs().length === 0;
+    return _missingConsumedInputs(peers).length === 0;
   };
   // The earliest consumed remote input each live peer still lacks (absent,
   // or fabricated as ZERO_INPUT) in the window _liveStateConfirmed checks.
-  const _missingConsumedInputs = () => {
+  const _missingConsumedInputs = (peers = getInputPeers()) => {
     const lastUsed = _frameNum - 1 - DELAY_FRAMES;
     // Frames applied before a deferred init ran on the lockstep path, which
     // deletes each remote input once applied (same floor as the gap check).
     const windowStart = lastUsed - KN_MAX_VISIBLE_ROLLBACK_DEPTH - DELAY_FRAMES;
     const missing = [];
-    for (const p of getInputPeers()) {
+    for (const p of peers) {
       if (_peerPhantom[p.slot]) continue;
       const firstInWindow = Math.max(_inputFloor(p.slot), windowStart);
       const got = _remoteInputs[p.slot];
@@ -16302,6 +17469,8 @@
     }
     _chk('post-phase');
     _creditLocalFreeze();
+    _checkReconnectAnswerDebt();
+    _serviceReconnectHostAnswers();
     _checkResyncRequestDeadline();
     _checkOverduePushes();
     _flushResendLogs();
@@ -16460,7 +17629,16 @@
           if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
           _syncTargetFrame = -1;
           _syncTargetDeadlineAt = 0;
-          applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId, pending.extras);
+          applySyncState(
+            pending.bytes,
+            pending.frame,
+            pending.fromProactive,
+            pending.recoveryId,
+            pending.extras,
+            pending.answerFor,
+            pending.answerScope,
+            pending.proofFor,
+          );
         } else if (_runSubstate !== RUN_AWAITING_RESYNC) {
           // Reached target frame but state not here yet — stall until it arrives
           _runSubstate = RUN_AWAITING_RESYNC;
@@ -16491,11 +17669,26 @@
       } else {
         _pendingResyncState = null;
         if (_runSubstate === RUN_AWAITING_RESYNC) _runSubstate = RUN_NORMAL;
-        applySyncState(pending.bytes, pending.frame, pending.fromProactive, pending.recoveryId, pending.extras);
+        applySyncState(
+          pending.bytes,
+          pending.frame,
+          pending.fromProactive,
+          pending.recoveryId,
+          pending.extras,
+          pending.answerFor,
+          pending.answerScope,
+          pending.proofFor,
+        );
       }
     }
 
     if (_coreFatalError) return; // sync application may have failed after loading native state
+    // A removed player's cut heard after this page ran frames it changes:
+    // they run again here, at the frame boundary (_serviceCutRerun).
+    if (_cutRerun) {
+      _serviceCutRerun();
+      if (_coreFatalError) return;
+    }
     _chk('post-sync-target');
 
     // ── Rollback-mode peer stall freeze ─────────────────────────────────
@@ -16586,7 +17779,7 @@
           if (_frameNum - DELAY_FRAMES < _admissionInputFloor(p.slot)) continue;
           if (!_peerPhantom[p.slot] && _peerLastAdvanceTime[p.slot] !== undefined) {
             if (nowPacing - _peerLastAdvanceTime[p.slot] >= PEER_DEAD_MS) {
-              _peerPhantom[p.slot] = true;
+              _setPacingPhantom(p.slot);
               _syncLog(
                 `PEER-PHANTOM slot=${p.slot} lastAdvance=${_peerLastAdvanceTime[p.slot].toFixed(0)} staleSec=${((nowPacing - _peerLastAdvanceTime[p.slot]) / 1000).toFixed(1)} — excluded from pacing`,
               );
@@ -16680,7 +17873,7 @@
                   `force-releasing pacing (I1 deadline)`,
               );
               if (slowestSlot >= 0) {
-                _peerPhantom[slowestSlot] = true;
+                _setPacingPhantom(slowestSlot);
                 _syncLog(
                   `PEER-PHANTOM slot=${slowestSlot} reason=pacing-timeout stalledMs=${Math.round(_pacingStallMs)} — excluded from pacing`,
                 );
@@ -16740,8 +17933,18 @@
           `ejsPaused=${suppressEjsPausedInput} guard=${suppressResumeGuardInput} lifecycle=${_lifecycleResyncPending}`,
       );
     }
+    // A joiner on the scheduled rule holds its own input neutral until the
+    // roster that admits it + MASK_LEAD (KNCore.lateJoinInput.joinerHoldsOwnInput).
+    if (
+      _joinHold &&
+      !window.KNCore.lateJoinInput.joinerHoldsOwnInput(_frameNum, _joinHold.rosterFrame, JOIN_HOLD_LEAD)
+    ) {
+      _syncLog(`LATE-JOIN-HOLD ended at f=${_frameNum} (roster f=${_joinHold.rosterFrame})`);
+      _joinHold = null;
+    }
+    const joinHoldsOwnInput = _joinHold !== null;
     const hadLocalInputForFrame = Object.prototype.hasOwnProperty.call(_localInputs, _frameNum);
-    const localInput = hadLocalInputForFrame
+    const madeInput = hadLocalInputForFrame
       ? _localInputs[_frameNum]
       : _applyExtraInputDelay(
           _cloneInput(
@@ -16755,8 +17958,10 @@
             ),
           ),
         );
+    const localInput = !hadLocalInputForFrame && joinHoldsOwnInput ? _cloneInput(KNShared.ZERO_INPUT) : madeInput;
     let recordAuthorOnSend =
       !hadLocalInputForFrame &&
+      !joinHoldsOwnInput &&
       _playerSlot !== 0 &&
       !menuStartBarrier.suppressInput &&
       !suppressLateJoinBootstrapInput &&
@@ -17079,7 +18284,7 @@
         _meshHealthTick();
         if (rbApplyFrame >= 0 && ownerGate !== 'replay') {
           // Stall only when too far ahead for rollback to help
-          const rbInputPeers = getInputPeers();
+          const rbInputPeers = _keptSlotStallPeers(getInputPeers());
           // Prediction window. A remote input X that turns out mispredicted
           // rewinds to frame X + delay (its first use). The C engine silently
           // skips (DEEP-MISPREDICT-SKIP = cross-peer desync) any rollback
@@ -17118,24 +18323,29 @@
               windowEdge >= _inputFloor(p.slot) &&
               windowEdge < peerFrame &&
               !_remoteInputs[p.slot]?.[windowEdge];
-            // After a reconnect reset nothing is known of how far ahead
-            // the peer is, and C would record no prediction: wait for its
-            // first input (specs/reconnect_inputs.qnt).
+            // A transport reset forgets how far ahead this peer is.
+            // Do not let predictions run unbounded before its first input.
+            let keptSlotWaitAt = _keptSlotFirstInputAt.get(p.slot);
             const firstWait =
-              !_remoteInputs[p.slot]?.[rbApplyFrame] &&
+              (keptSlotWaitAt !== undefined || !_remoteInputs[p.slot]?.[rbApplyFrame]) &&
               rbApplyFrame >= _inputFloor(p.slot) &&
               _awaitingFirstInput(p.slot);
-            if (gapAtEdge || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
+            if (gapAtEdge || firstWait || !_remoteInputs[p.slot]?.[rbApplyFrame]) {
               // Input missing — check how far ahead we are
               const adv = peerFrame >= 0 ? _frameNum - peerFrame : 0;
               if (gapAtEdge || firstWait || adv >= stallThreshold) {
                 const nowRbInputStall = performance.now();
+                if (firstWait && keptSlotWaitAt === null) {
+                  keptSlotWaitAt = nowRbInputStall;
+                  _keptSlotFirstInputAt.set(p.slot, keptSlotWaitAt);
+                }
                 const rbStallKey = `${p.slot}:${rbApplyFrame}`;
                 if (_rbInputStallKey !== rbStallKey) {
                   _rbInputStallKey = rbStallKey;
                   _rbInputStallStartTime = nowRbInputStall;
                 }
-                const stalledMs = nowRbInputStall - _rbInputStallStartTime;
+                const stalledMs =
+                  nowRbInputStall - ((firstWait ? keptSlotWaitAt : undefined) ?? _rbInputStallStartTime);
                 if (stalledMs >= MAX_STALL_MS + RESEND_TIMEOUT_MS) {
                   markPeerPhantomForStallTimeout(
                     p.slot,
@@ -17157,7 +18367,7 @@
                   _syncLog(
                     `RB-INPUT-STALL f=${_frameNum} apply=${rbApplyFrame} slot=${p.slot} ` +
                       `adv=${adv} stalledMs=${Math.round(stalledMs)} — stalling ` +
-                      (firstWait ? '(first input since the reconnect)' : '(rollback budget exhausted)'),
+                      (firstWait ? '(first input since the transport reset)' : '(rollback budget exhausted)'),
                   );
                   _rbStallLogged = _frameNum;
                 }
@@ -17494,11 +18704,11 @@
           }
         }
         // ── R4: Post-replay live-state mismatch poll ─────────────────────
-        // kn_post_tick compares the live emulator state hash to what the
-        // ring claims for the just-completed replay frame. If they differ,
-        // the replay introduced drift and the run is corrupted. Per §Core
-        // principle: dev throws, prod logs and continues. No resync.
-        // See docs/netplay-invariants.md §R4.
+        // Nothing raises this any more: the C engine has no post-replay
+        // comparison, and kn_get_live_mismatch always returns 0 on a current
+        // core. The poll stays for cores built before the check was removed.
+        // A log without RB-LIVE-MISMATCH is not evidence that a replay was
+        // faithful. See docs/netplay-invariants.md §R4.
         if (tickMod._kn_get_live_mismatch && _rbLiveMismatchBuf) {
           const hit = tickMod._kn_get_live_mismatch(_rbLiveMismatchBuf, _rbLiveMismatchBuf + 4, _rbLiveMismatchBuf + 8);
           if (hit) {
@@ -18089,13 +19299,12 @@
         // ── Freeze detection (delegated to kn-diagnostics.js) ──────────
         _diag.checkFreeze(localInput);
 
-        // ── Bisect-on-mismatch: when a divergence is detected, switch to
-        // per-frame hash broadcasts for the next N frames so we can pinpoint
-        // exactly when the next divergence happens. Without this, mismatch
-        // detection only fires at 300-frame boundaries — we can detect THAT
-        // divergence exists but not WHEN it was introduced. Per-frame hashing
-        // shrinks the window from 300 frames to 1 frame, but is expensive
-        // (~0.5 ms/frame), so we only run it briefly after a mismatch.
+        // ── Bisect-on-mismatch: when a divergence is detected, file and send
+        // the RB-CHECK hash (and, deep, the region snapshot) of every frame
+        // for the next N frames instead of every 300th, so the next
+        // divergence is found to the frame. The filing itself is the RB-CHECK
+        // block below (cadence 1 while this is on); it still files only
+        // frames one rollback window back, which can no longer be replayed.
         const bisectThisFrame =
           _knDeepDiagnostics &&
           _rbBisectActive &&
@@ -18108,164 +19317,34 @@
             _rbBisectActive = false;
             _syncLog(`RB-BISECT done at f=${_frameNum}`);
           }
-          // Broadcast both the cheap hash AND the per-region snapshot.
-          // Field test 754/755 had 1553 RB-REGION-DIFF entries stuck on
-          // "peer regions not yet received" because the receiver had no
-          // peer region data for the frame the bisect was checking. The
-          // periodic rb-regions broadcast only fires every 300 frames;
-          // bisect mode needs to send region snapshots per frame too.
-          // Cost: ~2 KB extra per bisect frame for at most 30 frames.
-          const hashFrame = _frameNum - 1;
-          const checkFrame = hashFrame;
-          const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
-          if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${tickMod._kn_game_state_hash?.(hashFrame) ?? 0}`);
-                } catch (_) {}
-              }
-            }
-            // Region snapshot via the frame-specific export so the snapshot
-            // matches the frame we just sent the hash for, not the most
-            // recent ring slot.
-            const NUM_REGIONS_BISECT = 256;
-            if (!_rbRegionsBufPtr && tickMod._malloc) _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_BISECT * 4);
-            if (_rbRegionsBufPtr) {
-              let ok = 0;
-              if (tickMod._kn_state_region_hashes_frame) {
-                ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_BISECT);
-              } else if (tickMod._kn_state_region_hashes) {
-                tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS_BISECT);
-                ok = NUM_REGIONS_BISECT;
-              }
-              if (ok > 0) {
-                const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_BISECT);
-                const regionsHex = Array.from(regions)
-                  .map((h) => h.toString(16))
-                  .join(',');
-                if (!window._rbLocalRegions) window._rbLocalRegions = {};
-                window._rbLocalRegions[checkFrame] = regionsHex;
-                for (const p of getActivePeers()) {
-                  if (p.dc?.readyState === 'open') {
-                    try {
-                      p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-                    } catch (_) {}
-                  }
-                }
-              }
-            }
-          }
         }
 
-        // ── Post-rollback verification: immediately after a replay completes,
-        // broadcast the rolled-forward state hash so peers can confirm the
-        // rollback restoration produced bit-identical state. Without this,
-        // a "toxic" rollback (one that introduces divergence) is invisible
-        // until the next 300-frame checkpoint, making it impossible to
-        // attribute the divergence to a specific rollback event.
-        //
-        // We ALSO broadcast per-64KB RDRAM block hashes + the per-region
-        // savestate digest here, so the 2026-04-08 audit path (match
-        // 002ad0f6) can pinpoint which block diverges AT the rollback
-        // boundary instead of inferring it from the next 300-frame
-        // checkpoint 180 frames later. Without per-rollback block data, we
-        // can see divergence has happened by f=3599 but not whether it was
-        // introduced at f=3420, f=3440, or f=3460.
+        // ── Post-rollback hashes: the tick after a replay completes, log this
+        // page's hashes of the frame just run (RB-POST-RB; with C-REPLAY done,
+        // tools/analyze_match.py checks that the restoration kept the ring
+        // and the live state together). Local only: the frame can still be
+        // rolled back, so a peer's hash of it could legitimately differ. It
+        // reaches RB-CHECK one rollback window later, like every frame.
         if (_rbPendingPostRollbackHash && !_isRbCheckGameplayPhase()) {
           _rbPendingPostRollbackHash = false;
         }
         if (_rbPendingPostRollbackHash) {
           _rbPendingPostRollbackHash = false;
           const hashFrame = _frameNum - 1;
-          const checkFrame = hashFrame;
           const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
           const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
           const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
           const hiddenFp = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
           const sfState = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
           const taintedCount = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
-          if (gpHash !== 0 && _isRbCheckGameplayPhase()) {
+          if (gpHash !== 0) {
             _syncLog(
-              `RB-POST-RB f=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (verifying restoration)`,
+              `RB-POST-RB f=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} taint=${taintedCount} (local, not compared)`,
             );
-            // Cache for RB-CHECK comparison (see periodic broadcast below for
-            // why — same race window applies on the post-rollback path).
-            if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
-            window._rbLocalGameHashes[checkFrame] = gpHash;
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-                } catch (_) {}
-              }
-            }
-
-            // Block-level snapshot + broadcast (duplicates the 300-frame
-            // periodic logic at a per-rollback cadence). Cache locally and
-            // broadcast so the peer can diff at this exact frame. Skips if
-            // the WASM exports or malloc aren't available (old core).
-            if (
-              _knDeepDiagnostics &&
-              tickMod._kn_rdram_block_hashes &&
-              tickMod._kn_get_taint_blocks &&
-              tickMod._malloc
-            ) {
-              if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
-              if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
-              if (_rbHashBufPtr && _rbTaintBufPtr) {
-                tickMod._kn_rdram_block_hashes(_rbHashBufPtr, RDRAM_TAINT_BLOCKS);
-                tickMod._kn_get_taint_blocks(_rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
-                const blocks = new Uint32Array(tickMod.HEAPU8.buffer, _rbHashBufPtr, RDRAM_TAINT_BLOCKS);
-                const taint = new Uint8Array(tickMod.HEAPU8.buffer, _rbTaintBufPtr, RDRAM_TAINT_BLOCKS);
-                const blocksSnap = Array.from(blocks);
-                const taintSnap = Array.from(taint);
-                const blocksHex = blocksSnap.map((h) => h.toString(16).padStart(8, '0')).join('');
-                const taintHex = taintSnap.map((t) => (t ? '1' : '0')).join('');
-                _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex} (post-rollback)`);
-                window._rbLocalBlocks[checkFrame] = blocksSnap;
-                window._rbLocalTaint[checkFrame] = taintSnap;
-                for (const p of getActivePeers()) {
-                  if (p.dc?.readyState === 'open') {
-                    try {
-                      p.dc.send(`rb-blocks:${checkFrame}:${blocksHex}`);
-                    } catch (_) {}
-                  }
-                }
-              }
-            }
-
-            // Per-region savestate digest (frame-specific variant so the
-            // regions match the post-rollback state of hashFrame, not the
-            // most recent ring slot). This is what lets the peer see which
-            // slice of the savestate — RDRAM r0..r31 vs post-RDRAM r32 —
-            // drifted at the rollback boundary.
-            const NUM_REGIONS_POSTRB = 256;
-            if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
-              _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS_POSTRB * 4);
-            }
-            if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes_frame) {
-              const ok = tickMod._kn_state_region_hashes_frame(hashFrame, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
-              if (ok > 0) {
-                const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS_POSTRB);
-                const regionsHex = Array.from(regions)
-                  .map((h) => h.toString(16))
-                  .join(',');
-                if (!window._rbLocalRegions) window._rbLocalRegions = {};
-                window._rbLocalRegions[checkFrame] = regionsHex;
-                for (const p of getActivePeers()) {
-                  if (p.dc?.readyState === 'open') {
-                    try {
-                      p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-                    } catch (_) {}
-                  }
-                }
-              }
-            }
           }
         }
 
-        // ── Periodic logging with timing + per-region hash exchange ──
+        // ── Periodic logging with timing ──
         // Tighter interval during menus (30 frames) to catch CSS/stage-select
         // divergence before it compounds. 300 frames during gameplay.
         const _hashInterval = _inGameplay ? 300 : _isLocalDev ? 30 : 60;
@@ -18274,102 +19353,31 @@
           const predCount = tickMod._kn_get_prediction_count?.() ?? 0;
           const correctCount = tickMod._kn_get_correct_predictions?.() ?? 0;
           const maxD = tickMod._kn_get_max_depth?.() ?? 0;
+          // The NEWEST frame's hashes (hashF), for the log only: that frame
+          // may have run on a predicted input and may still be rolled back,
+          // so two healthy peers can log different values for it here.
+          // RB-CHECK compares the frame one rollback window back instead
+          // (the RB-CHECK block below). gameplay_hash hashes ONLY
+          // game-relevant RDRAM addresses (damage, stocks, timer, RNG seeds).
           const hashFrame = _frameNum - 1;
-          const checkFrame = hashFrame;
-          // Gameplay hash for RB-CHECK: hashes ONLY game-relevant RDRAM
-          // addresses (damage, stocks, timer, RNG seeds). Immune to audio/
-          // video/heap noise. game_state_hash + full_state_hash kept for
-          // diagnostic monitoring.
           const gpHash = tickMod._kn_gameplay_hash?.(hashFrame) ?? 0;
           const gameHash = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(hashFrame) ?? 0) : 0;
           const fullHash = _knDeepDiagnostics ? (tickMod._kn_full_state_hash?.(hashFrame) ?? 0) : 0;
           const taintedCount = _knDeepDiagnostics ? (tickMod._kn_get_tainted_block_count?.() ?? 0) : 0;
           const hiddenFp = _knDeepDiagnostics ? (tickMod._kn_get_hidden_state_fingerprint?.() ?? 0) : 0;
           const sfState = _knDeepDiagnostics ? (tickMod._kn_get_softfloat_state?.() ?? 0) : 0;
-          // Per-region hashes — splits state buffer into 256 chunks
-          // (~34 KB regions for an ~8.6 MB savestate). At 32 regions the
-          // entire post-RDRAM section (CPU/cp0/cp1/event queue/fb) fit in
-          // one region, hiding which subsystem was diverging. 256 regions
-          // gives us ~7 regions covering the 256 KB post-RDRAM section, so
-          // a single mismatch pinpoints subsystem-level granularity.
-          const NUM_REGIONS = 256;
-          if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
-            _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS * 4);
-          }
-          let regionsHex = '';
-          if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes) {
-            tickMod._kn_state_region_hashes(_rbRegionsBufPtr, NUM_REGIONS);
-            const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS);
-            regionsHex = Array.from(regions)
-              .map((h) => h.toString(16))
-              .join(',');
-          }
           _syncLog(
             `C-PERF f=${_frameNum} preTick=${(_tPreTick - _t0).toFixed(1)}ms step=${(_tStep - _tStep0).toFixed(1)}ms total=${(_tTotal - _t0).toFixed(1)}ms | rb=${rbCount} pred=${predCount} correct=${correctCount} maxD=${maxD} hashF=${hashFrame} gp=0x${gpHash.toString(16)} game=0x${gameHash.toString(16)} full=0x${fullHash.toString(16)} taint=${taintedCount} hidden=0x${hiddenFp.toString(16)} sf=0x${sfState.toString(16)} eq=0x${(tickMod._kn_eventqueue_hash?.() >>> 0).toString(16)} serSkip=${tickMod._kn_get_serialize_skip_count?.() ?? '?'}`,
           );
-          if (regionsHex) {
-            _syncLog(`C-REGIONS f=${checkFrame} ${regionsHex}`);
-            // Stash our own snapshot keyed by frame so the RB-CHECK mismatch
-            // handler can diff against the peer's regions for the SAME frame.
-            // Without this, comparing regions across slightly different frames
-            // would always show divergence (regions evolve every frame).
-            if (!window._rbLocalRegions) window._rbLocalRegions = {};
-            window._rbLocalRegions[checkFrame] = regionsHex;
-            // Trim old snapshots — keep only the last ~16 frames to bound memory
-            const keys = Object.keys(window._rbLocalRegions)
-              .map(Number)
-              .sort((a, b) => a - b);
-            if (keys.length > 16) {
-              for (const k of keys.slice(0, keys.length - 16)) {
-                delete window._rbLocalRegions[k];
-              }
-            }
-            // Broadcast regions for cross-player comparison
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-regions:${checkFrame}:${regionsHex}`);
-                } catch (_) {}
-              }
-            }
-          }
-          // Broadcast gameplay hash for peer comparison.
-          // This is the authoritative desync detection hash — only game-relevant
-          // RDRAM addresses. game_state_hash kept for diagnostic monitoring.
-          //
-          // Cache the hash we sent so RB-CHECK can compare against it instead
-          // of re-hashing the ring buffer when the peer's reply arrives. Without
-          // this cache, a rollback that occurs between broadcast and receipt
-          // would invalidate the local state for that frame, producing a
-          // phantom MISMATCH (host hash post-rollback vs peer hash from before
-          // the rollback). The peer's hash IS the canonical "what did this frame
-          // look like at the moment of broadcast" — so the right comparison is
-          // "what we broadcast" vs "what they broadcast" at the same instant.
-          if (_isRbCheckGameplayPhase()) {
-            if (!window._rbLocalGameHashes) window._rbLocalGameHashes = {};
-            window._rbLocalGameHashes[checkFrame] = gpHash;
-            // Trim — keep only the most recent ~16 frames to bound memory.
-            const _rbHashKeys = Object.keys(window._rbLocalGameHashes)
-              .map(Number)
-              .sort((a, b) => a - b);
-            if (_rbHashKeys.length > 16) {
-              for (const k of _rbHashKeys.slice(0, _rbHashKeys.length - 16)) {
-                delete window._rbLocalGameHashes[k];
-              }
-            }
-            for (const p of getActivePeers()) {
-              if (p.dc?.readyState === 'open') {
-                try {
-                  p.dc.send(`rb-check:${checkFrame}:${gpHash}:${gameHash}`);
-                } catch (_) {}
-              }
-            }
-          }
-
           // Block-level diagnostic: hash every 64 KB of RDRAM (128 blocks) and
           // dump the taint bitmap. Share with peer so that when RB-CHECK misses
           // we can pinpoint which untainted block is diverging and map it back
-          // to the subsystem that owns that address.
+          // to the subsystem that owns that address. The export reads LIVE
+          // RDRAM, which after the post-tick is the state frame _frameNum
+          // starts from: the state the ring will hold for _frameNum, taken
+          // before it is final. Keyed by that frame, which is on the cadence,
+          // so a MISMATCH on it a rollback window later (RB-DIFF) diffs the
+          // two peers' snapshots of it.
           if (_knDeepDiagnostics && tickMod._kn_rdram_block_hashes && tickMod._kn_get_taint_blocks && tickMod._malloc) {
             if (!_rbHashBufPtr) _rbHashBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS * 4);
             if (!_rbTaintBufPtr) _rbTaintBufPtr = tickMod._malloc(RDRAM_TAINT_BLOCKS);
@@ -18388,17 +19396,17 @@
               // Taint bitmap is 128 chars — tiny. Full block hashes are
               // 1024 chars per line; we keep them out of the steady-state log
               // and only dump via RB-BYTES on actual mismatch.
-              _syncLog(`C-BLOCKS f=${hashFrame} taint=${taintHex}`);
-              // Cache our own snapshot keyed by hashFrame so RB-DIFF can
+              _syncLog(`C-BLOCKS f=${_frameNum} taint=${taintHex} (live, not final)`);
+              // Cache our own snapshot keyed by its frame so RB-DIFF can
               // compare frame-exactly against the peer's snapshot instead of
               // re-sampling live RDRAM (which would be frames ahead by then).
-              window._rbLocalBlocks[checkFrame] = blocksSnap;
-              window._rbLocalTaint[checkFrame] = taintSnap;
+              window._rbLocalBlocks[_frameNum] = blocksSnap;
+              window._rbLocalTaint[_frameNum] = taintSnap;
               // Broadcast block hashes to peer for per-block divergence diff
               for (const p of getActivePeers()) {
                 if (p.dc?.readyState === 'open') {
                   try {
-                    p.dc.send(`rb-blocks:${checkFrame}:${blocksHex}`);
+                    p.dc.send(`rb-blocks:${_frameNum}:${blocksHex}`);
                   } catch (_) {}
                 }
               }
@@ -18406,42 +19414,95 @@
           }
         }
 
-        // Check pending peer hashes only after the frame has aged out of the
-        // local correction window. A peer may send rb-check immediately after
-        // its own rollback while we have not received/applied the matching late
-        // input yet; comparing at age 1-3 frames flags the old prediction, not
-        // the final corrected state. Once old enough, compare against the newest
-        // ring entry for that frame, since rollback endpoint saves can replace
-        // the earlier predicted hash.
-        if (window._rbPendingChecks) {
-          for (const fStr of Object.keys(window._rbPendingChecks)) {
-            const f = parseInt(fStr);
-            const checkAge = _frameNum - f;
-            // Match the stall threshold's depth budget so we wait long enough
-            // for rollback-driven hash corrections to finalize before treating
-            // a peer's rb-check as authoritative. True-rollback widens this
-            // window to delay+10 (cap 12); legacy stays at delay+4.
-            const _checkAgeBudget = RB_TRUE_ROLLBACK ? Math.min(DELAY_FRAMES + 10, 12) : DELAY_FRAMES + 4;
-            const minCheckAge = Math.min(Math.max(_checkAgeBudget, 4), Math.max(_rbRollbackMax - 1, 4));
-            if (checkAge > _rbRollbackMax) {
-              delete window._rbPendingChecks[fStr];
-              delete window._rbPendingGameChecks?.[fStr];
-              _syncLog(`RB-CHECK f=${f} STALE (missed finalized window age=${checkAge})`);
+        // ── RB-CHECK: file and send the gameplay hash of the frame one
+        // rollback window behind the newest (web/src/rb-check.ts,
+        // specs/rb_check.qnt). The engine never replays further back than
+        // _rbRollbackMax (the window KNDesync.setConfirmWindow gets too), so
+        // the ring's hash of that frame is final now, and the value filed is
+        // the one compared: a peer's value for the frame is compared with it
+        // whenever the second of the two arrives. The ring holds the window
+        // + 1 newest frames, so the frame is still in it at this tick; a
+        // frame before a resync's or late join's state is not, hashes to 0
+        // and is not filed. Frames on the cadence; every frame during bisect.
+        const rbCheckFrame = window.KNCore.digestFrame(_frameNum, _rbRollbackMax, bisectThisFrame ? 1 : _hashInterval);
+        if (rbCheckFrame >= 0 && _isRbCheckGameplayPhase()) {
+          const gp = (tickMod._kn_gameplay_hash?.(rbCheckFrame) ?? 0) >>> 0;
+          if (gp !== 0) {
+            const game = _knDeepDiagnostics ? (tickMod._kn_game_state_hash?.(rbCheckFrame) ?? 0) >>> 0 : 0;
+            _rbCheckOutcomes.push(..._rbChecks().fileLocal(rbCheckFrame, { gp, game }));
+            for (const p of getActivePeers()) {
+              if (p.dc?.readyState === 'open') {
+                try {
+                  p.dc.send(`rb-final:${rbCheckFrame}:${gp}:${game}`);
+                } catch (_) {}
+              }
+            }
+            // Per-region savestate hashes of the same frame (deep), from the
+            // ring, so a MISMATCH on it can diff them against the peer's
+            // (RB-REGION-DIFF). 256 regions of ~34 KB: ~7 cover the post-RDRAM
+            // section (CPU/cp0/cp1/event queue/fb), so a mismatch pinpoints
+            // the subsystem.
+            const NUM_REGIONS = 256;
+            if (_knDeepDiagnostics && !_rbRegionsBufPtr && tickMod._malloc) {
+              _rbRegionsBufPtr = tickMod._malloc(NUM_REGIONS * 4);
+            }
+            if (_knDeepDiagnostics && _rbRegionsBufPtr && tickMod._kn_state_region_hashes_frame) {
+              const ok = tickMod._kn_state_region_hashes_frame(rbCheckFrame, _rbRegionsBufPtr, NUM_REGIONS);
+              if (ok > 0) {
+                const regions = new Uint32Array(tickMod.HEAPU8.buffer, _rbRegionsBufPtr, NUM_REGIONS);
+                const regionsHex = Array.from(regions)
+                  .map((h) => h.toString(16))
+                  .join(',');
+                if (!bisectThisFrame) _syncLog(`C-REGIONS f=${rbCheckFrame} ${regionsHex}`);
+                if (!window._rbLocalRegions) window._rbLocalRegions = {};
+                window._rbLocalRegions[rbCheckFrame] = regionsHex;
+                // Trim old snapshots — keep only the last ~16 frames to bound memory
+                const keys = Object.keys(window._rbLocalRegions)
+                  .map(Number)
+                  .sort((a, b) => a - b);
+                if (keys.length > 16) {
+                  for (const k of keys.slice(0, keys.length - 16)) {
+                    delete window._rbLocalRegions[k];
+                  }
+                }
+                for (const p of getActivePeers()) {
+                  if (p.dc?.readyState === 'open') {
+                    try {
+                      p.dc.send(`rb-regions:${rbCheckFrame}:${regionsHex}`);
+                    } catch (_) {}
+                  }
+                }
+              }
+            }
+          }
+        }
+        _rbCheckOutcomes.push(..._rbChecks().expire(_frameNum));
+
+        // Log what the book decided since the last tick: a comparison when
+        // the second value of a pair was filed, an UNCOMPARED value whose
+        // counterpart did not come within RB_CHECK_HISTORY_FRAMES.
+        if (_rbCheckOutcomes.length > 0) {
+          const rbCheckDecided = _rbCheckOutcomes;
+          _rbCheckOutcomes = [];
+          for (const outcome of rbCheckDecided) {
+            const f = outcome.frame;
+            const fStr = String(f);
+            if (outcome.kind === 'uncompared') {
+              _syncLog(
+                `RB-CHECK f=${f} UNCOMPARED slot=${outcome.slot} missing=${outcome.missing} hash=0x${outcome.value.gp.toString(16)}`,
+              );
               continue;
             }
-            if (checkAge >= minCheckAge) {
-              const peerHash = window._rbPendingChecks[fStr];
-              delete window._rbPendingChecks[fStr];
-              const localHash = tickMod._kn_gameplay_hash?.(f) ?? window._rbLocalGameHashes?.[f] ?? 0;
-              if (localHash === 0) {
-                _syncLog(`RB-CHECK f=${f} STALE (frame not in ring) peer=0x${peerHash.toString(16)}`);
-              } else if (localHash === peerHash) {
+            {
+              const peerHash = outcome.peer.gp;
+              const localHash = outcome.local.gp;
+              if (localHash === peerHash) {
                 // Gameplay hash matches — also check game_state_hash for
                 // broader divergence (player positions, animation, objects).
-                const peerGameHash = window._rbPendingGameChecks?.[fStr];
-                if (peerGameHash != null) {
-                  delete window._rbPendingGameChecks[fStr];
-                  const localGameHash = tickMod._kn_game_state_hash?.(f) ?? 0;
+                // Both were filed with the gameplay hash, for the same frame.
+                {
+                  const peerGameHash = outcome.peer.game;
+                  const localGameHash = outcome.local.game;
                   if (localGameHash !== 0 && peerGameHash !== 0 && localGameHash !== peerGameHash) {
                     // Throttle STATE-DRIFT logging: first + every 300 frames on prod
                     if (!window._stateDriftCount) window._stateDriftCount = 0;
@@ -18494,8 +19555,6 @@
                   } else {
                     _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)} game=MATCH`);
                   }
-                } else {
-                  _syncLog(`RB-CHECK f=${f} MATCH hash=0x${peerHash.toString(16)}`);
                 }
                 // Track last-known-good frame so post-mortem analysis can
                 // bound the divergence window without scanning the whole log.
@@ -18504,10 +19563,11 @@
                 _rbBisectFramesRemaining = 0;
               } else {
                 _syncLog(
-                  `RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)} lastGood=${_rbLastGoodFrame}`,
+                  `RB-CHECK f=${f} MISMATCH peer=0x${peerHash.toString(16)} local=0x${localHash.toString(16)} lastGood=${_rbLastGoodFrame} slot=${outcome.slot}`,
                 );
                 // Dump actual gameplay address values on first mismatch so we
-                // can see exactly which byte diverges. Read live RDRAM directly.
+                // can see exactly which byte diverges. Read live RDRAM directly:
+                // the newest frame's state, a rollback window past f.
                 if (_rdramBase) {
                   const m = window.EJS_emulator?.gameManager?.Module;
                   if (m?.HEAPU32) {
@@ -18567,7 +19627,7 @@
                 // — no temporal skew. If peer hasn't arrived yet, the diff
                 // will run when the message comes in (see rb-blocks handler).
                 if (_knDeepDiagnostics) {
-                  const peerBlocksHex = window._rbPendingBlocks?.[fStr];
+                  const peerBlocksHex = window._rbPendingBlocks?.[`${fStr}:${outcome.slot}`];
                   const localSnap = window._rbLocalBlocks?.[f];
                   const localTaint = window._rbLocalTaint?.[f];
                   if (peerBlocksHex && localSnap && localTaint) {
@@ -18626,7 +19686,7 @@
                   // exactly which 1/32-of-state slice diverged so we can map
                   // the divergence to a subsystem and decide whether to taint
                   // or fix it at the C level.
-                  const peerRegionsCsv = window._rbPendingRegions?.[fStr];
+                  const peerRegionsCsv = window._rbPendingRegions?.[`${fStr}:${outcome.slot}`];
                   const localRegionsCsv = window._rbLocalRegions?.[f];
                   if (peerRegionsCsv && localRegionsCsv) {
                     const peerRegions = peerRegionsCsv.split(',');
@@ -18737,7 +19797,7 @@
                                 // Compare against peer sub-hashes if we have them
                                 // — usually we don't yet on first detection, but
                                 // the peer's response will correlate post-mortem.
-                                const peerSubCsv = window._rbPendingSubHashes?.[key];
+                                const peerSubCsv = window._rbPendingSubHashes?.[`${key}:${outcome.slot}`];
                                 const divergingSubs = [];
                                 if (peerSubCsv) {
                                   const peerSubHashes = peerSubCsv.split(',');
@@ -18796,16 +19856,13 @@
                   }
                 }
               }
-              if (window._rbPendingBlocks) delete window._rbPendingBlocks[fStr];
-              if (window._rbPendingRegions) delete window._rbPendingRegions[fStr];
+              if (window._rbPendingBlocks) delete window._rbPendingBlocks[`${fStr}:${outcome.slot}`];
+              if (window._rbPendingRegions) delete window._rbPendingRegions[`${fStr}:${outcome.slot}`];
             }
           }
         }
-        // Clean up old pending checks (older than 60 frames)
-        if (window._rbPendingChecks && _frameNum % 300 === 0) {
-          for (const f of Object.keys(window._rbPendingChecks)) {
-            if (parseInt(f) < _frameNum - 60) delete window._rbPendingChecks[f];
-          }
+        // Clean up old block/region snapshots (older than 60 frames)
+        if (_frameNum % 300 === 0) {
           if (window._rbPendingBlocks) {
             for (const f of Object.keys(window._rbPendingBlocks)) {
               if (parseInt(f) < _frameNum - 60) delete window._rbPendingBlocks[f];
@@ -19214,14 +20271,14 @@
     _syncLog(`deltaBase ${state ? 'SET' : 'NULL'} reason=${reason} frame=${_frameNum} size=${state?.length ?? 0}`);
   };
 
-  // Internal opt-in seam; the owner wire and forward-tick path do not
-  // invoke this yet. Never overlap a native capture which already started.
+  // Reserve the capture for an owner-proof incident without overlapping
+  // another native capture that has already started.
   const _openCapturePublication = (plan, attempts, now) => {
     if (
       !_useCRollback ||
       !_hasKnSync ||
       RB_WORKER_COPROC ||
-      _isSmashRemix() ||
+      (_isSmashRemix() && !_readMenuPhase().gameplay) ||
       _playerSlot !== 0 ||
       _phase !== PHASE_RUNNING ||
       _runSubstate === RUN_LATE_JOIN_PAUSE ||
@@ -19269,7 +20326,8 @@
     _useCRollback &&
     _hasKnSync &&
     !RB_WORKER_COPROC &&
-    !_isSmashRemix() &&
+    // Remix menu and transition inputs keep their legacy behavior.
+    (!_isSmashRemix() || _readMenuPhase().gameplay) &&
     !_isSpectator &&
     !_demoMode &&
     _activeRoster?.size >= 3 &&
@@ -19562,6 +20620,7 @@
   });
 
   const _sealAndPublishCapture = (token, observe, attempts) => {
+    if (_hostReconnectBlocksNativeCapture()) return null;
     if (!_recovery.ownsPublication(token, attempts)) return null;
     const mod = window.EJS_emulator?.gameManager?.Module;
     if (!mod?._kn_sync_read || !mod._kn_get_frame || !mod._kn_get_replay_depth || !mod._kn_peek_pending_rollback)
@@ -19690,15 +20749,26 @@
           return null;
         }
         try {
+          if (!_admitReconnectNativeCapture(options, gm.Module)) {
+            notSent('protected reconnect input is not yet confirmed', attempts);
+            return null;
+          }
+          const reconnectFence = _hostReconnectFenceVersion;
+          const proofFor = options.reconnectDebt && options.pending?.via?.protected ? options.pending.id : 0;
           let currentState;
           // The hidden words and HLE state taken with it (_captureResyncExtras).
           let extras = null;
           const frame = capturedPublication?.frame ?? _frameNum;
-          const mayDeliver = capturedPublication
-            ? (t) =>
-                _syncTargetCurrent(t) &&
-                _recovery.publication.hasFor(capturedPublication, _ownedCaptureScope(t), performance.now())
-            : undefined;
+          const reconnectFenceCurrent = () =>
+            reconnectFence === _hostReconnectFenceVersion &&
+            (!options.reconnectDebt ||
+              (performance.now() < options.reconnectDebt.deadline &&
+                options.reconnectDebt.request === options.pending));
+          const mayDeliver = (t) =>
+            reconnectFenceCurrent() &&
+            (!capturedPublication ||
+              (_syncTargetCurrent(t) &&
+                _recovery.publication.hasFor(capturedPublication, _ownedCaptureScope(t), performance.now())));
           // Taken now: a guest it goes to unconfirmed is watched from here, before
           // compression, since an input that differs while it compresses changes
           // this frame as much as one after the send (specs/sync_follow_up.qnt).
@@ -19826,6 +20896,8 @@
           // moved it, so the next delta to another guest was applied, without a
           // word, onto a base it never got. A guest still decodes a delta from an
           // older host.
+          // Keep a locally confirmed history separate from a transport handoff.
+          if (proofFor && currentState.length > 0) options.reconnectDebt.historyProven = true;
           const toCompress = currentState;
 
           // By target sid: the number of the request this state answers, if any.
@@ -19836,10 +20908,10 @@
               return notSent('unknown socket target', attempts);
             }
             const encoded = await compressAndEncode(toCompress);
-            if (!_syncTargetCurrent(socketTarget)) {
+            if (!_syncTargetCurrent(socketTarget) || !mayDeliver(socketTarget)) {
               _syncLog(`socket sync dropped: ${targetSid} reconnected or match ended since the state was taken`);
               notSent('the socket target changed', attempts);
-              return [];
+              return options.reconnectDebt ? [targetSid] : [];
             }
             // The socket can drop while the state is compressed: not sent (a
             // follow-up retries within its bound, an answer is asked again).
@@ -19864,6 +20936,7 @@
                 data: encoded.data,
                 // The request this answers; absent when it answers none.
                 ...(requestIds[targetSid] ? { requestId: requestIds[targetSid] } : {}),
+                ...(proofFor ? { reconnectProofFor: proofFor, reconnectMatch: KNState.matchId } : {}),
                 // The hidden words and HLE state; absent when the core has neither.
                 ..._resyncExtrasFields(extras),
               });
@@ -19888,8 +20961,11 @@
                 isProactive,
                 requestIds,
                 attempts,
-                undefined,
+                mayDeliver,
                 extras,
+                !!options.reconnectDebt,
+                reconnectFenceCurrent,
+                proofFor,
               );
             }
           } else {
@@ -19905,6 +20981,9 @@
               attempts,
               mayDeliver,
               extras,
+              !!options.reconnectDebt,
+              reconnectFenceCurrent,
+              proofFor,
             );
           }
           return [];
@@ -19954,6 +21033,9 @@
     attempts = [],
     mayDeliver,
     extras = null,
+    requireSent = false,
+    reconnectFenceCurrent,
+    proofFor = 0,
   ) => {
     // A guest the state is not for (held as a late joiner, gone): its
     // escalation push does not go out. The others reach their guest's chain
@@ -19983,6 +21065,8 @@
             requestIds,
             attempts.find((a) => a.sid === t.sid)?.wireId ?? 0,
             extras,
+            reconnectFenceCurrent,
+            proofFor,
           );
         });
         _syncSendChains[t.sid] = run.catch(() => {});
@@ -20016,7 +21100,10 @@
       const w = _followUpWatches.get(t.sid);
       if (outcomes[i] === 'sent' && w && w.frame === frame) w.delivered = true;
     });
-    return targets.filter((t, i) => outcomes[i] === 'skipped').map((t) => t.sid);
+    if (requireSent && targets.length === 0) return null;
+    return targets
+      .filter((t, i) => (requireSent ? outcomes[i] !== 'sent' : outcomes[i] === 'skipped'))
+      .map((t) => t.sid);
   };
   // Host: send compressed state/delta via DC in 64KB chunks, handed to the
   // channel one at a time (KNCore.syncSend, specs/tick_deadlines.qnt
@@ -20031,7 +21118,17 @@
   // closed with the guest still on it), 'dropped' (reconnected or the match
   // ended since the state was taken), 'busy' (a proactive push onto a
   // backed-up channel), 'stalled' or 'failed'.
-  const _sendSyncChunksTo = async (t, compressed, frame, isProactive, requestIds, recoveryId = 0, extras = null) => {
+  const _sendSyncChunksTo = async (
+    t,
+    compressed,
+    frame,
+    isProactive,
+    requestIds,
+    recoveryId = 0,
+    extras = null,
+    reconnectFenceCurrent,
+    proofFor = 0,
+  ) => {
     const CHUNK_SIZE = 64000;
     // The transfer starting moves its guest's chain.
     _syncChainMovedAt[t.sid] = performance.now();
@@ -20042,7 +21139,8 @@
       return 'dropped';
     }
     // Always full (the third field): the host sends no deltas.
-    const header = `sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}`;
+    const proofSuffix = proofFor ? ':' + proofFor : '';
+    const header = `sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}${proofSuffix}`;
     // The primary channel accepts input packets, not state headers/chunks.
     // Never report a state as delivered on a channel that cannot parse it
     // (specs/recovery_delivery.qnt primaryChannelTest).
@@ -20067,7 +21165,7 @@
       // ordered channel: a guest on an older version parses the header
       // strictly, and ignores a string it does not know.
       const answerFor = requestIds[t.sid] || 0;
-      if (answerFor) dc.send(`sync-answer-id:${answerFor}`);
+      if (answerFor && !proofFor) dc.send(`sync-answer-id:${answerFor}`);
       dc.send(`sync-recovery-id:${recoveryId}`);
       // The hidden words and HLE state, for the state that follows.
       const extrasText = _resyncExtrasText(extras);
@@ -20083,12 +21181,13 @@
           _syncChainMovedAt[t.sid] = performance.now();
         },
         buffered: () => dc.bufferedAmount,
-        open: () => dc.readyState === 'open' && _syncTargetCurrent(t),
+        open: () =>
+          dc.readyState === 'open' && _syncTargetCurrent(t) && (!reconnectFenceCurrent || reconnectFenceCurrent()),
         lowWaterBytes: SYNC_SEND_LOW_WATER,
         pollMs: SYNC_SEND_POLL_MS,
         stallMs: SYNC_SEND_STALL_MS,
       });
-      if (outcome === 'sent' && _syncTargetCurrent(t)) {
+      if (outcome === 'sent' && _syncTargetCurrent(t) && (!reconnectFenceCurrent || reconnectFenceCurrent())) {
         // The guest will be on `frame` once it loads this: its inputs from
         // before frame - delay are in the state, and it may never have made
         // them (specs/resync_inputs.qnt). Only once every chunk is handed
@@ -20144,9 +21243,12 @@
     wireSize,
     source,
     answerFor = 0,
+    answerScope = null,
+    proofFor = 0,
     recoveryId = 0,
     extras = null,
   }) {
+    if (!isFull || isRegions || isProactive) proofFor = 0;
     // Recheck after async legacy XOR too: a newer recovery can finish while
     // an older ordinary/socket payload is still decoding. A strictly newer
     // ordinary frame remains useful; equal/older frames cannot erase its ACK.
@@ -20205,7 +21307,7 @@
       fullBytes = xorResult.data;
     }
 
-    if (supersededRecovery()) return;
+    if (supersededRecovery() || (answerScope && !_reconnectAnswerScopeCurrent(answerScope))) return;
 
     if (isProactive) {
       // Proactive push: buffer for instant resync, don't apply yet.
@@ -20232,7 +21334,13 @@
         return;
       }
       if (_keepsAwaitedAnswer(answerFor, frame)) return;
-      _pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId, extras };
+      const held = _pendingResyncState;
+      if (
+        _readReconnectAnswer(held?.answerFor, held?.answerScope, held?.proofFor) &&
+        !_readReconnectAnswer(answerFor, answerScope, proofFor)
+      )
+        return;
+      _pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras };
       _syncLog(
         `resync ready (${isFull ? 'full' : 'delta'}, ${Math.round(wireSize / 1024)}KB wire, source=${source}, ` +
           `answerFor=${answerFor} newest=${_resyncRequestId} endsRequest=${endsRequest})`,
@@ -20240,7 +21348,7 @@
     }
   }
 
-  const handleSyncChunksComplete = async (ownsAssembly = () => true) => {
+  const handleSyncChunksComplete = async (ownsAssembly = () => true, answerScope = null, proofFor = 0) => {
     const decodeEpoch = _syncQueueEpoch;
     // Guest: reassemble chunks, decompress, reconstruct state, buffer for apply.
     const total = _syncChunks.reduce((a, c) => a + c.length, 0);
@@ -20280,6 +21388,8 @@
           source: 'dc',
           recoveryId,
           answerFor,
+          answerScope,
+          proofFor,
           extras,
         });
       });
@@ -20339,11 +21449,15 @@
       _syncLog(`SYNC-CATCH-UP skipped from=${fromFrame} of=${toFrame}: a rollback is pending`);
       return;
     }
+    // The C log's lines so far (its replays of these frames among them) go
+    // into the sync log before the catch-up's own, in the order they ran.
+    _drainCDebugLog();
     _catchUpFrom = fromFrame;
     _catchUpTo = toFrame;
     _catchUpStartedAt = performance.now();
     // Its own digests for the frames run again describe the state replaced.
     window.KNDesync?.forgetFrom(fromFrame);
+    _rbCheckBook?.forgetFrom(fromFrame);
     _catchUpWorkMs = 0;
     _catchUpSlices = 0;
     _catchUpSendsReliable = 0;
@@ -20436,7 +21550,18 @@
       }
       _frameNum = mod._kn_get_frame();
       KNState.frameNum = _frameNum;
-      _writeRingInputs(mod, _frameNum - DELAY_FRAMES);
+      const catchUpApplied = _writeRingInputs(mod, _frameNum - DELAY_FRAMES);
+      // Every frame it runs, what it applied: a frame run again here
+      // replaces what NORMAL-INPUT-TR said of it.
+      if (RB_TRUE_ROLLBACK && key >= 0) {
+        let line = `CATCH-UP-INPUT-TR f=${_frameNum} apply=${key} L${_playerSlot}@${key}[${catchUpApplied.buttons},${catchUpApplied.lx},${catchUpApplied.ly}]`;
+        for (let s = 0; s < rb_numPlayers; s++) {
+          if (s === _playerSlot) continue;
+          const inp = _rbGetInput(mod, s, key);
+          line += ` R${s}@${key}[${inp.buttons},${inp.lx},${inp.ly}]`;
+        }
+        _syncLog(line);
+      }
       if (mod._kn_reset_audio) {
         mod._kn_reset_audio();
         _resetAudioCallsSinceRb++;
@@ -20456,7 +21581,24 @@
     if (stoppedAt || _frameNum >= _catchUpTo) _endCatchUp(mod, stoppedAt);
   };
 
-  const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {
+  const applySyncState = (
+    bytes,
+    frame,
+    fromProactive = false,
+    recoveryId = 0,
+    extras = null,
+    answerFor = 0,
+    answerScope = null,
+    proofFor = 0,
+  ) => {
+    // A same-match warning may arrive after a full state was buffered.
+    // Unverified is terminal for this match: do not change native state
+    // or settle inputs from even a previously valid protected answer.
+    if (_hostMatchUnverified()) {
+      _syncLog(`SYNC-STATE-HELD recovery unverified frame=${frame}`);
+      return;
+    }
+    if (!_guestAllowsReconnectState(answerFor, answerScope, proofFor)) return;
     if (recoveryId && recoveryId <= _lastAppliedRecoveryId) return;
     // Guest: hot-swap emulator state at a clean frame boundary.
     // Called from tick() when _pendingResyncState is set — ensures loadState()
@@ -20615,6 +21757,13 @@
     if (timelineAligned) {
       _lastAppliedRecoveryId = Math.max(_lastAppliedRecoveryId, recoveryId);
       _settleInputsAtResync(gm.Module, frame, recoveryId);
+      _finishReconnectAnswer(answerFor, answerScope, _hasKnSync && !!gm.Module?._kn_set_frame, proofFor);
+      // The host's state carries the frames a removed player's cut changed:
+      // a re-run still owed from before it is not run.
+      if (_cutRerun) {
+        _syncLog(`ROSTER-CUT-RERUN from=${_cutRerun.from}: replaced by the host's state of f=${frame}`);
+        _cutRerun = null;
+      }
       if (_hasKnSync && gm.Module?._kn_set_frame) _finishLateJoinOriginalWaitAtSync(frame);
     }
     // A state from before this guest's frame: the frames up to it run again
@@ -20800,6 +21949,8 @@
       document.removeEventListener('visibilitychange', _unloadVisChangeHandler);
       _unloadVisChangeHandler = null;
     }
+    // RB-CHECK values of this run, filed and received.
+    _rbCheckClear();
     // KNDesync owns its own setInterval heartbeat — without an explicit stop
     // it keeps firing across game cycles and retains module + digest caches.
     if (window.KNDesync && typeof window.KNDesync.stop === 'function') {
@@ -20870,6 +22021,10 @@
     _activeRoster = null;
     _lastControllerPresentMask = -1;
     _lastControllerPresentMaskModule = null;
+    _maskSchedule.stop();
+    _maskMatchScheduled = true;
+    _maskAnnouncedFrame = -1;
+    _lastBroadcastRosterFrame = -1;
     _menuStartBarrierReleased = false;
     _menuStartLocalReady = false;
     _menuStartLocalScene = 0;
@@ -20912,6 +22067,7 @@
     _lateJoinActivatedAtFrame = {};
     _lateJoinInputBootstrapUntilFrame = -1;
     _lateJoinSeededInputFrames = {};
+    _joinHold = null;
     clearLateJoinReadyRetry();
     _cacheAttempted = false;
     _lockstepReadyPeers = {};
@@ -20920,6 +22076,7 @@
     _lockstepStartStateKind = 'savestate';
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
+    _guestStateHle = null;
     _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
     _knownPlayers = {};
@@ -21109,6 +22266,7 @@
   const NetplayRollbackApi = {
     init,
     stop,
+    markMatchRecoveryUnverified: (matchId) => _setHostMatchUnverified(matchId, 'room recovery unverified'),
     exportSyncLog,
     flushSyncLog: _flushSyncLog,
     _startSpectatorStream: startSpectatorStream, // test hook
@@ -21268,6 +22426,13 @@
       // whether synthetic peers count as "plugged in" controllers, so the
       // mask must be re-applied or P2's port stays disconnected.
       if (changed) {
+        // While the match runs the change is this page's alone: it takes
+        // effect at the next frame not yet run, so a replay of an earlier
+        // frame keeps the mask it ran with.
+        if (_maskSchedule.active()) {
+          const mask = _activeRoster ? _rosterControllerMask([..._activeRoster]) : _controllerPresentMask();
+          if (mask) _maskSchedule.fileLocal(mask);
+        }
         // Bust the cache so _applyControllerPresentMask doesn't early-return.
         _lastControllerPresentMask = -1;
         _applyControllerPresentMask('demo-mode-toggle');
@@ -21347,6 +22512,7 @@
     getDebugState: () => ({
       state: _computeState(),
       activeRoster: _activeRoster ? [..._activeRoster] : null,
+      controllerMasks: _maskSchedule.active() ? _maskSchedule.describe() : null,
       pendingLateJoinSlots: [..._pendingLateJoinPeerSlots],
       pendingLateJoinSids: [..._pendingLateJoinPeerSids],
       lateJoinActivationFrames: { ..._lateJoinActivatedAtFrame },

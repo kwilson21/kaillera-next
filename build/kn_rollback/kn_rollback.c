@@ -79,7 +79,7 @@ extern void kn_reset_audio(void);
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
 
-/* Forward declaration: RF5 live gameplay hash (defined later). */
+/* Forward declaration: live gameplay hash (defined later). */
 uint32_t kn_live_gameplay_hash(void);
 
 /* Hidden emulator/plugin state that retro_serialize does not fully cover.
@@ -488,17 +488,6 @@ static struct {
     int fatal_stale_ring_idx;
     int fatal_stale_actual;
     int fatal_stale_pending;
-
-    /* RF5 (R4): Live-vs-ring hash mismatch signal. Set by kn_post_tick
-     * when a replay completes and the live state hash differs from
-     * what the ring claims for the just-completed frame. JS polls via
-     * kn_get_live_mismatch() and logs RB-LIVE-MISMATCH. No resync
-     * recovery per §Core principle.
-     * See docs/netplay-invariants.md §R4. */
-    int live_mismatch_pending;
-    int live_mismatch_f;
-    uint32_t live_mismatch_replay;
-    uint32_t live_mismatch_live;
 
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
@@ -998,6 +987,20 @@ static void setup_frame(int frame) {
     (void)frame;
 }
 
+/* ── Prediction flag ───────────────────────────────────────────────── */
+/* Whether ring entry `idx` of `slot` holds a prediction of input `frame`.
+ * The input ring is reused every KN_INPUT_RING_SIZE frames, and a
+ * prediction whose real input never arrives (the page drops inputs older
+ * than a resync's settled point) leaves rb.predicted set at its index. The
+ * real input KN_INPUT_RING_SIZE frames later is stored in the same entry
+ * without clearing it, so the bare flag would make that real input read as
+ * a prediction (a replay then overwrote it with a new guess). Every
+ * decision taken from the flag goes through here, with the frame it is
+ * about (specs/stale_prediction_flag.qnt). */
+static int rb_is_prediction_of(int slot, int idx, int frame) {
+    return rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame;
+}
+
 /* ── Write inputs for all players for a given frame ────────────────── */
 /* During replay (is_replay=1), logs what's actually being written to catch
  * input divergence between normal play and replay. */
@@ -1014,7 +1017,7 @@ static void write_frame_inputs_logged(int frame, int is_replay) {
             kn_input_t *inp = &rb.inputs[s][idx];
             if (inp->present && inp->frame == frame) {
                 btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
-                origin = rb.predicted[s][idx] ? 'P' : 'R'; /* Predicted or Real */
+                origin = rb_is_prediction_of(s, idx, frame) ? 'P' : 'R'; /* Predicted or Real */
                 kn_write_controller(s, btn, lx, ly, cx, cy);
             } else {
                 origin = 'Z'; /* Zero — missing input */
@@ -1425,7 +1428,7 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
     /* Check if this corrects a prediction.
      * Validate the predicted_values entry has the right frame — the ring
      * buffer at idx may contain stale predictions from 256 frames ago. */
-    if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {
+    if (rb_is_prediction_of(slot, idx, frame)) {
         kn_input_t *pred = &rb.predicted_values[slot][idx];
         /* Exact prediction match. A predicted stick value that differs from
          * the real one by any amount leaves different game state on the
@@ -1774,8 +1777,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
          * REMOTE is applied at replay_apply (delayed, from C ring or predicted).
          * If we wrote ALL slots from replay_apply during replay while the
          * forward path wrote local-at-current, replay would simulate with a
-         * stale local input the original frame never used → R4 LIVE-MISMATCH
-         * fires every replay frame → silent state divergence.
+         * stale local input the original frame never used → silent state
+         * divergence.
          *
          * Legacy (rb.true_rollback=0): all slots from replay_apply, matching
          * the legacy JS forward path that also writes all slots from applyFrame.
@@ -1819,7 +1822,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                      * so one input change became a chain of rollbacks. The
                      * new guess is stored as the prediction, so later
                      * arrivals are checked against what this replay ran. */
-                    int unconfirmed = (inp->present && inp->frame == replay_apply && rb.predicted[s][idx]);
+                    int unconfirmed = (inp->present && inp->frame == replay_apply
+                                       && rb_is_prediction_of(s, idx, replay_apply));
                     int missing = !(inp->present && inp->frame == replay_apply);
                     if (rb.slot_active[s] && (unconfirmed || missing)) {
                         kn_input_t pred_input = rb_predict_input(s);
@@ -1833,7 +1837,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                     }
                     if (inp->present && inp->frame == replay_apply) {
                         btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
-                        origin = rb.predicted[s][idx] ? 'P' : 'R';
+                        origin = rb_is_prediction_of(s, idx, replay_apply) ? 'P' : 'R';
                         kn_write_controller(s, btn, lx, ly, cx, cy);
                     } else {
                         origin = 'Z';
@@ -1908,7 +1912,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
              * triggering a misprediction — so we need state in the ring. */
             int needs_prediction = !rb.inputs[s][idx].present
                                 || rb.inputs[s][idx].frame != apply_frame
-                                || rb.predicted[s][idx];
+                                || rb_is_prediction_of(s, idx, apply_frame);
             if (needs_prediction && (!rb.inputs[s][idx].present || rb.inputs[s][idx].frame != apply_frame)) {
                 /* Predict: dead-reckoning for stick, repeat-last for buttons.
                  * Extrapolate stick position based on velocity between the
@@ -2342,20 +2346,25 @@ int kn_get_fatal_stale(int *out_f, int *out_idx, int *out_actual) {
     return 1;
 }
 
-/* ── RF5 (R4): Returns 1 (and clears flag) if post-replay live-state
- * hash mismatch was detected. Writes frame, ring hash, live hash to
- * out params. Per §Core principle: JS logs and continues; no resync
- * recovery. */
+/* ── Retired RF5 (R4) signal: always 0 ────────────────────────────────
+ * kn_post_tick no longer checks the live state against the ring at the end
+ * of a replay (the check was dropped in f322745), so there is never a
+ * mismatch to report and RB-LIVE-MISMATCH is never logged. The check it
+ * reported compared the ring copy of the last replayed frame, saved at
+ * that frame's start, with the live state at its end: one frame apart.
+ * And both come from the replay itself, so even aligned it could not see
+ * the replay drift from the original timeline; today the replay endpoint
+ * is saved from the live state on the next kn_pre_tick, which makes a
+ * live-vs-ring comparison there equal by construction. Kept, returning 0,
+ * because pages poll it (docs/netplay-invariants.md §R4). */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_live_mismatch(int *out_f, uint32_t *out_ring, uint32_t *out_live) {
-    if (!rb.live_mismatch_pending) return 0;
-    if (out_f) *out_f = rb.live_mismatch_f;
-    if (out_ring) *out_ring = rb.live_mismatch_replay;
-    if (out_live) *out_live = rb.live_mismatch_live;
-    rb.live_mismatch_pending = 0;
-    return 1;
+    (void)out_f;
+    (void)out_ring;
+    (void)out_live;
+    return 0;
 }
 
 /* ── Query: replay start frame ─────────────────────────────────────── */
@@ -2556,18 +2565,15 @@ uint32_t kn_gameplay_hash(int frame) {
     return hash;
 }
 
-/* ── Live gameplay hash (RF5, R4) ──────────────────────────────────
- * Fresh retro_serialize + gameplay hash of the CURRENT live emulator
- * state, bypassing the ring buffer. Used by kn_post_tick to verify
- * that after a replay completes, the live state matches what the ring
- * claims. If they differ, the replay introduced drift and we log
- * RB-LIVE-MISMATCH.
+/* ── Live gameplay hash ─────────────────────────────────────────────
+ * Fresh gameplay hash of the CURRENT live emulator state, bypassing the
+ * ring buffer. The engine itself does not call it: the page reads it
+ * around a rollback for its own diagnostics, and test harnesses read it.
+ * (It was added for an end-of-replay live-vs-ring check in kn_post_tick,
+ * RF5, which no longer exists; see kn_get_live_mismatch.)
  *
  * Uses a static scratch buffer reused across calls to avoid malloc
- * pressure. Expected cost: one retro_serialize (~1-2ms) per call.
- * Called at most once per rollback completion (rollbacks are rare),
- * so total overhead is negligible. Also exported for V1 integrity
- * harness use. */
+ * pressure. Expected cost: one retro_serialize (~1-2ms) per call. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif

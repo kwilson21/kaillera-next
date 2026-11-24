@@ -43,6 +43,27 @@
  * MISSING_RECIPIENT_PERMANENT=1 (PLAYERS=4): fail every transfer on the
  *   original target channel; require three attempts, notified removal, normal
  *   late rejoin and clean post-rejoin hashes. Full historical oracle stays strict.
+ *   From the fault on the target walks left and right (never neutral), so the
+ *   inputs it leaves behind at its removal differ from the neutral the cut
+ *   gives. The removed player's applied input (`removedInput` in
+ *   summary.json): every page that stayed must have applied the same input
+ *   for it on every input tag all of them ran, from 90 tags before the
+ *   removal to 150 after the rejoin (specs/removed_input.qnt,
+ *   removedInputAgrees), read from each page's NORMAL-INPUT-TR,
+ *   CATCH-UP-INPUT-TR and the C engine's REPLAY-INPUT-TR lines, the last in
+ *   its log winning. A difference fails the run.
+ *   Around the rejoin (`joinInput`, any run in which a page joins the running
+ *   match): from the frame of the state the joining page loaded to 150 frames
+ *   on, every page, the joining one too, must have applied the same input
+ *   for every slot on every tag all of them ran
+ *   (specs/late_join_input_agreement.qnt, pagesAgreeAroundTheJoin;
+ *   tests/join-input-check.mjs), a difference only on frames a later host
+ *   state replaced being reported, not failed.
+ *   ROSTER_HOLD_MS=<n> (with it): the host's roster messages (`roster-cut:`,
+ *   `roster-mask:`, `roster:`) to the guest in ROSTER_HOLD_SLOT (default 1)
+ *   are held n ms each, in order, so that guest hears of the removal frames
+ *   after the cut (removed_input.qnt, guestAheadTest); it must run them again
+ *   (ROSTER-CUT-RERUN, or the host's state: ROSTER-CUT-LATE) and still agree.
  * CATCH_UP_MS=<n>: a third of the way into the battle the guest in
  *   CATCH_UP_SLOT (default 2, a guest that is not the host's first one) asks
  *   the host for a full resync through its network-change handler (a window
@@ -115,6 +136,38 @@
  *   hear it again and ask the host for its state (web/src/recovery-resync.ts,
  *   `ask`), and the same agreement from the host's state on is required.
  *
+ * DROP_LINK=1 (PLAYERS=3|4): a guest's connection to the host drops and comes
+ *   back while the other guests ("bystanders") keep theirs
+ *   (specs/reconnect_inputs.qnt, reconnect_history: a reconnect keeps the C
+ *   slot, so a real input that comes after the reset for a frame the host
+ *   ran on a prediction is still checked). DROP_LINK_AT frames into the
+ *   battle (default 600) the guest in DROP_LINK_SLOT (default 1) stands
+ *   still for 20 frames, so the host predicts it standing, then holds the
+ *   stick right while no input packet of the walk goes to the host (its
+ *   channels to the host drop them on send) until the host has run three
+ *   tags of the walk, on a neutral prediction, and then closes its
+ *   RTCPeerConnection to the host (pc.close() on its engine's peer entry
+ *   for slot 0). Every bystander ran those tags on the real inputs. The engine reconnects (the host,
+ *   the lower slot, offers), resets the peer on both sides and the guest
+ *   resyncs from the host. Fails unless walk packets were actually held and
+ *   the host ran at least three of those tags before closing the connection.
+ *   The host must keep its C slot of the guest at the reconnect reset
+ *   (`PEER-RESET-KEEPS-CORE slot=<s> reason=reconnect`); the host's C engine
+ *   then compared one of the guest's real inputs with what it predicted and
+ *   rolled back one of those same held tags after the reset: the path the
+ *   fault is there to reach; the guest applied a resync after the reconnect;
+ *   and the host and every bystander applied the same input for that guest
+ *   on every tag all of them ran, from 60 tags before the drop to 400 after
+ *   it (`dropLink.applied`, tests/join-input-check.mjs `appliedForTag`).
+ *   Hashes: every bystander's are compared with the host's on every frame;
+ *   the dropped guest's, from 30 frames before the drop to the frame its
+ *   resync lands on, are left out (each side ran on predictions of the
+ *   other there, and the resync replaces the guest's), and compared after.
+ *   Known to fail on an ordering the reset does not decide: when the host
+ *   pushes the guest its state before the guest's re-sent inputs arrive,
+ *   the push settles them (C-INPUT-SETTLED-SKIP) and the host keeps its
+ *   predictions where the bystanders applied the real inputs
+ *   (`dropLink.settledSkips`, `applied.differing`).
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
  *   for seconds in a cloud container; a quarter of the pixels is a quarter
@@ -144,7 +197,9 @@ import { requireCurrentBundle } from './bundle-check.mjs';
 import { addNetworkInitScript } from './rb-page-network.mjs';
 import { catchUpHoleInput } from './directional-input-gate.mjs';
 import { installNativeInputObserver } from './native-input-observer.mjs';
+import { appliedForTag, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
 import { trackHashLag, unrecordedIn } from './hash-lag.mjs';
+import { heldPredictionAfterReset } from './drop-link-check.mjs';
 
 const URL = process.env.KN_URL || 'http://localhost:27888';
 const ROM = process.env.KN_ROM;
@@ -169,11 +224,16 @@ const CATCH_UP_HOLE_MODE = process.env.CATCH_UP_HOLE_MODE || 'deep';
 const DEEP_CATCH_UP_HOLE = CATCH_UP_HOLE && CATCH_UP_HOLE_MODE === 'deep';
 const CATCH_UP_HOLE_SLOT = Number(process.env.CATCH_UP_HOLE_SLOT || 1);
 const RECOVERY_BYSTANDER = process.env.RECOVERY_BYSTANDER === '1';
+const ROSTER_HOLD_MS = Number(process.env.ROSTER_HOLD_MS || 0);
+const ROSTER_HOLD_SLOT = Number(process.env.ROSTER_HOLD_SLOT || 1);
 const RECOVERY_SLOT = Number(process.env.RECOVERY_SLOT || 1);
 const RECOVERY_HOLD_MS = Number(process.env.RECOVERY_HOLD_MS || 3000);
 const RECOVERY_AT = Number(process.env.RECOVERY_AT || 600);
 const RECOVERY_MODE = process.env.RECOVERY_MODE || 'hold';
 const RECOVERY_QUIET_MS = 10000;
+const DROP_LINK = process.env.DROP_LINK === '1';
+const DROP_LINK_SLOT = Number(process.env.DROP_LINK_SLOT || 1);
+const DROP_LINK_AT = Number(process.env.DROP_LINK_AT || 600);
 const RECOVERY_SETTLE_MS = 120000;
 const QUERY = process.env.KN_QUERY || '';
 const OUT = process.env.OUT || '/tmp/rb-mesh';
@@ -194,6 +254,18 @@ const fail = (msg) => {
   process.exit(1);
 };
 if (PERMANENT_RECIPIENT && !MISSING_RECIPIENT) fail('MISSING_RECIPIENT_PERMANENT requires MISSING_RECIPIENT=1');
+if (ROSTER_HOLD_MS && !(PERMANENT_RECIPIENT && Number.isFinite(ROSTER_HOLD_MS) && ROSTER_HOLD_MS > 0))
+  fail('ROSTER_HOLD_MS needs MISSING_RECIPIENT_PERMANENT=1 and a number of ms above 0');
+if (
+  ROSTER_HOLD_MS &&
+  !(
+    Number.isInteger(ROSTER_HOLD_SLOT) &&
+    ROSTER_HOLD_SLOT >= 1 &&
+    ROSTER_HOLD_SLOT < PLAYERS &&
+    ROSTER_HOLD_SLOT !== MISSING_RECIPIENT_SLOT
+  )
+)
+  fail(`ROSTER_HOLD_SLOT=${process.env.ROSTER_HOLD_SLOT} invalid: a guest's slot other than the removed one`);
 if (!ROM || !fs.existsSync(ROM)) fail('KN_ROM must name the ROM file');
 if (![3, 4].includes(PLAYERS)) fail(`PLAYERS=${process.env.PLAYERS} invalid: 3 or 4`);
 if (!/^\d+x\d+$/.test(SCREEN_SIZE)) fail(`SCREEN_SIZE=${SCREEN_SIZE} invalid: WIDTHxHEIGHT, e.g. 320x240`);
@@ -246,6 +318,20 @@ if (
   fail(
     'RECOVERY_BYSTANDER is a run of its own, with RECOVERY_SLOT a guest (1..PLAYERS-1), RECOVERY_HOLD_MS >= 0 ' +
       'RECOVERY_AT a whole number of frames, and RECOVERY_MODE hold or pause',
+  );
+if (
+  DROP_LINK &&
+  (MISSING_RECIPIENT ||
+    FOLLOW_UP_RECIPIENT ||
+    CATCH_UP_MS > 0 ||
+    RECOVERY_BYSTANDER ||
+    !Number.isInteger(DROP_LINK_SLOT) ||
+    DROP_LINK_SLOT < 1 ||
+    DROP_LINK_SLOT >= PLAYERS ||
+    !(Number.isInteger(DROP_LINK_AT) && DROP_LINK_AT >= 0))
+)
+  fail(
+    'DROP_LINK is a run of its own, with DROP_LINK_SLOT a guest (1..PLAYERS-1) and DROP_LINK_AT a whole number of frames',
   );
 fs.mkdirSync(OUT, { recursive: true });
 
@@ -397,6 +483,8 @@ const install = async (p, slot) => {
         // does not.
         if (W.against === 'neutral') return { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
         if (W.against === 'right') return { buttons: 0, lx: 70, ly: 0, cx: 0, cy: 0 };
+        // MISSING_RECIPIENT_PERMANENT: the target walks left and right, never neutral.
+        if (W.against === 'pace') return { buttons: 0, lx: Math.floor(f / 30) % 2 ? 70 : -70, ly: 0, cx: 0, cy: 0 };
         if (f >= until) {
           const r = Math.random();
           held = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
@@ -626,6 +714,44 @@ if (MISSING_RECIPIENT) {
     }
     return [from, to];
   });
+  if (PERMANENT_RECIPIENT) {
+    await pages[MISSING_RECIPIENT_SLOT].evaluate(() => {
+      window.__mesh.against = 'pace';
+    });
+    if (ROSTER_HOLD_MS) {
+      await host.evaluate(
+        ({ slot, ms }) => {
+          const peer = Object.values(window.KNState?.peers ?? {}).find((p) => p.slot === slot);
+          if (peer?.dc?.readyState !== 'open') throw new Error('held guest channel is not open');
+          const dc = peer.dc;
+          const send = dc.send;
+          const queue = [];
+          const report = (window.__meshRosterHold = { held: 0, released: 0, first: null });
+          const flush = () => {
+            while (queue.length && queue[0].at <= performance.now()) {
+              const { data } = queue.shift();
+              try {
+                send.call(dc, data);
+                report.released++;
+              } catch (_) {}
+            }
+            if (queue.length) setTimeout(flush, Math.max(0, queue[0].at - performance.now()));
+          };
+          dc.send = function (data) {
+            if (typeof data === 'string' && data.startsWith('roster')) {
+              report.held++;
+              report.first ??= data.slice(0, 40);
+              queue.push({ data, at: performance.now() + ms });
+              if (queue.length === 1) setTimeout(flush, ms);
+              return;
+            }
+            return send.call(this, data);
+          };
+        },
+        { slot: ROSTER_HOLD_SLOT, ms: ROSTER_HOLD_MS },
+      );
+    }
+  }
   const p2 = await waitForLine(host, missingRecipient.hostAt, /INPUT-ASK-PUSH-SETTLED .*slot=1 /, 60000);
   if (PERMANENT_RECIPIENT) {
     const targetPage = pages[MISSING_RECIPIENT_SLOT];
@@ -684,6 +810,20 @@ if (MISSING_RECIPIENT) {
   // Keep observing after settlement: transient success followed by another
   // retry/drop is not recovery. At least 60 later hash frames are required.
   await host.waitForTimeout(20000);
+  // The join-input check needs 60 tags past the rejoin that every page has
+  // finalized (40 behind its last). A slow machine runs fewer than that in
+  // 20 s, so wait for the frames themselves, to a bound.
+  if (PERMANENT_RECIPIENT) {
+    const need = Math.max(...(missingRecipient.permanent?.framesAfterJoin ?? [0])) + 130;
+    const until = Date.now() + 90000;
+    while (Date.now() < until) {
+      const frames = await Promise.all(
+        pages.map((p) => p.evaluate(() => window.NetplayRollback?.getHudCounters?.()?.currentFrame ?? -1)),
+      );
+      if (Math.min(...frames) >= need) break;
+      await host.waitForTimeout(1000);
+    }
+  }
 }
 if (RECOVERY_BYSTANDER) {
   // RECOVERY_AT frames into the battle: past its countdown, when fighters move.
@@ -1036,6 +1176,77 @@ if (CATCH_UP_MS > 0) {
     await host.waitForTimeout(20000);
   }
 }
+// DROP_LINK=1: the guest's connection to the host drops and comes back.
+const dropLink = { pageAt: null, closed: null, heldFrom: null, resynced: false };
+if (DROP_LINK) {
+  const guest = pages[DROP_LINK_SLOT];
+  await host.waitForFunction(
+    (after) => window.NetplayRollback.getHudCounters().currentFrame >= window.__mesh.inBattleAt + after,
+    DROP_LINK_AT,
+    { timeout: BATTLE_SECONDS * 1000, polling: 250 },
+  );
+  dropLink.pageAt = await Promise.all(pages.map(lastSeq));
+  const neutralFrom = await guest.evaluate(() => {
+    window.__mesh.against = 'neutral';
+    return window.NetplayRollback.getHudCounters().currentFrame;
+  });
+  await guest.waitForFunction(
+    (from) => window.NetplayRollback.getHudCounters().currentFrame >= from + 20,
+    neutralFrom,
+    { timeout: 30000, polling: 20 },
+  );
+  // The walk starts, and no input packet of it goes to the host on the old
+  // connection (the new one's channels are not wrapped): the host runs its
+  // tags on a neutral prediction, the bystanders on the real inputs.
+  dropLink.heldFrom = await guest.evaluate(() => {
+    const from = window.NetplayRollback.getHudCounters().currentFrame;
+    window.__mesh.against = 'right';
+    window.__meshWalkDropped = 0;
+    const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
+    for (const dc of new Set([entry?.dc, entry?.rbDc].filter(Boolean))) {
+      const send = dc.send;
+      dc.send = function (data) {
+        if (data instanceof ArrayBuffer && data.byteLength >= 4 && new Int32Array(data, 0, 1)[0] >= from) {
+          window.__meshWalkDropped++;
+          return;
+        }
+        return send.call(this, data);
+      };
+    }
+    return from;
+  });
+  // Until the host has run three tags of the walk (on its prediction).
+  dropLink.hostWalkThrough = await host
+    .waitForFunction(
+      (from) => {
+        const c = window.NetplayRollback.getHudCounters();
+        const lastRanTag = c.currentFrame - (c.delay ?? 0) - 1;
+        return lastRanTag >= from + 2 && lastRanTag;
+      },
+      dropLink.heldFrom,
+      { timeout: 20000, polling: 20 },
+    )
+    .then(async (handle) => {
+      try {
+        return await handle.jsonValue();
+      } finally {
+        await handle.dispose();
+      }
+    })
+    .catch(() => -1);
+  dropLink.hostRanWalk = dropLink.hostWalkThrough >= dropLink.heldFrom + 2;
+  dropLink.closed = await guest.evaluate(() => {
+    const frame = window.NetplayRollback.getHudCounters().currentFrame;
+    const entry = Object.values(window.KNState?.peers ?? {}).find((peer) => peer.slot === 0);
+    if (!entry?.pc) return { closed: false, frame, why: 'no peer entry for slot 0' };
+    const was = { pc: entry.pc.connectionState, dc: entry.dc?.readyState ?? null };
+    entry.pc.close();
+    return { closed: true, frame, was, walkPacketsDropped: window.__meshWalkDropped };
+  });
+  console.log(`DROP_LINK: P${DROP_LINK_SLOT + 1} closed its connection to the host`, JSON.stringify(dropLink.closed));
+  dropLink.resynced = await waitForLine(guest, dropLink.pageAt[DROP_LINK_SLOT], /sync #\d+ applied/, 90000);
+  console.log(`DROP_LINK: P${DROP_LINK_SLOT + 1} resynced after the reconnect: ${dropLink.resynced}`);
+}
 await host.waitForTimeout(Math.max(0, BATTLE_SECONDS * 1000 - (Date.now() - tBattle)));
 
 // Collect, then compare every guest with the host.
@@ -1045,6 +1256,7 @@ const P = await Promise.all(
     ...(await p.evaluate(() => ({
       nativeInputs: window.__knNativeInputObserver?.export() ?? null,
       missingRecipientWire: window.__meshMissingRecipient ?? null,
+      rosterHold: window.__meshRosterHold ?? null,
       missingInputs: window.__meshMissingInputs ?? 0,
       hashes: { ...(window.__meshDroppedSnapshot?.hashes ?? {}), ...window.__mesh.hashes },
       rdram: window.__mesh.rdram,
@@ -1102,6 +1314,21 @@ const spans = (frames) =>
     }, []);
 
 const H = P[0];
+// DROP_LINK: from 30 frames before the drop to the frame the dropped guest's
+// reconnect resync lands on, its frames and the host's split by design.
+const linesAfterSeq = (x, seq) => x.sync.split('\n').filter((line) => seqOf(line) > seq);
+const dropLinkWindow = (() => {
+  if (!DROP_LINK || !dropLink.closed?.closed) return null;
+  const guestLines = linesAfterSeq(P[DROP_LINK_SLOT], dropLink.pageAt[DROP_LINK_SLOT]);
+  const sent = guestLines.findIndex((line) => /reconnect resync: sent/.test(line));
+  const applied = (sent < 0 ? [] : guestLines.slice(sent))
+    .map((line) => line.match(/sync #\d+ applied \(frame \d+ -> (\d+)/))
+    .filter(Boolean)
+    .map((m) => Number(m[1]));
+  let to = applied.length ? applied[0] : null;
+  for (const at of applied) if (to !== null && at > to && at <= to + 12) to = at;
+  return { from: dropLink.heldFrom - 30, to, resyncSent: sent >= 0 };
+})();
 const pairs = P.slice(1).map((G, gi) => {
   const slot = gi + 1;
   const battleFrom = Math.max(H.inBattleAt, G.inBattleAt);
@@ -1141,8 +1368,20 @@ const pairs = P.slice(1).map((G, gi) => {
       leftOut++;
       continue;
     }
+    // DROP_LINK: the dropped guest's frames until its resync (none compared
+    // if it never resynced: the run fails on that).
+    if (
+      dropLinkWindow &&
+      slot === DROP_LINK_SLOT &&
+      f >= dropLinkWindow.from &&
+      (dropLinkWindow.to === null || f < dropLinkWindow.to)
+    ) {
+      leftOut++;
+      continue;
+    }
     compared++;
     if (
+      (DROP_LINK && dropLinkWindow?.to != null && f >= dropLinkWindow.to) ||
       (MISSING_RECIPIENT && f > missingRecipient.recoveredFrame) ||
       (FOLLOW_UP_RECIPIENT && followUpRecipient.recoveredFrame !== null && f > followUpRecipient.recoveredFrame) ||
       (CATCH_UP_HOLE && hole.recoveredFrame !== null && f > hole.recoveredFrame) ||
@@ -1443,6 +1682,113 @@ const permanentProblems = !PERMANENT_RECIPIENT
         : []),
     ];
 const missingProblems = PERMANENT_RECIPIENT ? permanentProblems : transientMissingProblems;
+
+// MISSING_RECIPIENT_PERMANENT: the removed player's input, as every page that
+// stayed applied it, by input tag (specs/removed_input.qnt,
+// removedInputAgrees): tests/join-input-check.mjs `appliedForTag`.
+const rosterBroadcasts = [...H.sync.matchAll(/\tROSTER broadcast: frame=(\d+) slots=\[([\d,]*)\]/g)].map((m) => ({
+  frame: Number(m[1]),
+  slots: m[2] ? m[2].split(',').map(Number) : [],
+}));
+const removal =
+  rosterBroadcasts.find((r) => r.frame >= H.inBattleAt && !r.slots.includes(MISSING_RECIPIENT_SLOT)) ?? null;
+const rejoin = removal
+  ? (rosterBroadcasts.find((r) => r.frame >= removal.frame && r.slots.includes(MISSING_RECIPIENT_SLOT)) ?? null)
+  : null;
+const removedInput = !PERMANENT_RECIPIENT
+  ? null
+  : (() => {
+      const stayed = P.map((x, slot) => ({ x, slot })).filter(({ slot }) => slot !== MISSING_RECIPIENT_SLOT);
+      const applied = stayed.map(({ x }) => appliedForTag(x.sync, MISSING_RECIPIENT_SLOT));
+      // Tags every page has finalized: well behind the last one each logged.
+      const lastTag = Math.min(...applied.map((m) => Math.max(-1, ...m.keys()))) - 40;
+      const from = removal ? removal.frame - 90 : 0;
+      const to = Math.min(lastTag, (rejoin ?? removal)?.frame + 150);
+      const differing = [];
+      // Differences only on frames a page ran before a host state replaced
+      // its own: reported, not a failure (the host is slot 0, never loads one).
+      const superseded = [];
+      let compared = 0;
+      for (let tag = from; removal && tag <= to; tag++) {
+        if (!applied.every((m) => m.has(tag))) continue;
+        compared++;
+        const values = applied.map((m) => m.get(tag));
+        const off = values.map((v, i) => i).filter((i) => values[i] !== values[0]);
+        if (off.length === 0) continue;
+        const row = { tag, ...Object.fromEntries(stayed.map(({ slot }, i) => [`P${slot + 1}`, values[i]])) };
+        if (off.every((i) => applied[i].superseded(tag, applied[i].delay))) superseded.push(row);
+        else differing.push(row);
+      }
+      const rerun = stayed.map(({ x, slot }) => ({
+        page: `P${slot + 1}`,
+        cuts: [...x.sync.matchAll(/\tROSTER-CUT \(([^)]*)\) (.*)/g)].map((m) => `${m[1]}: ${m[2]}`),
+        reruns: [...x.sync.matchAll(/\t(ROSTER-CUT-RERUN .*|ROSTER-CUT-LATE .*|ROSTER-CUT-MISSING .*)/g)].map(
+          (m) => m[1],
+        ),
+      }));
+      return {
+        slot: MISSING_RECIPIENT_SLOT,
+        removedAt: removal?.frame ?? null,
+        rejoinedAt: rejoin?.frame ?? null,
+        tags: [from, to],
+        compared,
+        differing: differing.slice(0, 40),
+        differingCount: differing.length,
+        supersededByHostState: superseded.slice(0, 40),
+        supersededCount: superseded.length,
+        rosterHold: ROSTER_HOLD_MS ? { ms: ROSTER_HOLD_MS, slot: ROSTER_HOLD_SLOT, ...H.rosterHold } : null,
+        pages: rerun,
+      };
+    })();
+const removedInputProblems = !removedInput
+  ? []
+  : [
+      ...(removedInput.removedAt === null ? ['the host never broadcast the removal'] : []),
+      ...(removedInput.compared < 60 ? [`only ${removedInput.compared} tags of the removed player compared`] : []),
+      ...(removedInput.differingCount
+        ? [
+            `the removed player's applied input differs between pages on ${removedInput.differingCount} tags ` +
+              `(first ${JSON.stringify(removedInput.differing[0])})`,
+          ]
+        : []),
+      ...(ROSTER_HOLD_MS && !(H.rosterHold?.held > 0) ? ['no roster message was held'] : []),
+    ];
+// Any page that joined the running match (MISSING_RECIPIENT_PERMANENT's
+// rejoin, or a new player): from the frame of the state it loaded to 150
+// frames on, every page, the joining one too, must have applied the same
+// input for every slot on every tag all of them ran
+// (specs/late_join_input_agreement.qnt, pagesAgreeAroundTheJoin;
+// tests/join-input-check.mjs). A difference only on frames a page ran before
+// a host state replaced its own is reported, not failed.
+const joinInput = (() => {
+  const joiner = P.findIndex((x, slot) => slot !== 0 && joinStateFrame(x.sync) !== null);
+  if (joiner < 0) return null;
+  const stateFrame = joinStateFrame(P[joiner].sync);
+  const delay = appliedForTag(H.sync, 0).delay;
+  return {
+    joiner: `P${joiner + 1}`,
+    stateFrame,
+    ...joinInputAgreement({
+      pages: P.map((x, slot) => ({ name: `P${slot + 1}`, sync: x.sync })),
+      slots: P.map((_, slot) => slot),
+      from: stateFrame - delay,
+      to: stateFrame + 150,
+    }),
+  };
+})();
+const joinInputProblems = !joinInput
+  ? []
+  : [
+      ...Object.entries(joinInput.compared)
+        .filter(([, n]) => n < 60)
+        .map(([slot, n]) => `only ${n} tags of slot ${slot} compared around the join`),
+      ...(joinInput.differingCount
+        ? [
+            `the pages applied different inputs around the join on ${joinInput.differingCount} slot tags ` +
+              `(first ${JSON.stringify(joinInput.differing[0])})`,
+          ]
+        : []),
+    ];
 const followUpLines = FOLLOW_UP_RECIPIENT
   ? H.sync.split('\n').filter((line) => seqOf(line) > followUpRecipient.hostAt)
   : [];
@@ -1633,7 +1979,103 @@ const recoveryOracle = !MISSING_RECIPIENT
         : 'failed',
       transientMismatchFrames: pairs.map((p) => ({ slot: p.slot, ...p.recoveryMismatches })),
     };
+// DROP_LINK: the reset kept the host's C slot of the guest, a real input of it
+// that came after the reset was compared with the prediction and rolled back,
+// and the host and every bystander applied the same input for it.
+const dropLinkReport = !DROP_LINK
+  ? null
+  : (() => {
+      const hostLines = dropLink.pageAt ? linesAfterSeq(H, dropLink.pageAt[0]) : [];
+      const kept = hostLines.findIndex((line) =>
+        new RegExp(`PEER-RESET-KEEPS-CORE slot=${DROP_LINK_SLOT} reason=reconnect`).test(line),
+      );
+      const after = kept < 0 ? [] : hostLines.slice(kept + 1);
+      const c = (re) => after.filter((line) => re.test(line));
+      const rolledBack = c(new RegExp(`\\[C\\] MISPREDICTION slot=${DROP_LINK_SLOT} `));
+      const pastWindow = c(new RegExp(`\\[C\\] (DEEP-MISPREDICT-SKIP|FAILED-ROLLBACK) slot=${DROP_LINK_SLOT} `));
+      const settledSkips = c(/C-INPUT-SETTLED-SKIP/);
+      const stayed = P.map((x, slot) => ({ x, slot })).filter(({ slot }) => slot !== DROP_LINK_SLOT);
+      const applied = stayed.map(({ x }) => appliedForTag(x.sync, DROP_LINK_SLOT));
+      const delay = applied[0].delay;
+      const lastTag = Math.min(...applied.map((m) => Math.max(-1, ...m.keys()))) - 40;
+      const dropTag = (dropLink.heldFrom ?? 0) - delay;
+      const from = dropTag - 60;
+      const to = Math.min(lastTag, dropTag + 400);
+      const differing = [];
+      const superseded = [];
+      let compared = 0;
+      let walked = 0;
+      for (let tag = from; tag <= to; tag++) {
+        if (!applied.every((m) => m.has(tag))) continue;
+        compared++;
+        const values = applied.map((m) => m.get(tag));
+        if (values[0] !== '0,0,0' && tag >= dropTag) walked++;
+        const off = values.map((v, i) => i).filter((i) => values[i] !== values[0]);
+        if (off.length === 0) continue;
+        const row = { tag, ...Object.fromEntries(stayed.map(({ slot }, i) => [`P${slot + 1}`, values[i]])) };
+        if (off.every((i) => applied[i].superseded(tag, applied[i].delay))) superseded.push(row);
+        else differing.push(row);
+      }
+      return {
+        slot: DROP_LINK_SLOT,
+        at: DROP_LINK_AT,
+        closed: dropLink.closed,
+        walkFrom: dropLink.heldFrom,
+        hostRanWalk: dropLink.hostRanWalk,
+        hostWalkThrough: dropLink.hostWalkThrough,
+        heldPrediction: heldPredictionAfterReset(
+          rolledBack,
+          DROP_LINK_SLOT,
+          dropLink.heldFrom,
+          dropLink.hostWalkThrough,
+        ),
+        resynced: dropLink.resynced,
+        window: dropLinkWindow,
+        keptCore: kept >= 0 ? hostLines[kept] : null,
+        rolledBack: rolledBack.length,
+        firstRollback: rolledBack[0] ?? null,
+        pastWindow: pastWindow.length,
+        settledSkips: settledSkips.slice(0, 5),
+        applied: {
+          tags: [from, to],
+          compared,
+          walkedTags: walked,
+          differing: differing.slice(0, 40),
+          differingCount: differing.length,
+          supersededByHostState: superseded.slice(0, 40),
+          supersededCount: superseded.length,
+        },
+      };
+    })();
+const dropLinkProblems = !dropLinkReport
+  ? []
+  : [
+      ...(!dropLinkReport.closed?.closed
+        ? [`the connection was not closed: ${JSON.stringify(dropLinkReport.closed)}`]
+        : []),
+      ...(!dropLinkReport.hostRanWalk ? ['the host did not run three held walk tags before the reset'] : []),
+      ...(!(dropLinkReport.closed?.walkPacketsDropped > 0) ? ['no walk packets were held from the host'] : []),
+      ...(!dropLinkReport.keptCore ? ["the host's reconnect reset did not keep the guest's C slot"] : []),
+      ...(!dropLinkReport.heldPrediction ? ['no held pre-reset walk prediction was corrected on the host'] : []),
+      ...(!dropLinkReport.resynced || !dropLinkWindow?.resyncSent || dropLinkWindow?.to == null
+        ? ['the guest applied no resync after the reconnect']
+        : []),
+      ...(dropLinkReport.applied.compared < 200
+        ? [`only ${dropLinkReport.applied.compared} tags of the guest's input compared`]
+        : []),
+      ...(dropLinkReport.applied.walkedTags === 0 ? ['no tag of the walk was compared'] : []),
+      ...(dropLinkReport.applied.differingCount
+        ? [
+            `the host and a bystander applied different inputs for the guest on ${dropLinkReport.applied.differingCount} tags ` +
+              `(first ${JSON.stringify(dropLinkReport.applied.differing[0])})`,
+          ]
+        : []),
+      ...(pairs.find((p) => p.slot === DROP_LINK_SLOT)?.postRecoveryFramesCompared < MIN_BATTLE_FRAMES
+        ? ["too few of the dropped guest's frames compared after its resync"]
+        : []),
+    ];
 const summary = {
+  dropLink: dropLinkReport ? { ...dropLinkReport, problems: dropLinkProblems } : undefined,
   recoveryOracle,
   missingRecipient: {
     ...missingRecipient,
@@ -1646,6 +2088,8 @@ const summary = {
     problems: missingProblems,
   },
   followUpRecipient: FOLLOW_UP_RECIPIENT ? { ...followUpRecipient, problems: followUpProblems } : undefined,
+  removedInput: removedInput ? { ...removedInput, problems: removedInputProblems } : undefined,
+  joinInput: joinInput ? { ...joinInput, problems: joinInputProblems } : undefined,
   room,
   players: PLAYERS,
   latencyMs: LAT,
@@ -1677,7 +2121,10 @@ fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 2));
 console.log(JSON.stringify(summary, null, 2));
 
 const failed =
+  dropLinkProblems.length > 0 ||
   missingProblems.length > 0 ||
+  removedInputProblems.length > 0 ||
+  joinInputProblems.length > 0 ||
   followUpProblems.length > 0 ||
   recoveryProblems.length > 0 ||
   P.some((x) => x.inBattleAt < 0) ||
@@ -1693,7 +2140,7 @@ const failed =
   catchUpFailed;
 console.log(
   failed
-    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}`
+    ? `FAIL: ${pairs.map((p) => `P${p.slot + 1} gp=${p.gameplayMismatches} gs=${p.gameStateMismatches} battle=${p.battleFramesCompared}`).join(', ')}${catchUpFailed ? (CATCH_UP_HOLE ? `; the hole fault did not land as required: ${JSON.stringify(holeReport)}` : '; the catch-up did not run all the way') : ''}${fighterProblems.length ? `; ${fighterProblems.join('; ')}` : ''}${recoveryProblems.length ? `; ${recoveryProblems.join('; ')}` : ''}${removedInputProblems.length ? `; ${removedInputProblems.join('; ')}` : ''}${joinInputProblems.length ? `; ${joinInputProblems.join('; ')}` : ''}${dropLinkProblems.length ? `; ${dropLinkProblems.join('; ')}` : ''}`
     : `PASS: all ${PLAYERS} fighters in the battle; every guest's hashes match the host's (${pairs.map((p) => `P${p.slot + 1} ${p.battleFramesCompared} battle frames`).join(', ')})`,
 );
 process.exit(failed ? 1 : 0);
