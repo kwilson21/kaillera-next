@@ -9981,11 +9981,78 @@
     _armStartLoadDeadline(Math.max(START_LOAD_RECHECK_MIN_MS, nextDueMs));
   };
 
+  const _lockstepChannelRegistries = new WeakMap();
+  const _ownsPeerConnection = (remoteSid, peer, pc) => _peers[remoteSid] === peer && peer.pc === pc;
+  const _acceptLockstepChannel = (peer, ch, verified) =>
+    !!peer && peer.pc === ch._knPc && ch.readyState === 'open' && (verified !== true || peer.dc === ch);
+
+  const _adoptLockstepChannel = (remoteSid, peer, pc, ch) => {
+    if (!_ownsPeerConnection(remoteSid, peer, pc)) return;
+    let registry = _lockstepChannelRegistries.get(pc);
+    if (!registry) {
+      registry = { channels: new Map(), activated: null };
+      _lockstepChannelRegistries.set(pc, registry);
+    }
+    if (registry.channels.has(ch)) return;
+    // A browser can enter closed before dispatching its close callback.
+    // Retire those records before deciding whether the bounded set is full.
+    for (const candidate of registry.channels.keys()) {
+      if (candidate.readyState === 'closed') registry.channels.delete(candidate);
+    }
+    if (registry.channels.size >= 4) return;
+    ch._knPc = pc;
+    if (!peer.dc || peer.dc._knPc !== pc) peer.dc = ch;
+    const handlers = setupDataChannel(remoteSid, ch);
+    registry.channels.set(ch, handlers);
+    const selectOpen = () => {
+      if (!_ownsPeerConnection(remoteSid, peer, pc)) return false;
+      let selected = null;
+      let lowestId = Infinity;
+      // Simultaneous offers can produce two channels on the same connection.
+      // The SCTP stream ID is shared by its two endpoints, unlike arrival order
+      // or whether our browser created it. Both sides pick the same open lane.
+      for (const candidate of registry.channels.keys()) {
+        if (candidate.readyState !== 'open') continue;
+        const id = Number.isInteger(candidate.id) && candidate.id >= 0 ? candidate.id : Infinity;
+        if (!selected || id < lowestId) {
+          selected = candidate;
+          lowestId = id;
+        }
+      }
+      if (!selected) return false;
+      peer.dc = selected;
+      if (registry.activated !== selected) {
+        registry.activated = selected;
+        registry.channels.get(selected).opened();
+      }
+      return true;
+    };
+    const deliver = ch.onmessage;
+    ch.onmessage = (event) => {
+      if (!_ownsPeerConnection(remoteSid, peer, pc) || !registry.channels.has(ch)) return;
+      // A reliable message can reach a browser-open lane before its local
+      // open callback. Resolve the same authority before checking the lane.
+      selectOpen();
+      deliver(event);
+    };
+    ch.onopen = selectOpen;
+    ch.onclose = () => {
+      if (!_ownsPeerConnection(remoteSid, peer, pc)) return;
+      const wasSelected = peer.dc === ch;
+      registry.channels.delete(ch);
+      // Losing a duplicate is not a peer disconnect. A selected lane may
+      // fail over only to an open channel belonging to the same exact PC.
+      if (wasSelected && !selectOpen()) handlers.closed();
+    };
+    if (ch.readyState === 'open') selectOpen();
+  };
+
   const installPeerDataChannelHandlers = (remoteSid, peer) => {
-    peer.pc.ondatachannel = (e) => {
+    const pc = peer.pc;
+    pc.ondatachannel = (e) => {
+      if (!_ownsPeerConnection(remoteSid, peer, pc)) return;
       if (e.channel.label === 'lockstep') {
-        peer.dc = e.channel;
-        setupDataChannel(remoteSid, peer.dc);
+        _adoptLockstepChannel(remoteSid, peer, pc, e.channel);
       } else if (e.channel.label === 'sync-state') {
         peer.syncDc = e.channel;
         setupSyncDataChannel(remoteSid, peer.syncDc);
@@ -10005,13 +10072,13 @@
   };
 
   const createOutgoingPeerChannels = (remoteSid, peer) => {
-    peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
-    setupDataChannel(remoteSid, peer.dc);
-    peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
+    const pc = peer.pc;
+    _adoptLockstepChannel(remoteSid, peer, pc, pc.createDataChannel('lockstep', { ordered: true }));
+    peer.syncDc = pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
     setupSyncDataChannel(remoteSid, peer.syncDc);
     // P2: unordered input channel — always created, only used when the
     // host broadcasts rb-transport:unreliable. Cheap to leave idle.
-    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
+    peer.rbDc = pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
     peer.rbDcUnreliable = false;
     setupRollbackInputDataChannel(remoteSid, peer.rbDc);
     installPeerDataChannelHandlers(remoteSid, peer);
@@ -10884,16 +10951,7 @@
       _peerDriver()?.close(openedFrame, openedAttempt ? { type: 'opened', ...openedAttempt } : null);
       if (_phase < PHASE_GAME_STARTED) startGameSequence();
     };
-    ch.onopen = onOpen;
-    // If the DataChannel is already open (race: ondatachannel delivered it
-    // in the 'open' state), fire the handler immediately. Without this,
-    // startGameSequence() never runs and the gesture prompt never appears.
-    if (ch.readyState === 'open') onOpen();
-
-    ch.onclose = () => {
-      // Guard: ignore stale close events from replaced peers after restart
-      const current = _peers[remoteSid];
-      if (!current || current.dc !== ch) return;
+    const onClose = () => {
       _syncLog(`DC closed with ${remoteSid}`);
       handlePeerDisconnect(remoteSid, ch._knPc?._knAttempt);
     };
@@ -10904,7 +10962,7 @@
 
     ch.onmessage = (e) => {
       const peer = _peers[remoteSid];
-      if (!peer || (_reconnectProofStatus(remoteSid) === true && peer.dc !== ch)) return;
+      if (!_acceptLockstepChannel(peer, ch, _reconnectProofStatus(remoteSid))) return;
 
       // String messages: one off its schema goes no further.
       if (typeof e.data === 'string') {
@@ -11513,6 +11571,7 @@
         _processInputPacket(remoteSid, peer, e.data);
       }
     };
+    return { opened: onOpen, closed: onClose };
   };
 
   // -- Sync-state data channel -----------------------------------------------
@@ -12137,35 +12196,8 @@
       }
     };
 
-    peer.pc.ondatachannel = (e) => {
-      if (e.channel.label === 'lockstep') {
-        peer.dc = e.channel;
-        setupDataChannel(remoteSid, peer.dc);
-      } else if (e.channel.label === 'sync-state') {
-        peer.syncDc = e.channel;
-        setupSyncDataChannel(remoteSid, peer.syncDc);
-      } else if (e.channel.label === 'rollback-input') {
-        if (peer.rbDc)
-          try {
-            peer.rbDc.onclose = null;
-            peer.rbDc.close();
-          } catch (_) {}
-        peer.rbDc = e.channel;
-        peer.rbDcUnreliable = false;
-        setupRollbackInputDataChannel(remoteSid, peer.rbDc);
-      } else if (_onExtraDataChannel) {
-        _onExtraDataChannel(remoteSid, e.channel);
-      }
-    };
-
-    // Create new DCs and send offer with reconnect flag
-    peer.dc = peer.pc.createDataChannel('lockstep', { ordered: true });
-    setupDataChannel(remoteSid, peer.dc);
-    peer.syncDc = peer.pc.createDataChannel('sync-state', { ordered: true, priority: 'very-low' });
-    setupSyncDataChannel(remoteSid, peer.syncDc);
-    peer.rbDc = peer.pc.createDataChannel('rollback-input', { ordered: false, maxRetransmits: 0 });
-    peer.rbDcUnreliable = false;
-    setupRollbackInputDataChannel(remoteSid, peer.rbDc);
+    // Use the same channel ownership rules for initial connection and retry.
+    createOutgoingPeerChannels(remoteSid, peer);
 
     try {
       const offer = await peer.pc.createOffer();
