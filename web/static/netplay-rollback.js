@@ -8065,9 +8065,10 @@
   // the same ordered channel: a host on an older version matches the request
   // strings exactly, and ignores a string it does not know.
   const _sendResyncRequest = (dc, requestId, request) => {
-    if (_reconnectAnswerDebt && _reconnectAnswerScopeCurrent(_reconnectAnswerDebt.scope)) return;
+    if (_reconnectAnswerDebt && _reconnectAnswerScopeCurrent(_reconnectAnswerDebt.scope)) return false;
     dc.send(`sync-request-id:${requestId}`);
     dc.send(request);
+    return true;
   };
   // The resync request rules are web/src/resync-request.ts (proved), reached
   // through window.KNCore.resyncRequest when a rule is used: kn-core.js loads
@@ -10862,7 +10863,9 @@
               if (qualify && _reconnectProofStatus(remoteSid) !== false) {
                 _startsReconnectAnswerDebt(remoteSid, peer, _reconnectRequestId);
               } else {
-                _sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full');
+                if (_sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full')) {
+                  _syncLog(`reconnect resync: sent sync-request-full request=${_reconnectRequestId}`);
+                }
                 if (qualify) setStatus('Legacy game recovery is not verified');
               }
             } catch (e) {
