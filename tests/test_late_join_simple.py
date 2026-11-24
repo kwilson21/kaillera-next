@@ -91,7 +91,7 @@ def test_late_join_pause_is_not_sent_to_joiner():
 
     state_idx = source.find("const handleLateJoinState = async (msg) => {")
     assert state_idx != -1
-    load_window = source[state_idx : state_idx + 10000]
+    load_window = source[state_idx : state_idx + 12000]
     assert "late-join: clearing self pause after state load" in load_window
     assert "_runSubstate = RUN_NORMAL" in load_window
 
@@ -108,7 +108,8 @@ def test_smash_controller_presence_uses_core_mask_not_rdram_poke():
 
     assert "_forceSmashControllerRoster" not in source
     assert "_kn_set_controller_present_mask" in source
-    assert "_applyControllerPresentMask('broadcast-roster')" in source
+    # A roster's mask is filed at its frame (specs/controller_mask.qnt).
+    assert "_fileRosterControllerMask(rosterFrame, slots, 'broadcast-roster')" in source
     assert "_applyControllerPresentMask('late-join-state')" in source
     assert "_resetControllerPresentMask()" in source
 
@@ -305,11 +306,7 @@ def test_a_lost_host_resync_that_goes_unanswered_is_asked_again_up_to_a_bound():
     )
 
     # Cleared when a host state is applied.
-    apply = src[
-        src.index(
-            "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
-        ) :
-    ]
+    apply = src[src.index("const applySyncState = (") :]
     apply = apply[: apply.index("\n  };\n")]
     assert apply.index("_lastAppliedSyncHostFrame = frame;") < apply.index("_lateJoinLostHost = false;")
 

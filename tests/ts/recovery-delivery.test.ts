@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 import * as resyncRequest from '../../web/src/resync-request.ts';
 import { createRecoveryManager } from '../../web/src/recovery-delivery.ts';
 import { createRecoveryTransferPool } from '../../web/src/recovery-transfer.ts';
+import * as syncFollowUp from '../../web/src/sync-follow-up.ts';
 
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const engineFunction = (name: string) => {
@@ -16,17 +18,18 @@ const engineFunction = (name: string) => {
 // Execute the engine's actual handlers, not a second implementation. These
 // tests force the rare send/ack orderings before the ROM-backed mesh run.
 function room(guests = 2, realTransfers = false) {
-  const context = vm.createContext({ resyncRequest, createRecoveryManager, createRecoveryTransferPool });
+  const context = vm.createContext({ resyncRequest, createRecoveryManager, createRecoveryTransferPool, syncFollowUp });
   vm.runInContext(
     `
     let now = 10000;
     const performance = { now: () => now };
-    const window = { KNCore: { resyncRequest, recovery: { createRecoveryManager, createRecoveryTransferPool } } };
-    const _playerSlot = 0, _frameNum = 1000, DELAY_FRAMES = 3;
+    const window = { KNCore: { resyncRequest, syncFollowUp, recovery: { createRecoveryManager, createRecoveryTransferPool } } };
+    const _playerSlot = 0, _frameNum = 1000, DELAY_FRAMES = 3, _ranBeforeDelayChange = -1, _workerCoprocPending = null;
     const INPUT_ASK_OVERDUE_ASKS = 3, INPUT_ASK_OVERDUE_MS = 1500;
     const OVERDUE_MAX_PUSHES = 3, OVERDUE_PUSH_QUIET_MS = 20000, OVERDUE_PUSH_TIMEOUT_MS = 5000;
     const _peers = ${JSON.stringify(Object.fromEntries(Array.from({ length: guests }, (_, i) => [String.fromCharCode(97 + i), { slot: i + 1 }])))};
     const _peerPhantom = {}, _syncChainMovedAt = {}, _knownPlayers = {};
+    ${reconnectProofSource(source)}
     let _syncEnabled = true;
     const _recovery = createRecoveryManager({timeoutMs:5000, quietMs:20000, maxPushes:3}, notice => _handleRecoveryCommand(notice));
     const _recoveryTransfers = createRecoveryTransferPool();
@@ -597,6 +600,7 @@ test('actual receiver keeps tokens across buffering, rejects stale decode and sa
     const _syncLog = () => {}, _clearLifecycleResyncGuard = () => {};
     const _endsResyncRequest = () => false, _answersAnOlderRequest = () => false;
     const _keepsAwaitedAnswer = () => false;
+    ${reconnectProofSource(source)}
     ${handler}
     const receive = (id, frame=1000, full=true) => _handleDecodedSyncPayload({
       recoveryId:id, frame, isFull:full, isRegions:false, isProactive:false,

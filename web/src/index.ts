@@ -25,13 +25,28 @@ import { analogScale, axisSign, digitalSnap, gamepadDisplayName, normalizeAxis }
 import { captureFrame } from './desync-capture.ts';
 import { framesToAskFor } from './input-ask.ts';
 import { catchUpStep, tooOldStep } from './catch-up.ts';
+import {
+  MASK_LEAD,
+  changeInEffect,
+  fileIndex,
+  lateChange,
+  matchScheduled,
+  rosterScheduled,
+} from './controller-mask.ts';
+import { MASK_CAP, canScheduleMask, createMaskSchedule, rosterMask } from './controller-mask-schedule.ts';
+import { admissionFloor, cutTag, firstDiffering, NO_INPUT_TAKEN, rerunStep, wordSpan } from './removed-input.ts';
+import { cutInputAt, encodeRosterCut, packInput, parseRosterCut } from './removed-input-wire.ts';
 import { framesToSendAgain } from './input-resend.ts';
+import { admittedLate, bridgeOffered, joinerHoldsOwnInput, legacyBootstrap } from './late-join-input-rule.ts';
+import { keepsCoreSlot } from './peer-reset.ts';
 import {
   collectLateJoinInputBridge,
   decodeLateJoinInputBridge,
   lateJoinBootProgress,
 } from './late-join-input-bridge.ts';
 import { digestFrame } from './desync-confirm.ts';
+import { createRbCheckBook } from './rb-check-book.ts';
+import { pairVerdict } from './rb-check.ts';
 import { decodeInput, encodeInput, inputEqual } from './input-wire.ts';
 import {
   decodeGameEnded,
@@ -81,7 +96,14 @@ import { createConnectTracker, shouldResumeRomTransfer } from './reconnect.ts';
 import { checkServerMessage, createBoundary, takeAck, takeServerMessage } from './socket-boundary.ts';
 import { startLateJoinWait } from './late-join-wait.ts';
 import { mayHandChunk, mayReceiveState, sendPaced, transferStillFor } from './sync-send.ts';
-import { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded } from './sync-follow-up.ts';
+import {
+  changesWatchedFrame,
+  correctionOwed,
+  delayOfStateAt,
+  directFollowUpDue,
+  directWatchIsStale,
+  followUpIsUnneeded,
+} from './sync-follow-up.ts';
 import { recoveryStep } from './recovery-resync.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
@@ -113,7 +135,7 @@ import {
   missedDeliveryStep,
   resyncDeadlineStep,
 } from './resync-request.ts';
-import { meshHealTargets } from './roster.ts';
+import { meshHealTargets, rosterPeers } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
 import { installSite, KNSite } from './site/index.ts';
 import { installSafeStorage } from './site/storage.ts';
@@ -319,6 +341,54 @@ export const KNCore = {
   captureFrame,
   /** A host state from before this guest's frame: apply, catch up or refuse it, and what then (catch-up.ts, proved). */
   catchUp: { catchUpStep, tooOldStep },
+  /**
+   * The controller-present mask by frame: a roster's mask takes effect at its
+   * roster frame + MASK_LEAD on every page (controller-mask.ts, proved;
+   * specs/controller_mask.qnt).
+   */
+  controllerMask: {
+    MASK_LEAD,
+    MASK_CAP,
+    changeInEffect,
+    fileIndex,
+    lateChange,
+    matchScheduled,
+    rosterScheduled,
+    canScheduleMask,
+    createMaskSchedule,
+    rosterMask,
+  },
+  /**
+   * A removed player's input: neutral from the host's roster frame on every
+   * page, the host's inputs below it, and a page that ran otherwise runs
+   * again (removed-input.ts, proved; specs/removed_input.qnt).
+   */
+  removedInput: {
+    NO_INPUT_TAKEN,
+    admissionFloor,
+    cutTag,
+    firstDiffering,
+    rerunStep,
+    wordSpan,
+    cutInputAt,
+    encodeRosterCut,
+    packInput,
+    parseRosterCut,
+  },
+  /**
+   * Around a join every page applies the same input for every slot: no
+   * placeholder and no held window but the joiner's own, derived from the
+   * host's roster frame (late-join-input-rule.ts, proved;
+   * specs/late_join_input_agreement.qnt).
+   */
+  lateJoinInput: { admittedLate, bridgeOffered, joinerHoldsOwnInput, legacyBootstrap },
+  /**
+   * Whether a peer's reset keeps the C engine's slot: the same player goes on
+   * in the same slot, so its late real inputs are still checked against what
+   * this page predicted (peer-reset.ts, proved; specs/reconnect_inputs.qnt,
+   * reconnect_history).
+   */
+  peerReset: { keepsCoreSlot },
   framesToAskFor,
   framesToSendAgain,
   collectLateJoinInputBridge,
@@ -354,6 +424,8 @@ export const KNCore = {
   cLogDroppedSince,
   measureCanvasHealth,
   digestFrame,
+  /** RB-CHECK: the rollback engine's cross-peer check of confirmed gameplay hashes (web/src/rb-check.ts, specs/rb_check.qnt). */
+  rbCheck: { createBook: createRbCheckBook, pairVerdict },
   createRomResumeAnswerer,
   disconnectDisposition,
   hasAttemptLeft,
@@ -375,6 +447,8 @@ export const KNCore = {
     sayUntilHeard,
   },
   meshHealTargets,
+  /** Which roster entries are this page's peers: never its own, by socket id, slot or player id (roster.ts, proved). */
+  rosterPeers,
   normalizeAxis,
   peerFacts,
   peerTiming: PEER_TIMING,
@@ -413,7 +487,14 @@ export const KNCore = {
   /** The host's resync state, a chunk at a time (sync-send.ts). */
   syncSend: { mayHandChunk, mayReceiveState, sendPaced, transferStillFor },
   /** Whether the host's follow-up to an unconfirmed answer is needed (sync-follow-up.ts). */
-  syncFollowUp: { changesWatchedFrame, directFollowUpDue, directWatchIsStale, followUpIsUnneeded },
+  syncFollowUp: {
+    changesWatchedFrame,
+    correctionOwed,
+    delayOfStateAt,
+    directFollowUpDue,
+    directWatchIsStale,
+    followUpIsUnneeded,
+  },
   recoveryResync: { recoveryStep },
   startRejoin,
   shouldResumeRomTransfer,

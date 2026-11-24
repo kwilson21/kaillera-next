@@ -16,7 +16,8 @@ LOCKSTEP_JS = ROOT / "web" / "static" / "netplay-rollback.js"
 
 def _feed(watches, inputs, *, prime_inactive=False):
     """Feed `inputs` ([slot, frame, differs]) through _feedCInput with the
-    given watches ({sid: frame}); return each watch's `changed`."""
+    given watches ({sid: frame}), each taken at a delay of 3 (DELAY_FRAMES);
+    return each watch's `changed`."""
     src = LOCKSTEP_JS.read_text()
     start = src.index("const INPUT_PAST_WINDOW_FRAMES =")
     helpers = src[start : src.index("  const _backfillCInputsFromJs =", start)]
@@ -48,7 +49,7 @@ def _feed(watches, inputs, *, prime_inactive=False):
         }};
         eval({json.dumps(helpers)} + {json.dumps(roster)} + `
           for (const [sid, frame] of Object.entries({json.dumps(watches)}))
-            _followUpWatches.set(sid, {{ frame, changed: false }});
+            _followUpWatches.set(sid, {{ frame, delay: DELAY_FRAMES, changed: false }});
           for (const [slot, frame, differs] of {json.dumps(inputs)}) {{
             differsNext = differs;
             _feedCInput(mod, slot, frame, KNShared.ZERO_INPUT);
@@ -80,14 +81,22 @@ def _feed(watches, inputs, *, prime_inactive=False):
 
 
 def test_an_input_as_predicted_leaves_the_frame_unchanged():
-    assert _feed({"g": 100}, [[1, 98, False], [1, 99, False], [1, 100, False]]) == {
+    assert _feed({"g": 100}, [[1, 95, False], [1, 96, False], [1, 100, False]]) == {
         "g": False
     }
 
 
-def test_an_input_that_differs_at_or_before_the_frame_changes_it():
-    assert _feed({"g": 100}, [[1, 99, False], [1, 100, True]]) == {"g": True}
+def test_an_input_that_ran_before_the_frame_and_differs_changes_it():
+    # At a delay of 3 the state at the start of 100 holds inputs up to 96.
+    assert _feed({"g": 100}, [[1, 95, False], [1, 96, True]]) == {"g": True}
     assert _feed({"g": 100}, [[2, 90, True]]) == {"g": True}
+
+
+def test_an_input_labelled_within_the_delay_of_the_frame_does_not():
+    # Labelled 97..100: runs at 100..103, after the state at 100 was taken
+    # (specs/sync_follow_up.qnt, differsAtFMinusDelayTest).
+    for frame in range(97, 101):
+        assert _feed({"g": 100}, [[1, frame, True]]) == {"g": False}
 
 
 def test_an_input_after_the_frame_does_not():
@@ -95,7 +104,7 @@ def test_an_input_after_the_frame_does_not():
 
 
 def test_each_watch_is_judged_by_its_own_frame():
-    assert _feed({"a": 100, "b": 90}, [[1, 95, True]]) == {"a": True, "b": False}
+    assert _feed({"a": 100, "b": 98}, [[1, 95, True]]) == {"a": True, "b": False}
 
 
 def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken():
@@ -109,8 +118,17 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
     push = src[src.index("const pushSyncState = async (") :]
     push = push[: push.index("_kn_sync_read(")]
     # The watch is set before the state is read, not after it is sent.
+    # Starts changed when a correction is owed at the take (OWED_AT_TAKE),
+    # judged by the proved rule, never for a sealed capture.
     assert (
-        "_followUpWatches.set(sid, { frame, changed: false, delivered: false });"
+        "_followUpWatches.set(sid, { frame, delay, changed: owed, delivered: false });"
+        in push
+    )
+    assert "window.KNCore.syncFollowUp.correctionOwed(" in push
+    assert "!capturedPublication &&" in push
+    # With the delay that state ran under, the proved rule's.
+    assert (
+        "window.KNCore.syncFollowUp.delayOfStateAt(frame, DELAY_FRAMES, _ranBeforeDelayChange)"
         in push
     )
     # A watch superseded by a newer state is marked changed: its follow-up goes out.
@@ -123,7 +141,8 @@ def test_the_skip_is_the_proved_rule_and_the_watch_starts_as_the_state_is_taken(
 
 
 def test_confirmed_absence_priming_notifies_the_watch_without_claiming_a_real_input():
-    result = _feed({"old": 96, "affected": 97, "later": 99}, [], prime_inactive=True)
+    # Primed inputs 97..99 run at 100..102: a state at 101 or later holds them.
+    result = _feed({"old": 100, "affected": 101, "later": 103}, [], prime_inactive=True)
     assert result == {
         "watched": {"old": False, "affected": True, "later": True},
         "native": [[1, frame, 0, 0, 0, 0, 0] for frame in range(97, 100)],
@@ -198,6 +217,7 @@ def _answer_direct(
     script = textwrap.dedent(
         f"""
         const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        const _holdReconnectHostAnswer = () => false; // ordinary path; the guarded path has its own fixture
         globalThis.window = {{
           EJS_emulator: {{ gameManager: {{ Module: {{}} }} }},
           KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }},
@@ -390,6 +410,7 @@ def _socket_request(src_text):
     script = textwrap.dedent(
         f"""
         const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        const _holdReconnectHostAnswer = () => false; // ordinary path; the guarded path has its own fixture
         globalThis.window = {{ KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }} }};
         const _syncLog = () => {{}};
         const _playerSlot = 0, PHASE_RUNNING = 'running', _phase = 'running';
@@ -453,6 +474,7 @@ def test_only_the_newest_direct_answer_schedules_the_follow_up():
     script = textwrap.dedent(
         f"""
         const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        const _holdReconnectHostAnswer = () => false; // ordinary path; the guarded path has its own fixture
         globalThis.window = {{ KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }} }};
         const _syncLog = () => {{}};
         const _peers = {{ g: {{ slot: 1 }} }};

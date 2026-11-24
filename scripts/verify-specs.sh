@@ -101,9 +101,14 @@ room_lifecycle_drops() {
   verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
   verify "$ROOM" room_current anAbandonedMatchIsEnded
   verify "$ROOM" room_current aMatchIsNotLostToTheGraceWindow
+  verify "$ROOM" room_current nobodyLoadsIntoARunningMatch
   expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
   expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
   expect_violation "$ROOM" room_before_grace_wait aMatchIsNotLostToTheGraceWindow
+  # nobodyLoadsIntoARunningMatch is violated on room_before_serve_timeout_fix,
+  # but its shortest counterexample is 7 steps (a match running, a joiner
+  # serving, its serve timing out), beyond this bound; lateJoinServeTimeoutTest
+  # replays it in check-specs.sh.
 }
 
 peer_connection() {
@@ -303,6 +308,13 @@ sync_follow_up() {
   expect_violation "$FOLLOW" sync_follow_up_socket_undelivered aFollowUpCarriesANewState 5
   # A socket answer whose follow-up waits on a closed channel: 4 steps.
   expect_violation "$FOLLOW" sync_follow_up_socket_over_channel aWatchedAnswerCanBeFollowedUp 4
+  # An input labelled F - delay .. F differs after the send, and is counted as
+  # a change though it runs at F or later: 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_delay_unaware aFollowUpCarriesANewState 5
+  # A state taken with a correction owed, its follow-up skipped once the
+  # correction ran: 6 steps. Today's rule as well as the delay rule alone.
+  expect_violation "$FOLLOW" sync_follow_up_owed_unflagged theGuestEndsOnTheHostsState 6
+  expect_violation "$FOLLOW" sync_follow_up_delay_unaware theGuestEndsOnTheHostsState 6
 }
 
 rom_at_start() {
@@ -369,6 +381,8 @@ escalation_push() {
   expect_violation "$LIFECYCLE" recovery_lifecycle_before unusableChannelDoesNotCapture 2
   verify specs/input_placeholder.qnt input_placeholder_fixed allHold init 4
   expect_violation specs/input_placeholder.qnt input_placeholder_before allHold 2
+  verify specs/stale_prediction_flag.qnt stale_prediction_flag_fixed allHold
+  expect_violation specs/stale_prediction_flag.qnt stale_prediction_flag_before allHold 5
   verify specs/recovery_review.qnt recovery_review_fixed allHold init 14
   expect_violation specs/recovery_review.qnt recovery_review_before rosterGapCannotRenew 5
   expect_violation specs/recovery_review.qnt recovery_review_before readinessHasDeadline 1
@@ -435,6 +449,15 @@ reconnect_inputs() {
   # Right after the reset, one frame run on the peer's missing input with
   # the C slot inactive (runBeforeFirstInputTest): 1 step.
   expect_violation "$REC" reconnect_inputs_current theHostNeverPredictsAFrameThePeerHasMade 2
+  # The same with the reset that puts the ring's inputs back (de361fd).
+  verify "$REC" reconnect_inputs_keeps_history allHold init 12
+  # The frames run before the reset (~40 s at 5 steps); today a reconnect
+  # keeps the C slot (current, the same as fixed).
+  verify "$REC" reconnect_history_current allHold init 5
+  # A frame run on a prediction, then the reset: the prediction is gone
+  # (before) or is a real input now (as_real, de361fd to the fix), 3 steps.
+  expect_violation "$REC" reconnect_history_before everyInputItDidNotMakeIsChecked 3
+  expect_violation "$REC" reconnect_history_as_real everyInputItDidNotMakeIsChecked 3
 }
 
 drop_is_final() {
@@ -680,7 +703,7 @@ SHARDS=(
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final log_archive" # ~7.5 min + log_archive (~1 min)
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs session_log_store" # ~7.5 min + session_log_store (~3.5 min)
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs session_log_store" # ~8.5 min (reconnect_history ~1 min) + session_log_store (~3.5 min)
 )
 
 # Each group is in exactly one shard, and each shard names only groups.

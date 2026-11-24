@@ -226,7 +226,7 @@ def test_baseline_upgrades_existing_alembic_database(tmp_path):
             await backend.close()
 
     applied, feedback, leftover = run_async(scenario())
-    assert applied == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
+    assert applied == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
     assert feedback == [{"message": "kept"}]
     assert leftover == []
 
@@ -274,8 +274,8 @@ def test_alembic_0008_database_skips_session_log_chunks_migration(tmp_path):
             await backend.close()
 
     applied, recorded, chunks = run_async(scenario())
-    assert applied == ["0001", "0003", "0004", "0005", "0006", "0007"]
-    assert recorded == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
+    assert applied == ["0001", "0003", "0004", "0005", "0006", "0007", "0008"]
+    assert recorded == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
     assert chunks == [{"n": 1}]
 
 
@@ -307,5 +307,5 @@ def test_screenshot_rows_keep_their_bytes_through_0003(tmp_path):
             await backend.close()
 
     applied, rows = run_async(scenario())
-    assert applied == ["0003", "0004", "0005", "0006", "0007"]
+    assert applied == ["0003", "0004", "0005", "0006", "0007", "0008"]
     assert rows == [{"match_id": "m", "slot": 0, "frame": 60, "data": b"\xff\xd8old", "blob_key": None, "size": 5}]

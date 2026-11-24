@@ -308,7 +308,7 @@ def test_resync_settles_the_inputs_before_its_frame():
     assert "_inputSettledBefore[slot] ?? 0" in src[floor_idx : src.index(";", floor_idx)]
 
     # Both gap checks use the same floor.
-    missing_idx = src.index("const _missingConsumedInputs = () => {")
+    missing_idx = src.index("const _missingConsumedInputs = (peers = getInputPeers()) => {")
     missing_src = src[missing_idx : src.index("\n  };\n", missing_idx)]
     assert "Math.max(_inputFloor(p.slot), windowStart)" in missing_src
 
@@ -345,7 +345,7 @@ def test_resync_settles_the_inputs_before_its_frame():
     table_idx = src.index("const _slotInputMaps = () => [")
     assert "    _inputSettledBefore,\n" in src[table_idx : src.index("];", table_idx)]
     apply_idx = src.index(
-        "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
+        "const applySyncState = ("
     )
     assert re.search(
         r"if \(timelineAligned\) \{\s*_lastAppliedRecoveryId = Math.max\(_lastAppliedRecoveryId, recoveryId\);\s*_settleInputsAtResync\(gm.Module, frame, recoveryId\);",
@@ -465,7 +465,8 @@ def test_a_rollback_never_reaches_back_before_a_players_first_input():
     c_src = ROLLBACK_C.read_text()
     feed = c_src[c_src.index("int kn_feed_input(") : c_src.index("int kn_pre_tick(")]
     assert "slot_active[slot] = 1;" in feed
-    assert "if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {" in feed
+    # The flag is read with the frame it was set for (specs/stale_prediction_flag.qnt).
+    assert "if (rb_is_prediction_of(slot, idx, frame)) {" in feed
     pre_tick = c_src[c_src.index("int kn_pre_tick(") :]
     assert "if (!rb.slot_active[s]) continue;" in pre_tick
 
@@ -620,6 +621,11 @@ def test_rollback_init_backfills_remote_inputs_past_the_init_frame():
         const _awaitFirstInputAfterReset = {{}};
         const KNShared = {{ ZERO_INPUT: Object.freeze({{buttons:0,lx:0,ly:0,cx:0,cy:0}}) }};
         const mod = {{ _kn_feed_input: (...args) => calls.push(args) }};
+        // The admission floor (web/src/removed-input.ts admissionFloor): no
+        // slot here is cut, so a slot not admitted again takes any input.
+        const window = {{ KNCore: {{ removedInput: {{
+          admissionFloor: (first, cut) => (first >= 0 ? first : cut >= 0 ? Number.MAX_SAFE_INTEGER : 0),
+        }} }} }};
         for (let frame = 890; frame <= 910; frame++) {{
           _remoteInputs[1][frame] = {{ buttons: frame, lx: 0, ly: 0, cx: 0, cy: 0 }};
         }}
@@ -717,7 +723,7 @@ def test_a_settled_input_is_not_fed_to_the_engine():
     # The host settles the guest's backlog when it schedules the recovery
     # resync: that state is for this frame or a later one. A guest does not:
     # it may be taken back to an earlier frame.
-    recovered = src[src.index("} else if (recoveryStep === 'resync-guests') {") :]
+    recovered = src[src.index("const _scheduleRecoveredHostGuest =") :]
     recovered = recovered[: recovered.index("peer-recovery resync: host scheduled full sync")]
     assert "_settleInputsBefore(peer.slot, _frameNum);" in recovered
 
@@ -742,8 +748,10 @@ def test_a_recovery_resyncs_every_guest():
     ) in recovered
     for step in ("'ask-at'", "'resync-guests'", "'ask'"):
         assert f"recoveryStep === {step}" in recovered
-    host = recovered[recovered.index("} else if (recoveryStep === 'resync-guests') {") :]
-    host = host[: host.index("} else if (recoveryStep === 'ask') {")]
+    assert "_deferredPhantomRecovery.set(remoteSid," in recovered
+    assert "_scheduleRecoveredHostGuest(remoteSid, peer)" in recovered
+    host = src[src.index("const _scheduleRecoveredHostGuest =") :]
+    host = host[: host.index("const _serviceReconnectHostAnswers =")]
     assert "[remoteSid, ..._syncTargetsFor(null).map((t) => t.sid)]" in host
     assert "_scheduledSyncRequests.push({ targetFrame: _frameNum, targetSid: sid, deadlineAt });" in host
     assert host.count("deadlineAt") == 2
@@ -852,7 +860,7 @@ def test_a_state_behind_the_guest_is_caught_up_from_not_rewound_to():
 
     apply = src[
         src.index(
-            "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0) => {"
+            "const applySyncState = ("
         ) :
     ]
     apply = apply[: apply.index("\n  };\n")]
@@ -973,18 +981,20 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert src.count("_resyncRequestInFlight = true;") == 1
     assert "let _resyncRequestId = 0;" in src
 
-    # Eleven sites ask: one over Socket.IO, ten on a DataChannel (among them a
+    # Twelve sites ask: one over Socket.IO, eleven on a DataChannel (among them a
     # late joiner that lost its channel to the host,
     # specs/late_join_pause.qnt; the deadline asking again for an owed "now"
     # resync, specs/resync_reask.qnt; the boot sync, specs/resync_flow.qnt
     # EVERY_REQUEST_NUMBERED; a guest's ask for a missing input gone
-    # overdue, specs/ask_escalation.qnt; and a guest that hears another guest
-    # again after holding it as a phantom, specs/recovery_bystander.qnt).
+    # overdue, specs/ask_escalation.qnt; a guest that hears another guest
+    # again after holding it as a phantom, specs/recovery_bystander.qnt; and a
+    # guest that heard a roster after running past its frame,
+    # specs/controller_mask.qnt).
     # The two that name a target frame give it to the request, which keeps
     # it after the target's deadline (specs/resync_flow.qnt, askedAt).
-    assert src.count("_beginResyncRequest(") == 11
-    assert src.count("_beginResyncRequest()") == 7
-    assert src.count("_beginResyncRequest(-1, true)") == 1
+    assert src.count("_beginResyncRequest(") == 13
+    assert src.count("_beginResyncRequest()") == 8
+    assert src.count("_beginResyncRequest(-1, true)") == 2
     assert "const _recoveryRequestId = _beginResyncRequest(_recoveryTarget);" in src
     assert "const _desyncRequestId = _beginResyncRequest(_coordTarget);" in src
     assert "let _resyncRequestAt = -1;" in src
@@ -1000,8 +1010,8 @@ def test_every_resync_request_that_is_out_is_numbered():
     send = src[src.index("const _sendResyncRequest = (dc, requestId, request) => {") :]
     send = send[: send.index("\n  };\n")]
     assert send.index("dc.send(`sync-request-id:${requestId}`);") < send.index("dc.send(request);")
-    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 10
-    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 8
+    assert len(re.findall(r"(?<!const )_sendResyncRequest\(", src)) == 11
+    assert len(re.findall(r"_sendResyncRequest\([^;]*'sync-request-full'\);", src)) == 9
     assert len(re.findall(r"_sendResyncRequest\([^;]*`sync-request-full-at:\$\{\w+\}`\);", src)) == 2
     # Never sent bare. The boot sync's request was, and its unnumbered
     # answer was applied wherever it found the guest, even after a newer
@@ -1018,10 +1028,11 @@ def test_every_resync_request_that_is_out_is_numbered():
     assert boot.index("if (_resyncRequestInFlight) {") < boot.index("_beginResyncRequest()")
     assert "_syncTargetFrame" not in boot
 
-    # A new match starts counting again.
+    # A rematch gets no debt from the old match and never reuses its IDs.
     stop = src[src.index("const stopSync = () => {") :]
     stop = stop[: stop.index("\n  };\n")]
-    assert "_resyncRequestId = 0;" in stop
+    assert "_reconnectAnswerDebt = null;" in stop
+    assert "_resyncRequestId = 0;" not in stop
     assert "_hostNumbersAnswers = false;" in stop
 
 
@@ -1044,7 +1055,7 @@ def test_only_its_own_answer_ends_a_resync_request():
     assert handle.count("_resyncRequestInFlight = false;") == 4
     assert "_resyncRequestInFlight = false; // allow fresh request" in handle
     assert (
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };"
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras };"
         in handle
     )
     assert "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };" in handle
@@ -1064,7 +1075,7 @@ def test_only_its_own_answer_ends_a_resync_request():
     direct = src[src.index("const _answerDirectSyncRequest = (sid, requestId, via = {}) => {") :]
     direct = direct[: direct.index("\n  };\n")]
     assert "const requestIds = { [sid]: requestId };" in direct
-    assert "const options = { requestIds, watchFor: [sid]," in direct
+    assert "requestIds, watchFor: via.reconnectDebt ? [] : [sid]," in " ".join(direct.split())
     assert "pushSyncState(sid, false, options)" in direct
     assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {" in src
 
@@ -1090,20 +1101,22 @@ def test_only_its_own_answer_ends_a_resync_request():
     wrapper = src[src.index("const sendSyncChunks = async (") :]
     wrapper = wrapper[: wrapper.index("\n  };\n")]
     assert re.search(
-        r"_sendSyncChunksTo\(\s*t,\s*compressed,\s*frame,\s*isProactive,\s*requestIds,\s*attempts.find\(\(a\) => a.sid === t.sid\)\?\.wireId \?\? 0,\s*\)",
+        r"_sendSyncChunksTo\(\s*t,\s*compressed,\s*frame,\s*isProactive,\s*requestIds,\s*attempts.find\(\(a\) => a.sid === t.sid\)\?\.wireId \?\? 0,\s*extras,\s*reconnectFenceCurrent,\s*proofFor,\s*\)",
         wrapper,
     )
     chunks = src[src.index("const _sendSyncChunksTo = async (") :]
     chunks = chunks[: chunks.index("\n  };\n")]
-    assert chunks.index("if (answerFor) dc.send(`sync-answer-id:${answerFor}`);") < chunks.index("dc.send(header);")
+    assert chunks.index("if (answerFor && !proofFor) dc.send(`sync-answer-id:${answerFor}`);") < chunks.index("dc.send(header);")
     # The header an older guest parses is unchanged.
-    assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}`" in chunks
+    assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}${proofSuffix}`" in chunks
 
     # Guest: the number is for the next state on that channel only.
     sync_dc = src[src.index("const setupSyncDataChannel = (_remoteSid, ch) => {") :]
     sync_dc = sync_dc[: sync_dc.index("// -- Per-peer state cleanup")]
     assert "syncAnswerIdNext = _requestIdFrom(Number(e.data.substring(15)));" in sync_dc
-    assert sync_dc.count("_syncAnswerFor = syncAnswerIdNext;\n          syncAnswerIdNext = 0;") == 2
+    assert sync_dc.count("_syncAnswerFor = syncAnswerIdNext;\n          syncAnswerIdNext = 0;") == 1
+    assert "_syncAnswerFor = proofForAssembly || syncAnswerIdNext;" in sync_dc
+    assert sync_dc.count("syncAnswerIdNext = 0;") == 3
     # A host that has never numbered an answer is on a version that does not:
     # its states end a request as before. Learned from the host only, and
     # forgotten when the host's peer state is reset (I2).
@@ -1163,15 +1176,15 @@ def test_a_late_answer_does_not_replace_the_awaited_one():
     payload = src[src.index("async function _handleDecodedSyncPayload({") :]
     payload = payload[
         : payload.index(
-            "const handleSyncChunksComplete = async (ownsAssembly = () => true) => {"
+            "const handleSyncChunksComplete = async ("
         )
     ]
     for pending in (
         "_pendingResyncState = { bytes: decompressed, frame, isRegions: true, answerFor };",
-        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, recoveryId };",
+        "_pendingResyncState = { bytes: fullBytes, frame, answerFor, answerScope, proofFor, recoveryId, extras };",
     ):
         at = payload.index(pending)
-        assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 200
+        assert payload.rindex("if (_keepsAwaitedAnswer(answerFor, frame)) return;", 0, at) > at - 400
 
 
 def test_a_stale_late_answer_keeps_the_lifecycle_guard():
@@ -1181,7 +1194,7 @@ def test_a_stale_late_answer_keeps_the_lifecycle_guard():
     payload = src[src.index("async function _handleDecodedSyncPayload({") :]
     payload = payload[
         : payload.index(
-            "const handleSyncChunksComplete = async (ownsAssembly = () => true) => {"
+            "const handleSyncChunksComplete = async ("
         )
     ]
     assert "if (!_answersAnOlderRequest(answerFor)) _clearLifecycleResyncGuard('regions sync stale');" in payload
@@ -1221,3 +1234,4 @@ def test_a_chunk_timeout_is_scoped_to_the_request_its_transfer_answers():
     assert "_resyncRequestInFlight" not in branch and "_requestSocketFullResync" not in branch
     assert older < header.index("_resyncRequestInFlight = false;")
     assert older < header.index("_requestSocketFullResync('sync-chunk-timeout');")
+

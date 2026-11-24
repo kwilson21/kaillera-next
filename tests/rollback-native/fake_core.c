@@ -8,7 +8,8 @@
  * read it their own way: retro_serialize copies the marker, the split-RDRAM
  * backend copies RDRAM and the small CPU state below. The test sets the
  * marker the way running a frame, or loading a resync's state, would leave
- * it. Everything else the engine calls in the core does nothing. */
+ * it. kn_write_controller records the input each controller was last given.
+ * Everything else the engine calls in the core does nothing. */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -68,8 +69,19 @@ int kn_headless = 0;
 void kn_set_headless(int enable) { kn_headless = enable; }
 void kn_set_frame_time(double time_ms) { (void)time_ms; }
 void kn_reset_audio(void) {}
+/* The last input the engine wrote to each controller: buttons, lx, ly, cx,
+ * cy. A test reads it after kn_pre_tick to see what the frame runs with. */
+int32_t kn_test_controller[4][5];
 void kn_write_controller(int slot, int buttons, int lx, int ly, int cx, int cy) {
-    (void)slot; (void)buttons; (void)lx; (void)ly; (void)cx; (void)cy;
+    if (slot < 0 || slot >= 4) return;
+    kn_test_controller[slot][0] = buttons;
+    kn_test_controller[slot][1] = lx;
+    kn_test_controller[slot][2] = ly;
+    kn_test_controller[slot][3] = cx;
+    kn_test_controller[slot][4] = cy;
+}
+int32_t kn_test_controller_buttons(int slot) {
+    return (slot < 0 || slot >= 4) ? 0 : kn_test_controller[slot][0];
 }
 void kn_pack_hidden_state_impl(uint32_t *out) { (void)out; }
 void kn_restore_hidden_state_impl(const uint32_t *in) { (void)in; }
