@@ -27,10 +27,10 @@ import {
   type PeerTiming,
 } from '../../web/src/peer-connection.ts';
 
-type Deadline = 'startupAfter' | 'attemptAfter' | 'giveUpAfter' | 'answerAfter' | 'healAfter';
+type Deadline = 'startupAfter' | 'attemptAfter' | 'retryAfter' | 'giveUpAfter' | 'answerAfter' | 'healAfter';
 const After = Schema.Struct({
   type: Schema.Literal('xstate.after'),
-  delay: Schema.Literals(['startupAfter', 'attemptAfter', 'giveUpAfter', 'answerAfter', 'healAfter']),
+  delay: Schema.Literals(['startupAfter', 'attemptAfter', 'retryAfter', 'giveUpAfter', 'answerAfter', 'healAfter']),
   stateId: Schema.String,
 });
 type After = typeof After.Type;
@@ -398,8 +398,10 @@ test('an answer to the first attempt arrives after the second replaced it (lateA
   notice(lo);
   offer(hi, 2, 'reconnect');
   lo.fire('attemptAfter');
+  lo.fire('retryAfter');
   assert.deepEqual(lo.issued(), [
     { type: 'offer', page: LO, attempt: 2, mode: 'reconnect' },
+    { type: 'backoff' },
     { type: 'offer', page: LO, attempt: 3, mode: 'reconnect' },
   ]);
   answer(lo, 2);
@@ -573,7 +575,7 @@ test('everyWaitHasADeadline: a startup retry answered in a match is closed, then
 test('everyWaitHasADeadline: the lower slot gives a reconnect three attempts, then drops the player', () => {
   const { lo, notice } = inMatch();
   notice(lo);
-  lo.advance(PEER_TIMING.attemptAfterMs * 2);
+  lo.advance((PEER_TIMING.attemptAfterMs + PEER_TIMING.retryAfterMs) * 2);
   assert.equal(lo.state(), 'reconnecting.offering');
   assert.equal(lo.context().tries, 3);
   lo.advance(PEER_TIMING.attemptAfterMs);
@@ -605,6 +607,8 @@ const reachable = (mySlot: number, theirSlot: number) => {
       open: [],
       'reconnecting.awaitingOffer': [],
       'reconnecting.offering': ['attemptAfter'],
+      'reconnecting.backoff': ['retryAfter'],
+      'reconnecting.awaitingChannel': [],
       'reconnecting.answering': ['answerAfter'],
     };
     const own = delays[name].map((delay) => ({ type: 'xstate.after' as const, delay, stateId: `peer.${name}` }));
@@ -640,6 +644,8 @@ const reachable = (mySlot: number, theirSlot: number) => {
         { type: 'candidate', ...id },
         { type: 'opened', ...id },
         { type: 'lost', ...id },
+        { type: 'transportConnected', ...id },
+        { type: 'attemptFailed', ...id },
       ]),
     ];
   };
@@ -675,7 +681,14 @@ test('everyWaitHasADeadline: in a match, every reachable state with no open chan
       'reconnecting.answering',
       'reconnecting.awaitingOffer',
     ];
-    const offerer = ['healing', 'offering', 'reconnecting.offering', 'stalled'];
+    const offerer = [
+      'healing',
+      'offering',
+      'reconnecting.offering',
+      'reconnecting.backoff',
+      'reconnecting.awaitingChannel',
+      'stalled',
+    ];
     assert.deepEqual([...names].sort(), mySlot < theirSlot ? [...answerer, ...offerer].sort() : answerer);
     for (const snapshot of snapshots) {
       const name = peerStateName(snapshot.value);
@@ -707,6 +720,7 @@ test('staleSignalsAreNotApplied: an answer, candidate or channel event for anoth
   const { lo, hi, offer, notice } = inMatch();
   notice(lo);
   lo.fire('attemptAfter');
+  lo.fire('retryAfter');
   lo.issued();
   const before = lo.context();
   for (const signal of ['answer', 'candidate', 'opened', 'lost'] as const) {
@@ -866,4 +880,20 @@ test('an armed deadline can be taken early; one that is not armed is not', async
   await peer.stop();
   assert.deepEqual(peer.send({ type: 'lost', page: LO, attempt: 2 }), []);
   assert.deepEqual(deadlines, []);
+});
+
+test('a reconnect attempt owns one backoff even if its PC fails just after the deadline', () => {
+  const { lo, notice } = inMatch();
+  notice(lo);
+  const first = lo.connection();
+  lo.issued();
+  lo.fire('attemptAfter');
+  lo.send({ type: 'attemptFailed', ...first });
+  assert.equal(lo.state(), 'reconnecting.backoff');
+  assert.deepEqual(lo.armed(), ['giveUpAfter', 'retryAfter']);
+  assert.deepEqual(lo.issued(), [{ type: 'backoff' }]);
+  lo.fire('retryAfter');
+  lo.send({ type: 'attemptFailed', ...first });
+  assert.equal(lo.state(), 'reconnecting.offering');
+  assert.deepEqual(lo.issued(), [{ type: 'offer', page: LO, attempt: first.attempt + 1, mode: 'reconnect' }]);
 });

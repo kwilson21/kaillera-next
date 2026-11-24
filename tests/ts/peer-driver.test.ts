@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createPeerDriver, type DrivenEvent } from '../../web/src/peer-driver.ts';
 
+import { PEER_TIMING } from '../../web/src/peer-connection.ts';
+
 const PAGE = 'page-mine';
 const THEIRS = 'page-theirs';
 
@@ -215,4 +217,55 @@ test('heal, old against new: only the higher slot changes, from offering to wait
     assert.equal(offers === oldRuleOffers(mySlot, theirSlot), mySlot < theirSlot, `${mySlot}->${theirSlot}`);
     page.driver.stop();
   }
+});
+
+test('a reconnect on an unlabelled peer uses the same scoped retries and stops with the session', async () => {
+  const commands: string[] = [];
+  const driver = createPeerDriver({
+    page: 'mine',
+    mySlot: () => 0,
+    offersMade: () => 4,
+    log: () => {},
+    timing: { ...PEER_TIMING, attemptAfterMs: 500, retryAfterMs: 5, giveUpAfterMs: 2000 },
+  });
+  driver.stopWatching(1, 'old', 'unlabelled page');
+  const reconnect = driver.reconnect(1, (command) =>
+    commands.push(command.type === 'offer' ? `offer ${command.attempt}` : command.type),
+  );
+  assert.ok(reconnect);
+  reconnect.start();
+  reconnect.failed({ page: 'mine', attempt: 5 });
+  reconnect.failed({ page: 'mine', attempt: 5 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(commands, ['offer 5', 'backoff', 'offer 6']);
+  reconnect.failed({ page: 'mine', attempt: 5 });
+  reconnect.failed({ page: 'mine', attempt: 6 });
+  driver.sessionEnded();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(commands, ['offer 5', 'backoff', 'offer 6', 'backoff']);
+  driver.stop();
+});
+
+test('only the lower slot owns offers and a replaced controller cannot fail its successor', () => {
+  const high = engine(1);
+  assert.equal(
+    high.driver.reconnect(0, () => assert.fail('higher slot offered')),
+    null,
+  );
+  high.driver.stop();
+  const low = connectedInMatch(0, 1);
+  const first: string[] = [],
+    second: string[] = [];
+  const old = low.driver.reconnect(1, (c) => first.push(c.type));
+  assert.ok(old);
+  old.start();
+  const current = low.driver.reconnect(1, (c) => second.push(c.type));
+  assert.ok(current);
+  current.start();
+  old.failed({ page: PAGE, attempt: 2 });
+  old.stop();
+  assert.deepEqual(first, ['offer']);
+  assert.deepEqual(second, ['offer']);
+  current.stop();
+  low.driver.stop();
 });

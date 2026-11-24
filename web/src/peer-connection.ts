@@ -30,6 +30,8 @@
  *                                always arm together
  *     reconnecting.awaitingOffer   no connection (the higher slot after a drop)
  *     reconnecting.offering        made != 0 (or link), attempt = `tries` >= 1
+ *     reconnecting.backoff         one retry delay after a failed attempt
+ *     reconnecting.awaitingChannel transport connected, waiting for the channel
  *     reconnecting.answering       link != 0 from their offer, ansTimer
  *
  * `made` and `link` are `connection` and `connectionPage` here, the attempt
@@ -47,6 +49,7 @@
  * input (`PeerTiming`):
  *   startupTimeout   `startupAfterMs` in `offering`, before the match
  *   attemptTimeout   `attemptAfterMs` in `reconnecting.offering`
+ *   retryAfter       `retryAfterMs` in `reconnecting.backoff`
  *   giveUpTimeout    `giveUpAfterMs` in `reconnecting`, across its states
  *   answerTimeout    `answerAfterMs` in the two `answering` states
  *   heal             `healAfterMs` in every state with no open channel that
@@ -63,8 +66,8 @@
  *
  * Not covered, as in the model: spectators, late joiners and players held as
  * late joiners (the machine asks `shouldInitiate` as a player of the starting
- * cohort), more than one other player (there is one machine per player), the
- * pause between reconnect attempts, and PEER-PHANTOM.
+ * cohort), more than one other player (there is one machine per player), and
+ * PEER-PHANTOM. Gameplay retry ownership follows specs/reconnect_attempt.qnt.
  */
 import { Context, Duration, Effect, Exit, Fiber, Option, Schema, Scope } from 'effect';
 import { setupEffect } from '@xstate/effect';
@@ -81,12 +84,14 @@ export type PeerState =
   | 'open'
   | 'reconnecting.awaitingOffer'
   | 'reconnecting.offering'
+  | 'reconnecting.backoff'
+  | 'reconnecting.awaitingChannel'
   | 'reconnecting.answering';
 
 /** The machine's state value: `reconnecting` has states of its own. */
 export type PeerStateValue =
   | Exclude<PeerState, `reconnecting.${string}`>
-  | { readonly reconnecting: 'awaitingOffer' | 'offering' | 'answering' };
+  | { readonly reconnecting: 'awaitingOffer' | 'offering' | 'answering' | 'backoff' | 'awaitingChannel' };
 
 export const peerStateName = (value: PeerStateValue): PeerState =>
   typeof value === 'string' ? value : `reconnecting.${value.reconnecting}`;
@@ -151,6 +156,7 @@ export const PeerCommand = Schema.Union([
     reason: Schema.Literals(['gaveUp', 'attemptsExhausted', 'left', 'matchEnded', 'replaced', 'lostBeforeStart']),
   }),
   Schema.Struct({ type: Schema.Literal('stalled') }),
+  Schema.Struct({ type: Schema.Literal('backoff') }),
 ]);
 export type PeerCommand = typeof PeerCommand.Type;
 
@@ -165,6 +171,7 @@ const PeerTiming = Schema.Struct({
   startupAfterMs: Schema.Number,
   /** The same for one reconnect attempt. */
   attemptAfterMs: Schema.Number,
+  retryAfterMs: Schema.Number,
   /** Reconnecting this long: give the player up. */
   giveUpAfterMs: Schema.Number,
   /** No open channel this long after answering a replacement offer: close the connection. */
@@ -180,6 +187,7 @@ export type PeerTiming = typeof PeerTiming.Type;
 export const PEER_TIMING: PeerTiming = {
   startupAfterMs: 8000,
   attemptAfterMs: 10_000,
+  retryAfterMs: 3000,
   giveUpAfterMs: 45_000,
   answerAfterMs: 10_000,
   healAfterMs: 5000,
@@ -237,6 +245,7 @@ type Target =
   | '#peer.open'
   | '#peer.reconnecting.awaitingOffer'
   | '#peer.reconnecting.offering'
+  | '#peer.reconnecting.backoff'
   | '#peer.reconnecting.answering';
 
 /** One transition: what to issue and where to go. No `target` stays put; `reenter` restarts the state's deadlines. */
@@ -439,7 +448,7 @@ const onStartupDeadline = (context: PeerContext): Step => {
 /** `attemptTimeout` in the model. */
 const onAttemptDeadline = (context: PeerContext): Step =>
   hasAttemptLeft(context.tries, context.timing.maxAttempts)
-    ? offerStep(context, 'reconnect', context.tries + 1, '#peer.reconnecting.offering', [])
+    ? { commands: [{ type: 'backoff' }], context, target: '#peer.reconnecting.backoff' }
     : dropStep(context, 'attemptsExhausted');
 
 /** `answerTimeout` in the model: close the connection; the entry waits for another offer. */
@@ -496,6 +505,10 @@ export const peerConnectionMachine = setupEffect({
     events: {
       /** The roster lists the other player (under whatever socket id: #119). */
       roster: Empty,
+      /** Take ownership of the lower slot's reconnect, including a peer without a labelled startup history. */
+      beginReconnect: Schema.Struct({ offersMade: Schema.Number }),
+      attemptFailed: Attempt,
+      transportConnected: Attempt,
       /** The other player left the room, or said they were leaving. */
       left: Empty,
       /** This page started running the match. */
@@ -533,6 +546,7 @@ export const peerConnectionMachine = setupEffect({
   delays: {
     startupAfter: ({ context }) => context.timing.startupAfterMs,
     attemptAfter: ({ context }) => context.timing.attemptAfterMs,
+    retryAfter: ({ context }) => context.timing.retryAfterMs,
     giveUpAfter: ({ context }) => context.timing.giveUpAfterMs,
     answerAfter: ({ context }) => context.timing.answerAfterMs,
     healAfter: ({ context }) => context.timing.healAfterMs,
@@ -556,6 +570,21 @@ export const peerConnectionMachine = setupEffect({
   }),
   initial: 'absent',
   on: {
+    beginReconnect: ({ context, event, actions, self }, enq) => {
+      if (!lowerSlot(context)) return;
+      return run(
+        offerStep(
+          { ...context, running: true, listed: true, offers: event.offersMade },
+          'reconnect',
+          1,
+          '#peer.reconnecting.offering',
+          [],
+        ),
+        actions.issue,
+        self,
+        enq,
+      );
+    },
     left: ({ context, actions, self }, enq) => {
       enq(actions.issue, { command: { type: 'drop', reason: 'left' }, self });
       return { target: '.absent', context: { ...withoutConnection(context), listed: false } };
@@ -746,57 +775,56 @@ export const peerConnectionMachine = setupEffect({
       after: {
         giveUpAfter: ({ context, actions, self }, enq) => run(dropStep(context, 'gaveUp'), actions.issue, self, enq),
       },
-      states: {
-        awaitingOffer: {
-          on: {
-            offer: ({ context, event, actions, self }, enq) =>
-              run(onOffer('reconnecting', context, event), actions.issue, self, enq),
-            answer: ({ context, event, actions, self }, enq) =>
-              run(onAnswer('reconnecting', context, event), actions.issue, self, enq),
-            candidate: ({ context, event, actions, self }, enq) =>
-              run(onCandidate('reconnecting', context, event), actions.issue, self, enq),
-            opened: ({ context, event, actions, self }, enq) =>
-              run(onOpened('reconnecting', context, event), actions.issue, self, enq),
-            lost: ({ context, event, actions, self }, enq) =>
-              run(onLost('reconnecting', context, event), actions.issue, self, enq),
-          },
+      on: {
+        offer: ({ context, event, actions, self }, enq) =>
+          run({ ...onOffer('reconnecting', context, event), reenter: false }, actions.issue, self, enq),
+        answer: ({ context, event, actions, self }, enq) =>
+          run(onAnswer('reconnecting', context, event), actions.issue, self, enq),
+        candidate: ({ context, event, actions, self }, enq) =>
+          run(onCandidate('reconnecting', context, event), actions.issue, self, enq),
+        opened: ({ context, event, actions, self }, enq) =>
+          run(onOpened('reconnecting', context, event), actions.issue, self, enq),
+        lost: ({ context, event, actions, self }, enq) =>
+          run(onLost('reconnecting', context, event), actions.issue, self, enq),
+        attemptFailed: ({ context, event, actions, self }, enq) => {
+          if (context.mine && isFor(context, event)) return run(onAttemptDeadline(context), actions.issue, self, enq);
         },
+        transportConnected: ({ context, event }) => {
+          if (context.mine && isFor(context, event)) return { target: '.awaitingChannel' };
+        },
+      },
+      states: {
+        awaitingOffer: {},
         offering: {
           after: {
             attemptAfter: ({ context, actions, self }, enq) =>
               run(onAttemptDeadline(context), actions.issue, self, enq),
           },
-          on: {
-            offer: ({ context, event, actions, self }, enq) =>
-              run(onOffer('reconnecting', context, event), actions.issue, self, enq),
-            answer: ({ context, event, actions, self }, enq) =>
-              run(onAnswer('reconnecting', context, event), actions.issue, self, enq),
-            candidate: ({ context, event, actions, self }, enq) =>
-              run(onCandidate('reconnecting', context, event), actions.issue, self, enq),
-            opened: ({ context, event, actions, self }, enq) =>
-              run(onOpened('reconnecting', context, event), actions.issue, self, enq),
-            lost: ({ context, event, actions, self }, enq) =>
-              run(onLost('reconnecting', context, event), actions.issue, self, enq),
+        },
+        backoff: {
+          // The first failure owns this wait. Later callbacks for the same PC cannot re-arm it.
+          on: { attemptFailed: () => ({}) },
+          after: {
+            retryAfter: ({ context, actions, self }, enq) =>
+              run(
+                offerStep(context, 'reconnect', context.tries + 1, '#peer.reconnecting.offering', []),
+                actions.issue,
+                self,
+                enq,
+              ),
           },
         },
+        awaitingChannel: {},
         answering: {
+          on: {
+            offer: ({ context, event, actions, self }, enq) =>
+              run(onOffer('reconnectingAnswering', context, event), actions.issue, self, enq),
+          },
           after: {
             answerAfter: ({ context, actions, self }, enq) => {
               if (!context.answerDeadline) return;
               return run(onAnswerDeadline(context, '#peer.reconnecting.awaitingOffer'), actions.issue, self, enq);
             },
-          },
-          on: {
-            offer: ({ context, event, actions, self }, enq) =>
-              run(onOffer('reconnectingAnswering', context, event), actions.issue, self, enq),
-            answer: ({ context, event, actions, self }, enq) =>
-              run(onAnswer('reconnectingAnswering', context, event), actions.issue, self, enq),
-            candidate: ({ context, event, actions, self }, enq) =>
-              run(onCandidate('reconnectingAnswering', context, event), actions.issue, self, enq),
-            opened: ({ context, event, actions, self }, enq) =>
-              run(onOpened('reconnectingAnswering', context, event), actions.issue, self, enq),
-            lost: ({ context, event, actions, self }, enq) =>
-              run(onLost('reconnectingAnswering', context, event), actions.issue, self, enq),
           },
         },
       },
@@ -808,7 +836,14 @@ export const peerConnectionMachine = setupEffect({
 export type PeerEvent = Exclude<EventFrom<typeof peerConnectionMachine>, { type: `xstate.${string}` }>;
 
 /** The machine's deadlines, by the name of their delay. */
-const PeerDeadline = Schema.Literals(['startupAfter', 'attemptAfter', 'giveUpAfter', 'answerAfter', 'healAfter']);
+const PeerDeadline = Schema.Literals([
+  'startupAfter',
+  'attemptAfter',
+  'retryAfter',
+  'giveUpAfter',
+  'answerAfter',
+  'healAfter',
+]);
 export type PeerDeadline = typeof PeerDeadline.Type;
 
 /** A deadline as XState raises it for itself once its delay has passed. */
@@ -864,7 +899,9 @@ export const createPeerConnection = (
         if (stopped) continue;
         const fiber = Effect.runSync(
           Effect.forkIn(
-            Effect.sleep(Duration.millis(effect.delay)).pipe(Effect.andThen(Effect.sync(() => expire(key)))),
+            Effect.sleep(Duration.millis(effect.delay)).pipe(
+              Effect.andThen(Effect.sync(() => expire(key, effect.event))),
+            ),
             scope,
           ),
         );
@@ -889,10 +926,10 @@ export const createPeerConnection = (
     armed.delete(key);
     return step(asEvent(timer.event));
   };
-  const expire = (key: string): void => {
-    const event = armed.get(key)?.event;
+  const expire = (key: string, event: After): void => {
+    if (armed.get(key)?.event !== event) return;
     const commands = take(key);
-    if (event && commands) onDeadline(event.delay, commands);
+    if (commands) onDeadline(event.delay, commands);
   };
   absorb(initial);
   return {
