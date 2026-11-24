@@ -1,3 +1,5 @@
+import { CheckpointRecovery } from './checkpoint-recovery.ts';
+import { CHECKPOINT_CAP, CHECKPOINT_MESSAGE } from './checkpoint-wire.ts';
 import { createOwnerProofRelay } from './owner-proof-relay.ts';
 import { openProof as openOwnerInputProof, captureAllowed as ownerInputCaptureAllowed } from './owner-proof.ts';
 import { createRecoveryManager } from './recovery-delivery.ts';
@@ -333,6 +335,7 @@ export const createSession = (
 };
 
 export const KNCore = {
+  checkpoint: { CheckpointRecovery, CHECKPOINT_CAP, CHECKPOINT_MESSAGE },
   analogScale,
   audioTransition,
   axisSign,

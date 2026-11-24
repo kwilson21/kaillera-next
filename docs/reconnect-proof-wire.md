@@ -14,8 +14,17 @@ explicit retry; it is not confirmation that the guest applied the state. Sealed
 and late-join snapshots respect the capture fence. Phantom work postponed
 by the fence is retained for a current generation.
 
-A match whose safe input history is exhausted may remain unresolved; this
-does not coordinate an all-peer snapshot install or end a match. Unresolved
-host debt can still prevent separate snapshots while its slot is rostered;
-an unresolved guest does not take an ordinary snapshot as verified recovery.
-The wire rules model does not prove room-wide progress or atomic settlement.
+Three or four original native players can also negotiate `checkpointRecoveryV1`.
+Every 128 frames each peer may seal a full local checkpoint against its last
+agreed state and the inputs the cores consumed. Each owner verifies its own
+column. The journal retains 2,048 tags per slot, including neutral inputs.
+
+After an unsafe channel replacement, the host binds the numbered request to
+the original match, socket roster, epoch, checkpoint and common stop frame.
+Each peer restores its own agreed bytes and replays the authenticated owner
+journals. Every installed core must agree on the full state and replay history.
+The host then releases the new epoch. Peers wait for every first input before
+resuming. An incomplete install stays paused. A peer missing the decision
+asks again. A terminal room integrity report still prevents recovery. An ordinary
+state load ends checkpoint rotation for that epoch. See the [coordinator](../web/src/checkpoint-recovery.ts) and
+[barrier model](../specs/checkpoint_recovery.qnt).

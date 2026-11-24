@@ -10,6 +10,7 @@ import {
   openProof as openOwnerInputProof,
   captureAllowed as ownerInputCaptureAllowed,
 } from '../../web/src/owner-proof.ts';
+import { CHECKPOINT_MESSAGE } from '../../web/src/checkpoint-wire.ts';
 import { checkRelayed } from '../../web/src/relay.ts';
 import * as syncSend from '../../web/src/sync-send.ts';
 import * as syncFollowUp from '../../web/src/sync-follow-up.ts';
@@ -39,6 +40,7 @@ function room(realTransfer = false) {
     openOwnerInputProof,
     ownerInputCaptureAllowed,
     checkRelayed,
+    CHECKPOINT_MESSAGE,
     Uint8Array,
     queueMicrotask,
     crypto: { randomUUID: () => 'long-enough-opaque-token' },
@@ -81,7 +83,7 @@ function room(realTransfer = false) {
       _kn_sync_read(){ reads.push(nativeFrame); this.HEAPU8[1]=nativeFrame%256; this.HEAPU8[2]=99; return 2; },
     };
     const window={
-      KNCore:{checkRelayed,syncSend,syncFollowUp,recovery:{createOwnerProofRelay,openOwnerInputProof,ownerInputCaptureAllowed}},
+      KNCore:{checkpoint:{CHECKPOINT_MESSAGE},checkRelayed,syncSend,syncFollowUp,recovery:{createOwnerProofRelay,openOwnerInputProof,ownerInputCaptureAllowed}},
       EJS_emulator:{gameManager:{Module:mod,getState(){throw Error('late or raw state escaped');}}},
     };
     const _localInputs={}, _remoteInputs={1:{},2:{},3:{}}, nativeFed=[], _inputFloor=()=>1066;

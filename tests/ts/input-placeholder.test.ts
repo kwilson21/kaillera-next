@@ -19,7 +19,7 @@ for (const incomingLx of [0, 35]) {
         const zero={buttons:0,lx:0,ly:0,cx:0,cy:0};
         const KNShared={ZERO_INPUT:zero,decodeInput:x=>x};
         const _isPeerPendingLateJoin=()=>false, _syncLog=()=>{}, _auditRecordRemote=()=>{};
-        const _admissionInputFloor=()=>0;
+        const _admissionInputFloor=()=>0, _checkpointFloor=0, _checkpoint=null;
         const performance={now:()=>1};
         const _frameNum=1602, _catchUpTo=0, DELAY_FRAMES=12;
         const INPUT_PAST_WINDOW_FRAMES=240, INPUT_FUTURE_MARGIN_FRAMES=60;
