@@ -11,6 +11,7 @@
  */
 import { Option, Schema } from 'effect';
 import type { Attempt } from './peer-connection.ts';
+import { offerForConnection } from './streaming/attempt.ts';
 import type { WirePayload } from './wire.ts';
 
 const AttemptId = Schema.Struct({
@@ -24,6 +25,10 @@ export const readAttemptId = (value: WirePayload | undefined): Attempt | null =>
   const decoded = Option.getOrNull(decodeAttemptId(value));
   return decoded === null ? null : { page: decoded.page, attempt: decoded.attempt };
 };
+
+/** Only offers from the same page have an ordered attempt count. */
+export const isOlderAttempt = (signal: Attempt | null, held: Attempt | null | undefined): boolean =>
+  !!signal && !!held && offerForConnection(true, held.page, held.attempt, signal.page, signal.attempt) === 'drop';
 
 /** A new id for this page: random, made once when it loads. */
 export const newPageId = (): string => {

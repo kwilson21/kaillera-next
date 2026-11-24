@@ -13,7 +13,7 @@
 //   openRoom      _open_room_locked, new room
 //   join          _join_room_locked, new player; a join into a playing room
 //                 takes the late-join path (play.js "Mid-game join handling")
-//   startGame     _start_game_locked. Note: no guard on room.status.
+//   startGame     _start_game_locked, including a second delivery from the lobby.
 //   endGame       _end_game_locked
 //   leave         _leave (intentional), with ownership transfer
 //   reload        page unload mid-game: socket drops, 30 s grace keeps the slot
@@ -242,11 +242,18 @@ module room {
     matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
   }
 
-  // The Start button lives in the lobby UI; the server checks only ownership.
+  // A host may send two Start requests before its page hears game-started.
+  const START_ONLY_IN_LOBBY: bool
+  def matchForStart = if (START_ONLY_IN_LOBBY and status == "playing") matchId else nextMatch
+
   action startGame = all {
-    online.contains(owner), page.get(owner) == Lobby,
-    status' = "playing", matchId' = nextMatch, nextMatch' = nextMatch + 1, lostToGrace' = lostToGrace,
-    page' = broadcastGameStarted(nextMatch),
+    online.contains(owner), page.get(owner) == Lobby or status == "playing",
+    status' = "playing", matchId' = matchForStart, lostToGrace' = lostToGrace,
+    if (matchForStart == matchId) all {
+      nextMatch' = nextMatch, page' = page,
+    } else all {
+      nextMatch' = nextMatch + 1, page' = broadcastGameStarted(nextMatch),
+    },
     members' = members, owner' = owner, creator' = creator,
     online' = online, grace' = grace,
   }
@@ -487,6 +494,8 @@ module room {
 
   // ── properties ─────────────────────────────────────────────────────────
 
+  val aLiveMatchCannotStartAgain = status == "playing" implies matchForStart == matchId
+
   // The host never sits in the lobby while the server says a game is on.
   // Violated today (production, 2026-11-09, room X8XXM872): joiners were sent
   // down the late-join path towards a host with no emulator running.
@@ -580,6 +589,17 @@ module room {
   val aMatchIsNotLostToTheGraceWindow = not(lostToGrace)
 
   // ── scenarios ──────────────────────────────────────────────────────────
+
+  // Two Start requests arrive for the same lobby. Even after the host starts running,
+  // the delayed request leaves the match alone. End returns the host to the lobby for a rematch.
+  run queuedStartsTest =
+    init.then(openRoom("host")).then(startGame)
+      .then(beginSync).then(startRunning)
+      .then(startGame)
+      .expect(if (START_ONLY_IN_LOBBY) matchId == 1 and page.get("host") == Running(1)
+              else matchId == 2 and page.get("host") == Loading(2))
+      .then(endGame).then(startGame)
+      .expect(matchId == (if (START_ONLY_IN_LOBBY) 2 else 3))
 
   // The production sequence: host starts alone, reloads, a friend joins.
   run hostReloadTest =
@@ -789,7 +809,15 @@ module room {
 
 // The server and client as they are today.
 module room_current {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(START_ONLY_IN_LOBBY = true, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
+         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = true).*
+}
+
+// A second Start delivery used to allocate another match and restart every listening page.
+module room_before_duplicate_start_fix {
+  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = true).*
@@ -798,7 +826,7 @@ module room_current {
 // Before a late joiner the host dropped after its serve timed out started its
 // late join again. nobodyLoadsIntoARunningMatch is violated here.
 module room_before_serve_timeout_fix {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -807,7 +835,7 @@ module room_before_serve_timeout_fix {
 // Before the server kept the places of a room nobody was connected to.
 // aMatchIsNotLostToTheGraceWindow is violated here.
 module room_before_grace_wait {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -816,7 +844,7 @@ module room_before_grace_wait {
 // Before the server ended a match nobody was running.
 // anAbandonedMatchIsEnded is violated here.
 module room_before_abandoned_end {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -825,7 +853,7 @@ module room_before_abandoned_end {
 // Before a rejoin said it was a resume and a refusal was acted on.
 // nobodyIsStrandedInADroppedMatch is violated here.
 module room_before_resume_flag {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = false,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -835,7 +863,7 @@ module room_before_resume_flag {
 // (web/src/late-join-wait.ts). joinersAreNotLeftWaitingAtTheStart is
 // violated here.
 module room_before_start_fix {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false,
+  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -845,7 +873,7 @@ module room_before_start_fix {
 // (web/src/rejoin.ts). lateJoinersChaseTheCurrentMatch and
 // pagesAgreeWithServer are violated here.
 module room_before_reconcile {
-  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
+  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -853,7 +881,7 @@ module room_before_reconcile {
 
 // Before #104, kept so hostReloadTest still shows what that fix changed.
 module room_before_104 {
-  import room(HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
+  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*

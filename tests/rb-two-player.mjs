@@ -682,6 +682,7 @@
  * emulators headless on one machine run slowly and measure noisy RTTs, so
  * compare runs with each other; HEADED=1 on a real machine is closer to play.
  */
+import { PEER_TIMING } from '../web/src/peer-connection.ts';
 import { resyncOffEvidence } from './resync-off-evidence.mjs';
 import { chromium, webkit } from 'playwright';
 import fs from 'fs';
@@ -1263,23 +1264,8 @@ const LINK_RESYNC = LINK_KBPS > 0 && !(DELAY_SYNC_ANSWER_MS > 0);
 const LINK_RESYNC_RECOVER_MS = 30000;
 // Both start a third of the way in; what follows must fit in the remaining two thirds.
 const DROP_PEER_RECOVER_MS = 30000;
-// How long the host's reconnect attempt waits before it retries: the
-// engine's own _RECONNECT_ATTEMPT_TIMEOUT, read from netplay-rollback.js so
-// the two cannot drift. A DROP_PEER_MS longer than this drops the first
-// attempt's offer and outlasts its deadline, so the run must show a retry.
-const RECONNECT_ATTEMPT_TIMEOUT_MS = (() => {
-  const source = fs.readFileSync(
-    // URL is the server's address in this file.
-    new globalThis.URL('../web/static/netplay-rollback.js', import.meta.url),
-    'utf8',
-  );
-  const m = source.match(/const _RECONNECT_ATTEMPT_TIMEOUT = (\d+);/);
-  if (!m) {
-    console.log('netplay-rollback.js no longer defines _RECONNECT_ATTEMPT_TIMEOUT: update DROP_PEER_MS in this test');
-    process.exit(1);
-  }
-  return Number(m[1]);
-})();
+// A block longer than the initiating machine's deadline must exercise a retry.
+const RECONNECT_ATTEMPT_TIMEOUT_MS = PEER_TIMING.attemptAfterMs;
 const DELAY_SYNC_ANSWER_RECOVER_MS = 20000;
 const faultNeedsSeconds = Math.ceil(
   (((DROP_PEER_MS > 0 ? DROP_PEER_MS + DROP_PEER_RECOVER_MS : 0) +

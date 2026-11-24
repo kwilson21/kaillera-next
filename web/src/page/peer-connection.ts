@@ -72,11 +72,12 @@ export async function drainCandidates(peer: BufferingPeer): Promise<void> {
     // Swap to a temp array before iterating — candidates arriving during
     // the async addIceCandidate calls go into the fresh empty array
     // instead of being lost when we clear pendingCandidates.
+    const pc = peer.pc;
     const batch = peer.pendingCandidates;
     peer.pendingCandidates = [];
     for (const c of batch) {
       try {
-        await peer.pc.addIceCandidate(c);
+        await pc.addIceCandidate(c);
       } catch {}
     }
   }
@@ -124,16 +125,47 @@ export const addBufferedCandidate = async (peer: BufferingPeer, candidate: RTCIc
   }
 };
 
+export const attachSpectatorMedia = (pc: RTCPeerConnection, stream: MediaStream) => {
+  const video = stream.getVideoTracks().map((track) => pc.addTrack(track, stream));
+  let audioTrack = stream.getAudioTracks()[0] ?? null;
+  // Negotiate the audio lane together with video even if playback is still
+  // loading. Replacing its track later does not need a second SDP offer.
+  const sender = audioTrack
+    ? pc.addTrack(audioTrack, stream)
+    : pc.addTransceiver('audio', { direction: 'sendonly', streams: [stream] }).sender;
+  return {
+    pc,
+    stream,
+    async setAudio(track: MediaStreamTrack) {
+      if (track === audioTrack) return;
+      const old = audioTrack;
+      audioTrack = track;
+      try {
+        await sender.replaceTrack(track);
+      } catch (error) {
+        if (audioTrack === track) audioTrack = old;
+        throw error;
+      }
+    },
+    detach() {
+      if (pc.signalingState === 'closed') return;
+      for (const trackSender of [...video, sender]) pc.removeTrack(trackSender);
+    },
+  };
+};
+
 // Create an offer, set local description, and emit via socket.
 // Returns the offer for callers that need to inspect/modify it.
 export const createAndSendOffer = async (
   pc: RTCPeerConnection,
   socket: SignalSocket,
   targetSid: string,
+  current: () => boolean = () => true,
 ): Promise<RTCSessionDescriptionInit> => {
   const offer = await pc.createOffer();
+  if (!current()) return offer;
   await pc.setLocalDescription(offer);
-  socket.emit('webrtc-signal', { target: targetSid, offer });
+  if (current()) socket.emit('webrtc-signal', { target: targetSid, offer });
   return offer;
 };
 
@@ -144,9 +176,12 @@ export const createAndSendAnswer = async (
   socket: SignalSocket,
   targetSid: string,
   attemptId?: SignalPayload['attemptId'],
+  stillCurrent?: () => boolean,
 ): Promise<void> => {
   const answer = await pc.createAnswer();
+  if (stillCurrent && !stillCurrent()) return;
   await pc.setLocalDescription(answer);
+  if (stillCurrent && !stillCurrent()) return;
   socket.emit('webrtc-signal', attemptId ? { target: targetSid, answer, attemptId } : { target: targetSid, answer });
 };
 

@@ -43,6 +43,33 @@ sequenceDiagram
 
 The server's view of a room against what each player's page is doing. The note on a page is the state it moves to; a dashed arrow is what an action did to another page.
 
+### queuedStartsTest
+
+Two Start requests arrive for the same lobby. Even after the host starts running, the delayed request leaves the match alone. End returns the host to the lobby for a rematch.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  host->>Server: openRoom("host")
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
+  Note over host: Lobby
+  Server->>Server: startGame
+  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Server-->>host: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  Server->>Server: startGame
+  Server->>Server: endGame
+  Note over Server: status = lobby<br/>matchId = 0
+  Server-->>host: Lobby
+  Server->>Server: startGame
+  Note over Server: status = playing<br/>matchId = 2<br/>nextMatch = 3
+  Server-->>host: Loading(2)
+```
+
 ### hostReloadTest
 
 The production sequence: host starts alone, reloads, a friend joins.

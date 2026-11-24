@@ -70,6 +70,7 @@ import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
+from itertools import chain
 
 import socketio
 
@@ -754,36 +755,34 @@ async def connect(sid: str, environ: dict) -> None:
     log.info("SIO connect %s (ip=%s)", sid, ip)
 
 
+async def _expire_rooms(previous: dict[str, tuple[Room, int]]) -> dict[str, tuple[Room, int]]:
+    offline = {}
+    async with _room_lock:
+        for code, room in list(rooms.items()):
+            if room.players or room.spectators:
+                members = chain(room.players.values(), room.spectators.values())
+                if any(member["socketId"] in _sid_to_room for member in members):
+                    continue
+                # A newly opened room can reuse a code during the five-minute grace.
+                previous_room, ticks = previous.get(code, (None, 0))
+                ticks = ticks + 1 if previous_room is room else 1
+                if ticks < 5:
+                    offline[code] = (room, ticks)
+                    continue
+            del rooms[code]
+            await state.delete_room(code)
+            log.info("Cleanup: deleted room %s", code)
+        for code in [key for key in _room_frames if key not in rooms]:
+            _drop_room_frame(code)
+    return offline
+
+
 async def _cleanup_empty_rooms() -> None:
-    """Periodically remove empty rooms and zombie rooms (no live sockets)."""
-    _zombie_ages: dict[str, int] = {}  # session_id -> consecutive zombie ticks
+    """Periodically remove empty rooms and rooms with no live sockets."""
+    offline = {}
     while True:
         await asyncio.sleep(60)
-        to_delete = []
-        for session_id, r in list(rooms.items()):
-            if not r.players and not r.spectators:
-                to_delete.append(session_id)
-                continue
-            # Zombie check: room has entries but no live sockets
-            has_live = False
-            for info in list(r.players.values()) + list(r.spectators.values()):
-                if info["socketId"] in _sid_to_room:
-                    has_live = True
-                    break
-            if not has_live:
-                _zombie_ages[session_id] = _zombie_ages.get(session_id, 0) + 1
-                if _zombie_ages[session_id] >= 5:  # 5 minutes grace period
-                    to_delete.append(session_id)
-            else:
-                _zombie_ages.pop(session_id, None)
-        async with _room_lock:
-            for session_id in to_delete:
-                del rooms[session_id]
-                _zombie_ages.pop(session_id, None)
-                await state.delete_room(session_id)
-                log.info("Cleanup: deleted room %s", session_id)
-            for session_id in [k for k in _room_frames if k not in rooms]:
-                _drop_room_frame(session_id)
+        offline = await _expire_rooms(offline)
         cleanup()
 
 
@@ -1204,6 +1203,8 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     session_id, room = result
     if room.owner != sid:
         return "Only the host can start the game"
+    if room.status == "playing":
+        return None  # A queued Start is already satisfied by the live match.
 
     mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
 

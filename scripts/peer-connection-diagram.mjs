@@ -20,6 +20,7 @@ const OUT = new URL('../docs/peer-connection-machine.md', import.meta.url);
 const DEADLINES = {
   startupAfter: { model: '`startupTimeout`', ms: PEER_TIMING.startupAfterMs, states: ['offering'] },
   attemptAfter: { model: '`attemptTimeout`', ms: PEER_TIMING.attemptAfterMs, states: ['reconnecting.offering'] },
+  retryAfter: { model: '`reconnect_attempt.retry`', ms: PEER_TIMING.retryAfterMs, states: ['reconnecting.backoff'] },
   giveUpAfter: { model: '`giveUpTimeout`', ms: PEER_TIMING.giveUpAfterMs, states: ['reconnecting'] },
   answerAfter: {
     model: '`answerTimeout`',
@@ -44,6 +45,8 @@ const MODEL = {
   open: '`open`',
   'reconnecting.awaitingOffer': '`recon` and `giveUp`; no connection',
   'reconnecting.offering': '`recon` and `giveUp`; `made` (then `link`) is its own offer, `attempt` >= 1',
+  'reconnecting.backoff': 'one retry is due after the current attempt failed',
+  'reconnecting.awaitingChannel': 'the transport connected; the channel can still open before give-up',
   'reconnecting.answering': '`recon` and `giveUp`; `link` is their offer, `ansTimer`',
 };
 
@@ -69,6 +72,8 @@ const eventsFor = (snapshot) => {
     ['answer', { type: 'answer', ...id }],
     ['opened', { type: 'opened', ...id }],
     ['lost', { type: 'lost', ...id }],
+    ['attempt failed', { type: 'attemptFailed', ...id }],
+    ['transport connected', { type: 'transportConnected', ...id }],
     ...armed,
   ];
 };

@@ -13,6 +13,8 @@ flowchart LR
   subgraph reconnecting
     reconnecting_awaitingOffer["awaitingOffer"]
     reconnecting_offering["offering"]
+    reconnecting_backoff["backoff"]
+    reconnecting_awaitingChannel["awaitingChannel"]
     reconnecting_answering["answering"]
   end
   absent -->|"roster (lower slot, before the match) / offer"| offering
@@ -48,12 +50,21 @@ flowchart LR
   healing -->|"opened"| open
   stalled -->|"offer: first / answer<br/>offer: first, from a new page / drop, answer<br/>offer: startup / answer<br/>offer: reconnect (before the match) / answer"| answering
   reconnecting_offering -->|"offer: first / answer<br/>offer: first, from a new page / drop, answer<br/>offer: startup / answer<br/>offer: reconnect / answer"| reconnecting_answering
-  reconnecting_offering -->|"attemptAfter / offer"| reconnecting_offering
+  reconnecting_offering -->|"attempt failed / backoff<br/>attemptAfter / backoff"| reconnecting_backoff
+  reconnecting_offering -->|"transport connected"| reconnecting_awaitingChannel
   stalled -->|"opened"| open
   stalled -->|"offer: reconnect (in a match) / answer"| reconnecting_answering
   stalled -->|"healAfter (in a match) / reset, offer"| healing
   reconnecting_offering -->|"opened"| open
-  reconnecting_offering -->|"attemptAfter / drop"| absent
+  reconnecting_backoff -->|"offer: first / answer<br/>offer: first, from a new page / drop, answer<br/>offer: startup / answer<br/>offer: reconnect / answer"| reconnecting_answering
+  reconnecting_backoff -->|"transport connected"| reconnecting_awaitingChannel
+  reconnecting_backoff -->|"retryAfter / offer"| reconnecting_offering
+  reconnecting_awaitingChannel -->|"offer: first / answer<br/>offer: first, from a new page / drop, answer<br/>offer: startup / answer<br/>offer: reconnect / answer"| reconnecting_answering
+  reconnecting_awaitingChannel -->|"attempt failed / backoff"| reconnecting_backoff
+  reconnecting_backoff -->|"opened"| open
+  reconnecting_awaitingChannel -->|"opened"| open
+  reconnecting_offering -->|"attempt failed / drop<br/>attemptAfter / drop"| absent
+  reconnecting_awaitingChannel -->|"attempt failed / drop"| absent
   absent -->|"roster (higher slot, before the match)"| awaitingOffer
   awaitingOffer -->|"healAfter (higher slot, in a match)"| reconnecting_awaitingOffer
   open -->|"lost (higher slot, in a match)"| reconnecting_awaitingOffer
@@ -84,6 +95,8 @@ Each state, what it is in the model, and what the engine keeps as flags for it (
 | `open` | `open` | yes | yes | no |
 | `reconnecting.awaitingOffer` | `recon` and `giveUp`; no connection | yes | no | yes |
 | `reconnecting.offering` | `recon` and `giveUp`; `made` (then `link`) is its own offer, `attempt` >= 1 | yes | no | yes |
+| `reconnecting.backoff` | one retry is due after the current attempt failed | yes | no | yes |
+| `reconnecting.awaitingChannel` | the transport connected; the channel can still open before give-up | yes | no | yes |
 | `reconnecting.answering` | `recon` and `giveUp`; `link` is their offer, `ansTimer` | yes | no | yes |
 
 The deadlines (`PEER_TIMING`, the engine’s numbers today):
@@ -92,6 +105,7 @@ The deadlines (`PEER_TIMING`, the engine’s numbers today):
 |---|---|---|---|
 | `startupAfter` | `startupTimeout` | 8 s | `offering` |
 | `attemptAfter` | `attemptTimeout` | 10 s | `reconnecting.offering` |
+| `retryAfter` | `reconnect_attempt.retry` | 3 s | `reconnecting.backoff` |
 | `giveUpAfter` | `giveUpTimeout` | 45 s | `reconnecting` |
 | `answerAfter` | `answerTimeout` | 10 s | `answering`, `reconnecting.answering` |
 | `healAfter` | `heal` | 5 s | `absent`, `awaitingOffer`, `offering`, `stalled`, `answering`, `healing` |
