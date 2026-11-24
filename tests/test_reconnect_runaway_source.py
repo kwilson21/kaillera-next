@@ -209,7 +209,7 @@ def test_an_input_the_page_lacked_keeps_the_peer_live_a_repeat_does_not():
         ) : store
     ]
     assert "existingHeaderInput" in before
-    after = src[store : store + 800]
+    after = src[store : src.index("    if (!_lastKnownInput[peer.slot]", store)]
     assert (
         "if (existingHeaderInput === undefined && _peerLastAdvanceTime[peer.slot] !== undefined) {"
         in after
