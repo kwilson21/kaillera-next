@@ -105,6 +105,7 @@ def test_watch_link_waits_for_relay_before_answering(
     host, guest, watcher = [browser.new_page() for _ in range(3)]
     room = f"W{mode[0].upper()}{scenario[:3].upper()}"
     relay_available = scenario == "relay"
+    managed_retry_seconds = 3
     delayed_ice = []
     turn_url = "turn:127.0.0.1:3478"
     watcher.route("**/ice-servers?token=*", lambda route: delayed_ice.append(route))
@@ -178,7 +179,10 @@ def test_watch_link_waits_for_relay_before_answering(
             if scenario in ("transient", "expired"):
                 route.fulfill(status=503)
             elif scenario == "managed":
-                route.fulfill(json=[stun], headers={"X-KN-Relay-Retry-After": "60"})
+                route.fulfill(
+                    json=[stun],
+                    headers={"X-KN-Relay-Retry-After": str(managed_retry_seconds)},
+                )
             else:
                 route.fulfill(
                     json=[stun, turn] if relay_available else [stun],
@@ -234,7 +238,6 @@ def test_watch_link_waits_for_relay_before_answering(
                     )
 
             if scenario == "managed":
-                watcher.evaluate("window.__watchClockOffset = 30 * 1000")
                 with (
                     pytest.raises(PlaywrightTimeoutError),
                     watcher.expect_request("**/ice-servers?token=*", timeout=500),
@@ -242,7 +245,12 @@ def test_watch_link_waits_for_relay_before_answering(
                     later_offers()
                 assert len(delayed_ice) == 1
                 assert watcher.evaluate("window.__watchAnswers.length") == 0
-                watcher.evaluate("window.__watchClockOffset = 61 * 1000")
+                # Advancing Date.now also expires Engine.IO's live heartbeat.
+                # Let the advertised provider cooldown elapse on the connected socket.
+                watcher.evaluate(
+                    "(seconds) => new Promise(resolve => setTimeout(resolve, seconds * 1000))",
+                    managed_retry_seconds,
+                )
 
             if scenario in ("transient", "managed"):
                 with watcher.expect_request("**/ice-servers?token=*", timeout=3000):
