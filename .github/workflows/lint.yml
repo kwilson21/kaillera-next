@@ -241,7 +241,7 @@ jobs:
       # file is never left out of CI.
       - name: Server unit tests
         env:
-          KN_REQUIRE_IS_VIEWER_SOURCE: "1"
+          KN_REQUIRE_IS_VIEWER_SOURCE: '1'
         run: |
           files=$(python scripts/browser_shard.py --unit)
           echo "$files"
