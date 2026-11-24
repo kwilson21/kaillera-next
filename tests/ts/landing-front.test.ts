@@ -1210,6 +1210,12 @@ test('the front page bundle is made of the landing modules only: no core, no Eff
   const inputs = bundleInputs('landing-entry.ts');
   assert.ok(inputs.includes('web/src/landing/front.ts'));
   for (const input of inputs) {
-    assert.ok(input === 'web/src/landing-entry.ts' || input.startsWith('web/src/landing/'), input);
+    assert.ok(
+      input === 'web/src/landing-entry.ts' ||
+        input === 'web/src/play/host-return.ts' ||
+        input === 'web/src/play/token-claims.ts' ||
+        input.startsWith('web/src/landing/'),
+      input,
+    );
   }
 });

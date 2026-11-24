@@ -5,6 +5,7 @@ Run: pytest tests/test_e2e.py -v
 
 import re
 import secrets
+import time
 
 import pytest
 from playwright.sync_api import expect
@@ -29,6 +30,84 @@ def test_lobby_to_play_redirect(page, server_url):
     page.goto(server_url)
     page.click("#create-btn")
     expect(page).to_have_url(re.compile(r"play\.html\?room=\w+&host=1&mode=rollback"))
+
+
+def test_reopened_host_url_uses_the_rooms_current_mode(page, server_url, room):
+    url = f"{server_url}/play.html?room={room}&host=1&mode=rollback"
+    page.goto(url)
+    expect(page.locator("#host-controls")).to_be_visible()
+    page.locator("#opt-listed").check()
+    page.locator("#mode-select").select_option("streaming", force=True)
+    assert page.request.get(f"{server_url}/room/{room}").json()["mode"] == "streaming"
+
+    # A duplicate inherits this tab's credentials while its host is still connected.
+    with page.expect_popup() as popup:
+        page.evaluate("window.open(location.href)")
+    duplicate = popup.value
+    expect(duplicate.locator("#host-return-dialog [role=status]")).to_contain_text("still connected")
+    duplicate.close()
+    assert page.evaluate("KNState.isLocalHost")
+
+    page.reload()
+    expect(page.locator("#host-controls")).to_be_visible()
+    expect(page.locator("#mode-select")).to_have_value("streaming")
+    expect(page.locator("#opt-listed")).to_be_checked()
+    assert page.evaluate("KNState.slot") == 0
+    assert page.locator("#rollback-options").evaluate("e => e.style.display") == "none"
+    assert page.request.get(f"{server_url}/room/{room}").json()["mode"] == "streaming"
+
+
+def test_reopened_host_url_does_not_recreate_an_expired_room(page, server_url, room):
+    url = f"{server_url}/play.html?room={room}&host=1"
+    page.goto(url)
+    page.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
+    page.goto(server_url)
+    deadline = time.monotonic() + 15
+    while page.request.get(f"{server_url}/room/{room}").status == 200 and time.monotonic() < deadline:
+        time.sleep(0.25)
+    assert page.request.get(f"{server_url}/room/{room}").status == 404
+
+    # The tab remembers which room it visited even after its ticket expires.
+    page.add_init_script("const now = Date.now.bind(Date); Date.now = () => now() + 3600000;")
+    page.goto(url)
+    expect(page.locator(".error-card")).to_contain_text("Room not found")
+    assert page.request.get(f"{server_url}/room/{room}").status == 404
+
+
+def test_host_return_after_a_temporary_lookup_failure(page, server_url, room):
+    url = f"{server_url}/play.html?room={room}&host=1"
+    page.goto(url)
+    page.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
+    page.route(f"**/room/{room}", lambda route: route.fulfill(status=503))
+    page.reload()
+    expect(page.locator(".error-card")).to_contain_text("try again")
+    page.unroute(f"**/room/{room}")
+    page.reload()
+    expect(page.locator("#host-controls")).to_be_visible()
+
+
+def test_reopened_host_url_joins_after_ownership_has_transferred(browser, server_url, room):
+    url = f"{server_url}/play.html?room={room}"
+    original = browser.new_page()
+    guest = browser.new_page()
+    try:
+        original.goto(f"{url}&host=1&name=Original")
+        original.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
+        guest.goto(f"{url}&name=Guest")
+        guest.wait_for_function("KNState.slot === 1")
+        original.goto(server_url)
+        guest.wait_for_function("KNState.isLocalHost && KNState.slot === 0", timeout=15000)
+
+        original.goto(f"{url}&host=1&name=Original")
+        original.wait_for_function("KNState.slot === 1")
+        expect(original.locator("#guest-status")).to_be_visible()
+        expect(original.locator("#host-controls")).to_be_hidden()
+        original.wait_for_function("room => !localStorage.getItem('kn-host-return:' + room)", arg=room)
+        assert guest.evaluate("room => !!localStorage.getItem('kn-host-return:' + room)", room)
+        assert guest.evaluate("KNState.isLocalHost")
+    finally:
+        original.close()
+        guest.close()
 
 
 def test_host_guest_start_end(browser, server_url):
@@ -391,6 +470,11 @@ def test_host_disclaimer_visible(context, server_url):
         expect(host.locator("#rom-sharing-disclaimer")).to_contain_text(
             "legal right to distribute"
         )
+        host.reload()
+        expect(host.locator("#host-controls")).to_be_visible()
+        host.click("#host-controls .advanced-options > summary")
+        expect(host.locator("#opt-rom-sharing")).to_be_checked()
+        expect(host.locator("#rom-sharing-disclaimer")).to_be_visible()
     finally:
         host.close()
 

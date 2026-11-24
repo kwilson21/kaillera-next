@@ -26,6 +26,7 @@ export interface SessionStats {
 
 /** The storage helpers the state carries (web/src/site/storage.ts). */
 export interface SafeStorage {
+  keys?: (store: 'localStorage' | 'sessionStorage', prefix: string) => string[];
   get: (store: 'localStorage' | 'sessionStorage', key: string) => string | null;
   set: (store: 'localStorage' | 'sessionStorage', key: string, value: string) => void;
   remove: (store: 'localStorage' | 'sessionStorage', key: string) => void;

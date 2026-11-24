@@ -29,20 +29,30 @@ const usable = (host: StorageHost, store: StoreName): boolean => {
 
 /** Each store is probed once, here; a store that fails the probe is in memory for the life of the page. */
 export const createSafeStorage = (host: StorageHost): SafeStorage => {
-  const memory = new Map<string, string>();
+  const memory = { localStorage: new Map<string, string>(), sessionStorage: new Map<string, string>() };
   const ok: Record<StoreName, boolean> = {
     localStorage: usable(host, 'localStorage'),
     sessionStorage: usable(host, 'sessionStorage'),
   };
   return {
-    get: (store, key) => (ok[store] ? host[store].getItem(key) : (memory.get(`${store}:${key}`) ?? null)),
+    keys: (store, prefix) => {
+      if (!ok[store]) return [...memory[store].keys()].filter((key) => key.startsWith(prefix));
+      const saved = host[store];
+      const keys: string[] = [];
+      for (let i = 0; i < saved.length; i++) {
+        const key = saved.key(i);
+        if (key?.startsWith(prefix)) keys.push(key);
+      }
+      return keys;
+    },
+    get: (store, key) => (ok[store] ? host[store].getItem(key) : (memory[store].get(key) ?? null)),
     set: (store, key, value) => {
       if (ok[store]) host[store].setItem(key, value);
-      else memory.set(`${store}:${key}`, value);
+      else memory[store].set(key, value);
     },
     remove: (store, key) => {
       if (ok[store]) host[store].removeItem(key);
-      else memory.delete(`${store}:${key}`);
+      else memory[store].delete(key);
     },
   };
 };

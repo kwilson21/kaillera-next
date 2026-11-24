@@ -12,6 +12,7 @@
  * sleeps, so it loads no core.
  */
 import type { SafeStorage } from '../kn-state.ts';
+import { HOST_RETURN_PREFIX, readHostReturn } from '../play/host-return.ts';
 import {
   BOARD_STATES,
   MARKS,
@@ -62,7 +63,9 @@ import {
 import {
   boardRooms,
   getJSON,
+  getJSONIfThere,
   isHealthAnswer,
+  isRoomAnswer,
   isJson,
   isPublicStats,
   type BoardRoom,
@@ -79,7 +82,7 @@ export interface FrontHost extends WakeHost, CodeHost {
   readonly Math: Pick<Math, 'random'>;
   readonly Element: typeof Element;
   /** The safe storage wrapper, set by the small site bundle that loads first. */
-  readonly KNStorage?: Pick<SafeStorage, 'get' | 'set'>;
+  readonly KNStorage?: SafeStorage;
   matchMedia(query: string): Pick<MediaQueryList, 'matches'>;
   setInterval(handler: () => void, ms: number): number;
   clearInterval(id: number): void;
@@ -402,6 +405,49 @@ export const startFrontPage = (host: FrontHost): void => {
     restoreFocus(f);
   };
 
+  const hostReturns = $('host-returns');
+  const returnLinks = new Map<string, HTMLAnchorElement>();
+  const checkHostReturns = (checkRooms = false): void => {
+    const storage = host.KNStorage;
+    if (!storage?.keys || (API && new URL(API, host.location.href).origin !== host.location.origin)) return;
+    const present = new Set<string>();
+    for (const key of storage.keys('localStorage', HOST_RETURN_PREFIX)) {
+      const code = key.slice(HOST_RETURN_PREFIX.length);
+      const token = storage.get('localStorage', key);
+      if (!/^[A-Za-z0-9]{3,16}$/.test(code) || !readHostReturn(code, token, host.Date.now())) {
+        if (token === storage.get('localStorage', key)) storage.remove('localStorage', key);
+        continue;
+      }
+      present.add(code);
+      if (!returnLinks.has(code)) {
+        const link = el('a', 'btn big', `Return to room ${code}`);
+        link.href = playUrl(API, code, false);
+        hostReturns.append(link);
+        returnLinks.set(code, link);
+      }
+      if (checkRooms) {
+        // Unlisted rooms are absent from the board. A lookup failure can be temporary.
+        void getJSONIfThere(host, `${API}/room/${encodeURIComponent(code)}`, BOARD_TIMEOUT_MS, isRoomAnswer)
+          .then((room) => {
+            if (room === null && token === storage.get('localStorage', key)) {
+              storage.remove('localStorage', key);
+              checkHostReturns();
+            }
+          })
+          .catch(() => {});
+      }
+    }
+    for (const [code, link] of returnLinks) {
+      if (!present.has(code)) {
+        link.remove();
+        returnLinks.delete(code);
+      }
+    }
+    hostReturns.hidden = returnLinks.size === 0;
+  };
+  host.addEventListener('storage', () => checkHostReturns(), { passive: true });
+  checkHostReturns();
+
   // ── Polling, waking ─────────────────────────────────────────────────────
 
   let pollTimer = 0;
@@ -432,7 +478,9 @@ export const startFrontPage = (host: FrontHost): void => {
     // is used, even if a newer refresh is still out.
     const seq = ++refreshSeq;
     if (fresh) pollCount = 0;
-    const statsReq = asksForStats(pollCount++)
+    const refreshDetails = asksForStats(pollCount++);
+    checkHostReturns(refreshDetails);
+    const statsReq = refreshDetails
       ? getJSON(host, `${API}/api/stats/public`, BOARD_TIMEOUT_MS, isPublicStats)
           .then((st) => {
             if (seq < statsSeq) return;

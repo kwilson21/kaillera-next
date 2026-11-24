@@ -232,7 +232,8 @@ def test_host_navigation_keeps_the_match_unless_confirmed(browser, server_url, r
         guest.close()
 
 
-def test_closed_host_tab_returns_from_a_new_tab_without_displacing_a_live_host(browser, server_url, room):
+@pytest.mark.parametrize("entry", ["retry", "invite", "home"])
+def test_closed_host_tab_returns_from_a_new_tab_without_displacing_a_live_host(browser, server_url, room, entry):
     url = f"{server_url}/play.html?room={room}"
     with browser.new_context() as context:
         context.add_init_script("window.__test_skipBoot = true")
@@ -243,24 +244,38 @@ def test_closed_host_tab_returns_from_a_new_tab_without_displacing_a_live_host(b
         try:
             _start_room(host, guest)
             match_id = guest.evaluate("KNState.matchId")
-            replacement = context.new_page()
-            replacement.goto(url)
-            choose = replacement.get_by_role("button", name="Return as host")
-            expect(choose).to_be_visible()
-            choose.click()
-            expect(replacement.locator("#host-return-dialog [role=status]")).to_contain_text("still connected")
+            duplicate = context.new_page()
+            duplicate.goto(url)
+            duplicate.get_by_role("button", name="Return as host").click()
+            expect(duplicate.locator("#host-return-dialog [role=status]")).to_contain_text("still connected")
             assert guest.evaluate("KNState.matchId") == match_id
             assert host.evaluate("KNState.isLocalHost")
 
             host.close()
-            choose.click()
+            if entry == "retry":
+                replacement = duplicate
+            else:
+                duplicate.close()
+                replacement = context.new_page()
+                if entry == "invite":
+                    replacement.goto(f"{server_url}/join?room={room}")
+                    replacement.get_by_role("link", name="Return to room").click()
+                else:
+                    replacement.goto(server_url)
+                    replacement.get_by_role("link", name=f"Return to room {room}").click()
+            replacement.get_by_role("button", name="Return as host").click()
             expect(replacement.locator("#host-controls")).to_be_visible()
             expect(replacement.locator("#host-reload-notice")).to_be_visible()
             expect(guest.locator("#host-reload-notice")).to_be_visible()
             expect(replacement.locator("#start-btn")).to_be_enabled(timeout=10000)
             replacement.click("#start-btn")
-            _in_match(guest)
-            assert guest.evaluate("KNState.matchId") != match_id
+            for page in (replacement, guest):
+                _in_match(page)
+                expect(page.locator("#overlay")).to_be_hidden()
+                expect(page.locator("#host-reload-notice")).to_be_hidden()
+            rematch_id = replacement.evaluate("KNState.matchId")
+            assert rematch_id != match_id
+            assert guest.evaluate("KNState.matchId") == rematch_id
         finally:
             guest.close()
 

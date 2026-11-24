@@ -147,6 +147,7 @@ def test_authoritative_old_end_cannot_end_the_selected_current_match():
     const isGameRunning=()=>true, _isLateJoin=()=>false, _isPendingLateJoin=()=>false;
     const console={log:()=>{}}, _romBlob=null, _romBlobUrl=null, window={};
     const _sessionStopLateJoinPoll=()=>{}, _session={send:({type})=>events.push(type)};
+    const guardHostNavigation=active=>events.push(active);
     const showToast=()=>{}, hibernateEmulator=()=>{}, document={getElementById:()=>null};
     const dismissGameLoading=()=>{}, hideToolbar=()=>{}, _clearLateJoinRomPrompt=()=>{}, showOverlay=()=>{};
     const lastUsersData=null, resetRomTransfer=()=>{}, cleanupPreGameConnections=()=>{};
@@ -162,7 +163,7 @@ def test_authoritative_old_end_cannot_end_the_selected_current_match():
     actual = _run(f"{mocks}\n{on_end}\n{actions}")
     assert actual == {
         "afterStale": {"matchId": "match-b", "warning": "match-b", "events": []},
-        "matchId": None, "warning": None, "events": ["gameEnded", "stop"],
+        "matchId": None, "warning": None, "events": ["gameEnded", False, "stop"],
     }
 
 
@@ -179,7 +180,7 @@ def test_client_propagation_ignores_stale_updates_and_never_echoes_remote_warnin
     const engine={markMatchRecoveryUnverified: (matchId)=>marks.push(matchId)};
     let _unverifiedMatchId=null, _localUnverifiedMatchId=null, _reportedUnverifiedMatchId=null,
       _integrityNotice=null, _integrityNoticeAttempt=null;
-    const _persistentId='local';
+    const _identity={persistentId:'local'};
     let isHost=false, lastUsersData=null, active=true,
       socket={id:'sid-a',connected:true,emit:(...x)=>sends.push(x.slice(0,2))};
     const showToast=s=>toasts.push(s), isGameRunning=()=>active;

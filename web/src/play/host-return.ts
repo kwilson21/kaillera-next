@@ -2,7 +2,8 @@ import type { SafeStorage } from '../kn-state.ts';
 import { tokenClaims } from './token-claims.ts';
 
 /** The room's server verifies this credential before changing any membership. */
-export const hostReturnKey = (room: string): string => `kn-host-return:${room}`;
+export const HOST_RETURN_PREFIX = 'kn-host-return:';
+export const hostReturnKey = (room: string): string => HOST_RETURN_PREFIX + room;
 
 export type HostReturn = { readonly persistentId: string; readonly token: string };
 
@@ -51,6 +52,13 @@ export class RoomIdentity {
 
   hasRoomToken(): boolean {
     return readHostReturn(this.room, this.reconnectToken)?.persistentId === this.persistentId;
+  }
+
+  /** A restored host URL still means to return after its credential expires. */
+  wasInRoom(): boolean {
+    return !!(
+      this.storage.get('sessionStorage', this.tokenKey) || this.storage.get('localStorage', hostReturnKey(this.room))
+    );
   }
 
   forgetHost(): void {

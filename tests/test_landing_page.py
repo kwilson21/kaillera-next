@@ -6,11 +6,13 @@ Playwright routes, so every board state can be reached on demand.
 Run: pytest tests/test_landing_page.py -v
 """
 
+import json
 import re
 import time
 
 import pytest
 from playwright.sync_api import expect
+from src.api.signaling import make_reconnect_token
 
 
 def _ago(seconds):
@@ -119,6 +121,52 @@ def test_live_board_rows_and_links(landing):
         "/play.html?room=KAZ12345&spectate=1"
     )
     expect(page.locator(".room").nth(1)).to_contain_text("in game · 6 min")
+
+
+def test_home_shows_hosted_rooms_on_mobile_including_unlisted_and_full(page, server_url, monkeypatch):
+    page.set_viewport_size({"width": 390, "height": 844})
+    codes = ["PRIV1234", "fULL5678", "GONE1234", "WRONG123"]
+    tokens = {
+        "kn-host-return:" + code: make_reconnect_token("ELSE123" if code == "WRONG123" else code, "host")
+        for code in codes
+    }
+    with monkeypatch.context() as then:
+        then.setattr(time, "time", lambda: 1)
+        tokens["kn-host-return:EXPIRED1"] = make_reconnect_token("EXPIRED1", "host")
+    page.add_init_script(f"for (const [k,v] of Object.entries({json.dumps(tokens)})) localStorage.setItem(k,v)")
+    _mock(page, rooms=[_room("fULL5678", "Host", players=4)])
+    page.route("**/room/PRIV1234", lambda r: r.fulfill(json=_room("PRIV1234", "Host")))
+    page.route("**/room/fULL5678", lambda r: r.fulfill(json=_room("fULL5678", "Host", players=4)))
+    page.route("**/room/GONE1234", lambda r: r.fulfill(status=404))
+    with page.expect_response("**/room/GONE1234"):
+        page.goto(server_url)
+    returns = page.get_by_role("navigation", name="Your hosted rooms")
+    for code in codes[:2]:
+        link = returns.get_by_role("link", name=f"Return to room {code}")
+        expect(link).to_be_visible()
+        assert link.get_attribute("href") == f"/play.html?room={code}"
+    expect(returns.get_by_role("link")).to_have_count(2)
+    assert page.evaluate("localStorage.getItem('kn-host-return:GONE1234')") is None
+    assert page.evaluate("localStorage.getItem('kn-host-return:WRONG123')") is None
+    assert page.evaluate("localStorage.getItem('kn-host-return:EXPIRED1')") is None
+
+    # Another tab deliberately leaves the two rooms while the homepage stays open.
+    with page.context.new_page() as other:
+        other.goto(server_url)
+        other.evaluate("localStorage.clear()")
+        expect(returns).to_be_hidden()
+
+
+def test_home_keeps_saved_host_rooms_during_a_temporary_lookup_failure(page, server_url):
+    code = "PRIV1234"
+    token = make_reconnect_token(code, "host")
+    page.add_init_script(f"localStorage.setItem('kn-host-return:{code}', {json.dumps(token)})")
+    _mock(page)
+    page.route(f"**/room/{code}", lambda r: r.fulfill(status=503))
+    with page.expect_response(f"**/room/{code}"):
+        page.goto(server_url)
+    expect(page.get_by_role("link", name=f"Return to room {code}")).to_be_visible()
+    assert page.evaluate(f"localStorage.getItem('kn-host-return:{code}')") == token
 
 
 def test_full_room_offers_watch_only(landing):

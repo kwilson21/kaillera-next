@@ -677,7 +677,8 @@
     const params = new URLSearchParams(window.location.search);
     roomCode = params.get('room');
     KNState.room = roomCode;
-    isHost = params.get('host') === '1';
+    // A restored tab already visited this room. Let the room answer with its current owner, slot and mode.
+    isHost = params.get('host') === '1' && !_identity.wasInRoom();
     KNState.isLocalHost = isHost;
     playerName = params.get('name') || _safeGet('localStorage', 'kaillera-name') || 'Player';
     _safeSet('localStorage', 'kaillera-name', playerName);
@@ -1151,7 +1152,7 @@
       return;
     }
 
-    if (isHost && !_returningHost) {
+    if (isHost && !_returningHost && !_identity.wasInRoom()) {
       const lastEndBeforeOpen = _lastHandledGameEndMatchId;
       socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || '', null), (err) => {
         // What the answer means is connect.ts: opened, the room is someone
@@ -1202,11 +1203,17 @@
         showOverlay();
       });
     } else {
-      // Non-host: check room exists, then join
+      // Returning players and new guests both join the room as it exists now.
+      const savedHost = _identity.savedHost();
       try {
         const response = await fetch(`/room/${encodeURIComponent(roomCode)}`);
         if (!response.ok) {
-          showError('Room not found — it may have expired or the code may be incorrect');
+          if (response.status === 404 && savedHost) _identity.discardRefused(savedHost.token);
+          showError(
+            response.status === 404
+              ? 'Room not found — it may have expired or the code may be incorrect'
+              : 'Could not reach the room. Please try again.',
+          );
           return;
         }
         const roomData = await response.json();
@@ -1294,6 +1301,8 @@
             }
             _identity.acceptReturn(returning);
             _returningHost = null;
+          } else if (joinData?.owner && joinData.owner !== sid && savedHost?.persistentId === joiner.persistentId) {
+            _identity.discardRefused(savedHost.token);
           }
           const joinedStatus = joinData?.status ?? roomData.status;
           const hostShares = joinData?.romSharing ?? roomData.rom_sharing;
@@ -1464,7 +1473,7 @@
           }
         });
       } catch (_) {
-        showError('Failed to connect');
+        showError('Could not reach the room. Please try again.');
       }
     }
   };
@@ -1511,9 +1520,7 @@
     if (data.mode) {
       const prevMode = mode;
       mode = normalizeMode(data.mode);
-      // Sync mode-select dropdown if we're the host
-      const modeSel = document.getElementById('mode-select');
-      if (modeSel && !isHost) modeSel.value = mode;
+      if (mode !== prevMode) renderModeControls();
       // Re-emit rom-ready when switching to rollback so the host's "Waiting for ROMs"
       // check clears for guests who had already declared ROM in streaming mode.
       // Skip if ROM hash doesn't match the host's (guest has wrong cached ROM).
@@ -1531,7 +1538,7 @@
     if (_ROM_SHARING_FEATURE && data.romSharing !== undefined) {
       const wasSharing = _romSharingEnabled;
       _romSharingEnabled = !!data.romSharing;
-      if (_romSharingEnabled !== wasSharing) {
+      if (_romSharingEnabled !== wasSharing || (isHost && !wasHost)) {
         console.log('[play] ROM sharing state from users-updated:', _romSharingEnabled);
         if (_romSharingEnabled && !isHost) showToast('Host is sharing their ROM');
         updateRomSharingUI();
@@ -1921,8 +1928,7 @@
     // Host broadcasts mode selection to guests pre-game
     if (data.type === 'mode-select' && !isHost && data.mode) {
       mode = normalizeMode(data.mode);
-      const modeSel = document.getElementById('mode-select');
-      if (modeSel) modeSel.value = mode;
+      renderModeControls();
       updateRomSharingUI();
       if (lastUsersData) updateStartButton(lastUsersData.players || {});
       if (mode !== 'streaming' && !isHost && !isSpectator) {
@@ -1970,7 +1976,16 @@
     const progress = document.getElementById('rom-transfer-progress');
     const retryBtn = document.getElementById('rom-transfer-retry');
 
-    if (isHost) return;
+    if (isHost) {
+      const cb = document.getElementById('opt-rom-sharing');
+      if (cb) {
+        cb.checked = _romSharingEnabled;
+        cb.disabled = !_romBlob && !_romSharingEnabled;
+      }
+      renderModeControls();
+      updateAdvancedSummaryStatuses();
+      return;
+    }
     if (isSpectator) return;
 
     // Streaming guests don't load a ROM — host streams video. Hide the drop
@@ -4172,10 +4187,7 @@
     if (!isHost && !isSpectator) renderRomLibrary();
 
     updateNameHint();
-    syncDelayPickerPlacement();
-
-    const modeSel = document.getElementById('mode-select');
-    if (modeSel) modeSel.value = mode;
+    renderModeControls();
   };
 
   const hideOverlay = () => {
@@ -4900,6 +4912,21 @@
   const selectedModeIsRollback = () =>
     everyoneRunsTheGame(normalizeMode(document.getElementById('mode-select')?.value || mode));
 
+  const renderModeControls = () => {
+    const select = document.getElementById('mode-select');
+    if (select) select.value = mode;
+    const isRollback = everyoneRunsTheGame(mode);
+    const rollbackOpts = document.getElementById('rollback-options');
+    if (rollbackOpts) rollbackOpts.style.display = isRollback ? '' : 'none';
+    const canShare = isRollback && _ROM_SHARING_FEATURE;
+    const sharingRow = document.getElementById('rom-sharing-options');
+    if (sharingRow) sharingRow.style.display = canShare ? '' : 'none';
+    const disclaimer = document.getElementById('rom-sharing-disclaimer');
+    if (disclaimer)
+      disclaimer.style.display = canShare && document.getElementById('opt-rom-sharing')?.checked ? '' : 'none';
+    syncDelayPickerPlacement(isRollback);
+  };
+
   const updatePlayerControlsVisibility = (isRollbackMode = selectedModeIsRollback()) => {
     const playerControls = document.getElementById('player-controls');
     if (playerControls) playerControls.style.display = !isHost && !isSpectator && isRollbackMode ? '' : 'none';
@@ -5378,23 +5405,12 @@
 
     // Show/hide rollback options based on mode selector
     const modeSelect = document.getElementById('mode-select');
-    const rollbackOpts = document.getElementById('rollback-options');
-    if (modeSelect && rollbackOpts) {
-      // Set mode-select from URL params before running updateOpts
-      modeSelect.value = mode;
+    if (modeSelect) {
       let _romSharingBeforeStreamingMode = false;
-      const updateOpts = () => {
-        const isRollback = everyoneRunsTheGame(normalizeMode(modeSelect.value));
+      modeSelect.addEventListener('change', () => {
         mode = normalizeMode(modeSelect.value);
-        rollbackOpts.style.display = isRollback ? '' : 'none';
-        syncDelayPickerPlacement(isRollback);
-        // Hide ROM sharing options in streaming mode
-        const romSharingRow = document.getElementById('rom-sharing-options');
-        const romSharingDisclaimer = document.getElementById('rom-sharing-disclaimer');
-        if (romSharingRow) romSharingRow.style.display = isRollback ? '' : 'none';
-        if (!isRollback && romSharingDisclaimer) romSharingDisclaimer.style.display = 'none';
         const cb = document.getElementById('opt-rom-sharing');
-        if (!isRollback) {
+        if (!everyoneRunsTheGame(mode)) {
           // Switching to streaming — save and disable sharing
           _romSharingBeforeStreamingMode = cb?.checked ?? false;
           if (cb?.checked) {
@@ -5407,7 +5423,8 @@
           socket.emit('rom-sharing-toggle', { enabled: true });
           _romSharingBeforeStreamingMode = false;
         }
-        updateRomSharingUI();
+        renderModeControls();
+        if (!isHost) updateRomSharingUI();
         if (lastUsersData) updateStartButton(lastUsersData.players || {});
         // Broadcast mode to guests so they can update ROM/sharing UI for the new mode
         if (socket?.connected) {
@@ -5415,9 +5432,9 @@
           // Also set on server for users-updated payload (requires server restart)
           socket.emit('set-mode', { mode: modeSelect.value });
         }
-      };
-      modeSelect.addEventListener('change', updateOpts);
-      updateOpts();
+      });
+      renderModeControls();
+      if (!isHost) updateRomSharingUI();
     }
 
     // Front-page listing (host only; the server refuses password rooms)
@@ -5443,18 +5460,11 @@
       if (sharingRow) sharingRow.style.display = 'none';
       if (sharingPrompt) sharingPrompt.hidden = true;
       if (sharingDisclaimer) sharingDisclaimer.style.display = 'none';
-    } else {
-      if (romShareCb) romShareCb.addEventListener('change', toggleRomSharing);
-
-      // Show/hide disclaimer based on checkbox
-      const romDisclaimer = document.getElementById('rom-sharing-disclaimer');
-      if (romShareCb && romDisclaimer) {
-        const updateDisclaimer = () => {
-          romDisclaimer.style.display = romShareCb.checked ? '' : 'none';
-        };
-        romShareCb.addEventListener('change', updateDisclaimer);
-        updateDisclaimer();
-      }
+    } else if (romShareCb) {
+      romShareCb.addEventListener('change', () => {
+        toggleRomSharing();
+        renderModeControls();
+      });
     }
 
     // ROM sharing accept/decline/cancel buttons
