@@ -155,6 +155,15 @@ class MatchJoinedPayload(BaseModel):
     matchId: str = Field(max_length=64)
 
 
+# ── match-recovery-unverified ────────────────────────────────────────────────
+
+
+class MatchRecoveryUnverifiedPayload(BaseModel):
+    """The room owner or active slot zero could not verify recovery of the named running match."""
+
+    matchId: str = Field(min_length=1, max_length=64)
+
+
 # ── end-game ─────────────────────────────────────────────────────────────────
 
 
@@ -322,6 +331,8 @@ class UsersUpdated(_ServerMessage):
     mode: GameMode | None
     status: RoomStatus
     listed: bool
+    # Sticky for the named match. Absent from older servers.
+    recoveryUnverifiedMatchId: str | None = None
 
 
 class JoinRoomAck(UsersUpdated):

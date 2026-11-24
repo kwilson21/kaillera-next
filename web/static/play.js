@@ -127,6 +127,12 @@
   let engine = null;
   let _endGameRequest = null;
   let _lastHandledGameEndMatchId = null;
+  let _unverifiedMatchId = null;
+  let _localUnverifiedMatchId = null;
+  let _reportedUnverifiedMatchId = null;
+  let _integrityNotice = null;
+  let _integrityNoticeAttempt = null;
+  const RECOVERY_UNVERIFIED = 'Recovery unverified. The host can end this match.';
   let _gameResyncEnabled = true;
   let previousPlayers = {};
   let previousSpectators = {};
@@ -793,6 +799,8 @@
       _connects?.attempt(attempt);
     });
     socket.on('disconnect', (reason) => {
+      _cancelIntegrityNotice();
+      _integrityNoticeAttempt = null;
       _session?.send({ type: 'socketDown' });
       console.log('[play] socket disconnected:', reason, 'id was:', socket.id);
       if (reason === 'io client disconnect') return;
@@ -921,13 +929,109 @@
     }
   };
 
+  const _cancelIntegrityNotice = () => {
+    const notice = _integrityNotice;
+    _integrityNotice = null;
+    notice?.request?.cancel();
+  };
+
+  const _clearMatchIntegrity = () => {
+    _cancelIntegrityNotice();
+    _unverifiedMatchId = null;
+    _localUnverifiedMatchId = null;
+    _reportedUnverifiedMatchId = null;
+    _integrityNoticeAttempt = null;
+  };
+
+  const _matchIntegrityText = (normalText) =>
+    _unverifiedMatchId && _unverifiedMatchId === KNState.matchId ? RECOVERY_UNVERIFIED : normalText;
+
+  const _showUnverifiedMatch = (matchId) => {
+    if (!matchId || matchId !== KNState.matchId) return false;
+    if (_unverifiedMatchId === matchId) return true;
+    _unverifiedMatchId = matchId;
+    for (const id of ['toolbar-status', 'engine-status', 'game-loading-text']) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = RECOVERY_UNVERIFIED;
+    }
+    showToast(RECOVERY_UNVERIFIED);
+    return true;
+  };
+
+  const _acceptRemoteIntegrity = (room) => {
+    const matchId = room?.recoveryUnverifiedMatchId;
+    if (room?.status !== 'playing' || (room.matchId != null && room.matchId !== matchId)) return;
+    if (!_showUnverifiedMatch(matchId) || _reportedUnverifiedMatchId === matchId) return;
+    engine?.markMatchRecoveryUnverified?.(matchId);
+    _reportedUnverifiedMatchId = matchId;
+    _cancelIntegrityNotice();
+  };
+
+  const _maybeReportMatchIntegrity = () => {
+    const matchId = KNState.matchId;
+    const connection = socket;
+    const sid = connection?.id;
+    const canReportFromRoster = () => {
+      const room = lastUsersData;
+      const localPlayer = room?.players?.[_persistentId];
+      return (
+        room?.status === 'playing' &&
+        (room.matchId == null || room.matchId === matchId) &&
+        localPlayer?.socketId === sid &&
+        localPlayer.slot === 0
+      );
+    };
+    const canStillReport = () =>
+      !!(
+        sid &&
+        (isHost || canReportFromRoster()) &&
+        socket === connection &&
+        socket.connected &&
+        socket.id === sid &&
+        KNState.matchId === matchId &&
+        _localUnverifiedMatchId === matchId &&
+        isGameRunning()
+      );
+    if (!matchId || !canStillReport()) {
+      _cancelIntegrityNotice();
+      _integrityNoticeAttempt = null;
+      return;
+    }
+    if (_reportedUnverifiedMatchId === matchId) return;
+    const attempt = _integrityNoticeAttempt;
+    if (attempt?.matchId === matchId && attempt.sid === sid && attempt.connection === connection) return;
+    _cancelIntegrityNotice();
+    _integrityNoticeAttempt = { matchId, sid, connection };
+    const notice = { request: null };
+    _integrityNotice = notice;
+    const request = window.KNCore.startRejoin({
+      send: (answer) => {
+        if (_integrityNotice === notice && canStillReport()) {
+          connection.emit('match-recovery-unverified', { matchId }, answer);
+        }
+      },
+      answerWithinMs: 2000,
+      retryAfterMs: 250,
+      attempts: 3,
+    });
+    notice.request = request;
+    void request.outcome.then((outcome) => {
+      if (_integrityNotice !== notice) return;
+      _integrityNotice = null;
+      if (canStillReport() && outcome.kind === 'resumed') _reportedUnverifiedMatchId = matchId;
+    });
+  };
+
   // This page's socket was down, so it heard none of the room's broadcasts.
   // If the game ended meanwhile, or was replaced by a new match, catch up:
   // the rule is KNCore's reconcileRejoin (web/src/rejoin.ts), modelled as
   // `reconciled` in specs/room_lifecycle.qnt.
   const _reconcileAfterRejoin = (room) => {
     const verdict = _session?.rejoined({ playing: room.status === 'playing', matchId: room.matchId ?? null }) ?? 'keep';
-    if (verdict === 'keep') return;
+    if (verdict === 'keep') {
+      _acceptRemoteIntegrity(room);
+      return;
+    }
     console.log('[play] rejoin: the room moved on while the socket was down:', verdict);
     KNEvent('rejoin-reconciled', '', { verdict });
     onGameEnded({ matchId: KNState.matchId, leftByMachine: true });
@@ -1013,6 +1117,7 @@
         // its schema is dropped: the page then hears the room from users-updated.
         const rejoinedRoom = rejoinEvent === 'join-room' ? _boundary.ack('join-room', outcome.room) : outcome.room;
         if (rejoinedRoom?.status) _reconcileAfterRejoin(rejoinedRoom);
+        _maybeReportMatchIntegrity();
       });
       return;
     }
@@ -1201,8 +1306,11 @@
             // Set matchId for late joiners — game-started event doesn't fire
             // for them, so session logging would silently fail without this.
             // roomData (REST) doesn't include matchId — use joinData (Socket.IO ack).
-            if (joinData?.matchId) KNState.matchId = joinData.matchId;
-            else if (roomData.matchId) KNState.matchId = roomData.matchId;
+            const joinedMatchId = joinData?.matchId || roomData.matchId;
+            if (joinedMatchId && joinedMatchId !== KNState.matchId) {
+              _clearMatchIntegrity();
+              KNState.matchId = joinedMatchId;
+            }
             // Pick up the game mode — game-started event won't fire
             // since the game is already running. Try REST then join callback.
             if (roomData.mode) mode = roomData.mode;
@@ -1219,6 +1327,8 @@
             // frames. Streaming guests and spectators have no frame counter:
             // for them the engine start is the whole late join.
             if (!isSpectator && mode !== 'streaming') _sessionWatchLateJoin();
+            _acceptRemoteIntegrity(lastUsersData);
+            _acceptRemoteIntegrity(joinData);
             // Use joinData directly — the users-updated socket event may not
             // have arrived yet (ack returns before broadcast is delivered)
             if (joinData) lastUsersData = joinData;
@@ -1323,6 +1433,14 @@
     if (ownerSid) {
       isHost = ownerSid === socket.id;
       KNState.isLocalHost = isHost;
+    }
+    _acceptRemoteIntegrity(data);
+    if (wasHost !== isHost) {
+      const endButton = document.getElementById('toolbar-end');
+      if (endButton) endButton.style.display = isHost ? '' : 'none';
+    }
+    if (data.status === 'playing' && (data.matchId == null || data.matchId === KNState.matchId)) {
+      _maybeReportMatchIntegrity();
     }
     if (!wasHost && isHost) {
       showToast('You are now the host');
@@ -1486,7 +1604,9 @@
     _gameResyncEnabled = data.resyncEnabled !== false;
     _takeRoomGameId(data.gameId);
     applyHostRomFromData(data);
+    if (KNState.matchId !== (data.matchId || null)) _clearMatchIntegrity();
     KNState.matchId = data.matchId || null;
+    _acceptRemoteIntegrity(lastUsersData);
     _gfxRecoveryAttempt = 0;
 
     _session?.send({ type: 'gameStarted', matchId: String(data?.matchId ?? '') });
@@ -1572,13 +1692,14 @@
     showGameLoading();
     // Clear stale status text from previous game
     const toolbarEl = document.getElementById('toolbar-status');
-    if (toolbarEl) toolbarEl.textContent = '';
+    if (toolbarEl) toolbarEl.textContent = _matchIntegrityText('');
     const loadingText = document.getElementById('game-loading-text');
-    if (loadingText) loadingText.textContent = 'Loading...';
+    if (loadingText) loadingText.textContent = _matchIntegrityText('Loading...');
     initEngine();
   };
 
   const onGameEnded = (data = {}) => {
+    if (_unverifiedMatchId && _unverifiedMatchId === KNState.matchId && data?.matchId !== _unverifiedMatchId) return;
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (!_gameStart.endMatchesCurrent(endedMatchId ?? '', KNState.matchId ?? '')) return;
     // Whether this page has the end to handle (web/src/play/game-start.ts,
@@ -1595,6 +1716,7 @@
     );
     if (!handled) return;
     if (endedMatchId) _lastHandledGameEndMatchId = endedMatchId;
+    _clearMatchIntegrity();
     _endGameRequest?.cancel();
     _endGameRequest = null;
     console.log(
@@ -1641,6 +1763,7 @@
   };
 
   const onRoomClosed = (data) => {
+    _clearMatchIntegrity();
     _endGameRequest?.cancel();
     _endGameRequest = null;
     _sessionStopLateJoinPoll();
@@ -3512,10 +3635,15 @@
 
     const lateJoin = _isLateJoin();
     engine = Engine;
+    if (_reportedUnverifiedMatchId && _reportedUnverifiedMatchId === KNState.matchId) {
+      engine.markMatchRecoveryUnverified?.(_reportedUnverifiedMatchId);
+    }
     engine.init({
       socket,
       sessionId: roomCode,
       playerSlot: isSpectator ? null : mySlot,
+      // This page's own roster entry is found by this too (KNCore.rosterPeers).
+      persistentId: _persistentId,
       isSpectator,
       playerName,
       gameElement: document.getElementById('game'),
@@ -3527,15 +3655,21 @@
       gameId: _gameId ?? null,
       uploadToken: _uploadToken,
       isMobile: _isMobile,
+      onMatchIntegrityUnverified: ({ matchId }) => {
+        if (!_showUnverifiedMatch(matchId)) return;
+        _localUnverifiedMatchId = matchId;
+        _maybeReportMatchIntegrity();
+      },
       onStatus: (msg) => {
+        const status = _matchIntegrityText(msg);
         // Show in toolbar (visible during gameplay) and overlay (visible pre-game)
         const toolbarEl = document.getElementById('toolbar-status');
-        if (toolbarEl) toolbarEl.textContent = msg;
+        if (toolbarEl) toolbarEl.textContent = status;
         const overlayEl = document.getElementById('engine-status');
-        if (overlayEl) overlayEl.textContent = msg;
+        if (overlayEl) overlayEl.textContent = status;
         // Update game loading overlay
         const loadingText = document.getElementById('game-loading-text');
-        if (loadingText) loadingText.textContent = msg;
+        if (loadingText) loadingText.textContent = status;
         // Dismiss loading overlay when game loop starts or stream connects
         if (msg.includes('game on') || msg.includes('Spectating') || msg.includes('streaming')) {
           dismissGameLoading();
@@ -3607,7 +3741,10 @@
       // its own deadline on the start (specs/start_group.qnt, rejoinLate). It
       // joins late instead of waiting for an offer that will not come.
       // The same when the host dropped this page in the match because it
-      // could not be kept in sync (specs/drop_is_final.qnt).
+      // could not be kept in sync (specs/drop_is_final.qnt), or while it was
+      // still waiting for the state, its serve having timed out
+      // (specs/room_lifecycle.qnt, serveTimesOut). The machine moves to
+      // lateJoinStarting first, so initEngine below starts a late join.
       onLeftOutOfStart: () => {
         crumb('left-out-of-start', {});
         _session?.send({ type: 'leftOutOfStart' });
@@ -3659,7 +3796,7 @@
           // Report to telemetry so funnel timeline shows the specific reason
           KNEvent(eventType, `${reason}: ${detail}`, { states });
         }
-        if (text) text.textContent = `${reason} — ${detail}`;
+        if (text) text.textContent = _matchIntegrityText(`${reason} — ${detail}`);
         crumb('connection-timeout', {
           reason,
           detail,
@@ -3756,6 +3893,10 @@
       _endGameRequest = null;
       if (!_gameStart.endMatchesCurrent(endingMatchId ?? '', KNState.matchId ?? '')) return;
       if (outcome.kind === 'resumed') {
+        if (_unverifiedMatchId && _unverifiedMatchId === endingMatchId) {
+          showToast('End request acknowledged. The lobby is not yet confirmed.');
+          return;
+        }
         onGameEnded({ matchId: endingMatchId, localAck: true });
       } else {
         showToast(
@@ -3768,6 +3909,7 @@
   };
 
   const leaveGame = () => {
+    _clearMatchIntegrity();
     _endGameRequest?.cancel();
     _endGameRequest = null;
     // Notify peers this is intentional (prevents reconnect attempt)
@@ -4035,7 +4177,7 @@
     _loadingTimeoutId = setTimeout(() => {
       const text = document.getElementById('game-loading-text');
       if (text && !el?.classList.contains('hidden')) {
-        text.textContent = 'Still loading — this can take a moment on first boot...';
+        text.textContent = _matchIntegrityText('Still loading — this can take a moment on first boot...');
       }
     }, 15000);
     startBootPorts();

@@ -2,6 +2,8 @@
 
 datatype RosterEntry = RosterEntry(sid: string, healthy: bool, reconnecting: bool)
 
+datatype RosterPlayer = RosterPlayer(sid: string, slot: int, player: string)
+
 method meshHealTargets(roster: seq<RosterEntry>, ownSids: seq<string>) returns (res: seq<string>)
   ensures forall j: nat :: ((j < |res|) ==> !((res[j] in ownSids)))
   ensures (|res| <= |roster|)
@@ -22,4 +24,31 @@ method meshHealTargets(roster: seq<RosterEntry>, ownSids: seq<string>) returns (
     i := (i + 1);
   }
   return targets;
+}
+
+method rosterPeers(roster: seq<RosterPlayer>, ownSids: seq<string>, ownSlot: int, ownPlayer: string) returns (res: seq<int>)
+  ensures forall j: nat :: ((j < |res|) ==> (((0 <= res[j]) && (res[j] < |roster|)) && !((roster[res[j]].sid in ownSids))))
+  ensures forall j: nat :: ((j < |res|) ==> (((0 <= res[j]) && (res[j] < |roster|)) && ((ownSlot < 0) || (roster[res[j]].slot != ownSlot))))
+  ensures forall j: nat :: ((j < |res|) ==> (((0 <= res[j]) && (res[j] < |roster|)) && ((|ownPlayer| == 0) || (roster[res[j]].player != ownPlayer))))
+  ensures (|res| <= |roster|)
+{
+  var peers: seq<int> := [];
+  var i := 0;
+  while (i < |roster|)
+    invariant (0 <= i)
+    invariant (i <= |roster|)
+    invariant (|peers| <= i)
+    invariant forall j: nat :: ((j < |peers|) ==> (((0 <= peers[j]) && (peers[j] < i)) && !((roster[peers[j]].sid in ownSids))))
+    invariant forall j: nat :: ((j < |peers|) ==> (((0 <= peers[j]) && (peers[j] < i)) && ((ownSlot < 0) || (roster[peers[j]].slot != ownSlot))))
+    invariant forall j: nat :: ((j < |peers|) ==> (((0 <= peers[j]) && (peers[j] < i)) && ((|ownPlayer| == 0) || (roster[peers[j]].player != ownPlayer))))
+    decreases (|roster| - i)
+  {
+    var entry := roster[i];
+    var mine := (((entry.sid in ownSids) || ((ownSlot >= 0) && (entry.slot == ownSlot))) || ((|ownPlayer| > 0) && (entry.player == ownPlayer)));
+    if !(mine) {
+      peers := (peers + [i]);
+    }
+    i := (i + 1);
+  }
+  return peers;
 }

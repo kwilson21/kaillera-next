@@ -94,6 +94,7 @@ const TEXT_GRAMMAR = {
     'rb-delay': `:${INT}`,
     'rb-transport': ':(?:reliable|unreliable)',
     'rb-init-frame': `:${INT}`,
+    'reconnect-sync-request-v1': ':\\d+',
     'sync-request-full': '',
     'sync-request-full-at': `:${INT}`,
     // The number of the request that follows on the same channel. A message
@@ -109,7 +110,7 @@ const TEXT_GRAMMAR = {
   },
   'sync-state': {
     // sync-start:<frame>:<chunks>:<full 0|1>:<proactive 0|1>
-    'sync-start': `:${INT}:\\d+:[01]:[01]`,
+    'sync-start': `:${INT}:\\d+:(?:[01]:[01]|1:0:[1-9]\\d*)`,
     'sync-regions-start': `:${INT}:\\d+`,
     // The request the state that follows on the same channel answers; a state
     // the host sent for its own reasons has none.
@@ -178,6 +179,8 @@ const SaveState = Schema.Struct({
   saveRam: Schema.optional(Schema.NullOr(Encoded)),
   hiddenWords: Sidecar,
   audioFifo: Sidecar,
+  // Startup KNS4 omits the RSP HLE plugin state. Older hosts omit it.
+  hle: Schema.optional(Encoded),
 });
 
 const LateJoinState = Schema.Struct({
@@ -210,6 +213,8 @@ const SyncStateSocket = Schema.Struct({
   data: Encoded,
   // The request this state answers; absent when it answers none.
   requestId: Schema.optional(Schema.Number),
+  reconnectProofFor: Schema.optional(Schema.Number),
+  reconnectMatch: Schema.optional(Schema.String),
   // The hidden words and RSP HLE state (base64) taken with it; absent from an
   // older host, and from a core without the exports.
   hiddenWords: Schema.optional(Schema.Array(Schema.Number)),
@@ -252,6 +257,12 @@ const JSON_MESSAGES = {
       frame: Schema.Number,
       // The request's number; absent from a page that does not number them.
       requestId: Schema.optional(Schema.Number),
+    }),
+    'reconnect-sync-request-v1-socket': Schema.Struct({
+      targetSid: Schema.String,
+      requesterSid: Schema.String,
+      matchId: Schema.String,
+      requestId: Schema.Number,
     }),
     'sync-state-socket': SyncStateSocket,
     'late-join-ready': Schema.Struct({ senderSid: Schema.String }),

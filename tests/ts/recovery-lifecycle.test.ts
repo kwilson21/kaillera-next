@@ -13,7 +13,12 @@ const between = (a: string, b: string) => {
 };
 
 test('stopping a worker rejects captured work and suppresses compression fallback', async () => {
-  const context = vm.createContext({ DOMException, createRecoveryTransferPool });
+  const context = vm.createContext({
+    _hostReconnectBlocksNativeCapture: () => false,
+    _hostReconnectFenceVersion: 0,
+    DOMException,
+    createRecoveryTransferPool,
+  });
   vm.runInContext(
     `
     let _syncWorkerCallbacks = {}, _syncWorkerNextId = 0, fallbackCalls = 0;
@@ -39,7 +44,7 @@ test('stopping a worker rejects captured work and suppresses compression fallbac
 });
 
 test('coordinated requests wait for dedicated state transport, not input channel', () => {
-  const context = vm.createContext({});
+  const context = vm.createContext({ _hostReconnectBlocksNativeCapture: () => false, _hostReconnectFenceVersion: 0 });
   vm.runInContext(
     `const _peers = {a:{dc:{readyState:'open'},syncDc:{readyState:'connecting'}}};
     const _syncLog=()=>{};
@@ -53,7 +58,12 @@ test('coordinated requests wait for dedicated state transport, not input channel
 
 test('failed late-join preparation retains a dropped guest gate', async () => {
   for (const captureThrows of [false, true]) {
-    const context = vm.createContext({ Uint8Array, captureThrows });
+    const context = vm.createContext({
+      _hostReconnectBlocksNativeCapture: () => false,
+      _hostReconnectFenceVersion: 0,
+      Uint8Array,
+      captureThrows,
+    });
     vm.runInContext(
       `
       const _peers={a:{slot:1}}, _knownPlayers={}, _droppedThisMatch=new Set(['a']);

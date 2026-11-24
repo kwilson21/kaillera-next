@@ -76,7 +76,7 @@ const page = (slot: number): Page => {
     const stepOneFrame=()=>{stepMask=mod.mask;return true};
     ${part('  const _controllerPresentMask = () => {', '  // Apply the real player-count mask the *instant*')}
     ${runStep}
-    ${part('  const _broadcastRoster = () => {', '  const _snapshotLateJoinBridgeSources')}
+    ${part('  const _hostRosterSlots = () => {', '  const _snapshotLateJoinBridgeSources')}
     const onText=(e,peer,ch)=>{
       ${guestHandler}
           _activeRoster=new Set(slots);

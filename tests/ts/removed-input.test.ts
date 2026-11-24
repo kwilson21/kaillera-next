@@ -131,7 +131,7 @@ const page = (): Page => {
   vm.runInContext(
     `
     const window={KNCore,KNDesync:{forgetFrom(){}}};
-    const ring=new Map();
+    const ring=new Map(),_corePhantomHistory=new Set();
     const mod={cFrame:0,
       _kn_get_frame(){return this.cFrame},
       _kn_feed_input(s,t,b,lx,ly,cx,cy){if(s===SLOT)ring.set(t,{buttons:b,lx,ly,cx,cy})},
@@ -232,4 +232,35 @@ test('a guest that held a real input the host only predicted takes the host one 
   guest.at(14);
   assert.equal(guest.guestCut(msg), 12, 'tag 10 ran on frame 12');
   assert.deepEqual(guest.ring(10), input(1, -50));
+});
+
+// specs/removed_input.qnt, removed_input_delay_one_unheld / _fixed
+// (delayOneCollisionTest): _cutRemovedInput feeds neutral real inputs at the
+// cut tag and the one after it; a rejoin's floor is its roster frame A >= R.
+// Only at delay 1 with A == R does the floor reach one of them, and there
+// the joiner holds its own input neutral (#330), so the input C stores over
+// the cut's neutral with no check is that neutral.
+test('the cut neutral tags a rejoin reaches are ones the joiner holds neutral (delayOneCollisionTest)', () => {
+  const cutFeeds = part('  const _cutRemovedInput = (mod, slot, cut, reason) => {', '    record.cut = cut.cut;');
+  assert.ok(cutFeeds.includes('for (let tag = Math.max(0, cut.cut); tag < cut.cut + 2; tag++) {'));
+  let collisions = 0;
+  for (let delay = 1; delay <= 12; delay++) {
+    for (let rosterFrame = 20; rosterFrame < 30; rosterFrame++) {
+      const cut = cutTag(rosterFrame, delay);
+      for (let admission = rosterFrame; admission < rosterFrame + 4; admission++) {
+        const floor = admissionFloor(admission, cut);
+        const shared = [cut, cut + 1].filter((tag) => tag >= floor);
+        assert.equal(
+          shared.length > 0,
+          delay === 1 && admission === rosterFrame,
+          `delay ${delay} R ${rosterFrame} A ${admission}`,
+        );
+        for (const tag of shared) {
+          collisions++;
+          assert.ok(KNCore.lateJoinInput.joinerHoldsOwnInput(tag, admission, KNCore.controllerMask.MASK_LEAD));
+        }
+      }
+    }
+  }
+  assert.equal(collisions, 10);
 });

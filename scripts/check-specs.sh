@@ -76,6 +76,7 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend="$BACKEND"
+$QUINT test "$SPEC" --main=room_before_serve_timeout_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_grace_wait --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_abandoned_end --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_resume_flag --backend="$BACKEND"
@@ -111,6 +112,10 @@ check room_current anAbandonedMatchIsEnded
 # the grace window never empties a playing room whose last player is still
 # in it (violated on room_before_grace_wait).
 check room_current aMatchIsNotLostToTheGraceWindow
+# Nobody loads for the start of a match someone is already running: a late
+# joiner the host dropped after its serve timed out starts its late join again
+# (violated on room_before_serve_timeout_fix).
+check room_current nobodyLoadsIntoARunningMatch
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
@@ -664,7 +669,7 @@ $QUINT run "$ESCP" --main=hole_counts_fixed --invariant=pushesAreBoundedForEvery
 REC=specs/reconnect_inputs.qnt
 $QUINT typecheck "$REC"
 for variant in reconnect_inputs_current reconnect_inputs_fixed reconnect_inputs_keeps_history \
-  reconnect_history_before reconnect_history_current reconnect_history_fixed; do
+  reconnect_history_before reconnect_history_as_real reconnect_history_current reconnect_history_fixed; do
   $QUINT test "$REC" --main="$variant" --backend="$BACKEND"
 done
 # Today the reset leaves the C slot inactive and the page runs frames on the
@@ -679,13 +684,35 @@ $QUINT run "$REC" --main=reconnect_inputs_keeps_history --invariant=allHold \
 # The frames run before the reset: an emptied slot loses the predictions C
 # would check and a replay runs those frames neutral (reconnect_history_before);
 # the ring's inputs put back as real ones make a prediction real, so the
-# peer's real input is stored over it unchecked (reconnect_history_current;
-# predictionPutBackAsRealTest). A reconnect that keeps the C slot checks
-# every one (everyInputItDidNotMakeIsChecked).
+# peer's real input is stored over it unchecked (reconnect_history_as_real;
+# predictionPutBackAsRealTest). Today a reconnect keeps the C slot and every
+# one is checked (reconnect_history_current, everyInputItDidNotMakeIsChecked).
+$QUINT run "$REC" --main=reconnect_history_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 $QUINT run "$REC" --main=reconnect_history_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# Repeated native-slot resets and the bounded first-input wait, even absent.
+KEEP=specs/kept_slot_recovery.qnt
+$QUINT typecheck "$KEEP"
+$QUINT test "$KEEP" --main=kept_slot_recovery_before --backend="$BACKEND"
+$QUINT test "$KEEP" --main=kept_slot_recovery_fixed --backend="$BACKEND"
+$QUINT run "$KEEP" --main=kept_slot_recovery_fixed --invariant=allHold \
+  --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
+# Protected reconnect answers must not degrade to legacy or accept stale proof.
+PROOF=specs/reconnect_proof.qnt
+$QUINT typecheck "$PROOF"
+$QUINT test "$PROOF" --main=reconnect_proof --backend="$BACKEND"
+
 # ── A player dropped in a running match comes back only late ──────────────
+INTEGRITY=specs/reconnect_integrity.qnt
+$QUINT typecheck "$INTEGRITY"
+$QUINT test "$INTEGRITY" --main=reconnect_integrity --backend="$BACKEND"
+$QUINT run "$INTEGRITY" --main=reconnect_integrity \
+  --invariants unsafeMatchNeverCaptures oldUnverifiedMatchIsNotHealthy \
+  --max-samples=5000 --max-steps=12 --backend="$BACKEND"
+
 DROP=specs/drop_is_final.qnt
 $QUINT typecheck "$DROP"
 for variant in drop_is_final_before drop_is_final_skip_everywhere drop_is_final_fixed; do
@@ -897,6 +924,17 @@ $QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap
 $QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --backend="$BACKEND"
 $QUINT run specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --invariant=neverAdvanceOnMissing --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
+# Around a join every page applies the host's inputs for every slot: before,
+# each page's bootstrap window started at the frame it heard of the join and
+# its placeholders ran as real inputs (late_join_input_agreement_before;
+# joinerMissesTheTagsBelowFirstLiveTest, pagesHearAtDifferentFramesTest,
+# rosterAfterTheStateTest, aPageThatHearsLateTakesTheHostsStateTest).
+AGREEMENT=specs/late_join_input_agreement.qnt
+$QUINT typecheck "$AGREEMENT"
+$QUINT test "$AGREEMENT" --main=late_join_input_agreement_before --backend="$BACKEND"
+$QUINT test "$AGREEMENT" --main=late_join_input_agreement_fixed --backend="$BACKEND"
+$QUINT run "$AGREEMENT" --main=late_join_input_agreement_fixed --invariant=allHold --max-samples=10000 --max-steps=2 --backend="$BACKEND"
+
 BOOT_CONTINUATION=specs/late_join_boot_continuation.qnt
 $QUINT typecheck "$BOOT_CONTINUATION"
 $QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_before --backend="$BACKEND"
@@ -925,7 +963,8 @@ $QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
 # ── What a removed player's slot is fed with, frame by frame ──────────────
 REMOVED=specs/removed_input.qnt
 $QUINT typecheck "$REMOVED"
-for variant in removed_input_before removed_input_fixed removed_input_mid_replay; do
+for variant in removed_input_before removed_input_fixed removed_input_mid_replay \
+  removed_input_delay_one_unheld removed_input_delay_one_fixed; do
   $QUINT test "$REMOVED" --main="$variant" --backend="$BACKEND"
 done
 # Before, each page cut the removed player's input when it learned of the
@@ -942,6 +981,13 @@ $QUINT run "$REMOVED" --main=removed_input_fixed --invariant=allHold \
 # roster's, the word is what the ring holds, and the replay runs the rest
 # with the cut (hostCutsMidReplayTest, cutAboveTheReplayTest).
 $QUINT run "$REMOVED" --main=removed_input_mid_replay --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# Delay 1 with the admission at the cut's roster frame: the admission's first
+# tag is C + 1, which the cut fed neutral as a real input, so the rejoined
+# player's input there is stored with no check (removed_input_delay_one_unheld;
+# delayOneCollisionTest). The joiner holds its own input neutral below its
+# roster frame + MASK_LEAD (#330), so what ran is what it sent (joinerInputRuns).
+$QUINT run "$REMOVED" --main=removed_input_delay_one_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 # ── The server's store for a player's session log ──────────────────────────

@@ -59,11 +59,12 @@
 // property.
 //
 // A page's ring is the record of what it applied: the cut compares the host's
-// inputs with it. A page that empties a player's slot for its own reasons
-// (resetPeerState: a reconnect, a mesh heal) puts back the inputs the frames
-// still in its ring ran with, on the scheduled rule, so a replay runs them
-// again unchanged and a cut heard later reads them; not modelled apart (it is
-// `replay` keeping its inputs).
+// inputs with it. A reconnect or a mesh heal leaves the player's C slot as it
+// is (resetPeerState, _resetCoreSlot; specs/reconnect_inputs.qnt
+// reconnect_history), and a page that empties it for another reason puts back
+// the inputs the frames still in its ring ran with, on the scheduled rule:
+// either way a replay runs them again unchanged and a cut heard later reads
+// them; not modelled apart (it is `replay` keeping its inputs).
 //
 // What is modelled: the host and one guest; the removed player's inputs
 // (one session before the cut, one after the admission) reaching each page
@@ -104,9 +105,43 @@
 // real input taken in during one restarts it from that frame (a cascade),
 // and the host can broadcast another roster before the cut (`lastRoster`).
 
+// DELAY, COLLIDE, JOINER_HOLDS: the tags around a quick rejoin, where the
+// cut's neutral inputs and the rejoined player's first ones meet.
+// _cutRemovedInput feeds neutral at the cut tag C = R - delay and at C + 1 as
+// real inputs, so C predicts neutral after them. The admission at the host's
+// roster frame A >= R takes the player's inputs from tag A on (record.first,
+// _admissionInputFloor): a frame's own number as a tag, `delay` above the
+// tag that frame applies. So the floor is at least C + delay, and with delay
+// 1 and A == R (the host admits the player again at the frame it cut it) the
+// floor is C + 1: the first tag the rejoined player sends is one the cut
+// already holds a real neutral input for. A real input over a real input is
+// stored with no check (kn_feed_input checks a recorded prediction only): a
+// page that ran that frame on the cut's neutral is not run again when the
+// player's input comes, and one that had the input first ran it with it.
+//   DELAY: the delay, in the model's tags: the host's frame f runs tag f
+//     and admits from tag f + DELAY (0: the earlier variants, which put
+//     the admission's floor at the frame's own tag).
+//   COLLIDE: the cut's two neutral inputs are real entries (C and C + 1):
+//     a frame at a tag of them from the admission on runs neutral until the
+//     player's input of that tag is taken in, and taking it in runs nothing
+//     again. Without it (the earlier variants) every input of the rejoined
+//     player is compared with what ran.
+//   JOINER_HOLDS: on the scheduled rule the joiner holds its own input
+//     neutral below its admission's roster frame + MASK_LEAD
+//     (late-join-input-rule.ts joinerHoldsOwnInput; #330), here LEAD.
+// removed_input_delay_one_unheld (violated: delayOneCollisionTest) is the
+// collision with a joiner that sends what it makes from its floor on;
+// removed_input_delay_one_fixed is today: the tags the cut's neutral inputs
+// share with the admission (at most C + 1, below A + 1) are ones the joiner
+// holds neutral, so the input stored with no check is the neutral that ran
+// (joinerInputRuns). No code was needed for it.
+
 module removed_input {
   const AT_FRAME: bool
   const HOST_MID_REPLAY: bool
+  const DELAY: int
+  const COLLIDE: bool
+  const JOINER_HOLDS: bool
 
   // Bound on frames for the model.
   pure val MAX_F = 6
@@ -116,6 +151,9 @@ module removed_input {
   pure val AHEAD = 2
   // The neutral ramp a late joiner starts with (LATE_JOIN_INPUT_BOOTSTRAP_FRAMES).
   pure val RAMP = 2
+  // The joiner's hold past its admission's roster frame (MASK_LEAD, 60
+  // frames; any value of at least 2 covers the cut's two neutral tags).
+  pure val LEAD = 2
 
   pure val FRAMES = 0.to(MAX_F - 1)
   pure val INPUTS = Set(0, 1)
@@ -161,12 +199,24 @@ module removed_input {
   def cFrame(p: str): int = if (replaying(p)) replayAt.get(p) else frontier.get(p)
   def admitKnown(p: str): bool = if (p == "host") admitA >= 0 else guestAdmit
 
-  // The input page p runs frame f with, as it knows things now.
-  def inputAt(p: str, f: int): int =
-    if (not(cutKnown(p))) predict(held1.get(p), first, f)
-    else if (admitKnown(p) and f >= admitA) predict(held2.get(p), second, f)
+  // The rejoined player's input of each tag, as it sends it: neutral below
+  // its admission + LEAD when it holds its own input (JOINER_HOLDS).
+  def madeSecond: int -> int =
+    second.keys().mapBy(f => if (JOINER_HOLDS and admitA >= 0 and f < admitA + LEAD) 0 else second.get(f))
+
+  // A tag from the admission on that the cut fed a real neutral input for.
+  def collides(f: int): bool = COLLIDE and cutR >= 0 and admitA >= 0 and f >= admitA and f <= cutR + 1
+
+  // The input a page that knows of the cut (nowCut) and of the admission
+  // (nowAdmit), holding these real inputs of each session, runs frame f with.
+  def inputWith(nowCut: bool, nowAdmit: bool, h1: Set[int], h2: Set[int], f: int): int =
+    if (not(nowCut)) predict(h1, first, f)
+    else if (nowAdmit and f >= admitA) (if (collides(f) and not(h2.contains(f))) 0 else predict(h2, madeSecond, f))
     else if (AT_FRAME and f < cutR) word.get(f)
     else 0
+
+  // The input page p runs frame f with, as it knows things now.
+  def inputAt(p: str, f: int): int = inputWith(cutKnown(p), admitKnown(p), held1.get(p), held2.get(p), f)
 
   // Page p runs the frames from `from` to its frontier again with what it
   // knows now (inputAt).
@@ -249,7 +299,8 @@ module removed_input {
   }
 
   // The rejoined player's input of frame f reaches page p, once p has heard
-  // of the admission (the floor drops anything earlier).
+  // of the admission (the floor drops anything earlier). Over a real neutral
+  // input of the cut (COLLIDE) it is stored with no check: nothing runs again.
   action deliverSecond(p: str, f: int): bool = {
     val held = held2.get(p).union(Set(f))
     all {
@@ -258,8 +309,8 @@ module removed_input {
       not(held2.get(p).contains(f)),
       held2' = held2.set(p, held),
       // f >= admitA: only the frames from f on change.
-      applied' = applied.set(p, applied.get(p).keys().mapBy(g =>
-        if (g >= f) predict(held, second, g) else applied.get(p).get(g))),
+      applied' = if (collides(f)) applied else applied.set(p, applied.get(p).keys().mapBy(g =>
+        if (g >= f) predict(held, madeSecond, g) else applied.get(p).get(g))),
       first' = first, second' = second, alive' = alive, held1' = held1, frontier' = frontier, cutR' = cutR,
       word' = word, admitA' = admitA, guestCut' = guestCut, guestAdmit' = guestAdmit, inflight' = inflight,
       rerunFrom' = rerunFrom, replayChanged' = replayChanged, replayAt' = replayAt, replayBeforeCut' = replayBeforeCut, lastRoster' = lastRoster,
@@ -367,13 +418,15 @@ module removed_input {
 
   // The player joins again, into the same slot, at the host's frame.
   action hostAdmit: bool = {
-    val a = maxInt(cFrame("host"), lastRoster)
+    val r = maxInt(cFrame("host"), lastRoster)
+    // The admission's floor: the roster frame's own number, as a tag.
+    val a = r + DELAY
     all {
       cutR >= 0,
       admitA < 0,
       admitA' = a,
       inflight' = inflight.append(("admit", a)),
-      lastRoster' = a,
+      lastRoster' = r,
       first' = first, second' = second, alive' = alive, held1' = held1, held2' = held2, frontier' = frontier,
       applied' = applied, cutR' = cutR, word' = word, guestCut' = guestCut, guestAdmit' = guestAdmit,
       rerunFrom' = rerunFrom, replayChanged' = replayChanged, replayAt' = replayAt,
@@ -384,10 +437,7 @@ module removed_input {
   // The input the guest runs frame f with once it has heard (nowCut,
   // nowAdmit): inputAt with those flags.
   def guestKnows(nowCut: bool, nowAdmit: bool, f: int): int =
-    if (not(nowCut)) predict(held1.get("guest"), first, f)
-    else if (nowAdmit and f >= admitA) predict(held2.get("guest"), second, f)
-    else if (AT_FRAME and f < cutR) word.get(f)
-    else 0
+    inputWith(nowCut, nowAdmit, held1.get("guest"), held2.get("guest"), f)
 
   // The first frame the guest has run with another input than it knows now
   // it should have, or -1.
@@ -478,7 +528,18 @@ module removed_input {
       applied.get("host").keys().filter(f => (admitA < 0 or f < admitA) and f < cFrame("host"))
         .forall(f => applied.get("host").get(f) == (if (f < cutR) word.get(f) else 0))
 
-  val allHold = removedInputAgrees and aReplayKeepsTheCut and hostRunsItsWord
+  // A frame from the admission on, of a tag whose input of the rejoined
+  // player the page holds, ran with that input (once a guest has run again
+  // what it had to and no replay is under way).
+  val joinerInputRuns =
+    PAGES.forall(p =>
+      ((p == "host" or rerunFrom < 0) and not(replaying(p))) implies
+        applied.get(p).keys().forall(f =>
+          (admitA >= 0 and f >= admitA and held2.get(p).contains(f)) implies applied.get(p).get(f) == madeSecond.get(f)
+        )
+    )
+
+  val allHold = removedInputAgrees and aReplayKeepsTheCut and hostRunsItsWord and joinerInputRuns
 
   // ── Scenarios ────────────────────────────────────────────────────────────
 
@@ -649,20 +710,58 @@ module removed_input {
         .expect(allHold and applied.get("guest").get(1) == 1 and applied.get("guest").get(2) == 0)
     else
       initWith(MOVING, STILL)
+
+  // Delay 1: the host cuts the player at frame 1 (C = 1) and admits it again
+  // at once, so the admission's floor is tag 2 = C + 1, a tag the cut fed
+  // neutral for. The host runs frame 2 on that neutral input before the
+  // player's input of tag 2 comes; taken in over a real input, it runs
+  // nothing again. A joiner that sends its input (1) there leaves the host
+  // with the neutral it ran; one that holds its own input neutral below its
+  // roster frame + LEAD sends the neutral that ran.
+  run delayOneCollisionTest =
+    if (COLLIDE and DELAY == 1)
+      initWith(MOVING, MOVING)
+        .then(deliverFirst("host", 0))
+        .then(stepFrame("host")).then(stepFrame("guest"))
+        .then(hostCut)
+        .then(hostAdmit)
+        .expect(cutR == 1 and admitA == 2 and collides(2))
+        .then(stepFrame("host")).then(stepFrame("guest"))
+        .then(stepFrame("host"))
+        .expect(applied.get("host").get(2) == 0)
+        .then(deliverSecond("host", 2))
+        .expect(
+          applied.get("host").get(2) == 0 and
+          (if (JOINER_HOLDS) joinerInputRuns and madeSecond.get(2) == 0 else not(joinerInputRuns))
+        )
+    else
+      initWith(MOVING, STILL)
 }
 
 // Before: each page cut the player when it learned of the removal.
 module removed_input_before {
-  import removed_input(AT_FRAME = false, HOST_MID_REPLAY = false).*
+  import removed_input(AT_FRAME = false, HOST_MID_REPLAY = false, DELAY = 0, COLLIDE = false, JOINER_HOLDS = false).*
 }
 
 // The fix: the cut at the host's roster frame, the host's inputs below it.
 module removed_input_fixed {
-  import removed_input(AT_FRAME = true, HOST_MID_REPLAY = false).*
+  import removed_input(AT_FRAME = true, HOST_MID_REPLAY = false, DELAY = 0, COLLIDE = false, JOINER_HOLDS = false).*
 }
 
 // The fix with replays run a frame at a time: a host (or guest) can be in
 // the middle of one when the cut is made (or heard).
 module removed_input_mid_replay {
-  import removed_input(AT_FRAME = true, HOST_MID_REPLAY = true).*
+  import removed_input(AT_FRAME = true, HOST_MID_REPLAY = true, DELAY = 0, COLLIDE = false, JOINER_HOLDS = false).*
+}
+
+// Delay 1, the cut's neutral inputs as real entries, and a joiner that sends
+// what it makes from its floor on: the admission's first tag is the cut's
+// C + 1 (violated: delayOneCollisionTest).
+module removed_input_delay_one_unheld {
+  import removed_input(AT_FRAME = true, HOST_MID_REPLAY = false, DELAY = 1, COLLIDE = true, JOINER_HOLDS = false).*
+}
+
+// Today, on the scheduled rule: the same, with the joiner's hold (#330).
+module removed_input_delay_one_fixed {
+  import removed_input(AT_FRAME = true, HOST_MID_REPLAY = false, DELAY = 1, COLLIDE = true, JOINER_HOLDS = true).*
 }
