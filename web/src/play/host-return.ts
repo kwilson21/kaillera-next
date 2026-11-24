@@ -5,6 +5,28 @@ import { tokenClaims } from './token-claims.ts';
 /** The room's server verifies this credential before changing any membership. */
 export const HOST_RETURN_PREFIX = 'kn-host-return:';
 export const hostReturnKey = (room: string): string => HOST_RETURN_PREFIX + room;
+const PAST_HOST_PREFIX = 'kn-past-host:';
+const MAX_PAST_ROOMS = 32;
+
+/** After a host seat is cleared, an old creation bookmark should still open that room as a visitor. */
+export function clearHostReturn(storage: SafeStorage, room: string, token: string): void {
+  const key = hostReturnKey(room);
+  if (storage.get('localStorage', key) !== token) return;
+  storage.remove('localStorage', key);
+  // Separate keys preserve independent room closures from different tabs.
+  if (!storage.keys) return;
+  const past = PAST_HOST_PREFIX + room;
+  try {
+    storage.set('localStorage', past, String(Date.now()));
+    const keys = storage.keys('localStorage', PAST_HOST_PREFIX);
+    if (keys.length <= MAX_PAST_ROOMS) return;
+    const older = keys.filter((entry) => entry !== past);
+    older.sort((a, b) => Number(storage.get('localStorage', a)) - Number(storage.get('localStorage', b)));
+    for (const entry of older.slice(0, keys.length - MAX_PAST_ROOMS)) storage.remove('localStorage', entry);
+  } catch {
+    // The credential is already gone even if the browser cannot store the history.
+  }
+}
 
 export type HostReturn = { readonly persistentId: string; readonly token: string };
 
@@ -97,18 +119,19 @@ export class RoomIdentity {
   /** A restored host URL still means to return after its credential expires. */
   wasInRoom(): boolean {
     return !!(
-      this.storage.get('sessionStorage', this.tokenKey) || this.storage.get('localStorage', hostReturnKey(this.room))
+      this.storage.get('sessionStorage', this.tokenKey) ||
+      this.storage.get('localStorage', hostReturnKey(this.room)) ||
+      this.storage.get('localStorage', PAST_HOST_PREFIX + this.room)
     );
   }
 
   forgetHost(): void {
-    if (this.savedHost(0)?.persistentId === this.persistentId)
-      this.storage.remove('localStorage', hostReturnKey(this.room));
+    const host = this.savedHost(0);
+    if (host?.persistentId === this.persistentId) this.discardRefused(host.token);
   }
 
   discardRefused(token: string): void {
-    const key = hostReturnKey(this.room);
-    if (this.storage.get('localStorage', key) === token) this.storage.remove('localStorage', key);
+    clearHostReturn(this.storage, this.room, token);
   }
 
   joinSeparately(host: HostReturn): void {

@@ -14,6 +14,7 @@
 import type { SafeStorage } from '../kn-state.ts';
 import {
   HOST_RETURN_PREFIX,
+  clearHostReturn,
   hostReturnClock,
   hostReturnDuration,
   hostReturnSeconds,
@@ -460,7 +461,7 @@ export const startFrontPage = (host: FrontHost): void => {
         .then((room) => {
           if (token !== storage.get('localStorage', key)) return;
           if (room === null || (room.serverTime != null && !readHostReturn(code, token, room.serverTime))) {
-            storage.remove('localStorage', key);
+            clearHostReturn(storage, code, token);
             hideReturn(code);
             showReturnTimes();
             return;

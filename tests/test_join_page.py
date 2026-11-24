@@ -142,7 +142,8 @@ def test_closed_room_names_the_host(invite):
     expect(page.locator("#closed-title")).to_have_text("Kaz's room has closed.")
     expect(page.locator("#closed-line")).to_contain_text("Ask Kaz for a new link")
     page.locator("#open-own").click()
-    page.wait_for_url("**/play.html?room=*&host=1&mode=rollback")
+    page.wait_for_url("**/play.html?room=*&mode=rollback")
+    expect(page.locator("#host-controls")).to_be_visible()
 
 
 def test_unknown_room_is_closed_without_a_name(invite):

@@ -13,6 +13,7 @@ import {
 const storage = (): SafeStorage => {
   const stores = { localStorage: new Map<string, string>(), sessionStorage: new Map<string, string>() };
   return {
+    keys: (store, prefix) => [...stores[store].keys()].filter((key) => key.startsWith(prefix)),
     get: (store, key) => stores[store].get(key) ?? null,
     set: (store, key, value) => {
       stores[store].set(key, value);
@@ -63,6 +64,20 @@ test('a host saves the server-issued ticket and can return from its tab even whe
   assert.equal(seat.savedHost(5000000), null);
   seat.leaveRoom();
   assert.equal(stores.get('localStorage', hostReturnKey('RoomA')), null);
+});
+
+test('old creation bookmarks keep only a bounded history of case-sensitive room codes', () => {
+  const stores = storage();
+  for (let i = 0; i < 40; ++i) {
+    const seat = new RoomIdentity('Room' + i, stores);
+    seat.receiveToken(credential(seat.persistentId, seat.room), null, true);
+    seat.leaveRoom();
+  }
+  assert.equal(stores.keys!('localStorage', '').length, 32);
+  assert.equal(stores.keys!('localStorage', 'kn-host-return:').length, 0);
+  assert.equal(new RoomIdentity('Room39', stores).wasInRoom(), true);
+  assert.equal(new RoomIdentity('room39', stores).wasInRoom(), false);
+  assert.equal(new RoomIdentity('Unused', stores).wasInRoom(), false);
 });
 
 test('a declined return gets a separate seat, and a refused older credential cannot erase a renewed one', () => {

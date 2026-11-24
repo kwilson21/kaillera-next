@@ -686,6 +686,15 @@
 
   // ── URL Params ─────────────────────────────────────────────────────────
 
+  // Once admitted, reloading or sharing this history entry should only join the existing room.
+  const keepRoomAddress = () => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('host') && !url.searchParams.has('returnHost')) return;
+    url.searchParams.delete('host');
+    url.searchParams.delete('returnHost');
+    window.history.replaceState(window.history.state, '', url);
+  };
+
   const parseParams = () => {
     const params = new URLSearchParams(window.location.search);
     roomCode = params.get('room');
@@ -1197,6 +1206,7 @@
           return;
         }
         mySlot = 0;
+        keepRoomAddress();
         _session?.send({
           type: 'joined',
           status: 'lobby',
@@ -1337,6 +1347,7 @@
             _identity.discardRefused(savedHost.token);
           }
           const joinedStatus = joinData?.status ?? roomData.status;
+          keepRoomAddress();
           const hostShares = joinData?.romSharing ?? roomData.rom_sharing;
           mode = normalizeMode(joinData?.mode ?? roomData.mode ?? mode);
           _takeRoomGameId(joinData?.gameId ?? joinData?.game_id);

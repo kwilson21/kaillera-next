@@ -28,7 +28,8 @@ def test_lobby_to_play_redirect(page, server_url):
     """Create a room redirects to play.html as host (the room asks for a name)."""
     page.goto(server_url)
     page.click("#create-btn")
-    expect(page).to_have_url(re.compile(r"play\.html\?room=\w+&host=1&mode=rollback"))
+    expect(page).to_have_url(re.compile(r"play\.html\?room=\w+&mode=rollback$"))
+    expect(page.locator("#host-controls")).to_be_visible()
 
 
 def test_reopened_host_url_uses_the_rooms_current_mode(page, server_url, room):
@@ -61,6 +62,8 @@ def test_reopened_host_url_does_not_recreate_an_expired_room(browser, page, shor
     url = f"{short_host_return_url}/play.html?room={room}&host=1"
     page.goto(url)
     page.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
+    bookmark = f"{short_host_return_url}/play.html?room={room}"
+    expect(page).to_have_url(bookmark)
     with browser.new_page() as guest:
         guest.goto(f"{short_host_return_url}/play.html?room={room}&name=Guest")
         guest.wait_for_function("KNState.slot === 1")
@@ -81,6 +84,28 @@ def test_reopened_host_url_does_not_recreate_an_expired_room(browser, page, shor
         expect(guest.get_by_role("status")).to_contain_text("The room closed because the host did not return in time.")
         expect(page.get_by_role("link", name=f"Return to room {room}")).to_have_count(0)
         assert page.request.get(f"{short_host_return_url}/room/{room}").status == 404
+
+    # Even a browser with no history of the room can safely open the address the host bookmarked.
+    with browser.new_page() as visitor:
+        visitor.goto(bookmark)
+        expect(visitor.locator(".error-card")).to_contain_text("Room not found")
+        assert visitor.request.get(f"{short_host_return_url}/room/{room}").status == 404
+
+    # A fresh tab has no copy of the original tab's credentials. Replaying the literal
+    # creation URL still cannot create the old room after the homepage clears its ticket.
+    page.reload()
+    page.wait_for_function("room => !localStorage.getItem('kn-host-return:' + room)", arg=room)
+    with page.context.new_page() as fresh:
+        fresh.goto(url)
+        assert fresh.evaluate("room => sessionStorage.getItem('kn-reconnect-token:' + room)", room) is None
+        expect(fresh.locator(".error-card")).to_contain_text("Room not found")
+        assert fresh.request.get(f"{short_host_return_url}/room/{room}").status == 404
+        fresh.goto(short_host_return_url)
+        fresh.click("#create-btn")
+        expect(fresh.locator("#host-controls")).to_be_visible()
+        new_room = fresh.evaluate("KNState.room")
+        assert new_room and new_room != room
+        assert fresh.request.get(f"{short_host_return_url}/room/{new_room}").ok
 
     # A bookmark in the original tab cannot recreate the room even after its ticket expires.
     page.add_init_script("const now = Date.now.bind(Date); Date.now = () => now() + 3600000;")
