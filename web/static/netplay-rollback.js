@@ -10885,7 +10885,8 @@
               if (qualify && _reconnectProofStatus(remoteSid) !== false) {
                 _startsReconnectAnswerDebt(remoteSid, peer, _reconnectRequestId);
               } else {
-                if (_sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full')) {
+                const sent = _sendResyncRequest(hostDc, _reconnectRequestId, 'sync-request-full');
+                if (sent) {
                   _syncLog(`reconnect resync: sent sync-request-full request=${_reconnectRequestId}`);
                 }
                 if (qualify) setStatus('Legacy game recovery is not verified');
