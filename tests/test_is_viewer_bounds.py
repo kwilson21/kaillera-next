@@ -4,6 +4,7 @@ Run directly: python3 tests/test_is_viewer_bounds.py
 Requires git, a sanitizer-capable C compiler (CC, default gcc), and the pinned
 build source checkout (KN_MUPEN_SOURCE overrides build/src/mupen64plus-libretro-nx).
 The tested C and headers come from git objects, not a possibly patched worktree.
+CI sets KN_REQUIRE_IS_VIEWER_SOURCE=1 so absent setup fails instead of skipping.
 """
 
 import os
@@ -33,8 +34,16 @@ def run(args, **kwargs):
     return result
 
 
-@unittest.skipUnless(SOURCE.is_dir(), "requires pinned build source; see module docstring")
 class IsViewerBounds(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if SOURCE.is_dir():
+            return
+        message = "requires pinned build source; see module docstring"
+        if os.environ.get("KN_REQUIRE_IS_VIEWER_SOURCE") == "1":
+            raise AssertionError(message)
+        raise unittest.SkipTest(message)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="kn-is-viewer-")
         self.addCleanup(self.temp.cleanup)

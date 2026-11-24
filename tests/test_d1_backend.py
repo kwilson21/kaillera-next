@@ -151,7 +151,87 @@ def test_baseline_migration_applies_through_d1():
         return first, second, [t["name"] for t in tables]
 
     first, second, tables = run_async(_run(_backend(fake.transport()), call))
-    assert first == ["0001", "0002", "0003", "0004", "0005"]
+    assert first == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
     assert second == []
     assert {"feedback", "session_logs", "client_events", "screenshots", "match_metrics", "desync_events"} <= set(tables)
+    assert "server_state" in tables
 
+
+
+def test_archive_and_eviction_run_through_d1(tmp_path, monkeypatch):
+    """Every statement the archive and the eviction build, run on D1's HTTP
+    API: the flush, the record, the batch, and the readers afterwards.
+
+    `tests/test_log_archive.py` covers the behaviour on SQLite. This checks
+    the SQL itself is SQLite that D1 runs — the window-function cap DELETE,
+    `INSERT … SELECT … GROUP BY … HAVING … LIMIT`, a DELETE and an UPDATE
+    with an EXISTS subquery, and `ORDER BY created_at, id … LIMIT … OFFSET`.
+    """
+    from src.blobstore import LocalBlobStore
+
+    monkeypatch.setenv("LOG_ARCHIVE_LOCAL", "1")  # the store is a local folder
+    match_id = "22222222-2222-4222-8222-222222222222"
+    fake = FakeD1()
+
+    async def body():
+        import src.db as db
+        from src import log_archive
+
+        db._registered_matches.clear()
+        db._upload_check_cache.clear()
+        await db.init_db(backend=_backend(fake.transport()), blobs=LocalBlobStore(tmp_path / "blobs"))
+        try:
+            await db.register_match(match_id, "ROOM1")
+            await db.append_session_flush(
+                {
+                    "match_id": match_id,
+                    "room": "ROOM1",
+                    "slot": 0,
+                    "epoch": "e1",
+                    "entries": [{"seq": 0, "msg": "TICK f=1"}, {"seq": 1, "msg": "[C] rb f=1"}],
+                    "audit_epoch": "a1",
+                    "audit_entries": [{"seq": 0, "s": "L", "b": 1}],
+                    "context": '{"delay": 3}',
+                }
+            )
+            for statement in (
+                "UPDATE match_retention SET ended_at = datetime('now', '-45 minutes') WHERE match_id = ?",
+                "UPDATE session_logs SET updated_at = datetime(updated_at, '-45 minutes') WHERE match_id = ?",
+                "UPDATE session_log_chunks SET created_at = datetime(created_at, '-45 minutes') WHERE match_id = ?",
+            ):
+                await db.execute_write(statement, (match_id,))
+            before = await db.get_full_log_entries(match_id, 0, None)
+
+            archived, evicted = await log_archive.sweep()
+            for statement in (
+                "UPDATE match_retention SET archived_at = datetime(archived_at, '-3 days'),"
+                " archived_updated_at = datetime(archived_updated_at, '-3 days') WHERE match_id = ?",
+                "UPDATE session_logs SET updated_at = datetime(updated_at, '-3 days') WHERE match_id = ?",
+                "UPDATE session_log_chunks SET created_at = datetime(created_at, '-3 days') WHERE match_id = ?",
+            ):
+                await db.execute_write(statement, (match_id,))
+            archived_too, evicted_now = await log_archive.sweep()
+
+            rows = await db.query("SELECT context FROM session_logs WHERE match_id = ?", (match_id,))
+            chunks = await db.query(
+                "SELECT COUNT(*) AS n FROM session_log_chunks WHERE match_id = ?", (match_id,)
+            )
+            return {
+                "sweeps": [(archived, evicted), (archived_too, evicted_now)],
+                "before": before,
+                "after": await db.get_full_log_entries(match_id, 0, None),
+                "audit": await db.get_input_audit(match_id, 0),
+                "context": await db.get_session_context(match_id, 0, rows[0]["context"]),
+                "cleared": rows[0]["context"] is None,
+                "chunks_left": chunks[0]["n"],
+            }
+        finally:
+            await db.close_db()
+
+    out = run_async(body())
+    assert out["sweeps"] == [(1, 0), (0, 1)]
+    assert out["chunks_left"] == 0 and out["cleared"]
+    assert [e["msg"] for e in out["before"]] == ["TICK f=1", "[C] rb f=1"]
+    assert out["after"] == out["before"]
+    assert [r["b"] for r in out["audit"]] == [1]
+    assert out["context"] == '{"delay": 3}'

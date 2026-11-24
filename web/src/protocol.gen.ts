@@ -83,7 +83,15 @@ export const MatchJoinedPayload = Schema.Struct({
 });
 export type MatchJoinedPayload = typeof MatchJoinedPayload.Type;
 
-export const EndGamePayload = Schema.Struct({});
+/** The room owner or active slot zero could not verify recovery of the named running match. */
+export const MatchRecoveryUnverifiedPayload = Schema.Struct({
+  matchId: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(64)),
+});
+export type MatchRecoveryUnverifiedPayload = typeof MatchRecoveryUnverifiedPayload.Type;
+
+export const EndGamePayload = Schema.Struct({
+  matchId: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(64)))),
+});
 export type EndGamePayload = typeof EndGamePayload.Type;
 
 export const SetModePayload = Schema.Struct({
@@ -109,6 +117,7 @@ export type SetListedPayload = typeof SetListedPayload.Type;
 export const RomReadyPayload = Schema.Struct({
   ready: Schema.optional(Schema.Boolean),
   prompt: Schema.optional(Schema.Boolean),
+  pending: Schema.optional(Schema.Boolean),
   hash: Schema.optional(Schema.NullOr(Schema.String)),
   name: Schema.optional(Schema.NullOr(Schema.String.check(Schema.isMaxCodePoints(128)))),
   size: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 536870912 })))),
@@ -169,6 +178,7 @@ export const HostRom = Schema.Struct({
   size: Schema.NullOr(Schema.Int),
   gameId: Schema.String,
   game_id: Schema.String,
+  changing: Schema.optional(Schema.Boolean),
 });
 export type HostRom = typeof HostRom.Type;
 
@@ -189,6 +199,7 @@ export const UsersUpdated = Schema.Struct({
   mode: Schema.NullOr(GameMode),
   status: RoomStatus,
   listed: Schema.Boolean,
+  recoveryUnverifiedMatchId: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type UsersUpdated = typeof UsersUpdated.Type;
 
@@ -209,6 +220,7 @@ export const JoinRoomAck = Schema.Struct({
   mode: Schema.NullOr(GameMode),
   status: RoomStatus,
   listed: Schema.Boolean,
+  recoveryUnverifiedMatchId: Schema.optional(Schema.NullOr(Schema.String)),
   rom_hash: Schema.NullOr(Schema.String),
   rom_sharing: Schema.Boolean,
   matchId: Schema.NullOr(Schema.String),
@@ -291,6 +303,7 @@ export const decodeClaimSlotPayload = Schema.decodeUnknownResult(ClaimSlotPayloa
 export const decodeSetNamePayload = Schema.decodeUnknownResult(SetNamePayload);
 export const decodeStartGamePayload = Schema.decodeUnknownResult(StartGamePayload);
 export const decodeMatchJoinedPayload = Schema.decodeUnknownResult(MatchJoinedPayload);
+export const decodeMatchRecoveryUnverifiedPayload = Schema.decodeUnknownResult(MatchRecoveryUnverifiedPayload);
 export const decodeEndGamePayload = Schema.decodeUnknownResult(EndGamePayload);
 export const decodeSetModePayload = Schema.decodeUnknownResult(SetModePayload);
 export const decodeSetGameIdPayload = Schema.decodeUnknownResult(SetGameIdPayload);

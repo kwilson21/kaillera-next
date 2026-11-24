@@ -6,6 +6,39 @@ replayed by the model checker and drawn from the trace that produced. Do not edi
 
 To draw a counterexample instead, see the top of `scripts/trace-diagram.mjs`.
 
+## `specs/game_end.qnt` (`game_end_fixed`)
+
+A host end request waits for the server rather than ending only the host on timeout. The authoritative lobby roster repairs a lost end event, and a delayed request cannot end a rematch.
+
+### timeoutDoesNotEndOnlyHostTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: timeout
+```
+
+### rosterRepairsLostEndTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: receiveEnd
+  Note over Room: serverMatch = 0
+  Room->>Room: roster
+  Note over Room: hostMatch = 0<br/>guestMatch = 0
+```
+
+### staleRetryDoesNotEndRematchTest
+
+```mermaid
+sequenceDiagram
+  participant Room
+  Room->>Room: rematch
+  Note over Room: serverMatch = 2<br/>hostMatch = 2<br/>guestMatch = 2
+  Room->>Room: receiveEnd
+```
+
 ## `specs/room_lifecycle.qnt` (`room_current`)
 
 The server's view of a room against what each player's page is doing. The note on a page is the state it moves to; a dashed arrow is what an action did to another page.
@@ -20,19 +53,19 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
   Server-->>host: Loading(1)
   host->>Server: reload("host")
-  Note over Server: grace = {host}<br/>online = {}
+  Note over Server: online = {}<br/>grace = {host}
   Note over host: Closed
   host->>Server: reopen("host", true)
-  Note over Server: grace = {}<br/>status = lobby<br/>matchId = 0<br/>online = {host}
+  Note over Server: online = {host}<br/>grace = {}<br/>status = lobby<br/>matchId = 0
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
 ```
 
@@ -46,10 +79,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -62,9 +95,9 @@ sequenceDiagram
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
   host->>Server: dropSocket("host")
-  Note over Server: grace = {host}<br/>online = {guest1}
+  Note over Server: online = {guest1}<br/>grace = {host}
   host->>Server: resume("host", true)
-  Note over Server: grace = {}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>grace = {}
 ```
 
 ### returnAfterGraceTest
@@ -77,10 +110,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -93,11 +126,11 @@ sequenceDiagram
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
   guest1->>Server: dropSocket("guest1")
-  Note over Server: grace = {guest1}<br/>online = {host}
+  Note over Server: online = {host}<br/>grace = {guest1}
   Server->>Server: graceExpire("guest1")
   Note over Server: grace = {}<br/>members = {host}
   guest1->>Server: returnAfterExpiry("guest1", true, false)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
 ```
 
 ### hostReturnsAfterGraceTest
@@ -110,10 +143,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -126,11 +159,11 @@ sequenceDiagram
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
   host->>Server: dropSocket("host")
-  Note over Server: grace = {host}<br/>online = {guest1}
+  Note over Server: online = {guest1}<br/>grace = {host}
   Server->>Server: graceExpire("host")
-  Note over Server: grace = {}<br/>members = {guest1}<br/>owner = guest1<br/>creator = ""
+  Note over Server: grace = {}<br/>creator = ""<br/>members = {guest1}<br/>owner = guest1
   host->>Server: returnAfterExpiry("host", true, true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
 ```
 
 ### everyoneDropsTest
@@ -143,10 +176,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -159,11 +192,11 @@ sequenceDiagram
   Server-->>host: Running(1)
   Server-->>guest1: Running(1)
   host->>Server: dropSocket("host")
-  Note over Server: grace = {host}<br/>online = {guest1}
+  Note over Server: online = {guest1}<br/>grace = {host}
   guest1->>Server: dropSocket("guest1")
-  Note over Server: grace = {guest1, host}<br/>online = {}
+  Note over Server: online = {}<br/>grace = {guest1, host}
   host->>Server: resume("host", true)
-  Note over Server: grace = {guest1}<br/>online = {host}
+  Note over Server: online = {host}<br/>grace = {guest1}
 ```
 
 ### abandonedMatchTest
@@ -176,7 +209,7 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -186,10 +219,10 @@ sequenceDiagram
   Server->>Server: startRunning
   Server-->>host: Running(1)
   guest1->>Server: join("guest1", false)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: AwaitingRom(1)
   host->>Server: leave("host")
-  Note over Server: members = {guest1}<br/>owner = guest1<br/>online = {guest1}<br/>creator = ""
+  Note over Server: online = {guest1}<br/>creator = ""<br/>members = {guest1}<br/>owner = guest1
   Note over host: Closed
   Server->>Server: endAbandonedMatch
   Note over Server: status = lobby<br/>matchId = 0
@@ -204,7 +237,7 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -214,7 +247,7 @@ sequenceDiagram
   Server->>Server: startRunning
   Server-->>host: Running(1)
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Starting(1)
   guest1->>Server: startLateJoinEngine("guest1")
   Note over guest1: Syncing(1)
@@ -224,6 +257,78 @@ sequenceDiagram
   Note over Server: status = lobby<br/>matchId = 0
   Server-->>host: Lobby
   Server-->>guest1: Lobby
+```
+
+### lateJoinerSocketDropTest
+
+A late joiner's socket drops and comes back (a new socket id) before it has the match state: once while its engine is starting, and once more while it is asking for the state. Seen once in a real-ROM run of tests/lifecycle-e2e.mjs late-join-cached on an older branch, where the joiner logged "mid-game rejoin succeeded" and then went to the lobby. Here, as on the server, the resume keeps the joiner on the late-join path of the same match, and it is still served. What a new socket id does to the engines' own state is below this model: the fault modes late-join-drop-before-request and late-join-drop-during-serve in tests/lifecycle-e2e.mjs take a real page through both windows.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
+  Note over host: Lobby
+  Server->>Server: startGame
+  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Server-->>host: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  guest1->>Server: join("guest1", true)
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
+  Note over guest1: Starting(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: online = {host}<br/>grace = {guest1}
+  guest1->>Server: resume("guest1", true)
+  Note over Server: online = {guest1, host}<br/>grace = {}
+  guest1->>Server: startLateJoinEngine("guest1")
+  Note over guest1: Syncing(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: online = {host}<br/>grace = {guest1}
+  guest1->>Server: resume("guest1", true)
+  Note over Server: online = {guest1, host}<br/>grace = {}
+  Server->>Server: serveLateJoin("guest1")
+  Server-->>guest1: Running(1)
+```
+
+### lateJoinServeTimeoutTest
+
+The same, and the host's state for the joiner is lost with the socket: the host's serve deadline runs out and it drops the joiner so that it asks again (tests/lifecycle-e2e.mjs late-join-drop-during-serve). Before, the joiner restarted as a player loading for the start and was stuck.
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
+  Note over host: Lobby
+  Server->>Server: startGame
+  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Server-->>host: Loading(1)
+  Server->>Server: beginSync
+  Server-->>host: StartSync(1)
+  Server->>Server: startRunning
+  Server-->>host: Running(1)
+  guest1->>Server: join("guest1", true)
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
+  Note over guest1: Starting(1)
+  guest1->>Server: startLateJoinEngine("guest1")
+  Note over guest1: Syncing(1)
+  guest1->>Server: dropSocket("guest1")
+  Note over Server: online = {host}<br/>grace = {guest1}
+  guest1->>Server: resume("guest1", true)
+  Note over Server: online = {guest1, host}<br/>grace = {}
+  guest1->>Server: serveTimesOut("guest1")
+  Note over guest1: Starting(1)
+  guest1->>Server: startLateJoinEngine("guest1")
+  Note over guest1: Syncing(1)
+  Server->>Server: serveLateJoin("guest1")
+  Server-->>guest1: Running(1)
 ```
 
 ### lateJoinWithoutRomTest
@@ -236,7 +341,7 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -246,7 +351,7 @@ sequenceDiagram
   Server->>Server: startRunning
   Server-->>host: Running(1)
   guest1->>Server: join("guest1", false)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: AwaitingRom(1)
   guest1->>Server: romReady("guest1")
   Note over guest1: Starting(1)
@@ -266,13 +371,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
   Server-->>host: Loading(1)
   guest1->>Server: join("guest1", false)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: AwaitingRom(1)
   Server->>Server: endGame
   Note over Server: status = lobby<br/>matchId = 0
@@ -291,17 +396,17 @@ sequenceDiagram
   participant guest1
   participant guest2
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   guest2->>Server: join("guest2", true)
-  Note over Server: members = {guest1, guest2, host}<br/>online = {guest1, guest2, host}
+  Note over Server: online = {guest1, guest2, host}<br/>members = {guest1, guest2, host}
   Note over guest2: Starting(1)
   guest2->>Server: startLateJoinEngine("guest2")
   Note over guest2: Syncing(1)
@@ -328,10 +433,10 @@ sequenceDiagram
   participant guest1
   participant guest2
   host->>Server: openRoom("host")
-  Note over Server: members = {host}<br/>owner = host<br/>online = {host}<br/>creator = host
+  Note over Server: online = {host}<br/>creator = host<br/>members = {host}<br/>owner = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
-  Note over Server: members = {guest1, host}<br/>online = {guest1, host}
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
   Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
@@ -341,7 +446,7 @@ sequenceDiagram
   Server-->>host: StartSync(1)
   Server-->>guest1: StartSync(1)
   guest2->>Server: join("guest2", true)
-  Note over Server: members = {guest1, guest2, host}<br/>online = {guest1, guest2, host}
+  Note over Server: online = {guest1, guest2, host}<br/>members = {guest1, guest2, host}
   Note over guest2: Starting(1)
   guest2->>Server: startLateJoinEngine("guest2")
   Note over guest2: Syncing(1)
@@ -496,15 +601,15 @@ The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives 
 sequenceDiagram
   participant Guest
   Guest->>Guest: drop("wrong")
-  Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong
+  Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>caching = {wrong}<br/>loaded = wrong
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: hashing = {}<br/>toldFor = 1<br/>hashLoad = 1<br/>hash = wrong<br/>told = wrong
+  Note over Guest: hashLoad = 1<br/>told = wrong<br/>hash = wrong<br/>toldFor = 1<br/>hashing = {}
   Guest->>Guest: drop("right")
-  Note over Guest: hashing = {(2, right)}<br/>load = 2<br/>loaded = right
+  Note over Guest: hashing = {(2, right)}<br/>load = 2<br/>caching = {right, wrong}<br/>loaded = right
   Guest->>Guest: hostArrives
-  Note over Guest: hostKnown = true<br/>loadedIsDrop = false<br/>load = 3<br/>loaded = none<br/>banner = true<br/>clearedRight = true<br/>toldFor = 3<br/>hashLoad = 3<br/>hash = none<br/>told = none
+  Note over Guest: hashLoad = 3<br/>told = none<br/>hash = none<br/>banner = true<br/>clearedRight = true<br/>roomRom = right<br/>loadedIsDrop = false<br/>toldFor = 3<br/>load = 3<br/>loaded = none
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hashing = {}<br/>banner = false<br/>toldFor = 2<br/>hashLoad = 2<br/>toldStale = true<br/>hash = right<br/>told = right
+  Note over Guest: hashLoad = 2<br/>told = right<br/>hash = right<br/>banner = false<br/>toldFor = 2<br/>hashing = {}<br/>toldStale = true
 ```
 
 ### twoDropsTest
@@ -515,15 +620,15 @@ Two drops, the second (the host's ROM) hashed first; the first's hash lands late
 sequenceDiagram
   participant Guest
   Guest->>Guest: hostArrives
-  Note over Guest: hostKnown = true
+  Note over Guest: roomRom = right
   Guest->>Guest: drop("wrong")
-  Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>loaded = wrong
+  Note over Guest: loadedIsDrop = true<br/>hashing = {(1, wrong)}<br/>load = 1<br/>caching = {wrong}<br/>loaded = wrong
   Guest->>Guest: drop("right")
-  Note over Guest: hashing = {(1, wrong), (2, right)}<br/>load = 2<br/>loaded = right
+  Note over Guest: hashing = {(1, wrong), (2, right)}<br/>load = 2<br/>caching = {right, wrong}<br/>loaded = right
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hashing = {(1, wrong)}<br/>toldFor = 2<br/>hashLoad = 2<br/>hash = right<br/>told = right
+  Note over Guest: hashLoad = 2<br/>told = right<br/>hash = right<br/>toldFor = 2<br/>hashing = {(1, wrong)}
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: loadedIsDrop = false<br/>hashing = {}<br/>load = 3<br/>loaded = none<br/>banner = true<br/>clearedRight = true<br/>toldFor = 3<br/>hashLoad = 3<br/>hash = none<br/>told = none
+  Note over Guest: hashLoad = 3<br/>told = none<br/>hash = none<br/>banner = true<br/>clearedRight = true<br/>loadedIsDrop = false<br/>toldFor = 3<br/>hashing = {}<br/>load = 3<br/>loaded = none
 ```
 
 ## `specs/rom_identity.qnt` (`rom_identity_current`)
@@ -538,15 +643,15 @@ The guest has a wrong ROM, drops the host's over it, and the host's ROM arrives 
 sequenceDiagram
   participant Guest
   Guest->>Guest: drop("wrong")
-  Note over Guest: load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true<br/>toldFor = 1<br/>loaded = wrong
+  Note over Guest: loaded = wrong<br/>caching = {wrong}<br/>load = 1<br/>hashing = {(1, wrong)}<br/>toldFor = 1<br/>loadedIsDrop = true
   Guest->>Guest: hashLands(1, "wrong")
-  Note over Guest: hashing = {}<br/>hash = wrong<br/>told = wrong<br/>hashLoad = 1
+  Note over Guest: hashLoad = 1<br/>hashing = {}<br/>hash = wrong<br/>told = wrong
   Guest->>Guest: drop("right")
-  Note over Guest: load = 2<br/>hashing = {(2, right)}<br/>told = none<br/>toldFor = 2<br/>loaded = right
+  Note over Guest: loaded = right<br/>caching = {right, wrong}<br/>load = 2<br/>hashing = {(2, right)}<br/>toldFor = 2<br/>told = none
   Guest->>Guest: hostArrives
-  Note over Guest: hostKnown = true
+  Note over Guest: roomRom = right
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hashing = {}<br/>hash = right<br/>told = right<br/>hashLoad = 2
+  Note over Guest: hashLoad = 2<br/>hashing = {}<br/>hash = right<br/>told = right
 ```
 
 ### twoDropsTest
@@ -557,13 +662,149 @@ Two drops, the second (the host's ROM) hashed first; the first's hash lands late
 sequenceDiagram
   participant Guest
   Guest->>Guest: hostArrives
-  Note over Guest: hostKnown = true
+  Note over Guest: roomRom = right
   Guest->>Guest: drop("wrong")
-  Note over Guest: load = 1<br/>hashing = {(1, wrong)}<br/>loadedIsDrop = true<br/>toldFor = 1<br/>loaded = wrong
+  Note over Guest: loaded = wrong<br/>caching = {wrong}<br/>load = 1<br/>hashing = {(1, wrong)}<br/>toldFor = 1<br/>loadedIsDrop = true
   Guest->>Guest: drop("right")
-  Note over Guest: load = 2<br/>hashing = {(1, wrong), (2, right)}<br/>toldFor = 2<br/>loaded = right
+  Note over Guest: loaded = right<br/>caching = {right, wrong}<br/>load = 2<br/>hashing = {(1, wrong), (2, right)}<br/>toldFor = 2
   Guest->>Guest: hashLands(2, "right")
-  Note over Guest: hashing = {(1, wrong)}<br/>hash = right<br/>told = right<br/>hashLoad = 2
+  Note over Guest: hashLoad = 2<br/>hashing = {(1, wrong)}<br/>hash = right<br/>told = right
   Guest->>Guest: hashLands(1, "wrong")
   Note over Guest: hashing = {}
+```
+
+## `specs/rom_identity.qnt` (`rom_identity_host_silent`)
+
+The host changing its ROM while the host's drop said nothing (#289). `roomRom` is the host's ROM as the room names it and the guest has heard; the names follow the host, so `"right"` is always the ROM the host holds. Until the host's new ROM is hashed the room names its previous one (`"wrong"`): the guest's ROM that is the host's new one is refused against it, and a guest holding the previous one is still counted ready on it.
+
+### hostChangesToTheGuestsRomTest
+
+The host's ROM is known, and the host drops another: the one the guest is about to drop (the guest's "wrong" is "right" from here on). The guest drops it, and its hash lands before the host's. With the host's drop unsaid, the room still names the host's previous ROM, and the guest's ROM, the host's new one, is refused against it. Today the room's ROM is changing: the guest's page waits, and the host's hash, landing, finds the guest's ROM is the host's and it is announced.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: hostDrops(true)
+  Note over Guest: hostHashing = true<br/>roomRom = wrong
+  Guest->>Guest: drop("right")
+  Note over Guest: loaded = right<br/>caching = {right}<br/>load = 1<br/>hashing = {(1, right)}<br/>toldFor = 1<br/>loadedIsDrop = true
+  Guest->>Guest: hashLands(1, "right")
+  Note over Guest: hashLoad = 2<br/>loaded = none<br/>load = 2<br/>hashing = {}<br/>toldFor = 2<br/>loadedIsDrop = false<br/>clearedRight = true<br/>banner = true
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>roomRom = right
+```
+
+### hostChangesAwayFromTheGuestsRomTest
+
+The guest holds the host's ROM, and the server has heard so; the host drops another, one the guest has never held. With the host's drop unsaid, the room names the host's previous ROM while the new one is hashed: the server still counts the guest ready on it, and the page says so again at the next room change. Today the server drops the guest's word at once and the page waits. Either way the host's hash, landing, drops the guest's word and refuses its ROM.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: drop("right")
+  Note over Guest: loaded = right<br/>caching = {right}<br/>load = 1<br/>hashing = {(1, right)}<br/>toldFor = 1<br/>loadedIsDrop = true
+  Guest->>Guest: hashLands(1, "right")
+  Note over Guest: hashLoad = 1<br/>hashing = {}<br/>hash = right<br/>told = right
+  Guest->>Guest: hostDrops(false)
+  Note over Guest: hostHashing = true<br/>loaded = wrong<br/>caching = {wrong}<br/>roomRom = wrong<br/>hash = wrong<br/>told = wrong
+  Guest->>Guest: roomUpdate
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>hashLoad = 2<br/>loaded = none<br/>load = 2<br/>toldFor = 2<br/>loadedIsDrop = false<br/>roomRom = right<br/>banner = true<br/>hash = none<br/>told = none
+```
+
+## `specs/rom_identity.qnt` (`rom_identity_current`)
+
+The same orderings today. The host's drop says its ROM is being hashed: the room names none (`changing`) and drops every guest's word, the guest's page judges nothing and says nothing, and the host's hash, once it is the room's, decides.
+
+### hostChangesToTheGuestsRomTest
+
+The host's ROM is known, and the host drops another: the one the guest is about to drop (the guest's "wrong" is "right" from here on). The guest drops it, and its hash lands before the host's. With the host's drop unsaid, the room still names the host's previous ROM, and the guest's ROM, the host's new one, is refused against it. Today the room's ROM is changing: the guest's page waits, and the host's hash, landing, finds the guest's ROM is the host's and it is announced.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: hostDrops(true)
+  Note over Guest: hostHashing = true<br/>roomRom = changing
+  Guest->>Guest: drop("right")
+  Note over Guest: loaded = right<br/>caching = {right}<br/>load = 1<br/>hashing = {(1, right)}<br/>toldFor = 1<br/>loadedIsDrop = true
+  Guest->>Guest: hashLands(1, "right")
+  Note over Guest: hashLoad = 1<br/>hashing = {}<br/>hash = right
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>roomRom = right<br/>told = right
+```
+
+### hostChangesAwayFromTheGuestsRomTest
+
+The guest holds the host's ROM, and the server has heard so; the host drops another, one the guest has never held. With the host's drop unsaid, the room names the host's previous ROM while the new one is hashed: the server still counts the guest ready on it, and the page says so again at the next room change. Today the server drops the guest's word at once and the page waits. Either way the host's hash, landing, drops the guest's word and refuses its ROM.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: drop("right")
+  Note over Guest: loaded = right<br/>caching = {right}<br/>load = 1<br/>hashing = {(1, right)}<br/>toldFor = 1<br/>loadedIsDrop = true
+  Guest->>Guest: hashLands(1, "right")
+  Note over Guest: hashLoad = 1<br/>hashing = {}<br/>hash = right<br/>told = right
+  Guest->>Guest: hostDrops(false)
+  Note over Guest: hostHashing = true<br/>loaded = wrong<br/>caching = {wrong}<br/>roomRom = changing<br/>hash = wrong<br/>told = none
+  Guest->>Guest: roomUpdate
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>hashLoad = 2<br/>loaded = none<br/>load = 2<br/>toldFor = 2<br/>loadedIsDrop = false<br/>roomRom = right<br/>banner = true<br/>hash = none
+```
+
+## `specs/rom_identity.qnt` (`rom_identity_no_library`)
+
+The guest drops the ROM the host is about to change to, a moment before the host does (#303). Its copy lands in the library (`cacheLands`), and it is refused, rightly, against the host's ROM of the moment. When the room names the host's new ROM the page holds none, and stays so: it looked in its library only after a refusal (`missedLibraryRom`).
+
+### guestDroppedFirstTest
+
+The players agree to switch games and the guest drops the new ROM a moment before the host does: its copy lands in the library, and it is refused, correctly, against the ROM the host still holds. The host then drops the same ROM (the guest's "wrong" is "right" from here on), and its hash lands. Until now the guest stayed without a ROM and had to drop it again; today the page loads it from the library and says ready.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: drop("wrong")
+  Note over Guest: loadedIsDrop = true<br/>toldFor = 1<br/>hashing = {(1, wrong)}<br/>load = 1<br/>caching = {wrong}<br/>loaded = wrong
+  Guest->>Guest: cacheLands("wrong")
+  Note over Guest: caching = {}<br/>library = {wrong}
+  Guest->>Guest: hashLands(1, "wrong")
+  Note over Guest: hashLoad = 2<br/>banner = true<br/>loadedIsDrop = false<br/>toldFor = 2<br/>hashing = {}<br/>load = 2<br/>loaded = none
+  Guest->>Guest: hostDrops(true)
+  Note over Guest: hostHashing = true<br/>roomRom = changing<br/>library = {right}
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>roomRom = right<br/>missedLibraryRom = true
+```
+
+## `specs/rom_identity.qnt` (`rom_identity_current`)
+
+The same ordering today. When the room names the host's new ROM and the page holds none, it looks in its library, finds the ROM it dropped, loads it and says ready.
+
+### guestDroppedFirstTest
+
+The players agree to switch games and the guest drops the new ROM a moment before the host does: its copy lands in the library, and it is refused, correctly, against the ROM the host still holds. The host then drops the same ROM (the guest's "wrong" is "right" from here on), and its hash lands. Until now the guest stayed without a ROM and had to drop it again; today the page loads it from the library and says ready.
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: hostArrives
+  Note over Guest: roomRom = right
+  Guest->>Guest: drop("wrong")
+  Note over Guest: loaded = wrong<br/>caching = {wrong}<br/>load = 1<br/>hashing = {(1, wrong)}<br/>toldFor = 1<br/>loadedIsDrop = true
+  Guest->>Guest: cacheLands("wrong")
+  Note over Guest: library = {wrong}<br/>caching = {}
+  Guest->>Guest: hashLands(1, "wrong")
+  Note over Guest: hashLoad = 2<br/>loaded = none<br/>load = 2<br/>hashing = {}<br/>toldFor = 2<br/>loadedIsDrop = false<br/>banner = true
+  Guest->>Guest: hostDrops(true)
+  Note over Guest: hostHashing = true<br/>library = {right}<br/>roomRom = changing
+  Guest->>Guest: hostHashLands
+  Note over Guest: hostHashing = false<br/>hashLoad = 3<br/>loaded = right<br/>load = 3<br/>toldFor = 3<br/>roomRom = right<br/>banner = false<br/>hash = right<br/>told = right
 ```

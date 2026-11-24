@@ -35,6 +35,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import html as html_lib
 import json
 import logging
 import os
@@ -45,8 +46,8 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import ColumnElement, Select, or_, select
 from starlette.middleware.gzip import GZipMiddleware
@@ -76,6 +77,7 @@ from src.api.signaling import (
     rooms,
     verify_upload_token,
 )
+from src.log_archive import ArchiveUnreadable
 from src.ratelimit import check_ip, extract_ip, ip_hash
 from src.schema import ClientEvent, DesyncEvent, Feedback, MatchMetrics, SessionLog
 
@@ -146,6 +148,9 @@ _VALID_EVENT_TYPES = {
     "rejoin-no-answer",
     # A late joiner got no game state from a running host before its deadline.
     "late-join-timeout",
+    # The match could not start on a page: its core lacks the C engine, or it
+    # never heard the host's delay (netplay-rollback.js _stopAtStart).
+    "start-fail",
     # A late joiner that lost its channel to the host got no answer to any of
     # its resync requests and stopped asking (netplay-rollback.js).
     "late-join-lost-host-giveup",
@@ -282,6 +287,7 @@ class SecurityHeadersMiddleware:
 
         # Extract the request path for cache-control decisions.
         path: str = scope.get("path", "/")
+        query: bytes = scope.get("query_string", b"")
 
         async def send_with_headers(message: dict) -> None:
             if message["type"] == "http.response.start":
@@ -292,7 +298,7 @@ class SecurityHeadersMiddleware:
                     (b"strict-transport-security", b"max-age=63072000; includeSubDomains"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
                     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
-                    (b"cache-control", self._cache_control(path).encode()),
+                    (b"cache-control", self._cache_control(path, query, message["status"]).encode()),
                 ]
                 # COOP/COEP breaks OG image fetches by crawlers. The front page
                 # doesn't need cross-origin isolation (only the game does), and
@@ -305,13 +311,19 @@ class SecurityHeadersMiddleware:
 
         await self.app(scope, receive, send_with_headers)
 
-    def _cache_control(self, path: str) -> str:
+    def _cache_control(self, path: str, query: bytes = b"", status: int = 200) -> str:
         if not self._allow_cache:
             return "no-store, no-cache, must-revalidate, max-age=0"
         # WASM core + data — content-addressed via /api/core-info?h=<hash>,
         # so the URL itself changes when the file changes. Safe to cache for
         # a year (browsers + Cloudflare both treat ?h=… as part of the cache
         # key, so a new file = new URL = guaranteed cache miss).
+        if path == f"/{_CORE_RELATIVE_PATH}" or path.startswith("/static/ejs/cores/reports/"):
+            # Never pin a missing file for a year during a deployment.
+            if status >= 400:
+                return "no-store"
+            if not re.fullmatch(rb"h=[0-9a-f]{16}", query):
+                return "no-cache"
         if path.startswith("/static/ejs/cores/"):
             return "public, max-age=31536000, immutable"
         # JS/CSS — always revalidate via ETag (304 if unchanged)
@@ -704,11 +716,31 @@ class ErrorPageMiddleware:
                     await send({"type": "http.response.body", "body": body})
                     return
                 await send(message)
-            elif message["type"] == "http.response.body":
-                if not intercepted:
-                    await send(message)
+            elif message["type"] == "http.response.body" and not intercepted:
+                await send(message)
 
         await self.app(scope, receive, capture_send)
+
+
+# ── Session-log rendering (run in worker threads) ─────────────────────────────
+# Each log entry is serialized by its own json.dumps call. One call over a
+# whole log would hold the GIL, and so the event loop, until it returned, even
+# from a worker thread; between small calls the loop gets its turn.
+
+
+def _jsonl_lines(entries: list, per_line_meta: dict) -> bytes:
+    """Export lines for `entries`: each dict entry with the session's per-line metadata merged in."""
+    return "".join(
+        json.dumps({**per_line_meta, **e}, separators=(",", ":")) + "\n" for e in entries if isinstance(e, dict)
+    ).encode("utf-8")
+
+
+def _detail_json(entry: dict) -> bytes:
+    """The session-log detail response: `entry` as JSON, its `log_data` list serialized entry by entry."""
+    log_data = entry.pop("log_data")
+    head = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+    items = ",".join(json.dumps(e, ensure_ascii=False, separators=(",", ":")) for e in log_data)
+    return f'{head[:-1]},"log_data":[{items}]}}'.encode()
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -734,6 +766,12 @@ def create_app(lifespan=None) -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=500)
     app.add_middleware(SecurityHeadersMiddleware, allow_cache=production)
     app.add_middleware(PublicCorsMiddleware)
+
+    @app.exception_handler(ArchiveUnreadable)
+    async def _archive_unreadable(_request: Request, exc: ArchiveUnreadable) -> JSONResponse:
+        # An evicted match's chunks are no longer in the database, so an
+        # archive that can't be read is an error, not an empty log.
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     # Load error page template
     _error_html_path = Path(os.path.dirname(__file__)).parent.parent.parent / "web" / "error.html"
@@ -940,6 +978,7 @@ def create_app(lifespan=None) -> FastAPI:
                 "size": room.rom_size,
                 "gameId": room.game_id,
                 "game_id": room.game_id,
+                "changing": room.rom_changing,
             },
             "rom_sharing": room.rom_sharing,
             "mode": room.mode,
@@ -1390,6 +1429,31 @@ def create_app(lifespan=None) -> FastAPI:
             terms.append(ClientEvent.room == room)
         return or_(*terms) if terms else None
 
+    async def _client_events(match_id: str | None, room: str | None) -> list[dict]:
+        """A session's client events (DC failures, WebRTC state, milestones),
+        oldest first, at most 200, with meta decoded."""
+        either = _events_of(match_id, room)
+        if either is None:
+            return []
+        rows = await db.fetch(
+            select(
+                ClientEvent.id,
+                ClientEvent.type,
+                ClientEvent.message,
+                ClientEvent.meta,
+                ClientEvent.slot,
+                ClientEvent.created_at,
+            )
+            .where(either)
+            .order_by(ClientEvent.created_at, ClientEvent.id)
+            .limit(200)
+        )
+        for row in rows:
+            if row.get("meta") and isinstance(row["meta"], str):
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    row["meta"] = json.loads(row["meta"])
+        return rows
+
     def _desync_verdicts(match_id: str) -> Select:
         """A match's desync events with their vision verdicts, in frame order."""
         return (
@@ -1496,13 +1560,52 @@ def create_app(lifespan=None) -> FastAPI:
 
         return {"total": total, "entries": entries}
 
+    @app.get("/admin/api/session-logs/{log_id}/summary")
+    async def admin_session_log_summary(log_id: int, _auth: None = Depends(_require_admin)) -> dict:
+        """Metadata only; do not select the legacy raw log or load any chunks."""
+        rows = await db.fetch(
+            select(
+                SessionLog.id,
+                SessionLog.match_id,
+                SessionLog.room,
+                SessionLog.slot,
+                SessionLog.player_name,
+                SessionLog.mode,
+                SessionLog.summary,
+                SessionLog.ended_by,
+                SessionLog.created_at,
+                SessionLog.updated_at,
+            ).where(SessionLog.id == log_id)
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Session log not found")
+        entry = rows[0]
+        if isinstance(entry.get("summary"), str):
+            with contextlib.suppress(json.JSONDecodeError):
+                entry["summary"] = json.loads(entry["summary"])
+        return entry
+
+    @app.get("/admin/api/session-logs/{log_id}/client-events")
+    async def admin_session_log_client_events(log_id: int, _auth: None = Depends(_require_admin)) -> dict:
+        """The client events the detail endpoint bundles, without the session's
+        log: tools/analyze_match.py already has the log from the export."""
+        rows = await db.fetch(select(SessionLog.match_id, SessionLog.room).where(SessionLog.id == log_id))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Session log not found")
+        return {"client_events": await _client_events(rows[0].get("match_id"), rows[0].get("room"))}
+
     @app.get("/admin/api/session-logs/{log_id}")
-    async def admin_session_log_detail(request: Request, log_id: int, _auth: None = Depends(_require_admin)) -> dict:
+    async def admin_session_log_detail(
+        request: Request, log_id: int, _auth: None = Depends(_require_admin)
+    ) -> Response:
         rows = await db.fetch(select(SessionLog).where(SessionLog.id == log_id))
         if not rows:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
         raw_log_data = entry.get("log_data")
+        # `context` is cleared when a match's log moves to the archive
+        # (src/log_archive.py); read it back from there.
+        entry["context"] = await db.get_session_context(entry.get("match_id"), entry.get("slot"), entry.get("context"))
         for field in ("summary", "context"):
             if entry.get(field) and isinstance(entry[field], str):
                 with contextlib.suppress(json.JSONDecodeError, TypeError):
@@ -1515,29 +1618,7 @@ def create_app(lifespan=None) -> FastAPI:
         # Bundle client events for the same match/room so the full picture
         # is visible in one API call (DC failures, WebRTC state, milestones).
         match_id = entry.get("match_id")
-        room = entry.get("room")
-        either = _events_of(match_id, room)
-        if either is not None:
-            event_rows = await db.fetch(
-                select(
-                    ClientEvent.id,
-                    ClientEvent.type,
-                    ClientEvent.message,
-                    ClientEvent.meta,
-                    ClientEvent.slot,
-                    ClientEvent.created_at,
-                )
-                .where(either)
-                .order_by(ClientEvent.created_at, ClientEvent.id)
-                .limit(200)
-            )
-            for row in event_rows:
-                if row.get("meta") and isinstance(row["meta"], str):
-                    with contextlib.suppress(json.JSONDecodeError, TypeError):
-                        row["meta"] = json.loads(row["meta"])
-            entry["client_events"] = event_rows
-        else:
-            entry["client_events"] = []
+        entry["client_events"] = await _client_events(match_id, entry.get("room"))
 
         # Bundle vision desync verdicts for this match.
         if match_id:
@@ -1545,7 +1626,9 @@ def create_app(lifespan=None) -> FastAPI:
         else:
             entry["desync_events"] = []
 
-        return entry
+        # Megabytes of JSON for a long match: rendered in a worker thread, not
+        # by FastAPI on the event loop.
+        return Response(await asyncio.to_thread(_detail_json, entry), media_type="application/json")
 
     @app.get("/admin/api/session-logs/{log_id}/export")
     async def admin_session_log_export(
@@ -1574,17 +1657,25 @@ def create_app(lifespan=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Session log not found")
         entry = rows[0]
 
-        # Pre-parse the JSON-stored fields. log_data is legacy full-blob
-        # entries (if any) plus appended session_log_chunks; summary and
-        # context are JSON objects.
-        log_data = await db.get_full_log_entries(entry.get("match_id"), entry.get("slot"), entry.get("log_data"))
+        # log_data is legacy full-blob entries (if any) plus appended
+        # session_log_chunks, streamed a page of chunks at a time and
+        # serialized in worker threads. Done in one piece on the event loop,
+        # a 19-minute match's export kept /health from answering for 5 s and
+        # Render restarted the server. SQLite counts the chunks' entries for
+        # the meta line and header, and the stream reads no chunk added after
+        # the count. For a live log at its size cap, the count can exceed
+        # what is streamed: the cap may delete counted chunks meanwhile.
+        match_id, slot = entry.get("match_id"), entry.get("slot")
+        legacy = await db.legacy_log_entries(match_id, entry.get("log_data"))
+        stored, through_id = await db.count_log_entries(match_id, slot)
+        entry_count = len(legacy) + stored
 
         summary = entry.get("summary") or "{}"
         if isinstance(summary, str):
             with contextlib.suppress(json.JSONDecodeError, TypeError):
                 summary = json.loads(summary)
 
-        context_obj = entry.get("context") or "{}"
+        context_obj = await db.get_session_context(match_id, slot, entry.get("context")) or "{}"
         if isinstance(context_obj, str):
             with contextlib.suppress(json.JSONDecodeError, TypeError):
                 context_obj = json.loads(context_obj)
@@ -1592,9 +1683,9 @@ def create_app(lifespan=None) -> FastAPI:
         meta = {
             "_kind": "meta",
             "id": entry.get("id"),
-            "match_id": entry.get("match_id"),
+            "match_id": match_id,
             "room": entry.get("room"),
-            "slot": entry.get("slot"),
+            "slot": slot,
             "player_name": entry.get("player_name"),
             "mode": entry.get("mode"),
             "ended_by": entry.get("ended_by"),
@@ -1602,7 +1693,7 @@ def create_app(lifespan=None) -> FastAPI:
             "updated_at": str(entry.get("updated_at")),
             "summary": summary,
             "context": context_obj,
-            "entry_count": len(log_data),
+            "entry_count": entry_count,
         }
 
         # Stable per-line metadata included on every entry so the
@@ -1610,26 +1701,25 @@ def create_app(lifespan=None) -> FastAPI:
         # back to the meta line.
         per_line_meta = {
             "session_id": entry.get("id"),
-            "match_id": entry.get("match_id"),
-            "slot": entry.get("slot"),
+            "match_id": match_id,
+            "slot": slot,
         }
 
         async def generate():
             yield (json.dumps(meta) + "\n").encode("utf-8")
-            for row_entry in log_data:
-                if not isinstance(row_entry, dict):
-                    continue
-                # Merge per-line metadata into each entry. Don't mutate
-                # the original dict — make a shallow copy.
-                merged = {**per_line_meta, **row_entry}
-                yield (json.dumps(merged, separators=(",", ":")) + "\n").encode("utf-8")
+            if legacy:
+                yield await asyncio.to_thread(_jsonl_lines, legacy, per_line_meta)
+            async for page in db.iter_chunk_entries(match_id, slot, through_id=through_id):
+                lines = await asyncio.to_thread(_jsonl_lines, page, per_line_meta)
+                if lines:
+                    yield lines
 
         return StreamingResponse(
             generate(),
             media_type="application/x-ndjson",
             headers={
                 "content-disposition": f'attachment; filename="session-{log_id}.jsonl"',
-                "x-entry-count": str(len(log_data)),
+                "x-entry-count": str(entry_count),
             },
         )
 
@@ -1717,7 +1807,7 @@ def create_app(lifespan=None) -> FastAPI:
 
         peers: dict = {}
         for row in rows:
-            ctx = row.get("context") or "{}"
+            ctx = await db.get_session_context(match_id, row.get("slot"), row.get("context")) or "{}"
             if isinstance(ctx, str):
                 try:
                     ctx = json.loads(ctx)
@@ -1940,11 +2030,43 @@ def create_app(lifespan=None) -> FastAPI:
 
     # ── Screenshot routes ──────────────────────────────────────────────────
 
+    @app.get("/admin/api/screenshots/{match_id}/frame")
+    async def admin_screenshot_frame(
+        match_id: str,
+        frame: int | None = Query(default=None, ge=0, le=2**53 - 1),
+        _auth: None = Depends(_require_admin),
+    ) -> dict:
+        return {"matchId": match_id, **await db.get_screenshot_frame(match_id, frame)}
+
     @app.get("/admin/api/screenshots/{match_id}")
     async def admin_screenshots_list(request: Request, match_id: str, _auth: None = Depends(_require_admin)) -> dict:
         """List all screenshots for a given match (metadata only, no blobs)."""
         screenshots = await db.get_screenshots(match_id)
         return {"matchId": match_id, "screenshots": screenshots}
+
+    def _vision_capture_evidence(row: dict) -> tuple[int | None, list[int]]:
+        # Vision compares the first two submitted pictures, not the suspected
+        # frame. Historical rows and postmortems may not have exact frame tags.
+        # These are client-reported labels, not authenticated player identities.
+        try:
+            peers = json.loads(row.pop("capture_evidence") or "null")
+        except (TypeError, ValueError):
+            return None, []
+        if not isinstance(peers, list) or len(peers) < 2 or not all(isinstance(p, dict) for p in peers[:2]):
+            return None, []
+        first, second = peers[:2]
+        frame = first.get("captured_frame")
+        slots = [first.get("slot"), second.get("slot")]
+        if (
+            type(frame) is not int
+            or frame < row["frame"]
+            or type(second.get("captured_frame")) is not int
+            or second["captured_frame"] != frame
+            or any(type(slot) is not int or not 0 <= slot < 4 for slot in slots)
+            or slots[0] == slots[1]
+        ):
+            return None, []
+        return frame, slots
 
     @app.get("/admin/api/desync-events")
     async def admin_desync_events(request: Request, _auth: None = Depends(_require_admin)) -> dict:
@@ -1952,7 +2074,22 @@ def create_app(lifespan=None) -> FastAPI:
         match_id = request.query_params.get("match_id", "")
         if not match_id:
             raise HTTPException(status_code=400, detail="match_id required")
-        rows = await db.fetch(_desync_verdicts(match_id).add_columns(DesyncEvent.match_id))
+        verdicts = _desync_verdicts(match_id)
+        compact = request.query_params.get("compact") == "true"
+        if compact:
+            verdicts = verdicts.with_only_columns(
+                DesyncEvent.frame, DesyncEvent.vision_equal, DesyncEvent.vision_confidence
+            )
+        else:
+            verdicts = verdicts.add_columns(DesyncEvent.match_id)
+        verdicts = verdicts.add_columns(DesyncEvent.hashes_json.label("capture_evidence"))
+        rows = await db.fetch(verdicts)
+        for row in rows:
+            row["captured_frame"], row["capture_slots"] = _vision_capture_evidence(row)
+        # DB fetches return raw SQLite 0/1 rather than SQLAlchemy-coerced booleans.
+        for row in rows:
+            equal = row["vision_equal"]
+            row["vision_equal"] = bool(equal) if equal in (0, 1) else None
         return {
             "match_id": match_id,
             "events": rows,
@@ -2067,6 +2204,7 @@ def create_app(lifespan=None) -> FastAPI:
         host = _validated_host(request)
         tags = build_og_tags(host)
         html = inject_og_tags(_get_index_html(), tags)
+        html = html.replace("https://__KN_HOST__/", f"https://{html_lib.escape(host, quote=True)}/")
         return Response(content=html, media_type="text/html")
 
     # ── Vision desync verdict endpoint ────────────────────────────────────

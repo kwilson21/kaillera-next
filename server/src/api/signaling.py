@@ -12,6 +12,7 @@ Client → Server events:
   release-slot     — player gives up their slot to spectate ("Watch instead")
   start-game       — host starts the game (broadcasts mode + settings)
   end-game         — host ends the game (returns room to lobby)
+  match-recovery-unverified — current owner or active P1 reports unverified recovery
   set-mode         — host changes netplay mode (rollback/streaming)
   rom-sharing-toggle — host enables/disables P2P ROM sharing
   rom-ready        — player signals ROM is loaded
@@ -86,6 +87,7 @@ from src.api.payloads import (
     JoinRoomExtra,
     JoinRoomPayload,
     MatchJoinedPayload,
+    MatchRecoveryUnverifiedPayload,
     OpenRoomExtra,
     OpenRoomPayload,
     RelaySender,
@@ -327,12 +329,17 @@ class Room:
     rom_hash: str | None = None  # SHA-256 of ROM, set on start-game
     rom_name: str | None = None  # Host-provided display name for the currently loaded ROM
     rom_size: int | None = None  # Host-provided byte size for the currently loaded ROM
+    # The host has dropped a new ROM whose hash it has not sent yet
+    # (rom-ready {ready: false, pending: true}): the room names no ROM, takes
+    # no guest's word and refuses a start until the host's hash arrives.
+    rom_changing: bool = False
     rom_sharing: bool = False  # whether host is sharing ROM via P2P
     rom_ready: set[str] = field(default_factory=set)  # sids that have a ROM loaded
     rom_prompt: set[str] = field(default_factory=set)  # sids at the ROM prompt: no ROM, asking for one
     input_types: dict[str, str] = field(default_factory=dict)  # sid -> "keyboard" | "gamepad"
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
+    recovery_unverified_match_id: str | None = None
     listed: bool = False  # host opted in to the front-page board; never true with a password
     started_at: float | None = None  # wall-clock start of the current match, for the board
     # playerIds who joined after the current match began and are not in it
@@ -427,12 +434,14 @@ def _players_payload(room: Room) -> dict:
             "size": room.rom_size,
             "gameId": room.game_id,
             "game_id": room.game_id,
+            "changing": room.rom_changing,
         },
         "gameId": room.game_id,
         "game_id": room.game_id,
         "mode": room.mode,
         "status": room.status,
         "listed": room.listed,
+        "recoveryUnverifiedMatchId": room.recovery_unverified_match_id,
     }
 
 
@@ -507,6 +516,7 @@ def _clear_host_rom(room: Room) -> None:
     room.rom_hash = None
     room.rom_name = None
     room.rom_size = None
+    room.rom_changing = False
     room.rom_ready.clear()
 
 
@@ -1182,6 +1192,12 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
 
     mode = payload.mode if payload.mode in _VALID_MODES else "rollback"
 
+    # The host's new ROM is still being hashed: the start would carry the
+    # previous ROM's hash, and no guest has been held to the new one
+    # (specs/rom_identity.qnt, hostChangesThenStartsTest).
+    if room.rom_changing:
+        return "The host's ROM is still being checked"
+
     # Streaming: host runs the only emulator; guests don't need a ROM.
     # Rollback: every player must have a ROM loaded (or host is sharing).
     if mode != "streaming" and not _room_rom_sharing(room):
@@ -1203,6 +1219,7 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
     room.status = "playing"
     room.mode = mode
     room.match_id = str(uuid.uuid4())
+    room.recovery_unverified_match_id = None
     room.waiting_for_state.clear()
     # Register before announcing the match, so log uploads quoting this id
     # are accepted. Logging never blocks a game: a failed write is logged and
@@ -1232,6 +1249,7 @@ async def _start_game_locked(sid: str, payload: StartGamePayload) -> str | None:
                 "size": room.rom_size,
                 "gameId": room.game_id,
                 "game_id": room.game_id,
+                "changing": room.rom_changing,
             },
             "gameId": room.game_id,
             "matchId": room.match_id,
@@ -1274,6 +1292,38 @@ async def match_joined(sid: str, payload: MatchJoinedPayload) -> str | None:
         return None
 
 
+@sio.on("match-recovery-unverified")
+@validated(MatchRecoveryUnverifiedPayload)
+async def match_recovery_unverified(sid: str, payload: MatchRecoveryUnverifiedPayload) -> str | None:
+    """Record unverified recovery from the room owner or its native slot-zero authority."""
+    if not check(sid, "match-recovery-unverified"):
+        return "Rate limited"
+    async with _room_lock:
+        entry = _sid_to_room.get(sid)
+        if entry is None:
+            return "Not in a room"
+        session_id, player_id, spectator = entry
+        room = rooms.get(session_id)
+        if room is None:
+            return "Not in a room"
+        current_player = not spectator and room.players.get(player_id, {}).get("socketId") == sid
+        # Ownership can transfer without reshuffling the active rollback slots.
+        # The retained native snapshot authority may report, never end the game.
+        may_report = room.owner == sid or (
+            room.slots.get(0) == player_id and player_id not in room.waiting_for_state and sid in _sid_host
+        )
+        if not current_player or not may_report:
+            return "Only the host or active player 1 can report unverified match recovery"
+        if room.status != "playing" or room.mode not in ("rollback", "lockstep") or room.match_id != payload.matchId:
+            return "Not the current rollback or lockstep match"
+        if room.recovery_unverified_match_id == room.match_id:
+            return None
+        room.recovery_unverified_match_id = room.match_id
+        await state.save_room(session_id, room)
+        await _emit("users-updated", _players_payload(room), room=session_id)
+        return None
+
+
 @sio.on("end-game")
 @validated(EndGamePayload)
 async def end_game(sid: str, payload: EndGamePayload) -> str | None:
@@ -1288,6 +1338,9 @@ async def _end_game_locked(sid: str, payload: EndGamePayload) -> str | None:
     session_id, room = result
     if room.owner != sid:
         return "Only the host can end the game"
+    # A delayed retry from the previous match must not end a rematch.
+    if payload.matchId is not None and room.match_id != payload.matchId:
+        return None
     await _end_match(session_id, room, "game-end")
     return None
 
@@ -1316,6 +1369,7 @@ async def _end_match(session_id: str, room: Room, reason: str) -> None:
     """Put a playing room back in the lobby and tell everyone in it."""
     ended_match_id = room.match_id
     room.match_id = None
+    room.recovery_unverified_match_id = None
     room.waiting_for_state.clear()
     room.status = "lobby"
     room.started_at = None
@@ -1489,7 +1543,12 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
         if sid == room.owner:
             if not payload.ready:
                 _clear_host_rom(room)
+                # A new ROM being hashed: until its hash arrives the room
+                # names none, so no guest is judged against the ROM the host
+                # had before (specs/rom_identity.qnt, HOST_DROP_SAYS_CHANGING).
+                room.rom_changing = payload.pending
             else:
+                room.rom_changing = False
                 old_identity = _rom_identity(room)
                 if payload.hash is not None:
                     room.rom_hash = payload.hash if len(payload.hash) >= 16 else None
@@ -1504,6 +1563,16 @@ async def rom_ready(sid: str, payload: RomReadyPayload) -> str | None:
                     _invalidate_non_host_rom_state(room)
                 room.rom_ready.add(sid)
         elif payload.ready:
+            # Nothing to hold the word against while the host's ROM is
+            # changing; the guest's page says ready again once the room has
+            # the host's new hash. A page that sends it anyway judged against
+            # the ROM the host had before (its word was in flight, or it is
+            # an older page).
+            if room.rom_changing:
+                room.rom_ready.discard(sid)
+                await _emit("users-updated", _players_payload(room), room=session_id)
+                await state.save_room(session_id, room)
+                return "The host is changing ROM"
             if _rom_hashes_conflict(room.rom_hash, payload.hash):
                 room.rom_ready.discard(sid)
                 await _emit("users-updated", _players_payload(room), room=session_id)

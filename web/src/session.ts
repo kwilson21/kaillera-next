@@ -99,7 +99,11 @@ export const sessionMachine = setupEffect({
       /**
        * The host started without this page: it had no channel to the host by
        * its own deadline on the start's connection (specs/start_group.qnt,
-       * `rejoinLate`). It joins the match late instead.
+       * `rejoinLate`). It joins the match late instead. Also sent when the
+       * host drops this page (`dropped:`): from a running match
+       * (specs/drop_is_final.qnt), or while it waits for the state, when
+       * the host's serve deadline ran out (specs/room_lifecycle.qnt,
+       * `serveTimesOut`). Either way the next engine start is a late join.
        */
       leftOutOfStart: Empty,
       /** A late joiner has no usable ROM and has been asked for one. */
@@ -207,6 +211,12 @@ export const sessionMachine = setupEffect({
         gameStarted: ({ context, event }) => ({ context: { ...context, matchId: event.matchId } }),
         lateJoinSynced: { target: 'running' },
         admittedToStart: { target: 'running' },
+        // The host gave up serving this page (the state it sent was lost,
+        // its deadline ran out) and dropped it so that it asks again: the
+        // engine restarts as a late joiner. Ignored here before, the restart
+        // came up as a player loading for the start and waited for good
+        // (`serveTimesOut`, nobodyLoadsIntoARunningMatch).
+        leftOutOfStart: { target: 'lateJoinStarting' },
       },
     },
     running: {

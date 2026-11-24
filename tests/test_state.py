@@ -29,6 +29,7 @@ def test_serialize_roundtrip_basic():
     room.rom_name = "Super Smash Bros.z64"
     room.rom_size = 16 * 1024 * 1024
     room.rom_sharing = True
+    room.rom_changing = True
 
     serialized = _serialize_room(room)
     parsed = json.loads(serialized)
@@ -54,6 +55,7 @@ def test_serialize_roundtrip_basic():
     assert restored.rom_name == "Super Smash Bros.z64"
     assert restored.rom_size == 16 * 1024 * 1024
     assert restored.rom_sharing is True
+    assert restored.rom_changing is True
 
 
 def test_serialize_roundtrip_empty_room():

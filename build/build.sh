@@ -33,7 +33,6 @@ fi
 # itself without these exports. Set KN_ENABLE_HASH_REGISTRY=0 for a core
 # without them.
 KN_ENABLE_HASH_REGISTRY="${KN_ENABLE_HASH_REGISTRY:-1}"
-
 KN_DISABLE_WASM_SIMD="${KN_DISABLE_WASM_SIMD:-0}"
 KN_DISABLE_GLIDEN64_VEC4="${KN_DISABLE_GLIDEN64_VEC4:-1}"
 KN_DISABLE_GLIDEN64_SIMD="${KN_DISABLE_GLIDEN64_SIMD:-1}"
@@ -1056,6 +1055,7 @@ if [ ! -f "${JS_FILE}" ] || [ ! -f "${WASM_FILE}" ]; then
     echo "ERROR: .js or .wasm not produced"
     exit 1
 fi
+python3 "${SCRIPT_DIR}/patch-manual-scheduler.py" "${JS_FILE}"
 echo "==> JS glue: $(ls -lh ${JS_FILE} | awk '{print $5}')"
 echo "==> WASM:    $(ls -lh ${WASM_FILE} | awk '{print $5}')"
 

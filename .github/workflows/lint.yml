@@ -28,6 +28,9 @@ on:
       - 'antislop.toml'
       - 'server/**'
       - 'build/kn_rollback/**'
+      - 'build/build.sh'
+      - 'build/build-via-orchestrator.sh'
+      - 'build/patches/mupen64plus-is-viewer-bounds.patch'
       - 'scripts/**'
       - 'tools/**'
       - 'oxlint.config.mts'
@@ -66,7 +69,11 @@ jobs:
       - name: TypeScript tests
         run: npm run test:ts
       - name: Two-player test's own helpers
-        run: node --test tests/frozen-recovery.test.mjs tests/observer-reports.test.mjs tests/link-schedule.test.mjs tests/bundle-check.test.mjs
+        run: node --test tests/frozen-recovery.test.mjs tests/hash-lag.test.mjs tests/join-input-check.test.mjs tests/observer-reports.test.mjs tests/link-schedule.test.mjs tests/directional-input-gate.test.mjs tests/native-input-observer.test.mjs tests/bundle-check.test.mjs tests/drop-link-check.test.mjs tests/manual-main-loop.test.mjs
+      - name: Admin viewer loading and cancellation
+        run: node --test tests/admin-match-view.test.mjs
+      - name: Late-join input admission
+        run: node --test tests/late-join-input-admission.test.mjs
       # The menu driver the two-player test and the demo page share, against
       # a simulated SSB64 menu at every input delay the engine can set.
       - name: Menu autopilot against a simulated menu
@@ -217,10 +224,24 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm run build
+      # Materialize only the exact source object used by the native guard test.
+      # The ordinary production builder owns the pin; no checkout or build of
+      # this dependency is required to read the pinned source and headers.
+      - name: Fetch pinned source for the IS Viewer guard regression
+        run: |
+          pin=$(sed -nE 's/^MUPEN_SHA="([0-9a-f]{40})"$/\1/p' build/build.sh)
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]]
+          source_dir=build/src/mupen64plus-libretro-nx
+          git init --quiet "$source_dir"
+          GIT_TERMINAL_PROMPT=0 git -C "$source_dir" fetch --quiet --no-tags --depth=1 \
+            https://github.com/EmulatorJS/mupen64plus-libretro-nx.git "$pin"
+          test "$(git -C "$source_dir" rev-parse FETCH_HEAD)" = "$pin"
       # Every test file that needs neither the browser job's server nor
       # Playwright (scripts/browser_shard.py --unit): found by rule, so a new
       # file is never left out of CI.
       - name: Server unit tests
+        env:
+          KN_REQUIRE_IS_VIEWER_SOURCE: "1"
         run: |
           files=$(python scripts/browser_shard.py --unit)
           echo "$files"

@@ -8,13 +8,16 @@ kaillera-next is a browser-based netplay platform built on [EmulatorJS](https://
 
 1. One player creates a room and shares the invite link
 2. Others join by clicking the link or entering the room code
-3. Everyone drops their ROM file (drag-and-drop, cached in IndexedDB)
-   — or the host shares their ROM via P2P transfer
+3. Players whose browsers run the emulator bring their own compatible game file.
+   The browser can cache the file locally in IndexedDB. Spectators do not need a game file.
 4. Host picks a netplay mode and starts the game
+
+The public Kaillera Next service does not host, distribute, or link to ROMs.
+Peer-to-peer ROM transfer between players is disabled on the public service.
 
 ### Netplay modes
 
-**Rollback** — All players run the emulator in sync. Inputs are exchanged every frame over WebRTC DataChannels in a full mesh (up to 4 players, 6 connections). Uses a [patched mupen64plus-next WASM core](build/) with deterministic timing (`_kn_set_deterministic`, `_kn_set_frame_time`) and a [C-level GGPO-style rollback engine](build/kn_rollback/) (`_kn_pre_tick` / `_kn_post_tick`) that predicts remote inputs and replays on misprediction, keeping responsive play under ~150 ms RTT. Strict lockstep is the silent stall fallback inside the same engine (boot convergence, menu phase-lock gate, and stock cores without `kn_pre_tick`). Delay is symmetrically negotiated via host-authoritative broadcast at game start and works mobile↔mobile with bit-identical state across iOS Safari and desktop Chrome.
+**Rollback** — All players run the emulator in sync. Inputs are exchanged every frame over WebRTC DataChannels in a full mesh (up to 4 players, 6 connections). Uses a [patched mupen64plus-next WASM core](build/) with deterministic timing (`_kn_set_deterministic`, `_kn_set_frame_time`) and a [C-level GGPO-style rollback engine](build/kn_rollback/) (`_kn_pre_tick` / `_kn_post_tick`) that predicts remote inputs and replays on misprediction, keeping responsive play under ~150 ms RTT. Every frame of every match runs on that engine, solo play included; a core without it stops at the start and says so. Delay is symmetrically negotiated via host-authoritative broadcast at game start and works mobile↔mobile with bit-identical state across iOS Safari and desktop Chrome.
 
 **Streaming** — Host runs the only emulator and streams the canvas as video to guests via WebRTC MediaStream. Guests send controller input back over a DataChannel. Zero desync by design — only one emulator instance exists. SDP is optimized for low-latency gaming (H264/VP9 preference, high bitrate floor, minimal jitter buffer).
 
@@ -205,7 +208,7 @@ web/                 Static frontend (HTML + JS, served by FastAPI)
     admin.js           Admin dashboard logic (sessions, events, feedback, screenshots)
     admin.css          Admin dashboard styles
     play.css           Play page styles (room overlay tokens, direction A)
-    netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); strict lockstep is the silent stall fallback inside this file
+    netplay-rollback.js    Primary engine: GGPO-style C-level rollback (4P mesh WebRTC, prediction + replay); lockstep mode is the same engine with predictions off
     rollback-shadow-worker.js  Shadow worker: presentation overlay, plus a Mode 2 replay coprocessor whose corrected state main adopts
     netplay-lockstep.js    Deprecated compat shim (re-fetches netplay-rollback.js for cached play.html pages that still request the old filename)
     netplay-streaming.js   Streaming engine (host video → guests via WebRTC MediaStream); its decisions are observed from web/src/streaming
@@ -316,7 +319,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `ICE_SERVERS` | — | Legacy static ICE server config (JSON) |
 | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare Realtime TURN credentials for `/ice-servers` |
 | `PER_IP_SPECTATOR_CAP` | `3` | Max spectator slots one IP can hold in a room |
-| `ROM_SHARING_ENABLED` | `true` | Enable host ROM P2P sharing |
+| `ROM_SHARING_ENABLED` | `true` | Server option for peer-to-peer ROM transfer. The public deployment sets this to `false`. |
 | `GAME_IMAGES_ENABLED` | `true` | Read by `og.py` but not currently wired to anything — OG-card game images are always on |
 | `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` | — | Enable the Claude desync-vision endpoint (`DESYNC_VISION_ENABLED=1`) |
 | `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
@@ -366,6 +369,7 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `GET /admin/api/screenshots/{match_id}` | List screenshots for a match |
 | `GET /admin/api/screenshots/img/{screenshot_id}` | Serve screenshot image |
 | `GET /admin/api/session-logs/{log_id}/export` | Stream a session log's entries as newline-delimited JSON |
+| `GET /admin/api/session-logs/{log_id}/client-events` | A session's client events (as the detail bundles them), without its log |
 | `GET /admin/api/matches` | List recently-rotated matches with precomputed metrics |
 | `GET /admin/api/matches/{match_id}` | One match's precomputed metrics row |
 | `GET /admin/api/input-audit/{match_id}` | Per-slot input audit for a match |

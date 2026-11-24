@@ -87,16 +87,27 @@ def test_the_kept_resend_is_per_peer_state_cleared_with_it():
     # I2: cleared in resetPeerState, with a late joiner's pending inputs, and
     # with every input timeline.
     src = ENGINE_JS.read_text()
+    # One per-slot clear, which resetPeerState and _markPendingLateJoinPeer
+    # both call; one map reset for every input timeline.
+    table = src[src.index("const _slotInputMaps = () => [") :]
+    table = table[: table.index("];")]
+    assert "    _resendAtSwitch,\n" in table and "    _inputAskedAt,\n" in table
+    slot_clear = src[src.index("const _clearSlotInputState = (slot) => {") :]
+    slot_clear = slot_clear[: slot_clear.index("\n  };\n")]
+    assert "for (const map of _slotInputMaps()) delete map[slot];" in slot_clear
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
-    assert "delete _resendAtSwitch[slot];" in reset
-    assert src.count("delete _resendAtSwitch[slot];") == 2
+    assert "_clearSlotInputState(slot);" in reset
+    maps = src[src.index("const _resetInputMaps = () => {") :]
+    maps = maps[: maps.index("\n  };\n")]
+    assert "for (const map of _slotInputMaps()) for (const slot in map) delete map[slot];" in maps
     clear = src[src.index("const _clearInputsForNewMatch = (reason) => {") :]
     clear = clear[: clear.index("\n  };\n")]
-    assert "_resendAtSwitch = {};" in clear
-    # Every place the ask table is cleared (the declarations aside).
-    clears = src.count("_resendAtSwitch = {};") - src.count("let _resendAtSwitch = {};")
-    assert clears == src.count("_inputAskedAt = {};") - src.count("let _inputAskedAt = {};") == 3
+    assert "_resetInputMaps();" in clear
+    # Every place the tables are cleared (the declarations aside) is the one reset.
+    assert src.count("_resendAtSwitch = {};") == src.count("let _resendAtSwitch = {};") == 1
+    # A new match and stop() (the old path's fast-forward, the third, is gone).
+    assert src.count("_resetInputMaps();") == 2
 
 
 def test_the_comment_no_longer_promises_redundancy_carries_the_gap():
@@ -112,7 +123,7 @@ def test_only_the_host_sets_the_transport():
     # RB_RESEND_AT_SWITCH_MAX inputs to every peer.
     src = ENGINE_JS.read_text()
     handler = src[src.index("if (e.data.startsWith('rb-transport:')) {") :]
-    handler = handler[: handler.index("\n        }\n        if (e.data.startsWith('fpu-trace:'))")]
+    handler = handler[: handler.index("\n        }\n        // State sync: hash check from host")]
     guard = handler.index("if (_peers[remoteSid]?.slot !== 0) {")
     assert guard < handler.index("_switchInputsToReliable('rb-transport')")
     assert guard < handler.index("_rbTransport = mode")

@@ -79,7 +79,7 @@ extern void kn_reset_audio(void);
 /* Forward declaration: RDRAM hash for determinism self-test */
 extern uint32_t kn_sync_hash(void);
 
-/* Forward declaration: RF5 live gameplay hash (defined later). */
+/* Forward declaration: live gameplay hash (defined later). */
 uint32_t kn_live_gameplay_hash(void);
 
 /* Hidden emulator/plugin state that retro_serialize does not fully cover.
@@ -261,7 +261,13 @@ int kn_get_tainted_block_count(void) {
 /* ── Constants ─────────────────────────────────────────────────────── */
 #define KN_MAX_PLAYERS      4
 #define KN_INPUT_RING_SIZE  256   /* ~4 seconds at 60fps */
-#define KN_DEBUG_LOG_SIZE   (64 * 1024)
+/* The debug log holds what rb_log writes between two drains: the play page
+ * reads it, sends it with the session log and empties it
+ * (kn_clear_debug_log) every 5 s. A rollback logs about 1 KB at the deepest
+ * replay (its MISPREDICTION, C-REPLAY-START and two lines per replayed
+ * frame), so 512 KB holds one at every frame for 5 s at 60 fps. A line that
+ * does not fit is counted (kn_get_debug_log_dropped), never cut. */
+#define KN_DEBUG_LOG_SIZE   (512 * 1024)
 
 /* ── Input entry ───────────────────────────────────────────────────── */
 typedef struct {
@@ -435,7 +441,8 @@ static struct {
      * Reduces per-frame serialize from 16MB × 60fps = 960MB/s to near
      * zero on stable connections. */
     int has_active_predictions; /* 1 if any slot has predicted input */
-    int serialize_skip_count;  /* diagnostic: frames skipped */
+    int serialize_skip_count;  /* frames kn_pre_tick did not save: no other slot active */
+    int save_skipping;         /* 1 while kn_pre_tick skips the save (for its log lines) */
 
     /* Ring staleness ceiling: last frame where a state was saved.
      * Forces a periodic save even during long zero-input runs so
@@ -482,20 +489,10 @@ static struct {
     int fatal_stale_actual;
     int fatal_stale_pending;
 
-    /* RF5 (R4): Live-vs-ring hash mismatch signal. Set by kn_post_tick
-     * when a replay completes and the live state hash differs from
-     * what the ring claims for the just-completed frame. JS polls via
-     * kn_get_live_mismatch() and logs RB-LIVE-MISMATCH. No resync
-     * recovery per §Core principle.
-     * See docs/netplay-invariants.md §R4. */
-    int live_mismatch_pending;
-    int live_mismatch_f;
-    uint32_t live_mismatch_replay;
-    uint32_t live_mismatch_live;
-
     /* Debug log */
     char debug_log[KN_DEBUG_LOG_SIZE];
     int debug_log_pos;
+    int debug_log_dropped; /* lines that did not fit, since kn_rollback_init */
 } rb;
 
 /* ── SoftFloat state save/restore ──────────────────────────────────── */
@@ -947,17 +944,19 @@ static void rb_restore_slot_aux(int idx) {
 static void rb_log(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
+    /* Room for the line, its newline and the terminator. */
     int remaining = KN_DEBUG_LOG_SIZE - rb.debug_log_pos - 1;
-    if (remaining > 0) {
-        int written = vsnprintf(rb.debug_log + rb.debug_log_pos, remaining, fmt, args);
-        if (written > 0) {
-            rb.debug_log_pos += written;
-            if (rb.debug_log_pos < KN_DEBUG_LOG_SIZE - 1) {
-                rb.debug_log[rb.debug_log_pos++] = '\n';
-            }
-        }
-    }
+    int written = remaining > 1 ? vsnprintf(rb.debug_log + rb.debug_log_pos, remaining, fmt, args) : -1;
     va_end(args);
+    if (written < 0 || written >= remaining) {
+        /* It does not fit whole: count it, and leave the log as it was. */
+        rb.debug_log[rb.debug_log_pos] = '\0';
+        rb.debug_log_dropped++;
+        return;
+    }
+    rb.debug_log_pos += written;
+    rb.debug_log[rb.debug_log_pos++] = '\n';
+    rb.debug_log[rb.debug_log_pos] = '\0';
 }
 
 /* ── Per-frame setup: RNG seed + frame time ────────────────────────── */
@@ -988,6 +987,20 @@ static void setup_frame(int frame) {
     (void)frame;
 }
 
+/* ── Prediction flag ───────────────────────────────────────────────── */
+/* Whether ring entry `idx` of `slot` holds a prediction of input `frame`.
+ * The input ring is reused every KN_INPUT_RING_SIZE frames, and a
+ * prediction whose real input never arrives (the page drops inputs older
+ * than a resync's settled point) leaves rb.predicted set at its index. The
+ * real input KN_INPUT_RING_SIZE frames later is stored in the same entry
+ * without clearing it, so the bare flag would make that real input read as
+ * a prediction (a replay then overwrote it with a new guess). Every
+ * decision taken from the flag goes through here, with the frame it is
+ * about (specs/stale_prediction_flag.qnt). */
+static int rb_is_prediction_of(int slot, int idx, int frame) {
+    return rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame;
+}
+
 /* ── Write inputs for all players for a given frame ────────────────── */
 /* During replay (is_replay=1), logs what's actually being written to catch
  * input divergence between normal play and replay. */
@@ -1004,7 +1017,7 @@ static void write_frame_inputs_logged(int frame, int is_replay) {
             kn_input_t *inp = &rb.inputs[s][idx];
             if (inp->present && inp->frame == frame) {
                 btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
-                origin = rb.predicted[s][idx] ? 'P' : 'R'; /* Predicted or Real */
+                origin = rb_is_prediction_of(s, idx, frame) ? 'P' : 'R'; /* Predicted or Real */
                 kn_write_controller(s, btn, lx, ly, cx, cy);
             } else {
                 origin = 'Z'; /* Zero — missing input */
@@ -1415,7 +1428,7 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
     /* Check if this corrects a prediction.
      * Validate the predicted_values entry has the right frame — the ring
      * buffer at idx may contain stale predictions from 256 frames ago. */
-    if (rb.predicted[slot][idx] && rb.predicted_values[slot][idx].frame == frame) {
+    if (rb_is_prediction_of(slot, idx, frame)) {
         kn_input_t *pred = &rb.predicted_values[slot][idx];
         /* Exact prediction match. A predicted stick value that differs from
          * the real one by any amount leaves different game state on the
@@ -1764,8 +1777,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
          * REMOTE is applied at replay_apply (delayed, from C ring or predicted).
          * If we wrote ALL slots from replay_apply during replay while the
          * forward path wrote local-at-current, replay would simulate with a
-         * stale local input the original frame never used → R4 LIVE-MISMATCH
-         * fires every replay frame → silent state divergence.
+         * stale local input the original frame never used → silent state
+         * divergence.
          *
          * Legacy (rb.true_rollback=0): all slots from replay_apply, matching
          * the legacy JS forward path that also writes all slots from applyFrame.
@@ -1809,7 +1822,8 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                      * so one input change became a chain of rollbacks. The
                      * new guess is stored as the prediction, so later
                      * arrivals are checked against what this replay ran. */
-                    int unconfirmed = (inp->present && inp->frame == replay_apply && rb.predicted[s][idx]);
+                    int unconfirmed = (inp->present && inp->frame == replay_apply
+                                       && rb_is_prediction_of(s, idx, replay_apply));
                     int missing = !(inp->present && inp->frame == replay_apply);
                     if (rb.slot_active[s] && (unconfirmed || missing)) {
                         kn_input_t pred_input = rb_predict_input(s);
@@ -1823,7 +1837,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
                     }
                     if (inp->present && inp->frame == replay_apply) {
                         btn = inp->buttons; lx = inp->lx; ly = inp->ly; cx = inp->cx; cy = inp->cy;
-                        origin = rb.predicted[s][idx] ? 'P' : 'R';
+                        origin = rb_is_prediction_of(s, idx, replay_apply) ? 'P' : 'R';
                         kn_write_controller(s, btn, lx, ly, cx, cy);
                     } else {
                         origin = 'Z';
@@ -1898,7 +1912,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
              * triggering a misprediction — so we need state in the ring. */
             int needs_prediction = !rb.inputs[s][idx].present
                                 || rb.inputs[s][idx].frame != apply_frame
-                                || rb.predicted[s][idx];
+                                || rb_is_prediction_of(s, idx, apply_frame);
             if (needs_prediction && (!rb.inputs[s][idx].present || rb.inputs[s][idx].frame != apply_frame)) {
                 /* Predict: dead-reckoning for stick, repeat-last for buttons.
                  * Extrapolate stick position based on velocity between the
@@ -1933,32 +1947,54 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
         }
     }
 
-    /* ── Save state for current frame (dirty-input gated) ──
-     * Only serialize when predictions are active — if all remote inputs
-     * arrived on time, no rollback can target this frame. Inspired by
-     * RetroArch's runahead preemptive frames: skip serialization on
-     * steady-state frames to avoid 16MB memcpy at 60fps (960MB/s).
+    /* ── Save state for current frame ──
+     * Every frame, while another player's slot is active.
      *
-     * When a prediction IS active, we must save because a future
-     * misprediction could roll back to this frame. We also save
-     * unconditionally if a rollback is pending (need the most recent
-     * state for the replay target). */
-        /* Save state every frame — no serialize skip gate.
-         *
-         * The previous dirty-input gate skipped saves when inputs didn't
-         * change, creating ring coverage gaps. FATAL-RING-STALE at f=23410
-         * proved this causes permanent desync: 4 mispredictions couldn't
-         * be rolled back, wrong inputs ran uncorrected, characters diverged.
-         *
-         * Cost: ~3-5ms per serialize (16MB). At 60fps with the gate, we
-         * already saved ~59% of frames. Going to 100% adds ~1.5-2ms/frame
-        * average — well within the 16.6ms budget. Eliminates ring gaps. */
-        {
+     * A dirty-input gate once skipped saves when inputs didn't change and
+     * left ring gaps: FATAL-RING-STALE at f=23410, 4 mispredictions that
+     * couldn't be rolled back, characters diverged. A frame a rollback can
+     * go back to is always saved since.
+     *
+     * A rollback goes back to a frame only for an input that frame's
+     * kn_pre_tick predicted (kn_feed_input checks predicted[slot][tag];
+     * rb_rollback_target finds the frame that applied the tag), and this
+     * kn_pre_tick predicts only an active slot (above). So while no slot but
+     * this page's own is active, no rollback can come back to this frame:
+     * a page alone in a match (at a delay of 0), or one whose other players
+     * all left (kn_rollback_slot_reset). Its save, 3-6 ms of a 16.6 ms frame,
+     * is skipped. The first input kn_feed_input takes for another slot makes
+     * it active, and the next kn_pre_tick saves again; a player who joins a
+     * solo match arrives after the re-arm (kn_rollback_init), which starts
+     * the ring over anyway. specs/solo_save.qnt, noTargetLostToTheGate: no
+     * rollback misses a frame the every-frame ring has. A switch from JS's
+     * roster instead loses one (solo_save_roster): a player's first input can
+     * come before the roster that lists them.
+     *
+     * A skipped save forgets the sparse save mode's baseline, as kn_set_frame
+     * does: the first save after the stretch is whole, not diffed against a
+     * copy older than the frame before it (everyCopyIsWhole). */
+    {
+        int other_active = 0;
+        for (s = 0; s < KN_MAX_PLAYERS; s++) {
+            if (s != rb.local_slot && rb.slot_active[s]) { other_active = 1; break; }
+        }
+        if (!other_active) {
+            if (!rb.save_skipping)
+                rb_log("SAVE-SKIP from f=%d: no other slot is active", rb.frame);
+            rb.save_skipping = 1;
+            rb.serialize_skip_count++;
+            rb.baseline_initialized = 0;
+        } else {
             int save_idx = rb.frame % rb.ring_size;
+            if (rb.save_skipping) {
+                rb_log("SAVE-RESUME f=%d (%d skipped in all)", rb.frame, rb.serialize_skip_count);
+                rb.save_skipping = 0;
+            }
             if (rb.last_save_frame != rb.frame) {
                 rb_save_slot(save_idx, rb.frame, 1);
             }
         }
+    }
 
     /* Input writing is done by JS using kn_get_input + writeInputToMemory */
     /* R5 diagnostic: log if replay_depth is nonzero at normal-tick return.
@@ -2271,7 +2307,8 @@ int kn_peek_pending_rollback(void) {
 }
 
 /* ── Query: replay depth after kn_pre_tick ─────────────────────────── */
-/* Returns number of frames to replay (0 = none). Clears the flag. */
+/* Returns the number of frames the replay in progress has to run (0 = none).
+ * A pure read of rb.replay_depth: calling it changes nothing. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -2309,20 +2346,25 @@ int kn_get_fatal_stale(int *out_f, int *out_idx, int *out_actual) {
     return 1;
 }
 
-/* ── RF5 (R4): Returns 1 (and clears flag) if post-replay live-state
- * hash mismatch was detected. Writes frame, ring hash, live hash to
- * out params. Per §Core principle: JS logs and continues; no resync
- * recovery. */
+/* ── Retired RF5 (R4) signal: always 0 ────────────────────────────────
+ * kn_post_tick no longer checks the live state against the ring at the end
+ * of a replay (the check was dropped in f322745), so there is never a
+ * mismatch to report and RB-LIVE-MISMATCH is never logged. The check it
+ * reported compared the ring copy of the last replayed frame, saved at
+ * that frame's start, with the live state at its end: one frame apart.
+ * And both come from the replay itself, so even aligned it could not see
+ * the replay drift from the original timeline; today the replay endpoint
+ * is saved from the live state on the next kn_pre_tick, which makes a
+ * live-vs-ring comparison there equal by construction. Kept, returning 0,
+ * because pages poll it (docs/netplay-invariants.md §R4). */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int kn_get_live_mismatch(int *out_f, uint32_t *out_ring, uint32_t *out_live) {
-    if (!rb.live_mismatch_pending) return 0;
-    if (out_f) *out_f = rb.live_mismatch_f;
-    if (out_ring) *out_ring = rb.live_mismatch_replay;
-    if (out_live) *out_live = rb.live_mismatch_live;
-    rb.live_mismatch_pending = 0;
-    return 1;
+    (void)out_f;
+    (void)out_ring;
+    (void)out_live;
+    return 0;
 }
 
 /* ── Query: replay start frame ─────────────────────────────────────── */
@@ -2523,18 +2565,15 @@ uint32_t kn_gameplay_hash(int frame) {
     return hash;
 }
 
-/* ── Live gameplay hash (RF5, R4) ──────────────────────────────────
- * Fresh retro_serialize + gameplay hash of the CURRENT live emulator
- * state, bypassing the ring buffer. Used by kn_post_tick to verify
- * that after a replay completes, the live state matches what the ring
- * claims. If they differ, the replay introduced drift and we log
- * RB-LIVE-MISMATCH.
+/* ── Live gameplay hash ─────────────────────────────────────────────
+ * Fresh gameplay hash of the CURRENT live emulator state, bypassing the
+ * ring buffer. The engine itself does not call it: the page reads it
+ * around a rollback for its own diagnostics, and test harnesses read it.
+ * (It was added for an end-of-replay live-vs-ring check in kn_post_tick,
+ * RF5, which no longer exists; see kn_get_live_mismatch.)
  *
  * Uses a static scratch buffer reused across calls to avoid malloc
- * pressure. Expected cost: one retro_serialize (~1-2ms) per call.
- * Called at most once per rollback completion (rollbacks are rare),
- * so total overhead is negligible. Also exported for V1 integrity
- * harness use. */
+ * pressure. Expected cost: one retro_serialize (~1-2ms) per call. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -3365,6 +3404,22 @@ uint32_t kn_get_hidden_state_fingerprint(void) {
 EMSCRIPTEN_KEEPALIVE
 #endif
 const char* kn_get_debug_log(void) { return rb.debug_log; }
+
+/* The page has read and sent the log: start it over, so it only has to hold
+ * what is logged until the next drain. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_clear_debug_log(void) {
+    rb.debug_log_pos = 0;
+    rb.debug_log[0] = '\0';
+}
+
+/* Lines rb_log dropped since kn_rollback_init because the log was full. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int kn_get_debug_log_dropped(void) { return rb.debug_log_dropped; }
 
 /* ── Determinism self-test ─────────────────────────────────────────── */
 /* NOTE: This test cannot call retro_run() from C in ASYNC mode.

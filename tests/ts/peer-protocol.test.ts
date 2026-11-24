@@ -55,8 +55,8 @@ test('menu and phase messages carry integers', () => {
   ok('lockstep', 'menu-ready:300:16');
   ok('lockstep', 'resend:77');
   ok('lockstep', 'rb-delay:3');
+  ok('lockstep', 'rb-delay:0'); // a solo match a friend joins runs at 0
   ok('lockstep', 'rb-init-frame:0');
-  ok('lockstep', 'fpu-trace:600:-1234567:42');
   ok('lockstep', 'sync-request-full-at:980');
   // The number of the request that follows it.
   ok('lockstep', 'sync-request-id:3');
@@ -73,6 +73,15 @@ test('rollback checks: hashes are signed integers, the game hash optional', () =
   ok('lockstep', 'rb-check:1200:4294967295');
   bad('lockstep', 'rb-check:1200');
   bad('lockstep', 'rb-check:1200:0xdeadbeef');
+});
+
+test('confirmed rollback checks: frame and both hashes, unsigned', () => {
+  ok('lockstep', 'rb-final:1200:3405691582:0');
+  ok('lockstep', 'rb-final:0:4294967295:305419896');
+  bad('lockstep', 'rb-final:1200:3405691582');
+  bad('lockstep', 'rb-final:1200:-5:0');
+  bad('lockstep', 'rb-final:-1:5:0');
+  bad('lockstep', 'rb-final:1200:0xdeadbeef:0');
 });
 
 test('block, region and sub-hash lists are hex', () => {
@@ -190,6 +199,8 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
     toPlayers: true,
   };
   assert.equal(issueOf('data-message', saveState), null);
+  assert.equal(issueOf('data-message', { ...saveState, hle: 'AQI=' }), null);
+  assert.notEqual(issueOf('data-message', { ...saveState, hle: 123 }), null);
   assert.equal(issueOf('data-message', { type: 'save-state', frame: 0, data: 'H4sI' }), null);
   assert.notEqual(issueOf('data-message', { type: 'save-state', frame: 0 }), null);
   const lateJoin = {
@@ -203,6 +214,10 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
     saveRam: 'H4sI',
   };
   assert.equal(issueOf('data-message', lateJoin), null);
+  // The host says its C engine runs (a delay of 0 included); a host from
+  // before sends nothing, and the field is the schema's, so not anything goes.
+  assert.equal(issueOf('data-message', { ...lateJoin, effectiveDelay: 0, cEngine: true }), null);
+  assert.notEqual(issueOf('data-message', { ...lateJoin, cEngine: 'yes' }), null);
   const syncState = {
     type: 'sync-state-socket',
     targetSid: 'g',
@@ -218,6 +233,11 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
   assert.equal(issueOf('data-message', syncState), null);
   assert.equal(issueOf('data-message', { ...syncState, requestId: 3 }), null);
   assert.notEqual(issueOf('data-message', { ...syncState, full: 'yes' }), null);
+  // The hidden words and HLE state taken with the state; an older host sends neither.
+  const extras = { hiddenWords: [1, 4294967295], hle: 'AQID' };
+  assert.equal(issueOf('data-message', { ...syncState, ...extras }), null);
+  assert.notEqual(issueOf('data-message', { ...syncState, hiddenWords: 'x' }), null);
+  assert.notEqual(issueOf('data-message', { ...syncState, hle: [1, 2] }), null);
 });
 
 test("signal relays carry a sender; the server's own renegotiate request does not", () => {
@@ -251,4 +271,90 @@ test('checkPeerJson names the route and type', () => {
     kind: 'rom-transfer rom-complete',
     issue: null,
   });
+});
+
+test('inputs-settled carries the frame alone, whether or not inputs follow it', () => {
+  // _settleInputsAtResync sends it after every state the guest applies, with
+  // its own inputs (if any) as separate binary packets: the host's
+  // escalation push is answered by it (specs/ask_escalation.qnt).
+  ok('lockstep', 'inputs-settled:1168');
+  // `from` is Math.max(0, frame - DELAY_FRAMES): a state at the first frames.
+  ok('lockstep', 'inputs-settled:0');
+  bad('lockstep', 'inputs-settled:');
+  bad('lockstep', 'inputs-settled:NaN');
+});
+
+test('dropped names why the host dropped the player', () => {
+  ok('lockstep', 'dropped:desync');
+  ok('lockstep', 'dropped:host');
+  bad('lockstep', 'dropped:');
+  bad('lockstep', 'dropped:anything');
+  bad('lockstep', 'dropped');
+});
+
+test('resync extras carry hidden words and base64 HLE bytes, either part empty', () => {
+  ok('sync-state', 'sync-extras:0,1,4294967295:AQID');
+  ok('sync-state', 'sync-extras:1:AQI=');
+  ok('sync-state', 'sync-extras::AQ==');
+  ok('sync-state', 'sync-extras:7:');
+  ok('sync-state', 'sync-extras::');
+  ok('sync-state', 'sync-extras:1:AQIDBA==');
+  for (const text of [
+    'sync-extras',
+    'sync-extras:1',
+    'sync-extras:-1:',
+    'sync-extras:1,:',
+    'sync-extras:1:A=A',
+    'sync-extras:1:AQ:x',
+    // Not whole quartets: atob throws on these.
+    'sync-extras::A',
+    'sync-extras::AQIDB',
+    'sync-extras::AQ=',
+  ])
+    bad('sync-state', text);
+  // Only the state channel carries it.
+  bad('lockstep', 'sync-extras:1:AQ==');
+});
+
+test('recovery attempt metadata is separate from legacy headers and rejects malformed IDs', () => {
+  ok('sync-state', 'sync-recovery-id:17');
+  ok('sync-state', 'sync-start:1000:2:1:0');
+  ok('lockstep', 'recovery-settled:997:17');
+  ok('lockstep', 'inputs-settled:997');
+  for (const id of ['-1', '1.5', 'NaN', '1x', '', '1:2']) {
+    bad('sync-state', `sync-recovery-id:${id}`);
+    bad('lockstep', `recovery-settled:997:${id}`);
+  }
+});
+
+test('protected reconnect uses a dedicated request and an atomic full-state header', () => {
+  ok('lockstep', 'reconnect-sync-request-v1:19');
+  bad('sync-state', 'reconnect-sync-request-v1:19');
+  bad('lockstep', 'reconnect-sync-request-v1:-1');
+  bad('lockstep', 'reconnect-sync-request-v1:19:20');
+  ok('sync-state', 'sync-start:520:2:1:0:19');
+  ok('sync-state', 'sync-start:520:2:1:0');
+  bad('sync-state', 'sync-start:520:2:1:0:19:20');
+  bad('sync-state', 'sync-start:520:2:0:0:19');
+  bad('sync-state', 'sync-start:520:2:1:1:19');
+  bad('sync-state', 'sync-start:520:2:1:0:0');
+  assert.equal(
+    checkPeerJson('data-message', {
+      type: 'reconnect-sync-request-v1-socket',
+      targetSid: 'host',
+      requesterSid: 'guest',
+      matchId: 'current-match',
+      requestId: 19,
+    }).issue,
+    null,
+  );
+  assert.notEqual(
+    checkPeerJson('data-message', {
+      type: 'reconnect-sync-request-v1-socket',
+      targetSid: 'host',
+      requesterSid: 'guest',
+      requestId: 19,
+    }).issue,
+    null,
+  );
 });

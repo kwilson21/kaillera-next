@@ -111,12 +111,29 @@
             <div id="viewer-meta" class="viewer-meta"></div>
           </div>
           <div class="viewer-actions">
-            <button id="viewer-copy" title="Copy log content">Copy</button>
+            <button id="viewer-copy" title="Copy the current view">Copy</button>
+            <button id="viewer-download" class="hidden">Download raw log</button>
             <button id="viewer-close">Close</button>
           </div>
         </div>
-        <div id="viewer-extras"></div>
         <pre id="viewer-content"></pre>
+        <div id="viewer-captures" class="hidden">
+          <h4>Screenshot comparison</h4>
+          <button id="captures-show">Compare screenshots</button>
+          <div id="capture-controls" class="hidden">
+            <button id="captures-prev">Previous capture</button>
+            <button id="captures-next">Next capture</button>
+            <form id="captures-seek">
+              <label for="capture-seek">Find frame</label>
+              <input id="capture-seek" type="number" min="0" max="9007199254740991" step="1" required />
+              <button type="submit">Go</button>
+            </form>
+          </div>
+          <p id="captures-status" role="status"></p>
+          <p id="captures-verdict"></p>
+          <div id="captures-content"></div>
+        </div>
+        <div id="viewer-extras"></div>
       </div>
     </div>
 

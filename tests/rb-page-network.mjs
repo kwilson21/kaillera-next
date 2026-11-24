@@ -7,8 +7,9 @@
  * harness sets them.
  */
 import { createLinkSchedule } from './link-schedule.mjs';
+import { createDirectionalInputGate } from './directional-input-gate.mjs';
 
-export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => {
+export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, createDirectionalInputGate) => {
   // Simulated network (tests/link-schedule.mjs): every outgoing DataChannel
   // message is held (DELAY_SYNC_ANSWER_MS), carried by its connection's link
   // at LINK_KBPS (no limit when 0), then delayed LAT ms + up to JITTER ms.
@@ -113,6 +114,62 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
   // 0, every input packet (binary, on `lockstep` or `rollback-input`) is held
   // that long. A channel never reorders, so what follows waits behind it.
   window.__knHoldInputsMs = 0;
+  // SYNC_FOLLOW_UP=direct (the guest page): while performance.now() is before
+  // window.__knHoldInputsUntil, every input packet (binary, on `lockstep` or
+  // `rollback-input`) is held until then, so all of them go out together at
+  // that moment; what the page sends after them on the same channel (its
+  // resync request) follows them in the same burst.
+  window.__knHoldInputsUntil = 0;
+  // SYNC_FOLLOW_UP=socket (the guest page): while window.__knInputGate is
+  // set, every input packet (binary, on `lockstep` or `rollback-input`) is
+  // kept back, and window.__knReleaseInputs() sends them all, in order, when
+  // the test says (after the host has answered a request sent meanwhile over
+  // the signaling socket, which nothing orders against the data channels).
+  window.__knInputGate = false;
+  const gatedInputs = [];
+  window.__knReleaseInputs = () => {
+    window.__knInputGate = false;
+    const n = gatedInputs.length;
+    for (const send of gatedInputs.splice(0)) send();
+    return n;
+  };
+  // CATCH_UP_HOLE_MS (the host page): once window.__knDropInputsAfterOpenMs
+  // is above 0, a channel whose first input packet goes out after that drops
+  // every input packet (binary, on `lockstep` or `rollback-input`) from its
+  // first one until that long after the page next sends a state
+  // (`sync-start:`): the reconnected channel loses the host's inputs from
+  // just before the state it sends, so the guest's catch-up waits on a
+  // hole. Channels opened before arming are untouched. The dropped frames
+  // are kept in __knInputsDroppedAfterOpen.
+  window.__knDropInputsAfterOpenMs = 0;
+  // ASK_UNANSWERED_STALL_MS (the guest page): while performance.now() is before
+  // window.__knDropInputsUntil, every input packet (binary, on `lockstep` or
+  // `rollback-input`) is dropped: the host's asks for them go unanswered.
+  window.__knDropInputsUntil = 0;
+  window.__knInputsDroppedUntil = 0;
+  // ASK_UNANSWERED_STALL_MS: every input packet whose frame (its first word) is in
+  // [__knDropInputFrom, __knDropInputTo) is dropped, for good, resends
+  // included, while later frames go through: the peer learns they were made
+  // and asks for them, and the asks are never answered.
+  window.__knDropInputFrom = -1;
+  window.__knDropInputTo = -1;
+  // ASK_UNANSWERED_ACK_LOST: until __knDropSettledUntil, the page's
+  // acknowledgements of a pushed state are dropped too: `recovery-settled:`
+  // (the one that settles a recovery) and `inputs-settled:` (which tells the
+  // host not to wait for the frames the state skipped).
+  window.__knDropSettledUntil = 0;
+  window.__knSettledDropped = 0;
+  // ASK_UNANSWERED_ACKS (the host page): until __knDropSyncStateUntil, and only
+  // until the host gives up on the guest (its input-ask-push-giveup event),
+  // every send on `sync-state` is dropped. The engine hands each state over
+  // as usual; the guest never gets one, so it never applies or acknowledges
+  // a push and plays on its own frames.
+  window.__knDropSyncStateUntil = 0;
+  window.__knSyncStateDropped = 0;
+  window.__knDropArmedAt = 0;
+  window.__knInputsDroppedAfterOpen = [];
+  let stateSentAfterArming = 0;
+  const firstInputSendAt = new WeakMap();
   // UNANSWERED_SOCKET_RESYNC: each entry of window.__knSyncAnswerDrops is
   // taken by the next numbered answer on `sync-state` (its `sync-answer-id:`
   // message): 'chunks' passes the answer's id and header and drops its
@@ -161,6 +218,51 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
   window.__knSocketAnswersHeld = [];
   const heldSocketPackets = [];
   let realOnevent = null;
+  // SYNC_FOLLOW_UP=socket (the host page): while window.__knHoldSocketRequests
+  // is above 0, the next socket resync request that arrives
+  // (`data-message` of type `sync-request-full-socket`) is held, and
+  // delivered right after the next input packet (binary, on `lockstep` or
+  // `rollback-input`) has been handled, in the same task: the host takes in
+  // the inputs held with it (a rollback owed for its next tick) and answers
+  // before that tick. Kept in __knSocketRequestsHeld.
+  window.__knHoldSocketRequests = 0;
+  window.__knSocketRequestsHeld = [];
+  const heldSocketRequests = [];
+  const replayDepthNow = () => window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() ?? 0;
+  const releaseHeldSocketRequests = () => {
+    while (heldSocketRequests.length) {
+      const { socket, packet, record } = heldSocketRequests.shift();
+      record.releasedAt = performance.now();
+      record.replayDepth = replayDepthNow();
+      realOnevent.call(socket, packet);
+    }
+  };
+  // SYNC_FOLLOW_UP=owed (the host page): with window.__knReleaseOnReplay set,
+  // a held request is not delivered after the next input packet but between
+  // two ticks while the replay those inputs caused is still in flight (the
+  // engine replays a few frames per tick): the host takes its answer's state
+  // with a correction owed (specs/sync_follow_up.qnt, owedAtTakeTest). At
+  // SOCKET_REPLAY_WAIT_MS with no replay seen it is delivered anyway, and its
+  // record says so (replayDepth 0).
+  window.__knReleaseOnReplay = false;
+  const SOCKET_REPLAY_WAIT_MS = 4000;
+  let replayPoll = 0;
+  const releaseOnReplay = () => {
+    if (replayPoll) return;
+    const started = performance.now();
+    replayPoll = setInterval(() => {
+      if (!heldSocketRequests.length) {
+        clearInterval(replayPoll);
+        replayPoll = 0;
+        return;
+      }
+      if (replayDepthNow() > 0 || performance.now() - started > SOCKET_REPLAY_WAIT_MS) {
+        clearInterval(replayPoll);
+        replayPoll = 0;
+        releaseHeldSocketRequests();
+      }
+    }, 1);
+  };
   // And the page's next two decode results (the sync worker's replies) once
   // the held answer is let go are held and delivered back to back in one
   // task: the newest answer's first, then the late one's. A held "now"
@@ -216,6 +318,14 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
     syncChunksLeft--;
     if (syncChunksLeft === 0 && heldSocketPackets.length) releaseHeldSocketAnswers();
   };
+  const receiveGate = createDirectionalInputGate({
+    now: () => performance.now(),
+    target: (ch, slot) =>
+      Object.values(window.NetplayRollback?._getPeers?.() ?? {}).some(
+        (peer) => peer.slot === slot && (peer.dc === ch || peer.rbDc === ch),
+      ),
+  });
+  window.__knDirectionalInputGate = receiveGate;
   const realOnmessage = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'onmessage');
   Object.defineProperty(RTCDataChannel.prototype, 'onmessage', {
     configurable: true,
@@ -229,7 +339,18 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
       }
       const ch = this;
       realOnmessage.set.call(this, function (e) {
-        const result = fn.call(this, e);
+        const result = receiveGate.receive(ch, e.data, (data) => {
+          const handled = fn.call(this, data === e.data ? e : new MessageEvent('message', { data }));
+          if (
+            heldSocketRequests.length &&
+            (ch.label === 'lockstep' || ch.label === 'rollback-input') &&
+            typeof data !== 'string'
+          ) {
+            if (window.__knReleaseOnReplay) releaseOnReplay();
+            else releaseHeldSocketRequests();
+          }
+          return handled;
+        });
         if (ch.label === 'sync-state') afterSyncStateMessage(e.data);
         return result;
       });
@@ -254,6 +375,17 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
             heldSocketPackets.push({ socket: this, packet, record });
             return;
           }
+          if (
+            window.__knHoldSocketRequests > 0 &&
+            args?.[0] === 'data-message' &&
+            args[1]?.type === 'sync-request-full-socket'
+          ) {
+            window.__knHoldSocketRequests--;
+            const record = { requestId: args[1].requestId ?? null, heldAt: performance.now(), releasedAt: null };
+            window.__knSocketRequestsHeld.push(record);
+            heldSocketRequests.push({ socket: this, packet, record });
+            return;
+          }
           return onevent.call(this, packet);
         };
       }
@@ -272,10 +404,80 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
     },
   });
   RTCDataChannel.prototype.send = function (data) {
+    if (
+      window.__knDropArmedAt > 0 &&
+      !stateSentAfterArming &&
+      this.label === 'sync-state' &&
+      typeof data === 'string' &&
+      data.startsWith('sync-start:')
+    ) {
+      stateSentAfterArming = performance.now();
+    }
     if (this.label === 'sync-state' && syncStateDrops(data)) return;
+    if (
+      this.label === 'sync-state' &&
+      performance.now() < window.__knDropSyncStateUntil &&
+      !(window.__knEvents ?? []).some((e) => e.meta?.kind === 'input-ask-push-giveup')
+    ) {
+      window.__knSyncStateDropped++;
+      return;
+    }
     if (window.__knLoseRbInputs && this.label === 'rollback-input' && data instanceof ArrayBuffer) {
       if (data.byteLength >= 4) window.__knRbInputsLost.push(new Int32Array(data, 0, 1)[0]);
       return;
+    }
+    if (
+      window.__knDropInputsUntil > 0 &&
+      performance.now() < window.__knDropInputsUntil &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer
+    ) {
+      window.__knInputsDroppedUntil++;
+      return;
+    }
+    if (
+      window.__knDropInputTo > window.__knDropInputFrom &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer &&
+      data.byteLength >= 4
+    ) {
+      const frame = new Int32Array(data, 0, 1)[0];
+      if (frame >= window.__knDropInputFrom && frame < window.__knDropInputTo) {
+        window.__knInputsDroppedUntil++;
+        return;
+      }
+    }
+    if (
+      performance.now() < window.__knDropSettledUntil &&
+      typeof data === 'string' &&
+      (data.startsWith('recovery-settled:') || data.startsWith('inputs-settled:'))
+    ) {
+      window.__knSettledDropped++;
+      return;
+    }
+    if ((this.label === 'lockstep' || this.label === 'rollback-input') && data instanceof ArrayBuffer) {
+      const now = performance.now();
+      if (!firstInputSendAt.has(this)) firstInputSendAt.set(this, now);
+      const first = firstInputSendAt.get(this);
+      if (
+        window.__knDropInputsAfterOpenMs > 0 &&
+        window.__knDropArmedAt > 0 &&
+        first >= window.__knDropArmedAt &&
+        (stateSentAfterArming === 0 || now - stateSentAfterArming < window.__knDropInputsAfterOpenMs)
+      ) {
+        if (data.byteLength >= 4) window.__knInputsDroppedAfterOpen.push(new Int32Array(data, 0, 1)[0]);
+        return;
+      }
+    }
+    if (
+      this.label === 'sync-state' &&
+      typeof data === 'string' &&
+      data.startsWith('sync-start:') &&
+      Object.values(window.NetplayRollback?._getPeers?.() ?? {}).some(
+        (peer) => peer.slot === window.__knWatchSyncTargetSlot && peer.syncDc === this,
+      )
+    ) {
+      (window.__knWatchedSyncHeaders ??= []).push({ frame: Number(data.split(':')[1]), at: performance.now() });
     }
     const ch = scheduleOf(this);
     let hold = 0;
@@ -295,6 +497,23 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
       data instanceof ArrayBuffer
     )
       hold = Math.max(hold, window.__knHoldInputsMs);
+    if (
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer &&
+      performance.now() < window.__knHoldInputsUntil
+    )
+      hold = Math.max(hold, window.__knHoldInputsUntil - performance.now());
+    if (
+      window.__knInputGate &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer
+    ) {
+      gatedInputs.push(() => {
+        net.send(ch, data, bytesOf(data), 0, performance.now());
+        arm(ch.pumped);
+      });
+      return;
+    }
     net.send(ch, data, bytesOf(data), hold, performance.now());
     arm(ch.pumped);
   };
@@ -303,5 +522,5 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule) => 
 /** Install the simulated network on a browser context: LAT ms plus up to JITTER ms, at kbps (0 = no cap). */
 export const addNetworkInitScript = (ctx, { lat, jitter, kbps = 0 }) =>
   ctx.addInitScript({
-    content: `(${networkInitScript})(${JSON.stringify({ lat, jitter, kbps })}, ${createLinkSchedule});`,
+    content: `(${networkInitScript})(${JSON.stringify({ lat, jitter, kbps })}, ${createLinkSchedule}, ${createDirectionalInputGate});`,
   });

@@ -3,9 +3,8 @@
 These tests once checked the lockstep path's resend protocol: after
 MAX_STALL_MS (3 s) the host sent `resend:<frame>`, and after RESEND_TIMEOUT_MS
 more it went on with a zero input for the missing player (`INPUT-STALL
-resend-request` and `INPUT-STALL hard-timeout`). A game now runs on the C
-rollback engine, which the lockstep path stands in for only when the core
-lacks kn_pre_tick, and the rollback path does neither:
+resend-request` and `INPUT-STALL hard-timeout`). That path is gone: every
+frame runs on the C rollback engine, which does neither:
 
 - inputs go over the reliable channel by default, which loses nothing. With
   the unreliable one (knDiag.setTransport('unreliable') on the host), every

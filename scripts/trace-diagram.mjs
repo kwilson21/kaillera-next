@@ -37,6 +37,14 @@ const OUT = path.join(ROOT, 'docs/spec-traces.md');
 // the only runs of the spec that are drawn; otherwise every run is.
 const SPECS = [
   {
+    file: 'specs/game_end.qnt',
+    main: 'game_end_fixed',
+    hub: 'Room',
+    about:
+      'A host end request waits for the server rather than ending only the host on timeout. ' +
+      'The authoritative lobby roster repairs a lost end event, and a delayed request cannot end a rematch.',
+  },
+  {
     file: 'specs/room_lifecycle.qnt',
     main: 'room_current',
     hub: 'Server',
@@ -93,6 +101,48 @@ const SPECS = [
       "The same orderings today. While a load is being hashed the page waits (`pending`): the host's ROM " +
       "arriving refuses nothing and nothing is announced, and the drop's own hash, once it lands, decides. A " +
       'hash for a load the page no longer holds changes nothing.',
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_host_silent',
+    hub: 'Guest',
+    runs: ['hostChangesToTheGuestsRomTest', 'hostChangesAwayFromTheGuestsRomTest'],
+    about:
+      "The host changing its ROM while the host's drop said nothing (#289). `roomRom` is the host's ROM as the " +
+      'room names it and the guest has heard; the names follow the host, so `"right"` is always the ROM the ' +
+      'host holds. Until the host\'s new ROM is hashed the room names its previous one (`"wrong"`): the ' +
+      "guest's ROM that is the host's new one is refused against it, and a guest holding the previous one " +
+      'is still counted ready on it.',
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_current',
+    hub: 'Guest',
+    runs: ['hostChangesToTheGuestsRomTest', 'hostChangesAwayFromTheGuestsRomTest'],
+    about:
+      "The same orderings today. The host's drop says its ROM is being hashed: the room names none " +
+      "(`changing`) and drops every guest's word, the guest's page judges nothing and says nothing, and the " +
+      "host's hash, once it is the room's, decides.",
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_no_library',
+    hub: 'Guest',
+    runs: ['guestDroppedFirstTest'],
+    about:
+      'The guest drops the ROM the host is about to change to, a moment before the host does (#303). Its copy ' +
+      "lands in the library (`cacheLands`), and it is refused, rightly, against the host's ROM of the moment. " +
+      "When the room names the host's new ROM the page holds none, and stays so: it looked in its library only " +
+      'after a refusal (`missedLibraryRom`).',
+  },
+  {
+    file: 'specs/rom_identity.qnt',
+    main: 'rom_identity_current',
+    hub: 'Guest',
+    runs: ['guestDroppedFirstTest'],
+    about:
+      "The same ordering today. When the room names the host's new ROM and the page holds none, it looks in " +
+      'its library, finds the ROM it dropped, loads it and says ready.',
   },
 ];
 

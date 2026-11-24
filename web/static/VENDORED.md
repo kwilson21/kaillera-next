@@ -3,7 +3,7 @@
 Single source of truth for every third-party file checked into this repo.
 Update this file whenever you re-import, replace, or remove a vendored asset.
 
-Last updated: 2026-10-05
+Last updated: 2026-11-02
 
 ---
 
@@ -13,7 +13,7 @@ Last updated: 2026-10-05
 - **Version:** 4.8.4
 - **Source:** https://registry.npmjs.org/socket.io-client — `dist/socket.io.min.js` from the official npm tarball
 - **Used by:** all pages — Socket.IO client
-- **Pairs with:** server `python-socketio 5.17.x` (compatible with v4 protocol; EIO4, unchanged from 5.16.x)
+- **Pairs with:** server `python-socketio 5.18.x` (compatible with v4 protocol; EIO4, unchanged from 5.16.x)
 
 ### `vendor/fflate.min.js`
 - **Version:** 0.8.3
@@ -25,7 +25,10 @@ Last updated: 2026-10-05
 - **Version:** 4.2.3 (also recorded in `ejs/version.json`)
 - **Source:** kaillera-next fork of https://github.com/EmulatorJS/EmulatorJS
 - **Notes:** patched core redirector logic lives in `core-redirector.js`; the EJS bundle
-  itself is upstream + minor patches.
+  itself is upstream + minor patches. In `downloadGameCore`, a missing local
+  download ends with an error (no CDN retry); streaming N64 cache entries use
+  the bundled archive hash supplied by the redirector, or skip caching when
+  that hash is unavailable.
 
 ### `ejs/cores/mupen64plus_next_libretro.{js,wasm}` + `mupen64plus_next-wasm.data`
 - **Version:** built locally by `build/build.sh` — see "Build sources" below for pinned SHAs

@@ -212,7 +212,13 @@ test('window.KNDiag measures, crops and logs what kn-diagnostics.js did', () => 
   assert.equal(seen.health.length, GOLDEN.health);
   assert.equal(seen.crops.length, GOLDEN.crops);
   assert.equal(seen.log.length, GOLDEN.log);
-  assert.equal(digestOf(seen), GOLDEN.sha256);
+  // Keep the legacy trace oracle for every unchanged measurement and line.
+  // The only deliberate trace change is the first successful JPEG's dimensions.
+  const currentScreenshotLog = 'screenshot: ok 320x240 size=223';
+  const legacyScreenshotLog = 'screenshot: ok 160x120 size=223';
+  assert.equal(seen.log.filter((line) => line === currentScreenshotLog).length, 1);
+  const legacySizedLog = seen.log.map((line) => (line === currentScreenshotLog ? legacyScreenshotLog : line));
+  assert.equal(digestOf({ ...seen, log: legacySizedLog }), GOLDEN.sha256);
   // The script must reach every kind of line it is meant to compare.
   for (const kind of ['RENDER-STALL', 'AUDIO-STALL', 'AUDIO-RESUME', 'CANVAS-HEALTH', 'INPUT-DEAD']) {
     assert.ok(
