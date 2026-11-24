@@ -131,14 +131,14 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       # Apalache needs Java 17+, which the runner image already has.
       - name: Install pinned tools
         run: npm ci --ignore-scripts
       - name: Cache pinned Apalache archive
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.quint/apalache-dist-0.62.4/apalache.tgz
           key: apalache-0.62.4-${{ runner.os }}-8ac8488422c30
@@ -166,7 +166,7 @@ jobs:
           node-version: 24
       - name: Install pinned tools
         run: npm ci --ignore-scripts
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0.x'
       - uses: dafny-lang/setup-dafny-action@v1
@@ -187,7 +187,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/antislop
           key: antislop-0.3.0-${{ runner.os }}

@@ -55,7 +55,7 @@ jobs:
       # slow runners in run 43789283470. Cache package downloads, not .venv;
       # every job still checks and installs the frozen dependency set below.
       - name: Cache locked Python packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.UV_CACHE_DIR }}
           key: uv-0.13.8-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('server/uv.lock') }}
@@ -99,7 +99,7 @@ jobs:
             --ci-shard-index ${{ matrix.shard }} --ci-shard-count ${{ strategy.job-total }}
       - name: Optical button screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: optical-buttons-${{ matrix.shard }}
           path: test-results/optical-*.png
