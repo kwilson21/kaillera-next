@@ -16,6 +16,9 @@ void kn_rollback_init(int max_frames, int delay_frames, int local_slot, int num_
  */
 int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy);
 
+/* Store a removed slot's final input after slot reset, preserving it for replay. */
+void kn_store_cut_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy);
+
 /* Pre-tick: save state to ring buffer, store local input, predict
  * missing remote inputs. Does NOT step the emulator.
  * Returns current frame number.

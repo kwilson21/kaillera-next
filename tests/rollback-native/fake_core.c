@@ -45,8 +45,11 @@ bool retro_serialize(void *data, size_t size) {
     return true;
 }
 
+static int refuse_restore;
+void kn_test_refuse_restore(int refuse) { refuse_restore = refuse; }
+
 bool retro_unserialize(const void *data, size_t size) {
-    if (size < sizeof(kn_test_state_t)) return false;
+    if (refuse_restore || size < sizeof(kn_test_state_t)) return false;
     const kn_test_state_t *s = (const kn_test_state_t *)data;
     kn_test_set_live(s->origin, s->frame);
     return true;
@@ -63,7 +66,7 @@ uint32_t kn_sync_read_cpu(uint8_t *buf, uint32_t max_size) {
     memset(buf, 0, 4);
     return 4;
 }
-int kn_sync_write_cpu(const uint8_t *buf, uint32_t size) { (void)buf; (void)size; return 0; }
+int kn_sync_write_cpu(const uint8_t *buf, uint32_t size) { (void)buf; (void)size; return refuse_restore ? -1 : 0; }
 
 int kn_headless = 0;
 void kn_set_headless(int enable) { kn_headless = enable; }

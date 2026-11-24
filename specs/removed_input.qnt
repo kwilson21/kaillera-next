@@ -93,8 +93,8 @@
 //      neutral at C and C + 1, as real inputs (its late check reads tags
 //      below kn_get_frame() - delay only, all of them the word it just read);
 //   4. the replay goes on to its end reading the ring: every frame it still
-//      runs applies the word below C and neutral from C (C predicts neutral
-//      after the two neutral inputs), and no input of the player is taken
+//      runs applies the word below C and neutral from C (missing tags of an
+//      inactive slot read neutral), and no input of the player is taken
 //      in any more (_admissionInputFloor).
 // So the host runs exactly what it sent, and the frames from R the first
 // pass ran with the player's inputs are run again neutral by the replay that
@@ -107,8 +107,8 @@
 
 // DELAY, COLLIDE, JOINER_HOLDS: the tags around a quick rejoin, where the
 // cut's neutral inputs and the rejoined player's first ones meet.
-// _cutRemovedInput feeds neutral at the cut tag C = R - delay and at C + 1 as
-// real inputs, so C predicts neutral after them. The admission at the host's
+// _cutRemovedInput stores neutral at the cut tag C = R - delay and at C + 1
+// as final inputs. The admission at the host's
 // roster frame A >= R takes the player's inputs from tag A on (record.first,
 // _admissionInputFloor): a frame's own number as a tag, `delay` above the
 // tag that frame applies. So the floor is at least C + delay, and with delay
