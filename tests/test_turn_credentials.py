@@ -6,13 +6,14 @@ import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
 
-from src.api import turn  # noqa: E402
+from src.api import turn
 
 
 def _run(coro):
@@ -92,6 +93,26 @@ def test_cached_between_calls():
     assert a == b and len(calls) == 1
 
 
+def test_managed_turn_cache_expires_at_the_first_half(monkeypatch):
+    now = 100.0
+    calls = []
+    monkeypatch.setattr(turn, "time", SimpleNamespace(monotonic=lambda: now))
+
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json=CF_RESPONSE)
+
+    async def get():
+        async with _client(handler) as c:
+            return await turn.ice_servers(c)
+
+    assert _run(get())
+    now += turn.TTL_SECONDS // 2 - 0.5
+    assert _run(get()) and len(calls) == 1
+    now += 0.5
+    assert _run(get()) and len(calls) == 2
+
+
 def test_single_object_response_shape():
     body = {
         "iceServers": {
@@ -100,9 +121,7 @@ def test_single_object_response_shape():
             "credential": "c",
         }
     }
-    servers = _run(
-        turn.ice_servers(_client(lambda r: httpx.Response(200, json=body)))
-    )
+    servers = _run(turn.ice_servers(_client(lambda r: httpx.Response(200, json=body))))
     assert servers == [
         {"urls": ["turn:turn.cloudflare.com:3478"], "username": "u", "credential": "c"}
     ]
@@ -163,7 +182,6 @@ def test_unconfigured_makes_no_request(monkeypatch):
 
 def test_endpoint_falls_back_to_hmac_turn_when_cloudflare_fails(monkeypatch):
     from fastapi.testclient import TestClient
-
     from src.api import app as appmod
     from src.api.signaling import rooms
 
@@ -175,12 +193,147 @@ def test_endpoint_falls_back_to_hmac_turn_when_cloudflare_fails(monkeypatch):
     monkeypatch.setitem(rooms, "TURNFB", object())
     monkeypatch.setenv("TURN_SECRET", "s")
     monkeypatch.setenv("TURN_SERVERS", "turn:turn.example:3478")
-    servers = (
-        TestClient(appmod.create_app())
-        .get("/ice-servers", params={"room": "TURNFB", "token": "t"})
-        .json()
+    response = TestClient(appmod.create_app()).get(
+        "/ice-servers", params={"room": "TURNFB", "token": "t"}
     )
+    servers = response.json()
     assert servers[-1]["urls"] == "turn:turn.example:3478" and servers[-1]["credential"]
+    assert response.headers["x-kn-relay-ttl"] == str(turn.TTL_SECONDS - 1)
+    assert "x-kn-relay-retry-after" not in response.headers
+
+
+def test_managed_relay_lifetime_only_in_authenticated_response(monkeypatch):
+    from fastapi.testclient import TestClient
+    from src.api import app as appmod
+    from src.api.signaling import rooms
+
+    relay = CF_RESPONSE["iceServers"][1]
+
+    async def managed_turn():
+        return [relay]
+
+    monkeypatch.setattr(appmod.turn, "ice_servers", managed_turn)
+    monkeypatch.setattr(appmod, "check_ip", lambda ip, action: True)
+    monkeypatch.setattr(
+        appmod, "verify_upload_token", lambda room, token: token == "valid"
+    )
+    monkeypatch.setitem(rooms, "TURNCF", object())
+    monkeypatch.delenv("ICE_SERVERS", raising=False)
+    client = TestClient(appmod.create_app())
+    for params in (
+        {},
+        {"room": "TURNCF", "token": "invalid"},
+        {"room": "other", "token": "valid"},
+    ):
+        response = client.get("/ice-servers", params=params)
+        assert response.status_code == 200
+        assert "x-kn-relay-ttl" not in response.headers
+        assert all(server["urls"].startswith("stun:") for server in response.json())
+
+    room_request = {"room": "TURNCF", "token": "valid"}
+    response = client.get("/ice-servers", params=room_request)
+    assert response.json()[-1] == relay
+    assert response.headers["x-kn-relay-ttl"] == str(turn.TTL_SECONDS // 2)
+    assert "no-store" in response.headers["cache-control"]
+
+    monkeypatch.setenv("ICE_SERVERS", json.dumps([relay]))
+    legacy = client.get("/ice-servers", params=room_request)
+    assert legacy.json() == [relay]
+    assert legacy.headers["x-kn-relay-ttl"] == "86400"
+
+
+def test_managed_outage_hint_is_authorized_and_expires_with_the_provider_backoff(
+    monkeypatch,
+):
+    from fastapi.testclient import TestClient
+    from src.api import app as appmod
+    from src.api.signaling import make_upload_token, rooms
+
+    now = 100.0
+    replies = [
+        httpx.Response(503, json={"error": "temporary"}),
+        httpx.Response(200, json=CF_RESPONSE),
+    ]
+    fetch = turn.ice_servers
+
+    async def managed_turn():
+        async with _client(lambda _: replies.pop(0)) as client:
+            return await fetch(client)
+
+    monkeypatch.setattr(turn, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(turn, "ice_servers", managed_turn)
+    monkeypatch.setattr(appmod, "check_ip", lambda ip, action: True)
+    monkeypatch.setitem(rooms, "TURNTMP", object())
+    monkeypatch.setitem(rooms, "TURNALT", object())
+    for var in ("ICE_SERVERS", "TURN_SECRET", "TURN_SERVERS"):
+        monkeypatch.delenv(var, raising=False)
+
+    room = "TURNTMP"
+    token = make_upload_token(room)
+    client = TestClient(appmod.create_app())
+    for params in (
+        {},
+        {"room": room, "token": "invalid"},
+        {"room": "TURNALT", "token": token},
+    ):
+        response = client.get("/ice-servers", params=params)
+        assert response.status_code == 200
+        assert "x-kn-relay-retry-after" not in response.headers
+        assert all(server["urls"].startswith("stun:") for server in response.json())
+    assert len(replies) == 2
+
+    params = {"room": room, "token": token}
+    unavailable = client.get("/ice-servers", params=params)
+    assert unavailable.status_code == 200
+    assert unavailable.headers["x-kn-relay-retry-after"] == str(
+        turn.FAILURE_BACKOFF_SECONDS
+    )
+    assert "x-kn-relay-ttl" not in unavailable.headers
+    assert "no-store" in unavailable.headers["cache-control"]
+    assert all(server["urls"].startswith("stun:") for server in unavailable.json())
+
+    now += turn.FAILURE_BACKOFF_SECONDS - 0.5
+    almost_ready = client.get("/ice-servers", params=params)
+    assert almost_ready.headers["x-kn-relay-retry-after"] == "1"
+    assert len(replies) == 1
+
+    now += 0.5
+    recovered = client.get("/ice-servers", params=params)
+    assert recovered.json()[-1]["username"] == "u" and not replies
+    assert "x-kn-relay-retry-after" not in recovered.headers
+
+    monkeypatch.delenv("CF_TURN_API_TOKEN")
+    unconfigured = client.get("/ice-servers", params=params)
+    assert unconfigured.json() == unavailable.json()
+    assert "x-kn-relay-retry-after" not in unconfigured.headers
+
+
+@pytest.mark.parametrize(
+    "configured, username, expected",
+    [
+        (None, "opaque", 86400),
+        ("7200", "opaque", 7200),
+        ("not-an-integer", "opaque", 1800),
+        ("86401", "opaque", 1800),
+        ("-1", "opaque", 1800),
+        ("7200", "1700002500:lease", 2499),
+        ("7200", "1700000100:lease", 99),
+        ("7200", "1700000000:expired", 1),
+    ],
+)
+def test_legacy_relay_lifetime_is_bounded(monkeypatch, configured, username, expected):
+    monkeypatch.setattr(turn, "time", SimpleNamespace(time=lambda: 1700000000.5))
+    if configured is None:
+        monkeypatch.delenv("ICE_SERVERS_TTL_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("ICE_SERVERS_TTL_SECONDS", configured)
+    assert turn.legacy_relay_ttl([{"urls": "stun:example.test"}]) is None
+    relay = {
+        "urls": ["turns:example.test:443"],
+        "username": username,
+        "credential": "fixture",
+    }
+    assert turn.legacy_relay_ttl([relay]) == expected
 
 
 # ── ROM sharing off switch (server side) ─────────────────────────────────────
@@ -249,7 +402,7 @@ def test_restored_room_flag_is_not_advertised_when_off(sig, monkeypatch):
 
 
 def test_guest_on_unlisted_host_can_answer_an_allowed_host(sig, monkeypatch):
-    signaling, room, _, relayed = sig
+    signaling, _room, _, relayed = sig
     monkeypatch.setenv("ROM_SHARING_ENABLED", "play.example")
     _run(signaling.rom_signal("guest", {"target": "host", "answer": {}}))
     assert relayed == []  # host hasn't enabled sharing yet

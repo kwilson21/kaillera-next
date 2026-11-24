@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import time
 
@@ -25,6 +26,9 @@ log = logging.getLogger(__name__)
 
 _API = "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate-ice-servers"
 TTL_SECONDS = 24 * 60 * 60
+CACHE_SECONDS = TTL_SECONDS // 2
+MIN_REMAINING_SECONDS = TTL_SECONDS - CACHE_SECONDS
+LEGACY_UNKNOWN_TTL_SECONDS = 30 * 60
 FAILURE_BACKOFF_SECONDS = 60
 
 _cache: tuple[str, float, list[dict]] | None = None  # (config key, expires_at, servers)
@@ -60,6 +64,40 @@ def _usable(servers: object) -> list[dict]:
     return out
 
 
+def legacy_relay_ttl(servers: object) -> int | None:
+    """Use the configured validity for static relays, capped by dated usernames."""
+    if not isinstance(servers, list):
+        return None
+    relays = []
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        urls = server.get("urls")
+        urls = [urls] if isinstance(urls, str) else urls
+        if isinstance(urls, list) and any(
+            isinstance(url, str) and url.lower().startswith(("turn:", "turns:")) for url in urls
+        ):
+            relays.append(server)
+    if not relays:
+        return None
+    try:
+        ttl = int(os.environ.get("ICE_SERVERS_TTL_SECONDS", TTL_SECONDS))
+    except ValueError:
+        ttl = 0
+    if not 1 <= ttl <= TTL_SECONDS:
+        log.warning("ICE_SERVERS_TTL_SECONDS must be an integer between 1 and 86400")
+        ttl = LEGACY_UNKNOWN_TTL_SECONDS
+    next_second = int(time.time()) + 1
+    for server in relays:
+        username = server.get("username")
+        if isinstance(username, str):
+            timestamp, delimiter, _ = username.partition(":")
+            if delimiter and len(timestamp) == 10 and timestamp.isascii() and timestamp.isdigit():
+                ttl = min(ttl, int(timestamp) - next_second)
+    # A 1-second lease is already too short for the watcher's safety margin.
+    return max(1, ttl)
+
+
 def _config_key() -> str:
     raw = f"{os.environ['CF_TURN_KEY_ID']}\0{os.environ['CF_TURN_API_TOKEN']}"
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -77,11 +115,11 @@ async def ice_servers(client: httpx.AsyncClient | None = None) -> list[dict]:
     if not configured():
         return []
     key = _config_key()
-    hit = _cached(key, time.time())
+    hit = _cached(key, time.monotonic())
     if hit is not None:
         return hit
     async with _lock:
-        now = time.time()
+        now = time.monotonic()
         hit = _cached(key, now)
         if hit is not None:
             return hit
@@ -101,9 +139,17 @@ async def ice_servers(client: httpx.AsyncClient | None = None) -> list[dict]:
         except (httpx.HTTPError, ValueError, AttributeError) as e:
             # Never log the response body or headers: they carry credentials.
             log.warning("Cloudflare TURN credentials unavailable: %s", type(e).__name__)
-        ttl = TTL_SECONDS / 2 if servers else FAILURE_BACKOFF_SECONDS
+        ttl = CACHE_SECONDS if servers else FAILURE_BACKOFF_SECONDS
         _cache = (key, now + ttl, servers)
         return servers
+
+
+def failure_retry_after_seconds() -> int:
+    """Remaining provider backoff, immediately after a failed managed lookup."""
+    cache = _cache
+    if cache and not cache[2] and configured() and cache[0] == _config_key():
+        return max(1, math.ceil(cache[1] - time.monotonic()))
+    return 1
 
 
 def reset_cache() -> None:
