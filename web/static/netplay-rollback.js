@@ -65,19 +65,9 @@
  *
  * ── Frame Stepping (Manual Mode) ─────────────────────────────────────────
  *
- *   Emscripten's main loop is driven by requestAnimationFrame. To control
- *   frame timing, we intercept rAF via APISandbox (api-sandbox.js):
- *     - APISandbox saves native browser APIs (rAF, getGamepads,
- *       performance.now) at page load before any scripts can override them
- *     - overrideRAF() replaces window.requestAnimationFrame with an
- *       interceptor that captures only Emscripten's main-loop runner
- *       (_pendingRunner) by name; every other callback (UI code calling
- *       rAF during a match) is passed through to the native rAF (#62)
- *     - Module.resumeMainLoop() registers Emscripten's runner through
- *       our interceptor, giving us the callback
- *     - stepOneFrame() calls _pendingRunner(frameTimeMs), advancing the
- *       emulator by exactly one frame, then schedules a real rAF no-op
- *       to force GL compositing
+ *   The patched core passes scheduled runners to this module. Older cores
+ *   use the name-filtered rAF interceptor. stepOneFrame takes one runner
+ *   and checks dispatch and cycle progress before counting the step.
  *
  *   The tick loop uses setInterval(16) instead of rAF because rAF is
  *   throttled to ~1fps in background tabs, which would stall the game.
@@ -6773,6 +6763,7 @@
   };
 
   // Manual mode / rAF interception state (native refs managed by APISandbox)
+  let _manualSchedulerModule = null;
   let _pendingRunner = null; // captured Emscripten MainLoop_runner
   let _manualMode = false; // true once enterManualMode() called
   let _stallStart = 0; // timestamp when current stall began
@@ -14830,14 +14821,19 @@
     // Pause first to invalidate stale runners
     mod.pauseMainLoop();
 
-    // Replace rAF with interceptor that captures only Emscripten's runner;
-    // every other callback (UI code calling requestAnimationFrame during a
-    // match) goes to the native rAF instead (#62).
-    APISandbox.overrideRAF((cb) => {
-      if (!KNShared.isMainLoopRunner(cb)) return APISandbox.nativeRAF(cb);
-      _pendingRunner = cb;
-      return -999;
-    });
+    if (mod.knSetManualScheduler) {
+      _manualSchedulerModule = mod;
+      mod.knSetManualScheduler((runner) => {
+        _pendingRunner = runner;
+      });
+    } else {
+      // Older cores expose only the rAF runner. Leave unrelated UI callbacks alone.
+      APISandbox.overrideRAF((cb) => {
+        if (!KNShared.isMainLoopRunner(cb)) return APISandbox.nativeRAF(cb);
+        _pendingRunner = cb;
+        return -999;
+      });
+    }
 
     // Resume to capture fresh runner
     mod.resumeMainLoop();
@@ -15073,20 +15069,8 @@
 
   let _staleRunnerLastLogAt = 0;
 
-  // Run the currently-captured _pendingRunner once for `frameTimeMs` and
-  // report whether it actually emulated the frame. See #62: after a click
-  // moved DOM focus (e.g. toolbar or feedback form), the runner call could
-  // emulate nothing — no mainloop func call, no reschedule — while
-  // stepOneFrame still counted the frame as stepped. Root cause: the
-  // overrideRAF interceptor used to capture ANY callback passed to
-  // requestAnimationFrame, so the page UI code's own rAF call (fired by the
-  // click) overwrote _pendingRunner with a UI callback, stranding the real
-  // runner. Fixed by having the interceptor capture only Emscripten's
-  // runner (KNShared.isMainLoopRunner) and pass everything else to the
-  // native rAF. The detection below (KNShared.classifyRunnerStep, from two
-  // signals sampled around the call — did a fresh runner get rescheduled,
-  // and did CP0 Count (kn_get_cycle_time_ms) move at all) stays as a safety
-  // net for any other cause of a stale runner.
+  // A blocker or skipped iteration can reschedule without entering the core.
+  // On the patched core, require native dispatch and CP0 progress when available.
   const _runCapturedRunner = (frameTimeMs) => {
     const runner = _pendingRunner;
     _pendingRunner = null;
@@ -15094,8 +15078,11 @@
     const cycleMod = _hasForkedCore ? window.EJS_emulator?.gameManager?.Module : null;
     const hasCycleCheck = !!cycleMod?._kn_get_cycle_time_ms;
     const cycleBefore = hasCycleCheck ? cycleMod._kn_get_cycle_time_ms() : null;
-    runner(frameTimeMs);
+    const dispatched = runner(frameTimeMs);
     const cycleAfter = hasCycleCheck ? cycleMod._kn_get_cycle_time_ms() : null;
+    if (_manualSchedulerModule) {
+      return dispatched === true && (!hasCycleCheck || cycleAfter !== cycleBefore) ? 'emulated' : 'stale';
+    }
     const rescheduled = !!_pendingRunner;
     return KNShared.classifyRunnerStep(rescheduled, cycleBefore, cycleAfter);
   };
@@ -15131,7 +15118,7 @@
     const frameTimeMs = (_frameNum + 1) * 16.666666666666668;
     let outcome = _runCapturedRunner(frameTimeMs);
 
-    if (outcome === 'stale') {
+    if (outcome === 'stale' && !_manualSchedulerModule) {
       // The runner did not emulate: it was stale (see _runCapturedRunner
       // above) and this peer would otherwise count an unemulated frame —
       // exactly the #62 click-during-match desync. Recapture and re-step
@@ -16992,6 +16979,8 @@
     window._knLastTickWall = 0;
     // Restore rAF if we intercepted it (other overrides restored in stop())
     if (_manualMode) {
+      _manualSchedulerModule?.knSetManualScheduler(null);
+      _manualSchedulerModule = null;
       APISandbox.restoreAll();
       // Restore EJS / gameManager / WASM pause overrides installed in
       // enterManualMode. Match the install order so any chained restore
