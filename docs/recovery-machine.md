@@ -33,3 +33,19 @@ Immutable token identity prevents a stale completion from changing a new attempt
 Resync disabled prevents recovery startup; toggling it off cancels existing actors, not the normal stall path.
 
 Model: specs/recovery_delivery.qnt (actor, delivery, capacity and reservation invariants).
+
+## Verified checkpoint recovery
+
+```mermaid
+flowchart TD
+  playing -->|freeze| approaching
+  approaching -->|stop| frozen
+  approaching -->|fail| unresolved
+  frozen -->|install| replaying
+  frozen -->|fail| unresolved
+  replaying -->|verify| installed
+  replaying -->|fail| unresolved
+  installed -->|commit| committed
+  installed -->|fail| unresolved
+  committed -->|run| playing
+```

@@ -544,6 +544,7 @@
     sendNextPing(peer); // completion (incl. broadcast + re-check) handled by _finishRttMeasurement
   };
 
+  const _checkpointCaps = new Set();
   const RECONNECT_PROOF_CAP = 'reconnectProofV1';
   const RECONNECT_PROOF_REQUEST = 'reconnect-sync-request-v1';
   const _reconnectProofPeers = new Map();
@@ -571,6 +572,7 @@
       // This page runs a roster's controller mask from an agreed frame
       // (specs/controller_mask.qnt); a page without it applies it at once.
       [window.KNCore.controllerMask.MASK_CAP]: true,
+      [window.KNCore.checkpoint.CHECKPOINT_CAP]: true,
       [RECONNECT_PROOF_CAP]: true,
     };
   };
@@ -7746,6 +7748,280 @@
       : null;
   let _hostReconnectFenceVersion = 0;
   const _hostReconnectNative = () => window.EJS_emulator?.gameManager?.Module;
+  let _checkpoint = null;
+  let _checkpointBootInput = null;
+  let _checkpointRoute = null;
+  let _checkpointFloor = 0;
+  const _unsafeCheckpointRoutes = new Map();
+  const _checkpointMod = _hostReconnectNative;
+  const _pinCheckpointRoute = (key, peer) => ({ key, peer, dc: peer.dc, gen: _syncQueueGen[key] || 0 });
+  const _checkpointRouteCurrent = (route) =>
+    !route ||
+    (_peers[route.key] === route.peer &&
+      route.gen === (_syncQueueGen[route.key] || 0) &&
+      route.peer.dc === route.dc &&
+      route.dc?.readyState === 'open');
+  const _checkpointReturning = (id) => {
+    const scope = _reconnectAnswerDebt?.scope;
+    if (!scope || !_readReconnectAnswer(id, scope, id) || scope.peer.dc?.readyState !== 'open') return false;
+    _checkpointRoute = _pinCheckpointRoute(scope.key, scope.peer);
+    return true;
+  };
+  const _checkpointScope = () => {
+    if (_hostMatchUnverified()) return null;
+    if (
+      !_syncEnabled ||
+      _isSpectator ||
+      _demoMode ||
+      RB_WORKER_COPROC ||
+      RB_SHADOW_EMU ||
+      !RB_TRUE_ROLLBACK ||
+      !socket?.connected ||
+      !socket.id ||
+      !KNState.matchId ||
+      !_config?.romHash
+    )
+      return null;
+    // A guest can execute frame zero before the host roster arrives. Capture
+    // against the negotiated start group, then require the authoritative
+    // roster to match it before admitting any recovery.
+    const slots = _activeRoster ?? new Set([_playerSlot, ..._startGroupPeers().map(([, peer]) => peer.slot)]);
+    if (slots.size < 3 || slots.size > 4) return null;
+    const members = [];
+    for (const slot of [...slots].sort()) {
+      if (_admissionInputFloor(slot) > 0 || _cutGoverns(slot)) return null;
+      if (slot === _playerSlot) {
+        members.push({ slot, sid: socket.id });
+        continue;
+      }
+      const entry = _peerEntryForSlot(slot);
+      if (
+        !entry ||
+        _isPeerPendingLateJoin(...entry) ||
+        entry[1].synthetic ||
+        entry[1]._intentionalLeave ||
+        !_checkpointCaps.has(_currentSid(entry[0]))
+      )
+        return null;
+      members.push({ slot, sid: _currentSid(entry[0]) });
+    }
+    const core = window._knCoreHash || window._knCoreWorkerHash;
+    if (!core || _lastControllerPresentMask !== _rosterControllerMask(members.map((p) => p.slot))) return null;
+    return {
+      match: KNState.matchId,
+      members,
+      mask: members.reduce((m, p) => m | (1 << p.slot), 0),
+      fingerprint: JSON.stringify([core, _config.romHash, KN_INPUT_MODEL]),
+    };
+  };
+  const _checkpointAligned = () => {
+    const m = _checkpointMod();
+    return (
+      _useCRollback &&
+      _hasKnSync &&
+      !!m &&
+      m._kn_get_frame() === _frameNum &&
+      m._kn_get_replay_depth() === 0 &&
+      m._kn_peek_pending_rollback() < 0
+    );
+  };
+  const _checkpointCapture = () => {
+    if (!_checkpointAligned()) return null;
+    const m = _checkpointMod();
+    ensureSyncBuffer();
+    if (!_syncBufPtr) return null;
+    const n = m._kn_sync_read(_syncBufPtr, _syncBufSize);
+    const extra = _captureResyncExtras(m),
+      fifo = _captureAudioFifoState(m);
+    if (n <= 0 || n > _syncBufSize || !extra.hiddenWords || !extra.hle || (_isSmashRemix() && !fifo)) return null;
+    return {
+      frame: _frameNum,
+      bytes: m.HEAPU8.slice(_syncBufPtr, _syncBufPtr + n),
+      hidden: Uint32Array.from(extra.hiddenWords),
+      hle: extra.hle,
+      fifo: Uint32Array.from(fifo ?? []),
+    };
+  };
+  const _checkpointInstall = (s) => {
+    if (!_checkpointAligned()) return false;
+    const m = _checkpointMod();
+    ensureSyncBuffer();
+    if (!_syncBufPtr || s.bytes.length > _syncBufSize) return false;
+    m.HEAPU8.set(s.bytes, _syncBufPtr);
+    if (m._kn_sync_write(_syncBufPtr, s.bytes.length) !== 0) return false;
+    recaptureManualRunner(m, 'verified checkpoint');
+    if (
+      !_restoreHiddenStateWords(m, s.hidden, 'checkpoint') ||
+      !_restoreHleState(m, s.hle, 'checkpoint') ||
+      (s.fifo.length && !_restoreAudioFifoState(m, s.fifo, 'checkpoint'))
+    )
+      return false;
+    m._kn_set_frame(s.frame);
+    _frameNum = KNState.frameNum = s.frame;
+    const loaded = _checkpointCapture();
+    if (
+      !loaded ||
+      !['bytes', 'hidden', 'hle', 'fifo'].every(
+        (k) => s[k].length === loaded[k].length && s[k].every((v, i) => v === loaded[k][i]),
+      )
+    )
+      return false;
+    _clearPendingCInputs('checkpoint install');
+    window.KNDesync?.forgetFrom(s.frame);
+    _rbCheckBook?.forgetFrom(s.frame);
+    _setReplayFullHeadless(m, true, 'checkpoint');
+    _setReplayAudioOutputSkip(m, true, 'checkpoint');
+    return true;
+  };
+  const _inputFromTuple = ([buttons, lx, ly, cx, cy]) => ({ buttons, lx, ly, cx, cy });
+  const _checkpointReplay = (step) => {
+    const m = _checkpointMod();
+    if (!_checkpointAligned() || _frameNum !== step.frame) return false;
+    for (let slot = 0; slot < 4; slot++) writeInputToMemory(slot, 0);
+    _checkpoint.slots.forEach((slot, i) => writeInputToMemory(slot, _inputFromTuple(step.inputs[i])));
+    m._kn_reset_audio?.();
+    _syncRNGSeed(m, _frameNum);
+    if (!_runStepOneFrame('checkpoint replay')) return false;
+    _syncRNGSeed(m, _frameNum);
+    _frameNum = KNState.frameNum = m._kn_post_tick();
+    return _frameNum === step.frame + 1;
+  };
+  // kn_rollback_init replaces both the RNG pointers and the preserve buffer.
+  // Rebind them for deferred startup and for a verified replay's new ring.
+  const _configureRollbackMemory = (rngMod) => {
+    if (rngMod) _initRNGSync(rngMod);
+    if (_rngPatched && _rdramBase && rngMod?._kn_set_rng_sync) {
+      const rngPtr = _rdramBase + KN_RNG_SEED_RDRAM;
+      const rngAltPtr = _rdramBase + KN_RNG_ALT_SEED_RDRAM;
+      rngMod._kn_set_rng_sync(_rngSeed, rngPtr, rngAltPtr);
+      _syncLog(`C-ROLLBACK RNG sync configured: seed=0x${_rngSeed.toString(16)}`);
+    }
+    // Configure non-tainted RDRAM preservation — must be AFTER
+    // kn_rollback_init which sets up the taint bitmap.
+    if (_rdramBase && rngMod?._kn_set_rdram_preserve) {
+      rngMod._kn_set_rdram_preserve(_rdramBase);
+      _syncLog(`C-ROLLBACK non-tainted RDRAM preservation configured`);
+    }
+  };
+  const _checkpointPrepare = (r, rows) => {
+    const m = _checkpointMod();
+    if (!_checkpointAligned() || _frameNum !== r) return false;
+    _clearPendingCInputs('checkpoint install');
+    // Rebuild the prediction ring. No pre-checkpoint save can service a new rollback.
+    _drainCDebugLog();
+    m._kn_rollback_init(_rbRollbackMax, DELAY_FRAMES, _playerSlot, rb_numPlayers);
+    _cDebugLogLastLen = 0;
+    _cDebugLogDropped = 0;
+    _rbLastFailedRollbacks = 0;
+    _configureRollbackMemory(m);
+    recaptureManualRunner(m, 'checkpoint ring');
+    m._kn_set_true_rollback(1);
+    m._kn_set_frame(r);
+    for (const [slot, inputs] of rows) {
+      for (let tag = Math.max(0, r - DELAY_FRAMES - 1); tag < r; tag++) {
+        const tuple = inputs.get(tag);
+        if (!tuple) return false;
+        const value = _inputFromTuple(tuple);
+        if (slot === _playerSlot) _localInputs[tag] = value;
+        else (_remoteInputs[slot] ??= {})[tag] = value;
+        _feedCInput(m, slot, tag, value);
+        const applied = _rbGetInput(m, slot, tag);
+        if (applied === KNShared.ZERO_INPUT || !_inputEq(applied, value)) return false;
+      }
+    }
+    return _checkpointAligned();
+  };
+  const _checkpointResume = (r, values, run) => {
+    const m = _checkpointMod();
+    _setReplayFullHeadless(m, false, 'checkpoint');
+    _setReplayAudioOutputSkip(m, false, 'checkpoint');
+    _checkpointFloor = r;
+    if (_playerSlot === run.returning)
+      _finishReconnectAnswer(run.request, _reconnectAnswerDebt?.scope, true, run.request);
+    _syncQueueEpoch++;
+    _syncSendChains = {};
+    _syncChainMovedAt = {};
+    _hostReconnectFenceVersion++;
+    _hostReconnectDebts.clear();
+    _hostAuthoredReceipts.clear();
+    _deferredPhantomRecovery.clear();
+    _pendingResyncState = null;
+    _resyncRequestInFlight = false;
+    _owedResync = false;
+    _owedResyncAsksAgain = 0;
+    _clearLifecycleResyncGuard('verified checkpoint');
+    _setLastSyncState(null, 'verified checkpoint');
+    for (const [slot, tuple] of values) {
+      const value = _inputFromTuple(tuple);
+      if (slot === _playerSlot) _localInputs[r] = value;
+      else (_remoteInputs[slot] ??= {})[r] = value;
+      _feedCInput(m, slot, r, value);
+    }
+    _unsafeCheckpointRoutes.clear();
+    _checkpointRoute = null;
+    _resyncRequestAt = -1;
+    _syncTargetFrame = -1;
+    _syncTargetDeadlineAt = 0;
+    _scheduledSyncRequests = [];
+    _followUpWatches.clear();
+    _directAnswerNewest.clear();
+    _lastAppliedSyncHostFrame = Math.max(_lastAppliedSyncHostFrame, r);
+    _syncMismatchStreak = 0;
+    _lastResyncTime = performance.now();
+    setStatus('Connected -- game on!');
+    _syncLog(`RESYNC-INPUTS f=${r} verified checkpoint request=${run.request}`);
+  };
+  const _checkpointStart = () => {
+    if (_checkpoint || _frameNum !== 0 || _phase !== PHASE_RUNNING) return;
+    const scope = _checkpointScope();
+    if (!scope) return;
+    _checkpoint = new window.KNCore.checkpoint.CheckpointRecovery(
+      {
+        scope: _checkpointScope,
+        rosterConfirmed: () => !!_activeRoster,
+        frame: () => _frameNum,
+        delay: () => DELAY_FRAMES,
+        safe: _checkpointAligned,
+        failed: () => _checkpointMod()?._kn_get_failed_rollbacks() ?? 0,
+        capture: _checkpointCapture,
+        install: _checkpointInstall,
+        replay: _checkpointReplay,
+        prepare: _checkpointPrepare,
+        first: () =>
+          _ownerTuple(
+            _applyExtraInputDelay(
+              _cloneInput(
+                _deadbandStick(window.EJS_emulator?.paused || _joinHold ? KNShared.ZERO_INPUT : readLocalInput()),
+              ),
+            ),
+          ),
+        recovering: () => {
+          _pendingResyncState = null;
+          setStatus('Verifying checkpoint recovery…');
+        },
+        resume: _checkpointResume,
+        canReturn: _checkpointReturning,
+        currentRoute: () => _checkpointRouteCurrent(_checkpointRoute),
+        send: (msg) => socket.emit('data-message', msg),
+        log: _syncLog,
+        unresolved: () => setStatus('Verified checkpoint recovery unresolved'),
+      },
+      scope,
+      _playerSlot,
+    );
+    if (_checkpointBootInput?.match === scope.match && _checkpointBootInput.sid === socket.id)
+      _checkpoint.journal.witness(_playerSlot, 0, _checkpointBootInput.value);
+  };
+  const _recordCheckpointStep = (m) => {
+    if (!_checkpoint || _checkpoint.blocksInput) return;
+    const tag = _frameNum - DELAY_FRAMES;
+    _checkpoint.journal.executed(
+      _frameNum,
+      DELAY_FRAMES,
+      _checkpoint.slots.map((slot) => (tag < 0 ? [0, 0, 0, 0, 0] : _ownerTuple(_rbGetInput(m, slot, tag)))),
+    );
+  };
+
   const _armHostReconnectDebt = (slot, reason, sid, wasPhantom, mod = _hostReconnectNative()) => {
     const retained = _hostReconnectDebts.get(slot);
     const old =
@@ -7924,7 +8200,7 @@
     }
     return true;
   };
-  const _receiveReconnectProofRequest = (sid, id, transport) => {
+  const _receiveReconnectProofRequest = (sid, id, transport, channel = null) => {
     const peer = _peers[sid];
     if (
       _playerSlot !== 0 ||
@@ -7936,6 +8212,17 @@
       _reconnectProofStatus(sid) !== true
     )
       return;
+    const route = _unsafeCheckpointRoutes.get(peer.slot);
+    if (
+      transport === 'dc' &&
+      route?.key === sid &&
+      channel === peer.dc &&
+      _checkpointRouteCurrent(route) &&
+      _checkpoint?.request(peer.slot, id)
+    ) {
+      _checkpointRoute = route;
+      return;
+    }
     _holdReconnectHostAnswer(sid, id, { protected: true, transport });
   };
   const _scheduleRecoveredHostGuest = (remoteSid, peer) => {
@@ -8727,6 +9014,10 @@
 
   const onDataMessage = (msg) => {
     if (!msg?.type) return;
+    if (msg.type === window.KNCore.checkpoint.CHECKPOINT_MESSAGE) {
+      _checkpoint?.receive(msg);
+      return;
+    }
     if (msg.type === 'recovery-input-proof-request' || msg.type === 'recovery-input-proof-reply') {
       if (window.KNCore?.recovery?.createOwnerProofRelay) _readOwnerPacket(msg);
       return;
@@ -10512,7 +10803,10 @@
       }
       return false;
     }
+    if (recvFrame < _checkpointFloor || _checkpoint?.blocksInput) return;
     const recvInput = { buttons: decoded.buttons, lx: decoded.lx, ly: decoded.ly, cx: decoded.cx, cy: decoded.cy };
+    if (_checkpoint && _peers[remoteSid] === peer)
+      _checkpoint.witness(peer.slot, _currentSid(remoteSid), recvFrame, _ownerTuple(recvInput));
     // Track peer's ack — highest frame they've received from us
     if (decoded.ackFrame >= 0) {
       peer.lastAckFromPeer = Math.max(peer.lastAckFromPeer ?? -1, decoded.ackFrame);
@@ -10585,6 +10879,9 @@
           _rbTransportDupsRecv++;
           continue;
         }
+        if (r.frame < _checkpointFloor) continue;
+        if (_checkpoint && _peers[remoteSid] === peer)
+          _checkpoint.witness(peer.slot, _currentSid(remoteSid), r.frame, _ownerTuple(redundantInput));
         _remoteInputs[peer.slot][r.frame] = redundantInput;
         if (
           _useCRollback &&
@@ -11485,7 +11782,7 @@
         }
         // State sync: the number of the request that follows on this channel.
         if (e.data.startsWith(RECONNECT_PROOF_REQUEST + ':')) {
-          _receiveReconnectProofRequest(remoteSid, Number(e.data.slice(RECONNECT_PROOF_REQUEST.length + 1)), 'dc');
+          _receiveReconnectProofRequest(remoteSid, Number(e.data.slice(RECONNECT_PROOF_REQUEST.length + 1)), 'dc', ch);
           return;
         }
         if (e.data.startsWith('sync-request-id:')) {
@@ -11560,6 +11857,9 @@
                   peer.rollbackCaps[RECONNECT_PROOF_CAP] === true,
                 );
               _maskCapablePeers.set(remoteSid, window.KNCore.controllerMask.canScheduleMask(msg.caps));
+              if (peer.rollbackCaps[window.KNCore.checkpoint.CHECKPOINT_CAP] === true)
+                _checkpointCaps.add(_currentSid(remoteSid));
+              else _checkpointCaps.delete(_currentSid(remoteSid));
               _lockstepReadyPeers[remoteSid] = true;
               _noteStartStep(peer.slot);
               checkAllLockstepReady();
@@ -11878,6 +12178,7 @@
     _peerDriver()?.peerReset(slot, opts.sid ?? null);
     if (slot === null || slot === undefined) return;
     const unsafeHistory = _corePhantomHistory.has(slot);
+    const wasCheckpointPhantom = unsafeHistory || !!_peerPhantom[slot];
     const keptSlotWaitAt = _keptSlotFirstInputAt.get(slot);
     _clearPendingLateJoinPeer(opts.sid || null, slot, reason);
     // A player that comes back is measured from its next start step.
@@ -11939,6 +12240,16 @@
       // generation and stops (_syncTargetCurrent). The chain itself goes,
       // so the new connection's first transfer does not wait for them.
       _syncQueueGen[opts.sid] = (_syncQueueGen[opts.sid] || 0) + 1;
+      const wasUnsafe = wasCheckpointPhantom || _unsafeCheckpointRoutes.get(slot)?.key === opts.sid;
+      _unsafeCheckpointRoutes.delete(slot);
+      if (
+        _playerSlot === 0 &&
+        _checkpoint &&
+        wasUnsafe &&
+        opts.peer &&
+        (reason === 'reconnect' || reason === 'mesh-heal')
+      )
+        _unsafeCheckpointRoutes.set(slot, _pinCheckpointRoute(opts.sid, opts.peer));
       delete _syncSendChains[opts.sid];
       delete _syncChainMovedAt[opts.sid];
     }
@@ -15333,6 +15644,7 @@
     _syncRNGSeed(tickMod, _frameNum);
     // A step that did not run (or threw) must not advance the C frame —
     // return false so the caller stops the burst and retries next tick.
+    _recordCheckpointStep(tickMod);
     if (!_runStepOneFrame('replay')) return false;
     _syncRNGSeed(tickMod, _frameNum);
     // Replay audio was generated to keep emulator state faithful, but it
@@ -15795,6 +16107,9 @@
     if (!hadLocalInputForFrame) {
       _localInputs[_frameNum] = localInput;
       _auditRecordLocal(_frameNum, localInput);
+      if (_frameNum === 0 && socket?.id)
+        _checkpointBootInput = { match: KNState.matchId, sid: socket.id, value: _ownerTuple(localInput) };
+      _checkpoint?.journal.witness(_playerSlot, _frameNum, _ownerTuple(localInput));
       _rbLocalHistory.push({
         frame: _frameNum,
         buttons: localInput.buttons,
@@ -16237,24 +16552,7 @@
         if (_runSubstate === RUN_RB_STALL) _runSubstate = RUN_NORMAL;
         _rollbackStallStart = 0;
 
-        // C-level RNG sync + frame counter preservation.
-        // Must be inside doRollbackInit (not after) so deferred guest init
-        // also runs this — the outer code checks _useCRollback which is
-        // false until doRollbackInit sets it.
-        const rngMod = window.EJS_emulator?.gameManager?.Module;
-        if (rngMod) _initRNGSync(rngMod);
-        if (_rngPatched && _rdramBase && rngMod?._kn_set_rng_sync) {
-          const rngPtr = _rdramBase + KN_RNG_SEED_RDRAM;
-          const rngAltPtr = _rdramBase + KN_RNG_ALT_SEED_RDRAM;
-          rngMod._kn_set_rng_sync(_rngSeed, rngPtr, rngAltPtr);
-          _syncLog(`C-ROLLBACK RNG sync configured: seed=0x${_rngSeed.toString(16)}`);
-        }
-        // Configure non-tainted RDRAM preservation — must be AFTER
-        // kn_rollback_init which sets up the taint bitmap.
-        if (_rdramBase && rngMod?._kn_set_rdram_preserve) {
-          rngMod._kn_set_rdram_preserve(_rdramBase);
-          _syncLog(`C-ROLLBACK non-tainted RDRAM preservation configured`);
-        }
+        _configureRollbackMemory(detMod);
         // Input dedup can hide pre-init frames from C; init is its only chance to see them.
         _backfillCInputsFromJs(detMod, 'rollback-init');
 
@@ -16824,6 +17122,13 @@
     _hostAuthoredReceipts.clear();
     _deferredPhantomRecovery.clear();
     _reconnectProofPeers.clear();
+    _unsafeCheckpointRoutes.clear();
+    _checkpointCaps.clear();
+    _checkpointBootInput = null;
+    _checkpoint?.close();
+    _checkpoint = null;
+    _checkpointRoute = null;
+    _checkpointFloor = 0;
     ++_hostReconnectFenceVersion;
     _resyncRequestAt = -1;
     _owedResync = false;
@@ -17494,8 +17799,13 @@
       return;
     }
     _chk('post-phase');
+    _checkpointStart();
+    if (_checkpoint?.tick()) {
+      _markTickReturn('checkpoint');
+      return;
+    }
     _creditLocalFreeze();
-    _checkReconnectAnswerDebt();
+    if (!_checkpoint?.busy) _checkReconnectAnswerDebt();
     _serviceReconnectHostAnswers();
     _checkResyncRequestDeadline();
     _checkOverduePushes();
@@ -17997,6 +18307,7 @@
     if (!hadLocalInputForFrame) {
       _localInputs[_frameNum] = localInput;
       _auditRecordLocal(_frameNum, localInput);
+      _checkpoint?.journal.witness(_playerSlot, _frameNum, _ownerTuple(localInput));
       // Append to history ring once per logical frame. If the sim stalls on
       // this frame, resend the cached input below without mutating history.
       _rbLocalHistory.push({
@@ -18660,6 +18971,7 @@
         // the JS tick frame for one tick, so use the input captured for the C
         // frame when they differ.
         const cFrameBeforePreTick = tickMod._kn_get_frame?.() ?? _frameNum;
+        _checkpoint?.sample(cFrameBeforePreTick);
         const cFrameLocalInput = _localInputs[cFrameBeforePreTick];
         const preTickLocalInput = cFrameLocalInput || localInput;
         if (cFrameBeforePreTick !== _frameNum && window._knLastCInputAlignFrame !== _frameNum) {
@@ -19214,6 +19526,7 @@
         _syncRNGSeed(tickMod, _frameNum);
         const _tStep0 = performance.now();
         _chk('cr:pre-step');
+        _recordCheckpointStep(tickMod);
         if (!_runStepOneFrame('normal')) {
           _markTickReturn('skip:step-norun');
           return;
@@ -20695,6 +21008,7 @@
       _syncLog(`escalation push not sent: ${why}`);
       _onEscalationTransfer(recipients, null, false);
     };
+    if (_checkpoint?.busy) return notSent('verified checkpoint in progress');
     if (_coreFatalError) return notSent('the core is dead'); // a dead host core cannot provide resync state
     // Host: capture state, compress, and send.
     if (_playerSlot !== 0 || !_syncEnabled) return notSent(_syncEnabled ? 'not the host' : 'resync is off');
@@ -21274,17 +21588,20 @@
     recoveryId = 0,
     extras = null,
   }) {
+    if (_checkpoint?.busy || frame < _checkpointFloor) return;
     if (!isFull || isRegions || isProactive) proofFor = 0;
     // Recheck after async legacy XOR too: a newer recovery can finish while
     // an older ordinary/socket payload is still decoding. A strictly newer
     // ordinary frame remains useful; equal/older frames cannot erase its ACK.
     const supersededRecovery = () =>
-      recoveryId
+      _checkpoint?.busy ||
+      frame < _checkpointFloor ||
+      (recoveryId
         ? !isFull ||
           isRegions ||
           recoveryId <= _lastAppliedRecoveryId ||
           recoveryId < (_pendingResyncState?.recoveryId ?? 0)
-        : (_pendingResyncState?.recoveryId ?? 0) > 0 && frame <= _pendingResyncState.frame;
+        : (_pendingResyncState?.recoveryId ?? 0) > 0 && frame <= _pendingResyncState.frame);
     if (supersededRecovery()) return;
     // Regions patch: decompress directly, buffer for apply — no delta chain.
     if (isRegions) {
@@ -21617,6 +21934,7 @@
     answerScope = null,
     proofFor = 0,
   ) => {
+    if (_checkpoint?.busy || frame < _checkpointFloor) return;
     // A same-match warning may arrive after a full state was buffered.
     // Unverified is terminal for this match: do not change native state
     // or settle inputs from even a previously valid protected answer.
@@ -21657,6 +21975,7 @@
         return;
       }
       // The rest of the host's state, in the same step, before any frame runs.
+      _checkpoint?.invalidate();
       _applyResyncExtras(mod, extras, 'resync');
 
       // kn_sync_write calls invalidate_cached_code_hacktarux which clears

@@ -115,4 +115,6 @@ def test_the_owed_resync_ends_when_a_host_state_is_applied_or_the_match_ends():
     give_up = src[at - 400 : at]
     assert "_owedResync = false;" in give_up
     # Every page reset that clears the lost-host marker clears this one too.
-    assert src.count("_owedResync = false;") == 6
+    checkpoint = _body(src, "const _checkpointResume = (")
+    assert "_owedResync = false;" in checkpoint and "_owedResyncAsksAgain = 0;" in checkpoint
+    assert src.count("_owedResync = false;") == 7

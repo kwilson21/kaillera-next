@@ -38,5 +38,7 @@ def test_no_stick_tolerance_remains():
 def test_local_input_capture_goes_through_the_deadband():
     src = ROLLBACK_JS.read_text()
     assert "const _deadbandStick = KNShared.createStickDeadband();" in src
-    # Both per-frame capture sites (C rollback tick and fallback tick).
-    assert src.count("_deadbandStick(") == 2
+    # Both live capture sites and the first paused input for a committed checkpoint.
+    assert src.count("_deadbandStick(") == 3
+    first = src.split("first: () =>", 1)[1].split("recovering:", 1)[0]
+    assert "_deadbandStick(" in first and "readLocalInput()" in first

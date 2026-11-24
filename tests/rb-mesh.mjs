@@ -15,7 +15,7 @@
  *   just serve        # the real server on :27888, in another terminal
  *   KN_ROM=/path/ssb64-us.z64 [PLAYERS=4] [LAT=50] [JITTER=20] [LINK_KBPS=0] \
  *     [BATTLE_SECONDS=45] [CATCH_UP_MS=0] [CATCH_UP_SLOT=2] [MENU_AUTOPILOT=ssb64|any-fighter] \
- *     [RECOVERY_BYSTANDER=1 [RECOVERY_MODE=hold|pause] [RECOVERY_SLOT=1] [RECOVERY_AT=600]] \
+ *     [RECOVERY_BYSTANDER=1 [RECOVERY_MODE=hold|pause|reconnect] [RECOVERY_SLOT=1] [RECOVERY_AT=600]] \
  *     [KN_QUERY='&knperf=light'] [HEADED=1] [OUT=/tmp/rb-mesh] node tests/rb-mesh.mjs
  *
  * PLAYERS: 3 or 4 (default 4). Four emulators share the machine: in a cloud
@@ -168,6 +168,10 @@
  *   the push settles them (C-INPUT-SETTLED-SKIP) and the host keeps its
  *   predictions where the bystanders applied the real inputs
  *   (`dropLink.settledSkips`, `applied.differing`).
+ *   RECOVERY_MODE=reconnect cuts only host↔guest transport until host phantom,
+ *   then closes the old selected channel and observes ordinary reconnection.
+ *   It must see a genuine outage-induced split and convergence of both guests.
+ *
  * SCREEN_SIZE: the core's render size (default 320x240, the core's own
  *   default is 640x480). Four emulators on software GL are what stops pages
  *   for seconds in a cloud container; a quarter of the pixels is a quarter
@@ -196,6 +200,7 @@ import { fileURLToPath } from 'node:url';
 import { requireCurrentBundle } from './bundle-check.mjs';
 import { addNetworkInitScript } from './rb-page-network.mjs';
 import { catchUpHoleInput } from './directional-input-gate.mjs';
+import { observeCheckpoint } from './checkpoint-observer.mjs';
 import { installNativeInputObserver } from './native-input-observer.mjs';
 import { appliedForTag, joinInputAgreement, joinStateFrame } from './join-input-check.mjs';
 import { trackHashLag, unrecordedIn } from './hash-lag.mjs';
@@ -313,11 +318,11 @@ if (
     RECOVERY_SLOT >= PLAYERS ||
     !(Number.isFinite(RECOVERY_HOLD_MS) && RECOVERY_HOLD_MS >= 0) ||
     !(Number.isInteger(RECOVERY_AT) && RECOVERY_AT >= 0) ||
-    !['hold', 'pause'].includes(RECOVERY_MODE))
+    !['hold', 'pause', 'reconnect'].includes(RECOVERY_MODE))
 )
   fail(
     'RECOVERY_BYSTANDER is a run of its own, with RECOVERY_SLOT a guest (1..PLAYERS-1), RECOVERY_HOLD_MS >= 0 ' +
-      'RECOVERY_AT a whole number of frames, and RECOVERY_MODE hold or pause',
+      'RECOVERY_AT a whole number of frames, and RECOVERY_MODE hold, pause or reconnect',
   );
 if (
   DROP_LINK &&
@@ -348,6 +353,35 @@ const browser = await chromium.launch(launch);
 const mkPage = async (name) => {
   const ctx = await browser.newContext({ viewport: { width: 960, height: 720 } });
   await addNetworkInitScript(ctx, { lat: LAT, jitter: JITTER, kbps: LINK_KBPS });
+  if (RECOVERY_BYSTANDER && RECOVERY_MODE === 'reconnect' && name === 'P1') {
+    await ctx.addInitScript((slot) => {
+      // The lower slot (host) opens replacement lockstep channels. Listen for
+      // actual numbered request delivery, without changing application dispatch.
+      window.__meshReconnectProofRequests = [];
+      const create = RTCPeerConnection.prototype.createDataChannel;
+      RTCPeerConnection.prototype.createDataChannel = function (...args) {
+        const ch = create.apply(this, args);
+        if (args[0] === 'lockstep') {
+          ch.addEventListener('message', ({ data }) => {
+            const request = typeof data === 'string' && /^reconnect-sync-request-v1:(\d+)$/.exec(data);
+            if (!request || window.__meshReconnectProofRequests.length >= 32) return;
+            const [sid, peer] =
+              Object.entries(window.KNState?.peers ?? {}).find(([, p]) => p.dc === ch && p.slot === slot) ?? [];
+            if (!peer) return;
+            const log = window.NetplayRollback.exportSyncLog().trim().split('\n').at(-1);
+            window.__meshReconnectProofRequests.push({
+              id: Number(request[1]),
+              sid,
+              seq: Number(log?.split('\t')[0]),
+              frame: window.NetplayRollback.getHudCounters().currentFrame,
+              channel: ch.id,
+            });
+          });
+        }
+        return ch;
+      };
+    }, RECOVERY_SLOT);
+  }
   await ctx.addInitScript(() => {
     window.__knEvents = [];
     let real;
@@ -664,6 +698,15 @@ const recovery = {
   settledQuiet: false,
   bystanderPhantoms: null,
   bystanderAsks: null,
+  // RECOVERY_MODE=reconnect: the channels cut on each side, the guest's id
+  // on the host, where the host's log stood when it closed its end, and the
+  // host's reset of the guest's entry.
+  deadLink: null,
+  guestSid: null,
+  closedAt: null,
+  reset: null,
+  protectedRequest: null,
+  reconnectUnresolved: null,
 };
 const tBattle = Date.now();
 if (MISSING_RECIPIENT) {
@@ -867,6 +910,12 @@ if (RECOVERY_BYSTANDER) {
         return (rb.readRdram32(a & ~3) >>> ((3 - (a & 3)) * 8)) & 0xff;
       });
     }, PLAYERS);
+  if (RECOVERY_MODE === 'reconnect')
+    await Promise.all(
+      pages.map((p) =>
+        p.evaluate(observeCheckpoint, { returning: RECOVERY_SLOT, fault: process.env.CHECKPOINT_FAULT }),
+      ),
+    );
   recovery.stocksAtHold = await stocks(host);
   // The guest stands still for 20 frames, so the host's last inputs of it
   // are neutral and so is its prediction; then every input of it is held on
@@ -881,14 +930,42 @@ if (RECOVERY_BYSTANDER) {
     { timeout: 30000, polling: 20 },
   );
   recovery.heldFrom = await pages[RECOVERY_SLOT].evaluate(() => window.NetplayRollback.getHudCounters().currentFrame);
+  // RECOVERY_MODE=reconnect: the channel between the host and the guest goes
+  // dead on both sides (each drops what it sends to the other), with no event:
+  // the host stalls on the guest and drops it as a phantom, and so does the
+  // guest the host. Only the channels there now are cut; the ones a reconnect
+  // opens are new.
+  const cutLink = (slot) => {
+    const entry = Object.entries(window.KNState?.peers ?? {}).find(([, p]) => p.slot === slot);
+    if (!entry) throw new Error(`no peer in slot ${slot}`);
+    const [sid, peer] = entry;
+    let cut = 0;
+    window.__meshDeadReconnectSends = 0;
+    for (const dc of new Set([peer.dc, peer.rbDc, peer.syncDc].filter(Boolean))) {
+      if (dc.readyState !== 'open') continue;
+      dc.send = function () {
+        ++window.__meshDeadReconnectSends;
+      };
+      cut++;
+    }
+    return { sid, cut };
+  };
   if (RECOVERY_MODE === 'pause') await pages[RECOVERY_SLOT].evaluate(() => window.NetplayRollback.pauseTick());
-  else await host.evaluate((slot) => window.__knDirectionalInputGate.arm(slot, 'isolated'), RECOVERY_SLOT);
+  else if (RECOVERY_MODE === 'reconnect') {
+    const [onHost, onGuest] = await Promise.all([
+      host.evaluate(cutLink, RECOVERY_SLOT),
+      pages[RECOVERY_SLOT].evaluate(cutLink, 0),
+    ]);
+    recovery.guestSid = onHost.sid;
+    recovery.deadLink = { host: onHost.cut, guest: onGuest.cut };
+  } else await host.evaluate((slot) => window.__knDirectionalInputGate.arm(slot, 'isolated'), RECOVERY_SLOT);
   await pages[RECOVERY_SLOT].evaluate(() => {
     window.__mesh.against = 'right';
   });
   console.log(
     `RECOVERY_BYSTANDER: P${RECOVERY_SLOT + 1} ` +
-      `${RECOVERY_MODE === 'pause' ? 'paused' : "held on the host's side"} from f=${recovery.heldFrom}`,
+      `${{ pause: 'paused', reconnect: 'cut off from the host', hold: "held on the host's side" }[RECOVERY_MODE]} ` +
+      `from f=${recovery.heldFrom}`,
   );
   recovery.phantom = await waitForLineAfter(
     host,
@@ -915,7 +992,21 @@ if (RECOVERY_BYSTANDER) {
   // What each page shows as the guest is let through (held inputs, or ticks).
   await Promise.all(pages.map((p, i) => p.screenshot({ path: `${OUT}/recovery-p${i + 1}.png` }).catch(() => {})));
   if (RECOVERY_MODE === 'pause') await pages[RECOVERY_SLOT].evaluate(() => window.NetplayRollback.resumeTick());
-  else
+  else if (RECOVERY_MODE === 'reconnect') {
+    // The host closes its end of the dead channel: its close handler takes
+    // it for a drop and offers again (the lower slot), the guest's end
+    // closes too, and the reconnect offer marks the guest's entry
+    // reconnecting.
+    const [hostDropped, guestDropped] = await Promise.all(
+      [host, pages[RECOVERY_SLOT]].map((page) => page.evaluate(() => window.__meshDeadReconnectSends)),
+    );
+    recovery.deadLink = { ...recovery.deadLink, hostDropped, guestDropped };
+    recovery.closedAt = await lastSeq(host);
+    await host.evaluate((slot) => {
+      const peer = Object.values(window.KNState?.peers ?? {}).find((p) => p.slot === slot);
+      peer.dc.close();
+    }, RECOVERY_SLOT);
+  } else
     recovery.gate = await host.evaluate(() => {
       const gate = window.__knDirectionalInputGate;
       gate.release(0);
@@ -923,15 +1014,105 @@ if (RECOVERY_BYSTANDER) {
     });
   console.log(
     `RECOVERY_BYSTANDER: host dropped it ${recovery.phantom ? `at f=${recovery.phantom.frame}` : 'never'}; ` +
-      (RECOVERY_MODE === 'pause' ? 'resumed' : `${recovery.gate?.held ?? 0} held packet(s) let through`),
+      ({ pause: 'resumed', reconnect: 'closed its end of the channel' }[RECOVERY_MODE] ??
+        `${recovery.gate?.held ?? 0} held packet(s) let through`),
   );
-  recovery.recovered = await waitForLineAfter(
-    host,
-    recovery.hostAt,
-    new RegExp(`peer-recovery resync: host scheduled full sync for slot=${RECOVERY_SLOT} at f=(\\d+)`),
-    30000,
-  );
-  if (recovery.recovered) {
+  if (RECOVERY_MODE === 'reconnect') {
+    // The host resets its entry for the guest when the channel heals, and the
+    // guest asks for a resync from the new channel's open handler.
+    recovery.reset = await waitForLineAfter(
+      host,
+      recovery.closedAt,
+      new RegExp(`PEER-RESET slot=${RECOVERY_SLOT} reason=(reconnect|mesh-heal)`),
+      60000,
+    );
+    const guest = pages[RECOVERY_SLOT];
+    const guestReset = await waitForLineAfter(
+      guest,
+      recovery.pageAt[RECOVERY_SLOT],
+      /PEER-RESET slot=0 reason=reconnect/,
+      30000,
+    );
+    if (process.env.CHECKPOINT_FAULT) {
+      await host.waitForFunction(() => window.NetplayRollback.exportSyncLog().includes('CHECKPOINT-UNRESOLVED'), null, {
+        timeout: 45000,
+      });
+      const collect = () =>
+        Promise.all(
+          pages.map((p) =>
+            p.evaluate(() => ({
+              frame: window.NetplayRollback.getHudCounters().currentFrame,
+              proof: window.__meshCheckpoint(),
+              applied: window.NetplayRollback.exportSyncLog().includes('RECONNECT-ANSWER-APPLIED'),
+            })),
+          ),
+        );
+      const before = await collect();
+      await host.waitForTimeout(1500);
+      const after = await collect();
+      const pass =
+        !!recovery.reset &&
+        !!guestReset &&
+        !!recovery.phantom &&
+        recovery.deadLink.hostDropped > 0 &&
+        recovery.deadLink.guestDropped > 0 &&
+        after.some((x) => x.proof.faults > 0) &&
+        (process.env.CHECKPOINT_FAULT !== 'replace-roster' || after.some((x) => x.proof.replaced)) &&
+        after.every((x, i) => !x.applied && !x.proof.releases.length && x.frame === before[i].frame);
+      console.log('checkpoint negative control', process.env.CHECKPOINT_FAULT, {
+        pass,
+        frames: after.map((x) => x.frame),
+        injections: after.map((x) => x.proof.faults),
+      });
+      await browser.close();
+      process.exit(pass ? 0 : 1);
+    }
+    if (recovery.reset && guestReset) {
+      const until = Date.now() + 40000; // protected attempt can explicitly expire at ~34 s
+      const legacyRequestPattern = new RegExp(
+        `received sync-request-full from ${RegExp.escape(recovery.guestSid)}(?: |$)`,
+      );
+      let legacyRequest = null;
+      while (Date.now() < until) {
+        recovery.protectedRequest ??= await host.evaluate(
+          ({ sid, seq }) =>
+            window.__meshReconnectProofRequests.find((request) => request.sid === sid && request.seq >= seq) ?? null,
+          { sid: recovery.guestSid, seq: recovery.reset.seq },
+        );
+        legacyRequest ??= await lineAfter(host, recovery.reset.seq, legacyRequestPattern);
+        recovery.recovered = recovery.protectedRequest ?? legacyRequest;
+        if (recovery.protectedRequest) {
+          const applied = await lineAfter(guest, guestReset.seq, /RECONNECT-ANSWER-APPLIED f=(\d+) request=(\d+)/);
+          const sent = await host.evaluate(() => window.__meshReconnectProofRequests);
+          if (
+            applied &&
+            sent.some(
+              (r) => r.sid === recovery.guestSid && r.seq >= recovery.reset.seq && r.id === Number(applied.match[2]),
+            )
+          ) {
+            recovery.dispatch = applied;
+          }
+          recovery.reconnectUnresolved = await lineAfter(
+            guest,
+            guestReset.seq,
+            /RECONNECT-ANSWER-UNRESOLVED f=\d+ request=\d+/,
+          );
+        } else if (legacyRequest) {
+          recovery.dispatch = await lineAfter(guest, guestReset.seq, /\tRESYNC-INPUTS f=(\d+)/);
+        }
+        if (recovery.dispatch || recovery.reconnectUnresolved) break;
+        await host.waitForTimeout(250);
+      }
+    }
+  } else {
+    recovery.recovered = await waitForLineAfter(
+      host,
+      recovery.hostAt,
+      new RegExp(`peer-recovery resync: host scheduled full sync for slot=${RECOVERY_SLOT} at f=(\\d+)`),
+      30000,
+    );
+  }
+  if (recovery.recovered && RECOVERY_MODE !== 'reconnect') {
     recovery.dispatch = await waitForLineAfter(
       host,
       recovery.recovered.seq,
@@ -949,34 +1130,42 @@ if (RECOVERY_BYSTANDER) {
   // seconds. So the compare starts at the last state the host sent once it
   // has sent none for RECOVERY_QUIET_MS (within RECOVERY_SETTLE_MS).
   if (recovery.dispatch) {
+    // On the host's log: from its first dispatch for the recovery, or
+    // (reconnect) from the guest's request, answered directly before the fix.
+    const hostFrom = RECOVERY_MODE === 'reconnect' ? (recovery.recovered?.seq ?? Infinity) : recovery.dispatch.seq;
     const dispatchesSince = async () =>
       (await syncLogOf(host))
         .split('\n')
-        .filter((line) => seqOf(line) >= recovery.dispatch.seq && /coord sync dispatch:/.test(line));
+        .filter((line) => seqOf(line) >= hostFrom && /coord sync dispatch:/.test(line));
+    // And every state a guest loaded meanwhile: the answer to its own request
+    // goes out directly, not through a dispatch.
+    const loadedSince = () =>
+      Promise.all(
+        pages.slice(1).map(async (page, i) =>
+          (await syncLogOf(page))
+            .split('\n')
+            .filter((line) => seqOf(line) > recovery.pageAt[i + 1])
+            .flatMap((line) => {
+              const m = line.match(/\tRESYNC-INPUTS f=(\d+)/);
+              return m ? [Number(m[1])] : [];
+            }),
+        ),
+      );
     const until = Date.now() + RECOVERY_SETTLE_MS;
     let lines = await dispatchesSince();
+    let loaded = await loadedSince();
     let quietSince = Date.now();
     while (Date.now() < until && Date.now() - quietSince < RECOVERY_QUIET_MS) {
       await host.waitForTimeout(1000);
       const now = await dispatchesSince();
-      if (now.length !== lines.length) quietSince = Date.now();
+      const loadedNow = await loadedSince();
+      if (now.length !== lines.length || loadedNow.flat().length !== loaded.flat().length) quietSince = Date.now();
       lines = now;
+      loaded = loadedNow;
     }
     recovery.settledQuiet = Date.now() - quietSince >= RECOVERY_QUIET_MS;
     recovery.dispatches = lines.map((line) => Number(line.match(/at frame (\d+)/)[1]));
-    // And every state a guest loaded meanwhile: the answer to its own request
-    // goes out directly, not through a dispatch.
-    const loaded = await Promise.all(
-      pages.slice(1).map(async (page, i) =>
-        (await syncLogOf(page))
-          .split('\n')
-          .filter((line) => seqOf(line) > recovery.pageAt[i + 1])
-          .flatMap((line) => {
-            const m = line.match(/\tRESYNC-INPUTS f=(\d+)/);
-            return m ? [Number(m[1])] : [];
-          }),
-      ),
-    );
+    recovery.loaded = loaded;
     recovery.leftOut = [recovery.heldFrom, Math.max(...recovery.dispatches, ...loaded.flat())];
   }
   // RECOVERY_MODE=pause: each bystander heard the guest again and asked the
@@ -998,8 +1187,8 @@ if (RECOVERY_BYSTANDER) {
     window.__mesh.against = null;
   });
   console.log(
-    `RECOVERY_BYSTANDER: ${recovery.recovered ? recovery.recovered.line.split('\t').at(-1) : 'the host never heard it again'}; ` +
-      `${recovery.dispatch ? recovery.dispatch.line.split('\t').at(-1) : 'no state dispatched'}`,
+    `RECOVERY_BYSTANDER: ${recovery.recovered ? (recovery.recovered.line?.split('\t').at(-1) ?? `protected request ${recovery.protectedRequest.id}`) : 'the host never heard it again'}; ` +
+      `${recovery.dispatch ? recovery.dispatch.line.split('\t').at(-1) : 'no state applied'}`,
   );
   // Keep playing: at least 60 frames after the host's state must match.
   await host.waitForTimeout(20000);
@@ -1254,6 +1443,7 @@ const P = await Promise.all(
   pages.map(async (p) => ({
     sync: await syncLogOf(p),
     ...(await p.evaluate(() => ({
+      checkpoint: window.__meshCheckpoint?.() ?? null,
       nativeInputs: window.__knNativeInputObserver?.export() ?? null,
       missingRecipientWire: window.__meshMissingRecipient ?? null,
       rosterHold: window.__meshRosterHold ?? null,
@@ -1892,10 +2082,69 @@ const rdramCompare = (G) => {
   };
 };
 const rdram = !RECOVERY_BYSTANDER ? null : Object.fromEntries(P.slice(1).map((G, i) => [`P${i + 2}`, rdramCompare(G)]));
+const checkpointProblems = [];
+if (RECOVERY_BYSTANDER && RECOVERY_MODE === 'reconnect') {
+  const observed = P.map((p) => p.checkpoint);
+  const request = observed[0]?.freezes[0];
+  const reference = observed[0]?.installs[0];
+  const witness = observed[bystanderSlots[0]]?.received;
+  if (
+    !request ||
+    !reference ||
+    request.request !== recovery.protectedRequest?.id ||
+    request.request !== Number(recovery.dispatch?.match?.[2]) ||
+    !observed[0]?.releases.some(
+      (r) => r.id === request.id && r.history === reference.history && r.state === reference.state,
+    )
+  )
+    checkpointProblems.push('numbered freeze, install and release did not match');
+  recovery.checkpoint = observed.map((p, i) => {
+    const install = p?.installs[0];
+    let compared = 0,
+      changed = 0,
+      mismatches = 0;
+    for (const row of p?.replay?.rows ?? []) {
+      if (!row || row.tag < recovery.heldFrom || row.tag >= recovery.reset?.frame || !witness?.[row.tag]) continue;
+      compared++;
+      if (row.value.some((n) => n !== 0)) changed++;
+      if (!row.value.every((n, j) => n === witness[row.tag][j])) mismatches++;
+    }
+    if (
+      !request ||
+      !install ||
+      install.id !== request.id ||
+      install.c !== request.c ||
+      install.r !== request.r ||
+      install.anchor !== request.anchor ||
+      install.history !== reference?.history ||
+      install.state !== reference?.state ||
+      p.replay?.from !== request.c ||
+      p.replay?.to !== request.r ||
+      compared < 60 ||
+      !changed ||
+      mismatches
+    )
+      checkpointProblems.push(`P${i + 1} did not replay the bystander's witnessed inputs and verify its install`);
+    return { install, compared, nonNeutral: changed, mismatches };
+  });
+}
 const recoveryProblems = !RECOVERY_BYSTANDER
   ? []
   : [
+      ...checkpointProblems,
       ...(RECOVERY_MODE === 'hold' && !(recovery.gate?.held > 0) ? ["the gate held none of the guest's inputs"] : []),
+      ...(RECOVERY_MODE === 'reconnect' &&
+      !(
+        recovery.deadLink?.host > 0 &&
+        recovery.deadLink?.guest > 0 &&
+        recovery.deadLink?.hostDropped > 0 &&
+        recovery.deadLink?.guestDropped > 0
+      )
+        ? ['the channel between the host and the guest was not cut']
+        : []),
+      ...(RECOVERY_MODE === 'reconnect' && !recovery.reset
+        ? ['the host never reset its entry for the guest (the channel was not healed)']
+        : []),
       ...(RECOVERY_MODE === 'pause'
         ? bystanderSlots.flatMap((slot, i) => [
             ...(!recovery.bystanderPhantoms?.[i] ? [`bystander P${slot + 1} never dropped the paused guest`] : []),
@@ -1905,17 +2154,30 @@ const recoveryProblems = !RECOVERY_BYSTANDER
           ])
         : []),
       ...(!recovery.phantom ? ['the host never dropped the guest as a phantom'] : []),
-      ...(!recovery.recovered ? ['the host never heard the guest again (PEER-RECOVERED)'] : []),
-      ...(!recovery.dispatch ? ['the host sent no state after the recovery'] : []),
+      ...(!recovery.recovered
+        ? [
+            RECOVERY_MODE === 'reconnect'
+              ? "the host never got the reconnected guest's resync request"
+              : 'the host never heard the guest again (PEER-RECOVERED)',
+          ]
+        : []),
+      ...(!recovery.dispatch
+        ? [
+            RECOVERY_MODE === 'reconnect'
+              ? "the reconnected guest never loaded the host's state"
+              : 'the host sent no state after the recovery',
+          ]
+        : []),
+      ...(recovery.reconnectUnresolved ? ['protected reconnect was reported unresolved by the returning guest'] : []),
       ...(recovery.dispatch && !recovery.settledQuiet
         ? [`the host was still sending states ${RECOVERY_SETTLE_MS / 1000} s after the recovery`]
         : []),
-      ...(RECOVERY_MODE === 'hold' && Object.values(inputSplit).every((n) => n === 0)
+      ...(RECOVERY_MODE !== 'pause' && Object.values(inputSplit).every((n) => n === 0)
         ? ['the host and the bystanders ran the held frames on the same inputs: the fault made no split']
         : []),
       ...bystanderSlots.flatMap((slot) =>
         recoveryEvents[slot].drops.filter(
-          (line) => RECOVERY_MODE === 'hold' || !line.includes(`slot=${RECOVERY_SLOT} `),
+          (line) => RECOVERY_MODE !== 'pause' || !line.includes(`slot=${RECOVERY_SLOT} `),
         ).length
           ? [`bystander P${slot + 1} dropped a player: ${recoveryEvents[slot].drops.join(' | ')}`]
           : [],
@@ -1935,7 +2197,7 @@ const recoveryProblems = !RECOVERY_BYSTANDER
             ]
           : [],
       ),
-      ...(RECOVERY_MODE === 'hold' && Object.values(rdram).every((r) => r.splitDuring.length === 0)
+      ...(RECOVERY_MODE !== 'pause' && Object.values(rdram).every((r) => r.splitDuring.length === 0)
         ? ['no guest split from the host in the held stretch: the fault changed no game state the compare can see']
         : []),
       ...Object.entries(rdram).flatMap(([page, r]) =>
@@ -1956,7 +2218,10 @@ const recoveryProblems = !RECOVERY_BYSTANDER
 const recoveryOracle = !MISSING_RECIPIENT
   ? null
   : {
-      window: { from: missingRecipient.range[0], through: missingRecipient.recoveredFrame },
+      window: {
+        from: missingRecipient.range[0],
+        through: missingRecipient.recoveredFrame,
+      },
       status:
         missingProblems.length === 0 &&
         pairs.every(
@@ -2113,7 +2378,13 @@ const summary = {
   catchUp: catchUpReport,
   hole: holeReport,
   recoveryBystander: RECOVERY_BYSTANDER
-    ? { ...recovery, events: recoveryEvents, inputSplit, rdram, problems: recoveryProblems }
+    ? {
+        ...recovery,
+        events: recoveryEvents,
+        inputSplit,
+        rdram,
+        problems: recoveryProblems,
+      }
     : undefined,
 };
 if (hostEnd) summary.hostEnd = hostEnd;

@@ -686,7 +686,14 @@ log_archive() {
   expect_violation "$ARCHIVE" log_archive_any_store logAlwaysReadable 8
 }
 
+checkpoint_recovery() {
+  for start in init nearReplay startInstall; do
+    verify specs/checkpoint_recovery.qnt checkpoint_recovery safe "$start" 7
+  done
+}
+
 SPEC_GROUPS=(
+  checkpoint_recovery
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
@@ -699,7 +706,7 @@ SPEC_GROUPS=(
 # whole set took 32 minutes in one job. A group added above goes in a shard
 # here; the check below fails until it does.
 SHARDS=(
-  "room_lifecycle_start engine_start solo_save"                   # ~7 min + engine_start (~30 s) + solo_save (~40 s)
+  "room_lifecycle_start engine_start solo_save checkpoint_recovery"                   # ~7 min + engine_start (~30 s) + solo_save (~40 s)
   "room_lifecycle_drops"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final log_archive" # ~7.5 min + log_archive (~1 min)
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min

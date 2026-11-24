@@ -705,6 +705,10 @@ PROOF=specs/reconnect_proof.qnt
 $QUINT typecheck "$PROOF"
 $QUINT test "$PROOF" --main=reconnect_proof --backend="$BACKEND"
 
+CHECKPOINT=specs/checkpoint_recovery.qnt
+$QUINT typecheck "$CHECKPOINT"
+$QUINT test "$CHECKPOINT" --backend="$BACKEND"
+
 # ── A player dropped in a running match comes back only late ──────────────
 INTEGRITY=specs/reconnect_integrity.qnt
 $QUINT typecheck "$INTEGRITY"
