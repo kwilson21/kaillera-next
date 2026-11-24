@@ -199,6 +199,8 @@ test('state transfers over Socket.IO match with and without their sidecars', () 
     toPlayers: true,
   };
   assert.equal(issueOf('data-message', saveState), null);
+  assert.equal(issueOf('data-message', { ...saveState, hle: 'AQI=' }), null);
+  assert.notEqual(issueOf('data-message', { ...saveState, hle: 123 }), null);
   assert.equal(issueOf('data-message', { type: 'save-state', frame: 0, data: 'H4sI' }), null);
   assert.notEqual(issueOf('data-message', { type: 'save-state', frame: 0 }), null);
   const lateJoin = {

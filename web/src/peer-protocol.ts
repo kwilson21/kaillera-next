@@ -179,6 +179,8 @@ const SaveState = Schema.Struct({
   saveRam: Schema.optional(Schema.NullOr(Encoded)),
   hiddenWords: Sidecar,
   audioFifo: Sidecar,
+  // Startup KNS4 omits the RSP HLE plugin state. Older hosts omit it.
+  hle: Schema.optional(Encoded),
 });
 
 const LateJoinState = Schema.Struct({

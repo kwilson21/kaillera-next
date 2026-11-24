@@ -5793,6 +5793,7 @@
   let _lockstepStartStateKind = 'savestate'; // state kind that launched the current lockstep run
   let _guestStateHiddenWords = null; // host-side hidden state sidecar for startup
   let _guestStateAudioFifo = null; // host-side AI FIFO sidecar; kn-sync does not carry it
+  let _guestStateHle = null; // optional host RSP HLE sidecar; kn-sync does not carry it
   let _guestStateSaveRam = null; // host's cartridge save memory; no state format carries it
   let _guestStateCapturedLocally = false; // host already sits at this paused state
   let _frameNum = 0; // current logical frame number
@@ -8513,6 +8514,7 @@
           return {
             bytes,
             kind: 'kn-sync',
+            hle: _captureHleState(mod),
             hiddenWords: _captureHiddenStateWords(mod),
             audioFifo: _captureAudioFifoState(mod),
           };
@@ -13026,6 +13028,7 @@
       _guestStateKind = 'savestate';
       _guestStateHiddenWords = null;
       _guestStateAudioFifo = null;
+      _guestStateHle = null;
       _guestStateSaveRam = null;
       _guestStateCapturedLocally = false;
       _syncLog('synthetic demo: starting from live boot state (no state capture/load)');
@@ -13047,6 +13050,7 @@
         _guestStateKind = 'savestate';
         _guestStateHiddenWords = null;
         _guestStateAudioFifo = null;
+        _guestStateHle = null;
         _guestStateSaveRam = null;
         _guestStateCapturedLocally = false;
         _syncLog('host using own state (authoritative)');
@@ -13083,7 +13087,7 @@
     // the libretro savestate path has historically under-specified for startup.
     //
     // Host runs the IDENTICAL restore stack as guest (kn_sync_write of its own
-    // captured bytes + restoreHiddenState + restoreAudioFifo + cleanup). Even
+    // captured bytes + HLE + hidden state + audio FIFO + cleanup). Even
     // though the emulator was paused since capture, the restore path has
     // side effects the host's runtime hasn't been through (TLB rebuild, JIT
     // invalidate, full event-queue normalize). Skipping them on host meant
@@ -13110,6 +13114,9 @@
         kStage = 'post-write-dump';
         _checkAiInvariant(readyMod, 4);
         _logAudioDump(readyMod, `${stagePrefix}:post-knsync-write`);
+        kStage = 'restore-hle';
+        if (_restoreHleState(readyMod, _guestStateHle, 'initial-sync-load'))
+          _syncLog(`initial-sync-load: restored HLE (${_guestStateHle.length} bytes)`);
         kStage = 'restore-hidden';
         _restoreHiddenStateWords(readyMod, _guestStateHiddenWords, 'initial-sync-load');
         kStage = 'restore-audio-fifo';
@@ -13150,6 +13157,7 @@
     _guestStateKind = 'savestate';
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
+    _guestStateHle = null;
     _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
     _syncLog(`state loaded (manual mode, kind=${isKnSyncInitialState ? 'kn-sync' : 'savestate'})`);
@@ -13393,6 +13401,7 @@
         _guestStateKind = 'savestate';
         _guestStateHiddenWords = null;
         _guestStateAudioFifo = null;
+        _guestStateHle = null;
         _guestStateSaveRam = null;
         _guestStateCapturedLocally = false;
 
@@ -13439,6 +13448,7 @@
       _guestStateKind = 'savestate';
       _guestStateHiddenWords = null;
       _guestStateAudioFifo = null;
+      _guestStateHle = null;
       _guestStateSaveRam = null;
       _guestStateCapturedLocally = false;
 
@@ -13507,6 +13517,7 @@
         sourceRuntimeFamily: _getRuntimeFamily(),
         hiddenWords: captured.hiddenWords,
         audioFifo: captured.audioFifo,
+        ..._resyncExtrasFields({ hle: captured.hle }),
         data: encoded.data,
         saveRam,
       });
@@ -13518,6 +13529,7 @@
       _guestStateKind = captured.kind;
       _guestStateHiddenWords = captured.hiddenWords;
       _guestStateAudioFifo = captured.audioFifo;
+      _guestStateHle = captured.hle ?? null;
       _guestStateCapturedLocally = captured.kind === 'kn-sync';
       _clearInputsForNewMatch('host-capture-ready');
       _recordStartCohortIfMissing('host-capture-ready');
@@ -13603,6 +13615,7 @@
       _guestStateKind = msg.stateFormat === 'kn-sync' ? 'kn-sync' : 'savestate';
       _guestStateHiddenWords = Array.isArray(msg.hiddenWords) ? msg.hiddenWords.map((w) => w >>> 0) : null;
       _guestStateAudioFifo = Array.isArray(msg.audioFifo) ? msg.audioFifo.map((w) => w >>> 0) : null;
+      _guestStateHle = _guestStateKind === 'kn-sync' ? _resyncExtrasFromFields(msg).hle : null;
       _guestStateSaveRam = saveRam;
       _guestStateCapturedLocally = false;
       _syncLog(
@@ -22042,6 +22055,7 @@
     _lockstepStartStateKind = 'savestate';
     _guestStateHiddenWords = null;
     _guestStateAudioFifo = null;
+    _guestStateHle = null;
     _guestStateSaveRam = null;
     _guestStateCapturedLocally = false;
     _knownPlayers = {};
