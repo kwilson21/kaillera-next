@@ -43,7 +43,6 @@ def test_runtime_blocks_solid_yellow_boot_and_retries_safer_graphics_profile():
     lockstep = LOCKSTEP_JS.read_text()
     play = PLAY_JS.read_text()
     streaming = STREAMING_JS.read_text()
-    html = PLAY_HTML.read_text()
 
     assert "CANVAS-BOOT-BLOCK solid pale/yellow before sync" in lockstep
     assert "window.KNRecoverSolidCanvas?.({" in lockstep
@@ -59,7 +58,3 @@ def test_runtime_blocks_solid_yellow_boot_and_retries_safer_graphics_profile():
     assert "streaming CANVAS-BOOT-BLOCK solid pale/yellow" in streaming
     assert "window.KNStartEmulatorBoot?.({ forceStartOnLoad: true });" in streaming
     assert "window.KNRecoverSolidCanvas?.({" in streaming
-
-    assert "window.__knInstallUnpackAlignmentShim = function ()" in html
-    assert "window.__knInstallUnpackAlignmentShim();" in html
-    assert "window.__knInstallUnpackAlignmentShim();\n        var params = new URLSearchParams" not in html

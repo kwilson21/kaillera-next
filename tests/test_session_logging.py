@@ -10,13 +10,6 @@ import threading
 import pytest
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _patch_browser_ssl():
-    """No browser needed; avoids the [chromium] parameterize + event loop that
-    breaks asyncio.run() in these sync tests."""
-    yield
-
-
 def _run_async(coro):
     """Run a coroutine in a dedicated thread with a fresh event loop. Bypasses
     any session-level event loop pytest-playwright may have started on the

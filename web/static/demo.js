@@ -20,8 +20,9 @@
 
   // EmulatorJS's settings, controls and the ?kngfx=unpack1 shim, on window
   // before the emulator loads, and again at each boot.
-  // web/src/demo/ejs-globals.ts.
-  const _installEjsGlobals = () => _demo.installEjsGlobals(window, window.location.search || '');
+  // web/src/page/ejs-globals.ts.
+  const _installEjsGlobals = () =>
+    window.KNCore.ejs.installEjsGlobals(window, window.location.search, 'kaillera-next-demo');
 
   _installEjsGlobals();
 

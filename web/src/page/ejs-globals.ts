@@ -1,17 +1,4 @@
-/**
- * What the demo page puts on `window` for EmulatorJS before the emulator
- * loads: where it draws, which core, the core options of the `?kngfx=`
- * profile (options.ts), the keyboard and gamepad bindings, and the
- * texture-upload alignment shim. Moved from web/static/demo.js unchanged in
- * behaviour; demo.js calls it once, as the page loads.
- *
- * The shim makes every texture upload set UNPACK_ALIGNMENT to 1 first. The
- * page installs it for `?kngfx=unpack1` and leaves it on `window` as
- * `__knInstallUnpackAlignmentShim` for whoever wants it later. It marks each
- * prototype it patches with `__knUnpackAlignmentPatched`, the mark play.html's
- * own copy of the shim reads too, so a prototype is patched once.
- */
-import { ejsSettings } from './options.ts';
+/** Shared EmulatorJS settings for the play and demo pages. */
 
 /** One button's bindings: a keyboard key and a gamepad input. */
 interface ControlBinding {
@@ -71,7 +58,7 @@ type GlPrototype = Partial<Record<(typeof UPLOADS)[number], Upload>> & { __knUnp
 /** Whether a prototype's member is a method the shim can wrap. */
 const isUpload = (member: GlPrototype[(typeof UPLOADS)[number]]): member is Upload => typeof member === 'function';
 
-/** The window members the demo sets for EmulatorJS, and the WebGL constructors the shim patches. */
+/** The window members the pages set for EmulatorJS, and the WebGL constructors the shim patches. */
 export interface EjsPage {
   EJS_player?: string;
   EJS_core?: string;
@@ -108,16 +95,41 @@ const installUnpackAlignmentShim = (page: EjsPage): void => {
 };
 
 /** Put EmulatorJS's settings for the address `search` on the page. */
-export const installEjsGlobals = (page: EjsPage, search: string): void => {
-  const settings = ejsSettings(search);
+export const installEjsGlobals = (page: EjsPage, search: string, gameId: string): void => {
   page.EJS_player = '#game';
   page.EJS_core = 'n64';
-  page.EJS_gameID = 'kaillera-next-demo';
+  page.EJS_gameID = gameId;
   page.EJS_startOnLoaded = true;
   page.EJS_pathtodata = '/static/ejs/';
-  page.EJS_defaultOptions = settings.defaultOptions;
+  page.EJS_defaultOptions = { 'mupen64plus-cpucore': 'cached_interpreter' };
   page.__knInstallUnpackAlignmentShim = () => installUnpackAlignmentShim(page);
-  if (settings.forceLegacyCores) page.EJS_forceLegacyCores = true;
-  if (settings.unpackAlignmentShim) page.__knInstallUnpackAlignmentShim();
+  applyEjsGraphicsProfile(page, new URLSearchParams(search).get('kngfx'));
   page.EJS_defaultControls = defaultControls();
+};
+
+export const applyEjsGraphicsProfile = (page: EjsPage, profile: string | null): void => {
+  const options: [string, string][] = [];
+  if (profile === 'texrect') {
+    options.push(
+      ['mupen64plus-EnableNativeResTexrects', 'Optimized'],
+      ['mupen64plus-EnableTexCoordBounds', 'True'],
+      ['mupen64plus-CorrectTexrectCoords', 'Force'],
+    );
+  } else if (profile === 'texrect-unopt') {
+    options.push(
+      ['mupen64plus-EnableNativeResTexrects', 'Unoptimized'],
+      ['mupen64plus-EnableTexCoordBounds', 'True'],
+      ['mupen64plus-CorrectTexrectCoords', 'Force'],
+      ['mupen64plus-BackgroundMode', 'Stripped'],
+    );
+  } else if (profile === 'webgl1') {
+    options.push(['webgl2Enabled', 'disabled']);
+  } else if (profile === 'angrylion') {
+    options.push(['mupen64plus-rdp-plugin', 'angrylion']);
+  } else if (profile === 'parallel') {
+    options.push(['mupen64plus-rdp-plugin', 'parallel']);
+  }
+  if (profile === 'webgl1') page.EJS_forceLegacyCores = true;
+  if (profile === 'unpack1') page.__knInstallUnpackAlignmentShim?.();
+  Object.assign((page.EJS_defaultOptions ??= {}), Object.fromEntries(options));
 };

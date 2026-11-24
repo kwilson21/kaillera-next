@@ -75,6 +75,9 @@
     return;
   }
 
+  const { installEjsGlobals, applyEjsGraphicsProfile } = window.KNCore.ejs;
+  installEjsGlobals(window, window.location.search, 'kaillera-next');
+
   const { safeGet: _safeGet, safeSet: _safeSet, safeRemove: _safeRemove } = KNState;
 
   // ── State ──────────────────────────────────────────────────────────────
@@ -370,28 +373,7 @@
 
   const applyRuntimeGfxProfile = (profile) => {
     if (!_GFX_RECOVERY_PROFILES.includes(profile) && profile !== 'unpack1') return false;
-    window.EJS_defaultOptions = window.EJS_defaultOptions || {};
-    if (profile === 'texrect') {
-      Object.assign(window.EJS_defaultOptions, {
-        'mupen64plus-EnableNativeResTexrects': 'Optimized',
-        'mupen64plus-EnableTexCoordBounds': 'True',
-        'mupen64plus-CorrectTexrectCoords': 'Force',
-      });
-    } else if (profile === 'texrect-unopt') {
-      Object.assign(window.EJS_defaultOptions, {
-        'mupen64plus-EnableNativeResTexrects': 'Unoptimized',
-        'mupen64plus-EnableTexCoordBounds': 'True',
-        'mupen64plus-CorrectTexrectCoords': 'Force',
-        'mupen64plus-BackgroundMode': 'Stripped',
-      });
-    } else if (profile === 'webgl1') {
-      window.EJS_forceLegacyCores = true;
-      window.EJS_defaultOptions.webgl2Enabled = 'disabled';
-    } else if (profile === 'angrylion') {
-      window.EJS_defaultOptions['mupen64plus-rdp-plugin'] = 'angrylion';
-    } else if (profile === 'unpack1') {
-      window.__knInstallUnpackAlignmentShim?.();
-    }
+    applyEjsGraphicsProfile(window, profile);
     _runtimeGfxProfile = profile;
     window.__knRuntimeGfxProfile = profile;
     console.log('[play] applied graphics profile:', profile);

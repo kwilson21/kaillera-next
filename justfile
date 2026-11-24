@@ -35,11 +35,13 @@ lint-js:
 
 # Install dev dependencies
 setup:
-    uv pip install -e "server/[dev]"
+    uv sync --directory server --frozen --extra dev
     npm ci
     npm run --silent build
-    uv tool install pre-commit
-    pre-commit install
+
+# Install Git hooks for contributors who use pre-commit.
+hooks:
+    uvx pre-commit install
 
 # Type-check, test and bundle the TypeScript core (web/src -> web/static/dist)
 build:
@@ -57,16 +59,16 @@ spec:
 
 # Run pre-commit on all files
 check:
-    pre-commit run --all-files
+    uvx pre-commit run --all-files
 
 # Start dev server (Redis + HTTPS via Let's Encrypt certs)
 dev:
     docker compose -f docker-compose.dev.yml up -d
-    REDIS_URL=redis://:${REDIS_PASSWORD:-devpass}@localhost:6379/0 uv run kaillera-server
+    REDIS_URL=redis://:${REDIS_PASSWORD:-devpass}@localhost:6379/0 uv run --directory server --frozen kaillera-server
 
 # Run the server without Redis
 serve:
-    uv run kaillera-server
+    uv run --directory server --frozen kaillera-server
 
 # Start local Redis (stays running in background)
 redis:
@@ -124,7 +126,7 @@ design:
     echo "Serving on http://localhost:18888/tests/design-mode.html"
     echo "Press Ctrl+C to stop"
     open "http://localhost:18888/tests/design-mode.html"
-    python3 -m http.server 18888
+    python3 -m http.server 18888 --bind 127.0.0.1
 
 # Deploy: bump version (one chore commit summarising all unpushed feat/fix
 # commits since origin/main), then push main with the new tag. Idempotent

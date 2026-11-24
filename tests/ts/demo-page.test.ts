@@ -4,6 +4,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { test } from 'node:test';
 import vm from 'node:vm';
 import { demo } from '../../web/src/demo/index.ts';
+import * as ejs from '../../web/src/page/ejs-globals.ts';
 import { fakeIndexedDb } from './fake-indexeddb.ts';
 import { lcg } from './load-shared.ts';
 
@@ -298,7 +299,7 @@ type DemoApi = {
 };
 
 /** `window.KNCore` as a page script finds it. */
-type Core = { demo?: typeof demo };
+type Core = { demo?: typeof demo; ejs?: typeof ejs };
 
 /** A Blob that keeps what it was made from, so the fake File below can read it at once. */
 class RecordingBlob extends Blob {
@@ -727,7 +728,7 @@ const noteRunState = (page: ReturnType<typeof openDemo>): string => {
 const compareVisit = async (visit: Visit, steps: readonly Step[]): Promise<void> => {
   // The old script only checks that a core is there; it calls none of it.
   const before = openDemo(OLD_SCRIPT, {}, visit);
-  const after = openDemo(NEW_SCRIPT, { demo }, visit);
+  const after = openDemo(NEW_SCRIPT, { demo, ejs }, visit);
   noteRunState(after);
   assert.equal(after.snapshot(), before.snapshot(), `on load: ${show(visit)}`);
   // A cached ROM is restored on load: let both pages finish reading and hashing it.
@@ -970,7 +971,7 @@ test('a paused auto-compare: leaving the match or clicking its button stops it, 
   ];
   /** Whether auto-compare shows as on, and the mode, a cycle (6 s) after the ordering. */
   const after = async (script: vm.Script, steps: readonly Step[]) => {
-    const page = openDemo(script, script === NEW_SCRIPT ? { demo } : {}, visit);
+    const page = openDemo(script, script === NEW_SCRIPT ? { demo, ejs } : {}, visit);
     for (const step of [...autoComparePaused, ...steps]) await page.apply(step);
     const on = page.element('auto-compare')?.classes.has('is-running') ?? false;
     await page.apply({ kind: 'frame', ms: 6100 });
@@ -1010,7 +1011,7 @@ test('a restart in the frame a match begins: the retry mark survives the reload,
   ];
   /** The page after the failing frame, and what the next visit (the reload) does with what it left. */
   const visitAndReload = async (script: vm.Script) => {
-    const core = script === NEW_SCRIPT ? { demo } : {};
+    const core = script === NEW_SCRIPT ? { demo, ejs } : {};
     const first = openDemo(script, core, visit);
     for (const step of failsAsTheBattleBegins) await first.apply(step);
     const left = first.session();
@@ -1055,7 +1056,7 @@ test('the ROM cache: what a load keeps, the next visit restores, and Stop forget
     ]);
   }
   // The comparison above holds whatever both scripts do; this shows they did use the cache.
-  const page = openDemo(NEW_SCRIPT, { demo }, { search: '', local: [], session: [], closedLoop: false, seed: 1 });
+  const page = openDemo(NEW_SCRIPT, { demo, ejs }, { search: '', local: [], session: [], closedLoop: false, seed: 1 });
   await page.apply({ kind: 'load', name: 'game.z64' });
   assert.match(page.stored(), /"current",\{"bytes":\[1,2,3,4\],"name":"game.z64"\}/);
   await page.apply({ kind: 'click', id: 'gesture-button' });
@@ -1063,7 +1064,7 @@ test('the ROM cache: what a load keeps, the next visit restores, and Stop forget
   assert.doesNotMatch(page.stored(), /game\.z64/);
   const restored = openDemo(
     NEW_SCRIPT,
-    { demo },
+    { demo, ejs },
     { search: '', local: [], session: [], closedLoop: false, seed: 1, cached: 'saved.z64' },
   );
   await settle([restored.pending]);
@@ -1080,7 +1081,7 @@ test('every address: the EmulatorJS settings and controls, and the texture-uploa
   // The comparison holds whatever both do; this shows the shim does its work.
   const page = openDemo(
     NEW_SCRIPT,
-    { demo },
+    { demo, ejs },
     { search: '?kngfx=unpack1', local: [], session: [], closedLoop: false, seed: 1 },
   );
   assert.match(page.snapshot(), /true texImage2D:pixelStorei\(3317,1\)\|texImage2D\(1,2\)/);
@@ -1106,7 +1107,7 @@ test('the rollback timeline: what the card feeds it each frame, in both modes an
   const seen = async (reducedMotion: boolean): Promise<string> => {
     const page = openDemo(
       NEW_SCRIPT,
-      { demo },
+      { demo, ejs },
       { search: '', local: [], session: [], closedLoop: false, seed: 1, reducedMotion },
     );
     let log = '';

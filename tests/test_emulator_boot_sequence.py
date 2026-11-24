@@ -2,16 +2,9 @@
 
 from pathlib import Path
 
-import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-@pytest.fixture(autouse=True, scope="session")
-def _patch_browser_ssl():
-    """This static test module does not need the Playwright browser fixture."""
-    yield
 
 
 def test_restarts_reuse_ejs_loader_instead_of_direct_constructor():

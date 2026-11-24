@@ -4,29 +4,7 @@ Thanks for your interest in contributing! This project is open to contributions 
 
 ## Getting started
 
-### Prerequisites
-
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip for dependency management
-- [just](https://github.com/casey/just) (command runner)
-- Node.js (for the JS formatter, linters and the Quint model checker)
-- Optionally: Docker (for Redis), [lego](https://go-acme.github.io/lego/) + a
-  Cloudflare API token (for HTTPS dev — see `just certs` in the README)
-
-### Setup
-
-```bash
-# Install dependencies
-just setup
-
-# Simplest path — HTTP, no Redis, no HTTPS
-just serve
-# → http://localhost:27888/
-```
-
-This gets you a running server for exploring the lobby, streaming mode, and the
-codebase. See [README.md](README.md) for HTTPS setup (required for rollback mode)
-and Docker deployment.
+See the [quick start](README.md#quick-start) for dependencies and server setup.
 
 ## Ways to contribute
 
@@ -84,21 +62,9 @@ Have an idea for a feature? Open an issue tagged with your suggestion. Even roug
 
 ### Code architecture
 
-#### Pattern: IIFEs + window globals
-
-All frontend JS uses **immediately-invoked function expressions** (IIFEs) with
-`window.*` exports. This is intentional — EmulatorJS patches and overrides
-browser globals extensively, and ES modules would break interop with its runtime.
-Do not convert to ES modules.
-
-```js
-// Every module follows this pattern:
-(function () {
-  'use strict';
-  // ... private state and functions ...
-  window.ModuleName = {/* public API */};
-})();
-```
+Write new frontend logic in TypeScript modules under `web/src/`.
+The [web build](scripts/build-web.mjs) emits classic scripts so the pages
+and EmulatorJS can access the bundled APIs through `window`.
 
 #### Cross-module communication: KNState
 
@@ -207,7 +173,7 @@ The Python server is ~7,500 lines across `server/src/`, `server/src/api/`, and
 ### Conventions
 
 - **Modern ECMAScript** — `const`/`let` (never `var`), arrow functions, template
-  literals, `async`/`await`, optional chaining. No ES modules (see above).
+  literals, `async`/`await`, optional chaining.
 - **Python** — formatted by ruff, type hints encouraged.
 - **TypeScript** — new frontend logic lives in `web/src/` (strict mode,
   Effect, Effect Schema, XState). `just build` type-checks, runs
@@ -276,6 +242,7 @@ just redis-stop     # Stop Redis
 just fmt            # Auto-format everything
 just lint           # Check without fixing
 just check          # Run pre-commit on all files
+just hooks          # Install the pre-commit Git hook
 ```
 
 ### Tests
@@ -284,20 +251,7 @@ just check          # Run pre-commit on all files
 cd server && uv run --extra dev pytest   # full suite; many tests need Playwright browsers
 ```
 
-#### Virtual Gamepad visual regression (100 devices × 4 variants)
-
-Requires: `npm install playwright` and a local static server on port 18888.
-
-```bash
-cp tests/vgp-test.html web/vgp-test.html
-cd web && python3 -m http.server 18888 &
-node tests/vgp-device-test.mjs
-open tests/vgp-screenshots/index.html   # inspect results
-kill %1                                  # stop the server
-rm web/vgp-test.html
-```
-
-Screenshots are written to `tests/vgp-screenshots/` (gitignored).
+See the [virtual-gamepad device check](tests/VGP-DEVICE-TEST.md) for screenshot instructions.
 
 ## License
 

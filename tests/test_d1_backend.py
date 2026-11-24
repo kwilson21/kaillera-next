@@ -8,12 +8,6 @@ import pytest
 from db_test_support import FAKE_TOKEN, FakeD1, run_async
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _patch_browser_ssl():
-    """No browser needed (overrides the Playwright fixture in conftest.py)."""
-    yield
-
-
 def _backend(transport):
     from src.dbbackend.d1 import D1Backend
 

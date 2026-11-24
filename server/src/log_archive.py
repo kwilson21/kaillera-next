@@ -181,10 +181,7 @@ def _window_closed() -> ColumnElement[bool]:
     The same window ingest checks (db._uploads_open): 30 min after the end,
     or 4 h after the start when no end was recorded (crash, restart).
     """
-    closed = func.coalesce(
-        func.datetime(MatchRetention.ended_at, "+30 minutes"), func.datetime(MatchRetention.created_at, "+4 hours")
-    )
-    return closed < db.now()
+    return db.match_upload_deadline() < db.now()
 
 
 async def _archive_due() -> list[dict]:

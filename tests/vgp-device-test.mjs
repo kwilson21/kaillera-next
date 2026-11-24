@@ -49,12 +49,13 @@ async function run() {
         const label = `${name} ${orient} ${w}×${h} (${chromeLabel})`;
 
         await page.setViewportSize({ width: w, height: h });
-        await page.goto(URL, { waitUntil: 'domcontentloaded' });
+        const response = await page.goto(URL, { waitUntil: 'domcontentloaded' });
+        if (!response?.ok()) throw new Error(`Could not load ${URL} (HTTP ${response?.status()})`);
+        await page.locator('.vgp-a').waitFor({ state: 'visible' });
         await page.evaluate((t) => {
           const e = document.getElementById('device-label');
           if (e) e.textContent = t;
         }, label);
-        await page.waitForTimeout(150);
 
         const safeName = name.replace(/[^a-zA-Z0-9]/g, '_');
         const filename = `${cat}/${safeName}__${orient}__${chromeLabel}.png`;

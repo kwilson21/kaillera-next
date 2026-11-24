@@ -77,7 +77,7 @@ tools/dl-recorder/
 web/smash64r-test/
 web/webgpu-pivot-test/
 
-# Local gameplay test output (scripts/test-gameplay.sh)
+# Local gameplay test output
 test-results/
 
 # The static demo build (scripts/build_demo.py, since removed) wrote here;

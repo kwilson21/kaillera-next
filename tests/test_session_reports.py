@@ -19,12 +19,6 @@ from fastapi.testclient import TestClient
 SESSION_TS = Path(__file__).parent.parent / "web" / "src" / "session.ts"
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _patch_browser_ssl():
-    """No browser needed (overrides the Playwright fixture in conftest.py)."""
-    yield
-
-
 def _report_types() -> list[str]:
     """The `type` literals of the SessionReport union in session.ts, and of
     play/observe.ts's DisagreeReport."""

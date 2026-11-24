@@ -909,12 +909,20 @@ async def get_input_audit(match_id: str, slot: int | None) -> list[dict]:
 
 # Log uploads for a match are accepted until 30 min after game-end, or 4 h
 # after start when no end was recorded (crash, restart, room closed): spec §5.
-_UPLOAD_GRACE_AFTER_END = "-30 minutes"
-_UPLOAD_WINDOW_WITHOUT_END = "-4 hours"
+_UPLOAD_GRACE_AFTER_END = "30 minutes"
+_UPLOAD_WINDOW_WITHOUT_END = "4 hours"
 _UPLOAD_CHECK_TTL_SEC = 60.0
 _UPLOAD_CHECK_CACHE_MAX = 10_000
 _upload_check_cache: dict[tuple[str, str], tuple[bool, float]] = {}
 _registered_matches: set[str] = set()
+
+
+def match_upload_deadline() -> ColumnElement:
+    """SQL expression for an ended or abandoned match's log upload deadline."""
+    return func.coalesce(
+        func.datetime(MatchRetention.ended_at, f"+{_UPLOAD_GRACE_AFTER_END}"),
+        func.datetime(MatchRetention.created_at, f"+{_UPLOAD_WINDOW_WITHOUT_END}"),
+    )
 
 
 def _uploads_open() -> ColumnElement[bool]:
@@ -922,8 +930,8 @@ def _uploads_open() -> ColumnElement[bool]:
     return and_(
         MatchRetention.deleting_at.is_(None),
         or_(
-            and_(MatchRetention.ended_at.is_not(None), MatchRetention.ended_at > ago(_UPLOAD_GRACE_AFTER_END)),
-            and_(MatchRetention.ended_at.is_(None), MatchRetention.created_at > ago(_UPLOAD_WINDOW_WITHOUT_END)),
+            and_(MatchRetention.ended_at.is_not(None), MatchRetention.ended_at > ago(f"-{_UPLOAD_GRACE_AFTER_END}")),
+            and_(MatchRetention.ended_at.is_(None), MatchRetention.created_at > ago(f"-{_UPLOAD_WINDOW_WITHOUT_END}")),
         ),
     )
 

@@ -35,19 +35,10 @@ def test_legacy_lockstep_file_is_a_deprecation_shim_only():
     assert "kn_rollback_init" not in src
 
 
-def test_play_html_loads_rollback_engine_first_then_shim():
-    """Both files load (one for the new path, one for cached HTML), with
-    the real engine before the shim so the alias is set when stale HTML
-    requests the legacy path."""
+def test_current_play_page_loads_only_the_canonical_engine():
     src = PLAY_HTML.read_text()
-    rollback_idx = src.find("/static/netplay-rollback.js")
-    shim_idx = src.find("/static/netplay-lockstep.js")
-    assert rollback_idx != -1, "play.html must load netplay-rollback.js"
-    assert shim_idx != -1, "play.html keeps loading netplay-lockstep.js as compat shim"
-    assert rollback_idx < shim_idx, (
-        "rollback engine must load before the lockstep shim so the alias is "
-        "in place when stale HTML requests the legacy path"
-    )
+    assert "/static/netplay-rollback.js" in src
+    assert "/static/netplay-lockstep.js" not in src
 
 
 def test_mode_select_dropdown_offers_the_three_modes():

@@ -47,7 +47,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src import db, retention, schema
@@ -395,9 +395,7 @@ async def sweep_pending(limit: int = 50) -> int:
     # ended_by mid-match), so a match is rotated once more after its upload
     # window closes: 30 min after game-end, or 4 h after start if it never
     # ended. That final pass re-runs the retention classifier on every log.
-    window_closed = func.coalesce(
-        func.datetime(MatchRetention.ended_at, "+30 minutes"), func.datetime(MatchRetention.created_at, "+4 hours")
-    )
+    window_closed = db.match_upload_deadline()
     rows += await db.fetch(
         select(metrics.match_id)
         .join(MatchRetention, MatchRetention.match_id == metrics.match_id)
