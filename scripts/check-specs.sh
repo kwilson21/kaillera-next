@@ -83,6 +83,7 @@ $QUINT test "$SPEC" --main=room_before_abandoned_end --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_resume_flag --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_start_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_reconcile --backend="$BACKEND"
+$QUINT test "$SPEC" --main=room_before_duplicate_start_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_104 --backend="$BACKEND"
 
 check() { # module invariant
@@ -96,6 +97,7 @@ check() { # module invariant
 # the page reconciled on reconnect (room_before_reconcile).
 check room_current ownerSeesGame
 check room_current ownerDoesNotLateJoinItsOwnMatch
+check room_current aLiveMatchCannotStartAgain
 check room_current lateJoinersChaseTheCurrentMatch
 check room_current pagesAgreeWithServer
 # A joiner asking for state while the others are still loading always has a
@@ -126,6 +128,16 @@ for variant in room_disconnect_cleanup_before room_disconnect_cleanup_lifespan_o
 done
 $QUINT run "$DISCONNECT" --main=room_disconnect_cleanup_fixed --invariant=allHold \
   --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
+for model in room_expiry reconnect_attempt spectator_publication; do
+  file="specs/${model}.qnt"
+  $QUINT typecheck "$file"
+  for variant in before fixed; do
+    $QUINT test "$file" --main="${model}_${variant}" --backend="$BACKEND"
+  done
+  $QUINT run "$file" --main="${model}_fixed" --invariant=allHold \
+    --max-samples=5000 --max-steps=15 --backend="$BACKEND"
+done
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt

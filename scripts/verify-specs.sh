@@ -87,6 +87,8 @@ rom_transfer() {
 # minutes), beyond this bound; check-specs.sh samples deep enough to reach them.
 room_lifecycle_start() {
   local ROOM=specs/room_lifecycle.qnt
+  verify "$ROOM" room_current aLiveMatchCannotStartAgain init 3
+  expect_violation "$ROOM" room_before_duplicate_start_fix aLiveMatchCannotStartAgain 3
   verify "$ROOM" room_current ownerSeesGame
   verify "$ROOM" room_current ownerDoesNotLateJoinItsOwnMatch
   expect_violation "$ROOM" room_before_owner_invite_fix ownerDoesNotLateJoinItsOwnMatch 4
@@ -98,6 +100,10 @@ room_lifecycle_start() {
 }
 
 room_disconnect_cleanup() {
+  local expiry=specs/room_expiry.qnt
+  verify "$expiry" room_expiry_fixed allHold init 4
+  expect_violation "$expiry" room_expiry_before liveRoomSurvives 3
+  expect_violation "$expiry" room_expiry_before freshRoomHasGrace 3
   local spec=specs/room_disconnect_cleanup.qnt
   verify "$spec" room_disconnect_cleanup_fixed allHold
   expect_violation "$spec" room_disconnect_cleanup_before callbackCanReturn
@@ -121,6 +127,10 @@ room_lifecycle_drops() {
 }
 
 peer_connection() {
+  local retry=specs/reconnect_attempt.qnt
+  verify "$retry" reconnect_attempt_fixed allHold init 6
+  expect_violation "$retry" reconnect_attempt_before oneRetryPerAttempt 2
+  expect_violation "$retry" reconnect_attempt_before onlyCurrentOffersAreSent 2
   local PAIR=specs/peer_connection.qnt
   verify "$PAIR" peer_connection_fixed allHold
   verify "$PAIR" peer_connection_current holdToday
@@ -147,6 +157,10 @@ peer_connection() {
 }
 
 streaming_connection() {
+  local publication=specs/spectator_publication.qnt
+  verify "$publication" spectator_publication_fixed allHold init 5
+  expect_violation "$publication" spectator_publication_before readyViewersPublished 2
+  expect_violation "$publication" spectator_publication_before audioFollowsVideo 3
   local STREAM=specs/streaming_connection.qnt
   verify "$STREAM" streaming_connection_current allHold
   # Pages joining late, whose readies only this initial state has: a ready

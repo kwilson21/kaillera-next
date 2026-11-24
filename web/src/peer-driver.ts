@@ -12,15 +12,13 @@
  * the engine's as they are. It decides the mesh health check (`decideHeal`;
  * specs/peer_connection.qnt, peer_connection_heal_one_side): the lower slot
  * resets and offers, the higher slot treats the dead channel as a drop it
- * has just noticed and waits for that offer. Elsewhere what it would do is
- * not acted on yet.
+ * has just noticed and waits for that offer. The initiating page executes the
+ * machine's gameplay reconnect offers, backoff and give-up
+ * (specs/reconnect_attempt.qnt). Its deadlines use real time.
  *
- * The engine's timers and the machine's deadlines stand for the same waits
- * but run on different clocks (the health check runs every 300 frames, the
- * reconnect retry pauses 3 s). So when an engine timer fires, the machine's
- * deadline for that wait is taken at the same moment (`fire`), and the
- * machine's own deadlines run late by `LATE_MS` (the health check's by an
- * hour).
+ * Startup and answer timers are still observed. Their machine deadlines run
+ * late by `LATE_MS` (the frame-driven health check's by an hour), so an
+ * engine timer can feed the same event to the observer with `fire`.
  *
  * Which attempt a signal belongs to comes from the `attemptId` the engine
  * puts on every `webrtc-signal` (attempt-id.ts). A signal without one comes
@@ -28,15 +26,15 @@
  * connection it is for, so that player is left to the engine from then on
  * (`stopWatching`; specs/peer_connection.qnt, oldPageAnswersWithNoLabelTest).
  *
- * Not driven, as the machine does not cover them: spectators, a page that
- * joined a match in play, a player the engine holds as a late joiner, and a
- * player this page offered to before it had a machine for them.
+ * Spectators are excluded. A late joiner, or a player whose startup was
+ * not observed, can still drive its own numbered gameplay reconnects.
  *
  * Nothing here may reach the engine: every method catches what it throws.
  */
 import {
   createPeerConnection,
   PEER_TIMING,
+  type Attempt,
   type PeerCommand,
   type PeerConnection,
   type PeerDeadline,
@@ -81,8 +79,6 @@ export const LATE_MS = 5000;
 export const DRIVER_TIMING: PeerTiming = {
   ...PEER_TIMING,
   startupAfterMs: PEER_TIMING.startupAfterMs + LATE_MS,
-  attemptAfterMs: PEER_TIMING.attemptAfterMs + LATE_MS,
-  giveUpAfterMs: PEER_TIMING.giveUpAfterMs + LATE_MS,
   answerAfterMs: PEER_TIMING.answerAfterMs + LATE_MS,
   healAfterMs: 60 * 60_000,
 };
@@ -93,7 +89,10 @@ export const HELD_MAX = 64;
 const isPlayerSlot = (slot: number | null | undefined): slot is number =>
   typeof slot === 'number' && Number.isInteger(slot) && slot >= 0 && slot <= 3;
 
+type ReconnectCommand = Extract<PeerCommand, { type: 'offer' | 'drop' | 'backoff' }>;
+
 interface Watch {
+  reconnect: ((command: ReconnectCommand) => void) | null;
   readonly mySlot: number;
   readonly peer: PeerConnection;
 }
@@ -115,16 +114,27 @@ export const createPeerDriver = (options: PeerDriverOptions) => {
     if (unwatched.has(slot)) return;
     unwatched.set(slot, reason);
     const watch = watches.get(slot);
-    watches.delete(slot);
-    void watch?.peer.stop();
+    if (!watch?.reconnect) {
+      watches.delete(slot);
+      void watch?.peer.stop();
+    }
     options.log(`PEER-DRIVER slot=${slot} not driven: ${reason}`);
   };
 
-  // A deadline the machine takes on its own: nothing acts on what it issues yet.
-  const onDeadline = () => (): void => undefined;
+  const dispatch = (watch: Watch, commands: readonly PeerCommand[]) => {
+    for (const command of commands) {
+      if (
+        command.type === 'backoff' ||
+        command.type === 'drop' ||
+        (command.type === 'offer' && command.mode === 'reconnect')
+      ) {
+        watch.reconnect?.(command);
+      }
+    }
+  };
 
-  const watchFor = (slot: number | null): Watch | null => {
-    if (!isPlayerSlot(slot) || unwatched.has(slot)) return null;
+  const watchFor = (slot: number | null, localReconnect = false): Watch | null => {
+    if (!isPlayerSlot(slot) || (unwatched.has(slot) && !localReconnect)) return null;
     const mySlot = options.mySlot();
     if (!isPlayerSlot(mySlot) || mySlot === slot) return null;
     const known = watches.get(slot);
@@ -135,17 +145,20 @@ export const createPeerDriver = (options: PeerDriverOptions) => {
     }
     if (joinedLate) {
       unwatch(slot, 'this page joined a match in play');
-      return null;
+      if (!localReconnect) return null;
     }
     // The machine numbers its offers from 1: it must see every offer the engine makes to this player.
     if (options.offersMade(slot) > 0) {
       unwatch(slot, 'the engine offered to this player before it had a machine');
-      return null;
+      if (!localReconnect) return null;
     }
-    const peer = createPeerConnection({ mySlot, theirSlot: slot, timing, page: options.page }, onDeadline());
-    const watch = { mySlot, peer };
+    const peer = createPeerConnection({ mySlot, theirSlot: slot, timing, page: options.page }, (_, commands) =>
+      dispatch(watch, commands),
+    );
+    const watch: Watch = { mySlot, peer, reconnect: null };
     watches.set(slot, watch);
-    options.log(`PEER-DRIVER slot=${slot} driven (this page: slot ${mySlot}, id ${options.page})`);
+    if (!unwatched.has(slot))
+      options.log(`PEER-DRIVER slot=${slot} driven (this page: slot ${mySlot}, id ${options.page})`);
     if (running) peer.send({ type: 'matchStarted' });
     return watch;
   };
@@ -171,7 +184,10 @@ export const createPeerDriver = (options: PeerDriverOptions) => {
       return run();
     } catch (error) {
       failed = true;
-      for (const watch of watches.values()) void watch.peer.stop();
+      for (const watch of watches.values()) {
+        watch.reconnect = null;
+        void watch.peer.stop();
+      }
       watches.clear();
       frames = [];
       const message = error instanceof Error ? error.message : 'not an Error';
@@ -258,6 +274,33 @@ export const createPeerDriver = (options: PeerDriverOptions) => {
         return commands;
       }, null) ?? null,
 
+    /** Drive this page's reconnect even when a late or unlabelled peer has no observable startup history. */
+    reconnect: (slot: number, issue: (command: ReconnectCommand) => void) => {
+      const mySlot = options.mySlot();
+      if (failed || !isPlayerSlot(mySlot) || mySlot >= slot) return null;
+      const watch = watchFor(slot, true);
+      if (!watch) return null;
+      watch.reconnect = issue;
+      const send = (event: PeerEvent) => {
+        if (watch.reconnect === issue) dispatch(watch, watch.peer.send(event));
+      };
+      return {
+        current: () => watch.reconnect === issue,
+        offering: () => watch.peer.state() === 'reconnecting.offering',
+        start: () => send({ type: 'beginReconnect', offersMade: options.offersMade(slot) }),
+        failed: (id: Attempt) => send({ type: 'attemptFailed', ...id }),
+        connected: (id: Attempt) => send({ type: 'transportConnected', ...id }),
+        stop: () => {
+          if (watch.reconnect !== issue) return;
+          watch.reconnect = null;
+          if (unwatched.has(slot)) {
+            watches.delete(slot);
+            void watch.peer.stop();
+          }
+        },
+      };
+    },
+
     /** The roster names the slot of the player under `key`: what was held for them reaches their machine. */
     identify: (key: string, slot: number | null | undefined): void =>
       guard(() => {
@@ -306,7 +349,13 @@ export const createPeerDriver = (options: PeerDriverOptions) => {
         frames = [];
         held.clear();
         heldOverflow.clear();
-        for (const watch of watches.values()) {
+        for (const [slot, watch] of watches) {
+          watch.reconnect = null;
+          if (unwatched.has(slot)) {
+            watches.delete(slot);
+            void watch.peer.stop();
+            continue;
+          }
           watch.peer.send({ type: 'matchEnded' });
           watch.peer.send({ type: 'left' });
         }
@@ -314,12 +363,17 @@ export const createPeerDriver = (options: PeerDriverOptions) => {
 
     /** For tests and logs: the slots driven now with their state, and the ones not driven with why. */
     status: () => ({
-      watched: [...watches.entries()].map(([slot, watch]) => ({ slot, state: watch.peer.state() })),
+      watched: [...watches].flatMap(([slot, watch]) =>
+        unwatched.has(slot) ? [] : [{ slot, state: watch.peer.state() }],
+      ),
       unwatched: Object.fromEntries(unwatched),
     }),
 
     stop: (): void => {
-      for (const watch of watches.values()) void watch.peer.stop();
+      for (const watch of watches.values()) {
+        watch.reconnect = null;
+        void watch.peer.stop();
+      }
       watches.clear();
     },
   };

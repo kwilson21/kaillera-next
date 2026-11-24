@@ -121,6 +121,79 @@ def test_reclaim_ahead_of_deferred_cleanup_keeps_new_sid(server):
     run_async(scenario())
 
 
+@pytest.fixture
+def delete_record(server, monkeypatch):
+    delete = AsyncMock()
+    monkeypatch.setattr(signaling.state, "delete_room", delete)
+    monkeypatch.setattr(signaling, "_room_frames", {})
+    return delete
+
+
+@pytest.mark.parametrize("rejoin_first", [True, False])
+def test_reclaim_and_fifth_cleanup_tick_follow_lock_order(server, delete_record, rejoin_first):
+    async def scenario():
+        room, _ = await lobby(server)
+        signaling._sid_to_room.clear()
+        signaling._sid_host.clear()
+        offline = {}
+        for _ in range(4):
+            offline = await signaling._expire_rooms(offline)
+        returned = await server.manager.connect("reclaimed", "/")
+        request = {
+            "extra": {
+                "sessionid": "ROOM",
+                "persistentId": "host",
+                "reconnectToken": signaling.make_reconnect_token("ROOM", "host"),
+            }
+        }
+        reclaim = signaling.join_room(returned, request)
+        sweep = signaling._expire_rooms(offline)
+        async with signaling._room_lock:
+            first, second = (reclaim, sweep) if rejoin_first else (sweep, reclaim)
+            queued = [asyncio.create_task(op) for op in (first, second)]
+            await asyncio.sleep(0)  # both have reached the FIFO room lock
+        results = await asyncio.gather(*queued)
+        error, _ = results[0 if rejoin_first else 1]
+        if rejoin_first:
+            assert error is None
+            assert signaling.rooms["ROOM"] is room
+            assert room.players["host"]["socketId"] == returned
+            delete_record.assert_not_awaited()
+        else:
+            assert error == "Room not found"
+            assert returned not in signaling._sid_to_room
+            delete_record.assert_awaited_once_with("ROOM")
+
+    run_async(scenario())
+
+
+def test_replacement_with_same_code_gets_five_offline_ticks(server, delete_record):
+    async def scenario():
+        await lobby(server)
+        signaling._sid_to_room.clear()
+        offline = {}
+        for _ in range(4):
+            offline = await signaling._expire_rooms(offline)
+        replacement = signaling.Room("other", "New room", "", None, 4)
+        replacement.spectators["watcher"] = {"socketId": "watcher-sid"}
+        signaling.rooms["ROOM"] = replacement
+        for _ in range(4):
+            offline = await signaling._expire_rooms(offline)
+            assert signaling.rooms["ROOM"] is replacement
+        signaling._sid_to_room["watcher-sid"] = ("ROOM", "watcher", True)
+        offline = await signaling._expire_rooms(offline)
+        delete_record.assert_not_awaited()
+        del signaling._sid_to_room["watcher-sid"]
+        for _ in range(4):
+            offline = await signaling._expire_rooms(offline)
+            assert signaling.rooms["ROOM"] is replacement
+        await signaling._expire_rooms(offline)
+        assert "ROOM" not in signaling.rooms
+        delete_record.assert_awaited_once_with("ROOM")
+
+    run_async(scenario())
+
+
 def test_shutdown_preserves_members_awaiting_room_cleanup(server):
     async def scenario():
         room, guest = await lobby(server)

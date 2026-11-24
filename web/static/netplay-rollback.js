@@ -6878,15 +6878,14 @@
   // from the mesh code below, one per other player, through
   // web/src/peer-driver.ts: the code brackets each event it acts on with
   // _peerDriver().open/close, and close hands the machine the event. The
-  // machine decides nothing yet; it is being wired in one rule at a time
-  // (docs/roadmap.md).
+  // machine decides mesh healing and the initiating peer’s gameplay retries.
   //
   // Every webrtc-signal carries attemptId {page, attempt}: this page's id,
   // made once when it loads, and its count of the offers it has made to that
   // player. An offer carries its own; an answer and a candidate the one of
   // the offer their connection was made for (kept on the RTCPeerConnection
   // as _knAttempt). Pages from before it send none and ignore it; nothing
-  // accepts or rejects a signal by it yet.
+  // changes for unlabelled signals. Gameplay drops replies from an older attempt on the same page.
   let _attemptPage = null;
   const _offerCounts = new Map();
   const _attemptPageId = () => {
@@ -8874,6 +8873,7 @@
 
   // Spectator streaming state
   let _hostStream = null; // MediaStream for spectator canvas streaming
+  let _spectatorCanvasWait = null;
   let _guestVideo = null; // <video> element (spectator only)
 
   // Expose for Playwright
@@ -8884,7 +8884,8 @@
 
   // -- Audio pipeline (delegated to kn-audio.js) --
   async function initAudioPlayback() {
-    await _audio.init({
+    const session = _sessionId;
+    const playback = _audio.init({
       log: _syncLog,
       getFrame: () => _frameNum,
       getSlot: () => _playerSlot,
@@ -8892,6 +8893,10 @@
       getResetAudioCalls: () => _resetAudioCallsSinceRb,
       knEvent: KNEvent,
     });
+    // Show video to already-open viewers even if playback is still loading.
+    startSpectatorStream();
+    await playback;
+    if (_sessionId === session) startSpectatorStream();
   }
   const feedAudio = () => _audio.feed();
 
@@ -9674,7 +9679,7 @@
     try {
       peer.pc?.close();
     } catch (_) {}
-    if (peer._reconnectTimeout) clearTimeout(peer._reconnectTimeout);
+    _stopPeerReconnect(peer);
     if (peer._disconnectTimer) clearTimeout(peer._disconnectTimer);
     // I2: route per-peer cleanup through resetPeerState before
     // dropping the _peers entry.
@@ -10632,6 +10637,17 @@
       return;
     }
 
+    const gameplayReply =
+      _phase === PHASE_RUNNING &&
+      !_isSpectator &&
+      _isValidPlayerSlot(peer.slot) &&
+      (sigType === 'answer' || sigType === 'candidate');
+    if (gameplayReply && window.KNCore.attemptId.isOlderAttempt(signalAttempt, peer.pc._knAttempt)) {
+      signalDone();
+      return;
+    }
+
+    let ownsAnswer;
     try {
       if (data.offer) {
         // Reconnect: if peer exists and reconnect flag set, replace old PC
@@ -10642,6 +10658,18 @@
           // Mark gameplay reconnects so the DC open handler triggers resync.
           // Startup retries have no game state yet, so they should only
           // restart the WebRTC handshake and then continue normal boot.
+          if (existingPeer._reconnectAttempt?.current()) {
+            existingPeer._reconnectAttempt.stop();
+            existingPeer._reconnectAttempt = null;
+          }
+          if (!startupReconnect && _phase === PHASE_RUNNING && !_isSpectator && _isValidPlayerSlot(existingPeer.slot)) {
+            // A replacement offer can arrive before this page observes its own channel loss.
+            if (!existingPeer.reconnecting || !Number.isFinite(existingPeer.reconnectStart)) {
+              existingPeer.reconnectStart = Date.now();
+            }
+            _waitForPeerReconnect(key, existingPeer);
+          }
+          existingPeer._answerWait?.cancel();
           existingPeer.reconnecting = !startupReconnect;
           existingPeer.startupReconnecting = startupReconnect;
 
@@ -10650,24 +10678,31 @@
           existingPeer.ready = false;
           existingPeer.emuReady = false;
 
-          // Timeout: if reconnect doesn't reach 'connected' within 10s, close and retry
-          let _reconnectTimer = setTimeout(() => {
-            const state = existingPeer.pc.connectionState;
-            const frame = _peerDriver()?.open(existingPeer.slot, key);
-            if (state !== 'connected') {
-              _syncLog(`reconnect timeout (state=${state}) — closing stale PC for ${senderSid}`);
-              try {
-                existingPeer.pc.close();
-              } catch (_) {}
-            }
-            _peerDriver()?.close(frame, { type: 'deadline', deadline: 'answerAfter' });
-          }, 10000);
-          existingPeer.pc.onconnectionstatechange = () => {
-            const s = existingPeer.pc.connectionState;
-            _syncLog(`reconnect peer ${senderSid} connection-state: ${s}`);
-            if (s === 'connected' || s === 'failed' || s === 'closed') {
-              clearTimeout(_reconnectTimer);
-            }
+          const answerPc = existingPeer.pc;
+          if (!startupReconnect && _phase === PHASE_RUNNING) {
+            ownsAnswer = () =>
+              _phase === PHASE_RUNNING &&
+              _ownsPeerConnection(key, existingPeer, answerPc) &&
+              answerPc._knAttempt === signalAttempt;
+          }
+          const wait = window.KNCore.startGroup.startDeadline({
+            deadlineMs: window.KNCore.peerTiming.answerAfterMs,
+            onDeadline: () => {
+              if (!_ownsPeerConnection(key, existingPeer, answerPc)) return;
+              const frame = _peerDriver()?.open(existingPeer.slot, key);
+              if (answerPc.connectionState !== 'connected') {
+                _syncLog(`reconnect timeout (state=${answerPc.connectionState}) — closing stale PC for ${senderSid}`);
+                answerPc.close();
+              }
+              _peerDriver()?.close(frame, { type: 'deadline', deadline: 'answerAfter' });
+            },
+          });
+          existingPeer._answerWait = wait;
+          answerPc.onconnectionstatechange = () => {
+            if (!_ownsPeerConnection(key, existingPeer, answerPc)) return;
+            const state = answerPc.connectionState;
+            _syncLog(`reconnect peer ${senderSid} connection-state: ${state}`);
+            if (state === 'connected' || state === 'failed' || state === 'closed') wait.cancel();
           };
           installPeerDataChannelHandlers(key, existingPeer);
 
@@ -10702,11 +10737,19 @@
           }
         }
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+        if (ownsAnswer && !ownsAnswer()) return;
         await KNShared.drainCandidates(peer);
-        await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key, peer.pc._knAttempt);
+        if (ownsAnswer && !ownsAnswer()) return;
+        await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key, peer.pc._knAttempt, ownsAnswer);
       } else if (data.answer) {
+        const pc = peer.pc;
+        if (gameplayReply) {
+          const held = pc._knAttempt;
+          ownsAnswer = () => _phase === PHASE_RUNNING && _ownsPeerConnection(key, peer, pc) && pc._knAttempt === held;
+        }
         signalDone();
-        await peer.pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+        if (ownsAnswer && !ownsAnswer()) return;
         await KNShared.drainCandidates(peer);
       } else if (data.candidate) {
         signalDone();
@@ -10715,6 +10758,7 @@
       signalDone();
     } catch (err) {
       signalDone();
+      if (ownsAnswer && !ownsAnswer()) return;
       _syncLog(`WebRTC signal error: ${err.message || err}`);
       setStatus(`WebRTC error: ${err.message || err}`);
     }
@@ -11057,9 +11101,9 @@
       // Both sides measure RTT for auto delay
       startRttMeasurement(peer);
 
-      // Late join: if game is running, host starts spectator stream for new spectator
+      // The other arrival order: a spectator opens its channel during play.
       if (_phase === PHASE_RUNNING && _playerSlot === 0 && peer.slot === null) {
-        startSpectatorStreamForPeer(remoteSid);
+        startSpectatorStream();
       }
 
       // Opening a late joiner's channel is not an in-place reconnect.
@@ -11070,18 +11114,13 @@
         !_lateJoin &&
         _isValidPlayerSlot(peer.slot) &&
         (_observeLateJoinDcOpen(peer.slot) || _isPeerPendingLateJoin(remoteSid, peer));
+      _stopPeerReconnect(peer);
       if (lateJoinDc && peer.reconnecting) {
-        if (peer._reconnectTimeout) clearTimeout(peer._reconnectTimeout);
-        peer._reconnectTimeout = null;
         peer.reconnecting = false;
         _config?.onReconnecting?.(remoteSid, false);
       }
       // If this is a reconnect, clear reconnecting state and resync
       if (peer.reconnecting) {
-        if (peer._reconnectTimeout) {
-          clearTimeout(peer._reconnectTimeout);
-          peer._reconnectTimeout = null;
-        }
         peer.reconnecting = false;
         // P0-1 funnel: emit peer_reconnected from the host only (same rationale
         // as peer_left — single authoritative source, slot attributed via meta).
@@ -11236,6 +11275,11 @@
     };
     const onClose = () => {
       _syncLog(`DC closed with ${remoteSid}`);
+      const peer = _peers[remoteSid];
+      if (peer?.dc === ch && peer.slot === null && _playerSlot === 0) {
+        detachSpectatorMedia(peer);
+        if (!Object.values(_peers).some(isWatching)) stopSpectatorCapture();
+      }
       handlePeerDisconnect(remoteSid, ch._knPc?._knAttempt);
     };
 
@@ -12304,6 +12348,7 @@
     // If game is running and not an intentional leave, attempt reconnect
     if (_phase === PHASE_RUNNING && !peer._intentionalLeave) {
       observeDisposition('reconnect');
+      if (peer._reconnectAttempt?.current() || peer._reconnectWait) return;
       _syncLog(`peer ${remoteSid} DC died — attempting reconnect`);
 
       // Zero their input but keep peer in _peers
@@ -12321,19 +12366,8 @@
       _config?.onToast?.(`${name} disconnected — reconnecting...`);
       _config?.onReconnecting?.(remoteSid, true);
 
-      // Lower slot initiates reconnect
-      if (_playerSlot < peer.slot) {
-        attemptReconnect(remoteSid);
-      }
-
-      // 45-second timeout — give up and hard disconnect (allows up to 3 retry attempts)
-      peer._reconnectTimeout = setTimeout(() => {
-        if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
-        _syncLog(`reconnect timeout for ${remoteSid} after ${peer._reconnectAttempts || 1} attempts`);
-        const frame = _peerDriver()?.open(peer.slot, remoteSid);
-        hardDisconnectPeer(remoteSid);
-        _peerDriver()?.close(frame, { type: 'deadline', deadline: 'giveUpAfter' });
-      }, 45000);
+      if (_playerSlot < peer.slot && attemptReconnect(remoteSid)) return;
+      _waitForPeerReconnect(remoteSid, peer);
 
       return;
     }
@@ -12356,10 +12390,7 @@
       } catch (_) {}
     }
     clearStartupConnectWatchdog(peer);
-    if (peer._reconnectTimeout) {
-      clearTimeout(peer._reconnectTimeout);
-      peer._reconnectTimeout = null;
-    }
+    _stopPeerReconnect(peer);
 
     if (peer.slot !== null && peer.slot !== undefined) {
       try {
@@ -12422,93 +12453,103 @@
     if (_playerSlot !== 0 && _leftSlot === 0 && running && !peer._intentionalLeave) _endMatchDropped('lost-host');
   };
 
-  const _MAX_RECONNECT_ATTEMPTS = 3;
-  const _RECONNECT_ATTEMPT_TIMEOUT = 10000; // 10s per attempt
-  const _RECONNECT_RETRY_DELAY = 3000; // 3s between retries
+  const _stopPeerReconnect = (peer) => {
+    peer._reconnectAttempt?.stop();
+    peer._reconnectAttempt = null;
+    peer._reconnectWait?.cancel();
+    peer._reconnectWait = null;
+    peer._answerWait?.cancel();
+    peer._answerWait = null;
+  };
 
-  const attemptReconnect = async (remoteSid, attempt = 1) => {
-    const peer = _peers[remoteSid];
-    if (!peer || !peer.reconnecting) return;
-    peer._reconnectAttempts = attempt;
-
-    _syncLog(`initiating reconnect to ${remoteSid} (attempt ${attempt}/${_MAX_RECONNECT_ATTEMPTS})`);
-    const known = _knownPlayers[remoteSid];
-    const name = known ? known.playerName : `P${(peer.slot ?? 0) + 1}`;
-    setStatus(`${name} disconnected — reconnecting (attempt ${attempt})...`);
-
-    // A retry's attempt was named when the retry was decided (retryOrGiveUp).
-    const reserved = attempt > 1 ? peer._knNextAttempt : null;
-    const attemptId = reserved ?? _nextAttemptId(peer.slot, remoteSid);
-    peer._knNextAttempt = null;
-    const peerGuard = (p) => _peers[remoteSid] === p;
-    KNShared.resetPeerConnection(peer, _getIceServers(), remoteSid, _signalSocket, peerGuard);
-    peer.pc._knAttempt = attemptId;
-    peer.ready = false;
-
-    const retryOrGiveUp = () => {
-      if (!_peers[remoteSid] || !_peers[remoteSid].reconnecting) return;
-      const frame = _peerDriver()?.open(peer.slot, remoteSid);
-      try {
-        _retryOrGiveUp();
-      } finally {
-        _peerDriver()?.close(frame, { type: 'deadline', deadline: 'attemptAfter' });
-      }
-    };
-    const _retryOrGiveUp = () => {
-      _meshCompare(
-        'reconnect-attempt-left',
-        attempt < _MAX_RECONNECT_ATTEMPTS,
-        _meshCore()?.hasAttemptLeft(attempt, _MAX_RECONNECT_ATTEMPTS) ?? attempt < _MAX_RECONNECT_ATTEMPTS,
-      );
-      if (attempt < _MAX_RECONNECT_ATTEMPTS) {
-        _syncLog(`reconnect attempt ${attempt} failed — retrying in ${_RECONNECT_RETRY_DELAY}ms`);
-        setStatus(`${name} disconnected — retry in ${Math.round(_RECONNECT_RETRY_DELAY / 1000)}s...`);
-        const next = _nextAttemptId(peer.slot, remoteSid);
-        peer._knNextAttempt = next;
-        setTimeout(() => attemptReconnect(remoteSid, attempt + 1), _RECONNECT_RETRY_DELAY);
-      } else {
-        _syncLog(`reconnect failed after ${_MAX_RECONNECT_ATTEMPTS} attempts — hard disconnect ${remoteSid}`);
+  // The answering page waits for the lower slot's offers across PC replacements.
+  const _waitForPeerReconnect = (remoteSid, peer) => {
+    if (peer._reconnectWait) return;
+    peer._reconnectWait = window.KNCore.startGroup.startDeadline({
+      deadlineMs: Math.max(0, window.KNCore.peerTiming.giveUpAfterMs - (Date.now() - peer.reconnectStart)),
+      onDeadline: () => {
+        if (_peers[remoteSid] !== peer || !peer.reconnecting || _phase !== PHASE_RUNNING) return;
+        _syncLog(`reconnect timeout for ${remoteSid}`);
+        const frame = _peerDriver()?.open(peer.slot, remoteSid);
         hardDisconnectPeer(remoteSid);
-      }
-    };
+        _peerDriver()?.close(frame, { type: 'deadline', deadline: 'giveUpAfter' });
+      },
+    });
+  };
 
-    // Timeout: if this attempt doesn't reach 'connected' in time, retry
-    let _reconnectTimer2 = setTimeout(() => {
-      const state = peer.pc.connectionState;
-      if (state !== 'connected') {
-        _syncLog(`reconnect attempt ${attempt} timeout (state=${state}) for ${remoteSid}`);
-        retryOrGiveUp();
+  const attemptReconnect = (remoteSid) => {
+    const peer = _peers[remoteSid];
+    if (!peer?.reconnecting) return false;
+    const name = _knownPlayers[remoteSid]?.playerName ?? `P${peer.slot + 1}`;
+    let pc = peer.pc;
+    let tries = 0;
+    const owns = (connection) =>
+      control.current() &&
+      peer.reconnecting &&
+      _phase === PHASE_RUNNING &&
+      _ownsPeerConnection(remoteSid, peer, connection);
+    const control = _peerDriver()?.reconnect(peer.slot, (command) => {
+      if (!owns(pc)) {
+        control.stop();
+        return;
       }
-    }, _RECONNECT_ATTEMPT_TIMEOUT);
-    peer.pc.onconnectionstatechange = () => {
-      const s = peer.pc.connectionState;
-      _syncLog(`reconnect peer ${remoteSid} connection-state: ${s} (attempt ${attempt})`);
-      if (s === 'connected' || s === 'closed') {
-        clearTimeout(_reconnectTimer2);
+      if (command.type === 'drop') {
+        _syncLog(`reconnect failed after ${tries} attempts — hard disconnect ${remoteSid}`);
+        hardDisconnectPeer(remoteSid);
+        return;
       }
-      if (s === 'failed') {
-        clearTimeout(_reconnectTimer2);
-        _syncLog(`reconnect PC failed for ${remoteSid} (attempt ${attempt})`);
-        retryOrGiveUp();
+      if (command.type === 'backoff') {
+        setStatus(`${name} disconnected — retrying...`);
+        return;
       }
-    };
-
-    // Use the same channel ownership rules for initial connection and retry.
-    createOutgoingPeerChannels(remoteSid, peer);
-
-    try {
-      const offer = await peer.pc.createOffer();
-      await peer.pc.setLocalDescription(offer);
-      _signalSocket.emit('webrtc-signal', {
-        target: remoteSid,
-        offer: peer.pc.localDescription,
-        reconnect: true,
-        attemptId,
-      });
-    } catch (err) {
-      _syncLog(`reconnect offer failed (attempt ${attempt}): ${err}`);
-      retryOrGiveUp();
-    }
+      const attemptId = { page: command.page, attempt: command.attempt };
+      _offerCounts.set(_offerCountKey(peer.slot, remoteSid), command.attempt);
+      tries++;
+      _syncLog(`initiating reconnect to ${remoteSid} (attempt ${tries}/${window.KNCore.peerTiming.maxAttempts})`);
+      setStatus(`${name} disconnected — reconnecting (attempt ${tries})...`);
+      const send = async () => {
+        let connection = pc;
+        try {
+          KNShared.resetPeerConnection(
+            peer,
+            _getIceServers(),
+            remoteSid,
+            _signalSocket,
+            (p) => _peers[remoteSid] === p,
+          );
+          connection = pc = peer.pc;
+          connection._knAttempt = attemptId;
+          peer.ready = false;
+          connection.onconnectionstatechange = () => {
+            if (!owns(connection)) return;
+            const state = connection.connectionState;
+            _syncLog(`reconnect peer ${remoteSid} connection-state: ${state} (attempt ${tries})`);
+            if (state === 'connected') control.connected(attemptId);
+            if (state === 'failed') control.failed(attemptId);
+          };
+          createOutgoingPeerChannels(remoteSid, peer);
+          const offer = await connection.createOffer();
+          if (!owns(connection) || !control.offering()) return;
+          await connection.setLocalDescription(offer);
+          if (!owns(connection) || !control.offering()) return;
+          _signalSocket.emit('webrtc-signal', {
+            target: remoteSid,
+            offer: connection.localDescription,
+            reconnect: true,
+            attemptId,
+          });
+        } catch (err) {
+          if (!owns(connection)) return;
+          _syncLog(`reconnect offer failed (attempt ${attemptId.attempt}): ${err}`);
+          control.failed(attemptId);
+        }
+      };
+      void send();
+    });
+    if (!control) return false;
+    peer._reconnectAttempt = control;
+    control.start();
+    return true;
   };
 
   // -- Helper: get active player peers ---------------------------------------
@@ -13511,10 +13552,6 @@
     // (Warmup removed — deterministic timing patch makes it unnecessary)
     _frameNum = 0;
     startLockstep();
-
-    // Spectator stream starts lazily — only when a spectator actually connects.
-    // Eager start wastes CPU (drawImage + video encode every frame) which causes
-    // thermal throttling on mobile hosts even with zero spectators.
   };
 
   let _cacheAttempted = false;
@@ -14842,18 +14879,39 @@
 
   // -- Spectator canvas streaming --------------------------------------------
 
-  const startSpectatorStream = () => {
-    if (_playerSlot !== 0) return;
-    if (_hostStream) return; // already started
-    // Bail if the engine has been stopped — without this the recursive
-    // setTimeout below keeps polling for #game canvas after stop() and
-    // can re-create _hostStream + audio plumbing in a torn-down engine.
-    if (_phase === PHASE_IDLE || _phase === PHASE_STOPPED) return;
+  const isWatching = (peer) => peer.slot === null && peer.dc?.readyState === 'open';
 
+  const detachSpectatorMedia = (peer) => {
+    peer._spectatorMedia?.detach();
+    peer._spectatorMedia = null;
+  };
+
+  const stopSpectatorCapture = () => {
+    _spectatorCanvasWait?.cancel();
+    _spectatorCanvasWait = null;
+    if (!_hostStream) return;
+    for (const peer of Object.values(_peers)) {
+      if (peer._spectatorMedia?.stream === _hostStream) detachSpectatorMedia(peer);
+    }
+    // Playback owns the shared audio track; a later viewer still needs it.
+    for (const track of _hostStream.getVideoTracks()) track.stop();
+    _hostStream = null;
+  };
+
+  const createSpectatorStream = () => {
     const canvas = document.querySelector('#game canvas');
     if (!canvas) {
-      _syncLog('canvas not found for spectator stream, retrying...');
-      setTimeout(startSpectatorStream, 200);
+      if (!_spectatorCanvasWait) {
+        const wait = window.KNCore.startGroup.startDeadline({
+          deadlineMs: 200,
+          onDeadline: () => {
+            if (_spectatorCanvasWait !== wait) return;
+            _spectatorCanvasWait = null;
+            startSpectatorStream();
+          },
+        });
+        _spectatorCanvasWait = wait;
+      }
       return;
     }
 
@@ -14880,16 +14938,8 @@
     };
     let crop = computeCrop();
 
-    _hostStream = captureCanvas.captureStream(0); // manual frame control
-
-    // Add audio track from bypass playback (if available)
-    if (_audio?.destNode?.stream) {
-      const audioTracks = _audio.destNode.stream.getAudioTracks();
-      for (let at = 0; at < audioTracks.length; at++) {
-        _hostStream.addTrack(audioTracks[at]);
-      }
-      _syncLog('added audio track to spectator stream');
-    }
+    const stream = captureCanvas.captureStream(0); // manual frame control
+    _hostStream = stream;
 
     const captureTrack = _hostStream.getVideoTracks()[0];
 
@@ -14898,7 +14948,11 @@
     let _lastSrcW = canvas.width;
     let _lastSrcH = canvas.height;
     const blitFrame = () => {
-      if (_phase !== PHASE_RUNNING) return; // stopped
+      if (_phase !== PHASE_RUNNING || _hostStream !== stream) return;
+      if (!Object.values(_peers).some(isWatching)) {
+        stopSpectatorCapture();
+        return;
+      }
       APISandbox.nativeRAF(blitFrame);
       if (canvas.width !== _lastSrcW || canvas.height !== _lastSrcH) {
         _lastSrcW = canvas.width;
@@ -14911,46 +14965,46 @@
     blitFrame();
 
     _syncLog(`spectator capture stream started (640x480, crop: ${crop.sx},${crop.sy} ${crop.sw}x${crop.sh})`);
+  };
 
-    // Add tracks to all existing spectator peer connections
-    for (const [sid, peer] of Object.entries(_peers)) {
-      if (peer.slot === null) {
-        addStreamToPeer(sid);
+  const startSpectatorStream = () => {
+    if (_playerSlot !== 0 || _phase !== PHASE_RUNNING) return;
+    const viewers = Object.entries(_peers).filter(([, peer]) => isWatching(peer));
+    if (!viewers.length) {
+      stopSpectatorCapture();
+      return;
+    }
+    if (!_hostStream) createSpectatorStream();
+    if (!_hostStream) return;
+    const audio = _audio?.destNode?.stream.getAudioTracks()[0];
+    if (audio && !_hostStream.getAudioTracks().includes(audio)) _hostStream.addTrack(audio);
+    for (const [sid, peer] of viewers) {
+      let media = peer._spectatorMedia;
+      if (!media || media.pc !== peer.pc || media.stream !== _hostStream) {
+        media = peer._spectatorMedia = KNShared.attachSpectatorMedia(peer.pc, _hostStream);
+        peer._spectatorOfferedChannel = null;
+      } else if (audio) {
+        media.setAudio(audio).catch((err) => _syncLog(`spectator audio failed: ${err}`));
       }
+      if (peer._spectatorOfferedChannel !== peer.dc) offerSpectatorStream(sid, peer, _hostStream);
     }
   };
 
-  const startSpectatorStreamForPeer = (remoteSid) => {
-    if (!_hostStream) {
-      // Lazy start: first spectator triggers stream creation
-      startSpectatorStream();
-      // startSpectatorStream may retry async if canvas not ready yet.
-      // If stream is ready now, add tracks immediately; otherwise
-      // startSpectatorStream will pick up all spectator peers when it finishes.
-      if (!_hostStream) return;
-    }
-    addStreamToPeer(remoteSid);
-  };
-
-  const addStreamToPeer = (remoteSid) => {
-    const peer = _peers[remoteSid];
-    if (!peer || !_hostStream) return;
-
-    // A spectator whose signaling reconnects is offered the stream again on
-    // the same connection; addTrack throws if the track already has a sender.
-    const alreadySending = new Set(peer.pc.getSenders().map((sender) => sender.track));
-    for (const track of _hostStream.getTracks()) {
-      if (!alreadySending.has(track)) peer.pc.addTrack(track, _hostStream);
-    }
-    renegotiate(remoteSid);
-  };
-
-  async function renegotiate(remoteSid) {
-    const peer = _peers[remoteSid];
-    if (!peer) return;
+  async function offerSpectatorStream(remoteSid, peer, stream) {
+    const { pc, dc } = peer;
+    peer._spectatorOfferedChannel = dc;
+    const current = () =>
+      _phase === PHASE_RUNNING &&
+      _hostStream === stream &&
+      _peers[remoteSid] === peer &&
+      peer.pc === pc &&
+      peer.dc === dc &&
+      isWatching(peer);
     try {
-      await KNShared.createAndSendOffer(peer.pc, _signalSocket, remoteSid);
+      await KNShared.createAndSendOffer(pc, _signalSocket, remoteSid, current);
     } catch (err) {
+      if (!current()) return;
+      peer._spectatorOfferedChannel = null;
       _syncLog(`renegotiate failed: ${err}`);
     }
   }
@@ -22292,10 +22346,7 @@
     // Close all peer connections and clear reconnect timers
     for (const [sid, p] of Object.entries(_peers)) {
       clearStartupConnectWatchdog(p);
-      if (p._reconnectTimeout) {
-        clearTimeout(p._reconnectTimeout);
-        p._reconnectTimeout = null;
-      }
+      _stopPeerReconnect(p);
       if (p._disconnectTimer) {
         clearTimeout(p._disconnectTimer);
         p._disconnectTimer = null;
@@ -22481,12 +22532,7 @@
     }
 
     // Clean up spectator stream
-    if (_hostStream) {
-      _hostStream.getTracks().forEach((t) => {
-        t.stop();
-      });
-      _hostStream = null;
-    }
+    stopSpectatorCapture();
     if (_guestVideo) {
       _guestVideo.srcObject = null;
       if (_guestVideo.parentNode) _guestVideo.parentNode.removeChild(_guestVideo);

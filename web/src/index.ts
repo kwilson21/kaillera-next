@@ -112,7 +112,7 @@ import {
 import { recoveryStep } from './recovery-resync.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
-import { newPageId, readAttemptId } from './attempt-id.ts';
+import { isOlderAttempt, newPageId, readAttemptId } from './attempt-id.ts';
 import { createPeerDriver } from './peer-driver.ts';
 import {
   disconnectDisposition,
@@ -459,7 +459,7 @@ export const KNCore = {
   peerFacts,
   peerTiming: PEER_TIMING,
   /** Which connection attempt a WebRTC signal belongs to (attempt-id.ts); both engines use it. */
-  attemptId: { newPageId, readAttemptId },
+  attemptId: { isOlderAttempt, newPageId, readAttemptId },
   /** The per-peer machine, driven from the rollback engine's events (peer-driver.ts). */
   peerDriver: { createPeerDriver },
   /** The guest's resync request rules (resync-request.ts); the rollback engine runs them observing. */

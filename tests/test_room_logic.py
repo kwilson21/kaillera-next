@@ -657,6 +657,49 @@ def test_start_game_registers_the_match_before_announcing_it():
     assert ("emit", "game-started") in order
 
 
+def test_queued_start_preserves_the_live_match_until_the_host_ends_it():
+    room = _host_room()
+    room.players["pid-guest"] = {"socketId": "sid-guest", "playerName": "Guest"}
+    room.slots[1] = "pid-guest"
+    _sid_to_room["sid-guest"] = ("ROOM1", "pid-guest", False)
+
+    async def scenario():
+        request = {"mode": "streaming"}
+        assert await signaling.start_game("sid-host", request) is None
+        first_match = room.match_id
+        started_at = room.started_at
+        room.recovery_unverified_match_id = first_match
+        room.waiting_for_state.add("pid-guest")
+
+        assert await signaling.start_game("sid-guest", request) == "Only the host can start the game"
+        assert await signaling.start_game("sid-host", request) is None
+        assert room.match_id == room.recovery_unverified_match_id == first_match
+        assert room.waiting_for_state == {"pid-guest"}
+        assert room.started_at == started_at
+        signaling.db.register_match.assert_awaited_once_with(first_match, "ROOM1")
+        signaling.sio.emit.assert_awaited_once()
+        signaling.state.save_room.assert_awaited_once()
+        signaling.db.insert_client_event.assert_awaited_once()
+
+        assert await signaling.end_game("sid-host", {"matchId": first_match}) is None
+        assert await signaling.start_game("sid-host", request) is None
+        assert room.match_id and room.match_id != first_match
+        assert signaling.db.register_match.await_count == 2
+        starts = [c.args[1]["matchId"] for c in signaling.sio.emit.await_args_list if c.args[0] == "game-started"]
+        assert starts == [first_match, room.match_id]
+
+    _run_with(
+        _patched_start(
+            [
+                patch.object(signaling.db, "register_match", new=AsyncMock()),
+                patch.object(signaling.db, "set_session_ended", new=AsyncMock()),
+                patch.object(signaling.desync_vision, "run_postmortem", new=AsyncMock()),
+            ]
+        ),
+        scenario(),
+    )
+
+
 def test_start_game_survives_register_failure():
     from src.api.payloads import StartGamePayload
     from src.api.signaling import _start_game_locked

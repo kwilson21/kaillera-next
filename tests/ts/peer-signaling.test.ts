@@ -192,7 +192,6 @@ test('the engine runs each proved function beside its own decision and reports a
     'should-initiate': 'shouldInitiate',
     disconnect: 'disconnectDisposition',
     'startup-attempt-left': 'hasAttemptLeft',
-    'reconnect-attempt-left': 'hasAttemptLeft',
     signal: 'signalDisposition',
   };
   for (const [what, name] of Object.entries(observed)) {
@@ -203,5 +202,4 @@ test('the engine runs each proved function beside its own decision and reports a
   // Observing only: the engine's own rules are still the ones in charge.
   assert.ok(engine.includes('shouldInitiate = _playerSlot < p.slot'));
   assert.ok(engine.includes('if (nextAttempt > STARTUP_CONNECT_MAX_ATTEMPTS) {'));
-  assert.ok(engine.includes('if (attempt < _MAX_RECONNECT_ATTEMPTS) {'));
 });
