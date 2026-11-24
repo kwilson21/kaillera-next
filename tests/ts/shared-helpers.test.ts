@@ -216,3 +216,33 @@ test('building KNShared touches nothing on the page', () => {
   assert.equal(typeof window, 'undefined');
   assert.equal(createShared().N64_MAX, 83);
 });
+
+test('guest touch input survives the EmulatorJS toolbar reopening during play', (t) => {
+  const touchInput = { 0: 1, 16: 32767 };
+  const emulator = {
+    settingsMenuOpen: false,
+    isPopupOpen: () => false,
+    elements: { menu: { classList: { contains: () => false } } },
+  };
+  const window = { KNState: { touchInput }, EJS_emulator: emulator, _kn_ejsTouchDisabled: true };
+  Object.defineProperty(globalThis, 'window', { value: window, configurable: true });
+  t.after(() => Reflect.deleteProperty(globalThis, 'window'));
+
+  const shared = createShared();
+  const read = () => shared.readLocalInput(1, null, new Set());
+  assert.deepEqual(read(), { ...stick(83), buttons: 1 });
+
+  emulator.settingsMenuOpen = true;
+  assert.deepEqual(read(), stick(0));
+  assert.deepEqual(touchInput, { 0: 0, 16: 0 });
+
+  emulator.settingsMenuOpen = false;
+  emulator.isPopupOpen = () => true;
+  touchInput[0] = 1;
+  assert.deepEqual(read(), stick(0));
+
+  emulator.isPopupOpen = () => false;
+  window._kn_ejsTouchDisabled = false;
+  touchInput[0] = 1;
+  assert.deepEqual(read(), stick(0));
+});

@@ -13383,8 +13383,7 @@
           ejs2.touch = false;
           window._kn_ejsTouchDisabled = true; // prevent enableMobileTouch() from re-showing it
         }
-        // Also hide EJS menu bar — if left visible, readLocalInput()'s
-        // ejsMenuOpen check clears touch state every frame.
+        // Start with the EmulatorJS toolbar closed.
         if (ejs2?.elements?.menu) {
           ejs2.elements.menu.classList.add('ejs_menu_bar_hidden');
         }

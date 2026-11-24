@@ -11,6 +11,7 @@
  * markup.ts.
  */
 import type { PageState } from '../../kn-state.ts';
+import type { Diagnostics } from '../diagnostics.ts';
 import {
   buttonIndex,
   buttonPlace,
@@ -78,6 +79,7 @@ export interface PadElement {
 
 /** The part of `window` the controls use. */
 export interface VirtualGamepadHost {
+  readonly KNDiag?: Pick<Diagnostics, 'notePadTouch'>;
   /** Read on every touch, so the engines and the controls always share the object that is there now. */
   readonly KNState?: { readonly touchInput?: PageState['touchInput'] | undefined } | undefined;
   readonly document: {
@@ -168,6 +170,7 @@ export const startVirtualGamepad = (host: VirtualGamepadHost): VirtualGamepad =>
   };
 
   const onTouchStart = (event: PadTouchEvent): void => {
+    host.KNDiag?.notePadTouch('start');
     event.preventDefault();
     for (const touch of event.changedTouches) {
       const target = doc.elementFromPoint(touch.clientX, touch.clientY);
@@ -200,6 +203,7 @@ export const startVirtualGamepad = (host: VirtualGamepadHost): VirtualGamepad =>
   };
 
   const onTouchMove = (event: PadTouchEvent): void => {
+    host.KNDiag?.notePadTouch('move');
     event.preventDefault();
     const values = touchValues();
     for (const touch of event.changedTouches) {
@@ -251,6 +255,11 @@ export const startVirtualGamepad = (host: VirtualGamepadHost): VirtualGamepad =>
         setButtonActive(index, false);
       }
     }
+  };
+
+  const onTouchCancel = (event: PadTouchEvent): void => {
+    host.KNDiag?.notePadTouch('cancel');
+    onTouchEnd(event);
   };
 
   const createOverlay = (): void => {
@@ -309,7 +318,7 @@ export const startVirtualGamepad = (host: VirtualGamepadHost): VirtualGamepad =>
     root.addEventListener('touchstart', onTouchStart, { passive: false });
     root.addEventListener('touchmove', onTouchMove, { passive: false });
     root.addEventListener('touchend', onTouchEnd, { passive: false });
-    root.addEventListener('touchcancel', onTouchEnd, { passive: false });
+    root.addEventListener('touchcancel', onTouchCancel, { passive: false });
 
     buttons = [...root.querySelectorAll('.vgp-btn')];
 
@@ -339,7 +348,7 @@ export const startVirtualGamepad = (host: VirtualGamepadHost): VirtualGamepad =>
         overlay.removeEventListener('touchstart', onTouchStart);
         overlay.removeEventListener('touchmove', onTouchMove);
         overlay.removeEventListener('touchend', onTouchEnd);
-        overlay.removeEventListener('touchcancel', onTouchEnd);
+        overlay.removeEventListener('touchcancel', onTouchCancel);
         overlay.parentNode?.removeChild(overlay);
         overlay = null;
       }

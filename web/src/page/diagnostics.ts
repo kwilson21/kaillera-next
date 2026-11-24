@@ -145,6 +145,7 @@ export const createDiagnostics = () => {
   let inputLastNonZeroFrame = -1;
   let inputEverNonZero = false;
   let inputDeadLogged = false;
+  const padTouchFrames = { start: -1, move: -1, cancel: -1 };
   let audioLastState = '';
 
   // -- Screenshot state --
@@ -422,6 +423,16 @@ export const createDiagnostics = () => {
     log('DIAG hooks installed');
   };
 
+  const notePadTouch = (kind: keyof typeof padTouchFrames): void => {
+    padTouchFrames[kind] = getFrame();
+  };
+
+  const padTouchSummary = (): string => {
+    const { start, move, cancel } = padTouchFrames;
+    if (start < 0 && move < 0 && cancel < 0) return '';
+    return ` padStart=${start} padMove=${move} padCancel=${cancel}`;
+  };
+
   // -- Freeze detection (called from tick loop) --
 
   const checkFreeze = (localInput: DiagInput): void => {
@@ -460,6 +471,10 @@ export const createDiagnostics = () => {
       localInput.cx !== 0 ||
       localInput.cy !== 0;
     if (isNonZero) {
+      if (inputDeadLogged) {
+        const touchSummary = padTouchSummary();
+        if (touchSummary) log(`INPUT-RESUMED slot=${getSlot()} cur=${frameNum}${touchSummary}`);
+      }
       inputLastNonZeroFrame = frameNum;
       inputEverNonZero = true;
       inputDeadLogged = false;
@@ -476,7 +491,7 @@ export const createDiagnostics = () => {
       log(
         `INPUT-DEAD slot=${getSlot()} zeroSince=${inputLastNonZeroFrame} ` +
           `cur=${frameNum} gap=${frameNum - inputLastNonZeroFrame}f ` +
-          `focus=${hasFocus} gamepads=${gpCount}`,
+          `focus=${hasFocus} gamepads=${gpCount}${padTouchSummary()}`,
       );
       inputDeadLogged = true;
     }
@@ -543,6 +558,9 @@ export const createDiagnostics = () => {
     inputLastNonZeroFrame = -1;
     inputEverNonZero = false;
     inputDeadLogged = false;
+    padTouchFrames.start = -1;
+    padTouchFrames.move = -1;
+    padTouchFrames.cancel = -1;
     audioLastState = '';
     playerAddrs.fill(null);
     screenshotDebugLogged = false;
@@ -553,6 +571,7 @@ export const createDiagnostics = () => {
     installHooks,
     cleanup,
     checkFreeze,
+    notePadTouch,
     checkCanvasHealth,
     sampleCanvasHealth,
     captureCanvasHash,
