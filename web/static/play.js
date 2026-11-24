@@ -459,6 +459,8 @@
   const _uploadTokenKey = _urlRoomCode ? `kn-upload-token:${_urlRoomCode}` : '';
   let _uploadToken = (_uploadTokenKey && _safeGet('localStorage', _uploadTokenKey)) || '';
   KNState.uploadToken = _uploadToken;
+  const _roomIce = window.KNCore.play.createRoomIceCache();
+  let _roomIceAuth = null;
 
   const _persistentId =
     _safeGet('sessionStorage', 'kn-player-id') ||
@@ -753,6 +755,44 @@
     }, seconds * 1000);
   };
 
+  const loadRoomIce = (room, token) => {
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(), 8000);
+    return fetch(`/ice-servers?token=${encodeURIComponent(token)}&room=${encodeURIComponent(room || '')}`, {
+      signal: abort.signal,
+    })
+      .then(async (response) => {
+        if (response.status === 408 || response.status >= 500) {
+          throw new Error('Room ICE lookup failed temporarily');
+        }
+        return {
+          servers: response.ok ? await response.json() : [],
+          relayTtlSeconds: response.ok ? Number(response.headers.get('X-KN-Relay-Ttl')) : 0,
+          retryAfterSeconds: response.ok ? Number(response.headers.get('X-KN-Relay-Retry-After')) : 0,
+        };
+      })
+      .finally(() => clearTimeout(deadline));
+  };
+
+  const roomIceRetry = {
+    load: () => {
+      const auth = _roomIceAuth;
+      if (
+        !auth ||
+        !socket?.connected ||
+        socket.id !== auth.socketId ||
+        roomCode !== auth.room ||
+        !window.KNCore.play.canRetryRoomIce(auth.room, auth.token)
+      ) {
+        return null;
+      }
+      return loadRoomIce(auth.room, auth.token);
+    },
+    publish: (servers) => {
+      window._iceServers = servers;
+    },
+  };
+
   const connect = () => {
     socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
     window._isSpectator = isSpectator;
@@ -781,6 +821,8 @@
     });
     const _connects = window.KNCore?.createConnectTracker() ?? null;
     socket.on('connect', () => {
+      _roomIceAuth = null;
+      _roomIce.begin(roomCode);
       // Every (re)connect: Socket.IO v4 emits 'reconnect' on the Manager, not
       // on the socket, so 'connect' is the event that fires here.
       _session?.socketUp();
@@ -799,6 +841,7 @@
       _connects?.attempt(attempt);
     });
     socket.on('disconnect', (reason) => {
+      _roomIceAuth = null;
       _cancelIntegrityNotice();
       _integrityNoticeAttempt = null;
       _session?.send({ type: 'socketDown' });
@@ -821,12 +864,8 @@
         try {
           if (_uploadTokenKey) _safeSet('localStorage', _uploadTokenKey, _uploadToken);
         } catch (_) {}
-        fetch(`/ice-servers?token=${encodeURIComponent(_uploadToken)}&room=${encodeURIComponent(roomCode || '')}`)
-          .then((r) => r.json())
-          .then((s) => {
-            window._iceServers = s;
-          })
-          .catch(() => {});
+        _roomIceAuth = { room: roomCode, token: _uploadToken, socketId: socket.id };
+        _roomIce.refresh(roomCode, loadRoomIce(roomCode, _uploadToken), roomIceRetry.publish);
       }),
     );
     socket.on(
@@ -1763,6 +1802,8 @@
   };
 
   const onRoomClosed = (data) => {
+    _roomIceAuth = null;
+    _roomIce.clear();
     _clearMatchIntegrity();
     _endGameRequest?.cancel();
     _endGameRequest = null;
@@ -3634,6 +3675,8 @@
     const resyncEnabled = _gameResyncEnabled;
 
     const lateJoin = _isLateJoin();
+    let spectatorRelayUnavailable = false;
+    const spectatorRelayError = 'The private spectator connection is unavailable. Try reloading the watch link.';
     engine = Engine;
     if (_reportedUnverifiedMatchId && _reportedUnverifiedMatchId === KNState.matchId) {
       engine.markMatchRecoveryUnverified?.(_reportedUnverifiedMatchId);
@@ -3654,6 +3697,14 @@
       romHash: _romHash ?? null,
       gameId: _gameId ?? null,
       uploadToken: _uploadToken,
+      roomIceServers: () => _roomIce.ready(roomCode, roomIceRetry),
+      onSpectatorRelayUnavailable: () => {
+        if (spectatorRelayUnavailable) return;
+        spectatorRelayUnavailable = true;
+        dismissGameLoading();
+        KNEvent('webrtc-fail', 'Spectator relay unavailable', { stage: 'spectator-relay' });
+        showError(spectatorRelayError);
+      },
       isMobile: _isMobile,
       onMatchIntegrityUnverified: ({ matchId }) => {
         if (!_showUnverifiedMatch(matchId)) return;
@@ -3670,6 +3721,13 @@
         // Update game loading overlay
         const loadingText = document.getElementById('game-loading-text');
         if (loadingText) loadingText.textContent = status;
+        if (spectatorRelayUnavailable && msg === 'Spectating...') {
+          spectatorRelayUnavailable = false;
+          const error = document.getElementById('error-msg');
+          if (error?.querySelector('.error-card p')?.textContent === spectatorRelayError) {
+            error.classList.add('hidden');
+          }
+        }
         // Dismiss loading overlay when game loop starts or stream connects
         if (msg.includes('game on') || msg.includes('Spectating') || msg.includes('streaming')) {
           dismissGameLoading();
@@ -3765,7 +3823,7 @@
     // NAT traversal failure (state=failed), peer never started (state=new),
     // or signaling stalled (no peers in KNState at all).
     setTimeout(() => {
-      if (coreFatal) return;
+      if (coreFatal || spectatorRelayUnavailable) return;
       const loadingEl = document.getElementById('game-loading');
       if (loadingEl && !loadingEl.classList.contains('hidden') && isGameRunning()) {
         const text = document.getElementById('game-loading-text');
@@ -3909,6 +3967,8 @@
   };
 
   const leaveGame = () => {
+    _roomIceAuth = null;
+    _roomIce.clear();
     _clearMatchIntegrity();
     _endGameRequest?.cancel();
     _endGameRequest = null;

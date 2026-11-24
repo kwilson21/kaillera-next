@@ -10419,6 +10419,28 @@
         // The connection now belongs to this offer's attempt (none from an old page).
         peer.pc._knAttempt = signalAttempt;
         signalDone();
+        if (_isSpectator && _config?.roomIceServers) {
+          // Answering starts ICE gathering. A relay-only watcher cannot gather
+          // any local candidates if the room's TURN credentials are not here yet.
+          const config = _config;
+          const pc = peer.pc;
+          const socketId = socket.id;
+          const iceServers = await config.roomIceServers();
+          if (
+            _config !== config ||
+            !_isSpectator ||
+            socket.id !== socketId ||
+            _peers[key] !== peer ||
+            peer.pc !== pc ||
+            pc._knAttempt !== signalAttempt
+          ) {
+            return;
+          }
+          if (!KNShared.configureSpectatorRelay(pc, iceServers)) {
+            config.onSpectatorRelayUnavailable?.();
+            return;
+          }
+        }
         await peer.pc.setRemoteDescription(new RTCSessionDescription(data.offer));
         await KNShared.drainCandidates(peer);
         await KNShared.createAndSendAnswer(peer.pc, _signalSocket, key, peer.pc._knAttempt);

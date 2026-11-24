@@ -18,6 +18,7 @@ import { createSyncLogRing, genEpoch } from '../sync-log-ring.ts';
 import { clientEvent, pageState, type ClientEvent } from './client-event.ts';
 import {
   addBufferedCandidate,
+  configureSpectatorRelay,
   createAndSendAnswer,
   createAndSendOffer,
   createBasePeer,
@@ -777,6 +778,7 @@ export const createShared = () => {
     drainCandidates: drainCandidates,
     createBasePeer: createBasePeer,
     addBufferedCandidate: addBufferedCandidate,
+    configureSpectatorRelay,
     createAndSendOffer: createAndSendOffer,
     createAndSendAnswer: createAndSendAnswer,
     resetPeerConnection: resetPeerConnection,

@@ -51,6 +51,19 @@ const buildRtcConfig = (iceServers: RTCIceServer[]): RTCConfiguration => {
   return cfg;
 };
 
+// The public ICE response can arrive before the room-authorized response.
+export const configureSpectatorRelay = (pc: RTCPeerConnection, iceServers: RTCIceServer[]): boolean => {
+  const isTurnUrl = (url: string): boolean => typeof url === 'string' && /^turns?:/i.test(url);
+  if (
+    !Array.isArray(iceServers) ||
+    !iceServers.some((server) => (Array.isArray(server?.urls) ? server.urls : [server?.urls]).some(isTurnUrl))
+  ) {
+    return false;
+  }
+  pc.setConfiguration({ ...pc.getConfiguration(), iceServers, iceTransportPolicy: 'relay' });
+  return true;
+};
+
 // Drain buffered ICE candidates after setting remote description.
 // Shared by lockstep and streaming WebRTC signal handlers.
 export async function drainCandidates(peer: BufferingPeer): Promise<void> {
