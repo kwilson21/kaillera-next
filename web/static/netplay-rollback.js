@@ -7958,7 +7958,6 @@
     _syncLog(`RESYNC-INPUTS f=${r} verified checkpoint request=${run.request}`);
   };
   let _savedGame = null;
-  let _returnGate = 'idle';
   let _saveDue = 0;
   let _pendingSave = null;
   let _saveWriting = false;
@@ -8089,11 +8088,9 @@
       });
   };
   const _returnFailed = (reason) => {
-    if (_returnGate === 'failed') return;
-    _returnGate = 'failed';
+    if (!_config?.matchReturn?.fail()) return;
     _syncLog('Match return failed: ' + reason);
     KNEvent('start-fail', 'Saved game could not resume', { reason, frame: _frameNum });
-    _config?.onResumeFailed?.(reason);
   };
   const _sendMatchSave = async () => {
     const config = _config;
@@ -8152,7 +8149,7 @@
   };
 
   const _installMatchSave = () => {
-    if (_returnGate !== 'idle') return;
+    if (!_config.matchReturn.needsInstall) return;
     const config = _config,
       save = _savedGame;
     try {
@@ -8176,14 +8173,11 @@
         returning: -1,
         request: 0,
       });
-      _returnGate = 'waiting';
       setStatus('Waiting for everyone to resume…');
-      config
-        .awaitResumeRelease()
+      config.matchReturn
+        .ready()
         .then((released) => {
-          if (config !== _config || _returnGate !== 'waiting') return;
-          if (!released) return _returnFailed('Game return cancelled');
-          _returnGate = 'released';
+          if (config !== _config || !released) return;
           _savedGame = null;
           _resetPacingAfterLateJoin();
           setStatus('Connected -- game on!');
@@ -10406,7 +10400,7 @@
       _leftOutOfStart.has(slot),
     );
     if (!leaves) return false;
-    if (_config?.resumeFromMatchId && _returnGate !== 'released') {
+    if (_config?.matchReturn && !_config.matchReturn.playing) {
       _returnFailed('An original player could not join the saved game');
       return false;
     }
@@ -16225,7 +16219,7 @@
   // on would silently diverge, so stop the match and surface the failure.
   const _handleCoreFatal = (branch, e) => {
     if (_coreFatalError) return;
-    if (typeof _config !== 'undefined' && _config?.resumeFromMatchId && _returnGate !== 'released')
+    if (typeof _config !== 'undefined' && _config?.matchReturn && !_config.matchReturn.playing)
       _returnFailed('Emulator could not resume');
     _coreFatalError = true;
     // Restore wall-clock timestamps after a mid-step abort.
@@ -16261,7 +16255,7 @@
   };
   const _stopAtStart = (reason, detail = {}) => {
     if (_coreFatalError) return;
-    if (typeof _config !== 'undefined' && _config?.resumeFromMatchId && _returnGate !== 'released')
+    if (typeof _config !== 'undefined' && _config?.matchReturn && !_config.matchReturn.playing)
       _returnFailed('Emulator could not resume');
     // As after a trap: only a reload starts this page again.
     _coreFatalError = true;
@@ -18184,7 +18178,7 @@
       _markTickReturn('waiting-for-host-return');
       return;
     }
-    if (_config?.resumeFromMatchId && _returnGate !== 'released') {
+    if (_config?.matchReturn && !_config.matchReturn.playing) {
       if (window._rbPendingInit && !_guestStart('match return')) return;
       if (_useCRollback) _installMatchSave();
       return;
@@ -22590,7 +22584,6 @@
     _config = config;
     _rngPatched = false;
     _rdramBase = _rngSeed = 0;
-    _returnGate = 'idle';
     _savedGame = _pendingSave = null;
     _saveDue = 0;
     _saveWriting = false;
@@ -22661,7 +22654,6 @@
 
   const stop = () => {
     _savedGame = _pendingSave = null;
-    _returnGate = 'failed';
     _droppedThisMatch = new Set();
     _droppedByHost = false;
     // Before the final log flush, so its log line reaches the server.

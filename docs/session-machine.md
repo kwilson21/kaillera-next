@@ -8,18 +8,25 @@ flowchart LR
   start(( )) --> lobby
   lobby -->|"wait for host"| waitingForHost
   lobby -->|"join mid-game: player<br/>join mid-game: player, streamed<br/>join mid-game: spectator, streamed"| lateJoinStarting
-  lobby -->|"join mid-game: spectator<br/>gameStarted"| running
+  lobby -->|"join mid-game: spectator<br/>gameStarted<br/>gameStarted: next match"| running
   waitingForHost -->|"host returned"| lobby
-  waitingForHost -->|"gameStarted"| running
+  waitingForHost -->|"gameStarted<br/>gameStarted: next match"| running
+  lateJoinStarting -->|"host peer lost during hold"| lateJoinWaitingForHost
   lateJoinStarting -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
   lateJoinStarting -->|"lateJoinRomNeeded"| lateJoinAwaitingRom
   lateJoinStarting -->|"engineStarted: needs state"| lateJoinSyncing
   lateJoinStarting -->|"engineStarted: no state needed<br/>lateJoinSynced"| running
+  running -->|"host peer lost during hold"| lateJoinWaitingForHost
   running -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
   running -->|"lateJoinRomNeeded"| lateJoinAwaitingRom
   running -->|"leftOutOfStart"| lateJoinStarting
+  lateJoinWaitingForHost -->|"host can serve this match"| lateJoinStarting
+  lateJoinWaitingForHost -->|"gameStarted: next match"| running
+  lateJoinWaitingForHost -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
+  lateJoinAwaitingRom -->|"host peer lost during hold"| lateJoinWaitingForHost
   lateJoinAwaitingRom -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
   lateJoinAwaitingRom -->|"lateJoinRomReady"| lateJoinStarting
+  lateJoinSyncing -->|"host peer lost during hold"| lateJoinWaitingForHost
   lateJoinSyncing -->|"rejoined: game ended while away<br/>rejoined: match replaced while away"| lobby
   lateJoinSyncing -->|"leftOutOfStart"| lateJoinStarting
   lateJoinSyncing -->|"lateJoinSynced<br/>admittedToStart"| running
@@ -36,6 +43,7 @@ What `play.js` reads from each state (`sessionFlag`):
 | `waitingForHost` | no | no | no |
 | `lateJoinStarting` | yes | no | yes |
 | `running` | yes | no | no |
+| `lateJoinWaitingForHost` | yes | no | no |
 | `lateJoinAwaitingRom` | yes | yes | yes |
 | `lateJoinSyncing` | yes | no | no |
 
@@ -52,4 +60,22 @@ flowchart LR
   idle -->|"socketUp, a game is on"| rejoining
   rejoining -->|"socketUp, a game is on (asks again on the new connection)"| rejoining
   rejoining -->|"socketUp, in the lobby<br/>socketDown<br/>gameOver<br/>the rejoin program ends (its outcome is delivered)"| idle
+```
+
+# Saved fight return
+
+Each original seat waits for its local engine and the room grant for the same match.
+Generated from `web/src/play/match-return.ts`. The Quint model is `room_saved_seat_fixed` in `specs/room_member_return.qnt`.
+
+```mermaid
+flowchart LR
+  returnStart(( )) --> installing
+  installing -->|"install"| waitingForPlayers
+  installing -->|"grant"| grantedBeforeInstall
+  installing -->|"cancel"| cancelled
+  waitingForPlayers -->|"grant"| playing
+  waitingForPlayers -->|"restart"| installing
+  waitingForPlayers -->|"cancel"| cancelled
+  grantedBeforeInstall -->|"install"| playing
+  grantedBeforeInstall -->|"cancel"| cancelled
 ```

@@ -1,4 +1,4 @@
-import { Result, Schema } from 'effect';
+import { Effect, Result, Schema } from 'effect';
 import type { Input } from './owner-proof.ts';
 import { digestBytes, sameInput } from './checkpoint-journal.ts';
 import { GameMode, type RoomPlayer } from './protocol.ts';
@@ -150,33 +150,37 @@ function open(): Promise<IDBDatabase> {
     const r = indexedDB.open('kn-match-return', 1);
     r.onupgradeneeded = () => r.result.createObjectStore(STORE).createIndex('capturedAt', 'capturedAt');
     r.onsuccess = () => resolve(r.result);
-    r.onerror = r.onblocked = () => reject(new Error('Match save storage unavailable'));
+    r.onerror = () => reject(r.error);
+    r.onblocked = () => {
+      // A blocked open can still succeed after the caller has taken the fallback.
+      r.onsuccess = () => r.result.close();
+      reject(new Error('Match save storage unavailable'));
+    };
   });
 }
-async function transaction<T>(
+function transaction<T>(
   write: boolean,
   initial: T,
   fn: (store: IDBObjectStore, result: (value: T) => void) => void,
 ): Promise<T> {
-  try {
-    const db = await open();
-    try {
-      return await new Promise<T>((resolve, reject) => {
-        let result = initial;
-        const tx = db.transaction(STORE, write ? 'readwrite' : 'readonly');
-        const store = tx.objectStore(STORE);
-        tx.oncomplete = () => resolve(result);
-        tx.onerror = tx.onabort = () => reject(tx.error);
-        fn(store, (v) => {
-          result = v;
-        });
-      });
-    } finally {
-      db.close();
-    }
-  } catch {
-    return initial;
-  }
+  const use = (db: IDBDatabase) =>
+    Effect.tryPromise(
+      () =>
+        new Promise<T>((resolve, reject) => {
+          let result = initial;
+          const tx = db.transaction(STORE, write ? 'readwrite' : 'readonly');
+          const store = tx.objectStore(STORE);
+          tx.oncomplete = () => resolve(result);
+          tx.onerror = tx.onabort = () => reject(tx.error);
+          fn(store, (v) => {
+            result = v;
+          });
+        }),
+    );
+  return Effect.acquireUseRelease(Effect.tryPromise(open), use, (db) => Effect.sync(() => db.close())).pipe(
+    Effect.orElseSucceed(() => initial),
+    Effect.runPromise,
+  );
 }
 // Check the time inside the same transaction as put: an older capture can finish hashing last.
 async function write(s: Save, current = () => true): Promise<boolean> {

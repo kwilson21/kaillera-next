@@ -141,15 +141,24 @@ done
 for variant in before fixed; do
   $QUINT test specs/room_member_return.qnt --main="room_return_match_${variant}" --backend="$BACKEND"
   $QUINT test specs/room_member_return.qnt --main="room_host_traffic_${variant}" --backend="$BACKEND"
+  $QUINT test specs/room_member_return.qnt --main="room_late_join_host_${variant}" --backend="$BACKEND"
   $QUINT test specs/room_member_return.qnt --main="room_return_identity_${variant}" --backend="$BACKEND"
 done
 $QUINT run specs/room_member_return.qnt --main=room_return_identity_fixed --invariant=visibleSeatHasItsIdentity \
   --max-steps=8 --max-samples=5000 --backend="$BACKEND"
+$QUINT run specs/room_member_return.qnt --main=room_late_join_host_fixed --invariant=allHold \
+  --max-steps=5 --max-samples=1000 --backend="$BACKEND"
 $QUINT run specs/room_member_return.qnt --main=room_host_traffic_fixed --invariant=staleHostCannotAdvance \
   --max-steps=15 --max-samples=5000 --backend="$BACKEND"
 $QUINT test specs/room_member_return.qnt --main=room_saved_fight --backend="$BACKEND"
 $QUINT run specs/room_member_return.qnt --main=room_saved_fight --invariant=everyoneInstalled \
   --max-steps=12 --max-samples=5000 --backend="$BACKEND"
+
+for variant in room_saved_seat_before room_saved_seat_fixed; do
+  $QUINT test specs/room_member_return.qnt --main="$variant" --backend="$BACKEND"
+done
+$QUINT run specs/room_member_return.qnt --main=room_saved_seat_fixed --invariant=releaseNeedsBoth \
+  --max-steps=6 --max-samples=1000 --backend="$BACKEND"
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt

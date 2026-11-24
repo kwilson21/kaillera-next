@@ -11,6 +11,7 @@
  */
 import fs from 'node:fs';
 import { initialTransition, transition } from 'xstate';
+import { matchReturnMachine } from '../web/src/play/match-return.ts';
 import { rejoinMachine } from '../web/src/rejoin-machine.ts';
 import { sessionFlag, sessionMachine } from '../web/src/session.ts';
 
@@ -28,12 +29,15 @@ const joined = (over) => ({
 const EVENTS = [
   ['wait for host', { type: 'waitForHost' }],
   ['host returned', { type: 'hostReturned' }],
+  ['host peer lost during hold', { type: 'hostPeerLostDuringHold', matchId: 'm' }],
+  ['host can serve this match', { type: 'hostAvailableForMatch', matchId: 'm' }],
   ['join: room in lobby', joined({ status: 'lobby', matchId: null })],
   ['join mid-game: player', joined({})],
   ['join mid-game: player, streamed', joined({ streaming: true })],
   ['join mid-game: spectator', joined({ spectator: true })],
   ['join mid-game: spectator, streamed', joined({ spectator: true, streaming: true })],
   ['gameStarted', { type: 'gameStarted', matchId: 'm' }],
+  ['gameStarted: next match', { type: 'gameStarted', matchId: 'another' }],
   ['gameEnded', { type: 'gameEnded' }],
   ['roomClosed', { type: 'roomClosed' }],
   ['rejoinRefused', { type: 'rejoinRefused' }],
@@ -70,6 +74,44 @@ while (queue.length) {
   }
 }
 
+function drawMachine(machine, events, start) {
+  const [first] = initialTransition(machine);
+  const seen = new Map([[first.value, first]]);
+  const found = new Map(); // "from to" -> labels
+  const queue = [first];
+  while (queue.length) {
+    const from = queue.shift();
+    if (from.status === 'done') continue;
+    for (const [label, event] of events) {
+      const [to] = transition(machine, from, event);
+      // Re-entering `rejoining` on a newer connection restarts the program.
+      const restarts =
+        machine === rejoinMachine &&
+        from.value === 'rejoining' &&
+        to.value === 'rejoining' &&
+        event.type === 'socketUp';
+      if (to.value === from.value && !restarts) continue;
+      const key = `${from.value} ${to.value}`;
+      found.set(key, [...(found.get(key) ?? []), restarts ? `${label} (asks again on the new connection)` : label]);
+      if (!seen.has(to.value)) {
+        seen.set(to.value, to);
+        queue.push(to);
+      }
+    }
+  }
+  return [
+    '```mermaid',
+    'flowchart LR',
+    `  ${start}(( )) --> ${first.value}`,
+    ...[...found.entries()].map(([key, labels]) => {
+      const [from, to] = key.split(' ');
+      return `  ${from} -->|"${labels.join('<br/>')}"| ${to}`;
+    }),
+    '```',
+    '',
+  ];
+}
+
 // ── The rejoin machine (web/src/rejoin-machine.ts), walked the same way ─────
 function rejoinSection() {
   // The invoked rejoin program finishing is an event too.
@@ -83,40 +125,13 @@ function rejoinSection() {
       { type: 'xstate.done.actor', actorId: 'attempt', output: { kind: 'noAnswer' } },
     ],
   ];
-  const [first] = initialTransition(rejoinMachine);
-  const seen = new Map([[first.value, first]]);
-  const found = new Map(); // "from to" -> labels
-  const queue = [first];
-  while (queue.length) {
-    const from = queue.shift();
-    for (const [label, event] of events) {
-      const [to] = transition(rejoinMachine, from, event);
-      // Re-entering `rejoining` on a newer connection restarts the program.
-      const restarts = from.value === 'rejoining' && to.value === 'rejoining' && event.type === 'socketUp';
-      if (to.value === from.value && !restarts) continue;
-      const key = `${from.value} ${to.value}`;
-      found.set(key, [...(found.get(key) ?? []), restarts ? `${label} (asks again on the new connection)` : label]);
-      if (!seen.has(to.value)) {
-        seen.set(to.value, to);
-        queue.push(to);
-      }
-    }
-  }
   return [
     '# Rejoin machine',
     '',
     'Generated from `web/src/rejoin-machine.ts` by the same script. `rejoining` invokes the rejoin',
     'program (`web/src/rejoin-attempt.ts`); leaving the state interrupts it.',
     '',
-    '```mermaid',
-    'flowchart LR',
-    `  rejoinStart(( )) --> ${first.value}`,
-    ...[...found.entries()].map(([key, labels]) => {
-      const [from, to] = key.split(' ');
-      return `  ${from} -->|"${labels.join('<br/>')}"| ${to}`;
-    }),
-    '```',
-    '',
+    ...drawMachine(rejoinMachine, events, 'rejoinStart'),
   ];
 }
 
@@ -179,6 +194,16 @@ const lines = [
   'The Quint model of the same states, with the server beside them, is `specs/room_lifecycle.qnt`.',
   '',
   ...rejoinSection(),
+  '# Saved fight return',
+  '',
+  'Each original seat waits for its local engine and the room grant for the same match.',
+  'Generated from `web/src/play/match-return.ts`. The Quint model is `room_saved_seat_fixed` in `specs/room_member_return.qnt`.',
+  '',
+  ...drawMachine(
+    matchReturnMachine,
+    ['install', 'grant', 'restart', 'cancel'].map((type) => [type, { type }]),
+    'returnStart',
+  ),
 ];
 const text = lines.join('\n');
 

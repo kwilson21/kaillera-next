@@ -26,7 +26,7 @@ def test_rest_room_payload_includes_game_id_aliases():
 
 def test_play_join_adopts_room_game_id_before_mid_game_init():
     source = (REPO_ROOT / "web/static/play.js").read_text()
-    room_fetch_idx = source.find("const response = await fetch(`/room/${encodeURIComponent(roomCode)}`);")
+    room_fetch_idx = source.find("const roomData = await _hostReturn.roomForJoin(")
     assert room_fetch_idx != -1
     mid_game_idx = source.find("if (joinedStatus === 'playing')", room_fetch_idx)
     assert mid_game_idx != -1

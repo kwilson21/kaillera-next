@@ -449,8 +449,8 @@
   let _returningSeat = null;
   let _matchReturn = null;
   let _leavingRoom = false;
+  let _admission = null;
   const showHostWait = _hostReturn.hostWaitNotice(() => engine?.hostGameConnected?.() === true);
-  let _lateJoinWaitingForHost = null;
 
   const offerHostReturn = (proof, error = '') => {
     const remembered = _identity.savedHost(0)?.persistentId === proof.persistentId;
@@ -860,6 +860,7 @@
       _connects?.attempt(attempt);
     });
     socket.on('disconnect', (reason) => {
+      _admission?.abort();
       _roomIceAuth = null;
       _cancelIntegrityNotice();
       _integrityNoticeAttempt = null;
@@ -1126,6 +1127,7 @@
 
   const onConnect = async (isReconnect = false) => {
     if (_leavingRoom || document.getElementById('host-return-dialog')?.open) return;
+    _admission?.abort();
     // Mid-game reconnect: silently rejoin signaling channel, don't reset UI
     if (isGameRunning()) {
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
@@ -1190,9 +1192,14 @@
       return;
     }
 
+    // Room lookups, ROM reads and acknowledgements belong to the connection that started them.
+    const admission = new AbortController();
+    _admission = admission;
+    const sid = socket.id;
     if (isHost && !_returningSeat && !_identity.wasInRoom()) {
       const lastEndBeforeOpen = _lastHandledGameEndMatchId;
       socket.emit('open-room', _connect.openRoomRequest(joinerNow(), _gameId || '', null), (err) => {
+        if (admission.signal.aborted) return;
         // What the answer means is connect.ts: opened, the room is someone
         // else's now (it was handed on after this page was dropped as host),
         // or failed.
@@ -1245,21 +1252,14 @@
       // Returning players and new guests both join the room as it exists now.
       const savedHost = _identity.savedHost(0);
       try {
-        const response = await fetch(`/room/${encodeURIComponent(roomCode)}`);
-        if (!response.ok) {
-          if (response.status === 404) {
-            if (savedHost) _identity.discardRefused(savedHost.token);
-            if (_returningSeat?.role === 'player') _identity.discardPlayer(_returningSeat.token);
-          }
-          showError(
-            response.status === 404
-              ? 'Room not found — it may have expired or the code may be incorrect'
-              : 'Could not reach the room. Please try again.',
-          );
+        const roomData = await _hostReturn.roomForJoin(roomCode, admission.signal);
+        if (admission.signal.aborted) return;
+        if (!roomData) {
+          if (savedHost) _identity.discardRefused(savedHost.token);
+          if (_returningSeat?.role === 'player') _identity.discardPlayer(_returningSeat.token);
+          showError('Room not found — it may have expired or the code may be incorrect');
           return;
         }
-        const roomData = await response.json();
-        if (!roomData) return;
         // A visitor without a seat can wait on the invite while this room is reserved.
         if (_hostReturn.hostReturnClock(roomData) !== null && !_returningSeat && !_identity.reconnectToken) {
           window.location.replace(inviteUrl(isSpectator));
@@ -1315,12 +1315,8 @@
           (_returningSeat?.role === 'host' || (!returning && savedHost?.persistentId === joiner.persistentId)) &&
           savedHost;
         if (hostProof && roomData.status === 'playing' && roomData.hostReturnDeadline != null) {
-          const status = await fetch('/room/' + encodeURIComponent(roomCode), {
-            headers: { Authorization: 'Bearer ' + hostProof.token },
-            cache: 'no-store',
-          });
-          if (status.status >= 500) throw new Error('Could not check the saved fight');
-          const seat = status.ok ? await status.json() : null;
+          const seat = await _hostReturn.seatForJoin(roomCode, hostProof.token, admission.signal);
+          if (admission.signal.aborted) return;
           if (
             seat?.role === 'host' &&
             seat.matchId &&
@@ -1334,21 +1330,20 @@
               remainingMs: seat.returnDeadline - seat.serverTime,
             }))
           ) {
+            if (admission.signal.aborted) return;
             const loaded =
               (_romHash === seat.rom_hash && localRomLoaded()) ||
-              (await new Promise((resolve) => loadRomFromLibrary(seat.rom_hash, resolve)));
-            if (loaded && _romHash === seat.rom_hash) {
-              recoverMatchId = seat.matchId;
-              _returningSeat = { ...hostProof, role: 'host', remembered: true };
-            }
+              (await new Promise((resolve) => loadRomFromLibrary(seat.rom_hash, resolve, admission.signal)));
+            if (loaded && _romHash === seat.rom_hash) recoverMatchId = seat.matchId;
           }
         }
-        const sid = socket.id;
+        if (admission.signal.aborted) return;
+        if (recoverMatchId) _returningSeat = { ...hostProof, role: 'host', remembered: true };
         socket.emit(
           'join-room',
           _connect.joinRoomRequest(joiner, isSpectator, null, _returningSeat?.role, recoverMatchId),
           (err, joinAck) => {
-            if (socket.id !== sid) return;
+            if (admission.signal.aborted) return;
             if (err) {
               if (returning?.role === 'player') {
                 _returningSeat = null;
@@ -1374,6 +1369,7 @@
                 isSpectator = true;
                 _autoSpectated = true;
                 socket.emit('join-room', _connect.joinRoomRequest(joinerNow(), true, null), (err2, joinAck2) => {
+                  if (admission.signal.aborted) return;
                   if (err2) {
                     showError(`Failed to join: ${err2}`);
                     return;
@@ -1587,7 +1583,7 @@
           },
         );
       } catch (_) {
-        showError('Could not reach the room. Please try again.');
+        if (!admission.signal.aborted) showError('Could not reach the room. Please try again.');
       }
     }
   };
@@ -1596,6 +1592,13 @@
 
   const onUsersUpdated = (data) => {
     if (_leavingRoom) return;
+    if (
+      _session?.state() === 'lateJoinWaitingForHost' &&
+      data.status === 'playing' &&
+      data.matchId !== KNState.matchId &&
+      !(data.resumePending && data.resumeFromMatchId === KNState.matchId)
+    )
+      return;
     // Admission broadcasts can arrive before the acknowledgement. Publish the seat with its verified identity.
     if (_returningSeat && !_identity.acceptReturnFromRoster(_returningSeat, data, socket.id)) return;
     lastUsersData = data;
@@ -1765,17 +1768,14 @@
       if (KNState.matchId === data.resumeFromMatchId) onGameEnded({ matchId: KNState.matchId, reason: 'host-rewind' });
       if (!KNState.matchId) onGameStarted(data);
     }
-    if (_lateJoinWaitingForHost && data.hostReturnDeadline == null) {
-      const match = _lateJoinWaitingForHost;
-      _lateJoinWaitingForHost = null;
-      if (
-        !isHost &&
-        isGameRunning() &&
-        data.status === 'playing' &&
-        data.matchId === match &&
-        KNState.matchId === match
-      )
-        startGuestLateJoin();
+    if (
+      !isHost &&
+      _session?.state() === 'lateJoinWaitingForHost' &&
+      data.status === 'playing' &&
+      data.hostReturnDeadline == null &&
+      data.matchId
+    ) {
+      startGuestLateJoin({ type: 'hostAvailableForMatch', matchId: data.matchId });
     }
   };
 
@@ -1791,11 +1791,15 @@
   const _gameStart = window.KNCore.play.gameStart;
 
   const onGameStarted = (data) => {
+    if (_session?.state() === 'lateJoinWaitingForHost' && data.matchId === KNState.matchId) return;
     if (data.resumeFromMatchId) {
       // The host's snapshot and slot are bound to the identity confirmed in its join acknowledgement.
       if (_returningSeat || _matchReturn?.matchId === data.matchId || data.matchId === _lastHandledGameEndMatchId)
         return;
-      _matchReturn = new window.KNCore.play.MatchReturn(data.matchId, data.resumeFromMatchId);
+      const { matchId, resumeFromMatchId } = data;
+      _matchReturn = new window.KNCore.play.MatchReturn(matchId, resumeFromMatchId, (ready) =>
+        socket.emit('match-return-ready', { matchId, ready }),
+      );
       if (isHost) {
         const hostId = _identity.persistentId;
         void _matchReturn.released.then(() => window.KNCore.matchSave.remove(roomCode, data.resumeFromMatchId, hostId));
@@ -1928,7 +1932,6 @@
     if (_unverifiedMatchId && _unverifiedMatchId === KNState.matchId && data?.matchId !== _unverifiedMatchId) return;
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (!_gameStart.endMatchesCurrent(endedMatchId ?? '', KNState.matchId ?? '')) return;
-    _lateJoinWaitingForHost = null;
     // A freshly opened host page receives this end before its room acknowledgement.
     // It has no running engine to clean up, but still needs the lobby explanation.
     _matchReturn?.finish(endedMatchId, false);
@@ -2012,11 +2015,12 @@
   };
 
   const onRoomClosed = (data) => {
+    _leavingRoom = true;
+    _admission?.abort();
     if (_matchReturn) _matchReturn.finish(_matchReturn.matchId, false);
     if (isHost && KNState.matchId)
       void window.KNCore.matchSave.remove(roomCode, KNState.matchId, _identity.persistentId);
     _identity.leaveRoom();
-    _lateJoinWaitingForHost = null;
     showHostWait(null);
     _roomIceAuth = null;
     _roomIce.clear();
@@ -3728,11 +3732,11 @@
     } catch (_) {}
   };
 
-  const loadRomFromLibrary = (hash, cb) => {
+  const loadRomFromLibrary = (hash, cb, signal) => {
     _romLibrary
       .get(hash)
       .then((val) => {
-        if (!val) {
+        if (!val || signal?.aborted) {
           cb(false);
           return;
         }
@@ -3864,15 +3868,18 @@
   // A signaling-only outage with working peer connections never enters this path.
   const waitForHostBeforeLateJoin = () => {
     if (isHost || lastUsersData?.hostReturnDeadline == null || !KNState.matchId) return false;
-    _lateJoinWaitingForHost = KNState.matchId;
+    if (_session?.state() === 'lateJoinWaitingForHost') return true;
+    _session?.send({ type: 'hostPeerLostDuringHold', matchId: KNState.matchId });
+    if (_session?.state() !== 'lateJoinWaitingForHost') return false;
     _sessionStopLateJoinPoll();
     engine?.stop();
     engine = null;
     return true;
   };
 
-  const startGuestLateJoin = () => {
-    _session?.send({ type: 'leftOutOfStart' });
+  const startGuestLateJoin = (event = { type: 'leftOutOfStart' }) => {
+    _session?.send(event);
+    if (!_isLateJoin()) return;
     _sessionWatchLateJoin();
     initEngine();
   };
@@ -3924,12 +3931,13 @@
     }
 
     const resyncEnabled = _gameResyncEnabled;
+    const engineMatchId = KNState.matchId;
 
     const lateJoin = _isLateJoin();
     let spectatorRelayUnavailable = false;
     const spectatorRelayError = 'The private spectator connection is unavailable. Try reloading the watch link.';
     engine = Engine;
-    const savedStart = _matchReturn?.matchId === KNState.matchId ? _matchReturn : null;
+    const savedStart = isSpectator ? null : _matchReturn?.startEngine(KNState.matchId);
     if (_reportedUnverifiedMatchId && _reportedUnverifiedMatchId === KNState.matchId) {
       engine.markMatchRecoveryUnverified?.(_reportedUnverifiedMatchId);
     }
@@ -3939,19 +3947,7 @@
       matchId: KNState.matchId,
       mode,
       resumeFromMatchId: savedStart?.source ?? null,
-      awaitResumeRelease: () =>
-        savedStart?.ready(() =>
-          socket.emit('match-return-ready', {
-            matchId: savedStart.matchId,
-            ready: true,
-          }),
-        ) ?? Promise.resolve(false),
-      onResumeFailed: () => {
-        if (savedStart && savedStart === _matchReturn) {
-          socket.emit('match-return-ready', { matchId: savedStart.matchId, ready: false });
-          savedStart.finish(savedStart.matchId, false);
-        }
-      },
+      matchReturn: savedStart,
       playerSlot: isSpectator ? null : mySlot,
       // This page's own roster entry is found by this too (KNCore.rosterPeers).
       persistentId: _identity.persistentId,
@@ -4013,11 +4009,12 @@
         showError(
           message ||
             (isHost
-              ? 'The emulator crashed. Reloading will end this match and return everyone to the room for a new game.'
+              ? 'The emulator crashed. Reload the page to return as host.'
               : "The emulator crashed and can't continue. Reload the page to rejoin the match."),
         );
       },
       onLateJoinInputFailed: (message) => {
+        if (engineMatchId !== KNState.matchId) return;
         if (waitForHostBeforeLateJoin()) return;
         coreFatal = true; // stop the generic connection timeout from replacing this error
         _sessionStopLateJoinPoll();
@@ -4078,6 +4075,7 @@
       // (specs/room_lifecycle.qnt, serveTimesOut). The machine moves to
       // lateJoinStarting first, so initEngine below starts a late join.
       onLeftOutOfStart: () => {
+        if (engineMatchId !== KNState.matchId) return;
         crumb('left-out-of-start', {});
         if (!waitForHostBeforeLateJoin()) startGuestLateJoin();
       },
@@ -4241,6 +4239,7 @@
   const leaveGame = () => {
     if (_leavingRoom) return;
     _leavingRoom = true;
+    _admission?.abort();
     if (_matchReturn) _matchReturn.finish(_matchReturn.matchId, false);
     if (isHost && KNState.matchId)
       void window.KNCore.matchSave.remove(roomCode, KNState.matchId, _identity.persistentId);

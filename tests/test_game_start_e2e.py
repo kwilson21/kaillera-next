@@ -1220,6 +1220,7 @@ def test_guest_waits_for_the_same_host_before_starting_a_late_join(browser, serv
     host, guest = _guest_in_a_room(browser, server_url, room)
     try:
         guest.evaluate(_RECORD_ENGINE_STARTS)
+        guest.evaluate(_RECORD_ROOM)
         _start_room(host, guest)
         guest.wait_for_function("window.__engineStarts.includes(false)")
         match = guest.evaluate("KNState.matchId")
@@ -1228,12 +1229,19 @@ def test_guest_waits_for_the_same_host_before_starting_a_late_join(browser, serv
         expect(wait).to_be_visible()
         # Trigger the engine's lost-host callback while the server is holding the room.
         guest.evaluate("window.__lostHost()")
+        guest.evaluate("window.__lostHost()")
+        held_room = guest.evaluate("window.__room")
+        guest.evaluate(_DELIVER, ["users-updated", {**held_room, "matchId": "older", "hostReturnDeadline": None}])
+        guest.evaluate(_DELIVER, ["game-started", _game_started(match)])
+        expect(wait).to_be_visible()
         assert guest.evaluate("window.__engineStarts") == [False]
         assert guest.evaluate("KNState.matchId") == match
 
         if host_return == "reconnect":
             host.evaluate("() => { window.__test_socket.connect(); }")
             guest.wait_for_function("window.__engineStarts.includes(true)", timeout=10000)
+            guest.evaluate(_DELIVER, ["users-updated", guest.evaluate("window.__room")])
+            assert guest.evaluate("window.__engineStarts") == [False, True]
             assert guest.evaluate("KNState.matchId") == match
         else:
             host.once("dialog", lambda dialog: dialog.accept())

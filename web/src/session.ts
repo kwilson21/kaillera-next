@@ -1,10 +1,8 @@
 /**
  * What this page is doing, as a state machine: showing the lobby, joining a
  * match already in play, or running a match. It is the page half of
- * specs/room_lifecycle.qnt (`Page = Lobby | Waiting | Running`; the three
- * late-join states here are all `Waiting` there, since the server cannot
- * tell them apart). The scenario tests in tests/ts replay that model's runs
- * against it.
+ * specs/room_lifecycle.qnt. The guest waiting for its host to return is
+ * modelled in specs/room_member_return.qnt (room_late_join_host).
  *
  * play.js reads its lifecycle from here and keeps no flags of its own:
  *  - "is a game on" (anything but the lobby);
@@ -24,6 +22,8 @@ import { reconcileRejoin } from './rejoin.ts';
 export type SessionState =
   | 'lobby'
   | 'waitingForHost'
+  /** An active guest has stopped its engine until its host can serve the match. */
+  | 'lateJoinWaitingForHost'
   /** Joined a match in play; no usable ROM yet, the page is asking for one. */
   | 'lateJoinAwaitingRom'
   /** Joined a match in play; the next engine start is the late join. */
@@ -83,6 +83,8 @@ export const sessionMachine = setupEffect({
       gameEnded: Empty,
       waitForHost: Empty,
       hostReturned: Empty,
+      hostPeerLostDuringHold: Schema.Struct({ matchId: Schema.String }),
+      hostAvailableForMatch: Schema.Struct({ matchId: Schema.String }),
       /** The server closed the room under this page (host left, shutdown). */
       roomClosed: Empty,
       /**
@@ -148,6 +150,9 @@ export const sessionMachine = setupEffect({
   on: {
     socketDown: ({ context }) => ({ context: { ...context, socketUp: false } }),
     socketUp: ({ context }) => ({ context: { ...context, socketUp: true } }),
+    hostPeerLostDuringHold: ({ context, event }) => {
+      if (context.matchId === event.matchId) return { target: '.lateJoinWaitingForHost' };
+    },
     gameEnded: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
     roomClosed: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
     rejoinRefused: ({ context }) => ({ target: '.lobby', context: { ...context, matchId: null } }),
@@ -170,6 +175,21 @@ export const sessionMachine = setupEffect({
       on: {
         hostReturned: { target: 'lobby' },
         gameStarted: ({ context, event }) => ({ target: 'running', context: { ...context, matchId: event.matchId } }),
+      },
+    },
+    lateJoinWaitingForHost: {
+      on: {
+        gameStarted: ({ context, event }) => {
+          if (context.matchId !== event.matchId)
+            return { target: 'running', context: { ...context, matchId: event.matchId } };
+        },
+        hostAvailableForMatch: ({ context, event }) => {
+          if (context.matchId === event.matchId) return { target: 'lateJoinStarting' };
+        },
+        rejoined: ({ context, event }) => {
+          const verdict = reconcileRejoin(true, context.matchId ?? '', event.playing, event.matchId ?? '');
+          if (verdict !== 'keep') return { target: 'lobby', context: { ...context, matchId: null } };
+        },
       },
     },
     lateJoinAwaitingRom: {

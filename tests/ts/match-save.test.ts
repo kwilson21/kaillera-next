@@ -21,6 +21,27 @@ const config = {
   initialPlayers: { players: { guest: seat(3), host: seat(0) } },
 };
 const identity = matchSave.scope(config, 'core')!;
+test('a blocked save lookup falls back and closes the database if the open later succeeds', async (t) => {
+  const close = t.mock.fn();
+  const request = { result: { close }, onsuccess() {}, onblocked() {} };
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+  Object.defineProperty(globalThis, 'indexedDB', {
+    configurable: true,
+    value: {
+      open: () => {
+        queueMicrotask(() => request.onblocked());
+        return request;
+      },
+    },
+  });
+  t.after(() => {
+    if (previous) Object.defineProperty(globalThis, 'indexedDB', previous);
+    else Reflect.deleteProperty(globalThis, 'indexedDB');
+  });
+  assert.equal(await matchSave.available(identity), false);
+  request.onsuccess();
+  assert.equal(close.mock.callCount(), 1);
+});
 test('a save names permanent owners in their actual controller ports', () => {
   assert.deepEqual(identity.roster, ['host', null, null, 'guest']);
   assert.equal(identity.hostId, 'host');

@@ -130,6 +130,35 @@ module room_saved_fight {
     .then(installed("host", 2)).then(installed("guest2", 2)).expect(s.phase == "lobby")
 }
 
+// The room grant and the local emulator install can arrive in either order.
+// The page keeps the source save until both have arrived or the return is cancelled.
+module room_saved_seat {
+  const REQUIRE_LOCAL_INSTALL: bool
+  var s: { installed: bool, granted: bool, cancelled: bool, released: bool }
+  action init = s' = { installed: false, granted: false, cancelled: false, released: false }
+  action install = if (s.cancelled) s' = s
+    else s' = s.with("installed", true).with("released", s.granted)
+  action grant(current: bool): bool = if (not(current) or s.cancelled) s' = s
+    else s' = s.with("granted", true).with("released", s.installed or not(REQUIRE_LOCAL_INSTALL))
+  action restart = if (s.released or s.cancelled) s' = s else s' = s.with("installed", false)
+  action cancel = if (s.released) s' = s else s' = s.with("cancelled", true)
+  action step = any { install, grant(true), grant(false), restart, cancel }
+  val releaseNeedsBoth = not(s.released) or (s.installed and s.granted and not(s.cancelled))
+  run earlyGrantTest = init.then(grant(true)).expect(s.released == not(REQUIRE_LOCAL_INSTALL))
+    .then(install).expect(s.released)
+  run installBeforeGrantTest = init.then(install).then(grant(false)).expect(not(s.released))
+    .then(grant(true)).expect(s.released)
+  run restartedEngineTest = init.then(install).then(restart).then(grant(true))
+    .expect(s.released == not(REQUIRE_LOCAL_INSTALL)).then(install).expect(s.released)
+  run cancelledInstallTest = init.then(install).then(cancel).then(grant(true)).expect(not(s.released))
+}
+module room_saved_seat_before {
+  import room_saved_seat(REQUIRE_LOCAL_INSTALL = false).*
+}
+module room_saved_seat_fixed {
+  import room_saved_seat(REQUIRE_LOCAL_INSTALL = true).*
+}
+
 // WebRTC can keep a data channel "open" after its transport failed. During
 // the room's host hold, only recent direct traffic can keep the guest playing.
 module room_host_traffic {
@@ -161,6 +190,38 @@ module room_host_traffic_before {
 }
 module room_host_traffic_fixed {
   import room_host_traffic(REQUIRE_TRAFFIC = true).*
+}
+
+// A guest already syncing its match loses the host peer during a host hold.
+// A roster for an older match cannot consume its chance to restart.
+module room_late_join_host {
+  const MODEL_WAIT: bool
+  var page: { phase: str, awaitingHost: bool, restarts: int }
+  action init = page' = { phase: "syncing", awaitingHost: false, restarts: 0 }
+  action losePeer = all {
+    page.phase == "syncing", page.restarts == 0,
+    page' = page.with("phase", if (MODEL_WAIT) "waiting" else "syncing").with("awaitingHost", true),
+  }
+  action roster(sameMatch: bool): bool =
+    if (page.awaitingHost and sameMatch)
+      page' = { phase: "starting", awaitingHost: false, restarts: page.restarts + 1 }
+    else if (page.awaitingHost and not(MODEL_WAIT)) page' = page.with("awaitingHost", false)
+    else page' = page
+  action endRoom = page' = page.with("phase", "lobby").with("awaitingHost", false)
+  action step = any { losePeer, roster(false), roster(true), endRoom }
+  val hostWaitStopsSyncWatchdog = not(page.awaitingHost) or page.phase != "syncing"
+  val allHold = hostWaitStopsSyncWatchdog and page.restarts <= 1
+  run lateGuestWaitsForMatchingRosterTest = init.then(losePeer)
+    .expect(hostWaitStopsSyncWatchdog == MODEL_WAIT).then(roster(false)).then(roster(true)).then(roster(true))
+    .expect(page.restarts == (if (MODEL_WAIT) 1 else 0))
+  run lateGuestCannotRestartClosedRoomTest = init.then(losePeer).then(endRoom).then(roster(true))
+    .expect(page.phase == "lobby" and page.restarts == 0)
+}
+module room_late_join_host_before {
+  import room_late_join_host(MODEL_WAIT = false).*
+}
+module room_late_join_host_fixed {
+  import room_late_join_host(MODEL_WAIT = true).*
 }
 
 // A room may broadcast its roster before acknowledging the returning tab's

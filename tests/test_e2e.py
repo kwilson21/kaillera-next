@@ -126,6 +126,33 @@ def test_host_return_after_a_temporary_lookup_failure(page, server_url, room):
     expect(page.locator("#host-controls")).to_be_visible()
 
 
+def test_socket_replacement_cancels_the_old_room_lookup(browser, page, server_url, room):
+    url = f"{server_url}/play.html?room={room}"
+    page.goto(f"{url}&host=1")
+    expect(page.locator("#host-controls")).to_be_visible()
+    with browser.new_page() as guest:
+        guest.add_init_script("""
+            const fetchRoom = window.fetch.bind(window);
+            window.fetch = (url, options) => {
+                if (!window.answerOldLookup && String(url).startsWith('/room/')) {
+                    window.stalledLookup = options?.signal;
+                    return new Promise(resolve => {
+                        window.answerOldLookup = () => resolve(new Response(null, { status: 404 }));
+                    });
+                }
+                return fetchRoom(url, options);
+            };
+        """)
+        guest.goto(f"{url}&name=Guest")
+        guest.wait_for_function("typeof window.answerOldLookup === 'function'")
+        guest.evaluate("window.__test_socket.disconnect().connect()")
+        guest.wait_for_function("KNState.slot === 1")
+        assert guest.evaluate("window.stalledLookup.aborted")
+        guest.evaluate("window.answerOldLookup()")
+        expect(guest.locator("#error-msg")).to_be_hidden()
+        expect(guest.locator("#guest-status")).to_be_visible()
+
+
 def test_intentional_lobby_leave_transfers_the_room_and_clears_the_return_offer(browser, server_url, room):
     url = f"{server_url}/play.html?room={room}"
     original = browser.new_page()
@@ -170,7 +197,8 @@ def test_host_countdown_tracks_the_game_link_between_roster_updates(page, server
     expect(status).to_contain_text("Waiting for them to return")
     expect(timer).to_have_text("2:00")
     page.evaluate("window.gameLinkOpen = true")
-    page.clock.run_for(1000)
+    # The display refreshes every half second; allow it to render after the second changes.
+    page.clock.run_for(1250)
     expect(status).to_contain_text("game connection is still active")
     expect(timer).to_have_text("1:59")
     page.evaluate("window.gameLinkOpen = false")

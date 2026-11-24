@@ -435,7 +435,7 @@
         // The host attaches this video track after installing its saved fight.
         const config = _config;
         if (config?.resumeFromMatchId && !_isSpectator && peer.slot === 0 && event.track.kind === 'video') {
-          void config.awaitResumeRelease().then((go) => {
+          void config.matchReturn.ready().then((go) => {
             if (go && _config === config) startGuestInputLoop();
           });
         }
@@ -989,7 +989,7 @@
     return recovery;
   };
 
-  let _matchSaveTimer = null;
+  let _stopMatchSaves = null;
   const startStreamingSaves = (config, gm) => {
     if (!config.matchId) return;
     const store = window.KNCore.matchSave;
@@ -1019,7 +1019,7 @@
         writing = false;
       }
     };
-    _matchSaveTimer = setInterval(capture, store.cadence);
+    _stopMatchSaves = window.KNCore.startEvery(capture, store.cadence);
   };
 
   const startHost = () => {
@@ -1081,7 +1081,7 @@
             throw new Error('Streaming save verification failed');
         } catch (err) {
           _syncLog(`streaming restore failed: ${err?.message || err}`);
-          if (_config === config) config.onResumeFailed();
+          if (_config === config) config.matchReturn.fail();
           return;
         }
       }
@@ -1101,7 +1101,7 @@
 
       if (config.resumeFromMatchId) {
         setStatus('Waiting for players to resume…');
-        if (!(await config.awaitResumeRelease()) || _config !== config || !_gameRunning) return;
+        if (!(await config.matchReturn.ready()) || _config !== config || !_gameRunning) return;
         gm.Module.resumeMainLoop();
       }
       startStreamingSaves(config, gm);
@@ -1524,8 +1524,8 @@
   };
 
   const stop = () => {
-    if (_matchSaveTimer !== null) clearInterval(_matchSaveTimer);
-    _matchSaveTimer = null;
+    _stopMatchSaves?.();
+    _stopMatchSaves = null;
     if (_playerSlot === 0 && _config?.matchId) window.NetplayRollback.matchSaveCore.release();
     _gameRunning = false;
     _guestLoopStarted = false;
