@@ -19,12 +19,6 @@ def _run_async(coro):
         return pool.submit(asyncio.run, coro).result()
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _patch_browser_ssl():
-    """REST tests do not need a Playwright browser."""
-    yield
-
-
 @pytest.fixture
 def wake_client(monkeypatch):
     from fastapi.testclient import TestClient

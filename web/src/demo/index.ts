@@ -3,7 +3,6 @@
  * piece. The page reads it as `window.KNCore.demo`.
  */
 import * as autopilot from './autopilot.ts';
-import { installEjsGlobals } from './ejs-globals.ts';
 import * as hud from './hud.ts';
 import { createIndicators } from './indicators.ts';
 import * as network from './network.ts';
@@ -21,7 +20,6 @@ export const demo = {
   options,
   rom,
   romStore: demoRomStore,
-  installEjsGlobals,
   indicators: createIndicators,
   timelineView: createTimelineView,
   runState: createRunState,

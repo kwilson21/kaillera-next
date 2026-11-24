@@ -10,14 +10,6 @@ import threading
 import pytest
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _patch_browser_ssl():
-    """DB tests don't need the Playwright browser fixture (which would also
-    parameterize them with [chromium] and pull in an event loop that breaks
-    asyncio.run())."""
-    yield
-
-
 def _run_async(coro):
     """Run a coroutine in a dedicated thread with a fresh event loop. Bypasses
     any session-level event loop pytest-playwright may have started on the

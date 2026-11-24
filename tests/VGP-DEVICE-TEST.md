@@ -5,31 +5,17 @@ every major phone and tablet resolution. Tests both portrait and landscape
 orientations, with and without simulated browser chrome (Safari address bar,
 Chrome toolbar, etc).
 
-## What it tests
-
-- 25 devices (iPhones, Androids, iPads, Android tablets)
-- 4 variants each: landscape+browser, landscape+full, portrait+browser, portrait+full
-- **100 total screenshots** per run
-
 ## How to run
 
+From the repository root after [setup](../README.md#quick-start), install Chromium
+with `npx playwright install chromium` and start the static server with
+`just design`. In a second terminal at the repository root, run:
+
 ```bash
-# 1. Start the static file server from the web/ directory
-cd web && python3 -m http.server 18888 --bind 127.0.0.1 &
-
-# 2. Copy test page into web/ (needed for the server to serve it)
-cp tests/vgp-test.html web/vgp-test.html
-
-# 3. Run the test (requires playwright: npm install playwright)
 node tests/vgp-device-test.mjs
-
-# 4. Review results
-open tests/vgp-screenshots/index.html
-
-# 5. Clean up
-rm web/vgp-test.html
-kill %1  # stop the server
 ```
+
+Review `tests/vgp-screenshots/index.html` and stop the static server with Ctrl+C.
 
 ## Output
 

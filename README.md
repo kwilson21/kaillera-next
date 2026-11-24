@@ -50,7 +50,7 @@ Limits: this needs a browser with WebUSB (Chrome; Edge should work), so Safari a
 
 ## Quick start
 
-Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and [just](https://github.com/casey/just).
+Requires Python 3.11+, Node.js 24 with npm, [uv](https://docs.astral.sh/uv/), and [just](https://github.com/casey/just).
 
 ```bash
 # Install dependencies
@@ -61,21 +61,10 @@ just serve
 # → http://localhost:27888/
 ```
 
-This is the fastest path to a running server. Over plain HTTP you can explore the lobby, create rooms, and use **streaming mode**. Rollback mode requires HTTPS — see below.
-
-### What works without HTTPS
-
-| Feature | HTTP | HTTPS |
-|---|---|---|
-| Lobby, rooms, Socket.IO | works | works |
-| Streaming mode | works | works |
-| Rollback mode | broken (needs SharedArrayBuffer) | works |
-| High-res frame timing | degraded (~1ms vs ~5μs) | works |
-
-Browsers gate `SharedArrayBuffer` and `performance.now()` precision behind
-[cross-origin isolation](https://developer.mozilla.org/en-US/docs/Web/API/Window/crossOriginIsolated),
-which requires a secure context (HTTPS). The server sends the required
-`COOP`/`COEP` headers automatically — you just need HTTPS.
+The server sends the headers required for cross-origin isolation. On
+`http://localhost:27888/` the browser treats loopback as a secure context,
+so the rollback capability check can pass over HTTP. Use HTTPS when
+connecting from another device over the network.
 
 ### Full setup (HTTPS + Redis)
 
@@ -88,9 +77,9 @@ just dev
 # → https://<your-domain>:27888/
 ```
 
-### HTTPS setup (required for rollback)
+### HTTPS setup for other devices
 
-HTTPS is required — browsers need `crossOriginIsolated` (SharedArrayBuffer, high-res timers) which only works over secure contexts. `just certs` issues a real Let's Encrypt certificate via [lego](https://go-acme.github.io/lego/) using the Cloudflare DNS-01 challenge, so the cert is trusted by every device (including mobile) without installing a local CA. The subdomain never needs to resolve publicly — point it at your LAN IP via local DNS (AdGuard, Pi-hole, `/etc/hosts`, etc.).
+`just certs` issues a real Let's Encrypt certificate via [lego](https://go-acme.github.io/lego/) using the Cloudflare DNS-01 challenge, so the cert is trusted by every device (including mobile) without installing a local CA. The subdomain never needs to resolve publicly — point it at your LAN IP via local DNS (AdGuard, Pi-hole, `/etc/hosts`, etc.).
 
 #### 1. Install lego
 
@@ -320,7 +309,6 @@ The build clones EmulatorJS's forks of mupen64plus-libretro-nx and RetroArch, ap
 | `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN` | — | Cloudflare Realtime TURN credentials for `/ice-servers` |
 | `PER_IP_SPECTATOR_CAP` | `3` | Max spectator slots one IP can hold in a room |
 | `ROM_SHARING_ENABLED` | `true` | Server option for peer-to-peer ROM transfer. The public deployment sets this to `false`. |
-| `GAME_IMAGES_ENABLED` | `true` | Read by `og.py` but not currently wired to anything — OG-card game images are always on |
 | `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` | — | Enable the Claude desync-vision endpoint (`DESYNC_VISION_ENABLED=1`) |
 | `DISABLE_HTTPS` | — | Set to disable HTTPS even when certs are present |
 | `DISABLE_RATE_LIMIT` | — | Set to `1` to disable per-IP rate limiting (dev only) |

@@ -1750,8 +1750,7 @@ the desktop behind the browser.
   "kn" watermark). Recommendation: **OG cards go UI-only**, in direction A
   type, for the landing page and every invite. Box art next to "bring your
   own ROM" is exactly the look of the sketchy-ROM-site anti-reference, and
-  it is trademark art we don't need. `GAME_IMAGES_ENABLED=false` already
-  turns the per-game images off without a code change. Confirm?
+  it is trademark art we don't need. Confirm?
 - **Q3. A logo.** The site has none today (the name as text + a tiny "kn"
   tab icon). Do you want a symbol/mark designed? If yes, a generated sketch
   of ideas (no Nintendo content) is the one remaining use for GPT images.
@@ -2204,7 +2203,7 @@ rankings, avatars, roadmap, AI mention or personal story on the page.
 6. Public health for the waking state: `GET /health` already exists; make
    sure it answers fast and CORS-allows the static origin.
 7. OG cards: landing card in direction A type (UI-only); invite card =
-   box art while waiting (`GAME_IMAGES_ENABLED` stays on), **composed at
+   box art while waiting, **composed at
    request time from the latest frame once in game** (Pillow, 1200×630:
    name + "Kaz's room · in game" + the frame). No frame or unlisted → the
    waiting card.

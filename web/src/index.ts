@@ -14,6 +14,7 @@ import { initialTransition, transition } from 'xstate';
 import { addressMapFor } from './address-maps.ts';
 import { bootTimedOut } from './boot.ts';
 import { demo } from './demo/index.ts';
+import * as ejs from './page/ejs-globals.ts';
 import { decodeDesyncDigest } from './desync-digest.ts';
 import { fieldsToFlag } from './desync-fields.ts';
 import { lockstepStep } from './lockstep-wait.ts';
@@ -504,6 +505,7 @@ export const KNCore = {
   shouldResumeRomTransfer,
   /** The demo page's own logic, moving here from web/static/demo.js piece by piece. */
   demo,
+  ejs,
   /** The play and demo pages' own scripts (Stage 6); each is started by a small caller in web/static. */
   page: {
     menuAutopilot,

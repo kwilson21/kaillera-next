@@ -24,22 +24,23 @@ def browser_context_args(browser_context_args):
     return {**browser_context_args, "ignore_https_errors": True}
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _patch_browser_ssl(browser):
-    """Make browser.new_page() always create an SSL-tolerant context."""
+@pytest.fixture(scope="session")
+def browser(browser):
+    """Accept self-signed certs for tests that create their own contexts."""
     _orig_new_context = browser.new_context
-    _orig_new_page = browser.new_page
+    original_new_page = browser.new_page
 
     def _ssl_new_context(**kwargs):
         kwargs.setdefault("ignore_https_errors", True)
         return _orig_new_context(**kwargs)
 
     def _ssl_new_page(**kwargs):
-        ctx = browser.new_context()
-        return ctx.new_page(**kwargs)
+        kwargs.setdefault("ignore_https_errors", True)
+        return original_new_page(**kwargs)
 
     browser.new_context = _ssl_new_context
     browser.new_page = _ssl_new_page
+    return browser
 
 
 @pytest.fixture(autouse=True, scope="session")

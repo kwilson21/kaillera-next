@@ -962,16 +962,6 @@
       return 0;
     }
   })();
-  const RB_SHADOW_REPLAY_LEAD_FRAMES = (() => {
-    try {
-      const raw = _urlParams.get('shadowReplayLead') ?? localStorage.getItem('kn-shadow-replay-lead');
-      const parsed = raw === null ? 0 : parseInt(raw, 10);
-      if (!Number.isFinite(parsed)) return 0;
-      return Math.max(0, Math.min(12, parsed));
-    } catch (_) {
-      return 0;
-    }
-  })();
   const RB_SHADOW_RESYNC_DELAY_MS = (() => {
     try {
       const raw = _urlParams.get('shadowResyncDelayMs') ?? localStorage.getItem('kn-shadow-resync-delay-ms');
@@ -1267,11 +1257,6 @@
           : null,
     });
   }
-  // Legacy alias used by the existing code paths and the tail-fade
-  // timing. Kept as a getter-style constant so call sites stay
-  // unchanged. Reads adaptiveBurst at access time (eval's lazy enough
-  // because the call sites are inside hot loops, not module init).
-  const RB_REPLAY_BURST_MAX_FRAMES = RB_REPLAY_BURST_STATIC > 0 ? RB_REPLAY_BURST_STATIC : 4;
   // Diagnostic-only: ?tickProfile=1 records per-tick phase costs to a
   // circular buffer at window.__knTickProfile so a probe can identify
   // which phase dominates tick time. Off by default; recording costs
@@ -1506,21 +1491,6 @@
       };
     };
   }
-  const RB_REPLAY_BURST_BUDGET_MS = (() => {
-    try {
-      const raw = _urlParams.get('replayBurstBudgetMs') ?? localStorage.getItem('kn-replay-burst-budget-ms');
-      // 8 ms keeps the burst under half the frame budget — a single replayed
-      // game frame fits in one JS tick without overflowing the next render.
-      // Was 10 ms (lets a 2-frame replay land per tick) which read as a
-      // brief stutter every rollback. With burst=1 default this is a
-      // belt-and-suspenders cap; the burst-frame limit usually trips first.
-      const parsed = raw === null ? 8 : parseFloat(raw);
-      if (!Number.isFinite(parsed)) return 8;
-      return Math.max(1, Math.min(16, parsed));
-    } catch (_) {
-      return 10;
-    }
-  })();
   const RB_SKIP_RDP_DURING_REPLAY = (() => {
     try {
       const raw = _urlParams.get('replaySkipRdp') ?? localStorage.getItem('kn-replay-skip-rdp');

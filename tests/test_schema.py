@@ -11,12 +11,6 @@ import pytest
 from src import db, schema
 
 
-@pytest.fixture(autouse=True, scope="session")
-def _patch_browser_ssl():
-    """No browser needed (overrides the Playwright fixture in conftest.py)."""
-    yield
-
-
 def _run(coro):
     with ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(lambda: asyncio.run(coro)).result()

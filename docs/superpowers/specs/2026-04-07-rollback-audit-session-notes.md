@@ -255,7 +255,7 @@ path on this case too.
 ## Verification plan for device test
 
 1. **Rebuild WASM** via existing Docker pipeline (`build/build.sh` or
-   `build/build-via-orchestrator.sh`), deploy new core.
+   `build/build.sh`), deploy new core.
 2. **Lobby smoke test** — create room, join from second device, verify no
    DC errors in console.
 3. **rb-transport negotiation** — confirm session log contains:
