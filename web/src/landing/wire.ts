@@ -47,6 +47,8 @@ export const isHealthAnswer = (value: unknown): value is HealthAnswer => hasText
 
 /** A room as the invite page needs it. The server sends more; the rest is not read. */
 export interface RoomAnswer {
+  readonly hostReturnDeadline?: number | null;
+  readonly serverTime?: number | null;
   readonly status: string;
   readonly player_count: number;
   readonly max_players: number;
@@ -64,7 +66,9 @@ export const isRoomAnswer = (value: unknown): value is RoomAnswer =>
   mayHave(value, 'host_name', 'string') &&
   mayHave(value, 'game_id', 'string') &&
   mayHave(value, 'romName', 'string') &&
-  mayHave(value, 'closed', 'boolean');
+  mayHave(value, 'closed', 'boolean') &&
+  mayHave(value, 'hostReturnDeadline', 'number') &&
+  mayHave(value, 'serverTime', 'number');
 
 // ── GET /list ───────────────────────────────────────────────────────────────
 

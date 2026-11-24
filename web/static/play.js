@@ -447,17 +447,30 @@
   const _hostReturn = window.KNCore.play.hostReturn;
   const _identity = new _hostReturn.RoomIdentity(_urlRoomCode, window.KNStorage);
   let _returningHost = null;
+  let _leavingRoom = false;
+  const showHostWait = _hostReturn.hostWaitNotice();
+  let _lateJoinWaitingForHost = null;
 
   const offerHostReturn = (proof, error = '') => {
-    _hostReturn.chooseHostReturn(error, (returning) => {
-      // A return always joins an existing room, even on a bookmarked host URL.
-      isHost = false;
-      KNState.isLocalHost = false;
-      if (!returning) _identity.joinSeparately(proof);
-      _returningHost = returning ? proof : null;
-      if (!socket) connect();
-      else if (socket.connected) onConnect(false);
-    });
+    const remembered = _identity.savedHost(0)?.persistentId === proof.persistentId;
+    _hostReturn.chooseHostReturn(
+      _identity,
+      proof,
+      error,
+      (returning) => {
+        // A return always joins an existing room, even on a bookmarked host URL.
+        isHost = false;
+        KNState.isLocalHost = false;
+        if (!returning) _identity.joinSeparately(proof);
+        _returningHost = returning ? { ...returning, remembered } : null;
+        if (!socket) connect();
+        else if (socket.connected) onConnect(false);
+      },
+      () => {
+        _identity.discardRefused(proof.token);
+        showError('Room not found — it may have expired or the code may be incorrect');
+      },
+    );
   };
 
   // Moved to TypeScript (web/src/play/): this page reads them from the core
@@ -678,7 +691,7 @@
     roomCode = params.get('room');
     KNState.room = roomCode;
     // A restored tab already visited this room. Let the room answer with its current owner, slot and mode.
-    isHost = params.get('host') === '1' && !_identity.wasInRoom();
+    isHost = params.get('host') === '1' && params.get('returnHost') !== '1' && !_identity.wasInRoom();
     KNState.isLocalHost = isHost;
     playerName = params.get('name') || _safeGet('localStorage', 'kaillera-name') || 'Player';
     _safeSet('localStorage', 'kaillera-name', playerName);
@@ -862,12 +875,13 @@
     socket.on(
       'reconnect-token',
       _boundary.server('reconnect-token', (data) => {
+        if (_leavingRoom) return;
         _identity.receiveToken(data.token, _returningHost, !!socket.id && lastUsersData?.owner === socket.id);
       }),
     );
     socket.on('game-started', _boundary.server('game-started', onGameStarted));
     socket.on('game-ended', _boundary.server('game-ended', onGameEnded));
-    socket.on('room-closed', onRoomClosed);
+    socket.on('room-closed', _boundary.server('room-closed', onRoomClosed));
     socket.on('rom-sharing-updated', _boundary.server('rom-sharing-updated', onRomSharingUpdated));
     socket.on('data-message', _boundary.relay('data-message', onDataMessage));
 
@@ -1090,7 +1104,7 @@
   };
 
   const onConnect = async (isReconnect = false) => {
-    if (document.getElementById('host-return-dialog')?.open) return;
+    if (_leavingRoom || document.getElementById('host-return-dialog')?.open) return;
     // Mid-game reconnect: silently rejoin signaling channel, don't reset UI
     if (isGameRunning()) {
       const rejoinEvent = isHost ? 'open-room' : 'join-room';
@@ -1146,7 +1160,10 @@
         // its page cannot fall behind while it is still the owner.) An ack off
         // its schema is dropped: the page then hears the room from users-updated.
         const rejoinedRoom = rejoinEvent === 'join-room' ? _boundary.ack('join-room', outcome.room) : outcome.room;
-        if (rejoinedRoom?.status) _reconcileAfterRejoin(rejoinedRoom);
+        if (rejoinedRoom?.status) {
+          showHostWait(rejoinedRoom);
+          _reconcileAfterRejoin(rejoinedRoom);
+        }
         _maybeReportMatchIntegrity();
       });
       return;
@@ -1204,7 +1221,7 @@
       });
     } else {
       // Returning players and new guests both join the room as it exists now.
-      const savedHost = _identity.savedHost();
+      const savedHost = _identity.savedHost(0);
       try {
         const response = await fetch(`/room/${encodeURIComponent(roomCode)}`);
         if (!response.ok) {
@@ -1218,6 +1235,11 @@
         }
         const roomData = await response.json();
         if (!roomData) return;
+        // A visitor without a seat can wait on the invite while this room is reserved.
+        if (_hostReturn.hostReturnClock(roomData) !== null && !_returningHost && !_identity.reconnectToken) {
+          window.location.replace(inviteUrl(isSpectator));
+          return;
+        }
         _takeRoomGameId(roomData.gameId ?? roomData.game_id);
         applyHostRomFromData(roomData);
 
@@ -1252,6 +1274,11 @@
         const returning = _returningHost;
         const joiner = joinerNow();
         if (returning) {
+          if (returning.remembered && _identity.savedHost(0)?.persistentId !== returning.persistentId) {
+            _returningHost = null;
+            showError('This browser no longer has a saved host seat for this room.', inviteUrl(false));
+            return;
+          }
           joiner.persistentId = returning.persistentId;
           joiner.reconnectToken = returning.token;
         }
@@ -1263,6 +1290,10 @@
               _returningHost = null;
               if (returning && err === 'Host seat is no longer available') _identity.discardRefused(returning.token);
               offerHostReturn(returning ?? joinerProof(), err);
+              return;
+            }
+            if (err === 'Room closed' && _hostReturn.hostReturnClock(roomData) !== null) {
+              window.location.replace(inviteUrl(isSpectator));
               return;
             }
             // What each refusal says is connect.ts (the spectator-cap copy
@@ -1294,6 +1325,7 @@
           // The ack's data, decoded; one off its schema is dropped, and the page
           // goes on from the room it looked up and the users-updated that follows.
           const joinData = _boundary.ack('join-room', joinAck);
+          if (joinData) showHostWait(joinData);
           if (returning) {
             if (joinData?.owner !== sid) {
               showError('The server could not confirm your host seat.');
@@ -1481,7 +1513,9 @@
   // ── Users Updated ──────────────────────────────────────────────────────
 
   const onUsersUpdated = (data) => {
+    if (_leavingRoom) return;
     lastUsersData = data;
+    showHostWait(data);
     // The server sends this after game-ended as well. Reconcile its lobby
     // state even if the one-shot end event was missed (specs/game_end.qnt).
     if (data.status === 'lobby') _reconcileAfterRejoin(data);
@@ -1630,6 +1664,18 @@
       }
       syncDelayPickerPlacement();
     }
+    if (_lateJoinWaitingForHost && data.hostReturnDeadline == null) {
+      const match = _lateJoinWaitingForHost;
+      _lateJoinWaitingForHost = null;
+      if (
+        !isHost &&
+        isGameRunning() &&
+        data.status === 'playing' &&
+        data.matchId === match &&
+        KNState.matchId === match
+      )
+        startGuestLateJoin();
+    }
   };
 
   const diffForToasts = (players, spectators) => {
@@ -1771,6 +1817,7 @@
     if (_unverifiedMatchId && _unverifiedMatchId === KNState.matchId && data?.matchId !== _unverifiedMatchId) return;
     const endedMatchId = data?.matchId || KNState.matchId || null;
     if (!_gameStart.endMatchesCurrent(endedMatchId ?? '', KNState.matchId ?? '')) return;
+    _lateJoinWaitingForHost = null;
     // A freshly opened host page receives this end before its room acknowledgement.
     // It has no running engine to clean up, but still needs the lobby explanation.
     if (data.reason === 'host-reload') {
@@ -1805,7 +1852,8 @@
     _sessionStopLateJoinPoll();
     _session?.send({ type: 'gameEnded' });
     guardHostNavigation(false);
-    if (data.reason !== 'host-reload') showToast(_gameStart.gameEndedMessage(data?.reason));
+    if (data.reason !== 'host-reload' && data.reason !== 'host-timeout')
+      showToast(_gameStart.gameEndedMessage(data?.reason));
     if (engine) {
       engine.stop();
       engine = null;
@@ -1839,6 +1887,8 @@
   };
 
   const onRoomClosed = (data) => {
+    _lateJoinWaitingForHost = null;
+    showHostWait(null);
     _roomIceAuth = null;
     _roomIce.clear();
     _clearMatchIntegrity();
@@ -1852,10 +1902,20 @@
       engine = null;
     }
     const reason = data?.reason ?? 'closed';
-    const msg = reason === 'host-left' ? 'Host left — returning to lobby...' : 'Room closed';
+    const expired = reason === 'host-timeout';
+    if (expired) {
+      _identity.forgetHost();
+      socket.io.reconnection(false);
+      socket.disconnect();
+    }
+    const msg = expired
+      ? 'The room closed because the host did not return in time.'
+      : reason === 'host-left'
+        ? 'Host left — returning to lobby...'
+        : 'Room closed';
     showToast(msg);
     setTimeout(() => {
-      window.location.href = '/';
+      window.location.replace(expired ? '/?roomEnded=host-timeout' : '/');
     }, 2000);
   };
 
@@ -3672,6 +3732,23 @@
     });
   };
 
+  // A guest that lost its peer connection needs the host's state before it can rejoin.
+  // A signaling-only outage with working peer connections never enters this path.
+  const waitForHostBeforeLateJoin = () => {
+    if (isHost || lastUsersData?.hostReturnDeadline == null || !KNState.matchId) return false;
+    _lateJoinWaitingForHost = KNState.matchId;
+    _sessionStopLateJoinPoll();
+    engine?.stop();
+    engine = null;
+    return true;
+  };
+
+  const startGuestLateJoin = () => {
+    _session?.send({ type: 'leftOutOfStart' });
+    _sessionWatchLateJoin();
+    initEngine();
+  };
+
   const initEngine = () => {
     // Guard against double-init (e.g., race between game-started events).
     // Stop the previous engine so its socket listeners are removed first.
@@ -3796,6 +3873,7 @@
         );
       },
       onLateJoinInputFailed: (message) => {
+        if (waitForHostBeforeLateJoin()) return;
         coreFatal = true; // stop the generic connection timeout from replacing this error
         _sessionStopLateJoinPoll();
         // A failed admitted guest must vacate its server slot, not just close
@@ -3856,9 +3934,7 @@
       // lateJoinStarting first, so initEngine below starts a late join.
       onLeftOutOfStart: () => {
         crumb('left-out-of-start', {});
-        _session?.send({ type: 'leftOutOfStart' });
-        _sessionWatchLateJoin();
-        initEngine();
+        if (!waitForHostBeforeLateJoin()) startGuestLateJoin();
       },
     });
     _session?.send({
@@ -3874,7 +3950,7 @@
     // NAT traversal failure (state=failed), peer never started (state=new),
     // or signaling stalled (no peers in KNState at all).
     setTimeout(() => {
-      if (coreFatal || spectatorRelayUnavailable) return;
+      if (coreFatal || spectatorRelayUnavailable || lastUsersData?.hostReturnDeadline != null) return;
       const loadingEl = document.getElementById('game-loading');
       if (loadingEl && !loadingEl.classList.contains('hidden') && isGameRunning()) {
         const text = document.getElementById('game-loading-text');
@@ -4018,7 +4094,10 @@
   };
 
   const leaveGame = () => {
-    _identity.forgetHost();
+    if (_leavingRoom) return;
+    _leavingRoom = true;
+    _identity.leaveRoom();
+    showHostWait(null);
     guardHostNavigation(false);
     _roomIceAuth = null;
     _roomIce.clear();
@@ -4035,7 +4114,6 @@
         }
       }
     }
-    socket.emit('leave-room', {});
     if (engine) {
       engine.stop();
       engine = null;
@@ -4044,7 +4122,9 @@
     try {
       localStorage.setItem('kn-feedback-prompt', '1');
     } catch (_) {}
-    window.location.href = '/';
+    const backToLobby = () => window.location.replace('/');
+    if (socket?.connected) socket.timeout(2000).emit('leave-room', {}, backToLobby);
+    else backToLobby();
   };
 
   // ── Late-Join ROM Prompt ─────────────────────────────────────────────
@@ -5490,9 +5570,15 @@
     }
     wireAdvancedSummaryStatus();
 
-    const savedHost = _identity.savedHost();
+    // The server supplies the clock and authenticates recovery; a phone's clock can be ahead.
+    const savedHost = _identity.savedHost(0);
     if (savedHost && isSpectator) _identity.joinSeparately(savedHost);
-    if (!isSpectator && !_identity.hasRoomToken() && savedHost) offerHostReturn(savedHost);
+    if (!isSpectator && new URLSearchParams(location.search).get('returnHost') === '1') {
+      if (savedHost) {
+        _returningHost = { ...savedHost, remembered: true };
+        connect();
+      } else showError('This browser no longer has a saved host seat for this room.', inviteUrl(false));
+    } else if (!isSpectator && !_identity.hasRoomToken() && savedHost) offerHostReturn(savedHost);
     else connect();
     startGamepadManager();
     setupInputTypeDetection();

@@ -200,7 +200,10 @@ export const UsersUpdated = Schema.Struct({
   mode: Schema.NullOr(GameMode),
   status: RoomStatus,
   listed: Schema.Boolean,
+  matchId: Schema.optional(Schema.NullOr(Schema.String)),
   recoveryUnverifiedMatchId: Schema.optional(Schema.NullOr(Schema.String)),
+  hostReturnDeadline: Schema.optional(Schema.NullOr(Schema.Int)),
+  serverTime: Schema.optional(Schema.NullOr(Schema.Int)),
 });
 export type UsersUpdated = typeof UsersUpdated.Type;
 
@@ -221,10 +224,12 @@ export const JoinRoomAck = Schema.Struct({
   mode: Schema.NullOr(GameMode),
   status: RoomStatus,
   listed: Schema.Boolean,
+  matchId: Schema.NullOr(Schema.String),
   recoveryUnverifiedMatchId: Schema.optional(Schema.NullOr(Schema.String)),
+  hostReturnDeadline: Schema.optional(Schema.NullOr(Schema.Int)),
+  serverTime: Schema.optional(Schema.NullOr(Schema.Int)),
   rom_hash: Schema.NullOr(Schema.String),
   rom_sharing: Schema.Boolean,
-  matchId: Schema.NullOr(Schema.String),
 });
 export type JoinRoomAck = typeof JoinRoomAck.Type;
 
@@ -249,6 +254,12 @@ export const GameEnded = Schema.Struct({
   reason: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type GameEnded = typeof GameEnded.Type;
+
+/** `room-closed`. */
+export const RoomClosed = Schema.Struct({
+  reason: Schema.String,
+});
+export type RoomClosed = typeof RoomClosed.Type;
 
 /** `rom-sharing-updated`. */
 export const RomSharingUpdated = Schema.Struct({
@@ -323,6 +334,7 @@ export const decodeUsersUpdated = Schema.decodeUnknownResult(UsersUpdated);
 export const decodeJoinRoomAck = Schema.decodeUnknownResult(JoinRoomAck);
 export const decodeGameStarted = Schema.decodeUnknownResult(GameStarted);
 export const decodeGameEnded = Schema.decodeUnknownResult(GameEnded);
+export const decodeRoomClosed = Schema.decodeUnknownResult(RoomClosed);
 export const decodeRomSharingUpdated = Schema.decodeUnknownResult(RomSharingUpdated);
 export const decodeRenegotiateRequest = Schema.decodeUnknownResult(RenegotiateRequest);
 export const decodeSessionLogAck = Schema.decodeUnknownResult(SessionLogAck);
@@ -337,6 +349,7 @@ export const serverEvents = {
   'users-updated': UsersUpdated,
   'game-started': GameStarted,
   'game-ended': GameEnded,
+  'room-closed': RoomClosed,
   'rom-sharing-updated': RomSharingUpdated,
   'upload-token': TokenMessage,
   'reconnect-token': TokenMessage,

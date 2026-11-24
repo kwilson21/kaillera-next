@@ -1,14 +1,6 @@
-"""A signaling outage that hits every player does not cost them their match.
+"""A guest keeps its slot longer while every player's signaling socket is down.
 
-Players run a match over their own connections; the server only signals. When
-every player's socket was down for longer than the disconnect grace window (a
-server restart, a network drop), each was removed after its own window, the
-room was emptied and deleted, and the returning players were refused and sent
-to the lobby. The server now keeps their places while nobody in a playing
-room is connected, up to a much longer bound. The model is
-specs/room_lifecycle.qnt (aMatchIsNotLostToTheGraceWindow, everyoneDropsTest).
-
-Run: cd server && uv run pytest --noconftest ../tests/test_silent_room_grace.py -v
+The host has a separate deadline tested in test_disconnect_cleanup.py.
 """
 
 import asyncio
@@ -80,7 +72,7 @@ def test_places_are_kept_while_nobody_is_connected():
     room = _playing_room(connected=())
 
     async def scenario():
-        tasks = [_expire("host"), _expire("guest")]
+        tasks = [_expire("guest")]
         await asyncio.sleep(GRACE * 10)
         kept = sorted(room.players)
         for task in tasks:
@@ -128,29 +120,14 @@ def test_a_player_still_away_is_removed_once_another_returns():
     assert sorted(room.players) == ["pid-host"]
 
 
-def test_a_room_nobody_returns_to_is_given_up():
+def test_a_guest_who_never_returns_is_removed_at_the_silent_room_limit():
     _playing_room(connected=())
 
     async def scenario():
-        await asyncio.gather(_expire("host"), _expire("guest"))
+        await _expire("guest")
 
     with ExitStack() as stack:
         _stubbed(stack, silent_room_grace=GRACE * 3)
         _run(scenario())
 
-    assert "ROOM1" not in rooms
-
-
-def test_a_lobby_owner_is_not_kept_past_its_grace():
-    room = _playing_room(connected=())
-    room.status = "lobby"
-    room.match_id = None
-
-    async def scenario():
-        await _expire("host")
-
-    with ExitStack() as stack:
-        _stubbed(stack, silent_room_grace=60)
-        _run(scenario())
-
-    assert "pid-host" not in room.players
+    assert sorted(rooms["ROOM1"].players) == ["pid-host"]

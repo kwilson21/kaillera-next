@@ -212,6 +212,7 @@ test('serverEvents maps each server-authored event to its schema, relays left ou
     'game-started',
     'reconnect-token',
     'rom-sharing-updated',
+    'room-closed',
     'upload-token',
     'users-updated',
   ]);

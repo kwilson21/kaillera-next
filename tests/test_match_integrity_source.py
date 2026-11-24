@@ -140,6 +140,7 @@ def test_authoritative_old_end_cannot_end_the_selected_current_match():
     mocks = """
     const KNState={matchId:'match-b'}, events=[];
     let _unverifiedMatchId='match-b', _lastHandledGameEndMatchId=null,
+        _lateJoinWaitingForHost='match-b',
         _endGameRequest=null, engine={stop:()=>events.push('stop')};
     const _clearMatchIntegrity=()=>{_unverifiedMatchId=null};
     const _gameStart={endMatchesCurrent:(a,b)=>!a||!b||a===b,
@@ -153,17 +154,20 @@ def test_authoritative_old_end_cannot_end_the_selected_current_match():
     const lastUsersData=null, resetRomTransfer=()=>{}, cleanupPreGameConnections=()=>{};
     """
     actions = """
+    const snapshot = () => ({
+      matchId:KNState.matchId, warning:_unverifiedMatchId, waiting:_lateJoinWaitingForHost, events:[...events]
+    });
     onGameEnded({matchId:'match-a'});
     onGameEnded({});
-    const afterStale = {matchId:KNState.matchId,warning:_unverifiedMatchId,events:[...events]};
+    const afterStale = snapshot();
     onGameEnded({matchId:'match-b'});
     onGameEnded({matchId:'match-b'});
-    process.stdout.write(JSON.stringify({afterStale,matchId:KNState.matchId,warning:_unverifiedMatchId,events}));
+    process.stdout.write(JSON.stringify({afterStale,...snapshot()}));
     """
     actual = _run(f"{mocks}\n{on_end}\n{actions}")
     assert actual == {
-        "afterStale": {"matchId": "match-b", "warning": "match-b", "events": []},
-        "matchId": None, "warning": None, "events": ["gameEnded", False, "stop"],
+        "afterStale": {"matchId": "match-b", "warning": "match-b", "waiting": "match-b", "events": []},
+        "matchId": None, "warning": None, "waiting": None, "events": ["gameEnded", False, "stop"],
     }
 
 

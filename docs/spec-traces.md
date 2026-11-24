@@ -43,6 +43,68 @@ sequenceDiagram
 
 The server's view of a room against what each player's page is doing. The note on a page is the state it moves to; a dashed arrow is what an action did to another page.
 
+### lobbyHostReturnTest
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
+  Note over host: Lobby
+  guest1->>Server: join("guest1", true)
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
+  Note over guest1: Lobby
+  host->>Server: reload("host")
+  Note over Server: online = {guest1}<br/>grace = {host}
+  Note over host: Closed
+  host->>Server: reopen("host", true, false)
+  Note over Server: online = {guest1, host}<br/>grace = {}
+  Note over host: Lobby
+```
+
+### deliberateLeaveHasNoReturnTest
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
+  Note over host: Lobby
+  guest1->>Server: join("guest1", true)
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
+  Note over guest1: Lobby
+  host->>Server: leave("host")
+  Note over Server: online = {guest1}<br/>members = {guest1}<br/>owner = guest1<br/>creator = ""
+  Note over host: Closed
+  host->>Server: recoverHostTab("host", true)
+```
+
+### expiredLobbyHostCannotReturnTest
+
+```mermaid
+sequenceDiagram
+  participant Server
+  participant host
+  participant guest1
+  host->>Server: openRoom("host")
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
+  Note over host: Lobby
+  guest1->>Server: join("guest1", true)
+  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
+  Note over guest1: Lobby
+  host->>Server: reload("host")
+  Note over Server: online = {guest1}<br/>grace = {host}
+  Note over host: Closed
+  Server->>Server: graceExpire("host")
+  Note over Server: online = {}<br/>members = {}<br/>grace = {}<br/>owner = ""<br/>creator = ""
+  Server-->>guest1: Closed
+  host->>Server: recoverHostTab("host", true)
+```
+
 ### queuedStartsTest
 
 Two Start requests arrive for the same lobby. Even after the host starts running, the delayed request leaves the match alone. End returns the host to the lobby for a rematch.
@@ -52,10 +114,10 @@ sequenceDiagram
   participant Server
   participant host
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server->>Server: beginSync
   Server-->>host: StartSync(1)
@@ -66,7 +128,7 @@ sequenceDiagram
   Note over Server: status = lobby<br/>matchId = 0
   Server-->>host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 2<br/>nextMatch = 3
+  Note over Server: nextMatch = 3<br/>status = playing<br/>matchId = 2
   Server-->>host: Loading(2)
 ```
 
@@ -80,10 +142,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   host->>Server: reload("host")
   Note over Server: online = {}<br/>grace = {host}
@@ -106,13 +168,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   Server->>Server: beginSync
@@ -138,13 +200,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   Server->>Server: beginSync
@@ -164,13 +226,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   Server->>Server: beginSync
@@ -201,13 +263,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   Server->>Server: beginSync
@@ -232,13 +294,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   Server->>Server: beginSync
@@ -250,14 +312,14 @@ sequenceDiagram
   guest1->>Server: dropSocket("guest1")
   Note over Server: online = {host}<br/>grace = {guest1}
   Server->>Server: graceExpire("guest1")
-  Note over Server: grace = {}<br/>members = {host}
+  Note over Server: members = {host}<br/>grace = {}
   guest1->>Server: returnAfterExpiry("guest1", true, false)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
 ```
 
 ### hostReturnsAfterGraceTest
 
-The host's socket is down for longer than the grace window: the room is handed to the guest and the match goes on. Before, the returning host was told "Room already exists" and never got its signaling back.
+Only an explicit departure can hand the room to the guest. When the disconnected owner's deadline expires, a late return finds a closed room.
 
 ```mermaid
 sequenceDiagram
@@ -265,13 +327,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   Server->>Server: beginSync
@@ -283,9 +345,10 @@ sequenceDiagram
   host->>Server: dropSocket("host")
   Note over Server: online = {guest1}<br/>grace = {host}
   Server->>Server: graceExpire("host")
-  Note over Server: grace = {}<br/>owner = guest1<br/>creator = ""<br/>members = {guest1}
+  Note over Server: online = {}<br/>members = {}<br/>grace = {}<br/>owner = ""<br/>creator = ""<br/>status = lobby<br/>matchId = 0
+  Server-->>guest1: Closed
   host->>Server: returnAfterExpiry("host", true, true)
-  Note over Server: online = {guest1, host}<br/>members = {guest1, host}
+  Note over host: Closed
 ```
 
 ### everyoneDropsTest
@@ -298,13 +361,13 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   Server->>Server: beginSync
@@ -331,10 +394,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server->>Server: beginSync
   Server-->>host: StartSync(1)
@@ -344,7 +407,7 @@ sequenceDiagram
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: AwaitingRom(1)
   host->>Server: leave("host")
-  Note over Server: online = {guest1}<br/>owner = guest1<br/>creator = ""<br/>members = {guest1}
+  Note over Server: online = {guest1}<br/>members = {guest1}<br/>owner = guest1<br/>creator = ""
   Note over host: Closed
   Server->>Server: endAbandonedMatch
   Note over Server: status = lobby<br/>matchId = 0
@@ -359,10 +422,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server->>Server: beginSync
   Server-->>host: StartSync(1)
@@ -391,10 +454,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server->>Server: beginSync
   Server-->>host: StartSync(1)
@@ -427,10 +490,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server->>Server: beginSync
   Server-->>host: StartSync(1)
@@ -463,10 +526,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server->>Server: beginSync
   Server-->>host: StartSync(1)
@@ -493,10 +556,10 @@ sequenceDiagram
   participant host
   participant guest1
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   guest1->>Server: join("guest1", false)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
@@ -518,13 +581,13 @@ sequenceDiagram
   participant guest1
   participant guest2
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   guest2->>Server: join("guest2", true)
@@ -555,13 +618,13 @@ sequenceDiagram
   participant guest1
   participant guest2
   host->>Server: openRoom("host")
-  Note over Server: online = {host}<br/>owner = host<br/>creator = host<br/>members = {host}
+  Note over Server: online = {host}<br/>members = {host}<br/>owner = host<br/>creator = host
   Note over host: Lobby
   guest1->>Server: join("guest1", true)
   Note over Server: online = {guest1, host}<br/>members = {guest1, host}
   Note over guest1: Lobby
   Server->>Server: startGame
-  Note over Server: status = playing<br/>matchId = 1<br/>nextMatch = 2
+  Note over Server: nextMatch = 2<br/>status = playing<br/>matchId = 1
   Server-->>host: Loading(1)
   Server-->>guest1: Loading(1)
   Server->>Server: beginSync

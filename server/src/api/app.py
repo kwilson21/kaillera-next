@@ -71,6 +71,8 @@ from src.api.signaling import (
     _session_log_context,
     _session_log_entries,
     connected_players,
+    host_return_expired,
+    host_return_status,
     room_frame,
     room_host_name,
     room_is_live,
@@ -969,7 +971,7 @@ def create_app(lifespan=None) -> FastAPI:
             check_ip(client_ip_val, "room-lookup-miss")
             raise HTTPException(status_code=404, detail="Room not found")
         room = rooms.get(room_id)
-        if not room:
+        if not room or host_return_expired(room):
             # Enumerators accumulate 404s; they hit the tighter miss budget first.
             if not check_ip(client_ip_val, "room-lookup-miss"):
                 raise HTTPException(status_code=429, detail="Rate limited")
@@ -1000,7 +1002,8 @@ def create_app(lifespan=None) -> FastAPI:
             "listed": room.listed,
             # Nobody connected (restored after a restart): new joiners are
             # refused with "Room closed"; its own members may still return.
-            "closed": not room_is_live(room),
+            "closed": room.host_return_deadline is not None or not room_is_live(room),
+            **host_return_status(room),
         }
 
     @app.get("/room/{room_id}/frame.jpg")
@@ -1055,6 +1058,8 @@ def create_app(lifespan=None) -> FastAPI:
         now = time.time()
         result = []
         for code, room in rooms.items():
+            if room.host_return_deadline is not None:
+                continue
             if game_id and room.game_id != game_id:
                 continue
             if room.listed and not room.password:

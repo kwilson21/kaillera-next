@@ -1,4 +1,5 @@
 import type { SafeStorage } from '../kn-state.ts';
+import { getJSONIfThere, isRoomAnswer, type RoomAnswer } from '../landing/wire.ts';
 import { tokenClaims } from './token-claims.ts';
 
 /** The room's server verifies this credential before changing any membership. */
@@ -6,6 +7,45 @@ export const HOST_RETURN_PREFIX = 'kn-host-return:';
 export const hostReturnKey = (room: string): string => HOST_RETURN_PREFIX + room;
 
 export type HostReturn = { readonly persistentId: string; readonly token: string };
+
+/** Use the server's clock for the initial duration and elapsed local time thereafter. */
+export function hostReturnClock(
+  room: Pick<RoomAnswer, 'hostReturnDeadline' | 'serverTime'> | null,
+  now = performance.now(),
+): number | null {
+  const end = room?.hostReturnDeadline;
+  const sent = room?.serverTime;
+  return typeof end === 'number' && Number.isFinite(end) && typeof sent === 'number' && Number.isFinite(sent)
+    ? now + end - sent
+    : null;
+}
+
+export const hostReturnSeconds = (clock: number | null, now = performance.now()): number =>
+  clock === null ? 0 : Math.max(0, Math.ceil((clock - now) / 1000));
+
+export const hostReturnDuration = (seconds: number): string =>
+  Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+
+/** A connected guest keeps its game while the room waits for the host's socket. */
+export function hostWaitNotice(): (room: Pick<RoomAnswer, 'hostReturnDeadline' | 'serverTime'> | null) => void {
+  let ticking = 0;
+  return (room) => {
+    window.clearInterval(ticking);
+    const banner = document.getElementById('host-wait-banner');
+    if (!banner) return;
+    const clock = hostReturnClock(room);
+    banner.hidden = clock === null;
+    if (clock === null) return;
+    const timer = banner.querySelector<HTMLElement>('[role="timer"]')!;
+    const render = () => {
+      const seconds = hostReturnSeconds(clock);
+      timer.textContent = hostReturnDuration(seconds);
+      if (!seconds) window.clearInterval(ticking);
+    };
+    ticking = window.setInterval(render, 500);
+    render();
+  };
+}
 
 export function readHostReturn(room: string, token: string | null, now = Date.now()): HostReturn | null {
   if (!token || !room) return null;
@@ -46,12 +86,12 @@ export class RoomIdentity {
       : Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
   }
 
-  savedHost(): HostReturn | null {
-    return readHostReturn(this.room, this.storage.get('localStorage', hostReturnKey(this.room)));
+  savedHost(now = Date.now()): HostReturn | null {
+    return readHostReturn(this.room, this.storage.get('localStorage', hostReturnKey(this.room)), now);
   }
 
   hasRoomToken(): boolean {
-    return readHostReturn(this.room, this.reconnectToken)?.persistentId === this.persistentId;
+    return readHostReturn(this.room, this.reconnectToken, 0)?.persistentId === this.persistentId;
   }
 
   /** A restored host URL still means to return after its credential expires. */
@@ -62,7 +102,7 @@ export class RoomIdentity {
   }
 
   forgetHost(): void {
-    if (this.savedHost()?.persistentId === this.persistentId)
+    if (this.savedHost(0)?.persistentId === this.persistentId)
       this.storage.remove('localStorage', hostReturnKey(this.room));
   }
 
@@ -73,6 +113,15 @@ export class RoomIdentity {
 
   joinSeparately(host: HostReturn): void {
     if (this.persistentId !== host.persistentId) return;
+    this.resetTabIdentity();
+  }
+
+  leaveRoom(): void {
+    this.forgetHost();
+    this.resetTabIdentity();
+  }
+
+  private resetTabIdentity(): void {
     this.persistentId = this.newPlayerId();
     this.reconnectToken = '';
     this.storage.set('sessionStorage', 'kn-player-id', this.persistentId);
@@ -81,7 +130,7 @@ export class RoomIdentity {
   }
 
   rememberHost(persistentId: string): void {
-    const proof = readHostReturn(this.room, this.reconnectToken);
+    const proof = readHostReturn(this.room, this.reconnectToken, 0);
     if (proof?.persistentId === persistentId) this.storage.set('localStorage', hostReturnKey(this.room), proof.token);
   }
 
@@ -99,28 +148,85 @@ export class RoomIdentity {
   }
 }
 
-/** The buttons choose who joins. Dismissing the dialog returns to the lobby. */
-export function chooseHostReturn(error: string, choose: (returning: boolean) => void): void {
+/** A saved seat may still be open in another tab. Only the server can start its return window. */
+export function chooseHostReturn(
+  identity: RoomIdentity,
+  proof: HostReturn,
+  error: string,
+  choose: (returning: HostReturn | null) => void,
+  gone: () => void,
+): void {
   const dialog = document.querySelector<HTMLDialogElement>('#host-return-dialog');
-  if (!dialog) return;
+  if (!dialog || dialog.open) return;
   const message = dialog.querySelector<HTMLElement>('[role="status"]')!;
+  const timer = dialog.querySelector<HTMLElement>('[role="timer"]')!;
   const retry = dialog.querySelector<HTMLButtonElement>('[value="host"]')!;
-  retry.hidden = error === 'Host seat is no longer available';
-  message.textContent =
-    error === 'Host tab is still connected'
-      ? 'The original host tab is still connected. Use that tab, or close it and try again here.'
-      : error === 'Host seat is no longer available'
-        ? 'Your host seat is no longer available. You can still join if the room is open.'
-        : error;
-  if (dialog.open) return;
+  const guest = dialog.querySelector<HTMLButtonElement>('[value="guest"]')!;
+  const room = identity.room;
+  const remembered = identity.savedHost(0)?.persistentId === proof.persistentId;
+  // A second tab can renew the credential or deliberately give up the seat while this dialog is open.
+  const currentProof = () => {
+    if (!remembered) return proof;
+    const saved = identity.savedHost(0);
+    return saved?.persistentId === proof.persistentId ? saved : null;
+  };
+  let refused = error === 'Host seat is no longer available';
+  let clock: number | null = null;
+  let poll = 0;
+  let closed = false;
+  const tick = () => {
+    const seconds = hostReturnSeconds(clock);
+    const released = !currentProof();
+    retry.hidden = released || refused || seconds === 0;
+    timer.hidden = retry.hidden;
+    timer.textContent = timer.hidden ? '' : 'Time left to return: ' + hostReturnDuration(seconds);
+    if (clock !== null && !seconds) message.textContent = 'The time to return has ended.';
+    if (released) message.textContent = 'This browser no longer has that host seat.';
+  };
+  const check = async () => {
+    try {
+      const record = await getJSONIfThere(window, '/room/' + encodeURIComponent(room), 8000, isRoomAnswer);
+      if (closed || !dialog.open) return;
+      if (!record) {
+        dialog.close('gone');
+        return;
+      }
+      clock = hostReturnClock(record);
+      const latest = currentProof();
+      if (latest && record.serverTime != null && !readHostReturn(room, latest.token, record.serverTime)) refused = true;
+      guest.hidden = clock !== null;
+      message.textContent = refused
+        ? 'Your host seat is no longer available.'
+        : clock !== null
+          ? 'The host disconnected. Returning here opens the room for a new match.'
+          : 'The room is active. If your host tab just closed, keep this page open while it disconnects.';
+      if (!refused && clock === null && error === 'Host tab is still connected')
+        message.textContent = 'Your host tab is still connected. This page will check again.';
+    } catch {
+      if (closed || !dialog.open) return;
+      message.textContent = 'Could not check the room. Trying again…';
+    }
+    tick();
+    poll = window.setTimeout(check, 3000);
+  };
+  retry.hidden = guest.hidden = timer.hidden = true;
+  message.textContent = 'Checking your room…';
   dialog.returnValue = '';
+  const ticking = window.setInterval(tick, 500);
   dialog.addEventListener(
     'close',
     () => {
-      if (!dialog.returnValue) window.location.assign('/');
-      else choose(dialog.returnValue === 'host');
+      closed = true;
+      window.clearTimeout(poll);
+      window.clearInterval(ticking);
+      const selected = currentProof();
+      if (dialog.returnValue === 'gone') gone();
+      else if (dialog.returnValue === 'guest') choose(null);
+      else if (dialog.returnValue === 'host' && !refused && hostReturnSeconds(clock) && selected) choose(selected);
+      else window.location.assign('/');
     },
     { once: true },
   );
   dialog.showModal();
+  void check();
 }

@@ -46,14 +46,10 @@ Room list is exposed via a FastAPI REST endpoint: GET /list?game_id=...
 (see api/app.py — it imports `rooms` from here)
 
 Disconnect grace period:
-  Mid-game Socket.IO disconnects defer player removal for 30 seconds
-  (_DISCONNECT_GRACE_SECONDS), allowing auto-reconnect to reclaim the
-  slot. Cancelled on explicit leave-room or successful reconnect.
-  While no player of the room is connected at all, removal waits longer
-  (up to _SILENT_ROOM_GRACE_SECONDS): everyone dropping at once is an
-  outage, and the match is still running between the players.
-  Periodic 5-second re-stall prevents the host from running free
-  indefinitely if the peer never reconnects.
+  Losing the host socket reserves the room until HOST_RETURN_GRACE_SECONDS
+  elapses. The host can return sooner; expiry closes the room for everyone.
+  Other mid-game players keep their slot for _DISCONNECT_GRACE_SECONDS or,
+  while nobody is connected, up to _SILENT_ROOM_GRACE_SECONDS.
 """
 
 import asyncio
@@ -69,6 +65,7 @@ import secrets
 import time
 import unicodedata
 import uuid
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from itertools import chain
 
@@ -127,12 +124,8 @@ _PER_IP_SPECTATOR_CAP = int(os.environ.get("PER_IP_SPECTATOR_CAP", "3"))
 _RELAY_MAX_BYTES = 65_536
 _SIGNAL_MAX_BYTES = 65_536
 _DISCONNECT_GRACE_SECONDS = 30
-# While no player of a playing room is connected, a dropped player's place is
-# kept past the grace window: an outage that hits everyone (a server restart,
-# a network drop) is not the players leaving, and their match runs on over
-# their own connections. This is how long the server waits for any of them
-# before giving the room up (`aMatchIsNotLostToTheGraceWindow` and
-# `giveUpOnSilentRoom` in specs/room_lifecycle.qnt).
+# A dropped guest keeps its place longer during a shared signaling outage.
+# Its timer never extends the room's host-return deadline.
 _SILENT_ROOM_GRACE_SECONDS = 300
 _SILENT_ROOM_POLL_SECONDS = 5
 # The answer to a rejoin marked `resume` from a client the room no longer
@@ -142,11 +135,7 @@ NOT_IN_ROOM = "Not in room"
 # The page then joins with join-room instead (web/static/play.js).
 NOT_THE_OWNER = "Not the owner"
 HOST_SEAT_UNAVAILABLE = "Host seat is no longer available"
-# Short grace for lobby OWNER disconnects only — closes the ownership-churn
-# race where a brief network blip transferred host privileges to another
-# player. Mid-game already has the longer grace above; non-owner lobby
-# disconnects still leave immediately so room state stays responsive.
-_LOBBY_OWNER_GRACE_SECONDS = 5
+HOST_RETURN_GRACE_SECONDS = max(1, int(os.environ.get("HOST_RETURN_GRACE_SECONDS", "120")))
 
 
 # Signing key for HMAC tokens (upload + reconnect). Derived from the
@@ -162,7 +151,7 @@ _TOKEN_KEY = _token_key(os.environ.get("IP_HASH_SALT", ""))
 
 # Live room members receive new tokens before these expire.
 _UPLOAD_TOKEN_TTL_S = 30 * 60
-_RECONNECT_TOKEN_TTL_S = 30 * 60
+_RECONNECT_TOKEN_TTL_S = max(30 * 60, HOST_RETURN_GRACE_SECONDS + _UPLOAD_TOKEN_TTL_S // 2 + 1)
 
 
 def _b64e(b: bytes) -> str:
@@ -293,6 +282,11 @@ async def finish_room_shutdown() -> None:
     # A cleanup already holding the lock may still be persisting the room.
     # Finish that write before closing storage and discard future removals.
     async with _room_lock:
+        if state.enabled():
+            for code, room in rooms.items():
+                if room.players and room.host_return_deadline is None:
+                    room.host_return_deadline = _now_ms() + HOST_RETURN_GRACE_SECONDS * 1000
+                    await state.save_room(code, room)
         for task in _disconnect_grace_tasks.values():
             task.cancel()
         _disconnect_grace_tasks.clear()
@@ -346,6 +340,7 @@ class Room:
     device_types: dict[str, str] = field(default_factory=dict)  # sid -> "desktop" | "mobile"
     match_id: str | None = None  # per-match UUID, set on start-game, cleared on end-game
     recovery_unverified_match_id: str | None = None
+    host_return_deadline: int | None = None  # Unix epoch milliseconds, persisted across restarts
     listed: bool = False  # host opted in to the front-page board; never true with a password
     started_at: float | None = None  # wall-clock start of the current match, for the board
     # playerIds who joined after the current match began and are not in it
@@ -420,8 +415,21 @@ def _join_ack(room: Room) -> dict:
     resp = _players_payload(room)
     resp["rom_hash"] = room.rom_hash
     resp["rom_sharing"] = _room_rom_sharing(room)
-    resp["matchId"] = room.match_id
     return checked(JoinRoomAck, resp, "join-room ack")
+
+
+def _now_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+def host_return_expired(room: Room) -> bool:
+    return room.host_return_deadline is not None and room.host_return_deadline <= _now_ms()
+
+
+def host_return_status(room: Room) -> dict:
+    if room.host_return_deadline is None:
+        return {}
+    return {"hostReturnDeadline": room.host_return_deadline, "serverTime": _now_ms()}
 
 
 def _players_payload(room: Room) -> dict:
@@ -466,8 +474,10 @@ def _players_payload(room: Room) -> dict:
         "game_id": room.game_id,
         "mode": room.mode,
         "status": room.status,
+        "matchId": room.match_id,
         "listed": room.listed,
         "recoveryUnverifiedMatchId": room.recovery_unverified_match_id,
+        **host_return_status(room),
     }
 
 
@@ -499,7 +509,13 @@ def room_host_name(room: Room) -> str:
 def room_frame(session_id: str) -> tuple[bytes, float] | None:
     """Latest board frame for a room that may show one right now."""
     room = rooms.get(session_id)
-    if room is None or not room.listed or room.status != "playing" or not room_is_live(room):
+    if (
+        room is None
+        or room.host_return_deadline is not None
+        or not room.listed
+        or room.status != "playing"
+        or not room_is_live(room)
+    ):
         return None
     return _room_frames.get(session_id)
 
@@ -573,7 +589,7 @@ def _get_room(sid: str) -> tuple[str, Room] | None:
         return None
     session_id = entry[0]
     room = rooms.get(session_id)
-    if room is None:
+    if room is None or host_return_expired(room):
         return None
     return (session_id, room)
 
@@ -651,6 +667,80 @@ async def _disconnect_grace_expiry(
         await _leave(sid, reason)
 
 
+async def _close_host_timeout(session_id: str, room: Room) -> None:
+    """A reserved owner's deadline passed under the room lock."""
+    del rooms[session_id]
+    log.info("Room %s closed after its host return deadline", session_id)
+    _drop_room_frame(session_id)
+    members = []
+    for pid, info in chain(room.players.items(), room.spectators.items()):
+        sid = info["socketId"]
+        if _sid_to_room.get(sid, (None,))[0] == session_id:
+            _sid_to_room.pop(sid)
+            members.append(sid)
+        task = _disconnect_grace_tasks.pop((session_id, pid), None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+
+    async def attempt(action: str, operation: Awaitable[None]) -> bool:
+        try:
+            await operation
+            return True
+        except Exception:
+            log.exception("Could not %s while closing room %s", action, session_id)
+            return False
+
+    # The game end, closure notification and bookkeeping must survive each other's failures.
+    if room.status == "playing":
+        await attempt(
+            "announce game end",
+            _emit("game-ended", {"matchId": room.match_id, "reason": "host-timeout"}, room=session_id),
+        )
+    notice = {"reason": "host-timeout"}
+    if not await attempt("announce room closure", _emit("room-closed", notice, room=session_id)):
+        for sid in members:
+            if sid in _sid_host:
+                await attempt("notify remaining member", _emit("room-closed", notice, to=sid))
+    if not await attempt("close socket room", sio.close_room(session_id)):
+        for sid in members:
+            await attempt("remove socket from room", sio.leave_room(sid, session_id))
+    await attempt("delete saved room", state.delete_room(session_id))
+    if room.status == "playing":
+        await attempt("record match end", _record_match_end(session_id, room.match_id, "host-timeout"))
+
+
+async def _wait_for_host_return(session_id: str, room: Room) -> None:
+    while room.host_return_deadline is not None:
+        await asyncio.sleep(max(0, room.host_return_deadline - _now_ms()) / 1000)
+        async with _room_lock:
+            if rooms.get(session_id) is not room or _shutting_down:
+                return
+            if host_return_expired(room):
+                await _close_host_timeout(session_id, room)
+                return
+
+
+async def _reserve_host(session_id: str, room: Room, player_id: str) -> None:
+    if room.host_return_deadline is None:
+        room.host_return_deadline = _now_ms() + HOST_RETURN_GRACE_SECONDS * 1000
+    if host_return_expired(room):
+        await _close_host_timeout(session_id, room)
+        return
+    _cancel_disconnect_grace(session_id, player_id)
+    _disconnect_grace_tasks[session_id, player_id] = asyncio.create_task(_wait_for_host_return(session_id, room))
+    await state.save_room(session_id, room)
+    await _emit("users-updated", _players_payload(room), room=session_id)
+
+
+async def restore_host_reservations() -> None:
+    """Restored owners have no socket on this server; resume their remaining time."""
+    async with _room_lock:
+        for code, room in list(rooms.items()):
+            owner = next((pid for pid, player in room.players.items() if player["socketId"] == room.owner), None)
+            if owner is not None:
+                await _reserve_host(code, room, owner)
+
+
 async def _leave(sid: str, reason: str = "disconnect") -> None:
     """Remove sid from its room; handle ownership transfer and cleanup."""
     entry = _sid_to_room.pop(sid, None)
@@ -663,6 +753,8 @@ async def _leave(sid: str, reason: str = "disconnect") -> None:
     if room is None:
         return
 
+    if room.owner == sid:
+        room.host_return_deadline = None
     rm_slot = None  # referenced unconditionally below; spectator path leaves it None
     if is_spectator:
         room.spectators.pop(player_id, None)
@@ -776,6 +868,10 @@ async def _expire_rooms(previous: dict[str, tuple[Room, int]]) -> dict[str, tupl
     offline = {}
     async with _room_lock:
         for code, room in list(rooms.items()):
+            if room.host_return_deadline is not None:
+                if host_return_expired(room):
+                    await _close_host_timeout(code, room)
+                continue
             if room.players or room.spectators:
                 members = chain(room.players.values(), room.spectators.values())
                 if any(member["socketId"] in _sid_to_room for member in members):
@@ -799,8 +895,11 @@ async def _cleanup_empty_rooms() -> None:
     offline = {}
     while True:
         await asyncio.sleep(60)
-        offline = await _expire_rooms(offline)
-        cleanup()
+        try:
+            offline = await _expire_rooms(offline)
+            cleanup()
+        except Exception:
+            log.exception("Room cleanup sweep failed")
 
 
 # ── Events ────────────────────────────────────────────────────────────────────
@@ -828,6 +927,8 @@ async def _reconnect_member(
         if old_sid in _sid_host:
             return "Host tab is still connected"
     _cancel_disconnect_grace(session_id, persistent_id)
+    if old_sid == room.owner:
+        room.host_return_deadline = None
     _swap_sid(room, persistent_id, old_sid, sid)
     _sid_to_room.pop(old_sid, None)
     _sid_to_room[sid] = (session_id, persistent_id, spectator)
@@ -864,6 +965,9 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
 
     # Reconnect detection — BEFORE _leave
     existing = rooms.get(session_id)
+    if existing and host_return_expired(existing):
+        await _close_host_timeout(session_id, existing)
+        return NOT_IN_ROOM if payload.extra.resume else HOST_SEAT_UNAVAILABLE
     if existing and persistent_id in existing.players:
         if not verify_reconnect_token(session_id, persistent_id, payload.extra.reconnectToken):
             return "Invalid reconnect token"
@@ -884,7 +988,7 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
     # was handed to someone else when it was dropped, and stays theirs);
     # otherwise it is told so, before anything is created for it.
     if payload.extra.resume:
-        if existing is None or not _password_ok(existing, password):
+        if existing is None or existing.host_return_deadline is not None or not _password_ok(existing, password):
             return NOT_IN_ROOM
         return await _readmit_dropped_player(
             existing, session_id, sid, persistent_id, _sanitize_str(player_name, 32), payload.extra
@@ -892,6 +996,8 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
 
     if session_id in rooms:
         return "Room already exists"
+    if verify_reconnect_token(session_id, persistent_id, payload.extra.reconnectToken, allow_legacy=False):
+        return HOST_SEAT_UNAVAILABLE
 
     await _leave(sid)  # clean up if already in another room
 
@@ -987,6 +1093,9 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
 
     room = rooms.get(session_id)
     return_host = payload.extra.returnHost
+    if room and host_return_expired(room):
+        await _close_host_timeout(session_id, room)
+        room = None
     if return_host and (room is None or room.players.get(persistent_id, {}).get("socketId") != room.owner):
         return (HOST_SEAT_UNAVAILABLE, None)
     if room is None:
@@ -1013,6 +1122,8 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         )
         return (error, None) if error else (None, _join_ack(room))
 
+    if room.host_return_deadline is not None:
+        return ("Room closed", None)
     if not _password_ok(room, password):
         return ("Wrong password", None)
 
@@ -1429,6 +1540,10 @@ async def _end_match(session_id: str, room: Room, reason: str) -> None:
     # failover would restore this room still claiming to be mid-match even
     # though every client was already told the game ended above.
     await state.save_room(session_id, room)
+    await _record_match_end(session_id, ended_match_id, reason)
+
+
+async def _record_match_end(session_id: str, ended_match_id: str | None, reason: str) -> None:
     if ended_match_id:
         await db.set_session_ended(ended_match_id, None, reason)
     log.info("Game ended in room %s (%s)", session_id, reason)
@@ -2212,6 +2327,9 @@ async def _disconnect_from_room(sid: str) -> None:
         if entry:
             session_id, player_id, is_spectator = entry
             room = rooms.get(session_id)
+            if room and not is_spectator and room.owner == sid:
+                await _reserve_host(session_id, room, player_id)
+                return
             if room and room.status == "playing" and not is_spectator:
                 # Cancel any existing grace task before starting a new one —
                 # a rapid reconnect→disconnect cycle could otherwise orphan
@@ -2227,22 +2345,5 @@ async def _disconnect_from_room(sid: str) -> None:
                 task = asyncio.create_task(_disconnect_grace_expiry(sid, session_id, player_id, "disconnect"))
                 _disconnect_grace_tasks[session_id, player_id] = task
                 return  # Don't call _leave yet
-            # Lobby owner grace: serializes ownership transfer through a short
-            # timer so a brief network blip on the host doesn't churn ownership
-            # to the next player.
-            if room and room.status != "playing" and not is_spectator and room.owner == sid:
-                _cancel_disconnect_grace(session_id, player_id)
-                log.info(
-                    "SIO %s disconnect (lobby owner) — %ds grace for %s in room %s",
-                    sid,
-                    _LOBBY_OWNER_GRACE_SECONDS,
-                    player_id,
-                    session_id,
-                )
-                task = asyncio.create_task(
-                    _disconnect_grace_expiry(sid, session_id, player_id, "disconnect", _LOBBY_OWNER_GRACE_SECONDS)
-                )
-                _disconnect_grace_tasks[session_id, player_id] = task
-                return
 
         await _leave(sid)

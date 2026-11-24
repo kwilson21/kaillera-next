@@ -18,6 +18,7 @@ import {
   WAKE_POLL_MS,
   apiBase,
   elapsedText,
+  hostReturnUrl,
   hostUrl,
   isSlowWake,
   nextPingTimeout,
@@ -30,7 +31,13 @@ import {
   type WakeHost,
 } from './wake.ts';
 import type { SafeStorage } from '../kn-state.ts';
-import { hostReturnKey, readHostReturn } from '../play/host-return.ts';
+import {
+  hostReturnClock,
+  hostReturnDuration,
+  hostReturnKey,
+  hostReturnSeconds,
+  readHostReturn,
+} from '../play/host-return.ts';
 import { getJSONIfThere, isHealthAnswer, isRoomAnswer, type RoomAnswer } from './wire.ts';
 
 /** How often a room on screen is looked up again. */
@@ -284,27 +291,46 @@ export const startJoinPage = (host: JoinHost): void => {
     host.location.href = hostUrl(API, randomRoomCode(host));
   });
 
-  const offersHostReturn = (): boolean => {
+  const offersHostReturn = (now: number): boolean => {
     if (spectate || !canPlay) return false;
     try {
       const token = host.KNStorage?.get('localStorage', hostReturnKey(code)) ?? null;
-      return readHostReturn(code, token, host.Date.now()) !== null;
+      return readHostReturn(code, token, now) !== null;
     } catch {
       return false;
     }
   };
 
-  const showClosed = (hostName: string, returning = false): void => {
+  const showClosed = (hostName: string): void => {
     const view = closedView(hostName);
-    $('closed-title').textContent = returning ? 'Return to your room' : view.title;
-    $('closed-line').textContent = returning
-      ? 'Nobody is connected. You can try to reclaim your host seat.'
-      : view.line;
-    const rejoin = $<HTMLAnchorElement>('closed-return');
-    rejoin.hidden = !returning;
-    if (returning) rejoin.href = playUrl(API, code, false);
+    $('closed-title').textContent = view.title;
+    $('closed-line').textContent = view.line;
+    $('closed-return').hidden = true;
+    openOwn.className = 'btn primary big';
+    doc.title = 'Room closed · kaillera-next';
+    show('inv-closed');
+  };
+
+  let holdClock: number | null = null;
+  let holdDeadline = 0;
+  let holdPlaying = false;
+  let holdTimer = 0;
+  const showHold = (): void => {
+    const seconds = hostReturnSeconds(holdClock);
+    const returning = seconds > 0 && offersHostReturn(holdDeadline - seconds * 1000);
+    $('closed-title').textContent = returning ? 'Return to your room' : 'Waiting for the host';
+    $('closed-line').textContent = !seconds
+      ? 'The time to return has ended.'
+      : returning && holdPlaying
+        ? 'Return before the timer ends to start a rematch with your players.'
+        : 'The host disconnected. The room is reserved until the timer ends.';
+    $('closed-timer').textContent = hostReturnDuration(seconds);
+    $('closed-timer').hidden = false;
+    const link = $<HTMLAnchorElement>('closed-return');
+    link.hidden = !returning;
+    if (returning) link.href = hostReturnUrl(API, code);
     openOwn.className = returning ? 'btn big' : 'btn primary big';
-    doc.title = returning ? 'Return to room · kaillera-next' : 'Room closed · kaillera-next';
+    doc.title = $('closed-title').textContent + ' · kaillera-next';
     show('inv-closed');
   };
 
@@ -327,14 +353,13 @@ export const startJoinPage = (host: JoinHost): void => {
 
   const showRoom = (room: RoomAnswer): void => {
     const view = inviteView(room, spectate);
-    const returning = offersHostReturn();
-    const watchFirst = view.watchFirst && !returning;
+    const watchFirst = view.watchFirst;
 
-    $('inv-kicker').textContent = returning ? `Room ${code}` : view.kicker;
+    $('inv-kicker').textContent = view.kicker;
     $('inv-title').textContent = view.title;
     doc.title = `${$('inv-kicker').textContent} · kaillera-next`;
     $('inv-facts').replaceChildren(factsEl(room));
-    $('inv-fullline').hidden = returning || view.fullLineHidden;
+    $('inv-fullline').hidden = view.fullLineHidden;
 
     const join = $<HTMLAnchorElement>('inv-join');
     const watch = $<HTMLAnchorElement>('inv-watch');
@@ -342,11 +367,11 @@ export const startJoinPage = (host: JoinHost): void => {
     const watchHint = $('inv-watch-hint');
     join.href = playUrl(API, code, false);
     watch.href = playUrl(API, code, true);
-    join.textContent = returning ? 'Return to room' : view.joinText;
+    join.textContent = view.joinText;
     watch.textContent = view.watchText;
     join.className = watchFirst ? 'btn big' : 'btn primary big';
     watch.className = watchFirst ? 'btn primary big' : 'btn big';
-    joinHint.textContent = returning ? 'Use the host seat saved in this browser.' : view.joinHint;
+    joinHint.textContent = view.joinHint;
     // Primary first: Watch leads for a full room or a spectator link.
     // Moving a node drops its focus, so the stack is only reordered when the
     // order changes, and a focused action gets its focus back.
@@ -362,7 +387,7 @@ export const startJoinPage = (host: JoinHost): void => {
     join.hidden = joinHint.hidden = !canPlay;
     watch.hidden = watchHint.hidden = !hasWebRTC;
 
-    $('inv-next').textContent = returning ? '' : view.next;
+    $('inv-next').textContent = view.next;
     if (state !== 'inv-main') show('inv-main');
   };
 
@@ -412,17 +437,31 @@ export const startJoinPage = (host: JoinHost): void => {
     if (seq < shownSeq) return;
     shownSeq = seq;
     stopClock();
+    const elapsedHold = holdClock !== null && !hostReturnSeconds(holdClock);
+    holdClock = hostReturnClock(room);
+    holdDeadline = room?.hostReturnDeadline ?? 0;
+    holdPlaying = room?.status === 'playing';
+    host.clearInterval(holdTimer);
+    $('closed-timer').hidden = true;
     closedRecord = false;
+    if (holdClock !== null) {
+      closedRecord = true;
+      showHold();
+      holdTimer = host.setInterval(showHold, 1000);
+      again(5000);
+      return;
+    }
     const result = lookupResult(room);
     if (result.kind === 'gone') {
       showClosed('');
+      if (elapsedHold) $('closed-line').textContent = 'The host did not return before the timer ended.';
       return;
     }
     // A room nobody is connected to takes back only its own members (§7.2
     // M0.2), so it can come back: keep checking until it does.
     if (result.kind === 'closed') {
       closedRecord = true;
-      showClosed(result.hostName, offersHostReturn());
+      showClosed(result.hostName);
     } else {
       showRoom(result.room);
     }

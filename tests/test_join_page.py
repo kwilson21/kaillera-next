@@ -82,10 +82,13 @@ def test_full_room_leads_with_watch(invite):
 @pytest.mark.parametrize(
     ("record", "query", "token_room", "offer"),
     [
-        (_room(players=4), "", "KAZ12345", True),
-        (_room(closed=True), "", "KAZ12345", True),
+        (_room(players=4), "", "KAZ12345", False),
+        (_room(closed=True), "", "KAZ12345", False),
+        (dict(_room(players=4), hostReturnDeadline=1030000, serverTime=1000000), "", "KAZ12345", True),
+        (dict(_room(closed=True), hostReturnDeadline=1030000, serverTime=1000000), "", "KAZ12345", True),
+        (dict(_room(status="playing"), hostReturnDeadline=1030000, serverTime=1000000), "", "KAZ12345", True),
         (None, "", "KAZ12345", False),
-        (_room(closed=True), "&spectate=1", "KAZ12345", False),
+        (dict(_room(closed=True), hostReturnDeadline=1030000, serverTime=1000000), "&spectate=1", "KAZ12345", False),
         (_room(players=4), "&spectate=1", "KAZ12345", False),
         (_room(closed=True), "", "OTHER123", False),
     ],
@@ -97,14 +100,23 @@ def test_invite_offers_a_saved_host_seat_only_in_its_own_retained_room(page, inv
     link = page.get_by_role("link", name="Return to room", exact=True)
     if offer:
         expect(link).to_be_visible()
-        assert link.get_attribute("href") == "/play.html?room=KAZ12345"
-        if record["closed"]:
-            expect(page.get_by_role("button", name="Open your own room")).to_be_visible()
-        else:
-            expect(page.locator("#inv-stack > *").first).to_have_id("inv-join")
-            expect(page.get_by_role("link", name="Watch")).to_be_visible()
+        assert link.get_attribute("href") == "/play.html?room=KAZ12345&returnHost=1"
+        expect(page.get_by_role("button", name="Open your own room")).to_be_visible()
+        expect(page.get_by_role("timer")).to_contain_text("0:30")
+        if record["status"] == "playing":
+            expect(page.locator("#closed-line")).to_contain_text("start a rematch")
+        expect(page.get_by_role("link", name="Watch")).to_have_count(0)
     else:
         expect(link).to_have_count(0)
+
+
+def test_host_invite_stops_offering_return_at_the_deadline(page, invite):
+    token = make_reconnect_token("KAZ12345", "returning-host")
+    page.add_init_script(f"localStorage.setItem('kn-host-return:KAZ12345', {json.dumps(token)})")
+    invite(room=dict(_room(), hostReturnDeadline=102000, serverTime=100000))
+    expect(page.get_by_role("link", name="Return to room")).to_be_visible()
+    expect(page.get_by_role("link", name="Return to room")).to_have_count(0, timeout=4000)
+    expect(page.get_by_role("timer")).to_have_text("0:00")
 
 
 def test_match_in_progress_says_you_join_mid_match(invite):

@@ -434,6 +434,7 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
 - `ANTHROPIC_API_KEY`, `DESYNC_VISION_ENABLED` (`=1`): enable the Claude
   desync-vision endpoint
 - `PER_IP_SPECTATOR_CAP` (default 3): max spectator slots one IP can hold in a room
+- `HOST_RETURN_GRACE_SECONDS` defaults to 120. After an unexpected host disconnect, the server holds the room until the host returns or the deadline closes it. Redis preserves the deadline across restarts. An explicit leave immediately releases the host seat.
 - `ROM_SHARING_ENABLED` (default `true`): toggle host ROM P2P sharing
 - `LOG_RETENTION_DAYS` (default 7): how long a normal (non-flagged) match's
   session logs are kept before the retention sweep deletes them

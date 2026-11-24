@@ -908,6 +908,7 @@ button:hover {
 }
 
 /* Reconnecting banner */
+#host-wait-banner,
 #reconnecting-banner {
   position: fixed;
   top: 0;

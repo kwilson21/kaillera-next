@@ -67,7 +67,7 @@ const decoder = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
 //   reloads it into the new code.
 // A field the server removes or retypes drops the message on an old page, so
 // payloads.py changes a field a page reads only by adding a new one.
-const newerServer = <F extends typeof UsersUpdated.fields>(fields: F) => ({
+const newerServer = <F extends Pick<typeof UsersUpdated.fields, 'mode' | 'status'>>(fields: F) => ({
   ...fields,
   mode: Schema.NullOr(Schema.String),
   status: Schema.String,
@@ -79,6 +79,7 @@ const serverDecoders = {
   'users-updated': decoder(roomFromNewerServer),
   'game-started': decoder(serverEvents['game-started']),
   'game-ended': decoder(serverEvents['game-ended']),
+  'room-closed': decoder(serverEvents['room-closed']),
   'rom-sharing-updated': decoder(serverEvents['rom-sharing-updated']),
   'upload-token': decoder(serverEvents['upload-token']),
   'reconnect-token': decoder(serverEvents['reconnect-token']),

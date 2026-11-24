@@ -286,15 +286,16 @@
     </div>
 
     <dialog id="host-return-dialog" aria-labelledby="host-return-title" aria-describedby="host-return-help">
-      <h2 id="host-return-title">Return to your room?</h2>
+      <h2 id="host-return-title">Your hosted room</h2>
       <p id="host-return-help">
-        This browser hosted this room. You can reclaim your seat if your host tab closed. A game that was running in
-        that tab will end.
+        This browser hosted this room. A new tab can restore your host controls after the original tab disconnects.
       </p>
       <p role="status"></p>
+      <p role="timer" hidden></p>
       <form method="dialog">
-        <button value="host" autofocus>Return as host</button>
-        <button value="guest">Join separately</button>
+        <button value="host" hidden>Return as host</button>
+        <button value="guest" hidden>Join separately</button>
+        <button value="back">Back to lobby</button>
       </form>
     </dialog>
 
@@ -386,6 +387,10 @@
     <div id="unmute-banner" class="hidden">Tap to unmute</div>
 
     <!-- Reconnecting banner -->
+    <div id="host-wait-banner" hidden>
+      <span role="status">The host disconnected. Waiting for them to return.</span>
+      <span role="timer" aria-label="Time left for the host to return"></span>
+    </div>
     <div id="reconnecting-banner" class="hidden">
       <span class="spinner"></span>
       <span id="reconnecting-text">Reconnecting to server&hellip;</span>

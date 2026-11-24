@@ -252,6 +252,20 @@ def test_listed_zombie_room_is_not_on_the_board(client, sig):
     assert client.get("/list").json() == []
 
 
+def test_reserved_room_exposes_its_server_deadline_and_disappears_at_expiry(client, sig, monkeypatch):
+    room, _ = sig
+    now = 1_000
+    monkeypatch.setattr(signaling, "_now_ms", lambda: now)
+    room.host_return_deadline = 121_000
+    room.listed = True
+    status = client.get("/room/ROOM1").json()
+    assert status["serverTime"] == now
+    assert status["closed"] and status["hostReturnDeadline"] == 121_000
+    assert client.get("/list").json() == []
+    now = 121_000
+    assert client.get("/room/ROOM1").status_code == 404
+
+
 def test_room_lookup_reports_host_listed_and_closed(client, sig):
     body = client.get("/room/ROOM1").json()
     assert body["host_name"] == "Kaz" and body["listed"] is False and body["closed"] is False

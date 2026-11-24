@@ -333,8 +333,12 @@ class UsersUpdated(_ServerMessage):
     mode: GameMode | None
     status: RoomStatus
     listed: bool
+    # Absent on older rosters. The join acknowledgement always includes it.
+    matchId: str | None = None
     # Sticky for the named match. Absent from older servers.
     recoveryUnverifiedMatchId: str | None = None
+    hostReturnDeadline: int | None = None
+    serverTime: int | None = None
 
 
 class JoinRoomAck(UsersUpdated):
@@ -367,6 +371,12 @@ class GameEnded(_ServerMessage):
     # None when the room had no match to end.
     matchId: str | None
     reason: str | None = None
+
+
+class RoomClosed(_ServerMessage):
+    """`room-closed`."""
+
+    reason: str
 
 
 class RomSharingUpdated(_ServerMessage):
@@ -424,6 +434,7 @@ SERVER_EVENTS: dict[str, type[BaseModel]] = {
     "users-updated": UsersUpdated,
     "game-started": GameStarted,
     "game-ended": GameEnded,
+    "room-closed": RoomClosed,
     "rom-sharing-updated": RomSharingUpdated,
     "upload-token": TokenMessage,
     "reconnect-token": TokenMessage,

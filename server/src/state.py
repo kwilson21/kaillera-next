@@ -86,6 +86,7 @@ def _deserialize_room(d: dict):
         ),
         listed=bool(d.get("listed", False)) and d.get("password") is None,
         started_at=d.get("started_at"),
+        host_return_deadline=d.get("host_return_deadline"),
         waiting_for_state=set(d.get("waiting_for_state", [])),
     )
 

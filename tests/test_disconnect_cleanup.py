@@ -1,6 +1,7 @@
 """Room membership when a roster delivery observes a transport disconnect."""
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -22,6 +23,7 @@ def server(monkeypatch):
     server.on("disconnect", handler=signaling.disconnect)
     monkeypatch.setattr(server, "_send_eio_packet", AsyncMock())
     monkeypatch.setattr(signaling, "sio", server)
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
     monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
     monkeypatch.setattr(signaling, "_waiting_disconnects", set())
     monkeypatch.setattr(signaling, "_disconnect_grace_tasks", {})
@@ -241,9 +243,248 @@ def test_shutdown_drains_cleanup_that_already_started_persisting(server, monkeyp
     run_async(scenario())
 
 
+@pytest.mark.parametrize("status", ["lobby", "playing"])
+@pytest.mark.parametrize("with_guest", [False, True])
+def test_host_has_the_same_return_deadline_with_or_without_other_players(server, monkeypatch, status, with_guest):
+    async def scenario():
+        now = 10_000
+        monkeypatch.setattr(signaling, "_now_ms", lambda: now)
+        monkeypatch.setattr(signaling, "HOST_RETURN_GRACE_SECONDS", 120)
+        events = AsyncMock(wraps=server.emit)
+        monkeypatch.setattr(server, "emit", events)
+        monkeypatch.setattr(signaling.db, "set_session_ended", AsyncMock())
+        monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+        room, guest = await lobby(server)
+        if not with_guest:
+            await server._handle_eio_disconnect("guest-transport", "transport close")
+        elif status == "playing":
+            await signaling.join_room(
+                await server.manager.connect("spectator", "/"),
+                {
+                    "extra": {"sessionid": "ROOM", "persistentId": "watcher", "spectate": True},
+                },
+            )
+        room.status = status
+        room.match_id = "current" if status == "playing" else None
+        await server._handle_eio_disconnect("host-transport", "transport close")
+        deadline = room.host_return_deadline
+        assert deadline == now + 120_000
+        _, roster = events.await_args.args
+        assert roster["hostReturnDeadline"] == deadline and roster["serverTime"] == now
+        assert signaling._join_ack(room)["hostReturnDeadline"] == deadline
+        assert room.owner == room.players["host"]["socketId"]
+        assert await signaling.join_room("stranger", {"extra": {"sessionid": "ROOM"}}) == ("Room closed", None)
+
+        now = deadline
+        returned = await server.manager.connect("too-late", "/")
+        error, _ = await signaling.join_room(
+            returned,
+            {
+                "extra": {
+                    "sessionid": "ROOM",
+                    "persistentId": "host",
+                    "returnHost": True,
+                    "reconnectToken": signaling.make_reconnect_token("ROOM", "host"),
+                }
+            },
+        )
+        assert error == signaling.HOST_SEAT_UNAVAILABLE
+        assert "ROOM" not in signaling.rooms
+        assert (
+            await signaling.open_room(
+                returned,
+                {
+                    "extra": {
+                        "sessionid": "ROOM",
+                        "persistentId": "host",
+                        "fresh": True,
+                        "reconnectToken": signaling.make_reconnect_token("ROOM", "host"),
+                    }
+                },
+            )
+            == signaling.HOST_SEAT_UNAVAILABLE
+        )
+        assert "ROOM" not in signaling.rooms
+        assert guest not in signaling._sid_to_room
+        assert not signaling._disconnect_grace_tasks
+        assert list(server.manager.get_participants("/", "ROOM")) == []
+        events.assert_awaited_with("room-closed", {"reason": "host-timeout"}, room="ROOM")
+        if status == "playing":
+            signaling.db.set_session_ended.assert_awaited_once_with("current", None, "host-timeout")
+
+    run_async(scenario())
+
+
+@pytest.mark.parametrize("failure", ["game-ended", "room-closed", "socket-close", "delete", "match-log"])
+def test_expiry_attempts_other_notifications_and_cleanup_after_a_failure(server, monkeypatch, failure):
+    async def scenario():
+        room, guest = await lobby(server)
+        room.status, room.match_id, room.host_return_deadline = "playing", "current", 1
+        signaling._sid_host.pop(room.owner)
+        signaling.rooms["EMPTY"] = signaling.Room("none", "Empty", "", None, 4)
+        events = []
+
+        async def emit(event, data, **options):
+            target = options.get("to") or options["room"]
+            events.append((event, target))
+            if event == failure and target == "ROOM":
+                raise RuntimeError("broadcast failed")
+
+        monkeypatch.setattr(server, "emit", emit)
+        close = AsyncMock(wraps=server.close_room)
+        if failure == "socket-close":
+            close.side_effect = RuntimeError("socket close failed")
+        monkeypatch.setattr(server, "close_room", close)
+
+        async def delete(code):
+            if code == "ROOM" and failure == "delete":
+                raise RuntimeError("delete failed")
+
+        delete = AsyncMock(side_effect=delete)
+        monkeypatch.setattr(signaling.state, "delete_room", delete)
+        record = AsyncMock(side_effect=RuntimeError("match logging failed") if failure == "match-log" else None)
+        monkeypatch.setattr(signaling, "_record_match_end", record)
+
+        await signaling._expire_rooms({})
+        assert ("game-ended", "ROOM") in events and ("room-closed", "ROOM") in events
+        if failure == "room-closed":
+            assert ("room-closed", guest) in events
+        close.assert_awaited_once_with("ROOM")
+        assert not signaling.rooms and not signaling._sid_to_room
+        assert guest not in {sid for sid, _ in server.manager.get_participants("/", "ROOM")}
+        assert [call.args[0] for call in delete.await_args_list] == ["ROOM", "EMPTY"]
+        record.assert_awaited_once_with("ROOM", "current", "host-timeout")
+
+    run_async(scenario())
+
+
+def test_room_sweeper_runs_again_after_an_unexpected_failure(monkeypatch):
+    sweep = AsyncMock(side_effect=[RuntimeError("failed sweep"), {}])
+    monkeypatch.setattr(signaling, "_expire_rooms", sweep)
+    monkeypatch.setattr(signaling.asyncio, "sleep", AsyncMock(side_effect=[None, None, asyncio.CancelledError()]))
+    with pytest.raises(asyncio.CancelledError):
+        run_async(signaling._cleanup_empty_rooms())
+    assert sweep.await_count == 2
+
+
+@pytest.mark.parametrize("resume", [True, False])
+def test_host_rejoins_just_before_deadline_and_cancels_closure(server, monkeypatch, resume):
+    async def scenario():
+        now = 0
+        monkeypatch.setattr(signaling, "_now_ms", lambda: now)
+        monkeypatch.setattr(signaling.db, "set_session_ended", AsyncMock())
+        monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+        room, _ = await lobby(server)
+        room.status, room.match_id = "playing", "current"
+        await server._handle_eio_disconnect("host-transport", "transport close")
+        now = room.host_return_deadline - 1
+        sid = await server.manager.connect("returned-transport", "/")
+        signaling._sid_host[sid] = "localhost"
+        error, ack = await signaling.join_room(
+            sid,
+            {
+                "extra": {
+                    "sessionid": "ROOM",
+                    "persistentId": "host",
+                    "resume": resume,
+                    "returnHost": not resume,
+                    "slot": 0,
+                    "matchId": "current",
+                    "reconnectToken": signaling.make_reconnect_token("ROOM", "host"),
+                }
+            },
+        )
+        assert error is None
+        assert ack["owner"] == sid and ack.get("hostReturnDeadline") is None
+        assert room.status == ("playing" if resume else "lobby")
+        assert not signaling._disconnect_grace_tasks
+        now += 1
+        await signaling._expire_rooms({})
+        assert signaling.rooms["ROOM"] is room
+
+    run_async(scenario())
+
+
+def test_explicit_leave_forfeits_the_host_seat_without_a_timer(server):
+    async def scenario():
+        room, guest = await lobby(server)
+        await signaling.leave_room(room.owner)
+        assert not signaling._disconnect_grace_tasks
+        assert room.owner == guest and room.host_return_deadline is None
+        sid = await server.manager.connect("former-host", "/")
+        err, _ = await signaling.join_room(
+            sid,
+            {
+                "extra": {
+                    "sessionid": "ROOM",
+                    "persistentId": "host",
+                    "returnHost": True,
+                    "reconnectToken": signaling.make_reconnect_token("ROOM", "host"),
+                }
+            },
+        )
+        assert err == signaling.HOST_SEAT_UNAVAILABLE
+        assert room.owner == guest
+
+    run_async(scenario())
+
+
+@pytest.mark.parametrize("reserved", [True, False])
+def test_shutdown_persists_the_deadline_without_restarting_an_existing_window(server, monkeypatch, reserved):
+    async def scenario():
+        room, _ = await lobby(server)
+        monkeypatch.setattr(signaling.state, "enabled", lambda: True)
+        monkeypatch.setattr(signaling, "_now_ms", lambda: 100_000)
+        if reserved:
+            room.host_return_deadline = 100_001
+            await signaling._reserve_host("ROOM", room, "host")
+        await signaling.finish_room_shutdown()
+        expected = 100_001 if reserved else 100_000 + signaling.HOST_RETURN_GRACE_SECONDS * 1000
+        assert room.host_return_deadline == expected
+        signaling.state.save_room.assert_awaited_with("ROOM", room)
+        assert not signaling._disconnect_grace_tasks
+
+    run_async(scenario())
+
+
+def test_restored_deadline_expires_on_its_own_even_with_a_connected_guest(server):
+    async def scenario():
+        room, guest = await lobby(server)
+        deadline = signaling._now_ms() + 100
+        room.host_return_deadline = deadline
+        restored = signaling.state._deserialize_room(json.loads(signaling.state._serialize_room(room)))
+        signaling.rooms["ROOM"] = restored
+        await signaling.restore_host_reservations()
+        assert restored.host_return_deadline == deadline
+        await asyncio.wait_for(signaling._disconnect_grace_tasks["ROOM", "host"], timeout=2)
+        assert guest not in signaling._sid_to_room and "ROOM" not in signaling.rooms
+
+    run_async(scenario())
+
+
+def test_startup_drops_expired_reservations_and_grants_legacy_rooms_one_window(server, monkeypatch):
+    async def scenario():
+        now = 100_000
+        monkeypatch.setattr(signaling, "_now_ms", lambda: now)
+        room, _ = await lobby(server)
+        room.host_return_deadline = now
+        legacy = signaling.Room("old-sid", "Old room", "", None, 4)
+        legacy.players["host"] = {"socketId": "old-sid"}
+        signaling.rooms["OLDER"] = legacy
+        await signaling.restore_host_reservations()
+        assert "ROOM" not in signaling.rooms
+        assert legacy.host_return_deadline == now + signaling.HOST_RETURN_GRACE_SECONDS * 1000
+        original = legacy.host_return_deadline
+        now += 5000
+        await signaling.restore_host_reservations()
+        assert legacy.host_return_deadline == original
+
+    run_async(scenario())
+
+
 def test_same_browser_hosting_two_rooms_has_independent_grace(server, monkeypatch):
     async def scenario():
-        first, guest = await lobby(server)
+        first, _ = await lobby(server)
         second_host = await server.manager.connect("other-transport", "/")
         signaling._sid_host[second_host] = "localhost"
         opened = {"extra": {"sessionid": "OTHER", "persistentId": "host"}}
@@ -251,13 +492,13 @@ def test_same_browser_hosting_two_rooms_has_independent_grace(server, monkeypatc
 
         # Hold the first timer until the host has returned to the second room.
         release = asyncio.Event()
-        expiry = signaling._disconnect_grace_expiry
+        wait_for_host = signaling._wait_for_host_return
 
-        async def grace(sid, code, pid, reason, _seconds):
+        async def grace(code, room):
             await release.wait()
-            await expiry(sid, code, pid, reason, 0)
+            await wait_for_host(code, room)
 
-        monkeypatch.setattr(signaling, "_disconnect_grace_expiry", grace)
+        monkeypatch.setattr(signaling, "_wait_for_host_return", grace)
         await server._handle_eio_disconnect("host-transport", "transport close")
         await server._handle_eio_disconnect("other-transport", "transport close")
         timers = list(signaling._disconnect_grace_tasks.values())
@@ -276,10 +517,10 @@ def test_same_browser_hosting_two_rooms_has_independent_grace(server, monkeypatc
             },
         )
         assert error is None
+        first.host_return_deadline = 1
         release.set()
         await asyncio.gather(*timers, return_exceptions=True)
-        assert first.owner == guest
-        assert first.slots == {0: "guest"}
+        assert "ROOM" not in signaling.rooms
         assert signaling.rooms["OTHER"].owner == returned
         assert signaling.rooms["OTHER"].slots == {0: "host"}
         assert not signaling._disconnect_grace_tasks

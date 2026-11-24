@@ -123,9 +123,9 @@ def test_live_board_rows_and_links(landing):
     expect(page.locator(".room").nth(1)).to_contain_text("in game · 6 min")
 
 
-def test_home_shows_hosted_rooms_on_mobile_including_unlisted_and_full(page, server_url, monkeypatch):
+def test_home_shows_only_disconnected_host_rooms_on_mobile_including_unlisted_and_full(page, server_url, monkeypatch):
     page.set_viewport_size({"width": 390, "height": 844})
-    codes = ["PRIV1234", "fULL5678", "GONE1234", "WRONG123"]
+    codes = ["PRIV1234", "fULL5678", "GONE1234", "WRONG123", "LIVE1234", "OVER1234"]
     tokens = {
         "kn-host-return:" + code: make_reconnect_token("ELSE123" if code == "WRONG123" else code, "host")
         for code in codes
@@ -134,9 +134,15 @@ def test_home_shows_hosted_rooms_on_mobile_including_unlisted_and_full(page, ser
         then.setattr(time, "time", lambda: 1)
         tokens["kn-host-return:EXPIRED1"] = make_reconnect_token("EXPIRED1", "host")
     page.add_init_script(f"for (const [k,v] of Object.entries({json.dumps(tokens)})) localStorage.setItem(k,v)")
+    page.add_init_script("const now = Date.now.bind(Date); Date.now = () => now() + 3600000;")
     _mock(page, rooms=[_room("fULL5678", "Host", players=4)])
-    page.route("**/room/PRIV1234", lambda r: r.fulfill(json=_room("PRIV1234", "Host")))
-    page.route("**/room/fULL5678", lambda r: r.fulfill(json=_room("fULL5678", "Host", players=4)))
+    server_now = int(time.time() * 1000)
+    hold = {"hostReturnDeadline": server_now + 60000, "serverTime": server_now}
+    page.route("**/room/PRIV1234", lambda r: r.fulfill(json={**_room("PRIV1234", "Host"), **hold}))
+    page.route("**/room/fULL5678", lambda r: r.fulfill(json={**_room("fULL5678", "Host", "playing", players=4), **hold}))
+    page.route("**/room/LIVE1234", lambda r: r.fulfill(json=_room("LIVE1234", "Host")))
+    page.route("**/room/OVER1234", lambda r: r.fulfill(json={**_room("OVER1234", "Host"), **hold, "serverTime": server_now + 60001}))
+    page.route("**/room/EXPIRED1", lambda r: r.fulfill(json={**_room("EXPIRED1", "Host"), **hold}))
     page.route("**/room/GONE1234", lambda r: r.fulfill(status=404))
     with page.expect_response("**/room/GONE1234"):
         page.goto(server_url)
@@ -144,8 +150,15 @@ def test_home_shows_hosted_rooms_on_mobile_including_unlisted_and_full(page, ser
     for code in codes[:2]:
         link = returns.get_by_role("link", name=f"Return to room {code}")
         expect(link).to_be_visible()
-        assert link.get_attribute("href") == f"/play.html?room={code}"
+        assert link.get_attribute("href") == f"/play.html?room={code}&returnHost=1"
+        timer = returns.locator(".host-return").filter(has_text=f"Return to room {code}").get_by_role("timer")
+        if code == "fULL5678":
+            expect(timer).to_contain_text("Return to the lobby for a rematch. Room closes in")
+        else:
+            expect(timer).to_contain_text("You disconnected as host. Room closes in")
     expect(returns.get_by_role("link")).to_have_count(2)
+    expect(returns.get_by_role("timer")).to_have_count(2)
+    expect(returns.get_by_role("timer").first).to_contain_text("Room closes in")
     assert page.evaluate("localStorage.getItem('kn-host-return:GONE1234')") is None
     assert page.evaluate("localStorage.getItem('kn-host-return:WRONG123')") is None
     assert page.evaluate("localStorage.getItem('kn-host-return:EXPIRED1')") is None
@@ -157,7 +170,7 @@ def test_home_shows_hosted_rooms_on_mobile_including_unlisted_and_full(page, ser
         expect(returns).to_be_hidden()
 
 
-def test_home_keeps_saved_host_rooms_during_a_temporary_lookup_failure(page, server_url):
+def test_home_keeps_the_ticket_but_waits_for_a_confirmed_return_deadline(page, server_url):
     code = "PRIV1234"
     token = make_reconnect_token(code, "host")
     page.add_init_script(f"localStorage.setItem('kn-host-return:{code}', {json.dumps(token)})")
@@ -165,7 +178,22 @@ def test_home_keeps_saved_host_rooms_during_a_temporary_lookup_failure(page, ser
     page.route(f"**/room/{code}", lambda r: r.fulfill(status=503))
     with page.expect_response(f"**/room/{code}"):
         page.goto(server_url)
-    expect(page.get_by_role("link", name=f"Return to room {code}")).to_be_visible()
+    expect(page.get_by_role("link", name=f"Return to room {code}")).to_have_count(0)
+    assert page.evaluate(f"localStorage.getItem('kn-host-return:{code}')") == token
+
+    page.clock.install()
+    room = {**_room(code, "Host"), "serverTime": 100000, "hostReturnDeadline": 185000}
+    page.route(f"**/room/{code}", lambda route: route.fulfill(json=room))
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    link = page.get_by_role("link", name=f"Return to room {code}")
+    expect(link).to_be_visible()
+    timer = page.get_by_role("timer")
+    expect(timer).to_contain_text("Room closes in 1:25")
+    page.route(f"**/room/{code}", lambda route: route.fulfill(status=503))
+    page.clock.fast_forward(2000)
+    expect(timer).to_contain_text("Room closes in 1:23")
+    page.clock.fast_forward(83000)
+    expect(link).to_have_count(0)
     assert page.evaluate(f"localStorage.getItem('kn-host-return:{code}')") == token
 
 

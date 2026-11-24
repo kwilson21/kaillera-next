@@ -80,7 +80,7 @@ async def _room_life_steps() -> dict[str, dict | None]:
         assert err is None, err
         acks[name] = ack
 
-    assert await _open_room_locked("sid-host", OpenRoomPayload(extra=_extra("pid-host", player_name="Host"))) is None
+    assert await _open_room_locked("sid-host", OpenRoomPayload(extra={"sessionid": "ROOM1", "persistentId": "pid-host", "player_name": "Host"})) is None
     await join("guest", "sid-guest", "pid-guest")
     await join("spectator", "sid-spec", "pid-spec", spectate=True)
     rom = {"ready": True, "hash": "S" + "ab" * 32, "name": "Smash.z64", "size": 16 * 1024 * 1024}
@@ -96,7 +96,9 @@ async def _room_life_steps() -> dict[str, dict | None]:
     acks["session-log refused"] = await signaling.session_log_handler("sid-host", {**flush, "matchId": "other"})
     assert await _end_game_locked("sid-host", EndGamePayload()) is None
     # The host leaves: the guest becomes the owner and is asked to renegotiate.
-    await _leave("sid-host")
+    await _leave("sid-host", "leave")
+    rooms["ROOM1"].host_return_deadline = 1
+    await signaling._expire_rooms({})
     return acks
 
 
@@ -155,6 +157,17 @@ def test_users_updated_covers_lobby_and_match(room_life):
     assert any(u.romHash and u.hostRom.size for u in updates)
     assert any(u.spectators for u in updates)
     assert any(p.slot is not None and p.romReady for u in updates for p in u.players.values())
+
+
+def test_rosters_identify_the_running_match_and_clear_it_in_the_lobby(room_life):
+    emitted, acks = room_life
+    rosters = [d for event, d in emitted if event == "users-updated"]
+    assert all(r["matchId"] is None for r in rosters if r["status"] == "lobby")
+    assert {r["matchId"] for r in rosters if r["status"] == "playing"} == {acks["rejoin"]["matchId"]}
+    legacy = dict(rosters[0])
+    del legacy["matchId"]
+    assert UsersUpdated.model_validate(legacy).matchId is None
+    assert JoinRoomAck.model_fields["matchId"].is_required()
 
 
 def test_join_room_acks_match_the_model(room_life):

@@ -12,7 +12,13 @@
  * sleeps, so it loads no core.
  */
 import type { SafeStorage } from '../kn-state.ts';
-import { HOST_RETURN_PREFIX, readHostReturn } from '../play/host-return.ts';
+import {
+  HOST_RETURN_PREFIX,
+  hostReturnClock,
+  hostReturnDuration,
+  hostReturnSeconds,
+  readHostReturn,
+} from '../play/host-return.ts';
 import {
   BOARD_STATES,
   MARKS,
@@ -49,6 +55,7 @@ import {
   WAKE_POLL_MS,
   apiBase,
   elapsedText,
+  hostReturnUrl,
   hostUrl,
   isSlowWake,
   nextPingTimeout,
@@ -87,6 +94,7 @@ export interface FrontHost extends WakeHost, CodeHost {
   setInterval(handler: () => void, ms: number): number;
   clearInterval(id: number): void;
   addEventListener(type: 'pageshow', listener: (event: PageTransitionEvent) => void): void;
+  addEventListener(type: 'storage', listener: (event: StorageEvent) => void): void;
   addEventListener(type: string, listener: () => void, options: AddEventListenerOptions): void;
 }
 
@@ -405,47 +413,94 @@ export const startFrontPage = (host: FrontHost): void => {
     restoreFocus(f);
   };
 
+  $('host-timeout-notice').hidden = new URLSearchParams(host.location.search).get('roomEnded') !== 'host-timeout';
   const hostReturns = $('host-returns');
-  const returnLinks = new Map<string, HTMLAnchorElement>();
-  const checkHostReturns = (checkRooms = false): void => {
+  const returnLinks = new Map<
+    string,
+    { row: HTMLElement; timer: HTMLElement; clock: number; token: string; hint: string }
+  >();
+  const pendingReturns = new Map<string, string>();
+  let returnTimer = 0;
+  const hideReturn = (code: string): void => {
+    returnLinks.get(code)?.row.remove();
+    returnLinks.delete(code);
+  };
+  const showReturnTimes = (): void => {
+    for (const [code, entry] of returnLinks) {
+      const seconds = hostReturnSeconds(entry.clock);
+      if (seconds === 0) hideReturn(code);
+      else setText(entry.timer, `${entry.hint} Room closes in ${hostReturnDuration(seconds)}`);
+    }
+    hostReturns.hidden = returnLinks.size === 0;
+    if (hostReturns.hidden && returnTimer) {
+      host.clearInterval(returnTimer);
+      returnTimer = 0;
+    } else if (!hostReturns.hidden && !returnTimer) {
+      returnTimer = host.setInterval(showReturnTimes, 1000);
+    }
+  };
+  const checkHostReturns = (): void => {
     const storage = host.KNStorage;
     if (!storage?.keys || (API && new URL(API, host.location.href).origin !== host.location.origin)) return;
     const present = new Set<string>();
     for (const key of storage.keys('localStorage', HOST_RETURN_PREFIX)) {
       const code = key.slice(HOST_RETURN_PREFIX.length);
       const token = storage.get('localStorage', key);
-      if (!/^[A-Za-z0-9]{3,16}$/.test(code) || !readHostReturn(code, token, host.Date.now())) {
+      if (!token || !/^[A-Za-z0-9]{3,16}$/.test(code) || !readHostReturn(code, token, 0)) {
         if (token === storage.get('localStorage', key)) storage.remove('localStorage', key);
         continue;
       }
       present.add(code);
-      if (!returnLinks.has(code)) {
-        const link = el('a', 'btn big', `Return to room ${code}`);
-        link.href = playUrl(API, code, false);
-        hostReturns.append(link);
-        returnLinks.set(code, link);
-      }
-      if (checkRooms) {
-        // Unlisted rooms are absent from the board. A lookup failure can be temporary.
-        void getJSONIfThere(host, `${API}/room/${encodeURIComponent(code)}`, BOARD_TIMEOUT_MS, isRoomAnswer)
-          .then((room) => {
-            if (room === null && token === storage.get('localStorage', key)) {
-              storage.remove('localStorage', key);
-              checkHostReturns();
+      const previous = returnLinks.get(code);
+      if (previous && previous.token !== token) hideReturn(code);
+      if (pendingReturns.get(code) === token) continue;
+      pendingReturns.set(code, token);
+      // The saved ticket proves this browser hosted. Only the room can confirm it is waiting for the host.
+      void getJSONIfThere(host, `${API}/room/${encodeURIComponent(code)}`, BOARD_TIMEOUT_MS, isRoomAnswer)
+        .then((room) => {
+          if (token !== storage.get('localStorage', key)) return;
+          if (room === null || (room.serverTime != null && !readHostReturn(code, token, room.serverTime))) {
+            storage.remove('localStorage', key);
+            hideReturn(code);
+            showReturnTimes();
+            return;
+          }
+          const clock = hostReturnClock(room);
+          if (clock === null || hostReturnSeconds(clock) === 0) {
+            hideReturn(code);
+          } else {
+            const hint =
+              room.status === 'playing'
+                ? 'You disconnected as host. Return to the lobby for a rematch.'
+                : 'You disconnected as host.';
+            const entry = returnLinks.get(code);
+            if (entry) {
+              entry.clock = clock;
+              entry.hint = hint;
+            } else {
+              const row = el('div', 'host-return');
+              const link = el('a', 'btn primary big', `Return to room ${code}`);
+              link.href = hostReturnUrl(API, code);
+              const timer = el('span');
+              timer.setAttribute('role', 'timer');
+              row.append(link, timer);
+              hostReturns.append(row);
+              returnLinks.set(code, { row, timer, clock, token, hint });
             }
-          })
-          .catch(() => {});
-      }
+          }
+          showReturnTimes();
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (pendingReturns.get(code) === token) pendingReturns.delete(code);
+        });
     }
-    for (const [code, link] of returnLinks) {
-      if (!present.has(code)) {
-        link.remove();
-        returnLinks.delete(code);
-      }
-    }
-    hostReturns.hidden = returnLinks.size === 0;
+    for (const code of returnLinks.keys()) if (!present.has(code)) hideReturn(code);
+    showReturnTimes();
   };
-  host.addEventListener('storage', () => checkHostReturns(), { passive: true });
+  host.addEventListener('storage', (event) => {
+    if (event.key === null || event.key.startsWith(HOST_RETURN_PREFIX)) checkHostReturns();
+  });
   checkHostReturns();
 
   // ── Polling, waking ─────────────────────────────────────────────────────
@@ -479,7 +534,7 @@ export const startFrontPage = (host: FrontHost): void => {
     const seq = ++refreshSeq;
     if (fresh) pollCount = 0;
     const refreshDetails = asksForStats(pollCount++);
-    checkHostReturns(refreshDetails);
+    checkHostReturns();
     const statsReq = refreshDetails
       ? getJSON(host, `${API}/api/stats/public`, BOARD_TIMEOUT_MS, isPublicStats)
           .then((st) => {

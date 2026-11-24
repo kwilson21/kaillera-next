@@ -5,7 +5,6 @@ Run: pytest tests/test_e2e.py -v
 
 import re
 import secrets
-import time
 
 import pytest
 from playwright.sync_api import expect
@@ -57,21 +56,37 @@ def test_reopened_host_url_uses_the_rooms_current_mode(page, server_url, room):
     assert page.request.get(f"{server_url}/room/{room}").json()["mode"] == "streaming"
 
 
-def test_reopened_host_url_does_not_recreate_an_expired_room(page, server_url, room):
-    url = f"{server_url}/play.html?room={room}&host=1"
+@pytest.mark.parametrize("playing", [False, True], ids=["lobby", "match"])
+def test_reopened_host_url_does_not_recreate_an_expired_room(browser, page, short_host_return_url, room, playing):
+    url = f"{short_host_return_url}/play.html?room={room}&host=1"
     page.goto(url)
     page.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
-    page.goto(server_url)
-    deadline = time.monotonic() + 15
-    while page.request.get(f"{server_url}/room/{room}").status == 200 and time.monotonic() < deadline:
-        time.sleep(0.25)
-    assert page.request.get(f"{server_url}/room/{room}").status == 404
+    with browser.new_page() as guest:
+        guest.goto(f"{short_host_return_url}/play.html?room={room}&name=Guest")
+        guest.wait_for_function("KNState.slot === 1")
+        if playing:
+            for player in (page, guest):
+                _mark_rom_ready(player)
+            page.click("#start-btn")
+            expect(guest.locator("#toolbar")).to_be_visible()
+            page.once("dialog", lambda dialog: dialog.accept())
+        page.goto(short_host_return_url)
+        expect(page.get_by_role("link", name=f"Return to room {room}")).to_be_visible()
+        expect(page.get_by_role("timer")).to_contain_text("Room closes in")
+        expect(guest.locator("#host-wait-banner [role=timer]")).to_be_visible()
+        deadline = guest.request.get(f"{short_host_return_url}/room/{room}").json()
+        assert 0 < deadline["hostReturnDeadline"] - deadline["serverTime"] <= 5000
 
-    # The tab remembers which room it visited even after its ticket expires.
+        expect(guest).to_have_url(f"{short_host_return_url}/?roomEnded=host-timeout", timeout=15000)
+        expect(guest.get_by_role("status")).to_contain_text("The room closed because the host did not return in time.")
+        expect(page.get_by_role("link", name=f"Return to room {room}")).to_have_count(0)
+        assert page.request.get(f"{short_host_return_url}/room/{room}").status == 404
+
+    # A bookmark in the original tab cannot recreate the room even after its ticket expires.
     page.add_init_script("const now = Date.now.bind(Date); Date.now = () => now() + 3600000;")
     page.goto(url)
     expect(page.locator(".error-card")).to_contain_text("Room not found")
-    assert page.request.get(f"{server_url}/room/{room}").status == 404
+    assert page.request.get(f"{short_host_return_url}/room/{room}").status == 404
 
 
 def test_host_return_after_a_temporary_lookup_failure(page, server_url, room):
@@ -86,7 +101,7 @@ def test_host_return_after_a_temporary_lookup_failure(page, server_url, room):
     expect(page.locator("#host-controls")).to_be_visible()
 
 
-def test_reopened_host_url_joins_after_ownership_has_transferred(browser, server_url, room):
+def test_intentional_lobby_leave_transfers_the_room_and_clears_the_return_offer(browser, server_url, room):
     url = f"{server_url}/play.html?room={room}"
     original = browser.new_page()
     guest = browser.new_page()
@@ -95,10 +110,12 @@ def test_reopened_host_url_joins_after_ownership_has_transferred(browser, server
         original.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
         guest.goto(f"{url}&name=Guest")
         guest.wait_for_function("KNState.slot === 1")
-        original.goto(server_url)
+        original.click("#leave-btn")
+        expect(original).to_have_url(f"{server_url}/")
+        expect(original.get_by_role("link", name=f"Return to room {room}")).to_have_count(0)
         guest.wait_for_function("KNState.isLocalHost && KNState.slot === 0", timeout=15000)
 
-        original.goto(f"{url}&host=1&name=Original")
+        original.goto(f"{url}&name=Original")
         original.wait_for_function("KNState.slot === 1")
         expect(original.locator("#guest-status")).to_be_visible()
         expect(original.locator("#host-controls")).to_be_hidden()
@@ -151,15 +168,8 @@ def test_host_guest_start_end(browser, server_url):
 
 
 @pytest.mark.parametrize("offer_delay_ms", [0, 1000], ids=["normal", "delayed-offer"])
-def test_host_leave_midgame_keeps_room(browser, server_url, offer_delay_ms):
-    """When the host leaves mid-game, the guest stays in the game and the room stays open.
-
-    The server used to close the room on a host disconnect (`room-closed`) and
-    the guest was sent back to the lobby. It now keeps the room and the match:
-    the host may come back, and after the disconnect grace a remaining player
-    becomes the owner (signaling._leave; tests/test_room_logic.py,
-    tests/test_host_reload.py). The guest is told the host left.
-    """
+def test_disconnected_host_keeps_room_during_return_window(browser, server_url, offer_delay_ms):
+    """The guest stays in the playing room while the disconnected host can still return."""
     host = browser.new_page()
     guest = browser.new_page()
     if offer_delay_ms:
@@ -219,6 +229,7 @@ def test_host_leave_midgame_keeps_room(browser, server_url, offer_delay_ms):
         resp = guest.request.get(f"{server_url}/room/{room_code}")
         assert resp.ok, f"room lookup failed: {resp.status}"
         assert resp.json()["status"] == "playing"
+        assert resp.json()["hostReturnDeadline"] > resp.json()["serverTime"]
     finally:
         if not host.is_closed():
             host.close()
