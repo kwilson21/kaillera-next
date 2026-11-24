@@ -1042,6 +1042,7 @@ if [ ! -f "${JS_FILE}" ] || [ ! -f "${WASM_FILE}" ]; then
     echo "ERROR: .js or .wasm not produced"
     exit 1
 fi
+python3 "${SCRIPT_DIR}/patch-manual-scheduler.py" "${JS_FILE}"
 echo "==> JS glue: $(ls -lh ${JS_FILE} | awk '{print $5}')"
 echo "==> WASM:    $(ls -lh ${WASM_FILE} | awk '{print $5}')"
 

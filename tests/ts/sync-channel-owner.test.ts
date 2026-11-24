@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 import { mayReceiveState } from '../../web/src/sync-chunk-room.ts';
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const start = source.indexOf('  const setupSyncDataChannel = ');
@@ -12,15 +13,19 @@ function room() {
     `
     const window = { KNCore: { syncSend: { mayReceiveState } } };
     const _peers = { host: { slot: 0 }, guest: { slot: 2 } };
-    let _syncRecoveryId=0, _syncExpected=0, _syncChunks=[], _syncFrame=0, _syncIsFull=false,
+    const KNState={matchId:'assembly-fixture'},_syncQueueEpoch=1,_syncQueueGen={};
+    ${reconnectProofSource(source)}
+    let _syncRecoveryId=0, _syncExtras=null, _syncExpected=0, _syncChunks=[], _syncFrame=0, _syncIsFull=false,
       _syncIsProactive=false, _syncIsRegions=false, _syncAnswerFor=0,
       _syncLastChunkProgressLogAt=0, _syncChunkSessionId=0,
       _syncChunkTimeoutTimer=null, _rearmSyncChunkDeadline=null,
       _hostNumbersAnswers=false, complete=0;
-    const _peerBoundary=()=>({peerText:()=>true}), _requestIdFrom=n=>n,
+    const _peerBoundary=()=>({peerText:()=>true}), _requestIdFrom=n=>Number.isSafeInteger(n)&&n>0?n:0,
+      _resyncExtrasFromText=(t)=>({text:t}),
       _syncLog=()=>{}, performance={now:()=>1000},
       clearTimeout=()=>{}, setTimeout=()=>1, SYNC_CHUNK_TIMEOUT_MS=5000;
-    const handleSyncChunksComplete=()=>{complete++};
+    const receivedProofs=[];
+    const handleSyncChunksComplete=(_owns,scope,proof)=>{complete++; receivedProofs.push({scope,proof})};
     ${handler}
     const host={},guest={};
     _peers.host.syncDc=host; setupSyncDataChannel('host',host);
@@ -85,7 +90,7 @@ test('actual decoder discards an old channel or match result even when fallback 
       `
       let _syncQueueEpoch=1, owns=true, resolveDecode, applied=0;
       let _syncChunks=[new Uint8Array([1])], _syncExpected=1,
-        _syncRecoveryId=17, _syncFrame=1000, _syncIsFull=true,
+        _syncRecoveryId=17, _syncExtras=null, _syncFrame=1000, _syncIsFull=true,
         _syncIsProactive=false, _syncIsRegions=false, _syncAnswerFor=0;
       const _syncLog=()=>{}, _decodingSyncAnswer=fn=>fn();
       const decompressState=()=>new Promise(resolve=>{resolveDecode=resolve});
@@ -99,4 +104,35 @@ test('actual decoder discards an old channel or match result even when fallback 
     await vm.runInContext('pending', context);
     assert.equal(vm.runInContext('applied', context), change ? 0 : 1);
   }
+});
+
+test('extras come only from the current host channel, and go with the header after them', () => {
+  const run = room();
+  run(`_peers.guest.syncDc=guest; setupSyncDataChannel('guest',guest);
+    guest.onmessage({data:'sync-extras:9:AA=='});
+    host.onmessage({data:'sync-extras:1,2:AQI='});
+    host.onmessage({data:'sync-start:101:2:1:0'});`);
+  assert.equal(run('_syncExtras.text'), 'sync-extras:1,2:AQI=');
+  // A header with none sent ahead of it carries none.
+  run(`host.onmessage({data:'sync-start:102:2:1:0'});`);
+  assert.equal(run('_syncExtras'), null);
+  // A replaced channel's extras never reach the new one's header.
+  run(`const replacement={}; _peers.host.syncDc=replacement;
+    setupSyncDataChannel('host',replacement);
+    host.onmessage({data:'sync-extras:3:AQ=='});
+    replacement.onmessage({data:'sync-start:103:2:1:0'});`);
+  assert.equal(run('_syncExtras'), null);
+});
+
+test('protected proof stays bound to the header and cannot leak to a legacy state', () => {
+  const run = room();
+  run(`host.onmessage({data:'sync-start:200:1:1:0:19'});
+    _syncQueueGen.host=1;
+    host.onmessage({data:new Uint8Array([21]).buffer});
+    host.onmessage({data:'sync-start:201:1:1:0'});
+    host.onmessage({data:new Uint8Array([22]).buffer});`);
+  assert.equal(run('receivedProofs[0].scope.gen'), 0);
+  assert.equal(run('receivedProofs[0].proof'), 19);
+  assert.equal(run('receivedProofs[1].scope.gen'), 1);
+  assert.equal(run('receivedProofs[1].proof'), 0);
 });

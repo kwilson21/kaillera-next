@@ -79,6 +79,18 @@ module room {
   // players were still running over their own connections was ended when
   // they came back (seen in a two-player run with a 40 s outage, 2026-11-14).
   const GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED: bool
+  // What a late joiner does when the host gives up serving it: the host's
+  // serve deadline ran out (its state was lost, here with the joiner's
+  // socket) and it drops the joiner (`dropped:` on their channel) so that it
+  // asks again.
+  //   false  before: the page restarted its engine as a player loading for
+  //          the start (session.ts ignored `leftOutOfStart` while it was
+  //          waiting for state, so the next start was not a late join). It
+  //          waited for an offer and a start that never came, and the host
+  //          held it as a pending late joiner for good (tests/lifecycle-e2e.mjs
+  //          late-join-drop-during-serve, 2026-11-23)
+  //   true   today: it starts its late join again and asks for the state
+  const SERVE_TIMEOUT_RESTARTS_LATE_JOIN: bool
 
   // web/src/session.ts is the page half of this model, state for state:
   //   Lobby = lobby, AwaitingRom = lateJoinAwaitingRom, Starting =
@@ -364,6 +376,15 @@ module room {
     matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
   }
 
+  // The host gave up serving a late joiner (no word that it loaded within
+  // the host's serve deadline) and drops it so that it asks again.
+  action serveTimesOut(p: str): bool = all {
+    status == "playing", page.get(p) == Syncing(matchId), canBeServed(p),
+    page' = page.set(p, if (SERVE_TIMEOUT_RESTARTS_LATE_JOIN) Starting(matchId) else Loading(matchId)),
+    members' = members, owner' = owner, creator' = creator, status' = status,
+    matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace, online' = online, grace' = grace,
+  }
+
   action graceExpire(p: str): bool = all {
     grace.contains(p),
     not(GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED) or status != "playing" or online != Set(),
@@ -459,6 +480,7 @@ module room {
     any {
       returnAfterExpiry(p, hasRom, asHost),
       openRoom(p), join(p, hasRom), romReady(p), startLateJoinEngine(p), serveLateJoin(p), admitToStart(p),
+      serveTimesOut(p),
       leave(p), reload(p), dropSocket(p), reopen(p, hasRom), resume(p, hasRom), graceExpire(p), closeTab(p),
     },
   }
@@ -525,6 +547,14 @@ module room {
       | Stranded(_) => false
       | _ => true
     })
+
+  // Nobody loads for the start of a match someone is already running: that
+  // start is over, and a page loading for it waits for good. Failed before
+  // SERVE_TIMEOUT_RESTARTS_LATE_JOIN: a late joiner the host dropped after
+  // its serve timed out restarted as a player loading for the start.
+  val nobodyLoadsIntoARunningMatch =
+    members.exists(p => page.get(p) == Running(matchId)) implies
+      PLAYERS.forall(p => page.get(p) != Loading(matchId))
 
   // A playing room nobody is running is ended. "Nobody" leaves out players
   // inside their grace window, who may be on their way back. Failed before
@@ -656,6 +686,52 @@ module room {
       .then(endGame)
       .expect(status == "lobby" and page.get("guest1") == Lobby and ownerSeesGame)
 
+  // A late joiner's socket drops and comes back (a new socket id) before it
+  // has the match state: once while its engine is starting, and once more
+  // while it is asking for the state. Seen once in a real-ROM run of
+  // tests/lifecycle-e2e.mjs late-join-cached on an older branch, where the
+  // joiner logged "mid-game rejoin succeeded" and then went to the lobby.
+  // Here, as on the server, the resume keeps the joiner on the late-join path
+  // of the same match, and it is still served. What a new socket id does to
+  // the engines' own state is below this model: the fault modes
+  // late-join-drop-before-request and late-join-drop-during-serve in
+  // tests/lifecycle-e2e.mjs take a real page through both windows.
+  run lateJoinerSocketDropTest =
+    init
+      .then(openRoom("host"))
+      .then(startGame)
+      .then(beginSync).then(startRunning)
+      .then(join("guest1", true))
+      .expect(page.get("guest1") == Starting(1))
+      .then(dropSocket("guest1"))
+      .then(resume("guest1", true))
+      .expect(page.get("guest1") == Starting(1) and members.contains("guest1") and status == "playing")
+      .then(startLateJoinEngine("guest1"))
+      .then(dropSocket("guest1"))
+      .then(resume("guest1", true))
+      .expect(page.get("guest1") == Syncing(1) and pagesAgreeWithServer and lateJoinersChaseTheCurrentMatch)
+      .then(serveLateJoin("guest1"))
+      .expect(page.get("guest1") == Running(1) and page.get("host") == Running(1))
+
+  // The same, and the host's state for the joiner is lost with the socket:
+  // the host's serve deadline runs out and it drops the joiner so that it
+  // asks again (tests/lifecycle-e2e.mjs late-join-drop-during-serve). Before,
+  // the joiner restarted as a player loading for the start and was stuck.
+  run lateJoinServeTimeoutTest =
+    init
+      .then(openRoom("host"))
+      .then(startGame)
+      .then(beginSync).then(startRunning)
+      .then(join("guest1", true))
+      .then(startLateJoinEngine("guest1"))
+      .then(dropSocket("guest1"))
+      .then(resume("guest1", true))
+      .then(serveTimesOut("guest1"))
+      .expect(nobodyLoadsIntoARunningMatch == SERVE_TIMEOUT_RESTARTS_LATE_JOIN)
+      .expect(page.get("guest1") == (if (SERVE_TIMEOUT_RESTARTS_LATE_JOIN) Starting(1) else Loading(1)))
+      .then(if (SERVE_TIMEOUT_RESTARTS_LATE_JOIN) startLateJoinEngine("guest1").then(serveLateJoin("guest1")) else endGame)
+      .expect(page.get("guest1") == (if (SERVE_TIMEOUT_RESTARTS_LATE_JOIN) Running(1) else Lobby))
+
   // A joiner with no ROM is asked for one before its engine starts.
   run lateJoinWithoutRomTest =
     init
@@ -715,7 +791,17 @@ module room {
 module room_current {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
-         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true).*
+         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = true).*
+}
+
+// Before a late joiner the host dropped after its serve timed out started its
+// late join again. nobodyLoadsIntoARunningMatch is violated here.
+module room_before_serve_timeout_fix {
+  import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
+         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
 }
 
 // Before the server kept the places of a room nobody was connected to.
@@ -723,7 +809,8 @@ module room_current {
 module room_before_grace_wait {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
-         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
+         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
 }
 
 // Before the server ended a match nobody was running.
@@ -731,7 +818,8 @@ module room_before_grace_wait {
 module room_before_abandoned_end {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
-         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
 }
 
 // Before a rejoin said it was a resume and a refusal was acted on.
@@ -739,7 +827,8 @@ module room_before_abandoned_end {
 module room_before_resume_flag {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = false,
-         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
 }
 
 // Before a joiner who asks for state too early was admitted to the start
@@ -748,7 +837,8 @@ module room_before_resume_flag {
 module room_before_start_fix {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
-         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
 }
 
 // Before the page reconciled with the server on reconnect
@@ -757,12 +847,14 @@ module room_before_start_fix {
 module room_before_reconcile {
   import room(HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
-         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
 }
 
 // Before #104, kept so hostReloadTest still shows what that fix changed.
 module room_before_104 {
   import room(HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
-         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false).*
+         SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
 }

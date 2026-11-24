@@ -353,6 +353,82 @@ class TestRomReady:
         assert "sid-2" in room.rom_ready
         assert room.rom_prompt == set()
 
+    def _changing_room(self, code):
+        """A room whose host had ROM a and whose guest was ready with it."""
+        room = _make_room(owner="sid-host")
+        room.rom_hash = "S" + "a" * 64
+        room.rom_size = 4096
+        room.players["pid-host"] = {"socketId": "sid-host", "playerName": "Host"}
+        room.players["pid-2"] = {"socketId": "sid-2", "playerName": "P2"}
+        room.slots[0] = "pid-host"
+        room.slots[1] = "pid-2"
+        room.rom_ready.update({"sid-host", "sid-2"})
+        rooms[code] = room
+        _sid_to_room["sid-host"] = (code, "pid-host", False)
+        _sid_to_room["sid-2"] = (code, "pid-2", False)
+        return room
+
+    def test_the_hosts_drop_being_hashed_leaves_the_room_naming_no_rom(self):
+        # specs/rom_identity.qnt, HOST_DROP_SAYS_CHANGING: the host drops a new
+        # ROM. Until its hash arrives the room names none, and the guest's word
+        # for the previous one no longer counts.
+        room = self._changing_room("ROOM8")
+
+        assert self._run("sid-host", {"ready": False, "pending": True}) is None
+
+        assert room.rom_changing is True
+        assert (room.rom_hash, room.rom_name, room.rom_size) == (None, None, None)
+        assert room.rom_ready == set()
+        host_rom = _players_payload(room)["hostRom"]
+        assert host_rom["changing"] is True
+        assert host_rom["hash"] is None
+
+    def test_a_guest_is_not_counted_ready_while_the_hosts_rom_is_changing(self):
+        # specs/rom_identity.qnt, hostChangesAwayFromTheGuestsRomTest: a word
+        # sent against the previous ROM (in flight, or from an older page) has
+        # nothing to be held against.
+        room = self._changing_room("ROOM9")
+        self._run("sid-host", {"ready": False, "pending": True})
+
+        err = self._run("sid-2", {"ready": True, "hash": "S" + "a" * 64, "size": 4096})
+
+        assert err == "The host is changing ROM"
+        assert "sid-2" not in room.rom_ready
+
+    def test_the_hosts_new_hash_ends_the_change(self):
+        room = self._changing_room("ROOM10")
+        self._run("sid-host", {"ready": False, "pending": True})
+
+        assert self._run("sid-host", {"ready": True, "hash": "S" + "b" * 64, "size": 4096}) is None
+
+        assert room.rom_changing is False
+        assert room.rom_hash == "S" + "b" * 64
+        assert _players_payload(room)["hostRom"]["changing"] is False
+        # The guest is held to the new ROM: the previous one is refused, the
+        # new one counted.
+        assert self._run("sid-2", {"ready": True, "hash": "S" + "a" * 64, "size": 4096}) == "ROM does not match host"
+        assert self._run("sid-2", {"ready": True, "hash": "S" + "b" * 64, "size": 4096}) is None
+        assert "sid-2" in room.rom_ready
+
+    def test_a_host_with_no_rom_is_not_changing_one(self):
+        room = self._changing_room("ROOM11")
+        self._run("sid-host", {"ready": False, "pending": True})
+
+        # Its new ROM could not be read: it has none.
+        assert self._run("sid-host", {"ready": False}) is None
+
+        assert room.rom_changing is False
+        assert _players_payload(room)["hostRom"]["changing"] is False
+
+    def test_a_guests_pending_rom_changes_nothing_for_the_room(self):
+        room = self._changing_room("ROOM12")
+
+        assert self._run("sid-2", {"ready": False, "pending": True}) is None
+
+        assert room.rom_changing is False
+        assert room.rom_hash == "S" + "a" * 64
+        assert room.rom_ready == {"sid-host"}
+
 
 class TestReleaseSlot:
     def test_same_ip_spectator_cap_refuses_release(self):
@@ -593,6 +669,22 @@ def test_start_game_survives_register_failure():
     assert room.status == "playing" and room.match_id
 
 
+def test_start_game_is_refused_while_the_hosts_rom_is_changing():
+    # specs/rom_identity.qnt, hostChangesThenStartsTest: a start then would
+    # carry the previous ROM's hash. Streaming needs no guest ROM, so only the
+    # change refuses it.
+    from src.api.payloads import StartGamePayload
+    from src.api.signaling import _start_game_locked
+
+    room = _host_room("ROOM13")
+    room.rom_changing = True
+
+    err = _run_with(_patched_start(), _start_game_locked("sid-host", StartGamePayload(mode="streaming")))
+
+    assert err == "The host's ROM is still being checked"
+    assert room.status == "lobby"
+
+
 def _screenshot_room():
     room = _host_room()
     room.match_id = "match-1"
@@ -765,3 +857,194 @@ def test_the_host_can_clear_and_change_the_game_id():
     # A request without the field is not taken as SSB64 either.
     assert _run_with(patches, set_game_id("sid-host", {})) is None
     assert room.game_id == ""
+
+
+def test_unverified_recovery_latches_once_and_is_in_room_and_join_snapshots(monkeypatch):
+    room = _host_room()
+    room.status, room.mode, room.match_id = "playing", "rollback", "match-1"
+    save_entered = asyncio.Event()
+    release_save = asyncio.Event()
+    emit = AsyncMock()
+    payload = {"matchId": room.match_id}
+
+    async def slow_save(*_args):
+        save_entered.set()
+        await release_save.wait()
+
+    save = AsyncMock(side_effect=slow_save)
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    monkeypatch.setattr(signaling.state, "save_room", save)
+    monkeypatch.setattr(signaling.sio, "emit", emit)
+
+    async def report_twice():
+        first = asyncio.create_task(signaling.match_recovery_unverified("sid-host", payload))
+        await asyncio.wait_for(save_entered.wait(), timeout=3)
+        retry = asyncio.create_task(signaling.match_recovery_unverified("sid-host", payload))
+        await asyncio.sleep(0)
+        assert not retry.done()
+        release_save.set()
+        assert await asyncio.gather(first, retry) == [None, None]
+
+    _run_async(report_twice())
+    save.assert_awaited_once_with("ROOM1", room)
+    emit.assert_awaited_once_with("users-updated", _players_payload(room), room="ROOM1")
+    assert room.status == "playing"
+    assert room.match_id == "match-1"
+    assert room.recovery_unverified_match_id == "match-1"
+    assert signaling._join_ack(room)["recoveryUnverifiedMatchId"] == "match-1"
+
+    # The same match keeps the latch on roster changes and owner SID rotation.
+    _swap_sid(room, "pid-host", "sid-host", "sid-current")
+    _sid_to_room.pop("sid-host")
+    _sid_to_room["sid-current"] = ("ROOM1", "pid-host", False)
+    assert _players_payload(room)["recoveryUnverifiedMatchId"] == "match-1"
+
+
+@pytest.mark.parametrize(
+    ("sid", "status", "mode", "payload", "expected"),
+    [
+        ("sid-guest", "playing", "rollback", {"matchId": "match-1"}, "Only the host"),
+        ("sid-spec", "playing", "rollback", {"matchId": "match-1"}, "Only the host"),
+        ("sid-old", "playing", "rollback", {"matchId": "match-1"}, "Only the host"),
+        ("sid-outside", "playing", "rollback", {"matchId": "match-1"}, "Not in a room"),
+        ("sid-host", "playing", "rollback", {"matchId": "old-match"}, "Not the current"),
+        ("sid-host", "playing", "streaming", {"matchId": "match-1"}, "Not the current"),
+        ("sid-host", "lobby", "rollback", {"matchId": "match-1"}, "Not the current"),
+        ("sid-host", "playing", "rollback", {}, "Invalid data"),
+    ],
+)
+def test_unverified_recovery_rejects_non_owner_and_wrong_match(sid, status, mode, payload, expected, monkeypatch):
+    room = _host_room()
+    room.status, room.mode, room.match_id = status, mode, "match-1" if status == "playing" else None
+    room.players["pid-guest"] = {"socketId": "sid-guest"}
+    room.slots[1] = "pid-guest"
+    room.spectators["pid-spec"] = {"socketId": "sid-spec"}
+    _sid_to_room["sid-guest"] = ("ROOM1", "pid-guest", False)
+    _sid_to_room["sid-spec"] = ("ROOM1", "pid-spec", True)
+    _sid_to_room["sid-old"] = ("ROOM1", "pid-host", False)
+    emit, save = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    monkeypatch.setattr(signaling.state, "save_room", save)
+    monkeypatch.setattr(signaling.sio, "emit", emit)
+
+    result = _run_async(signaling.match_recovery_unverified(sid, payload))
+    assert result is not None and result.startswith(expected)
+    assert room.recovery_unverified_match_id is None
+    emit.assert_not_awaited()
+    save.assert_not_awaited()
+
+
+def test_unverified_recovery_restores_only_the_active_matching_room():
+    import json
+
+    room = _make_room(status="playing", mode="rollback", match_id="match-1", recovery_unverified_match_id="match-1")
+    snapshot = json.loads(signaling.state._serialize_room(room))
+    assert signaling.state._deserialize_room(snapshot).recovery_unverified_match_id == "match-1"
+    assert signaling.state._deserialize_room({**snapshot, "match_id": "match-2"}).recovery_unverified_match_id is None
+    assert signaling.state._deserialize_room({**snapshot, "status": "lobby"}).recovery_unverified_match_id is None
+    snapshot.pop("recovery_unverified_match_id")
+    assert signaling.state._deserialize_room(snapshot).recovery_unverified_match_id is None
+
+
+def test_unverified_recovery_survives_until_owner_ends_match_and_cannot_latch_rematch(monkeypatch):
+    from src.api.payloads import EndGamePayload, StartGamePayload
+
+    room = _host_room()
+    room.status, room.mode, room.match_id = "playing", "rollback", "match-1"
+    room.recovery_unverified_match_id = "match-1"
+    _sid_to_room["sid-guest"] = ("ROOM1", "pid-guest", False)
+    save, emit = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    monkeypatch.setattr(signaling.state, "save_room", save)
+    monkeypatch.setattr(signaling.sio, "emit", emit)
+    monkeypatch.setattr(signaling.db, "register_match", AsyncMock())
+    monkeypatch.setattr(signaling.db, "set_session_ended", AsyncMock())
+    monkeypatch.setattr(signaling.db, "insert_client_event", AsyncMock())
+    monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+    monkeypatch.setattr(signaling.stats, "record_match", AsyncMock())
+
+    async def end_and_restart():
+        assert await signaling._end_game_locked("sid-guest", EndGamePayload(matchId="match-1"))
+        assert room.recovery_unverified_match_id == "match-1"
+        assert await signaling._end_game_locked("sid-host", EndGamePayload(matchId="wrong-match")) is None
+        assert room.recovery_unverified_match_id == "match-1"
+        assert await signaling._end_game_locked("sid-host", EndGamePayload(matchId="match-1")) is None
+        assert room.match_id is None
+        assert room.recovery_unverified_match_id is None
+        assert await signaling._start_game_locked("sid-host", StartGamePayload(mode="rollback")) is None
+        assert room.match_id and room.match_id != "match-1"
+        assert await signaling.match_recovery_unverified("sid-host", {"matchId": "match-1"})
+        assert room.recovery_unverified_match_id is None
+
+    _run_async(end_and_restart())
+
+
+def test_readmitted_slot_zero_can_report_after_owner_transfer_but_cannot_end(monkeypatch):
+    room = _host_room()
+    room.status, room.mode, room.match_id = "playing", "rollback", "match-1"
+    room.players["pid-next"] = {"socketId": "sid-next-owner", "playerName": "Next owner"}
+    room.slots[1] = "pid-next"
+    _sid_to_room["sid-next-owner"] = ("ROOM1", "pid-next", False)
+    monkeypatch.setattr(signaling, "_sid_host", dict.fromkeys(("sid-next-owner", "sid-returned"), "example.test"))
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    for name in ("emit", "enter_room", "leave_room"):
+        monkeypatch.setattr(signaling.sio, name, AsyncMock())
+    monkeypatch.setattr(signaling.state, "save_room", AsyncMock())
+    for name in ("insert_client_event", "set_session_ended", "reopen_session"):
+        monkeypatch.setattr(signaling.db, name, AsyncMock())
+    monkeypatch.setattr(signaling.desync_vision, "run_postmortem", AsyncMock())
+
+    async def transfer_then_readmit():
+        await _leave("sid-host")
+        assert room.owner == "sid-next-owner" and 0 not in room.slots and room.status == "playing"
+        assert (
+            await signaling.open_room(
+                "sid-returned",
+                {
+                    "extra": {
+                        "sessionid": "ROOM1",
+                        "persistentId": "pid-host",
+                        "resume": True,
+                        "slot": 0,
+                        "matchId": "match-1",
+                    }
+                },
+            )
+            is None
+        )
+        assert room.owner == "sid-next-owner" and room.slots[0] == "pid-host"
+        assert not room.waiting_for_state
+        payload = {"matchId": "match-1"}
+        assert await signaling.match_recovery_unverified("sid-host", payload) == "Not in a room"
+        assert await signaling.match_recovery_unverified("sid-returned", payload) is None
+        assert room.recovery_unverified_match_id == "match-1"
+        assert await signaling.end_game("sid-returned", payload) == "Only the host can end the game"
+        assert room.status == "playing"
+        assert await signaling.end_game("sid-next-owner", payload) is None
+        assert room.status == "lobby" and room.recovery_unverified_match_id is None
+
+    _run_async(transfer_then_readmit())
+
+
+@pytest.mark.parametrize(("connected", "waiting"), [(True, True), (False, False)])
+def test_slot_zero_needs_active_membership_to_report(connected, waiting, monkeypatch):
+    room = _host_room()
+    room.status, room.mode, room.match_id = "playing", "rollback", "match-1"
+    room.owner = "sid-next-owner"
+    room.players["pid-next"] = {"socketId": "sid-next-owner"}
+    room.slots[1] = "pid-next"
+    if waiting:
+        room.waiting_for_state.add("pid-host")
+    monkeypatch.setattr(signaling, "_sid_host", {"sid-host": "example.test"} if connected else {})
+    monkeypatch.setattr(signaling, "_room_lock", asyncio.Lock())
+    monkeypatch.setattr(signaling, "check", lambda *_: True)
+    emit = AsyncMock()
+    monkeypatch.setattr(signaling.sio, "emit", emit)
+    result = _run_async(signaling.match_recovery_unverified("sid-host", {"matchId": "match-1"}))
+    assert result == "Only the host or active player 1 can report unverified match recovery"
+    assert room.recovery_unverified_match_id is None
+    emit.assert_not_awaited()

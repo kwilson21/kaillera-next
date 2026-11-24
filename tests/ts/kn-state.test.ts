@@ -56,7 +56,6 @@ const BUILT_BY_THE_SCRIPT = {
   sessionStats: '{"reconnects":0,"desyncs":0,"stalls":0}',
   matchId: 'null',
   isLocalHost: 'false',
-  boardFrame: 'false',
   DEFAULT_ICE_SERVERS: '[{"urls":"stun:stun.cloudflare.com:3478"}]',
 } satisfies Record<string, string>;
 

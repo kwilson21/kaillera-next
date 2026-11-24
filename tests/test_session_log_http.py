@@ -337,6 +337,53 @@ def test_admin_session_summary_selects_only_metadata(audit_client, monkeypatch):
     assert http.get("/admin/api/session-logs/42/summary", headers=key).status_code == 404
 
 
+def test_admin_session_client_events_reads_no_log(audit_client, monkeypatch):
+    """The analyzer's client events: what the detail endpoint bundles, without the log."""
+    import src.db as db
+
+    http, fetch = audit_client
+    event = {"id": 7, "type": "webrtc", "message": "dc open", "meta": '{"match_id":"m1"}', "slot": 1, "created_at": "t"}
+    session = {"id": 42, "match_id": "m1", "room": "ROOM1", "slot": 1, "log_data": None}
+    statements = []
+
+    def answer(statement):
+        sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        statements.append(sql)
+        if "FROM client_events" in sql:
+            return [dict(event)]
+        return [session] if "session_logs.id = 42" in sql else []
+
+    fetch.side_effect = answer
+    path = "/admin/api/session-logs/42/client-events"
+    assert http.get(path).status_code == 401
+    fetch.assert_not_awaited()
+
+    key = {"X-Admin-Key": "k"}
+    resp = http.get(path, headers=key)
+    assert resp.status_code == 200
+    events = [{**event, "meta": {"match_id": "m1"}}]
+    assert resp.json() == {"client_events": events}
+    session_sql, events_sql = statements
+    assert "log_data" not in session_sql
+    assert "context" not in session_sql
+
+    # The detail endpoint keeps bundling the same events, from the same query.
+    monkeypatch.setattr(db, "get_full_log_entries", AsyncMock(return_value=[{"msg": "a"}]))
+    statements.clear()
+    detail = http.get("/admin/api/session-logs/42", headers=key)
+    assert detail.status_code == 200
+    assert detail.json()["client_events"] == events
+    assert detail.json()["log_data"] == [{"msg": "a"}]
+    assert events_sql in statements
+
+    # Only the detail endpoint ever reads the log.
+    log = AsyncMock(side_effect=AssertionError("client events must not read the log"))
+    monkeypatch.setattr(db, "get_full_log_entries", log)
+    assert http.get(path, headers=key).status_code == 200
+    log.assert_not_awaited()
+    assert http.get("/admin/api/session-logs/43/client-events", headers=key).status_code == 404
+
+
 def test_admin_capture_frame_requires_header_and_bounds_frame(audit_client, monkeypatch):
     import src.db as db
 
@@ -366,37 +413,77 @@ def test_admin_legacy_detail_and_explicit_export_still_bundle_raw_data(audit_cli
     )
     chunks = AsyncMock(return_value=[{"msg": "older"}, {"msg": "chunk"}])
     monkeypatch.setattr(db, "get_full_log_entries", chunks)
+    # The export streams the chunks it counted, a page at a time.
+    monkeypatch.setattr(db, "count_log_entries", AsyncMock(return_value=(1, 7)))
+    pages = []
+
+    async def iter_chunk_entries(match_id, slot, kind="log", *, through_id=None):
+        pages.append((match_id, slot, kind, through_id))
+        yield [{"msg": "chunk"}]
+
+    monkeypatch.setattr(db, "iter_chunk_entries", iter_chunk_entries)
     path = "/admin/api/session-logs/42"
     key = {"X-Admin-Key": "k"}
     resp = http.get(path, headers=key)
     assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/json"
     assert resp.json()["log_data"] == [{"msg": "older"}, {"msg": "chunk"}]
     assert resp.json()["client_events"] == []
     assert resp.json()["desync_events"] == []
+    assert chunks.await_count == 1
     assert http.get(f"{path}/export").status_code == 401
     resp = http.get(f"{path}/export", headers=key)
     assert resp.status_code == 200
     assert resp.headers["content-disposition"] == 'attachment; filename="session-42.jsonl"'
     assert resp.headers["x-entry-count"] == "2"
-    assert '"_kind": "meta"' in resp.text.splitlines()[0]
-    assert '"msg":"chunk"' in resp.text.splitlines()[2]
-    assert chunks.await_count == 2
+    lines = resp.text.splitlines()
+    assert '"_kind": "meta"' in lines[0] and '"entry_count": 2' in lines[0]
+    assert lines[1:] == [
+        '{"session_id":42,"match_id":"m1","slot":1,"msg":"older"}',
+        '{"session_id":42,"match_id":"m1","slot":1,"msg":"chunk"}',
+    ]
+    assert pages == [("m1", 1, "log", 7)]
+    assert chunks.await_count == 1
 
 
 def test_admin_compact_verdicts_keep_outcomes_without_replay_or_payload_blobs(audit_client):
     http, fetch = audit_client
-    fetch.return_value = [
-        {"frame": 10, "vision_equal": 0, "vision_confidence": "high"},
-        {"frame": 11, "vision_equal": None, "vision_confidence": None},
-        {"frame": 12, "vision_equal": 1, "vision_confidence": "medium"},
-    ]
+    def rows():
+        return [
+            {
+                "frame": 10,
+                "vision_equal": 0,
+                "vision_confidence": "high",
+                "capture_evidence": '[{"slot":0,"captured_frame":100},{"slot":1,"captured_frame":100}]',
+            },
+            {"frame": 11, "vision_equal": None, "vision_confidence": None, "capture_evidence": None},
+            {
+                "frame": 12,
+                "vision_equal": 1,
+                "vision_confidence": "medium",
+                "capture_evidence": '[{"slot":0,"captured_frame":102},{"slot":1,"captured_frame":103}]',
+            },
+            {
+                "frame": 13,
+                "vision_equal": 0,
+                "vision_confidence": "high",
+                "capture_evidence": '[{"slot":0,"captured_frame":103},{"slot":0,"captured_frame":103}]',
+            },
+        ]
+
+    fetch.side_effect = lambda *_args: rows()
     key = {"X-Admin-Key": "k"}
     resp = http.get("/admin/api/desync-events?match_id=m1&compact=true", headers=key)
     assert resp.status_code == 200
-    outcomes = [row["vision_equal"] for row in resp.json()["events"]]
-    assert outcomes[0] is False
-    assert outcomes[1] is None
-    assert outcomes[2] is True
+    events = resp.json()["events"]
+    assert [row["vision_equal"] for row in events] == [False, None, True, False]
+    assert [(row["captured_frame"], row["capture_slots"]) for row in events] == [
+        (100, [0, 1]),
+        (None, []),
+        (None, []),
+        (None, []),
+    ]
+    assert all("capture_evidence" not in row for row in events)
     sql = str(fetch.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
     assert "desync_events.vision_equal" in sql
     assert "desync_events.vision_confidence" in sql

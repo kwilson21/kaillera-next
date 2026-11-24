@@ -274,3 +274,15 @@ test('KNCore exposes the decoders to the plain-script pages', () => {
   assert.equal(KNCore.protocol.decodeJoinRoomAck, decodeJoinRoomAck);
   assert.ok(Result.isSuccess(KNCore.protocol.decodeGameStarted(gameStarted)));
 });
+
+test('room snapshots read old servers and decode a sticky match-scoped recovery warning', () => {
+  assert.ok(Result.isSuccess(decodeUsersUpdated(usersUpdated)));
+  const live = { ...usersUpdated, status: 'playing', recoveryUnverifiedMatchId: MATCH_ID };
+  const roster = decodeUsersUpdated(live);
+  assert.ok(Result.isSuccess(roster));
+  assert.equal(roster.success.recoveryUnverifiedMatchId, MATCH_ID);
+  const ack = decodeJoinRoomAck({ ...joinAck, ...live, matchId: MATCH_ID });
+  assert.ok(Result.isSuccess(ack));
+  assert.equal(ack.success.recoveryUnverifiedMatchId, MATCH_ID);
+  assert.ok(Result.isFailure(decodeUsersUpdated({ ...live, recoveryUnverifiedMatchId: true })));
+});

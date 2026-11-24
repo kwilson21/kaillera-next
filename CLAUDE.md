@@ -38,8 +38,8 @@ V1 — Browser-based
 
   Rollback mode: GGPO-style C-level rollback engine. All players run their own
     emulator and exchange inputs over WebRTC DataChannels; misprediction triggers
-    bit-exact replay via the patched WASM core. Strict lockstep is the silent
-    fallback path inside the same engine when the core does not export kn_pre_tick.
+    bit-exact replay via the patched WASM core. Every frame of every match, solo
+    play included, runs on that engine; a core without it stops at the start.
   Lockstep mode: the same engine with nothing predicted; a frame runs only once
     every player's input for it is here (a missing one is dropped at 5 s).
   Streaming mode: host runs the only emulator and streams video via WebRTC MediaStream.
@@ -63,6 +63,7 @@ kaillera-next/
 │       ├── migrate.py       # plain-SQL schema migrations shared by SQLite/D1 (replaces Alembic)
 │       ├── blobstore.py     # blob storage for screenshots (R2 in prod, local folder in dev)
 │       ├── retention.py     # flags matches with a crash/freeze/desync; sweeps expired ones
+│       ├── log_archive.py   # archives an ended match's session log to the blob store, then evicts its chunks from the database
 │       ├── match_rotation.py # rolls up ended session logs into Parquet + match_metrics rows
 │       ├── stats.py         # "matches started in last 7 days" counter for the front page
 │       ├── landing_build.py # content-hash build id shared by the server and the landing Worker
@@ -160,7 +161,7 @@ kaillera-next/
 | Socket.IO signaling server (rooms + WebRTC relay)                                                   | done   |
 | Web lobby (create/join/spectate)                                                                    | done   |
 | EmulatorJS embed + ROM drag-and-drop                                                                | done   |
-| Rollback netplay (up to 4 players, GGPO-style C-level engine, mesh WebRTC, lockstep stall fallback) | done   |
+| Rollback netplay (up to 4 players, GGPO-style C-level engine, mesh WebRTC)                          | done   |
 | Streaming netplay (host video → guests via WebRTC MediaStream)                                      | done   |
 | Spectators (canvas video stream from host)                                                          | done   |
 | Gamepad support (profiles, remapping wizard)                                                        | done   |
@@ -196,14 +197,14 @@ All events go through the default Socket.IO namespace (`/`).
 | `input`               | client→server→room | `{...}`                                                                                                                                   | Input relay (streaming mode, 64KB max)                                                                                                                                                                                           |
 | `rom-sharing-toggle`  | client→server      | `{enabled}`                                                                                                                               | Toggle host ROM sharing                                                                                                                                                                                                          |
 | `set-listed`          | client→server      | `{listed}`                                                                                                                                | Host lists the room on the front-page board (never with a password)                                                                                                                                                              |
-| `rom-ready`           | client→server      | `{ready, prompt, hash, name, size}`                                                                                                       | Player signals ROM loaded (hash/name/size establish or check ROM identity). `prompt` with `ready: false`: the page shows the ROM prompt (users-updated `romPrompt`)                                                              |
+| `rom-ready`           | client→server      | `{ready, prompt, pending, hash, name, size}`                                                                                              | Player signals ROM loaded (hash/name/size establish or check ROM identity). `prompt` with `ready: false`: the page shows the ROM prompt (users-updated `romPrompt`). `pending` with `ready: false`: the page holds a ROM still being hashed; from the host, the room's ROM is changing: it names none (`hostRom.changing`), takes no guest's `ready` and refuses a start until the host's hash arrives |
 | `input-type`          | client→server      | `{type}`                                                                                                                                  | Player reports input type (keyboard/gamepad)                                                                                                                                                                                     |
 | `device-type`         | client→server      | `{type}`                                                                                                                                  | Player reports device type                                                                                                                                                                                                       |
 | `session-log`         | client→server      | `{matchId, epoch, entries, summary, context, audit}`                                                                                      | Periodic sync log flush: only the log entries and input audit records (`audit: {epoch, entries}`) the server hasn't acked; acks `{lastSeq, auditLastSeq}`                                                                        |
 | `debug-sync`          | client→server      | `{...}`                                                                                                                                   | Upload sync diagnostic log                                                                                                                                                                                                       |
 | `debug-logs`          | client→server      | `{...}`                                                                                                                                   | Upload debug console log                                                                                                                                                                                                         |
 | `game-screenshot`     | client→server      | `{matchId, slot, frame, data}`                                                                                                            | Periodic gameplay screenshot (debug mode)                                                                                                                                                                                        |
-| `users-updated`       | server→room        | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}`                              | Room state broadcast. Each player carries `romReady`, and `romPrompt` while its page shows the ROM prompt                                                                                                                                |
+| `users-updated`       | server→room        | `{players, spectators, owner, romSharing, romHash, romName, romSize, hostRom, gameId, mode, status, listed}`                              | Room state broadcast. Each player carries `romReady`, and `romPrompt` while its page shows the ROM prompt. `hostRom.changing` while the host's new ROM is being hashed |
 | `upload-token`        | server→client      | `{token}`                                                                                                                                 | HMAC token for upload endpoints                                                                                                                                                                                                  |
 | `reconnect-token`     | server→client      | `{token}`                                                                                                                                 | HMAC token for session reconnection                                                                                                                                                                                              |
 | `rom-sharing-updated` | server→room        | `{romSharing}`                                                                                                                            | ROM sharing state changed                                                                                                                                                                                                        |
@@ -219,10 +220,13 @@ All events go through the default Socket.IO namespace (`/`).
   predicts remote inputs, advances locally, and replays via state ring buffer +
   amortized restore on misprediction. Cross-platform determinism via SoftFloat FPU.
   Rollback runs on every screen, menus included; nothing in the engine's tick
-  depends on the scene the game is showing. Strict lockstep is the path used
-  when the core does not export `kn_pre_tick`. A throw out of the C engine's
-  tick is a WASM trap and ends the match on that page (`FATAL-CORE-ABORT`),
-  as any core trap does; nothing switches a page off rollback mid-match.
+  depends on the scene the game is showing. Every page arms the engine before
+  it runs a frame, with the host's delay, solo play at a delay of 0 included
+  (`specs/engine_start.qnt`); a page that cannot (a core without the exports,
+  no delay from the host by the deadline) stops and says so (`START-FAIL`).
+  A throw out of the C engine's tick is a WASM trap and ends the match on that
+  page (`FATAL-CORE-ABORT`), as any core trap does; nothing switches a page
+  off rollback mid-match.
   Host-authoritative resync remains as fallback for reconnection and late join.
 - **Streaming netplay:** Star topology. Host runs the only emulator, streams canvas
   video via WebRTC MediaStream. Guests send input back over DataChannel. The host
@@ -235,8 +239,8 @@ All events go through the default Socket.IO namespace (`/`).
   session logs, match metrics, desync events and feedback for diagnostics and retention.
 - **Patched WASM core:** mupen64plus-next compiled with deterministic timing patches
   (`kn_set_deterministic`, `kn_set_frame_time`), SoftFloat FPU, and rollback engine
-  exports (`kn_pre_tick`, `kn_post_tick`, etc.). Falls back to stock CDN core with
-  JS-level timing shim — in that case the engine takes its strict lockstep path.
+  exports (`kn_pre_tick`, `kn_post_tick`, etc.). A core without them cannot play
+  online: the page stops at the start and says so.
 
 ## Netplay invariants
 
@@ -435,6 +439,12 @@ Hard-won rules from past sessions. Follow them unless the user says otherwise.
   but not currently wired to anything — OG-card game images are always on
 - `LOG_RETENTION_DAYS` (default 7): how long a normal (non-flagged) match's
   session logs are kept before the retention sweep deletes them
+- `D1_HOT_DAYS` (default 2): how long an archived match's log chunks stay in
+  the database before the sweep deletes them; its logs are read from the blob
+  store after that (`log_archive.py`). The archive runs only into R2: a local
+  blob folder is wiped on deploy, so without R2 logs stay in the database
+- `LOG_ARCHIVE_LOCAL` (`=1`, tests and local dev only): let the log archive use
+  the local blob folder; never set in production
 - `FLAGGED_STALE_DAYS` (default 180): how long an unresolved flagged match's
   logs are kept before the retention sweep deletes them
 - `DEBUG_MODE`: enables `debug-sync` and local log files; `debug-logs` writes to stdout even when unset

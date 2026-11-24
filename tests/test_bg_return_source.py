@@ -25,67 +25,55 @@ def test_stall_threshold_formula_is_not_duplicated():
     assert "const stallThreshold = _rbInputStallThreshold();" in src[tick_idx:]
 
 
-def test_background_return_skips_resync_only_while_c_rollback_is_active():
+def test_background_return_never_fast_forwards_or_resyncs():
     # #64/#69: fast-forwarding and wiping inputs creates holes neither peer can
-    # refill, causing both to stall and phantom each other; stale freeze data
-    # at visibilitychange must not send C rollback through that path.
+    # refill, causing both to stall and phantom each other. Every frame runs
+    # on the C engine now (specs/engine_start.qnt), so a return only logs; the
+    # old path's fast-forward and full resync are gone.
     src = ROLLBACK_JS.read_text()
-    fn_start = src.index("const _requestLifecycleFullResync = (reason) => {")
+    assert "_requestLifecycleFullResync" not in src
+    fn_start = src.index("const _noteLifecycleReturn = (reason) => {")
     fn_end = src.index("_visChangeHandler = () => {", fn_start)
     fn = src[fn_start:fn_end]
     fn = fn[: fn.rfind("};") + 2]
+    assert "_useCRollback" not in fn
     script = f"""
-const calls = {{ setLastSyncState: [], guards: [], socket: [], logs: [] }};
-let _useCRollback = true;
+const logs = [];
+const window = {{ _rbPendingInit: false }};
 let _frameNum = 100;
 let _lastRemoteFrame = 400;
-let _playerSlot = 1;
 let _remoteInputs = {{ 0: {{ 100: {{ buttons: 1 }} }} }};
 let _localInputs = {{ 100: {{ buttons: 2 }} }};
-let _consecutiveResyncs = 0;
-let _syncCheckInterval = 10;
-let _resyncRequestInFlight = false;
-let _syncTargetFrame = 0;
-let _syncTargetDeadlineAt = 1;
-const _syncBaseInterval = 20;
-const DELAY_FRAMES = 2;
 const KNState = {{ frameNum: 100 }};
-const KNShared = {{ ZERO_INPUT: {{ buttons: 0 }} }};
-const _peers = {{}};
-const _setLastSyncState = (...args) => calls.setLastSyncState.push(args);
-const _beginLifecycleResyncGuard = (...args) => calls.guards.push(args);
-const _requestSocketFullResync = (...args) => {{ calls.socket.push(args); return true; }};
-const _syncLog = (message) => calls.logs.push(message);
-const _resetInputMaps = () => {{}};
-eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
-const rollback = {{ frame: _frameNum, inputs: _remoteInputs, localInputs: _localInputs, calls: JSON.parse(JSON.stringify(calls)) }};
+const _syncLog = (message) => logs.push(message);
+eval({json.dumps(fn)} + "\\n_noteLifecycleReturn('bg-return');");
+const armed = {{ frame: _frameNum, knFrame: KNState.frameNum, inputs: _remoteInputs, localInputs: _localInputs, logs: logs.splice(0) }};
 
-_useCRollback = false;
-_frameNum = 100;
-_lastRemoteFrame = 104;
-_remoteInputs = {{ 0: {{ 100: {{ buttons: 1 }} }} }};
-_localInputs = {{ 100: {{ buttons: 2 }} }};
-calls.setLastSyncState.length = calls.guards.length = calls.socket.length = calls.logs.length = 0;
-eval({json.dumps(fn)} + "\\n_requestLifecycleFullResync('bg-return');");
-process.stdout.write(JSON.stringify({{ rollback, lockstep: {{ frame: _frameNum, inputs: _remoteInputs, localInputs: _localInputs, calls }} }}));
+window._rbPendingInit = true;
+_frameNum = 0;
+KNState.frameNum = 0;
+_lastRemoteFrame = 40;
+_remoteInputs = {{ 0: {{ 0: {{ buttons: 1 }} }} }};
+_localInputs = {{ 0: {{ buttons: 2 }} }};
+eval({json.dumps(fn)} + "\\n_noteLifecycleReturn('bg-return');");
+process.stdout.write(JSON.stringify({{ armed, waiting: {{ frame: _frameNum, knFrame: KNState.frameNum, inputs: _remoteInputs, localInputs: _localInputs, logs }} }}));
 """
     result = subprocess.run(["node", "-e", script], cwd=ROOT, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr + result.stdout
     output = json.loads(result.stdout)
 
-    rollback = output["rollback"]
-    assert rollback["frame"] == 100
-    assert rollback["inputs"] == {"0": {"100": {"buttons": 1}}}
-    assert rollback["localInputs"] == {"100": {"buttons": 2}}
-    assert rollback["calls"]["setLastSyncState"] == []
-    assert rollback["calls"]["guards"] == []
-    assert rollback["calls"]["socket"] == []
-    assert "bg-return: rollback mode — no fast-forward/resync (behind=300)" in rollback["calls"]["logs"]
+    armed = output["armed"]
+    assert armed["frame"] == 100
+    assert armed["knFrame"] == 100
+    assert armed["inputs"] == {"0": {"100": {"buttons": 1}}}
+    assert armed["localInputs"] == {"100": {"buttons": 2}}
+    assert armed["logs"] == ["bg-return: rollback mode — no fast-forward/resync (behind=300)"]
 
-    lockstep = output["lockstep"]
-    assert lockstep["frame"] == 104
-    assert lockstep["inputs"] == {}
-    assert lockstep["calls"]["setLastSyncState"] == [[None, "bg-return"]]
-    assert lockstep["localInputs"] == {"104": {"buttons": 0}, "105": {"buttons": 0}}
-    assert lockstep["calls"]["guards"] == [["bg-return"]]
-    assert lockstep["calls"]["socket"] == [["bg-return"]]
+    # Waiting to arm: nothing moves either (specs/engine_start.qnt,
+    # tabReturnWhileWaitingTest), and the log says which case it was.
+    waiting = output["waiting"]
+    assert waiting["frame"] == 0
+    assert waiting["knFrame"] == 0
+    assert waiting["inputs"] == {"0": {"0": {"buttons": 1}}}
+    assert waiting["localInputs"] == {"0": {"buttons": 2}}
+    assert waiting["logs"] == ["bg-return: waiting to arm — no fast-forward/resync (f=0)"]

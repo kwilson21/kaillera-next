@@ -254,20 +254,21 @@ def test_local_input_is_zeroed_while_emulator_resume_is_guarded():
     assert "? KNShared.ZERO_INPUT" in source
 
 
-def test_lockstep_background_return_requests_full_sync_and_guards_input_until_apply():
-    # C rollback return skips this path; see test_bg_return_source.py.
+def test_socket_full_sync_guards_input_until_apply():
+    # A return from the background only logs (test_bg_return_source.py); the
+    # lifecycle guard is armed by the full syncs that still ask, such as the
+    # sync-state chunk timeout's fallback below.
     source = LOCKSTEP_JS.read_text()
 
     assert "_lifecycleResyncStartedAt + LIFECYCLE_RESYNC_INPUT_GUARD_MS" in source
-    assert "const _requestLifecycleFullResync = (reason) => {" in source
     assert "type: 'sync-request-full-socket'" in source
     assert "type: 'sync-state-socket'" in source
-    assert "pushSyncState(requesterSid, false, {\n      transport: 'socket'," in source
+    # Answered over the socket, watched and followed up there (sync_follow_up.qnt).
+    assert "_answerDirectSyncRequest(requesterSid, _requestIdFrom(msg.requestId), {\n      transport: 'socket'," in source
     assert "`${reason}: sent socket sync-request-full to host`" in source
     assert "_sendResyncRequest(hostPeer.dc, _beginResyncRequest(), 'sync-request-full');" in source
-    assert "sent sync-request-full to host over DC fallback" in source
-    assert "_requestLifecycleFullResync('bg-return')" in source
-    assert "_requestLifecycleFullResync('pageshow')" in source
+    assert "_noteLifecycleReturn('bg-return')" in source
+    assert "_noteLifecycleReturn('pageshow')" in source
     assert "_resumeInputGuardUntil = now + EJS_RESUME_INPUT_GUARD_MS" in source
     assert "_clearLifecycleResyncGuard('sync apply')" in source
     assert "resume input guard shortened after sync apply" in source

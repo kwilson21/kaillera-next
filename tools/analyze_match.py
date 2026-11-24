@@ -106,8 +106,27 @@ def _fetch_desync_events(base: str, key: str, match_id: str) -> list[dict]:
     return []
 
 
+def _get_session_client_events(base: str, key: str, session_id: int) -> requests.Response:
+    """GET one session's client events without its log.
+
+    A server without the client-events endpoint answers 404 there; its detail
+    endpoint bundles the same list, along with the session's whole log.
+    """
+    r = None
+    for path in (f"session-logs/{session_id}/client-events", f"session-logs/{session_id}"):
+        r = requests.get(
+            f"{base}/admin/api/{path}",
+            headers={"X-Admin-Key": key},
+            verify=False,
+            timeout=10,
+        )
+        if r.status_code != 404:
+            break
+    return r
+
+
 def _fetch_client_events(base: str, key: str, sessions: list[dict]) -> list[dict]:
-    """Fetch client_events from each session's detail endpoint.
+    """Fetch each session's client_events.
 
     Client events (room_created, peer_joined, webrtc_connected, emulator_booted,
     game_started, game_ended, disconnect) are stored separately from log_data.
@@ -116,12 +135,7 @@ def _fetch_client_events(base: str, key: str, sessions: list[dict]) -> list[dict
     all_events = []
     for s in sessions:
         try:
-            r = requests.get(
-                f"{base}/admin/api/session-logs/{s['id']}",
-                headers={"X-Admin-Key": key},
-                verify=False,
-                timeout=10,
-            )
+            r = _get_session_client_events(base, key, s["id"])
             if r.status_code == 200:
                 detail = r.json()
                 for ev in detail.get("client_events", []):
@@ -467,10 +481,14 @@ def query_desync_timeline(df: pl.DataFrame, base: str, key: str, match_id: str) 
     print()
     rb_checks = df.filter(pl.col("msg").str.contains("RB-CHECK"))
     if rb_checks.height > 0:
-        stale = rb_checks.filter(pl.col("msg").str.contains("STALE"))
-        match_ok = rb_checks.filter(pl.col("msg").str.contains("MATCH"))
+        # STALE: pages before rb-final; UNCOMPARED: a value whose counterpart never came.
+        stale = rb_checks.filter(pl.col("msg").str.contains("STALE|UNCOMPARED"))
+        match_ok = rb_checks.filter(pl.col("msg").str.contains(" MATCH"))
         mismatch_rb = rb_checks.filter(pl.col("msg").str.contains("MISMATCH"))
-        print(f"  RB-CHECK: {rb_checks.height} total — {match_ok.height} MATCH, {mismatch_rb.height} MISMATCH, {stale.height} STALE")
+        print(
+            f"  RB-CHECK: {rb_checks.height} total — {match_ok.height} MATCH, {mismatch_rb.height} MISMATCH, "
+            f"{stale.height} STALE/UNCOMPARED"
+        )
         if mismatch_rb.height > 0:
             print("  First RB-CHECK mismatches:")
             for row in mismatch_rb.head(5).iter_rows(named=True):
@@ -1065,7 +1083,9 @@ def query_freeze_detection(df: pl.DataFrame, jsonl_dir: str = "") -> None:
         for row in fatal_stale.head(5).iter_rows(named=True):
             print(f"    slot={row.get('slot')} f={row.get('f')} {row['msg'][:240]}")
 
-    # RF5: post-replay live-state drift
+    # RF5: post-replay live-state drift. Only logs recorded before f322745
+    # (April 2026) can hold it: the engine no longer makes this check, so
+    # its absence proves nothing (docs/netplay-invariants.md §R4).
     live_mismatch = df.filter(pl.col("msg").str.contains("RB-LIVE-MISMATCH"))
     if live_mismatch.height > 0:
         found_any = True

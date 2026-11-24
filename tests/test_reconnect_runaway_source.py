@@ -131,15 +131,21 @@ def test_an_input_past_the_window_that_differs_escalates_like_an_overdue_ask():
 
 
 def test_after_a_reconnect_reset_a_frame_waits_for_the_peers_first_input():
-    # specs/reconnect_inputs.qnt WAIT_FIRST_INPUT: the reset leaves the C slot
-    # inactive, so a frame run on the peer's missing input would record no
-    # prediction. It waits until one input at or above the floor is in.
+    # specs/reconnect_inputs.qnt WAIT_FIRST_INPUT: a reset that empties the C
+    # slot leaves it inactive, so a frame run on the peer's missing input would
+    # record no prediction. It waits until one input at or above the floor is
+    # in. A reconnect keeps the C slot (reconnect_history) and the wait too.
     src = _src()
     reset = src[src.index("const resetPeerState = (slot, reason, opts = {}) => {") :]
     reset = reset[: reset.index("\n  };\n")]
     assert "    _awaitFirstInputAfterReset,\n" in _slot_clear(src)
-    assert reset.index("mod._kn_rollback_slot_reset(slot)") < reset.index(
-        "if (reason === 'reconnect') _awaitFirstInputAfterReset[slot] = true;"
+    assert reset.index("_resetCoreSlot(slot, reason, !!opts.keepCoreSlot, unsafeHistory);") < reset.index(
+        "if (reason === 'reconnect' || kept) _awaitFirstInputAfterReset[slot] = true;"
+    )
+    core = src[src.index("const _resetCoreSlot = (slot, reason, keepCoreSlot, unsafeHistory) => {") :]
+    core = core[: core.index("\n  };\n")]
+    assert core.index("window.KNCore.peerReset.keepsCoreSlot(reason, listed, unsafeHistory)") < core.index(
+        "mod._kn_rollback_slot_reset(slot);"
     )
     feed = src[src.index("const _feedWatched = (mod, slot, frame, feed) => {") :]
     feed = feed[: feed.index("\n  };\n")]
@@ -312,7 +318,8 @@ def test_the_push_deadline_runs_only_on_the_pushs_own_hand_over():
     pending = src[src.index("const _markPendingLateJoinPeer = ") :]
     pending = pending[: pending.index("\n  };\n")]
     assert "_clearSlotInputState(slot);" in pending
-    assert src.count("_resetInputMaps();") == 3
+    # A new match and stop() (the old path's fast-forward, the third, is gone).
+    assert src.count("_resetInputMaps();") == 2
     clear = _slot_clear(src)
     assert "    _inputOorLog,\n" in clear
     assert "    _resendLog,\n" in clear
@@ -337,7 +344,7 @@ def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
     # The host sends no deltas (sync_base): every state is full and no base
     # is kept for it.
     assert "const toCompress = currentState;" in push[:12000]
-    assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}`" in src
+    assert "`sync-start:${frame}:${numChunks}:1:${isProactive ? '1' : '0'}${proofSuffix}`" in src
     assert "_setLastSyncState(currentState.slice(), 'pushSync')" not in src
     assert "toCompress[i] = currentState[i] ^ _lastSyncState[i];" not in src
     stop = src[src.index("  const stop = () => {") :]
@@ -347,8 +354,7 @@ def test_an_escalation_push_is_a_full_state_and_the_counter_is_per_match():
 
 def test_the_per_slot_only_maps_are_reset_where_their_timeline_starts_over():
     # Not in _slotInputMaps: a new match (startLockstep, frames from 0) and
-    # stop() reset them; a fast-forward keeps them, since it moves only this
-    # page's frame.
+    # stop() reset them.
     src = _src()
     start = src[src.index("const startLockstep = ") :]
     start = start[: start.index("_peerLastAdvanceTime = {};")]
@@ -367,11 +373,8 @@ def test_the_per_slot_only_maps_are_reset_where_their_timeline_starts_over():
         "_lateJoinSeededInputFrames",
     ):
         assert f"{name} = {{}};" in stop
-    ff = src[
-        src.index("_syncLog(`fast-forward: ${_frameNum} -> ${_lastRemoteFrame}`);") :
-    ]
-    ff = ff[: ff.index("_resetInputMaps();") + 20]
-    assert "_lastRemoteFramePerSlot = {};" not in ff
+    # The old path's fast-forward on a tab's return is gone with that path.
+    assert "fast-forward: ${_frameNum}" not in src
 
 
 def test_recovery_transfers_are_bounded_and_only_the_delivered_state_is_acknowledged():

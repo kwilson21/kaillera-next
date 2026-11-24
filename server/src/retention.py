@@ -1,6 +1,7 @@
 """Retention tiers: which matches are kept until someone resolves them.
 
-A match is flagged when its session logs show a crash, freeze or desync, a
+A match is flagged when its session logs show a crash, freeze or desync
+(including a field-detector `KNDesync suspect` raised by a real mismatch), a
 client reports a fatal error, a vision check finds a visual desync, or a
 player sends feedback about it (docs/superpowers/specs/
 2026-09-25-offbox-log-storage-design.md §2). Flagged matches are kept until
@@ -14,10 +15,12 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import ColumnElement, and_, case, delete, func, or_, select, update
 
 from src import db
+from src.blobstore import BlobStoreError
 from src.schema import (
     ClientEvent,
     DesyncEvent,
@@ -26,6 +29,7 @@ from src.schema import (
     Screenshot,
     SessionLog,
     SessionLogChunk,
+    SessionLogEviction,
 )
 
 log = logging.getLogger(__name__)
@@ -48,6 +52,16 @@ _ANY_TAGS = frozenset(
 # (FATAL, FATAL-RING-STALE, ...) and rollback-invariant events
 # (RB-INVARIANT-FIXUP).
 _ANY_PREFIXES = ("FATAL", "RB-INVARIANT-")
+# The field desync detector (web/src/page/desync-detector.ts) logs
+# `KNDesync suspect frame=... field=... slot=... trigger=flag ...` when the
+# peers' per-field hashes differ for a confirmed frame. It only compares
+# frames a confirm window behind the newest, past the rollback window, so a
+# suspect is a real split, not a stale prediction a rollback would correct.
+# It flags as KNDESYNC-SUSPECT. Mode B's heartbeat logs the same line with
+# `trigger=heartbeat` on healthy matches; that one, and every other
+# `KNDesync ...` line (init, confirm window, capture, disabled, ...), is not a
+# signal.
+_KNDESYNC_SUSPECT = "KNDESYNC-SUSPECT"
 # Out-of-range inputs from one peer this many times in a match is a storm.
 _INPUT_OOR_STORM = 20
 
@@ -73,6 +87,11 @@ def classify_entries(entries: Iterable[dict]) -> list[dict]:
             continue
         if tag == "RB-CHECK" and "MISMATCH" in msg:
             signal = "RB-CHECK-MISMATCH"
+        elif tag == "KNDesync":
+            words = msg.removeprefix("[C] ").split()
+            if len(words) < 2 or words[1] != "suspect" or "trigger=flag" not in words:
+                continue
+            signal = _KNDESYNC_SUSPECT
         elif tag in _ANY_TAGS or tag.startswith(_ANY_PREFIXES):
             signal = tag
         else:
@@ -105,7 +124,7 @@ def _count(found: dict[str, dict], signal: str, entry: dict) -> None:
 _BATCH = 200
 
 
-def _days(name: str, default: int) -> int:
+def window_days(name: str, default: int) -> int:
     """A retention window in days, never below 1: 0 would delete live matches."""
     try:
         value = int(os.environ.get(name, default))
@@ -116,13 +135,13 @@ def _days(name: str, default: int) -> int:
 
 
 def _retention_window() -> str:
-    return f"-{_days('LOG_RETENTION_DAYS', 7)} days"
+    return f"-{window_days('LOG_RETENTION_DAYS', 7)} days"
 
 
 def _expired() -> ColumnElement[bool]:
     """The match_retention rows whose window has passed (see the three cases above)."""
     kept_until = db.ago(_retention_window())
-    stale = db.ago(f"-{_days('FLAGGED_STALE_DAYS', 180)} days")
+    stale = db.ago(f"-{window_days('FLAGGED_STALE_DAYS', 180)} days")
     return or_(
         and_(
             MatchRetention.tier == "normal",
@@ -147,7 +166,7 @@ def _event_match_id() -> ColumnElement:
 
 
 # Everything keyed by match_id, in deletion order.
-_MATCH_TABLES = (Screenshot, DesyncEvent, SessionLogChunk, SessionLog, MatchMetrics)
+_MATCH_TABLES = (Screenshot, DesyncEvent, SessionLogChunk, SessionLogEviction, SessionLog, MatchMetrics)
 
 
 async def mark_expired() -> list[str]:
@@ -228,13 +247,130 @@ async def sweep_unregistered() -> None:
     await db.run(delete(ClientEvent).where(ClientEvent.created_at < old, ~in_a_match))
 
 
+# ── Orphan sweep ─────────────────────────────────────────────────────────────
+#
+# A blob-store prefix `matches/<id>/` can outlive its match's rows: an upload
+# that lands after finish_deletes removed the prefix and the rows, or a crash
+# between an upload and its record. Nothing else ever deletes those objects.
+# Weekly (spec §4 "Retention sweep"), the sweep lists the prefixes and
+# deletes the orphans.
+#
+# The rule: a prefix is deleted only when BOTH
+#   1. no match_retention row has its id — not a live, flagged or tombstoned
+#      match (a tombstoned one is finish_deletes's to delete, objects first,
+#      row last), and
+#   2. its newest object is older than LOG_RETENTION_DAYS (at least a day).
+# Rule 2 is what keeps a match that is still being written. Its writers are
+# game-screenshot (for the room's live match, which can run before
+# register_match has committed the row) and log_archive.archive_match (for a
+# match with a row; an upload can be in flight while finish_deletes removes
+# that row). Either leaves an object minutes old, far inside the window, so
+# the prefix is kept, and a later sweep finds it again. A write landing
+# between the listing and the delete would need a prefix whose objects are
+# all a window old and that has no row: a match gone for days, which nothing
+# writes for again, since match ids are fresh uuid4s (api/signaling.py, _start_game_locked).
+_ORPHAN_SWEEP_EVERY = timedelta(days=7)
+# Prefixes looked at per sweep (one listing call each on R2). A bigger bucket
+# is worked through over several 6-hourly sweeps, resuming at the cursor.
+_ORPHAN_PREFIXES_PER_RUN = 500
+# D1 caps bound parameters per statement at 100.
+_ID_QUERY_BATCH = 90
+LAST_ORPHAN_SWEEP = "last_orphan_sweep"
+ORPHAN_SWEEP_CURSOR = "orphan_sweep_cursor"
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+async def _registered(match_ids: list[str]) -> set[str]:
+    found: set[str] = set()
+    for start in range(0, len(match_ids), _ID_QUERY_BATCH):
+        batch = match_ids[start : start + _ID_QUERY_BATCH]
+        rows = await db.fetch(select(MatchRetention.match_id).where(MatchRetention.match_id.in_(batch)))
+        found.update(row["match_id"] for row in rows)
+    return found
+
+
+async def sweep_orphans(now: datetime | None = None) -> int | None:
+    """Delete blob-store prefixes that belong to no match (see the rule above).
+
+    Runs only when the last full pass ended a week ago, or a pass is part way
+    through (`orphan_sweep_cursor`); each call looks at one bounded page of
+    prefixes. A listing that fails logs a warning and changes neither marker,
+    so the next sweep tries again. Returns prefixes deleted, or None when it
+    didn't run.
+    """
+    now = now or datetime.now(UTC)
+    cursor = await db.get_server_state(ORPHAN_SWEEP_CURSOR)
+    last = _parse_time(await db.get_server_state(LAST_ORPHAN_SWEEP))
+    if cursor is None and last is not None and now - last < _ORPHAN_SWEEP_EVERY:
+        return None
+    try:
+        listing = await db.list_match_prefixes(after=cursor, limit=_ORPHAN_PREFIXES_PER_RUN)
+    except BlobStoreError as exc:
+        log.warning("Orphan sweep: listing the blob store failed; retrying next sweep: %s", exc)
+        return None
+
+    # The database first: most prefixes have a row, and each newest-time
+    # check below is a listing call (an R2 Class A operation).
+    registered = await _registered(listing.match_ids) if listing.match_ids else set()
+    cutoff = now - timedelta(days=window_days("LOG_RETENTION_DAYS", 7))
+    deleted = 0
+    for match_id in listing.match_ids:
+        if match_id in registered:
+            continue
+        try:
+            newest = await db.newest_in_match(match_id)
+        except BlobStoreError as exc:
+            log.warning("Orphan sweep: prefix of %s not listed: %s", match_id[:8], exc)
+            continue
+        if newest is None:
+            log.warning("Orphan sweep: prefix of %s kept: its newest object time isn't known", match_id[:8])
+            continue
+        if newest >= cutoff:
+            continue
+        try:
+            await db.delete_match_blobs(match_id)
+        except BlobStoreError as exc:
+            # Still an orphan next week; one failure doesn't stop the others.
+            log.warning("Orphan sweep: prefix of %s not deleted: %s", match_id[:8], exc)
+            continue
+        deleted += 1
+
+    await db.set_server_state(ORPHAN_SWEEP_CURSOR, listing.next_after)
+    if listing.next_after is None:
+        await db.set_server_state(LAST_ORPHAN_SWEEP, now.isoformat())
+    log.info(
+        "Orphan sweep: %d prefix(es) listed, %d orphan(s) deleted%s",
+        len(listing.match_ids),
+        deleted,
+        "" if listing.next_after is None else "; continuing next sweep",
+    )
+    return deleted
+
+
 async def sweep(*, include_unregistered: bool = True) -> None:
     """One retention pass: finish interrupted deletes, tombstone and delete
-    newly expired matches, then (unless told not to) age out unregistered
-    rows, which scans whole tables and so runs less often."""
+    newly expired matches, archive and evict what is left, then (unless told
+    not to) age out unregistered rows, which scans whole tables and so runs
+    less often. Last, the weekly orphan sweep, which gates itself.
+
+    Expiry runs before the archive so a match past its window is deleted
+    rather than uploaded first (src/log_archive.py)."""
+    from src import log_archive
+
     await finish_deletes()
     marked = await mark_expired()
     finished = await finish_deletes()
+    await log_archive.sweep()
     if include_unregistered:
         await sweep_unregistered()
+    await sweep_orphans()
     log.info("Retention sweep: %d match(es) expired, %d deleted", len(marked), finished)

@@ -95,7 +95,9 @@ def test_watch_link_midgame_no_rom_prompt(browser, server_url):
 
 
 @pytest.mark.parametrize("mode", ["rollback", "lockstep"])
-@pytest.mark.parametrize("scenario", ["relay", "stun", "transient", "expired"])
+@pytest.mark.parametrize(
+    "scenario", ["relay", "stun", "transient", "managed", "expired"]
+)
 def test_watch_link_waits_for_relay_before_answering(
     browser, server_url, mode, scenario
 ):
@@ -175,6 +177,8 @@ def test_watch_link_waits_for_relay_before_answering(
         for route in delayed_ice:
             if scenario in ("transient", "expired"):
                 route.fulfill(status=503)
+            elif scenario == "managed":
+                route.fulfill(json=[stun], headers={"X-KN-Relay-Retry-After": "60"})
             else:
                 route.fulfill(
                     json=[stun, turn] if relay_available else [stun],
@@ -229,10 +233,25 @@ def test_watch_link_waits_for_relay_before_answering(
                         spectator_sid,
                     )
 
-            if scenario == "transient":
+            if scenario == "managed":
+                watcher.evaluate("window.__watchClockOffset = 30 * 1000")
+                with (
+                    pytest.raises(PlaywrightTimeoutError),
+                    watcher.expect_request("**/ice-servers?token=*", timeout=500),
+                ):
+                    later_offers()
+                assert len(delayed_ice) == 1
+                assert watcher.evaluate("window.__watchAnswers.length") == 0
+                watcher.evaluate("window.__watchClockOffset = 61 * 1000")
+
+            if scenario in ("transient", "managed"):
                 with watcher.expect_request("**/ice-servers?token=*", timeout=3000):
                     later_offers()
-                watcher.wait_for_function("window.__watchOfferCount >= 4", timeout=3000)
+                watcher.wait_for_function(
+                    "(expected) => window.__watchOfferCount >= expected",
+                    arg=6 if scenario == "managed" else 4,
+                    timeout=3000,
+                )
                 assert len(delayed_ice) == 2
                 delayed_ice[-1].fulfill(
                     json=[stun, turn], headers={"X-KN-Relay-Ttl": "86400"}

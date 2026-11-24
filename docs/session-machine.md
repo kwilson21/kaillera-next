@@ -14,6 +14,7 @@ flowchart LR
   running -->|"lateJoinRomNeeded"| lateJoinAwaitingRom
   running -->|"leftOutOfStart"| lateJoinStarting
   lateJoinAwaitingRom -->|"lateJoinRomReady"| lateJoinStarting
+  lateJoinSyncing -->|"leftOutOfStart"| lateJoinStarting
   lateJoinSyncing -->|"lateJoinSynced<br/>admittedToStart"| running
 ```
 

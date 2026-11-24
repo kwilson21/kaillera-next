@@ -22,9 +22,13 @@ function between(value: WirePayload, lo: number, hi: number): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= lo && value <= hi;
 }
 
+// A delay of 0 has a window too: alone in a room the match runs on the C
+// engine at 0, and a friend who joins it joins at 0 (specs/engine_start.qnt,
+// lateJoinIntoSoloTest). Without one, the solo host sent no source and the
+// joiner, with none to wait for, failed its input wait as it arrived.
 function bounds(frame: number, delay: number): readonly [number, number] | null {
   if (!Number.isInteger(frame) || frame < 0 || frame > 0x7fffffff - MAX_AHEAD) return null;
-  if (!Number.isInteger(delay) || delay < 1 || delay > MAX_DELAY) return null;
+  if (!Number.isInteger(delay) || delay < 0 || delay > MAX_DELAY) return null;
   return [Math.max(0, frame - delay), frame + delay + 7];
 }
 

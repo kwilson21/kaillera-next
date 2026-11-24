@@ -98,7 +98,7 @@ def test_smash_remix_startup_uses_c_normalized_kn_sync_before_hidden_sidecar_fal
     assert "const _restoreHiddenStateWords = (mod, words, reason) =>" in source
     assert "mod?._kn_restore_hidden_state_impl || mod?._kn_restore_hidden_state_boot" in source
     assert "const method = mod._kn_restore_hidden_state_impl ? 'full' : 'boot'" in source
-    assert "restored Remix hidden state (${method}) words=${wordCount}" in source
+    assert "restored hidden state (${method}) words=${wordCount}" in source
 
     initial_idx = source.find("initial-sync-load", source.find("if (isKnSyncInitialState)"))
     assert initial_idx != -1
@@ -191,16 +191,15 @@ def test_smash_remix_rng_seed_sync_stays_out_of_live_tick_path():
     assert "void mod" in sync_window
     assert "void frameNum" in sync_window
 
-    tick_idx = source.find("// Step one frame with audio capture")
-    assert tick_idx != -1
-    tick_window = source[tick_idx : tick_idx + 700]
+    # The C engine's tick (the only one: every frame runs on it) steps
+    # through _runStepOneFrame (STEP-NORUN / STEP-THREW handling), which is
+    # the wrapper around the raw stepOneFrame() call, with the no-op seed
+    # sync just before it.
+    step_idx = source.find("if (!_runStepOneFrame('normal')) {")
+    assert step_idx != -1
+    tick_window = source[step_idx - 300 : step_idx]
     assert tick_window.count("_syncRNGSeed(tickMod, _frameNum);") == 1
-    sync_idx = tick_window.find("_syncRNGSeed(tickMod, _frameNum);")
-    # The tick loop steps through _runStepOneFrame (STEP-NORUN / STEP-THREW
-    # handling), which is the wrapper around the raw stepOneFrame() call.
-    step_idx = tick_window.find("_runStepOneFrame('fallback')")
-    assert sync_idx != -1
-    assert step_idx > sync_idx
+    assert "_runStepOneFrame('fallback')" not in source
 
     runner_idx = source.find("const _runStepOneFrame = (branch) => {")
     assert runner_idx != -1
@@ -251,7 +250,9 @@ def test_determinism_harness_has_setup_only_css_character_gate():
 
 def test_controller_mask_reapplies_when_emulator_module_changes():
     source = (REPO_ROOT / "web/static/netplay-rollback.js").read_text()
-    apply_idx = source.find("const _applyControllerPresentMask =")
+    # The core call and its per-module cache are in _setCoreControllerMask,
+    # which every application (before the match and per frame) goes through.
+    apply_idx = source.find("const _setCoreControllerMask =")
     reset_idx = source.find("const _resetControllerPresentMask =", apply_idx)
     assert apply_idx != -1
     assert reset_idx != -1

@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 import * as resyncRequest from '../../web/src/resync-request.ts';
 import { createRecoveryManager } from '../../web/src/recovery-delivery.ts';
 import { createRecoveryTransferPool } from '../../web/src/recovery-transfer.ts';
+import * as syncFollowUp from '../../web/src/sync-follow-up.ts';
 
 const source = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const engineFunction = (name: string) => {
@@ -16,17 +18,18 @@ const engineFunction = (name: string) => {
 // Execute the engine's actual handlers, not a second implementation. These
 // tests force the rare send/ack orderings before the ROM-backed mesh run.
 function room(guests = 2, realTransfers = false) {
-  const context = vm.createContext({ resyncRequest, createRecoveryManager, createRecoveryTransferPool });
+  const context = vm.createContext({ resyncRequest, createRecoveryManager, createRecoveryTransferPool, syncFollowUp });
   vm.runInContext(
     `
     let now = 10000;
     const performance = { now: () => now };
-    const window = { KNCore: { resyncRequest, recovery: { createRecoveryManager, createRecoveryTransferPool } } };
-    const _playerSlot = 0, _frameNum = 1000, DELAY_FRAMES = 3;
+    const window = { KNCore: { resyncRequest, syncFollowUp, recovery: { createRecoveryManager, createRecoveryTransferPool } } };
+    const _playerSlot = 0, _frameNum = 1000, DELAY_FRAMES = 3, _ranBeforeDelayChange = -1, _workerCoprocPending = null;
     const INPUT_ASK_OVERDUE_ASKS = 3, INPUT_ASK_OVERDUE_MS = 1500;
     const OVERDUE_MAX_PUSHES = 3, OVERDUE_PUSH_QUIET_MS = 20000, OVERDUE_PUSH_TIMEOUT_MS = 5000;
     const _peers = ${JSON.stringify(Object.fromEntries(Array.from({ length: guests }, (_, i) => [String.fromCharCode(97 + i), { slot: i + 1 }])))};
     const _peerPhantom = {}, _syncChainMovedAt = {}, _knownPlayers = {};
+    ${reconnectProofSource(source)}
     let _syncEnabled = true;
     const _recovery = createRecoveryManager({timeoutMs:5000, quietMs:20000, maxPushes:3}, notice => _handleRecoveryCommand(notice));
     const _recoveryTransfers = createRecoveryTransferPool();
@@ -38,7 +41,7 @@ function room(guests = 2, realTransfers = false) {
       realTransfers
         ? `
       let _pushingSyncState = false, _proactivePushInFlight = false;
-      const _queuedSyncPushes = new Map(), _followUpWatches = new Map();
+      const _queuedSyncPushes = new Map(), _followUpWatches = new Map(), _directAnswerNewest = new Map();
       const _coreFatalError = false, _hasKnSync = false;
       const _syncQueueEpoch = 1, _syncQueueGen = {}, _syncSendChains = {};
       let captureThrows = false, compressions = 0, holdCompression = false, releaseCompression;
@@ -133,6 +136,101 @@ test('four-player recovery keeps each missing recipient independently owed', () 
   assert.equal(run('_recovery.entries().length'), 0);
   assert.equal(run('drops.length'), 1);
   assert.equal(run('drops[0]'), 'c');
+});
+
+test('a guest skipped by a follow-up broadcast is pushed a fresh state when its earlier one settles', () => {
+  // b still owes hole 1 when a's second hole is broadcast to a and c only.
+  // Settling hole 1's state would leave b before hole 2 while the others
+  // adopt it (specs/recovery_delivery.qnt, recovery_skipped).
+  const run = room(3);
+  // Hole 1's state was taken at 990, before the second broadcast (at 1000).
+  run(`_escalateLostInput(_peers.a, 'push', now, 900);
+       for (const sid of ['a', 'b', 'c']) _onEscalationTransfer(sends[0].options.escalation, sid, true, 990);
+       _recovery.acknowledge(1, 987, _recovery.entries().find((t) => t.slot === 1).wireId);
+       _recovery.acknowledge(3, 987, _recovery.entries().find((t) => t.slot === 3).wireId);
+       _checkOverduePushes();
+       globalThis.oldB = _recovery.entries().find((t) => t.slot === 2);`);
+  assert.equal(run('_recovery.state(2)'), 'awaitingAck');
+  run(`now += 1500; _escalateLostInput(_peers.a, 'push', now, 1100);`);
+  assert.equal(run('sends[1].options.escalation.map((t) => t.slot).join()'), '1,3');
+  run('_recovery.acknowledge(2, 987, oldB.wireId);');
+  // b's earlier attempt settled; a fresh one is pushed to b alone.
+  assert.equal(run('sends.length'), 3);
+  assert.equal(run('sends[2].sid'), 'b');
+  assert.equal(run('_recovery.current(sends[2].options.escalation[0])'), true);
+  assert.equal(run('_recovery.state(2)'), 'sending');
+  // It settles like any attempt, and is owed no further push.
+  run(`_onEscalationTransfer(sends[2].options.escalation, 'b', true, 1101);
+       _recovery.acknowledge(2, 1098, sends[2].options.escalation[0].wireId);`);
+  assert.equal(run('_recovery.state(2)'), null);
+  assert.equal(run("sends.filter((s) => s.sid === 'b').length"), 1);
+  assert.equal(run('drops.length'), 0);
+});
+
+test('a skipped guest whose earlier attempt retries, ends or is reset is owed no follow-up push', () => {
+  // A retry captures afresh, so it already covers the later hole.
+  const retried = room(3);
+  retried(`_escalateLostInput(_peers.a, 'push', now, 900);
+           for (const sid of ['a', 'c']) _onEscalationTransfer(sends[0].options.escalation, sid, true, 1000);
+           _onEscalationTransfer(sends[0].options.escalation, 'b', false, 1000);
+           _recovery.acknowledge(1, 997, _recovery.entries().find((t) => t.slot === 1).wireId);
+           _recovery.acknowledge(3, 997, _recovery.entries().find((t) => t.slot === 3).wireId);
+           now += 1500; _escalateLostInput(_peers.a, 'push', now, 1100);
+           now += 5000; _checkOverduePushes();`);
+  assert.equal(retried("sends.filter((s) => s.sid === 'b').length"), 1);
+  retried(`_onEscalationTransfer(sends.find((s) => s.sid === 'b').options.escalation, 'b', true, 1200);
+           _recovery.acknowledge(2, 1197, _recovery.entries().find((t) => t.slot === 2).wireId);`);
+  assert.equal(retried('_recovery.state(2)'), null);
+  assert.equal(retried("sends.filter((s) => s.sid === 'b').length"), 1);
+  // A reset recipient is owed nothing from before the reset.
+  const reset = room(3);
+  reset(`_escalateLostInput(_peers.a, 'push', now, 900);
+         for (const sid of ['a', 'b', 'c']) _onEscalationTransfer(sends[0].options.escalation, sid, true, 1000);
+         _recovery.acknowledge(1, 997, _recovery.entries().find((t) => t.slot === 1).wireId);
+         now += 1500; _escalateLostInput(_peers.a, 'push', now, 1100);
+         _recovery.reset(2);`);
+  assert.equal(reset('_recovery.followUp({ slot: 2, sid: "b", sequence: 1, wireId: 1 }, now).kind'), 'none');
+});
+
+test('a skipped guest whose earlier state was taken at or after the newer broadcast is owed nothing', () => {
+  // Its state, taken at 1000, already holds what the broadcast at 1000 sent.
+  const run = room(3);
+  run(`_escalateLostInput(_peers.a, 'push', now, 900);
+       for (const sid of ['a', 'c']) _onEscalationTransfer(sends[0].options.escalation, sid, true, 990);
+       _recovery.acknowledge(1, 987, _recovery.entries().find((t) => t.slot === 1).wireId);
+       _recovery.acknowledge(3, 987, _recovery.entries().find((t) => t.slot === 3).wireId);
+       globalThis.oldB = _recovery.entries().find((t) => t.slot === 2);
+       now += 1500; _escalateLostInput(_peers.a, 'push', now, 1100);
+       _onEscalationTransfer(sends[0].options.escalation, 'b', true, 1000);
+       _recovery.acknowledge(2, 997, oldB.wireId);`);
+  assert.equal(run('_recovery.state(2)'), null);
+  assert.equal(run("sends.filter((s) => s.sid === 'b').length"), 0);
+});
+
+test('a follow-up is charged to the room capture budget and left once it is spent', () => {
+  const manager = createRecoveryManager({ timeoutMs: 5000, quietMs: 20000, maxPushes: 3 }, () => {});
+  const recipients = [1, 2, 3].map((slot) => ({ sid: `s${slot}`, slot, playerId: `p${slot}` }));
+  // Hole 1 from slot 1 to all; slot 2 stays owed while slot 1's later holes
+  // are broadcast to the others, until the room's nine captures are spent.
+  let now = 1000;
+  const first = manager.begin(1, 900, recipients, 990, now, true);
+  const old2 = first.find((t) => t.slot === 2)!;
+  manager.event(old2, { type: 'delivered', attempt: 1, now, before: 987 });
+  for (const t of first) if (t.slot !== 2) manager.event(t, { type: 'delivered', attempt: 1, now, before: 987 });
+  for (const t of first) if (t.slot !== 2) manager.acknowledge(t.slot, 987, t.wireId);
+  // Slot 1's roster identity rotates (as in the identity-churn test), so its
+  // own source budget never binds: the room's nine captures are what run out.
+  for (let i = 0; i < 8; i++) {
+    now += 100;
+    const churned = recipients.map((r) => (r.slot === 1 ? { ...r, playerId: `p1-${i}` } : r));
+    for (const t of manager.begin(1, 1000 + i, churned, 1000 + i, now, true)) {
+      manager.event(t, { type: 'delivered', attempt: 1, now, before: 997 + i });
+      manager.acknowledge(t.slot, 997 + i, t.wireId);
+    }
+  }
+  manager.acknowledge(2, 987, old2.wireId);
+  const outcome = manager.followUp(old2, now, 990);
+  assert.equal(outcome.kind, 'budget');
 });
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -502,6 +600,7 @@ test('actual receiver keeps tokens across buffering, rejects stale decode and sa
     const _syncLog = () => {}, _clearLifecycleResyncGuard = () => {};
     const _endsResyncRequest = () => false, _answersAnOlderRequest = () => false;
     const _keepsAwaitedAnswer = () => false;
+    ${reconnectProofSource(source)}
     ${handler}
     const receive = (id, frame=1000, full=true) => _handleDecodedSyncPayload({
       recoveryId:id, frame, isFull:full, isRegions:false, isProactive:false,

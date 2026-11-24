@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import * as removedInput from '../web/src/removed-input.ts';
 
 const source = fs.readFileSync(new URL('../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const read = (worker = false) => {
@@ -19,6 +20,8 @@ const read = (worker = false) => {
       source.slice(start, end) +
       '\n({ update: _recordHostInputRoster, floor: _admissionInputFloor, prime: _primeLateJoinInactiveInput, reset: _clearLateJoinInputRoster, late: _waitingForHostAdmission, open: _observeLateJoinDcOpen })',
     {
+      // The admission floor is a proved rule (web/src/removed-input.ts), reached as on the page.
+      window: { KNCore: { removedInput } },
       RB_WORKER_COPROC: worker,
       _playerSlot: 1,
       _frameNum: 1362,

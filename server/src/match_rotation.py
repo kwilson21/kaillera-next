@@ -47,7 +47,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src import db, retention, schema
@@ -65,6 +65,9 @@ _DEFAULT_PARQUET_DIR = os.path.join("data", "parquet")
 # Background sweeper interval. Short enough that analyze_match.py on a just-
 # ended match reliably sees metrics on a second attempt.
 SWEEP_INTERVAL_SEC = 60
+
+# Rows per Polars frame built from the merged entries (see _write_parquet).
+_FRAME_SLICE_ROWS = 10_000
 
 
 def _parquet_dir() -> Path:
@@ -241,11 +244,7 @@ def _write_parquet(match_id: str, merged_entries: list[dict], created_at: str | 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{match_id}.zstd.parquet"
 
-    # Polars is strict about schema mismatches across rows; use
-    # infer_schema_length=None so it scans every row to find the widest
-    # type. Small cost compared to JSON parsing.
-    df = pl.DataFrame(merged_entries, infer_schema_length=None, strict=False)
-    df.write_parquet(out_path, compression="zstd", compression_level=3)
+    _entries_frame(pl, merged_entries).write_parquet(out_path, compression="zstd", compression_level=3)
 
     try:
         size = out_path.stat().st_size
@@ -254,23 +253,63 @@ def _write_parquet(match_id: str, merged_entries: list[dict], created_at: str | 
     return out_path, size
 
 
+def _entries_frame(pl, entries: list[dict]):
+    """The merged entries as one Polars frame (`pl`, imported lazily), typed as one build over all of them would type it.
+
+    infer_schema_length=None scans every row for the widest type. The frame
+    is built a slice at a time because building one from Python objects
+    holds the GIL: one build over a long match would stall the event loop
+    even from the worker thread this runs in. A relaxed concat widens scalar
+    types across slices exactly as the single build does, but not a column
+    that is nested (an object or a list) in one slice and something else in
+    another: the concat would wrap a number into a struct, or fail on an
+    empty one. Such a log is built in one piece instead.
+    """
+    frames = [
+        pl.DataFrame(entries[i : i + _FRAME_SLICE_ROWS], infer_schema_length=None, strict=False)
+        for i in range(0, len(entries), _FRAME_SLICE_ROWS)
+    ]
+    dtypes: dict[str, set] = {}
+    for frame in frames:
+        for name, dtype in frame.schema.items():
+            if dtype != pl.Null:
+                dtypes.setdefault(name, set()).add(dtype)
+    if any(len(seen) > 1 and any(d.is_nested() for d in seen) for seen in dtypes.values()):
+        return pl.DataFrame(entries, infer_schema_length=None, strict=False)
+    return pl.concat(frames, how="diagonal_relaxed")
+
+
 # ── Core rotation logic ──────────────────────────────────────────────────────
 
 
 async def _merge_entries(session_rows: list[dict]) -> list[dict]:
     """Flatten all peers' log entries (legacy log_data + chunks) into one list,
-    stamping per-row metadata."""
+    stamping per-row metadata. One peer's log is held at a time, and stamped
+    in a worker thread."""
     merged: list[dict] = []
     for r in session_rows:
         log_data = await db.get_full_log_entries(r.get("match_id"), r.get("slot"), r.get("log_data"))
-        stamp = {
-            "session_id": r.get("id"),
-            "match_id": r.get("match_id"),
-            "slot": r.get("slot"),
-            "player_name": r.get("player_name"),
-        }
-        merged.extend({**stamp, **entry} for entry in log_data if isinstance(entry, dict))
+        merged.extend(await asyncio.to_thread(_stamped, r, log_data))
     return merged
+
+
+def _stamped(session_row: dict, log_data: list) -> list[dict]:
+    stamp = {
+        "session_id": session_row.get("id"),
+        "match_id": session_row.get("match_id"),
+        "slot": session_row.get("slot"),
+        "player_name": session_row.get("player_name"),
+    }
+    return [{**stamp, **entry} for entry in log_data if isinstance(entry, dict)]
+
+
+def _process_match(match_id: str, session_rows: list[dict], merged: list[dict], created_at: str | None) -> MatchMetrics:
+    """Write the Parquet file and compute the metrics. Seconds of CPU for a
+    long match on a small instance, so rotate_match runs it in a worker
+    thread, off the event loop, as it does the retention classifier."""
+    parquet_result = _write_parquet(match_id, merged, created_at)
+    parquet_path, parquet_bytes = parquet_result if parquet_result else (None, None)
+    return _compute_metrics(match_id, session_rows, merged, parquet_path, parquet_bytes)
 
 
 async def rotate_match(match_id: str) -> MatchMetrics | None:
@@ -289,13 +328,12 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
     # Earliest created_at across peers determines the partition month.
     created_at = min((r.get("created_at") or "") for r in rows) or None
 
-    parquet_result = _write_parquet(match_id, merged, created_at)
-    parquet_path, parquet_bytes = parquet_result if parquet_result else (None, None)
-
-    metrics = _compute_metrics(match_id, rows, merged, parquet_path, parquet_bytes)
+    metrics = await asyncio.to_thread(_process_match, match_id, rows, merged, created_at)
+    # Stored before the classifier runs: if it raises on a malformed log, the
+    # metrics row still keeps the sweeper from rotating this match again.
     await _upsert_metrics(metrics)
 
-    reasons = retention.classify_entries(merged)
+    reasons = await asyncio.to_thread(retention.classify_entries, merged)
     if reasons:
         try:
             # Matches from before registration existed have no row yet.
@@ -310,16 +348,25 @@ async def rotate_match(match_id: str) -> MatchMetrics | None:
         metrics.peer_count,
         metrics.entry_count,
         metrics.mismatch_count,
-        f"{parquet_bytes} bytes" if parquet_bytes else "skipped",
+        f"{metrics.parquet_bytes} bytes" if metrics.parquet_bytes else "skipped",
     )
     return metrics
 
 
 async def _upsert_metrics(m: MatchMetrics) -> None:
-    """Insert-or-replace one match_metrics row."""
+    """Insert-or-replace one match_metrics row.
+
+    A row whose Parquet was archived to the blob store keeps pointing there:
+    a rotation that runs after the archive (the minute sweeper, or a forced
+    backfill) writes its file to this instance's disk, which a deploy wipes
+    (src/log_archive.py).
+    """
     row = dataclasses.asdict(m)
     upsert = sqlite_insert(schema.MatchMetrics).values(**row, rotated_at=db.now())
     replaced = {column: upsert.excluded[column] for column in row if column != "match_id"}
+    archived = schema.MatchMetrics.parquet_path.like("matches/%")
+    for column in ("parquet_path", "parquet_bytes"):
+        replaced[column] = case((archived, getattr(schema.MatchMetrics, column)), else_=upsert.excluded[column])
     await db.run(upsert.on_conflict_do_update(index_elements=["match_id"], set_={**replaced, "rotated_at": db.now()}))
 
 

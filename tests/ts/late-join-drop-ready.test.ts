@@ -2,15 +2,21 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { reconnectProofSource } from './fixtures/reconnect-proof-source.ts';
 const src = readFileSync(new URL('../../web/static/netplay-rollback.js', import.meta.url), 'utf8');
 const part = (a: string, b: string) => src.slice(src.indexOf(a), src.indexOf(b, src.indexOf(a)));
 function room(peerPresent = false) {
-  const c = vm.createContext({ Uint8Array, peerPresent });
+  const c = vm.createContext({
+    _hostReconnectBlocksNativeCapture: () => false,
+    _hostReconnectFenceVersion: 0,
+    Uint8Array,
+    peerPresent,
+  });
   vm.runInContext(
     `
  const peer={slot:1,dc:{readyState:'open',send(){}}};
  const _peers=peerPresent?{a:peer}:{},_knownPlayers={a:{slot:1}},_droppedThisMatch=new Set(['a']);
- const _lateJoinServing=new Map(),_lateJoinStateSent=new Map(),_pendingLateJoinReadySids=new Set(),_lateJoinReadyHandled=new Set();
+ const _lateJoinServing=new Map(),_lateJoinStateSent=new Map(),_pendingLateJoinReadySids=new Set(),_lateJoinReadyHandled=new Set(),_lateJoinOfferedDelay=new Map();
  let _lateJoinServeSeq=0,_lateJoinPausedAt=0,_runSubstate=0,_syncQueueEpoch=1;
  const _syncQueueGen={},RUN_LATE_JOIN_PAUSE=1,LATE_JOIN_TIMEOUT_MS=15000,_frameNum=100,_playerSlot=0,DELAY_FRAMES=12,_rbTransport='reliable';
  let pending=false,activated=0,emits=0,resumes=0; const timers=[];
@@ -18,17 +24,21 @@ function room(peerPresent = false) {
  const _markPendingLateJoinPeer=()=>{pending=true},_clearPendingLateJoinPeer=(sid,slot,why,opts)=>{pending=false;if(opts?.activate)activated++};
  const _syncLog=()=>{},_endLateJoinPauseIfNoneServed=()=>{},_captureHiddenStateWords=()=>null,_captureAudioFifoState=()=>null,_captureSaveRam=()=>null;
  const _resetPacingAfterLateJoin=()=>{},_broadcastRoster=()=>{},_config=null,resumeLateJoinPause=()=>{resumes++};
- const _signalSocket={emit(){emits++}};
+ const _signalSocket={emit(){emits++}},_maskSchedule={active:()=>false};
  const window={EJS_emulator:{gameManager:{getState:()=>new Uint8Array([1]),Module:{}}}};
  let compression;const compressAndEncode=()=>new Promise(r=>compression=r);
  const hardDisconnectPeer=()=>{delete _peers.a;pending=false};
  ${part('  async function sendLateJoinState(remoteSid)', '  // Joiner: a full resync')}
  ${part('  const finishLateJoinReady =', '  const _syntheticSidForSlot')}
  const _peerDriver=()=>null,_startSteps=new Map(),_endKeptOpen=()=>{},queueMicrotask=()=>{};
- const _lateJoinInputWindows=new Map();
- const _clearSlotInputState=()=>{},_peerLastAdvanceTime={},_peerPhantom={},_consecutiveFabrications={},_inputLateLogTime={},_auditLastRemote={};
- const _pendingCInputs=[],_followUpWatches=new Map(),_queuedSyncPushes=new Map(),_syncSendChains={},_syncChainMovedAt={};
+ const _lateJoinInputWindows=new Map(),_keptSlotFirstInputAt=new Map(),_corePhantomHistory=new Set();
+ const PHASE_RUNNING=5,_phase=PHASE_RUNNING;
+ ${reconnectProofSource(src)}
+ const _clearSlotInputState=()=>{},_peerLastAdvanceTime={},_peerPhantom={},_inputLateLogTime={},_auditLastRemote={};
+ const _rbCheckBook=null,_rbLegacyCheckSlots=new Set();
+ const _pendingCInputs=[],_followUpWatches=new Map(),_directAnswerNewest=new Map(),_queuedSyncPushes=new Map(),_syncSendChains={},_syncChainMovedAt={};
  let _scheduledSyncRequests=[];const clearPeerStallTimers=()=>{},_useCRollback=false,_awaitFirstInputAfterReset={};
+ ${part('  const _resetCoreSlot =', '  /**')}
  ${part('  const resetPeerState =', '  // -- Peer disconnect')}
  globalThis.reset=()=>resetPeerState(1,'drop',{sid:'a',peer});
  globalThis.send=()=>sendLateJoinState('a');globalThis.ready=()=>finishLateJoinReady('Socket.IO','a');

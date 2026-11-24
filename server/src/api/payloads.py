@@ -155,6 +155,15 @@ class MatchJoinedPayload(BaseModel):
     matchId: str = Field(max_length=64)
 
 
+# ── match-recovery-unverified ────────────────────────────────────────────────
+
+
+class MatchRecoveryUnverifiedPayload(BaseModel):
+    """The room owner or active slot zero could not verify recovery of the named running match."""
+
+    matchId: str = Field(min_length=1, max_length=64)
+
+
 # ── end-game ─────────────────────────────────────────────────────────────────
 
 
@@ -197,6 +206,10 @@ class RomReadyPayload(BaseModel):
     # With ready false: the page shows the ROM prompt (it has no ROM and asks
     # for one), not merely that it has not loaded one yet.
     prompt: bool = False
+    # With ready false: the page holds a ROM whose hash is still being
+    # computed. From the host, the room's ROM is changing: the room names
+    # none (hostRom.changing) until the host says ready with the new hash.
+    pending: bool = False
     hash: str | None = None
     name: str | None = Field(default=None, max_length=128)
     size: int | None = Field(default=None, ge=0, le=512 * 1024 * 1024)
@@ -291,6 +304,10 @@ class HostRom(_ServerMessage):
     size: int | None
     gameId: str
     game_id: str
+    # The host has dropped a new ROM and its hash is not in yet: hash, name and
+    # size are None, and the ROM the room named before is not the host's.
+    # Absent from a server that predates it.
+    changing: bool = False
 
 
 class UsersUpdated(_ServerMessage):
@@ -314,6 +331,8 @@ class UsersUpdated(_ServerMessage):
     mode: GameMode | None
     status: RoomStatus
     listed: bool
+    # Sticky for the named match. Absent from older servers.
+    recoveryUnverifiedMatchId: str | None = None
 
 
 class JoinRoomAck(UsersUpdated):

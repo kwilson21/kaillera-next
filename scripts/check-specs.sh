@@ -76,6 +76,7 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend="$BACKEND"
+$QUINT test "$SPEC" --main=room_before_serve_timeout_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_grace_wait --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_abandoned_end --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_resume_flag --backend="$BACKEND"
@@ -111,6 +112,10 @@ check room_current anAbandonedMatchIsEnded
 # the grace window never empties a playing room whose last player is still
 # in it (violated on room_before_grace_wait).
 check room_current aMatchIsNotLostToTheGraceWindow
+# Nobody loads for the start of a match someone is already running: a late
+# joiner the host dropped after its serve timed out starts its late join again
+# (violated on room_before_serve_timeout_fix).
+check room_current nobodyLoadsIntoARunningMatch
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
@@ -168,7 +173,7 @@ $QUINT run "$ROM_START" --main=rom_at_start_current --invariant=allHold \
 ROM_IDENTITY=specs/rom_identity.qnt
 $QUINT typecheck "$ROM_IDENTITY"
 for variant in rom_identity_before rom_identity_judge_only rom_identity_no_retract rom_identity_first_push \
-  rom_identity_current; do
+  rom_identity_host_silent rom_identity_no_library rom_identity_no_cache_lookup rom_identity_current; do
   $QUINT test "$ROM_IDENTITY" --main="$variant" --backend="$BACKEND"
 done
 # Today: a page never announces a hash that is not its ROM's, never clears
@@ -183,7 +188,17 @@ done
 # pushed, which booted a ROM still being hashed, let the host start on its
 # previous hash, left a failed hash pending for good and a rejoin with the
 # previous ROM's word (rom_identity_first_push; bootWhileHashingTest,
-# hostStartsWhileHashingTest, hashFailsTest, rejoinWhileHashingTest).
+# hostStartsWhileHashingTest, hashFailsTest, rejoinWhileHashingTest,
+# hostChangesThenStartsTest). And while the host's own drop said nothing, the
+# room named the host's previous ROM until its new one was hashed: a guest's
+# ROM that is the new one was refused against it, and the server counted a
+# guest ready on the previous one (rom_identity_host_silent;
+# hostChangesToTheGuestsRomTest, hostChangesAwayFromTheGuestsRomTest). And a
+# page holding no ROM when the room named the host's did not look for it in
+# its library, so a guest who dropped it first had to drop it again
+# (rom_identity_no_library; guestDroppedFirstTest), nor again when the
+# dropped file's copy landed there a moment after the room named it
+# (rom_identity_no_cache_lookup; cacheLandsLateTest).
 $QUINT run "$ROM_IDENTITY" --main=rom_identity_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
@@ -251,6 +266,19 @@ done
 # while replays leave the history as first written; when a late joiner
 # reports frames it never simulated; and with the detector on under Mode 2.
 $QUINT run "$DIGEST" --main=desync_digest_current --invariant=neverReportsAnUnconfirmedHash \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# ── RB-CHECK: the rollback engine's cross-peer gameplay-hash check ──────────
+RBCHECK=specs/rb_check.qnt
+$QUINT typecheck "$RBCHECK"
+for variant in rb_check_before rb_check_current; do
+  $QUINT test "$RBCHECK" --main="$variant" --backend="$BACKEND"
+done
+# Today: a MISMATCH means the peers' final states differ, and a frame whose
+# final states differ is never logged MATCH or dropped uncompared. Violated
+# when each page sent the frame it had just simulated and the receiver
+# compared it with its ring a few frames later, dropping it past the window.
+$QUINT run "$RBCHECK" --main=rb_check_current --invariant=rbCheckIsSound \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 # ── Desync screenshots: which frame each peer captures ──────────────────────
@@ -478,6 +506,29 @@ done
 $QUINT run "$MESH" --main=resync_mesh_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# A guest dropped as a phantom comes back: the host and every other guest end
+# up having run its frames on the same inputs.
+BYSTANDER=specs/recovery_bystander.qnt
+$QUINT typecheck "$BYSTANDER"
+for variant in recovery_bystander_before recovery_bystander_broadcast_only \
+  recovery_bystander_broadcast_lossless recovery_bystander_fixed; do
+  $QUINT test "$BYSTANDER" --main="$variant" --backend="$BACKEND"
+done
+# Fixed: the host's PEER-RECOVERED resync goes to every guest, and a guest
+# that hears again from any player it held as a phantom asks for one. VIOLATED
+# before the fix, when the host's resync went to the returning guest alone and settled
+# its late inputs, while a bystander applied them
+# (recovery_bystander_before; onlyTheHostDroppedItTest,
+# bystanderAppliesWhatTheHostSettledTest; tests/rb-mesh.mjs
+# RECOVERY_BYSTANDER=1 drives the first on the real ROM). With
+# inputs lost, VIOLATED too while only the host was heard from again
+# (recovery_bystander_broadcast_only; bystanderStillPhantomTest). 150 steps:
+# most runs play the model to its end (LAST frames, nothing on the way).
+$QUINT run "$BYSTANDER" --main=recovery_bystander_fixed --invariant=allHold \
+  --max-samples=3000 --max-steps=150 --backend="$BACKEND"
+$QUINT run "$BYSTANDER" --main=recovery_bystander_broadcast_lossless --invariant=allHold \
+  --max-samples=2000 --max-steps=150 --backend="$BACKEND"
+
 # ── Inputs on the unreliable channel, and the switch to the reliable one ────
 INPUTS=specs/input_transport.qnt
 $QUINT typecheck "$INPUTS"
@@ -523,7 +574,7 @@ $QUINT run "$REASK" --main=resync_reask_fixed --invariant=allHold \
 # ── The follow-up to an answer sent unconfirmed ────────────────────────────
 FOLLOW=specs/sync_follow_up.qnt
 $QUINT typecheck "$FOLLOW"
-for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_fixed; do
+for variant in sync_follow_up_current sync_follow_up_from_send sync_follow_up_direct_unwatched sync_follow_up_socket_unwatched sync_follow_up_socket_over_channel sync_follow_up_socket_undelivered sync_follow_up_delay_unaware sync_follow_up_owed_unflagged sync_follow_up_fixed; do
   $QUINT test "$FOLLOW" --main="$variant" --backend="$BACKEND"
 done
 # With the fix: a follow-up goes out only for a state an input changed after
@@ -532,6 +583,20 @@ done
 # (sync_follow_up_current; unchangedFollowUpTest); recording the change from
 # the send only misses one made while the state is compressed
 # (sync_follow_up_from_send; mispredictWhileCompressingTest).
+# A direct request's answer (BOOT-SYNC, reconnect) was never followed up
+# (sync_follow_up_direct_unwatched; directUnconfirmedAnswerTest).
+# Nor was one asked over the signaling socket (sync_follow_up_socket_unwatched;
+# socketUnconfirmedAnswerTest); watched there but never recorded delivered, an
+# unchanged follow-up goes out anyway (sync_follow_up_socket_undelivered).
+# Its follow-up sent on the channel only waits for good while the channel is
+# down (sync_follow_up_socket_over_channel; aWatchedAnswerCanBeFollowedUp).
+# Counting every input at or before the frame, not only those that ran
+# before it (labelled at most F - 1 - delay), sends a follow-up with the same
+# state (sync_follow_up_delay_unaware; differsAtFMinusDelayTest).
+# A state taken while a correction is owed is not the host's, and nothing fed
+# after the take flags it: unflagged, its follow-up is skipped and the guest
+# keeps a state the host rolled back (sync_follow_up_owed_unflagged, and
+# today's sync_follow_up_delay_unaware; owedAtTakeTest).
 $QUINT run "$FOLLOW" --main=sync_follow_up_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
@@ -603,7 +668,8 @@ $QUINT run "$ESCP" --main=hole_counts_fixed --invariant=pushesAreBoundedForEvery
 # ── After a reconnect, frames run before the peer's inputs ────────────────
 REC=specs/reconnect_inputs.qnt
 $QUINT typecheck "$REC"
-for variant in reconnect_inputs_current reconnect_inputs_fixed; do
+for variant in reconnect_inputs_current reconnect_inputs_fixed reconnect_inputs_keeps_history \
+  reconnect_history_before reconnect_history_as_real reconnect_history_current reconnect_history_fixed; do
   $QUINT test "$REC" --main="$variant" --backend="$BACKEND"
 done
 # Today the reset leaves the C slot inactive and the page runs frames on the
@@ -611,8 +677,42 @@ done
 # runBeforeFirstInputTest).
 $QUINT run "$REC" --main=reconnect_inputs_fixed --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# The same with the reset that puts the ring's inputs back (de361fd, the
+# scheduled rule): the slot may be active at once; the first-input wait is JS's.
+$QUINT run "$REC" --main=reconnect_inputs_keeps_history --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# The frames run before the reset: an emptied slot loses the predictions C
+# would check and a replay runs those frames neutral (reconnect_history_before);
+# the ring's inputs put back as real ones make a prediction real, so the
+# peer's real input is stored over it unchecked (reconnect_history_as_real;
+# predictionPutBackAsRealTest). Today a reconnect keeps the C slot and every
+# one is checked (reconnect_history_current, everyInputItDidNotMakeIsChecked).
+$QUINT run "$REC" --main=reconnect_history_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+$QUINT run "$REC" --main=reconnect_history_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# Repeated native-slot resets and the bounded first-input wait, even absent.
+KEEP=specs/kept_slot_recovery.qnt
+$QUINT typecheck "$KEEP"
+$QUINT test "$KEEP" --main=kept_slot_recovery_before --backend="$BACKEND"
+$QUINT test "$KEEP" --main=kept_slot_recovery_fixed --backend="$BACKEND"
+$QUINT run "$KEEP" --main=kept_slot_recovery_fixed --invariant=allHold \
+  --max-samples=10000 --max-steps=20 --backend="$BACKEND"
+
+# Protected reconnect answers must not degrade to legacy or accept stale proof.
+PROOF=specs/reconnect_proof.qnt
+$QUINT typecheck "$PROOF"
+$QUINT test "$PROOF" --main=reconnect_proof --backend="$BACKEND"
 
 # ── A player dropped in a running match comes back only late ──────────────
+INTEGRITY=specs/reconnect_integrity.qnt
+$QUINT typecheck "$INTEGRITY"
+$QUINT test "$INTEGRITY" --main=reconnect_integrity --backend="$BACKEND"
+$QUINT run "$INTEGRITY" --main=reconnect_integrity \
+  --invariants unsafeMatchNeverCaptures oldUnverifiedMatchIsNotHealthy \
+  --max-samples=5000 --max-steps=12 --backend="$BACKEND"
+
 DROP=specs/drop_is_final.qnt
 $QUINT typecheck "$DROP"
 for variant in drop_is_final_before drop_is_final_skip_everywhere drop_is_final_fixed; do
@@ -667,10 +767,55 @@ done
 $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+# ── The ring while a page plays alone ──────────────────────────────────────
+SOLO=specs/solo_save.qnt
+$QUINT typecheck "$SOLO"
+for variant in solo_save_before solo_save_roster solo_save_keep_baseline solo_save_current; do
+  $QUINT test "$SOLO" --main="$variant" --backend="$BACKEND"
+done
+# kn_pre_tick skips the save while no other slot is active: no rollback
+# loses a frame today's ring has, and the first save after a skipped stretch
+# is whole. The first is VIOLATED when JS switches the saves off from the
+# room's roster: a player's first input can come before the roster that
+# lists them (solo_save_roster; inputBeforeRosterTest). The second is
+# VIOLATED when a skipped save keeps the sparse baseline
+# (solo_save_keep_baseline; firstSaveAfterAStretchTest).
+$QUINT run "$SOLO" --main=solo_save_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# ── How a page's C engine starts ───────────────────────────────────────────
+START=specs/engine_start.qnt
+$QUINT typecheck "$START"
+for variant in engine_start_before engine_start_stop_only engine_start_jump_on_return engine_start_no_zero_bridge engine_start_no_rearm engine_start_current; do
+  $QUINT test "$START" --main="$variant" --backend="$BACKEND"
+done
+# Today: every frame of a match runs on the C engine, a guest arms with the
+# host's delay on the frame the host gave it, and stops only when it cannot
+# reach the armed host. The first was VIOLATED while a delay of 0 ran on the
+# old JS lockstep path: every solo match, and a friend who joined it
+# (engine_start_before; soloTest, lateJoinIntoSoloTest). The second was
+# VIOLATED while a guest that heard nothing by the deadline armed with its
+# own delay (engine_start_before; lostDelayTest). Stopping at the deadline
+# without the host sending the delay and start frame again on every open
+# stops a guest the host could reach (engine_start_stop_only; lostDelayTest).
+# So does arming at 0 with the late join's input bridge defined only for a
+# delay of 1 or more: a friend joining a solo match fails its input wait as
+# it arrives (engine_start_no_zero_bridge; lateJoinIntoSoloTest), and the
+# lifecycle return moving a waiting page's frame when its tab comes back: it
+# then stops on the host's start (engine_start_jump_on_return;
+# tabReturnWhileWaitingTest). That jump was the only way the host's start
+# frame differed from the guest's own (theHostsStartIsWhereTheGuestIs,
+# VIOLATED before), which is why RB-INIT-CATCHUP and the overshoot went.
+# A match a friend joined runs at a match delay, and no rollback reaches
+# back before the frame the host armed at again (aJoinedMatchRunsAboveZero,
+# VIOLATED without the re-arm: engine_start_no_rearm; noRollbackBeforeTheRearm).
+$QUINT run "$START" --main=engine_start_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # Recovery broadcast obligations and untrusted acknowledgement ordering.
 DELIVERY=specs/recovery_delivery.qnt
 $QUINT typecheck "$DELIVERY"
-for variant in recovery_source_budget_before recovery_source_budget_fixed recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed recovery_actor_enabled recovery_actor_disabled recovery_followup_before recovery_followup_fixed recovery_partial_before recovery_partial_fixed; do
+for variant in recovery_source_budget_before recovery_source_budget_fixed recovery_delivery_before recovery_delivery_fixed recovery_capacity_before recovery_capacity_fixed recovery_reservation_together recovery_reservation_unowned recovery_reservation_fixed recovery_actor_enabled recovery_actor_disabled recovery_followup_before recovery_followup_fixed recovery_skipped_current recovery_skipped_fixed recovery_partial_before recovery_partial_fixed; do
   $QUINT test "$DELIVERY" --main="$variant" --backend="$BACKEND"
 done
 $QUINT run "$DELIVERY" --main=recovery_delivery_fixed --invariant=allHold \
@@ -688,6 +833,9 @@ for variant in recovery_actor_enabled recovery_actor_disabled; do
 done
 
 $QUINT run "$DELIVERY" --main=recovery_followup_fixed --invariant=allHold --max-samples=10000 --max-steps=15 --backend="$BACKEND"
+# VIOLATED on recovery_skipped_current: a recipient skipped by a follow-up
+# broadcast settles on its earlier state (skippedThenAckedTest).
+$QUINT run "$DELIVERY" --main=recovery_skipped_fixed --invariant=allHold --max-samples=10000 --max-steps=12 --backend="$BACKEND"
 
 # Only the current host channel may mutate incoming state assembly.
 $QUINT typecheck specs/sync_channel_owner.qnt
@@ -707,6 +855,18 @@ $QUINT typecheck specs/input_placeholder.qnt
 $QUINT test specs/input_placeholder.qnt --main=input_placeholder_before --backend="$BACKEND"
 $QUINT test specs/input_placeholder.qnt --main=input_placeholder_fixed --backend="$BACKEND"
 $QUINT run specs/input_placeholder.qnt --main=input_placeholder_fixed --invariant=allHold --max-samples=10000 --max-steps=10 --backend="$BACKEND"
+
+# A replay applies a confirmed input's real value: the prediction flag is read
+# together with the tag it was set for. VIOLATED while the replay branch read
+# the bare flag, which a prediction 256 tags older could leave set
+# (stale_prediction_flag_before; staleFlagTest).
+STALE=specs/stale_prediction_flag.qnt
+$QUINT typecheck "$STALE"
+for variant in stale_prediction_flag_before stale_prediction_flag_fixed; do
+  $QUINT test "$STALE" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$STALE" --main=stale_prediction_flag_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=20 --backend="$BACKEND"
 ACK=specs/recovery_ack.qnt
 $QUINT typecheck "$ACK"
 for variant in recovery_ack_before recovery_ack_fixed; do
@@ -764,11 +924,120 @@ $QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap
 $QUINT test specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --backend="$BACKEND"
 $QUINT run specs/late_join_input_bootstrap.qnt --main=late_join_input_bootstrap_fixed --invariant=neverAdvanceOnMissing --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
+# Around a join every page applies the host's inputs for every slot: before,
+# each page's bootstrap window started at the frame it heard of the join and
+# its placeholders ran as real inputs (late_join_input_agreement_before;
+# joinerMissesTheTagsBelowFirstLiveTest, pagesHearAtDifferentFramesTest,
+# rosterAfterTheStateTest, aPageThatHearsLateTakesTheHostsStateTest).
+AGREEMENT=specs/late_join_input_agreement.qnt
+$QUINT typecheck "$AGREEMENT"
+$QUINT test "$AGREEMENT" --main=late_join_input_agreement_before --backend="$BACKEND"
+$QUINT test "$AGREEMENT" --main=late_join_input_agreement_fixed --backend="$BACKEND"
+$QUINT run "$AGREEMENT" --main=late_join_input_agreement_fixed --invariant=allHold --max-samples=10000 --max-steps=2 --backend="$BACKEND"
+
 BOOT_CONTINUATION=specs/late_join_boot_continuation.qnt
 $QUINT typecheck "$BOOT_CONTINUATION"
 $QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_before --backend="$BACKEND"
 $QUINT test "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --backend="$BACKEND"
 $QUINT run "$BOOT_CONTINUATION" --main=late_join_boot_continuation_fixed --invariant=noGenericBootAfterValidatedHandoff --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
+# ── Which controllers the game sees as plugged in, frame by frame ─────────
+MASK=specs/controller_mask.qnt
+$QUINT typecheck "$MASK"
+for variant in controller_mask_before controller_mask_unversioned controller_mask_fixed; do
+  $QUINT test "$MASK" --main="$variant" --backend="$BACKEND"
+done
+# Before, each page set the mask when it heard the roster: pages ran the
+# frames between their arrival points with different masks
+# (controller_mask_before; arrivalOrderTest), and a rollback across the change
+# ran earlier frames again with the new one (rollbackAcrossTheChangeTest).
+# Today the change takes effect at the roster frame + LEAD on every page, and
+# a guest that hears it late asks for the host's state (lateArrivalTest).
+# Scheduling whatever the other pages did put a match that spans a deploy on
+# two rules (controller_mask_unversioned; oldGuestTest, oldHostTest,
+# oldJoinerTest); today the host's rule is the match's, scheduled only while
+# every player page can.
+$QUINT run "$MASK" --main=controller_mask_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# ── What a removed player's slot is fed with, frame by frame ──────────────
+REMOVED=specs/removed_input.qnt
+$QUINT typecheck "$REMOVED"
+for variant in removed_input_before removed_input_fixed removed_input_mid_replay \
+  removed_input_delay_one_unheld removed_input_delay_one_fixed; do
+  $QUINT test "$REMOVED" --main="$variant" --backend="$BACKEND"
+done
+# Before, each page cut the removed player's input when it learned of the
+# removal: a guest ahead of the host ran frames past the host's cut with the
+# real inputs (removed_input_before; guestAheadTest), one behind went neutral
+# early (guestBehindTest), and a replay after a page's cut ran earlier frames
+# again neutral (replayAfterTheCutTest). Today the cut is at the host's
+# roster frame on every page, below it the host's inputs, and a guest that
+# ran frames otherwise runs them again (removedInputAgrees).
+$QUINT run "$REMOVED" --main=removed_input_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# A replay is run a few frames a tick, so the host can cut (and a guest hear
+# the cut) in the middle of one: the cut is at the replay's frame or the last
+# roster's, the word is what the ring holds, and the replay runs the rest
+# with the cut (hostCutsMidReplayTest, cutAboveTheReplayTest).
+$QUINT run "$REMOVED" --main=removed_input_mid_replay --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+# Delay 1 with the admission at the cut's roster frame: the admission's first
+# tag is C + 1, which the cut fed neutral as a real input, so the rejoined
+# player's input there is stored with no check (removed_input_delay_one_unheld;
+# delayOneCollisionTest). The joiner holds its own input neutral below its
+# roster frame + MASK_LEAD (#330), so what ran is what it sent (joinerInputRuns).
+$QUINT run "$REMOVED" --main=removed_input_delay_one_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# ── The server's store for a player's session log ──────────────────────────
+STORE=specs/session_log_store.qnt
+$QUINT typecheck "$STORE"
+for variant in session_log_store_before session_log_store_per_flush session_log_store_unrecorded \
+  session_log_store_unbounded session_log_store_current; do
+  $QUINT test "$STORE" --main="$variant" --backend="$BACKEND"
+done
+# Each run of JS lines or of C lines is its own row, in order, and each kind
+# has its own store: the rows come back in the order the page logged them,
+# and neither kind's volume evicts the other's lines. The second and third
+# are VIOLATED with one store (session_log_store_before;
+# jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest), the first with a JS
+# row and a C row per flush (session_log_store_per_flush;
+# cLinesInTheMiddleOfAFlushTest). A reader can tell what a cap deleted
+# (truncationIsVisible): VIOLATED with no record of it
+# (session_log_store_unrecorded; evictionIsRecordedTest). No flush adds more
+# than its bound of rows (rowsPerFlushBounded): VIOLATED with one row per run
+# and no bound (session_log_store_unbounded; alternatingLinesTest).
+$QUINT run "$STORE" --main=session_log_store_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
+# ── Archiving a match's log off D1, and evicting it ────────────────────────
+ARCHIVE=specs/log_archive.qnt
+$QUINT typecheck "$ARCHIVE"
+for variant in log_archive_record_first log_archive_evict_all log_archive_archive_only \
+  log_archive_ignore_tombstone log_archive_read_all_tail log_archive_delete_by_id_only \
+  log_archive_key_by_through log_archive_any_store log_archive_current; do
+  $QUINT test "$ARCHIVE" --main="$variant" --backend="$BACKEND"
+done
+# A match's log is always readable, from exactly one place: D1 until it is
+# evicted, then the archive the record's token names and the D1 chunks it
+# does not hold. VIOLATED by an eviction of every chunk and by a reader of
+# the archive alone (log_archive_evict_all, log_archive_archive_only;
+# lateChunkTest), by a reader of every chunk left in D1 after an eviction
+# that stopped part-way (log_archive_read_all_tail; partialEvictionTest), and
+# by a DELETE by id alone run again after a chunk reused an archived id
+# (log_archive_delete_by_id_only; deleteAgainAfterReuseTest), and by an
+# archive and eviction into a store a deploy wipes (log_archive_any_store;
+# localStoreTest). The archive is
+# recorded only once complete and nothing takes it back after
+# (archivedOnlyWhenComplete): VIOLATED by recording it before the uploads are
+# confirmed (log_archive_record_first; failedUploadTest) and by two archivers
+# sharing keys (log_archive_key_by_through; twoArchiversAtOnceTest).
+# Retention leaves nothing behind (retentionLeavesNothing): VIOLATED by an
+# archive that keeps its objects after finding the match tombstoned
+# (log_archive_ignore_tombstone; deleteDuringArchiveTest).
+$QUINT run "$ARCHIVE" --main=log_archive_current --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
 # An out-of-date matrix must not produce a green job that checked nothing.
 if [ "$selected" -eq 0 ]; then

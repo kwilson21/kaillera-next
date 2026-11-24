@@ -1,5 +1,185 @@
 [
   {
+    "version": "0.72.4",
+    "date": "2026-11-24",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "rollback engine and desync-check defects found in the 3K6RTALA / FQ9JOZNT investigation (#314)"
+      }
+    ]
+  },
+  {
+    "version": "0.72.3",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a late joiner the host drops while it waits for the state joins late again (#327)"
+      }
+    ]
+  },
+  {
+    "version": "0.72.2",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync carries the hidden words and HLE state, not just kn_sync_read (#331)"
+      }
+    ]
+  },
+  {
+    "version": "0.72.1",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a resync follow-up counts only inputs that ran before the state it watched (#329)"
+      }
+    ]
+  },
+  {
+    "version": "0.72.0",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "weekly orphan sweep of blob-store match prefixes (#328)"
+      }
+    ]
+  },
+  {
+    "version": "0.71.0",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "archive an ended match's session log to the blob store, then evict it from the database (#324)"
+      }
+    ]
+  },
+  {
+    "version": "0.70.0",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "feat",
+        "message": "a server store of their own for C log lines, and a record of what a size cap deletes (#321)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.26",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "flag a match when the desync detector raises a confirmed suspect (#313)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.25",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "a guest with no ROM takes the host's new one from its ROM library (#316)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.24",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "resync every guest when a phantom is heard again (#318)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.23",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "drop no C log line between two drains (#317)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.22",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "watch and follow up a resync answer asked over the signaling socket (#315)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.21",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "drain the C engine's log before a re-init starts it over (#312)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.20",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "guests judge nothing against the host's ROM while the host's new one is hashed (#303)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.19",
+    "date": "2026-11-23",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "keep /health answering while a long session log is exported or rotated (#308)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.18",
+    "date": "2026-11-22",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "every page arms the C engine before it runs a frame (engine_start.qnt) (#304)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.17",
+    "date": "2026-11-22",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "push a fresh state to a guest a follow-up recovery skipped (#306)"
+      }
+    ]
+  },
+  {
+    "version": "0.69.16",
+    "date": "2026-11-22",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "watch and follow up a direct resync answer taken unconfirmed (#305)"
+      }
+    ]
+  },
+  {
     "version": "0.69.15",
     "date": "2026-11-21",
     "changes": [

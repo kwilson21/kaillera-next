@@ -6,7 +6,11 @@ const STUN = [{ urls: 'stun:stun.example.test' }];
 const RELAY = [{ urls: 'turn:relay.example.test', username: 'fixture', credential: 'fixture' }];
 const NEXT = [{ urls: 'turns:next.example.test', username: 'fixture', credential: 'fixture' }];
 const ignore = () => {};
-const reply = (servers: RTCIceServer[], relayTtlSeconds = 0) => ({ servers, relayTtlSeconds });
+const reply = (servers: RTCIceServer[], relayTtlSeconds = 0, retryAfterSeconds = 0) => ({
+  servers,
+  relayTtlSeconds,
+  retryAfterSeconds,
+});
 const deferredIce = () => {
   let resolve: (result: ReturnType<typeof reply>) => void = ignore;
   const promise = new Promise<ReturnType<typeof reply>>((done) => {
@@ -230,4 +234,40 @@ test('a retried offer waits only for the bounded readiness window', async () => 
   assert.deepEqual(await cache.ready('room', retry), []);
   assert.equal(requests, 1);
   pending.resolve(RELAY);
+});
+
+test('managed STUN fallback retries when cooldown passes, not before or in another room', async () => {
+  let now = 1_700_000_000_000;
+  const cache = createRoomIceCache(() => now);
+  const response = deferredIce();
+  let calls = 0;
+  const retry = { load: () => (++calls, response.promise), publish: ignore };
+
+  const firstOffer = cache.ready('room', retry);
+  await cache.refresh('room', Promise.resolve(reply(STUN, 0, 59)), ignore);
+  assert.deepEqual(await firstOffer, []);
+  now += 58_999;
+  assert.deepEqual(await cache.ready('room', retry), []);
+  assert.equal(calls, 0);
+  now++;
+  assert.deepEqual(await cache.ready('another', retry), []);
+  const laterOffer = cache.ready('room', retry);
+  assert.equal(cache.ready('room', retry), laterOffer);
+  response.resolve(RELAY);
+  assert.deepEqual(await laterOffer, RELAY);
+  assert.equal(calls, 1);
+});
+
+test('out-of-range provider retry hints cannot make STUN configuration retryable', async () => {
+  const cache = createRoomIceCache();
+  const retry = {
+    load: () => {
+      assert.fail('no retry expected');
+    },
+    publish: ignore,
+  };
+  for (const hint of [-1, 0, 0.5, 61, Infinity]) {
+    await cache.refresh('room', Promise.resolve(reply(STUN, 0, hint)), ignore);
+    assert.deepEqual(await cache.ready('room', retry), []);
+  }
 });

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import time
 
@@ -141,6 +142,14 @@ async def ice_servers(client: httpx.AsyncClient | None = None) -> list[dict]:
         ttl = CACHE_SECONDS if servers else FAILURE_BACKOFF_SECONDS
         _cache = (key, now + ttl, servers)
         return servers
+
+
+def failure_retry_after_seconds() -> int:
+    """Remaining provider backoff, immediately after a failed managed lookup."""
+    cache = _cache
+    if cache and not cache[2] and configured() and cache[0] == _config_key():
+        return max(1, math.ceil(cache[1] - time.monotonic()))
+    return 1
 
 
 def reset_cache() -> None:

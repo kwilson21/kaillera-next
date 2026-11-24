@@ -199,6 +199,7 @@ def test_endpoint_falls_back_to_hmac_turn_when_cloudflare_fails(monkeypatch):
     servers = response.json()
     assert servers[-1]["urls"] == "turn:turn.example:3478" and servers[-1]["credential"]
     assert response.headers["x-kn-relay-ttl"] == str(turn.TTL_SECONDS - 1)
+    assert "x-kn-relay-retry-after" not in response.headers
 
 
 def test_managed_relay_lifetime_only_in_authenticated_response(monkeypatch):
@@ -239,6 +240,72 @@ def test_managed_relay_lifetime_only_in_authenticated_response(monkeypatch):
     legacy = client.get("/ice-servers", params=room_request)
     assert legacy.json() == [relay]
     assert legacy.headers["x-kn-relay-ttl"] == "86400"
+
+
+def test_managed_outage_hint_is_authorized_and_expires_with_the_provider_backoff(
+    monkeypatch,
+):
+    from fastapi.testclient import TestClient
+    from src.api import app as appmod
+    from src.api.signaling import make_upload_token, rooms
+
+    now = 100.0
+    replies = [
+        httpx.Response(503, json={"error": "temporary"}),
+        httpx.Response(200, json=CF_RESPONSE),
+    ]
+    fetch = turn.ice_servers
+
+    async def managed_turn():
+        async with _client(lambda _: replies.pop(0)) as client:
+            return await fetch(client)
+
+    monkeypatch.setattr(turn, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(turn, "ice_servers", managed_turn)
+    monkeypatch.setattr(appmod, "check_ip", lambda ip, action: True)
+    monkeypatch.setitem(rooms, "TURNTMP", object())
+    monkeypatch.setitem(rooms, "TURNALT", object())
+    for var in ("ICE_SERVERS", "TURN_SECRET", "TURN_SERVERS"):
+        monkeypatch.delenv(var, raising=False)
+
+    room = "TURNTMP"
+    token = make_upload_token(room)
+    client = TestClient(appmod.create_app())
+    for params in (
+        {},
+        {"room": room, "token": "invalid"},
+        {"room": "TURNALT", "token": token},
+    ):
+        response = client.get("/ice-servers", params=params)
+        assert response.status_code == 200
+        assert "x-kn-relay-retry-after" not in response.headers
+        assert all(server["urls"].startswith("stun:") for server in response.json())
+    assert len(replies) == 2
+
+    params = {"room": room, "token": token}
+    unavailable = client.get("/ice-servers", params=params)
+    assert unavailable.status_code == 200
+    assert unavailable.headers["x-kn-relay-retry-after"] == str(
+        turn.FAILURE_BACKOFF_SECONDS
+    )
+    assert "x-kn-relay-ttl" not in unavailable.headers
+    assert "no-store" in unavailable.headers["cache-control"]
+    assert all(server["urls"].startswith("stun:") for server in unavailable.json())
+
+    now += turn.FAILURE_BACKOFF_SECONDS - 0.5
+    almost_ready = client.get("/ice-servers", params=params)
+    assert almost_ready.headers["x-kn-relay-retry-after"] == "1"
+    assert len(replies) == 1
+
+    now += 0.5
+    recovered = client.get("/ice-servers", params=params)
+    assert recovered.json()[-1]["username"] == "u" and not replies
+    assert "x-kn-relay-retry-after" not in recovered.headers
+
+    monkeypatch.delenv("CF_TURN_API_TOKEN")
+    unconfigured = client.get("/ice-servers", params=params)
+    assert unconfigured.json() == unavailable.json()
+    assert "x-kn-relay-retry-after" not in unconfigured.headers
 
 
 @pytest.mark.parametrize(

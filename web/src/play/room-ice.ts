@@ -3,6 +3,7 @@ const MAX_RELAY_TTL_SECONDS = 24 * 60 * 60;
 const EXPIRY_MARGIN_MS = 10_000;
 const READINESS_TIMEOUT_MS = 8000;
 const RETRY_BACKOFF_MS = 15_000;
+const MAX_PROVIDER_RETRY_SECONDS = 60;
 
 const hasTurnUrl = (server: RTCIceServer): boolean => {
   const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls];
@@ -24,6 +25,7 @@ interface RoomIceWait {
 interface RoomIceResponse {
   servers: RTCIceServer[];
   relayTtlSeconds: number;
+  retryAfterSeconds?: number;
 }
 
 interface RoomIceRetry {
@@ -153,7 +155,13 @@ export const createRoomIceCache = (now: () => number = Date.now, waitMs = READIN
         }
         // A valid older request may rescue a failed newer one, but cannot
         // replace a newer valid relay or publish the older request's STUN list.
-        if (requestId === scope.requestId) scope.retryable = result === null;
+        if (requestId === scope.requestId) {
+          const delay = result?.retryAfterSeconds;
+          const providerUnavailable =
+            delay !== undefined && Number.isInteger(delay) && delay > 0 && delay <= MAX_PROVIDER_RETRY_SECONDS;
+          scope.retryable = result === null || providerUnavailable;
+          if (providerUnavailable) scope.retryAfter = Math.max(scope.retryAfter, now() + delay * 1000);
+        }
         if (accepted || requestId === scope.requestId) {
           const latest = selected?.servers ?? servers;
           if (latest.length > 0) publish(latest);

@@ -114,6 +114,25 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   // 0, every input packet (binary, on `lockstep` or `rollback-input`) is held
   // that long. A channel never reorders, so what follows waits behind it.
   window.__knHoldInputsMs = 0;
+  // SYNC_FOLLOW_UP=direct (the guest page): while performance.now() is before
+  // window.__knHoldInputsUntil, every input packet (binary, on `lockstep` or
+  // `rollback-input`) is held until then, so all of them go out together at
+  // that moment; what the page sends after them on the same channel (its
+  // resync request) follows them in the same burst.
+  window.__knHoldInputsUntil = 0;
+  // SYNC_FOLLOW_UP=socket (the guest page): while window.__knInputGate is
+  // set, every input packet (binary, on `lockstep` or `rollback-input`) is
+  // kept back, and window.__knReleaseInputs() sends them all, in order, when
+  // the test says (after the host has answered a request sent meanwhile over
+  // the signaling socket, which nothing orders against the data channels).
+  window.__knInputGate = false;
+  const gatedInputs = [];
+  window.__knReleaseInputs = () => {
+    window.__knInputGate = false;
+    const n = gatedInputs.length;
+    for (const send of gatedInputs.splice(0)) send();
+    return n;
+  };
   // CATCH_UP_HOLE_MS (the host page): once window.__knDropInputsAfterOpenMs
   // is above 0, a channel whose first input packet goes out after that drops
   // every input packet (binary, on `lockstep` or `rollback-input`) from its
@@ -134,8 +153,10 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   // and asks for them, and the asks are never answered.
   window.__knDropInputFrom = -1;
   window.__knDropInputTo = -1;
-  // ASK_UNANSWERED_ACKS: until __knDropSettledUntil, the page's
-  // `inputs-settled:` (its acknowledgement of a pushed state) is dropped too.
+  // ASK_UNANSWERED_ACK_LOST: until __knDropSettledUntil, the page's
+  // acknowledgements of a pushed state are dropped too: `recovery-settled:`
+  // (the one that settles a recovery) and `inputs-settled:` (which tells the
+  // host not to wait for the frames the state skipped).
   window.__knDropSettledUntil = 0;
   window.__knSettledDropped = 0;
   // ASK_UNANSWERED_ACKS (the host page): until __knDropSyncStateUntil, and only
@@ -197,6 +218,51 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
   window.__knSocketAnswersHeld = [];
   const heldSocketPackets = [];
   let realOnevent = null;
+  // SYNC_FOLLOW_UP=socket (the host page): while window.__knHoldSocketRequests
+  // is above 0, the next socket resync request that arrives
+  // (`data-message` of type `sync-request-full-socket`) is held, and
+  // delivered right after the next input packet (binary, on `lockstep` or
+  // `rollback-input`) has been handled, in the same task: the host takes in
+  // the inputs held with it (a rollback owed for its next tick) and answers
+  // before that tick. Kept in __knSocketRequestsHeld.
+  window.__knHoldSocketRequests = 0;
+  window.__knSocketRequestsHeld = [];
+  const heldSocketRequests = [];
+  const replayDepthNow = () => window.EJS_emulator?.gameManager?.Module?._kn_get_replay_depth?.() ?? 0;
+  const releaseHeldSocketRequests = () => {
+    while (heldSocketRequests.length) {
+      const { socket, packet, record } = heldSocketRequests.shift();
+      record.releasedAt = performance.now();
+      record.replayDepth = replayDepthNow();
+      realOnevent.call(socket, packet);
+    }
+  };
+  // SYNC_FOLLOW_UP=owed (the host page): with window.__knReleaseOnReplay set,
+  // a held request is not delivered after the next input packet but between
+  // two ticks while the replay those inputs caused is still in flight (the
+  // engine replays a few frames per tick): the host takes its answer's state
+  // with a correction owed (specs/sync_follow_up.qnt, owedAtTakeTest). At
+  // SOCKET_REPLAY_WAIT_MS with no replay seen it is delivered anyway, and its
+  // record says so (replayDepth 0).
+  window.__knReleaseOnReplay = false;
+  const SOCKET_REPLAY_WAIT_MS = 4000;
+  let replayPoll = 0;
+  const releaseOnReplay = () => {
+    if (replayPoll) return;
+    const started = performance.now();
+    replayPoll = setInterval(() => {
+      if (!heldSocketRequests.length) {
+        clearInterval(replayPoll);
+        replayPoll = 0;
+        return;
+      }
+      if (replayDepthNow() > 0 || performance.now() - started > SOCKET_REPLAY_WAIT_MS) {
+        clearInterval(replayPoll);
+        replayPoll = 0;
+        releaseHeldSocketRequests();
+      }
+    }, 1);
+  };
   // And the page's next two decode results (the sync worker's replies) once
   // the held answer is let go are held and delivered back to back in one
   // task: the newest answer's first, then the late one's. A held "now"
@@ -273,9 +339,18 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       }
       const ch = this;
       realOnmessage.set.call(this, function (e) {
-        const result = receiveGate.receive(ch, e.data, (data) =>
-          fn.call(this, data === e.data ? e : new MessageEvent('message', { data })),
-        );
+        const result = receiveGate.receive(ch, e.data, (data) => {
+          const handled = fn.call(this, data === e.data ? e : new MessageEvent('message', { data }));
+          if (
+            heldSocketRequests.length &&
+            (ch.label === 'lockstep' || ch.label === 'rollback-input') &&
+            typeof data !== 'string'
+          ) {
+            if (window.__knReleaseOnReplay) releaseOnReplay();
+            else releaseHeldSocketRequests();
+          }
+          return handled;
+        });
         if (ch.label === 'sync-state') afterSyncStateMessage(e.data);
         return result;
       });
@@ -298,6 +373,17 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
             const record = { requestId: args[1].requestId ?? null, heldAt: performance.now(), releasedAt: null };
             window.__knSocketAnswersHeld.push(record);
             heldSocketPackets.push({ socket: this, packet, record });
+            return;
+          }
+          if (
+            window.__knHoldSocketRequests > 0 &&
+            args?.[0] === 'data-message' &&
+            args[1]?.type === 'sync-request-full-socket'
+          ) {
+            window.__knHoldSocketRequests--;
+            const record = { requestId: args[1].requestId ?? null, heldAt: performance.now(), releasedAt: null };
+            window.__knSocketRequestsHeld.push(record);
+            heldSocketRequests.push({ socket: this, packet, record });
             return;
           }
           return onevent.call(this, packet);
@@ -364,7 +450,7 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
     if (
       performance.now() < window.__knDropSettledUntil &&
       typeof data === 'string' &&
-      data.startsWith('inputs-settled:')
+      (data.startsWith('recovery-settled:') || data.startsWith('inputs-settled:'))
     ) {
       window.__knSettledDropped++;
       return;
@@ -411,6 +497,23 @@ export const networkInitScript = ({ lat, jitter, kbps }, createLinkSchedule, cre
       data instanceof ArrayBuffer
     )
       hold = Math.max(hold, window.__knHoldInputsMs);
+    if (
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer &&
+      performance.now() < window.__knHoldInputsUntil
+    )
+      hold = Math.max(hold, window.__knHoldInputsUntil - performance.now());
+    if (
+      window.__knInputGate &&
+      (this.label === 'lockstep' || this.label === 'rollback-input') &&
+      data instanceof ArrayBuffer
+    ) {
+      gatedInputs.push(() => {
+        net.send(ch, data, bytesOf(data), 0, performance.now());
+        arm(ch.pumped);
+      });
+      return;
+    }
     net.send(ch, data, bytesOf(data), hold, performance.now());
     arm(ch.pumped);
   };

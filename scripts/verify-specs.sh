@@ -101,9 +101,14 @@ room_lifecycle_drops() {
   verify "$ROOM" room_current nobodyIsStrandedInADroppedMatch
   verify "$ROOM" room_current anAbandonedMatchIsEnded
   verify "$ROOM" room_current aMatchIsNotLostToTheGraceWindow
+  verify "$ROOM" room_current nobodyLoadsIntoARunningMatch
   expect_violation "$ROOM" room_before_resume_flag nobodyIsStrandedInADroppedMatch
   expect_violation "$ROOM" room_before_abandoned_end anAbandonedMatchIsEnded
   expect_violation "$ROOM" room_before_grace_wait aMatchIsNotLostToTheGraceWindow
+  # nobodyLoadsIntoARunningMatch is violated on room_before_serve_timeout_fix,
+  # but its shortest counterexample is 7 steps (a match running, a joiner
+  # serving, its serve timing out), beyond this bound; lateJoinServeTimeoutTest
+  # replays it in check-specs.sh.
 }
 
 peer_connection() {
@@ -296,6 +301,20 @@ sync_follow_up() {
   # while the state is compressed, recorded from the send only: 5 steps.
   expect_violation "$FOLLOW" sync_follow_up_current aFollowUpCarriesANewState
   expect_violation "$FOLLOW" sync_follow_up_from_send theGuestEndsOnTheHostsState
+  # A direct answer taken unconfirmed, final, then the input differs: 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_direct_unwatched theGuestEndsOnTheHostsState 5
+  # The same over the socket, and a socket send never recorded delivered: 5 steps each.
+  expect_violation "$FOLLOW" sync_follow_up_socket_unwatched theGuestEndsOnTheHostsState 5
+  expect_violation "$FOLLOW" sync_follow_up_socket_undelivered aFollowUpCarriesANewState 5
+  # A socket answer whose follow-up waits on a closed channel: 4 steps.
+  expect_violation "$FOLLOW" sync_follow_up_socket_over_channel aWatchedAnswerCanBeFollowedUp 4
+  # An input labelled F - delay .. F differs after the send, and is counted as
+  # a change though it runs at F or later: 5 steps.
+  expect_violation "$FOLLOW" sync_follow_up_delay_unaware aFollowUpCarriesANewState 5
+  # A state taken with a correction owed, its follow-up skipped once the
+  # correction ran: 6 steps. Today's rule as well as the delay rule alone.
+  expect_violation "$FOLLOW" sync_follow_up_owed_unflagged theGuestEndsOnTheHostsState 6
+  expect_violation "$FOLLOW" sync_follow_up_delay_unaware theGuestEndsOnTheHostsState 6
 }
 
 rom_at_start() {
@@ -362,6 +381,8 @@ escalation_push() {
   expect_violation "$LIFECYCLE" recovery_lifecycle_before unusableChannelDoesNotCapture 2
   verify specs/input_placeholder.qnt input_placeholder_fixed allHold init 4
   expect_violation specs/input_placeholder.qnt input_placeholder_before allHold 2
+  verify specs/stale_prediction_flag.qnt stale_prediction_flag_fixed allHold
+  expect_violation specs/stale_prediction_flag.qnt stale_prediction_flag_before allHold 5
   verify specs/recovery_review.qnt recovery_review_fixed allHold init 14
   expect_violation specs/recovery_review.qnt recovery_review_before rosterGapCannotRenew 5
   expect_violation specs/recovery_review.qnt recovery_review_before readinessHasDeadline 1
@@ -377,6 +398,8 @@ escalation_push() {
   expect_violation "$DELIVERY" recovery_partial_before freeRecipientProceeds 2
   verify "$DELIVERY" recovery_followup_fixed allHold init 10
   expect_violation "$DELIVERY" recovery_followup_before healthySourceIsNeverBlocked 3
+  verify "$DELIVERY" recovery_skipped_fixed allHold init 10
+  expect_violation "$DELIVERY" recovery_skipped_current settledCoversNewestHole 2
   verify "$DELIVERY" recovery_actor_enabled allHold init 10
   verify "$DELIVERY" recovery_actor_disabled allHold init 10
   verify "$DELIVERY" recovery_delivery_fixed allHold init 10
@@ -426,6 +449,15 @@ reconnect_inputs() {
   # Right after the reset, one frame run on the peer's missing input with
   # the C slot inactive (runBeforeFirstInputTest): 1 step.
   expect_violation "$REC" reconnect_inputs_current theHostNeverPredictsAFrameThePeerHasMade 2
+  # The same with the reset that puts the ring's inputs back (de361fd).
+  verify "$REC" reconnect_inputs_keeps_history allHold init 12
+  # The frames run before the reset (~40 s at 5 steps); today a reconnect
+  # keeps the C slot (current, the same as fixed).
+  verify "$REC" reconnect_history_current allHold init 5
+  # A frame run on a prediction, then the reset: the prediction is gone
+  # (before) or is a real input now (as_real, de361fd to the fix), 3 steps.
+  expect_violation "$REC" reconnect_history_before everyInputItDidNotMakeIsChecked 3
+  expect_violation "$REC" reconnect_history_as_real everyInputItDidNotMakeIsChecked 3
 }
 
 drop_is_final() {
@@ -444,6 +476,10 @@ drop_is_final() {
 rom_identity() {
   local ROM_IDENTITY=specs/rom_identity.qnt
   verify "$ROM_IDENTITY" rom_identity_current allHold
+  # No start took the guest's word for the host's previous ROM even while the
+  # host's drop said nothing: the host's Start waits for its own hash, and
+  # the server drops every guest's word when that hash lands.
+  verify "$ROM_IDENTITY" rom_identity_host_silent aStartCountsOnlyTheHostsRom
   # A wrong ROM hashed, the host's dropped over it, the host's ROM arrives:
   # 4 steps (rightOverWrongTest).
   expect_violation "$ROM_IDENTITY" rom_identity_before aRightRomStays
@@ -463,6 +499,25 @@ rom_identity() {
   expect_violation "$ROM_IDENTITY" rom_identity_first_push aSettledRomKeepsItsHash
   # A rejoin while the drop is hashed is 7 steps, past the bound: its scenario
   # (rejoinWhileHashingTest) checks it.
+  # The host's ROM known, the host's ROM picked from the library, the host
+  # drops another, Start: 4 steps (hostChangesThenStartsTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_first_push aStartCountsOnlyTheHostsRom
+  # The host's ROM known, the host drops another, the guest picks that one
+  # from the library and refuses it against the host's previous ROM: 3 steps
+  # (hostChangesToTheGuestsRomTest drops it instead).
+  expect_violation "$ROM_IDENTITY" rom_identity_host_silent aRightRomStays
+  # The host's ROM known and the guest's ROM the host's, the host drops
+  # another: the server still counts the guest ready on the previous one,
+  # 3 steps (hostChangesAwayFromTheGuestsRomTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_host_silent theServerCountsOnlyTheHostsRom
+  # The host's ROM known, the guest picks another from the library and it is
+  # refused, the host changes to that one and its hash lands: the page holds
+  # none with the host's ROM in its library, 4 steps (guestDroppedFirstTest
+  # drops it instead).
+  expect_violation "$ROM_IDENTITY" rom_identity_no_library theHostsRomComesFromTheLibrary
+  # The same, with the dropped file's copy landing after the room names the
+  # host's ROM (cacheLandsLateTest).
+  expect_violation "$ROM_IDENTITY" rom_identity_no_cache_lookup theHostsRomComesFromTheLibrary
 }
 
 start_group() {
@@ -540,12 +595,103 @@ ring_after_resync() {
   expect_violation "$RING" ring_after_resync_save_only everyCopyIsWhole
 }
 
+solo_save() {
+  local SOLO=specs/solo_save.qnt
+  # The keep-baseline counterexample is 7 steps; check the gate past it.
+  verify "$SOLO" solo_save_current allHold init 8
+  # The friend's first input, two frames, the next input wrong, before the
+  # roster lists them: join, feed, tick, tick, feed (5 steps;
+  # inputBeforeRosterTest).
+  expect_violation "$SOLO" solo_save_roster noTargetLostToTheGate
+  # A save, the other player leaves, a skipped frame, they come back, the
+  # next save: 7 steps (firstSaveAfterAStretchTest).
+  expect_violation "$SOLO" solo_save_keep_baseline everyCopyIsWhole 8
+}
+
+engine_start() {
+  local START=specs/engine_start.qnt
+  verify "$START" engine_start_current allHold
+  # A tab that comes back while its page waits moves the page's frame:
+  # start, GO, lose the delay, reopen, arm, a frame, the return, the start
+  # frame (8 steps; tabReturnWhileWaitingTest).
+  expect_violation "$START" engine_start_before theHostsStartIsWhereTheGuestIs 8
+  expect_violation "$START" engine_start_jump_on_return aGuestStopsOnlyWhenTheHostIsUnreachable 8
+  # A solo match: start, arm, one frame (3 steps; soloTest).
+  expect_violation "$START" engine_start_before everyFrameRunsOnTheCEngine
+  # A guest that hears nothing: start, three ticks, the deadline (5 steps).
+  expect_violation "$START" engine_start_before armsWithTheHostsDelay
+  # engine_start_stop_only's counterexample needs a close, an open and the
+  # whole wait (9 steps): check-specs.sh's random runs find it.
+  # A friend joins a solo match with no bridge window at 0: start alone, arm,
+  # join late (3 steps; lateJoinIntoSoloTest).
+  expect_violation "$START" engine_start_no_zero_bridge aGuestStopsOnlyWhenTheHostIsUnreachable
+  # A friend joins a solo match and plays at 0: start alone, arm, join late
+  # (3 steps; lateJoinIntoSoloTest).
+  expect_violation "$START" engine_start_no_rearm aJoinedMatchRunsAboveZero
+}
+
+session_log_store() {
+  local STORE=specs/session_log_store.qnt
+  # The counterexamples below are 5 steps or fewer; the change is checked
+  # past them.
+  verify "$STORE" session_log_store_current allHold
+  # The shortest in one store: four lines in one flush, one row over the
+  # store's cap, taking the other kind's line with it (5 steps). Over two
+  # flushes it is 6 (jsLinesPushACLineOutTest, cLinesPushAJsLineOutTest).
+  expect_violation "$STORE" session_log_store_before cLinesKeepTheirOwnRoom
+  expect_violation "$STORE" session_log_store_before jsLinesKeepTheirOwnRoom
+  # A C line, a JS line, a flush: the JS row before the C row (3 steps;
+  # cLinesInTheMiddleOfAFlushTest).
+  expect_violation "$STORE" session_log_store_per_flush readInOrder
+  # Four JS lines in one flush, one row over the cap, deleted with no record
+  # of it (5 steps; over two flushes, evictionIsRecordedTest).
+  expect_violation "$STORE" session_log_store_unrecorded truncationIsVisible
+  # Four lines alternating in one flush, one row each, past the bound of
+  # three (5 steps; alternatingLinesTest).
+  expect_violation "$STORE" session_log_store_unbounded rowsPerFlushBounded
+}
+
 # Every group, in the order a local run takes them.
+log_archive() {
+  local ARCHIVE=specs/log_archive.qnt
+  # A match's log is readable from exactly one place, the archive is recorded
+  # only once it is complete, and retention leaves nothing behind — with two
+  # archivers at once, crashes at each step, an eviction batch that runs in
+  # parts or again, and SQLite reusing ids. Checked as deep as the deepest
+  # counterexample below (9 steps); 10 outlasts a CI job's 20 minutes.
+  verify "$ARCHIVE" log_archive_current allHold init 9
+  # Recorded before the uploads are confirmed, a failed upload leaves an
+  # archived id R2 has nothing for (failedUploadTest).
+  expect_violation "$ARCHIVE" log_archive_record_first archivedOnlyWhenComplete
+  # An eviction batch that stops after its mark leaves the archived chunks in
+  # D1; reading every chunk left there reads them twice: flush, window,
+  # archive x3, hot, evict (7 steps; partialEvictionTest).
+  expect_violation "$ARCHIVE" log_archive_read_all_tail logAlwaysReadable 7
+  # Two archivers keyed by the chunk id alone share keys; the refused one
+  # takes back the recorded one's objects: flush, window, begin x2, upload x2,
+  # finish x2 (8 steps; twoArchiversAtOnceTest).
+  expect_violation "$ARCHIVE" log_archive_key_by_through archivedOnlyWhenComplete 8
+  # An archive that keeps its objects after finding the match tombstoned
+  # leaves them behind for good (8 steps; deleteDuringArchiveTest).
+  expect_violation "$ARCHIVE" log_archive_ignore_tombstone retentionLeavesNothing 8
+  # Reading the archive alone after eviction, or evicting every chunk, loses
+  # a chunk written after the archive (8 steps; lateChunkTest).
+  expect_violation "$ARCHIVE" log_archive_archive_only logAlwaysReadable 8
+  expect_violation "$ARCHIVE" log_archive_evict_all logAlwaysReadable 8
+  # A DELETE by id alone, run again after a chunk reused an archived id,
+  # takes it (9 steps; deleteAgainAfterReuseTest).
+  expect_violation "$ARCHIVE" log_archive_delete_by_id_only logAlwaysReadable 9
+  # Archiving and evicting into a store a deploy wipes (a local folder, no
+  # R2) loses the log at the next deploy (8 steps; localStoreTest).
+  expect_violation "$ARCHIVE" log_archive_any_store logAlwaysReadable 8
+}
+
 SPEC_GROUPS=(
   peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
   rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
+  engine_start solo_save session_log_store log_archive
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -553,11 +699,11 @@ SPEC_GROUPS=(
 # whole set took 32 minutes in one job. A group added above goes in a shard
 # here; the check below fails until it does.
 SHARDS=(
-  "room_lifecycle_start"                                          # ~7 min
+  "room_lifecycle_start engine_start solo_save"                   # ~7 min + engine_start (~30 s) + solo_save (~40 s)
   "room_lifecycle_drops"                                          # ~8 min
-  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final" # ~7.5 min
+  "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final log_archive" # ~7.5 min + log_archive (~1 min)
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
-  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs" # ~7.5 min
+  "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs session_log_store" # ~8.5 min (reconnect_history ~1 min) + session_log_store (~3.5 min)
 )
 
 # Each group is in exactly one shard, and each shard names only groups.

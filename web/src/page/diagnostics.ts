@@ -95,10 +95,10 @@ interface TouchHook {
 const DIAG_INPUT_INTERVAL = 300;
 const DIAG_EARLY_FRAMES = 30;
 const SCREENSHOT_INTERVAL = 300; // ~5 seconds at 60fps
-// 160x120 for desync triage. The host of a listed room captures 320x240:
-// it doubles as the room's live preview on the front-page board.
-const SCREENSHOT_WIDTH = 160;
-const SCREENSHOT_HEIGHT = 120;
+// Use the same capture size for every player so comparisons retain detail.
+// The server decides separately whether a capture can serve as the board preview.
+const SCREENSHOT_WIDTH = 320;
+const SCREENSHOT_HEIGHT = 240;
 
 const isElement = (node: Node): node is Element => node.nodeType === 1;
 const hasSettingsMenu = (node: Node): boolean =>
@@ -269,17 +269,17 @@ export const createDiagnostics = () => {
     }
 
     try {
-      const scale = window.KNState?.boardFrame ? 2 : 1;
-      const outW = SCREENSHOT_WIDTH * scale;
-      const outH = SCREENSHOT_HEIGHT * scale;
-      if (!screenshotCanvas || screenshotCanvas.width !== outW) {
+      const { sx, sy, sw, sh } = screenshotCrop(canvas.width, canvas.height);
+      if (!sw || !sh) return;
+      const outW = Math.min(SCREENSHOT_WIDTH, sw);
+      const outH = Math.min(SCREENSHOT_HEIGHT, sh);
+      if (!screenshotCanvas || screenshotCanvas.width !== outW || screenshotCanvas.height !== outH) {
         screenshotCanvas = document.createElement('canvas');
         screenshotCanvas.width = outW;
         screenshotCanvas.height = outH;
         screenshotCtx = screenshotCanvas.getContext('2d');
       }
       if (!screenshotCtx) throw new Error('no 2d context for the screenshot');
-      const { sx, sy, sw, sh } = screenshotCrop(canvas.width, canvas.height);
       screenshotCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, outW, outH);
       const dataUrl = screenshotCanvas.toDataURL('image/jpeg', 0.6);
       if (!dataUrl || dataUrl.length < 100) {
