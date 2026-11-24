@@ -119,6 +119,7 @@ interface Page {
   guestCut: (msg: string) => number;
   /** What the ring holds for the slot at `tag`. */
   ring: (tag: number) => ReturnType<typeof input> | null;
+  active: () => boolean;
   floor: () => number;
   rerunFrom: () => number;
 }
@@ -126,16 +127,19 @@ interface Page {
 const DELAY = 2;
 const SLOT = 3;
 
-const page = (): Page => {
-  const c = vm.createContext({ KNCore, DELAY, SLOT, performance });
+const page = (canStoreCut = true): Page => {
+  const c = vm.createContext({ KNCore, DELAY, SLOT, performance, canStoreCut });
   vm.runInContext(
     `
     const window={KNCore,KNDesync:{forgetFrom(){}}};
     const ring=new Map(),_corePhantomHistory=new Set();
+    let active = false;
+    const store=(s,t,b,lx,ly,cx,cy)=>{if(s===SLOT)ring.set(t,{buttons:b,lx,ly,cx,cy})};
     const mod={cFrame:0,
       _kn_get_frame(){return this.cFrame},
-      _kn_feed_input(s,t,b,lx,ly,cx,cy){if(s===SLOT)ring.set(t,{buttons:b,lx,ly,cx,cy})},
-      _kn_rollback_slot_reset(s){if(s===SLOT)ring.clear()},
+      _kn_feed_input(...args){active=true;store(...args)},
+      _kn_store_cut_input:canStoreCut?store:undefined,
+      _kn_rollback_slot_reset(s){if(s===SLOT){active=false;ring.clear()}},
     };
     const ZERO={buttons:0,lx:0,ly:0,cx:0,cy:0};
     const _rbGetInput=(m,s,t)=>ring.get(t)??ZERO;
@@ -145,7 +149,8 @@ const page = (): Page => {
     const _feedWatchedFrame=(m,s,t,feed)=>feed();
     ${part('  // While a cut governs the slot no input of it is taken in;', '  const _observeLateJoinDcOpen')}
     ${part('  const _hostRosterCut = (mod, slot, rosterFrame) => {', '  // A page that ran frames with other inputs than a cut gives runs them')}
-    globalThis.hold=(t,i)=>ring.set(t,i);
+    globalThis.hold=(t,i)=>{active=true;ring.set(t,i)};
+    globalThis.active=()=>active;
     globalThis.at=(f)=>{mod.cFrame=f;_frameNum=f};
     globalThis.hostCut=(r)=>{const cut=_hostRosterCut(mod,SLOT,r);const late=_cutRemovedInput(mod,SLOT,cut,'test');return {msg:KNCore.removedInput.encodeRosterCut(cut),late}};
     globalThis.guestCut=(msg)=>_cutRemovedInput(mod,SLOT,KNCore.removedInput.parseRosterCut(msg),'test');
@@ -165,6 +170,7 @@ const page = (): Page => {
     hostCut: (rosterFrame) => plain(g.hostCut(rosterFrame)),
     guestCut: (msg) => g.guestCut(msg),
     ring: (tag) => plain(g.ring(tag)),
+    active: () => g.active(),
     floor: () => g.floor(),
     rerunFrom: () => g.rerunFrom(),
   };
@@ -188,8 +194,19 @@ test('the host freezes what it applied below its roster frame and is never late 
   assert.deepEqual(host.ring(11), input(1, -50), 'below the cut: what it ran');
   assert.deepEqual(host.ring(12), input(0), 'from the cut: neutral');
   assert.deepEqual(host.ring(13), input(0));
-  assert.equal(host.ring(14), null, 'later tags are predicted from the neutral ones');
+  assert.equal(host.ring(14), null, 'an absent slot reads neutral after the cut');
+  assert.equal(host.active(), false);
   assert.equal(host.floor(), NO_INPUT_TAKEN, 'it takes no more input of the player');
+});
+
+test('a core with live feeds only still replays the removed player’s cut', () => {
+  const host = page(false);
+  moving(host, 13);
+  host.at(14);
+  host.hostCut(14);
+  assert.equal(host.active(), true);
+  assert.deepEqual(host.ring(11), input(1, -50));
+  assert.deepEqual(host.ring(12), input(0));
 });
 
 test('a guest ahead of the host runs again from the cut (guestAheadTest)', () => {

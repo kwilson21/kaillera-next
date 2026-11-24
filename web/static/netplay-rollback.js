@@ -6372,8 +6372,8 @@
   // first frame this page ran with another input for it. Below the cut the
   // ring gets the host's inputs, as real ones (a replay runs them again
   // unchanged, and no input of the player replaces them: the slot takes none
-  // until it is admitted again); from the cut on, two neutral real inputs, so
-  // C predicts neutral for every tag after them. Returns that frame, or -1.
+  // until it is admitted again). Two neutral tags anchor the cut. The slot
+  // stays inactive until a live feed. Returns the differing frame or -1.
   const _cutRemovedInput = (mod, slot, cut, reason) => {
     const RI = window.KNCore.removedInput;
     const record = _lateJoinInputWindows.get(slot);
@@ -6395,12 +6395,14 @@
     if (k >= 0) lateFrame = checkFrom + k + DELAY_FRAMES;
     mod._kn_rollback_slot_reset(slot);
     _corePhantomHistory.delete(slot);
+    // An older core can still replay the cut using ordinary feeds.
+    const store = mod._kn_store_cut_input ?? mod._kn_feed_input;
     for (let tag = cut.from; tag < cut.cut; tag++) {
       const i = RI.cutInputAt(cut, tag);
-      _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
+      _feedWatchedFrame(mod, slot, tag, () => store(slot, tag, i.buttons, i.lx, i.ly, i.cx, i.cy));
     }
     for (let tag = Math.max(0, cut.cut); tag < cut.cut + 2; tag++) {
-      _feedWatchedFrame(mod, slot, tag, () => mod._kn_feed_input(slot, tag, 0, 0, 0, 0, 0));
+      _feedWatchedFrame(mod, slot, tag, () => store(slot, tag, 0, 0, 0, 0, 0));
     }
     record.cut = cut.cut;
     record.absentSince = cut.cut;
@@ -7856,8 +7858,7 @@
     _frameNum = KNState.frameNum = m._kn_post_tick();
     return _frameNum === step.frame + 1;
   };
-  // kn_rollback_init replaces both the RNG pointers and the preserve buffer.
-  // Rebind them for deferred startup and for a verified replay's new ring.
+  // Rebind RNG and live RDRAM after startup or checkpoint recovery resets the ring.
   const _configureRollbackMemory = (rngMod) => {
     if (rngMod) _initRNGSync(rngMod);
     if (_rngPatched && _rdramBase && rngMod?._kn_set_rng_sync) {
@@ -7866,11 +7867,9 @@
       rngMod._kn_set_rng_sync(_rngSeed, rngPtr, rngAltPtr);
       _syncLog(`C-ROLLBACK RNG sync configured: seed=0x${_rngSeed.toString(16)}`);
     }
-    // Configure non-tainted RDRAM preservation — must be AFTER
-    // kn_rollback_init which sets up the taint bitmap.
     if (_rdramBase && rngMod?._kn_set_rdram_preserve) {
       rngMod._kn_set_rdram_preserve(_rdramBase);
-      _syncLog(`C-ROLLBACK non-tainted RDRAM preservation configured`);
+      _syncLog(`C-ROLLBACK live RDRAM bound`);
     }
   };
   const _checkpointPrepare = (r, rows) => {
@@ -16526,14 +16525,8 @@
         // Input dedup can hide pre-init frames from C; init is its only chance to see them.
         _backfillCInputsFromJs(detMod, 'rollback-init');
 
-        // kn_rollback_init mallocs ringSize × stateSize (~208MB) + an 8MB
-        // rdram-preserve buffer. On Smash Remix, this consistently grows
-        // the WASM heap, detaching HEAPU8 and stranding _pendingRunner with
-        // stale memory views — the next stepOneFrame throws WASM
-        // RuntimeError ('null function' on V8, 'call_indirect signature
-        // mismatch' on JSC), and the no-runner recapture path then loops
-        // forever logging 'manual runner recaptured after stepOneFrame:no-runner'.
-        // Re-capture here forces updateMemoryViews + a fresh rAF runner.
+        // Allocating the rollback ring can grow the WASM heap. Rebind the
+        // runner before its next frame can use a detached memory view.
         recaptureManualRunner(detMod, 'kn-rollback-init');
       };
       window._rbDoInit = doRollbackInit;

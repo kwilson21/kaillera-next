@@ -117,6 +117,14 @@ check room_current aMatchIsNotLostToTheGraceWindow
 # (violated on room_before_serve_timeout_fix).
 check room_current nobodyLoadsIntoARunningMatch
 
+DISCONNECT=specs/room_disconnect_cleanup.qnt
+$QUINT typecheck "$DISCONNECT"
+for variant in room_disconnect_cleanup_before room_disconnect_cleanup_lifespan_only room_disconnect_cleanup_fixed; do
+  $QUINT test "$DISCONNECT" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$DISCONNECT" --main=room_disconnect_cleanup_fixed --invariant=allHold \
+  --max-samples=1000 --max-steps=10 --backend="$BACKEND"
+
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt
 $QUINT typecheck "$PEERS"
@@ -771,10 +779,18 @@ done
 $QUINT run "$RING" --main=ring_after_resync_current --invariant=allHold \
   --max-samples=20000 --max-steps=25 --backend="$BACKEND"
 
+REPLAY=specs/replay_preemption.qnt
+$QUINT typecheck "$REPLAY"
+for variant in replay_preemption_before replay_preemption_fixed; do
+  $QUINT test "$REPLAY" --main="$variant" --backend="$BACKEND"
+done
+$QUINT run "$REPLAY" --main=replay_preemption_fixed --invariant=allHold \
+  --max-samples=20000 --max-steps=25 --backend="$BACKEND"
+
 # ── The ring while a page plays alone ──────────────────────────────────────
 SOLO=specs/solo_save.qnt
 $QUINT typecheck "$SOLO"
-for variant in solo_save_before solo_save_roster solo_save_keep_baseline solo_save_current; do
+for variant in solo_save_before solo_save_roster solo_save_keep_baseline solo_save_cut_feed solo_save_current; do
   $QUINT test "$SOLO" --main="$variant" --backend="$BACKEND"
 done
 # kn_pre_tick skips the save while no other slot is active: no rollback

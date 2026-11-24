@@ -424,15 +424,7 @@ static struct {
     uint32_t *rng_alt_ptr;  /* pointer to alternate RNG RDRAM address */
     uint32_t *rng_netplay_ptr; /* pointer to Smash Remix netplay seed (0x3CB3C) */
 
-    /* Full RDRAM preservation during replay.
-     * Replay runs extra retro_run() calls that mutate RDRAM everywhere —
-     * game globals, heap, audio, interrupt state. Instead of chasing
-     * individual divergent blocks, we save/restore the ENTIRE 8MB RDRAM
-     * before/after replay. This guarantees replay has zero lasting side
-     * effects on ANY RDRAM, regardless of which blocks are tainted.
-     * Cost: ~2-3ms per save/restore on mobile (one memcpy each way). */
-    uint8_t *rdram_base;       /* -> start of RDRAM (set by JS) */
-    uint8_t *saved_rdram;      /* malloc'd 8MB buffer for snapshot */
+    uint8_t *rdram_base; /* live RDRAM shared with the core */
 
     /* Dirty-input gate: skip retro_serialize when no predictions are
      * active (all remote inputs arrived on time). Inspired by RetroArch's
@@ -1318,11 +1310,6 @@ void kn_rollback_shutdown(void) {
     free(rb.ring_frames);
     free(rb.ring_sf_state);
     free(rb.ring_hidden_state);
-    /* The 8MB RDRAM-preserve buffer is allocated by kn_set_rdram_preserve
-     * and lives across rollback init/shutdown cycles. Free it here so the
-     * subsequent kn_rollback_init's memset(&rb, 0, ...) doesn't orphan it
-     * — without this, every match in a session leaks 8MB. */
-    free(rb.saved_rdram);
     rb.ring_bufs = NULL;
     rb.ring_cpu_bufs = NULL;
     rb.ring_rdram_bufs = NULL;
@@ -1336,7 +1323,6 @@ void kn_rollback_shutdown(void) {
     rb.ring_frames = NULL;
     rb.ring_sf_state = NULL;
     rb.ring_hidden_state = NULL;
-    rb.saved_rdram = NULL;
     rb.initialized = 0;
     rb_log("kn_rollback_shutdown");
 }
@@ -1373,6 +1359,17 @@ void kn_rollback_slot_reset(int slot) {
         memset(&rb.predicted_values[slot][i], 0, sizeof(rb.predicted_values[slot][i]));
     }
     rb_log("slot_reset: slot=%d", slot);
+}
+
+/* A roster cut files the removed player's final inputs immediately after
+ * slot reset. Replay reads them by tag; only a live feed starts prediction. */
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void kn_store_cut_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy) {
+    if (!rb.initialized || slot < 0 || slot >= KN_MAX_PLAYERS || slot == rb.local_slot
+        || frame < 0 || rb.slot_active[slot]) return;
+    rb.inputs[slot][frame % KN_INPUT_RING_SIZE] = (kn_input_t){buttons, lx, ly, cx, cy, 1, frame};
 }
 
 /* ── Feed remote input ─────────────────────────────────────────────── */
@@ -1416,6 +1413,11 @@ static int rb_rollback_target(int tag, int limit) {
         if (rb.applied_tag_frame[i] != f || rb.applied_tag[i] >= tag) return f;
     }
     return -1;
+}
+
+/* The next live frame stays fixed while kn_pre_tick replays earlier frames. */
+static int rb_live_frontier(void) {
+    return rb.replay_remaining > 0 ? rb.replay_target : rb.frame;
 }
 
 int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int cy) {
@@ -1512,7 +1514,7 @@ int kn_feed_input(int slot, int frame, int buttons, int lx, int ly, int cx, int 
                 visible_rb_max = rb.delay_frames + 4;
             }
             int rb_target = rb_rollback_target(frame, rb.frame);
-            int depth = rb.frame - rb_target;
+            int depth = rb_live_frontier() - rb_target;
             if (rb_target < 0) {
                 /* No frame before rb.frame applied this input yet (it
                  * arrived during a replay that hasn't reached it); the
@@ -1665,45 +1667,25 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
         /* Fall through to normal forward processing below. pending_rollback
          * stays set so kn_peek_pending_rollback returns it. */
     } else
-    /* ── Handle pending rollback: restore state, start amortized catch-up ──
-     *
-     * P3: Preempt an active replay if a newer (earlier-frame) misprediction
-     * arrives — e.g., a slow packet finally delivered for a frame before the
-     * current replay window's start. Continuing the stale replay would waste
-     * frames on known-wrong state. We discard replay_remaining and restart
-     * from the earlier frame; retro_unserialize fully overwrites emulator
-     * state, so no bookkeeping is needed to "undo" the partial replay. */
+    /* An earlier correction can restart an active replay. Commit the new
+     * cursor and depth only after restoring its state: a rejected restore
+     * leaves the existing replay responsible for reaching the frontier. */
     if (rb.pending_rollback >= 0 &&
         (rb.replay_remaining == 0 || rb.pending_rollback < rb.replay_start)) {
         int rb_frame = rb.pending_rollback;
-        int depth = rb.frame - rb_frame;
+        int target = rb_live_frontier();
+        int depth = target - rb_frame;
         int ring_idx = rb_frame % rb.ring_size;
-        if (rb.replay_remaining > 0) {
-            /* Preempting an active replay — restore full RDRAM to pre-replay
-             * values FIRST, so the partial replay's mutations don't
-             * contaminate the next save. */
-            if (rb.rdram_base && rb.saved_rdram)
-                memcpy(rb.rdram_base, rb.saved_rdram, 0x800000);
-            rb_log("C-REPLAY-PREEMPT old_start=%d old_remaining=%d new_start=%d",
-                rb.replay_start, rb.replay_remaining, rb_frame);
-            rb.replay_remaining = 0;
-        }
         rb.pending_rollback = -1;
 
+        int restored = 0;
         if (rb.ring_frames[ring_idx] == rb_frame && depth > 0 && depth <= rb.max_frames) {
-            /* Save full RDRAM BEFORE state restore. These are the "real"
-             * values that both peers agree on. Replay will mutate them,
-             * but we restore the entire 8MB after replay ends. */
-            if (rb.rdram_base && rb.saved_rdram)
-                memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);
-
-            if (!rb_restore_slot_state(ring_idx)) {
-                rb.failed_rollbacks++;
-                rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)",
-                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,
-                    rb.state_backend, rb.failed_rollbacks);
-                return 0;
-            }
+            restored = rb_restore_slot_state(ring_idx);
+        }
+        if (restored) {
+            if (rb.replay_remaining > 0)
+                rb_log("C-REPLAY-PREEMPT old_start=%d old_remaining=%d new_start=%d",
+                    rb.replay_start, rb.replay_remaining, rb_frame);
             /* R1: retro_unserialize invalidates the Emscripten rAF runner
              * captured by JS's overrideRAF interceptor. JS must re-capture
              * it via pauseMainLoop/resumeMainLoop before the next
@@ -1715,7 +1697,7 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             rb.rollback_count++;
             if (depth > rb.max_depth) rb.max_depth = depth;
             rb.replay_remaining = depth;
-            rb.replay_target = rb.frame;
+            rb.replay_target = target;
             KN_HASH_ON_REPLAY_ENTER(rb_frame);
             rb.frame = rb_frame;
             rb.replay_depth = depth;
@@ -1723,10 +1705,9 @@ int kn_pre_tick(int buttons, int lx, int ly, int cx, int cy, int frame_adv) {
             rb_log("C-REPLAY-START f=%d depth=%d target=%d replay_remaining=%d replay_depth=%d",
                 rb_frame, depth, rb.replay_target, rb.replay_remaining, rb.replay_depth);
         } else {
-            /* Restore impossible — treat as silent desync so P4 resync path triggers */
             rb.failed_rollbacks++;
-            rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d (failed_rollbacks=%d)",
-                rb_frame, ring_idx, rb.ring_frames[ring_idx], depth, rb.failed_rollbacks);
+            rb_log("RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)",
+                rb_frame, ring_idx, rb.ring_frames[ring_idx], depth, rb.state_backend, rb.failed_rollbacks);
         }
     }
 
@@ -2272,15 +2253,12 @@ void kn_set_rng_netplay_ptr(uint32_t *ptr) {
     rb_log("RNG netplay ptr configured: %p", ptr);
 }
 
-/* ── Configure RDRAM preservation for replay (SSB64 / Smash Remix) ── */
+/* Bind live RDRAM. The export name is part of the browser/core ABI. */
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 void kn_set_rdram_preserve(uint8_t *rdram_base) {
     rb.rdram_base = rdram_base;
-    if (rb.saved_rdram) free(rb.saved_rdram);
-    rb.saved_rdram = (uint8_t *)malloc(0x800000); /* 8MB */
-    rb_log("rdram preserve: base=%p buf=%p (8MB)", rdram_base, rb.saved_rdram);
 }
 
 /* ── Query: pending rollback frame (legacy — use kn_get_replay_depth) */

@@ -290,6 +290,18 @@ def configure_cors(origin: str | list[str]) -> None:
 def set_shutting_down() -> None:
     global _shutting_down
     _shutting_down = True
+    for task in tuple(_waiting_disconnects):
+        task.cancel()
+
+
+async def finish_room_shutdown() -> None:
+    set_shutting_down()
+    # A cleanup already holding the lock may still be persisting the room.
+    # Finish that write before closing storage and discard future removals.
+    async with _room_lock:
+        for task in _disconnect_grace_tasks.values():
+            task.cancel()
+        _disconnect_grace_tasks.clear()
 
 
 # ── Socket.IO server instance ─────────────────────────────────────────────────
@@ -368,6 +380,7 @@ _sid_to_room: dict[str, tuple[str, str, bool]] = {}
 _room_lock = asyncio.Lock()
 
 _shutting_down = False
+_waiting_disconnects: set[asyncio.Task] = set()
 
 # Latest board frame per listed, in-game room: session_id -> (jpeg bytes, wall time).
 # Memory only, one per room; dropped when the room ends its match, unlists or closes.
@@ -611,6 +624,8 @@ async def _disconnect_grace_expiry(
         return  # Reconnected in time
     async with _room_lock:
         _disconnect_grace_tasks.pop(player_id, None)
+        if _shutting_down:
+            return
         log.info("Disconnect grace expired for %s in room %s — removing", player_id, session_id)
         # Re-insert the entry so _leave can find it. The SID is dead but
         # _leave needs the mapping to locate the room/player.
@@ -2140,16 +2155,36 @@ def _register_match_soon(match_id: str, session_id: str) -> None:
     _registering[match_id] = asyncio.create_task(register())
 
 
+def _disconnect_finished(task: asyncio.Task) -> None:
+    _waiting_disconnects.discard(task)
+    if not task.cancelled() and (error := task.exception()) is not None:
+        log.error("%s failed", task.get_name(), exc_info=error)
+
+
 @sio.event
-async def disconnect(sid: str) -> None:
-    log.info("SIO disconnect %s", sid)
+async def disconnect(sid: str, reason: str | None = None) -> None:
+    log.info("SIO disconnect %s (%s)", sid, reason)
     unregister_sid(sid)
     _sid_host.pop(sid, None)
     _drop_byte_history(sid)
     if _shutting_down:
         return
 
+    # A roster send under the lock can await this transport callback. Let
+    # delivery return before taking the lock for this SID's membership.
+    if _room_lock.locked():
+        task = asyncio.create_task(_disconnect_from_room(sid), name=f"disconnect room member {sid}")
+        _waiting_disconnects.add(task)
+        task.add_done_callback(_disconnect_finished)
+        return
+    await _disconnect_from_room(sid)
+
+
+async def _disconnect_from_room(sid: str) -> None:
     async with _room_lock:
+        _waiting_disconnects.discard(asyncio.current_task())
+        if _shutting_down:
+            return
         # Mid-game disconnect grace: defer _leave so the player can reconnect
         # and reclaim their slot within _DISCONNECT_GRACE_SECONDS.
         entry = _sid_to_room.get(sid)

@@ -51,6 +51,7 @@
 //
 // SKIP: "never" (today), "roster" (the rejected JS switch), "slots" (the gate
 // on the C engine's own slot_active).
+// "cut-feed" uses the slot gate but files the removal cut as live input.
 // FORGET_BASELINE_ON_SKIP: a skipped save forgets the sparse baseline.
 module solo_save {
   const SKIP: str
@@ -128,7 +129,7 @@ module solo_save {
   // wrong prediction for a frame already run rolls back to the target, if
   // the ring has it, and the replay saves every frame from there again.
   action feed(tag: int, wrong: bool): bool = all {
-    joined, not(fed.contains(tag)),
+    joined, not(fed.contains(tag)) or not(active),
     val rollsBack = predicted.contains(tag) and wrong and tag < frame
     val target = if (rollsBack) rollbackTarget(tag) else NONE
     val restores = target != NONE and ring.contains(target)
@@ -151,6 +152,21 @@ module solo_save {
     frame' = frame, delay' = delay, rosterAlone' = rosterAlone, applied' = applied,
     ring' = ring, everyFrame' = everyFrame, baseline' = baseline,
     copiesWhole' = copiesWhole, lost' = lost,
+  }
+
+  // A scheduled roster removal resets the slot, then files the host's real
+  // inputs before the cut and neutral at the cut and the next tag. All are
+  // final. Only a subsequent input from an admitted player starts prediction.
+  action leaveWithCut = all {
+    joined,
+    val cut = frame - delay
+    all {
+      joined' = false, active' = SKIP == "cut-feed",
+      fed' = 0.to(MAX_TAG + 1).filter(t => t <= cut + 1), predicted' = Set(),
+      frame' = frame, delay' = delay, rosterAlone' = rosterAlone, applied' = applied,
+      ring' = ring, everyFrame' = everyFrame, baseline' = baseline,
+      copiesWhole' = copiesWhole, lost' = lost,
+    }
   }
 
   // A player joins. Into a match at 0 (the page played alone), the host arms
@@ -182,6 +198,7 @@ module solo_save {
     nondet wrong = Set(true, false).oneOf()
     feed(tag, wrong),
     leave,
+    leaveWithCut,
     join,
     rosterArrives,
   }
@@ -196,7 +213,9 @@ module solo_save {
   // Violated when a skipped save keeps the baseline.
   val everyCopyIsWhole = copiesWhole
 
-  val allHold = noTargetLostToTheGate and everyCopyIsWhole
+  val removedSlotStaysInactive = joined or not(active)
+
+  val allHold = noTargetLostToTheGate and everyCopyIsWhole and removedSlotStaysInactive
 
   // ── Scenarios ─────────────────────────────────────────────────────────
 
@@ -234,6 +253,16 @@ module solo_save {
       .expect(predicted == Set(3))
       .then(feed(3, true))
       .expect(not(lost) and ring.contains(4))
+
+  run scheduledCutThenReturnTest =
+    armAt(0, MATCH_DELAY, true, false).then(feed(0, false)).then(tick).then(tick)
+      .then(leaveWithCut).then(rosterArrives)
+      .expect(fed == Set(0, 1, 2) and predicted == Set())
+      .then(tick)
+      .expect(ring.contains(2) == (SKIP == "never" or SKIP == "cut-feed"))
+      .then(join).then(rosterArrives).then(feed(3, false))
+      .then(tick).then(tick).then(tick).then(feed(4, true))
+      .expect(not(lost) and ring.contains(5))
 
   // The first save after a skipped stretch. Keeping the baseline, it is
   // diffed against a copy older than the frame before it.
@@ -273,4 +302,10 @@ module solo_save_keep_baseline {
 // skipped save forgets the sparse baseline.
 module solo_save_current {
   import solo_save(SKIP = "slots", FORGET_BASELINE_ON_SKIP = true).*
+}
+
+// Rejected: feeding the fixed cut through kn_feed_input reactivates the
+// absent player, keeping prediction and saves on until a reset.
+module solo_save_cut_feed {
+  import solo_save(SKIP = "cut-feed", FORGET_BASELINE_ON_SKIP = true).*
 }

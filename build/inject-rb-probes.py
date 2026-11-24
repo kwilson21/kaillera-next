@@ -350,35 +350,16 @@ PROBE_PATCHES = [
         "        return 3; /* ring maintained, skip frame advance */\n"
         "    }\n",
     ),
-    # Rollback restore — state-backend restore wrapper.
+    # Record successful and rejected backend restores.
     (
-        "            if (rb.rdram_base && rb.saved_rdram)\n"
-        "                memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);\n"
-        "\n"
-        "            if (!rb_restore_slot_state(ring_idx)) {\n"
-        "                rb.failed_rollbacks++;\n"
-        "                rb_log(\"RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)\",\n"
-        "                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,\n"
-        "                    rb.state_backend, rb.failed_rollbacks);\n"
-        "                return 0;\n"
-        "            }\n",
+        "            restored = rb_restore_slot_state(ring_idx);\n",
 
-        "            if (rb.rdram_base && rb.saved_rdram)\n"
-        "                memcpy(rb.saved_rdram, rb.rdram_base, 0x800000);\n"
-        "\n"
         "            KN_RB_PROBE_SLOT(40, ring_idx);\n"
         "            kn_diag_rb_unserialize_count++;\n"
         "            kn_diag_rb_unserialize_frame = (int32_t)rb_frame;\n"
-        "            int _krb_restore_ret = rb_restore_slot_state(ring_idx);\n"
-        "            kn_diag_rb_unserialize_ret = _krb_restore_ret;\n"
-        "            KN_RB_PROBE_SLOT(41, ring_idx);\n"
-        "            if (!_krb_restore_ret) {\n"
-        "                rb.failed_rollbacks++;\n"
-        "                rb_log(\"RESTORE-FAILED f=%d ring[%d]=%d depth=%d backend=%d (failed_rollbacks=%d)\",\n"
-        "                    rb_frame, ring_idx, rb.ring_frames[ring_idx], depth,\n"
-        "                    rb.state_backend, rb.failed_rollbacks);\n"
-        "                return 0;\n"
-        "            }\n",
+        "            restored = rb_restore_slot_state(ring_idx);\n"
+        "            kn_diag_rb_unserialize_ret = restored;\n"
+        "            KN_RB_PROBE_SLOT(41, ring_idx);\n",
     ),
     # Replay save + return 2 (line 973 + line 993).
     (

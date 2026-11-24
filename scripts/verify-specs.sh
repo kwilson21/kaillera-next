@@ -95,6 +95,13 @@ room_lifecycle_start() {
   expect_violation "$ROOM" room_before_start_fix startIsNotHeldUpByALateJoiner
 }
 
+room_disconnect_cleanup() {
+  local spec=specs/room_disconnect_cleanup.qnt
+  verify "$spec" room_disconnect_cleanup_fixed allHold
+  expect_violation "$spec" room_disconnect_cleanup_before callbackCanReturn
+  expect_violation "$spec" room_disconnect_cleanup_lifespan_only shutdownKeepsMembers 2
+}
+
 room_lifecycle_drops() {
   local ROOM=specs/room_lifecycle.qnt
   verify "$ROOM" room_current lateJoinersChaseTheCurrentMatch
@@ -595,6 +602,14 @@ ring_after_resync() {
   expect_violation "$RING" ring_after_resync_save_only everyCopyIsWhole
 }
 
+replay_preemption() {
+  local REPLAY=specs/replay_preemption.qnt
+  verify "$REPLAY" replay_preemption_fixed allHold
+  expect_violation "$REPLAY" replay_preemption_before replayEndsAtFrontier
+  expect_violation "$REPLAY" replay_preemption_before liveStartsAtFrontier
+  expect_violation "$REPLAY" replay_preemption_before replayStaysInWindow
+}
+
 solo_save() {
   local SOLO=specs/solo_save.qnt
   # The keep-baseline counterexample is 7 steps; check the gate past it.
@@ -606,6 +621,7 @@ solo_save() {
   # A save, the other player leaves, a skipped frame, they come back, the
   # next save: 7 steps (firstSaveAfterAStretchTest).
   expect_violation "$SOLO" solo_save_keep_baseline everyCopyIsWhole 8
+  expect_violation "$SOLO" solo_save_cut_feed removedSlotStaysInactive 2
 }
 
 engine_start() {
@@ -694,11 +710,11 @@ checkpoint_recovery() {
 
 SPEC_GROUPS=(
   checkpoint_recovery
-  peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops
+  peer_identity rom_transfer room_lifecycle_start room_lifecycle_drops room_disconnect_cleanup
   peer_connection streaming_connection late_join_pause resync_flow
   tick_deadlines resync_inputs resync_mesh input_transport resync_reask sync_follow_up
   rom_at_start rom_identity ring_after_resync start_group mesh_heal catch_up_wait ask_escalation escalation_push reconnect_inputs drop_is_final
-  engine_start solo_save session_log_store log_archive
+  engine_start solo_save replay_preemption session_log_store log_archive
 )
 
 # CI runs one job per shard, in parallel (lint.yml, spec-verify). Shards are
@@ -706,8 +722,8 @@ SPEC_GROUPS=(
 # whole set took 32 minutes in one job. A group added above goes in a shard
 # here; the check below fails until it does.
 SHARDS=(
-  "room_lifecycle_start engine_start solo_save checkpoint_recovery"                   # ~7 min + engine_start (~30 s) + solo_save (~40 s)
-  "room_lifecycle_drops"                                          # ~8 min
+  "room_lifecycle_start engine_start solo_save replay_preemption checkpoint_recovery"                   # ~7 min + engine_start (~30 s) + solo_save (~40 s)
+  "room_lifecycle_drops room_disconnect_cleanup"                                          # ~8 min
   "streaming_connection resync_flow tick_deadlines resync_mesh mesh_heal drop_is_final log_archive" # ~7.5 min + log_archive (~1 min)
   "peer_identity rom_transfer peer_connection rom_at_start rom_identity catch_up_wait ask_escalation escalation_push" # ~8 min
   "late_join_pause resync_inputs input_transport resync_reask ring_after_resync sync_follow_up start_group reconnect_inputs session_log_store" # ~8.5 min (reconnect_history ~1 min) + session_log_store (~3.5 min)
@@ -734,7 +750,7 @@ case "${1:-}" in
   *) run=("$@") ;;
 esac
 for group in "${run[@]}"; do
-  if ! printf '%s\n' "${SPEC_GROUPS[@]}" | grep -qx "$group"; then
+  if ! printf '%s\n' "${SPEC_GROUPS[@]}" | grep -Fx "$group" >/dev/null; then
     echo "no group $group (groups: ${SPEC_GROUPS[*]})" >&2
     exit 1
   fi

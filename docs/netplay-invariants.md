@@ -247,7 +247,8 @@ didn't change was removed in v0.43.0, after FATAL-RING-STALE at f=23410
 proved it left gaps a rollback needed.
 
 A page alone skips the save: alone in a match (at a delay of 0), or
-after every other player left (`kn_rollback_slot_reset`). No rollback
+after every other player left. A roster cut stores final inputs for replay
+without activating the removed slot (`kn_store_cut_input`). No rollback
 can come back to those frames (`specs/solo_save.qnt`,
 `noTargetLostToTheGate`). The first input for another slot starts the
 saves again from the next frame. A switch from JS's roster would not be
@@ -302,6 +303,13 @@ in CLAUDE.md for what each covers). The replay's inputs are checked
 natively: `tests/rollback-native/test_stale_prediction_flag.py`
 (specs/stale_prediction_flag.qnt) holds that a replay runs a confirmed
 input's real value.
+
+A correction that predates an active replay can rewind its cursor again.
+Both rollback limits and the replay endpoint stay relative to the original
+next live frame. Each replayed frame uses its original input tag across delay
+changes. A rejected rewind leaves the active replay running.
+[Replay preemption model](../specs/replay_preemption.qnt) and
+[native regression tests](../tests/rollback-native/test_replay_preemption.py).
 
 ### R5 — Pre-tick return value consistency
 

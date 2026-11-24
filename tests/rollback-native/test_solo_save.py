@@ -114,6 +114,52 @@ def test_saves_stop_while_the_other_player_is_gone(backend):
     rolls_back_to(backend, 4)
 
 
+def test_removal_cut_keeps_the_solo_slot_inactive_until_readmission(backend):
+    arm(backend, 1)
+    feed(backend, 0, 1)
+    tick(backend)
+    tick(backend)
+    backend.kn_rollback_slot_reset(1)
+    for tag, buttons in enumerate((1, 0, 0)):
+        backend.kn_store_cut_input(1, tag, buttons, 0, 0, 0, 0)
+    tick(backend)
+    assert not saved(backend, 2)
+    tick(backend)
+    assert not saved(backend, 3)
+    assert backend.kn_get_prediction_count() == 0
+    feed(backend, 3, 1)
+    tick(backend)
+    tick(backend)
+    assert saved(backend, 4) and saved(backend, 5)
+    feed(backend, 4, 2)
+    rolls_back_to(backend, 5)
+
+
+def test_pending_replay_keeps_the_removed_players_final_inputs(backend):
+    arm(backend, 1)
+    backend.kn_set_num_players(4)
+    for slot in (1, 2, 3):
+        backend.kn_feed_input(slot, 0, 8, 0, 0, 0, 0)
+    for _ in range(7):
+        tick(backend)
+    backend.kn_feed_input(2, 1, 4, 0, 0, 0, 0)
+    assert backend.kn_peek_pending_rollback() == 2
+
+    # A 4-to-3 roster cut arrives before P3's correction starts replaying.
+    backend.kn_rollback_slot_reset(1)
+    for tag, buttons in enumerate((8, 16, 32, 0, 0)):
+        backend.kn_store_cut_input(1, tag, buttons, 0, 0, 0, 0)
+    for frame, buttons in enumerate((16, 32, 0, 0, 0), start=2):
+        assert backend.kn_pre_tick(0, 0, 0, 0, 0, -1) == 2
+        assert backend.kn_get_frame() == frame
+        assert backend.kn_test_controller_buttons(1) == buttons
+        backend.kn_test_set_live(OWN, frame + 1)
+        assert backend.kn_post_tick() == frame + 1
+    tick(backend)
+    assert saved(backend, 7)
+    assert backend.kn_get_failed_rollbacks() == 0
+
+
 def test_an_input_for_a_frame_run_alone_rolls_nothing_back(backend):
     # inputForAnUnpredictedFrameTest: the late join primes the other slot
     # with inputs for frames the page ran while it was inactive. Nothing was

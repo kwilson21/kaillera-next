@@ -36,13 +36,25 @@ def test_invalid_shards_fail_closed():
         ["no", 8],
         ["01", 8],
         [1, 257],
-        [256, 256],
         [99999999999999999999999999999, 8],
         [1, 99999999999999999999999999999],
         [1, 8, "extra"],
     ]:
         result = subprocess.run(["bash", str(SCRIPT), "--shard", *map(str, args)], capture_output=True, check=False)
         assert result.returncode == 2
+
+
+def test_last_supported_shard_fails_only_when_it_is_empty():
+    full = plan()
+    # Commands of each kind are dealt independently across the 256 lanes.
+    counts = collections.Counter(command[0] for command in full)
+    result = subprocess.run(["bash", str(SCRIPT), "--list", "--shard", "256", "256"], capture_output=True, text=True)
+    if max(counts.values()) < 256:
+        assert result.returncode == 2
+        assert "selected no checks" in result.stderr
+    else:
+        assert result.returncode == 0
+        assert result.stdout.strip()
 
 
 def test_execution_matches_plan_and_propagates_failure():
