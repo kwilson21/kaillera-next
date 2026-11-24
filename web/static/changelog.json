@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.72.6",
+    "date": "2026-11-24",
+    "changes": [
+      {
+        "type": "fix",
+        "message": "preserve matches and peer connections across lifecycle races (#335)"
+      }
+    ]
+  },
+  {
     "version": "0.72.5",
     "date": "2026-11-24",
     "changes": [
