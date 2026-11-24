@@ -77,7 +77,7 @@ def test_an_answer_being_decoded_holds_the_deadline_off_for_a_bounded_time():
     assert "} finally {\n      _syncDecodes--;" in wrap
     # Both ways an answer arrives decode inside it.
     chunks = _body(
-        src, "const handleSyncChunksComplete = async (ownsAssembly = () => true) => {"
+        src, "const handleSyncChunksComplete = async ("
     )
     assert (
         "await _decodingSyncAnswer(async () => {\n        const decompressed = await decompressState(assembled);"
@@ -105,7 +105,7 @@ def test_the_owed_resync_ends_when_a_host_state_is_applied_or_the_match_ends():
     src = LOCKSTEP_JS.read_text()
     apply = _body(
         src,
-        "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {",
+        "const applySyncState = (",
     )
     assert apply.index("_lastAppliedSyncHostFrame = frame;") < apply.index("_owedResync = false;")
     stop_sync = _body(src, "const stopSync = () => {")

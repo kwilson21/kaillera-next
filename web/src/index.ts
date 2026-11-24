@@ -38,6 +38,7 @@ import { admissionFloor, cutTag, firstDiffering, NO_INPUT_TAKEN, rerunStep, word
 import { cutInputAt, encodeRosterCut, packInput, parseRosterCut } from './removed-input-wire.ts';
 import { framesToSendAgain } from './input-resend.ts';
 import { admittedLate, bridgeOffered, joinerHoldsOwnInput, legacyBootstrap } from './late-join-input-rule.ts';
+import { keepsCoreSlot } from './peer-reset.ts';
 import {
   collectLateJoinInputBridge,
   decodeLateJoinInputBridge,
@@ -134,7 +135,7 @@ import {
   missedDeliveryStep,
   resyncDeadlineStep,
 } from './resync-request.ts';
-import { meshHealTargets } from './roster.ts';
+import { meshHealTargets, rosterPeers } from './roster.ts';
 import { classifyRunnerStep } from './runner-step.ts';
 import { installSite, KNSite } from './site/index.ts';
 import { installSafeStorage } from './site/storage.ts';
@@ -381,6 +382,13 @@ export const KNCore = {
    * specs/late_join_input_agreement.qnt).
    */
   lateJoinInput: { admittedLate, bridgeOffered, joinerHoldsOwnInput, legacyBootstrap },
+  /**
+   * Whether a peer's reset keeps the C engine's slot: the same player goes on
+   * in the same slot, so its late real inputs are still checked against what
+   * this page predicted (peer-reset.ts, proved; specs/reconnect_inputs.qnt,
+   * reconnect_history).
+   */
+  peerReset: { keepsCoreSlot },
   framesToAskFor,
   framesToSendAgain,
   collectLateJoinInputBridge,
@@ -439,6 +447,8 @@ export const KNCore = {
     sayUntilHeard,
   },
   meshHealTargets,
+  /** Which roster entries are this page's peers: never its own, by socket id, slot or player id (roster.ts, proved). */
+  rosterPeers,
   normalizeAxis,
   peerFacts,
   peerTiming: PEER_TIMING,

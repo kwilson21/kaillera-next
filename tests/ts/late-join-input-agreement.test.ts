@@ -45,7 +45,13 @@ type Page = {
 };
 
 function page(opts: { slot: number; remix: boolean; scheduled: boolean; frame: number; frontier?: number }): Page {
-  const c = vm.createContext({ api, ZERO, opts });
+  const c = vm.createContext({
+    _hostReconnectBlocksNativeCapture: () => false,
+    _hostReconnectFenceVersion: 0,
+    api,
+    ZERO,
+    opts,
+  });
   vm.runInContext(
     `
     const window={KNCore:api};

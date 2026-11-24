@@ -52,6 +52,7 @@ function setup(mode: Mode = 'normal') {
       const _askForMissingInputs=()=>{},setStatus=()=>{},_config={},queueMicrotask=()=>{},stop=()=>{};
       const _syncEnabled=true,_lockstepStartStateKind=mode==='kn-sync'?'kn-sync':'savestate';
       let _resyncRequestInFlight=false,_resyncRequestId=0;
+      const _reconnectAnswerDebt=null;
       const _beginResyncRequest=()=>{_resyncRequestInFlight=true;return ++_resyncRequestId};
       ${part('  const _sendResyncRequest =', '  // The resync request rules')}
       ${part('  let _lateJoinOriginalWait = null;', '  async function sendLateJoinState')}

@@ -16,7 +16,7 @@ async function initialStateStoppedDuringSidecar(helperSource: string) {
     let _phase=1, emitted=0, retryCalls=0, compressCalls=0;
     const PHASE_LOCKSTEP_READY=2, _playerSlot=0, _rttComplete=false, _config=null;
     let _guestStateBytes=null, _guestStateKind=null, _guestStateHiddenWords=null;
-    let _guestStateAudioFifo=null, _guestStateCapturedLocally=false;
+    let _guestStateAudioFifo=null, _guestStateHle=null, _guestStateCapturedLocally=false;
     const window={EJS_emulator:{gameManager:{Module:{}}}};
     const waitForSmashTitleState=async()=>{};
     const _captureInitialStateBytes=()=>({bytes:new Uint8Array([1]),kind:'kn-sync'});
@@ -31,6 +31,7 @@ async function initialStateStoppedDuringSidecar(helperSource: string) {
       throw new DOMException('Match stopped','AbortError');
     };
     ${helperSource}
+    ${between('  const _resyncExtrasFields =', '  const _resyncExtrasFromFields =')}
     ${between('  async function sendInitialState()', "  // The host's own starting state failed")}
     globalThis.pending=sendInitialState();
   `,

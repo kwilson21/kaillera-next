@@ -227,25 +227,12 @@ Count (`kn_get_cycle_time_ms`) unchanged across the call and no
 successor runner scheduled — while `EJS_emulator.paused` stays false;
 the old code counted the frame anyway, a silent one-tick desync.
 
-Root cause: `enterManualMode()`'s `overrideRAF` interceptor captured
-ANY callback passed to `requestAnimationFrame` as `_pendingRunner`,
-not just Emscripten's main-loop runner. Page UI code that calls
-`requestAnimationFrame` during a match — `toggleMoreDropdown` in
-play.js, `_openModal` in feedback.js — overwrote `_pendingRunner` with
-its own callback; the next `stepOneFrame()` ran that UI callback
-instead of emulating, and the real runner was lost. Fixed by having
-the interceptor capture only Emscripten's runner
-(`KNShared.isMainLoopRunner`, matched by `cb.name ===
-'MainLoop_runner'`) and pass every other callback straight to the
-native `requestAnimationFrame` (`APISandbox.nativeRAF`). `stepOneFrame()`
-still detects the no-op signature (no runner rescheduled AND
-`kn_get_cycle_time_ms` unchanged across the call, when the core exports
-it), recaptures the runner, and re-steps the SAME frame once, as a
-safety net for any other cause of a stale runner. If the retry still
-does not emulate, `stepOneFrame()` returns `false` like the no-runner
-case above, so the frame is never counted — R2's `REPLAY-NORUN` logging
-applies identically whether the cause was "no runner at all" or "stale
-runner exhausted its retry."
+The bundled core gives the manual scheduler the current runner for rAF,
+timers, immediates and blocker continuations. A stale generation returns
+before taking a blocker. A counted step requires dispatch into the core
+and CP0 movement when available. These signals establish progress, not
+an exact VI count. Older cores use the name-filtered rAF interceptor and
+retry a stale runner once.
 
 ### R3 — Ring coverage within the rollback window
 

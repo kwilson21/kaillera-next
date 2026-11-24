@@ -217,6 +217,7 @@ def _answer_direct(
     script = textwrap.dedent(
         f"""
         const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        const _holdReconnectHostAnswer = () => false; // ordinary path; the guarded path has its own fixture
         globalThis.window = {{
           EJS_emulator: {{ gameManager: {{ Module: {{}} }} }},
           KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }},
@@ -409,6 +410,7 @@ def _socket_request(src_text):
     script = textwrap.dedent(
         f"""
         const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        const _holdReconnectHostAnswer = () => false; // ordinary path; the guarded path has its own fixture
         globalThis.window = {{ KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }} }};
         const _syncLog = () => {{}};
         const _playerSlot = 0, PHASE_RUNNING = 'running', _phase = 'running';
@@ -472,6 +474,7 @@ def test_only_the_newest_direct_answer_schedules_the_follow_up():
     script = textwrap.dedent(
         f"""
         const {{ directFollowUpDue, directWatchIsStale }} = await import('./web/src/sync-follow-up.ts');
+        const _holdReconnectHostAnswer = () => false; // ordinary path; the guarded path has its own fixture
         globalThis.window = {{ KNCore: {{ syncFollowUp: {{ directFollowUpDue, directWatchIsStale }} }} }};
         const _syncLog = () => {{}};
         const _peers = {{ g: {{ slot: 1 }} }};

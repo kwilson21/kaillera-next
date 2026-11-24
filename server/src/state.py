@@ -77,6 +77,13 @@ def _deserialize_room(d: dict):
         input_types=d.get("input_types", {}),
         device_types=d.get("device_types", {}),
         match_id=d.get("match_id"),
+        recovery_unverified_match_id=(
+            d.get("match_id")
+            if d.get("status") == "playing"
+            and mode_value in ("rollback", "lockstep")
+            and d.get("recovery_unverified_match_id") == d.get("match_id")
+            else None
+        ),
         listed=bool(d.get("listed", False)) and d.get("password") is None,
         started_at=d.get("started_at"),
         waiting_for_state=set(d.get("waiting_for_state", [])),

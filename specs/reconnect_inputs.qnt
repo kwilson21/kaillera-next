@@ -39,16 +39,17 @@
 // edge stall (peerHas, considered) changes no outcome here
 // (heardAheadOnlyTest).
 //
-// KEEPS_HISTORY: on the scheduled roster rule the reset (de361fd) puts back
-//   the inputs the frames still in the ring ran with, re-fed as real ones
-//   (_ringInputsRan), so the C slot can be active right after it: frames run
-//   on a missing input then record a prediction. The first-input wait is
-//   JS's (_awaitFirstInputAfterReset, cleared by the first input taken in
-//   through _feedWatched; the re-feed goes through _feedWatchedFrame and does
-//   not clear it), so it is `firstTaken`, apart from `cActive`. Nothing here
-//   changes: the property holds with it (reconnect_inputs_keeps_history).
-//   What the re-fed inputs do to the frames run before the reset is
-//   `reconnect_history`, below.
+// KEEPS_HISTORY: the C slot can be active right after the reset: on the
+//   scheduled roster rule the reset of de361fd put back the inputs the
+//   frames still in the ring ran with, re-fed as real ones (_ringInputsRan),
+//   and today a reconnect keeps the C slot as it is (_resetCoreSlot), active
+//   if it was. Frames run on a missing input then record a prediction. The
+//   first-input wait is JS's (_awaitFirstInputAfterReset, cleared by the
+//   first input taken in through _feedWatched; the re-feed went through
+//   _feedWatchedFrame and did not clear it), so it is `firstTaken`, apart
+//   from `cActive`. Nothing here changes: the property holds with it
+//   (reconnect_inputs_keeps_history). What the reset does to the frames run
+//   before it is `reconnect_history`, below.
 //
 // What is modelled: one peer, after the reset; frames from 0; the peer's
 // inputs as a contiguous prefix this page has (`have`); the peer heard as
@@ -199,7 +200,8 @@ module reconnect_inputs_fixed {
   import reconnect_inputs(WAIT_FIRST_INPUT = true, KEEPS_HISTORY = false).*
 }
 
-// The fix with the reset that keeps history (de361fd, the scheduled rule).
+// The fix with a reset that leaves the C slot active (de361fd on the
+// scheduled rule; today a reconnect that keeps the C slot).
 module reconnect_inputs_keeps_history {
   import reconnect_inputs(WAIT_FIRST_INPUT = true, KEEPS_HISTORY = true).*
 }
@@ -207,9 +209,9 @@ module reconnect_inputs_keeps_history {
 // ── The frames run before the reset ───────────────────────────────────────
 //
 // What a reconnect reset does to the frames this page ran for the peer
-// before it: the C slot's input ring (kn_rollback_slot_reset, the re-feed in
-// resetPeerState) and what C checks when the peer's real inputs come after
-// the reset (kn_feed_input).
+// before it: the C slot's input ring (_resetCoreSlot in resetPeerState:
+// kn_rollback_slot_reset and the re-feed, or nothing) and what C checks when
+// the peer's real inputs come after the reset (kn_feed_input).
 //
 // C checks a real input only against a recorded prediction
 // (rb_is_prediction_of): a frame run on a prediction is corrected when the
@@ -221,23 +223,36 @@ module reconnect_inputs_keeps_history {
 // are fed to C again).
 //
 // RESET:
-//   "empty" (before de361fd, and the immediate rule today):
+//   "empty" (before de361fd, and the immediate rule until the fix):
 //     kn_rollback_slot_reset empties the slot: no entry, no prediction, the
 //     slot inactive. A frame run before it on a prediction is not checked
 //     when its real input comes, and a replay of a frame before it runs it
 //     neutral (the slot inactive) and records nothing.
-//   "asReal" (de361fd, the scheduled rule): _ringInputsRan reads the entries
+//   "asReal" (de361fd to the fix, the scheduled rule): _ringInputsRan reads the entries
 //     of the tags the frames still in the ring ran with (kn_get_input: the
 //     value, prediction or not), the slot is reset, and each goes back in
 //     through kn_feed_input as a real input. A replay runs them again
 //     unchanged, but a prediction among them is now a real input: the peer's
 //     real input for that tag, when it comes, is stored over it with no
 //     check, and the frame that ran on the prediction is never corrected.
-//   "kept" (the fix): a reconnect (the same player in the same slot) does
-//     not reset the C slot: its entries, their prediction records, the slot
-//     active and its newest real input stay, so every frame run on a
-//     prediction is checked when the real input comes, and a replay runs
-//     the real entries again unchanged.
+//   "kept" (the fix, today on both rules): a reconnect (the same player in
+//     the same slot: reasons reconnect, mesh-heal, hard-disconnect-non-host,
+//     while the roster lists the slot; KNCore.peerReset.keepsCoreSlot,
+//     web/src/peer-reset.ts) does not reset the C slot: its entries, their
+//     prediction records, the slot active and its newest real input stay, so
+//     every frame run on a prediction is checked when the real input comes,
+//     and a replay runs the real entries again unchanged. JS still forgets
+//     what it held of the peer (I2) and waits for its first input.
+//     Only for a peer this page did not hold as a phantom: the frame-ahead
+//     stall keeps every frame run on its prediction inside the window (W
+//     here). A phantom (PEER-PHANTOM, after the stall's deadline) runs on
+//     predictions past the window by design, and the resync after the
+//     reconnect is its recovery; its reset empties the slot as before. Kept,
+//     the peer's backlog, asked for tag by tag, mispredicted against those
+//     frames one rollback after another past what the ring holds
+//     (FATAL-RING-STALE, a two-player Smash Remix run with a 17 s outage).
+//     Not modelled here: the phantom and its resync (specs/tick_deadlines.qnt,
+//     specs/resync_flow.qnt).
 //
 // The property: this page never has run a frame for the peer with an input
 // the peer did not make unless C holds that input as a recorded prediction
@@ -470,14 +485,21 @@ module reconnect_history {
       .expect(if (RESET == "empty") not(allHold) and ran.get(0) == 0 else allHold and ran.get(0) == 1)
 }
 
-// Before de361fd (and on the immediate rule): the reset empties the slot.
+// Before de361fd (and on the immediate rule until the fix): the reset
+// empties the slot.
 module reconnect_history_before {
   import reconnect_history(RESET = "empty").*
 }
 
-// Today on the scheduled rule: the ring's inputs go back in as real ones.
-module reconnect_history_current {
+// de361fd to the fix, on the scheduled rule: the ring's inputs go back in as
+// real ones.
+module reconnect_history_as_real {
   import reconnect_history(RESET = "asReal").*
+}
+
+// Today: a reconnect keeps the C slot (_resetCoreSlot, KNCore.peerReset).
+module reconnect_history_current {
+  import reconnect_history(RESET = "kept").*
 }
 
 // The fix: a reconnect keeps the C slot.

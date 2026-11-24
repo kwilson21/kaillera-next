@@ -306,11 +306,7 @@ def test_a_lost_host_resync_that_goes_unanswered_is_asked_again_up_to_a_bound():
     )
 
     # Cleared when a host state is applied.
-    apply = src[
-        src.index(
-            "const applySyncState = (bytes, frame, fromProactive = false, recoveryId = 0, extras = null) => {"
-        ) :
-    ]
+    apply = src[src.index("const applySyncState = (") :]
     apply = apply[: apply.index("\n  };\n")]
     assert apply.index("_lastAppliedSyncHostFrame = frame;") < apply.index("_lateJoinLostHost = false;")
 
