@@ -229,3 +229,40 @@ test('window.KNDiag measures, crops and logs what kn-diagnostics.js did', () => 
   const solid = seen.health.map((h) => h !== null && !('error' in h) && h.solidPale);
   assert.ok(solid.includes(true) && solid.includes(false));
 });
+
+test('neutral input reports touch activity at the gap and when input resumes', () => {
+  const window: DiagWindow = {
+    KNCapture: { allowed: () => false },
+    KNAudio: { ctx: { state: 'running' } },
+    addEventListener: () => undefined,
+  };
+  const document = { hasFocus: () => true };
+  vm.runInContext(pageScript(), vm.createContext({ window, document, navigator: {} }));
+  const diag = window.KNDiag ?? assert.fail('missing diagnostics');
+  const messages: string[] = [];
+  let frame = 360;
+  diag.init({ log: (line) => messages.push(line), getFrame: () => frame, getSlot: () => 1 });
+  const neutral = { buttons: 0, lx: 0, ly: 0, cx: 0, cy: 0 };
+  const pressed = { ...neutral, buttons: 1 };
+
+  diag.checkFreeze(pressed);
+  frame = 361;
+  diag.notePadTouch('cancel');
+  frame = 600;
+  diag.notePadTouch('start');
+  frame = 660;
+  diag.checkFreeze(neutral);
+  assert.match(messages[0] ?? '', /INPUT-DEAD .*padStart=600 padMove=-1 padCancel=361$/);
+  frame = 667;
+  diag.notePadTouch('move');
+  frame = 720;
+  diag.checkFreeze(pressed);
+  assert.match(messages[1] ?? '', /INPUT-RESUMED .*padStart=600 padMove=667 padCancel=361$/);
+
+  diag.cleanup();
+  frame = 360;
+  diag.checkFreeze(pressed);
+  frame = 660;
+  diag.checkFreeze(neutral);
+  assert.doesNotMatch(messages[2] ?? '', /padStart/);
+});

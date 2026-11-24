@@ -629,12 +629,14 @@ export const createShared = () => {
 
     // 3. Touch/virtual gamepad (mobile)
     const touch = state.touchInput;
-    const ejs = page().EJS_emulator;
+    const { EJS_emulator: ejs, _kn_ejsTouchDisabled: ejsTouchDisabled } = page();
+    // The EmulatorJS toolbar can reopen during play. Its visibility only
+    // controls touch input when EmulatorJS owns the touch controls.
     const ejsMenuOpen =
       ejs &&
       (ejs.settingsMenuOpen ||
         ejs.isPopupOpen?.() ||
-        (ejs.elements?.menu && !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden')));
+        (!ejsTouchDisabled && ejs.elements?.menu && !ejs.elements.menu.classList.contains('ejs_menu_bar_hidden')));
     if (ejsMenuOpen) {
       for (const ck in touch) {
         if (Object.hasOwn(touch, ck)) touch[ck] = 0;
