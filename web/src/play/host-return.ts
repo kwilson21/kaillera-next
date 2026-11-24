@@ -1,4 +1,5 @@
 import type { SafeStorage } from '../kn-state.ts';
+import type { UsersUpdated } from '../protocol.ts';
 import { getJSONIfThere, isRoomAnswer, type RoomAnswer } from '../landing/wire.ts';
 import { tokenClaims } from './token-claims.ts';
 
@@ -198,11 +199,22 @@ export class RoomIdentity {
     else if (player) this.rememberPlayer(returning?.persistentId ?? this.persistentId);
   }
 
-  acceptReturn(host: HostReturn): void {
-    this.persistentId = host.persistentId;
-    if (!this.hasRoomToken()) this.reconnectToken = host.token;
+  acceptReturnFromRoster(
+    seat: HostReturn & { role: 'host' | 'player' },
+    roster: Pick<UsersUpdated, 'players' | 'owner'> | null | undefined,
+    socketId: string | undefined,
+  ): boolean {
+    if (
+      !socketId ||
+      roster?.players?.[seat.persistentId]?.socketId !== socketId ||
+      (seat.role === 'host') !== (roster.owner === socketId)
+    )
+      return false;
+    this.persistentId = seat.persistentId;
+    if (!this.hasRoomToken()) this.reconnectToken = seat.token;
     this.storage.set('sessionStorage', 'kn-player-id', this.persistentId);
     this.storage.set('sessionStorage', this.tokenKey, this.reconnectToken);
+    return true;
   }
 }
 

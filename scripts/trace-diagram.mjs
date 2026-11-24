@@ -65,6 +65,13 @@ const SPECS = [
     about: 'A guest waits when the host is absent and its direct game connection stops delivering input.',
   },
   {
+    file: 'specs/room_member_return.qnt',
+    main: 'room_return_identity_fixed',
+    hub: 'Guest',
+    runs: ['rosterBeforeReturnAcknowledgementTest'],
+    about: 'A returning guest adopts the original player identity before the room shows their controller slot.',
+  },
+  {
     file: 'specs/game_end.qnt',
     main: 'game_end_fixed',
     hub: 'Room',

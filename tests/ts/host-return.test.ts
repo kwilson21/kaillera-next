@@ -98,7 +98,25 @@ test('a declined return gets a separate seat, and a refused older credential can
   seat.forgetHost();
   assert.equal(seat.savedHost()?.token, renewed);
   seat.receiveToken(renewed, offer, true);
-  seat.acceptReturn(offer);
+  const proposed = { ...offer, role: 'host' } as const;
+  const roster = {
+    owner: 'local',
+    players: {
+      [pid]: {
+        socketId: 'local',
+        slot: 0,
+        playerName: 'Host',
+        romReady: true,
+        inputType: 'keyboard',
+        deviceType: 'desktop',
+      },
+    },
+  };
+  assert.equal(seat.acceptReturnFromRoster(proposed, roster, 'other'), false);
+  assert.equal(seat.acceptReturnFromRoster(proposed, { ...roster, owner: 'other' }, 'local'), false);
+  assert.equal(seat.acceptReturnFromRoster(proposed, { ...roster, players: {} }, 'local'), false);
+  assert.notEqual(seat.persistentId, pid);
+  assert.equal(seat.acceptReturnFromRoster(proposed, roster, 'local'), true);
   assert.equal(seat.persistentId, pid);
   assert.equal(seat.reconnectToken, renewed);
   seat.forgetHost();

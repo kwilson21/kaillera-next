@@ -1398,14 +1398,10 @@
             if (recoverMatchId && !returning) _returningSeat = null;
             if (joinData) showHostWait(joinData);
             if (returning) {
-              if (
-                joinData?.players?.[returning.persistentId]?.socketId !== sid ||
-                (returning.role === 'host') !== (joinData.owner === sid)
-              ) {
+              if (!_identity.acceptReturnFromRoster(returning, joinData, sid)) {
                 showError('The server could not confirm your seat.');
                 return;
               }
-              _identity.acceptReturn(returning);
               _returningSeat = null;
             } else if (joinData?.owner && joinData.owner !== sid && savedHost?.persistentId === joiner.persistentId) {
               _identity.discardRefused(savedHost.token);
@@ -1600,6 +1596,8 @@
 
   const onUsersUpdated = (data) => {
     if (_leavingRoom) return;
+    // Admission broadcasts can arrive before the acknowledgement. Publish the seat with its verified identity.
+    if (_returningSeat && !_identity.acceptReturnFromRoster(_returningSeat, data, socket.id)) return;
     lastUsersData = data;
     showHostWait(data);
     if (data.resumePending === false && data.matchId) _matchReturn?.finish(data.matchId, true);

@@ -82,6 +82,22 @@ sequenceDiagram
   Note over Guest: age = 2
 ```
 
+## `specs/room_member_return.qnt` (`room_return_identity_fixed`)
+
+A returning guest adopts the original player identity before the room shows their controller slot.
+
+### rosterBeforeReturnAcknowledgementTest
+
+```mermaid
+sequenceDiagram
+  participant Guest
+  Guest->>Guest: roster(false)
+  Guest->>Guest: roster(true)
+  Note over Guest: page = {ack: false, identity: member, visible: true}
+  Guest->>Guest: acknowledged
+  Note over Guest: page = {ack: true, identity: member, visible: true}
+```
+
 ## `specs/game_end.qnt` (`game_end_fixed`)
 
 A host end request waits for the server rather than ending only the host on timeout. The authoritative lobby roster repairs a lost end event, and a delayed request cannot end a rematch.

@@ -162,3 +162,27 @@ module room_host_traffic_before {
 module room_host_traffic_fixed {
   import room_host_traffic(REQUIRE_TRAFFIC = true).*
 }
+
+// A room may broadcast its roster before acknowledging the returning tab's
+// join. A visible seat and its persisted identity must agree in both orders.
+module room_return_identity {
+  const BIND_BEFORE_PUBLISH: bool
+  var page: { identity: str, visible: bool, ack: bool }
+  action init = page' = { identity: "temporary", visible: false, ack: false }
+  action roster(matchesSeat: bool): bool =
+    if (matchesSeat)
+      page' = page.with("visible", true).with("identity", if (BIND_BEFORE_PUBLISH) "member" else page.identity)
+    else page' = page
+  action acknowledged = page' = { identity: "member", visible: true, ack: true }
+  action step = any { roster(true), roster(false), acknowledged }
+  val visibleSeatHasItsIdentity = not(page.visible) or page.identity == "member"
+  run rosterBeforeReturnAcknowledgementTest = init.then(roster(false)).expect(not(page.visible))
+    .then(roster(true)).expect(visibleSeatHasItsIdentity == BIND_BEFORE_PUBLISH).then(acknowledged).expect(page.ack)
+  run returnAcknowledgementBeforeRosterTest = init.then(acknowledged).then(roster(true)).expect(visibleSeatHasItsIdentity)
+}
+module room_return_identity_before {
+  import room_return_identity(BIND_BEFORE_PUBLISH = false).*
+}
+module room_return_identity_fixed {
+  import room_return_identity(BIND_BEFORE_PUBLISH = true).*
+}

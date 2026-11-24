@@ -209,8 +209,24 @@ def test_guest_returns_first_to_empty_fight_then_leaves_their_seat(browser, serv
         expect(offer).to_be_visible()
         before = guest.request.get(lookup).json()
         assert before["status"] == "playing" and before["hostReturnDeadline"] > before["serverTime"]
+        # Let the server's real roster and credentials reach the new tab before its join acknowledgement.
+        guest.add_init_script("""document.addEventListener('load', ({ target }) => {
+            if (!(target instanceof HTMLScriptElement) || !target.src.includes('/socket.io.min.js')) return;
+            const emit = io.Socket.prototype.emit;
+            io.Socket.prototype.emit = function(event, ...args) {
+                if (event === 'join-room' && args[0]?.extra?.returnPlayer) {
+                    const ack = args.pop();
+                    args.push((...reply) => { window.finishSeatReturn = () => ack(...reply); });
+                }
+                return emit.call(this, event, ...args);
+            };
+        }, true);""")
         offer.click()
-        guest.wait_for_function("window.KNState?.slot === 1 && !KNState.isLocalHost")
+        guest.wait_for_function("typeof window.finishSeatReturn === 'function'")
+        assert guest.evaluate("[KNState.slot, KNState.isLocalHost, sessionStorage.getItem('kn-player-id')]") == [
+            1, False, guest_id,
+        ]
+        guest.evaluate("window.finishSeatReturn()")
         assert guest.evaluate("sessionStorage.getItem('kn-player-id')") == guest_id
         expect(guest.locator("#overlay")).to_be_visible()
         expect(guest.locator("#host-wait-banner [role=timer]")).to_be_visible()
