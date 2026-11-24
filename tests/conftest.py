@@ -3,7 +3,9 @@
 import contextlib
 import os
 import secrets
+import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -123,30 +125,43 @@ def server_url():
         except Exception:
             pass
 
-    # No server running — start one
-    env = {**os.environ, "DISABLE_RATE_LIMIT": "1", "DISABLE_HTTPS": "1", "PORT": os.environ.get("KN_TEST_PORT", "27888")}
-    proc = subprocess.Popen(
-        ["python", "-c", "from src.main import run; run()"],
-        cwd=SERVER_DIR,
-        env=env,
+    yield from _start_test_server(int(os.environ.get("KN_TEST_PORT", "27888")))
+
+
+@pytest.fixture(scope="session")
+def short_host_return_url(tmp_path_factory):
+    """An isolated server where browser tests can observe actual host reservation expiry."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    yield from _start_test_server(
+        port,
+        HOST_RETURN_GRACE_SECONDS="5",
+        DB_PATH=str(tmp_path_factory.mktemp("host-return") / "rooms.db"),
+        D1_DATABASE_ID="",
+        D1_API_TOKEN="",
+        REDIS_URL="",
+        REDIS_PASSWORD="",
     )
-    actual_url = SERVER_URL
-    for _ in range(30):
-        for url in [SERVER_URL, SERVER_URL.replace("http://", "https://")]:
+
+
+def _start_test_server(port, **settings):
+    env = {**os.environ, "DISABLE_RATE_LIMIT": "1", "DISABLE_HTTPS": "1", "PORT": str(port), **settings}
+    url = f"http://localhost:{port}"
+    proc = subprocess.Popen([sys.executable, "-c", "from src.main import run; run()"], cwd=SERVER_DIR, env=env)
+    try:
+        for _ in range(30):
+            if proc.poll() is not None:
+                pytest.fail(f"Server exited with status {proc.returncode}")
             try:
-                r = requests.get(f"{url}/health", timeout=1, verify=False)
-                if r.status_code == 200:
-                    actual_url = url
+                if requests.get(f"{url}/health", timeout=2).status_code == 200:
                     break
-            except Exception:
+            except requests.RequestException:
                 pass
-        else:
             time.sleep(0.5)
-            continue
-        break
-    else:
+        else:
+            pytest.fail("Server did not start within 15 seconds")
+        yield url
+    finally:
         proc.terminate()
-        pytest.fail("Server did not start within 15 seconds")
-    yield actual_url
-    proc.terminate()
-    proc.wait()
+        proc.wait()

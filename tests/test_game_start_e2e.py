@@ -38,6 +38,7 @@ branches over every input.
 Run: pytest tests/test_game_start_e2e.py -v   (needs the server running)
 """
 
+import pytest
 from playwright.sync_api import expect
 
 ROM = {"name": "test.z64", "mimeType": "application/octet-stream", "buffer": bytes(i % 251 for i in range(200_000))}
@@ -173,6 +174,137 @@ def test_players_play_and_a_spectator_watches_then_all_return_to_the_lobby(brows
     finally:
         for page in pages:
             page.close()
+
+
+def _start_room(host, guest):
+    for page in (host, guest):
+        _load_rom(page)
+    expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+    host.click("#start-btn")
+    for page in (host, guest):
+        _in_match(page)
+
+
+@pytest.mark.parametrize("entry", ["reload", "join-link"])
+def test_host_navigation_keeps_the_match_unless_confirmed(browser, server_url, room, entry):
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _start_room(host, guest)
+        match_id = guest.evaluate("KNState.matchId")
+        assert host.evaluate("getComputedStyle(document.scrollingElement).overscrollBehavior") == "none"
+        assert guest.evaluate("window.dispatchEvent(new Event('beforeunload', {cancelable: true}))")
+
+        navigate = (
+            "() => setTimeout(() => location.reload(), 0)"
+            if entry == "reload"
+            else "() => setTimeout(() => location.assign(location.pathname + '?room=' + new URLSearchParams(location.search).get('room')), 0)"
+        )
+        with host.expect_event("dialog") as pending:
+            host.evaluate(navigate)
+        assert pending.value.type == "beforeunload"
+        pending.value.dismiss()
+        assert host.evaluate("KNState.matchId") == match_id
+        assert guest.evaluate("KNState.matchId") == match_id
+
+        host.add_init_script(_RECORD_EVENTS)
+        with host.expect_navigation():
+            with host.expect_event("dialog") as pending:
+                host.evaluate(navigate)
+            pending.value.accept()
+
+        for page in (host, guest):
+            expect(page.locator("#host-reload-notice")).to_be_visible(timeout=10000)
+            expect(page.locator("#overlay")).to_be_visible()
+            assert page.evaluate("KNState.matchId") is None
+            assert page.evaluate("window.dispatchEvent(new Event('beforeunload', {cancelable: true}))")
+        expect(host.locator("#host-controls")).to_be_visible()
+        expect(guest.locator("#host-controls")).to_be_hidden()
+        assert "room_created" not in host.evaluate("window.__events")
+
+        expect(host.locator("#start-btn")).to_be_enabled(timeout=10000)
+        host.click("#start-btn")
+        for page in (host, guest):
+            _in_match(page)
+            assert page.evaluate("KNState.matchId") != match_id
+            expect(page.locator("#host-reload-notice")).to_be_hidden()
+    finally:
+        host.close()
+        guest.close()
+
+
+@pytest.mark.parametrize("entry", ["retry", "invite", "home"])
+def test_closed_host_tab_returns_from_a_new_tab_without_displacing_a_live_host(browser, server_url, room, entry):
+    url = f"{server_url}/play.html?room={room}"
+    with browser.new_context() as context:
+        context.add_init_script("window.__test_skipBoot = true")
+        host = context.new_page()
+        host.goto(f"{url}&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible()
+        guest = _open(browser, f"{url}&name=Guest")
+        try:
+            _start_room(host, guest)
+            match_id = guest.evaluate("KNState.matchId")
+            duplicate = context.new_page()
+            duplicate.goto(url)
+            expect(duplicate.get_by_role("button", name="Join separately")).to_be_visible()
+            expect(duplicate.get_by_role("button", name="Return as host")).to_have_count(0)
+            assert guest.evaluate("KNState.matchId") == match_id
+            assert host.evaluate("KNState.isLocalHost")
+
+            host.close()
+            if entry == "retry":
+                replacement = duplicate
+                replacement.get_by_role("button", name="Return as host").click(timeout=15000)
+            else:
+                duplicate.close()
+                replacement = context.new_page()
+                if entry == "invite":
+                    replacement.goto(f"{server_url}/join?room={room}")
+                    replacement.get_by_role("link", name="Return to room").click()
+                else:
+                    replacement.goto(server_url)
+                    replacement.get_by_role("link", name="Return to room", exact=True).click()
+            expect(replacement.locator("#host-controls")).to_be_visible()
+            expect(replacement.locator("#host-reload-notice")).to_be_visible()
+            expect(guest.locator("#host-reload-notice")).to_be_visible()
+            expect(replacement.locator("#start-btn")).to_be_enabled(timeout=10000)
+            replacement.click("#start-btn")
+            for page in (replacement, guest):
+                _in_match(page)
+                expect(page.locator("#overlay")).to_be_hidden()
+                expect(page.locator("#host-reload-notice")).to_be_hidden()
+            rematch_id = replacement.evaluate("KNState.matchId")
+            assert rematch_id != match_id
+            assert guest.evaluate("KNState.matchId") == rematch_id
+        finally:
+            guest.close()
+
+
+def test_host_can_cancel_or_confirm_leaving_an_active_room(browser, server_url, room):
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        _start_room(host, guest)
+        match_id = guest.evaluate("KNState.matchId")
+        host.locator("#toolbar-leave").dispatch_event("click")
+        dialog = host.get_by_role("dialog", name="Leave this game?")
+        expect(dialog).to_be_visible()
+        expect(dialog.get_by_role("button", name="Stay in game")).to_be_focused()
+        host.keyboard.press("Escape")
+        expect(dialog).to_be_hidden()
+        assert host.evaluate("KNState.matchId") == match_id
+        assert guest.evaluate("KNState.matchId") == match_id
+        host.locator("#toolbar-leave").dispatch_event("click")
+        with host.expect_navigation():
+            dialog.get_by_role("button", name="Leave room").click()
+        assert host.url == f"{server_url}/"
+        expect(host.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+        assert host.evaluate("room => localStorage.getItem('kn-host-return:' + room)", room) is None
+        guest.wait_for_function("() => window.KNState.isLocalHost", timeout=10000)
+        response = guest.request.get(f"{server_url}/room/{room}")
+        assert response.ok and response.json().get("hostReturnDeadline") is None
+    finally:
+        host.close()
+        guest.close()
 
 
 def test_a_guest_without_the_rom_keeps_the_hosts_offer_up_when_the_game_starts(browser, server_url, room):
@@ -822,6 +954,7 @@ _RECORD_ENGINE_STARTS = """() => {
     const init = engine.init.bind(engine);
     engine.init = (config) => {
         window.__engineStarts.push(!!config.lateJoin);
+        window.__lostHost = config.onLeftOutOfStart;
         return init(config);
     };
 }"""
@@ -1080,3 +1213,63 @@ def test_a_left_out_word_from_a_guest_is_dropped(browser, server_url, room):
         host.close()
         guest.close()
         other.close()
+
+
+@pytest.mark.parametrize("host_return", ["reconnect", "reload"])
+def test_guest_waits_for_the_same_host_before_starting_a_late_join(browser, server_url, room, host_return):
+    host, guest = _guest_in_a_room(browser, server_url, room)
+    try:
+        guest.evaluate(_RECORD_ENGINE_STARTS)
+        guest.evaluate(_RECORD_ROOM)
+        _start_room(host, guest)
+        guest.wait_for_function("window.__engineStarts.includes(false)")
+        match = guest.evaluate("KNState.matchId")
+        host.evaluate("() => { window.__test_socket.disconnect(); }")
+        wait = guest.locator("#host-wait-banner [role=timer]")
+        expect(wait).to_be_visible()
+        # Trigger the engine's lost-host callback while the server is holding the room.
+        guest.evaluate("window.__lostHost()")
+        guest.evaluate("window.__lostHost()")
+        held_room = guest.evaluate("window.__room")
+        guest.evaluate(_DELIVER, ["users-updated", {**held_room, "matchId": "older", "hostReturnDeadline": None}])
+        guest.evaluate(_DELIVER, ["game-started", _game_started(match)])
+        expect(wait).to_be_visible()
+        assert guest.evaluate("window.__engineStarts") == [False]
+        assert guest.evaluate("KNState.matchId") == match
+
+        if host_return == "reconnect":
+            host.evaluate("() => { window.__test_socket.connect(); }")
+            guest.wait_for_function("window.__engineStarts.includes(true)", timeout=10000)
+            guest.evaluate(_DELIVER, ["users-updated", guest.evaluate("window.__room")])
+            assert guest.evaluate("window.__engineStarts") == [False, True]
+            assert guest.evaluate("KNState.matchId") == match
+        else:
+            host.once("dialog", lambda dialog: dialog.accept())
+            host.reload()
+            expect(guest.locator("#host-reload-notice")).to_be_visible(timeout=10000)
+            assert guest.evaluate("window.__engineStarts") == [False]
+            assert guest.evaluate("KNState.matchId") is None
+        expect(wait).to_be_hidden()
+    finally:
+        host.close()
+        guest.close()
+
+
+def test_an_open_duplicate_honors_leaving_from_the_disconnected_host_tab(browser, server_url, room):
+    url = f"{server_url}/play.html?room={room}"
+    with browser.new_context() as context:
+        context.add_init_script("window.__test_skipBoot = true")
+        host = context.new_page()
+        host.goto(f"{url}&host=1&name=Host")
+        expect(host.locator("#overlay")).to_be_visible()
+        duplicate = context.new_page()
+        duplicate.goto(url)
+        expect(duplicate.get_by_role("button", name="Join separately")).to_be_visible()
+        host.evaluate("() => { window.__test_socket.disconnect(); }")
+        recover = duplicate.get_by_role("button", name="Return as host")
+        expect(recover).to_be_visible(timeout=10000)
+        with host.expect_navigation():
+            host.locator("#leave-btn").click()
+        expect(recover).to_have_count(0)
+        expect(duplicate.locator("#host-return-dialog [role=status]")).to_contain_text("no longer has that host seat")
+        expect(host.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)

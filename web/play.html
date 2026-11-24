@@ -39,6 +39,8 @@
           <button id="copy-link" class="copy-btn" title="Invite players">Invite</button>
         </div>
 
+        <p id="host-reload-notice" role="status" hidden></p>
+
         <div class="card-section name-section">
           <label for="player-name-input" class="name-label">Name:</label>
           <input id="player-name-input" class="name-input" maxlength="24" autocomplete="off" spellcheck="false" />
@@ -281,6 +283,29 @@
       </div>
     </div>
 
+    <dialog id="host-return-dialog" aria-labelledby="host-return-title" aria-describedby="host-return-help">
+      <h2 id="host-return-title">Your hosted room</h2>
+      <p id="host-return-help">
+        This browser hosted this room. A new tab can restore your host controls after the original tab disconnects.
+      </p>
+      <p role="status"></p>
+      <p role="timer" hidden></p>
+      <form method="dialog">
+        <button value="host" hidden>Return as host</button>
+        <button value="guest" hidden>Join separately</button>
+        <button value="back">Back to lobby</button>
+      </form>
+    </dialog>
+
+    <dialog id="host-leave-dialog" aria-labelledby="host-leave-title" aria-describedby="host-leave-help">
+      <h2 id="host-leave-title">Leave this game?</h2>
+      <p id="host-leave-help">Leaving gives up your place as host.</p>
+      <form method="dialog">
+        <button type="submit" autofocus>Stay in game</button>
+        <button type="button" id="confirm-host-leave">Leave room</button>
+      </form>
+    </dialog>
+
     <!-- In-game toolbar -->
     <div id="toolbar" class="hidden" role="toolbar" aria-label="Game controls">
       <span id="toolbar-room"></span>
@@ -360,6 +385,10 @@
     <div id="unmute-banner" class="hidden">Tap to unmute</div>
 
     <!-- Reconnecting banner -->
+    <div id="host-wait-banner" hidden>
+      <span role="status">The host disconnected. Waiting for them to return.</span>
+      <span role="timer" aria-label="Time left for the host to return"></span>
+    </div>
     <div id="reconnecting-banner" class="hidden">
       <span class="spinner"></span>
       <span id="reconnecting-text">Reconnecting to server&hellip;</span>

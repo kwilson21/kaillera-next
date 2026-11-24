@@ -694,6 +694,7 @@ export class FakePage {
       },
       Element: FakeElement,
       Date: { now: () => this.now },
+      performance: { now: () => this.now },
       Math: math,
       fetch,
       setTimeout: (run: () => void, ms: number) => setTimer(run, ms, null),
@@ -831,7 +832,11 @@ export const runBundle = (entry: 'join-entry.ts' | 'landing-entry.ts', page: Fak
     source = built.outputFiles[0]?.text ?? '';
     bundles.set(entry, source);
   }
-  vm.runInNewContext(source, { ...PLATFORM, window: page.window }, { filename: entry });
+  vm.runInNewContext(
+    source,
+    { ...PLATFORM, performance: page.window.performance, window: page.window },
+    { filename: entry },
+  );
 };
 
 /** The source files a bundle is made of, as paths from the repository root. */

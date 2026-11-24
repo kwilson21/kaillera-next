@@ -88,6 +88,16 @@ test('reads, writes and removals match the old script, with either store blocked
   assert.equal(compared, 4 * 3 * 2 * 3);
 });
 
+test('listing a prefix sees only keys in the selected store, including when storage is blocked', () => {
+  for (const blocked of [true, false]) {
+    const storage = createSafeStorage({ localStorage: fakeStore(blocked), sessionStorage: fakeStore(false) });
+    storage.set('localStorage', 'return:one', 'a');
+    storage.set('localStorage', 'unrelated', 'b');
+    storage.set('sessionStorage', 'return:session', 'c');
+    assert.deepEqual(storage.keys?.('localStorage', 'return:'), ['return:one']);
+  }
+});
+
 test('a blocked store keeps what the page saved, in memory, apart from the other store', () => {
   const host = { localStorage: fakeStore(true), sessionStorage: fakeStore(false) };
   const storage = createSafeStorage(host);

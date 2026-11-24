@@ -97,10 +97,10 @@ def test_first_visit_callout(context, server_url):
         page2.close()
 
 
-def test_feedback_fab_hidden_during_game(context, server_url):
+def test_feedback_fab_hidden_during_game(browser, server_url):
     """FAB hides when game starts; feedback item appears in toolbar dropdown."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=FB01{_R}&host=1&name=Host")

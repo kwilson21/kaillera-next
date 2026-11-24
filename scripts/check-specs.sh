@@ -76,6 +76,7 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend="$BACKEND"
+$QUINT test "$SPEC" --main=room_before_owner_invite_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_serve_timeout_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_grace_wait --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_abandoned_end --backend="$BACKEND"
@@ -95,6 +96,7 @@ check() { # module invariant
 # with the server about lobby vs playing. The last two were violated before
 # the page reconciled on reconnect (room_before_reconcile).
 check room_current ownerSeesGame
+check room_current ownerDoesNotLateJoinItsOwnMatch
 check room_current aLiveMatchCannotStartAgain
 check room_current lateJoinersChaseTheCurrentMatch
 check room_current pagesAgreeWithServer
@@ -127,7 +129,7 @@ done
 $QUINT run "$DISCONNECT" --main=room_disconnect_cleanup_fixed --invariant=allHold \
   --max-samples=1000 --max-steps=10 --backend="$BACKEND"
 
-for model in room_expiry reconnect_attempt spectator_publication; do
+for model in room_expiry room_member_return reconnect_attempt spectator_publication; do
   file="specs/${model}.qnt"
   $QUINT typecheck "$file"
   for variant in before fixed; do
@@ -136,6 +138,27 @@ for model in room_expiry reconnect_attempt spectator_publication; do
   $QUINT run "$file" --main="${model}_fixed" --invariant=allHold \
     --max-samples=5000 --max-steps=15 --backend="$BACKEND"
 done
+for variant in before fixed; do
+  $QUINT test specs/room_member_return.qnt --main="room_return_match_${variant}" --backend="$BACKEND"
+  $QUINT test specs/room_member_return.qnt --main="room_host_traffic_${variant}" --backend="$BACKEND"
+  $QUINT test specs/room_member_return.qnt --main="room_late_join_host_${variant}" --backend="$BACKEND"
+  $QUINT test specs/room_member_return.qnt --main="room_return_identity_${variant}" --backend="$BACKEND"
+done
+$QUINT run specs/room_member_return.qnt --main=room_return_identity_fixed --invariant=visibleSeatHasItsIdentity \
+  --max-steps=8 --max-samples=5000 --backend="$BACKEND"
+$QUINT run specs/room_member_return.qnt --main=room_late_join_host_fixed --invariant=allHold \
+  --max-steps=5 --max-samples=1000 --backend="$BACKEND"
+$QUINT run specs/room_member_return.qnt --main=room_host_traffic_fixed --invariant=staleHostCannotAdvance \
+  --max-steps=15 --max-samples=5000 --backend="$BACKEND"
+$QUINT test specs/room_member_return.qnt --main=room_saved_fight --backend="$BACKEND"
+$QUINT run specs/room_member_return.qnt --main=room_saved_fight --invariant=everyoneInstalled \
+  --max-steps=12 --max-samples=5000 --backend="$BACKEND"
+
+for variant in room_saved_seat_before room_saved_seat_fixed; do
+  $QUINT test specs/room_member_return.qnt --main="$variant" --backend="$BACKEND"
+done
+$QUINT run specs/room_member_return.qnt --main=room_saved_seat_fixed --invariant=releaseNeedsBoth \
+  --max-steps=6 --max-samples=1000 --backend="$BACKEND"
 
 # ── Peer identity: which connection a rejoining player keeps ────────────────
 PEERS=specs/peer_identity.qnt

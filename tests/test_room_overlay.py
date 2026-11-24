@@ -300,10 +300,10 @@ def test_reclaim_slot_restores_rom_ready_and_allows_start(browser, server_url, r
         guest.close()
 
 
-def test_release_slot_rejected_mid_game(context, server_url, room):
+def test_release_slot_rejected_mid_game(browser, server_url, room):
     """Server refuses release-slot once the game is running (lobby-only)."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
     try:
         host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host")
         expect(host.locator("#overlay")).to_be_visible(timeout=10000)

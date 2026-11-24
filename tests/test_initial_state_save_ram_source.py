@@ -5,6 +5,7 @@ had the starting state waits (bounded) for that message instead of starting
 without it.
 """
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ def test_every_initial_save_state_carries_save_ram():
     assert sends
     for start in sends:
         message = SRC[start : SRC.index("});", start)]
-        assert "saveRam," in message
+        assert re.search(r"^\s*saveRam(?:,|: ram\.data,)$", message, re.MULTILINE)
     start = SRC.index("const _emitSaveStateToPlayers = (msg) => {")
     emit = SRC[start : SRC.index("\n  };\n", start)]
     assert "socket.emit('data-message', { ...msg, toPlayers: true });" in emit

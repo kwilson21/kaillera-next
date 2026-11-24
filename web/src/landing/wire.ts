@@ -47,6 +47,9 @@ export const isHealthAnswer = (value: unknown): value is HealthAnswer => hasText
 
 /** A room as the invite page needs it. The server sends more; the rest is not read. */
 export interface RoomAnswer {
+  readonly room_name?: string | null;
+  readonly hostReturnDeadline?: number | null;
+  readonly serverTime?: number | null;
   readonly status: string;
   readonly player_count: number;
   readonly max_players: number;
@@ -61,10 +64,39 @@ export const isRoomAnswer = (value: unknown): value is RoomAnswer =>
   hasText(value, 'status') &&
   hasNumber(value, 'player_count') &&
   hasNumber(value, 'max_players') &&
+  mayHave(value, 'room_name', 'string') &&
   mayHave(value, 'host_name', 'string') &&
   mayHave(value, 'game_id', 'string') &&
   mayHave(value, 'romName', 'string') &&
-  mayHave(value, 'closed', 'boolean');
+  mayHave(value, 'closed', 'boolean') &&
+  mayHave(value, 'hostReturnDeadline', 'number') &&
+  mayHave(value, 'serverTime', 'number');
+
+/** A room lookup with a seat credential reports whether that particular seat can return. */
+export interface SeatAnswer extends RoomAnswer {
+  readonly role: 'host' | 'player';
+  readonly matchId?: string | null;
+  readonly rom_hash?: string | null;
+  readonly mode?: string | null;
+  readonly returnDeadline: number | null;
+  readonly serverTime: number;
+  readonly player_name: string;
+  readonly slot: number | null;
+}
+
+export const isSeatAnswer = (value: unknown): value is SeatAnswer =>
+  isRoomAnswer(value) &&
+  hasText(value, 'role') &&
+  (value.role === 'host' || value.role === 'player') &&
+  mayHave(value, 'matchId', 'string') &&
+  mayHave(value, 'rom_hash', 'string') &&
+  mayHave(value, 'mode', 'string') &&
+  hasNumber(value, 'serverTime') &&
+  'returnDeadline' in value &&
+  (value.returnDeadline === null || typeof value.returnDeadline === 'number') &&
+  hasText(value, 'player_name') &&
+  'slot' in value &&
+  (value.slot === null || typeof value.slot === 'number');
 
 // ── GET /list ───────────────────────────────────────────────────────────────
 
@@ -134,21 +166,38 @@ type Answer<T> = { readonly there: true; readonly body: T } | { readonly there: 
 const request = async <T>(
   host: NetHost,
   url: string,
-  timeoutMs: number,
+  deadline: number | AbortSignal,
   accepts: (body: unknown) => body is T,
   missingIsAnAnswer: boolean,
+  token?: string,
 ): Promise<Answer<T>> => {
-  const ctl = new AbortController();
-  const timer = host.setTimeout(() => ctl.abort(), timeoutMs);
+  // Landing pages supply a timeout. The play session owns its request's lifetime.
+  let timer: number | undefined;
+  let signal: AbortSignal;
+  if (typeof deadline === 'number') {
+    const ctl = new AbortController();
+    signal = ctl.signal;
+    timer = host.setTimeout(() => ctl.abort(), deadline);
+  } else {
+    signal = deadline;
+  }
   try {
-    const res = await host.fetch(url, { signal: ctl.signal, cache: 'no-store' });
+    const res = await host.fetch(url, {
+      signal,
+      cache: 'no-store',
+      ...(token && {
+        headers: { Authorization: 'Bearer ' + token },
+        mode: 'same-origin' as const,
+        redirect: 'error' as const,
+      }),
+    });
     if (missingIsAnAnswer && res.status === 404) return { there: false };
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body: unknown = await res.json();
     if (!accepts(body)) throw new Error('The answer does not fit');
     return { there: true, body };
   } finally {
-    host.clearTimeout(timer);
+    if (timer !== undefined) host.clearTimeout(timer);
   }
 };
 
@@ -172,9 +221,10 @@ export const getJSON = async <T>(
 export const getJSONIfThere = async <T>(
   host: NetHost,
   url: string,
-  timeoutMs: number,
+  deadline: number | AbortSignal,
   accepts: (body: unknown) => body is T,
+  token?: string,
 ): Promise<T | null> => {
-  const answer = await request(host, url, timeoutMs, accepts, true);
+  const answer = await request(host, url, deadline, accepts, true, token);
   return answer.there ? answer.body : null;
 };

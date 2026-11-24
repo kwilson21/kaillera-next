@@ -58,15 +58,17 @@ def test_a_full_room_takes_a_fifth_person_as_a_spectator(browser, server_url, ro
         assert opened[0][1]["extra"]["fresh"] is True
         assert opened[0][1]["extra"]["sessionid"] == room
         assert opened[0][1]["maxPlayers"] == 4
+        assert opened[0][1]["extra"]["supportsMatchReturn"] is True
         assert set(opened[0][1]["extra"]) == {
-            "sessionid", "player_name", "room_name", "game_id", "persistentId", "reconnectToken", "fresh",
+            "sessionid", "player_name", "room_name", "game_id", "persistentId", "reconnectToken", "fresh", "supportsMatchReturn",
         }  # fmt: skip
 
         joined = pages[1].evaluate("window.__requests")
         assert [event for event, _ in joined] == ["join-room"]
         assert joined[0][1]["extra"]["spectate"] is False
+        assert joined[0][1]["extra"]["supportsMatchReturn"] is True
         assert set(joined[0][1]["extra"]) == {
-            "sessionid", "player_name", "spectate", "persistentId", "reconnectToken",
+            "sessionid", "player_name", "spectate", "persistentId", "reconnectToken", "supportsMatchReturn",
         }  # fmt: skip
 
         watched = fifth.evaluate("window.__requests")

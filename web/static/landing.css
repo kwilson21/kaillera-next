@@ -749,6 +749,15 @@ button {
   align-items: center;
   margin-top: 18px;
 }
+.host-return {
+  display: grid;
+  gap: 4px;
+}
+.host-return [role='timer'] {
+  color: var(--muted);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
 .code {
   display: inline-flex;
   gap: 8px;

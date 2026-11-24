@@ -44,13 +44,12 @@ async function waitForFrame(page, minFrame, timeoutMs = 30000) {
 
 async function main() {
   const browser = await chromium.launch({ headless: false });
-  const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
 
   console.log(`Room: ${ROOM}`);
 
   // Host
   console.log('Starting host...');
-  const host = await ctx.newPage();
+  const host = await browser.newPage({ ignoreHTTPSErrors: true });
   await host.goto(`${BASE_URL}/play.html?room=${ROOM}&host=1&name=Host&mode=rollback`, {
     waitUntil: 'domcontentloaded',
   });
@@ -61,7 +60,7 @@ async function main() {
 
   // Guest
   console.log('Starting guest...');
-  const guest = await ctx.newPage();
+  const guest = await browser.newPage({ ignoreHTTPSErrors: true });
   await guest.goto(`${BASE_URL}/play.html?room=${ROOM}&name=Guest`, { waitUntil: 'domcontentloaded' });
   await guest.waitForTimeout(1000);
   const [fc2] = await Promise.all([guest.waitForEvent('filechooser'), guest.click('#rom-drop')]);
@@ -141,7 +140,6 @@ async function main() {
   // Keep alive for manual inspection
   await host.waitForTimeout(5000);
 
-  await ctx.close();
   await browser.close();
 }
 

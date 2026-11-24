@@ -68,7 +68,7 @@ def _run(coro):
 
 
 def _extra(pid: str, **more) -> dict:
-    return {"sessionid": "ROOM1", "persistentId": pid, "reconnectToken": make_reconnect_token(pid), **more}
+    return {"sessionid": "ROOM1", "persistentId": pid, "reconnectToken": make_reconnect_token("ROOM1", pid), **more}
 
 
 async def _room_life_steps() -> dict[str, dict | None]:
@@ -80,7 +80,7 @@ async def _room_life_steps() -> dict[str, dict | None]:
         assert err is None, err
         acks[name] = ack
 
-    assert await _open_room_locked("sid-host", OpenRoomPayload(extra=_extra("pid-host", player_name="Host"))) is None
+    assert await _open_room_locked("sid-host", OpenRoomPayload(extra={"sessionid": "ROOM1", "persistentId": "pid-host", "player_name": "Host"})) is None
     await join("guest", "sid-guest", "pid-guest")
     await join("spectator", "sid-spec", "pid-spec", spectate=True)
     rom = {"ready": True, "hash": "S" + "ab" * 32, "name": "Smash.z64", "size": 16 * 1024 * 1024}
@@ -95,8 +95,17 @@ async def _room_life_steps() -> dict[str, dict | None]:
     acks["session-log"] = await signaling.session_log_handler("sid-host", flush)
     acks["session-log refused"] = await signaling.session_log_handler("sid-host", {**flush, "matchId": "other"})
     assert await _end_game_locked("sid-host", EndGamePayload()) is None
+    # A saved fight has its own transport epoch and waits for both engines.
+    assert await _start_game_locked("sid-host", StartGamePayload(mode="rollback"), resume_from=match_id) is None
+    acks["rewind"] = signaling._join_ack(rooms["ROOM1"])
+    ready = {"matchId": acks["rewind"]["matchId"], "ready": True}
+    assert await signaling.match_return_ready("sid-host", ready) is None
+    assert await signaling.match_return_ready("sid-guest-2", ready) is None
+    assert await _end_game_locked("sid-host", EndGamePayload()) is None
     # The host leaves: the guest becomes the owner and is asked to renegotiate.
-    await _leave("sid-host")
+    await _leave("sid-host", "leave")
+    rooms["ROOM1"].host_return_deadline = 1
+    await signaling._expire_rooms({})
     return acks
 
 
@@ -157,6 +166,20 @@ def test_users_updated_covers_lobby_and_match(room_life):
     assert any(p.slot is not None and p.romReady for u in updates for p in u.players.values())
 
 
+def test_rosters_identify_the_running_match_and_clear_it_in_the_lobby(room_life):
+    emitted, acks = room_life
+    rosters = [d for event, d in emitted if event == "users-updated"]
+    assert all(r["matchId"] is None for r in rosters if r["status"] == "lobby")
+    assert {r["matchId"] for r in rosters if r["status"] == "playing"} == {
+        acks["rejoin"]["matchId"],
+        acks["rewind"]["matchId"],
+    }
+    legacy = dict(rosters[0])
+    del legacy["matchId"]
+    assert UsersUpdated.model_validate(legacy).matchId is None
+    assert JoinRoomAck.model_fields["matchId"].is_required()
+
+
 def test_join_room_acks_match_the_model(room_life):
     _, acks = room_life
     for name in ("guest", "spectator", "rejoin"):
@@ -184,6 +207,7 @@ def test_game_started_and_ended_name_the_same_match(room_life):
     started = next(GameStarted.model_validate(d) for e, d in emitted if e == "game-started")
     ended = next(GameEnded.model_validate(d) for e, d in emitted if e == "game-ended")
     assert started.matchId == ended.matchId
+    assert ended.reason == "game-end"
     assert started.mode == "rollback"
 
 

@@ -79,7 +79,7 @@ def _join(pid: str, sid: str, *, resume: bool, slot: int | None = 1, match_id: s
         extra={
             "sessionid": "ROOM1",
             "persistentId": pid,
-            "reconnectToken": make_reconnect_token(pid),
+            "reconnectToken": make_reconnect_token("ROOM1", pid),
             "resume": resume,
             "slot": slot,
             "matchId": match_id,
@@ -93,7 +93,7 @@ def _open(pid: str, sid: str, code: str, *, resume: bool, slot: int | None = 0, 
         extra={
             "sessionid": code,
             "persistentId": pid,
-            "reconnectToken": make_reconnect_token(pid),
+            "reconnectToken": make_reconnect_token(code, pid),
             "resume": resume,
             "slot": slot,
             "matchId": match_id,
@@ -266,7 +266,7 @@ def test_a_taken_back_host_that_reloads_is_sent_to_join_room():
         extra={
             "sessionid": "ROOM1",
             "persistentId": "pid-host",
-            "reconnectToken": make_reconnect_token("pid-host"),
+            "reconnectToken": make_reconnect_token("ROOM1", "pid-host"),
             "fresh": True,
         }
     )
@@ -294,7 +294,7 @@ def test_a_taken_back_host_that_reloads_in_the_lobby_is_sent_to_join_room_too():
         extra={
             "sessionid": "ROOM1",
             "persistentId": "pid-host",
-            "reconnectToken": make_reconnect_token("pid-host"),
+            "reconnectToken": make_reconnect_token("ROOM1", "pid-host"),
             "fresh": True,
         }
     )

@@ -200,7 +200,7 @@ def test_streaming_host_normalizes_timing_after_lockstep_resume():
 
     host_idx = streaming.find("const startHost = () => {")
     assert host_idx != -1
-    host_window = streaming[host_idx : host_idx + 2100]
+    host_window = streaming[host_idx : streaming.index('const renegotiate =', host_idx)]
     normalize_idx = host_window.find("_normalizeStreamingTiming('host-start')")
     frame_idx = host_window.find("const frames = gm.Module?._get_current_frame_count")
     watchdog_idx = host_window.find("startHostFrameRateWatchdog();")

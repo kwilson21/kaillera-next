@@ -25,7 +25,16 @@ from uvicorn.main import STARTUP_FAILURE
 
 from src import db, match_rotation, state, state_cache
 from src.api.app import cleanup_old_data, create_app
-from src.api.signaling import _cleanup_empty_rooms, configure_cors, finish_room_shutdown, rooms, set_shutting_down, sio
+from src.api.signaling import (
+    _cleanup_empty_rooms,
+    configure_cors,
+    finish_room_shutdown,
+    renew_member_tokens,
+    restore_member_reservations,
+    rooms,
+    set_shutting_down,
+    sio,
+)
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +57,16 @@ async def lifespan(_app):
     restored = await state.load_all_rooms()
     if restored:
         rooms.update(restored)
+        await restore_member_reservations()
         log.info("Restored %d room(s) from Redis", len(restored))
     task = asyncio.create_task(_cleanup_empty_rooms())
+    token_task = asyncio.create_task(renew_member_tokens())
     log_task = asyncio.create_task(cleanup_old_data())
     rotation_task = match_rotation.start_sweeper()
     yield
     await finish_room_shutdown()
     task.cancel()
+    token_task.cancel()
     log_task.cancel()
     rotation_task.cancel()
     if rooms:

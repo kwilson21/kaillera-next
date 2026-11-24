@@ -18,6 +18,8 @@ export const OpenRoomExtra = Schema.Struct({
   sessionid: Schema.optional(Schema.String),
   persistentId: Schema.optional(Schema.String),
   reconnectToken: Schema.optional(Schema.String),
+  supportsMatchReturn: Schema.optional(Schema.Boolean),
+  recoverMatchId: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(64))),
   player_name: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(32))),
   room_name: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(64))),
   game_id: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(32))),
@@ -40,8 +42,12 @@ export const JoinRoomExtra = Schema.Struct({
   sessionid: Schema.optional(Schema.String),
   persistentId: Schema.optional(Schema.String),
   reconnectToken: Schema.optional(Schema.String),
+  supportsMatchReturn: Schema.optional(Schema.Boolean),
+  recoverMatchId: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(64))),
   player_name: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(32))),
   spectate: Schema.optional(Schema.Boolean),
+  returnHost: Schema.optional(Schema.Boolean),
+  returnPlayer: Schema.optional(Schema.Boolean),
   resume: Schema.optional(Schema.Boolean),
   slot: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 3 })))),
   matchId: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(64))),
@@ -82,6 +88,12 @@ export const MatchJoinedPayload = Schema.Struct({
   matchId: Schema.String.check(Schema.isMaxCodePoints(64)),
 });
 export type MatchJoinedPayload = typeof MatchJoinedPayload.Type;
+
+export const MatchReturnReadyPayload = Schema.Struct({
+  matchId: Schema.String.check(Schema.isMinCodePoints(1), Schema.isMaxCodePoints(64)),
+  ready: Schema.Boolean,
+});
+export type MatchReturnReadyPayload = typeof MatchReturnReadyPayload.Type;
 
 /** The room owner or active slot zero could not verify recovery of the named running match. */
 export const MatchRecoveryUnverifiedPayload = Schema.Struct({
@@ -160,6 +172,7 @@ export const RoomPlayer = Schema.Struct({
   playerName: Schema.String,
   slot: Schema.NullOr(Schema.Int),
   romReady: Schema.Boolean,
+  away: Schema.optional(Schema.Boolean),
   romPrompt: Schema.optional(Schema.Boolean),
   inputType: Schema.String,
   deviceType: Schema.String,
@@ -199,7 +212,13 @@ export const UsersUpdated = Schema.Struct({
   mode: Schema.NullOr(GameMode),
   status: RoomStatus,
   listed: Schema.Boolean,
+  matchId: Schema.optional(Schema.NullOr(Schema.String)),
   recoveryUnverifiedMatchId: Schema.optional(Schema.NullOr(Schema.String)),
+  resumeFromMatchId: Schema.optional(Schema.NullOr(Schema.String)),
+  resumePending: Schema.optional(Schema.Boolean),
+  resyncEnabled: Schema.optional(Schema.Boolean),
+  hostReturnDeadline: Schema.optional(Schema.NullOr(Schema.Int)),
+  serverTime: Schema.optional(Schema.NullOr(Schema.Int)),
 });
 export type UsersUpdated = typeof UsersUpdated.Type;
 
@@ -220,10 +239,15 @@ export const JoinRoomAck = Schema.Struct({
   mode: Schema.NullOr(GameMode),
   status: RoomStatus,
   listed: Schema.Boolean,
+  matchId: Schema.NullOr(Schema.String),
   recoveryUnverifiedMatchId: Schema.optional(Schema.NullOr(Schema.String)),
+  resumeFromMatchId: Schema.optional(Schema.NullOr(Schema.String)),
+  resumePending: Schema.optional(Schema.Boolean),
+  resyncEnabled: Schema.optional(Schema.Boolean),
+  hostReturnDeadline: Schema.optional(Schema.NullOr(Schema.Int)),
+  serverTime: Schema.optional(Schema.NullOr(Schema.Int)),
   rom_hash: Schema.NullOr(Schema.String),
   rom_sharing: Schema.Boolean,
-  matchId: Schema.NullOr(Schema.String),
 });
 export type JoinRoomAck = typeof JoinRoomAck.Type;
 
@@ -239,14 +263,27 @@ export const GameStarted = Schema.Struct({
   hostRom: HostRom,
   gameId: Schema.String,
   matchId: Schema.String,
+  resumeFromMatchId: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type GameStarted = typeof GameStarted.Type;
+
+export const MatchReturnGo = Schema.Struct({
+  matchId: Schema.String,
+});
+export type MatchReturnGo = typeof MatchReturnGo.Type;
 
 /** `game-ended`. */
 export const GameEnded = Schema.Struct({
   matchId: Schema.NullOr(Schema.String),
+  reason: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type GameEnded = typeof GameEnded.Type;
+
+/** `room-closed`. */
+export const RoomClosed = Schema.Struct({
+  reason: Schema.String,
+});
+export type RoomClosed = typeof RoomClosed.Type;
 
 /** `rom-sharing-updated`. */
 export const RomSharingUpdated = Schema.Struct({
@@ -303,6 +340,7 @@ export const decodeClaimSlotPayload = Schema.decodeUnknownResult(ClaimSlotPayloa
 export const decodeSetNamePayload = Schema.decodeUnknownResult(SetNamePayload);
 export const decodeStartGamePayload = Schema.decodeUnknownResult(StartGamePayload);
 export const decodeMatchJoinedPayload = Schema.decodeUnknownResult(MatchJoinedPayload);
+export const decodeMatchReturnReadyPayload = Schema.decodeUnknownResult(MatchReturnReadyPayload);
 export const decodeMatchRecoveryUnverifiedPayload = Schema.decodeUnknownResult(MatchRecoveryUnverifiedPayload);
 export const decodeEndGamePayload = Schema.decodeUnknownResult(EndGamePayload);
 export const decodeSetModePayload = Schema.decodeUnknownResult(SetModePayload);
@@ -320,7 +358,9 @@ export const decodeHostRom = Schema.decodeUnknownResult(HostRom);
 export const decodeUsersUpdated = Schema.decodeUnknownResult(UsersUpdated);
 export const decodeJoinRoomAck = Schema.decodeUnknownResult(JoinRoomAck);
 export const decodeGameStarted = Schema.decodeUnknownResult(GameStarted);
+export const decodeMatchReturnGo = Schema.decodeUnknownResult(MatchReturnGo);
 export const decodeGameEnded = Schema.decodeUnknownResult(GameEnded);
+export const decodeRoomClosed = Schema.decodeUnknownResult(RoomClosed);
 export const decodeRomSharingUpdated = Schema.decodeUnknownResult(RomSharingUpdated);
 export const decodeRenegotiateRequest = Schema.decodeUnknownResult(RenegotiateRequest);
 export const decodeSessionLogAck = Schema.decodeUnknownResult(SessionLogAck);
@@ -334,7 +374,9 @@ export const decodeRelaySender = Schema.decodeUnknownResult(RelaySender);
 export const serverEvents = {
   'users-updated': UsersUpdated,
   'game-started': GameStarted,
+  'match-return-go': MatchReturnGo,
   'game-ended': GameEnded,
+  'room-closed': RoomClosed,
   'rom-sharing-updated': RomSharingUpdated,
   'upload-token': TokenMessage,
   'reconnect-token': TokenMessage,

@@ -6,11 +6,13 @@ Playwright routes, so every board state can be reached on demand.
 Run: pytest tests/test_landing_page.py -v
 """
 
+import json
 import re
 import time
 
 import pytest
 from playwright.sync_api import expect
+from src.api.signaling import make_reconnect_token
 
 
 def _ago(seconds):
@@ -119,6 +121,134 @@ def test_live_board_rows_and_links(landing):
         "/play.html?room=KAZ12345&spectate=1"
     )
     expect(page.locator(".room").nth(1)).to_contain_text("in game · 6 min")
+
+
+def test_home_shows_only_disconnected_host_rooms_on_mobile_including_unlisted_and_full(page, server_url, monkeypatch):
+    page.set_viewport_size({"width": 390, "height": 844})
+    codes = ["PRIV1234", "fULL5678", "GONE1234", "WRONG123", "LIVE1234", "OVER1234"]
+    tokens = {
+        "kn-host-return:" + code: make_reconnect_token("ELSE123" if code == "WRONG123" else code, "host")
+        for code in codes
+    }
+    with monkeypatch.context() as then:
+        then.setattr(time, "time", lambda: 1)
+        tokens["kn-host-return:EXPIRED1"] = make_reconnect_token("EXPIRED1", "host")
+    page.add_init_script(f"for (const [k,v] of Object.entries({json.dumps(tokens)})) localStorage.setItem(k,v)")
+    page.add_init_script("const now = Date.now.bind(Date); Date.now = () => now() + 3600000;")
+    _mock(page, rooms=[_room("fULL5678", "Host", players=4)])
+    server_now = int(time.time() * 1000)
+    hold = {
+        "returnDeadline": server_now + 60000, "serverTime": server_now,
+        "role": "host", "player_name": "Host", "slot": 0,
+    }
+
+    def reply(route, code, record):
+        assert route.request.headers["authorization"] == "Bearer " + tokens["kn-host-return:" + code]
+        route.fulfill(json={**_room(code, "Host"), **hold, **record})
+
+    page.route("**/room/PRIV1234", lambda r: reply(r, "PRIV1234", {"room_name": "Friday matches"}))
+    page.route("**/room/fULL5678", lambda r: reply(r, "fULL5678", {"status": "playing", "player_count": 4}))
+    page.route("**/room/LIVE1234", lambda r: reply(r, "LIVE1234", {"returnDeadline": None}))
+    page.route("**/room/OVER1234", lambda r: reply(r, "OVER1234", {"serverTime": server_now + 60001}))
+    page.route("**/room/EXPIRED1", lambda r: reply(r, "EXPIRED1", {}))
+    page.route("**/room/GONE1234", lambda r: r.fulfill(status=404))
+    with page.expect_response("**/room/GONE1234"):
+        page.goto(server_url)
+    returns = page.get_by_role("navigation", name="Your rooms")
+    for code, caption in (("PRIV1234", "Friday matches"), ("fULL5678", "fULL5678")):
+        row = returns.locator(".host-return").filter(has=page.get_by_text(caption, exact=True))
+        link = row.get_by_role("link", name="Return to room", exact=True)
+        expect(link).to_be_visible()
+        expect(link).to_have_accessible_description(caption)
+        assert link.get_attribute("href") == f"/play.html?room={code}&returnHost=1"
+        expect(row.get_by_role("timer")).to_contain_text("Room closes in")
+    expect(returns.get_by_role("link")).to_have_count(2)
+    expect(returns.get_by_role("timer")).to_have_count(2)
+    expect(returns.get_by_role("timer").first).to_contain_text("Room closes in")
+    assert page.evaluate("localStorage.getItem('kn-host-return:GONE1234')") is None
+    assert page.evaluate("localStorage.getItem('kn-host-return:WRONG123')") is None
+    assert page.evaluate("localStorage.getItem('kn-host-return:EXPIRED1')") is None
+
+    # Another tab deliberately leaves the two rooms while the homepage stays open.
+    with page.context.new_page() as other:
+        other.goto(server_url)
+        other.evaluate("localStorage.clear()")
+        expect(returns).to_be_hidden()
+
+
+def test_home_keeps_the_ticket_but_waits_for_a_confirmed_return_deadline(page, server_url):
+    code = "PRIV1234"
+    token = make_reconnect_token(code, "host")
+    page.add_init_script(f"localStorage.setItem('kn-host-return:{code}', {json.dumps(token)})")
+    _mock(page)
+    page.route(f"**/room/{code}", lambda r: r.fulfill(status=503))
+    with page.expect_response(f"**/room/{code}"):
+        page.goto(server_url)
+    expect(page.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+    assert page.evaluate(f"localStorage.getItem('kn-host-return:{code}')") == token
+
+    page.clock.install()
+    room = {
+        **_room(code, "Host"), "serverTime": 100000, "returnDeadline": 185000,
+        "role": "host", "slot": 0, "player_name": "Host", "room_name": "Friday matches",
+    }
+    page.route(f"**/room/{code}", lambda route: route.fulfill(json=room))
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    link = page.get_by_role("link", name="Return to room", exact=True)
+    expect(link).to_be_visible()
+    expect(link).to_have_accessible_description("")
+    expect(page.get_by_text("Friday matches", exact=True)).to_have_count(0)
+    timer = page.get_by_role("timer")
+    expect(timer).to_contain_text("Room closes in 1:25")
+    page.route(f"**/room/{code}", lambda route: route.fulfill(status=503))
+    page.clock.fast_forward(2000)
+    expect(timer).to_contain_text("Room closes in 1:23")
+    page.clock.fast_forward(83000)
+    expect(link).to_have_count(0)
+    assert page.evaluate(f"localStorage.getItem('kn-host-return:{code}')") == token
+
+
+@pytest.mark.parametrize("path", ["/", "/join?room=SEATS001"])
+def test_shared_device_lists_only_its_reserved_seats_with_short_actions(page, server_url, path):
+    code = "SEATS001"
+    members = {"host": ("Kaz", 0), "guest1": ("Lee", 1), "guest2": ("Lee", 2), "active": ("Sam", 3)}
+    tokens = {pid: make_reconnect_token(code, pid) for pid in members}
+    keys = {
+        ("kn-host-return:" + code if pid == "host" else f"kn-player-return:{code}:{pid}"): token
+        for pid, token in tokens.items()
+    }
+    page.add_init_script(f"for (const [key,value] of Object.entries({json.dumps(keys)})) localStorage.setItem(key,value)")
+    pub = dict(
+        _room(code, "Kaz", "playing", 4), room_name="Friday matches",
+        hostReturnDeadline=1030000, serverTime=1000000,
+    )
+    _mock(page)
+
+    def lookup(route):
+        auth = route.request.headers.get("authorization")
+        if not auth:
+            return route.fulfill(json=pub)
+        pid = next(pid for pid in members if auth == "Bearer " + tokens[pid])
+        name, slot = members[pid]
+        route.fulfill(json={
+            **pub, "role": "host" if slot == 0 else "player", "slot": slot,
+            "player_name": name, "returnDeadline": None if pid == "active" else 1030000,
+        })
+
+    page.route(f"**/room/{code}", lookup)
+    page.goto(server_url + path)
+    choices = page.get_by_role("navigation", name="Your rooms")
+    expect(choices.get_by_role("link", name="Return to room", exact=True)).to_have_count(3)
+    for pid, caption in (("host", "Kaz"), ("guest1", "Lee (P2)"), ("guest2", "Lee (P3)")):
+        row = choices.locator(".host-return").filter(has=page.get_by_text(caption, exact=True))
+        link = row.get_by_role("link", name="Return to room", exact=True)
+        expect(link).to_have_accessible_description(caption)
+        expected = "&returnHost=1" if pid == "host" else f"#returnPlayer={pid}"
+        assert link.get_attribute("href") == f"/play.html?room={code}{expected}"
+        assert tokens[pid] not in link.get_attribute("href")
+    if path.startswith("/join"):
+        page.goto(server_url + path + "&spectate=1")
+        expect(page.get_by_role("link", name="Return to room")).to_have_count(0)
 
 
 def test_full_room_offers_watch_only(landing):

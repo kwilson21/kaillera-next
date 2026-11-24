@@ -78,7 +78,7 @@ def _join(pid: str, sid: str, *, resume: bool = False):
         extra={
             "sessionid": "ROOM1",
             "persistentId": pid,
-            "reconnectToken": make_reconnect_token(pid),
+            "reconnectToken": make_reconnect_token("ROOM1", pid),
             "resume": resume,
         }
     )
@@ -157,6 +157,129 @@ def test_the_only_player_reloading_into_its_own_match_ends_it():
     assert room.status == "lobby"
     assert "game-ended" in events
     assert resp["status"] == "lobby"
+
+
+@pytest.mark.parametrize("owner", ["host", "guest"])
+def test_fresh_owner_using_the_invite_reclaims_the_lobby_with_other_players(monkeypatch, owner):
+    room = _playing_room()
+    room.players["pid-guest"] = {"socketId": "sid-guest", "playerName": "Guest"}
+    room.slots[1] = "pid-guest"
+    room.owner = f"sid-{owner}"
+    emit = AsyncMock(wraps=signaling._emit)
+    monkeypatch.setattr(signaling, "_emit", emit)
+
+    (err, ack), events = _join(f"pid-{owner}", "sid-returning")
+
+    assert err is None
+    assert ack["owner"] == "sid-returning"
+    assert ack["status"] == "lobby"
+    assert ack["matchId"] is None
+    assert ack["players"]["pid-host"]["slot"] == 0
+    assert ack["players"]["pid-guest"]["slot"] == 1
+    assert events.count("game-ended") == 1
+    emit.assert_any_await("game-ended", {"matchId": "match-1", "reason": "host-reload"}, room="ROOM1")
+
+
+def _return_host(room_id="ROOM1", sid="sid-new", pid="pid-host", token=None):
+    extra = {
+        "sessionid": room_id,
+        "persistentId": pid,
+        "reconnectToken": make_reconnect_token(room_id, pid) if token is None else token,
+        "returnHost": True,
+    }
+    return _call(signaling.join_room, sid, {"extra": extra})
+
+
+def test_return_host_waits_for_the_old_tab_and_only_reclaims_once(monkeypatch):
+    room = _playing_room()
+    monkeypatch.setattr(signaling, "_sid_host", {"sid-host": "localhost", "sid-new": "localhost"})
+    (err, ack), events = _return_host()
+    assert (err, ack) == ("Host tab is still connected", None)
+    assert not events and room.owner == "sid-host" and room.match_id == "match-1"
+
+    del signaling._sid_host["sid-host"]
+    (err, ack), events = _return_host()
+    assert err is None and ack["status"] == "lobby" and room.owner == "sid-new"
+    assert events.count("game-ended") == 1
+
+    room.status, room.match_id = "playing", "rematch"
+    (err, ack), events = _return_host()
+    assert err is None and ack["matchId"] == "rematch"
+    assert not events
+
+
+@pytest.mark.parametrize("event", ["open-room", "join-room"])
+def test_fresh_owner_requests_never_replace_a_connected_host(monkeypatch, event):
+    room = _playing_room()
+    monkeypatch.setattr(signaling, "_sid_host", {"sid-host": "localhost", "sid-new": "localhost"})
+    extra = {"sessionid": "ROOM1", "persistentId": "pid-host", "reconnectToken": make_reconnect_token("ROOM1", "pid-host")}
+
+    def request(sid, *, resume=False):
+        if event == "open-room":
+            return _call(signaling.open_room, sid, {"extra": {**extra, "fresh": not resume, "resume": resume}})
+        (error, _), events = _call(signaling.join_room, sid, {"extra": {**extra, "resume": resume}})
+        return error, events
+
+    assert request("sid-new") == ("Host tab is still connected", [])
+    assert request("sid-host") == (None, [])
+    assert room.owner == "sid-host" and room.match_id == "match-1"
+    err, events = request("sid-new", resume=True)
+    assert err is None and "game-ended" not in events
+    assert room.owner == "sid-new" and room.match_id == "match-1"
+
+    del signaling._sid_host["sid-new"]
+    err, events = request("sid-host")
+    assert err is None and events.count("game-ended") == 1
+    assert room.owner == "sid-host" and room.status == "lobby"
+
+
+@pytest.mark.parametrize("token", [
+    "",
+    make_reconnect_token("OTHER", "pid-host"),
+    signaling._make_token({"k": "reconnect", "pid": "pid-host", "exp": 2**40}),
+    signaling._make_token({"k": "reconnect", "room": "ROOM1", "pid": "pid-host", "exp": 0}),
+], ids=["missing", "wrong-room", "legacy", "expired"])
+def test_return_host_requires_current_room_bound_proof(token):
+    room = _playing_room()
+    (err, ack), events = _return_host(token=token)
+    assert (err, ack) == ("Host seat is no longer available", None)
+    assert not events and room.owner == "sid-host" and room.match_id == "match-1"
+    assert "sid-new" not in _sid_to_room
+
+
+def test_return_host_preserves_transferred_ownership():
+    room = _playing_room()
+    _join("pid-guest", "sid-guest")
+    _call(_leave, "sid-host", "leave")
+    assert room.owner == "sid-guest"
+    (err, ack), events = _return_host()
+    assert (err, ack) == ("Host seat is no longer available", None)
+    assert not events and "pid-host" not in room.players
+
+
+def test_return_host_preserves_a_guest_membership():
+    room = _playing_room()
+    _join("pid-guest", "sid-guest")
+    (err, ack), events = _return_host(pid="pid-guest")
+    assert (err, ack) == ("Host seat is no longer available", None)
+    assert not events and room.players["pid-guest"]["socketId"] == "sid-guest"
+
+
+def test_return_host_cannot_open_a_closed_room():
+    (err, ack), events = _return_host()
+    assert (err, ack) == ("Host seat is no longer available", None)
+    assert not events and not rooms and not _sid_to_room
+
+
+def test_invite_without_the_owners_token_cannot_end_the_match():
+    room = _playing_room()
+    payload = JoinRoomPayload(extra={"sessionid": "ROOM1", "persistentId": "pid-host"})
+    (err, ack), events = _call(_join_room_locked, "sid-other", payload)
+
+    assert err == "Invalid reconnect token"
+    assert ack is None
+    assert room.owner == "sid-host" and room.match_id == "match-1"
+    assert "game-ended" not in events
 
 
 def test_a_page_resuming_under_its_running_game_is_not_waiting():

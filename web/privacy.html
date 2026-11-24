@@ -17,7 +17,7 @@
       <div class="wrap narrow">
         <a class="brand-sm" href="/">kaillera<span class="hy">-</span>next</a>
         <h1 class="name sm">Privacy</h1>
-        <p class="m">Last updated October 29, 2026</p>
+        <p class="m">Last updated November 24, 2026</p>
         <p>
           kaillera-next uses session diagnostics to investigate connection, emulator, and synchronization problems.
           Gameplay images are enabled by default and can be turned off. This notice explains the app's behavior and the
@@ -110,8 +110,13 @@
             applying to those records or to provider-held copies.
           </p>
           <p>
-            The browser also stores preferences and may cache ROMs locally for your convenience. Clearing site data
-            removes local preferences and caches, not records already sent to the service.
+            The browser also stores preferences, may cache ROMs locally, and saves a short-lived credential so you can
+            return to your host or player seat from another tab. During a multiplayer fight, the host’s browser
+            periodically saves a copy of the game state locally so the players can resume it during the two-minute
+            return window. Choosing Leave clears that seat’s credential. When a host credential is cleared, the browser
+            remembers up to 32 recent room codes so an old bookmark cannot accidentally create a room with the same
+            code. Clearing site data removes these codes, saved credentials, preferences and caches. Records already
+            sent to the service follow the retention rules above.
           </p>
         </section>
         <p><a href="/">Back to kaillera-next</a></p>

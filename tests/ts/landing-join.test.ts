@@ -561,10 +561,17 @@ test('the direct wake address, the wake report, room codes and room links', () =
 
 // ── The bundle ──────────────────────────────────────────────────────────────
 
-test('the invite bundle is made of the landing modules only: no core, no Effect', () => {
+test('the invite bundle includes only the landing modules, host credential reader and safe storage', () => {
   const inputs = bundleInputs('join-entry.ts');
   assert.ok(inputs.includes('web/src/landing/join.ts'));
   for (const input of inputs) {
-    assert.ok(input === 'web/src/join-entry.ts' || input.startsWith('web/src/landing/'), input);
+    assert.ok(
+      input === 'web/src/join-entry.ts' ||
+        input.startsWith('web/src/landing/') ||
+        input === 'web/src/play/host-return.ts' ||
+        input === 'web/src/play/token-claims.ts' ||
+        input === 'web/src/site/storage.ts',
+      input,
+    );
   }
 });

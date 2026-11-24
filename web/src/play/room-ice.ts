@@ -1,3 +1,4 @@
+import { tokenClaims } from './token-claims.ts';
 const LEGACY_RELAY_AGE_MS = 30 * 60 * 1000;
 const MAX_RELAY_TTL_SECONDS = 24 * 60 * 60;
 const EXPIRY_MARGIN_MS = 10_000;
@@ -35,25 +36,10 @@ interface RoomIceRetry {
 
 /** Read expiry for scheduling only. The HTTP endpoint still verifies the signature. */
 export const canRetryRoomIce = (room: string, token: string, now = Date.now()): boolean => {
-  const encoded = /^([A-Za-z0-9_-]+)\.[a-f0-9]{64}$/.exec(token)?.[1];
-  if (!encoded) return false;
-  try {
-    const payload: unknown = JSON.parse(atob(encoded.replace(/-/g, '+').replace(/_/g, '/')));
-    return (
-      typeof payload === 'object' &&
-      payload !== null &&
-      'k' in payload &&
-      payload.k === 'upload' &&
-      'room' in payload &&
-      payload.room === room &&
-      'exp' in payload &&
-      typeof payload.exp === 'number' &&
-      Number.isSafeInteger(payload.exp) &&
-      payload.exp * 1000 > now + READINESS_TIMEOUT_MS + EXPIRY_MARGIN_MS
-    );
-  } catch {
-    return false;
-  }
+  const claims = tokenClaims(token);
+  return (
+    claims?.k === 'upload' && claims.room === room && claims.exp * 1000 > now + READINESS_TIMEOUT_MS + EXPIRY_MARGIN_MS
+  );
 };
 
 interface RoomIce {

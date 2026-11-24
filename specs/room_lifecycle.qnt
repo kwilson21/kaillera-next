@@ -16,15 +16,15 @@
 //   startGame     _start_game_locked, including a second delivery from the lobby.
 //   endGame       _end_game_locked
 //   leave         _leave (intentional), with ownership transfer
-//   reload        page unload mid-game: socket drops, 30 s grace keeps the slot
+//   reload        page unload: the disconnected host or mid-game guest retains its seat
 //   dropSocket    signaling socket drops mid-game, page keeps running
 //   reopen        fresh page returns inside the grace window:
 //                 open-room (host) or join-room (guest) reconnect path
 //   resume        dropped socket reconnects, page never went away
 //   graceExpire   _disconnect_grace_expiry
 //
-// Not modelled: spectators, ROM readiness, passwords, the 5 s lobby-owner
-// grace (a lobby reload is treated as leave + join), WebRTC itself.
+// A grace expiry represents the corresponding server deadline, independent of transport detection.
+// Spectators, ROM readiness, passwords and WebRTC are outside this model.
 //
 // HOST_REOPEN_ENDS_MATCH selects the server behaviour for a host that
 // re-opens a playing room from a fresh page:
@@ -32,6 +32,9 @@
 //   true   proposed fix: end the match and send everyone back to the lobby
 module room {
   const HOST_REOPEN_ENDS_MATCH: bool
+  // A fresh owner can open the public invite, which sends join-room.
+  const INVITE_RECOGNIZES_OWNER: bool
+  const HOST_TIMEOUT_CLOSES_ROOM: bool
   // What a page does when its socket reconnects under it:
   //   false  before: rejoin silently and keep whatever it was doing
   //   true   today (web/src/rejoin.ts): compare with the status and match
@@ -217,6 +220,7 @@ module room {
 
   action join(p: str, hasRom: bool): bool = all {
     members != Set(), not(members.contains(p)), page.get(p) == Closed,
+    not(HOST_TIMEOUT_CLOSES_ROOM and grace.contains(owner)),
     // room_is_live, or a player in grace is on their way back
     online != Set() or grace != Set(),
     members' = members.union(Set(p)),
@@ -338,7 +342,7 @@ module room {
   }
 
   action reload(p: str): bool = all {
-    status == "playing", online.contains(p),
+    status == "playing" or p == owner, online.contains(p),
     online' = online.exclude(Set(p)), grace' = grace.union(Set(p)),
     page' = page.set(p, Closed),
     members' = members, owner' = owner, creator' = creator, status' = status,
@@ -346,32 +350,49 @@ module room {
   }
 
   action dropSocket(p: str): bool = all {
-    status == "playing", online.contains(p),
+    status == "playing" or p == owner, online.contains(p),
     online' = online.exclude(Set(p)), grace' = grace.union(Set(p)),
     page' = page,
     members' = members, owner' = owner, creator' = creator, status' = status,
     matchId' = matchId, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
   }
 
-  // Fresh page, back inside the grace window.
-  action reopen(p: str, hasRom: bool): bool = all {
-    grace.contains(p), page.get(p) == Closed,
-    online' = online.union(Set(p)), grace' = grace.exclude(Set(p)),
-    members' = members, owner' = owner, creator' = creator, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
-    if (p == creator and HOST_REOPEN_ENDS_MATCH) all {
-      // Proposed: the host's emulator is gone, so the match is over.
-      status' = "lobby", matchId' = 0,
-      page' = broadcast(Lobby).set(p, Lobby),
-    } else if (p == creator) all {
-      // Today: open-room's reconnect path returns no status; the page shows the lobby.
-      status' = status, matchId' = matchId,
-      page' = page.set(p, Lobby),
-    } else all {
-      // join-room's reconnect path returns status; a playing room means late join.
-      status' = status, matchId' = matchId,
-      page' = page.set(p, joinedPage(status, matchId, hasRom)),
+  action keepRoom = all {
+    page' = page, status' = status, matchId' = matchId,
+    online' = online, grace' = grace, members' = members, owner' = owner,
+    creator' = creator, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
+  }
+
+  // A fresh page can also be a duplicated host tab, with copied session
+  // storage. It cannot replace the owner while that socket is connected.
+  action reopen(p: str, hasRom: bool, publicInvite: bool): bool = all {
+    (grace.contains(p) and page.get(p) == Closed) or (p == owner and online.contains(p)),
+    if (INVITE_RECOGNIZES_OWNER and p == owner and online.contains(p)) keepRoom
+    else all {
+      online' = online.union(Set(p)), grace' = grace.exclude(Set(p)),
+      members' = members, owner' = owner, creator' = creator, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
+      if (p == owner and HOST_REOPEN_ENDS_MATCH and ((p == creator and not(publicInvite)) or INVITE_RECOGNIZES_OWNER)) all {
+        // The authenticated owner has lost its emulator, whichever link it used.
+        status' = "lobby", matchId' = 0,
+        page' = broadcast(Lobby).set(p, Lobby),
+      } else if (p == creator and not(publicInvite)) all {
+        // Before #104, open-room's reconnect path returns no status; the page shows the lobby.
+        status' = status, matchId' = matchId,
+        page' = page.set(p, Lobby),
+      } else all {
+        // join-room's reconnect path returns status; a playing room means late join.
+        status' = status, matchId' = matchId,
+        page' = page.set(p, joinedPage(status, matchId, hasRom)),
+      },
     },
   }
+
+  // A different tab may claim only the offline owner's retained seat using
+  // that room's proof. A refusal leaves both the room and the old page alone.
+  action recoverHostTab(p: str, proofForRoom: bool): bool =
+    if (INVITE_RECOGNIZES_OWNER and p == owner and proofForRoom and not(online.contains(p)))
+      reopen(p, true, true)
+    else keepRoom
 
   // Socket reconnects under a page that kept running. The match must survive
   // this, so a fix for `reopen` has to tell a fresh page from a reconnect.
@@ -394,8 +415,14 @@ module room {
 
   action graceExpire(p: str): bool = all {
     grace.contains(p),
-    not(GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED) or status != "playing" or online != Set(),
-    removeMember(p, page.get(p), true),
+    if (HOST_TIMEOUT_CLOSES_ROOM and p == owner) all {
+      members' = Set(), online' = Set(), grace' = Set(), creator' = NOBODY, owner' = NOBODY,
+      status' = "lobby", matchId' = 0, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
+      page' = broadcast(Closed),
+    } else all {
+      not(GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED) or status != "playing" or online != Set(),
+      removeMember(p, page.get(p), true),
+    },
   }
 
   // Nobody has come back to a playing room for far longer than the grace
@@ -403,7 +430,8 @@ module room {
   // may still be in their match; this is the bound on how long an outage the
   // room survives, not a state the server can tell apart from closed tabs.
   action giveUpOnSilentRoom = all {
-    GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED, status == "playing", members != Set(), online == Set(),
+    not(HOST_TIMEOUT_CLOSES_ROOM), GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED,
+    status == "playing", members != Set(), online == Set(),
     members' = Set(), online' = Set(), grace' = Set(),
     owner' = NOBODY, creator' = NOBODY, status' = "lobby", matchId' = 0,
     page' = page, nextMatch' = nextMatch, lostToGrace' = lostToGrace,
@@ -416,6 +444,7 @@ module room {
     val was = gameOf(page.get(p))
     val sameMatch = status == "playing" and was == matchId
     val roomTakesJoiners = members != Set() and (online != Set() or grace != Set())
+                           and not(HOST_TIMEOUT_CLOSES_ROOM and grace.contains(owner))
     all {
       was != 0, not(members.contains(p)),
       nextMatch' = nextMatch, lostToGrace' = lostToGrace, grace' = grace,
@@ -435,7 +464,7 @@ module room {
         members' = members.union(Set(p)), online' = online.union(Set(p)),
         owner' = owner, creator' = creator, status' = status, matchId' = matchId,
         page' = page.set(p, joinedPage(status, matchId, hasRom)),
-      } else if (asHost and members == Set()) all {
+      } else if (asHost and members == Set() and not(HOST_TIMEOUT_CLOSES_ROOM)) all {
         // The room is gone and open-room makes a new one. Before, the page
         // kept showing its game on top of it.
         members' = Set(p), owner' = p, creator' = p, online' = Set(p),
@@ -488,7 +517,7 @@ module room {
       returnAfterExpiry(p, hasRom, asHost),
       openRoom(p), join(p, hasRom), romReady(p), startLateJoinEngine(p), serveLateJoin(p), admitToStart(p),
       serveTimesOut(p),
-      leave(p), reload(p), dropSocket(p), reopen(p, hasRom), resume(p, hasRom), graceExpire(p), closeTab(p),
+      leave(p), reload(p), dropSocket(p), reopen(p, hasRom, not(asHost)), resume(p, hasRom), graceExpire(p), closeTab(p),
     },
   }
 
@@ -501,6 +530,12 @@ module room {
   // down the late-join path towards a host with no emulator running.
   val ownerSeesGame =
     (status == "playing" and listeners.contains(owner)) implies page.get(owner) != Lobby
+
+  // The original owner, while it still owns the room, cannot late-join
+  // the match it must serve. A successor can inherit ownership mid-join.
+  val ownerDoesNotLateJoinItsOwnMatch =
+    (status == "playing" and owner == creator and listeners.contains(owner)) implies
+      not(isLateJoining(page.get(owner)))
 
   // The next two failed before RESUME_RECONCILES and hold with it. Both came
   // from a page whose socket was down while the room moved on: on reconnect
@@ -579,16 +614,23 @@ module room {
   val anAbandonedMatchIsEnded =
     matchHasNobody implies (SERVER_ENDS_ABANDONED_MATCH and everyoneIsWaiting)
 
-  // A signaling outage alone never costs the players their match: a grace
-  // window running out does not remove the last player of a playing room
-  // while that player is still in the match. Failed before: every player's
-  // signaling was down for longer than the window, the room was emptied and
-  // deleted, and the returning players were sent to the lobby or shown a
-  // closed room. Now the server waits while nobody is connected, up to the
-  // much longer bound in `giveUpOnSilentRoom`.
+  // A player-slot timer cannot tear down a match while everyone is offline.
+  // A room can still close when the host reservation itself expires.
   val aMatchIsNotLostToTheGraceWindow = not(lostToGrace)
 
   // ── scenarios ──────────────────────────────────────────────────────────
+
+  run lobbyHostReturnTest = init.then(openRoom("host")).then(join("guest1", true)).then(reload("host"))
+    .expect(grace.contains(owner)).then(reopen("host", true, false))
+    .expect(owner == "host" and online == Set("host", "guest1") and grace == Set())
+
+  run deliberateLeaveHasNoReturnTest = init.then(openRoom("host")).then(join("guest1", true)).then(leave("host"))
+    .then(recoverHostTab("host", true)).expect(owner == "guest1" and not(members.contains("host")))
+
+  run expiredLobbyHostCannotReturnTest = init.then(openRoom("host")).then(join("guest1", true)).then(reload("host"))
+    .then(graceExpire("host")).then(recoverHostTab("host", true))
+    .expect(if (HOST_TIMEOUT_CLOSES_ROOM) members == Set() and owner == NOBODY and page.get("guest1") == Closed
+            else members == Set("guest1") and owner == "guest1")
 
   // Two Start requests arrive for the same lobby. Even after the host starts running,
   // the delayed request leaves the match alone. End returns the host to the lobby for a rematch.
@@ -607,10 +649,52 @@ module room {
       .then(openRoom("host"))
       .then(startGame)
       .then(reload("host"))
-      .then(reopen("host", true))
+      .then(reopen("host", true, false))
       .then(join("guest1", true))
       .expect(ownerSeesGame == HOST_REOPEN_ENDS_MATCH)
       .expect(page.get("guest1") == (if (HOST_REOPEN_ENDS_MATCH) Lobby else Starting(1)))
+
+  // The owner returns through a public invite after losing its emulator.
+  // join-room used to tell it to late-join the match it was hosting.
+  run ownerReopensInviteTest =
+    init
+      .then(openRoom("host"))
+      .then(join("guest1", true))
+      .then(startGame)
+      .then(beginSync).then(startRunning)
+      .then(reload("host"))
+      .then(reopen("host", true, true))
+      .expect(owner == "host")
+      .expect(page.get("host") == (if (INVITE_RECOGNIZES_OWNER) Lobby else Starting(1)))
+      .expect(page.get("guest1") == (if (INVITE_RECOGNIZES_OWNER) Lobby else Running(1)))
+      .expect((status == "lobby") == INVITE_RECOGNIZES_OWNER)
+
+  run copiedHostTabTest =
+    init
+      .then(openRoom("host"))
+      .then(join("guest1", true))
+      .then(startGame)
+      .then(beginSync).then(startRunning)
+      .then(reopen("host", true, false))
+      .expect((page.get("host") == Running(1)) == INVITE_RECOGNIZES_OWNER)
+      .expect((status == "playing" and page.get("guest1") == Running(1)) ==
+              (INVITE_RECOGNIZES_OWNER or not(HOST_REOPEN_ENDS_MATCH)))
+
+  run hostRecoveryInAnotherTabTest =
+    init
+      .then(openRoom("host"))
+      .then(join("guest1", true))
+      .then(startGame)
+      .then(beginSync).then(startRunning)
+      .then(recoverHostTab("host", true))
+      .expect(status == "playing" and page.get("host") == Running(1))
+      .then(reload("host"))
+      .then(recoverHostTab("host", false))
+      .expect(page.get("host") == Closed and owner == "host")
+      .then(recoverHostTab("guest1", true))
+      .expect(owner == "host" and page.get("guest1") == Running(1))
+      .then(recoverHostTab("host", true))
+      .expect((status == "lobby" and page.get("host") == Lobby) == INVITE_RECOGNIZES_OWNER)
 
   // A dropped socket under a running page must not end the match.
   run socketDropKeepsMatchTest =
@@ -640,9 +724,8 @@ module room {
       .then(returnAfterExpiry("guest1", true, false))
       .expect(members.contains("guest1") and page.get("guest1") == Running(1))
 
-  // The host's socket is down for longer than the grace window: the room is
-  // handed to the guest and the match goes on. Before, the returning host
-  // was told "Room already exists" and never got its signaling back.
+  // Only an explicit departure can hand the room to the guest. When the
+  // disconnected owner's deadline expires, a late return finds a closed room.
   run hostReturnsAfterGraceTest =
     init
       .then(openRoom("host"))
@@ -652,10 +735,12 @@ module room {
       .then(startRunning)
       .then(dropSocket("host"))
       .then(graceExpire("host"))
-      .expect(owner == "guest1" and status == "playing")
+      .expect(if (HOST_TIMEOUT_CLOSES_ROOM) members == Set() and page.get("guest1") == Closed
+              else owner == "guest1" and status == "playing")
       .then(returnAfterExpiry("host", true, true))
-      .expect(page.get("host") == (if (RESUME_KNOWS_IT_WAS_DROPPED) Running(1) else Stranded(1)))
-      .expect(members.contains("host") == RESUME_KNOWS_IT_WAS_DROPPED)
+      .expect(page.get("host") == (if (HOST_TIMEOUT_CLOSES_ROOM) Closed
+                                  else if (RESUME_KNOWS_IT_WAS_DROPPED) Running(1) else Stranded(1)))
+      .expect(members.contains("host") == (not(HOST_TIMEOUT_CLOSES_ROOM) and RESUME_KNOWS_IT_WAS_DROPPED))
 
   // Every player's signaling is down for longer than the grace window while
   // the match runs on over their own connections. Before, the room was
@@ -809,7 +894,17 @@ module room {
 
 // The server and client as they are today.
 module room_current {
-  import room(START_ONLY_IN_LOBBY = true, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = true,
+         START_ONLY_IN_LOBBY = true, INVITE_RECOGNIZES_OWNER = true, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+         START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
+         SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
+         SERVE_TIMEOUT_RESTARTS_LATE_JOIN = true).*
+}
+
+// The owner opening the public invite was treated as a late joiner.
+module room_before_owner_invite_fix {
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         START_ONLY_IN_LOBBY = true, INVITE_RECOGNIZES_OWNER = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = true).*
@@ -817,7 +912,8 @@ module room_current {
 
 // A second Start delivery used to allocate another match and restart every listening page.
 module room_before_duplicate_start_fix {
-  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         INVITE_RECOGNIZES_OWNER = false, START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = true).*
@@ -826,7 +922,8 @@ module room_before_duplicate_start_fix {
 // Before a late joiner the host dropped after its serve timed out started its
 // late join again. nobodyLoadsIntoARunningMatch is violated here.
 module room_before_serve_timeout_fix {
-  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         START_ONLY_IN_LOBBY = false, INVITE_RECOGNIZES_OWNER = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = true,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -835,7 +932,8 @@ module room_before_serve_timeout_fix {
 // Before the server kept the places of a room nobody was connected to.
 // aMatchIsNotLostToTheGraceWindow is violated here.
 module room_before_grace_wait {
-  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         START_ONLY_IN_LOBBY = false, INVITE_RECOGNIZES_OWNER = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = true, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -844,7 +942,8 @@ module room_before_grace_wait {
 // Before the server ended a match nobody was running.
 // anAbandonedMatchIsEnded is violated here.
 module room_before_abandoned_end {
-  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         START_ONLY_IN_LOBBY = false, INVITE_RECOGNIZES_OWNER = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = true,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -853,7 +952,8 @@ module room_before_abandoned_end {
 // Before a rejoin said it was a resume and a refusal was acted on.
 // nobodyIsStrandedInADroppedMatch is violated here.
 module room_before_resume_flag {
-  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         START_ONLY_IN_LOBBY = false, INVITE_RECOGNIZES_OWNER = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = true,
          START_WAITS_ONLY_FOR_ITS_COHORT = true, RESUME_KNOWS_IT_WAS_DROPPED = false,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -863,7 +963,8 @@ module room_before_resume_flag {
 // (web/src/late-join-wait.ts). joinersAreNotLeftWaitingAtTheStart is
 // violated here.
 module room_before_start_fix {
-  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         START_ONLY_IN_LOBBY = false, INVITE_RECOGNIZES_OWNER = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = true, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -873,7 +974,8 @@ module room_before_start_fix {
 // (web/src/rejoin.ts). lateJoinersChaseTheCurrentMatch and
 // pagesAgreeWithServer are violated here.
 module room_before_reconcile {
-  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         START_ONLY_IN_LOBBY = false, INVITE_RECOGNIZES_OWNER = false, HOST_REOPEN_ENDS_MATCH = true, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*
@@ -881,7 +983,8 @@ module room_before_reconcile {
 
 // Before #104, kept so hostReloadTest still shows what that fix changed.
 module room_before_104 {
-  import room(START_ONLY_IN_LOBBY = false, HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
+  import room(HOST_TIMEOUT_CLOSES_ROOM = false,
+         START_ONLY_IN_LOBBY = false, INVITE_RECOGNIZES_OWNER = false, HOST_REOPEN_ENDS_MATCH = false, RESUME_RECONCILES = false, START_ADMITS_JOINERS = false,
          START_WAITS_ONLY_FOR_ITS_COHORT = false, RESUME_KNOWS_IT_WAS_DROPPED = false,
          SERVER_ENDS_ABANDONED_MATCH = false, GRACE_WAITS_WHILE_NOBODY_IS_CONNECTED = false,
          SERVE_TIMEOUT_RESTARTS_LATE_JOIN = false).*

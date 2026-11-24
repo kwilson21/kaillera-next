@@ -26,6 +26,7 @@ def test_preference_survives_reload_and_syncs_between_tabs(context, page, server
     other = context.new_page()
     try:
         other.goto(f"{server_url}/play.html?room={room}&name=PrivacyGuest")
+        other.get_by_role("button", name="Join separately").click()
         other_box = other.locator("#opt-diagnostic-images")
         expect(other_box).to_be_visible()
         expect(other_box).not_to_be_checked()

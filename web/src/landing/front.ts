@@ -12,6 +12,7 @@
  * sleeps, so it loads no core.
  */
 import type { SafeStorage } from '../kn-state.ts';
+import { roomReturnLinks } from './return-rooms.ts';
 import {
   BOARD_STATES,
   MARKS,
@@ -79,11 +80,12 @@ export interface FrontHost extends WakeHost, CodeHost {
   readonly Math: Pick<Math, 'random'>;
   readonly Element: typeof Element;
   /** The safe storage wrapper, set by the small site bundle that loads first. */
-  readonly KNStorage?: Pick<SafeStorage, 'get' | 'set'>;
+  readonly KNStorage?: SafeStorage;
   matchMedia(query: string): Pick<MediaQueryList, 'matches'>;
   setInterval(handler: () => void, ms: number): number;
   clearInterval(id: number): void;
   addEventListener(type: 'pageshow', listener: (event: PageTransitionEvent) => void): void;
+  addEventListener(type: 'storage', listener: (event: StorageEvent) => void): void;
   addEventListener(type: string, listener: () => void, options: AddEventListenerOptions): void;
 }
 
@@ -402,6 +404,10 @@ export const startFrontPage = (host: FrontHost): void => {
     restoreFocus(f);
   };
 
+  $('host-timeout-notice').hidden = new URLSearchParams(host.location.search).get('roomEnded') !== 'host-timeout';
+  const checkHostReturns = roomReturnLinks(host, API, $('host-returns'));
+  checkHostReturns();
+
   // ── Polling, waking ─────────────────────────────────────────────────────
 
   let pollTimer = 0;
@@ -432,7 +438,9 @@ export const startFrontPage = (host: FrontHost): void => {
     // is used, even if a newer refresh is still out.
     const seq = ++refreshSeq;
     if (fresh) pollCount = 0;
-    const statsReq = asksForStats(pollCount++)
+    const refreshDetails = asksForStats(pollCount++);
+    checkHostReturns();
+    const statsReq = refreshDetails
       ? getJSON(host, `${API}/api/stats/public`, BOARD_TIMEOUT_MS, isPublicStats)
           .then((st) => {
             if (seq < statsSeq) return;

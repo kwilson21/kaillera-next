@@ -72,7 +72,8 @@
  *                     grace window, so the room drops it while the match goes
  *                     on over the players' own connections; on reconnect it
  *                     must be taken back and neither page may leave the match
- *   dropped-host      the same for the host, whose room is handed to the guest
+ *   dropped-host      the host's signaling drops while its emulator keeps running;
+ *                     the original host returns inside the room's reservation
  *   streaming-join    a third player joins a streamed game already running
  *   spectate          a spectator joins a game already running, then the host ends it
  *   spectator-forgery a bare Socket.IO client joins a two-player room as a
@@ -153,7 +154,6 @@ const BLIP_MS = 3000;
 // Reports that mean a TypeScript module and the page (or the server) differ.
 // The rollback engine's observer reports its own the same way.
 const DISAGREEMENTS = ['session-disagree', 'play-disagree', 'protocol-mismatch', ...OBSERVER_EVENTS];
-const SERVER_GRACE_MS = 30000; // _DISCONNECT_GRACE_SECONDS in server/src/api/signaling.py
 const LATE_JOIN_REPORT_AFTER_MS = 20000; // web/src/session.ts
 
 // The play page's TypeScript must be this tree's, built and served (bundle-check.mjs).
@@ -379,24 +379,48 @@ const checkpoint = async (name, expectations, failures, log) => {
   }
 };
 
-const playersInRoom = async (room) => {
-  const res = await fetch(`${URL}/room/${room}`);
-  return res.ok ? (await res.json()).player_count : 0;
+const roomInfo = async (room, token) => {
+  const res = await fetch(`${URL}/room/${room}`, token ? { headers: { Authorization: 'Bearer ' + token } } : {});
+  return res.ok ? res.json() : null;
 };
 
-// One player's signaling stays down past the server's grace window, so the
-// room drops it while the match goes on over the players' own connections.
-// When the socket returns the player must be taken back into the room and
-// neither page may leave the match.
+const playersInRoom = async (room) => (await roomInfo(room))?.player_count ?? 0;
+
+// A guest can outlast its grace and be readmitted to the active match. A host
+// must keep its own seat and reconnect before the host reservation expires.
 const droppedPlayerReturns = async (room, failures, log, who) => {
   const [host, guest] = await startTwoPlayerGame(room, failures);
+  const match = await matchOf(host);
   const dropped = who === 'host' ? host : guest;
+  const token = await dropped.page.evaluate((code) => sessionStorage.getItem('kn-reconnect-token:' + code), room);
   await cutSignaling(dropped);
-  await dropped.page.waitForTimeout(SERVER_GRACE_MS + 8000);
-  if ((await playersInRoom(room)) !== 1) failures.push(`the room did not drop the ${who} after its grace window`);
+  let remainingMs = 0;
+  const held = await waitUntil(async () => {
+    const seat = await roomInfo(room, token);
+    if (seat?.player_count !== 2 || !(seat.returnDeadline > seat.serverTime)) return false;
+    remainingMs = seat.returnDeadline - seat.serverTime;
+    return true;
+  }, 10000);
+  if (!held) failures.push(`the room did not reserve the disconnected ${who} seat`);
+  const since = performance.now();
+  if (who === 'host') {
+    // Return in the latter half of the actual lease, keeping time for reconnection.
+    await dropped.page.waitForTimeout(remainingMs / 2);
+  } else {
+    const released = await waitUntil(async () => (await playersInRoom(room)) === 1, remainingMs + 15000);
+    if (!released) failures.push('the room did not drop the guest after its grace window');
+    if (performance.now() - since + 1000 < remainingMs) failures.push('the room released the guest seat early');
+    if (await roomInfo(room, token)) failures.push('the expired guest could still return from a fresh tab');
+  }
+  log.push({ seat: who, remainingMs, waitedMs: Math.round(performance.now() - since) });
   dropped.signaling.down = false;
-  if (!(await waitUntil(async () => (await playersInRoom(room)) === 2, 60000)))
-    failures.push(`the ${who} was not taken back into the room`);
+  const returned = await waitUntil(async () => {
+    const data = await roomInfo(room);
+    return data?.player_count === 2 && data.hostReturnDeadline == null && data.status === 'playing';
+  }, 60000);
+  if (!returned) failures.push(`the ${who} was not taken back into the active room`);
+  if (!match || (await matchOf(host)) !== match || (await matchOf(guest)) !== match)
+    failures.push('the players did not retain their original match');
   if (await countOf(dropped, 'rejoin-refused')) failures.push(`the ${who}'s rejoin was refused`);
   if ((await lobbyShownOn(host)) || (await lobbyShownOn(guest))) failures.push('a page left the match');
   if (!(await waitForFrames([host, guest], 120, 120000))) failures.push('the game stopped advancing after the return');
@@ -1083,13 +1107,14 @@ const scenarios = {
     // The guest joins mid-game with no ROM and is asked for one.
     const guest = await openPlayer('guest', `room=${room}&name=Guest`);
     await guest.page.waitForSelector('#rom-drop', { state: 'visible', timeout: 30000 });
-    // The only player running the match leaves for good.
-    await host.ctx.close();
-    // The server drops the host after its grace window and, with only a
-    // waiting joiner left, ends the match: the guest gets the lobby back.
+    // Explicit departure gives up the seat immediately. A closed tab would
+    // instead leave the original host a window in which to return.
+    await host.page.locator('#toolbar-leave').dispatchEvent('click');
+    await host.page.locator('#confirm-host-leave').click();
+    // With only a waiting joiner left, the abandoned match ends.
     const ended = await waitUntil(
       async () => (await lobbyShownOn(guest)) && !(await guest.page.locator('#late-join-msg').count()),
-      SERVER_GRACE_MS + 30000,
+      30000,
     );
     if (!ended) failures.push('the guest was left joining a match nobody was running');
     const res = await fetch(`${URL}/room/${room}`);
@@ -1305,6 +1330,7 @@ const scenarios = {
 
     // The reloaded host has no game running, so it asks for a fresh room and
     // the server ends the match for everyone (the fix from #104).
+    host.page.once('dialog', (dialog) => dialog.accept());
     await host.page.reload();
     await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 30000 });
     if (!(await waitUntil(() => lobbyShownOn(guest), 30000)))

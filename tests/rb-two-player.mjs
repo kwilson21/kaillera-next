@@ -47,6 +47,9 @@
  *     [HEADED=1] [OUT=/tmp/two-player] [KN_DB=server DB_PATH, Node >= 22.13] node tests/rb-two-player.mjs
  *
  * Extra knobs, all off by default:
+ *   FIGHT_RETURN_CHECK=1  In a rollback or lockstep battle (JITTER=20), close the host tab,
+ *     return from the homepage, and verify the saved fight on both controllers
+ *     through at least 300 more confirmed frames.
  *   RESET_COMBO_CHECK=1  After battle evidence is collected, pause via Start
  *     and hold the real mobile reset control; require both peers at character
  *     select with the same running emulator and connected room.
@@ -695,6 +698,7 @@ import {
 } from './frozen-recovery.mjs';
 import { fileURLToPath } from 'node:url';
 import { requireCurrentBundle } from './bundle-check.mjs';
+import { checkFightReturn, installFightProbe } from './rb-fight-return.mjs';
 import { trackHashLag, unrecordedIn } from './hash-lag.mjs';
 import { spansInFrames } from './link-schedule.mjs';
 import { addNetworkInitScript } from './rb-page-network.mjs';
@@ -1526,6 +1530,7 @@ const resyncExtrasProbeInitScript = () => {
       out.hle = h.toString(16);
       out.hleBytes = size;
     }
+    if (window.__knReadFight) out.fight = window.__knReadFight();
     return out;
   };
   const wrap = () => {
@@ -1556,7 +1561,11 @@ const resyncExtrasProbeInitScript = () => {
     };
     around('_kn_sync_read', (call, args) => {
       const n = call(...args);
-      if (n > 0) P.reads.push({ frame: m._kn_get_frame(), ...hiddenOf(m) });
+      if (n > 0) {
+        const read = { frame: m._kn_get_frame(), ...hiddenOf(m) };
+        P.reads.push(read);
+        if (read.fight) window.__knSavedFight?.(read.frame, read.fight);
+      }
       return n;
     });
     let wrote = false;
@@ -1780,6 +1789,7 @@ const mkPage = async (
   if (resyncOneBack) await ctx.addInitScript(resyncOneBackInitScript);
   // Every run: the observers' client events are counted from these.
   await ctx.addInitScript(recordEventsInitScript);
+  if (process.env.FIGHT_RETURN_CHECK === '1') await ctx.addInitScript(installFightProbe);
   await ctx.addInitScript(resyncExtrasProbeInitScript);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => console.log(`[${name}] pageerror ${e.message}`));
@@ -4839,6 +4849,19 @@ if (process.env.HOST_END_CHECK === '1') {
   summary.hostEnd = await checkHostEnd([host, guest], OUT);
   fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
 }
+if (process.env.FIGHT_RETURN_CHECK === '1') {
+  summary.fightReturn = await checkFightReturn({
+    host,
+    guest,
+    baseUrl: URL,
+    room,
+    out: OUT,
+    mode: MODE,
+    jitter: JITTER,
+  });
+  fs.writeFileSync(`${OUT}/summary.json`, JSON.stringify(summary, null, 1));
+  console.log('FIGHT_RETURN_CHECK:', JSON.stringify(summary.fightReturn));
+}
 // Close each distinct browser instance once (host and guest may share one,
 // e.g. the Chromium/Chromium default, or both resolve to the one WebKit
 // instance with HOST_BROWSER=webkit GUEST_BROWSER=webkit).
@@ -5580,6 +5603,7 @@ const failed =
   startLostFailed ||
   predictedKnownFailed ||
   resetComboFailed ||
+  summary.fightReturn?.passed === false ||
   addressMapFailed ||
   resyncOneBackFailed ||
   resyncExtrasFailed ||

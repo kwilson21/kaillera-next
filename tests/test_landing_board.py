@@ -100,7 +100,7 @@ def test_new_player_and_spectator_are_refused_by_a_zombie_room(sig):
 def test_returning_member_may_revive_a_zombie_room(sig):
     room, _ = sig
     del signaling._sid_host["host"]
-    token = signaling.make_reconnect_token("p-host")
+    token = signaling.make_reconnect_token("ROOM1", "p-host")
     err, _ = _join("host-new", "p-host", token=token)
     assert err is None
     assert room.players["p-host"]["socketId"] == "host-new"
@@ -250,6 +250,47 @@ def test_listed_zombie_room_is_not_on_the_board(client, sig):
     room.listed = True
     del signaling._sid_host["host"]
     assert client.get("/list").json() == []
+
+
+def test_reserved_room_exposes_its_server_deadline_and_disappears_at_expiry(client, sig, monkeypatch):
+    room, _ = sig
+    now = 1_000
+    monkeypatch.setattr(signaling, "_now_ms", lambda: now)
+    room.host_return_deadline = 121_000
+    room.listed = True
+    status = client.get("/room/ROOM1").json()
+    assert status["serverTime"] == now
+    assert status["closed"] and status["hostReturnDeadline"] == 121_000
+    assert client.get("/list").json() == []
+    now = 121_000
+    assert client.get("/room/ROOM1").status_code == 404
+
+
+def test_room_lookup_discloses_only_the_callers_saved_seat(client, sig, monkeypatch):
+    room, _ = sig
+    assert _join("guest", "p-guest")[0] is None
+    monkeypatch.setattr(signaling, "_now_ms", lambda: 100_000)
+    auth = {"Authorization": "Bearer " + signaling.make_reconnect_token("ROOM1", "p-guest")}
+    public = client.get("/room/ROOM1").json()
+    assert public["room_name"] == "r" and "returnDeadline" not in public and "role" not in public
+    active = client.get("/room/ROOM1", headers=auth)
+    assert "no-store" in active.headers["Cache-Control"]
+    assert active.json()["returnDeadline"] is None and active.json()["role"] == "player"
+    assert active.json()["player_name"] == "Friend" and active.json()["slot"] == 1
+    del signaling._sid_host["guest"]
+    room.players["p-guest"]["returnDeadline"] = 220_000
+    assert client.get("/room/ROOM1", headers=auth).json()["returnDeadline"] == 220_000
+    room.host_return_deadline = 150_000
+    assert client.get("/room/ROOM1", headers=auth).json()["returnDeadline"] == 150_000
+    for invalid in [
+        "bad",
+        signaling.make_reconnect_token("OTHER", "p-guest"),
+        signaling.make_reconnect_token("ROOM1", "absent"),
+    ]:
+        assert client.get("/room/ROOM1", headers={"Authorization": "Bearer " + invalid}).status_code == 404
+    monkeypatch.setattr(signaling, "_now_ms", lambda: 220_000)
+    room.host_return_deadline = None
+    assert client.get("/room/ROOM1", headers=auth).status_code == 404
 
 
 def test_room_lookup_reports_host_listed_and_closed(client, sig):
@@ -478,12 +519,12 @@ def test_host_leaving_with_only_spectators_unlists_the_room(sig):
     assert "ROOM1" in signaling.rooms and not room.listed
 
 
-def test_join_allowed_while_the_only_player_is_in_grace(sig):
-    room, _ = sig
+@pytest.mark.parametrize(("grace_room", "error"), [("ROOM1", None), ("ELSEWHERE", "Room closed")])
+def test_join_allowed_only_during_grace_in_this_room(sig, grace_room, error):
     del signaling._sid_host["host"]
-    signaling._disconnect_grace_tasks["p-host"] = object()  # lobby owner grace running
-    assert _join("guest", "p-guest")[0] is None
-    assert not signaling.room_frame("ROOM1")  # still nothing public
+    signaling._disconnect_grace_tasks[grace_room, "p-host"] = object()
+    assert _join("guest", "p-guest")[0] == error
+    assert not signaling.room_frame("ROOM1")
 
 
 def test_end_game_drops_the_frame(sig):
@@ -526,7 +567,7 @@ def test_set_listed_is_rate_limited():
 
 def test_spectator_not_admitted_while_the_only_player_is_in_grace(sig):
     del signaling._sid_host["host"]
-    signaling._disconnect_grace_tasks["p-host"] = object()
+    signaling._disconnect_grace_tasks["ROOM1", "p-host"] = object()
     assert _join("watcher", "p-watch", spectate=True) == ("Room closed", None)
 
 

@@ -295,3 +295,25 @@ def test_streaming_paths_send_the_expected_http_cache_policy():
     assert (
         middleware._cache_control(CORE, f"h={FIRST}".encode(), status=404) == "no-store"
     )
+
+
+def test_denied_wake_lock_during_core_boot(page, server_url, rom_path, room, start_game):
+    page.add_init_script("""
+        window.wakeRequests = 0;
+        window.unhandledWakeDenials = 0;
+        const denied = new DOMException("Permission was denied", "NotAllowedError");
+        Object.defineProperty(navigator, "wakeLock", {value: {
+            request() {
+                window.wakeRequests++;
+                return Promise.reject(denied);
+            }
+        }});
+        window.addEventListener("unhandledrejection", e => {
+            if (e.reason === denied) window.unhandledWakeDenials++;
+        });
+    """)
+    page.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=rollback")
+    page.set_input_files("#rom-drop input[type=file]", rom_path)
+    start_game(page)
+    assert page.evaluate("window.wakeRequests") > 0
+    assert page.evaluate("window.unhandledWakeDenials") == 0

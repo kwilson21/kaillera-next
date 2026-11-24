@@ -1,10 +1,13 @@
 """Invite page (/join, docs/landing-design.md §7.2 M2, W3): every state with
 mocked /health and /room/{code} answers."""
 
+import json
 import time
 
 import pytest
 from playwright.sync_api import expect
+
+from src.api.signaling import make_reconnect_token
 
 
 def _room(host="Kaz", players=2, max_players=4, status="lobby", game_id="ssb64", closed=False):
@@ -76,6 +79,53 @@ def test_full_room_leads_with_watch(invite):
     expect(page.locator("#inv-stack > *").first).to_have_id("inv-watch")
 
 
+@pytest.mark.parametrize(
+    ("record", "query", "token_room", "offer"),
+    [
+        (_room(players=4), "", "KAZ12345", False),
+        (_room(closed=True), "", "KAZ12345", False),
+        (dict(_room(players=4), hostReturnDeadline=1030000, serverTime=1000000), "", "KAZ12345", True),
+        (dict(_room(closed=True), hostReturnDeadline=1030000, serverTime=1000000), "", "KAZ12345", True),
+        (dict(_room(status="playing"), hostReturnDeadline=1030000, serverTime=1000000), "", "KAZ12345", True),
+        (None, "", "KAZ12345", False),
+        (dict(_room(closed=True), hostReturnDeadline=1030000, serverTime=1000000), "&spectate=1", "KAZ12345", False),
+        (_room(players=4), "&spectate=1", "KAZ12345", False),
+        (_room(closed=True), "", "OTHER123", False),
+    ],
+)
+def test_invite_offers_a_saved_host_seat_only_in_its_own_retained_room(page, invite, record, query, token_room, offer):
+    token = make_reconnect_token(token_room, "returning-host")
+    page.add_init_script(f"localStorage.setItem('kn-host-return:KAZ12345', {json.dumps(token)})")
+    if record is not None:
+        record = {
+            **record, "role": "host", "player_name": "Kaz", "slot": 0,
+            "serverTime": record.get("serverTime", 1000000), "returnDeadline": record.get("hostReturnDeadline"),
+        }
+    invite(query=f"?room=KAZ12345{query}", room=record)
+    link = page.get_by_role("link", name="Return to room", exact=True)
+    if offer:
+        expect(link).to_be_visible()
+        assert link.get_attribute("href") == "/play.html?room=KAZ12345&returnHost=1"
+        expect(page.get_by_role("button", name="Open your own room")).to_be_visible()
+        expect(page.get_by_role("timer")).to_contain_text("0:30")
+        expect(page.locator("#closed-line")).to_contain_text("The host disconnected.")
+        expect(page.get_by_role("link", name="Watch")).to_have_count(0)
+    else:
+        expect(link).to_have_count(0)
+
+
+def test_host_invite_stops_offering_return_at_the_deadline(page, invite):
+    token = make_reconnect_token("KAZ12345", "returning-host")
+    page.add_init_script(f"localStorage.setItem('kn-host-return:KAZ12345', {json.dumps(token)})")
+    invite(room=dict(
+        _room(), hostReturnDeadline=102000, returnDeadline=102000, serverTime=100000,
+        role="host", player_name="Kaz", slot=0,
+    ))
+    expect(page.get_by_role("link", name="Return to room")).to_be_visible()
+    expect(page.get_by_role("link", name="Return to room")).to_have_count(0, timeout=4000)
+    expect(page.get_by_role("timer")).to_have_text("0:00")
+
+
 def test_match_in_progress_says_you_join_mid_match(invite):
     page = invite(room=_room(status="playing", game_id="smash-remix"))
     expect(page.locator("#inv-title")).to_have_text("Smash Remix")
@@ -99,7 +149,8 @@ def test_closed_room_names_the_host(invite):
     expect(page.locator("#closed-title")).to_have_text("Kaz's room has closed.")
     expect(page.locator("#closed-line")).to_contain_text("Ask Kaz for a new link")
     page.locator("#open-own").click()
-    page.wait_for_url("**/play.html?room=*&host=1&mode=rollback")
+    page.wait_for_url("**/play.html?room=*&mode=rollback")
+    expect(page.locator("#host-controls")).to_be_visible()
 
 
 def test_unknown_room_is_closed_without_a_name(invite):

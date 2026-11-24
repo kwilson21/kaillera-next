@@ -339,7 +339,18 @@ test('a bootstrap failure leaves only this player’s signaling slot, without re
   vm.runInContext(
     `
     let coreFatal=false,engine={stop(){events.push('stop local engine')}};
-    ({${play.slice(from, to)}}).onLateJoinInputFailed('reload to rejoin');
+    const engineMatchId='older', KNState={matchId:'current'};
+    let held=false;
+    const waitForHostBeforeLateJoin=()=>held;
+    const fail=({${play.slice(from, to)}}).onLateJoinInputFailed;
+    fail('obsolete engine');
+    if (coreFatal || !engine || events.length) throw Error('old engine ended the current match');
+    KNState.matchId=engineMatchId;
+    held=true;
+    fail('waiting for host');
+    if (coreFatal || !engine || events.length) throw Error('reserved room lost its guest');
+    held=false;
+    fail('reload to rejoin');
     if (!coreFatal || engine !== null) throw Error('local failure did not stop the engine');
   `,
     c,

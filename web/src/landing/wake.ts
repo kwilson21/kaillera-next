@@ -46,6 +46,9 @@ export const apiBase = (doc: Document): string =>
 export const playUrl = (api: string, code: string, spectate: boolean): string =>
   `${api}/play.html?room=${encodeURIComponent(code)}${spectate ? '&spectate=1' : ''}`;
 
+/** This link records an explicit choice to return using the credential held in this browser. */
+export const hostReturnUrl = (api: string, code: string): string => playUrl(api, code, false) + '&returnHost=1';
+
 /** The room page for a new room this visitor hosts. */
 export const hostUrl = (api: string, code: string): string => `${api}/play.html?room=${code}&host=1&mode=rollback`;
 

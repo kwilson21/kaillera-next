@@ -19,6 +19,60 @@ const joinMidGame = { type: 'joined', status: 'playing', matchId: 'm1', spectato
 const engineUp = { type: 'engineStarted', connectOnly: false, waitsForState: true } as const;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+test('a returning player waits for the host before asking to join a running match', async () => {
+  const { session } = open();
+  session.send({ type: 'waitForHost' });
+  assert.equal(session.state(), 'waitingForHost');
+  assert.equal(session.gameOn(), false);
+  assert.equal(session.rejoined({ playing: false, matchId: null }), 'keep');
+  assert.equal(session.rejoined({ playing: true, matchId: 'm1' }), 'keep');
+  assert.equal(session.state(), 'waitingForHost');
+  session.send({ type: 'hostReturned' });
+  session.send(joinMidGame);
+  assert.equal(session.state(), 'lateJoinStarting');
+  await session.stop();
+});
+
+test('an active guest stops its sync watchdog until its host can serve the same match', async () => {
+  const { session, reported } = open(20);
+  session.send(joinMidGame);
+  session.send(engineUp);
+  const lost = { type: 'hostPeerLostDuringHold', matchId: 'm1' } as const;
+  session.send({ ...lost, matchId: 'old' });
+  assert.equal(session.state(), 'lateJoinSyncing');
+  session.send(lost);
+  session.send(lost);
+  session.send({ type: 'gameStarted', matchId: 'm1' });
+  session.send({ type: 'lateJoinSynced' });
+  session.send({ type: 'hostAvailableForMatch', matchId: 'old' });
+  assert.equal(session.rejoined({ playing: true, matchId: 'm1' }), 'keep');
+  assert.equal(session.state(), 'lateJoinWaitingForHost');
+  assert.equal(session.gameOn(), true);
+  await pause(70);
+  assert.deepEqual(reported, []);
+  session.send({ type: 'hostAvailableForMatch', matchId: 'm1' });
+  assert.equal(session.state(), 'lateJoinStarting');
+  session.send(engineUp);
+  session.send({ type: 'hostAvailableForMatch', matchId: 'm1' });
+  assert.equal(session.state(), 'lateJoinSyncing');
+  await session.stop();
+});
+
+test('a guest waiting for the host never restarts a match that ended or was replaced', async () => {
+  for (const end of ['roomClosed', 'gameEnded', 'rejoinRefused', 'replaced', 'gameStarted'] as const) {
+    const { session } = open();
+    session.send({ type: 'gameStarted', matchId: 'm1' });
+    session.send({ type: 'hostPeerLostDuringHold', matchId: 'm1' });
+    assert.equal(session.state(), 'lateJoinWaitingForHost');
+    if (end === 'replaced') assert.equal(session.rejoined({ playing: true, matchId: 'm2' }), 'matchReplaced');
+    else if (end === 'gameStarted') session.send({ type: end, matchId: 'm2' });
+    else session.send({ type: end });
+    session.send({ type: 'hostAvailableForMatch', matchId: 'm1' });
+    assert.equal(session.state(), end === 'gameStarted' ? 'running' : 'lobby');
+    await session.stop();
+  }
+});
+
 test('a new page is fresh and in the lobby', async () => {
   const { session } = open();
   session.socketUp();

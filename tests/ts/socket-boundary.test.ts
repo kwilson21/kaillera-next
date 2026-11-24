@@ -124,6 +124,8 @@ const SENT = [
     },
   ],
   ['game-ended', { matchId: null }],
+  ['match-return-go', { matchId: 'recovery' }],
+  ['room-closed', { reason: 'host-timeout' }],
   ['rom-sharing-updated', { romSharing: false }],
   ['upload-token', token],
   ['reconnect-token', token],

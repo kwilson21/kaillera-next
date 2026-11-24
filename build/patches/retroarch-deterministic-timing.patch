@@ -203,7 +203,7 @@ index be6c1f6..dcf3fa1 100644
     return al->res_ptr * OPENAL_BUFSIZE;
  }
 diff --git a/emscripten/library_platform_emscripten.js b/emscripten/library_platform_emscripten.js
-index 73ff846..c3db4fe 100644
+index 73ff846..be67488 100644
 --- a/emscripten/library_platform_emscripten.js
 +++ b/emscripten/library_platform_emscripten.js
 @@ -63,7 +63,10 @@ var LibraryPlatformEmscripten = {
@@ -218,6 +218,34 @@ index 73ff846..c3db4fe 100644
     },
  
     PlatformEmscriptenWatchWindowVisibility__deps: ["$PlatformEmscriptenOnVisibilityChange"],
+@@ -161,13 +164,20 @@ var LibraryPlatformEmscripten = {
+    $PlatformEmscriptenDoSetWakeLock: async function(state) {
++      var pending;
+       if (state && !RPE.sentinelPromise && navigator?.wakeLock?.request) {
+          try {
+-            RPE.sentinelPromise = navigator.wakeLock.request("screen");
++            pending = navigator.wakeLock.request("screen");
++            RPE.sentinelPromise = pending;
++            await pending;
++         } catch (e) {
++            if (RPE.sentinelPromise === pending)
++               RPE.sentinelPromise = null;
++         }
++      } else if (!state && RPE.sentinelPromise) {
++         pending = RPE.sentinelPromise;
++         RPE.sentinelPromise = null;
++         try {
++            var sentinel = await pending;
++            await sentinel.release();
+          } catch (e) {}
+-      } else if (!state && RPE.sentinelPromise) {
+-         try {
+-            var sentinel = await RPE.sentinelPromise;
+-            sentinel.release();
+-         } catch (e) {}
+-         RPE.sentinelPromise = null;
+       }
+    },
 diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
 index c9ceed1..c494df5 100644
 --- a/frontend/drivers/platform_emulatorjs.c

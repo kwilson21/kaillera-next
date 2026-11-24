@@ -50,6 +50,7 @@ def _cleanup(*pages_and_contexts):
     for item in pages_and_contexts:
         try:
             if hasattr(item, "goto") and not item.is_closed():
+                item.once("dialog", lambda dialog: dialog.accept())
                 item.goto("about:blank")
         except Exception:
             pass
@@ -86,11 +87,62 @@ def _start_lockstep_game(host, guest, server_url, room, start_game):
     )
 
 
+@pytest.mark.parametrize("mode", ["rollback", "lockstep"])
+@pytest.mark.parametrize("first_loss", ["signaling", "game"])
+def test_running_guest_waits_for_an_absent_host(browser, server_url, room, start_game, mode, first_loss):
+    frame = "window.EJS_emulator.gameManager.Module._kn_get_frame()"
+    host_channel = "Object.values(KNState.peers || {}).some(p => p.slot === 0 && p.dc?.readyState === 'open')"
+    with browser.new_context() as creator, browser.new_context() as player:
+        host, guest = creator.new_page(), player.new_page()
+        url = f"{server_url}/play.html?room={room}"
+        host.goto(f"{url}&host=1&name=Host&mode={mode}")
+        expect(host.locator("#host-controls")).to_be_visible()
+        guest.goto(f"{url}&name=Guest")
+        guest.wait_for_function("window.KNState?.slot === 1")
+        for page in (host, guest):
+            _load_rom(page)
+        start_game(host, guest)
+        guest.wait_for_function(f"{frame} > 120 && {host_channel}", timeout=30000)
+        match = guest.evaluate("KNState.matchId")
+        assert guest.request.get(f"{server_url}/room/{room}").json()["mode"] == mode
+        timer = guest.locator("#host-wait-banner [role=timer]")
+        status = guest.locator("#host-wait-banner [role=status]")
+
+        if first_loss == "signaling":
+            host.evaluate("window.__test_socket.disconnect()")
+            expect(timer).to_be_visible()
+            expect(status).to_contain_text("game connection is still active")
+            healthy = guest.evaluate(frame)
+            guest.wait_for_function(f"before => {frame} >= before + 12 && {host_channel}", arg=healthy)
+            # A remote tab can disappear while local WebRTC still reports an open channel.
+            host.evaluate("RTCDataChannel.prototype.send = function () {}")
+            expect(status).to_contain_text("Waiting for them to return", timeout=10000)
+            assert guest.evaluate(host_channel)
+            held = guest.evaluate(frame)
+            guest.wait_for_timeout(1500)
+            assert guest.evaluate(frame) == held
+        else:
+            guest.evaluate("Object.values(KNState.peers).find(p => p.slot === 0).pc.close()")
+            guest.wait_for_function(f"!({host_channel})")
+            expect(timer).to_be_hidden()
+
+        host.close()
+        expect(timer).to_be_visible()
+        guest.wait_for_function("!window.NetplayRollback.hostGameConnected()")
+        expect(status).to_contain_text("Waiting for them to return")
+        frozen = guest.evaluate(frame)
+        guest.wait_for_timeout(1500)
+        assert guest.evaluate(frame) == frozen
+        assert guest.evaluate("KNState.matchId") == match
+        guest.locator("#toolbar-leave").click()
+        expect(guest).to_have_url(f"{server_url}/")
+        expect(guest.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+
+
 def test_resume_toast_on_visibility_change(browser, server_url, start_game):
     """Returning from background sends 'returned' toast to peers."""
-    ctx = browser.new_context()
-    host = ctx.new_page()
-    guest = ctx.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         _start_lockstep_game(host, guest, server_url, _room_id("P1"), start_game)
@@ -118,14 +170,13 @@ def test_resume_toast_on_visibility_change(browser, server_url, start_game):
             timeout=5000,
         )
     finally:
-        _cleanup(host, guest, ctx)
+        _cleanup(host, guest)
 
 
 def test_reconnect_toast_on_dc_close(browser, server_url, start_game):
     """DC death shows toast notifications (no blocking overlay)."""
-    ctx = browser.new_context()
-    host = ctx.new_page()
-    guest = ctx.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         _start_lockstep_game(host, guest, server_url, _room_id("RC"), start_game)
@@ -152,7 +203,7 @@ def test_reconnect_toast_on_dc_close(browser, server_url, start_game):
             timeout=20000,
         )
     finally:
-        _cleanup(host, guest, ctx)
+        _cleanup(host, guest)
 
 
 def test_rom_transfer_mobile_ua(browser, server_url):
@@ -202,9 +253,8 @@ def test_rom_transfer_mobile_ua(browser, server_url):
 
 def test_background_tab_resumes_cleanly(browser, server_url, start_game):
     """Background tab resumes on return."""
-    ctx = browser.new_context()
-    host = ctx.new_page()
-    guest = ctx.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         _start_lockstep_game(host, guest, server_url, _room_id("P2"), start_game)
@@ -243,4 +293,4 @@ def test_background_tab_resumes_cleanly(browser, server_url, start_game):
             timeout=10000,
         )
     finally:
-        _cleanup(host, guest, ctx)
+        _cleanup(host, guest)

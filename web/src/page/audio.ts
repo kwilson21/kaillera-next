@@ -267,7 +267,7 @@ export interface AudioPipeline<C extends AudioCtx> {
   readonly init: (callbacks: AudioCallbacks) => Promise<void>;
   readonly feed: () => void;
   readonly ensureRunning: (reason?: string) => boolean;
-  readonly cleanup: () => void;
+  readonly cleanup: (keepForReturn?: boolean) => void;
   readonly destNode: AudioStreamDestination | null;
   readonly ready: boolean;
   readonly ctx: C | null;
@@ -749,7 +749,7 @@ export const startAudio = <C extends AudioCtx>(host: AudioHost<C>): AudioPipelin
     }
   }
 
-  function cleanup(): void {
+  function cleanup(keepForReturn = false): void {
     // The gesture-resume listeners normally self-detach on first user
     // interaction. If cleanup runs first (game ends before any gesture),
     // they would otherwise stay attached to document forever.
@@ -782,7 +782,8 @@ export const startAudio = <C extends AudioCtx>(host: AudioHost<C>): AudioPipelin
       audioDestNode = null;
     }
     if (audioCtx) {
-      audioCtx.close();
+      if (keepForReturn && audioCtx.state !== 'closed') host._kn_preloadedAudioCtx = audioCtx;
+      else audioCtx.close();
       audioCtx = null;
     }
     audioReady = false;

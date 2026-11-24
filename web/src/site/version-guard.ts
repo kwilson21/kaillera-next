@@ -13,9 +13,8 @@
  * `?v=` cache-bust on script URLs cannot help it: it would keep running the
  * old engine against a fixed server.
  *
- * A player is never taken out of a match: the page reloads only when no game
- * is in progress or the tab is hidden. With a match on screen the mismatch is
- * logged and the reload waits for the next check that finds the page idle.
+ * During a match the guard logs the mismatch and waits for the next check
+ * that finds the page idle, including when a player backgrounds the tab.
  */
 
 /** How often the server is asked. */
@@ -69,16 +68,13 @@ export const gameInProgress = (state: EngineStateView | null | undefined): boole
   }
 };
 
-/** Reloading now interrupts nobody: the tab is hidden, or no match is on. */
-export const safeToReload = (hidden: boolean, inGame: boolean): boolean => hidden || !inGame;
-
 /**
  * What a check does, given what the server said.
  *
  * - `nothing`: no answer, the versions agree, or this version was already
  *   logged and the page is still busy (or its reload is already on the way).
  * - `reload`: a version not logged before, and the page is idle.
- * - `waiting-for-idle`: a version not logged before, with a match on screen.
+ * - `waiting-for-idle`: a version not logged before, while a game is running.
  * - `reload-on-idle`: a version logged earlier, and the page is idle now.
  *
  * Every action but `nothing` is logged; `reload` and `waiting-for-idle` also
@@ -160,15 +156,14 @@ export const startVersionGuard = (host: VersionGuardHost): void => {
     }
   };
 
-  const isSafeToReload = (): boolean => {
-    if (host.document.hidden) return true;
-    return safeToReload(false, gameInProgress(host.KNState));
-  };
-
   const forceReload = (): void => {
     if (reloadScheduled) return;
     reloadScheduled = true;
     host.setTimeout(() => {
+      if (gameInProgress(host.KNState)) {
+        reloadScheduled = false;
+        return;
+      }
       // HTML is served no-store, so navigating to the same address also loads a fresh page.
       const navigateHere = (): void => {
         const href = host.location.href;
@@ -189,7 +184,13 @@ export const startVersionGuard = (host: VersionGuardHost): void => {
       if (!response.ok) return;
       const serverVersion = decodeServerVersion(await response.json());
       if (serverVersion === '' || serverVersion === pageVersion) return;
-      const action = guardAction(pageVersion, serverVersion, lastLoggedVersion, isSafeToReload(), reloadScheduled);
+      const action = guardAction(
+        pageVersion,
+        serverVersion,
+        lastLoggedVersion,
+        !gameInProgress(host.KNState),
+        reloadScheduled,
+      );
       if (action === 'nothing') return;
       if (action !== 'reload-on-idle') lastLoggedVersion = serverVersion;
       logMismatch(serverVersion, action);

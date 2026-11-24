@@ -72,6 +72,11 @@ import { startResetCombo } from './page/reset-combo.ts';
 import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
+import * as roomIdentity from './play/host-return.ts';
+import * as hostReturnEffects from './play/host-return-effects.ts';
+import { matchSave } from './match-save.ts';
+import { startEvery } from './poll.ts';
+import { MatchReturn } from './play/match-return.ts';
 import * as connectionNotices from './play/connection-notices.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
@@ -109,6 +114,7 @@ import {
   followUpIsUnneeded,
 } from './sync-follow-up.ts';
 import { recoveryStep } from './recovery-resync.ts';
+import { hostGameConnected } from './host-game-link.ts';
 import { rosterKey } from './peer-identity.ts';
 import { createPeerConnection, PEER_TIMING, peerFacts } from './peer-connection.ts';
 import { isOlderAttempt, newPageId, readAttemptId } from './attempt-id.ts';
@@ -223,6 +229,7 @@ export const createSession = (
 
   let [snapshot] = initialTransition(sessionMachine, { lateJoinReportAfterMs });
   const state = (): SessionState => snapshot.value;
+  const gameOn = (): boolean => sessionFlag(state(), 'gameRunning');
   // The rejoin is its own machine (rejoin-machine.ts), run by an actor in
   // this session's scope. The session gives it the request of the current
   // connection, sends it the events it shares with the lifecycle machine,
@@ -284,8 +291,7 @@ export const createSession = (
     send,
     state,
     joinedMatch,
-    /** A game is on for this page: it is anywhere but the lobby. */
-    gameOn: (): boolean => sessionFlag(state(), 'gameRunning'),
+    gameOn,
     /**
      * One of the page's late-join questions, answered by the machine: is the
      * next engine start a late join (`lateJoin`), is the page waiting for a
@@ -309,25 +315,20 @@ export const createSession = (
       options: RejoinOptions<RejoinedRoom>,
       onOutcome: (outcome: RejoinOutcome<RejoinedRoom>) => void,
     ): boolean => {
-      const gameOn = state() !== 'lobby';
-      if (gameOn) {
+      const playing = gameOn();
+      if (playing) {
         rejoinOptions = options;
         rejoinListener = onOutcome;
       }
-      sendRejoin({ type: 'socketUp', gameOn });
-      return gameOn;
+      sendRejoin({ type: 'socketUp', gameOn: playing });
+      return playing;
     },
     /**
      * The server acknowledged a rejoin after a socket drop. Moves the machine
      * if the page is out of step and says what the page must do about it.
      */
     rejoined: (room: { playing: boolean; matchId: string | null }): RejoinVerdict => {
-      const verdict = reconcileRejoin(
-        state() !== 'lobby',
-        snapshot.context.matchId ?? '',
-        room.playing,
-        room.matchId ?? '',
-      );
+      const verdict = reconcileRejoin(gameOn(), snapshot.context.matchId ?? '', room.playing, room.matchId ?? '');
       send({ type: 'rejoined', playing: room.playing, matchId: room.matchId });
       return verdict === 'gameEnded' || verdict === 'matchReplaced' ? verdict : 'keep';
     },
@@ -336,6 +337,8 @@ export const createSession = (
 };
 
 export const KNCore = {
+  matchSave,
+  startEvery,
   checkpoint: { CheckpointRecovery, CHECKPOINT_CAP, CHECKPOINT_MESSAGE },
   analogScale,
   audioTransition,
@@ -484,6 +487,7 @@ export const KNCore = {
     resyncDeadlineStep,
   },
   rosterKey,
+  hostGameConnected,
   screenshotCrop,
   shouldInitiate,
   signalDisposition,
@@ -540,6 +544,8 @@ export const KNCore = {
     romLibraryHtml,
     delay,
     connect,
+    hostReturn: { ...roomIdentity, ...hostReturnEffects },
+    MatchReturn,
     connectionNotices,
     joinPlan,
     canRetryRoomIce,

@@ -28,13 +28,262 @@ def test_lobby_to_play_redirect(page, server_url):
     """Create a room redirects to play.html as host (the room asks for a name)."""
     page.goto(server_url)
     page.click("#create-btn")
-    expect(page).to_have_url(re.compile(r"play\.html\?room=\w+&host=1&mode=rollback"))
+    expect(page).to_have_url(re.compile(r"play\.html\?room=\w+&mode=rollback$"))
+    expect(page.locator("#host-controls")).to_be_visible()
 
 
-def test_host_guest_start_end(context, server_url):
+def test_reopened_host_url_uses_the_rooms_current_mode(page, server_url, room):
+    url = f"{server_url}/play.html?room={room}&host=1&mode=rollback"
+    page.goto(url)
+    expect(page.locator("#host-controls")).to_be_visible()
+    page.locator("#opt-listed").check()
+    page.locator("#mode-select").select_option("streaming", force=True)
+    assert page.request.get(f"{server_url}/room/{room}").json()["mode"] == "streaming"
+
+    # A duplicate inherits this tab's credentials while its host is still connected.
+    with page.expect_popup() as popup:
+        page.evaluate("window.open(location.href)")
+    duplicate = popup.value
+    expect(duplicate.locator("#host-return-dialog [role=status]")).to_contain_text("still connected")
+    duplicate.close()
+    assert page.evaluate("KNState.isLocalHost")
+
+    page.reload()
+    expect(page.locator("#host-controls")).to_be_visible()
+    expect(page.locator("#mode-select")).to_have_value("streaming")
+    expect(page.locator("#opt-listed")).to_be_checked()
+    assert page.evaluate("KNState.slot") == 0
+    assert page.locator("#rollback-options").evaluate("e => e.style.display") == "none"
+    assert page.request.get(f"{server_url}/room/{room}").json()["mode"] == "streaming"
+
+
+@pytest.mark.parametrize("playing", [False, True], ids=["lobby", "match"])
+def test_reopened_host_url_does_not_recreate_an_expired_room(browser, page, short_host_return_url, room, playing):
+    url = f"{short_host_return_url}/play.html?room={room}&host=1"
+    page.goto(url)
+    page.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
+    bookmark = f"{short_host_return_url}/play.html?room={room}"
+    expect(page).to_have_url(bookmark)
+    with browser.new_page() as guest:
+        guest.goto(f"{short_host_return_url}/play.html?room={room}&name=Guest")
+        guest.wait_for_function("KNState.slot === 1")
+        if playing:
+            for player in (page, guest):
+                _mark_rom_ready(player)
+            page.click("#start-btn")
+            expect(guest.locator("#toolbar")).to_be_visible()
+            page.once("dialog", lambda dialog: dialog.accept())
+        page.goto(short_host_return_url)
+        expect(page.get_by_role("link", name="Return to room", exact=True)).to_be_visible()
+        expect(page.get_by_role("timer")).to_contain_text("Room closes in")
+        expect(guest.locator("#host-wait-banner [role=timer]")).to_be_visible()
+        deadline = guest.request.get(f"{short_host_return_url}/room/{room}").json()
+        assert 0 < deadline["hostReturnDeadline"] - deadline["serverTime"] <= 5000
+
+        expect(guest).to_have_url(f"{short_host_return_url}/?roomEnded=host-timeout", timeout=15000)
+        expect(guest.get_by_role("status")).to_contain_text("The room closed because the host did not return in time.")
+        expect(page.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+        assert page.request.get(f"{short_host_return_url}/room/{room}").status == 404
+
+    # Even a browser with no history of the room can safely open the address the host bookmarked.
+    with browser.new_page() as visitor:
+        visitor.goto(bookmark)
+        expect(visitor.locator(".error-card")).to_contain_text("Room not found")
+        assert visitor.request.get(f"{short_host_return_url}/room/{room}").status == 404
+
+    # A fresh tab has no copy of the original tab's credentials. Replaying the literal
+    # creation URL still cannot create the old room after the homepage clears its ticket.
+    page.reload()
+    page.wait_for_function("room => !localStorage.getItem('kn-host-return:' + room)", arg=room)
+    with page.context.new_page() as fresh:
+        fresh.goto(url)
+        assert fresh.evaluate("room => sessionStorage.getItem('kn-reconnect-token:' + room)", room) is None
+        expect(fresh.locator(".error-card")).to_contain_text("Room not found")
+        assert fresh.request.get(f"{short_host_return_url}/room/{room}").status == 404
+        fresh.goto(short_host_return_url)
+        fresh.click("#create-btn")
+        expect(fresh.locator("#host-controls")).to_be_visible()
+        new_room = fresh.evaluate("KNState.room")
+        assert new_room and new_room != room
+        assert fresh.request.get(f"{short_host_return_url}/room/{new_room}").ok
+
+    # A bookmark in the original tab cannot recreate the room even after its ticket expires.
+    page.add_init_script("const now = Date.now.bind(Date); Date.now = () => now() + 3600000;")
+    page.goto(url)
+    expect(page.locator(".error-card")).to_contain_text("Room not found")
+    assert page.request.get(f"{short_host_return_url}/room/{room}").status == 404
+
+
+def test_host_return_after_a_temporary_lookup_failure(page, server_url, room):
+    url = f"{server_url}/play.html?room={room}&host=1"
+    page.goto(url)
+    page.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
+    page.route(f"**/room/{room}", lambda route: route.fulfill(status=503))
+    page.reload()
+    expect(page.locator(".error-card")).to_contain_text("try again")
+    page.unroute(f"**/room/{room}")
+    page.reload()
+    expect(page.locator("#host-controls")).to_be_visible()
+
+
+def test_socket_replacement_cancels_the_old_room_lookup(browser, page, server_url, room):
+    url = f"{server_url}/play.html?room={room}"
+    page.goto(f"{url}&host=1")
+    expect(page.locator("#host-controls")).to_be_visible()
+    with browser.new_page() as guest:
+        guest.add_init_script("""
+            const fetchRoom = window.fetch.bind(window);
+            window.fetch = (url, options) => {
+                if (!window.answerOldLookup && String(url).startsWith('/room/')) {
+                    window.stalledLookup = options?.signal;
+                    return new Promise(resolve => {
+                        window.answerOldLookup = () => resolve(new Response(null, { status: 404 }));
+                    });
+                }
+                return fetchRoom(url, options);
+            };
+        """)
+        guest.goto(f"{url}&name=Guest")
+        guest.wait_for_function("typeof window.answerOldLookup === 'function'")
+        guest.evaluate("window.__test_socket.disconnect().connect()")
+        guest.wait_for_function("KNState.slot === 1")
+        assert guest.evaluate("window.stalledLookup.aborted")
+        guest.evaluate("window.answerOldLookup()")
+        expect(guest.locator("#error-msg")).to_be_hidden()
+        expect(guest.locator("#guest-status")).to_be_visible()
+
+
+def test_intentional_lobby_leave_transfers_the_room_and_clears_the_return_offer(browser, server_url, room):
+    url = f"{server_url}/play.html?room={room}"
+    original = browser.new_page()
+    guest = browser.new_page()
+    try:
+        original.goto(f"{url}&host=1&name=Original")
+        original.wait_for_function("room => !!sessionStorage.getItem('kn-reconnect-token:' + room)", arg=room)
+        guest.goto(f"{url}&name=Guest")
+        guest.wait_for_function("KNState.slot === 1")
+        original.click("#leave-btn")
+        expect(original).to_have_url(f"{server_url}/")
+        expect(original.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+        guest.wait_for_function("KNState.isLocalHost && KNState.slot === 0", timeout=15000)
+
+        original.goto(f"{url}&name=Original")
+        original.wait_for_function("KNState.slot === 1")
+        expect(original.locator("#guest-status")).to_be_visible()
+        expect(original.locator("#host-controls")).to_be_hidden()
+        original.wait_for_function("room => !localStorage.getItem('kn-host-return:' + room)", arg=room)
+        assert guest.evaluate("room => !!localStorage.getItem('kn-host-return:' + room)", room)
+        assert guest.evaluate("KNState.isLocalHost")
+    finally:
+        original.close()
+        guest.close()
+
+
+def test_host_countdown_tracks_the_game_link_between_roster_updates(page, server_url, room):
+    page.goto(f"{server_url}/play.html?room={room}&host=1")
+    expect(page.locator("#host-controls")).to_be_visible()
+    page.clock.install(time="2025-01-01T00:00:00Z")
+    page.clock.pause_at("2025-01-01T00:00:01Z")
+    page.evaluate("""() => {
+        window.gameLinkOpen = false;
+        window.showHostWait = KNCore.play.hostReturn.hostWaitNotice(() => window.gameLinkOpen);
+        window.showHostWait({
+            status: 'playing', hostReturnDeadline: 121000, serverTime: 1000,
+        });
+    }""")
+    assert page.locator("#toolbar-status").evaluate("element => element.hidden")
+    status = page.locator("#host-wait-banner [role=status]")
+    timer = page.locator("#host-wait-banner [role=timer]")
+    expect(status).to_contain_text("Waiting for them to return")
+    expect(timer).to_have_text("2:00")
+    page.evaluate("window.gameLinkOpen = true")
+    # The display refreshes every half second; allow it to render after the second changes.
+    page.clock.run_for(1250)
+    expect(status).to_contain_text("game connection is still active")
+    expect(timer).to_have_text("1:59")
+    page.evaluate("window.gameLinkOpen = false")
+    page.clock.run_for(1000)
+    expect(status).to_contain_text("Waiting for them to return")
+    expect(timer).to_have_text("1:58")
+    page.evaluate("() => window.showHostWait(null)")
+    expect(status).to_be_hidden()
+    assert not page.locator("#toolbar-status").evaluate("element => element.hidden")
+
+
+def test_guest_returns_first_to_empty_fight_then_leaves_their_seat(browser, server_url, room):
+    play_url = f"{server_url}/play.html?room={room}"
+    lookup = f"{server_url}/room/{room}"
+    with browser.new_context() as host_device, browser.new_context() as guest_device:
+        host = host_device.new_page()
+        guest = guest_device.new_page()
+        host.goto(f"{play_url}&host=1&name=Original")
+        expect(host.locator("#host-controls")).to_be_visible()
+        guest.goto(f"{play_url}&name=Guest")
+        guest.wait_for_function("KNState.slot === 1")
+        for page in (host, guest):
+            _mark_rom_ready(page)
+        expect(host.locator("#start-btn")).to_be_enabled()
+        host.click("#start-btn")
+        expect(guest.locator("#toolbar")).to_be_visible()
+        guest_id = guest.evaluate("sessionStorage.getItem('kn-player-id')")
+        ticket = guest.evaluate("room => sessionStorage.getItem('kn-reconnect-token:' + room)", room)
+        assert guest_id and ticket
+        host.close()
+        guest.close()
+
+        guest = guest_device.new_page()
+        guest.goto(f"{server_url}/join?room={room}")
+        offer = guest.get_by_role("link", name="Return to room", exact=True)
+        expect(offer).to_be_visible()
+        before = guest.request.get(lookup).json()
+        assert before["status"] == "playing" and before["hostReturnDeadline"] > before["serverTime"]
+        # Let the server's real roster and credentials reach the new tab before its join acknowledgement.
+        guest.add_init_script("""document.addEventListener('load', ({ target }) => {
+            if (!(target instanceof HTMLScriptElement) || !target.src.includes('/socket.io.min.js')) return;
+            const emit = io.Socket.prototype.emit;
+            io.Socket.prototype.emit = function(event, ...args) {
+                if (event === 'join-room' && args[0]?.extra?.returnPlayer) {
+                    const ack = args.pop();
+                    args.push((...reply) => { window.finishSeatReturn = () => ack(...reply); });
+                }
+                return emit.call(this, event, ...args);
+            };
+        }, true);""")
+        offer.click()
+        guest.wait_for_function("typeof window.finishSeatReturn === 'function'")
+        assert guest.evaluate("[KNState.slot, KNState.isLocalHost, sessionStorage.getItem('kn-player-id')]") == [
+            1, False, guest_id,
+        ]
+        guest.evaluate("window.finishSeatReturn()")
+        assert guest.evaluate("sessionStorage.getItem('kn-player-id')") == guest_id
+        expect(guest.locator("#overlay")).to_be_visible()
+        expect(guest.locator("#host-wait-banner [role=timer]")).to_be_visible()
+        returned = guest.request.get(lookup).json()
+        assert returned["status"] == "lobby" and returned["hostReturnDeadline"] == before["hostReturnDeadline"]
+
+        host = host_device.new_page()
+        host.goto(server_url)
+        host.get_by_role("link", name="Return to room", exact=True).click()
+        host.wait_for_function("window.KNState?.slot === 0 && KNState.isLocalHost")
+        expect(host.locator("#host-controls")).to_be_visible()
+        expect(guest.locator("#host-wait-banner")).to_be_hidden()
+        after = host.request.get(lookup).json()
+        assert after["status"] == "lobby" and after["player_count"] == 2 and "hostReturnDeadline" not in after
+
+        guest.click("#leave-btn")
+        expect(guest).to_have_url(f"{server_url}/")
+        assert guest.request.get(lookup, headers={"Authorization": f"Bearer {ticket}"}).status == 404
+        expect(guest.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+        guest.goto(f"{server_url}/join?room={room}")
+        expect(guest.locator("#inv-loading")).to_be_hidden()
+        expect(guest.get_by_role("link", name="Return to room", exact=True)).to_have_count(0)
+        assert host.request.get(lookup).json()["player_count"] == 1
+
+
+def test_host_guest_start_end(browser, server_url):
     """Full flow: host creates, guest joins, start game, end game."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         # Host creates room
@@ -72,27 +321,22 @@ def test_host_guest_start_end(context, server_url):
 
 
 @pytest.mark.parametrize("offer_delay_ms", [0, 1000], ids=["normal", "delayed-offer"])
-def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
-    """When the host leaves mid-game, the guest stays in the game and the room stays open.
-
-    The server used to close the room on a host disconnect (`room-closed`) and
-    the guest was sent back to the lobby. It now keeps the room and the match:
-    the host may come back, and after the disconnect grace a remaining player
-    becomes the owner (signaling._leave; tests/test_room_logic.py,
-    tests/test_host_reload.py). The guest is told the host left.
-    """
+def test_disconnected_host_keeps_room_during_return_window(browser, server_url, offer_delay_ms):
+    """The guest stays in the playing room while the disconnected host can still return."""
+    host = browser.new_page()
+    guest = browser.new_page()
     if offer_delay_ms:
         # The toolbar is visible before WebRTC connects. A delayed offer makes
         # that ordering deterministic instead of relying on runner load.
-        context.add_init_script(f"""(() => {{
+        delay_offer = f"""(() => {{
             const createOffer = RTCPeerConnection.prototype.createOffer;
             RTCPeerConnection.prototype.createOffer = async function(...args) {{
                 await new Promise(resolve => setTimeout(resolve, {offer_delay_ms}));
                 return createOffer.apply(this, args);
             }};
-        }})();""")
-    host = context.new_page()
-    guest = context.new_page()
+        }})();"""
+        for player in (host, guest):
+            player.add_init_script(delay_offer)
     room_code = f"E2E02{_R}{offer_delay_ms}"
 
     try:
@@ -120,6 +364,7 @@ def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
             )
 
         # Host navigates away (Socket.IO disconnect; 'leaving' over the DataChannel)
+        host.once("dialog", lambda dialog: dialog.accept())
         host.goto("about:blank")
 
         # Guest is told the host left ("Host dropped" once the host's 'leaving'
@@ -137,16 +382,17 @@ def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
         resp = guest.request.get(f"{server_url}/room/{room_code}")
         assert resp.ok, f"room lookup failed: {resp.status}"
         assert resp.json()["status"] == "playing"
+        assert resp.json()["hostReturnDeadline"] > resp.json()["serverTime"]
     finally:
         if not host.is_closed():
             host.close()
         guest.close()
 
 
-def test_host_leave_lobby_transfers_ownership(context, server_url):
+def test_host_leave_lobby_transfers_ownership(browser, server_url):
     """When host leaves in lobby, room stays open for remaining players."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=E2E03{_R}&host=1&name=Host")
@@ -177,15 +423,15 @@ def test_guest_nonexistent_room(page, server_url):
 # ── ROM Sharing Tests ──────────────────────────────────────────────────
 
 
-def test_rom_sharing_prompt_appears(context, server_url):
+def test_rom_sharing_prompt_appears(browser, server_url):
     """When host enables ROM sharing, joiners see accept/decline prompt.
 
     Accepting is the "Accept from Host" button; declining is loading your own
     ROM, so the drop zone stays beside the offer (the separate Decline button
     is gone).
     """
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS01{_R}&host=1&name=Host")
@@ -217,15 +463,15 @@ def test_rom_sharing_prompt_appears(context, server_url):
         guest.close()
 
 
-def test_rom_sharing_decline_shows_drop_zone(context, server_url):
+def test_rom_sharing_decline_shows_drop_zone(browser, server_url):
     """When joiner declines ROM sharing, the ROM drop zone is theirs to use.
 
     There is no Decline button any more: the drop zone stays beside the offer,
     and a joiner declines by loading their own ROM there, which takes the offer
     away.
     """
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
     # A generated file stands in for the ROM: nothing is booted.
     guest.add_init_script("window.__test_skipBoot = true;")
 
@@ -266,10 +512,10 @@ def test_rom_sharing_decline_shows_drop_zone(context, server_url):
         guest.close()
 
 
-def test_rom_sharing_start_gated_without_roms(context, server_url):
+def test_rom_sharing_start_gated_without_roms(browser, server_url):
     """Host cannot start game when not all players have ROMs and sharing is off."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS03{_R}&host=1&name=Host")
@@ -296,10 +542,10 @@ def test_rom_sharing_start_gated_without_roms(context, server_url):
         guest.close()
 
 
-def test_rom_sharing_bypasses_rom_requirement(context, server_url):
+def test_rom_sharing_bypasses_rom_requirement(browser, server_url):
     """When host enables sharing, start game is allowed even if guests have no ROM."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS04{_R}&host=1&name=Host")
@@ -327,9 +573,9 @@ def test_rom_sharing_bypasses_rom_requirement(context, server_url):
         guest.close()
 
 
-def test_rom_sharing_joiner_after_toggle(context, server_url):
+def test_rom_sharing_joiner_after_toggle(browser, server_url):
     """Joiner who connects after host enables sharing sees the prompt immediately."""
-    host = context.new_page()
+    host = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS05{_R}&host=1&name=Host")
@@ -343,7 +589,7 @@ def test_rom_sharing_joiner_after_toggle(context, server_url):
         """)
 
         # Now guest joins
-        guest = context.new_page()
+        guest = browser.new_page()
         try:
             guest.goto(f"{server_url}/play.html?room=ROMS05{_R}&name=Guest")
             expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
@@ -388,6 +634,11 @@ def test_host_disclaimer_visible(context, server_url):
         expect(host.locator("#rom-sharing-disclaimer")).to_contain_text(
             "legal right to distribute"
         )
+        host.reload()
+        expect(host.locator("#host-controls")).to_be_visible()
+        host.click("#host-controls .advanced-options > summary")
+        expect(host.locator("#opt-rom-sharing")).to_be_checked()
+        expect(host.locator("#rom-sharing-disclaimer")).to_be_visible()
     finally:
         host.close()
 
@@ -565,10 +816,10 @@ def test_host_still_has_delay_picker(page, server_url):
     assert page.locator("#delay-auto").count() == 1
 
 
-def test_guest_delay_preference_readable(context, server_url):
+def test_guest_delay_preference_readable(browser, server_url):
     """getDelayPreference returns manual delay when set."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=DLYS4{_R}&host=1&name=Host")
@@ -698,14 +949,14 @@ def test_worker_compress_and_encode(page, server_url):
     assert result.get("hasPeers") is True, "getInfo should have peers array"
 
 
-def test_share_dropdown_copies_links(context, server_url):
+def test_share_dropdown_copies_links(browser, server_url):
     """In-game share menu offers play and watch links and copies one.
 
     The links are the Invite group of the toolbar's More menu (they had a
     toolbar button and dropdown of their own once).
     """
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=SHR01{_R}&host=1&name=Host")
@@ -742,13 +993,13 @@ def test_share_dropdown_copies_links(context, server_url):
         guest.close()
 
 
-def test_auto_spectate_when_room_full(context, server_url):
+def test_auto_spectate_when_room_full(browser, server_url):
     """Joining a full room auto-spectates with a banner."""
-    host = context.new_page()
-    p2 = context.new_page()
-    p3 = context.new_page()
-    p4 = context.new_page()
-    joiner = context.new_page()
+    host = browser.new_page()
+    p2 = browser.new_page()
+    p3 = browser.new_page()
+    p4 = browser.new_page()
+    joiner = browser.new_page()
 
     try:
         # Fill room to 4 players
