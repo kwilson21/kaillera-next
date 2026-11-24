@@ -24,10 +24,10 @@ _GUEST_HOST_PEER = "Object.values(window.KNState?.peers || {}).find((p) => p.slo
 _HOST_GUEST_PEER = "(window.KNState?.peers || {})[sid]"
 
 
-def _start(context, server_url):
+def _start(browser, server_url):
     room = f"STR{secrets.token_hex(3).upper()}"
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
     host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=streaming")
     expect(host.locator("#overlay")).to_be_visible(timeout=10000)
     _wait_for_socket(host)
@@ -84,11 +84,11 @@ def _attempts(host, guest, sid):
     }
 
 
-def test_two_player_stream_connects_and_carries_input(context, server_url):
+def test_two_player_stream_connects_and_carries_input(browser, server_url):
     """Host and guest connect on one named connection; video reaches the guest and its input reaches the host."""
     pages = []
     try:
-        host, guest = _start(context, server_url)
+        host, guest = _start(browser, server_url)
         pages = [host, guest]
         sid = guest.evaluate("window.__test_socket.id")
         host.wait_for_function(f"(sid) => {_HOST_GUEST_PEER}?.dc?.readyState === 'open'", arg=sid, timeout=10000)
@@ -132,11 +132,11 @@ def _reconnected(host, guest, sid):
     return guest.evaluate("window.NetplayStreaming.exportSyncLog()")
 
 
-def test_a_dropped_connection_is_offered_again(context, server_url):
+def test_a_dropped_connection_is_offered_again(browser, server_url):
     """droppedGuestTest: the connection drops, both pages forget it, and the host's deadline offers a new one."""
     pages = []
     try:
-        host, guest = _start(context, server_url)
+        host, guest = _start(browser, server_url)
         pages = [host, guest]
         sid = guest.evaluate("window.__test_socket.id")
         host.wait_for_function(f"(sid) => {_HOST_GUEST_PEER}?.dc?.readyState === 'open'", arg=sid, timeout=10000)
@@ -152,11 +152,11 @@ def test_a_dropped_connection_is_offered_again(context, server_url):
         _close(pages)
 
 
-def test_a_guest_that_still_holds_the_old_connection_replaces_it(context, server_url):
+def test_a_guest_that_still_holds_the_old_connection_replaces_it(browser, server_url):
     """guestStillHoldsTheOldConnectionTest: the host notices the drop first; its new offer replaces the guest's old one."""
     pages = []
     try:
-        host, guest = _start(context, server_url)
+        host, guest = _start(browser, server_url)
         pages = [host, guest]
         sid = guest.evaluate("window.__test_socket.id")
         host.wait_for_function(f"(sid) => {_HOST_GUEST_PEER}?.dc?.readyState === 'open'", arg=sid, timeout=10000)

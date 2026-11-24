@@ -96,7 +96,7 @@ def test_reclaim_ahead_of_deferred_cleanup_keeps_new_sid(server):
             "extra": {
                 "sessionid": "ROOM",
                 "persistentId": "guest",
-                "reconnectToken": signaling.make_reconnect_token("guest"),
+                "reconnectToken": signaling.make_reconnect_token("ROOM", "guest"),
                 "resume": True,
                 "slot": 1,
                 "matchId": "match",

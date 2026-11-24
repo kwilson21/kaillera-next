@@ -25,7 +25,7 @@ export const showToast = (message: string): void => {
 };
 
 /** Fill and show the error card: the message and the way back to the lobby. */
-export const showErrorCard = (message: string): void => {
+export const showErrorCard = (message: string, joinUrl: string | null = null): void => {
   const el = document.getElementById('error-msg');
   if (!el) return;
   el.classList.remove('hidden');
@@ -39,7 +39,15 @@ export const showErrorCard = (message: string): void => {
   back.href = '/';
   back.className = 'error-back';
   back.textContent = 'Back to Lobby';
-  card.replaceChildren(heading, text, back);
+  card.replaceChildren(heading, text);
+  if (joinUrl) {
+    const join = document.createElement('a');
+    join.href = joinUrl;
+    join.className = 'error-back';
+    join.textContent = 'Join this room';
+    card.append(join);
+  }
+  card.append(back);
 };
 
 /** Tell a player who was put in the audience why. Closes itself. */
@@ -55,4 +63,18 @@ export const showRoomFullBanner = (): void => {
   banner.append(text, close);
   document.body.appendChild(banner);
   setTimeout(() => banner.remove(), BANNER_MS);
+};
+
+const warnBeforeLeaving = (event: BeforeUnloadEvent): void => {
+  event.preventDefault();
+  event.returnValue = true;
+};
+
+/** Only a host with a live match has emulator state the rest of the room depends on. */
+export const guardHostNavigation = (active: boolean): void => {
+  if (active) window.addEventListener('beforeunload', warnBeforeLeaving);
+  else {
+    window.removeEventListener('beforeunload', warnBeforeLeaving);
+    document.querySelector<HTMLDialogElement>('#host-leave-dialog[open]')?.close();
+  }
 };

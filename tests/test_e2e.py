@@ -31,10 +31,10 @@ def test_lobby_to_play_redirect(page, server_url):
     expect(page).to_have_url(re.compile(r"play\.html\?room=\w+&host=1&mode=rollback"))
 
 
-def test_host_guest_start_end(context, server_url):
+def test_host_guest_start_end(browser, server_url):
     """Full flow: host creates, guest joins, start game, end game."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         # Host creates room
@@ -72,7 +72,7 @@ def test_host_guest_start_end(context, server_url):
 
 
 @pytest.mark.parametrize("offer_delay_ms", [0, 1000], ids=["normal", "delayed-offer"])
-def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
+def test_host_leave_midgame_keeps_room(browser, server_url, offer_delay_ms):
     """When the host leaves mid-game, the guest stays in the game and the room stays open.
 
     The server used to close the room on a host disconnect (`room-closed`) and
@@ -81,18 +81,20 @@ def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
     becomes the owner (signaling._leave; tests/test_room_logic.py,
     tests/test_host_reload.py). The guest is told the host left.
     """
+    host = browser.new_page()
+    guest = browser.new_page()
     if offer_delay_ms:
         # The toolbar is visible before WebRTC connects. A delayed offer makes
         # that ordering deterministic instead of relying on runner load.
-        context.add_init_script(f"""(() => {{
+        delay_offer = f"""(() => {{
             const createOffer = RTCPeerConnection.prototype.createOffer;
             RTCPeerConnection.prototype.createOffer = async function(...args) {{
                 await new Promise(resolve => setTimeout(resolve, {offer_delay_ms}));
                 return createOffer.apply(this, args);
             }};
-        }})();""")
-    host = context.new_page()
-    guest = context.new_page()
+        }})();"""
+        for player in (host, guest):
+            player.add_init_script(delay_offer)
     room_code = f"E2E02{_R}{offer_delay_ms}"
 
     try:
@@ -120,6 +122,7 @@ def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
             )
 
         # Host navigates away (Socket.IO disconnect; 'leaving' over the DataChannel)
+        host.once("dialog", lambda dialog: dialog.accept())
         host.goto("about:blank")
 
         # Guest is told the host left ("Host dropped" once the host's 'leaving'
@@ -143,10 +146,10 @@ def test_host_leave_midgame_keeps_room(context, server_url, offer_delay_ms):
         guest.close()
 
 
-def test_host_leave_lobby_transfers_ownership(context, server_url):
+def test_host_leave_lobby_transfers_ownership(browser, server_url):
     """When host leaves in lobby, room stays open for remaining players."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=E2E03{_R}&host=1&name=Host")
@@ -177,15 +180,15 @@ def test_guest_nonexistent_room(page, server_url):
 # ── ROM Sharing Tests ──────────────────────────────────────────────────
 
 
-def test_rom_sharing_prompt_appears(context, server_url):
+def test_rom_sharing_prompt_appears(browser, server_url):
     """When host enables ROM sharing, joiners see accept/decline prompt.
 
     Accepting is the "Accept from Host" button; declining is loading your own
     ROM, so the drop zone stays beside the offer (the separate Decline button
     is gone).
     """
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS01{_R}&host=1&name=Host")
@@ -217,15 +220,15 @@ def test_rom_sharing_prompt_appears(context, server_url):
         guest.close()
 
 
-def test_rom_sharing_decline_shows_drop_zone(context, server_url):
+def test_rom_sharing_decline_shows_drop_zone(browser, server_url):
     """When joiner declines ROM sharing, the ROM drop zone is theirs to use.
 
     There is no Decline button any more: the drop zone stays beside the offer,
     and a joiner declines by loading their own ROM there, which takes the offer
     away.
     """
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
     # A generated file stands in for the ROM: nothing is booted.
     guest.add_init_script("window.__test_skipBoot = true;")
 
@@ -266,10 +269,10 @@ def test_rom_sharing_decline_shows_drop_zone(context, server_url):
         guest.close()
 
 
-def test_rom_sharing_start_gated_without_roms(context, server_url):
+def test_rom_sharing_start_gated_without_roms(browser, server_url):
     """Host cannot start game when not all players have ROMs and sharing is off."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS03{_R}&host=1&name=Host")
@@ -296,10 +299,10 @@ def test_rom_sharing_start_gated_without_roms(context, server_url):
         guest.close()
 
 
-def test_rom_sharing_bypasses_rom_requirement(context, server_url):
+def test_rom_sharing_bypasses_rom_requirement(browser, server_url):
     """When host enables sharing, start game is allowed even if guests have no ROM."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS04{_R}&host=1&name=Host")
@@ -327,9 +330,9 @@ def test_rom_sharing_bypasses_rom_requirement(context, server_url):
         guest.close()
 
 
-def test_rom_sharing_joiner_after_toggle(context, server_url):
+def test_rom_sharing_joiner_after_toggle(browser, server_url):
     """Joiner who connects after host enables sharing sees the prompt immediately."""
-    host = context.new_page()
+    host = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=ROMS05{_R}&host=1&name=Host")
@@ -343,7 +346,7 @@ def test_rom_sharing_joiner_after_toggle(context, server_url):
         """)
 
         # Now guest joins
-        guest = context.new_page()
+        guest = browser.new_page()
         try:
             guest.goto(f"{server_url}/play.html?room=ROMS05{_R}&name=Guest")
             expect(guest.locator("#overlay")).to_be_visible(timeout=10000)
@@ -565,10 +568,10 @@ def test_host_still_has_delay_picker(page, server_url):
     assert page.locator("#delay-auto").count() == 1
 
 
-def test_guest_delay_preference_readable(context, server_url):
+def test_guest_delay_preference_readable(browser, server_url):
     """getDelayPreference returns manual delay when set."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=DLYS4{_R}&host=1&name=Host")
@@ -698,14 +701,14 @@ def test_worker_compress_and_encode(page, server_url):
     assert result.get("hasPeers") is True, "getInfo should have peers array"
 
 
-def test_share_dropdown_copies_links(context, server_url):
+def test_share_dropdown_copies_links(browser, server_url):
     """In-game share menu offers play and watch links and copies one.
 
     The links are the Invite group of the toolbar's More menu (they had a
     toolbar button and dropdown of their own once).
     """
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=SHR01{_R}&host=1&name=Host")
@@ -742,13 +745,13 @@ def test_share_dropdown_copies_links(context, server_url):
         guest.close()
 
 
-def test_auto_spectate_when_room_full(context, server_url):
+def test_auto_spectate_when_room_full(browser, server_url):
     """Joining a full room auto-spectates with a banner."""
-    host = context.new_page()
-    p2 = context.new_page()
-    p3 = context.new_page()
-    p4 = context.new_page()
-    joiner = context.new_page()
+    host = browser.new_page()
+    p2 = browser.new_page()
+    p3 = browser.new_page()
+    p4 = browser.new_page()
+    joiner = browser.new_page()
 
     try:
         # Fill room to 4 players

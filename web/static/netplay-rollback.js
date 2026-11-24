@@ -15842,7 +15842,7 @@
   // players drop it at the input deadline, as they drop a page whose core
   // trapped (specs/engine_start.qnt).
   const START_FAIL_MESSAGES = {
-    core: "This page's emulator can't run online play. Reload the page to rejoin the match.",
+    core: "This page's emulator can't run online play.",
     'old-host':
       "The match couldn't start: the host is on an older version of the site. Ask them to reload the page, then rejoin.",
     'no-host': "The match couldn't start: no word from the host. Reload the page to rejoin the match.",
@@ -15853,7 +15853,12 @@
     if (_coreFatalError) return;
     // As after a trap: only a reload starts this page again.
     _coreFatalError = true;
-    const message = START_FAIL_MESSAGES[reason] || START_FAIL_MESSAGES['no-host'];
+    let message = START_FAIL_MESSAGES[reason] || START_FAIL_MESSAGES['no-host'];
+    if (reason === 'core') {
+      message += KNState.isLocalHost
+        ? ' Reloading will end this match and return everyone to the room for a new game.'
+        : ' Reload the page to rejoin the match.';
+    }
     // A later start on this page (a late join) shows this again, not a crash.
     _coreFatalMessage = message;
     _syncLog(`START-FAIL reason=${reason} f=${_frameNum} ${JSON.stringify(detail)}`);

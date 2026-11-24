@@ -25,6 +25,7 @@
 }
 
 :root {
+  overscroll-behavior: none;
   color-scheme: dark;
   --bg: #0e1218;
   --bg2: #151b25;
@@ -1608,6 +1609,8 @@ a.more-option {
 }
 
 /* Reset shortcut is in More: existing touch controls keep their exact layout. */
+#host-return-dialog,
+#host-leave-dialog,
 #reset-combo-dialog {
   max-width: min(28rem, calc(100vw - 32px));
   max-height: calc(100dvh - 32px);
@@ -1618,9 +1621,13 @@ a.more-option {
   border-radius: 12px;
   padding: 20px;
 }
+#host-return-dialog::backdrop,
+#host-leave-dialog::backdrop,
 #reset-combo-dialog::backdrop {
   background: rgb(0 0 0 / 55%);
 }
+#host-return-dialog button,
+#host-leave-dialog button,
 #reset-combo-dialog button {
   min-height: 48px;
   padding: 10px 16px;

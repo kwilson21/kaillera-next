@@ -76,6 +76,7 @@ $QUINT typecheck "$SPEC"
 # Scenario tests: today's code and the three earlier variants (the scenarios
 # show what each fix changed).
 $QUINT test "$SPEC" --main=room_current --backend="$BACKEND"
+$QUINT test "$SPEC" --main=room_before_owner_invite_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_serve_timeout_fix --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_grace_wait --backend="$BACKEND"
 $QUINT test "$SPEC" --main=room_before_abandoned_end --backend="$BACKEND"
@@ -94,6 +95,7 @@ check() { # module invariant
 # with the server about lobby vs playing. The last two were violated before
 # the page reconciled on reconnect (room_before_reconcile).
 check room_current ownerSeesGame
+check room_current ownerDoesNotLateJoinItsOwnMatch
 check room_current lateJoinersChaseTheCurrentMatch
 check room_current pagesAgreeWithServer
 # A joiner asking for state while the others are still loading always has a

@@ -1305,6 +1305,7 @@ const scenarios = {
 
     // The reloaded host has no game running, so it asks for a fresh room and
     // the server ends the match for everyone (the fix from #104).
+    host.page.once('dialog', (dialog) => dialog.accept());
     await host.page.reload();
     await host.page.waitForSelector('#overlay', { state: 'visible', timeout: 30000 });
     if (!(await waitUntil(() => lobbyShownOn(guest), 30000)))

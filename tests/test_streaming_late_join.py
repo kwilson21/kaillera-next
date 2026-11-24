@@ -76,14 +76,14 @@ def _install_fake_streaming_host(page):
     )
 
 
-def test_streaming_third_player_late_join_gets_video_port_and_input(context, server_url):
+def test_streaming_third_player_late_join_gets_video_port_and_input(browser, server_url):
     """P3 can late-join a streaming match and drive controller port 3."""
     room = f"STR{secrets.token_hex(3).upper()}"
     pages = []
 
     try:
-        host = context.new_page()
-        guest = context.new_page()
+        host = browser.new_page()
+        guest = browser.new_page()
         pages = [host, guest]
 
         host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=streaming")
@@ -112,7 +112,7 @@ def test_streaming_third_player_late_join_gets_video_port_and_input(context, ser
             timeout=30000,
         )
 
-        late = context.new_page()
+        late = browser.new_page()
         pages.append(late)
         late.goto(f"{server_url}/play.html?room={room}&name=P3")
         _wait_for_socket(late)
@@ -168,15 +168,15 @@ _HAS_VIDEO = """
 """
 
 
-def test_streaming_guest_refuses_an_offer_from_another_player(context, server_url):
+def test_streaming_guest_refuses_an_offer_from_another_player(browser, server_url):
     """A guest answers only the host's offers: another player's is refused, and its stream stays the host's."""
     room = f"STR{secrets.token_hex(3).upper()}"
     pages = []
 
     try:
-        host = context.new_page()
-        guest = context.new_page()
-        other = context.new_page()
+        host = browser.new_page()
+        guest = browser.new_page()
+        other = browser.new_page()
         pages = [host, guest, other]
 
         host.goto(f"{server_url}/play.html?room={room}&host=1&name=Host&mode=streaming")

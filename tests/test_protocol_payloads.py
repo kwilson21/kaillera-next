@@ -68,7 +68,7 @@ def _run(coro):
 
 
 def _extra(pid: str, **more) -> dict:
-    return {"sessionid": "ROOM1", "persistentId": pid, "reconnectToken": make_reconnect_token(pid), **more}
+    return {"sessionid": "ROOM1", "persistentId": pid, "reconnectToken": make_reconnect_token("ROOM1", pid), **more}
 
 
 async def _room_life_steps() -> dict[str, dict | None]:
@@ -184,6 +184,7 @@ def test_game_started_and_ended_name_the_same_match(room_life):
     started = next(GameStarted.model_validate(d) for e, d in emitted if e == "game-started")
     ended = next(GameEnded.model_validate(d) for e, d in emitted if e == "game-ended")
     assert started.matchId == ended.matchId
+    assert ended.reason == "game-end"
     assert started.mode == "rollback"
 
 

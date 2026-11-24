@@ -41,7 +41,7 @@ export const openRoomRequest = (joiner: Joiner, gameId: string, resume: Resume |
 };
 
 /** A guest's `join-room`, to play or to watch; with `resume`, coming back mid-game. */
-export const joinRoomRequest = (joiner: Joiner, spectate: boolean, resume: Resume | null) => {
+export const joinRoomRequest = (joiner: Joiner, spectate: boolean, resume: Resume | null, returnHost = false) => {
   const who = {
     sessionid: joiner.roomCode,
     player_name: joiner.playerName,
@@ -49,7 +49,12 @@ export const joinRoomRequest = (joiner: Joiner, spectate: boolean, resume: Resum
     persistentId: joiner.persistentId,
     reconnectToken: joiner.reconnectToken,
   };
-  const extra = resume === null ? who : { ...who, resume: true, slot: resume.slot, matchId: resume.matchId };
+  const extra =
+    resume === null
+      ? returnHost
+        ? { ...who, returnHost: true }
+        : who
+      : { ...who, resume: true, slot: resume.slot, matchId: resume.matchId };
   return { extra } satisfies typeof JoinRoomPayload.Type;
 };
 

@@ -100,7 +100,7 @@ def test_new_player_and_spectator_are_refused_by_a_zombie_room(sig):
 def test_returning_member_may_revive_a_zombie_room(sig):
     room, _ = sig
     del signaling._sid_host["host"]
-    token = signaling.make_reconnect_token("p-host")
+    token = signaling.make_reconnect_token("ROOM1", "p-host")
     err, _ = _join("host-new", "p-host", token=token)
     assert err is None
     assert room.players["p-host"]["socketId"] == "host-new"

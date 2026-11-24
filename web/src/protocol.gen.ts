@@ -42,6 +42,7 @@ export const JoinRoomExtra = Schema.Struct({
   reconnectToken: Schema.optional(Schema.String),
   player_name: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(32))),
   spectate: Schema.optional(Schema.Boolean),
+  returnHost: Schema.optional(Schema.Boolean),
   resume: Schema.optional(Schema.Boolean),
   slot: Schema.optional(Schema.NullOr(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 3 })))),
   matchId: Schema.optional(Schema.String.check(Schema.isMaxCodePoints(64))),
@@ -245,6 +246,7 @@ export type GameStarted = typeof GameStarted.Type;
 /** `game-ended`. */
 export const GameEnded = Schema.Struct({
   matchId: Schema.NullOr(Schema.String),
+  reason: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type GameEnded = typeof GameEnded.Type;
 

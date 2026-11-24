@@ -33,8 +33,8 @@ Client → Server events:
   debug-logs       — upload debug console log
 
 Server → Client (targeted):
-  upload-token     — HMAC token for upload endpoints (on join/open)
-  reconnect-token  — HMAC token for session reconnection (on join/open)
+  upload-token     — HMAC token for upload endpoints (on admission and renewal)
+  reconnect-token  — HMAC token for session reconnection (on admission and renewal)
 
 Server → Room broadcasts:
   users-updated    — room state (players, spectators, owner)
@@ -140,6 +140,7 @@ NOT_IN_ROOM = "Not in room"
 # The answer to a fresh open-room from a member who is not the room's owner.
 # The page then joins with join-room instead (web/static/play.js).
 NOT_THE_OWNER = "Not the owner"
+HOST_SEAT_UNAVAILABLE = "Host seat is no longer available"
 # Short grace for lobby OWNER disconnects only — closes the ownership-churn
 # race where a brief network blip transferred host privileges to another
 # player. Mid-game already has the longer grace above; non-owner lobby
@@ -158,8 +159,7 @@ def _token_key(secret: str) -> bytes:
 
 _TOKEN_KEY = _token_key(os.environ.get("IP_HASH_SALT", ""))
 
-# Token TTLs. Both cover a normal match + reconnect window; on expiry the
-# client must rejoin to get a fresh token.
+# Live room members receive new tokens before these expire.
 _UPLOAD_TOKEN_TTL_S = 30 * 60
 _RECONNECT_TOKEN_TTL_S = 30 * 60
 
@@ -223,32 +223,25 @@ def verify_upload_token(room_id: str, token: str) -> bool:
     return payload.get("room") == room_id
 
 
-def make_reconnect_token(persistent_id: str) -> str:
-    """HMAC token that authorizes reconnect for a persistent_id.
-
-    Bound to (persistent_id, expiry, signature, kind). Intentionally NOT
-    bound to ip_hash: mobile network handoffs (5G↔Wi-Fi), CGNAT rotation,
-    and VPN toggles all change the source IP mid-session, and the team has
-    explicit product support for those handoffs. The realistic token-theft
-    paths (XSS, local device access) already grant the attacker far worse
-    capabilities than reclaiming a slot, so IP binding adds little real
-    protection in exchange for breaking a supported user flow.
-    """
+def make_reconnect_token(room_id: str, persistent_id: str) -> str:
+    """Sign the room and player identity. IPs can change during a mobile handoff."""
     return _make_token(
         {
             "k": "reconnect",
+            "room": room_id,
             "pid": persistent_id,
             "exp": int(time.time()) + _RECONNECT_TOKEN_TTL_S,
         }
     )
 
 
-def verify_reconnect_token(persistent_id: str, token: str) -> bool:
-    """Verify a reconnect token: signature, expiry, persistent_id binding."""
+def verify_reconnect_token(room_id: str, persistent_id: str, token: str, *, allow_legacy: bool = True) -> bool:
     payload = _verify_token(token)
     if payload is None or payload.get("k") != "reconnect":
         return False
-    return payload.get("pid") == persistent_id
+    # Unexpired tokens from the preceding release have no room claim.
+    correct_room = payload.get("room") == room_id or (allow_legacy and "room" not in payload)
+    return correct_room and payload.get("pid") == persistent_id
 
 
 def _clean_game_id(game_id: str) -> str:
@@ -400,6 +393,25 @@ async def _emit(event: str, data: dict, **kwargs) -> None:
     through sio.emit directly.
     """
     await sio.emit(event, checked(SERVER_EVENTS[event], data, event), **kwargs)
+
+
+async def _send_member_tokens(sid: str, session_id: str, persistent_id: str) -> None:
+    await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
+    await _emit("reconnect-token", {"token": make_reconnect_token(session_id, persistent_id)}, to=sid)
+
+
+async def renew_member_tokens() -> None:
+    while True:
+        await asyncio.sleep(min(_UPLOAD_TOKEN_TTL_S, _RECONNECT_TOKEN_TTL_S) / 2)
+        for sid in tuple(_sid_to_room):
+            entry = _sid_to_room.get(sid)
+            if entry is None or sid not in _sid_host:
+                continue
+            session_id, player_id, _ = entry
+            try:
+                await _send_member_tokens(sid, session_id, player_id)
+            except Exception:
+                log.exception("Could not renew room tokens for socket %s", sid)
 
 
 def _join_ack(room: Room) -> dict:
@@ -799,6 +811,39 @@ async def open_room(sid: str, payload: OpenRoomPayload) -> str | None:
         return await _open_room_locked(sid, payload)
 
 
+async def _reconnect_member(
+    room: Room, session_id: str, persistent_id: str, sid: str, *, spectator: bool, fresh: bool
+) -> str | None:
+    members = room.spectators if spectator else room.players
+    old_sid = members[persistent_id]["socketId"]
+    if fresh and old_sid == room.owner:
+        # Duplicated tabs can inherit the same identity and proof. A retry
+        # from the admitted socket is already satisfied, including after Start.
+        if old_sid == sid:
+            return None
+        if old_sid in _sid_host:
+            return "Host tab is still connected"
+    _cancel_disconnect_grace(persistent_id)
+    _swap_sid(room, persistent_id, old_sid, sid)
+    _sid_to_room.pop(old_sid, None)
+    _sid_to_room[sid] = (session_id, persistent_id, spectator)
+    await sio.enter_room(sid, session_id)
+
+    # A fresh owner has lost its emulator even when it came back via an
+    # invite. A fresh guest can still get the state from the running host.
+    if fresh and room.status == "playing" and room.owner == sid:
+        await _end_match(session_id, room, "host-reload")
+    else:
+        if fresh and not spectator and room.status == "playing":
+            room.waiting_for_state.add(persistent_id)
+        await _emit("users-updated", _players_payload(room), room=session_id)
+        await state.save_room(session_id, room)
+    await _send_member_tokens(sid, session_id, persistent_id)
+    log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
+    await _end_match_if_abandoned(session_id, room)
+    return None
+
+
 async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
     session_id = payload.extra.sessionid
     persistent_id = payload.extra.persistentId or sid
@@ -816,7 +861,7 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
     # Reconnect detection — BEFORE _leave
     existing = rooms.get(session_id)
     if existing and persistent_id in existing.players:
-        if not payload.extra.reconnectToken or not verify_reconnect_token(persistent_id, payload.extra.reconnectToken):
+        if not verify_reconnect_token(session_id, persistent_id, payload.extra.reconnectToken):
             return "Invalid reconnect token"
         old_sid = existing.players[persistent_id]["socketId"]
         # A fresh page asking to open a room it is in but no longer owns (it
@@ -826,27 +871,9 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
         # it has to come in through join-room.
         if payload.extra.fresh and existing.owner != old_sid:
             return NOT_THE_OWNER
-        _cancel_disconnect_grace(persistent_id)
-        _swap_sid(existing, persistent_id, old_sid, sid)
-        _sid_to_room.pop(old_sid, None)
-        _sid_to_room[sid] = (session_id, persistent_id, False)
-        await sio.enter_room(sid, session_id)
-        # The host reloaded mid-game: their emulator is gone and their page is
-        # showing the lobby, so the match is over. Leaving the room "playing"
-        # sent every later joiner down the late-join path to a host with
-        # nothing running (specs/room_lifecycle.qnt, ownerSeesGame). A socket
-        # that reconnects under a still-running game is not fresh and keeps
-        # the match.
-        if payload.extra.fresh and existing.status == "playing" and existing.owner == sid:
-            log.info("Room %s: host re-opened from a fresh page mid-game, ending the match", session_id)
-            await _end_match(session_id, existing, "host-reload")
-        else:
-            await _emit("users-updated", _players_payload(existing), room=session_id)
-            await state.save_room(session_id, existing)
-        await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-        await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
-        log.info("SIO %s reconnected to room %s (host, persistentId=%s)", sid, session_id, persistent_id)
-        return None
+        return await _reconnect_member(
+            existing, session_id, persistent_id, sid, spectator=False, fresh=payload.extra.fresh
+        )
 
     # A page resuming a game it is no longer a member of. If the room is
     # still playing that match the host is taken back as a player (the room
@@ -887,8 +914,7 @@ async def _open_room_locked(sid: str, payload: OpenRoomPayload) -> str | None:
 
     await sio.enter_room(sid, session_id)
     await _emit("users-updated", _players_payload(room), room=session_id)
-    await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-    await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+    await _send_member_tokens(sid, session_id, persistent_id)
     log.info("SIO %s opened room %s (game=%s, persistentId=%s)", sid, session_id, game_id, persistent_id)
     return None  # success
 
@@ -921,8 +947,7 @@ async def _readmit_dropped_player(
     _sid_to_room[sid] = (session_id, persistent_id, False)
     await sio.enter_room(sid, session_id)
     await _emit("users-updated", _players_payload(room), room=session_id)
-    await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-    await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+    await _send_member_tokens(sid, session_id, persistent_id)
     await state.save_room(session_id, room)
     # Its session was marked ended when the room dropped it.
     if room.match_id:
@@ -957,6 +982,9 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
         return ("Invalid room code", None)
 
     room = rooms.get(session_id)
+    return_host = payload.extra.returnHost
+    if return_host and (room is None or room.players.get(persistent_id, {}).get("socketId") != room.owner):
+        return (HOST_SEAT_UNAVAILABLE, None)
     if room is None:
         return ("Room not found", None)
 
@@ -967,27 +995,19 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
     is_returning_player = persistent_id in room.players
     is_returning_spectator = persistent_id in room.spectators
     if is_returning_player or is_returning_spectator:
-        if not payload.extra.reconnectToken or not verify_reconnect_token(persistent_id, payload.extra.reconnectToken):
-            return ("Invalid reconnect token", None)
-        _cancel_disconnect_grace(persistent_id)
-        entry = room.players.get(persistent_id) or room.spectators.get(persistent_id)
-        old_sid = entry["socketId"]
-        _swap_sid(room, persistent_id, old_sid, sid)
-        _sid_to_room.pop(old_sid, None)
-        _sid_to_room[sid] = (session_id, persistent_id, is_returning_spectator)
-        await sio.enter_room(sid, session_id)
-        await _emit("users-updated", _players_payload(room), room=session_id)
-        await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-        await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
-        # A player's fresh page (a reload) has no emulator running: it has to
-        # late-join the match again. A page resuming under a running game
-        # says so and is left as it was.
-        if is_returning_player and room.status == "playing" and not payload.extra.resume:
-            room.waiting_for_state.add(persistent_id)
-        await state.save_room(session_id, room)
-        log.info("SIO %s reconnected to room %s (persistentId=%s)", sid, session_id, persistent_id)
-        await _end_match_if_abandoned(session_id, room)
-        return (None, _join_ack(room))
+        if not verify_reconnect_token(
+            session_id, persistent_id, payload.extra.reconnectToken, allow_legacy=not return_host
+        ):
+            return (HOST_SEAT_UNAVAILABLE if return_host else "Invalid reconnect token", None)
+        error = await _reconnect_member(
+            room,
+            session_id,
+            persistent_id,
+            sid,
+            spectator=is_returning_spectator,
+            fresh=return_host or not payload.extra.resume,
+        )
+        return (error, None) if error else (None, _join_ack(room))
 
     if not _password_ok(room, password):
         return ("Wrong password", None)
@@ -1038,8 +1058,7 @@ async def _join_room_locked(sid: str, payload: JoinRoomPayload) -> tuple[str | N
 
     await sio.enter_room(sid, session_id)
     await _emit("users-updated", _players_payload(room), room=session_id)
-    await _emit("upload-token", {"token": make_upload_token(session_id)}, to=sid)
-    await _emit("reconnect-token", {"token": make_reconnect_token(persistent_id)}, to=sid)
+    await _send_member_tokens(sid, session_id, persistent_id)
     await state.save_room(session_id, room)
     log.info(
         "SIO %s %s room %s (persistentId=%s)", sid, "spectating" if spectate else "joined", session_id, persistent_id
@@ -1398,7 +1417,7 @@ async def _end_match(session_id: str, room: Room, reason: str) -> None:
     # broadcast reflects the true post-end state even though the DB row
     # hasn't been marked ended yet.
     # mode persists for rematch convenience
-    await _emit("game-ended", {"matchId": ended_match_id}, room=session_id)
+    await _emit("game-ended", {"matchId": ended_match_id, "reason": reason}, room=session_id)
     # Broadcast fresh state so player list reflects current device/input types
     # (late-joiners' corrected types may not have been seen by all clients)
     await _emit("users-updated", _players_payload(room), room=session_id)

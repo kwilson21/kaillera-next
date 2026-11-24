@@ -71,7 +71,7 @@ def test_a_lobby_session_decodes_cleanly(browser, server_url, room):
                 s.emit('join-room', { extra: {
                     sessionid: new URLSearchParams(location.search).get('room'),
                     persistentId: sessionStorage.getItem('kn-player-id') || '',
-                    reconnectToken: sessionStorage.getItem('kn-reconnect-token') || '',
+                    reconnectToken: sessionStorage.getItem('kn-reconnect-token:' + KNState.room) || '',
                     player_name: 'Guest2',
                 } }, (err, data) => resolve({ err, issue: data ?
                     window.KNCore.protocol.checkServerMessage('join-room ack', data) : 'no data' }));

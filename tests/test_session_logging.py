@@ -71,19 +71,62 @@ async def _run_ended_by_no_overwrite(tmp_db):
 
 
 def test_reconnect_token_roundtrip():
-    """HMAC reconnect tokens verify correctly; forged or wrong-pid tokens are rejected.
-
-    Tokens deliberately do NOT bind to ip_hash — mobile network handoffs
-    (5G↔Wi-Fi) change source IP mid-session and the team has explicit
-    product support for that flow. Signature + expiry + pid binding still
-    cover the practical token-theft threats.
-    """
     from src.api.signaling import make_reconnect_token, verify_reconnect_token
 
-    token = make_reconnect_token("pid-123")
-    assert verify_reconnect_token("pid-123", token) is True
-    assert verify_reconnect_token("pid-123", "forged") is False
-    assert verify_reconnect_token("wrong-pid", token) is False
+    token = make_reconnect_token("ROOM1", "pid-123")
+    assert verify_reconnect_token("ROOM1", "pid-123", token)
+    assert not verify_reconnect_token("ROOM1", "pid-123", "forged")
+    assert not verify_reconnect_token("ROOM1", "wrong-pid", token)
+    assert not verify_reconnect_token("ROOM2", "pid-123", token)
+
+
+def test_previous_release_token_survives_rollout_until_expiry(monkeypatch):
+    from src.api import signaling
+
+    token = signaling._make_token({"k": "reconnect", "pid": "player", "exp": 200})
+    monkeypatch.setattr(signaling.time, "time", lambda: 150)
+    assert signaling.verify_reconnect_token("ROOM1", "player", token)
+    monkeypatch.setattr(signaling.time, "time", lambda: 201)
+    assert not signaling.verify_reconnect_token("ROOM1", "player", token)
+
+
+def test_long_match_renews_tokens_only_for_connected_members(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from src.api import signaling
+
+    now = 1_000
+    room_code, pid = "ROOM1", "player"
+    monkeypatch.setattr(signaling.time, "time", lambda: now)
+    first = signaling.make_reconnect_token(room_code, pid)
+    emitted = AsyncMock()
+    monkeypatch.setattr(signaling, "_emit", emitted)
+    monkeypatch.setattr(signaling, "_sid_host", {"current": "example"})
+    monkeypatch.setattr(signaling, "_sid_to_room", {
+        "current": (room_code, pid, False),
+        "disconnected": (room_code, "away", False),
+    })
+
+    async def wait(seconds):
+        nonlocal now
+        if emitted.await_count:
+            raise asyncio.CancelledError
+        assert seconds < signaling._RECONNECT_TOKEN_TTL_S
+        now += seconds
+
+    monkeypatch.setattr(signaling.asyncio, "sleep", wait)
+
+    async def renew():
+        with pytest.raises(asyncio.CancelledError):
+            await signaling.renew_member_tokens()
+
+    _run_async(renew())
+    assert [call.kwargs["to"] for call in emitted.await_args_list] == ["current", "current"]
+    (_, upload), (_, refresh) = (call.args for call in emitted.await_args_list)
+    now = 1_001 + signaling._RECONNECT_TOKEN_TTL_S
+    assert not signaling.verify_reconnect_token(room_code, pid, first)
+    assert signaling.verify_reconnect_token(room_code, pid, refresh["token"], allow_legacy=False)
+    assert signaling.verify_upload_token(room_code, upload["token"])
 
 
 def test_upload_token_roundtrip():

@@ -4,5 +4,7 @@
  * waking art and nothing else: no core, no Effect.
  */
 import { startJoinPage } from './landing/join.ts';
+import { installSafeStorage } from './site/storage.ts';
 
+if (!window.KNStorage) installSafeStorage();
 startJoinPage(window);

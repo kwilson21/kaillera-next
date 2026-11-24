@@ -39,6 +39,10 @@
           <button id="copy-link" class="copy-btn" title="Invite players">Invite</button>
         </div>
 
+        <p id="host-reload-notice" role="status" hidden>
+          The host’s page reloaded and ended the match. The host can start a new game in this room.
+        </p>
+
         <div class="card-section name-section">
           <label for="player-name-input" class="name-label">Name:</label>
           <input id="player-name-input" class="name-input" maxlength="24" autocomplete="off" spellcheck="false" />
@@ -280,6 +284,28 @@
         </div>
       </div>
     </div>
+
+    <dialog id="host-return-dialog" aria-labelledby="host-return-title" aria-describedby="host-return-help">
+      <h2 id="host-return-title">Return to your room?</h2>
+      <p id="host-return-help">
+        This browser hosted this room. You can reclaim your seat if your host tab closed. A game that was running in
+        that tab will end.
+      </p>
+      <p role="status"></p>
+      <form method="dialog">
+        <button value="host" autofocus>Return as host</button>
+        <button value="guest">Join separately</button>
+      </form>
+    </dialog>
+
+    <dialog id="host-leave-dialog" aria-labelledby="host-leave-title" aria-describedby="host-leave-help">
+      <h2 id="host-leave-title">Leave this game?</h2>
+      <p id="host-leave-help">Leaving gives up your place as host.</p>
+      <form method="dialog">
+        <button type="submit" autofocus>Stay in game</button>
+        <button type="button" id="confirm-host-leave">Leave room</button>
+      </form>
+    </dialog>
 
     <!-- In-game toolbar -->
     <div id="toolbar" class="hidden" role="toolbar" aria-label="Game controls">

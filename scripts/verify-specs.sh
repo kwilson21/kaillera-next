@@ -88,6 +88,8 @@ rom_transfer() {
 room_lifecycle_start() {
   local ROOM=specs/room_lifecycle.qnt
   verify "$ROOM" room_current ownerSeesGame
+  verify "$ROOM" room_current ownerDoesNotLateJoinItsOwnMatch
+  expect_violation "$ROOM" room_before_owner_invite_fix ownerDoesNotLateJoinItsOwnMatch 4
   verify "$ROOM" room_current pagesAgreeWithServer
   verify "$ROOM" room_current joinersAreNotLeftWaitingAtTheStart
   verify "$ROOM" room_current startIsNotHeldUpByALateJoiner

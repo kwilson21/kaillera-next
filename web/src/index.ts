@@ -72,6 +72,7 @@ import { startResetCombo } from './page/reset-combo.ts';
 import { startVirtualGamepad } from './page/virtual-gamepad/gamepad.ts';
 import { checkPeerText, checkRelay } from './peer-protocol.ts';
 import * as connect from './play/connect.ts';
+import * as hostReturn from './play/host-return.ts';
 import * as connectionNotices from './play/connection-notices.ts';
 import { installShared } from './page/shared.ts';
 import * as delay from './play/delay.ts';
@@ -540,6 +541,7 @@ export const KNCore = {
     romLibraryHtml,
     delay,
     connect,
+    hostReturn,
     connectionNotices,
     joinPlan,
     canRetryRoomIce,

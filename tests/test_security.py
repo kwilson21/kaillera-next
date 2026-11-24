@@ -21,10 +21,10 @@ def _mark_rom_ready(page):
     """)
 
 
-def test_reconnect_token_issued_and_forged_rejected(context, server_url):
+def test_reconnect_token_issued_and_forged_rejected(browser, server_url):
     """Reconnect token is issued on join; forged tokens are rejected."""
-    host = context.new_page()
-    impersonator = context.new_page()
+    host = browser.new_page()
+    impersonator = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=SEC01{_R}&host=1&name=Host")
@@ -32,11 +32,11 @@ def test_reconnect_token_issued_and_forged_rejected(context, server_url):
 
         # Verify token was issued (play.js keeps both in sessionStorage)
         host.wait_for_function(
-            "sessionStorage.getItem('kn-player-id') && sessionStorage.getItem('kn-reconnect-token')",
+            "sessionStorage.getItem('kn-player-id') && sessionStorage.getItem('kn-reconnect-token:' + KNState.room)",
             timeout=10000,
         )
         host_pid = host.evaluate(
-            "({ pid: sessionStorage.getItem('kn-player-id'), tok: sessionStorage.getItem('kn-reconnect-token') })"
+            "({ pid: sessionStorage.getItem('kn-player-id'), tok: sessionStorage.getItem('kn-reconnect-token:' + KNState.room) })"
         )
         assert len(host_pid["tok"]) > 16
 
@@ -63,11 +63,11 @@ def test_reconnect_token_issued_and_forged_rejected(context, server_url):
         impersonator.close()
 
 
-def test_spectator_cannot_claim_slot_during_game(context, server_url):
+def test_spectator_cannot_claim_slot_during_game(browser, server_url):
     """Spectator slot claims blocked while game is active."""
-    host = context.new_page()
-    guest = context.new_page()
-    spectator = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
+    spectator = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=SEC02{_R}&host=1&name=Host")
@@ -135,10 +135,10 @@ def test_sanitize_strips_angle_brackets(page, server_url):
     assert "<script>" not in page.locator("#player-list").inner_html()
 
 
-def test_oversized_snapshot_dropped(context, server_url):
+def test_oversized_snapshot_dropped(browser, server_url):
     """Snapshot payloads exceeding 64KB are silently dropped (input/snapshot cap)."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=SEC04{_R}&host=1&name=Host")

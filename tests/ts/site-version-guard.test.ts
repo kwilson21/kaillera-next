@@ -8,7 +8,6 @@ import {
   guardAction,
   POLL_INTERVAL_MS,
   RELOAD_DELAY_MS,
-  safeToReload,
   startVersionGuard,
   type GuardAction,
   type MismatchReport,
@@ -188,6 +187,12 @@ const step = (page: Page, pick: (n: number) => number): string => {
     page.setAnswer(answer);
     return `answer ${JSON.stringify(answer)}`;
   }
+  // Compare the old and new implementations on their common behavior. The
+  // two intentional differences have their own timer and hidden-tab tests.
+  if (oldGameInProgress(page.window.KNState)) {
+    if (kind === 3 && page.timeouts.length) return 'hold timer until idle';
+    if (kind >= 4 && kind !== 5 && page.hidden()) return 'hold hidden match poll';
+  }
   if (kind === 3) {
     for (const timeout of page.timeouts.splice(0)) timeout.run();
     return 'timeouts';
@@ -230,7 +235,7 @@ const addLoggers = (page: Page, loggers: Loggers): void => {
   window.KNEvent = (...args: unknown[]) => trace.push(`KNEvent ${JSON.stringify(args)}`);
 };
 
-test('everything the guard does to a page matches the old script, over random sequences', async () => {
+test('unaffected version checks match the old script over random sequences', async () => {
   const loggerKinds: readonly Loggers[] = ['none', 'lockstep', 'syncLog', 'both', 'throwing'];
   const reloadKinds = ['works', 'throws', 'missing'] as const;
   let reloads = 0;
@@ -330,27 +335,44 @@ test('an idle page with a newer server logs once and reloads after the delay', a
   assert.equal(page.trace.at(-1), 'reload()');
 });
 
-test('a player in a match is not reloaded until the match is over or the tab is hidden', async () => {
-  for (const release of ['matchEnds', 'tabHidden'] as const) {
-    const page = fakePage('v1');
-    page.setAnswer({ kind: 'json', json: '{"version":"v2"}' });
-    page.window.KNState = { gameOn: () => true };
-    startVersionGuard(page.window);
-    await settle();
-    page.intervals[0]?.run();
-    await settle();
-    assert.deepEqual(
-      page.trace.filter((line) => line.startsWith('warn')),
-      ['warn [version-guard] VERSION-MISMATCH page=v1 server=v2 action=waiting-for-idle'],
-    );
-    assert.equal(page.timeouts.length, 0);
-    if (release === 'matchEnds') page.window.KNState = { gameOn: () => false };
-    else page.setHidden(true);
-    page.intervals[0]?.run();
-    await settle();
-    assert.equal(page.trace.at(-1), 'warn [version-guard] VERSION-MISMATCH page=v1 server=v2 action=reload-on-idle');
-    assert.equal(page.timeouts.length, 1);
-  }
+test('a running match waits for its end even when its tab is hidden', async () => {
+  const page = fakePage('v1');
+  page.setAnswer({ kind: 'json', json: '{"version":"v2"}' });
+  page.window.KNState = { gameOn: () => true };
+  page.setHidden(true);
+  startVersionGuard(page.window);
+  await settle();
+  assert.equal(page.trace.at(-1), 'warn [version-guard] VERSION-MISMATCH page=v1 server=v2 action=waiting-for-idle');
+  page.intervals[0]?.run();
+  await settle();
+  assert.equal(page.timeouts.length, 0);
+  page.window.KNState = { gameOn: () => false };
+  page.intervals[0]?.run();
+  await settle();
+  assert.equal(page.trace.at(-1), 'warn [version-guard] VERSION-MISMATCH page=v1 server=v2 action=reload-on-idle');
+  assert.equal(page.timeouts.length, 1);
+  page.timeouts[0]?.run();
+  assert.equal(page.trace.at(-1), 'reload()');
+});
+
+test('a game that starts during the reload delay can finish before the page reloads', async () => {
+  const page = fakePage('v1');
+  page.setAnswer({ kind: 'json', json: '{"version":"v2"}' });
+  startVersionGuard(page.window);
+  await settle();
+  assert.equal(page.timeouts.length, 1);
+  page.window.KNState = { gameOn: () => true };
+  page.timeouts.shift()?.run();
+  page.intervals[0]?.run();
+  await settle();
+  assert.ok(!page.trace.includes('reload()'));
+  assert.equal(page.timeouts.length, 0);
+  page.window.KNState = { gameOn: () => false };
+  page.intervals[0]?.run();
+  await settle();
+  assert.equal(page.timeouts.length, 1);
+  page.timeouts[0]?.run();
+  assert.equal(page.trace.at(-1), 'reload()');
 });
 
 test('coming back to the tab checks; hiding it does not', async () => {
@@ -445,7 +467,7 @@ test('guardAction agrees with the old branch for every input', () => {
   assert.equal(compared, 3 * 4 * 4 * 2 * 2);
 });
 
-test('gameInProgress and safeToReload agree with the old code', () => {
+test('gameInProgress agrees with the old code', () => {
   const states: readonly (EngineState | null | undefined)[] = [
     undefined,
     null,
@@ -460,11 +482,6 @@ test('gameInProgress and safeToReload agree with the old code', () => {
   ];
   for (const state of states) {
     assert.equal(gameInProgress(state), oldGameInProgress(state));
-    for (const hidden of [false, true]) {
-      // _safeToReload of the old script: `if (document.hidden) return true; return !_gameInProgress();`
-      const old = hidden ? true : !oldGameInProgress(state);
-      assert.equal(safeToReload(hidden, gameInProgress(state)), old);
-    }
   }
   // Only the answer `true` is a match: an answer of another kind is not.
   for (const answer of ['yes', 1, {}, null, undefined]) {

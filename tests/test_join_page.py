@@ -1,10 +1,13 @@
 """Invite page (/join, docs/landing-design.md §7.2 M2, W3): every state with
 mocked /health and /room/{code} answers."""
 
+import json
 import time
 
 import pytest
 from playwright.sync_api import expect
+
+from src.api.signaling import make_reconnect_token
 
 
 def _room(host="Kaz", players=2, max_players=4, status="lobby", game_id="ssb64", closed=False):
@@ -74,6 +77,34 @@ def test_full_room_leads_with_watch(invite):
     expect(page.locator("#inv-watch")).to_have_text("Watch")
     expect(page.locator("#inv-watch")).to_have_class("btn primary big")
     expect(page.locator("#inv-stack > *").first).to_have_id("inv-watch")
+
+
+@pytest.mark.parametrize(
+    ("record", "query", "token_room", "offer"),
+    [
+        (_room(players=4), "", "KAZ12345", True),
+        (_room(closed=True), "", "KAZ12345", True),
+        (None, "", "KAZ12345", False),
+        (_room(closed=True), "&spectate=1", "KAZ12345", False),
+        (_room(players=4), "&spectate=1", "KAZ12345", False),
+        (_room(closed=True), "", "OTHER123", False),
+    ],
+)
+def test_invite_offers_a_saved_host_seat_only_in_its_own_retained_room(page, invite, record, query, token_room, offer):
+    token = make_reconnect_token(token_room, "returning-host")
+    page.add_init_script(f"localStorage.setItem('kn-host-return:KAZ12345', {json.dumps(token)})")
+    invite(query=f"?room=KAZ12345{query}", room=record)
+    link = page.get_by_role("link", name="Return to room", exact=True)
+    if offer:
+        expect(link).to_be_visible()
+        assert link.get_attribute("href") == "/play.html?room=KAZ12345"
+        if record["closed"]:
+            expect(page.get_by_role("button", name="Open your own room")).to_be_visible()
+        else:
+            expect(page.locator("#inv-stack > *").first).to_have_id("inv-join")
+            expect(page.get_by_role("link", name="Watch")).to_be_visible()
+    else:
+        expect(link).to_have_count(0)
 
 
 def test_match_in_progress_says_you_join_mid_match(invite):

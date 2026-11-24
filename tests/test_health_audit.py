@@ -45,10 +45,10 @@ def test_sync_log_ring_available(page, server_url):
     assert result == {"length": 2, "msgs": ["a", "b"]}
 
 
-def test_console_restored_after_game_end(context, server_url):
+def test_console_restored_after_game_end(browser, server_url):
     """console.log is restored after a game ends (cleanup in stopSync)."""
-    host = context.new_page()
-    guest = context.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         host.goto(f"{server_url}/play.html?room=HA03{_R}&host=1&name=Host")

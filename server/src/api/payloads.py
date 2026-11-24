@@ -99,6 +99,8 @@ class JoinRoomExtra(BaseModel):
     reconnectToken: str = ""
     player_name: str = Field(default="Player", max_length=32)
     spectate: bool = False
+    # Explicitly reclaim the offline owner seat from a new browser tab.
+    returnHost: bool = False
     # `resume` is true when the page still has a game running and is taking
     # its place in the room back after a socket drop; `slot` and `matchId`
     # are the slot it plays and the match it is in. A member is taken back as
@@ -364,6 +366,7 @@ class GameEnded(_ServerMessage):
 
     # None when the room had no match to end.
     matchId: str | None
+    reason: str | None = None
 
 
 class RomSharingUpdated(_ServerMessage):

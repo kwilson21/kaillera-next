@@ -50,6 +50,7 @@ def _cleanup(*pages_and_contexts):
     for item in pages_and_contexts:
         try:
             if hasattr(item, "goto") and not item.is_closed():
+                item.once("dialog", lambda dialog: dialog.accept())
                 item.goto("about:blank")
         except Exception:
             pass
@@ -88,9 +89,8 @@ def _start_lockstep_game(host, guest, server_url, room, start_game):
 
 def test_resume_toast_on_visibility_change(browser, server_url, start_game):
     """Returning from background sends 'returned' toast to peers."""
-    ctx = browser.new_context()
-    host = ctx.new_page()
-    guest = ctx.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         _start_lockstep_game(host, guest, server_url, _room_id("P1"), start_game)
@@ -118,14 +118,13 @@ def test_resume_toast_on_visibility_change(browser, server_url, start_game):
             timeout=5000,
         )
     finally:
-        _cleanup(host, guest, ctx)
+        _cleanup(host, guest)
 
 
 def test_reconnect_toast_on_dc_close(browser, server_url, start_game):
     """DC death shows toast notifications (no blocking overlay)."""
-    ctx = browser.new_context()
-    host = ctx.new_page()
-    guest = ctx.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         _start_lockstep_game(host, guest, server_url, _room_id("RC"), start_game)
@@ -152,7 +151,7 @@ def test_reconnect_toast_on_dc_close(browser, server_url, start_game):
             timeout=20000,
         )
     finally:
-        _cleanup(host, guest, ctx)
+        _cleanup(host, guest)
 
 
 def test_rom_transfer_mobile_ua(browser, server_url):
@@ -202,9 +201,8 @@ def test_rom_transfer_mobile_ua(browser, server_url):
 
 def test_background_tab_resumes_cleanly(browser, server_url, start_game):
     """Background tab resumes on return."""
-    ctx = browser.new_context()
-    host = ctx.new_page()
-    guest = ctx.new_page()
+    host = browser.new_page()
+    guest = browser.new_page()
 
     try:
         _start_lockstep_game(host, guest, server_url, _room_id("P2"), start_game)
@@ -243,4 +241,4 @@ def test_background_tab_resumes_cleanly(browser, server_url, start_game):
             timeout=10000,
         )
     finally:
-        _cleanup(host, guest, ctx)
+        _cleanup(host, guest)

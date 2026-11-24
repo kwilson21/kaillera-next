@@ -58,7 +58,7 @@ def _reopen(pid: str, new_sid: str, *, fresh: bool):
         extra={
             "sessionid": "ROOM1",
             "persistentId": pid,
-            "reconnectToken": make_reconnect_token(pid),
+            "reconnectToken": make_reconnect_token("ROOM1", pid),
             "fresh": fresh,
         }
     )
